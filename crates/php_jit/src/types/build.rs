@@ -223,8 +223,8 @@ struct Builder<'a> {
     /// of what the root frame entered with, which php's allocator may
     /// load at entry ([`Builder::load_at_entry`]).
     entry_reads: Vec<usize>,
-    /// Per op, the operands' types its recording saw, where it is a line.
-    sampled: Vec<Option<[Option<Sample>; 3]>>,
+    /// Per line, the operands' types its recording saw.
+    sampled: HashMap<OpId, [Option<Sample>; 3]>,
 }
 
 impl<'a> Builder<'a> {
@@ -259,7 +259,7 @@ impl<'a> Builder<'a> {
             },
             held: HashMap::new(),
             entry_reads: Vec::new(),
-            sampled: Vec::new(),
+            sampled: HashMap::new(),
         };
         let root = builder.frame(rec.root, Place::Root, None)?;
         builder.stack.push(root);
@@ -490,10 +490,7 @@ impl<'a> Builder<'a> {
             samples,
         );
         let form = self.form(frame, &op, seen, next);
-        if self.sampled.len() <= idx.index() {
-            self.sampled.resize(idx.index() + 1, None);
-        }
-        self.sampled[idx.index()] = Some(samples);
+        self.sampled.insert(idx, samples);
         let map_ptr = self.map_ptr(func, &op, form);
         self.record_send(frame, &op, op1);
         if !keeps_temporaries(op.opcode) {
@@ -1388,13 +1385,6 @@ impl<'a> Builder<'a> {
             {
                 (GuardAt::Entry, self.start())
             }
-            (Def::Entry, _) if held.slot.frame == Frame::ROOT && self.repeat.is_none() => {
-                self.entry_reads.push(self.guards.len());
-                (
-                    GuardAt::Before(idx),
-                    draft(Point::Before(idx), held.slot.frame, At::Opline(here)),
-                )
-            }
             (_, Some((def, frame, opline, kind, op1, op2))) => {
                 let fetched = |read| At::Fetched {
                     fetch: opline,
@@ -1419,10 +1409,16 @@ impl<'a> Builder<'a> {
                 }
                 (GuardAt::Within(def), draft(Point::Before(def), frame, to))
             }
-            _ => (
-                GuardAt::Before(idx),
-                draft(Point::Before(idx), held.slot.frame, At::Opline(here)),
-            ),
+            _ => {
+                if held.def == Def::Entry && held.slot.frame == Frame::ROOT && self.repeat.is_none()
+                {
+                    self.entry_reads.push(self.guards.len());
+                }
+                (
+                    GuardAt::Before(idx),
+                    draft(Point::Before(idx), held.slot.frame, At::Opline(here)),
+                )
+            }
         };
         self.guards.push(Placed { at, check, exit });
         self.guards.extend(then);
@@ -1671,9 +1667,7 @@ impl<'a> Builder<'a> {
                     .flatten(),
             },
         };
-        if repeat.is_none() {
-            self.load_at_entry();
-        }
+        self.load_at_entry();
         let numbered = self.number(closes)?;
         let end = numbered
             .end

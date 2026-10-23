@@ -5,14 +5,18 @@
 //! does not loop otherwise holds the type at the value's first read
 //! (`Z/ext/opcache/jit/zend_jit_trace.c:4283-4310`). The decision is
 //! `zend_jit_trace_allocate_registers`' over the trace's SSA
-//! (`:2847-3380`): a live range opens at entry for every variable the
+//! (`:2847-3374`): a live range opens at entry for every variable the
 //! trace reads, of no alias and of a type a register holds, and closes
 //! for good where an opline that reads it keeps no operand in a register
 //! (`zend_jit_opline_supports_reg`, `Z/ext/opcache/jit/zend_jit_ir.c:17434-17611`),
 //! where a call the trace follows is entered while it is still to be
 //! read, or where it is read once alone. What survives is loaded. The
 //! allocation itself, which registers and where they spill, is
-//! Cranelift's and not ported.
+//! Cranelift's and not ported. A side's parent may hold a value in a
+//! register, which php's side reuses and loads nothing for (`:2896-2905`,
+//! `:4291`); here an exit stores every register it holds, and its side
+//! knows the type of what the exit stored, so no guard is held on it to
+//! begin with.
 
 use php_engine::tier::Sample;
 use php_heap::ZvalType;
@@ -20,14 +24,8 @@ use php_unit::{Opcode, OperandKind, Opline};
 
 use super::{Builder, Placed};
 use crate::types::lattice::{self, Types};
-use crate::types::{Check, Frame, GuardAt, Line, Op, Operand, Slot, ValueId};
-
-/// `MAX_ARG_FLAG_NUM` (`Z/Zend/zend_compile.h:1165`): the arguments whose
-/// way of being sent a function's flags carry.
-const MAX_ARG_FLAG_NUM: u32 = 12;
-
-/// php's `ZEND_ISEMPTY`.
-const ISEMPTY: u32 = 1 << 0;
+use crate::types::opcodes::{ISEMPTY, MAX_ARG_FLAG_NUM};
+use crate::types::{Check, Frame, GuardAt, Line, Op, OpId, Operand, Slot, ValueId};
 
 impl Builder<'_> {
     /// In a trace that does not loop, each guard [`Builder::place`] held
@@ -62,36 +60,41 @@ impl Builder<'_> {
         if !matches!(tag, ZvalType::Long | ZvalType::Double) || self.aliased(slot) {
             return false;
         }
-        // The ops that use the value as php's trace SSA numbers it, up to
-        // the one that writes its slot anew, after which a use is another
-        // variable's.
-        let reads = |line: &Line| [line.op1, line.op2, line.data].contains(&Operand::Value(value));
-        let mut uses: Vec<usize> = Vec::new();
+        // The uses of the value as php's trace SSA numbers them, up to
+        // the op that writes its slot anew, after which a use is another
+        // variable's; an opline and its `OP_DATA` are two ops there.
+        let mut uses: Vec<Use> = Vec::new();
         let mut ends = None;
-        for (at, op) in self.ops.iter().enumerate() {
+        for (at, op) in self.ops_by_id() {
             let Op::Line(line) = op else {
                 continue;
             };
-            if reads(line) {
-                uses.push(at);
+            let reads = |operand: Operand| operand == Operand::Value(value);
+            if reads(line.op1) || reads(line.op2) {
+                uses.push(Use {
+                    at,
+                    part: Part::Opline,
+                });
+            }
+            if reads(line.data) {
+                uses.push(Use {
+                    at,
+                    part: Part::Data,
+                });
             }
             if self.writes_anew(line, slot) {
                 ends = Some(at);
                 break;
             }
         }
-        let line_at = |at: usize| match self.ops.get(at) {
-            Some(Op::Line(line)) => Some(line),
-            _ => None,
-        };
         // An interval opens only where the first use reads the value.
-        match uses.first().and_then(|&at| line_at(at)) {
-            Some(first) if !no_val_use(first, value) => {}
+        match uses.first() {
+            Some(first) if !self.no_val_at(*first, value) => {}
             _ => return false,
         }
         let mut current = Frame::ROOT;
         let mut last_use = false;
-        for (at, op) in self.ops.iter().enumerate() {
+        for (at, op) in self.ops_by_id() {
             match op {
                 // Entering a call frees every register of the frame it
                 // leaves whose value is still to be read.
@@ -106,21 +109,44 @@ impl Builder<'_> {
                 Op::InitCall { .. } => {}
                 Op::Line(line) => {
                     current = line.frame;
-                    let Some(k) = uses.iter().position(|&used| used == at) else {
+                    if !uses.iter().any(|used| used.at == at) {
                         continue;
-                    };
+                    }
                     if !self.supports_reg(at, line) {
                         return false;
                     }
-                    if !no_val_use(line, value) {
-                        let next = uses.get(k + 1).and_then(|&next| line_at(next));
-                        last_use = self.last_use(line, value, next);
+                    for (k, used) in uses.iter().enumerate().filter(|(_, used)| used.at == at) {
+                        if !self.no_val_at(*used, value) {
+                            let next = uses.get(k + 1).copied();
+                            last_use = self.last_use(line, used.part, value, next);
+                        }
                     }
                 }
             }
         }
         // A range read once, and that its last, is no register's.
         !(last_use && uses.len() == 1)
+    }
+
+    /// Whether `used` names the value without reading it.
+    fn no_val_at(&self, used: Use, value: ValueId) -> bool {
+        used.part == Part::Opline
+            && self
+                .line_at(used.at)
+                .is_some_and(|line| no_val_use(line, value))
+    }
+
+    /// The trace's ops, each by its place.
+    fn ops_by_id(&self) -> impl Iterator<Item = (OpId, &Op)> {
+        (0..).map(OpId).zip(&self.ops)
+    }
+
+    /// The line at `at`, where the op there is one.
+    fn line_at(&self, at: OpId) -> Option<&Line> {
+        match self.ops.get(at.index()) {
+            Some(Op::Line(line)) => Some(line),
+            _ => None,
+        }
     }
 
     /// Which of a line's operands, `[op1, op2, OP_DATA's op1]`, php's
@@ -182,20 +208,27 @@ impl Builder<'_> {
             || line.out.is_some_and(|out| self.val(out).slot == slot)
     }
 
-    /// Whether the use of `value` at `line` is its last in a register,
-    /// `ZREG_LAST_USE` (`zend_jit_trace_use_var` and the operands' kinds
-    /// in `zend_jit_trace_allocate_registers`): the opline writes the
-    /// variable anew, or no use follows, or the next writes over it
-    /// without reading it, where php asks its function-level SSA
+    /// Whether the use of `value` at `part` of `line` is its last in a
+    /// register, `ZREG_LAST_USE` (`zend_jit_trace_use_var` and the
+    /// operands' kinds in `zend_jit_trace_allocate_registers`): the op
+    /// writes the variable anew, or no use follows, or the next writes
+    /// over it without reading it, where php asks its function-level SSA
     /// (`zend_ssa_is_last_use`), which this tier does not keep (#3149);
     /// and a temporary is read once, but where a `foreach`, a `switch`
     /// or a rope keeps it beyond the opline.
-    fn last_use(&self, line: &Line, value: ValueId, next: Option<&Line>) -> bool {
+    fn last_use(&self, line: &Line, part: Part, value: ValueId, next: Option<Use>) -> bool {
         let at = |operand: Operand| operand == Operand::Value(value);
         let [op1, op2, data] = self.defines(line);
-        let redefined = (at(line.op1) && op1) || (at(line.op2) && op2) || (at(line.data) && data);
-        if redefined || next.is_none_or(|next| no_val_use(next, value)) {
+        let redefined = match part {
+            Part::Opline => (at(line.op1) && op1) || (at(line.op2) && op2),
+            Part::Data => data,
+        };
+        if redefined || next.is_none_or(|next| self.no_val_at(next, value)) {
             return true;
+        }
+        if part == Part::Data {
+            return (self.opline_of_data(line))
+                .is_some_and(|data| data.op1_type != OperandKind::Cv);
         }
         let Some(op) = self.opline_of(line) else {
             return false;
@@ -218,8 +251,6 @@ impl Builder<'_> {
         );
         (at(line.op1) && op.op1_type != OperandKind::Cv && !kept)
             || (at(line.op2) && op.op2_type != OperandKind::Cv)
-            || (at(line.data)
-                && (self.opline_of_data(line)).is_some_and(|data| data.op1_type != OperandKind::Cv))
     }
 
     /// The opline a line serves.
@@ -231,11 +262,11 @@ impl Builder<'_> {
     /// php's `zend_jit_opline_supports_reg` over the types the trace
     /// holds of the opline's operands and the ones its recording saw:
     /// whether its code reads an operand from a register.
-    fn supports_reg(&self, at: usize, line: &Line) -> bool {
+    fn supports_reg(&self, at: OpId, line: &Line) -> bool {
         let Some(op) = self.opline_of(line) else {
             return false;
         };
-        let samples = self.sampled.get(at).copied().flatten().unwrap_or([None; 3]);
+        let samples = self.sampled.get(&at).copied().unwrap_or([None; 3]);
         let frame = line.frame;
         let (t1, t2) = (
             self.types_of(frame, line.op1),
@@ -269,7 +300,14 @@ impl Builder<'_> {
                 .view
                 .is_main(self.frames[usize::from(frame.0)].func)
                 .unwrap_or(true),
-            Opcode::Assign => cv1,
+            // An assignment to a variable a symbol table reaches, which
+            // other code may write, keeps nothing in a register
+            // (`Z/ext/opcache/jit/zend_jit_trace.c:2950-2957`).
+            Opcode::Assign => {
+                cv1 && !line
+                    .op1_def
+                    .is_some_and(|def| self.aliased(self.val(def).slot))
+            }
             Opcode::AssignOp => {
                 cv1 && op.out_type == OperandKind::Unused
                     && lattice::binary_of(op.extended_value)
@@ -318,13 +356,8 @@ impl Builder<'_> {
             self.types_of(line.frame, line.op2),
         );
         let unused = op.out_type == OperandKind::Unused;
-        if line.opcode == Opcode::AssignDimOp {
-            let td = self.types_of(line.frame, line.data);
-            let served = lattice::binary_of(op.extended_value)
-                .is_some_and(|binary| supported_binary_op(binary, Types::ANY, td));
-            if !unused || !served {
-                return false;
-            }
+        if line.opcode == Opcode::AssignDimOp && !self.compound_in_reg(line, op) {
+            return false;
         }
         let self_assigned = matches!(line.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
             && (self.opline_of_data(line))
@@ -337,17 +370,22 @@ impl Builder<'_> {
         by_key(t1, t2, samples[0])
     }
 
+    /// A compound assignment to an element or a property: its `out` slot
+    /// unused and its operator one php's code keeps in registers over
+    /// anything and the `OP_DATA`'s value.
+    fn compound_in_reg(&self, line: &Line, op: &Opline) -> bool {
+        let td = self.types_of(line.frame, line.data);
+        op.out_type == OperandKind::Unused
+            && lattice::binary_of(op.extended_value)
+                .is_some_and(|binary| supported_binary_op(binary, Types::ANY, td))
+    }
+
     /// `zend_jit_opline_supports_reg`'s arm for a property by a constant
     /// name: of `$this` or of what may be an object; a compound write
     /// only over an operator php's code keeps in registers.
     fn property_in_reg(&self, line: &Line, op: &Opline) -> bool {
-        if line.opcode == Opcode::AssignObjOp {
-            let td = self.types_of(line.frame, line.data);
-            let served = lattice::binary_of(op.extended_value)
-                .is_some_and(|binary| supported_binary_op(binary, Types::ANY, td));
-            if op.out_type != OperandKind::Unused || !served {
-                return false;
-            }
+        if line.opcode == Opcode::AssignObjOp && !self.compound_in_reg(line, op) {
+            return false;
         }
         let named = op.op2_type == OperandKind::Const
             && (self.meta(line.frame).code.literals.get(op.op2 as usize))
@@ -428,4 +466,19 @@ fn by_key(t1: Types, t2: Types, sample: Option<Sample>) -> bool {
         _ => t1,
     };
     t1.kinds() == Types::ARRAY && (t2.kinds() == Types::LONG || t2.kinds() == Types::STRING)
+}
+
+/// One use of a value in php's trace SSA: the op at its place, or the
+/// `OP_DATA` after it, which the SSA numbers as an op of its own.
+#[derive(Debug, Clone, Copy)]
+struct Use {
+    at: OpId,
+    part: Part,
+}
+
+/// Which of a line's two ops in php's trace SSA a use is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Opline,
+    Data,
 }

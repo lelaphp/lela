@@ -199,24 +199,51 @@ link-at {root} 82\nstop link 6\n"
         .replace("{root}", &root);
     let record = TraceRecord::parse(&text).map_err(|e| format!("{e:?}"))?;
     let ir = build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
-    let first: Vec<(u32, Option<u32>, bool)> = (ir.guards.iter().take(2))
-        .map(|guard| {
-            let var = match guard.check {
-                Check::Type { value, .. } => ir.values[value.0 as usize].slot.var,
-                _ => u32::MAX,
-            };
-            let lands = ir.exits[usize::from(guard.exit.0)].opline.map(|at| at.0);
-            (var, lands, guard.at == GuardAt::Entry)
+    let first: Vec<Option<(u32, Option<u32>, bool)>> = (ir.guards.iter().take(2))
+        .map(|guard| match guard.check {
+            Check::Type { value, .. } => {
+                let var = ir.values[value.0 as usize].slot.var;
+                let lands = ir.exits[usize::from(guard.exit.0)].opline.map(|at| at.0);
+                Some((var, lands, guard.at == GuardAt::Entry))
+            }
+            _ => None,
         })
         .collect();
     assert_eq!(
         first,
-        [(5, Some(49), true), (9, Some(49), false)],
+        [Some((5, Some(49), true)), Some((9, Some(49), false))],
         "{}",
         dump::render(&ir)
     );
     let exits: Vec<u16> = ir.guards.iter().take(2).map(|guard| guard.exit.0).collect();
     assert_eq!(exits, [0, 1], "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// An element write and its `OP_DATA` are two ops of php's trace SSA, so
+/// `$a[$k] = $k` reads `$k` twice, as the key and as the value the
+/// `OP_DATA` takes an owner of, and php's allocator loads it at the entry
+/// of a trace that does not loop where nothing else reads it
+/// (`zend_jit_trace_allocate_registers`, `Z/ext/opcache/jit/zend_jit_trace.c:3290-3300`;
+/// #3270).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_key_written_as_its_own_value_is_read_twice() -> Result<(), String> {
+    let (mut recorded, _) = recording(
+        &IN_F,
+        "function f($a, $k, $n) { for ($i = 0; $i < $n; $i++) { $a[$k] = $k; } return $a; }
+        echo f([1, 2, 3], 1, 3)[1], \"\\n\";",
+    )?;
+    recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
+    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let entered: Vec<u32> = (linked.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Entry)
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => Some(linked.values[value.0 as usize].slot.var),
+            _ => None,
+        })
+        .collect();
+    assert!(entered.contains(&1), "{}", dump::render(&linked));
     Ok(())
 }
 

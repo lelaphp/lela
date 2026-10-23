@@ -12,11 +12,11 @@ use super::lattice::{self, Types};
 use super::{Constant, Frame, Imm, Layout, Line, Slot};
 
 /// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
-const MAX_ARG_FLAG_NUM: u32 = 12;
+pub(super) const MAX_ARG_FLAG_NUM: u32 = 12;
 /// php's `ZEND_FETCH_LOCAL`: a fetch by name from the frame's variables.
 const FETCH_LOCAL: u32 = 1 << 2;
 /// php's `ZEND_ISEMPTY`.
-const ISEMPTY: u32 = 1 << 0;
+pub(super) const ISEMPTY: u32 = 1 << 0;
 /// php's `ZEND_BIND_REF` and `ZEND_ARRAY_ELEMENT_REF`.
 const BY_REF: u32 = 1 << 0;
 /// The functions that read their caller's variables by name, php's
