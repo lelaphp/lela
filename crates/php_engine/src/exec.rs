@@ -2072,7 +2072,7 @@ impl Vm {
         extra_args: usize,
         header: Header,
     ) -> Result<FrameRef, Fatal> {
-        self.stack.push_frame(heap, slots, extra_args, header)
+        self.stack.push_frame(heap, slots, extra_args, || header)
     }
 
     /// The frame of an unobserved frameless call, off the VM stack's

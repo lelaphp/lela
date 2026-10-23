@@ -1776,9 +1776,13 @@ fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -
         return init_native(req, frame, function, op, at);
     };
     let room = user.shape.room(op.extended_value);
-    let mut header = exec::Header::call(function, op.extended_value);
-    header.callee = user.callee_at();
-    header.info.join(user.shape.sent);
+    let (callee, sent, count) = (user.callee_at(), user.shape.sent, op.extended_value);
+    let header = move || {
+        let mut header = exec::Header::call(function, count);
+        header.callee = callee;
+        header.info.join(sent);
+        header
+    };
     Some(match req.push_laid(room as usize, header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
@@ -1805,7 +1809,7 @@ fn init_native(
     let mut header = exec::Header::call(function, op.extended_value);
     header.callee = req.shared.native_callee(function)?;
     let room = req.native_room(op.extended_value) as usize;
-    Some(match req.push_laid(room, header) {
+    Some(match req.push_laid(room, || header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
             req.vm_mut().stand(frame, at);

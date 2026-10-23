@@ -1415,14 +1415,14 @@ impl Request {
     }
 
     /// A call pushed with `room` slots past its header, its record named,
-    /// laid whole in its `INIT_FCALL` ([`Request::push_room`]): the push
-    /// written in the handler's body, so the header goes into its room
-    /// as it is laid.
+    /// laid whole in its `INIT_FCALL` ([`Request::push_room`]) by
+    /// `header`: the push written in the handler's body, so the header
+    /// is made where its room is.
     #[inline(always)] // as `php_heap::VmStack::push_frame`
     pub(crate) fn push_laid(
         &mut self,
         room: usize,
-        header: exec::Header,
+        header: impl FnOnce() -> exec::Header,
     ) -> Result<FrameRef, Fatal> {
         self.vm.stack.push_frame(&mut self.heap, room, 0, header)
     }
