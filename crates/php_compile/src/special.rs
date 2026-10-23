@@ -192,14 +192,13 @@ pub(crate) fn row(lowered: &[u8]) -> Option<Special> {
 impl Emit<'_> {
     /// `zend_try_ct_eval_const` for a name with no namespace in it: php's
     /// special constants, `true`, `false` and `null` in any case
-    /// (`zend_get_special_const`), then the persistent table.
-    fn ct_eval_const(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
-        Ok(match name.to_ascii_lowercase().as_slice() {
-            b"true" => Some(Zval::bool(true)),
-            b"false" => Some(Zval::bool(false)),
-            b"null" => Some(Zval::null()),
-            _ => self.persistent(name)?,
-        })
+    /// (`zend_get_special_const`), then a constant the compile
+    /// substitutes ([`Emit::ct_substitutes`]).
+    fn ct_eval_const(&mut self, name: &[u8]) -> Result<bool, CompileError> {
+        match name.to_ascii_lowercase().as_slice() {
+            b"true" | b"false" | b"null" => Ok(true),
+            _ => self.ct_substitutes(name),
+        }
     }
 
     /// `zend_try_compile_special_func`: where the value is once the call
@@ -789,7 +788,7 @@ impl Emit<'_> {
             return Ok(None);
         };
         if let tree::Expr::NameRef(token) = self.peel(flag) {
-            return Ok(self.named_constant(token)?.map(truth));
+            return self.named_constant_truth(token);
         }
         Ok(self.written(flag)?.map(truth))
     }
@@ -840,7 +839,7 @@ impl Emit<'_> {
         let Some(bytes) = name.as_str() else {
             return Ok(None);
         };
-        if self.ct_eval_const(bytes.bytes())?.is_some() {
+        if self.ct_eval_const(bytes.bytes())? {
             return Ok(Some(Where::Constant(Zval::bool(true))));
         }
         let slot = self.cache_slot();
@@ -861,7 +860,9 @@ impl Emit<'_> {
         let Some(bytes) = name.as_str() else {
             return Ok(None);
         };
-        Ok(self.ct_eval_const(bytes.bytes())?.map(|_| Zval::bool(true)))
+        Ok(self
+            .ct_eval_const(bytes.bytes())?
+            .then_some(Zval::bool(true)))
     }
 
     /// The name `zend_compile_func_defined` reads: the one argument

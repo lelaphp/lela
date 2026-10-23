@@ -2006,21 +2006,27 @@ impl Request {
 
     /// The home the units it compiles for itself make their constant
     /// strings in ([`super::memory::RequestStrings`]), which the unit
-    /// keeps, beside its classes as the compiler asks after one
-    /// ([`php_compile::RequestClasses`]), the arena its compiles parse
-    /// into and its working directory, which `__DIR__` folds to, borrowed
-    /// apart so all four are handed to one compile.
+    /// keeps, beside its classes and its constants as the compiler asks
+    /// after one ([`php_compile::RequestClasses`],
+    /// [`php_compile::RequestConstants`]: such a unit is one no cache
+    /// keeps, which php compiles without
+    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`), the arena its compiles
+    /// parse into and its working directory, which `__DIR__` folds to,
+    /// borrowed apart so all five are handed to one compile.
     pub(crate) fn compiling<R>(
         &mut self,
         compile: impl FnOnce(
             &mut dyn Intern,
             php_compile::RequestClasses<'_>,
+            php_compile::RequestConstants<'_>,
             &mut php_compile::syntax::Arena,
             &std::path::Path,
         ) -> R,
     ) -> R {
         let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
         let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
+        let constants = &self.constants;
+        let defined = |name: &[u8]| constants.defined(name);
         let mut strings = super::memory::RequestStrings {
             shared,
             hold: self.shared_hold,
@@ -2030,6 +2036,7 @@ impl Request {
         compile(
             &mut strings,
             php_compile::RequestClasses::new(&holds),
+            php_compile::RequestConstants::new(&defined),
             &mut self.compile_arena,
             &self.cwd,
         )

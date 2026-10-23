@@ -160,6 +160,25 @@ impl Constants {
         Some((at, self.rows.get(usize::try_from(at).ok()?)?))
     }
 
+    /// The constant the request holds under `name` as a compile of its
+    /// own reads `EG(zend_constants)` ([`php_compile::RequestConstants`]):
+    /// a row it added, or `PHP_SAPI`, which php registers persistent and
+    /// the engine holds per request; the engine's declared constants are
+    /// the compile's persistent table, never asked here.
+    pub(super) fn defined(&self, name: &[u8]) -> Option<php_compile::Defined> {
+        if name == b"PHP_SAPI" {
+            return Some(php_compile::Defined {
+                value: self.sapi_constant.to_zval(),
+                deprecated: false,
+            });
+        }
+        let (_, row) = self.find(name)?;
+        Some(php_compile::Defined {
+            value: row.value.to_zval(),
+            deprecated: row.deprecated,
+        })
+    }
+
     /// The row under `name` taken out, those after it moved down and the
     /// index laid again, a new generation of positions.
     fn remove(&mut self, name: &[u8]) -> Option<ConstantRow> {
