@@ -144,7 +144,7 @@ impl PerReading for Row {
     fn of(reading: &Reading) -> Row {
         let counted = |key: &str| count(reading, key).unwrap_or(0);
         let sum = |which: fn(Judgement) -> bool| -> u64 {
-            Judgement::all()
+            Judgement::ALL
                 .into_iter()
                 .filter(|j| which(*j))
                 .map(|j| counted(j.key()))

@@ -151,32 +151,49 @@ pub enum Variable {
 }
 
 impl Variable {
-    /// Every variable, with the name nginx spells after the `$`.
-    const NAMES: [(Variable, &'static str); 18] = [
-        (Variable::DocumentRoot, "document_root"),
-        (Variable::FastcgiUri, "fastcgi_script_name"),
-        (Variable::PathInfo, "fastcgi_path_info"),
-        (Variable::QueryString, "query_string"),
-        (Variable::RequestMethod, "request_method"),
-        (Variable::ContentType, "content_type"),
-        (Variable::ContentLength, "content_length"),
-        (Variable::RequestUri, "request_uri"),
-        (Variable::DocumentUri, "document_uri"),
-        (Variable::ServerProtocol, "server_protocol"),
-        (Variable::Scheme, "scheme"),
-        (Variable::Https, "https"),
-        (Variable::NginxVersion, "nginx_version"),
-        (Variable::RemoteAddr, "remote_addr"),
-        (Variable::RemotePort, "remote_port"),
-        (Variable::ServerAddr, "server_addr"),
-        (Variable::ServerPort, "server_port"),
-        (Variable::ServerName, "server_name"),
+    pub const ALL: [Variable; 18] = [
+        Variable::DocumentRoot,
+        Variable::FastcgiUri,
+        Variable::PathInfo,
+        Variable::QueryString,
+        Variable::RequestMethod,
+        Variable::ContentType,
+        Variable::ContentLength,
+        Variable::RequestUri,
+        Variable::DocumentUri,
+        Variable::ServerProtocol,
+        Variable::Scheme,
+        Variable::Https,
+        Variable::NginxVersion,
+        Variable::RemoteAddr,
+        Variable::RemotePort,
+        Variable::ServerAddr,
+        Variable::ServerPort,
+        Variable::ServerName,
     ];
 
     /// The name nginx spells after the `$`.
     pub fn name(self) -> &'static str {
-        let named = Variable::NAMES.iter().find(|(v, _)| *v == self);
-        named.map_or("", |(_, name)| name)
+        match self {
+            Variable::DocumentRoot => "document_root",
+            Variable::FastcgiUri => "fastcgi_script_name",
+            Variable::PathInfo => "fastcgi_path_info",
+            Variable::QueryString => "query_string",
+            Variable::RequestMethod => "request_method",
+            Variable::ContentType => "content_type",
+            Variable::ContentLength => "content_length",
+            Variable::RequestUri => "request_uri",
+            Variable::DocumentUri => "document_uri",
+            Variable::ServerProtocol => "server_protocol",
+            Variable::Scheme => "scheme",
+            Variable::Https => "https",
+            Variable::NginxVersion => "nginx_version",
+            Variable::RemoteAddr => "remote_addr",
+            Variable::RemotePort => "remote_port",
+            Variable::ServerAddr => "server_addr",
+            Variable::ServerPort => "server_port",
+            Variable::ServerName => "server_name",
+        }
     }
 }
 
@@ -285,9 +302,9 @@ fn pieces(value: &str) -> Result<Vec<Piece>> {
         if name.is_empty() {
             bail!("{value:?} has a `$` that names no variable");
         }
-        let variable = Variable::NAMES
+        let variable = Variable::ALL
             .into_iter()
-            .find_map(|(v, spelled)| (spelled == name).then_some(v))
+            .find(|v| v.name() == name)
             .ok_or_else(|| {
                 anyhow!("{value:?} names the variable ${name}, which is not one the mapping knows")
             })?;

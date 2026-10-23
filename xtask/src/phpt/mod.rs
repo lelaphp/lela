@@ -640,35 +640,37 @@ pub(crate) enum Judgement {
 }
 
 impl Judgement {
-    /// Every verdict, in the order the reading counts them: as a kept run
-    /// spells it, the key of a reading's `numbers` that counts it (the one
-    /// place it is named, for the run that writes the count and the
-    /// rendering that reads it back, #1745), and what `run-tests.php`
-    /// calls it, where it does: a difference a registry row accepts is
-    /// still its `FAIL`, and a test the compiler did not read has none,
-    /// since only the engine's compiler refuses one, nor one the served
-    /// lane left out, since only that lane sends HTTP.
-    const NAMES: [(Judgement, &'static str, &'static str, Option<&'static str>); 9] = [
-        (Judgement::Pass, "pass", "passed", Some("PASS")),
-        (Judgement::Fail, "fail", "failed", Some("FAIL")),
-        (Judgement::Skip, "skip", "skipped", Some("SKIP")),
-        (Judgement::Bork, "bork", "borked", Some("BORK")),
-        (Judgement::XFail, "xfail", "xfailed", Some("XFAIL")),
-        (Judgement::Warn, "warn", "warned", Some("WARN")),
-        (Judgement::Diverged, "diverged", "diverged", Some("FAIL")),
-        (Judgement::Unread, "unread", "unread", None),
-        (Judgement::Unsent, "unsent", "unsent", None),
+    /// Every verdict, in the order the reading counts them.
+    pub(crate) const ALL: [Judgement; 9] = [
+        Judgement::Pass,
+        Judgement::Fail,
+        Judgement::Skip,
+        Judgement::Bork,
+        Judgement::XFail,
+        Judgement::Warn,
+        Judgement::Diverged,
+        Judgement::Unread,
+        Judgement::Unsent,
     ];
 
-    /// Every verdict, in the order the reading counts them.
-    pub(crate) fn all() -> [Judgement; 9] {
-        Judgement::NAMES.map(|(judgement, ..)| judgement)
-    }
-
-    /// This verdict's row of [`Judgement::NAMES`].
-    fn names(self) -> (Judgement, &'static str, &'static str, Option<&'static str>) {
-        let row = Judgement::NAMES.into_iter().find(|(j, ..)| *j == self);
-        row.unwrap_or((self, "", "", None))
+    /// The verdict's three spellings, the one place each is named.
+    fn spelled(self) -> Spelled {
+        let spelled = |kept, key, upstream| Spelled {
+            kept,
+            key,
+            upstream,
+        };
+        match self {
+            Judgement::Pass => spelled("pass", "passed", Some("PASS")),
+            Judgement::Fail => spelled("fail", "failed", Some("FAIL")),
+            Judgement::Skip => spelled("skip", "skipped", Some("SKIP")),
+            Judgement::Bork => spelled("bork", "borked", Some("BORK")),
+            Judgement::XFail => spelled("xfail", "xfailed", Some("XFAIL")),
+            Judgement::Warn => spelled("warn", "warned", Some("WARN")),
+            Judgement::Diverged => spelled("diverged", "diverged", Some("FAIL")),
+            Judgement::Unread => spelled("unread", "unread", None),
+            Judgement::Unsent => spelled("unsent", "unsent", None),
+        }
     }
 
     /// Whether the test met its expectation with no registry row: a pass,
@@ -684,15 +686,30 @@ impl Judgement {
         matches!(self, Judgement::Fail | Judgement::Bork | Judgement::Unread)
     }
 
-    /// The key of a reading's `numbers` that counts the verdict.
+    /// The key of a reading's `numbers` that counts the verdict: the one
+    /// place it is named, for the run that writes the count and the
+    /// rendering that reads it back (#1745).
     pub(crate) fn key(self) -> &'static str {
-        self.names().2
+        self.spelled().key
     }
 
-    /// What `run-tests.php` calls the verdict, where it calls it anything.
+    /// What `run-tests.php` calls the verdict: a difference a registry
+    /// row accepts is still its `FAIL`, and a test the compiler did not
+    /// read has none, since only the engine's compiler refuses one, nor
+    /// one the served lane left out, since only that lane sends HTTP.
     pub(super) fn word(self) -> Option<&'static str> {
-        self.names().3
+        self.spelled().upstream
     }
+}
+
+/// A verdict's spellings ([`Judgement::spelled`]).
+struct Spelled {
+    /// As a kept run spells it, [`tally::Judgement::as_str`].
+    kept: &'static str,
+    /// The key of a reading's `numbers` that counts it.
+    key: &'static str,
+    /// What `run-tests.php` calls it, where it calls it anything.
+    upstream: Option<&'static str>,
 }
 
 impl tally::Judgement for Judgement {
@@ -702,7 +719,7 @@ impl tally::Judgement for Judgement {
     const PASS: Judgement = Judgement::Pass;
 
     fn as_str(self) -> &'static str {
-        self.names().1
+        self.spelled().kept
     }
 
     /// Whether the subset's reading fails on it.
@@ -847,7 +864,7 @@ pub(crate) fn reading(
     // compiler's, held to that cause alone, and the one `done` meets
     // beside `engine_absent` when it is every test of the subset (harness
     // §4.5 condition 1, #319).
-    for judgement in Judgement::all() {
+    for judgement in Judgement::ALL {
         reading.count(judgement.key(), tally.count(judgement))?;
     }
     // Why nothing ran, where nothing did: the engine has no binary yet,
@@ -982,7 +999,7 @@ fn words(
             // Every verdict the run gave, under the key its count is kept
             // in, so the counts named add up to the tests (#2939).
             Outcome::Passed => {
-                let counts = Judgement::all().map(|j| (tally.count(j), j.key()));
+                let counts = Judgement::ALL.map(|j| (tally.count(j), j.key()));
                 let named = counts.iter().filter(|(n, _)| *n > 0);
                 let named: Vec<String> = named.map(|(n, key)| format!("{n} {key}")).collect();
                 let tests = tally.judged.len();
@@ -1920,7 +1937,7 @@ fn run_tests(
     let waited = Mutex::new(across::Waited::default());
     let tally = Tally::judge_apart(&held, jobs, batch, &apart, |(item, keys)| {
         let (_held, wait) = across::hold(locks, keys)?;
-        crate::held(&waited).add(wait);
+        crate::locked(&waited).add(wait);
         adapter.judge(subset, item)
     })?;
     let waited = waited.into_inner().unwrap_or_else(PoisonError::into_inner);

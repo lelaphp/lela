@@ -135,7 +135,7 @@ impl Tree {
         // Before this process's first tree under `base`, and so before
         // there is one of ours there to mistake for a dead run's.
         {
-            let mut swept = crate::held(&SWEPT);
+            let mut swept = crate::locked(&SWEPT);
             if !swept.iter().any(|done| done == base) {
                 reap(base);
                 swept.push(base.to_path_buf());
@@ -1154,7 +1154,7 @@ mod tests {
     /// a child, for its length: one's first tree sweeps another's.
     fn alone() -> std::sync::MutexGuard<'static, ()> {
         static STRAYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        crate::held(&STRAYS)
+        crate::locked(&STRAYS)
     }
 
     /// The same under a subreaper (#2761): a test process run under a perl

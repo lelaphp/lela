@@ -46,7 +46,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -116,19 +116,23 @@ pub enum Promise {
 }
 
 impl Promise {
-    /// Every fact, with the word [`PROMISE_VARIABLE`] lists for it.
-    const WORDS: [(Promise, &'static str); 5] = [
-        (Promise::Tree, "tree"),
-        (Promise::Oracle, "oracle"),
-        (Promise::Mysql, "mysql"),
-        (Promise::Locale, "locale"),
-        (Promise::MainStack, "main-stack"),
+    const ALL: [Promise; 5] = [
+        Promise::Tree,
+        Promise::Oracle,
+        Promise::Mysql,
+        Promise::Locale,
+        Promise::MainStack,
     ];
 
     /// The word [`PROMISE_VARIABLE`] lists for this fact.
     pub fn word(self) -> &'static str {
-        let named = Promise::WORDS.iter().find(|(p, _)| *p == self);
-        named.map_or("", |(_, word)| word)
+        match self {
+            Promise::Tree => "tree",
+            Promise::Oracle => "oracle",
+            Promise::Mysql => "mysql",
+            Promise::Locale => "locale",
+            Promise::MainStack => "main-stack",
+        }
     }
 
     /// What every guarded test asks (#38): `found` when it is, and
@@ -189,10 +193,10 @@ impl Promised {
     pub fn parse(value: &str) -> Result<Promised> {
         let mut promised = Vec::new();
         for word in value.split_whitespace() {
-            let Some((promise, _)) = Promise::WORDS.into_iter().find(|(_, w)| *w == word) else {
+            let Some(promise) = Promise::ALL.into_iter().find(|p| p.word() == word) else {
                 bail!(
                     "{PROMISE_VARIABLE} lists {word:?}, which promises nothing; the words it takes are {}",
-                    Promise::WORDS.map(|(_, w)| w).join(", ")
+                    Promise::ALL.map(Promise::word).join(", ")
                 );
             };
             if !promised.contains(&promise) {
@@ -636,7 +640,7 @@ static RUN_DIR: Mutex<Option<Tree>> = Mutex::new(None);
 /// Where the run's own directory stands, made now if no program has
 /// named it yet.
 pub(crate) fn run_dir() -> Result<PathBuf> {
-    let mut held = crate::held(&RUN_DIR);
+    let mut held = crate::locked(&RUN_DIR);
     if let Some(tree) = &*held {
         return Ok(tree.path().to_path_buf());
     }
@@ -648,7 +652,7 @@ pub(crate) fn run_dir() -> Result<PathBuf> {
 
 /// The run's own directory removed, as the run ends.
 pub(crate) fn run_ended() {
-    crate::held(&RUN_DIR).take();
+    crate::locked(&RUN_DIR).take();
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -1508,7 +1512,7 @@ impl Spawned {
     /// One program spawned as `pid` at `from`; the number
     /// [`Spawned::ended`] closes its run by.
     fn add(&self, pid: u32, from: SystemTime) -> u64 {
-        let mut programs = crate::held(&self.programs);
+        let mut programs = crate::locked(&self.programs);
         let number = programs.next;
         programs.next += 1;
         programs.pids.insert(pid);
@@ -1525,7 +1529,7 @@ impl Spawned {
     /// fails leaves the window its last write bounds, which the lane's
     /// own sweep settles whole when the run is not cut off.
     fn journal(&self, line: fmt::Arguments<'_>) {
-        let journal = crate::held(&self.journal);
+        let journal = crate::locked(&self.journal);
         if let Some(mut file) = journal.as_ref() {
             writeln!(file, "{line}").ok();
         }
@@ -1535,7 +1539,7 @@ impl Spawned {
     /// forgotten since is not looked for.
     fn ended(&self, number: u64) {
         let now = SystemTime::now();
-        let mut programs = crate::held(&self.programs);
+        let mut programs = crate::locked(&self.programs);
         if let Some(ran) = programs.runs.iter_mut().rev().find(|r| r.number == number) {
             ran.to = Some(now);
         }
@@ -1546,7 +1550,7 @@ impl Spawned {
     /// The programs spawned since the last take, and none kept after but
     /// the count, so a number is never given twice.
     fn take(&self) -> Programs {
-        let mut programs = crate::held(&self.programs);
+        let mut programs = crate::locked(&self.programs);
         let next = programs.next;
         std::mem::replace(
             &mut *programs,
@@ -1606,11 +1610,7 @@ impl<'a> Oracle<'a> {
     /// Each program's start and end written to `journal` from now, a
     /// System V claim's file, or to none (#2448).
     pub(crate) fn journal(&self, journal: Option<File>) {
-        *self
-            .spawned
-            .journal
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = journal;
+        *crate::locked(&self.spawned.journal) = journal;
     }
 
     /// Run `program` under the pinned binary and the recipe, with

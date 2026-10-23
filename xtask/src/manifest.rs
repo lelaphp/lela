@@ -725,7 +725,8 @@ pub(crate) fn in_tests_key(lint: &str) -> Option<&'static str> {
         .map(|(_, key)| *key)
 }
 
-/// Whether a rule's predicates carry one of them.
+/// Whether a rule's predicates carry the one a row of
+/// [`Predicates::TABLE`] names.
 type Carries = fn(&Predicates) -> bool;
 
 impl Predicates {
@@ -751,14 +752,20 @@ impl Predicates {
 
     /// The names of the predicates this rule carries.
     pub fn named(&self) -> Vec<&'static str> {
-        let set = Self::TABLE.into_iter().filter(|(_, set, _)| set(self));
-        set.map(|(name, ..)| name).collect()
+        let carried = Self::TABLE
+            .into_iter()
+            .filter(|(_, carries, _)| carries(self));
+        carried.map(|(name, ..)| name).collect()
     }
 
     /// Whether the predicate describes one write or one command, so `permit`
-    /// can judge it before the call runs.
+    /// can judge it before the call runs: `deny`, `deny_argv`, `require_argv`,
+    /// `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
+    /// tree after the write (harness-design.md §4.4).
     pub fn describes_a_call(&self) -> bool {
-        Self::TABLE.iter().any(|(_, set, call)| *call && set(self))
+        Self::TABLE
+            .iter()
+            .any(|(_, carries, call)| *call && carries(self))
     }
 
     /// A qualifier that has no predicate to qualify: `unless` without

@@ -430,7 +430,7 @@ impl Fpm {
         // waits for it and says why a master ended.
         let stream = match UnixStream::connect_addr(&self.address) {
             Ok(stream) => stream,
-            Err(_) => crate::held(&self.pool).connect()?,
+            Err(_) => crate::locked(&self.pool).connect()?,
         };
         stream.set_read_timeout(Some(self.timeout))?;
         let pairs = (self.params.iter()).map(|(n, v)| (n.as_bytes(), v.as_slice()));
@@ -439,7 +439,7 @@ impl Fpm {
 
     /// The pool's master, whose children answer its requests.
     pub(crate) fn pid(&self) -> u32 {
-        crate::held(&self.pool).pid()
+        crate::locked(&self.pool).pid()
     }
 
     /// Once the request last asked has ended in the pool's child, as well

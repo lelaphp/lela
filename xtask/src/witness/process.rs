@@ -112,7 +112,7 @@ impl Binary {
     #[cfg(test)]
     #[cfg(tracked)]
     fn stand(&self, host: EngineHost, features: &[&str], path: PathBuf) {
-        let mut built = crate::held(&self.built);
+        let mut built = crate::locked(&self.built);
         let key = (host.krate, owned(features));
         built.insert(key, Arc::new(OnceLock::from(Ok(path))));
     }
@@ -136,7 +136,7 @@ impl Binary {
         // The map's lock is held to find the build's slot alone, so one
         // host's build never waits on another's.
         let slot = {
-            let mut built = crate::held(&self.built);
+            let mut built = crate::locked(&self.built);
             let key = (host.krate, owned(features));
             Arc::clone(built.entry(key).or_default())
         };

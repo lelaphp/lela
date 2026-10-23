@@ -1102,8 +1102,8 @@ fn serve(
     }
     let mut kept = judge::Kept::default();
     let judged = judge::one(oracle, registry, ask, witness, regime, binary, &mut kept)?;
-    crate::held(&gathered.captured).extend(kept.captured);
-    crate::held(&gathered.entered).insert(witness.id(), kept.entered);
+    crate::locked(&gathered.captured).extend(kept.captured);
+    crate::locked(&gathered.entered).insert(witness.id(), kept.entered);
     if let Some(watch) = watch {
         watch.served(witness)?;
     }
@@ -1134,7 +1134,7 @@ fn serve_absent(
                 Record::Unserved
             }
         };
-        crate::held(&gathered.entered).insert(witness.id(), record);
+        crate::locked(&gathered.entered).insert(witness.id(), record);
     }
     unserved
 }

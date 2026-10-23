@@ -368,7 +368,7 @@ mod recorder {
     static ASKED: Mutex<BTreeMap<PathBuf, Vec<Vec<String>>>> = Mutex::new(BTreeMap::new());
 
     fn listening<T>(f: impl FnOnce(&mut BTreeMap<PathBuf, Vec<Vec<String>>>) -> T) -> T {
-        f(&mut crate::held(&ASKED))
+        f(&mut crate::locked(&ASKED))
     }
 
     /// One question asked of git in `root`, for each listener above it.

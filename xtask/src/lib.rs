@@ -208,7 +208,7 @@ pub(crate) fn lock_file(path: &Path) -> std::io::Result<std::fs::File> {
 
 /// The value under `lock`, a poisoned one included: a thread that panicked
 /// holding it leaves what it gathered as it was.
-pub(crate) fn held<T>(lock: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(crate) fn locked<T>(lock: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     lock.lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }

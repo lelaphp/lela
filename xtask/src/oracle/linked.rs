@@ -172,7 +172,7 @@ fn ask(dir: &Path, server: Option<&Path>, recipe: &Recipe) -> Result<()> {
     };
     let environ = Environ::of(recipe);
     let idle = {
-        let mut idle = crate::held(&IDLE);
+        let mut idle = crate::locked(&IDLE);
         let at = idle
             .iter()
             .position(|server| server.binary == binary && server.environ == environ);
@@ -183,7 +183,7 @@ fn ask(dir: &Path, server: Option<&Path>, recipe: &Recipe) -> Result<()> {
         None => Server::start(binary, recipe, environ)?,
     };
     server.ask(dir)?;
-    crate::held(&IDLE).push(server);
+    crate::locked(&IDLE).push(server);
     Ok(())
 }
 

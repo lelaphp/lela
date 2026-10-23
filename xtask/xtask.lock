@@ -220,6 +220,7 @@ oracle::Stdin
 oracle::Streams
 oracle::TREE_VARIABLE
 oracle::Variable
+oracle::Variable::ALL
 oracle::Variable::name
 oracle::Variant
 oracle::Variant::build
