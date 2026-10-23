@@ -139,8 +139,8 @@ pub(crate) enum Command {
         /// An instrument this run did not take: a missing reading of it is
         /// a note that it did not run, never unmet and never met. CI names
         /// the oracle job's two while that job is skipped (#2477).
-        #[arg(long = "not-run", value_name = "INSTRUMENT", conflicts_with = "hook",
-              value_parser = clap::builder::PossibleValuesParser::new(crate::done::FRESH))]
+        /// An `[[owed]]` row names it, or the run is refused.
+        #[arg(long = "not-run", value_name = "INSTRUMENT", conflicts_with = "hook")]
         not_run: Vec<String>,
     },
     /// Say the branch, the commit it was taken off main at, the store
@@ -278,7 +278,8 @@ pub(crate) enum Command {
     /// lane design §9 runs per commit; one reading per crate, with what
     /// ran, failed and was ignored in its numbers.
     Miri {
-        /// Only these crates, by manifest name; default `php_heap`.
+        /// Only these crates, by manifest name; default the crates the
+        /// manifest's `[[owed]]` row of `miri` names, `php_heap`.
         #[arg(long = "crate", value_name = "NAME")]
         crates: Vec<String>,
     },

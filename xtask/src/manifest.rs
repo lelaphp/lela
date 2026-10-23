@@ -22,6 +22,11 @@ use crate::oracle::Pin;
 use crate::phpt::Scope;
 use crate::track::Ticket;
 
+pub use crate::layout::Layout;
+pub use owed::{Instrument, Owed, When};
+
+mod owed;
+
 /// The file name of the manifest at the workspace root.
 pub const FILE: &str = "seams.toml";
 
@@ -47,6 +52,10 @@ pub struct Manifest {
     pub edges: Vec<Edge>,
     #[serde(rename = "rule", default)]
     pub rules: Vec<Rule>,
+    /// `[[owed]]`: the instruments a crate owes a fresh reading of before
+    /// `done`, one row per instrument ([`Owed`], #3206).
+    #[serde(default)]
+    pub owed: Vec<Owed>,
     /// `[lock_home]`: the crate a lock's file lives with, for a lock no
     /// `[[crate]]` row names. A seam whose producer is a file and not a
     /// crate (`ops`, generated from `ops.toml`) has no row to carry it,
@@ -190,7 +199,10 @@ pub struct PinRow {
     pub pin: String,
 }
 
-/// `[budget]`: the workspace-wide ceilings (design §4.1, §10).
+/// `[budget]`: the workspace-wide ceilings (design §4.1, §10). The php
+/// measures, `clean_build_release_s`, `api_items` and `bindings`, are
+/// optional: a manifest that omits one states no budget for it, and
+/// nothing is held to it (#3187's ruling, #3207).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -200,14 +212,14 @@ pub struct Budget {
     pub docs: u64,
     pub harness: u64,
     pub lock_packages: u64,
-    pub clean_build_release_s: u64,
-    pub api_items: u64,
+    pub clean_build_release_s: Option<u64>,
+    pub api_items: Option<u64>,
     /// `api.lock`'s `__private` lines, the helpers only a macro expansion
     /// names, held apart from `api_items` (design §4.4, revision 34);
     /// absent while a person has not written the row, and the whole lock
     /// is then held to `api_items`.
     pub api_private_items: Option<u64>,
-    pub bindings: u64,
+    pub bindings: Option<u64>,
     /// `scripts/**` against its ceiling, with what under it is a generator
     /// and not counted; absent while a person has not written the row,
     /// and `budget` then counts the tree and holds it to nothing.
@@ -225,10 +237,10 @@ impl Budget {
             docs: n,
             harness: n,
             lock_packages: n,
-            clean_build_release_s: n,
-            api_items: n,
+            clean_build_release_s: Some(n),
+            api_items: Some(n),
             api_private_items: None,
-            bindings: n,
+            bindings: Some(n),
             scripts: None,
         }
     }
@@ -1095,6 +1107,7 @@ impl Manifest {
             }
         }
         manifest.parity.hold(&manifest.crates)?;
+        owed::hold(&manifest.owed, &manifest.crates)?;
         Ok(manifest)
     }
 
@@ -1112,11 +1125,12 @@ impl Manifest {
     }
 
     /// The ceilings on a seam's lock width: `[budget] api_items` and
-    /// `api_private_items` for the api seam (design §4.4, §4.5); no other
-    /// lock has one.
+    /// `api_private_items` for the api seam (design §4.4, §4.5), where the
+    /// manifest states `api_items`; no other lock has one.
     pub fn lock_ceiling(&self, seam: &Seam) -> Option<LockCeiling> {
-        (seam.name == "api").then_some(LockCeiling {
-            items: self.budget.api_items,
+        let items = self.budget.api_items.filter(|_| seam.name == "api")?;
+        Some(LockCeiling {
+            items,
             private: self.budget.api_private_items,
         })
     }
@@ -1137,8 +1151,21 @@ impl Manifest {
             .map(|t| t.trim().to_owned())
     }
 
+    /// The directories its crates are laid down in, derived from its
+    /// `[[crate]]` rows ([`Layout`], #3207).
+    pub fn layout(&self) -> Layout {
+        Layout::of(&self.crates)
+    }
+
     pub fn crate_named(&self, name: &str) -> Option<&Crate> {
         self.crates.iter().find(|c| c.name == name)
+    }
+
+    /// The `[[owed]]` row of `instrument`, where the manifest has one.
+    pub fn owing(&self, instrument: &str) -> Option<&Owed> {
+        self.owed
+            .iter()
+            .find(|row| row.instrument.name() == instrument)
     }
 
     /// The rows `only` names, in the manifest's order, or every row where

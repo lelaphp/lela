@@ -59,7 +59,6 @@ divergence::Status::as_str
 divergence::reason
 done::Base
 done::Base::of
-done::FRESH
 done::Verdict
 done::Verdict::met
 done::Verdict::render
@@ -91,6 +90,10 @@ manifest::Edge::between
 manifest::FILE
 manifest::Generated
 manifest::Generated::files
+manifest::Instrument
+manifest::Instrument::name
+manifest::Layout
+manifest::Layout::of
 manifest::LockCeiling
 manifest::Manifest
 manifest::Manifest::adr_title
@@ -98,12 +101,14 @@ manifest::Manifest::crate_named
 manifest::Manifest::crate_of
 manifest::Manifest::crates_of
 manifest::Manifest::generated_files
+manifest::Manifest::layout
 manifest::Manifest::load
 manifest::Manifest::lock_ceiling
 manifest::Manifest::lock_home
 manifest::Manifest::lock_line_rule
 manifest::Manifest::named
 manifest::Manifest::of
+manifest::Manifest::owing
 manifest::Manifest::parse
 manifest::Manifest::pin
 manifest::Manifest::pin_file
@@ -117,6 +122,8 @@ manifest::OneOrMany::adr_cited
 manifest::OneOrMany::adr_field
 manifest::OneOrMany::is_empty
 manifest::OneOrMany::iter
+manifest::Owed
+manifest::Owed::covers
 manifest::PinRow
 manifest::Predicates
 manifest::Predicates::NAMES
@@ -136,9 +143,9 @@ manifest::Section
 manifest::Section::name
 manifest::Section::readers
 manifest::Telemetry
+manifest::When
 manifest::Where
 manifest::scope_matches
-miri::CRATES
 miri::TOOLCHAIN
 miri::run
 new_ext::Laid

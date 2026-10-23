@@ -918,12 +918,17 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
     assert!(found.contains("this run measured no engine"), "{found}");
 }
 
+/// The crate directories of the manifest at `root`.
+fn layout(root: &Path) -> xtask::manifest::Layout {
+    xtask::manifest::Manifest::load(root).unwrap().layout()
+}
+
 /// The engine tree a run at `root`'s `HEAD` on a binary with no dep-info
 /// is kept under (`xtask::phpt::kept_run`).
 fn engine_tree(root: &Path) -> String {
     let head = sh(root, &["git", "rev-parse", "HEAD"]);
     let snapshot = xtask::key::Snapshot::commit(root, head.trim()).unwrap();
-    let run = xtask::phpt::kept_run(&snapshot, "ext/pcre").unwrap();
+    let run = xtask::phpt::kept_run(&snapshot, &layout(root), "ext/pcre").unwrap();
     let tree = run
         .parent()
         .and_then(Path::parent)

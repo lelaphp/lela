@@ -81,6 +81,7 @@ use super::target::{Target, named};
 use super::{INSTRUMENT, Judgement, Lane, Scope, Tally};
 use crate::git;
 use crate::key::Snapshot;
+use crate::layout::Layout;
 use crate::manifest::Manifest;
 use crate::oracle::built_from::BuiltFrom;
 use crate::oracle::{Pin, Runner};
@@ -222,6 +223,8 @@ pub(crate) struct Runs {
     /// The workspaces a base's run and a target are looked for in,
     /// [`roots`].
     roots: Vec<PathBuf>,
+    /// The crate directories a binary with no dep-info is keyed over.
+    layout: Layout,
     /// The engine's sources by their stat data, which [`Runs::moved`]
     /// asks before git.
     stood: Stood,
@@ -259,6 +262,7 @@ impl Runs {
         Ok(Runs {
             root: root.to_path_buf(),
             roots: roots(root),
+            layout: manifest.layout(),
             stood,
             snapshot,
             commit: git::head_commit(root)?,
@@ -313,7 +317,7 @@ impl Runs {
         let (paths, key) = self.keyed(runner)?;
         let moved = self.moved(&paths, &key)?;
         if let (Some(run), false) = (&run, moved) {
-            remember(&self.root, &paths)?;
+            remember(&self.root, &self.layout, &paths)?;
             keep(&path(&self.root, &key, scope), run)?;
         }
         let Some(base) = &self.base else {
@@ -322,7 +326,8 @@ impl Runs {
         // A base with no run kept is a comparison that gives no verdict and
         // never a subset left unrun: the subset's own reading stands beside
         // it, and the skip says so with its counts (#1435).
-        let diff = match (base.run(&self.roots, scope, &self.recipe)?, run) {
+        let was = base.run(&self.roots, &self.layout, scope, &self.recipe)?;
+        let diff = match (was, run) {
             (Err(why), _) => Err(format!(
                 "{why}; the subset ran, and its own reading stands beside this one: {}",
                 subset.message
@@ -343,7 +348,7 @@ impl Runs {
     /// at over them.
     fn keyed(&self, runner: &Runner) -> Result<(Vec<PathBuf>, String)> {
         let built = runner.binary().map_or(BuiltFrom::Unlisted, BuiltFrom::of);
-        let paths = built.keyed(&self.root);
+        let paths = built.keyed(&self.root, &self.layout);
         let key = self.snapshot.tracked_over(&paths)?;
         Ok((paths, key))
     }
@@ -432,10 +437,16 @@ impl Base {
     /// The run of `scope` stored at the commit under the pin whose digest
     /// is `recipe`, from the first of `roots` that keeps one, or why there
     /// is none, naming each root looked in or the run under another pin.
-    fn run(&self, roots: &[PathBuf], scope: &str, recipe: &str) -> Result<Result<Run, String>> {
+    fn run(
+        &self,
+        roots: &[PathBuf],
+        layout: &Layout,
+        scope: &str,
+        recipe: &str,
+    ) -> Result<Result<Run, String>> {
         let commit = &self.commit;
         let take = super::base::call(commit, scope);
-        match kept(roots, &self.snapshot, scope, recipe)? {
+        match kept(roots, &self.snapshot, layout, scope, recipe)? {
             Kept::Fresh(run) => return Ok(Ok(run)),
             Kept::Stale => {
                 return Ok(Err(format!(
@@ -473,16 +484,18 @@ pub(crate) fn fetch(root: &Path) -> String {
     )
 }
 
-/// The run of `scope` kept at `commit`'s engine tree under `pin` in a
-/// workspace of the repository at `root` ([`roots`]), or why there is
-/// none: what `--against` holds a subset to, and what `phpt --base` keeps.
+/// The run of `scope` kept at `commit`'s engine tree under the pin of
+/// `manifest` in a workspace of the repository at `root` ([`roots`]), or
+/// why there is none: what `--against` holds a subset to, and what `phpt
+/// --base` keeps.
 pub(crate) fn kept_at(
     root: &Path,
-    pin: &Pin,
+    manifest: &Manifest,
     commit: &str,
     scope: &str,
 ) -> Result<Result<Run, String>> {
-    Base::at(root, commit)?.run(&roots(root), scope, pin.digest())
+    let (layout, digest) = (manifest.layout(), manifest.pin()?.digest());
+    Base::at(root, commit)?.run(&roots(root), &layout, scope, digest)
 }
 
 /// Why a kept run is stale, the words `done` gives a stale reading
@@ -521,8 +534,8 @@ const KEYED: &str = "built-from";
 /// Keep `paths`, the set a run at `root` is kept under, among the sets
 /// [`keys`] looks under, where it is not kept already and is not the one
 /// [`keys`] looks under with none kept.
-fn remember(root: &Path, paths: &[PathBuf]) -> Result<()> {
-    if paths == BuiltFrom::Unlisted.keyed(root) {
+fn remember(root: &Path, layout: &Layout, paths: &[PathBuf]) -> Result<()> {
+    if paths == BuiltFrom::Unlisted.keyed(root, layout) {
         return Ok(());
     }
     let text = serde_json::to_string_pretty(paths).context("rendering a set of sources")?;
@@ -536,12 +549,13 @@ fn remember(root: &Path, paths: &[PathBuf]) -> Result<()> {
 
 /// Every key a run at `snapshot`'s engine may be kept under: its tracked
 /// files over each set of paths a run was kept under in any of `roots`
-/// ([`remember`]), and over [`BuiltFrom::Unlisted`]'s, which needs none
-/// kept. Two trees with one key over a set build one binary from it, since
-/// the set holds every manifest the build resolved its packages from, so a
-/// run found under any is the engine's at this tree.
-fn keys(snapshot: &Snapshot, roots: &[PathBuf]) -> Result<Vec<String>> {
-    let mut sets = BTreeSet::from([BuiltFrom::Unlisted.keyed(snapshot.root())]);
+/// ([`remember`]), and over [`BuiltFrom::Unlisted`]'s over `layout`,
+/// which needs none kept. Two trees with one key over a set build one
+/// binary from it, since the set holds every manifest the build resolved
+/// its packages from, so a run found under any is the engine's at this
+/// tree.
+fn keys(snapshot: &Snapshot, layout: &Layout, roots: &[PathBuf]) -> Result<Vec<String>> {
+    let mut sets = BTreeSet::from([BuiltFrom::Unlisted.keyed(snapshot.root(), layout)]);
     for root in roots {
         let Ok(files) = crate::entries(&root.join(RUNS).join(KEYED)) else {
             continue;
@@ -570,10 +584,16 @@ enum Kept {
 /// The run of `scope` at `snapshot`'s engine, under any of its [`keys`]
 /// in any of `roots`, the newest of those taken under the pin whose digest
 /// is `recipe`; a run of no test is none ([`Run::holds_a_test`]).
-fn kept(roots: &[PathBuf], snapshot: &Snapshot, scope: &str, recipe: &str) -> Result<Kept> {
+fn kept(
+    roots: &[PathBuf],
+    snapshot: &Snapshot,
+    layout: &Layout,
+    scope: &str,
+    recipe: &str,
+) -> Result<Kept> {
     let mut found: Option<(Option<SystemTime>, Run)> = None;
     let mut stale = false;
-    for key in keys(snapshot, roots)? {
+    for key in keys(snapshot, layout, roots)? {
         for root in roots {
             let file = path(root, &key, scope);
             let Some(run) = read(&file)?.filter(Run::holds_a_test) else {
@@ -615,10 +635,11 @@ pub(super) fn read(file: &Path) -> Result<Option<Run>> {
 }
 
 /// Where the workspace `snapshot` stands in keeps the run of `scope` taken
-/// on a binary with no dep-info of its own ([`BuiltFrom::Unlisted`]), one
-/// of the files [`regressed`] reads as this tree's run.
-pub fn kept_run(snapshot: &Snapshot, scope: &str) -> Result<PathBuf> {
-    let tree = snapshot.tracked_over(&BuiltFrom::Unlisted.keyed(snapshot.root()))?;
+/// on a binary with no dep-info of its own ([`BuiltFrom::Unlisted`]) over
+/// the crate directories of `layout`, one of the files [`regressed`] reads
+/// as this tree's run.
+pub fn kept_run(snapshot: &Snapshot, layout: &Layout, scope: &str) -> Result<PathBuf> {
+    let tree = snapshot.tracked_over(&BuiltFrom::Unlisted.keyed(snapshot.root(), layout))?;
     Ok(path(snapshot.root(), &tree, scope))
 }
 
@@ -638,15 +659,17 @@ pub(crate) enum Against {
 /// `scope` kept at `base`'s engine tree is met in the one kept at
 /// `snapshot`'s, a skip meeting none ([`diff`]), over the target kept under
 /// `pin` where there is one; a run kept under another pin is stale
-/// (#2725).
+/// (#2725). A binary with no dep-info's runs are keyed over the crate
+/// directories of `layout`.
 pub(crate) fn regressed(
     snapshot: &Snapshot,
+    layout: &Layout,
     base: &str,
     pin: &Pin,
     scope: &str,
 ) -> Result<Against> {
     let roots = roots(snapshot.root());
-    let run = match kept(&roots, snapshot, scope, pin.digest())? {
+    let run = match kept(&roots, snapshot, layout, scope, pin.digest())? {
         Kept::Fresh(run) => run,
         Kept::Stale => {
             return Ok(Against::Unrun(format!(
@@ -661,7 +684,7 @@ pub(crate) fn regressed(
         }
     };
     let base = Base::at(snapshot.root(), base)?;
-    let was = match base.run(&roots, scope, pin.digest())? {
+    let was = match base.run(&roots, layout, scope, pin.digest())? {
         Ok(was) => was,
         Err(why) => return Ok(Against::Unmet(why)),
     };

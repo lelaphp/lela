@@ -189,7 +189,7 @@ pub(crate) fn run_bench(
     for (name, q) in &measured.shapes {
         println!("  {}", line(name, q));
     }
-    let mut reading = Reading::for_scope(INSTRUMENT, crate::done::HARNESS, manifest, &snapshot)?;
+    let mut reading = Reading::for_scope(INSTRUMENT, crate::layout::HARNESS, manifest, &snapshot)?;
     reading.status = Status::of(measured.meets_the_bar(bar_ms));
     reading.set("runs", i64::try_from(measured.runs)?);
     reading.set("bar_ms", bar_ms);

@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use xtask::manifest::{Manifest, Scripts};
+use xtask::manifest::{Budget, Manifest, Scripts, Seam};
 use xtask::reading::{Number, Status, Store};
 use xtask::scratch::Tree;
 use xtask::{budget, generated};
@@ -95,6 +95,43 @@ fn without_the_scripts_row_the_tree_is_measured_and_held_to_nothing() {
         scripts.message
     );
     assert!(!scripts.key().is_empty(), "stamped over scripts/");
+}
+
+/// A manifest that states no `bindings`, `clean_build_release_s` or
+/// `api_items` under `[budget]` loads, and states no budget for them: the
+/// workspace's reading carries no bindings count or ceiling, and the api
+/// seam's lock no ceiling (#3187's ruling, #3207).
+#[test]
+fn a_budget_without_the_php_measures_holds_nothing_to_them() {
+    let root = scratch("no-php-measures");
+    common::repo::scratch_workspace(workspace(), &root);
+    let mut stated = Budget::flat(1_000_000);
+    stated.bindings = None;
+    stated.clean_build_release_s = None;
+    stated.api_items = None;
+    let table = toml::Table::try_from(stated).unwrap();
+    let manifest = Tracked::minimal()
+        .with_table("budget", Some(table))
+        .write(&root);
+    let text = std::fs::read_to_string(root.join("seams.toml")).unwrap();
+    for measure in ["bindings", "clean_build_release_s", "api_items"] {
+        assert!(!text.contains(measure), "{measure} is stated: {text}");
+    }
+    let budget = &manifest.budget;
+    let measures = (
+        budget.bindings,
+        budget.clean_build_release_s,
+        budget.api_items,
+    );
+    assert_eq!(measures, (None, None, None));
+    assert_eq!(manifest.lock_ceiling(&Seam::named("api", "php_ext")), None);
+    std::fs::copy(workspace().join("Cargo.lock"), root.join("Cargo.lock")).unwrap();
+    let readings = budget::run(&root, &manifest).unwrap();
+    let numbers = &workspace_reading(&readings).numbers;
+    assert!(numbers.contains_key("total"), "{numbers:?}");
+    for number in ["bindings", "bindings_ceiling"] {
+        assert!(!numbers.contains_key(number), "{number}: {numbers:?}");
+    }
 }
 
 /// The mechanism, held without the row in the tracked manifest: a scratch

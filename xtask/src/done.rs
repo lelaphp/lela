@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -59,8 +59,7 @@ use crate::crosscheck;
 use crate::divergence::{self, Registry};
 use crate::git::{self, Change};
 use crate::key::{self, Snapshot};
-use crate::manifest::{Crate, Manifest};
-use crate::miri;
+use crate::manifest::{Crate, Manifest, Owed, When};
 use crate::permit;
 use crate::phpt;
 use crate::phpt::against::{self, Against};
@@ -74,79 +73,40 @@ use crate::track::{self, MAIN, Ticket, merge_base, short};
 pub(crate) const INSTRUMENT: &str = "done";
 /// The scope of the verdict's reading: the whole tree.
 pub(crate) const WORKSPACE: &str = "workspace";
-/// The instruments condition 1 knows. Which of them one crate is asked
-/// for is [`instruments_of`], since three of the eight are a narrower
-/// crate's than "every touched one": `phpt`'s is the reading over the
-/// subsets the crate's `[[crate]]` row owns, written under the crate's
-/// name, `witness` is no crate's without a kernel or a native, and
-/// `port-map` is the one crate `api.lock` lives with alone, and
-/// `crosscheck` is an extension's the binary carries, the ones the
-/// per-commit lane renders (#269), and `miri` is the memory model's,
-/// the crates [`miri::CRATES`] names (#2416). `test` is narrowed for
-/// nobody: the harness has tests as every crate has, and it is asked the
-/// way `clippy` is (#191).
-pub const FRESH: [&str; 10] = [
-    "clippy",
-    "test",
-    "witness",
-    "api-check",
-    "budget",
-    "unsafe-audit",
-    "phpt",
-    "port-map",
-    "crosscheck",
-    "miri",
-];
+/// The instruments condition 1 asks of one crate, in the manifest's
+/// order: each `[[owed]]` row's whose `crates` cover it and whose `when`
+/// holds of it ([`holds`]), the rows being the statement of what a crate
+/// owes and this the one reader of them (harness §4.5 condition 1, #3184's
+/// ruling, #3206), `carried` being what the binary under test carries.
+pub(crate) fn owed<'m>(manifest: &'m Manifest, krate: &Crate, carried: &Carried) -> Vec<&'m str> {
+    let owes = |row: &&Owed| {
+        row.covers(&krate.name) && row.when.is_none_or(|w| holds(w, manifest, krate, carried))
+    };
+    let rows = manifest.owed.iter().filter(owes);
+    rows.map(|row| row.instrument.name()).collect()
+}
 
-/// The harness crate; it has no kernel and no native.
-pub(crate) const HARNESS: &str = "xtask";
-
-/// The instruments condition 1 asks of one crate: all of [`FRESH`], less
-/// `witness` for the harness, which has no kernel and no native, less
-/// `phpt` for a crate the per-commit lane writes no reading for, and less
-/// `port-map` for every crate but the one `api.lock` lives with, named by
-/// `home_of_the_lock` in the manifest's terms and passed in here. Which
-/// crate owns which of the corpus is the `[[crate]]` row's sentence, so a
-/// crate that owns none is not asked here rather than asked and answered
-/// by the runner's error. The lane runs the subsets of every crate the
-/// binary under test carries, `carried`, read from the binary's own
-/// declaration: a crate the row marks `feature =` is asked where the
-/// binary turns the feature on or the row names an oracle variant, whose
-/// subset the lane runs on the engine built with the feature (#2029), and
-/// any other is the nightly lane's, which `done`, running per commit, does
-/// not ask for a reading only a run by name could write (harness §4.1,
-/// §4.5 condition 1, §7, revision 63). `port-map` writes exactly one reading, at
-/// the crate the lock lives with, so every other crate would be held to a
-/// reading nothing ever writes; that crate is the one asked because the
-/// lock is in its tree, and a change to the lock is what makes a row of
-/// the join matched or unmatched (harness §4.5 condition 1, #148).
-/// `crosscheck` is asked of an `ext/*` crate the binary carries: the lane
-/// renders those per commit and every other feature nightly (harness §7),
-/// the same line `phpt` stands on, and the reading is the port's progress
-/// meter, so an extension whose rendering is not the oracle's is not done
-/// (design §7.1, #269). `miri` is asked of the crates the Miri lane runs,
-/// [`miri::CRATES`], `php_heap`, the engine's main `unsafe` home, when the
-/// change moves its key (#2416). `php_heap` depends on no workspace crate,
-/// so its dependency closure is itself and a change that moves its key is
-/// a change to it, one that touches it.
-pub(crate) fn instruments_of(
-    krate: &Crate,
-    lock_home: Option<&str>,
-    carried: &Carried,
-) -> impl Iterator<Item = &'static str> {
-    let harness = krate.name == HARNESS;
-    let measured_by_the_lane = measured_by_the_lane(krate, carried);
-    let carried = carried.carries(krate);
-    let home_of_the_lock = lock_home == Some(krate.name.as_str());
-    let carried_extension = krate.name.starts_with("ext/") && carried;
-    FRESH.into_iter().filter(move |i| match *i {
-        "witness" => !harness,
-        "phpt" => measured_by_the_lane,
-        "port-map" => home_of_the_lock,
-        "crosscheck" => carried_extension,
-        "miri" => miri::CRATES.contains(&krate.name.as_str()),
-        _ => true,
-    })
+/// Whether `when` holds of `krate`, derived from what the instrument
+/// writes its readings over. The lane runs the subsets of every crate the
+/// binary under test carries, read from the binary's own declaration, and
+/// of one whose row names an oracle variant, whose subset it runs on the
+/// engine built with the feature (#2029); any other is the nightly
+/// lane's, which `done`, running per commit, does not ask for a reading
+/// only a run by name could write (harness §4.1, §4.5 condition 1, §7,
+/// revision 63). `port-map` writes exactly one reading, at the crate the
+/// lock lives with, so every other crate would be held to a reading
+/// nothing ever writes (#148); a manifest that names no crate holding the
+/// lock is one the instrument itself refuses, and `done` asks nobody for
+/// the reading instead. `crosscheck` renders the extensions the binary
+/// carries per commit and every other feature nightly (harness §7, #269).
+fn holds(when: When, manifest: &Manifest, krate: &Crate, carried: &Carried) -> bool {
+    match when {
+        When::PhptSubset => measured_by_the_lane(krate, carried),
+        When::LockHome => {
+            port_map::home_of_the_lock(manifest).is_ok_and(|home| home.name == krate.name)
+        }
+        When::Carried => carried.carries(krate),
+    }
 }
 
 /// Whether the per-commit lane runs a subset of `krate`: it owns one, and
@@ -156,17 +116,6 @@ pub(crate) fn instruments_of(
 /// the touched crates' runs by, as condition 1 holds them to those runs.
 pub(crate) fn measured_by_the_lane(krate: &Crate, carried: &Carried) -> bool {
     !krate.subsets().is_empty() && (carried.carries(krate) || krate.oracle.is_some())
-}
-
-/// The name of the crate `api.lock` lives with, the one crate condition 1
-/// asks for a `port-map` reading, or `None` for a manifest that names no
-/// crate holding the lock, which is a manifest the instrument itself
-/// refuses; `done` is not the place that says so, and asks nobody for the
-/// reading instead.
-fn lock_home(manifest: &Manifest) -> Option<String> {
-    port_map::home_of_the_lock(manifest)
-        .ok()
-        .map(|krate| krate.name.clone())
 }
 
 /// The commit the changes are measured since, and the ref it was taken
@@ -339,36 +288,34 @@ pub(crate) enum Condition {
     /// (`unsupported` is reported, not held, under the permissive
     /// provenance #2415 ruled).
     ///
-    /// Which instruments one crate is asked for is [`instruments_of`],
-    /// over [`FRESH`], `test` among them and asked of every crate, since
-    /// every crate has tests and one whose tests do not run is not done
-    /// (#191); `port-map` is the only scope that instrument writes a
-    /// reading at (#148), and `crosscheck` is the rendering diff the
-    /// per-commit lane writes per extension (#269). The key is the hash
-    /// over the crate's sources and its declared dependency closure's (§4.2,
-    /// §13 D.18), the one every instrument stamps; an instrument that does
-    /// not exist yet has written no reading, so its condition is unmet and
-    /// the list is honest from day one. `phpt` is [`no_regression`], the
-    /// two kept runs diffed by [`against::regressed`], where a test the
-    /// compiler no longer reads is a regression and one it never read is
-    /// held to nothing, which retires the `unread` rung of #319; where no
-    /// run is kept here, a fresh skip the missing engine binary causes is
-    /// met, [`no_binary_yet`] (#132). A `witness` reading is held to its
-    /// status, the linked engine having served it (#119). A rung is the
-    /// manifest's, not a lane's: a crate whose `[[crate]]` row carries
-    /// `porting = true` has its `crosscheck` readings read as the port's
-    /// meter, [`porting_meter`], fresh and printed but met whatever they
-    /// say, while the port is partial (#383). `miri` is asked of the
-    /// crates [`miri::CRATES`] names, `php_heap`, when a change touches
-    /// it, `php_heap` depending
-    /// on no workspace crate; a fail made only of unsupported operations is
-    /// met, [`miri_unsupported`], and every other is held (#2416). A crate
-    /// whose library or binary sources name `debug_assertions` is asked
-    /// for `clippy` twice, at its name and at `<name>/release`, the release
-    /// profile's lint ([`scopes_of`], #2392). A
-    /// caller's `--not-run` moves an instrument's missing reading off this
-    /// list and onto the notes, as CI's does for the oracle job's two while
-    /// that job is skipped (#2477).
+    /// Which instruments one crate is asked for is [`owed`], the manifest's
+    /// `[[owed]]` rows (#3206): `test` is asked of every crate, since every
+    /// crate has tests and one whose tests do not run is not done (#191);
+    /// `port-map` of the crate the lock lives with, the only scope that
+    /// instrument writes a reading at (#148), and `crosscheck` of the
+    /// extensions the per-commit lane renders (#269). The key is the hash over
+    /// the crate's sources and its declared dependency closure's (§4.2, §13
+    /// D.18), the one every instrument stamps; an instrument that does not
+    /// exist yet has written no reading, so its condition is unmet and the list
+    /// is honest from day one. `phpt` is [`no_regression`], the two kept runs
+    /// diffed by [`against::regressed`], where a test the compiler no longer
+    /// reads is a regression and one it never read is held to nothing, which
+    /// retires the `unread` rung of #319; where no run is kept here, a fresh
+    /// skip the missing engine binary causes is met, [`no_binary_yet`] (#132).
+    /// A `witness` reading is held to its status, the linked engine having
+    /// served it (#119). A rung is the manifest's, not a lane's: a crate whose
+    /// `[[crate]]` row carries `porting = true` has its `crosscheck` readings
+    /// read as the port's meter, [`porting_meter`], fresh and printed but met
+    /// whatever they say, while the port is partial (#383). `miri` is asked of
+    /// the crates its row names, `php_heap`, when a change touches it,
+    /// `php_heap` depending on no workspace crate; a fail made only of
+    /// unsupported operations is met, [`miri_unsupported`], and every other is
+    /// held (#2416). A crate whose library or binary sources name
+    /// `debug_assertions` is asked for `clippy` twice, at its name and at
+    /// `<name>/release`, the release profile's lint ([`scopes_of`], #2392). A
+    /// caller's `--not-run` moves an instrument's missing reading off this list
+    /// and onto the notes, as CI's does for the oracle job's two while that job
+    /// is skipped (#2477).
     Fresh,
     /// Every kernel or native added in the diff has a witness: the
     /// `witness` reading's `missing` is zero for the crate.
@@ -477,14 +424,12 @@ pub fn judge(
     let mut notes = Vec::new();
     let mut not_judged = Vec::new();
 
-    let lock_home = lock_home(manifest);
     let carried = Carried::binary(root)?;
     let asking = Asking {
         snapshot,
         manifest,
         store,
         base: &base.commit,
-        lock_home: lock_home.as_deref(),
         carried: &carried,
         not_run,
     };
@@ -782,7 +727,6 @@ struct Asking<'a> {
     manifest: &'a Manifest,
     store: &'a Store,
     base: &'a str,
-    lock_home: Option<&'a str>,
     carried: &'a Carried,
     /// The instruments the caller's run did not take (#2477).
     not_run: &'a [String],
@@ -811,7 +755,8 @@ fn no_regression(
         Some(Ok(variant)) => variant,
         None => pin.clone(),
     };
-    match against::regressed(asking.snapshot, asking.base, &pin, scope)? {
+    let layout = asking.manifest.layout();
+    match against::regressed(asking.snapshot, &layout, asking.base, &pin, scope)? {
         Against::Held => {}
         // An extension with no tests of its own keeps no run (#3143) and
         // holds nothing against any base (#725).
@@ -886,7 +831,7 @@ fn fresh_readings(
     // A scope with no file has no reading, whatever the log holds.
     let mut asked = Vec::new();
     let mut phpt = false;
-    for instrument in instruments_of(krate, asking.lock_home, asking.carried) {
+    for instrument in owed(asking.manifest, krate, asking.carried) {
         // `phpt` is held by its kept runs, not by a reading, after them.
         if instrument == "phpt" {
             phpt = true;
@@ -1138,7 +1083,8 @@ fn bullets(out: &mut String, head: &str, lines: &[String]) {
 }
 
 /// The command: judge, write the reading, print the list, fail while
-/// anything is unmet.
+/// anything is unmet. An instrument `not_run` names that no `[[owed]]`
+/// row does is refused, naming the ones the rows do.
 pub fn run(
     root: &Path,
     manifest: &Manifest,
@@ -1147,6 +1093,13 @@ pub fn run(
     base: Option<&str>,
     not_run: &[String],
 ) -> Result<()> {
+    if let Some(unowed) = not_run.iter().find(|n| manifest.owing(n).is_none()) {
+        let owed: Vec<&str> = manifest.owed.iter().map(|r| r.instrument.name()).collect();
+        bail!(
+            "--not-run {unowed}: no [[owed]] row names it, so no crate is asked for its reading; the rows name {}",
+            owed.join(", ")
+        );
+    }
     let snapshot = Snapshot::disk(root)?;
     let verdict = judge(&snapshot, manifest, registry, store, base, not_run)?;
     let outcome = store.record(&[verdict.reading(manifest, &snapshot)?])?;
@@ -1244,28 +1197,95 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 #[cfg(test)]
 mod tests {
     use super::{
-        FRESH, Slack, instruments_of, met_without_passing, miri_unsupported, no_binary_yet,
-        porting_meter, rule_absent, slack_porting,
+        Slack, met_without_passing, miri_unsupported, no_binary_yet, owed, porting_meter,
+        rule_absent, slack_porting,
     };
     use crate::carried::Carried;
-    use crate::manifest::{Crate, Manifest, Rule};
+    use crate::manifest::{Crate, Manifest, Owed, Rule};
     use crate::reading::{Reading, Status};
 
-    /// The crate `api.lock` lives with in the shipped manifest, which is
-    /// what narrows `port-map`; every crate here but that one is asked
-    /// for `ASKED_OF_EVERY_OTHER_CRATE` at most.
-    const HOME: Option<&str> = Some("php_ext");
+    /// The `[[owed]]` rows the tracked manifest carries (#3206), stated
+    /// here so these tests hold the rows' mechanics and a person's edit to
+    /// `seams.toml` turns none of them red; the tracked rows are held to
+    /// what `done` asked before them by
+    /// `the_tracked_rows_ask_every_crate_what_done_asked_before_them`.
+    const OWED: &str = r#"
+[[owed]]
+instrument = "clippy"
+crates = "*"
+
+[[owed]]
+instrument = "test"
+crates = "*"
+
+[[owed]]
+instrument = "witness"
+crates = "*"
+exempt = ["xtask"]                         # the harness has no kernel and no native
+
+[[owed]]
+instrument = "api-check"
+crates = "*"
+
+[[owed]]
+instrument = "budget"
+crates = "*"
+
+[[owed]]
+instrument = "unsafe-audit"
+crates = "*"
+
+[[owed]]
+instrument = "phpt"
+crates = "*"
+when = "phpt-subset"                       # the per-commit lane runs a subset of the crate
+
+[[owed]]
+instrument = "port-map"
+crates = "*"
+when = "lock-home"                         # the crate api.lock lives with, the one scope port-map writes
+
+[[owed]]
+instrument = "crosscheck"
+crates = "ext/*"
+when = "carried"                           # an extension the binary under test carries
+
+[[owed]]
+instrument = "miri"
+crates = ["php_heap"]                      # design §9's memory model; also what `xtask miri` runs by default
+"#;
+
+    /// A manifest of [`OWED`] and the crate `api.lock` lives with, where
+    /// `home` names one, as the shipped manifest's is `php_ext`.
+    fn homed(home: Option<&str>) -> &'static Manifest {
+        #[derive(serde::Deserialize)]
+        struct Rows {
+            owed: Vec<Owed>,
+        }
+        let rows: Rows = toml::from_str(OWED).unwrap();
+        let mut manifest = Manifest::of(home.map(Crate::named));
+        manifest.owed = rows.owed;
+        manifest
+            .lock_homes
+            .extend(home.map(|h| ("api.lock".to_owned(), h.to_owned())));
+        Box::leak(Box::new(manifest))
+    }
+
+    /// The rows, with the lock living with `php_ext`.
+    fn rows() -> &'static Manifest {
+        homed(Some("php_ext"))
+    }
 
     /// What the crate asks as the binary under test that turns on the
     /// `openssl` feature and no other carries it.
-    fn asked_of(krate: &Crate, lock_home: Option<&str>) -> Vec<&'static str> {
-        instruments_of(krate, lock_home, &Carried::turning_on(&["openssl"])).collect()
+    fn asked_of(krate: &Crate) -> Vec<&'static str> {
+        owed(rows(), krate, &Carried::turning_on(&["openssl"]))
     }
 
-    /// [`FRESH`] less `port-map`, `crosscheck` and `miri`: what an engine
+    /// The rows less `port-map`, `crosscheck` and `miri`: what an engine
     /// crate that is not the lock's home nor the Miri lane's is asked,
-    /// before the two narrowings of its own. That it is [`FRESH`] less the
-    /// three rows is asserted below and not trusted here.
+    /// before the two narrowings of its own. That it is the rows less the
+    /// three is asserted below and not trusted here.
     const ASKED_OF_EVERY_OTHER_CRATE: [&str; 7] = [
         "clippy",
         "test",
@@ -1290,12 +1310,12 @@ mod tests {
 
     #[test]
     fn the_harness_crate_is_asked_for_clippy_test_api_check_budget_and_unsafe_audit_only() {
-        let asked = asked_of(&Crate::named("xtask"), HOME);
+        let asked = asked_of(&Crate::named("xtask"));
         assert_eq!(
             asked,
             ["clippy", "test", "api-check", "budget", "unsafe-audit"]
         );
-        let asked = asked_of(&Crate::named("ext/pcre"), HOME);
+        let asked = asked_of(&Crate::named("ext/pcre"));
         assert_eq!(asked, ASKED_OF_A_DEFAULT_EXTENSION);
     }
 
@@ -1306,15 +1326,15 @@ mod tests {
     /// engine crate is (#269).
     #[test]
     fn a_default_extension_is_asked_for_a_crosscheck_reading_and_nobody_else_is() {
-        let asked = asked_of(&Crate::named("ext/ctype"), HOME);
+        let asked = asked_of(&Crate::named("ext/ctype"));
         assert!(asked.contains(&"crosscheck"), "{asked:?}");
         let row = Crate::named("ext/mbstring").with_feature("mbstring");
-        let asked = asked_of(&row, HOME);
+        let asked = asked_of(&row);
         assert!(!asked.contains(&"crosscheck"), "{asked:?}");
         let row = Crate::named("ext/openssl").with_feature("openssl");
-        assert!(asked_of(&row, HOME).contains(&"crosscheck"));
+        assert!(asked_of(&row).contains(&"crosscheck"));
         for other in ["php_engine", "php_ext", "xtask"] {
-            let asked = asked_of(&Crate::named(other), HOME);
+            let asked = asked_of(&Crate::named(other));
             assert!(!asked.contains(&"crosscheck"), "{other}: {asked:?}");
         }
     }
@@ -1325,7 +1345,7 @@ mod tests {
     /// one is asked.
     #[test]
     fn a_crate_is_asked_for_a_phpt_reading_only_where_the_manifest_gives_it_one() {
-        let asked = asked_of(&Crate::named("php_engine"), HOME);
+        let asked = asked_of(&Crate::named("php_engine"));
         assert_eq!(
             asked,
             [
@@ -1338,7 +1358,7 @@ mod tests {
             ]
         );
         let row = Crate::named("php_engine").with_phpt(&["Zend/tests"]);
-        let asked = asked_of(&row, HOME);
+        let asked = asked_of(&row);
         assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
     }
 
@@ -1346,7 +1366,7 @@ mod tests {
     /// of no other crate (#2416).
     #[test]
     fn the_memory_model_is_the_one_crate_asked_for_a_miri_reading() {
-        let asked = asked_of(&Crate::named("php_heap"), HOME);
+        let asked = asked_of(&Crate::named("php_heap"));
         assert_eq!(
             asked,
             [
@@ -1360,7 +1380,7 @@ mod tests {
             ]
         );
         for other in ["php_engine", "php_ext", "ext/pcre", "xtask"] {
-            let asked = asked_of(&Crate::named(other), HOME);
+            let asked = asked_of(&Crate::named(other));
             assert!(!asked.contains(&"miri"), "{other}: {asked:?}");
         }
     }
@@ -1409,17 +1429,17 @@ mod tests {
         let varied = Crate::named("ext/mbstring")
             .with_feature("mbstring")
             .with_oracle("zend-test");
-        assert_eq!(asked_of(&varied, HOME), ASKED_OF_EVERY_OTHER_CRATE);
+        assert_eq!(asked_of(&varied), ASKED_OF_EVERY_OTHER_CRATE);
         let root = crate::package_dir().parent().unwrap();
         let manifest = crate::manifest::Manifest::load(root).unwrap();
         let zend_test = manifest.crate_named("ext/zend_test").unwrap();
         let carried = Carried::binary(root).unwrap();
         assert!(!carried.carries(zend_test), "{carried:?}");
-        let asked: Vec<_> = instruments_of(zend_test, HOME, &carried).collect();
+        let asked = owed(rows(), zend_test, &carried);
         assert_eq!(asked, ASKED_OF_EVERY_OTHER_CRATE);
 
         let row = Crate::named("ext/mbstring").with_feature("mbstring");
-        let asked = asked_of(&row, HOME);
+        let asked = asked_of(&row);
         assert_eq!(
             asked,
             [
@@ -1431,10 +1451,10 @@ mod tests {
                 "unsafe-audit"
             ]
         );
-        let asked = asked_of(&Crate::named("ext/mbstring"), HOME);
+        let asked = asked_of(&Crate::named("ext/mbstring"));
         assert_eq!(asked, ASKED_OF_A_DEFAULT_EXTENSION);
         let row = Crate::named("ext/openssl").with_feature("openssl");
-        assert_eq!(asked_of(&row, HOME), ASKED_OF_A_DEFAULT_EXTENSION);
+        assert_eq!(asked_of(&row), ASKED_OF_A_DEFAULT_EXTENSION);
     }
 
     /// `port-map` writes exactly one reading, at the crate `api.lock`
@@ -1444,12 +1464,12 @@ mod tests {
     /// said, not `done`.
     #[test]
     fn the_crate_the_lock_lives_with_is_the_one_asked_for_a_port_map_reading() {
-        let rest: Vec<&str> = FRESH
-            .into_iter()
+        let rest: Vec<&str> = (rows().owed.iter())
+            .map(|row| row.instrument.name())
             .filter(|i| !matches!(*i, "port-map" | "crosscheck" | "miri"))
             .collect();
         assert_eq!(rest, ASKED_OF_EVERY_OTHER_CRATE);
-        let asked = asked_of(&Crate::named("php_ext"), HOME);
+        let asked = asked_of(&Crate::named("php_ext"));
         assert_eq!(
             asked,
             [
@@ -1463,10 +1483,11 @@ mod tests {
             ]
         );
         for other in ["php_engine", "ext/pcre", "xtask"] {
-            let asked = asked_of(&Crate::named(other), HOME);
+            let asked = asked_of(&Crate::named(other));
             assert!(!asked.contains(&"port-map"), "{other}: {asked:?}");
         }
-        let asked = asked_of(&Crate::named("php_ext"), None);
+        let carried = Carried::turning_on(&["openssl"]);
+        let asked = owed(homed(None), &Crate::named("php_ext"), &carried);
         assert!(!asked.contains(&"port-map"), "{asked:?}");
     }
 
@@ -1520,7 +1541,8 @@ mod tests {
             assert!(met_without_passing(&porting, "crosscheck", &reading));
             assert!(!met_without_passing(&held, "crosscheck", &reading));
         }
-        for instrument in FRESH.into_iter().filter(|i| *i != "crosscheck") {
+        let instruments = rows().owed.iter().map(|row| row.instrument.name());
+        for instrument in instruments.filter(|i| *i != "crosscheck") {
             assert!(!porting_meter(&porting, instrument), "{instrument}");
             assert!(
                 !met_without_passing(&porting, instrument, &red(instrument, Status::Fail)),
@@ -1584,5 +1606,48 @@ mod tests {
         assert!(!rule_absent(&with, &reading));
         reading.status = Status::Fail;
         assert!(!rule_absent(&without, &reading), "a fail is held");
+    }
+
+    /// #3206: the tracked manifest's `[[owed]]` rows ask every crate of it
+    /// for what `done` asked before the rows, when `done.rs` carried the
+    /// list as `FRESH` and narrowed it in `instruments_of` (at 3e9e33de6):
+    /// all ten but `witness` of the harness, `phpt` of a crate the lane
+    /// measures, `port-map` of the lock's home, `crosscheck` of an
+    /// extension the binary carries and `miri` of `php_heap`, in that
+    /// order.
+    #[cfg(tracked)]
+    #[test]
+    fn the_tracked_rows_ask_every_crate_what_done_asked_before_them() {
+        let root = crate::package_dir().parent().unwrap();
+        let manifest = Manifest::load(root).unwrap();
+        let carried = Carried::binary(root).unwrap();
+        let home = &crate::port_map::home_of_the_lock(&manifest).unwrap().name;
+        let before = [
+            "clippy",
+            "test",
+            "witness",
+            "api-check",
+            "budget",
+            "unsafe-audit",
+            "phpt",
+            "port-map",
+            "crosscheck",
+            "miri",
+        ];
+        for krate in &manifest.crates {
+            let name = krate.name.as_str();
+            let asked_before: Vec<&str> = (before.into_iter())
+                .filter(|i| match *i {
+                    "witness" => name != "xtask",
+                    "phpt" => super::measured_by_the_lane(krate, &carried),
+                    "port-map" => name == home,
+                    "crosscheck" => name.starts_with("ext/") && carried.carries(krate),
+                    "miri" => name == "php_heap",
+                    _ => true,
+                })
+                .collect();
+            let asked = owed(&manifest, krate, &carried);
+            assert_eq!(asked, asked_before, "{name}");
+        }
     }
 }

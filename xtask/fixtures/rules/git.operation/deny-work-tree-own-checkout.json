@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"GIT_DIR=/tmp/.git GIT_WORK_TREE=. git add -- AGENTS.md","description":"Stage into another git dir with the checkout the merge stands in as the work tree, a place git reaches besides (#3271)"}}

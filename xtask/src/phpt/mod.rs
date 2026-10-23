@@ -1409,11 +1409,12 @@ impl<'v> Runners<'v> {
             .map_err(|why| anyhow::anyhow!("{why}"))?;
         // The control is each oracle's own php, standing for the engine
         // under its own pin (#1970).
+        let layout = manifest.layout();
         let resolve = |pin: &Pin| match &ask.engine {
             Engine::Built => tiered
                 .clone()
-                .map_or_else(|| Runner::resolve(root, pin, None), Ok),
-            Engine::Named(path) => Runner::resolve(root, pin, Some(path)),
+                .map_or_else(|| Runner::resolve(root, &layout, pin, None), Ok),
+            Engine::Named(path) => Runner::resolve(root, &layout, pin, Some(path)),
             Engine::Control => Ok(Runner::Control(pin.oracle.path.clone())),
         };
         let mut resolved = BTreeMap::new();
