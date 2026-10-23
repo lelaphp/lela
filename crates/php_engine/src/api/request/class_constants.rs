@@ -80,9 +80,22 @@ impl Request {
     /// (`zval_update_constant_ex`), one owner the caller's. The class
     /// is named in the error as the opline names it, `ce->name`.
     pub(crate) fn class_constant(&mut self, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-        let class_name = self.symbols().class_name(class);
+        self.class_constant_fetched(class, name)
+            .map(|(value, _)| value)
+    }
+
+    /// [`Request::class_constant`] as `ZEND_FETCH_CLASS_CONSTANT` reads
+    /// it, beside whether the opline may keep the value in its runtime
+    /// cache: a value the class's row or the request's case keeps to
+    /// request end, which is every one but a deprecated constant's
+    /// (`!is_constant_deprecated`, `Z/Zend/zend_vm_def.h:6142`).
+    pub(crate) fn class_constant_fetched(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Result<(Value, bool), Thrown> {
         let scope = self.executed_scope();
-        self.class_constant_from(class, name, &class_name, scope, ConstantFetch::Opline)
+        self.class_constant_found(class, name, None, scope, ConstantFetch::Opline)
     }
 
     /// [`Request::class_constant`] with the class named in the error as
@@ -125,13 +138,31 @@ impl Request {
         scope: Option<ClassId>,
         fetch: ConstantFetch,
     ) -> Result<Value, Thrown> {
-        let shown = String::from_utf8_lossy(name).into_owned();
+        self.class_constant_found(class, name, Some(class_name), scope, fetch)
+            .map(|(value, _)| value)
+    }
+
+    /// The body of [`Request::class_constant_from`] and
+    /// [`Request::class_constant_fetched`]: the value, and whether it is
+    /// no deprecated constant's. The class is named in an error as
+    /// `class_name` spells it, or as the linked class's own where none is
+    /// given, which is worded only where an error is.
+    fn class_constant_found(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        class_name: Option<&str>,
+        scope: Option<ClassId>,
+        fetch: ConstantFetch,
+    ) -> Result<(Value, bool), Thrown> {
+        let shown = |req: &Request| {
+            let class_name =
+                class_name.map_or_else(|| req.symbols().class_name(class), str::to_owned);
+            format!("{class_name}::{}", String::from_utf8_lossy(name))
+        };
         let Some((declaring, constant)) = self.symbols().class_constant_of(class, name) else {
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!("Undefined constant {class_name}::{shown}"),
-            ));
+            let message = format!("Undefined constant {}", shown(self));
+            return Err(crate::api::raising::throw_error(self, "Error", &message));
         };
         let (visibility, is_case) = (constant.visibility, constant.is_case);
         let deprecated = crate::attributes::Flags::of(&constant.attributes)
@@ -145,11 +176,8 @@ impl Request {
                 Visibility::Protected => "protected",
                 Visibility::Private => "private",
             };
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!("Cannot access {word} constant {class_name}::{shown}"),
-            ));
+            let message = format!("Cannot access {word} constant {}", shown(self));
+            return Err(crate::api::raising::throw_error(self, "Error", &message));
         }
         // A constant a trait declares is the composing class's to hand
         // out, never the trait's own.
@@ -158,12 +186,10 @@ impl Request {
             .class_decl(asked)
             .is_some_and(|decl| decl.kind == ClassKind::Trait)
         {
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!("Cannot access trait constant {class_name}::{shown} directly"),
-            ));
+            let message = format!("Cannot access trait constant {} directly", shown(self));
+            return Err(crate::api::raising::throw_error(self, "Error", &message));
         }
+        let cacheable = deprecated.is_none();
         if let Some(constant) = deprecated {
             self.deprecated_class_constant(class, name, &constant)?;
         }
@@ -178,13 +204,21 @@ impl Request {
         if fetch == ConstantFetch::Opline {
             self.update_enum_constants(class)?;
         }
-        if is_case {
-            return self.enum_case(class, name).map(|case| case.as_value());
-        }
-        match fetch {
-            ConstantFetch::Opline => self.evaluated_class_constant(class, name),
-            ConstantFetch::Lookup => self.visited_class_constant(class, name, class_name),
-        }
+        let value = if is_case {
+            self.enum_case(class, name).map(|case| case.as_value())
+        } else {
+            match fetch {
+                ConstantFetch::Opline => self.evaluated_class_constant(class, name),
+                ConstantFetch::Lookup => {
+                    let class_name = class_name.map_or_else(
+                        || std::borrow::Cow::Owned(self.symbols().class_name(class)),
+                        std::borrow::Cow::Borrowed,
+                    );
+                    self.visited_class_constant(class, name, &class_name)
+                }
+            }
+        };
+        value.map(|value| (value, cacheable))
     }
 
     /// `zend_get_class_constant_ex` under `ZEND_FETCH_CLASS_SILENT`, as

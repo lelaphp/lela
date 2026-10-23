@@ -1541,7 +1541,7 @@ pub(crate) struct FastCall {
 /// and `ZEND_JMP_FL_HIT = 2` (`Z/Zend/zend_frameless_function.h:126`).
 /// Zero is what the fresh cache holds, so the first pass of any of them
 /// finds `Unprimed` and looks the table up once.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) enum Cached {
     /// Nothing written yet: the table is looked up on this pass.
     #[default]
@@ -1569,33 +1569,48 @@ pub(crate) enum Cached {
     /// read as one, and the second slot the compiler reserves stands as
     /// php's dump has it.
     ///
-    /// `scope` is the calling scope the callee was resolved from, which
-    /// the access rule reads, and the private method of the scope that
-    /// stands in for another class's (`zend_std_get_method`,
-    /// `Z/Zend/zend_object_handlers.c:1939`). php keys on no scope
-    /// because its cache is one per scope: a trait's method is copied
-    /// into each class that uses it with a cache of its own
-    /// (`zend_add_trait_method`, `Z/Zend/zend_inheritance.c:2369`), and
-    /// a closure bound to another scope is given a fresh one
-    /// (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). Both read a
-    /// cache of their own here too ([`init_runtime_cache`]), and the pair
-    /// is still read back only in the scope that wrote it. What the slot
-    /// holds is what was asked and what answered, never how the answer
-    /// was found.
-    ///
-    /// `from` is the function of the frame that wrote the pair where
-    /// that frame is no closure's, which fixes its scope, as
-    /// [`Cached::Property`]'s `function` does: a frame of that function
-    /// reads the pair back without its scope being asked. And `instance`
-    /// is whether the callee takes `$this`, the test of
-    /// `fbc->common.fn_flags` php makes, read where the pair is written,
-    /// as php reads it off the callee it holds.
+    /// `primed` is the frame the pair was written from, since the
+    /// access rule reads the calling scope, and the private method of
+    /// the scope stands in for another class's (`zend_std_get_method`,
+    /// `Z/Zend/zend_object_handlers.c:1939`). What the slot holds is
+    /// what was asked and what answered, never how the answer was
+    /// found. And `instance` is whether the callee takes `$this`, the
+    /// test of `fbc->common.fn_flags` php makes, read where the pair is
+    /// written, as php reads it off the callee it holds.
     ClassAndCallee {
         class: ClassId,
-        scope: Option<ClassId>,
-        from: Option<Function>,
+        primed: PrimedFrom,
         function: Function,
         instance: bool,
+    },
+    /// The `static` property a fetch over a constant name found on its
+    /// first pass, `CACHE_POLYMORPHIC_PTR(cache_slot, ce, result)` and
+    /// `CACHE_PTR(cache_slot + 2, property_info)`
+    /// (`zend_fetch_static_property_address_ex`,
+    /// `Z/Zend/zend_execute.c:3780`): the class asked about, read back
+    /// only where the class is resolved on every pass (`static::`, a
+    /// `FETCH_CLASS`), and the property's row, which names its slot and
+    /// its declaration. Written for no property a trait declares, whose
+    /// every access is php's deprecation, and for no miss, so a class
+    /// declared after a pass is found by the next.
+    StaticProperty {
+        class: ClassId,
+        primed: PrimedFrom,
+        info: crate::api::request::PropertyInfo,
+    },
+    /// The value a `FETCH_CLASS_CONSTANT` over a constant name read on
+    /// its first pass, `CACHE_POLYMORPHIC_PTR(opline->extended_value,
+    /// ce, value)` (`Z/Zend/zend_vm_def.h:6143`): the class it was read
+    /// on, which a class resolved on every pass must be again, and the
+    /// value, evaluated and held to its type, which the class's row or
+    /// the request's case of an enum keeps an owner of to request end,
+    /// as php's slot points at `c->value`. Written for no deprecated
+    /// constant, whose every read is php's deprecation, and for no
+    /// expression that refused.
+    ClassConstant {
+        class: ClassId,
+        primed: PrimedFrom,
+        value: Value,
     },
     /// The place a property fetch or assignment over a constant name
     /// found on its first pass, `CACHE_POLYMORPHIC_PTR_EX(cache_slot, ce,
@@ -1627,6 +1642,26 @@ pub(crate) enum Cached {
     /// `ZEND_JMP_FL_HIT`: the table has not the name in the namespace,
     /// so the jump lands on the frameless call over the global one.
     Hit,
+}
+
+/// The frame a slot whose answer the access rule decides was written
+/// from, [`Cached::ClassAndCallee`], [`Cached::StaticProperty`] and
+/// [`Cached::ClassConstant`]: the frame's scope, and its function where
+/// the frame is no closure's, which fixes the scope. php keys on no
+/// scope because its cache is one per scope: a trait's method is copied
+/// into each class that uses it with a cache of its own
+/// (`zend_add_trait_method`, `Z/Zend/zend_inheritance.c:2369`), and a
+/// closure bound to another scope is given a fresh one
+/// (`zend_create_closure`, `Z/Zend/zend_closures.c:794`). Both read a
+/// cache of their own here too ([`init_runtime_cache`]), and the slot is
+/// still read back only from the scope that wrote it
+/// ([`crate::api::request::Request::cached_in_scope`]): a frame of the
+/// function that wrote it without asking its scope, as
+/// [`Cached::Property`]'s `function` is read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrimedFrom {
+    pub(crate) function: Option<Function>,
+    pub(crate) scope: Option<ClassId>,
 }
 
 /// What [`Cached::Property`] holds beside the class, php's `prop_offset`
@@ -3000,6 +3035,12 @@ pub(crate) fn statics_values(
     }
 }
 
+/// The bytes of the op array's string constant at `at`, borrowed from
+/// the op array, none where it holds no string.
+pub(crate) fn constant_str(code: &OpArray, at: ConstIdx) -> Option<&[u8]> {
+    code.literals.get(at.0 as usize)?.str_bytes()
+}
+
 /// The op array's constant at `at`, as a value.
 pub(crate) fn constant(code: &OpArray, at: ConstIdx) -> Value {
     code.literals
@@ -3523,7 +3564,9 @@ pub(crate) fn cached_class(
     at: u32,
     slot: Option<CacheSlot>,
 ) -> Option<crate::api::values::ClassId> {
-    if let Some(Cached::Class(class)) = slot.map(|slot| req.cached(frame, slot)) {
+    if let Some(Cached::Class(class) | Cached::ClassConstant { class, .. }) =
+        slot.map(|slot| req.cached(frame, slot))
+    {
         return Some(class);
     }
     let lowered = constant(code, ConstIdx(at.saturating_add(1)));

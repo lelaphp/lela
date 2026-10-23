@@ -56,6 +56,7 @@
 #![allow(clippy::extra_unused_type_parameters, clippy::unnecessary_wraps)]
 
 use php_unit::decl::Bare;
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::ops::ControlFlow;
 
@@ -7122,26 +7123,162 @@ fn fetched_name(
 /// Class "Missing" not found
 /// Attempt to unset static property A::$b
 /// ```
-fn static_member(
+fn static_member<'c>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &'c OpArray,
+    op: &Opline,
+) -> Result<(crate::api::values::ClassId, Cow<'c, [u8]>), Thrown> {
+    let class = static_class(req, frame, code, op, None)?;
+    Ok((class, static_name(req, frame, code, op)?))
+}
+
+/// The class half of [`static_member`], `op1` given up where it throws:
+/// the class off `slot` where php caches it, a constant pair beside a
+/// name the program computes (`if (op1_type != IS_CONST) CACHE_PTR(cache_slot, ce)`).
+fn static_class(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-) -> Result<(crate::api::values::ClassId, Vec<u8>), Thrown> {
-    let class = match class_operand(req, frame, code, op.op2_type, op.op2, None) {
-        Ok(class) => class,
-        Err(thrown) => {
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            return Err(thrown);
-        }
-    };
+    slot: Option<CacheSlot>,
+) -> Result<crate::api::values::ClassId, Thrown> {
+    class_operand(req, frame, code, op.op2_type, op.op2, slot).inspect_err(|_| {
+        exec::free_operand(req, frame, op.op1_type, op.op1);
+    })
+}
+
+/// The name half of [`static_member`], `op1` given up: the constant the
+/// compiler wrote, borrowed from the op array, or the value converted
+/// as [`fetched_name`] converts it.
+fn static_name<'c>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &'c OpArray,
+    op: &Opline,
+) -> Result<Cow<'c, [u8]>, Thrown> {
+    if op.op1_type == OperandKind::Const {
+        return Ok(Cow::Borrowed(
+            exec::constant_str(code, ConstIdx(op.op1)).unwrap_or_default(),
+        ));
+    }
     let name = fetched_name(req, frame, code, op).map(|name| {
         let bytes = name.as_bytes().to_vec();
         name.give_up(req);
-        bytes
+        Cow::Owned(bytes)
     });
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    Ok((class, name?))
+    name
+}
+
+/// What [`static_slot_at`] addressed: the property's row, which names
+/// its slot, and its name as `op1` carries it.
+type StaticSlot<'c> = (crate::api::request::PropertyInfo, Cow<'c, [u8]>);
+
+/// `zend_fetch_static_property_address` (`Z/Zend/zend_execute.c:3793`),
+/// which every opline that addresses a `static` property's slot shares:
+/// the property's row, which names the slot, beside its name, `None`
+/// for the silent miss of [`PropertyRead::Silent`].
+///
+/// Over a name the compiler wrote, the first pass that finds the slot
+/// writes its row into the runtime cache at `slot`
+/// ([`Cached::StaticProperty`]) and every pass after reads it there:
+/// with no lookup where the class is a constant, `self` or `parent`,
+/// which the frame's scope fixes, and where the class is the one asked
+/// about again where it is resolved on every pass, `static` or a
+/// `FETCH_CLASS`. So a property a child redeclares is read on the
+/// child, a class declared after a pass that could not find it is found
+/// by the next, and a property of a class whose statics nothing has
+/// laid down yet is laid down by its first read:
+///
+/// ```php
+/// class A { public static $p = 'A'; static function get() { return static::$p; } static function own() { return self::$p; } }
+/// class B extends A { public static $p = 'B'; }
+/// class C extends A {}
+/// foreach (['A', 'B', 'C', 'B', 'A'] as $c) { echo $c::get(), $c::own(), $c::$p, '|'; }
+/// echo "\n";
+/// function f() { return D::$q; }
+/// try { f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// eval('class D { public static $q = [1, 2]; }');
+/// var_dump(f() === D::$q, count(f()));
+/// D::$q[] = 3;
+/// echo count(f()), "\n";
+/// ```
+/// ```expect
+/// AAA|BAB|AAA|BAB|AAA|
+/// Class "D" not found
+/// bool(true)
+/// int(2)
+/// 3
+/// ```
+///
+/// A typed slot nothing has written still refuses each read the cache
+/// serves, and a write the type refuses is refused on each pass:
+///
+/// ```php
+/// class T { public static int $n; static function read() { return self::$n; } static function write($v) { self::$n = $v; } }
+/// for ($i = 0; $i < 2; $i++) { try { T::read(); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// T::write(5); echo T::read(), "\n";
+/// for ($i = 0; $i < 2; $i++) { try { T::write([]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; } }
+/// echo T::read(), "\n";
+/// ```
+/// ```expect
+/// Typed static property T::$n must not be accessed before initialization
+/// Typed static property T::$n must not be accessed before initialization
+/// 5
+/// Cannot assign array to property T::$n of type int
+/// Cannot assign array to property T::$n of type int
+/// 5
+/// ```
+fn static_slot_at<'c>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &'c OpArray,
+    op: &Opline,
+    slot: CacheSlot,
+    read: PropertyRead,
+) -> Result<Option<StaticSlot<'c>>, Thrown> {
+    let named = op.op1_type == OperandKind::Const;
+    let mut asked = None;
+    if named && let Cached::StaticProperty { class, info, .. } = req.cached_in_scope(frame, slot) {
+        let name = || Cow::Borrowed(exec::constant_str(code, ConstIdx(op.op1)).unwrap_or_default());
+        if class_fixed(op.op2_type, op.op2) {
+            return Ok(Some((info, name())));
+        }
+        let now = class_operand(req, frame, code, op.op2_type, op.op2, None)?;
+        if now == class {
+            return Ok(Some((info, name())));
+        }
+        asked = Some(now);
+    }
+    let class = match asked {
+        Some(class) => class,
+        None => static_class(req, frame, code, op, (!named).then_some(slot))?,
+    };
+    let name = static_name(req, frame, code, op)?;
+    let scope = req.executed_scope();
+    let Some(info) = req.static_slot(class, &name, scope, read)? else {
+        return Ok(None);
+    };
+    // `!(property_info->ce->ce_flags & ZEND_ACC_TRAIT)`: a property
+    // addressed on its trait raises on every pass.
+    let on_trait = req
+        .symbols()
+        .class_decl(info.declaring)
+        .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Trait);
+    if named && !on_trait {
+        let primed = req.primed_from(frame);
+        req.prime(
+            frame,
+            slot,
+            Cached::StaticProperty {
+                class,
+                primed,
+                info,
+            },
+        );
+    }
+    Ok(Some((info, name)))
 }
 
 /// `zend_fetch_this_var` (`Z/Zend/zend_execute.c:4185`): `$this` read
@@ -7294,8 +7431,7 @@ pub(crate) fn end_silence<T: Tier>(
 /// expression the declaration kept evaluated on this use
 /// (`zval_update_constant_ex`), into the temporary `result` names.
 /// The two cache slots php primes with the class and the constant are
-/// not read here; the lookup is made on every pass, which nothing
-/// observes.
+/// read before anything is looked up ([`class_constant_found`]).
 ///
 /// A name the program computes, `C::{expr}` (8.3), is read as any
 /// operand is: `class` names the class, and what is no string is php's
@@ -7368,45 +7504,144 @@ pub(crate) fn fetch_class_constant<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let class = match class_operand(
-        req,
-        frame,
-        code,
-        op.op1_type,
-        op.op1,
-        Some(CacheSlot(op.extended_value)),
-    ) {
+    let slot = CacheSlot(op.extended_value);
+    // `CACHED_PTR(opline->extended_value + sizeof(void*))`: the value a
+    // pass before read, served where the class is fixed ([`class_fixed`]),
+    // and where it is resolved on every pass, where it is the one the
+    // value was read on (`CACHED_PTR(opline->extended_value) == ce`).
+    let cached = if op.op2_type == OperandKind::Const {
+        req.cached_in_scope(frame, slot)
+    } else {
+        Cached::Unprimed
+    };
+    if class_fixed(op.op1_type, op.op1)
+        && let Cached::ClassConstant { value, .. } = cached
+    {
+        return class_constant_served(req, frame, op, value);
+    }
+    let class = match class_operand(req, frame, code, op.op1_type, op.op1, Some(slot)) {
         Ok(class) => class,
         Err(thrown) => {
             exec::free_operand(req, frame, op.op2_type, op.op2);
             return threw(req, frame, &thrown);
         }
     };
+    if let Cached::ClassConstant {
+        class: held, value, ..
+    } = cached
+        && held == class
+    {
+        return class_constant_served(req, frame, op, value);
+    }
+    class_constant_found(req, frame, code, op, class)
+}
+
+/// [`fetch_class_constant`] where its slot holds nothing for this pass:
+/// the constant looked up on `class`, and the slot written for one that
+/// is not deprecated, named by a constant
+/// (`if (OP2_TYPE == IS_CONST && !is_constant_deprecated)
+/// CACHE_POLYMORPHIC_PTR(...)`).
+///
+/// A constant read on a class resolved late is read on the class of
+/// each pass, an expression is cached only once it evaluated, and a
+/// deprecated constant raises on every pass:
+///
+/// ```php
+/// class A { const X = 'A'; const E = self::X . '!'; static function get() { return static::X; } function mine() { return $this::X; } }
+/// class B extends A { const X = 'B'; }
+/// foreach ([new A, new B, new A, new B] as $o) { echo $o::get(), $o->mine(), $o::E; }
+/// echo "\n";
+/// class R { const BAD = Missing::X; static function bad() { return self::BAD; } }
+/// for ($i = 0; $i < 2; $i++) { try { R::bad(); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// eval('class Missing { const X = 1; }');
+/// var_dump(R::bad(), R::bad());
+/// class O { #[\Deprecated] const OLD = 1; static function old() { return self::OLD; } }
+/// echo O::old() + O::old(), "\n";
+/// enum S: string { case A = 'a'; static function a() { return self::A; } }
+/// var_dump(S::a() === S::a(), S::a()->value);
+/// ```
+/// ```expect
+/// AAA!BBA!AAA!BBA!
+/// Class "Missing" not found
+/// Class "Missing" not found
+/// int(1)
+/// int(1)
+///
+/// Deprecated: Constant O::OLD is deprecated in %s on line 10
+///
+/// Deprecated: Constant O::OLD is deprecated in %s on line 10
+/// 2
+/// bool(true)
+/// string(1) "a"
+/// ```
+#[inline(never)]
+fn class_constant_found(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    class: crate::api::values::ClassId,
+) -> Edge {
     // `GET_OP2_ZVAL_PTR_DEREF(BP_VAR_R)`: a name the program computed,
     // `C::{expr}`, read as any operand is, a variable nothing wrote
     // warning first; what is no string is `TypeError`
     // (`zend_invalid_class_constant_type_error`), and `class` in any
     // case is the class's name, the compiler having caught only the
     // spelling it saw.
-    let named = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
-    let Some(name) = named.as_str_bytes().map(<[u8]>::to_vec) else {
-        let message = format!(
-            "Cannot use value of type {} as class constant name",
-            named.type_name()
-        );
-        exec::free_operand(req, frame, op.op2_type, op.op2);
-        let thrown = crate::api::raising::throw_error(req, "TypeError", &message);
-        return threw(req, frame, &thrown);
+    let literal = (op.op2_type == OperandKind::Const)
+        .then(|| exec::constant_str(code, ConstIdx(op.op2)))
+        .flatten();
+    let name: Cow<'_, [u8]> = if let Some(name) = literal {
+        Cow::Borrowed(name)
+    } else {
+        let named = exec::operand(req, frame, code, op.op2_type, op.op2).deref();
+        let Some(name) = named.as_str_bytes().map(<[u8]>::to_vec) else {
+            let message = format!(
+                "Cannot use value of type {} as class constant name",
+                named.type_name()
+            );
+            exec::free_operand(req, frame, op.op2_type, op.op2);
+            let thrown = crate::api::raising::throw_error(req, "TypeError", &message);
+            return threw(req, frame, &thrown);
+        };
+        Cow::Owned(name)
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
-    let value = if op.op2_type != OperandKind::Const && name.eq_ignore_ascii_case(b"class") {
+    if op.op2_type != OperandKind::Const && name.eq_ignore_ascii_case(b"class") {
         let written = req.class_name_bytes(class);
-        req.declared_string(&written)
-            .map(|name| name.into_value().hand_on())
-    } else {
-        req.class_constant(class, &name)
+        let value = req
+            .declared_string(&written)
+            .map(|name| name.into_value().hand_on());
+        return computed_into(req, frame, op, value);
+    }
+    let (value, cacheable) = match req.class_constant_fetched(class, &name) {
+        Ok(found) => found,
+        Err(thrown) => return threw(req, frame, &thrown),
     };
-    computed_into(req, frame, op, value)
+    if cacheable && op.op2_type == OperandKind::Const {
+        let primed = req.primed_from(frame);
+        let slot = CacheSlot(op.extended_value);
+        req.prime(
+            frame,
+            slot,
+            Cached::ClassConstant {
+                class,
+                primed,
+                value,
+            },
+        );
+    }
+    set_out(req, frame, op, value);
+    Ok(advance(req, frame))
+}
+
+/// `ZVAL_COPY_OR_DUP(EX_VAR(opline->result.var), value)` over the value
+/// [`Cached::ClassConstant`] holds: one more owner of it in the
+/// temporary, and the opline advanced past.
+fn class_constant_served(req: &mut Request, frame: FrameRef, op: &Opline, value: Value) -> Edge {
+    req.addref(&value);
+    set_out(req, frame, op, value);
+    Ok(advance(req, frame))
 }
 
 /// `ZEND_FETCH_CONSTANT` (`Z/Zend/zend_vm_def.h:6075`), the opline
@@ -7426,10 +7661,9 @@ pub(crate) fn fetch_class_constant<T: Tier>(
 /// The `Error` for a miss names the constant as the source wrote it
 /// resolved, which is `op2` itself.
 ///
-/// php primes the opline's cache slot with the constant it found; this
-/// engine looks the name up on every pass, which nothing observes,
-/// since a deprecated constant is the one php never caches and the
-/// table it reads is the request's own.
+/// php primes the opline's cache slot with the constant it found, a
+/// deprecated one aside, and so does this engine
+/// ([`Cached::Constant`]).
 ///
 /// ```php
 /// define("W", 1);
@@ -7634,11 +7868,9 @@ pub(crate) fn fetch_static_prop_is<T: Tier>(
 /// a temporary with one more owner of the value, a reference followed.
 ///
 /// php reserves three cache slots here and, where `op1` is a constant,
-/// leaves the first empty and primes the second with the address of the
-/// slot itself (`CACHE_POLYMORPHIC_PTR`). This engine's table names a
-/// slot by its class and its name rather than by an address, so nothing
-/// is cached and the lookup is made on every pass, which nothing
-/// observes.
+/// primes them with the class, the slot and the property's info
+/// (`CACHE_POLYMORPHIC_PTR`); this engine primes the first with the class
+/// and the property's row, which names the slot ([`static_slot_at`]).
 ///
 /// ```php
 /// class A { public static $p = 1; protected static $q = 2; private static $r = 3; static function all() { return A::$p + A::$q + A::$r; } }
@@ -7795,37 +8027,33 @@ fn static_prop_place(
     mode: StaticFetch,
 ) -> Edge {
     let rw = mode == StaticFetch::ReadWrite;
-    let (class, name) = match static_member(req, frame, code, op) {
-        Ok(member) => member,
+    // The slot found and filled first, raising what access raises, and
+    // under `BP_VAR_RW` the typed slot nothing has written; then
+    // `zend_handle_fetch_obj_flags`'s refusals over the slot as it stands,
+    // before the binding lays `null` in a slot nothing has written; then
+    // the place.
+    let slot = property_cache_slot(op);
+    let (info, name) = match static_slot_at(req, frame, code, op, slot, PropertyRead::Warning) {
+        Ok(Some(found)) => found,
+        Ok(None) => {
+            return Err(Fatal::error(
+                "InternalError: ZEND_FETCH_STATIC_PROP_W placed a property the table holds no slot for",
+            ));
+        }
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let scope = req.executed_scope();
     if rw {
-        match req.static_property(class, &name, scope, PropertyRead::Warning) {
+        match req.static_value(info, PropertyRead::Warning) {
             Ok(held) => req.release(held),
             Err(thrown) => return threw(req, frame, &thrown),
         }
     }
-    // The slot found and filled first, raising what access raises; then
-    // `zend_handle_fetch_obj_flags`'s refusals over the slot as it stands,
-    // before the binding lays `null` in a slot nothing has written; then
-    // the place.
-    let info = match req.static_slot(class, &name, scope, PropertyRead::Warning) {
-        Ok(Some(info)) => info,
-        Ok(None) => {
-            return Err(Fatal::error(format!(
-                "InternalError: ZEND_FETCH_STATIC_PROP_W placed ${} and the table holds no slot for it",
-                String::from_utf8_lossy(&name)
-            )));
-        }
-        Err(thrown) => return threw(req, frame, &thrown),
-    };
     let flag = if rw {
         None
     } else {
         FetchFlag::of(op.extended_value)
     };
-    let typed = flag.and_then(|_| req.declared_typed_static(class, &name));
+    let typed = flag.and_then(|_| req.typed_static(info));
     if let (Some(flag), Some(typed)) = (flag, &typed) {
         let held = req.held_static(info);
         if let Err(thrown) = refuse_fetch(req, &held, typed, &name, flag) {
@@ -7885,12 +8113,11 @@ fn fetch_static_prop(
     op: &Opline,
     fetch: PropertyRead,
 ) -> Edge {
-    let (class, name) = match static_member(req, frame, code, op) {
-        Ok(member) => member,
-        Err(thrown) => return threw(req, frame, &thrown),
+    let read = match static_slot_at(req, frame, code, op, property_cache_slot(op), fetch) {
+        Ok(Some((info, _))) => req.static_value(info, fetch),
+        Ok(None) => Ok(Value::null()),
+        Err(thrown) => Err(thrown),
     };
-    let scope = req.executed_scope();
-    let read = req.static_property(class, &name, scope, fetch);
     computed_into(req, frame, op, read)
 }
 
@@ -11904,6 +12131,17 @@ fn class_operand(
     ))
 }
 
+/// Whether the class operand `kind`/`at` names one class wherever a
+/// slot is read back: a constant, or `self` or `parent`, which the
+/// frame's scope fixes, and which a slot read back from the scope that
+/// wrote it ([`Request::cached_in_scope`]) needs not resolve again;
+/// `static` and a `FETCH_CLASS`'s are resolved on every pass.
+fn class_fixed(kind: OperandKind, at: u32) -> bool {
+    kind == OperandKind::Const
+        || kind == OperandKind::Unused
+            && matches!(at & FETCH_CLASS_MASK, FETCH_CLASS_SELF | FETCH_CLASS_PARENT)
+}
+
 /// `ZEND_FETCH_CLASS_MASK` (`Z/Zend/zend_compile.h:1034`): the bits of a
 /// class operand's number that are its fetch type, the flags above them.
 const FETCH_CLASS_MASK: u32 = 0x0f;
@@ -12348,6 +12586,8 @@ pub(crate) fn jmp_frameless<T: Tier>(
         | Cached::Class(_)
         | Cached::ClassAndCallee { .. }
         | Cached::Property { .. }
+        | Cached::StaticProperty { .. }
+        | Cached::ClassConstant { .. }
         | Cached::Constant(_) => {
             let name = exec::constant(code, ConstIdx(op.op1));
             let found = name
@@ -14097,10 +14337,8 @@ fn assign_property(
 /// the value under `RETURN_VALUE_USED` and is not written where the
 /// compiler marked it `UNUSED`.
 ///
-/// php reserves three cache slots here as the fetch does, and this
-/// engine's table names a slot by its class and its name rather than by
-/// an address, so nothing is cached and the lookup is made on every
-/// pass, which nothing observes. The address is taken under
+/// php reserves three cache slots here as the fetch does, and primes
+/// them as the fetch does ([`static_slot_at`]). The address is taken under
 /// [`PropertyRead::Warning`], php's `BP_VAR_W` as far as the slot is
 /// concerned, so the silent miss [`Request::static_slot`] answers under
 /// `BP_VAR_IS` cannot stand here. A typed slot is
@@ -14239,15 +14477,8 @@ pub(crate) fn assign_static_prop<T: Tier>(
 ) -> Edge {
     let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
-    let scope = req.executed_scope();
-    let (addressed, name) = match static_member(req, frame, code, op) {
-        Ok((class, name)) => (
-            req.static_slot(class, &name, scope, PropertyRead::Warning),
-            name,
-        ),
-        Err(thrown) => (Err(thrown), Vec::new()),
-    };
-    let placed = match addressed {
+    let slot = CacheSlot(op.extended_value);
+    let placed = match static_slot_at(req, frame, code, op, slot, PropertyRead::Warning) {
         // A write is never `BP_VAR_IS`, so the silent miss cannot stand
         // here.
         Ok(placed) => placed,
@@ -14256,7 +14487,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
             return threw(req, frame, &thrown);
         }
     };
-    let Some(info) = placed else {
+    let Some((info, name)) = placed else {
         exec::free_operand(req, frame, data_type, data_at);
         return Ok(advance_over_data(req, frame, at));
     };
@@ -14289,24 +14520,21 @@ pub(crate) fn assign_static_prop<T: Tier>(
 /// scope may not reach each throw where php's does. `None` is the miss
 /// that raised nothing, which a write can only meet where the class
 /// itself could not be addressed.
-fn static_place(
+fn static_place<'c>(
     req: &mut Request,
     frame: FrameRef,
-    code: &OpArray,
+    code: &'c OpArray,
     op: &Opline,
-) -> Result<Option<Placed>, Thrown> {
-    let (class, name) = static_member(req, frame, code, op)?;
-    let scope = req.executed_scope();
-    match req.static_slot(class, &name, scope, PropertyRead::Warning)? {
-        Some(info) => {
+    slot: CacheSlot,
+) -> Result<Option<Placed<'c>>, Thrown> {
+    match static_slot_at(req, frame, code, op, slot, PropertyRead::Warning)? {
+        Some((info, name)) => {
             if let Some(thrown) = req.set_refused(info, "indirectly modify") {
                 return Err(thrown);
             }
             Ok(Some(Placed {
-                class,
                 info,
                 name,
-                scope,
                 ty: req.property_decl(info).and_then(|p| p.ty.clone()),
             }))
         }
@@ -14314,16 +14542,13 @@ fn static_place(
     }
 }
 
-/// What [`static_place`] addressed: the class the opline named, the
-/// property's row, whose class declared it and names its slot, the
-/// property's name, the scope the access was measured against, and the
+/// What [`static_place`] addressed: the property's row, whose class
+/// declared it and names its slot, the property's name, and the
 /// declared type the write is held to, which is php's `prop_info` beside
 /// the slot.
-struct Placed {
-    class: crate::api::values::ClassId,
+struct Placed<'c> {
     info: crate::api::request::PropertyInfo,
-    name: Vec<u8>,
-    scope: Option<crate::api::values::ClassId>,
+    name: Cow<'c, [u8]>,
     ty: Option<php_unit::decl::Type>,
 }
 
@@ -14526,26 +14751,20 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     };
     let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
-    let placed = match static_place(req, frame, code, op) {
+    // `(opline+1)->extended_value`: the slots stand on the `OP_DATA`.
+    let placed = match static_place(req, frame, code, op, CacheSlot(data.extended_value)) {
         Ok(placed) => placed,
         Err(thrown) => {
             exec::free_operand(req, frame, data_type, data_at);
             return threw(req, frame, &thrown);
         }
     };
-    let Some(Placed {
-        class,
-        info,
-        name,
-        scope,
-        ty,
-    }) = placed
-    else {
+    let Some(Placed { info, name, ty }) = placed else {
         exec::free_operand(req, frame, data_type, data_at);
         return Ok(advance_over_data(req, frame, at));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
-    let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
+    let held = match req.static_value(info, PropertyRead::Warning) {
         Ok(held) => held,
         Err(thrown) => {
             req.release(value);
@@ -14673,21 +14892,14 @@ fn static_prop_step(
     } else {
         crate::ops::decrement
     };
-    let placed = match static_place(req, frame, code, op) {
+    let placed = match static_place(req, frame, code, op, CacheSlot(op.extended_value)) {
         Ok(placed) => placed,
         Err(thrown) => return threw(req, frame, &thrown),
     };
-    let Some(Placed {
-        class,
-        info,
-        name,
-        scope,
-        ty,
-    }) = placed
-    else {
+    let Some(Placed { info, name, ty }) = placed else {
         return Ok(advance(req, frame));
     };
-    let held = match req.static_property(class, &name, scope, PropertyRead::Warning) {
+    let held = match req.static_value(info, PropertyRead::Warning) {
         Ok(held) => held,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -14969,21 +15181,15 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
 ) -> Edge {
     let (at, data) = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
-    let placed = match static_place(req, frame, code, op) {
+    let slot = CacheSlot(op.extended_value & !RETURNS_FUNCTION);
+    let placed = match static_place(req, frame, code, op, slot) {
         Ok(placed) => placed,
         Err(thrown) => {
             exec::free_operand(req, frame, data_type, data_at);
             return threw(req, frame, &thrown);
         }
     };
-    let Some(Placed {
-        class,
-        info,
-        name,
-        scope,
-        ty,
-    }) = placed
-    else {
+    let Some(Placed { info, name, ty }) = placed else {
         exec::free_operand(req, frame, data_type, data_at);
         return Ok(advance_over_data(req, frame, at));
     };
@@ -15044,15 +15250,13 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     let bound = cell.as_value();
     req.addref(&bound);
     write_out(req, frame, op, &bound);
-    if let Err(thrown) = req.bind_static_property(class, &name, scope, bound) {
-        return threw(req, frame, &thrown);
-    }
+    req.bind_static_property(info, bound);
     if let Some(ty) = typed {
         req.ref_add_type_source(
             cell.heap(),
             crate::api::request::RefSource {
                 declaring: info.declaring,
-                name: name.clone(),
+                name: name.into_owned(),
                 ty,
             },
         );
@@ -22027,12 +22231,13 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let (class, name) = match static_member(req, frame, code, op) {
-        Ok(member) => member,
-        Err(thrown) => return threw(req, frame, &thrown),
+    let slot = CacheSlot(op.extended_value & !ISEMPTY);
+    let held = match static_slot_at(req, frame, code, op, slot, PropertyRead::Silent) {
+        Ok(Some((info, _))) => req.static_value(info, PropertyRead::Silent),
+        Ok(None) => Ok(Value::null()),
+        Err(thrown) => Err(thrown),
     };
-    let scope = req.executed_scope();
-    let held = match req.static_property(class, &name, scope, PropertyRead::Silent) {
+    let held = match held {
         Ok(held) => held,
         Err(thrown) => return threw(req, frame, &thrown),
     };

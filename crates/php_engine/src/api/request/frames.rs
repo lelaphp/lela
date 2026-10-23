@@ -1051,12 +1051,54 @@ impl Request {
         self.vm.prime(&mut self.map, frame, slot, value);
     }
 
+    /// `CACHED_PTR(num)` for a slot whose answer the access rule decides
+    /// ([`exec::PrimedFrom`]): what the runtime cache of `frame`'s op array
+    /// holds at `slot` where `frame` reads it back, a frame of the
+    /// function that wrote it, no closure's, or one of the scope it was
+    /// written from; `Unprimed` otherwise, which is the pass that looks
+    /// the name up.
+    #[inline]
+    pub(crate) fn cached_in_scope(&self, frame: FrameRef, slot: CacheSlot) -> exec::Cached {
+        let Some(state) = self.frame_at(frame) else {
+            return exec::Cached::Unprimed;
+        };
+        let header = state.header();
+        let cached = self
+            .map
+            .get(header.runtime_cache())
+            .map_or(exec::Cached::Unprimed, |cache| cache.get(slot));
+        let (exec::Cached::ClassAndCallee { primed, .. }
+        | exec::Cached::StaticProperty { primed, .. }
+        | exec::Cached::ClassConstant { primed, .. }) = cached
+        else {
+            return cached;
+        };
+        let same = primed.function.is_some()
+            && header.closure.is_none()
+            && header.function == primed.function
+            || primed.scope == self.scope_of(state);
+        if same { cached } else { exec::Cached::Unprimed }
+    }
+
+    /// What a slot primed from `frame` names as the frame it was primed from
+    /// ([`exec::PrimedFrom`]): its scope, and its function where it is no
+    /// closure's.
+    pub(crate) fn primed_from(&self, frame: FrameRef) -> exec::PrimedFrom {
+        exec::PrimedFrom {
+            function: self
+                .vm
+                .at(frame)
+                .filter(|header| header.closure.is_none())
+                .and_then(|header| header.function),
+            scope: self.frame_scope(frame),
+        }
+    }
+
     /// `CACHED_PTR(num) == ce ? CACHED_PTR(num + sizeof(void *)) : NULL`
     /// for a method call's pair (`Z/Zend/zend_vm_def.h:3670`, `:3778`):
     /// the callee [`exec::Cached::ClassAndCallee`] at `slot` holds, with
-    /// whether it takes `$this`, where it holds `class` and was written
-    /// from `frame`'s scope: a frame of the function that wrote it, no
-    /// closure's, has that scope without asking it. None otherwise,
+    /// whether it takes `$this`, where it holds `class` and `frame`
+    /// reads it back ([`Request::cached_in_scope`]). None otherwise,
     /// which is the pass that looks the method up.
     #[inline]
     pub(crate) fn cached_callee(
@@ -1065,28 +1107,21 @@ impl Request {
         slot: CacheSlot,
         class: crate::api::values::ClassId,
     ) -> Option<(Function, bool)> {
-        let state = self.frame_at(frame)?;
-        let header = state.header();
-        let exec::Cached::ClassAndCallee {
-            class: held,
-            scope,
-            from,
-            function,
-            instance,
-        } = self.map.get(header.runtime_cache())?.get(slot)
-        else {
-            return None;
-        };
-        let same = held == class
-            && (from.is_some() && header.closure.is_none() && header.function == from
-                || scope == self.scope_of(state));
-        same.then_some((function, instance))
+        match self.cached_in_scope(frame, slot) {
+            exec::Cached::ClassAndCallee {
+                class: held,
+                function,
+                instance,
+                ..
+            } if held == class => Some((function, instance)),
+            _ => None,
+        }
     }
 
     /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3694`,
     /// `:3818`): `class` and the callee it answered into `slot`, with
     /// whether the callee takes `$this` ([`Request::takes_this`]) and
-    /// `frame`'s scope as the key [`Request::cached_callee`] reads back.
+    /// `frame` as the frame [`Request::cached_callee`] reads it back from.
     pub(crate) fn prime_callee(
         &mut self,
         frame: FrameRef,
@@ -1094,19 +1129,13 @@ impl Request {
         class: crate::api::values::ClassId,
         (function, instance): (Function, bool),
     ) {
-        let scope = self.frame_scope(frame);
-        let from = self
-            .vm
-            .at(frame)
-            .filter(|header| header.closure.is_none())
-            .and_then(|header| header.function);
+        let primed = self.primed_from(frame);
         self.prime(
             frame,
             slot,
             exec::Cached::ClassAndCallee {
                 class,
-                scope,
-                from,
+                primed,
                 function,
                 instance,
             },

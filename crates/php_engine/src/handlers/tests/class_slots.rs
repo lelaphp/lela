@@ -153,7 +153,7 @@ fn a_static_call_over_two_constants_resolves_its_class_and_callee_once() {
         assert!(
             matches!(
                 req.cached(frame, CacheSlot(0)),
-                Cached::ClassAndCallee { class, scope: None, function, .. }
+                Cached::ClassAndCallee { class, primed: exec::PrimedFrom { scope: None, .. }, function, .. }
                     if class == closure && function == callee
             ),
             "the class and the callee are in the slot after pass {pass}"
@@ -283,7 +283,7 @@ fn a_method_call_by_a_constant_name_looks_its_callee_up_once_per_class() {
         assert!(
             matches!(
                 req.cached(frame, CacheSlot(0)),
-                Cached::ClassAndCallee { class: held, scope: None, function: callee, .. }
+                Cached::ClassAndCallee { class: held, primed: exec::PrimedFrom { scope: None, .. }, function: callee, .. }
                     if Some(held) == class && Some(callee) == function
             ),
             "the receiver's class and its callee are in the slot after pass {pass}"
@@ -426,4 +426,73 @@ fn new_instanceof_and_a_class_constant_read_the_class_off_their_slot() {
         "FETCH_CLASS_CONSTANT took its class off extended_value's slot"
     );
     assert_eq!(req.vm().lookups, 0, "no handler looked the table up");
+}
+
+/// `ZEND_FETCH_CLASS_CONSTANT` over two constants, twice: the first
+/// pass reads the constant on its class and writes the class and the
+/// value into the slot, `CACHE_POLYMORPHIC_PTR(opline->extended_value,
+/// ce, value)`; the second serves what the slot holds, which a value
+/// primed in its place shows.
+#[test]
+fn a_class_constant_over_two_constants_is_served_off_its_slot() {
+    let engine = Engine::cli_builder().build();
+    let mut req = Request::new(Arc::clone(&engine.shared), RequestDescription::default());
+    let mut strings = php_heap::Strings::new();
+    let unit = Unit {
+        main: OpArray {
+            oplines: vec![Opline {
+                opcode: Opcode::FetchClassConstant,
+                op1_type: OperandKind::Const,
+                op1: 0,
+                op2_type: OperandKind::Const,
+                op2: 2,
+                out_type: OperandKind::Tmp,
+                out: 0,
+                ..Opline::default()
+            }],
+            literals: vec![
+                interned(&mut strings, b"Attribute"),
+                interned(&mut strings, b"attribute"),
+                interned(&mut strings, b"TARGET_CLASS"),
+            ],
+            num_tmps: 1,
+            cache_size: 16,
+            ..OpArray::default()
+        },
+        ..Unit::default()
+    }
+    .published(None);
+    let frame = req.pushed(PublishedUnit::clone(&unit));
+    let code = crate::exec::code_of(&unit);
+    let op = code.oplines.first().copied().expect("opline 0");
+    let class = req
+        .class_named(Bare::resolved(b"attribute"))
+        .expect("the engine declares Attribute");
+    let fetched = |mut req: &mut Request| {
+        req.vm_mut().stand(frame, 0);
+        let edge = served!(req, frame, at => fetch_class_constant::<Nop>(req, frame, code, &op));
+        assert_eq!(edge, Ok(Stepped::Same(frame)));
+        req.slot(frame, 0).as_int()
+    };
+    assert_eq!(fetched(&mut req), Some(1), "Attribute::TARGET_CLASS");
+    assert!(matches!(
+        req.cached(frame, CacheSlot(0)),
+        Cached::ClassConstant { class: held, value, .. } if held == class && value.as_int() == Some(1)
+    ));
+    let primed = req.primed_from(frame);
+    let value = Value::int(99);
+    req.prime(
+        frame,
+        CacheSlot(0),
+        Cached::ClassConstant {
+            class,
+            primed,
+            value,
+        },
+    );
+    assert_eq!(
+        fetched(&mut req),
+        Some(99),
+        "the second pass reads the slot"
+    );
 }

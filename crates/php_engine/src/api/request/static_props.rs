@@ -231,21 +231,34 @@ impl Request {
         scope: Option<ClassId>,
         read: PropertyRead,
     ) -> Result<Value, Thrown> {
-        let Some(info) = self.static_slot(class, name, scope, read)? else {
-            return Ok(Value::null());
-        };
+        match self.static_slot(class, name, scope, read)? {
+            Some(info) => self.static_value(info, read),
+            None => Ok(Value::null()),
+        }
+    }
+
+    /// [`Request::static_property`] over a slot already addressed, as a
+    /// handler that read the slot off its runtime cache reads it
+    /// (`zend_fetch_static_property_address`, `Z/Zend/zend_execute.c:3793`):
+    /// one more owner of the value the slot of `info` holds, a reference
+    /// followed, and under [`PropertyRead::Warning`] php's `Error` for a
+    /// typed slot nothing has written, `null` under the silent read.
+    pub(crate) fn static_value(
+        &mut self,
+        info: PropertyInfo,
+        read: PropertyRead,
+    ) -> Result<Value, Thrown> {
         let held = self.held_static(info);
         if held.tag() == TypeTag::Undef {
-            if self.property_typed(info) && read == PropertyRead::Warning {
-                let declaring = self.symbols().class_name(info.declaring);
-                return Err(crate::api::raising::throw_error(
-                    self,
-                    "Error",
-                    &format!(
-                        "Typed static property {declaring}::${} must not be accessed before initialization",
-                        String::from_utf8_lossy(name)
-                    ),
-                ));
+            if read == PropertyRead::Warning
+                && let Some(property) = self.property_decl(info).filter(|p| p.ty.is_some())
+            {
+                let message = format!(
+                    "Typed static property {}::${} must not be accessed before initialization",
+                    self.symbols().class_name(info.declaring),
+                    String::from_utf8_lossy(&property.name.0)
+                );
+                return Err(crate::api::raising::throw_error(self, "Error", &message));
             }
             return Ok(Value::null());
         }
@@ -481,37 +494,20 @@ impl Request {
             .and_then(super::super::values::Value::as_php_ref)
     }
 
-    /// `zend_assign_to_variable_reference` over a `static` property's
-    /// slot, which `ZEND_ASSIGN_STATIC_PROP_REF` runs: the cell itself
+    /// `zend_assign_to_variable_reference` over the slot of the `static`
+    /// property `info` names, one the opline has already addressed,
+    /// which `ZEND_ASSIGN_STATIC_PROP_REF` runs: the cell itself
     /// becomes what the slot holds, so the property and every name
     /// bound to it are one value, and what the slot held is given up
     /// after the write. This is not [`Request::set_static_property`],
     /// which writes *through* a reference standing there; a bind
     /// replaces it.
-    pub(crate) fn bind_static_property(
-        &mut self,
-        class: ClassId,
-        name: &[u8],
-        scope: Option<ClassId>,
-        bound: Value,
-    ) -> Result<(), Thrown> {
-        let info = match self.static_slot(class, name, scope, PropertyRead::Warning) {
-            Ok(Some(info)) => info,
-            Ok(None) => {
-                self.release(bound);
-                return Ok(());
-            }
-            Err(thrown) => {
-                self.release(bound);
-                return Err(thrown);
-            }
-        };
+    pub(crate) fn bind_static_property(&mut self, info: PropertyInfo, bound: Value) {
         let Some(slot) = self.static_props.slot_mut(info) else {
             self.release(bound);
-            return Ok(());
+            return;
         };
         let previous = std::mem::replace(slot, bound);
         self.release(previous);
-        Ok(())
     }
 }
