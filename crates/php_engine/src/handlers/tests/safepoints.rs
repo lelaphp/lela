@@ -202,7 +202,7 @@ fn a_comparison_branches_over_the_jump_after_it_as_one_step() {
     req.vm_mut().stand(frame, 1);
 
     assert_eq!(
-        served!(req, frame, at => is_smaller::<Probe, crate::operand::Const, crate::operand::Const, branch::OnJmpnzBack>(
+        served!(req, frame, at => is_smaller::<Probe, crate::operand::Const, crate::operand::Const, branch::OnJump<true, true>>(
             &mut req, frame, code, &op, at
         )),
         Ok(Stepped::Same(frame))

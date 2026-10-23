@@ -216,14 +216,14 @@ impl Tier for Nop {
     }
 }
 
-/// Whether the loop of `T` asks a tier at its safepoints, which every
-/// tier but [`Nop`] is: what only a safepoint reads, the frame stood at
-/// a back-edge's target, is written for it alone. A constant of the
-/// instantiation, so the test folds.
+/// Whether the loop of `T` is the interpreter's alone, [`Nop`]'s, which
+/// asks nothing at its safepoints: what only a safepoint reads, the
+/// frame stood at a back-edge's target, is written for every other
+/// tier alone. A constant of the instantiation, so the test folds.
 #[inline(always)] // a constant of the instantiation
 #[allow(clippy::inline_always)]
-pub(crate) fn asks<T: Tier>() -> bool {
-    std::any::TypeId::of::<T>() != std::any::TypeId::of::<Nop>()
+pub(crate) fn interpreted<T: Tier>() -> bool {
+    std::any::TypeId::of::<T>() == std::any::TypeId::of::<Nop>()
 }
 
 /// Where a request keeps its tier's [`Tier::State`]
@@ -440,7 +440,9 @@ impl Next {
         #[allow(clippy::cast_possible_truncation)]
         let low = self.0 as u32;
         // On, tested on the whole word first, so the way met most is one
-        // compare and not a search of the high half.
+        // compare and not a search of the high half: its high half is
+        // zero.
+        const { assert!(Next::ON_WAY == 0) };
         if self.0 <= u32::MAX as u64 {
             return Way::On(low);
         }

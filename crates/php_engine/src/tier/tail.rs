@@ -92,7 +92,7 @@ pub(crate) fn onward<'a, D: Telling>(
     // handler whose answer is known on its path goes on from that path:
     // as the loop's, the add does not wrap.
     let to = if next == Next::ADVANCE {
-        at.wrapping_add(1)
+        crate::exec::after(at)
     } else {
         match next.way() {
             Way::On(places) => at.wrapping_add(places),

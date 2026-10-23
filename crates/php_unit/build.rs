@@ -351,14 +351,15 @@ type Dimension = (&'static str, Vec<(String, String)>);
 /// every pair of the kinds it lists for the operands it specialises,
 /// `op1`'s then `op2`'s, and one for the kinds it does not list, as
 /// `zend_vm_gen.php` emits a handler per `SPEC` pair and
-/// `ZEND_NULL_HANDLER` for the rest; for an opcode whose handler line
-/// says `SMART_BRANCH`, each of those five times over, unfused and fused
-/// to the `JMPZ` or the `JMPNZ` after it, as php's `_JMPZ` and `_JMPNZ`
-/// handlers are, the jump forward or back, which php tests where it
-/// takes the jump and this resolves with it; for one whose line says `RETVAL`, each kind's twice
-/// over, its `out` unread and read, as php's `_RETVAL_UNUSED` and
-/// `_RETVAL_USED` handlers are. `Unresolved`, the default, is what an opline holds
-/// until its unit is published, and what no opline of a
+/// `ZEND_NULL_HANDLER` for the rest; for an opcode whose line says
+/// `RETVAL`, each kind's twice over, its `out` unread and read, as
+/// php's `_RETVAL_UNUSED` and `_RETVAL_USED` handlers are; for one whose
+/// handler line says `SMART_BRANCH`, each of those five times over,
+/// unfused and fused to the `JMPZ` or the `JMPNZ` after it, as php's
+/// `_JMPZ` and `_JMPNZ` handlers are, with the jump forward or back,
+/// which php does not tell apart where it takes the jump and this
+/// resolves with the handler. `Unresolved`, the default, is what an
+/// opline holds until its unit is published, and what no opline of a
 /// `PublishedUnit` holds.
 fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {
     let mut variants = vec!["Unresolved".to_owned()];

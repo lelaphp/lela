@@ -398,21 +398,19 @@ struct Variant {
 }
 
 /// The two ways of a `RETVAL` opcode's `out`, each the part of the
-/// variant's name `php_unit` gives it and the type in `crate::operand`.
-const RETVALS: [(&str, &str); 2] = [
-    ("RetvalUnused", "RetvalUnused"),
-    ("RetvalUsed", "RetvalUsed"),
-];
+/// variant's name `php_unit` gives it and the type in `crate::operand`
+/// that serves it, which are one name.
+const RETVALS: [&str; 2] = ["RetvalUnused", "RetvalUsed"];
 
 /// The branches of a `SMART_BRANCH` comparison, each the part of the
 /// variant's name `php_unit` gives it and the type the handler is served
 /// at.
 const BRANCHES: [(&str, &str); 5] = [
     ("", "Unfused"),
-    ("Jmpz", "OnJmpz"),
-    ("Jmpnz", "OnJmpnz"),
-    ("JmpzBack", "OnJmpzBack"),
-    ("JmpnzBack", "OnJmpnzBack"),
+    ("Jmpz", "OnJump<false, false>"),
+    ("Jmpnz", "OnJump<true, false>"),
+    ("JmpzBack", "OnJump<false, true>"),
+    ("JmpnzBack", "OnJump<true, true>"),
 ];
 
 /// Every `php_unit::Handler` of one opcode, as `php_unit`'s `build.rs`
@@ -469,15 +467,15 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
     };
     // `SPEC(RETVAL)`: each kind's variant twice, its result unused and
     // used, after the kinds' parts of the name, as `php_unit` names them.
-    let retvals: &[(&str, &str)] = if spec.retval { &RETVALS } else { &[("", "")] };
+    let retvals: &[&str] = if spec.retval { &RETVALS } else { &[""] };
     let mut out = Vec::new();
     for (a, ka) in side(spec1, &spec.op1)? {
         for (b, kb) in side(spec2, &spec.op2)? {
             for (d, kd) in &data {
-                for (r, ty) in retvals {
+                for r in retvals {
                     let mut kinds = vec![ka.clone(), kb.clone()];
                     kinds.extend(kd.clone());
-                    let retval = (!ty.is_empty()).then_some(*ty);
+                    let retval = (!r.is_empty()).then_some(*r);
                     out.extend(branched(
                         format!("{}{a}{b}{d}{r}", spec.variant),
                         Some(kinds),
@@ -718,6 +716,17 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
             .get("specialise")
             .and_then(toml::Value::as_bool)
             .unwrap_or(false);
+        let zval_shaped = [specialised("op1_raw"), specialised("op2_raw")];
+        let op_data: Option<Vec<String>> = words
+            .iter()
+            .find_map(|word| word.strip_prefix("OP_DATA="))
+            .filter(|_| specialise)
+            .map(|kinds| kinds.split('|').map(str::to_owned).collect());
+        // `php_unit` resolves `RETVAL` where it resolves a kind of an
+        // operand or of the `OP_DATA` after it, and only there.
+        let retval = specialise
+            && words.contains(&"RETVAL")
+            && (zval_shaped.contains(&true) || op_data.is_some());
         out.insert(
             snake(name),
             Spec {
@@ -725,16 +734,10 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
                 specialise,
                 op1: kinds("op1"),
                 op2: kinds("op2"),
-                zval_shaped: [specialised("op1_raw"), specialised("op2_raw")],
+                zval_shaped,
                 smart: words.contains(&"SMART_BRANCH"),
-                op_data: words
-                    .iter()
-                    .find_map(|word| word.strip_prefix("OP_DATA="))
-                    .filter(|_| specialise)
-                    .map(|kinds| kinds.split('|').map(str::to_owned).collect()),
-                retval: specialise
-                    && words.contains(&"RETVAL")
-                    && (specialised("op1_raw") || specialised("op2_raw")),
+                op_data,
+                retval,
             },
         );
     }
