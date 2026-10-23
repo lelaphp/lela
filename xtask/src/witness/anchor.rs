@@ -563,15 +563,9 @@ impl<'a> Scanner<'a> {
     /// The identifier at the cursor, after any space, consumed.
     fn identifier(&mut self) -> Option<&'a str> {
         self.skip_space();
-        let rest = self.rest();
-        let raw = if rest.starts_with("r#") { 2 } else { 0 };
-        let len = rest[raw..]
-            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
-            .map_or(rest.len(), |n| raw + n);
-        (len > raw).then(|| {
-            self.advance(len);
-            &rest[..len]
-        })
+        let found = super::fence::identifier(self.rest())?;
+        self.advance(found.len());
+        Some(found)
     }
 
     /// The offset past the bracket that closes the one opening at `from`,

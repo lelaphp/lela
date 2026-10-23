@@ -126,7 +126,6 @@ manifest::Owed
 manifest::Owed::covers
 manifest::PinRow
 manifest::Predicates
-manifest::Predicates::NAMES
 manifest::Predicates::describes_a_call
 manifest::Predicates::named
 manifest::Predicates::orphaned_qualifier

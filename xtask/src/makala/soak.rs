@@ -94,7 +94,7 @@ struct Found {
 impl Found {
     /// One mismatch or failure, named while fewer than [`NAMED`] are.
     fn name(&self, what: String) {
-        let mut named = self.named.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut named = crate::locked(&self.named);
         if named.len() < NAMED {
             named.push(what);
         }

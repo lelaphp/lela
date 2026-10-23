@@ -188,7 +188,7 @@ pub(crate) fn blobs(root: &Path, commit: &str, paths: &[&str]) -> Result<Vec<(St
 
 /// What `git <args>` lists with `-z`, entry by entry.
 pub(crate) fn listed(root: &Path, args: &[&str]) -> Result<Vec<String>> {
-    let said = git(root, args, None)?;
+    let said = git(root, args)?;
     Ok(said
         .split('\0')
         .filter(|e| !e.is_empty())
@@ -286,7 +286,7 @@ pub(crate) fn has_ref(root: &Path, name: &str) -> bool {
 
 /// `git rev-parse` with `args` in `root`: what it printed, trimmed.
 pub(crate) fn rev_parse(root: &Path, args: &[&str]) -> Result<String> {
-    let out = git(root, &[&["rev-parse"], args].concat(), None)?;
+    let out = git(root, &[&["rev-parse"], args].concat())?;
     Ok(out.trim().to_owned())
 }
 
@@ -312,8 +312,13 @@ pub(crate) fn elsewhere(root: &Path, args: &[&str]) -> Result<String> {
 
 /// Run git in `root` and return its stdout; a non-zero exit is an error
 /// carrying git's stderr.
-pub(crate) fn git(root: &Path, args: &[&str], stdin: Option<&str>) -> Result<String> {
-    utf8(run(Command::new("git"), root, args, stdin)?)
+pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String> {
+    utf8(run(Command::new("git"), root, args, None)?)
+}
+
+/// [`git`] with `stdin` fed to it.
+pub(crate) fn fed(root: &Path, args: &[&str], stdin: &str) -> Result<String> {
+    utf8(run(Command::new("git"), root, args, Some(stdin))?)
 }
 
 /// `git`, as `command` stands, run in `root` with `stdin` fed to it: what
@@ -356,14 +361,14 @@ pub(crate) fn run(
 mod recorder {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, PoisonError};
+    use std::sync::Mutex;
 
     /// The questions asked of git in each directory `asked` listens at,
     /// or below it, each as its arguments.
     static ASKED: Mutex<BTreeMap<PathBuf, Vec<Vec<String>>>> = Mutex::new(BTreeMap::new());
 
     fn listening<T>(f: impl FnOnce(&mut BTreeMap<PathBuf, Vec<Vec<String>>>) -> T) -> T {
-        f(&mut ASKED.lock().unwrap_or_else(PoisonError::into_inner))
+        f(&mut crate::locked(&ASKED))
     }
 
     /// One question asked of git in `root`, for each listener above it.
@@ -416,7 +421,6 @@ pub fn changed_since(root: &Path, base: &str) -> Result<Vec<Change>> {
     let listing = git(
         root,
         &["diff", "--name-status", "-z", "--no-renames", base, "--"],
-        None,
     )?;
     let mut out = changes(&listing);
     let untracked = untracked(root)?;
@@ -443,7 +447,6 @@ pub fn staged(root: &Path) -> Result<Vec<Change>> {
             "--no-renames",
             "--",
         ],
-        None,
     )?;
     let mut out = changes(&listing);
     out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -469,7 +472,7 @@ pub fn staged_content(root: &Path, path: &str) -> Result<Option<String>> {
 /// The content of `path` at `rev`, or `None` when the commit has no such
 /// file.
 pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
-    match git(root, &["show", &format!("{rev}:{path}")], None) {
+    match git(root, &["show", &format!("{rev}:{path}")]) {
         Ok(text) => Ok(Some(text)),
         Err(err) if err.to_string().contains("does not exist") => Ok(None),
         Err(err) => Err(err),
@@ -483,7 +486,7 @@ mod tests {
     #[test]
     fn a_repository_with_no_commit_is_refused_in_a_sentence() {
         let dir = crate::scratch::Tree::new("git-unborn").unwrap();
-        super::git(&dir, &["init", "-q"], None).unwrap();
+        super::git(&dir, &["init", "-q"]).unwrap();
         let refused = super::head_commit(&dir).unwrap_err();
         assert_eq!(
             format!("{refused:#}"),
@@ -614,7 +617,7 @@ mod tests {
         std::fs::write(root.join("docs/deeper/two.toml"), "two = 2\n").unwrap();
         std::fs::write(root.join("elsewhere.md"), "not under docs\n").unwrap();
         for args in [&["init", "-q", "-b", "main"][..], &["add", "-A"]] {
-            super::git(&root, args, None).unwrap();
+            super::git(&root, args).unwrap();
         }
         crate::scratch::committing(&root, &["commit", "-q", "-m", "scratch"]);
         let root = root.path();

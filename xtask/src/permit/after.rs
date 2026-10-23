@@ -100,7 +100,7 @@ use super::rules::{at, runs_in};
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
-use crate::reading::{self, Number, Reading, Status, Store};
+use crate::reading::{self, Number, Reading, Status, Store, joined};
 use crate::{git, manifest, steer};
 
 /// The rule the sensor holds, whose scope and text it reads.
@@ -263,11 +263,7 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     if moved.is_empty() {
         return Ok(());
     }
-    let said = moved
-        .iter()
-        .map(|m| format!("{RULE}: {}", m.said))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let said = joined(moved.iter().map(|m| format!("{RULE}: {}", m.said)), "\n");
     // The answer names the event it answers. A failed call's event takes
     // no `decision`: the call has already failed, and what was put back is
     // said as context (#2762).
@@ -580,38 +576,34 @@ fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>) ->
 /// put back. What neither can see is a comment written before steer in the
 /// same call, which binds nothing.
 fn steered(checkout: &Path, path: &str, was: Option<&str>, since: i64) -> bool {
-    let Some(was) = was else {
-        return false;
-    };
-    if !steer::binding(checkout).is_ok_and(|manifest| steer::steerable(&manifest, path)) {
-        return false;
-    }
-    let Ok(Some(reading)) = Store::of_workspace(checkout).read(steer::INSTRUMENT, path) else {
-        return false;
-    };
+    was.and_then(|was| steered_by(checkout, path, was, since))
+        .is_some()
+}
+
+/// [`steered`], `None` at the first thing that says it was not.
+fn steered_by(checkout: &Path, path: &str, was: &str, since: i64) -> Option<()> {
+    let manifest = steer::binding(checkout).ok()?;
+    steer::steerable(&manifest, path).then_some(())?;
+    let reading = Store::of_workspace(checkout)
+        .read(steer::INSTRUMENT, path)
+        .ok()??;
     let taken_since = reading::epoch_seconds(&reading.at).is_ok_and(|at| at >= since);
-    if reading.status != Status::Pass
-        || !taken_since
-        || reading.message.contains("dry run")
-        || on_disk(&checkout.join(path))
-            .is_none_or(|now| reading.key() != git::file_hash(path, &now))
-    {
-        return false;
-    }
-    let Ok(before) = cat_blob(checkout, was).map(|b| String::from_utf8_lossy(&b).into_owned())
-    else {
-        return false;
-    };
-    let Ok(now) = fs::read_to_string(checkout.join(path)) else {
-        return false;
-    };
-    let Ok(verdict) = steer::Ground::of(checkout, path, before).and_then(|g| g.judge(&now)) else {
-        return false;
-    };
+    (reading.status == Status::Pass
+        && taken_since
+        && !reading.message.contains("dry run")
+        && on_disk(&checkout.join(path))
+            .is_some_and(|now| reading.key() == git::file_hash(path, &now)))
+    .then_some(())?;
+    let before = String::from_utf8_lossy(&cat_blob(checkout, was).ok()?).into_owned();
+    let now = fs::read_to_string(checkout.join(path)).ok()?;
+    let verdict = steer::Ground::of(checkout, path, before)
+        .and_then(|g| g.judge(&now))
+        .ok()?;
     let added = verdict.additions();
-    !added.is_empty()
+    (!added.is_empty()
         && reading.numbers.get("added") == Some(&Number::count(added.len()))
-        && reading.message.ends_with(&added.join(", "))
+        && reading.message.ends_with(&added.join(", ")))
+    .then_some(())
 }
 
 /// Whether one of the command's simple commands runs `xtask steer`,
@@ -862,10 +854,10 @@ fn prune(dir: &Path) {
 fn hash_objects(checkout: &Path, paths: &[&str]) -> Result<Vec<String>> {
     let mut stdin = paths.join("\n");
     stdin.push('\n');
-    let ids = git::git(
+    let ids = git::fed(
         checkout,
         &["hash-object", "-w", "--no-filters", "--stdin-paths"],
-        Some(&stdin),
+        &stdin,
     )?;
     Ok(ids.lines().map(str::to_owned).collect())
 }
@@ -904,12 +896,11 @@ mod tests {
         for file in ["oracle.toml", "notes.toml"] {
             fs::write(root.join(file), was).unwrap();
         }
-        git::git(&root, &["init", "-q"], None).unwrap();
-        git::git(&root, &["add", "."], None).unwrap();
+        git::git(&root, &["init", "-q"]).unwrap();
+        git::git(&root, &["add", "."]).unwrap();
         git::git(
             &root,
             &[&crate::scratch::UNHOOKED[..], &["commit", "-qm", "x"]].concat(),
-            None,
         )
         .unwrap();
         let steered_over = |file: &str| {

@@ -38,6 +38,7 @@ use crate::oracle::{
     self, Ended, Invocation, Observation, Oracle, PastLimit, Pin, Program, Stdin, Streams,
     Verdict as Compared,
 };
+use crate::reading::joined;
 use crate::tally::{Apart, Within};
 
 /// The fresh-process adapter of design §8's `ScriptExec` seam, bound to
@@ -128,12 +129,13 @@ impl<'a> Adapter<'a> {
                         "phpt: {name} redirects {} tests of {} under {}",
                         set.len(),
                         redirect.set.under.display(),
-                        redirect
-                            .env
-                            .iter()
-                            .map(|(key, value)| format!("{key}={}", value.to_string_lossy()))
-                            .collect::<Vec<_>>()
-                            .join(" ")
+                        joined(
+                            redirect
+                                .env
+                                .iter()
+                                .map(|(key, value)| format!("{key}={}", value.to_string_lossy())),
+                            " "
+                        )
                     );
                     let redirect = Arc::new(redirect);
                     items.extend(set.into_iter().map(|file| {

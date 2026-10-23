@@ -82,7 +82,7 @@ use crate::manifest::Manifest;
 use crate::oracle::{
     self, Ended, Invocation, Observation, Oracle, Oracles, Pin, Program, Verdict, linked,
 };
-use crate::reading::{Reading, Status, Store, listed, plural};
+use crate::reading::{Reading, Status, Store, joined, listed, plural};
 use crate::sources::{self, Outside, Standing};
 use crate::tally;
 use crate::witness::Binary;
@@ -274,12 +274,7 @@ pub(crate) fn first_difference(diff: &str, what: &str) -> String {
         .take_while(|line| changed(line))
         .copied()
         .collect();
-    let shown = hunk
-        .iter()
-        .take(HUNK)
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n");
+    let shown = joined(hunk.iter().take(HUNK).copied(), "\n");
     let rest = hunk.len().saturating_sub(HUNK);
     let more = if rest == 0 {
         String::new()

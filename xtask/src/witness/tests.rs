@@ -1001,8 +1001,8 @@ fn committed_xtask(name: &str) -> Tree {
     fs::create_dir_all(dir.join("xtask/src")).unwrap();
     fs::write(dir.join("xtask/Cargo.toml"), "[package]\n").unwrap();
     fs::write(dir.join("xtask/src/lib.rs"), "a\n").unwrap();
-    git(&dir, &["init", "-q"], None).unwrap();
-    git(&dir, &["add", "--", "xtask"], None).unwrap();
+    git(&dir, &["init", "-q"]).unwrap();
+    git(&dir, &["add", "--", "xtask"]).unwrap();
     let unhooked = [
         "-c",
         "user.name=x",
@@ -1016,7 +1016,7 @@ fn committed_xtask(name: &str) -> Tree {
         &["-c", "core.hooksPath=/var/empty", "commit", "-q", "-m", "x"],
     ]
     .concat();
-    git(&dir, &commit, None).unwrap();
+    git(&dir, &commit).unwrap();
     dir
 }
 

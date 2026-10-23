@@ -417,8 +417,8 @@ mod tests {
         fs::create_dir_all(tree.join("xtask/src")).unwrap();
         fs::write(tree.join("xtask/Cargo.toml"), "[package]\n").unwrap();
         fs::write(tree.join("xtask/src/lib.rs"), "a\n").unwrap();
-        git(&tree, &["init", "-q", "-b", "main"], None).unwrap();
-        git(&tree, &["add", "--", "xtask"], None).unwrap();
+        git(&tree, &["init", "-q", "-b", "main"]).unwrap();
+        git(&tree, &["add", "--", "xtask"]).unwrap();
         committing(&tree, &["commit", "-q", "-m", "scratch"]);
         let store = Store::at(tree.join("target/harness"));
         (tree, Manifest::load(&built_root()).unwrap(), store)
@@ -428,7 +428,7 @@ mod tests {
     fn edit(tree: &Tree, text: &str, stage: bool) {
         fs::write(tree.join("xtask/src/lib.rs"), text).unwrap();
         if stage {
-            git(tree, &["add", "--", "xtask"], None).unwrap();
+            git(tree, &["add", "--", "xtask"]).unwrap();
         }
     }
 
@@ -480,7 +480,7 @@ mod tests {
         edit(&tree, "b\n", true);
         pass(&tree, &manifest, &store);
         fs::write(tree.join("AGENTS.md"), "").unwrap();
-        git(&tree, &["add", "--", "AGENTS.md"], None).unwrap();
+        git(&tree, &["add", "--", "AGENTS.md"]).unwrap();
         assert!(stands(&tree, &manifest, &store));
     }
 
@@ -490,7 +490,7 @@ mod tests {
         edit(&tree, "b\n", true);
         pass(&tree, &manifest, &store);
         fs::write(tree.join("seams.toml"), "").unwrap();
-        git(&tree, &["add", "--", "seams.toml"], None).unwrap();
+        git(&tree, &["add", "--", "seams.toml"]).unwrap();
         assert!(!stands(&tree, &manifest, &store));
     }
 
@@ -532,7 +532,7 @@ mod tests {
         heap_passes(&tree, &manifest, &store);
         fs::create_dir_all(tree.join("data")).unwrap();
         fs::write(tree.join("data/port-map.v0.toml"), "").unwrap();
-        git(&tree, &["add", "--", "data"], None).unwrap();
+        git(&tree, &["add", "--", "data"]).unwrap();
         assert_eq!(standing_over(&tree, &manifest, &store), ["php_heap"]);
     }
 
@@ -557,7 +557,7 @@ mod tests {
         );
         let bumped = lock.replace("checksum = \"aa\"", "checksum = \"bb\"");
         fs::write(tree.join("Cargo.lock"), bumped).unwrap();
-        git(&tree, &["add", "--", "Cargo.lock"], None).unwrap();
+        git(&tree, &["add", "--", "Cargo.lock"]).unwrap();
         assert_eq!(standing_over(&tree, &manifest, &store), ["php_heap"]);
     }
 
@@ -648,7 +648,7 @@ mod tests {
             "pub fn ctype_digit() {}\n",
         )
         .unwrap();
-        git(&tree, &["add", "--", "ext/ctype"], None).unwrap();
+        git(&tree, &["add", "--", "ext/ctype"]).unwrap();
         assert_eq!(standing(), ["php_engine", "php_ext", "ext/reflection"]);
 
         fs::write(
@@ -656,7 +656,7 @@ mod tests {
             "pub fn execute() { }\n",
         )
         .unwrap();
-        git(&tree, &["add", "--", "crates/php_engine"], None).unwrap();
+        git(&tree, &["add", "--", "crates/php_engine"]).unwrap();
         assert!(standing().is_empty(), "{:?}", standing());
     }
 

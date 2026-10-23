@@ -95,7 +95,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use anyhow::{Context, Result, bail};
 
 use crate::key::Snapshot;
-use crate::reading::{Reading, Status, Store};
+use crate::reading::{Reading, Status, Store, joined};
 use crate::tally::{Judged, Judgement, Outcome, Tally};
 use crate::ticket::{self, Gh, State};
 use crate::track::{Ticket, rev, short};
@@ -169,10 +169,10 @@ impl Skill {
             ),
             many => bail!(
                 "{ticket} is labelled {}, and a ticket is on one side of the frontier; a person takes one label off, and nothing is laid down",
-                many.iter()
-                    .map(|side| format!("{FRONTIER_LABEL}{side}"))
-                    .collect::<Vec<_>>()
-                    .join(" and ")
+                joined(
+                    many.iter().map(|side| format!("{FRONTIER_LABEL}{side}")),
+                    " and "
+                )
             ),
         }
     }
@@ -255,14 +255,12 @@ impl Session {
     /// The line saying what is started where: the program and its
     /// arguments, the directory and the subagents' model.
     fn announce(&self, dir: &Path, prompt: &str) {
-        say(
+        say!(
             WORK,
-            &format!(
-                "session: {PROGRAM} {} in {}, subagents on {}",
-                self.arguments(prompt).join(" "),
-                dir.display(),
-                self.subagent()
-            ),
+            "session: {PROGRAM} {} in {}, subagents on {}",
+            self.arguments(prompt).join(" "),
+            dir.display(),
+            self.subagent()
         );
     }
 
@@ -599,13 +597,13 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
     let ticket = Ticket::new(next.number);
     let skill = Skill::of(ticket, next.labels.iter().map(String::as_str))?;
     let branch = format!("t{}", next.number);
-    say(WORK, &format!("{ticket} {}: on {branch}", next.title));
+    say!(WORK, "{ticket} {}: on {branch}", next.title);
 
     let dir = worktree::add(root, &branch, Some(ticket))?;
     let prompt = Session::prompt(skill, ticket);
     run.session.announce(&dir, &prompt);
     let status = run.session.run(&dir, &prompt)?;
-    say(WORK, &format!("the session ended: {status}"));
+    say!(WORK, "the session ended: {status}");
     let tip = rev(root, &format!("refs/heads/{branch}"))?;
     let issue = gh.view(root, ticket)?;
     let ready = ticket::ready_of(root, &branch, ticket)?.is_some();
@@ -636,13 +634,10 @@ pub fn work(root: &Path, gh: &Gh, run: &Run) -> Result<Worked> {
 /// checkout (#85), and the frontier as it is read once the session ends;
 /// the session's exit is said, not judged, as a ticket's is.
 fn fill(root: &Path, gh: &Gh, session: &Session, track: &str) -> Result<Option<Next>> {
-    say(WORK, &format!("the frontier of {track} is empty"));
+    say!(WORK, "the frontier of {track} is empty");
     session.announce(root, FRONTIER_PROMPT);
     let status = session.run(root, FRONTIER_PROMPT)?;
-    say(
-        WORK,
-        &format!("the {FRONTIER_PROMPT} session ended: {status}"),
-    );
+    say!(WORK, "the {FRONTIER_PROMPT} session ended: {status}");
     track_next::next(root, gh, track)
 }
 
@@ -711,7 +706,7 @@ fn steps(
         hold(root, store, tally, total, outcome.step())?;
         if let Some(how) = empty {
             if !tally.judged.is_empty() {
-                say(WORK, &outcomes(tally, &how));
+                say!(WORK, "{}", outcomes(tally, &how));
             }
             return Ok(Ended { how, refused: None });
         }

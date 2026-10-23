@@ -174,14 +174,14 @@ impl Ground {
     /// the one `permit --after` kept from before the call.
     pub(crate) fn of(root: &Path, file: &str, text: String) -> Result<Ground> {
         let merging = git::has_ref(root, "MERGE_HEAD");
-        let unmerged = git::git(root, &["ls-files", "--unmerged", "--", file], None)?;
+        let unmerged = git::git(root, &["ls-files", "--unmerged", "--", file])?;
         if !merging || unmerged.is_empty() {
             return Ok(Ground::File(text));
         }
         // Each entry is `<mode> <blob> <stage>\t<path>`; a file both sides
         // added has no stage 1, and its base carries nothing.
         let staged = |n: u8| unmerged.lines().any(|e| e.contains(&format!(" {n}\t")));
-        let stage = |n: u8| git::git(root, &["show", &format!(":{n}:{file}")], None);
+        let stage = |n: u8| git::git(root, &["show", &format!(":{n}:{file}")]);
         Ok(Ground::Merge {
             base: if staged(1) { stage(1)? } else { String::new() },
             head: stage(2)?,

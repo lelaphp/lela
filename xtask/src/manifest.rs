@@ -725,46 +725,37 @@ pub(crate) fn in_tests_key(lint: &str) -> Option<&'static str> {
         .map(|(_, key)| *key)
 }
 
+/// Whether a rule's predicates carry the one a row of
+/// [`Predicates::TABLE`] names.
+type Carries = fn(&Predicates) -> bool;
+
 impl Predicates {
-    /// The predicate names, in the design's order, `require_argv` after
-    /// the `deny_argv` it stands beside.
-    pub const NAMES: [&'static str; 12] = [
-        "deny_types",
-        "deny_methods",
-        "allow",
-        "deny_pattern",
-        "deny_argv",
-        "require_argv",
-        "on",
-        "deny",
-        "deny_lints",
-        "check",
-        "avoid_from",
-        "generated",
+    /// Each predicate: its name, in the design's order, `require_argv`
+    /// after the `deny_argv` it stands beside; whether a rule carries it;
+    /// and whether it describes one write or one command, so `permit` can
+    /// judge it before the call runs (the other five read the tree after
+    /// the write, harness-design.md §4.4).
+    const TABLE: [(&'static str, Carries, bool); 12] = [
+        ("deny_types", |p| p.deny_types.is_some(), true),
+        ("deny_methods", |p| p.deny_methods.is_some(), false),
+        ("allow", |p| p.allow.is_some(), true),
+        ("deny_pattern", |p| p.deny_pattern.is_some(), true),
+        ("deny_argv", |p| p.deny_argv.is_some(), true),
+        ("require_argv", |p| p.require_argv.is_some(), true),
+        ("on", |p| p.on.is_some(), true),
+        ("deny", |p| p.deny.is_some(), true),
+        ("deny_lints", |p| p.deny_lints.is_some(), false),
+        ("check", |p| p.check.is_some(), false),
+        ("avoid_from", |p| p.avoid_from.is_some(), false),
+        ("generated", |p| p.generated.is_some(), false),
     ];
 
     /// The names of the predicates this rule carries.
     pub fn named(&self) -> Vec<&'static str> {
-        let set = [
-            self.deny_types.is_some(),
-            self.deny_methods.is_some(),
-            self.allow.is_some(),
-            self.deny_pattern.is_some(),
-            self.deny_argv.is_some(),
-            self.require_argv.is_some(),
-            self.on.is_some(),
-            self.deny.is_some(),
-            self.deny_lints.is_some(),
-            self.check.is_some(),
-            self.avoid_from.is_some(),
-            self.generated.is_some(),
-        ];
-        Self::NAMES
-            .iter()
-            .zip(set)
-            .filter(|(_, on)| *on)
-            .map(|(name, _)| *name)
-            .collect()
+        let carried = Self::TABLE
+            .into_iter()
+            .filter(|(_, carries, _)| carries(self));
+        carried.map(|(name, ..)| name).collect()
     }
 
     /// Whether the predicate describes one write or one command, so `permit`
@@ -772,13 +763,9 @@ impl Predicates {
     /// `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
     /// tree after the write (harness-design.md §4.4).
     pub fn describes_a_call(&self) -> bool {
-        self.deny.is_some()
-            || self.deny_argv.is_some()
-            || self.require_argv.is_some()
-            || self.deny_pattern.is_some()
-            || self.deny_types.is_some()
-            || self.allow.is_some()
-            || self.on.is_some()
+        Self::TABLE
+            .iter()
+            .any(|(_, carries, call)| *call && carries(self))
     }
 
     /// A qualifier that has no predicate to qualify: `unless` without
@@ -1034,7 +1021,7 @@ impl Manifest {
                     rule.id,
                     named.len(),
                     named.join(", "),
-                    Predicates::NAMES.join(", ")
+                    crate::reading::joined(Predicates::TABLE.map(|(name, ..)| name), ", ")
                 );
             }
             if rule.predicate.with.iter().any(|w| w.trim().is_empty()) {

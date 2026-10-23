@@ -20,7 +20,7 @@ use crate::layout::{HARNESS, Layout};
 use crate::lines;
 use crate::lock::CargoLock;
 use crate::manifest::{self, Budget, Crate, Generated, Manifest, OneOrMany};
-use crate::reading::{Reading, Status, Store, plural};
+use crate::reading::{Reading, Status, Store, joined, plural};
 use crate::sources::{self, Standing};
 
 /// The instrument whose readings this module writes.
@@ -332,11 +332,7 @@ fn generated_readings(snapshot: &Snapshot, manifest: &Manifest) -> Result<Vec<Re
             let from = format!(
                 "rule{} {}",
                 plural(carried.len()),
-                carried
-                    .iter()
-                    .map(|r| r.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                joined(carried.iter().map(|r| r.id.as_str()), ", ")
             );
             let want = generated::render(root, manifest, file)?;
             let mut failures = match std::fs::read_to_string(root.join(file)) {

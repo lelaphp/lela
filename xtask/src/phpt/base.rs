@@ -184,11 +184,7 @@ impl Laid {
     /// watched for the process `owner`.
     pub(crate) fn at(root: &Path, dir: &Path, commit: &str, owner: u32) -> Result<Laid> {
         let at = dir.to_str().context("the worktree's path is not UTF-8")?;
-        git(
-            root,
-            &["worktree", "add", "-q", "--detach", at, commit],
-            None,
-        )?;
+        git(root, &["worktree", "add", "-q", "--detach", at, commit])?;
         let laid = Laid {
             root: root.to_path_buf(),
             dir: dir.to_path_buf(),
@@ -215,7 +211,7 @@ impl Laid {
 
     fn unlay(&self) -> Result<()> {
         let at = self.dir.to_string_lossy();
-        let removed = git(&self.root, &["worktree", "remove", "--force", &at], None);
+        let removed = git(&self.root, &["worktree", "remove", "--force", &at]);
         removed
             .with_context(|| format!("removing the worktree at {at}"))
             .map(drop)

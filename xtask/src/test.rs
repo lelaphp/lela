@@ -446,7 +446,7 @@ fn execute(executable: &Executable, built: &Built, run: &Run) -> Result<Ran> {
 /// path with every directory a `build.rs` named for the linker, the
 /// profile's own directories and the toolchain's ahead of what the path
 /// held.
-fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(String, OsString)> {
+fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(&'static str, OsString)> {
     let package = &built.package;
     let mut version = package.version.splitn(3, '.');
     let (major, minor) = (version.next().unwrap_or("0"), version.next().unwrap_or("0"));
@@ -456,53 +456,32 @@ fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(String
     let optional = |s: &Option<String>| OsString::from(s.as_deref().unwrap_or_default());
     let mut env = vec![
         (
-            "CARGO".to_owned(),
+            "CARGO",
             std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
         ),
-        ("CARGO_MANIFEST_DIR".to_owned(), package.dir().into()),
-        (
-            "CARGO_MANIFEST_PATH".to_owned(),
-            package.manifest_path.clone().into(),
-        ),
-        ("CARGO_PKG_NAME".to_owned(), text(&package.name)),
-        ("CARGO_PKG_VERSION".to_owned(), text(&package.version)),
-        ("CARGO_PKG_VERSION_MAJOR".to_owned(), text(major)),
-        ("CARGO_PKG_VERSION_MINOR".to_owned(), text(minor)),
-        ("CARGO_PKG_VERSION_PATCH".to_owned(), text(patch)),
-        ("CARGO_PKG_VERSION_PRE".to_owned(), text(pre)),
-        (
-            "CARGO_PKG_AUTHORS".to_owned(),
-            text(&package.authors.join(":")),
-        ),
-        (
-            "CARGO_PKG_DESCRIPTION".to_owned(),
-            optional(&package.description),
-        ),
-        ("CARGO_PKG_HOMEPAGE".to_owned(), optional(&package.homepage)),
-        (
-            "CARGO_PKG_REPOSITORY".to_owned(),
-            optional(&package.repository),
-        ),
-        ("CARGO_PKG_LICENSE".to_owned(), optional(&package.license)),
-        (
-            "CARGO_PKG_LICENSE_FILE".to_owned(),
-            optional(&package.license_file),
-        ),
-        (
-            "CARGO_PKG_RUST_VERSION".to_owned(),
-            optional(&package.rust_version),
-        ),
-        ("CARGO_PKG_README".to_owned(), optional(&package.readme)),
-        ("CARGO_PRIMARY_PACKAGE".to_owned(), text("1")),
+        ("CARGO_MANIFEST_DIR", package.dir().into()),
+        ("CARGO_MANIFEST_PATH", package.manifest_path.clone().into()),
+        ("CARGO_PKG_NAME", text(&package.name)),
+        ("CARGO_PKG_VERSION", text(&package.version)),
+        ("CARGO_PKG_VERSION_MAJOR", text(major)),
+        ("CARGO_PKG_VERSION_MINOR", text(minor)),
+        ("CARGO_PKG_VERSION_PATCH", text(patch)),
+        ("CARGO_PKG_VERSION_PRE", text(pre)),
+        ("CARGO_PKG_AUTHORS", text(&package.authors.join(":"))),
+        ("CARGO_PKG_DESCRIPTION", optional(&package.description)),
+        ("CARGO_PKG_HOMEPAGE", optional(&package.homepage)),
+        ("CARGO_PKG_REPOSITORY", optional(&package.repository)),
+        ("CARGO_PKG_LICENSE", optional(&package.license)),
+        ("CARGO_PKG_LICENSE_FILE", optional(&package.license_file)),
+        ("CARGO_PKG_RUST_VERSION", optional(&package.rust_version)),
+        ("CARGO_PKG_README", optional(&package.readme)),
+        ("CARGO_PRIMARY_PACKAGE", text("1")),
     ];
     if let Some(out_dir) = &built.out_dir {
-        env.push(("OUT_DIR".to_owned(), out_dir.clone().into()));
+        env.push(("OUT_DIR", out_dir.clone().into()));
     }
     if executable.kind == "test" {
-        env.push((
-            "CARGO_TARGET_TMPDIR".to_owned(),
-            run.target_dir.join("tmp").into(),
-        ));
+        env.push(("CARGO_TARGET_TMPDIR", run.target_dir.join("tmp").into()));
     }
     let variable = if cfg!(target_os = "macos") {
         "DYLD_FALLBACK_LIBRARY_PATH"
@@ -530,7 +509,7 @@ fn environment(executable: &Executable, built: &Built, run: &Run) -> Vec<(String
         None => {}
     }
     if let Ok(joined) = std::env::join_paths(paths) {
-        env.push((variable.to_owned(), joined));
+        env.push((variable, joined));
     }
     env
 }

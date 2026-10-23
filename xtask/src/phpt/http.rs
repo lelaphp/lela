@@ -35,7 +35,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Result, anyhow};
 
 use super::cgi;
 use super::environment::Environment;
@@ -49,7 +49,7 @@ use crate::oracle::{PastLimit, Recipe, Runner, Verdict};
 use crate::reading::Reading;
 use crate::scratch::Tree;
 use crate::tally;
-use crate::witness::makala::{Http, Server, split_head};
+use crate::witness::makala::{Http, Server, placed, split_head};
 
 /// The subset's scope: the host's crate.
 pub(crate) const SCOPE: &str = MAKALA.krate;
@@ -177,9 +177,7 @@ pub(super) fn served(
     ini: &[String],
     env: &Environment,
 ) -> Result<Vec<u8>> {
-    let dir = program.parent().context("a program with no directory")?;
-    let script = (program.file_name().and_then(|name| name.to_str()))
-        .context("a program with no name of text")?;
+    let (dir, script) = placed(program)?;
     let logs = Tree::new("phpt-http")?;
     let log = logs.path().join("errors");
     let server = Server::start(recipe, host, dir, ini, Some(1), &log, env.entries())?;

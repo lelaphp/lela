@@ -31,7 +31,7 @@ use anyhow::{Context, Result, bail};
 use crate::glossary::{self, Avoided, Glossary};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::reading::{Outcome, Reading, Status, Store};
+use crate::reading::{Outcome, Reading, Status, Store, joined};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "vocab";
@@ -91,11 +91,7 @@ impl fmt::Display for Finding {
 }
 
 fn quoted(terms: &[String]) -> String {
-    terms
-        .iter()
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(" or ")
+    joined(terms.iter().map(|t| format!("\"{t}\"")), " or ")
 }
 
 /// What one scan counted and found.
@@ -180,10 +176,7 @@ fn rule_over<'a>(
             "{} rules with `avoid_from` cover {} ({}); the store holds one vocab reading per crate, so one rule holds it",
             many.len(),
             path.display(),
-            many.iter()
-                .map(|(r, _)| r.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            joined(many.iter().map(|(r, _)| r.id.as_str()), ", ")
         ),
     }
 }
@@ -201,12 +194,7 @@ fn reading_of(scan: &Scan, snapshot: &Snapshot, rule: &Rule, krate: &Crate) -> R
     reading.message = if scan.findings.is_empty() {
         format!("{}: no avoided word", krate.name)
     } else {
-        let list = scan
-            .findings
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let list = joined(scan.findings.iter(), "\n");
         format!("{}: {}\n{list}", krate.name, rule.text)
     };
     Ok(reading)
