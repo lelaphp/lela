@@ -61,10 +61,10 @@ pub fn exists(root: &Path, krate: &Crate) -> bool {
     root.join(krate.path()).join("Cargo.toml").is_file()
 }
 
-/// Every crate directory on disk (each of the manifest's [`Layout`](crate::layout::Layout)'s
-/// crates and `xtask`, by the presence of a `Cargo.toml`) that has no
-/// `[[crate]]` row, as its manifest name (`ext/<name>`, `sapi/<name>` or
-/// `<name>`).
+/// Every crate directory on disk (each directory of the manifest's
+/// [`Layout`](crate::layout::Layout) and `xtask`, by the presence of a
+/// `Cargo.toml`) that has no `[[crate]]` row, as its manifest name
+/// (`ext/<name>`, `sapi/<name>` or `<name>`).
 pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
     let mut out = Vec::new();
     let layout = manifest.layout();
@@ -84,9 +84,8 @@ pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
             }
         }
     }
-    let harness = HARNESS;
-    if root.join(harness).join("Cargo.toml").is_file() && manifest.crate_named(harness).is_none() {
-        out.push(harness.to_owned());
+    if root.join(HARNESS).join("Cargo.toml").is_file() && manifest.crate_named(HARNESS).is_none() {
+        out.push(HARNESS.to_owned());
     }
     out
 }

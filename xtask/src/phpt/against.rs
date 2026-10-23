@@ -81,7 +81,8 @@ use super::target::{Target, named};
 use super::{INSTRUMENT, Judgement, Lane, Scope, Tally};
 use crate::git;
 use crate::key::Snapshot;
-use crate::manifest::{Layout, Manifest};
+use crate::layout::Layout;
+use crate::manifest::Manifest;
 use crate::oracle::built_from::BuiltFrom;
 use crate::oracle::{Pin, Runner};
 use crate::reading::{Reading, Status, listed};
@@ -549,9 +550,10 @@ fn remember(root: &Path, layout: &Layout, paths: &[PathBuf]) -> Result<()> {
 /// Every key a run at `snapshot`'s engine may be kept under: its tracked
 /// files over each set of paths a run was kept under in any of `roots`
 /// ([`remember`]), and over [`BuiltFrom::Unlisted`]'s over `layout`,
-/// which needs none kept. Two trees with one key over a set build one binary from it, since
-/// the set holds every manifest the build resolved its packages from, so a
-/// run found under any is the engine's at this tree.
+/// which needs none kept. Two trees with one key over a set build one
+/// binary from it, since the set holds every manifest the build resolved
+/// its packages from, so a run found under any is the engine's at this
+/// tree.
 fn keys(snapshot: &Snapshot, layout: &Layout, roots: &[PathBuf]) -> Result<Vec<String>> {
     let mut sets = BTreeSet::from([BuiltFrom::Unlisted.keyed(snapshot.root(), layout)]);
     for root in roots {

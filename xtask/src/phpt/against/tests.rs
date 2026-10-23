@@ -25,14 +25,14 @@ fn reading_of(diff: Result<Diff, String>) -> Reading {
     .unwrap()
 }
 
-/// A tally of one test of `ext/ctype`, met: a run the engine keeps.
-#[cfg(tracked)]
 /// The crate directories of a manifest laying crates down in `crates`,
 /// `ext` and `sapi`.
 fn layout() -> Layout {
     Layout::of(&["php_engine", "ext/fixture", "sapi/cli"].map(crate::manifest::Crate::named))
 }
 
+/// A tally of one test of `ext/ctype`, met: a run the engine keeps.
+#[cfg(tracked)]
 fn one_met() -> Tally {
     let id = "phpt:php-src/ext/ctype/tests/one.phpt";
     let judged = crate::phpt::Judged::new(id, "one.phpt", Judgement::Pass, "");

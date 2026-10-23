@@ -288,37 +288,34 @@ pub(crate) enum Condition {
     /// (`unsupported` is reported, not held, under the permissive
     /// provenance #2415 ruled).
     ///
-    /// Which instruments one crate is asked for is [`owed`], the
-    /// manifest's `[[owed]]` rows (#3206): `test` is asked of every crate,
-    /// since every crate has tests and one whose tests do not run is not
-    /// done (#191); `port-map` of the crate the lock lives with, the only
-    /// scope that instrument writes a reading at (#148), and `crosscheck`
-    /// of the extensions the per-commit lane renders (#269). The key is the
-    /// hash over the crate's sources and its declared dependency closure's
-    /// (§4.2, §13 D.18), the one every instrument stamps; an instrument
-    /// that does not exist yet has written no reading, so its condition is
-    /// unmet and the list is honest from day one. `phpt` is
-    /// [`no_regression`], the
-    /// two kept runs diffed by [`against::regressed`], where a test the
-    /// compiler no longer reads is a regression and one it never read is
-    /// held to nothing, which retires the `unread` rung of #319; where no
-    /// run is kept here, a fresh skip the missing engine binary causes is
-    /// met, [`no_binary_yet`] (#132). A `witness` reading is held to its
-    /// status, the linked engine having served it (#119). A rung is the
-    /// manifest's, not a lane's: a crate whose `[[crate]]` row carries
-    /// `porting = true` has its `crosscheck` readings read as the port's
-    /// meter, [`porting_meter`], fresh and printed but met whatever they
-    /// say, while the port is partial (#383). `miri` is asked of the
-    /// crates its row names, `php_heap`, when a change touches it,
+    /// Which instruments one crate is asked for is [`owed`], the manifest's
+    /// `[[owed]]` rows (#3206): `test` is asked of every crate, since every
+    /// crate has tests and one whose tests do not run is not done (#191);
+    /// `port-map` of the crate the lock lives with, the only scope that
+    /// instrument writes a reading at (#148), and `crosscheck` of the
+    /// extensions the per-commit lane renders (#269). The key is the hash over
+    /// the crate's sources and its declared dependency closure's (§4.2, §13
+    /// D.18), the one every instrument stamps; an instrument that does not
+    /// exist yet has written no reading, so its condition is unmet and the list
+    /// is honest from day one. `phpt` is [`no_regression`], the two kept runs
+    /// diffed by [`against::regressed`], where a test the compiler no longer
+    /// reads is a regression and one it never read is held to nothing, which
+    /// retires the `unread` rung of #319; where no run is kept here, a fresh
+    /// skip the missing engine binary causes is met, [`no_binary_yet`] (#132).
+    /// A `witness` reading is held to its status, the linked engine having
+    /// served it (#119). A rung is the manifest's, not a lane's: a crate whose
+    /// `[[crate]]` row carries `porting = true` has its `crosscheck` readings
+    /// read as the port's meter, [`porting_meter`], fresh and printed but met
+    /// whatever they say, while the port is partial (#383). `miri` is asked of
+    /// the crates its row names, `php_heap`, when a change touches it,
     /// `php_heap` depending on no workspace crate; a fail made only of
-    /// unsupported operations is
-    /// met, [`miri_unsupported`], and every other is held (#2416). A crate
-    /// whose library or binary sources name `debug_assertions` is asked
-    /// for `clippy` twice, at its name and at `<name>/release`, the release
-    /// profile's lint ([`scopes_of`], #2392). A
-    /// caller's `--not-run` moves an instrument's missing reading off this
-    /// list and onto the notes, as CI's does for the oracle job's two while
-    /// that job is skipped (#2477).
+    /// unsupported operations is met, [`miri_unsupported`], and every other is
+    /// held (#2416). A crate whose library or binary sources name
+    /// `debug_assertions` is asked for `clippy` twice, at its name and at
+    /// `<name>/release`, the release profile's lint ([`scopes_of`], #2392). A
+    /// caller's `--not-run` moves an instrument's missing reading off this list
+    /// and onto the notes, as CI's does for the oracle job's two while that job
+    /// is skipped (#2477).
     Fresh,
     /// Every kernel or native added in the diff has a witness: the
     /// `witness` reading's `missing` is zero for the crate.

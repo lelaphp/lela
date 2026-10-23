@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use toml::Value;
 
-use crate::layout::normalize;
-use crate::manifest::{Layout, Manifest};
+use crate::layout::{Layout, normalize};
+use crate::manifest::Manifest;
 
 /// One crate that exists, by its manifest name (`php_heap`, `ext/random`,
 /// `xtask`).

@@ -25,25 +25,25 @@ const BARE: &str = "crates";
 /// directory a row names before its `/`, sorted (#3207).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Layout {
-    dirs: Vec<String>,
+    /// The directories a row names before its `/`, sorted.
+    prefixed: Vec<String>,
 }
 
 impl Layout {
     /// The layout `crates`, the manifest's rows, lay their crates down in.
     pub fn of(crates: &[Crate]) -> Layout {
-        let named: BTreeSet<&str> = crates
+        let named = crates
             .iter()
-            .filter_map(|krate| Some(split(&krate.name)?.0))
-            .collect();
-        let dirs = std::iter::once(BARE).chain(named);
+            .filter_map(|k| Some(k.name.split_once('/')?.0));
+        let named: BTreeSet<&str> = named.collect();
         Layout {
-            dirs: dirs.map(str::to_owned).collect(),
+            prefixed: named.into_iter().map(str::to_owned).collect(),
         }
     }
 
     /// Each directory crates are laid down in, `crates` first.
     pub(crate) fn dirs(&self) -> impl Iterator<Item = &str> {
-        self.dirs.iter().map(String::as_str)
+        std::iter::once(BARE).chain(self.prefixed.iter().map(String::as_str))
     }
 
     /// The manifest name of the crate at `rel`, relative to the root: the
@@ -53,10 +53,9 @@ impl Layout {
         match parts.as_slice() {
             [HARNESS] => Some(HARNESS.to_owned()),
             [BARE, bare] => Some((*bare).to_owned()),
-            [dir, bare] => self
-                .dirs()
-                .any(|d| d == *dir)
-                .then(|| format!("{dir}/{bare}")),
+            [dir, bare] => {
+                (self.prefixed.iter().any(|d| d == dir)).then(|| format!("{dir}/{bare}"))
+            }
             _ => None,
         }
     }
@@ -66,8 +65,8 @@ impl Layout {
     /// other `php_*` package and `xtask` are themselves. `None` for a
     /// package that is no workspace crate.
     pub(crate) fn name_of_package(&self, package: &str) -> Option<String> {
-        let prefixed = self.dirs().skip(1).find_map(|dir| {
-            let bare = package.strip_prefix("php_")?.strip_prefix(dir)?;
+        let prefixed = self.prefixed.iter().find_map(|dir| {
+            let bare = package.strip_prefix("php_")?.strip_prefix(dir.as_str())?;
             Some(format!("{dir}/{}", bare.strip_prefix('_')?))
         });
         prefixed.or_else(|| {
@@ -76,24 +75,18 @@ impl Layout {
     }
 }
 
-/// The directory a prefixed manifest name names and its bare name;
-/// `None` for a bare one.
-fn split(name: &str) -> Option<(&str, &str)> {
-    name.split_once('/')
-}
-
 /// Where the crate named `name` is, relative to the root.
 pub(crate) fn path(name: &str) -> PathBuf {
-    match split(name) {
-        Some(_) => PathBuf::from(name),
-        None if name == HARNESS => PathBuf::from(name),
-        None => Path::new(BARE).join(name),
+    if name.contains('/') || name == HARNESS {
+        PathBuf::from(name)
+    } else {
+        Path::new(BARE).join(name)
     }
 }
 
 /// The cargo package of the crate named `name`.
 pub(crate) fn package(name: &str) -> String {
-    match split(name) {
+    match name.split_once('/') {
         Some((dir, bare)) => format!("php_{dir}_{bare}"),
         None => name.to_owned(),
     }

@@ -26,7 +26,8 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
-use crate::manifest::{Layout, Manifest};
+use crate::layout::Layout;
+use crate::manifest::Manifest;
 use crate::ticket::{Gh, Open};
 use crate::track::{Records, Ticket};
 use crate::track_next::{PERSON, READY, is_tracks};
@@ -96,13 +97,13 @@ impl Chains {
     pub(crate) fn of(
         open: Vec<Open>,
         track: &str,
-        krate: Option<(&str, &Layout)>,
+        (krate, layout): (Option<&str>, &Layout),
         records: &Records,
     ) -> Chains {
         let mut kept: Vec<Open> = open
             .into_iter()
             .filter(|ticket| is_tracks(ticket, track))
-            .filter(|ticket| krate.is_none_or(|(name, layout)| names(&ticket.title, name, layout)))
+            .filter(|ticket| krate.is_none_or(|name| names(&ticket.title, name, layout)))
             .collect();
         kept.sort_by_key(|ticket| ticket.number);
         let shown: BTreeSet<u64> = kept.iter().map(|ticket| ticket.number).collect();
@@ -264,8 +265,7 @@ fn is_crate(word: &str, layout: &Layout) -> bool {
 pub fn command(root: &Path, track: &str, krate: Option<&str>, json: bool) -> Result<()> {
     let layout = Manifest::load(root)?.layout();
     let open = Gh::on_path().open(root)?;
-    let krate = krate.map(|name| (name, &layout));
-    let chains = Chains::of(open, track, krate, &Records::read(root));
+    let chains = Chains::of(open, track, (krate, &layout), &Records::read(root));
     if json {
         println!("{}", serde_json::to_string_pretty(&chains)?);
     } else {
@@ -340,7 +340,8 @@ mod tests {
             ("t9".to_owned(), Ticket::new(9)),
         ];
         let records = Records::of(recorded);
-        let chains = Chains::of(open, "main", None, &records);
+        let layout = super::Layout::of(&[]);
+        let chains = Chains::of(open, "main", (None, &layout), &records);
         assert_eq!(
             chains.render(),
             "main: 6 open, 3 no ticket blocks, 3 waiting on a blocker, 1 a person's\n\

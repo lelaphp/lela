@@ -18,13 +18,14 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::layout;
+use crate::oracle::Pin;
+use crate::phpt::Scope;
+use crate::track::Ticket;
+
 pub use crate::layout::Layout;
 pub use owed::{Owed, When};
 
 mod owed;
-use crate::oracle::Pin;
-use crate::phpt::Scope;
-use crate::track::Ticket;
 
 /// The file name of the manifest at the workspace root.
 pub const FILE: &str = "seams.toml";
@@ -1160,14 +1161,14 @@ impl Manifest {
         self.crates.iter().find(|c| c.name == name)
     }
 
-    /// The rows `only` names, in the manifest's order, or every row where
-    /// it names none: an instrument's `--crate`, refused for a name no row
-    /// carries.
     /// The `[[owed]]` row of `instrument`, where the manifest has one.
     pub fn owing(&self, instrument: &str) -> Option<&Owed> {
         self.owed.iter().find(|row| row.instrument == instrument)
     }
 
+    /// The rows `only` names, in the manifest's order, or every row where
+    /// it names none: an instrument's `--crate`, refused for a name no row
+    /// carries.
     pub(crate) fn crates_named(&self, only: &[String]) -> Result<Vec<&Crate>> {
         if let Some(name) = only.iter().find(|n| self.crate_named(n).is_none()) {
             bail!("the manifest has no crate named {name:?}");
