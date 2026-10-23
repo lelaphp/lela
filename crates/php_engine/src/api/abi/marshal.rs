@@ -930,18 +930,23 @@ impl<T> IntoIterator for Variadic<T> {
 
 /// The tail read off a call of `count` arguments from `position` on,
 /// `first` the argument there as the entry read it and each later one
-/// read off the frame: one in place, a longer one on the heap at once.
+/// read off the frame: none or one in place, a longer one on the heap
+/// at once. An empty tail holds nothing, so no hold sees the `UNDEF`
+/// the entry reads past the call's arguments.
 fn tail<T: FromArgument>(
     req: &mut Request,
     first: Value,
     position: u32,
     count: u32,
 ) -> Result<Variadic<T>, Thrown> {
-    if count <= position {
-        return Ok(Variadic(Tail::Few(T::hold(req, first, position)?)));
-    }
-    let mut held = Vec::with_capacity((count - position + 1) as usize);
-    for at in position..=count {
+    use std::cmp::Ordering::{Equal, Greater, Less};
+    let mut held = match count.cmp(&position) {
+        Less => return Ok(Variadic(Tail::Few(None))),
+        Equal => return Ok(Variadic(Tail::Few(T::hold(req, first, position)?))),
+        Greater => Vec::with_capacity((count - position + 1) as usize),
+    };
+    held.extend(T::hold(req, first, position)?);
+    for at in position + 1..=count {
         let given = req.frames().argument(at).unwrap_or(Value::undef());
         if let Some(value) = T::hold(req, given, at)? {
             held.push(value);
