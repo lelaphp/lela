@@ -204,6 +204,7 @@ fn the_renumbered_fixture_is_a_pass_under_the_row_and_not_without_it() {
     let with_row = Manifest::load(crate::package_dir().parent().unwrap())
         .unwrap()
         .pin
+        .unwrap()
         .recipe
         .normalise;
     assert!(
@@ -352,7 +353,11 @@ fn the_oracles_bytes_are_kept_under_the_scope_and_the_digest() {
 /// extension no host adds to stays the linked engine's.
 #[test]
 fn standard_is_the_binarys_since_the_linked_engine_lacks_a_hosts_natives() {
-    let recipe = Manifest::load(&crate::built_root()).unwrap().pin.recipe;
+    let recipe = Manifest::load(&crate::built_root())
+        .unwrap()
+        .pin
+        .unwrap()
+        .recipe;
     let served = crate::oracle::linked::serve(&recipe, None, &Column::Re.program(HOSTED)).unwrap();
     let rendered = String::from_utf8_lossy(&served.stdout);
     assert!(rendered.contains("function str_repeat ]"), "{rendered}");
@@ -408,6 +413,7 @@ fn the_head_a_host_writes_is_let_go_and_a_body_alone_is_kept() {
     let rules = Manifest::load(&crate::built_root())
         .unwrap()
         .pin
+        .unwrap()
         .recipe
         .normalise;
     let served = b"X-Powered-By: PHP\r\nContent-type: text/html; charset=UTF-8\r\n\r\nExtension [ x ] {\n\n}\n";

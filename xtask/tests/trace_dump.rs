@@ -95,7 +95,7 @@ impl Scratch {
 
     /// What the run kept for `side` of `loop.php`.
     fn kept(&self, side: Side) -> String {
-        let digest = self.manifest.pin.digest();
+        let digest = self.manifest.pin().unwrap().digest();
         fs::read_to_string(trace_dump::kept(&self.store, digest, "loop", side)).unwrap()
     }
 }
@@ -192,7 +192,7 @@ fn an_accepted_row_passes_the_difference_and_an_open_one_does_not() {
 #[test]
 fn an_absent_oracle_is_a_skip_and_not_a_pass() {
     let mut scratch = Scratch::new("absent");
-    scratch.manifest.pin.oracle.path = scratch.root.join("nowhere/php");
+    scratch.manifest.pin.as_mut().unwrap().oracle.path = scratch.root.join("nowhere/php");
     let reading = scratch.one("engine.lines", &registry(""));
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
     assert!(

@@ -55,7 +55,7 @@ fn manifest() -> Manifest {
 /// for as long as it reads the manifest.
 fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
     let mut manifest = Manifest::of(rows);
-    manifest.pin = pin_over(tree);
+    manifest.pin = Some(pin_over(tree));
     manifest
 }
 
@@ -127,7 +127,7 @@ impl Scratch {
             fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let mut manifest = Manifest::named("ext/fixture");
-        manifest.pin = pin_over(&corpus);
+        manifest.pin = Some(pin_over(&corpus));
         Scratch {
             root,
             manifest,
@@ -173,6 +173,23 @@ fn count(reading: &Reading, key: &str) -> i64 {
         Some(Number::Int(n)) => *n,
         other => panic!("{key} is {other:?} in {reading:#?}"),
     }
+}
+
+/// A repository that runs no php has no `[oracle]` row: its manifest
+/// loads with no pin, and `phpt`, which runs php under one, refuses naming
+/// the absent pin (#3181).
+#[test]
+fn a_manifest_with_no_oracle_row_loads_and_phpt_refuses_naming_the_pin() {
+    let root = Tree::new("phpt-no-pin").unwrap();
+    let budget = "total = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n";
+    fs::write(root.join("seams.toml"), format!("[budget]\n{budget}")).unwrap();
+    let manifest = Manifest::load(&root).unwrap();
+    assert!(manifest.pin.is_none() && manifest.pin_file().is_none());
+    let refused = phpt::run(&root, &manifest, &Registry::default(), &Ask::default()).unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("seams.toml has no `[oracle]` row, so no oracle pin"),
+        "{refused:#}"
+    );
 }
 
 #[test]
@@ -226,7 +243,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
         ..Ask::default()
     };
     let run = || phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask(&php));
-    let pin = &scratch.manifest.pin;
+    let pin = scratch.manifest.pin().unwrap();
     let kept = scratch.root.join(format!(
         "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
         pin.source.tag, pin.oracle.md5
@@ -540,7 +557,7 @@ fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
 fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read_it() {
     let tree = fixture_tree();
     let mut manifest = manifest();
-    manifest.pin = pin_over(&tree);
+    manifest.pin = Some(pin_over(&tree));
     let ask = Ask {
         subset: Some("pcre".to_owned()),
         ..Ask::default()
@@ -2315,7 +2332,7 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
     let mut scratch = Scratch::new("writes", &tests);
     let corpus = scratch.root.join("corpus");
     Repo::init(&corpus);
-    scratch.manifest.pin.source.commit = commit_all(&corpus, "the pin");
+    scratch.manifest.pin.as_mut().unwrap().source.commit = commit_all(&corpus, "the pin");
     fs::write(
         corpus.join("ext/fixture/tests/stray.php"),
         "<?php echo 'a stray';\n",
@@ -2435,7 +2452,7 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
         "{}",
         control.message
     );
-    let pin = &scratch.manifest.pin;
+    let pin = scratch.manifest.pin().unwrap();
     let kept = scratch.root.join(format!(
         "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
         pin.source.tag, pin.oracle.md5

@@ -643,6 +643,7 @@ fn run_in(
     journal: Option<&Journal>,
     binary: &Binary,
 ) -> Result<Vec<Reading>> {
+    let pin = manifest.pin()?;
     let Some(crates) = asked(root, manifest, ask)? else {
         return Ok(Vec::new());
     };
@@ -652,7 +653,7 @@ fn run_in(
     // witness or per crate (harness §4.3). A crate whose row names a
     // variant is read under it (#1782).
     let variants = manifest.variants();
-    let oracles = Oracles::new(&manifest.pin, &variants);
+    let oracles = Oracles::new(pin, &variants);
     // Each crate is read in three steps (#2212): found and prepared in the
     // manifest's order, its fences served on one pool with every other
     // crate's, so no crate's last fences leave a thread idle while the
@@ -676,7 +677,7 @@ fn run_in(
     for slot in slots {
         let (one, tally) = match slot {
             Slot::Unrun(krate, why, failed) => {
-                let mut unrun = under_rule(krate, &snapshot, rule)?.under(&manifest.pin);
+                let mut unrun = under_rule(krate, &snapshot, rule)?.under(manifest.pin()?);
                 unrun.message = format!("{}: {why}", krate.name);
                 if failed {
                     unrun.status = Status::Fail;
@@ -687,7 +688,7 @@ fn run_in(
             Slot::Ready(at) => (&ready[at], finished[at].take()),
         };
         if let Some(why) = &full {
-            let unrun = under_rule(one.krate, &snapshot, rule)?.under(&manifest.pin);
+            let unrun = under_rule(one.krate, &snapshot, rule)?.under(manifest.pin()?);
             readings.push(Full::skipped(unrun, &one.krate.name, why)?);
             continue;
         }
@@ -917,7 +918,7 @@ fn finished_reading(
             tally.witnesses.judged.len()
         );
     }
-    let mut judged = reading(tally, snapshot, krate, rule)?.under(&manifest.pin);
+    let mut judged = reading(tally, snapshot, krate, rule)?.under(manifest.pin()?);
     if let Some(under) = one.oracle.pin().oracle.read_under() {
         judged.message = format!("{}; {under}", judged.message);
     }
@@ -1276,7 +1277,7 @@ fn unmeasured(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<Str
         let tree = snapshot.key(&krate.path())?;
         let stands = store
             .read(INSTRUMENT, &krate.name)?
-            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree, manifest.pin.digest()));
+            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree, manifest.pin_digest()));
         if !stands {
             left.push(krate.name.clone());
         }

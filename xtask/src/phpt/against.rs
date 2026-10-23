@@ -250,7 +250,7 @@ impl Runs {
     /// one is named; a commit the repository does not have is refused.
     pub(crate) fn new(root: &Path, manifest: &Manifest, against: Option<&str>) -> Result<Runs> {
         let base = against.map(|named| Base::at(root, named)).transpose()?;
-        let source = &manifest.pin.source;
+        let source = &manifest.pin()?.source;
         // Stat before the snapshot: a file written between the two is one
         // whose stat has moved by the first subset's end, and is asked of
         // git there.
@@ -263,7 +263,7 @@ impl Runs {
             snapshot,
             commit: git::head_commit(root)?,
             corpus: format!("{} {}", source.tag, source.commit),
-            recipe: manifest.pin.digest().to_owned(),
+            recipe: manifest.pin_digest().to_owned(),
             base,
         })
     }
@@ -335,7 +335,7 @@ impl Runs {
         };
         let scope = held_as.held_against().to_string();
         let reading = Reading::for_scope(INSTRUMENT, &scope, manifest, &self.snapshot)?;
-        compared(reading.under(&manifest.pin), &base.commit, diff).map(Some)
+        compared(reading.under(manifest.pin()?), &base.commit, diff).map(Some)
     }
 
     /// The paths a run on `runner` is kept under, what the binary is built

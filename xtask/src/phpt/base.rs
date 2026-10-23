@@ -60,7 +60,7 @@ pub(crate) fn take(
 ) -> Result<()> {
     let base = Base::of(root, Some(since))?;
     let commit = short(&base.commit);
-    let source = manifest.pin.source.tree()?;
+    let source = manifest.pin()?.source.tree()?;
     let names = match &ask.subset {
         Some(name) => vec![name.clone()],
         None => touched(root, manifest, &base)?,
@@ -68,7 +68,7 @@ pub(crate) fn take(
     let mut wanted = Vec::new();
     for name in names {
         let scope = Subset::resolve(manifest, &source, &name)?.scope;
-        if against::kept_at(root, &manifest.pin, &base.commit, &scope)?.is_ok() {
+        if against::kept_at(root, manifest.pin()?, &base.commit, &scope)?.is_ok() {
             say(&format!("a run of {scope} is kept at {base} already"));
         } else {
             wanted.push(scope);
@@ -92,7 +92,7 @@ pub(crate) fn take(
     say(&format!("removed {}", dir.display()));
     let mut missing = Vec::new();
     for scope in &wanted {
-        if against::kept_at(root, &manifest.pin, &base.commit, scope)?.is_err() {
+        if against::kept_at(root, manifest.pin()?, &base.commit, scope)?.is_err() {
             missing.push(scope.as_str());
         }
     }

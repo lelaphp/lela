@@ -410,7 +410,7 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
     let (tree, binary) = workspace_with_a_binary("against-built-from");
     let root: &Path = &tree;
     let manifest = Manifest::load(&crate::built_root()).unwrap();
-    let pin = &manifest.pin;
+    let pin = manifest.pin().unwrap();
     let (scope, engine) = ("ext/ctype", Runner::Engine(binary));
     let runs = Runs::new(root, &manifest, None).unwrap();
     let subset = Reading::new(INSTRUMENT, scope);
@@ -473,7 +473,7 @@ fn a_run_of_no_test_is_no_run_and_the_bases_run_carried_in_replaces_it() {
     let (tree, binary) = workspace_with_a_binary("against-none");
     let root: &Path = &tree;
     let manifest = Manifest::load(&crate::built_root()).unwrap();
-    let pin = &manifest.pin;
+    let pin = manifest.pin().unwrap();
     let (scope, engine) = (Scope::of("ext/ctype"), Runner::Engine(binary));
     let runs = Runs::new(root, &manifest, None).unwrap();
     let after = |tally: &Tally| {

@@ -423,7 +423,7 @@ impl Subset {
         bail!(
             "no subset {name:?}: the manifest has no crate {named} and no crate {as_crate}, and the pinned php-src at {} ({}) has no {named}",
             source.display(),
-            manifest.pin.source.tag
+            manifest.pin()?.source.tag
         )
     }
 
@@ -804,7 +804,15 @@ pub(crate) fn reading(
     } else {
         tally.outcome(runner)
     };
-    let message = words(&scope, tally, &outcome, subset, uncreated, source, manifest);
+    let message = words(
+        &scope,
+        tally,
+        &outcome,
+        subset,
+        uncreated,
+        source,
+        &manifest.pin()?.source.tag,
+    );
     let message = match under.served {
         Some(version) => format!("{message}; served by MySQL {version}"),
         None => message,
@@ -820,7 +828,7 @@ pub(crate) fn reading(
     // Stamped through the manifest's scope mapping: the crate whose subset
     // it is, so `done` can tell a stale reading from a fresh one.
     let mut reading = tally.reading(
-        Reading::for_scope(INSTRUMENT, &scope, manifest, snapshot)?.under(&manifest.pin),
+        Reading::for_scope(INSTRUMENT, &scope, manifest, snapshot)?.under(manifest.pin()?),
         &outcome,
         message,
     )?;
@@ -933,7 +941,7 @@ fn words(
     subset: &Subset,
     uncreated: bool,
     source: &Path,
-    manifest: &Manifest,
+    tag: &str,
 ) -> String {
     let absent = subset.absent();
     // A derived subset the tree has but holds no `.phpt`: named as an
@@ -1009,7 +1017,7 @@ fn words(
             "{scope}: {whose} {}, and the pinned php-src at {} ({}) {has}{why}",
             listed(&named),
             source.display(),
-            manifest.pin.source.tag
+            tag
         )
     }
 }
@@ -1070,7 +1078,7 @@ pub enum Engine {
 /// Whether the subset `scope` names is testless in the pinned tree on this
 /// machine ([`Subset::testless`]); one that cannot be resolved is not.
 pub(crate) fn testless(manifest: &Manifest, scope: &str) -> bool {
-    let tree = manifest.pin.source.tree();
+    let tree = manifest.pin().and_then(|pin| pin.source.tree());
     let subset = tree.and_then(|tree| Subset::resolve(manifest, &tree, scope));
     subset
         .and_then(|subset| subset.testless(manifest))
@@ -1088,12 +1096,12 @@ pub fn run(
 ) -> Result<Vec<Reading>> {
     // Where the tree is on this machine is the oracle module's one answer;
     // an absent tree refuses the run naming both places it looked.
-    let source = manifest.pin.source.tree()?;
+    let source = manifest.pin()?.source.tree()?;
     let subsets = asked(root, manifest, &source, ask)?;
     // The main oracle, and one per variant a row names, whose crate's subset
     // runs under it (#1782); each digest asserted once a run (harness §4.3).
     let variants = manifest.variants();
-    let oracles = Oracles::new(&manifest.pin, &variants);
+    let oracles = Oracles::new(manifest.pin()?, &variants);
     let runners = Runners::resolve(root, manifest, &variants, ask, &subsets)?;
     let runner = &runners.main;
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
@@ -1427,7 +1435,7 @@ impl<'v> Runners<'v> {
             crate::makala::makala(root)?;
         }
         Ok(Runners {
-            main: resolve(&manifest.pin)?,
+            main: resolve(manifest.pin()?)?,
             variants: resolved,
             featured,
         })
@@ -1623,7 +1631,7 @@ fn refused(
     why: &anyhow::Error,
 ) -> Result<Reading> {
     let mut reading =
-        Reading::for_scope(INSTRUMENT, scope, manifest, snapshot)?.under(&manifest.pin);
+        Reading::for_scope(INSTRUMENT, scope, manifest, snapshot)?.under(manifest.pin()?);
     if Full::of(why).is_some() {
         return Full::skipped(reading, scope, why);
     }

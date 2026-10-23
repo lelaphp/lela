@@ -234,7 +234,7 @@ fn fresh_but_test(root: &Path, manifest: &Manifest, store: &Store) {
         let mut reading =
             Reading::for_scope(instrument, "php_heap", manifest, &snapshot).expect("a reading");
         if xtask::reading::UNDER_RECIPE.contains(&instrument) {
-            reading = reading.under(&manifest.pin);
+            reading = reading.under(manifest.pin().unwrap());
         }
         reading.status = Status::Pass;
         reading.message = String::from("php_heap: measured");

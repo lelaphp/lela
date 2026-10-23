@@ -166,7 +166,7 @@ fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
         .unwrap(),
     };
     if UNDER_RECIPE.contains(&instrument) {
-        reading = reading.under(&manifest.pin);
+        reading = reading.under(manifest.pin().unwrap());
     }
     reading.status = Status::Pass;
     reading.message = format!("{scope}: measured");
@@ -232,7 +232,12 @@ fn keep_run(root: &Path, at: Option<&str>, scope: &str, verdict: &str) {
     if !verdict.is_empty() {
         verdicts.insert(format!("phpt:php-src/{scope}/tests/a.phpt"), verdict.into());
     }
-    let recipe = Manifest::load(root).unwrap().pin.digest().to_owned();
+    let recipe = Manifest::load(root)
+        .unwrap()
+        .pin()
+        .unwrap()
+        .digest()
+        .to_owned();
     let run = serde_json::json!({"commit": "0", "corpus": "c", "engine": "e", "recipe": recipe, "verdicts": verdicts});
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, run.to_string()).unwrap();
@@ -740,7 +745,7 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
             .unwrap()
         };
         if UNDER_RECIPE.contains(&instrument) {
-            reading = reading.under(&manifest.pin);
+            reading = reading.under(manifest.pin().unwrap());
         }
         reading.status = Status::Pass;
         reading.message = "measured".into();
@@ -955,7 +960,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
 #[test]
 fn an_extension_with_no_tests_of_its_own_is_met_with_no_run_kept() {
     let manifest = Manifest::load(workspace()).unwrap();
-    let tree = manifest.pin.source.tree();
+    let tree = manifest.pin().unwrap().source.tree();
     if Promise::Tree.or_skip(tree).unwrap().is_none() {
         return;
     }

@@ -64,8 +64,9 @@ pub(crate) struct Held {
 
 impl Surfaces {
     /// §4.10 of `root`'s [`DESIGN`], with the markers to be held against
-    /// `source`; a workspace without the file has no rows.
-    pub(crate) fn read(root: &Path, source: &Source) -> Result<Surfaces> {
+    /// `source`, or none where the manifest names no pin; a workspace
+    /// without the file has no rows.
+    pub(crate) fn read(root: &Path, source: Result<&Source>) -> Result<Surfaces> {
         let text = crate::read_if(&root.join(DESIGN))?;
         let surfaces = text.map_or_else(Surfaces::default, |text| Surfaces::parse(&text));
         Ok(Surfaces {

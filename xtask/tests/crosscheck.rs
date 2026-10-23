@@ -293,7 +293,7 @@ fn an_extension_the_oracle_does_not_have_fails_with_phps_own_words() {
         assert!(
             !crosscheck::kept(
                 &scratch.store,
-                &scratch.manifest.pin.oracle.md5,
+                &scratch.manifest.pin().unwrap().oracle.md5,
                 "nosuch",
                 column
             )
@@ -377,7 +377,8 @@ fn the_renumbered_fixture_through_run_is_a_pass_under_the_row_and_not_without_it
     let mut scratch = Scratch::new("renumbered");
     let token = scratch
         .manifest
-        .pin
+        .pin()
+        .unwrap()
         .recipe
         .normalise
         .extension_number_token
@@ -391,7 +392,7 @@ fn the_renumbered_fixture_through_run_is_a_pass_under_the_row_and_not_without_it
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     let kept = fs::read(crosscheck::kept(
         &scratch.store,
-        &scratch.manifest.pin.oracle.md5,
+        &scratch.manifest.pin().unwrap().oracle.md5,
         "ctype",
         Column::Re,
     ))
@@ -402,7 +403,14 @@ fn the_renumbered_fixture_through_run_is_a_pass_under_the_row_and_not_without_it
         String::from_utf8_lossy(&kept[..60])
     );
 
-    scratch.manifest.pin.recipe.normalise.extension_number_token = None;
+    scratch
+        .manifest
+        .pin
+        .as_mut()
+        .unwrap()
+        .recipe
+        .normalise
+        .extension_number_token = None;
     let reading = scratch.one(&ask);
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert!(
@@ -422,7 +430,7 @@ fn the_renumbered_fixture_through_run_is_a_pass_under_the_row_and_not_without_it
 #[test]
 fn an_absent_oracle_is_a_skip_and_not_a_pass() {
     let mut scratch = Scratch::new("absent");
-    scratch.manifest.pin.oracle.path = scratch.root.join("nowhere/php");
+    scratch.manifest.pin.as_mut().unwrap().oracle.path = scratch.root.join("nowhere/php");
     let (re, ri) = scratch.two(&one("ctype"));
     for reading in [re, ri] {
         assert_eq!(reading.status, Status::Skip, "{reading:#?}");
@@ -575,7 +583,7 @@ mod tracked {
         }
         let kept_ri = crosscheck::kept(
             &scratch.store,
-            &scratch.manifest.pin.oracle.md5,
+            &scratch.manifest.pin().unwrap().oracle.md5,
             "ctype",
             Column::Ri,
         );
@@ -587,7 +595,7 @@ mod tracked {
         );
         let kept = crosscheck::kept(
             &scratch.store,
-            &scratch.manifest.pin.oracle.md5,
+            &scratch.manifest.pin().unwrap().oracle.md5,
             "ctype",
             Column::Re,
         );
@@ -597,7 +605,7 @@ mod tracked {
         assert_eq!(
             fs::read(&kept).unwrap(),
             oracle::normalise(
-                &scratch.manifest.pin.recipe.normalise,
+                &scratch.manifest.pin().unwrap().recipe.normalise,
                 fs::read(fixtures().join("oracle.re")).unwrap()
             ),
             "the oracle's bytes at {} are the fixture's as the recipe normalises them",

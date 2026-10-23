@@ -139,7 +139,7 @@ pub(crate) fn measure(
         surfaces::write(&crates, &mut inventory)?;
     }
     let snapshot = Snapshot::disk(root)?;
-    let surfaces = Surfaces::read(root, &manifest.pin.source)?;
+    let surfaces = Surfaces::read(root, manifest.pin().map(|pin| &pin.source))?;
     let mut readings = Vec::new();
     for seam in &manifest.seams {
         readings.push(seam_reading(

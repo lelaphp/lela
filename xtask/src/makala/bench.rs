@@ -154,10 +154,11 @@ pub(crate) fn declared(root: &Path) -> Result<Vec<Declared>> {
 /// php-fpm's is too, so the control is never read beside no series.
 fn sides(root: &Path, entry: &Entry, held: Held, load: Load) -> Result<Sides> {
     let manifest = Manifest::load(root)?;
-    let Some(fpm) = (manifest.pin.sapi.fpm.as_ref()).filter(|fpm| fpm.path.is_file()) else {
+    let pin = manifest.pin()?;
+    let Some(fpm) = (pin.sapi.fpm.as_ref()).filter(|fpm| fpm.path.is_file()) else {
         return Ok(Err(NO_FPM.to_owned()));
     };
-    let oracle = manifest.pin.oracle();
+    let oracle = pin.oracle();
     oracle.host_asserted(fpm)?;
     let (threads, children) = load.hosts();
     let served = Arc::new(Served::start(root, &manifest, entry, threads)?);
@@ -220,7 +221,7 @@ impl Served {
         entry: &Entry,
         threads: Option<usize>,
     ) -> Result<Served> {
-        let recipe = &manifest.pin.recipe;
+        let recipe = &manifest.pin()?.recipe;
         let binary = profile::released(root, (&MAKALA.package(), MAKALA.binary), None, None)?;
         let own = Tree::new("bench-makala")?;
         own.write(&entry.script, &entry.program)?;

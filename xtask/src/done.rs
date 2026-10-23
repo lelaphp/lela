@@ -537,7 +537,7 @@ pub fn judge(
             ),
             Condition::TicketBoxes => {
                 if let Some(ticket) = ticket {
-                    boxes(snapshot, store, manifest.pin.digest(), ticket, &mut unmet)?;
+                    boxes(snapshot, store, manifest.pin_digest(), ticket, &mut unmet)?;
                 }
             }
             Condition::Stranded => unmet.extend(ticket::stranded(root, store, &base.commit)?),
@@ -723,7 +723,7 @@ fn slack_porting_notes(
             }
             key = snapshot.key(&krate.path())?;
         }
-        if let Some(why) = slack_porting(krate, &columns, &key, manifest.pin.digest()) {
+        if let Some(why) = slack_porting(krate, &columns, &key, manifest.pin_digest()) {
             slack.entry(why).or_default().push(&krate.name);
         }
     }
@@ -793,7 +793,7 @@ fn no_regression(
     not_judged: &mut Vec<String>,
     unmet: &mut Vec<String>,
 ) -> Result<()> {
-    let (scope, pin) = (&krate.name, &asking.manifest.pin);
+    let (scope, pin) = (&krate.name, asking.manifest.pin()?);
     let pin = match krate.oracle.as_deref().map(|v| pin.variant(v)) {
         Some(Err(err)) => {
             unmet.push(format!("phpt: {scope}: {err:#}"));
@@ -809,7 +809,7 @@ fn no_regression(
         Against::Unrun(_) if phpt::testless(asking.manifest, scope) => {}
         Against::Unrun(why) => {
             let sought = [("phpt".to_owned(), scope.clone(), key.to_owned())];
-            let digest = asking.manifest.pin.digest();
+            let digest = asking.manifest.pin_digest();
             let read = asking.store.latest_over_each(&sought, digest)?;
             let excused = read.values().any(no_binary_yet);
             if asking.not_run.iter().any(|n| n == "phpt") {
@@ -868,7 +868,7 @@ fn fresh_readings(
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let (root, store, not_run) = (asking.snapshot.root(), asking.store, asking.not_run);
-    let pin = asking.manifest.pin.digest();
+    let pin = asking.manifest.pin_digest();
     let key = &now.key;
     let name = &krate.name;
     // The scope's file holds the last reading written, which a refused
@@ -1012,7 +1012,7 @@ fn locks(
             continue;
         };
         let tree = snapshot.key(&dir)?;
-        let fresh = reading.fresh_for(&tree, manifest.pin.digest());
+        let fresh = reading.fresh_for(&tree, manifest.pin_digest());
         match reading.status {
             Status::Fail if fresh => unmet.push(format!(
                 "{shown}: {}{}",

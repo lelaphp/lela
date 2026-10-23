@@ -1565,7 +1565,7 @@ fn an_exit_in_a_file_no_crate_row_names_is_denied() {
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle_is_here() -> bool {
-    let pin = Manifest::load(workspace()).unwrap().pin;
+    let pin = Manifest::load(workspace()).unwrap().pin.unwrap();
     Promise::Oracle
         .or_skip(pin.oracle.file().map(Path::to_path_buf))
         .unwrap()

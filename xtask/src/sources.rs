@@ -252,7 +252,7 @@ impl Standing {
         let trees = (scopes.iter())
             .map(|(scope, path)| Ok((scope.clone(), index.key(path)?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let mut standing = store.latest_over(instrument, &trees, manifest.pin.digest())?;
+        let mut standing = store.latest_over(instrument, &trees, manifest.pin_digest())?;
         standing.retain(|_, reading| reading.status == Status::Pass);
         if let Some(path) = harness
             && standing.remove("xtask").is_some()

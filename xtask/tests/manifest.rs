@@ -64,7 +64,7 @@ fn a_row_built_by_name_is_the_row_the_file_would_parse() {
     let built = Manifest::named("php_heap");
     assert_eq!(built.budget, parsed.budget);
     assert_eq!(built.crates, parsed.crates);
-    assert_eq!(built.oracle.pin, parsed.oracle.pin);
+    assert_eq!(built.pin_file(), parsed.pin_file());
     assert_eq!(Seam::named("api", "php_engine"), parsed.seams[0]);
     assert_eq!(Edge::between("php_bundle", "php_ext"), parsed.edges[0]);
     assert_eq!(Rule::named("x.deny", "ext/*"), parsed.rules[0]);
@@ -497,13 +497,13 @@ mod tracked {
         assert_eq!(no_locks.adr, ["0005"]);
         assert!(manifest.crate_named("php_engine").is_some());
         assert!(manifest.seams.iter().any(|s| s.lock == "api.lock"));
-        assert_eq!(manifest.oracle.pin, "oracle.toml");
+        assert_eq!(manifest.pin_file(), Some("oracle.toml"));
     }
 
     #[test]
     fn the_oracle_version_comes_from_the_pin_and_is_written_in_no_source_file() {
         let manifest = Manifest::load(workspace()).unwrap();
-        let version = &manifest.pin.oracle.version;
+        let version = &manifest.pin().unwrap().oracle.version;
         assert!(!version.is_empty());
         let src = xtask::package_dir().join("src");
         for entry in walk(&src) {
@@ -514,7 +514,7 @@ mod tracked {
                 entry.display()
             );
             assert!(
-                !text.contains(&manifest.pin.oracle.md5),
+                !text.contains(&manifest.pin().unwrap().oracle.md5),
                 "{} states the oracle digest",
                 entry.display()
             );

@@ -1,6 +1,7 @@
 //! The seam manifest, `seams.toml`, and the oracle pin it points at,
 //! `oracle.toml`, loaded by one reader (harness-design.md §4.1, §4.3); the
-//! pin's grammar is the oracle module's.
+//! pin's grammar is the oracle module's. A manifest with no `[oracle]` row
+//! loads with no pin, and [`Manifest::pin`] refuses whatever asks for one.
 //!
 //! The grammar is `[oracle] [budget] [telemetry] [[crate]] [[seam]]
 //! [[edge]] [[rule]] [[bench]]`, each rule carrying exactly one predicate.
@@ -13,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::layout;
@@ -34,7 +35,8 @@ pub const SCRIPTS: &str = "scripts";
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Manifest {
-    pub oracle: PinRow,
+    /// `[oracle]`: absent in a repository that runs no php (#3181).
+    pub oracle: Option<PinRow>,
     pub budget: Budget,
     pub telemetry: Option<Telemetry>,
     #[serde(rename = "crate", default)]
@@ -63,9 +65,10 @@ pub struct Manifest {
     #[serde(rename = "bench", default)]
     pub(crate) tolerances: Vec<Tolerance>,
     /// The pin the `[oracle]` row names, loaded from that file by the
-    /// oracle module, whose grammar it is.
+    /// oracle module, whose grammar it is; absent with the row, and read
+    /// through [`Manifest::pin`].
     #[serde(skip)]
-    pub pin: Pin,
+    pub pin: Option<Pin>,
     /// The workspace the manifest was loaded from; empty for `parse`.
     #[serde(skip)]
     pub root: PathBuf,
@@ -932,9 +935,9 @@ impl Manifest {
     /// tracked manifest when the rows are resolved against the pinned tree.
     pub fn of(crates: impl IntoIterator<Item = Crate>) -> Manifest {
         Manifest {
-            oracle: PinRow {
+            oracle: Some(PinRow {
                 pin: "oracle.toml".to_owned(),
-            },
+            }),
             budget: Budget::flat(1),
             crates: crates.into_iter().collect(),
             ..Manifest::default()
@@ -946,14 +949,37 @@ impl Manifest {
         Manifest::of([Crate::named(krate)])
     }
 
-    /// Load `seams.toml` from the workspace root, then the pin it names.
+    /// Load `seams.toml` from the workspace root, then the pin it names,
+    /// where it names one.
     pub fn load(root: &Path) -> Result<Manifest> {
         let path = root.join(FILE);
         let text = crate::read(&path)?;
         let mut manifest = Manifest::parse(&text).with_context(|| format!("{}", path.display()))?;
-        manifest.pin = Pin::load(&root.join(&manifest.oracle.pin))?;
+        manifest.pin = (manifest.oracle.as_ref())
+            .map(|row| Pin::load(&root.join(&row.pin)))
+            .transpose()?;
         manifest.root = root.to_path_buf();
         Ok(manifest)
+    }
+
+    /// The oracle pin, which every instrument that runs php asks for here
+    /// and nowhere else: refused, naming it, where the manifest has no
+    /// `[oracle]` row (#3181).
+    pub fn pin(&self) -> Result<&Pin> {
+        self.pin.as_ref().ok_or_else(|| {
+            anyhow!("{FILE} has no `[oracle]` row, so no oracle pin names the php to run or the php-src it is held to")
+        })
+    }
+
+    /// The file the `[oracle]` row names, where the manifest has one.
+    pub fn pin_file(&self) -> Option<&str> {
+        self.oracle.as_ref().map(|row| row.pin.as_str())
+    }
+
+    /// The pin's [`Pin::digest`], which a reading under the recipe is
+    /// fresh for; empty with no pin, which no such reading is fresh for.
+    pub(crate) fn pin_digest(&self) -> &str {
+        self.pin.as_ref().map_or("", Pin::digest)
     }
 
     /// Every oracle variant a `[[crate]]` row names and the pin carries,
@@ -967,7 +993,7 @@ impl Manifest {
         self.crates
             .iter()
             .filter_map(|k| k.oracle.as_deref())
-            .filter_map(|name| Some((name.to_owned(), self.pin.variant(name).ok()?)))
+            .filter_map(|name| Some((name.to_owned(), self.pin.as_ref()?.variant(name).ok()?)))
             .collect()
     }
 
@@ -1245,7 +1271,7 @@ impl Manifest {
             let dir = name.rsplit_once('/').map_or(".", |(dir, _)| dir);
             return Some(PathBuf::from(dir));
         }
-        if let Ok(corpus) = self.pin.source.tree()
+        if let Some(Ok(corpus)) = self.pin.as_ref().map(|pin| pin.source.tree())
             && corpus.join(name).is_dir()
         {
             return Some(PathBuf::from("."));
