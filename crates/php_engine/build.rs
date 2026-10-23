@@ -24,6 +24,10 @@
 //! it; every other arm writes the position first, php's `SAVE_OPLINE()`
 //! (`crate::tier::Next`).
 //!
+//! The arms of the variants [`IN_THE_LOOP`] names call their handlers in
+//! the loop's body, and every other arm calls its handler out of line
+//! (#3285).
+//!
 //! Written to `OUT_DIR/dispatch.rs` and included, never committed (design
 //! §10).
 //!
@@ -225,6 +229,16 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          \x20       )))"
             .to_owned(),
     );
+    if let Some(stray) = IN_THE_LOOP.iter().find(|name| {
+        !calls.iter().any(|(call, variants)| {
+            !call.starts_with("Err(") && variants.iter().any(|variant| variant == *name)
+        })
+    }) {
+        return Err(format!(
+            "`{stray}` is in the loop's body by `IN_THE_LOOP` and is no variant a handler of {} serves",
+            bodies.display()
+        ));
+    }
     // `become` is refused by a stable parser even where a `cfg` leaves it
     // out, so the threaded calls are written only into the build that sets
     // the `cfg`, which cargo names to a build script in its environment.
@@ -271,7 +285,8 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          // count is no bound on it. Every crate lints under `-D warnings`\n\
          // (harness §4.2), which reaches generated code too.\n\
          // Inlined into the loop, so that an opline costs one indirect\n\
-         // jump to its handler and no call of its own (design §5.8).\n\
+         // jump to its handler and no call of its own (design §5.8);\n\
+         // the arm of a variant outside `IN_THE_LOOP` is one call.\n\
          #[allow(clippy::too_many_lines, clippy::match_same_arms, clippy::inline_always, clippy::match_wildcard_for_single_variants)]\n\
          #[inline(always)]\n\
          pub(crate) fn dispatch<T: Tier>(\n\
@@ -363,6 +378,8 @@ fn tails(calls: &[(String, Vec<String>)]) -> String {
          use crate::observer::Telling;\n\
          use crate::tier::tail::{{Tail, Table, onward}};\n\
          use crate::tier::{{Next, Tier}};\n\
+         \n\
+         use super::{{aside, aside_at}};\n\
          \n\
          /// How many `php_unit::Handler`s there are, one entry of the table\n\
          /// each.\n\
@@ -523,24 +540,7 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
                 out.push((variant.name, unlisted.to_owned()));
                 continue;
             }
-            // A handler that takes the opline's place stands the frame
-            // there itself, where something outside the loop can read it.
-            let call = if handler.at {
-                format!(
-                    "crate::handlers::{}::<T{}>(req, frame, code, op, at)",
-                    handler.ident,
-                    branch(&variant)?
-                )
-            } else {
-                format!(
-                    "{{\n\
-                     \x20           req.vm_mut().stand(frame, at);\n\
-                     \x20           crate::handlers::{}::<T{}>(req, frame, code, op)\n\
-                     \x20       }}",
-                    handler.ident,
-                    branch(&variant)?
-                )
-            };
+            let call = call(handler, &variant.name, &branch(&variant)?);
             out.push((variant.name, call));
         }
         return Ok(out);
@@ -587,15 +587,179 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
                 ));
             }
         }
-        out.push((
-            variant.name,
-            format!(
-                "crate::handlers::{}::<T{params}>(req, frame, code, op, at)",
-                handler.ident
-            ),
-        ));
+        let call = call(handler, &variant.name, &params);
+        out.push((variant.name, call));
     }
     Ok(out)
+}
+
+/// The variants whose arms are in the loop's body (design §5.8): every
+/// variant met in more than a quarter of a percent of the oplines
+/// dispatched by any program of `docs/perf/workloads`, by php-src's
+/// `Zend/micro_bench.php` or by the four counting loops of #3273, as
+/// a counting build of the loop told them over each (#3285). The arm of
+/// every other variant calls its handler out of line, through a call the
+/// optimiser reads as cold, so that the loop's body is the arms programs
+/// meet and the register allocator, which weighs every arm of the
+/// `match` alike, places the loop's values for them: with all 526
+/// generic and `#[inline(always)]` arms in its body, `serve_frame` was
+/// 270 KB and the arms programs meet paid for the ones they do not.
+/// A name that is no variant the dispatch serves is a build error.
+const IN_THE_LOOP: &[&str] = &[
+    "AddArrayElement",
+    "AddConstVar",
+    "AddCvConst",
+    "AddCvCv",
+    "AddTmpConst",
+    "AddTmpCv",
+    "AddTmpTmp",
+    "AddTmpVar",
+    "AddVarVar",
+    "ArrayKeyExists",
+    "AssignCvConstRetvalUnused",
+    "AssignCvCvRetvalUnused",
+    "AssignCvTmpRetvalUnused",
+    "AssignCvVarRetvalUnused",
+    "AssignDimCvConstOpDataTmp",
+    "AssignDimCvConstOpDataVar",
+    "AssignDimCvCvOpDataConst",
+    "AssignDimCvCvOpDataCv",
+    "AssignDimCvCvOpDataTmp",
+    "AssignDimCvTmpOpDataCv",
+    "AssignDimOpCvCv",
+    "AssignObjOp",
+    "AssignObjUnusedConstOpDataConst",
+    "AssignOpCvConst",
+    "AssignOpCvCv",
+    "AssignOpCvTmp",
+    "AssignOpCvVar",
+    "AssignStaticProp",
+    "Bool",
+    "BoolNot",
+    "Cast",
+    "CheckFuncArg",
+    "Coalesce",
+    "ConcatConstTmp",
+    "ConcatCvCv",
+    "ConcatTmpConst",
+    "ConcatTmpTmp",
+    "Div",
+    "DoFcall",
+    "DoFcallByName",
+    "DoIcall",
+    "DoUcall",
+    "Echo",
+    "FeFetchRVar",
+    "FeFree",
+    "FeResetR",
+    "FetchClass",
+    "FetchClassConstant",
+    "FetchConstant",
+    "FetchDimFuncArgCvConst",
+    "FetchDimIs",
+    "FetchDimRCvConst",
+    "FetchDimRCvCv",
+    "FetchDimRCvTmp",
+    "FetchDimRTmpCv",
+    "FetchDimRwCvCv",
+    "FetchObjRUnusedConst",
+    "FetchR",
+    "FetchStaticPropR",
+    "FetchThis",
+    "FramelessIcall1",
+    "FramelessIcall2",
+    "FramelessIcall3",
+    "Free",
+    "FuncNumArgs",
+    "InArray",
+    "InitArray",
+    "InitDynamicCall",
+    "InitFcallByName",
+    "InitFcallConst",
+    "InitMethodCall",
+    "InitStaticMethodCall",
+    "IsEqualCvConstJmpz",
+    "IsIdenticalCvConst",
+    "IsIdenticalCvCv",
+    "IsIdenticalTmpConst",
+    "IsNotIdentical",
+    "IssetIsemptyPropObj",
+    "IssetIsemptyStaticProp",
+    "IsSmallerConstCv",
+    "IsSmallerConstTmpJmpz",
+    "IsSmallerCvConst",
+    "IsSmallerCvConstJmpnzBack",
+    "IsSmallerCvConstJmpz",
+    "IsSmallerCvCvJmpnzBack",
+    "IsSmallerCvCvJmpz",
+    "IsSmallerCvTmpJmpz",
+    "IsSmallerOrEqualJmpnzBack",
+    "IsSmallerTmpConst",
+    "Jmp",
+    "JmpnzConst",
+    "JmpnzEx",
+    "JmpnzTmp",
+    "JmpSet",
+    "JmpzCv",
+    "JmpzEx",
+    "JmpzTmp",
+    "Mod",
+    "MulCvConst",
+    "MulCvCv",
+    "MulCvTmp",
+    "MulCvVar",
+    "MulTmpConst",
+    "MulTmpTmp",
+    "MulVarTmp",
+    "New",
+    "PreDecCvRetvalUnused",
+    "PreDecObj",
+    "PreDecVarRetvalUnused",
+    "PreIncCvRetvalUnused",
+    "PreIncObj",
+    "QmAssign",
+    "ReturnConst",
+    "ReturnCv",
+    "ReturnTmp",
+    "RopeAddTmpConst",
+    "RopeAddTmpCv",
+    "RopeEndTmpConst",
+    "RopeInitUnusedConst",
+    "SendFuncArg",
+    "SendRef",
+    "SendValConstUnused",
+    "SendValEx",
+    "SendValTmpUnused",
+    "SendVarCvUnused",
+    "SendVarEx",
+    "Strlen",
+    "SubCvConst",
+    "SubCvCv",
+    "SubTmpConst",
+    "SubTmpTmp",
+    "TypeCheck",
+    "VerifyReturnType",
+];
+
+/// The call one arm makes to `handler` at `generics` for `variant`:
+/// in the loop's body for a variant [`IN_THE_LOOP`] names, and out of
+/// line through the dispatch's `aside` for every other. A handler that
+/// takes the opline's place stands the frame there itself, where
+/// something outside the loop can read it; every other is entered with
+/// the frame stood there, php's `SAVE_OPLINE()`.
+fn call(handler: &Handler, variant: &str, generics: &str) -> String {
+    let path = format!("crate::handlers::{}::<T{generics}>", handler.ident);
+    match (IN_THE_LOOP.contains(&variant), handler.at) {
+        (true, true) => format!("{path}(req, frame, code, op, at)"),
+        (true, false) => format!(
+            "{{\n\
+             \x20           req.vm_mut().stand(frame, at);\n\
+             \x20           {path}(req, frame, code, op)\n\
+             \x20       }}"
+        ),
+        (false, true) => format!("aside_at(req, frame, code, op, at, {path})"),
+        (false, false) => format!("aside(req, frame, code, op, at, {path})"),
+    }
 }
 
 /// The operand kind's type in `crate::operand`, as `ops.toml` names it.

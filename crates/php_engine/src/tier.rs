@@ -500,6 +500,44 @@ mod dispatch {
     use crate::tier::{Next, Tier};
 
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
+
+    /// The arm of a handler the loop does not hold in its body: the
+    /// frame stood at `at`, php's `SAVE_OPLINE()`, and `handler` called
+    /// out of line, so what it holds live is its own and not the loop's.
+    #[cold]
+    #[inline(never)]
+    fn aside<F>(
+        req: &mut Request,
+        frame: FrameRef,
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+        handler: F,
+    ) -> Result<Next, Fatal>
+    where
+        F: FnOnce(&mut Request, FrameRef, &OpArray, &Opline) -> Result<Next, Fatal>,
+    {
+        req.vm_mut().stand(frame, at);
+        handler(req, frame, code, op)
+    }
+
+    /// [`aside`] for a handler that takes its opline's place and stands
+    /// the frame there itself.
+    #[cold]
+    #[inline(never)]
+    fn aside_at<F>(
+        req: &mut Request,
+        frame: FrameRef,
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+        handler: F,
+    ) -> Result<Next, Fatal>
+    where
+        F: FnOnce(&mut Request, FrameRef, &OpArray, &Opline, u32) -> Result<Next, Fatal>,
+    {
+        handler(req, frame, code, op, at)
+    }
 }
 
 /// What a handler's site, a backward `JMP*` or a `RETURN*`, does with a

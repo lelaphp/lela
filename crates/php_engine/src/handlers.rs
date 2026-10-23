@@ -23178,13 +23178,15 @@ fn counted(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> E
 /// (`jit-design.md` §2.2), then the interrupt check, then the site with
 /// the number the compiler wrote in `result`. A forward jump is neither
 /// and costs one comparison.
+#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[allow(clippy::inline_always)]
 pub(crate) fn jmp<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    let at = req.vm().opline(frame);
     jumped::<T>(req, frame, code, at, (op.op1, op.op1 <= at), op.out)
 }
 
