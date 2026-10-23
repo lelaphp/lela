@@ -1,6 +1,7 @@
 //! `lower` at its seam (`jit-design.md` §4.3 *Tested*, §7): the CLIF of
 //! each `types` fixture's trace, held to a golden file, every loop's
-//! carrying the interrupt test; the same function compiled to bytes for
+//! carrying the interrupt test but a recursive return's, which carries
+//! none; the same function compiled to bytes for
 //! the golden's ISA and the host's, a mark per recorded opline; and a
 //! host with no ISA refused as `Unsupported`.
 //!
@@ -95,12 +96,15 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
         &constants_named(&ir, &clif),
     )?;
     if let End::Loop(header) = ir.end {
-        let answers = match header.interrupt {
-            Interrupt::Exit(exit) => i64::from(exit.0),
+        match header.interrupt {
+            Interrupt::Exit(exit) => interrupt_test(&clif, i64::from(exit.0))?,
             // CLIF writes an `i32` constant signed.
-            Interrupt::Stub(_) => i64::from(i32::from_ne_bytes(INTERRUPTED.to_ne_bytes())),
-        };
-        interrupt_test(&clif, answers)?;
+            Interrupt::Stub(_) => interrupt_test(
+                &clif,
+                i64::from(i32::from_ne_bytes(INTERRUPTED.to_ne_bytes())),
+            )?,
+            Interrupt::None => untested(&clif)?,
+        }
     }
     let host = Backend::new(&policy(&[]), symbols()).map_err(|e| format!("{e:?}"))?;
     for backend in [&backend, &host] {
@@ -155,6 +159,35 @@ fn interrupt_test(clif: &str, exit: i64) -> Result<(), String> {
         Err(format!(
             "the interrupt test's block does not answer exit {exit}:\n{clif}"
         ))
+    }
+}
+
+/// That a loop's CLIF tests no interrupt, a loop by recursive return's
+/// (`types::Interrupt::None`): no byte read through a pointer loaded from
+/// the `ExitCtx`'s interrupt word is branched on, as [`interrupt_test`]
+/// finds the test. A call made in place reads the byte for a check of
+/// its own, which compares it before it branches.
+fn untested(clif: &str) -> Result<(), String> {
+    let lines: Vec<&str> = clif.lines().map(instruction).collect();
+    let loaded = |from: &dyn Fn(&str) -> bool| -> Vec<String> {
+        (lines.iter())
+            .filter_map(|line| {
+                let (value, load) = line.split_once(" = ")?;
+                from(load).then(|| value.to_owned())
+            })
+            .collect()
+    };
+    let pointers = loaded(&|load| load == format!("load.i64 notrap aligned v0+{INTERRUPT_AT}"));
+    let bytes = loaded(&|load| {
+        (pointers.iter()).any(|pointer| load == format!("load.i8 notrap aligned {pointer}"))
+    });
+    match (lines.iter())
+        .find(|line| (bytes.iter()).any(|byte| line.starts_with(&format!("brif {byte}, "))))
+    {
+        Some(branch) => Err(format!(
+            "a loop by recursive return tests the interrupt, `{branch}`:\n{clif}"
+        )),
+        None => Ok(()),
     }
 }
 

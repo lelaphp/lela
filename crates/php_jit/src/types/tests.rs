@@ -161,6 +161,64 @@ fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
     Ok(())
 }
 
+/// `fib`'s return trace loops by recursive return and takes no interrupt
+/// test, and numbers no exit for one, as php's `zend_jit_trace` sets no
+/// `timeout_exit_addr` for `ZEND_JIT_TRACE_STOP_RECURSIVE_RET`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:7214-7231`, #3314). The pinned
+/// php's `TRACE 3 exit info` under the trace-dump regime lists three
+/// exits, `exit_0: 0008/0000/3/VM`, `exit_1: 0004/0003/1` and
+/// `exit_2: 0012/0004/4`, and no interrupt exit after them: the stack
+/// check before the second call, the comparison's direction in the
+/// callee and the addition's overflow, each an opline later here, past
+/// the `VERIFY_RETURN_TYPE` php's optimiser drops from `return $n`. The
+/// trace takes those three and #3176's three, which php's function-level
+/// inference proves need no guard: the entry's guard on what the call
+/// before returned, exit 0, and the guard on `$n` and the subtraction's
+/// overflow before the second call, exits 2 and 3.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "fib"), ("record.start", "return")],
+        "function fib(int $n): int
+        {
+            if ($n < 2) {
+                return $n;
+            }
+            return fib($n - 1) + fib($n - 2);
+        }
+        echo fib(6), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let End::Loop(header) = ir.end else {
+        return Err(format!("no loop: {rendered}"));
+    };
+    assert_eq!(
+        (header.repeat, header.interrupt),
+        (Repeat::Return, Interrupt::None),
+        "{rendered}"
+    );
+    let inferred = [0, 2, 3];
+    let phps: Vec<(Frame, Option<u32>, Grows)> = (ir.exits.iter().enumerate())
+        .filter(|(at, _)| !inferred.contains(at))
+        .map(|(_, exit)| (exit.frame, exit.opline.map(|at| at.0), exit.grows))
+        .collect();
+    assert_eq!(
+        (ir.exits.len(), phps.as_slice()),
+        (
+            3 + inferred.len(),
+            [
+                (Frame(0), Some(9), Grows::Never),
+                (Frame(1), Some(5), Grows::Side),
+                (Frame(0), Some(13), Grows::Side),
+            ]
+            .as_slice()
+        ),
+        "{rendered}"
+    );
+    Ok(())
+}
+
 /// A `foreach` over a packed array writes its key as a long, as php's
 /// inference types what `FE_FETCH_R` writes from the array's layout, so
 /// no guard holds it; the exit its end takes knows nothing of it, as
@@ -1627,6 +1685,7 @@ fn an_entered_trace_numbers_phps_recv_exits_ahead_of_its_own() -> Result<(), Str
         let interrupt = match header.interrupt {
             Interrupt::Exit(exit) => exit,
             Interrupt::Stub(_) => return Err(format!("a stub: {rendered}")),
+            Interrupt::None => return Err(format!("no test: {rendered}")),
         };
         // The test's own exit, where it takes one, is numbered last.
         let last = u16::try_from(ir.exits.len().saturating_sub(1)).map_err(|e| e.to_string())?;

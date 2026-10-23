@@ -11,7 +11,7 @@ entry
   #3 f0.CV1 [long]
   #9 f2.CV1 [long]
   #12 f3.CV1 [undef]
-loop at 0, recursive return, interrupt exit 6
+loop at 0, recursive return, interrupt none
   #1 f0.T3 [ref, any] = phi(#0, #22)
 0009 f0 INIT_ARRAY #1 step unwinds -> unwind 0
   -> #2 f0.T4 [array]
@@ -93,7 +93,6 @@ exit 2: f1 0004 plain f1.CV0:long
 exit 3: f3 0003 plain f3.CV0:long
 exit 4: f3 0006 plain f3.CV1=#13 f3.CV0:long f3.CV1:long to vm
 exit 5: f3 0010 plain f3.CV1=#13 f3.CV0:long f3.CV1:long f3.T4:array to vm
-exit 6: f0 0009 plain f0.CV1:long to vm
 unwind 0:
 unwind 1: f3.CV1=#13
 map 0: offset 1 slot 8

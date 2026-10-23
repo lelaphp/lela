@@ -2207,16 +2207,7 @@ impl<'a> Builder<'a> {
         if repeat.is_some() {
             self.close_phis()?;
         }
-        let closes = match repeat {
-            None => Closes::Leave,
-            Some(repeat) => Closes::Loop {
-                repeat,
-                stub: self
-                    .stubbed(repeat)
-                    .then(|| self.at_header_opline())
-                    .flatten(),
-            },
-        };
+        let closes = self.closes();
         self.load_at_entry();
         let numbered = self.number(closes)?;
         let end = numbered
@@ -2309,7 +2300,7 @@ impl<'a> Builder<'a> {
     /// after a guard does. The places an opline unwinds from are numbered
     /// apart, one per set of stores.
     fn number(&mut self, closes: Closes) -> Result<Numbered, Abort> {
-        let (order, stubbed) = self.order(closes);
+        let (order, ended) = self.order(closes);
         let mut exits = Exits::default();
         let interrupt_reuses = self.reserve_recv_exits(&mut exits)?;
         let mut unwinds: Vec<Unwind> = Vec::new();
@@ -2318,7 +2309,7 @@ impl<'a> Builder<'a> {
             exits: Vec::new(),
             unwinds: Vec::new(),
             guards: Vec::with_capacity(self.guards.len()),
-            end: stubbed,
+            end: ended,
         };
         for (_, source) in order {
             let draft = match source {
@@ -2481,8 +2472,7 @@ impl<'a> Builder<'a> {
     }
 
     /// Every place that takes an exit, in the order the trace meets them,
-    /// and the end of a loop whose interrupt test takes php's stub, which
-    /// takes none.
+    /// and the end of a loop whose header numbers no exit.
     fn order(&self, closes: Closes) -> (Vec<(Order, Source)>, Option<End>) {
         let mut order: Vec<(Order, Source)> = Vec::new();
         for (at, guard) in self.guards.iter().enumerate() {
@@ -2504,26 +2494,15 @@ impl<'a> Builder<'a> {
             let stage = if opens { Stage::Opens } else { Stage::Leaves };
             order.push((Order::At(*op, stage), Source::Leave(at)));
         }
-        let mut stubbed = None;
+        let mut ended = None;
         match closes {
-            Closes::Loop { repeat, stub: None } => {
-                order.push((Order::End, Source::Interrupt(repeat)));
-            }
-            Closes::Loop {
-                repeat,
-                stub: Some(at),
-            } => {
-                stubbed = Some(End::Loop(LoopHeader {
-                    at: self.header,
-                    repeat,
-                    interrupt: Interrupt::Stub(at),
-                }));
-            }
+            Closes::ThroughExit(repeat) => order.push((Order::End, Source::Interrupt(repeat))),
+            Closes::NoExit(header) => ended = Some(End::Loop(header)),
             Closes::Leave => order.push((Order::End, Source::End)),
         }
         // Stable: within one place, in the order they were placed.
         order.sort_by_key(|(key, _)| *key);
-        (order, stubbed)
+        (order, ended)
     }
 
     /// The slot a guard holds a value of; none for a guard on no value.
@@ -2539,21 +2518,38 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// Whether a loop's interrupt test takes php's interrupt stub and no
-    /// exit (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7228`): in a root
-    /// trace that does not loop by returning, whose code keeps the
-    /// instruction pointer it entered with, php's
-    /// `ZEND_JIT_TRACE_USES_INITIAL_IP`, and holds nothing in registers
-    /// where the test leaves, so no deoptimisation is needed
-    /// (`zend_jit_trace_stack_needs_deoptimization`).
-    fn stubbed(&self, repeat: Repeat) -> bool {
-        let root = self.rec.start.grew().is_none();
-        root && repeat != Repeat::Return
-            && self.uses_initial_ip()
-            && self
-                .spec(&self.interrupt(), &HashMap::new())
-                .stores
-                .is_empty()
+    /// How the trace closes, as php's `zend_jit_trace` chooses a loop's
+    /// `timeout_exit_addr` (`Z/ext/opcache/jit/zend_jit_trace.c:7214-7231`):
+    /// a loop by recursive return takes no interrupt test
+    /// ([`Interrupt::None`]); a loop's test takes php's interrupt stub and
+    /// no exit in a root trace whose code keeps the instruction pointer it
+    /// entered with, php's `ZEND_JIT_TRACE_USES_INITIAL_IP`, and holds
+    /// nothing in registers where the test leaves, so no deoptimisation
+    /// is needed (`zend_jit_trace_stack_needs_deoptimization`); any other
+    /// loop's test takes an exit at its header.
+    fn closes(&self) -> Closes {
+        let Some(repeat) = self.repeat else {
+            return Closes::Leave;
+        };
+        let closed = |interrupt| {
+            Closes::NoExit(LoopHeader {
+                at: self.header,
+                repeat,
+                interrupt,
+            })
+        };
+        let stubbed = || {
+            self.rec.start.grew().is_none()
+                && self.uses_initial_ip()
+                && (self.spec(&self.interrupt(), &HashMap::new()).stores).is_empty()
+        };
+        match repeat {
+            Repeat::Return => closed(Interrupt::None),
+            Repeat::Loop | Repeat::Call => match self.at_header_opline().filter(|_| stubbed()) {
+                Some(at) => closed(Interrupt::Stub(at)),
+                None => Closes::ThroughExit(repeat),
+            },
+        }
     }
 
     /// php's `zend_jit_trace_uses_initial_ip` over the trace's ops as
@@ -3321,15 +3317,16 @@ struct Numbered {
     end: Option<End>,
 }
 
-/// How a trace ends, for its numbering: a loop, its interrupt test
-/// taking an exit or, where `stub` names the header's opline, php's
-/// stub; or a trace that does not loop, through the exit it ends by.
+/// How a trace ends, for its numbering ([`Builder::closes`]).
 #[derive(Clone, Copy)]
 enum Closes {
-    Loop {
-        repeat: Repeat,
-        stub: Option<OplineIdx>,
-    },
+    /// A loop whose interrupt test leaves through an exit at its header,
+    /// numbered after every exit of its body.
+    ThroughExit(Repeat),
+    /// A loop whose header numbers no exit, whole before the numbering:
+    /// its test takes php's stub, or it takes no test.
+    NoExit(LoopHeader),
+    /// A trace that does not loop, through the exit it ends by.
     Leave,
 }
 
