@@ -372,40 +372,23 @@ fn check(check: Check) -> String {
 /// is `imm`: a call made, and a leave's value, where it is no scalar, and
 /// the variables it frees.
 fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
-    match imm {
-        Imm::Make { .. }
-        | Imm::Leave {
-            value: Returned::Scalar,
-            ..
-        } => {
-            write!(text, " in-place")?;
-        }
-        Imm::Leave {
-            value: Returned::Constant(_),
-            ..
-        } => {
-            write!(text, " in-place constant")?;
-        }
-        Imm::Leave {
-            value: Returned::Moved,
-            ..
-        } => write!(text, " in-place moved")?,
-        _ => {}
+    let (value, owners) = match imm {
+        Imm::Make { .. } => return write!(text, " in-place"),
+        Imm::Leave { value, owners } => (value, owners),
+        _ => return Ok(()),
+    };
+    match value {
+        Returned::Scalar => write!(text, " in-place")?,
+        Returned::Constant(_) => write!(text, " in-place constant")?,
+        Returned::Moved => write!(text, " in-place moved")?,
     }
     // The variables a leave frees, `zend_jit_free_cv`'s.
-    match imm {
-        Imm::Leave {
-            owners: Owners::Each(vars),
-            ..
-        } => {
+    match owners {
+        Owners::Each(vars) => {
             let vars: Vec<String> = vars.iter().map(|var| format!("CV{var}")).collect();
-            write!(text, " frees {}", vars.join(","))?;
+            write!(text, " frees {}", vars.join(","))
         }
-        Imm::Leave {
-            owners: Owners::Kernel,
-            ..
-        } => write!(text, " frees by kernel")?,
-        _ => {}
+        Owners::Kernel => write!(text, " frees by kernel"),
+        Owners::Uncounted => Ok(()),
     }
-    Ok(())
 }

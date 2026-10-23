@@ -51,8 +51,6 @@ const fn at(word: u32) -> i32 {
 /// Where a counted block keeps its count and its `GC_TYPE_INFO`.
 const COUNT_AT: i32 = imm(Zval::COUNT_AT);
 const GC_INFO_AT: i32 = imm(Zval::GC_INFO_AT);
-/// A throw's status, as compiled code compares it.
-const EXCEPTION: i64 = THREW as i64;
 
 /// Where variable `var` of a frame stands past its room.
 fn var_at(var: u32) -> Result<i32, Abort> {
@@ -442,7 +440,7 @@ impl Emit<'_> {
                 let (callers, target) = self.taken_at(frames, place, returns);
                 (Some(threw), frames, callers, target)
             }
-            Owners::None | Owners::Kernel => (None, frames, callers, target),
+            Owners::Uncounted | Owners::Kernel => (None, frames, callers, target),
         };
         self.when(reads, |emit| {
             match returned {
@@ -673,8 +671,13 @@ impl Emit<'_> {
             let word = self.b.ins().load(I64, trusted(), room, slot);
             let count = self.b.ins().load(I32, trusted(), word, COUNT_AT);
             let owners = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
-            let last = self.b.ins().icmp_imm_u(IntCC::Equal, owners, 1);
-            let kind = self.b.ins().band_imm_u(info, 0xff);
+            // The last owner, or none, which the heap's own release reads
+            // with its pin.
+            let last = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, owners, 1);
+            let kind = self.b.ins().band_imm_u(info, super::KIND);
             let reference =
                 self.b
                     .ins()
@@ -694,16 +697,19 @@ impl Emit<'_> {
             self.b.switch_to_block(kernel);
             self.b.seal_block(kernel);
             let status = self.call_status(Kernel::FreeCv, &[room, opline, word, info])?;
-            let unwinds = self
-                .b
-                .ins()
-                .icmp_imm_u(IntCC::UnsignedGreaterThan, status, EXCEPTION);
+            let unwinds =
+                self.b
+                    .ins()
+                    .icmp_imm_u(IntCC::UnsignedGreaterThan, status, i64::from(THREW));
             let to = self.unwind_block(unwind)?;
             let on = self.b.create_block();
             self.b.ins().brif(unwinds, to, &[], on, &[]);
             self.b.switch_to_block(on);
             self.b.seal_block(on);
-            let thrown = self.b.ins().icmp_imm_u(IntCC::Equal, status, EXCEPTION);
+            let thrown = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::Equal, status, i64::from(THREW));
             let thrown = self.b.ins().uextend(I32, thrown);
             let before = self.b.use_var(threw);
             let now = self.b.ins().bor(before, thrown);

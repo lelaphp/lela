@@ -75,6 +75,8 @@ const TYPE_AT: i32 = imm(Zval::TYPE_AT);
 /// `IS_TYPE_REFCOUNTED` in the type word: the flags byte follows the type
 /// byte, as php's `Z_TYPE_FLAGS_SHIFT` lays it.
 const COUNTED: i64 = (Zval::TYPE_REFCOUNTED as i64) << 8;
+/// The type byte in the type word, php's `Z_TYPE` of `Z_TYPE_INFO`.
+const KIND: i64 = 0xff;
 const _: () = assert!(Zval::FLAGS_AT == Zval::TYPE_AT + 1);
 /// A slot, `sizeof(zval)`.
 const SLOT: i64 = 16;
@@ -1926,7 +1928,7 @@ impl<'a> Emit<'a> {
             return Err(mismatch("a fetch holds a guard of another kind"));
         };
         let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        let kind = self.b.ins().band_imm_u(info, 0xff);
+        let kind = self.b.ins().band_imm_u(info, KIND);
         let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, kind, tag(t));
         let other = self.fuzzed(other)?;
         let goes_on = self
@@ -2077,7 +2079,7 @@ impl<'a> Emit<'a> {
         self.divert_if(past, handled);
         let element = self.slot_at(arr, key);
         let old = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        let kind = self.b.ins().band_imm_u(old, 0xff);
+        let kind = self.b.ins().band_imm_u(old, KIND);
         let hole = self
             .b
             .ins()
@@ -2211,7 +2213,7 @@ impl<'a> Emit<'a> {
             }
         };
         let (element, old) = self.written_in_place(zval, key, hash, handled);
-        let kind = self.b.ins().band_imm_u(old, 0xff);
+        let kind = self.b.ins().band_imm_u(old, KIND);
         let is_long = self
             .b
             .ins()

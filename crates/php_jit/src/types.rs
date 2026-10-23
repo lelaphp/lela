@@ -358,7 +358,7 @@ pub(crate) enum Imm {
 pub(crate) enum Owners {
     /// Every variable holds what no reference counts: the leave frees
     /// nothing.
-    None,
+    Uncounted,
     /// The variables that may own something, each freed in place in slot
     /// order, `zend_jit_free_cv` unrolled.
     Each(Vars),

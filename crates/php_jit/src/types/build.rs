@@ -2159,7 +2159,7 @@ impl<'a> Builder<'a> {
     /// Whether every variable of `frame` holds what no reference counts,
     /// so a return frees nothing that runs a destructor.
     fn uncounted(&self, frame: Frame) -> bool {
-        self.owners(frame) == Owners::None
+        self.owners(frame) == Owners::Uncounted
     }
 
     /// The variables of `frame` a return gives up ([`Owners`]): each the
@@ -2184,7 +2184,7 @@ impl<'a> Builder<'a> {
             }
         }
         if owners.is_empty() {
-            Owners::None
+            Owners::Uncounted
         } else {
             Owners::Each(owners)
         }
