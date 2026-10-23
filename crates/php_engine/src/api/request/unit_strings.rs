@@ -885,6 +885,30 @@ impl Request {
     /// 1288
     /// 1464
     /// ```
+    ///
+    /// A class's name is interned where opcache holds its bytes, a file
+    /// the cache keeps naming the class (`zend_new_interned_string` in
+    /// `zend_compile_class_decl`), so the `eval` that declares it makes
+    /// no string for it; a function's name is made whatever the cache
+    /// holds:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3259-interned-name.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('class Fooq {}'), "\n";
+    /// echo m('class Barq {}'), "\n";
+    /// $o = new Fooq;
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 112
+    /// 176
+    /// ```
     pub(crate) fn hold_unit_names(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
         let at = self.unit_strings.held(unit);
         let Some(held) = self.unit_strings.units.get_mut(at) else {
@@ -908,9 +932,17 @@ impl Request {
                     .map(|made| made.as_bytes().to_vec())
                     .collect()
             });
+        // A class's name, the last of them, is `zend_new_interned_string`'s
+        // in `zend_compile_class_decl`: the interned string where opcache
+        // holds the bytes, no string of the unit's.
+        let first_class = php_compile::op_array_names(unit)
+            .count()
+            .saturating_sub(unit.classes.len());
         for (index, name) in php_compile::op_array_names(unit).enumerate() {
             let owner = name_owner(unit, index);
-            let made = file.is_some_and(|file| file.as_bytes() == name)
+            let interned = index >= first_class && self.shared.existing_interned(name).is_some();
+            let made = interned
+                || file.is_some_and(|file| file.as_bytes() == name)
                 || match owner {
                     // A definition's own, which its compile made with it.
                     Owner::Definition(_) => (self.unit_strings.units.get_mut(at))
