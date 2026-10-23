@@ -23,6 +23,7 @@ use crate::phpt::Scope;
 use crate::track::Ticket;
 
 pub use crate::layout::Layout;
+pub(crate) use owed::of_the_engine;
 pub use owed::{Instrument, Owed, When};
 
 mod owed;
@@ -196,6 +197,31 @@ pub(crate) fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+/// Hold each row's `needed_in` (#3309): an extension's alone, and only
+/// beyond the directories its subset holds whole, so no test is listed
+/// twice.
+fn needed_in(crates: &[Crate]) -> Result<()> {
+    for krate in crates.iter().filter(|k| !k.needed_in.is_empty()) {
+        if krate.extension().is_none() {
+            bail!(
+                "[[crate]] {} has `needed_in`, the places of tests that name an extension in `--EXTENSIONS--`; the row is no extension's, so no test names it",
+                krate.name
+            );
+        }
+        let own = krate.subsets();
+        if let Some(place) = (krate.needed_in.iter().map(Path::new))
+            .find(|place| own.iter().any(|dir| overlaps(place, dir)))
+        {
+            bail!(
+                "[[crate]] {} has `needed_in` {}, inside or around a directory its subset holds whole; a test is its subset's once",
+                krate.name,
+                place.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `[oracle]`: the only place the manifest says where the pin is.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -306,6 +332,13 @@ pub struct Crate {
     /// not asked for a phpt reading.
     #[serde(default)]
     pub phpt: Vec<String>,
+    /// The directories of the pinned tree beyond an extension's own whose
+    /// tests name it in `--EXTENSIONS--`: its subset holds those too, run
+    /// under its row's oracle and feature, where the main oracle skips
+    /// them for want of the extension (`Zend/tests` for `zend_test`,
+    /// #3309). A row that is no extension's carries none.
+    #[serde(default)]
+    pub needed_in: Vec<String>,
     /// Whether this extension's port is not finished, so that its
     /// `crosscheck` and `phpt` readings are the port's meter and not a
     /// condition of done: `done` prints their numbers and holds the row
@@ -385,10 +418,13 @@ impl Crate {
         if !self.phpt.is_empty() {
             return self.phpt.iter().map(PathBuf::from).collect();
         }
-        match self.name.strip_prefix("ext/") {
-            Some(extension) => vec![derived_subset(extension)],
-            None => Vec::new(),
-        }
+        self.extension().map(derived_subset).into_iter().collect()
+    }
+
+    /// The extension the row is, `pcre` for `ext/pcre`; none for a crate
+    /// of any other directory.
+    pub(crate) fn extension(&self) -> Option<&str> {
+        self.name.strip_prefix("ext/")
     }
 
     /// Whether the crate's subset is the one the design derives for an
@@ -1098,6 +1134,7 @@ impl Manifest {
                 );
             }
         }
+        needed_in(&manifest.crates)?;
         manifest.parity.hold(&manifest.crates)?;
         owed::hold(&manifest.owed, &manifest.crates)?;
         Ok(manifest)

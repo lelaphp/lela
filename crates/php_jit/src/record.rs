@@ -1203,9 +1203,7 @@ impl<'p> Recorder<'p> {
             self.megamorphic.push(call.call);
         }
         let callee = Callee::of(req, call);
-        if callee.user().is_some() {
-            view.hold_call(req, call.call);
-        }
+        view.hold_call(req, call.call);
         self.events.push(Event::InitCall {
             callee,
             began: Began::Here,

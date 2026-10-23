@@ -592,11 +592,12 @@ pub(super) fn held(
             Judgement::Fail,
             missed
                 .iter()
-                .map(|(run, _, actual)| {
-                    format!(
+                .map(|(run, verdict, actual)| match verdict {
+                    Compared::Moved(moved) => format!("what {run} ran is not what {moved}\n"),
+                    _ => format!(
                         "what the fences pin is not what {run} ran:\n{}",
                         oracle::diff(&expected, actual)
-                    )
+                    ),
                 })
                 .collect::<Vec<_>>()
                 .concat(),

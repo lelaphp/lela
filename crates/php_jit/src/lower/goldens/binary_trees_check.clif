@@ -263,7 +263,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0004                               v153 = band v151, v152  ; v152 = -129
 @0004                               store notrap aligned v153, v150+44
 @0005                               v154 = iconst.i64 0
-@0005                               v156 = load.i64 notrap aligned v22+80
+@0005                               v156 = load.i64 notrap aligned v155+80
 @0005                               v157 = load.i32 notrap aligned v156+24
 @0005                               v158 = uextend.i64 v157
 @0005                               v159 = icmp uge v154, v158  ; v154 = 0
@@ -632,7 +632,7 @@ function u0:0(i64, i64) -> i32 tail {
 @000d                               v373 = band v371, v372  ; v372 = -129
 @000d                               store notrap aligned v373, v370+44
 @000e                               v374 = iconst.i64 0
-@000e                               v376 = load.i64 notrap aligned v246+80
+@000e                               v376 = load.i64 notrap aligned v375+80
 @000e                               v377 = load.i32 notrap aligned v376+24
 @000e                               v378 = uextend.i64 v377
 @000e                               v379 = icmp uge v374, v378  ; v374 = 0

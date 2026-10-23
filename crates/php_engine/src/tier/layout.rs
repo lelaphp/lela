@@ -327,15 +327,19 @@ impl FrameLayout {
 }
 
 /// A call to a user function as `push_call` laid it down and as a
-/// `DO_*CALL`'s inline path activates it, taken by a recording where the
-/// call stood built: what compiled code writes in place for the same
-/// callee and argument count, as php's trace writes a recorded `func`'s
-/// call. Its header is the one [`call_image`] lays out for the request
-/// the code runs in, since the function's number and its record are the
-/// request's.
+/// `DO_*CALL`'s inline path activates it, or to a native as `INIT_FCALL`
+/// pushes it, taken by a recording where the call stood built: what
+/// compiled code writes in place for the same callee and argument count,
+/// as php's trace writes a recorded `func`'s call
+/// (`zend_jit_push_call_frame`, `Z/ext/opcache/jit/zend_jit_ir.c:8466-8650`, which pushes a native's as a user
+/// function's). Its header is the one [`call_image`] lays out for the
+/// request the code runs in, since the function's number and its record
+/// are the request's.
 #[derive(Debug, Clone)]
 pub struct PlainCall {
-    callee: FuncRef,
+    /// The op array a user function's call serves; none for a native's,
+    /// which its name names.
+    callee: Option<FuncRef>,
     count: u32,
     /// The function's name as the function table holds it, lowered.
     name: Box<[u8]>,
@@ -344,10 +348,12 @@ pub struct PlainCall {
     checks: bool,
 }
 
-/// Two calls of one callee and one argument count are the same call.
+/// Two calls of one callee and one argument count are the same call: a
+/// user function by its op array, a native by its name.
 impl PartialEq for PlainCall {
     fn eq(&self, other: &PlainCall) -> bool {
         (self.callee, self.count) == (other.callee, other.count)
+            && (self.callee.is_some() || self.name == other.name)
     }
 }
 
@@ -395,10 +401,16 @@ impl Activation {
 }
 
 impl PlainCall {
-    /// The op array the call serves.
+    /// The op array the call serves; none for a native's call.
     #[must_use]
-    pub fn callee(&self) -> FuncRef {
+    pub fn callee(&self) -> Option<FuncRef> {
         self.callee
+    }
+
+    /// The callee's name as the function table holds it, lowered.
+    #[must_use]
+    pub fn name(&self) -> &[u8] {
+        &self.name
     }
 
     /// How many arguments its `INIT_*` says are passed.
@@ -433,9 +445,9 @@ impl PlainCall {
 }
 
 /// The plain call `call` is, the record on top of the stack being built:
-/// a call to a user function whose `INIT_*` found its entry plain and gave
-/// it no receiver, closure, scope or annex, with no observer declared;
-/// none for any other.
+/// a call to a user function whose `INIT_*` found its entry plain, or to a
+/// native of the engine's table, given no receiver, closure, scope or
+/// annex, with no observer declared; none for any other.
 #[must_use]
 pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
@@ -443,7 +455,6 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let function = header.function?;
     let plain = top == call
         && header.info.building()
-        && header.info.plain_entry()
         && header.this().is_none()
         && header.closure.is_none()
         && header.called_scope().is_none()
@@ -452,14 +463,29 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     if !plain {
         return None;
     }
-    let user = req.user_function(function)?;
+    let name = || {
+        let decl = req.symbols().function_decl(function)?;
+        Some(decl.name.0.to_ascii_lowercase().into_boxed_slice())
+    };
+    let Some(user) = req.user_function(function) else {
+        // A native's call: its arguments' room and its record, as
+        // `INIT_FCALL` pushes `fbc` (`init_native`).
+        req.native_entry(function)?;
+        req.shared.native_callee(function)?;
+        return Some(PlainCall {
+            callee: None,
+            count: header.num_args,
+            name: name()?,
+            slots: u32::try_from(laid.len()).ok()?,
+            activation: None,
+            checks: false,
+        });
+    };
+    if !header.info.plain_entry() {
+        return None;
+    }
     let code = crate::exec::body_of(&user.unit, user.body)?;
-    let name = req
-        .symbols()
-        .function_decl(function)?
-        .name
-        .0
-        .to_ascii_lowercase();
+    let name = name()?;
     let shape = user.shape;
     let slots = u32::try_from(laid.len()).ok()?;
     let count = header.num_args;
@@ -500,9 +526,9 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         _ => None,
     };
     Some(PlainCall {
-        callee: FuncRef::at(code.runtime_cache),
+        callee: Some(FuncRef::at(code.runtime_cache)),
         count,
-        name: name.into_boxed_slice(),
+        name,
         slots,
         activation,
         checks,
@@ -517,15 +543,21 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
 #[must_use]
 pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     let function = req.function_named(Bare::resolved(&call.name))?;
-    let user = req.user_function(function)?;
-    let code = crate::exec::body_of(&user.unit, user.body)?;
-    if FuncRef::at(code.runtime_cache) != call.callee {
+    let served = if let Some(user) = req.user_function(function) {
+        let code = crate::exec::body_of(&user.unit, user.body)?;
+        Some(FuncRef::at(code.runtime_cache))
+    } else {
+        req.native_entry(function)?;
+        None
+    };
+    if served != call.callee {
         return None;
     }
     let (_, header) = req.laid_call(Header::call(function, call.count))?;
     // A header with no record of its callee is one `push_call` completes
     // as it lays it down, and so not one to copy.
-    if !header.info.plain_entry() || header.callee.is_none() {
+    let plain = call.callee.is_none() || header.info.plain_entry();
+    if !plain || header.callee.is_none() {
         return None;
     }
     HeaderImage::of(&header)

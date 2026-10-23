@@ -240,6 +240,9 @@ impl<'a> Adapter<'a> {
             (Compared::Diverged(row), _) => {
                 Judged::new(&id, &name, Judgement::Diverged, row.reason)
             }
+            (Compared::Moved(moved), _) => {
+                Judged::new(&id, &name, Judgement::Fail, moved.to_string())
+            }
             (Compared::Differs(difference), Some(why)) => {
                 Judged::new(&id, &name, Judgement::XFail, format!("{why}\n{difference}"))
             }
@@ -475,12 +478,11 @@ impl<'a> Adapter<'a> {
     /// upstream's words, with a redirected test's redirecting test's
     /// after its own (run-tests.php:2029-2031).
     fn missing(&self, phpt: &Phpt, test: &Test) -> Option<String> {
-        let wanted = phpt.text("EXTENSIONS").unwrap_or_default().into_owned();
+        let wanted = phpt.extensions();
         let redirected = test.via.iter().flat_map(|via| &via.extensions);
-        let missing: Vec<&str> = wanted
-            .split_whitespace()
-            .chain(redirected.map(String::as_str))
-            .filter(|name| !self.loaded.iter().any(|had| had == &name.to_lowercase()))
+        let missing: Vec<&str> = (wanted.iter().chain(redirected))
+            .map(String::as_str)
+            .filter(|name| !self.loaded.iter().any(|had| had == name))
             .collect();
         if missing.is_empty() {
             return None;

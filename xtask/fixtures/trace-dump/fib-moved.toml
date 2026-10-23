@@ -1,0 +1,16 @@
+# A negative control for #3291's ruling: an accepted trace:dump/fib row
+# that pins `oracle.lines` and `engine-pinned.lines`, which is
+# `engine.lines` with one exit line more. Against `oracle.lines` and
+# `engine.lines`, the engine's dump now, the row accepts nothing and the
+# verdict names the engine's side as the one that moved; against the
+# lines it pins, the row accepts the difference. Each digest is
+# `shasum -a 256` of the file it names.
+
+[[divergence]]
+id = "trace:dump/fib"
+kind = "trace"
+reason = "The engine's loop root is a line apart from php's (fixture)."
+status = "accepted"
+since = "2026-10-23"
+oracle = "sha256:8f13bcce665a56c36a86f8621db11bb53e7fe3198c375e834a0da9a225377a7a"
+engine = "sha256:8ccf5f7c0650c45cfa447560786b0838b7f234c6105dc8b76d81988f77487b50"
