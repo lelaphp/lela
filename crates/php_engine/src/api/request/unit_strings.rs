@@ -28,8 +28,8 @@
 
 use std::collections::HashMap;
 
-use php_compile::Named;
 use php_compile::values::Holder;
+use php_compile::{Named, SourceKind};
 use php_heap::{Str, Zval};
 use php_link::NameHasher;
 use php_unit::decl::TraitAdaptation;
@@ -228,6 +228,11 @@ pub(crate) struct Compiling {
     /// ([`php_heap::Intern::hand_name`]), one for each place of the walk
     /// that tells what each names ([`php_compile::named`]).
     names: Vec<Option<Str>>,
+    /// The string the file under compile was opened under where the
+    /// request holds one already, one owner: `EG(included_files)`'s for a
+    /// once form, whose `opened_path` `zend_set_compiled_filename` names
+    /// the op arrays by in place of a string of the compile's.
+    opened: Option<PhpString>,
 }
 
 impl Compiling {
@@ -460,7 +465,7 @@ impl UnitStrings {
     /// The string `unit`, a unit the request compiled for itself, holds
     /// as its file's name `file`: [`Held::file`], or its name among the
     /// names of one that declares.
-    fn file_of(&self, unit: *const Unit, file: &[u8]) -> Option<PhpString> {
+    pub(super) fn file_of(&self, unit: *const Unit, file: &[u8]) -> Option<PhpString> {
         let held = self.units.get(self.position(unit)?)?;
         (held.file.into_iter().chain(held.names.iter().copied()))
             .find(|name| name.as_bytes() == file)
@@ -797,13 +802,27 @@ impl Request {
         // finds it ([`Request::declared_string`]) while what holds it
         // lives. Any other string of a name's bytes is a token's of its
         // own, as php's scanner made one for each.
-        let Compiling { made, names } = &mut strings.compiling;
+        let Compiling {
+            made,
+            names,
+            opened,
+        } = &mut strings.compiling;
         held.unnamed.clear();
         // A refused compile hands nothing over.
         let handed = names.drain(..).chain(std::iter::repeat(None));
         for ((named, _), name) in php_compile::named(unit).zip(handed) {
-            let Some(s) = (name.filter(|s| taken(made, Zval::string(*s)))).map(PhpString::of)
-            else {
+            let mut own = (name.filter(|s| taken(made, Zval::string(*s)))).map(PhpString::of);
+            // The file's name the request opened it under where it holds
+            // one, which the compile's own gives way to, given up with the
+            // main op array's constants; an interned one stands.
+            if named == Named::File
+                && let Some(compiled) = own
+                && let Some(opened) = opened.take()
+            {
+                made.push(Zval::string(compiled.heap()));
+                own = Some(opened);
+            }
+            let Some(s) = own else {
                 if held.declares && !matches!(named, Named::Read(_)) {
                     held.unnamed.push(named);
                 }
@@ -818,6 +837,9 @@ impl Request {
             }
             point(&mut strings.by_bytes, s);
         }
+        // An opened name the compile's interned one left standing goes
+        // with the main op array's constants too.
+        made.extend(opened.take().map(|opened| Zval::string(opened.heap())));
         if !held.declares {
             held.main.append(made);
             return;
@@ -901,10 +923,23 @@ impl Request {
         }
     }
 
+    /// The file the next compile reads was opened under `opened`, a
+    /// string the request holds, of which the compile takes one owner as
+    /// its file's name ([`Request::hold_compiled`]).
+    pub(crate) fn compile_opened(&mut self, opened: PhpString) {
+        self.addref(&Value::string(opened));
+        if let Some(stale) = self.unit_strings.compiling.opened.replace(opened) {
+            self.release(Value::string(stale));
+        }
+    }
+
     /// The constant strings a compile the compiler refused made, given up
     /// as `zend_compile`'s refusal destroys the op array it was making.
     pub(crate) fn release_compiled(&mut self) {
         self.unit_strings.compiling.names.clear();
+        if let Some(opened) = self.unit_strings.compiling.opened.take() {
+            self.release(Value::string(opened));
+        }
         let mut made = std::mem::take(&mut self.unit_strings.compiling.made);
         for z in made.drain(..) {
             self.release(Value::of_slot(z));
@@ -1034,8 +1069,14 @@ impl Request {
     /// 1552
     /// [1,1,4,3]
     /// ```
-    pub(crate) fn hold_unit_names(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
-        let at = self.unit_strings.held(unit);
+    pub(crate) fn hold_unit_names(
+        &mut self,
+        unit: &PublishedUnit,
+        kind: SourceKind,
+    ) -> Result<(), Thrown> {
+        let Some(at) = self.unit_strings.position(PublishedUnit::as_ptr(unit)) else {
+            return Ok(());
+        };
         let Some(held) = self.unit_strings.units.get_mut(at) else {
             return Ok(());
         };
@@ -1054,12 +1095,17 @@ impl Request {
                 continue;
             }
             let made = match named {
+                // A file's name the compile left unmade is the one
+                // opcache holds, `zend_set_compiled_filename`'s
+                // `zend_new_interned_string`; an `eval`'s is its own.
+                Named::File => matches!(kind, SourceKind::Eval(_)),
                 // Every op array's, made once for each: two closures on
                 // one line are two `{closure:…}` strings, and a
                 // function's name and a top-level one's key, the function
                 // table's, are made whatever the cache holds
-                // (`zend_begin_func_decl`).
-                Named::File | Named::Function(_) | Named::FunctionKey(_) => true,
+                // (`zend_begin_func_decl`), the scanner's string a method's
+                // name is among them (`zend_begin_method_decl`).
+                Named::Function(_) | Named::FunctionKey(_) => true,
                 // A class's name and its and its methods' keys are
                 // `zend_new_interned_string`'s: the interned string where
                 // opcache holds the bytes, `count` or `__tostring` or one

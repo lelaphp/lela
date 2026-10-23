@@ -615,7 +615,7 @@ impl Request {
         };
         match cached {
             Some(Ok(unit)) => {
-                self.note_included(&path)?;
+                self.note_compiled_file(&path, &unit)?;
                 Ok(Opened::Unit(unit))
             }
             Some(Err(refused)) => Err(self.refused_include(&refused, &path, SourceKind::File)),
@@ -921,7 +921,7 @@ impl Request {
             }
             None => return self.failed_opening(kind, written),
         };
-        self.note_included(path)?;
+        self.note_compiled_file(path, &unit)?;
         Ok(Opened::Unit(unit))
     }
 
@@ -1426,6 +1426,31 @@ impl Request {
         }
         let held = self.string(path)?;
         self.note_included_held(held)
+    }
+
+    /// The string a once form put in `EG(included_files)` for the file
+    /// at `full` before compiling it, its `opened_path`, which names
+    /// what the compile makes of it; none for any other compile.
+    pub(crate) fn opened_once(&self, full: &[u8]) -> Option<PhpString> {
+        let once = (self.include.including).is_some_and(|(kind, _)| kind.once());
+        self.included_files.held(full).filter(|_| once)
+    }
+
+    /// [`Request::note_included`] for the file `path` that `unit` was
+    /// compiled from or served as: `compile_filename`'s
+    /// `zend_hash_add_empty_element(&EG(included_files), opened_path)`,
+    /// whose `opened_path` is the string a request-only compile names its
+    /// op arrays' `filename` by, so a unit the request compiled for itself
+    /// lends the table its file's name and the path costs no string more.
+    fn note_compiled_file(&mut self, path: &[u8], unit: &PublishedUnit) -> Result<(), Thrown> {
+        let own = (self.unit_strings).file_of(PublishedUnit::as_ptr(unit), path);
+        match own.filter(|_| !self.included_files.contains(path)) {
+            Some(own) => {
+                self.addref(&Value::string(own));
+                self.note_included_held(own)
+            }
+            None => self.note_included(path),
+        }
     }
 
     /// [`Request::note_included`] over `held`, a string whose one owner
