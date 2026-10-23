@@ -14,7 +14,7 @@
 //! compiles none of this and keeps php's fast teardown, the heap's
 //! chunks given back whole.
 
-use super::{ExtensionId, Request};
+use super::Request;
 
 impl Request {
     /// What `zend_shutdown_executor_values` releases by name in a debug
@@ -70,12 +70,13 @@ impl Request {
         self.drop_request_states();
         let shared = &self.shared;
         self.heap.sense_leaks(&|origin| {
-            let extension = ExtensionId::of_origin(origin);
-            let at = usize::try_from(extension.0).unwrap_or(usize::MAX);
-            shared.extensions.get(at).map_or_else(
-                || format!("the extension numbered {}", origin.number()),
-                |extension| extension.name.clone(),
-            )
+            shared
+                .extensions
+                .get(usize::from(origin.number()))
+                .map_or_else(
+                    || format!("the extension numbered {}", origin.number()),
+                    |extension| extension.name.clone(),
+                )
         });
     }
 }

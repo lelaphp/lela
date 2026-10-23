@@ -1627,7 +1627,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::before(req, this.object(), &nodes.0)
+        crate::parent::before(req, this.object(), &nodes)
     }
 
     /// `after(DOMNode|string ...$nodes): void`.
@@ -1636,7 +1636,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::after(req, this.object(), &nodes.0)
+        crate::parent::after(req, this.object(), &nodes)
     }
 
     /// `replaceWith(DOMNode|string ...$nodes): void`.
@@ -1645,7 +1645,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::replace_with(req, this.object(), &nodes.0)
+        crate::parent::replace_with(req, this.object(), &nodes)
     }
 
     /// `append(DOMNode|string ...$nodes): void`.
@@ -1654,7 +1654,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::append(req, this.object(), &nodes.0)
+        crate::parent::append(req, this.object(), &nodes)
     }
 
     /// `prepend(DOMNode|string ...$nodes): void`.
@@ -1663,7 +1663,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::prepend(req, this.object(), &nodes.0)
+        crate::parent::prepend(req, this.object(), &nodes)
     }
 
     /// `replaceChildren(DOMNode|string ...$nodes): void`.
@@ -1672,7 +1672,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::replace_children(req, this.object(), &nodes.0)
+        crate::parent::replace_children(req, this.object(), &nodes)
     }
 
     /// `DOMElement::insertAdjacentElement(string $where, DOMElement $element): ?DOMElement`.

@@ -1269,16 +1269,6 @@ fn apply_default_charset(req: &Request, mimetype: &[u8]) -> (Vec<u8>, bool) {
     }
 }
 
-/// The line less its trailing spaces, linefeeds and carriage returns,
-/// as `sapi_header_op` cuts them (`Z/main/SAPI.c:736`).
-fn trimmed_end(line: &[u8]) -> &[u8] {
-    let mut end = line.len();
-    while end > 0 && line[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    &line[..end]
-}
-
 /// `sapi_remove_header` (`Z/main/SAPI.c:600`): every line whose name is
 /// `name`, case aside, with `:` after it; with `prefix_len` set, one
 /// whose first `name.len()` bytes are `name` however it goes on; each
@@ -1361,7 +1351,7 @@ pub(crate) fn header_add(
         return false;
     }
     let written = line.len();
-    let line = trimmed_end(line);
+    let line = line.trim_ascii_end();
     // The safety check walks the line once, and the first byte it trips
     // on names the refusal (`Z/main/SAPI.c:740-755`).
     match line.iter().find(|b| matches!(b, b'\n' | b'\r' | 0)) {
@@ -1463,7 +1453,7 @@ pub(crate) fn header_remove(req: &mut Request, name: Option<&[u8]>) -> bool {
     if name.is_empty() {
         return false;
     }
-    let name = trimmed_end(name);
+    let name = name.trim_ascii_end();
     if name.contains(&b':') {
         req.note_error(Level::Warning, "Header to delete may not contain colon.");
         return false;
@@ -1482,7 +1472,7 @@ pub(crate) fn header_remove_prefix(req: &mut Request, prefix: &[u8], name_len: u
     if !header_modifiable(req) || prefix.is_empty() {
         return false;
     }
-    let prefix = trimmed_end(prefix);
+    let prefix = prefix.trim_ascii_end();
     remove_header(req, prefix, name_len);
     true
 }

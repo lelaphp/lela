@@ -1713,7 +1713,7 @@ impl PDOStatement {
         #[php(default = PDO::FETCH_DEFAULT)] mode: Raw<i64>,
         args: Variadic<Value>,
     ) -> Result<Owner<PhpArray>, Thrown> {
-        fetch::fetch_all(req, this.object(), mode, &args.0)
+        fetch::fetch_all(req, this.object(), mode, &args)
     }
 
     /// `PDOStatement::fetchColumn(int $column = 0): mixed`.
@@ -2002,7 +2002,7 @@ impl PDOStatement {
         mode: i64,
         args: Variadic<Value>,
     ) -> Result<True, Thrown> {
-        fetch::set_fetch_mode(req, this.object(), mode, &args.0)
+        fetch::set_fetch_mode(req, this.object(), mode, &args)
     }
 
     /// `PDOStatement::getIterator(): Iterator`: an `InternalIterator` over

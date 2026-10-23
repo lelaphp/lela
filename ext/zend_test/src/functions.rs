@@ -843,7 +843,7 @@ fn zend_call_method_if_exists(
     pair.append(req, Owner::take(req, obj.as_value()))?;
     pair.append(req, Owner::take(req, Value::string(method)))?;
     let served = match callable_checked(req, &pair.to_value()) {
-        Ok(callable) => call(req, &callable, &args.0),
+        Ok(callable) => call(req, &callable, &args),
         Err(_) => Ok(Owner::null()),
     };
     pair.give_up(req);

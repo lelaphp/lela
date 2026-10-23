@@ -135,6 +135,16 @@ fn ini_key_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 }
 
 impl IniState {
+    /// The entry the request changed under `name`, where it changed one.
+    fn changed(&self, name: &[u8]) -> Option<&IniChanged> {
+        self.changed.iter().find(|(n, ..)| n.as_slice() == name)
+    }
+
+    /// [`IniState::changed`] to write.
+    fn changed_mut(&mut self, name: &[u8]) -> Option<&mut IniChanged> {
+        self.changed.iter_mut().find(|(n, ..)| n.as_slice() == name)
+    }
+
     /// The ini state a request starts with: nothing changed, and the
     /// typed entries the engine's master values give.
     pub(super) fn new(typed: TypedIni) -> IniState {
@@ -492,12 +502,7 @@ impl Request {
     fn ini_hold(&mut self, name: &[u8], value: Option<&[u8]>) {
         self.ini.typed.update(name, value);
         let value = value.map(<[u8]>::to_vec);
-        if let Some((_, held, _)) = self
-            .ini
-            .changed
-            .iter_mut()
-            .find(|(n, ..)| n.as_slice() == name)
-        {
+        if let Some((_, held, _)) = self.ini.changed_mut(name) {
             *held = value;
         } else {
             self.ini.changed.push((name.to_vec(), value, None));
@@ -516,12 +521,8 @@ impl Request {
         string: Option<PhpString>,
     ) {
         self.ini_hold(name, value);
-        let before = self
-            .ini
-            .changed
-            .iter_mut()
-            .find(|(n, ..)| n.as_slice() == name)
-            .and_then(|(.., held)| std::mem::replace(held, string));
+        let before =
+            (self.ini.changed_mut(name)).and_then(|(.., held)| std::mem::replace(held, string));
         if let Some(before) = before {
             self.release(Value::string(before));
         }
@@ -531,12 +532,7 @@ impl Request {
     /// the entry marked changed, holding the value it holds, as the
     /// handler adds it to `EG(modified_ini_directives)`.
     pub(crate) fn silence_modifies_error_reporting(&mut self) {
-        if !self
-            .ini
-            .changed
-            .iter()
-            .any(|(n, ..)| n == b"error_reporting")
-        {
+        if self.ini.changed(b"error_reporting").is_none() {
             let held = self.ini().value(b"error_reporting").map(<[u8]>::to_vec);
             self.ini_hold(b"error_reporting", held.as_deref());
         }
@@ -938,8 +934,7 @@ impl Request {
                         ConfiguredKey::Index(n) => Owner::index(*n),
                         ConfiguredKey::Name(name) => PhpString::new(self, name)?.into_key(),
                     };
-                    let value = self.configured_value(entry)?;
-                    let value = Owner::adopt(value);
+                    let value = Owner::adopt(self.configured_value(entry)?);
                     array.set(self, key, value)?;
                 }
                 Value::array(array)
@@ -1010,7 +1005,7 @@ impl Request {
                 || decl.default.clone(),
                 |(_, v)| v.as_deref().map(Into::into),
             );
-        let changed = self.ini.changed.iter().find(|(n, ..)| n.as_slice() == name);
+        let changed = self.ini.changed(name);
         IniEntry {
             value: changed.map_or_else(|| master.clone(), |(_, v, _)| v.as_deref().map(Into::into)),
             master,
@@ -1116,10 +1111,6 @@ impl Request {
     /// The typed entries as this request holds them now ([`TypedIni`]).
     pub(crate) fn typed_ini(&self) -> &TypedIni {
         &self.ini.typed
-    }
-
-    pub(super) fn ini_parse_bytes_of(&self, name: &str) -> i64 {
-        self.ini().get(name.as_bytes()).map_or(0, Ini::parse_bytes)
     }
 
     /// One entry added to `EG(modified_ini_directives)`, which the
@@ -1285,13 +1276,7 @@ impl<'r> Ini<&'r Request> {
     /// value (php's `NULL`); `None` where php has no such entry.
     #[must_use]
     pub fn get(self, name: &[u8]) -> Option<&'r [u8]> {
-        match self
-            .0
-            .ini
-            .changed
-            .iter()
-            .find(|(n, ..)| n.as_slice() == name)
-        {
+        match self.0.ini.changed(name) {
             Some((_, value, _)) => Some(value.as_deref().unwrap_or_default()),
             None => self.0.shared.ini_default(name),
         }
@@ -1315,13 +1300,7 @@ impl<'r> Ini<&'r Request> {
     /// ```
     #[must_use]
     pub fn value(self, name: &[u8]) -> Option<&'r [u8]> {
-        match self
-            .0
-            .ini
-            .changed
-            .iter()
-            .find(|(n, ..)| n.as_slice() == name)
-        {
+        match self.0.ini.changed(name) {
             Some((_, value, _)) => value.as_deref(),
             None => self.0.shared.ini_default_value(name),
         }
@@ -1670,7 +1649,7 @@ impl Ini<&mut Request> {
     /// ```
     pub fn restore(self, name: &[u8]) -> Result<(), Thrown> {
         let user = Request::ini_modifiable(name).0 && self.0.ini_user(name);
-        if !user || self.0.ini_locked(name) || !self.0.ini.changed.iter().any(|(n, ..)| n == name) {
+        if !user || self.0.ini_locked(name) || self.0.ini.changed(name).is_none() {
             return Ok(());
         }
         let original = self.0.shared.ini_default_value(name).map(<[u8]>::to_vec);

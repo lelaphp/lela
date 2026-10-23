@@ -33,7 +33,7 @@ use php_unit::decl::Bare;
 
 use crate::api::abi::{DtorObj, GcTable, Instance, ObjectHandlers, Refusals, This};
 use crate::api::call::Function;
-use crate::api::raising::{Thrown, throw, throw_error};
+use crate::api::raising::{Thrown, error, throw};
 use crate::api::request::Request;
 use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
 use crate::classes::{Exception, Throwable};
@@ -221,9 +221,8 @@ impl ObjectHandlers for GeneratorHandlers {
 
     /// `zend_generator_get_constructor`.
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
+        Err(error(
             req,
-            "Error",
             "The \"Generator\" class is reserved for internal use and cannot be manually instantiated",
         ))
     }
@@ -443,28 +442,13 @@ fn same(a: PhpObject, b: PhpObject) -> bool {
     a.index() == b.index()
 }
 
-/// The temporary the opline a suspended frame stands at writes, the
-/// one its `result` operand names.
-fn suspended_out(req: &Request, object: PhpObject) -> Option<u32> {
+/// The opline a suspended frame stands at: its opcode, and the
+/// temporary its `result` operand names.
+fn suspended_op(req: &Request, object: PhpObject) -> Option<php_unit::Opline> {
     read(req, object, |generator| match &generator.execution {
         Execution::Suspended(suspended) => {
             let state = req.kept_frame(&suspended.frame);
-            let code = state.code()?;
-            let op = exec::opline_at(code, state.opline())?;
-            Some(op.out)
-        }
-        _ => None,
-    })
-    .flatten()
-}
-
-/// The opline a suspended frame stands at, and its op array's opcode
-/// there.
-fn suspended_at(req: &Request, object: PhpObject) -> Option<Opcode> {
-    read(req, object, |generator| match &generator.execution {
-        Execution::Suspended(suspended) => {
-            let state = req.kept_frame(&suspended.frame);
-            exec::opline_at(state.code()?, state.opline()).map(|op| op.opcode)
+            exec::opline_at(state.code()?, state.opline()).copied()
         }
         _ => None,
     })
@@ -495,14 +479,6 @@ fn clear_link_to_leaf(req: &mut Request, generator: PhpObject) -> Option<PhpObje
     set_link(req, leaf, None);
     set_link(req, generator, None);
     Some(leaf)
-}
-
-/// `clear_link_to_root`.
-fn clear_link_to_root(req: &mut Request, generator: PhpObject) {
-    if let Some(root) = link(req, generator) {
-        set_link(req, root, None);
-        set_link(req, generator, None);
-    }
 }
 
 /// `zend_generator_update_root`.
@@ -577,7 +553,7 @@ fn update_current(req: &mut Request, generator: PhpObject) -> PhpObject {
     remove_child(req, root_parent, root);
     if !req.is_pending()
         && !read(req, generator, |g| g.destroying).unwrap_or(false)
-        && suspended_at(req, root) == Some(Opcode::YieldFrom)
+        && suspended_op(req, root).map(|op| op.opcode) == Some(Opcode::YieldFrom)
     {
         let retval = read(req, root_parent, |g| g.retval).unwrap_or_else(Value::undef);
         if retval.tag() == TypeTag::Undef {
@@ -604,11 +580,9 @@ fn update_current(req: &mut Request, generator: PhpObject) -> PhpObject {
             let value = read(req, root_parent, |g| g.value).unwrap_or_else(Value::null);
             req.addref(&value);
             let old = with(req, root, |g| std::mem::replace(&mut g.value, value));
-            if let Some(old) = old {
-                req.release(old);
-            }
+            req.release(old.unwrap_or_else(Value::null));
             req.addref(&retval);
-            let out = suspended_out(req, root);
+            let out = suspended_op(req, root).map(|op| op.out);
             let written = with(req, root, |g| {
                 let Execution::Suspended(suspended) = &mut g.execution else {
                     return Some(retval);
@@ -955,9 +929,7 @@ pub(crate) fn yielded(
 /// returned kept, and the frame closed as a finished one.
 pub(crate) fn returned(req: &mut Request, generator: PhpObject, value: Value) {
     let old = with(req, generator, |g| std::mem::replace(&mut g.retval, value));
-    if let Some(old) = old {
-        req.release(old);
-    }
+    req.release(old.unwrap_or_else(Value::null));
     close(req, generator, true);
 }
 
@@ -994,18 +966,16 @@ pub(crate) fn yield_from(
     let object = value.as_object().filter(|_| !constant);
     let Some(object) = object else {
         req.release(value);
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "Can use \"yield from\" only with arrays and Traversables",
         ));
     };
     if is_generator(req, object) {
         if !has_frame(req, object) {
             req.release(value);
-            return Err(throw_error(
+            return Err(error(
                 req,
-                "Error",
                 "Generator passed to yield from was aborted without proper return and is unable to continue",
             ));
         }
@@ -1017,9 +987,8 @@ pub(crate) fn yield_from(
         }
         if same(current(req, object), generator) {
             req.release(value);
-            return Err(throw_error(
+            return Err(error(
                 req,
-                "Error",
                 "Impossible to yield from the Generator being currently run",
             ));
         }
@@ -1029,9 +998,8 @@ pub(crate) fn yield_from(
     }
     if !crate::interfaces::is_traversable(req, object.class()) {
         req.release(value);
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "Can use \"yield from\" only with arrays and Traversables",
         ));
     }
@@ -1126,7 +1094,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
     }
     loop {
         if is_running(req, generator) {
-            let thrown = throw_error(req, "Error", "Cannot resume an already running generator");
+            let thrown = error(req, "Cannot resume an already running generator");
             req.leave_pending(&thrown);
             return Ok(());
         }
@@ -1184,7 +1152,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         }
         let returned = read(req, generator, |g| g.retval.tag() != TypeTag::Undef).unwrap_or(false);
         if (!same(generator, orig) && returned)
-            || suspended_at(req, generator) == Some(Opcode::YieldFrom)
+            || suspended_op(req, generator).map(|op| op.opcode) == Some(Opcode::YieldFrom)
         {
             generator = current(req, orig);
             continue;
@@ -1559,32 +1527,26 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
         req.release(value);
     }
     let opline = header.opline;
-    if !finished && opline != 0 {
-        for call in calls.into_iter().rev() {
-            req.release_frozen_call(call);
-        }
-        if let Some(code) = code {
-            for range in &code.live_ranges {
-                if range.start.0 > opline {
-                    break;
-                }
-                if opline >= range.end.0 {
-                    continue;
-                }
-                let slot = range.var;
-                if range.kind == php_unit::LiveKind::Loop {
-                    crate::handlers::ForeachVar::iterator_del(
-                        req,
-                        slots.slot(php_heap::Slot(slot)),
-                    );
-                }
-                let value = take(&mut slots, slot);
-                exec::release_live(req, range.kind, value);
+    for call in calls.into_iter().rev() {
+        req.release_frozen_call(call);
+    }
+    if !finished
+        && opline != 0
+        && let Some(code) = code
+    {
+        for range in &code.live_ranges {
+            if range.start.0 > opline {
+                break;
             }
-        }
-    } else {
-        for call in calls.into_iter().rev() {
-            req.release_frozen_call(call);
+            if opline >= range.end.0 {
+                continue;
+            }
+            let slot = range.var;
+            if range.kind == php_unit::LiveKind::Loop {
+                crate::handlers::ForeachVar::iterator_del(req, slots.slot(php_heap::Slot(slot)));
+            }
+            let value = take(&mut slots, slot);
+            exec::release_live(req, range.kind, value);
         }
     }
     let len = u32::try_from(slots.len()).unwrap_or(u32::MAX);
@@ -1636,16 +1598,14 @@ fn dtor_storage(req: &mut Request, object: PhpObject) {
         return;
     }
     drop_values(req, object);
-    match parent(req, object) {
-        Some(above) => {
-            remove_child(req, above, object);
-            clear_link_to_root(req, object);
-            with(req, object, |g| g.parent = None);
-            req.release(above.as_value());
-        }
-        None => {
-            clear_link_to_leaf(req, object);
-        }
+    // php's `clear_link_to_root` under a parent and `clear_link_to_leaf`
+    // at a root are the same two writes: the link and its far end's
+    // cleared.
+    clear_link_to_leaf(req, object);
+    if let Some(above) = parent(req, object) {
+        remove_child(req, above, object);
+        with(req, object, |g| g.parent = None);
+        req.release(above.as_value());
     }
     let Some(frame) = push(req, object) else {
         close(req, object, false);
@@ -2060,11 +2020,7 @@ impl Generator {
         let root = current(req, this);
         if is_running(req, root) {
             throwable.give_up(req);
-            return Err(throw_error(
-                req,
-                "Error",
-                "Cannot resume an already running generator",
-            ));
+            return Err(error(req, "Cannot resume an already running generator"));
         }
         // Told with the generator's frame current, its
         // `prev_execute_data` the caller's, as php switches to it before

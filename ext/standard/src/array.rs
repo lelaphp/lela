@@ -233,7 +233,6 @@ fn array_merge(
     req: &mut Request,
     arrays: Variadic<PhpArray>,
 ) -> Result<Owner<Raw<PhpArray>>, Thrown> {
-    let arrays = arrays.0;
     if arrays.is_empty() {
         return Ok(returned(Owner::take(req, Value::array(PhpArray::empty()))));
     }

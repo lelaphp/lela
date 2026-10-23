@@ -47,13 +47,20 @@ pub(super) const fn civil_from_days(days: i64) -> (i64, i64, i64) {
 /// UTC, the stamp `php_log_err` writes before a file log's entry:
 /// `30-Sep-2026 14:05:03 UTC`.
 pub(super) fn utc_log_stamp(at: std::time::SystemTime) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
     let secs = match at.duration_since(std::time::UNIX_EPOCH) {
         Ok(since) => i64::try_from(since.as_secs()).unwrap_or(i64::MAX),
         Err(before) => i64::try_from(before.duration().as_secs()).map_or(i64::MIN, |s| -s),
     };
+    let (year, name, day, [h, m, s]) = civil_parts(secs);
+    format!("{day:02}-{name}-{year:04} {h:02}:{m:02}:{s:02} UTC")
+}
+
+/// The UTC date and time `secs` past the epoch: the year, the month's
+/// three letters, the day, and the hour, minute and second.
+pub(super) fn civil_parts(secs: i64) -> (i64, &'static str, i64, [i64; 3]) {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let (year, month, day) = civil_from_days(secs.div_euclid(DAY));
     let of_day = secs.rem_euclid(DAY);
     let name = usize::try_from(month - 1)
@@ -61,11 +68,11 @@ pub(super) fn utc_log_stamp(at: std::time::SystemTime) -> String {
         .and_then(|at| MONTHS.get(at))
         .copied()
         .unwrap_or_default();
-    format!(
-        "{day:02}-{name}-{year:04} {:02}:{:02}:{:02} UTC",
-        of_day / 3600,
-        of_day % 3600 / 60,
-        of_day % 60
+    (
+        year,
+        name,
+        day,
+        [of_day / 3600, of_day % 3600 / 60, of_day % 60],
     )
 }
 

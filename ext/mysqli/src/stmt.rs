@@ -820,7 +820,7 @@ impl mysqli_stmt {
         types: PhpString,
         vars: Variadic<Ref<Value>>,
     ) -> Answer<bool> {
-        bind_param(req, On::method(this.object()), types, &vars.0)
+        bind_param(req, On::method(this.object()), types, &vars)
     }
 
     #[php(tentative)]
@@ -829,7 +829,7 @@ impl mysqli_stmt {
         this: This<Self>,
         vars: Variadic<Ref<Value>>,
     ) -> Answer<bool> {
-        bind_result(req, On::method(this.object()), &vars.0)
+        bind_result(req, On::method(this.object()), &vars)
     }
 
     #[php(tentative)]

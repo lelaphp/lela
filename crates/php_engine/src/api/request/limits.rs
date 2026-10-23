@@ -332,7 +332,7 @@ impl Request {
     /// `OnUpdateTimeout` at runtime. Whatever was armed is unset first,
     /// so the seconds count from here.
     pub(super) fn arm_timer(&mut self) {
-        let (seconds, hard) = (self.max_execution_time(), self.hard_timeout());
+        let (seconds, hard) = (self.max_execution_time(), self.ini().long(b"hard_timeout"));
         self.limits.deadlines.arm(seconds, hard);
     }
 
@@ -404,12 +404,6 @@ impl Request {
     /// armed for; zero, php's CLI default, arms none.
     pub(crate) fn max_execution_time(&self) -> i64 {
         i64::from(self.ini_number(b"max_execution_time", 0))
-    }
-
-    /// `EG(hard_timeout)`, `OnUpdateLong` over the startup ini: the
-    /// seconds past a timeout the timer gives the loop to take it.
-    fn hard_timeout(&self) -> i64 {
-        self.ini().long(b"hard_timeout")
     }
 }
 

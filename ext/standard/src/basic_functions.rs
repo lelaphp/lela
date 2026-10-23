@@ -1675,7 +1675,8 @@ fn ignore_user_abort(
 /// ```
 #[php_function]
 fn register_tick_function(req: &mut Request, callback: Callable, args: Variadic<Value>) -> bool {
-    req.code_mut().register_tick_function(callback, args.0)
+    req.code_mut()
+        .register_tick_function(callback, args.into_iter().collect())
 }
 
 /// `unregister_tick_function(callable $callback): void`: the first
@@ -2429,7 +2430,6 @@ fn forward_static_call(
     callback: Callable,
     args: Variadic<Value>,
 ) -> Result<Owner<Value>, Thrown> {
-    let arguments = args.0;
     if req.frames().scope().is_none() {
         return Err(php_ext::raising::throw_error(
             req,
@@ -2438,7 +2438,7 @@ fn forward_static_call(
         ));
     }
     let callback = forwarded(req, &callback);
-    call(req, &callback, &arguments)
+    call(req, &callback, &args)
 }
 
 /// `forward_static_call_array(callable $callback, array $args): mixed`,

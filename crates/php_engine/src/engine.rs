@@ -101,6 +101,16 @@ pub struct RequestDescription {
     pub exit_status: i32,
 }
 
+impl RequestDescription {
+    /// A request of the host `sapi_name` that describes nothing else.
+    pub(crate) fn of_host(sapi_name: &str) -> RequestDescription {
+        RequestDescription {
+            sapi_name: sapi_name.to_owned(),
+            ..RequestDescription::default()
+        }
+    }
+}
+
 /// How a host has its program served: wrapped, as `php_execute_script`
 /// serves it for every host of php's but one; or bare, as php's phpdbg
 /// serves it, the file compiled with `zend_compile_file` and the op array
@@ -1014,6 +1024,21 @@ pub(crate) struct NativeMethod {
     pub(crate) flags: crate::attributes::Flags,
 }
 
+/// The declaration of the native method at `at`: a class's own, or
+/// one of the trampolines no class lists.
+fn native_method_decl<'a>(
+    classes: &'a [ClassDecl],
+    trampolines: &'a [MethodDecl],
+    at: MethodAt,
+) -> Option<&'a MethodDecl> {
+    match at {
+        MethodAt::Declared { class, at } => classes.get(class.0 as usize)?.methods.get(at as usize),
+        MethodAt::Trampoline { at, .. }
+        | MethodAt::ParentHook { at, .. }
+        | MethodAt::Unlisted { at } => trampolines.get(at as usize),
+    }
+}
+
 /// The callees of the natives and then of the native methods, in the
 /// numbers their `Function`s take ([`Shared::callees`]): each under
 /// the name its declaration holds, php's `common.function_name`, which
@@ -1025,14 +1050,7 @@ fn native_callees(
     trampolines: &[MethodDecl],
 ) -> Box<[crate::readable::Record]> {
     let method_name = |method: &NativeMethod| -> &[u8] {
-        let decl = match method.at {
-            MethodAt::Declared { class, at } => classes
-                .get(class.0 as usize)
-                .and_then(|class| class.methods.get(at as usize)),
-            MethodAt::Trampoline { at, .. }
-            | MethodAt::ParentHook { at, .. }
-            | MethodAt::Unlisted { at } => trampolines.get(at as usize),
-        };
+        let decl = native_method_decl(classes, trampolines, method.at);
         decl.map_or(&[][..], |decl| &decl.function.name.0)
     };
     functions
@@ -1359,35 +1377,15 @@ fn trampoline_tables(
     trampolines: &[MethodDecl],
     functions: usize,
 ) -> Vec<FunctionTable> {
-    tables_of(classes, methods, functions, |at| match at {
-        MethodAt::Trampoline { class, at } => {
-            Some((class, trampolines.get(usize::try_from(at).ok()?)?))
-        }
-        _ => None,
-    })
-}
-
-/// One table per class, `classes` of them: each row of `methods` that
-/// `place` gives a class and a declaration, filed among that class's
-/// rows under the declaration's name and numbered past the
-/// `functions` natives; the first of a name stays.
-fn tables_of<'a>(
-    classes: usize,
-    methods: &[NativeMethod],
-    functions: usize,
-    place: impl Fn(MethodAt) -> Option<(ClassId, &'a MethodDecl)>,
-) -> Vec<FunctionTable> {
     let mut tables = vec![FunctionTable::new(); classes];
     for (row, method) in (functions..).zip(methods) {
-        let Some((class, decl)) = place(method.at) else {
+        let MethodAt::Trampoline { class, at } = method.at else {
             continue;
         };
-        let (Some(table), Ok(row)) = (
-            usize::try_from(class.0)
-                .ok()
-                .and_then(|class| tables.get_mut(class)),
-            u32::try_from(row),
-        ) else {
+        let table = tables.get_mut(class.0 as usize);
+        let (Some(decl), Some(table), Ok(row)) =
+            (trampolines.get(at as usize), table, u32::try_from(row))
+        else {
             continue;
         };
         table.add(&decl.function.name.0, Function(row));
@@ -1395,7 +1393,6 @@ fn tables_of<'a>(
     tables
 }
 
-/// `zend_string_tolower`: the key a name is found under.
 /// `zend_parse_arg_object`'s class for each parameter of each native, by
 /// the native's number among the functions and then the methods: the
 /// class a parameter's type names where it names one, `?Class` among
@@ -1428,15 +1425,7 @@ fn parameter_classes(
                 .collect()
         })
     };
-    let method_decl = |method: &NativeMethod| match method.at {
-        MethodAt::Declared { class, at } => classes
-            .get(class.0 as usize)?
-            .methods
-            .get(usize::try_from(at).ok()?),
-        MethodAt::Trampoline { at, .. }
-        | MethodAt::ParentHook { at, .. }
-        | MethodAt::Unlisted { at } => trampolines.get(usize::try_from(at).ok()?),
-    };
+    let method_decl = |method: &NativeMethod| native_method_decl(classes, trampolines, method.at);
     functions
         .iter()
         .map(|decl| of(Some(decl)))
@@ -1446,10 +1435,6 @@ fn parameter_classes(
                 .map(|method| of(method_decl(method).map(|decl| &decl.function))),
         )
         .collect()
-}
-
-fn lowered(name: &[u8]) -> Box<[u8]> {
-    name.to_ascii_lowercase().into_boxed_slice()
 }
 
 /// `zend_declare_class_constant_ex` over a class another extension
@@ -1483,6 +1468,16 @@ fn link_trampolines(
     methods: &mut Vec<NativeMethod>,
 ) -> Vec<MethodDecl> {
     let mut trampolines = Vec::new();
+    let mut lay = |method: MethodDecl, entry, at: &dyn Fn(u32) -> MethodAt| {
+        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
+        let flags = crate::attributes::Flags::of(&method.function.attributes);
+        methods.push(NativeMethod {
+            at: at(index),
+            entry,
+            flags,
+        });
+        trampolines.push(method);
+    };
     let own = crate::classes::trampolines();
     let laid = (declarations.iter_mut()).flat_map(|d| std::mem::take(&mut d.trampolines));
     for (class_name, method, entry) in own.into_iter().chain(laid) {
@@ -1492,35 +1487,15 @@ fn link_trampolines(
         else {
             continue;
         };
-        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
-        methods.push(NativeMethod {
-            at: MethodAt::Trampoline {
-                class: ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
-                at: index,
-            },
-            entry,
-            flags: crate::attributes::Flags::of(&method.function.attributes),
-        });
-        trampolines.push(method);
+        let class = ClassId(u32::try_from(at).unwrap_or(u32::MAX));
+        lay(method, entry, &|at| MethodAt::Trampoline { class, at });
     }
     // `zend_get_property_hook_trampoline`'s two, which no class holds.
     for (kind, method, entry) in crate::api::request::parent_hook_trampolines() {
-        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
-        methods.push(NativeMethod {
-            at: MethodAt::ParentHook { kind, at: index },
-            entry,
-            flags: crate::attributes::Flags::of(&method.function.attributes),
-        });
-        trampolines.push(method);
+        lay(method, entry, &|at| MethodAt::ParentHook { kind, at });
     }
     for (method, entry) in crate::fiber::unlisted_functions() {
-        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
-        methods.push(NativeMethod {
-            at: MethodAt::Unlisted { at: index },
-            entry,
-            flags: crate::attributes::Flags::of(&method.function.attributes),
-        });
-        trampolines.push(method);
+        lay(method, entry, &|at| MethodAt::Unlisted { at });
     }
     trampolines
 }
@@ -1733,7 +1708,9 @@ impl Shared {
         use crate::unit_cache::Optimizer;
         let level = self
             .ini_default(b"opcache.optimization_level")
-            .map_or(0, ini_quantity);
+            // The one reading of a whole-number entry, without the
+            // sentence `Request::ini_quantity_warn` raises.
+            .map_or(0, |value| crate::ini_quantity::parse(value).0);
         if level & Optimizer::PASS_11 == 0 {
             return Optimizer::Off;
         }
@@ -2142,10 +2119,7 @@ impl Shared {
     fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
         self.typed_ini.update(&name, value.as_deref());
         self.realpath_cache.update(&name, value.as_deref());
-        match self.ini.iter_mut().find(|(n, _)| *n == name) {
-            Some(entry) => entry.1 = value,
-            None => self.ini.push((name, value)),
-        }
+        upsert(&mut self.ini, name, value);
     }
 
     /// The value the entry `name` starts every request with as php holds
@@ -2231,9 +2205,9 @@ impl Shared {
     /// `ZEND_CONSTANT_MODULE_NUMBER` of the constant `name` an extension
     /// or the engine declared with a value.
     pub(crate) fn constant_module(&self, name: &[u8]) -> Option<ExtensionId> {
-        let at = self.constant_names.find(&self.constants, name)?;
-        self.constant_values.get(at)?.as_ref()?;
-        self.constant_modules.get(at).copied()
+        self.constant_modules
+            .get(self.constant_index(name)?)
+            .copied()
     }
 
     /// `CONST_DEPRECATED` of an extension's or the engine's constant,
@@ -2574,10 +2548,8 @@ impl Configuration {
         };
         if let Some(file) = &mut files.loaded {
             startup.read(&std::mem::take(&mut file.bytes), &file.path);
-            startup.set(
-                b"cfg_file_path".to_vec(),
-                Configured::Str(file.path.clone()),
-            );
+            let path = Configured::Str(file.path.clone());
+            upsert(&mut startup.table, b"cfg_file_path".to_vec(), path);
         }
         files
             .scanned
@@ -2654,11 +2626,6 @@ impl crate::ini_syntax::Host for Configure<'_> {
         self.shared.directive(name).map(<[u8]>::to_vec)
     }
 
-    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        std::env::var_os(&*String::from_utf8_lossy(name))
-            .map(std::ffi::OsString::into_encoded_bytes)
-    }
-
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
         Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper).into_bytes())
     }
@@ -2681,11 +2648,6 @@ impl crate::ini_syntax::Host for Startup<'_> {
             .iter()
             .find(|(n, _)| n.as_slice() == name)
             .and_then(|(_, value)| value.text().map(<[u8]>::to_vec))
-    }
-
-    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        std::env::var_os(&*String::from_utf8_lossy(name))
-            .map(std::ffi::OsString::into_encoded_bytes)
     }
 
     /// `zend_double_to_str` before any ini entry is registered, when
@@ -2716,14 +2678,6 @@ impl Startup<'_> {
                 false
             }
             Err(never) => match never {},
-        }
-    }
-
-    /// `zend_hash_update` of the table.
-    fn set(&mut self, name: Vec<u8>, value: Configured) {
-        match self.table.iter_mut().find(|(n, _)| *n == name) {
-            Some(entry) => entry.1 = value,
-            None => self.table.push((name, value)),
         }
     }
 
@@ -2776,13 +2730,10 @@ impl Startup<'_> {
                 let value = ini_text(&value);
                 if let Some(rows) = self.section_rows() {
                     let key = configured_key(&label);
-                    match rows.iter_mut().find(|(k, _)| *k == key) {
-                        Some(row) => row.1 = Configured::Str(value),
-                        None => rows.push((key, Configured::Str(value))),
-                    }
+                    upsert(rows, key, Configured::Str(value));
                     return;
                 }
-                self.set(label, Configured::Str(value));
+                upsert(&mut self.table, label, Configured::Str(value));
             }
             // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label in
             // the active table, a section's where one is active, made where
@@ -2856,10 +2807,7 @@ fn configured_insert(rows: &mut Vec<(ConfiguredKey, Configured)>, offset: &[u8],
     } else {
         configured_key(offset)
     };
-    match rows.iter_mut().find(|(k, _)| *k == key) {
-        Some(row) => row.1 = value,
-        None => rows.push((key, value)),
-    }
+    upsert(rows, key, value);
 }
 
 /// `ZEND_HANDLE_NUMERIC_STR`: the offset as an integer where it is one
@@ -2889,13 +2837,6 @@ fn ini_text(value: &IniValue) -> Vec<u8> {
 /// the bit of `opcache.opt_debug_level` that asks for each op array as
 /// the compiler left it.
 const BEFORE_OPTIMIZER: i64 = 0x1_0000;
-
-/// `zend_ini_parse_quantity`, which `OnUpdateLong` reads every
-/// whole-number ini entry by: `crate::ini_quantity`, the one reading
-/// of it, here without the sentence `Request::ini_quantity_warn` raises.
-fn ini_quantity(value: &[u8]) -> i64 {
-    crate::ini_quantity::parse(value).0
-}
 
 /// `php_module_startup`'s check for deprecated directives
 /// (`Z/main/main.c:2393-2450`), its last step: each name of the
@@ -4244,7 +4185,9 @@ fn permanent_names(
     let mut names = Strings::new();
     names.intern_known(&KNOWN_STRINGS.map(str::as_bytes));
     for extension in extensions {
-        names.intern(&lowered(extension.name.as_bytes())).ok();
+        names
+            .intern(&extension.name.as_bytes().to_ascii_lowercase())
+            .ok();
     }
     let declared = functions
         .iter()
@@ -4283,7 +4226,7 @@ fn permanent_names(
                 .chain(decl.methods.iter().map(|method| &method.function.name))
         }));
     for name in keyed {
-        names.intern(&lowered(&name.0)).ok();
+        names.intern(&name.0.to_ascii_lowercase()).ok();
     }
     for decl in classes {
         for constant in &decl.constants {
@@ -4603,10 +4546,7 @@ impl Drop for EngineEnd {
         {
             return;
         }
-        let description = RequestDescription {
-            sapi_name: shared.host.to_owned(),
-            ..RequestDescription::default()
-        };
+        let description = RequestDescription::of_host(shared.host);
         let sink = (self.sink.get_mut())
             .unwrap_or_else(PoisonError::into_inner)
             .take();
@@ -4719,10 +4659,7 @@ impl Engine {
         };
         held.sort_by_key(|(name, _)| declared_at(name));
         let sapi_name = self.shared.host;
-        let description = RequestDescription {
-            sapi_name: sapi_name.to_owned(),
-            ..RequestDescription::default()
-        };
+        let description = RequestDescription::of_host(sapi_name);
         let mut req = Request::new(Arc::clone(&self.shared), description);
         req.begin_startup();
         let mut taken = core_startup(&mut req);
@@ -4823,10 +4760,7 @@ impl Engine {
         let Some(refused) = self.shared.refused.as_ref() else {
             return (None, sink);
         };
-        let description = RequestDescription {
-            sapi_name: self.shared.host.to_owned(),
-            ..RequestDescription::default()
-        };
+        let description = RequestDescription::of_host(self.shared.host);
         let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
         for (level, message) in &refused.raised {
             req.note_startup_error(*level, message);
@@ -4871,10 +4805,7 @@ impl Engine {
         entries: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     ) -> Result<Vec<u8>, NotAlone> {
         let shared = &self.shared;
-        let description = RequestDescription {
-            sapi_name: shared.host.to_owned(),
-            ..RequestDescription::default()
-        };
+        let description = RequestDescription::of_host(shared.host);
         let mut req = Request::new(Arc::clone(shared), description);
         req.begin_startup();
         req.set_ini_stage(IniStage::Activate);
@@ -5153,7 +5084,8 @@ impl Engine {
     /// strings live, so the two compiles print one dump.
     #[must_use]
     pub fn dump_before_optimizer(&self, description: &RequestDescription) -> Option<Vec<u8>> {
-        let level = ini_quantity(self.shared.ini_default(b"opcache.opt_debug_level")?);
+        let level =
+            crate::ini_quantity::parse(self.shared.ini_default(b"opcache.opt_debug_level")?).0;
         if level & BEFORE_OPTIMIZER == 0 {
             return None;
         }
@@ -6491,17 +6423,12 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
 /// zlib.*,bzip2.*,convert.iconv.*,string.rot13,string.toupper,string.tolower,convert.*,consumed,dechunk
 /// ```
 fn serve_rinits(req: &mut Request, extensions: &[ExtensionEntry]) -> Result<(), Thrown> {
-    let mut served = Ok(());
     for (at, extension) in extensions.iter().enumerate() {
-        let Some(rinit) = extension.rinit else {
-            continue;
-        };
-        served = req.serve_for(ExtensionId::at(at), rinit);
-        if served.is_err() {
-            break;
+        if let Some(rinit) = extension.rinit {
+            req.serve_for(ExtensionId::at(at), rinit)?;
         }
     }
-    served
+    Ok(())
 }
 
 /// The master value of the entry `name` among `ini` as
@@ -6515,3 +6442,12 @@ fn master_of<'a>(ini: &'a [(Vec<u8>, Option<Vec<u8>>)], name: &[u8]) -> Option<&
 
 #[cfg(test)]
 mod tests;
+
+/// `zend_hash_update` over a table kept as rows: the row of `key` takes
+/// `value`, or a row of the two is added last.
+fn upsert<K: PartialEq, V>(rows: &mut Vec<(K, V)>, key: K, value: V) {
+    match rows.iter_mut().find(|(k, _)| *k == key) {
+        Some(row) => row.1 = value,
+        None => rows.push((key, value)),
+    }
+}

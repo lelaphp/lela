@@ -88,16 +88,19 @@ mod sealed {
 }
 
 macro_rules! view {
-    ($t:ty, $make:expr) => {
-        impl sealed::Counted for $t {
+    ([$($generics:tt)*] $t:ty, $make:expr) => {
+        impl<$($generics)*> sealed::Counted for $t {
             type Kept = ();
             fn kept(&self) {}
             fn counted_on(&self, (): ()) -> Value {
                 ($make)(self.clone())
             }
         }
-        impl View for $t {}
-        impl sealed::One for $t {}
+        impl<$($generics)*> View for $t {}
+        impl<$($generics)*> sealed::One for $t {}
+    };
+    ($t:ty, $make:expr) => {
+        view!([] $t, $make);
     };
 }
 view!(Value, |v: Value| v);
@@ -114,25 +117,8 @@ view!(Key, |k: Key| match k {
 view!(Static, |s: Static| Value::object(s.0));
 view!(Iter, |i: Iter| i.as_value());
 
-impl<C: Class> sealed::Counted for Instance<C> {
-    type Kept = ();
-    fn kept(&self) {}
-    fn counted_on(&self, (): ()) -> Value {
-        Value::object(self.object())
-    }
-}
-impl<C: Class> View for Instance<C> {}
-impl<C: Class> sealed::One for Instance<C> {}
-
-impl<T: FromArgument> sealed::Counted for Raw<T> {
-    type Kept = ();
-    fn kept(&self) {}
-    fn counted_on(&self, (): ()) -> Value {
-        self.value()
-    }
-}
-impl<T: FromArgument> View for Raw<T> {}
-impl<T: FromArgument> sealed::One for Raw<T> {}
+view!([C: Class] Instance<C>, |i: Instance<C>| Value::object(i.object()));
+view!([T: FromArgument] Raw<T>, |r: Raw<T>| r.value());
 
 /// A callable kept past the frame it was read off, `zend_fcc_dup`: an
 /// owner of it is the claim `zend_fcc_addref` (`Z/Zend/zend_API.h:773`)
@@ -526,7 +512,7 @@ impl Owner<Value> {
     /// the same count ([`Raw`]).
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_raw<T: FromArgument>(self) -> Owner<Raw<T>> {
-        let raw = Raw::returned(self.view);
+        let raw = Raw::at(self.view, 0);
         self.recast(raw, ())
     }
 

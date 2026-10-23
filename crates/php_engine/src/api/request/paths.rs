@@ -141,3 +141,11 @@ pub fn scheme_length(path: &[u8]) -> Option<usize> {
 pub(crate) fn is_wrapper_url(path: &[u8]) -> bool {
     scheme_length(path).is_some_and(|n| !path[..n].eq_ignore_ascii_case(b"file"))
 }
+
+/// opcache's `is_cacheable_stream_path`
+/// (`Z/ext/opcache/ZendAccelerator.c:205-209`): whether a stream's path
+/// is one the unit cache keys and holds as it does a plain file, a
+/// `file://` or a `phar://` one, the scheme as written byte for byte.
+pub(crate) fn is_cacheable_stream_path(path: &[u8]) -> bool {
+    path.starts_with(b"file://") || path.starts_with(b"phar://")
+}

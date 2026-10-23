@@ -22,7 +22,6 @@
 //!
 //! [`ZendExtension::statement_handler`]: crate::api::abi::ZendExtension::statement_handler
 
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use php_heap::FrameRef;
@@ -48,26 +47,34 @@ pub struct Statement<'a> {
     frame: FrameRef,
 }
 
-impl Deref for Statement<'_> {
-    type Target = Request;
-    fn deref(&self) -> &Request {
-        self.req
-    }
-}
+/// A handler's view that holds the request as its `req`: the request
+/// read and written through it, and the request whose time limit a
+/// [`TimeLimitSuspended`] over the view suspends.
+macro_rules! over_request {
+    ($view:ident) => {
+        impl std::ops::Deref for $view<'_> {
+            type Target = Request;
+            fn deref(&self) -> &Request {
+                self.req
+            }
+        }
 
-impl DerefMut for Statement<'_> {
-    fn deref_mut(&mut self) -> &mut Request {
-        self.req
-    }
-}
+        impl std::ops::DerefMut for $view<'_> {
+            fn deref_mut(&mut self) -> &mut Request {
+                self.req
+            }
+        }
 
-impl AsMut<Request> for Statement<'_> {
-    /// The request whose time limit a [`TimeLimitSuspended`] over the
-    /// statement suspends.
-    fn as_mut(&mut self) -> &mut Request {
-        self.req
-    }
+        impl AsMut<Request> for $view<'_> {
+            fn as_mut(&mut self) -> &mut Request {
+                self.req
+            }
+        }
+    };
 }
+pub(crate) use over_request;
+
+over_request!(Statement);
 
 impl Statement<'_> {
     /// The frame that stands before the statement, read for as long as the

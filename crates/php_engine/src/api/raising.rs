@@ -694,9 +694,8 @@ pub(crate) fn call_stack_entry(req: &mut Request) -> Result<(), Thrown> {
 
 /// `zend_call_stack_size_error`: php's sentence over `size`.
 fn call_stack_size_error(req: &mut Request, size: usize) -> Thrown {
-    throw_error(
+    error(
         req,
-        "Error",
         &format!(
             "Maximum call stack size of {size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"
         ),
@@ -833,6 +832,16 @@ pub fn throw_error(req: &mut Request, class: &str, message: &str) -> Thrown {
     }
 }
 
+/// `zend_type_error`: [`throw_error`] of php's `TypeError`.
+pub(crate) fn type_error(req: &mut Request, message: &str) -> Thrown {
+    throw_error(req, "TypeError", message)
+}
+
+/// `zend_throw_error(NULL, …)`: [`throw_error`] of php's `Error`.
+pub(crate) fn error(req: &mut Request, message: &str) -> Thrown {
+    throw_error(req, "Error", message)
+}
+
 /// A throwable of `class` made at a site of its own, the `file` and
 /// `line` `zend_default_exception_new` records for a `ParseError` or a
 /// `CompileError` while a file is being compiled: the compiled name and
@@ -902,12 +911,12 @@ pub fn illegal_container_offset(
     let message = match read {
         DimensionRead::Silent => format!("Cannot access offset of type {given} in isset or empty"),
         DimensionRead::Unset if container == "string" => {
-            return throw_error(req, "Error", "Cannot unset string offsets");
+            return error(req, "Cannot unset string offsets");
         }
         DimensionRead::Unset => format!("Cannot unset offset of type {given} on {container}"),
         _ => format!("Cannot access offset of type {given} on {container}"),
     };
-    throw_error(req, "TypeError", &message)
+    type_error(req, &message)
 }
 
 /// `zend_cannot_add_element`: php's `Error` for `$a[] = v` where
@@ -915,9 +924,8 @@ pub fn illegal_container_offset(
 /// append that refuses (`ZEND_ASSIGN_DIM`, `ZEND_ADD_ARRAY_ELEMENT`,
 /// `ZEND_ADD_ARRAY_UNPACK`, `add_next_index_*`'s callers).
 pub(crate) fn cannot_add_element(req: &mut Request) -> Thrown {
-    throw_error(
+    error(
         req,
-        "Error",
         "Cannot add element to the array as the next element is already occupied",
     )
 }
@@ -929,7 +937,7 @@ pub(crate) fn undefined_function(req: &mut Request, name: &[u8]) -> Thrown {
         "Call to undefined function {}()",
         String::from_utf8_lossy(name)
     );
-    throw_error(req, "Error", &message)
+    error(req, &message)
 }
 
 /// `zend_undefined_method`: php's `Error` naming the class as declared
@@ -944,7 +952,7 @@ pub(crate) fn undefined_method(
         "Call to undefined method {class}::{}()",
         String::from_utf8_lossy(method)
     );
-    throw_error(req, "Error", &message)
+    error(req, &message)
 }
 
 /// `zend_non_static_method_call`: php's `Error` naming the method's
@@ -955,14 +963,14 @@ pub(crate) fn non_static_method_call(
 ) -> Thrown {
     let name = req.qualified_name_of(function);
     let message = format!("Non-static method {name}() cannot be called statically");
-    throw_error(req, "Error", &message)
+    error(req, &message)
 }
 
 /// `zend_fetch_class`'s refusal where no class answers the name, php's
 /// `Error` naming it as written.
 pub(crate) fn class_not_found(req: &mut Request, name: &[u8]) -> Thrown {
     let message = format!("Class \"{}\" not found", String::from_utf8_lossy(name));
-    throw_error(req, "Error", &message)
+    error(req, &message)
 }
 
 /// `get_function_arg_name` as php's argument errors print it after
@@ -996,7 +1004,7 @@ pub(crate) fn non_object_error(
     let shown = crate::ops::value_name(req, &container.undef_as_null());
     let name = String::from_utf8_lossy(name);
     let message = format!("Attempt to {verb} property \"{name}\" on {shown}");
-    throw_error(req, "Error", &message)
+    error(req, &message)
 }
 
 /// `zend_throw_exception` with `EG(exception)` set: a new throwable of
@@ -1089,11 +1097,7 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
         req.addref(throwable);
         return throw_object(req, object);
     }
-    throw_error(
-        req,
-        "Error",
-        "Cannot throw objects that do not implement Throwable",
-    )
+    error(req, "Cannot throw objects that do not implement Throwable")
 }
 
 /// `zend_throw_exception_internal` (`Z/Zend/zend_exceptions.c:183-238`),
@@ -1184,8 +1188,7 @@ pub fn new_throwable(
     class: &str,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Result<Owner<Value>, Thrown> {
-    let made = new_throwable_made(req, class, message);
-    adopted(made)
+    adopted(new_throwable_made(req, class, message))
 }
 
 /// What [`new_throwable`] makes, its one owner not yet named.

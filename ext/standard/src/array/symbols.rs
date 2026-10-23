@@ -604,7 +604,7 @@ fn compact(
 ) -> Result<Owner<PhpArray>, Thrown> {
     req.frames_mut().forbid_dynamic_call()?;
     let arguments: Vec<Value> = std::iter::once(var_name.0)
-        .chain(var_names.0.into_iter().map(|name| name.0))
+        .chain(var_names.into_iter().map(|name| name.0))
         .collect();
     let mut out = PhpArray::new(req)?;
     for (at, argument) in arguments.iter().enumerate() {

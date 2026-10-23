@@ -27,7 +27,7 @@ use crate::api::abi::{
     ClassIterator, CurrentPlace, DtorObj, ExtensionBuilder, GcTable, Instance, IteratorElement,
     ObjectHandlers, Refusals, This, Untyped,
 };
-use crate::api::raising::{Thrown, throw, throw_error};
+use crate::api::raising::{Thrown, error, throw};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
 
@@ -237,14 +237,7 @@ impl Funcs {
                 valid
             }
             Funcs::Generator => crate::generator::iterator_valid(req, data),
-            Funcs::Element => Ok(match element(req, wrapper, data)? {
-                Some((key, value)) => {
-                    key.give_up(req);
-                    value.give_up(req);
-                    true
-                }
-                None => false,
-            }),
+            Funcs::Element => Ok(element_stands(element(req, wrapper, data)?, req)),
             Funcs::Class => {
                 class_step(req, it, |iter, req, data| iter.valid(req, data)).unwrap_or(Ok(false))
             }
@@ -309,13 +302,7 @@ impl Funcs {
                 req.addref(&value);
                 Ok(value)
             }
-            Funcs::Element => Ok(match element(req, wrapper, data)? {
-                Some((key, value)) => {
-                    key.give_up(req);
-                    value.hand_on()
-                }
-                None => Value::null(),
-            }),
+            Funcs::Element => Ok(element_value(element(req, wrapper, data)?, req).hand_on()),
             Funcs::Class => class_step(req, it, |iter, req, data| {
                 iter.current(req, data).map(Owner::hand_on)
             })
@@ -337,13 +324,7 @@ impl Funcs {
                 Ok(bare)
             }
             Funcs::Generator => crate::generator::iterator_key(req, data),
-            Funcs::Element => Ok(match element(req, wrapper, data)? {
-                Some((key, value)) => {
-                    value.give_up(req);
-                    key.hand_on()
-                }
-                None => Value::null(),
-            }),
+            Funcs::Element => Ok(element_key(element(req, wrapper, data)?, req).hand_on()),
             Funcs::Class => class_step(req, it, |iter, req, data| {
                 iter.key(req, data).map(Owner::hand_on)
             })
@@ -685,11 +666,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
                 req.addref(&object.as_value());
                 Ok((Funcs::Class, object, Some(class_iter)))
             }
-            None => Err(throw_error(
-                req,
-                "Error",
-                "An iterator cannot be used with foreach by reference",
-            )),
+            None => Err(no_foreach_by_ref(req)),
         };
     }
     if req
@@ -706,11 +683,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         let funcs = match by_ref_places(req, object) {
             Some(place) => Funcs::Places(place),
             None if by_ref => {
-                return Err(throw_error(
-                    req,
-                    "Error",
-                    "An iterator cannot be used with foreach by reference",
-                ));
+                return Err(no_foreach_by_ref(req));
             }
             None => Funcs::User,
         };
@@ -738,11 +711,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         Some(inner) if native && internal_walked(req, inner) == Some(object) => {
             answered.give_up(req);
             if by_ref {
-                return Err(throw_error(
-                    req,
-                    "Error",
-                    "An iterator cannot be used with foreach by reference",
-                ));
+                return Err(no_foreach_by_ref(req));
             }
             req.addref(&object.as_value());
             Ok((Funcs::Element, object, None))
@@ -786,7 +755,7 @@ fn iterator_methods_native(req: &Request, object: PhpObject) -> bool {
         .all(|name| {
             req.symbols()
                 .method_named(object.class(), name)
-                .is_some_and(|function| req.is_native_function(function))
+                .is_some_and(|function| req.user_function(function).is_none())
         })
 }
 
@@ -1050,11 +1019,7 @@ impl InternalIterator {
     #[php(private, arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        Err(throw_error(
-            req,
-            "Error",
-            "Cannot manually construct InternalIterator",
-        ))
+        Err(error(req, "Cannot manually construct InternalIterator"))
     }
 
     /// `InternalIterator::current(): mixed`.
@@ -1064,13 +1029,7 @@ impl InternalIterator {
             let made = funcs.current(req, walk, false);
             return crate::api::values::adopted(made);
         }
-        Ok(match internal_element(req, this.object())? {
-            Some((key, value)) => {
-                key.give_up(req);
-                value
-            }
-            None => Owner::null(),
-        })
+        Ok(element_value(internal_element(req, this.object())?, req))
     }
 
     /// `InternalIterator::key(): mixed`.
@@ -1080,13 +1039,7 @@ impl InternalIterator {
             let made = funcs.key(req, walk);
             return crate::api::values::adopted(made);
         }
-        Ok(match internal_element(req, this.object())? {
-            Some((key, value)) => {
-                value.give_up(req);
-                key
-            }
-            None => Owner::null(),
-        })
+        Ok(element_key(internal_element(req, this.object())?, req))
     }
 
     /// `InternalIterator::next(): void`.
@@ -1107,14 +1060,7 @@ impl InternalIterator {
             let (funcs, walk) = walk?;
             return funcs.valid(req, walk);
         }
-        Ok(match internal_element(req, this.object())? {
-            Some((key, value)) => {
-                key.give_up(req);
-                value.give_up(req);
-                true
-            }
-            None => false,
-        })
+        Ok(element_stands(internal_element(req, this.object())?, req))
     }
 
     /// `InternalIterator::rewind(): void`: the class's own iterator
@@ -1205,13 +1151,48 @@ pub(crate) fn internal_iterator(req: &mut Request, object: PhpObject) -> Result<
 /// class's `iterator_element`.
 fn internal_element(req: &mut Request, this: PhpObject) -> Result<Option<IteratorElement>, Thrown> {
     let Some(Internal::Elements { object, index }) = this.native::<Internal>(req) else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "The InternalIterator object has not been properly initialized",
         ));
     };
     let (object, index) = (*object, *index as usize);
     let table = req.object_handlers(object.heap());
     table.iterator_element(req, object, index)
+}
+
+/// php's `Error` for a `foreach` by reference over an iterator.
+fn no_foreach_by_ref(req: &mut Request) -> Thrown {
+    error(req, "An iterator cannot be used with foreach by reference")
+}
+
+/// Whether an iterator's element stands, the two owners it handed given
+/// up.
+fn element_stands(element: Option<IteratorElement>, req: &mut Request) -> bool {
+    let Some((key, value)) = element else {
+        return false;
+    };
+    key.give_up(req);
+    value.give_up(req);
+    true
+}
+
+/// An iterator's element's value, its key given up; `null` past the
+/// end.
+fn element_value(element: Option<IteratorElement>, req: &mut Request) -> Owner<Value> {
+    let Some((key, value)) = element else {
+        return Owner::null();
+    };
+    key.give_up(req);
+    value
+}
+
+/// An iterator's element's key, its value given up; `null` past the
+/// end.
+fn element_key(element: Option<IteratorElement>, req: &mut Request) -> Owner<Value> {
+    let Some((key, value)) = element else {
+        return Owner::null();
+    };
+    value.give_up(req);
+    key
 }

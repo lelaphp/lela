@@ -530,7 +530,7 @@ impl Request {
         }
         let held = self.held_as_written(written);
         let resolved = match &held {
-            Some(held) => Ok(held.path.clone()),
+            Some((held, _)) => Ok(held.path.clone()),
             None => self.code_mut().resolve_path(written),
         };
         if kind.once()
@@ -546,7 +546,8 @@ impl Request {
             return Ok(Opened::Already);
         }
         let path = match resolved {
-            Ok(path) if !is_wrapper_url(&path) => path,
+            // A stream the cache holds is served as a file it holds is.
+            Ok(path) if held.is_some() || !is_wrapper_url(&path) => path,
             // php's `resolved_path = zend_string_copy(inc_filename)` for a
             // path it could not resolve, which a stream wrapper opens.
             Ok(path) => return self.include_stream(kind, written, &path),
@@ -568,7 +569,10 @@ impl Request {
                 return self.failed_opening(kind, written);
             }
         };
-        if let Err(refused) = self.include_guard(kind, &path) {
+        // A file the lookup by the key serves is opened by nothing.
+        if held.is_none()
+            && let Err(refused) = self.include_guard(kind, &path)
+        {
             // The stream opens the resolved path, which its warning names.
             self.open_stream_failed(kind, &path, &refused.into());
             return self.failed_opening(kind, written);
@@ -589,8 +593,8 @@ impl Request {
         // A unit the lookup by the key served is opcache's answer above
         // every link; any other file is compiled through them all, inside
         // the include, as `zend_include_or_eval` calls `zend_compile_file`.
-        let cached = if let Some(held) = held {
-            Some(self.held_answer(&held))
+        let cached = if let Some((held, validation)) = held {
+            self.held_answer(&held, validation)
         } else {
             let outer = self.include.including.replace((kind, self.vm.depth()));
             let compiled = self.compile_file(&path, Some(written), handle);
@@ -691,6 +695,21 @@ impl Request {
     /// Warning: include(): Failed opening '/etc/hosts' for inclusion (include_path='%s') in %s on line 3
     /// bool(false)
     /// ```
+    ///
+    /// A file opcache's lookup by the path as written serves with nothing
+    /// due is opened by nothing, so nothing guards it:
+    ///
+    /// ```php
+    /// ini_set('opcache.revalidate_freq', 60);
+    /// $f = __DIR__ . '/guarded.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// var_dump(include $f);
+    /// ini_set('open_basedir', '/nonexistent');
+    /// var_dump(include $f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// int(1)
+    /// int(1)
+    /// ```
     fn include_guard(&mut self, kind: IncludeKind, path: &[u8]) -> Result<HostPath, Refused> {
         let outer = self.include.including.replace((kind, self.vm.depth()));
         let guarded = self.environment_mut().check_open_basedir(path, true);
@@ -702,8 +721,9 @@ impl Request {
     /// `php_stream_open_for_zend_ex` under `USE_PATH | REPORT_ERRORS |
     /// STREAM_OPEN_FOR_INCLUDE`: the stream opened as its wrapper opens it,
     /// the warnings raised under it naming the construct, read whole, and
-    /// compiled as a file under the path, a unit of the request's own
-    /// that nothing publishes, since opcache keeps plain files alone. The
+    /// compiled as a file under the path, held by the unit cache where
+    /// opcache's predicate admits the path, a `phar://` one
+    /// ([`FileArgs::cached`]), and the request's own otherwise. The
     /// path goes in the included-files table as the construct puts a
     /// file's there, before the compile for the once forms and after it
     /// for the others.
@@ -1100,9 +1120,8 @@ impl Request {
                 .into_owned();
         let shown = String::from_utf8_lossy(written).into_owned();
         if kind.required() {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!("Failed opening required '{shown}' (include_path='{include_path}')"),
             ));
         }
@@ -1379,7 +1398,7 @@ impl Code<&mut Request> {
             return Err(Thrown::of(self.0.take_pending_view()));
         }
         let standing = self.0.vm.depth();
-        let from = (self.0.caller_frame()).map_or(super::CodeFrom::Top(None), |frame| {
+        let from = (self.0.innermost_user_frame()).map_or(super::CodeFrom::Top(None), |frame| {
             super::CodeFrom::Nested(frame, None)
         });
         let callee = self.0.push_code_frame(unit, from);

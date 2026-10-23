@@ -21,7 +21,7 @@ use crate::api::abi::{
 };
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::ExtensionId;
-use crate::api::request::{HandlePath, Request, Unresolved};
+use crate::api::request::{HandlePath, Request, Unresolved, is_cacheable_stream_path};
 use crate::api::values::{PhpObject, PhpString};
 use crate::observer::Opcodes;
 
@@ -67,6 +67,20 @@ pub(crate) mod sealed {
         where
             Self: ChainKind;
     }
+}
+
+/// A kind's [`sealed::Kind::link`] where the link is a function of the
+/// request and the links beneath, called as it stands.
+macro_rules! linked {
+    () => {
+        fn link(
+            link: Self::Link,
+            req: &mut Request,
+            beneath: Beneath<'_, Self>,
+        ) -> <Self as ChainKind>::Answer {
+            link(req, beneath)
+        }
+    };
 }
 
 /// What a link holds of the pointer it saved: every link beneath it
@@ -172,13 +186,7 @@ impl sealed::Kind for Interrupt {
     type Link = InterruptHook;
     type Args<'a> = ();
 
-    fn link(
-        link: InterruptHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(_: &mut Request, (): ()) -> <Self as ChainKind>::Answer {
         Ok(())
@@ -217,6 +225,63 @@ impl<'a> FileArgs<'a> {
     pub(crate) fn opens_stream(&self) -> bool {
         self.source.is_none() && !matches!(self.handle, HandlePath::Host | HandlePath::Stream)
     }
+
+    /// Whether `persistent_compile_file` caches the file
+    /// (`ZendAccelerator.c:2051`): every file but a wrapper's stream whose
+    /// path as written [`is_cacheable_stream_path`] does not admit, so a
+    /// file read through `phar://` is held and its arrays and strings are
+    /// the cache's, as a plain file's are, and one read through `PHAR://`
+    /// is the request's own, however its wrapper names it opened:
+    ///
+    /// ```php
+    /// function member($name, $data) {
+    ///     $h = pack('a100a8a8a8a12a12a8a1a100a6a2a247', $name, '0000644', '', '', sprintf('%011o', strlen($data)), sprintf('%011o', time() - 60), '        ', '0', '', 'ustar', '00', '');
+    ///     $h = substr_replace($h, sprintf('%06o', array_sum(array_map('ord', str_split($h)))) . "\0 ", 148, 8);
+    ///     return $h . str_pad($data, (strlen($data) + 511) & ~511, "\0");
+    /// }
+    /// $t = __DIR__ . '/lib.phar.tar';
+    /// $tar = member('.phar/stub.php', '<?php __HALT_COMPILER();');
+    /// $tar .= member('def.php', "<?php\nfunction g(\$s = ['abcdefgh' => [1, 2]]) { return \$s; }\n");
+    /// $tar .= member('r.php', '<?php return 1;');
+    /// $tar .= member('.phar/signature.bin', pack('VV', 2, 20) . sha1($tar, true)) . str_repeat("\0", 1024);
+    /// file_put_contents($t, $tar);
+    /// $s = fn () => opcache_get_status(true);
+    /// $before = $s()['opcache_statistics'];
+    /// require "phar://$t/def.php";
+    /// debug_zval_dump(g());
+    /// ini_set('opcache.revalidate_freq', 0);
+    /// include "phar://$t/r.php"; include "phar://$t/r.php";
+    /// $after = $s();
+    /// $held = $after['scripts']["phar://$t/def.php"] ?? [];
+    /// $after = $after['opcache_statistics'];
+    /// var_dump($after['num_cached_scripts'] - $before['num_cached_scripts'], $after['hits'] - $before['hits'], $after['num_cached_keys'] - $before['num_cached_keys']);
+    /// var_dump(($held['timestamp'] ?? 0) === filemtime("phar://$t/def.php"), opcache_is_script_cached("phar://$t/r.php"));
+    /// $hits = $s()['opcache_statistics']['hits'];
+    /// var_dump(include "PHAR://$t/r.php", $s()['opcache_statistics']['hits'] - $hits);
+    /// unlink($t);
+    /// ```
+    /// ```expect regime=jit-off
+    /// array(1) interned {
+    ///   ["abcdefgh"]=>
+    ///   array(2) packed interned {
+    ///     [0]=>
+    ///     int(1)
+    ///     [1]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// int(2)
+    /// int(1)
+    /// int(2)
+    /// bool(true)
+    /// bool(true)
+    /// int(1)
+    /// int(0)
+    /// ```
+    pub(crate) fn cached(&self) -> bool {
+        self.handle != HandlePath::Stream
+            || is_cacheable_stream_path(self.written.unwrap_or(self.path))
+    }
 }
 
 impl ChainKind for CompileFile {
@@ -227,21 +292,15 @@ impl sealed::Kind for CompileFile {
     type Link = CompileFileHook;
     type Args<'a> = FileArgs<'a>;
 
-    fn link(
-        link: CompileFileHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(req: &mut Request, args: FileArgs<'_>) -> <Self as ChainKind>::Answer {
         if let Some(opened) = args.opened {
             req.hold_opened(opened, args.handle);
         }
         // `persistent_compile_file` takes opcache's hold for every file
-        // but a stream no cache keeps (`ZendAccelerator.c:2051`, `:2106`).
-        if args.handle != crate::api::request::HandlePath::Stream {
+        // it caches (`ZendAccelerator.c:2051`, `:2106`).
+        if args.cached() {
             req.take_shared_hold();
         }
         Ok(req.cached_source(args).map(Compiled))
@@ -342,13 +401,7 @@ impl sealed::Kind for CompileString {
     type Link = CompileStringHook;
     type Args<'a> = StringArgs<'a>;
 
-    fn link(
-        link: CompileStringHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(req: &mut Request, args: StringArgs<'_>) -> <Self as ChainKind>::Answer {
         Ok(Compiled(req.compile_string_own(
@@ -412,9 +465,7 @@ impl sealed::Kind for Error {
     type Link = ErrorHook;
     type Args<'a> = ErrorArgs<'a>;
 
-    fn link(link: ErrorHook, req: &mut Request, beneath: Beneath<'_, Self>) {
-        link(req, beneath);
-    }
+    linked!();
 
     fn own(req: &mut Request, args: ErrorArgs<'_>) {
         req.php_error_cb(args);
@@ -467,9 +518,7 @@ impl sealed::Kind for GcCollect {
     type Link = GcCollectHook;
     type Args<'a> = ();
 
-    fn link(link: GcCollectHook, req: &mut Request, beneath: Beneath<'_, Self>) -> i64 {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(req: &mut Request, (): ()) -> i64 {
         req.gc_collect_own()
@@ -484,9 +533,7 @@ impl sealed::Kind for Throw {
     type Link = ThrownHook;
     type Args<'a> = PhpObject;
 
-    fn link(link: ThrownHook, req: &mut Request, beneath: Beneath<'_, Self>) {
-        link(req, beneath);
-    }
+    linked!();
 
     fn own(_: &mut Request, _: PhpObject) {}
 }
@@ -507,13 +554,7 @@ impl sealed::Kind for ResolvePath {
     type Link = ResolvePathHook;
     type Args<'a> = &'a [u8];
 
-    fn link(
-        link: ResolvePathHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(req: &mut Request, written: &[u8]) -> <Self as ChainKind>::Answer {
         req.resolve_path_own(written)
@@ -537,13 +578,7 @@ impl sealed::Kind for PostStartup {
     type Link = PostStartupHook;
     type Args<'a> = ();
 
-    fn link(
-        link: PostStartupHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(_: &mut Request, (): ()) -> <Self as ChainKind>::Answer {
         crate::api::abi::PostStartup::Serve
@@ -558,13 +593,7 @@ impl sealed::Kind for Upload {
     type Link = UploadHook;
     type Args<'a> = crate::api::request::Upload<'a>;
 
-    fn link(
-        link: UploadHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(_: &mut Request, _: crate::api::request::Upload<'_>) -> <Self as ChainKind>::Answer {
         Ok(true)

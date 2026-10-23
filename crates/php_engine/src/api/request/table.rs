@@ -44,12 +44,6 @@ enum Row {
 }
 
 impl Request {
-    /// The object whose table an access reads, `zend_std_get_properties`'s
-    /// `zend_lazy_object_init` first.
-    fn table_owner(&mut self, object: PhpObject) -> Result<PhpObject, Thrown> {
-        self.lazy_init(object)
-    }
-
     /// The row `key` names on `object`: the declared slot
     /// whose mangled name is the key, `\0*\0p` for a protected property
     /// and `\0C\0p` for a private one declared by `C`, or the dynamic
@@ -93,7 +87,7 @@ impl Request {
         object: PhpObject,
         key: &Key,
     ) -> Result<Option<Value>, Thrown> {
-        let object = self.table_owner(object)?;
+        let object = self.lazy_init(object)?;
         let o = object.heap();
         Ok(match self.table_row_of(object, key) {
             Row::Slot(i) => {
@@ -119,7 +113,7 @@ impl Request {
         value: Value,
     ) -> Result<(), Thrown> {
         let placed = self
-            .table_owner(object)
+            .lazy_init(object)
             .map(|object| (object, self.table_row_of(object, key)));
         let (object, row) = match placed {
             Ok(placed) => placed,
@@ -153,7 +147,7 @@ impl Request {
         name: &[u8],
         value: Value,
     ) -> Result<(), Thrown> {
-        let object = match self.table_owner(object) {
+        let object = match self.lazy_init(object) {
             Ok(object) => object,
             Err(thrown) => {
                 self.release(value);
@@ -184,7 +178,7 @@ impl Request {
         value: Value,
     ) -> Result<bool, Thrown> {
         let table = match self
-            .table_owner(object)
+            .lazy_init(object)
             .and_then(|object| self.separated_properties(object.heap()))
         {
             Ok(table) => table,
@@ -205,7 +199,7 @@ impl Request {
         key: &Key,
         value: Value,
     ) -> Result<(), Thrown> {
-        let slot = match self.table_owner(object) {
+        let slot = match self.lazy_init(object) {
             Ok(owner) => match self.table_row_of(owner, key) {
                 Row::Slot(i) => Some((owner, i)),
                 Row::Dynamic(_) => None,
@@ -227,7 +221,7 @@ impl Request {
     /// [`PhpObject::unset_row`]: `zend_symtable_del_ind`, a slot left
     /// `UNDEF` and a dynamic key removed, what either held released.
     pub(crate) fn table_unset_row(&mut self, object: PhpObject, key: &Key) -> Result<(), Thrown> {
-        let object = self.table_owner(object)?;
+        let object = self.lazy_init(object)?;
         let o = object.heap();
         match self.table_row_of(object, key) {
             Row::Slot(i) => {
@@ -269,7 +263,7 @@ impl Request {
         object: PhpObject,
         key: &Key,
     ) -> Result<php_heap::ZvalRef, Thrown> {
-        let object = self.table_owner(object)?;
+        let object = self.lazy_init(object)?;
         let o = object.heap();
         let place = match self.table_row_of(object, key) {
             Row::Slot(i) => o.slot_ref(i),
@@ -299,7 +293,7 @@ impl Request {
         object: PhpObject,
         key: &Key,
     ) -> Result<PhpRef, Thrown> {
-        let object = self.table_owner(object)?;
+        let object = self.lazy_init(object)?;
         if let Row::Slot(i) = self.table_row_of(object, key)
             && let Some((typed, name)) = self.slot_typed_property(object.class(), i)
             && let Some(at) = object.heap().slot_ref(i)
@@ -330,7 +324,7 @@ impl Request {
         if let Table::Object(table) = handlers.get_properties(self, object)? {
             return Ok((table.owner(), table.positions()));
         }
-        let object = self.table_owner(object)?;
+        let object = self.lazy_init(object)?;
         let table = self.heap.object_property_table(object.heap());
         Ok((object, self.fatal_of(table)?))
     }
@@ -339,7 +333,13 @@ impl Request {
     /// table laid down for the object a lazy one initialises to, in
     /// php's positions.
     pub(crate) fn std_properties(&mut self, object: PhpObject) -> Result<Table, Thrown> {
-        let owner = self.table_owner(object)?;
+        let owner = self.lazy_init(object)?;
+        self.owner_table(owner)
+    }
+
+    /// `owner`'s property table, laid down where it has none, as a walk
+    /// reads it.
+    fn owner_table(&mut self, owner: PhpObject) -> Result<Table, Thrown> {
         let table = self.heap.object_property_table(owner.heap());
         let table = self.fatal_of(table)?;
         self.object_table(owner, table).map(Table::Object)
@@ -379,9 +379,7 @@ impl Request {
             return handlers.get_properties(self, object);
         }
         let owner = self.lay_properties_no_lazy_init(object)?;
-        let table = self.heap.object_property_table(owner.heap());
-        let table = self.fatal_of(table)?;
-        self.object_table(owner, table).map(Table::Object)
+        self.owner_table(owner)
     }
 
     /// `zend_get_properties_for(obj, purpose)`: the class's
@@ -430,31 +428,28 @@ impl Request {
         purpose: PropertyPurpose,
     ) -> Result<PropertiesFor, Thrown> {
         let handlers = self.object_handlers(object.heap());
-        match purpose {
-            PropertyPurpose::Debug => match handlers.get_debug_info(self, object)? {
-                Some(info) => Ok(PropertiesFor::Debug(info)),
-                None => self
-                    .properties_no_lazy_init(object)
-                    .map(PropertiesFor::Table),
-            },
+        // Whether the table is read with no lazy object initialised.
+        let no_lazy_init = match purpose {
+            PropertyPurpose::Debug => {
+                if let Some(info) = handlers.get_debug_info(self, object)? {
+                    return Ok(PropertiesFor::Debug(info));
+                }
+                true
+            }
             PropertyPurpose::Json | PropertyPurpose::GetObjectVars | PropertyPurpose::VarExport => {
                 if let Some(hooked) = self.hooked_properties_for(object, purpose)? {
                     return Ok(hooked);
                 }
-                handlers
-                    .get_properties(self, object)
-                    .map(PropertiesFor::Table)
+                false
             }
-            PropertyPurpose::ArrayCast => self
-                .properties_no_lazy_init(object)
-                .map(PropertiesFor::Table),
-            PropertyPurpose::Serialize if self.lazy_skips_serialize(object.heap()) => self
-                .properties_no_lazy_init(object)
-                .map(PropertiesFor::Table),
-            PropertyPurpose::Serialize => handlers
-                .get_properties(self, object)
-                .map(PropertiesFor::Table),
-        }
+            PropertyPurpose::ArrayCast => true,
+            PropertyPurpose::Serialize => self.lazy_skips_serialize(object.heap()),
+        };
+        Ok(PropertiesFor::Table(if no_lazy_init {
+            self.properties_no_lazy_init(object)?
+        } else {
+            handlers.get_properties(self, object)?
+        }))
     }
 
     /// `owner`'s table `table`, laid down, in php's positions, each
@@ -565,7 +560,7 @@ impl Request {
         object: PhpObject,
         table: Owner<PhpArray>,
     ) -> Result<(), Thrown> {
-        let object = match self.table_owner(object) {
+        let object = match self.lazy_init(object) {
             Ok(object) => object,
             Err(thrown) => {
                 table.give_up(self);

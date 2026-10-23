@@ -713,8 +713,7 @@ impl Response<&mut Request> {
     /// native being served.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn buffer_op(self, op: &OutputOp) -> Result<Owner<Value>, Thrown> {
-        let made = crate::output::buffer_op(self.0, op);
-        adopted(made)
+        adopted(crate::output::buffer_op(self.0, op))
     }
 
     /// `php_output_start_default`, what `body` writes through the stack,
@@ -813,8 +812,7 @@ impl Response<&mut Request> {
     /// passed over.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn response_headers(self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.response_headers_made();
-        adopted(made)
+        adopted(self.0.response_headers_made())
     }
 }
 

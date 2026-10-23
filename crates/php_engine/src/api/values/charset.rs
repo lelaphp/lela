@@ -62,6 +62,9 @@ const CHARSET_MAP: [(&[u8], Charset); 33] = [
     (b"MacRoman", Charset::MacRoman),
 ];
 
+/// One test of a byte of a double-byte charset ([`Charset::next_char`]).
+type ByteTest = fn(u32) -> bool;
+
 impl Charset {
     /// The charset `charset_map` names `name` by, ignoring case, as
     /// `determine_charset` looks it up; `None` for a name it lacks,
@@ -104,84 +107,55 @@ impl Charset {
         let at = |i: usize| u32::from(s.get(pos + i).copied().unwrap_or(0));
         let c = at(0);
         let two = || (c << 8) | at(1);
-        match self {
-            Charset::Utf8 => next_utf8_char(s, pos),
-            Charset::Big5 => {
-                if (0x81..=0xFE).contains(&c) {
-                    if avail < 2 {
-                        return (None, pos + 1);
-                    }
-                    let next = at(1);
-                    if (0x40..=0x7E).contains(&next) || (0xA1..=0xFE).contains(&next) {
-                        (Some(two()), pos + 2)
-                    } else {
-                        (None, pos + 1)
-                    }
-                } else {
-                    (Some(c), pos + 1)
-                }
-            }
-            Charset::Big5Hkscs => {
-                if (0x81..=0xFE).contains(&c) {
-                    if avail < 2 {
-                        return (None, pos + 1);
-                    }
-                    let next = at(1);
-                    if (0x40..=0x7E).contains(&next) || (0xA1..=0xFE).contains(&next) {
-                        (Some(two()), pos + 2)
-                    } else if next != 0x80 && next != 0xFF {
-                        (None, pos + 1)
-                    } else {
-                        (None, pos + 2)
-                    }
-                } else {
-                    (Some(c), pos + 1)
-                }
-            }
-            Charset::Gb2312 => {
-                let lead = |c: u32| c != 0x8E && c != 0x8F && c != 0xA0 && c != 0xFF;
-                let trail = |c: u32| (0xA1..=0xFE).contains(&c);
-                if (0xA1..=0xFE).contains(&c) {
-                    if avail < 2 {
-                        return (None, pos + 1);
-                    }
-                    let next = at(1);
-                    if trail(next) {
-                        (Some(two()), pos + 2)
-                    } else if lead(next) {
-                        (None, pos + 1)
-                    } else {
-                        (None, pos + 2)
-                    }
-                } else if lead(c) {
-                    (Some(c), pos + 1)
-                } else {
-                    (None, pos + 1)
-                }
-            }
-            Charset::Sjis => {
-                let lead = |c: u32| c != 0x80 && c != 0xA0 && c < 0xFD;
-                let trail = |c: u32| (0x40..0xFD).contains(&c) && c != 0x7F;
-                if (0x81..=0x9F).contains(&c) || (0xE0..=0xFC).contains(&c) {
-                    if avail < 2 {
-                        return (None, pos + 1);
-                    }
-                    let next = at(1);
-                    if trail(next) {
-                        (Some(two()), pos + 2)
-                    } else if lead(next) {
-                        (None, pos + 1)
-                    } else {
-                        (None, pos + 2)
-                    }
-                } else if c < 0x80 || (0xA1..=0xDF).contains(&c) {
-                    (Some(c), pos + 1)
-                } else {
-                    (None, pos + 1)
-                }
-            }
-            Charset::EucJp => next_euc_jp_char(s, pos),
-            _ => (Some(c), pos + 1),
+        // A double-byte charset's four tests: whether a byte leads a
+        // pair, whether one trails it, whether a byte that fails to trail
+        // is read again as the next character's, and whether a byte that
+        // leads none is a character of its own.
+        let big5_trail: ByteTest = |n| (0x40..=0x7E).contains(&n) || (0xA1..=0xFE).contains(&n);
+        let gb_lead: ByteTest = |c| c != 0x8E && c != 0x8F && c != 0xA0 && c != 0xFF;
+        let sjis_lead: ByteTest = |c| c != 0x80 && c != 0xA0 && c < 0xFD;
+        let (first, trail, again, single): (ByteTest, ByteTest, ByteTest, ByteTest) = match self {
+            Charset::Utf8 => return next_utf8_char(s, pos),
+            Charset::EucJp => return next_euc_jp_char(s, pos),
+            Charset::Big5 => (
+                |c| (0x81..=0xFE).contains(&c),
+                big5_trail,
+                |_| true,
+                |_| true,
+            ),
+            Charset::Big5Hkscs => (
+                |c| (0x81..=0xFE).contains(&c),
+                big5_trail,
+                |n| n != 0x80 && n != 0xFF,
+                |_| true,
+            ),
+            Charset::Gb2312 => (
+                |c| (0xA1..=0xFE).contains(&c),
+                |c| (0xA1..=0xFE).contains(&c),
+                gb_lead,
+                gb_lead,
+            ),
+            Charset::Sjis => (
+                |c| (0x81..=0x9F).contains(&c) || (0xE0..=0xFC).contains(&c),
+                |n| (0x40..0xFD).contains(&n) && n != 0x7F,
+                sjis_lead,
+                |c| c < 0x80 || (0xA1..=0xDF).contains(&c),
+            ),
+            _ => return (Some(c), pos + 1),
+        };
+        if !first(c) {
+            return (single(c).then_some(c), pos + 1);
+        }
+        if avail < 2 {
+            return (None, pos + 1);
+        }
+        let next = at(1);
+        if trail(next) {
+            (Some(two()), pos + 2)
+        } else if again(next) {
+            (None, pos + 1)
+        } else {
+            (None, pos + 2)
         }
     }
 }

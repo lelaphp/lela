@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Obj, Ref, Res, ResourceType, Zval, ZvalRef};
 use php_link::LinkedClass;
+use php_unit::PublishedUnit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
-use php_unit::{PublishedUnit, Unit};
 
 use crate::api::abi::GcTable;
 use crate::api::call::Function;
@@ -120,7 +120,7 @@ pub(crate) use observing::{ObservedChain, OpenCall};
 pub use op_arrays::{ConstIdx, OpArrayView, Opcode, Operand, OplineIdx, OplineView};
 pub(crate) mod paths;
 pub use paths::RealpathEntry;
-pub(crate) use paths::is_wrapper_url;
+pub(crate) use paths::{is_cacheable_stream_path, is_wrapper_url};
 mod pending;
 pub(crate) use pending::Leaving;
 pub use pending::Raised;
@@ -199,13 +199,6 @@ impl ExtensionId {
     #[cfg(debug_assertions)]
     pub(crate) fn origin(self) -> php_heap::Origin {
         php_heap::Origin::new(u16::try_from(self.0).unwrap_or(u16::MAX))
-    }
-
-    /// The extension a debug build's heap names by `origin`, the inverse
-    /// of [`ExtensionId::origin`].
-    #[cfg(debug_assertions)]
-    pub(crate) fn of_origin(origin: php_heap::Origin) -> ExtensionId {
-        ExtensionId(u32::from(origin.number()))
     }
 }
 
@@ -642,12 +635,29 @@ pub(crate) struct UserFunction {
 }
 
 impl UserFunction {
-    /// The record of `body` of `unit` under `name`; none for a body
-    /// the unit has not.
-    pub(crate) fn record(unit: &Unit, body: exec::Body, name: &[u8]) -> crate::readable::Record {
-        exec::body_of(unit, body).map_or_else(crate::readable::Record::default, |code| {
-            crate::readable::Record::user(name, code)
-        })
+    /// The row of `body` of `unit`, declared as `decl`: its flags, its
+    /// frame's shape and its record read off the declaration and the op
+    /// array, where the unit has the body.
+    pub(crate) fn of(
+        unit: PublishedUnit,
+        body: exec::Body,
+        member: Option<Member>,
+        decl: &FunctionDecl,
+        observed: bool,
+    ) -> UserFunction {
+        let code = exec::body_of(&unit, body);
+        let shape = FrameShape::of(decl, code, observed);
+        let record = code.map_or_else(crate::readable::Record::default, |code| {
+            crate::readable::Record::user(&decl.name.0, code)
+        });
+        UserFunction {
+            flags: crate::attributes::Flags::of(&decl.attributes),
+            unit,
+            body,
+            member,
+            shape,
+            record,
+        }
     }
 
     /// Where the function's record stands, what a frame serving it
@@ -1019,19 +1029,12 @@ impl Declared {
 /// declared at its top level, or one a `DECLARE_FUNCTION` bound where
 /// it stood. None for a method, whose declaration is its class's.
 fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
-    match user.body {
-        exec::Body::Function(at) => user
-            .unit
-            .functions
-            .get(usize::try_from(at).ok()?)
-            .map(|(decl, _)| decl),
-        exec::Body::Dynamic(at) => user
-            .unit
-            .dynamic
-            .get(usize::try_from(at).ok()?)
-            .map(|(decl, _)| decl),
-        exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => None,
-    }
+    let (table, at) = match user.body {
+        exec::Body::Function(at) => (&user.unit.functions, at),
+        exec::Body::Dynamic(at) => (&user.unit.dynamic, at),
+        exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => return None,
+    };
+    Some(&table.get(usize::try_from(at).ok()?)?.0)
 }
 
 impl Request {
@@ -1644,11 +1647,7 @@ mod tests {
     fn never_served(
         req: &mut Request,
     ) -> Result<crate::api::values::Owner<crate::api::values::Value>, super::Thrown> {
-        Err(crate::api::raising::throw_error(
-            req,
-            "Error",
-            "the destructor was served",
-        ))
+        Err(crate::api::raising::error(req, "the destructor was served"))
     }
 
     /// The same entry, serving: what a native class's `__destruct` is,

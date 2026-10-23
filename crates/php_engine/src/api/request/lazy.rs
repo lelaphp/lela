@@ -22,7 +22,7 @@ use php_unit::decl::Bare;
 use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
 use crate::api::call::Target;
-use crate::api::raising::{Thrown, throw_error};
+use crate::api::raising::{Thrown, error, type_error};
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, TypeTag, Value};
 
 /// `ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE`.
@@ -256,9 +256,8 @@ impl Request {
             |req: &Request, at: ClassId| req.class_is_internal(at) && Some(at) != std_class;
         let name = self.symbols().class_name(class);
         if internal(self, class) {
-            return Some(throw_error(
+            return Some(error(
                 self,
-                "Error",
                 &format!("Cannot make instance of internal class lazy: {name} is internal"),
             ));
         }
@@ -266,9 +265,8 @@ impl Request {
             .ancestors(class)
             .find(|&parent| internal(self, parent))?;
         let parent = self.symbols().class_name(parent);
-        Some(throw_error(
+        Some(error(
             self,
-            "Error",
             &format!(
                 "Cannot make instance of internal class lazy: {name} inherits internal class {parent}"
             ),
@@ -369,9 +367,8 @@ impl Request {
         let iterating = |at: Obj| at.properties().is_some_and(php_heap::Arr::has_iterators);
         let forwarded = self.lazy_instance(o);
         if iterating(o) || forwarded.is_some_and(|i| iterating(i.heap())) {
-            return Err(throw_error(
+            return Err(error(
                 self,
-                "Error",
                 "Can not reset an object during property iteration",
             ));
         }
@@ -380,9 +377,8 @@ impl Request {
             self.lazy_forget(o);
         } else {
             if self.lazy_row(o).is_some() {
-                return Err(throw_error(
+                return Err(error(
                     self,
-                    "Error",
                     "Can not reset an object while it is being initialized",
                 ));
             }
@@ -613,7 +609,7 @@ impl Request {
         let Some((initializer, lazy)) = self.lazy_waiting(o) else {
             return Ok(object);
         };
-        let defaults = self.property_defaults(object.class())?;
+        let defaults = self.default_properties(object.class())?;
         self.addref(&object.as_value());
         o.set_laziness(Laziness::Eager);
         let table = o.properties();
@@ -645,9 +641,8 @@ impl Request {
             Ok(returned) if returned.tag() != TypeTag::Null => {
                 self.lazy_revert(o, snapshot, table);
                 self.release(returned);
-                Err(throw_error(
+                Err(type_error(
                     self,
-                    "TypeError",
                     "Lazy object initializer must return NULL or no value",
                 ))
             }
@@ -733,9 +728,8 @@ impl Request {
             o.set_laziness(Laziness::Proxy);
             let shown = crate::ops::value_name(self, &returned);
             self.release(returned);
-            return Err(throw_error(
+            return Err(type_error(
                 self,
-                "TypeError",
                 &format!(
                     "Lazy proxy factory must return an instance of a class compatible with {class}, {shown} returned"
                 ),
@@ -745,9 +739,8 @@ impl Request {
             o.set_laziness(Laziness::Proxy);
             let shown = self.symbols().class_name(instance.class());
             self.release(returned);
-            return Err(throw_error(
+            return Err(type_error(
                 self,
-                "TypeError",
                 &format!(
                     "The real instance class {shown} is not compatible with the proxy class {class}. The proxy must be a instance of the same class as the real instance, or a sub-class with no additional properties, and no overrides of the __destructor or __clone methods."
                 ),
@@ -756,9 +749,8 @@ impl Request {
         if instance == object || instance.heap().laziness() != Laziness::Eager {
             o.set_laziness(Laziness::Proxy);
             self.release(returned);
-            return Err(throw_error(
+            return Err(error(
                 self,
-                "Error",
                 "Lazy proxy factory must return a non-lazy object",
             ));
         }
@@ -827,11 +819,7 @@ impl Request {
             self.release(object.as_value());
             return outcome;
         }
-        let thrown = throw_error(
-            self,
-            "Error",
-            "Lazy object was released during initialization",
-        );
+        let thrown = error(self, "Lazy object was released during initialization");
         // `zend_throw_error` over a pending throwable chains it as the
         // new one's previous.
         if let (Some(new), Err(earlier)) = (thrown.exception().copied(), &outcome)
@@ -851,7 +839,7 @@ impl Request {
         let Some((_, lazy)) = self.lazy_waiting(o) else {
             return Ok(());
         };
-        let defaults = self.property_defaults(object.class())?;
+        let defaults = self.default_properties(object.class())?;
         o.set_laziness(Laziness::Eager);
         for (i, default) in (0..o.slots()).zip(defaults) {
             let Some(value) = default else { continue };
@@ -908,7 +896,7 @@ impl Request {
                     return Ok(());
                 }
                 self.lazy_set_waiting(o, slot, false);
-                let defaults = self.property_defaults(object.class())?;
+                let defaults = self.default_properties(object.class())?;
                 for (i, default) in defaults.into_iter().enumerate() {
                     let Some(default) = default else { continue };
                     if i == slot as usize {

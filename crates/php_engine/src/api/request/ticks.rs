@@ -46,10 +46,7 @@ impl Request {
             ..
         } in std::mem::take(&mut self.ticks.tick_functions)
         {
-            callback.give_up(self);
-            for value in arguments {
-                self.release(value);
-            }
+            self.drop_callback(callback, arguments);
         }
     }
 
@@ -133,9 +130,8 @@ impl Code<&mut Request> {
             return Ok(false);
         };
         if self.0.ticks.tick_functions[at].calling {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self.0,
-                "Error",
                 "Registered tick function cannot be unregistered while it is being executed",
             ));
         }
@@ -144,10 +140,7 @@ impl Code<&mut Request> {
             arguments,
             ..
         } = self.0.ticks.tick_functions.remove(at);
-        held.give_up(self.0);
-        for value in arguments {
-            self.0.release(value);
-        }
+        self.0.drop_callback(held, arguments);
         Ok(true)
     }
 }

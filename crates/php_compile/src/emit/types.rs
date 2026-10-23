@@ -741,7 +741,7 @@ fn builtin_type(lowered: &[u8]) -> Option<Type> {
 
 /// `zend_is_reserved_class_name` over an unqualified name: the names
 /// `reserved_class_names` lists, whatever the case.
-pub(super) fn is_reserved_class_name(name: &[u8]) -> bool {
+pub fn is_reserved_class_name(name: &[u8]) -> bool {
     matches!(
         name.to_ascii_lowercase().as_slice(),
         b"bool"
