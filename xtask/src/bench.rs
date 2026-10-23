@@ -105,7 +105,7 @@ const PATTERN: f64 = 0.01;
 /// upper tail (#3127): 3 of 8. None where no count is that unlikely, a set
 /// of one, whose one row is evidence alone.
 #[allow(clippy::cast_precision_loss)]
-fn pattern(n: usize) -> Option<usize> {
+fn aa_fails_at(n: usize) -> Option<usize> {
     let (p, q) = (AA_RESOLVES, 1.0 - AA_RESOLVES);
     // At count k, `each` is P(X = k - 1) and `below` becomes P(X < k).
     let (mut each, mut below) = (q.powi(i32::try_from(n).ok()?), 0.0);
@@ -442,35 +442,37 @@ pub(crate) type Sides = Result<Arms, String>;
 pub(crate) enum Held {
     /// An A/A control: a pair passes while its paired delta has its sign
     /// swamped (§2, §4.3), and a set until its rows resolve in the count
-    /// [`pattern`] makes §2's pattern (#3127).
+    /// [`aa_fails_at`] makes §2's pattern (#3127).
     Control,
     /// A series: two arms that differ, its reading stating the measurement
     /// and the distance to go to the second arm, and held by [`series`]'s
     /// rule where the manifest gives it a tolerance (#1902, #2336, #2659).
     Series,
-    /// A series held to a bound, one plus its `[[bench]]` row's tolerance
-    /// ([`Shown::bound`]), G1's (design §9.2, #2947, #3130): a fail where
-    /// the bar's ratio, a set's geomean, is established above it, or is
-    /// `mixed`, whose value a bound is not read from (§10, #3127); and a
-    /// pass where it is at most it or swamped, as a swamped night is never
-    /// a regression (protocol §1.2, §12), or where the bar has no row.
+    /// A series held to a bound, its `[[bench]]` row's tolerance
+    /// ([`Shown::tolerance`]), G1's (design §9.2, #2947, #3130): a fail
+    /// where the bar's ratio, a set's geomean, is established behind by
+    /// more than it, one plus it for a time, or is `mixed`, whose value a
+    /// bound is not read from (§10, #3127); and a pass where it is within
+    /// it or swamped, as a swamped night is never a regression (protocol
+    /// §1.2, §12), or where the bar has no row.
     Bound,
 }
 
 impl Held {
     /// The reading's status for what a bar `took`: a control fails at
-    /// [`Took::pattern`] resolved rows, a bound where the ratio is
-    /// established above `bound`, is mixed or is no number, and a series is
-    /// held to no bound.
-    fn status(self, took: &Took, bound: Option<f64>) -> Status {
+    /// [`Took::fails_at`] resolved rows, a bound where its first arm is
+    /// established behind its second by more than `tolerance` percent, in
+    /// time or in rate ([`to_go`]), or the ratio is mixed or no number; a
+    /// series is held to no bound.
+    fn status(self, took: &Took, tolerance: Option<f64>) -> Status {
         let (value, sign) = (took.ratio(), took.sign());
-        let above = |at_most| {
-            value.is_nan() || sign == Sign::Mixed || (sign == Sign::Slower && value > at_most)
+        let beyond = |pct| {
+            value.is_nan() || sign == Sign::Mixed || to_go(took).is_some_and(|behind| behind > pct)
         };
         let resolved: usize = took.each_way().iter().sum();
         match self {
-            Held::Control if took.pattern().is_some_and(|k| resolved >= k) => Status::Fail,
-            Held::Bound if bound.is_some_and(above) => Status::Fail,
+            Held::Control if took.fails_at().is_some_and(|k| resolved >= k) => Status::Fail,
+            Held::Bound if tolerance.is_some_and(beyond) => Status::Fail,
             Held::Control | Held::Series | Held::Bound => Status::Pass,
         }
     }
@@ -547,10 +549,10 @@ impl Took {
     }
 
     /// How many resolved rows fail an A/A control over them: a pair's one,
-    /// and a set's [`pattern`].
-    fn pattern(&self) -> Option<usize> {
+    /// and a set's [`aa_fails_at`].
+    fn fails_at(&self) -> Option<usize> {
         if self.set() {
-            pattern(self.rows.len())
+            aa_fails_at(self.rows.len())
         } else {
             Some(1)
         }
@@ -1093,12 +1095,11 @@ struct Shown<'a> {
 }
 
 impl Shown<'_> {
-    /// The ratio a bound bar is held to, one plus its row's tolerance, the
-    /// one place it is written (protocol §12.3, #3130); none for another
-    /// bar, and for a bound without a row, a series held to none.
-    fn bound(&self) -> Option<f64> {
-        let row = self.row.filter(|_| self.held == Held::Bound)?;
-        Some(1.0 + row.pct / 100.0)
+    /// The tolerance a bound bar is held to, its row's, the one place it
+    /// is written (protocol §12.3, #3130); none for another bar, and for a
+    /// bound without a row, a series held to none.
+    fn tolerance(&self) -> Option<f64> {
+        Some(self.row.filter(|_| self.held == Held::Bound)?.pct)
     }
 }
 
@@ -1183,7 +1184,7 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
         Held::Control if !took.set() => format!("the bar is the A/A control of {PROTOCOL} §2"),
         Held::Control => {
             let (rows, rate, chance) = (took.rows.len(), 1.0 / AA_RESOLVES, PATTERN * 100.0);
-            let fails = (took.pattern()).map_or_else(
+            let fails = (took.fails_at()).map_or_else(
                 || "at no count of them, none's chance".to_owned(),
                 |k| format!("where {k} of them resolve, the fewest whose chance"),
             );
@@ -1198,9 +1199,9 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
                 |to_go| format!("{} is {to_go:.2}% to go to {}", bar.names[0], bar.names[1]),
             )
         ),
-        Held::Bound => bar.bound().map_or_else(
+        Held::Bound => bar.tolerance().map_or_else(
             || format!("a bound with no `[[bench]]` row, so a series held to none ({PROTOCOL} §12.3)"),
-            |at_most| format!("a bound, its ratio held to at most {at_most:.4}, one plus its `[[bench]]` tolerance ({PROTOCOL} §12.3)"),
+            |pct| format!("a bound, {} held to at most {pct}% behind {}, its `[[bench]]` tolerance ({PROTOCOL} §12.3)", bar.names[0], bar.names[1]),
         ),
     }
 }
@@ -1273,11 +1274,11 @@ fn recorded(
     snapshot: &Snapshot,
 ) -> Result<Reading> {
     let mut reading = Reading::stamped_over(INSTRUMENT, bar.id, snapshot, Path::new("."))?;
-    reading.status = bar.held.status(took, bar.bound());
-    if let Some(at_most) = bar.bound() {
+    reading.status = bar.held.status(took, bar.tolerance());
+    if let Some(pct) = bar.tolerance() {
         reading
             .numbers
-            .insert("bound_ratio".to_owned(), at_most.into());
+            .insert("tolerance_pct".to_owned(), pct.into());
     }
     if bar.held == Held::Series
         && let Some(to_go) = to_go(took)
@@ -1463,7 +1464,7 @@ mod tests {
         assert_eq!((set.sign(), set.each_way()), (Sign::Mixed, [1, 1]));
         assert_eq!(to_go(&set), None, "a mixed geomean has no sign");
         assert_eq!(
-            Held::Bound.status(&set, Some(1.02)),
+            Held::Bound.status(&set, Some(2.0)),
             Status::Fail,
             "a bound is not read from a mixed geomean, near 1.00 as it is"
         );
@@ -1482,19 +1483,24 @@ mod tests {
             "one swamped row leaves the geomean unsigned"
         );
         assert_eq!(Held::Control.status(&swamped, None), Status::Pass, "1 of 2");
-        assert_eq!(Held::Bound.status(&swamped, Some(1.02)), Status::Pass);
+        assert_eq!(Held::Bound.status(&swamped, Some(2.0)), Status::Pass);
         let at = took(vec![row(Ms, &BEHIND, 0.0), row(Ms, &BEHIND, 0.0)], true);
         assert_eq!(at.sign(), Sign::Slower);
         assert_eq!(
-            Held::Bound.status(&at, Some(1.0)),
+            Held::Bound.status(&at, Some(0.0)),
             Status::Pass,
             "at the bound"
         );
         let behind = took(vec![row(Ms, &BEHIND, 10.0), row(Ms, &BEHIND, 10.0)], true);
-        assert_eq!(Held::Bound.status(&behind, Some(1.02)), Status::Fail);
+        assert_eq!(Held::Bound.status(&behind, Some(2.0)), Status::Fail);
         let ahead = took(vec![row(Ms, &AHEAD, -10.0), row(Ms, &AHEAD, -10.0)], true);
         assert_eq!(ahead.sign(), Sign::Faster);
-        assert_eq!(Held::Bound.status(&ahead, Some(1.02)), Status::Pass);
+        assert_eq!(Held::Bound.status(&ahead, Some(2.0)), Status::Pass);
+        let fewer = took(vec![row(Rps, &AHEAD, -10.0), row(Rps, &AHEAD, -10.0)], true);
+        assert_eq!(fewer.sign(), Sign::Slower, "fewer requests a second");
+        assert_eq!(Held::Bound.status(&fewer, Some(2.0)), Status::Fail);
+        let more = took(vec![row(Rps, &BEHIND, 10.0), row(Rps, &BEHIND, 10.0)], true);
+        assert_eq!(Held::Bound.status(&more, Some(2.0)), Status::Pass);
         let shown = super::geomean(&set);
         assert!(
             shown.contains(
@@ -1516,7 +1522,7 @@ mod tests {
     #[test]
     fn an_aa_set_fails_at_the_fewest_resolved_rows_whose_chance_is_at_most_one_percent() {
         assert_eq!(
-            [0, 1, 2, 7, 8, 17].map(super::pattern),
+            [0, 1, 2, 7, 8, 17].map(super::aa_fails_at),
             [None, None, Some(2), Some(3), Some(3), Some(5)]
         );
         let set = |resolved: usize, n: usize| {
@@ -1540,8 +1546,9 @@ mod tests {
     }
 
     /// G1's bound is its `[[bench]]` row's (#3130): a manifest carrying
-    /// `g1` at the 2% floor and no nights holds a bound bar to 1.02, a
-    /// series and a control to none of it, and a bound with no row to none.
+    /// `g1` at the 2% floor and no nights holds a bound bar to 2% behind,
+    /// a ratio of 1.02 in time and 0.98 in rate, a series to none of it,
+    /// and a bound with no row to none.
     #[test]
     fn a_bound_bar_is_held_to_one_plus_its_row_s_tolerance() {
         let text = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\n\n[[bench]]\nbar = \"g1\"\ntolerance_pct = 2.0\n";
@@ -1557,15 +1564,15 @@ mod tests {
             names: ["a", "b"],
             row,
         };
-        assert!(close(bar(Held::Bound, Some(g1)).bound().unwrap(), 1.02));
-        assert_eq!(bar(Held::Series, Some(g1)).bound(), None);
-        assert_eq!(bar(Held::Bound, None).bound(), None);
+        assert_eq!(bar(Held::Bound, Some(g1)).tolerance(), Some(2.0));
+        assert_eq!(bar(Held::Series, Some(g1)).tolerance(), None);
+        assert_eq!(bar(Held::Bound, None).tolerance(), None);
         let set = |pct| took(vec![row(Ms, &BEHIND, pct), row(Ms, &BEHIND, pct)], true);
-        let held = |pct| Held::Bound.status(&set(pct), bar(Held::Bound, Some(g1)).bound());
+        let held = |pct| Held::Bound.status(&set(pct), bar(Held::Bound, Some(g1)).tolerance());
         assert_eq!((held(1.0), held(3.0)), (Status::Pass, Status::Fail));
         let shown = super::held_by(&bar(Held::Bound, Some(g1)), &set(3.0));
         assert!(
-            shown.contains("at most 1.0200, one plus its `[[bench]]` tolerance"),
+            shown.contains("a held to at most 2% behind b, its `[[bench]]` tolerance"),
             "{shown}"
         );
         let missing = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\n\n[[bench]]\nbar = \"g1\"\n";
