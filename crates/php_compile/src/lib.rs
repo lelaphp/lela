@@ -1067,10 +1067,10 @@ impl<'u> Parts<'u> {
                 )
             });
         let classes = (self.classes.iter().enumerate())
-            .map(move |(at, class)| (Some(Slot::ClassKey(at)), Key(unit), &class.name));
-        let methods = (self.classes.iter()).flat_map(move |class| {
+            .map(|(at, class)| (Some(Slot::ClassKey(at)), Named::InternedKey, &class.name));
+        let methods = (self.classes.iter()).flat_map(|class| {
             (php_unit::written_methods(class).iter())
-                .map(move |method| (None, Key(unit), &method.function.name))
+                .map(|method| (None, Named::InternedKey, &method.function.name))
         });
         (functions.chain(dynamic).chain(classes).chain(methods))
             .filter(|(_, _, name)| name.0.iter().any(u8::is_ascii_uppercase))
@@ -1149,9 +1149,15 @@ pub enum Named {
     Function(Holder),
     /// A class's, `ce->name`.
     Class,
-    /// The lowered key a function, a class or a method is bound under
-    /// where lowering changes its name.
+    /// The lowered key a function is bound under where lowering changes
+    /// its name, `zend_begin_func_decl`'s `zend_string_tolower`: a
+    /// top-level one's the function table's key, a dynamic definition's
+    /// its `DECLARE_FUNCTION`'s constant.
     Key(Holder),
+    /// The lowered key a class or a method is bound under where lowering
+    /// changes its name, which php's compile interns
+    /// (`zend_new_interned_string`).
+    InternedKey,
     /// A name a declaration is read by: a variable's, a declared
     /// property's and a class constant's or enum case's.
     Read(Holder),

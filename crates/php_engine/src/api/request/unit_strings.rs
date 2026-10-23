@@ -834,7 +834,7 @@ impl Request {
                     held.main.push(Zval::string(s.heap()));
                     held.found_main.push(s);
                 }
-                Named::File | Named::Class => held.names.push(s),
+                Named::File | Named::Class | Named::InternedKey => held.names.push(s),
                 Named::Function(holder) | Named::Key(holder) | Named::Read(holder) => {
                     held.names_of(owner_of(holder)).push(s);
                 }
@@ -1010,6 +1010,28 @@ impl Request {
     /// 112
     /// 176
     /// ```
+    ///
+    /// and so is a function's lowered key, the function table's, where
+    /// php interns only a class's and a method's:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3310-function-key.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('namespace NS1; class NQ { const K = self::class; } function fn1() { return NQ::K; }'), "\n";
+    /// echo m('function Fqwertyu() { return 2; } class Cqwertyu { function Mqwertyu() { return 3; } }'), "\n";
+    /// echo NS1\fn1(), Fqwertyu(), (new Cqwertyu)->Mqwertyu(), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 672
+    /// 776
+    /// NS1\NQ23
+    /// ```
     pub(crate) fn hold_unit_names(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
         let at = self.unit_strings.held(unit);
         let Some(held) = self.unit_strings.units.get_mut(at) else {
@@ -1029,22 +1051,22 @@ impl Request {
                 _ if handed => continue,
                 // Every op array's, made once for each: two closures on
                 // one line are two `{closure:…}` strings, and a
-                // function's name is made whatever the cache holds.
-                Named::File => (Owner::Tables, true),
+                // function's name and a top-level one's key, the function
+                // table's, are made whatever the cache holds
+                // (`zend_begin_func_decl`).
+                Named::File | Named::Key(Holder::Unit) => (Owner::Tables, true),
                 Named::Function(holder) => (owner_of(holder), true),
-                // A class's name is `zend_new_interned_string`'s in
-                // `zend_compile_class_decl`, and so is each lowered key
-                // but a runtime declaration's, its `DECLARE_*`'s
-                // constant: the interned string where opcache holds the
-                // bytes, `count` or `__tostring` or one a cached file's
-                // constants hold, and the one made goes
+                // A dynamic definition's key is its `DECLARE_FUNCTION`'s
+                // constant, which the compile made, or the interned
+                // string where opcache holds the bytes (`zend_insert_literal`).
+                Named::Key(_) => continue,
+                // A class's name and its and its methods' keys are
+                // `zend_new_interned_string`'s: the interned string where
+                // opcache holds the bytes, `count` or `__tostring` or one
+                // a cached file's constants hold, and the one made goes
                 // (`accel_new_interned_string_for_php`).
-                Named::Class => (
+                Named::Class | Named::InternedKey => (
                     Owner::Tables,
-                    self.shared.existing_interned(&name).is_none(),
-                ),
-                Named::Key(holder) => (
-                    owner_of(holder),
                     self.shared.existing_interned(&name).is_none(),
                 ),
                 // The rest the compile made.
