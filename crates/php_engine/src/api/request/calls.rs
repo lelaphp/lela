@@ -122,9 +122,8 @@ impl Request {
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
         let Some(closure) = object.closure(self).cloned() else {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 "Closure object cannot have properties",
             ));
         };

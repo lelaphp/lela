@@ -1350,7 +1350,7 @@ impl Request {
                     String::from_utf8_lossy(name),
                     self.symbols().class_name(found)
                 );
-                let thrown = crate::api::raising::throw_error(self, "Error", &message);
+                let thrown = crate::api::raising::error(self, &message);
                 return Err(self.link_abandoned(name, thrown, false));
             }
             if let Err(thrown) = self.deprecated_trait(found, name) {
@@ -1555,9 +1555,8 @@ impl Request {
     ) -> Result<ClassId, Thrown> {
         let found = crate::api::call::autoload(self, &name.0)?;
         found.ok_or_else(|| {
-            crate::api::raising::throw_error(
+            crate::api::raising::error(
                 self,
-                "Error",
                 &format!("{what} \"{}\" not found", String::from_utf8_lossy(&name.0)),
             )
         })

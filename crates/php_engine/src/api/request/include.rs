@@ -1100,9 +1100,8 @@ impl Request {
                 .into_owned();
         let shown = String::from_utf8_lossy(written).into_owned();
         if kind.required() {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!("Failed opening required '{shown}' (include_path='{include_path}')"),
             ));
         }

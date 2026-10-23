@@ -18,7 +18,7 @@
 use php_unit::decl::{ClassKind, EnumBacking, Type};
 
 use crate::api::abi::{Entry, Refusals};
-use crate::api::raising::{Thrown, arity, throw_error};
+use crate::api::raising::{Thrown, arity, error, throw_error};
 use crate::api::request::{ByValue, Request};
 use crate::api::values::{ClassId, Owner, Value, adopted};
 
@@ -85,13 +85,7 @@ fn called_enum(req: &mut Request) -> Result<ClassId, Thrown> {
     req.frames()
         .called_scope()
         .filter(|class| req.class_is(*class, ClassKind::Enum))
-        .ok_or_else(|| {
-            throw_error(
-                req,
-                "Error",
-                "InternalError: an enum method served on no enum",
-            )
-        })
+        .ok_or_else(|| error(req, "InternalError: an enum method served on no enum"))
 }
 
 /// The names of an enum's cases in declaration order, the constants
@@ -232,11 +226,7 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         .map_or(EnumBacking::Pure, |decl| decl.backing);
     if backing == EnumBacking::Pure {
         let name = req.symbols().class_name(class);
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!("Enum {name} is not backed"),
-        ));
+        return Err(error(req, &format!("Enum {name} is not backed")));
     }
     let given = req.frames().argument(1).unwrap_or_default().deref();
     let wanted = backing_key(req, &given, backing)?;

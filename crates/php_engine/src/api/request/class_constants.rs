@@ -147,7 +147,7 @@ impl Request {
         self.separate_constants(class)?;
         let Some((declaring, constant)) = self.symbols().class_constant_of(class, name) else {
             let message = format!("Undefined constant {}", shown(self));
-            return Err(crate::api::raising::throw_error(self, "Error", &message));
+            return Err(crate::api::raising::error(self, &message));
         };
         let (visibility, is_case) = (constant.visibility, constant.is_case);
         let deprecated = crate::attributes::Flags::of(&constant.attributes)
@@ -158,13 +158,13 @@ impl Request {
         if !self.may_access_from(class, visibility, scope) {
             let word = super::methods::visibility_string(visibility);
             let message = format!("Cannot access {word} constant {}", shown(self));
-            return Err(crate::api::raising::throw_error(self, "Error", &message));
+            return Err(crate::api::raising::error(self, &message));
         }
         // A constant a trait declares is the composing class's to hand
         // out, never the trait's own.
         if self.class_is(asked, ClassKind::Trait) {
             let message = format!("Cannot access trait constant {} directly", shown(self));
-            return Err(crate::api::raising::throw_error(self, "Error", &message));
+            return Err(crate::api::raising::error(self, &message));
         }
         let kept = deprecated.is_none();
         if let Some(constant) = deprecated {

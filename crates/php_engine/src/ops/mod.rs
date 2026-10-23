@@ -22,8 +22,8 @@ use php_heap::{Exponent, Number, Scalar, ZvalType, double_to_string, numeric_pre
 use crate::api::abi::{DimensionRead, PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{
-    Level, Thrown, cannot_add_element, deprecated, illegal_container_offset, none_pending, throw,
-    throw_error, warning,
+    Level, Thrown, cannot_add_element, deprecated, error, illegal_container_offset, none_pending,
+    throw, throw_error, warning,
 };
 use crate::api::request::{HookedTable, Request};
 use crate::api::values::walk::{self, Table};
@@ -151,9 +151,8 @@ pub(crate) fn object_to_string(
         returned.give_up(req);
     }
     let name = req.symbols().class_name(class);
-    Err(throw_error(
+    Err(error(
         req,
-        "Error",
         &format!("Object of class {name} could not be converted to string"),
     ))
 }
@@ -2700,7 +2699,7 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// ```
 pub(crate) fn join(req: &mut Request, a: PhpString, b: PhpString) -> Result<PhpString, Thrown> {
     if a.len() > ZSTR_MAX_LEN - b.len() {
-        return Err(throw_error(req, "Error", "String size overflow"));
+        return Err(error(req, "String size overflow"));
     }
     let joined = req.string_with(a.len() + b.len(), |bytes| {
         let (head, tail) = bytes.split_at_mut(a.len());
@@ -2975,7 +2974,7 @@ pub(crate) fn concat_assign(
         if owned {
             req.release(Value::string(b));
         }
-        return Err(throw_error(req, "Error", "String size overflow"));
+        return Err(error(req, "String size overflow"));
     }
     vacate(req);
     // An empty side hands the other side on, `ZVAL_STR_COPY` of it.
@@ -3625,11 +3624,7 @@ fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<
 /// Nesting level too deep - recursive dependency?
 /// ```
 pub(crate) fn nesting_too_deep(req: &mut Request) -> Thrown {
-    crate::api::raising::throw_error(
-        req,
-        "Error",
-        "Nesting level too deep - recursive dependency?",
-    )
+    crate::api::raising::error(req, "Nesting level too deep - recursive dependency?")
 }
 
 /// `zend_hash_compare_impl` under the protection

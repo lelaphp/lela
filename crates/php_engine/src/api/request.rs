@@ -1647,11 +1647,7 @@ mod tests {
     fn never_served(
         req: &mut Request,
     ) -> Result<crate::api::values::Owner<crate::api::values::Value>, super::Thrown> {
-        Err(crate::api::raising::throw_error(
-            req,
-            "Error",
-            "the destructor was served",
-        ))
+        Err(crate::api::raising::error(req, "the destructor was served"))
     }
 
     /// The same entry, serving: what a native class's `__destruct` is,

@@ -34,9 +34,7 @@ use crate::api::abi::{
     Callable, Entry, Never, OrFalse, Passed, PropertyPurpose, Raw, Union, Variadic,
 };
 use crate::api::coerce::to_string;
-use crate::api::raising::{
-    Thrown, arg_type_error, argument_error, deprecated, throw_error, warning,
-};
+use crate::api::raising::{Thrown, arg_type_error, argument_error, deprecated, error, warning};
 use crate::api::request::Request;
 use crate::api::values::walk::{self, GiveUp, Hold, Unwritten};
 use crate::api::values::{
@@ -814,9 +812,8 @@ fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<Owner<PhpSt
                 scope
             }
             None => {
-                return Err(throw_error(
+                return Err(error(
                     req,
-                    "Error",
                     "get_class() without arguments must be called from within a class",
                 ));
             }

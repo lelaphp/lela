@@ -391,7 +391,7 @@ impl Request {
         let message = sentence
             .replace("{class}", &class)
             .replace("{name}", &shown);
-        crate::api::raising::throw_error(self, "Error", &message)
+        crate::api::raising::error(self, &message)
     }
 
     /// `ZEND_HOOKED_PROPERTY_OFFSET` at `zend_std_read_property`, placed
@@ -503,11 +503,8 @@ impl Request {
             Err(thrown) => return Some(thrown),
         };
         let refused = self.refuse_indirect(object, name, answered, PropertyRead::Write);
-        let thrown = crate::api::raising::throw_error(
-            self,
-            "Error",
-            "Cannot assign by reference to overloaded object",
-        );
+        let thrown =
+            crate::api::raising::error(self, "Cannot assign by reference to overloaded object");
         match refused {
             Ok(value) => self.release(value),
             Err(previous) => {
@@ -860,9 +857,8 @@ fn trampoline_call(
     wanted: usize,
 ) -> Result<(PhpObject, Vec<u8>), Thrown> {
     let Some((name, scope)) = req.trampoline_property() else {
-        return Err(crate::api::raising::throw_error(
+        return Err(crate::api::raising::error(
             req,
-            "Error",
             "InternalError: a parent hook trampoline served with no property",
         ));
     };
@@ -884,9 +880,8 @@ fn trampoline_call(
         }));
     }
     let Some(this) = req.frames().this() else {
-        return Err(crate::api::raising::throw_error(
+        return Err(crate::api::raising::error(
             req,
-            "Error",
             "InternalError: a parent hook trampoline served with no receiver",
         ));
     };

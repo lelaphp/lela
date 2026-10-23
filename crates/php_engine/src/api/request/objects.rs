@@ -739,9 +739,8 @@ impl Request {
             return true;
         }
         let from = self.scope_phrase(self.executed_scope());
-        let thrown = crate::api::raising::throw_error(
+        let thrown = crate::api::raising::error(
             self,
-            "Error",
             &format!("Call to {shown} {class}::__destruct() from {from}"),
         );
         self.leave_pending(&thrown);
@@ -1011,9 +1010,8 @@ impl Request {
             return Ok(());
         }
         let class = self.symbols().class_name(object.class());
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot use object of type {class} as array"),
         ))
     }
@@ -1196,9 +1194,8 @@ impl Request {
         );
         let from = self.scope_phrase(scope);
         object.heap().set_destructor_called(true);
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!("Call to {shown} {class}::__construct() from {from}"),
         ))
     }
@@ -1232,9 +1229,8 @@ impl Request {
                 self.release(value);
                 crate::api::raising::pending(self)?;
                 let class = self.symbols().class_name(object.class());
-                Err(crate::api::raising::throw_error(
+                Err(crate::api::raising::error(
                     self,
-                    "Error",
                     &format!("Method {class}::__toString() must return a string value"),
                 ))
             }
@@ -1391,9 +1387,8 @@ impl Request {
     ) -> Result<Option<std::cmp::Ordering>, Thrown> {
         use std::cmp::Ordering;
         if self.limits().stack_overflowed() {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 "Maximum call stack size reached during object comparison",
             ));
         }
@@ -1878,9 +1873,8 @@ impl Request {
         let walked = walk::foreach(self, properties, Hold::None, |req, row| -> walk::Step {
             let value = match row.value().as_php_ref() {
                 Some(_) if row.value().refcount() > 1 => {
-                    return Err(crate::api::raising::throw_error(
+                    return Err(crate::api::raising::error(
                         req,
-                        "Error",
                         "Cannot assign by reference when cloning with updated properties",
                     ));
                 }
@@ -1936,9 +1930,8 @@ impl Request {
     /// php's `Error` for a class whose `clone_obj` slot is null.
     pub(super) fn uncloneable(&mut self, object: PhpObject) -> Thrown {
         let class = self.symbols().class_name(object.class());
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Trying to clone an uncloneable object of class {class}"),
         )
     }

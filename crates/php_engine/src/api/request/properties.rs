@@ -1366,9 +1366,8 @@ impl Request {
         let from = self.scope_phrase(self.executed_scope());
         let class = self.symbols().class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot {operation} {word} property {class}::${shown} from {from}"),
         )
     }
@@ -2101,9 +2100,8 @@ impl Request {
     ) -> Thrown {
         let class = self.symbols().class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot {operation} readonly property {class}::${shown}"),
         )
     }
@@ -2114,9 +2112,8 @@ impl Request {
     pub(crate) fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
         let class = self.symbols().class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Typed property {class}::${shown} must not be accessed before initialization"),
         )
     }
@@ -2164,11 +2161,7 @@ impl Request {
     /// bool(false)
     /// ```
     pub(crate) fn bad_property_name_error(&mut self) -> Thrown {
-        crate::api::raising::throw_error(
-            self,
-            "Error",
-            "Cannot access property starting with \"\\0\"",
-        )
+        crate::api::raising::error(self, "Cannot access property starting with \"\\0\"")
     }
 
     /// `zend_wrong_offset`: the placement a magic accessor's guard
@@ -2200,9 +2193,8 @@ impl Request {
         let word = super::methods::visibility_string(visibility);
         let class = self.symbols().class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot access {word} property {class}::${shown}"),
         )
     }
@@ -3040,9 +3032,8 @@ impl Request {
         }
         let class = self.symbols().class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        let error = crate::api::raising::throw_error(
+        let error = crate::api::raising::error(
             self,
-            "Error",
             &format!("Object was released while assigning to property {class}::${shown}"),
         );
         held.let_go(self);
@@ -3854,7 +3845,7 @@ impl Request {
         let class_name = self.symbols().class_name(class);
         let cannot = format!("Cannot create dynamic property {class_name}::${shown}");
         if carries == DynamicProperties::Forbidden {
-            return Err(crate::api::raising::throw_error(self, "Error", &cannot));
+            return Err(crate::api::raising::error(self, &cannot));
         }
         let held = Owner::take(self, object.as_value());
         crate::api::raising::deprecated(
@@ -3867,7 +3858,7 @@ impl Request {
             return Ok(());
         }
         none_pending(self)?;
-        Err(crate::api::raising::throw_error(self, "Error", &cannot))
+        Err(crate::api::raising::error(self, &cannot))
     }
 
     /// `ZEND_FE_RESET_R`'s separation of a shared property table

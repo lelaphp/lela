@@ -28,7 +28,7 @@ use crate::api::abi::{
     Instance, NamedVariadic, ObjectHandlers, Passed, Raw, Refusals, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target, write_prop};
-use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
+use crate::api::raising::{Thrown, error, throw, throw_over_pending, warning};
 use crate::api::request::{Refusal, Request};
 use crate::api::values::{
     ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value, adopted, adopted_some,
@@ -113,11 +113,7 @@ impl ObjectHandlers for ClosureHandlers {
     ///   thrown in %s on line 2
     /// ```
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Instantiation of class Closure is not allowed",
-        ))
+        Err(error(req, "Instantiation of class Closure is not allowed"))
     }
 
     /// `zend_closure_free_storage`: `zend_object_std_dtor` first, which
@@ -857,11 +853,7 @@ impl Closure {
     #[php(private, arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        Err(throw_error(
-            req,
-            "Error",
-            "Instantiation of class Closure is not allowed",
-        ))
+        Err(error(req, "Instantiation of class Closure is not allowed"))
     }
 
     /// `Closure::bind(Closure $closure, ?object $newThis, object|string|null $newScope = "static"): ?Closure`,
@@ -1224,11 +1216,7 @@ impl Closure {
     /// ```
     fn getCurrent(req: &mut Request) -> Result<Instance<Closure>, Thrown> {
         let Some(closure) = req.calling_closure() else {
-            return Err(throw_error(
-                req,
-                "Error",
-                "Current function is not a closure",
-            ));
+            return Err(error(req, "Current function is not a closure"));
         };
         Ok(Instance::of(closure))
     }
@@ -1422,11 +1410,7 @@ pub(crate) fn const_expr_closure(
 /// not (`zend_call_known_fcc`); what it returns is the call's.
 pub(crate) fn closure_invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some(this) = req.frames().this() else {
-        return Err(throw_error(
-            req,
-            "Error",
-            "Closure::__invoke called with no receiver",
-        ));
+        return Err(error(req, "Closure::__invoke called with no receiver"));
     };
     let arguments: Vec<Value> = (1..=u32::try_from(req.frames().argument_count())
         .unwrap_or(u32::MAX))
@@ -2318,7 +2302,7 @@ fn create_closure(
     this: Option<PhpObject>,
 ) -> Result<PhpObject, Thrown> {
     let Some(class) = req.class_named(Bare::resolved(b"Closure")) else {
-        return Err(throw_error(req, "Error", "Class \"Closure\" not found"));
+        return Err(error(req, "Class \"Closure\" not found"));
     };
     let bound = info
         .bound

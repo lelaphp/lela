@@ -375,11 +375,7 @@ impl Request {
     /// native being served.
     pub(crate) fn dynamic_call(&mut self) -> Thrown {
         let name = self.frames().active_function_name();
-        crate::api::raising::throw_error(
-            self,
-            "Error",
-            &format!("Cannot call {name}() dynamically"),
-        )
+        crate::api::raising::error(self, &format!("Cannot call {name}() dynamically"))
     }
 
     /// `zend_active_function()`: the native being served, which is the

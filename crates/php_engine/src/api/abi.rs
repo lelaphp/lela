@@ -3315,7 +3315,7 @@ impl Refusals {
             }
             None => format!("Cannot directly construct {class}"),
         };
-        crate::api::raising::throw_error(req, "Error", &message)
+        crate::api::raising::error(req, &message)
     }
 }
 

@@ -466,9 +466,8 @@ impl Request {
             String::from_utf8_lossy(&name.0)
         );
         if is_abstract {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!("Cannot call abstract method {shown}()"),
             ));
         }
@@ -577,9 +576,8 @@ impl Request {
             ClassKind::Class => return Ok(()),
         };
         let name = self.symbols().class_name(class);
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot instantiate {what} {name}"),
         ))
     }

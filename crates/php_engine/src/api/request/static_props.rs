@@ -325,7 +325,7 @@ impl Request {
                     self.symbols().class_name(info.declaring),
                     String::from_utf8_lossy(&property.name.0)
                 );
-                return Err(crate::api::raising::throw_error(self, "Error", &message));
+                return Err(crate::api::raising::error(self, &message));
             }
             return Ok(Value::null());
         }

@@ -315,7 +315,7 @@ fn disable_functions_takes_its_natives_out_of_the_function_table() {
 /// is zero.
 #[test]
 fn a_whole_number_ini_value_is_read_as_php_s_quantity_reads_it() {
-    let read = |value: &str| ini_quantity(value.as_bytes());
+    let read = |value: &str| crate::ini_quantity::parse(value.as_bytes()).0;
     assert_eq!(
         read("0x10000"),
         0x1_0000,

@@ -13,7 +13,7 @@ use php_unit::{ConstIdx, Opcode, Unit};
 
 use crate::api::abi::{Callable, PropertyRead};
 use crate::api::raising::{
-    Thrown, argument_error, class_not_found, non_static_method_call, throw_error,
+    Thrown, argument_error, class_not_found, error, non_static_method_call, throw_error,
     undefined_function, undefined_method,
 };
 use crate::api::request::{Request, Strategy};
@@ -551,9 +551,8 @@ pub(crate) fn call_array_made(
     }
     match refused {
         None => serve(req, target, &placement.arguments, &placement.extra_named),
-        Some(None) => Err(throw_error(
+        Some(None) => Err(error(
             req,
-            "Error",
             "Cannot use positional argument after named argument",
         )),
         Some(Some((named, name))) => Err(named.throw(req, name)),
@@ -697,7 +696,7 @@ impl NamedRefused {
                 format!("Named parameter ${spelled} overwrites previous argument")
             }
         };
-        throw_error(req, "Error", &message)
+        error(req, &message)
     }
 }
 
@@ -1278,7 +1277,7 @@ fn construct_object(
                 "Unknown named parameter ${}",
                 String::from_utf8_lossy(name.as_bytes())
             );
-            return Err(throw_error(req, "Error", &message));
+            return Err(error(req, &message));
         }
         return Ok(());
     };
@@ -2108,9 +2107,8 @@ fn global_constant(
         unqualified_constant(req, name)
     };
     let Some((key, value)) = found else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             &format!("Undefined constant \"{}\"", String::from_utf8_lossy(name)),
         ));
     };
@@ -2153,9 +2151,8 @@ pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thr
     }
     if name.eq_ignore_ascii_case(b"static") {
         return req.frames().called_scope().ok_or_else(|| {
-            throw_error(
+            error(
                 req,
-                "Error",
                 "Cannot access \"static\" when no class scope is active",
             )
         });
@@ -2655,17 +2652,15 @@ fn class_name_node(
     let parent = class.eq_ignore_ascii_case(b"parent");
     let name = if parent || class.eq_ignore_ascii_case(b"self") {
         let Some(scope) = scope else {
-            return Err(throw_error(
+            return Err(error(
                 req,
-                "Error",
                 "Cannot use \"self\" when no class scope is active",
             ));
         };
         let named = if parent {
             req.symbols().class_parent(scope).ok_or_else(|| {
-                throw_error(
+                error(
                     req,
-                    "Error",
                     "Cannot use \"parent\" when current class scope has no parent",
                 )
             })?
@@ -2826,9 +2821,8 @@ fn chain_node(
             }
             if under.value.deref().as_object().is_some() {
                 req.release(under.value);
-                return Err(throw_error(
+                return Err(error(
                     req,
-                    "Error",
                     "Cannot use [] on objects in constant expression",
                 ));
             }
@@ -2916,9 +2910,8 @@ fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, 
         .class_decl(instance.class())
         .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Enum);
     if !is_enum {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "Fetching properties on non-enums in constant expressions is not allowed",
         ));
     }
@@ -3179,9 +3172,8 @@ fn method_callable(
     let ce = const_class(req, &class.0, scope)?;
     let magic = req.symbols().method_named(ce, b"__callstatic").is_some();
     let magic_refused = |req: &mut Request| {
-        throw_error(
+        error(
             req,
-            "Error",
             "Creating a callable for the magic __callStatic() method is not supported in constant expressions",
         )
     };
@@ -3221,9 +3213,8 @@ fn const_class(req: &mut Request, class: &[u8], scope: Option<ClassId>) -> Resul
     }
     let word = if parent { "parent" } else { "self" };
     let Some(scope) = scope else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             &format!("Cannot access \"{word}\" when no class scope is active"),
         ));
     };
@@ -3231,9 +3222,8 @@ fn const_class(req: &mut Request, class: &[u8], scope: Option<ClassId>) -> Resul
         return Ok(scope);
     }
     req.symbols().class_parent(scope).ok_or_else(|| {
-        throw_error(
+        error(
             req,
-            "Error",
             "Cannot access \"parent\" when current class scope has no parent",
         )
     })
@@ -3269,9 +3259,8 @@ fn add_unpacked_element(
     spread: &Value,
 ) -> Result<(), Thrown> {
     let Some(source) = spread.deref().as_array() else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "Only arrays can be unpacked in constant expression",
         ));
     };
@@ -3295,11 +3284,7 @@ fn add_unpacked_element(
 /// php's `Error` for a node its constant-expression walk does not
 /// evaluate.
 fn invalid_operations(req: &mut Request) -> Thrown {
-    throw_error(
-        req,
-        "Error",
-        "Constant expression contains invalid operations",
-    )
+    error(req, "Constant expression contains invalid operations")
 }
 
 /// One binary operator of a constant expression, by the spelling the

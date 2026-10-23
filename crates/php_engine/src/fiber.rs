@@ -49,7 +49,7 @@ use crate::api::abi::{
     Callable, DtorObj, GcTable, Instance, NamedVariadic, ObjectHandlers, Refusals, This,
 };
 use crate::api::call::call_named_made;
-use crate::api::raising::{Thrown, throw, throw_error};
+use crate::api::raising::{Thrown, error, throw, throw_error};
 use crate::api::request::{ObservedChain, Raised, Request};
 use crate::api::values::{Owner, PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
@@ -883,11 +883,7 @@ pub(crate) fn with_held<R>(
 /// The payload of `object`, which a `Fiber`'s object always carries.
 fn payload(req: &mut Request, object: PhpObject) -> Result<&mut ZendFiber, Thrown> {
     if object.native::<ZendFiber>(req).is_none() {
-        return Err(throw_error(
-            req,
-            "Error",
-            "Fiber object with no fiber payload",
-        ));
+        return Err(error(req, "Fiber object with no fiber payload"));
     }
     object
         .native_mut::<ZendFiber>(req)
@@ -1657,9 +1653,8 @@ fn switch_into<P: HoldsCoroutine>(
 ) -> Result<Transfer, Thrown> {
     let coroutine = coroutine_of::<P>(req, object)?;
     let (Some(mut stack), Some(own)) = (coroutine.stack.take(), coroutine.execution.take()) else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "InternalError: a fiber coroutine resumed with no stack of its own",
         ));
     };
@@ -1940,9 +1935,8 @@ fn suspend_into<P: HoldsCoroutine>(
         .iter()
         .any(|running| running.fiber.is(object));
     if !running {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "InternalError: a suspend of a fiber coroutine that is not running",
         ));
     }
@@ -2102,9 +2096,8 @@ fn start_gc_fiber(req: &mut Request) {
 /// destroyed at the request's end while it waits returns too.
 fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some(fiber) = req.fibers().gc.fiber else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "InternalError: gc_destructor_fiber served with no collector's fiber",
         ));
     };
@@ -2173,9 +2166,8 @@ fn start(
         ));
     }
     let Some(callable) = fiber.callable.clone() else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "Cannot start a fiber whose constructor was not called",
         ));
     };

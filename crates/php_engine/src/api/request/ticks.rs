@@ -130,9 +130,8 @@ impl Code<&mut Request> {
             return Ok(false);
         };
         if self.0.ticks.tick_functions[at].calling {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self.0,
-                "Error",
                 "Registered tick function cannot be unregistered while it is being executed",
             ));
         }
