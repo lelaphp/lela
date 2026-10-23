@@ -78,7 +78,7 @@ fn a_call_by_name_resolves_the_lowered_constant_and_serves_the_native() {
         Ok(Stepped::Same(frame))
     );
     assert_eq!(
-        served!(req, frame, at => do_fcall_by_name::<Nop>(&mut req, frame, code, &call)),
+        served!(req, frame, at => do_fcall_by_name::<Nop>(&mut req, frame, code, &call, at)),
         Ok(Stepped::Same(frame))
     );
     assert_eq!(req.slot(frame, 0).as_int(), Some(3));

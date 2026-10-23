@@ -3575,10 +3575,12 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
     frame: FrameRef,
     _: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_enter(req, frame, op, true) {
+    if let Some(edge) = inline_enter(req, (frame, at), op, true) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     do_call(req, frame, op, "ZEND_DO_FCALL_BY_NAME")
 }
 
@@ -3607,10 +3609,12 @@ pub(crate) fn do_fcall<T: Tier>(
     frame: FrameRef,
     _: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_enter(req, frame, op, true) {
+    if let Some(edge) = inline_enter(req, (frame, at), op, true) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     do_call(req, frame, op, "ZEND_DO_FCALL")
 }
 
@@ -3922,10 +3926,12 @@ pub(crate) fn do_ucall<T: Tier>(
     frame: FrameRef,
     _: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_enter(req, frame, op, false) {
+    if let Some(edge) = inline_enter(req, (frame, at), op, false) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     do_call(req, frame, op, "ZEND_DO_UCALL")
 }
 
@@ -3934,11 +3940,17 @@ pub(crate) fn do_ucall<T: Tier>(
 /// `i_init_func_execute_data` makes a frame of by writing words alone
 /// ([`Request::enter_call`]), entered with no call out of the loop. The
 /// answer is [`Stepped::Pushed`], as [`enter`]'s; `None`, with nothing
-/// touched, for every other call, which [`do_call`] serves.
+/// touched but the caller's position, `SAVE_OPLINE()` at `at`, for
+/// every other call, which [`do_call`] serves.
 #[inline(always)] // as `inline_init_fcall`
-fn inline_enter(req: &mut Request, frame: FrameRef, op: &Opline, flagged: bool) -> Option<Edge> {
+fn inline_enter(
+    req: &mut Request,
+    (frame, at): (FrameRef, u32),
+    op: &Opline,
+    flagged: bool,
+) -> Option<Edge> {
     let returns_to = (op.out_type != OperandKind::Unused).then_some(op.out);
-    let callee = req.enter_call(returns_to, frame, flagged)?;
+    let callee = req.enter_call(returns_to, (frame, at), flagged)?;
     Some(Ok(Stepped::Pushed(callee).into()))
 }
 

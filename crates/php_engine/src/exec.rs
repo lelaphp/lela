@@ -3233,16 +3233,21 @@ pub(crate) struct Activated {
 }
 
 /// The `RECV` oplines from `start` in `code`, the op array `callee`
-/// serves, that php's handler passes on its first test, read off the
-/// frame once: each a parameter the call passed an argument for, not
-/// by reference, of a type the mask the compiler put in `op2` holds
-/// (`ZEND_RECV`'s `opline->op2.num & (1u << Z_TYPE_P(param))`,
-/// `MAY_BE_ANY` for a parameter with no type). The answer is the first
-/// opline that does not pass, where the handlers take over, at most the
-/// entry safepoint; nothing observes these, so no observer is told.
+/// serves, up to `entry`, its entry safepoint, that php's handler
+/// passes on its first test, read off the frame once: each a parameter
+/// the call passed an argument for, not by reference, of a type the
+/// mask the compiler put in `op2` holds (`ZEND_RECV`'s
+/// `opline->op2.num & (1u << Z_TYPE_P(param))`, `MAY_BE_ANY` for a
+/// parameter with no type). The answer is the first opline that does
+/// not pass, where the handlers take over, at most `entry`; nothing
+/// observes these, so no observer is told.
 #[inline]
-pub(crate) fn recv_passed(req: &Request, callee: FrameRef, code: &OpArray, start: u32) -> u32 {
-    let entry = entry_of(code);
+pub(crate) fn recv_passed(
+    req: &Request,
+    callee: FrameRef,
+    code: &OpArray,
+    (start, entry): (u32, u32),
+) -> u32 {
     let Some(frame) = req.vm().stack.frame(callee) else {
         return start;
     };

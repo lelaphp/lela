@@ -16,6 +16,7 @@ use crate::tier::Stepped;
 
 use super::Frames;
 use super::Request;
+use super::calls::user_in;
 
 /// The links of one stack, innermost first: the records `records`
 /// numbers that are on php's chain, every user frame and every native's
@@ -1586,43 +1587,71 @@ impl Request {
     pub(crate) fn enter_call(
         &mut self,
         returns_to: Option<u32>,
-        caller: FrameRef,
+        (caller, at): (FrameRef, u32),
         flagged: bool,
     ) -> Option<FrameRef> {
-        let (call, top) = self.vm.stack.top()?;
+        let call = self.vm.stack.current();
+        // The callee on top and the caller below it lent together, one
+        // look at the frame table for both, and the function's row read
+        // off the tables beside the stack.
+        let Request {
+            vm,
+            map,
+            user_functions,
+            arena,
+            ..
+        } = self;
+        let (top, from) = vm.stack.top_and_frame_mut(caller)?;
         let header = top.header();
         if !header.info.building() {
             return None;
         }
+        if !header.info.plain_entry() {
+            return self.enter_flagged(returns_to, (caller, at), flagged);
+        }
+        let function = header.function?;
+        let passed = header.num_args;
+        let shape = user_in(user_functions, arena, function)?.shape;
+        // The `INIT` found the entry plain ([`exec::CallInfo::plain_entry`]):
+        // the function's own cache, and no attribute to raise.
+        let cache = shape.cache;
+        if passed > shape.parameters || top.len() < shape.slots as usize || !map.laid(cache) {
+            return None;
+        }
+        entered_words((top, from), (caller, at), returns_to, shape, cache);
+        crate::observer::call(self, call);
+        Some(call)
+    }
+
+    /// [`Request::enter_call`] over a call whose `INIT` found its entry
+    /// not plain: the attributes `flagged` raises asked, and a closure's
+    /// own cache read in place of its function's.
+    #[cold]
+    #[inline(never)]
+    fn enter_flagged(
+        &mut self,
+        returns_to: Option<u32>,
+        (caller, at): (FrameRef, u32),
+        flagged: bool,
+    ) -> Option<FrameRef> {
+        let (call, top) = self.vm.stack.top()?;
+        let header = top.header();
         let function = header.function?;
         let passed = header.num_args;
         let len = top.len();
         let user = self.user_function(function)?;
         let shape = user.shape;
-        // The `INIT` found the entry plain where it could
-        // ([`exec::CallInfo::plain_entry`]): the function's own cache, and
-        // no attribute to raise. Otherwise both are asked here.
-        let cache = if header.info.plain_entry() {
-            shape.cache
-        } else {
-            if flagged && (user.flags.deprecated || user.flags.no_discard && returns_to.is_none()) {
-                return None;
-            }
-            self.closure_own_cache(header.closure)
-                .unwrap_or(shape.cache)
-        };
+        if flagged && (user.flags.deprecated || user.flags.no_discard && returns_to.is_none()) {
+            return None;
+        }
+        let cache = self
+            .closure_own_cache(header.closure)
+            .unwrap_or(shape.cache);
         if passed > shape.parameters || len < shape.slots as usize || !self.map.laid(cache) {
             return None;
         }
-        let opline =
-            exec::skipped_recv(passed, shape.parameters, shape.typed, shape.entry).unwrap_or(0);
-        let (_, top) = self.vm.stack.top_mut()?;
-        let laid = top.header_mut();
-        laid.info.set_serving();
-        laid.info.set_return_used(returns_to.is_some());
-        laid.activate(cache, opline, false);
-        laid.set_returns_to(returns_to);
-        laid.set_caller(exec::Caller::Opline(caller));
+        let frames = self.vm.stack.top_and_frame_mut(caller)?;
+        entered_words(frames, (caller, at), returns_to, shape, cache);
         crate::observer::call(self, call);
         Some(call)
     }
@@ -2365,4 +2394,31 @@ pub(crate) enum CodeFrom {
     /// `ZEND_CALL_NESTED_CODE`: nested in the frame, its value read into
     /// the temporary where one is.
     Nested(FrameRef, Option<(FrameRef, u32)>),
+}
+
+/// The words `i_init_func_execute_data` writes ([`Request::enter_call`]):
+/// the caller standing at its call opline, `SAVE_OPLINE()`, which the
+/// callee's backtrace reads; and the call made the callee's frame, at
+/// the opline its prologue's skip leaves it, reading `cache`, returning
+/// into `returns_to`.
+#[inline(always)] // part of `enter_call`'s inline path
+fn entered_words(
+    (top, from): (
+        &mut php_heap::Frame<exec::Header>,
+        &mut php_heap::Frame<exec::Header>,
+    ),
+    (caller, at): (FrameRef, u32),
+    returns_to: Option<u32>,
+    shape: super::FrameShape,
+    cache: exec::CacheAt,
+) {
+    from.header_mut().opline = at;
+    let laid = top.header_mut();
+    let opline =
+        exec::skipped_recv(laid.num_args, shape.parameters, shape.typed, shape.entry).unwrap_or(0);
+    laid.info.set_serving();
+    laid.info.set_return_used(returns_to.is_some());
+    laid.activate(cache, opline, false);
+    laid.set_returns_to(returns_to);
+    laid.set_caller(exec::Caller::Opline(caller));
 }
