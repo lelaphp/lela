@@ -73,12 +73,12 @@ use cranelift_codegen::isa::{self, OwnedTargetIsa};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_codegen::{Context, Final, MachSrcLoc};
 use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall};
-use php_unit::OplineIdx;
+use php_unit::{MapPtrOffset, OplineIdx};
 
 use crate::policy::{Mode, Policy};
 use crate::record::{Began, Stop};
 use crate::table::TraceName;
-use crate::types::{Abort, Check, End, ExitId, ExitSpec, GuardAt, Interrupt, Op, TraceIr};
+use crate::types::{Abort, Check, End, ExitId, ExitSpec, GuardAt, Interrupt, Op, Repeat, TraceIr};
 
 /// A trace in final bytes (`jit-design.md` §4.3), what the `Backend` makes
 /// and `table::TraceTable::publish` copies into the code arena once:
@@ -98,6 +98,10 @@ pub(crate) struct Compiled {
     /// A power of two.
     pub(crate) align: usize,
     pub(crate) exits: Box<[ExitSpec]>,
+    /// Whether a side trace's link to it tests the interrupt first, php's
+    /// `ZEND_JIT_TRACE_CHECK_INTERRUPT`: a loop, but one of recursive
+    /// returns (`Z/ext/opcache/jit/zend_jit_trace.c:7209-7212`).
+    pub(crate) checks_interrupt: bool,
     /// The exit a trace that does not loop ends through, none for a loop:
     /// php's return to the interpreter at a trace's end
     /// (`zend_jit_trace_return`), which no side trace grows from.
@@ -182,6 +186,37 @@ impl Fuzzed {
         }
     }
 }
+
+/// The engine's number of the op array `f` names, which compiled code,
+/// the kernels and a `Stood` name it by; none for a request's own.
+pub(crate) fn engine_offset(f: FuncRef) -> Option<u32> {
+    match f.offset() {
+        MapPtrOffset::Engine(n) => Some(n),
+        MapPtrOffset::Request(_) => None,
+    }
+}
+
+/// Where a frame stands, as a [`Stood`] holds it: its op array by the
+/// engine's number and its opline, in that order, which compiled code
+/// reads and writes as one word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Stands {
+    pub(crate) func: u32,
+    pub(crate) opline: u32,
+}
+
+impl Stands {
+    /// The one word a `Stood` holds it in, on the little-endian hosts
+    /// compiled code runs on.
+    pub(crate) fn word(self) -> u64 {
+        u64::from(self.func) | u64::from(self.opline) << 32
+    }
+}
+
+const _: () = assert!(
+    std::mem::offset_of!(Stood, opline) == std::mem::offset_of!(Stood, func) + 4
+        && cfg!(target_endian = "little")
+);
 
 /// How a trace is entered by a jump from another (`jit-design.md` §4.6):
 /// the address of its body and its number, which the jump writes at
@@ -315,12 +350,11 @@ impl LandingSlots {
         self.0.as_ptr().addr()
     }
 
-    /// The key of the landing at `opline` of the op array the engine
-    /// numbers `func`: the two words a `Stood` holds them in, read as one,
-    /// with [`LANDING_TAG`]. An op array's oplines are numbered below
-    /// `2^31`.
-    pub(crate) fn key(func: u32, opline: u32) -> u64 {
-        u64::from(func) | u64::from(opline) << 32 | LANDING_TAG
+    /// The key of the landing where `stands` says: the word a `Stood`
+    /// holds it in, with [`LANDING_TAG`]. An op array's oplines are
+    /// numbered below `2^31`.
+    pub(crate) fn key(stands: Stands) -> u64 {
+        stands.word() | LANDING_TAG
     }
 
     /// `landed` remembered as the trace compiled at the landing `key`
@@ -368,10 +402,9 @@ pub(crate) struct Linked {
     pub(crate) body: usize,
     pub(crate) trace: u32,
     pub(crate) interrupt: bool,
-    /// The op array, by the engine's number, and the opline the trace
-    /// opens at, where a link that names no opline leaves the frame
-    /// standing.
-    pub(crate) opens: Option<(u32, u32)>,
+    /// Where the trace opens, where a link that names no opline leaves the
+    /// frame standing.
+    pub(crate) opens: Option<Stands>,
 }
 
 /// Where one recorded opline's code begins: the op array, named with
@@ -803,6 +836,7 @@ impl Backend {
                 End::Leave(exit) | End::Return(exit) => Some(exit),
                 End::Loop(_) => None,
             },
+            checks_interrupt: matches!(ir.end, End::Loop(header) if header.repeat != Repeat::Return),
             stub: stub_at(ir),
             opens: opens_at(ir),
             entry_stood: stood_at_entry(ir),

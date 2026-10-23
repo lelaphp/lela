@@ -50,7 +50,7 @@ use php_engine::tier::{self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Ste
 use php_heap::{HeaderImage, Zval};
 use php_unit::{MapPtrOffset, OplineIdx};
 
-use crate::lower::{self, Stood};
+use crate::lower::{self, Stood, engine_offset};
 use crate::table::{Exit, Trace};
 use crate::types::{ExitId, Landing};
 
@@ -670,15 +670,6 @@ fn where_stood(
     })
 }
 
-/// The engine offset that numbers the op array `f` names, which compiled
-/// code compares a callee with; none for a request's own.
-fn engine_offset(f: FuncRef) -> Option<u32> {
-    match f.offset() {
-        MapPtrOffset::Engine(n) => Some(n),
-        MapPtrOffset::Request(_) => None,
-    }
-}
-
 /// The zval compiled code hands a kernel as its two words, its value, a
 /// pointer for a counted type, and php's `Z_TYPE_INFO`, with a `u2` of
 /// zero.
@@ -1109,8 +1100,7 @@ impl Rows {
     /// `images`, and whether they are `ready`; nothing for a number past
     /// the segments.
     fn lay(&self, id: crate::table::TraceId, images: *const usize, ready: bool) {
-        let n = id.get() as usize;
-        let (segment, at) = (n / lower::ROW_SEGMENT, n % lower::ROW_SEGMENT);
+        let (segment, at) = id.slot();
         let (Some(cell), Some(first)) = (self.segments.get(segment), self.firsts.get(segment))
         else {
             return;
@@ -1138,7 +1128,8 @@ pub(crate) fn remembered(req: &Request, frame: FrameRef, escaped: &Trace, landed
     let func = tier::frame_cache(req, frame).and_then(engine_offset);
     let opline = tier::frame(req, frame).map(|view| view.opline().0);
     if let (Some(func), Some(opline)) = (func, opline) {
-        (escaped.landings).remember(lower::LandingSlots::key(func, opline), &landed.entrance);
+        let key = lower::LandingSlots::key(lower::Stands { func, opline });
+        escaped.landings.remember(key, &landed.entrance);
     }
 }
 

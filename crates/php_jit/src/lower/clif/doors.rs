@@ -35,7 +35,7 @@ use super::{
 use crate::lower::{
     ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, ESCAPED, IMAGES_AT, LANDING_BYTES, LANDING_KEY,
     LANDING_TAG, LANDINGS, Linked, READY_AT, ROOT_AT, ROW_BYTES, ROW_IMAGES, ROW_READY,
-    ROW_SEGMENT, ROWS_AT, STOOD_AT, TRACE_AT,
+    ROW_SEGMENT, ROWS_AT, STOOD_AT, Stands, TRACE_AT,
 };
 use crate::types::{Abort, End, ExitId, Grows, Landing};
 
@@ -66,6 +66,9 @@ struct Leaving {
     stand: Option<Value>,
 }
 
+/// A trace's number's place in its segment of rows, as a mask.
+const ROW_MASK: i32 = imm(ROW_SEGMENT - 1);
+
 /// Where the frame's opline is in its room, `EX(opline)`.
 const OPLINE: i32 = imm(FRAME.opline() as usize);
 
@@ -77,18 +80,21 @@ impl Emit<'_> {
     /// stands already, in a frame of that op array; and a landing that
     /// frees nothing, as `enter`'s
     /// landing of it does nothing but stand the frame.
-    fn goes_on_at(&self, exit: ExitId, linked: Option<Linked>) -> Option<(u32, u32)> {
+    fn goes_on_at(&self, exit: ExitId, linked: Option<Linked>) -> Option<Stands> {
         let spec = self.ir.exits.get(usize::from(exit.0))?;
         if !matches!(spec.landing, Landing::Plain | Landing::RestoreCall) {
             return None;
         }
         if let Some(opline) = spec.opline {
             let frame = self.ir.frames.get(usize::from(spec.frame.0))?;
-            return Some((engine_offset(frame.func).ok()?, opline.0));
+            return Some(Stands {
+                func: engine_offset(frame.func).ok()?,
+                opline: opline.0,
+            });
         }
-        let (func, opline) = linked?.opens?;
+        let opens = linked?.opens?;
         let running = self.ir.frames.get(usize::from(self.running.0))?;
-        (engine_offset(running.func).ok()? == func).then_some((func, opline))
+        (engine_offset(running.func).ok()? == opens.func).then_some(opens)
     }
 
     /// Whether the entry of a trace entered from `exit` can be laid in
@@ -382,10 +388,10 @@ impl Emit<'_> {
     /// stack's room, and the frame to be stood at that opline.
     fn exit_leaving(
         &mut self,
-        (func, opline): (u32, u32),
+        stands: Stands,
         [call, room, place]: [Value; 3],
     ) -> Result<Leaving, Abort> {
-        let at = u64::from(func) | u64::from(opline) << 32;
+        let at = stands.word();
         let at = self.b.ins().iconst(I64, at.cast_signed());
         let stack = self.stack()?;
         let top = self.b.ins().load(I64, trusted(), stack, TOP);
@@ -395,7 +401,7 @@ impl Emit<'_> {
             call,
             at,
             left: self.left_past(stack, top),
-            stand: Some(self.b.ins().iconst(I32, i64::from(opline))),
+            stand: Some(self.b.ins().iconst(I32, i64::from(stands.opline))),
         })
     }
 
@@ -454,10 +460,7 @@ impl Emit<'_> {
         let segment = self.b.ins().iadd(rows, segment);
         let first = self.b.ins().load(I64, trusted(), segment, 0);
         self.closed_unless(first, closed);
-        let within = self
-            .b
-            .ins()
-            .band_imm_u(number, i64::try_from(ROW_SEGMENT - 1).unwrap_or(0));
+        let within = self.b.ins().band_imm_u(number, i64::from(ROW_MASK));
         let within = self.b.ins().imul_imm_u(within, ROW_BYTES);
         let row = self.b.ins().iadd(first, within);
         let ready = self.b.ins().load(I32, trusted(), row, ROW_READY);

@@ -125,6 +125,7 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
         align: 4,
         exits: exits.into(),
         leaves: None,
+        checks_interrupt: false,
         stub: None,
         opens: None,
         entry_stood: false,

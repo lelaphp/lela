@@ -43,7 +43,9 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
 
-use crate::lower::{Compiled, Entrance, EntrySlots, Fuzzed, LandingSlots, Linked, Mark};
+use crate::lower::{
+    Compiled, Entrance, EntrySlots, Fuzzed, LandingSlots, Linked, Mark, Stands, engine_offset,
+};
 use crate::policy::{Place, Policy};
 use crate::record::{Entered, Start, Stop};
 use crate::types::{ExitId, Grows, Landing};
@@ -98,8 +100,9 @@ impl TraceId {
         self.0
     }
 
-    /// Its place in a table: the segment, and the slot in it.
-    fn slot(self) -> (usize, usize) {
+    /// Its place in a table, and in a request's rows of a table's traces
+    /// (`enter::Rows`): the segment, and the slot in it.
+    pub(crate) fn slot(self) -> (usize, usize) {
         let n = self.0 as usize;
         (n / SEGMENT, n % SEGMENT)
     }
@@ -173,6 +176,9 @@ pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) exits: Box<[Exit]>,
     /// The exit it ends through where it does not loop.
     pub(crate) leaves: Option<ExitId>,
+    /// Whether a side trace's link to it tests the interrupt first
+    /// (`lower::Compiled::checks_interrupt`).
+    pub(crate) checks_interrupt: bool,
     /// Where a loop whose interrupt test takes php's stub stands its
     /// frame as it answers `lower::INTERRUPTED`: its header's opline.
     pub(crate) stub: Option<OplineIdx>,
@@ -238,16 +244,19 @@ impl<P: Pages> Trace<P> {
     /// What a link to it jumps to (`lower::Linked`), from a trace that
     /// `start` grew: its entrance, and whether the jump tests the
     /// interrupt first, which php's does where a side trace links to its
-    /// own root and the root loops (`zend_jit_trace.c:7285-7303`).
+    /// own root and the root loops other than by recursive returns
+    /// (`zend_jit_trace.c:7209-7212`, `:7285-7303`).
     pub(crate) fn linked(&self, from_root: Option<TraceId>) -> Linked {
-        let opens = self.opens.and_then(|(func, opline)| match func.offset() {
-            php_unit::MapPtrOffset::Engine(func) => Some((func, opline.0)),
-            php_unit::MapPtrOffset::Request(_) => None,
+        let opens = self.opens.and_then(|(func, opline)| {
+            Some(Stands {
+                func: engine_offset(func)?,
+                opline: opline.0,
+            })
         });
         Linked {
             body: self.entrance.body,
             trace: self.entrance.trace,
-            interrupt: from_root == Some(self.id) && self.leaves.is_none(),
+            interrupt: from_root == Some(self.id) && self.checks_interrupt,
             opens,
         }
     }
@@ -754,6 +763,7 @@ impl<P: Pages> TraceTable<P> {
             root: admitted.root,
             exits: built,
             leaves: compiled.leaves,
+            checks_interrupt: compiled.checks_interrupt,
             stub: compiled.stub,
             opens: compiled.opens,
             entry_stood: compiled.entry_stood,

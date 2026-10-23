@@ -42,7 +42,7 @@ use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use php_engine::tier::{FuncRef, PlainCall};
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
-use php_unit::{MapPtrOffset, Opcode, OplineIdx};
+use php_unit::{Opcode, OplineIdx};
 
 use super::{
     ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
@@ -2514,8 +2514,5 @@ fn slot_offset(var: u32) -> Result<i32, Abort> {
 /// The engine offset that numbers an op array a trace holds; a
 /// request-scoped one is never held (`jit-design.md` §4.1).
 fn engine_offset(func: FuncRef) -> Result<u32, Abort> {
-    match func.offset() {
-        MapPtrOffset::Engine(n) => Ok(n),
-        MapPtrOffset::Request(_) => Err(mismatch("a request-scoped op array in a trace")),
-    }
+    super::engine_offset(func).ok_or_else(|| mismatch("a request-scoped op array in a trace"))
 }

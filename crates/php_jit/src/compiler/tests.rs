@@ -101,6 +101,7 @@ fn body(len: usize) -> Compiled {
         align: 16,
         exits: Box::new([]),
         leaves: None,
+        checks_interrupt: false,
         stub: None,
         opens: None,
         entry_stood: false,

@@ -65,6 +65,7 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         align: 4,
         exits: exits.into(),
         leaves: None,
+        checks_interrupt: false,
         stub: None,
         opens: None,
         entry_stood: false,

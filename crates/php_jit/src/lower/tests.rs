@@ -658,14 +658,14 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
 /// free slot's zero, and a landing past the slots left to the crossing.
 #[test]
 fn a_landing_slot_names_the_first_trace_entered_at_its_landing() {
-    use super::{Entrance, LANDING_TAG, LANDINGS, LandingSlots};
+    use super::{Entrance, LANDING_TAG, LANDINGS, LandingSlots, Stands};
     let entrance = |trace| Entrance {
         body: 0x1000,
         trace,
     };
     let (first, second, third) = (entrance(1), entrance(2), entrance(3));
     let slots = LandingSlots::new();
-    let key = LandingSlots::key(0, 0);
+    let key = LandingSlots::key(Stands { func: 0, opline: 0 });
     assert_eq!(
         key, LANDING_TAG,
         "the first opline of op array 0 is no free slot"
@@ -674,12 +674,15 @@ fn a_landing_slot_names_the_first_trace_entered_at_its_landing() {
     slots.remember(key, &second);
     let at = |entrance: &Entrance| std::ptr::from_ref(entrance).addr();
     assert_eq!(slots.landed(key), Some(at(&first)));
-    let other = LandingSlots::key(7, 9);
+    let other = LandingSlots::key(Stands { func: 7, opline: 9 });
     assert_eq!(other, 7 | 9 << 32 | LANDING_TAG);
     slots.remember(other, &second);
     assert_eq!(slots.landed(other), Some(at(&second)));
     assert_eq!(LANDINGS, 2);
-    let past = LandingSlots::key(7, 10);
+    let past = LandingSlots::key(Stands {
+        func: 7,
+        opline: 10,
+    });
     slots.remember(past, &third);
     assert_eq!(slots.landed(past), None);
 }
@@ -730,7 +733,7 @@ fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
         body,
         trace: link.get(),
         interrupt,
-        opens: Some((g, 1)),
+        opens: Some(super::Stands { func: g, opline: 1 }),
     };
     let plain = lowered(None)?;
     assert!(!plain.contains("return_call_indirect"), "{plain}");

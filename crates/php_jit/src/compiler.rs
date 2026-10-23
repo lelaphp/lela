@@ -31,7 +31,7 @@ use crate::lower::{Compiled, Linked};
 use crate::policy::{self, Claim, Compile, Mode, Outcome, State, TraceEvent};
 use crate::record::{self, Recorded, Start, Stop};
 use crate::table::{self, Table, TraceName, Unpublished};
-use crate::types::{self, Abort, TraceIr};
+use crate::types::{self, Abort, End, TraceIr};
 
 #[cfg(test)]
 #[allow(
@@ -355,9 +355,11 @@ fn published(
     start: Start,
 ) -> Outcome {
     let compiled = types::build(&recorded.record, &recorded.view).and_then(|ir| {
-        let linked = (ir.exits.iter())
-            .find_map(|exit| exit.link)
-            .and_then(|link| table.linked(link, start));
+        let link = match ir.end {
+            End::Leave(end) => ir.exits.get(usize::from(end.0)).and_then(|exit| exit.link),
+            End::Loop(_) | End::Return(_) => None,
+        };
+        let linked = link.and_then(|link| table.linked(link, start));
         compile(&ir, name, linked)
     });
     match compiled.map(|compiled| table.publish(compiled, start)) {
