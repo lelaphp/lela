@@ -3239,36 +3239,38 @@ pub(crate) struct Activated {
 /// mask the compiler put in `op2` holds (`ZEND_RECV`'s
 /// `opline->op2.num & (1u << Z_TYPE_P(param))`, `MAY_BE_ANY` for a
 /// parameter with no type). The answer is the first opline that does
-/// not pass, where the handlers take over, at most `entry`; nothing
-/// observes these, so no observer is told.
+/// not pass, where the handlers take over, at most `entry`, and the
+/// frame stands there where it moved; nothing observes these, so no
+/// observer is told.
 #[inline]
 pub(crate) fn recv_passed(
-    req: &Request,
+    req: &mut Request,
     callee: FrameRef,
     code: &OpArray,
     (start, entry): (u32, u32),
 ) -> u32 {
-    let Some(frame) = req.vm().stack.frame(callee) else {
+    let (Some(frame), Some(prologue)) = (
+        req.vm_mut().stack.frame_mut(callee),
+        code.oplines.get(start as usize..entry as usize),
+    ) else {
         return start;
     };
     let passed = frame.header().num_args;
     let slots = frame.slots();
-    let mut at = start;
-    while at < entry {
-        let Some(op) = code.oplines.get(at as usize) else {
-            break;
-        };
-        if op.opcode != php_unit::Opcode::Recv || op.op1 > passed {
-            break;
-        }
-        let Some(argument) = slots.get(op.out as usize) else {
-            break;
-        };
-        let kind = argument.kind();
-        if kind == php_heap::ZvalType::Reference || op.op2 & (1u32 << (kind as u32)) == 0 {
-            break;
-        }
-        at += 1;
+    let taken = prologue
+        .iter()
+        .take_while(|op| {
+            op.opcode == php_unit::Opcode::Recv
+                && op.op1 <= passed
+                && slots.get(op.out as usize).is_some_and(|argument| {
+                    let kind = argument.kind();
+                    kind != php_heap::ZvalType::Reference && op.op2 & (1u32 << (kind as u32)) != 0
+                })
+        })
+        .count();
+    let at = start.saturating_add(u32::try_from(taken).unwrap_or(u32::MAX));
+    if at != start {
+        frame.header_mut().opline = at;
     }
     at
 }
