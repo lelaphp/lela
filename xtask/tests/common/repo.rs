@@ -148,7 +148,8 @@ pub fn scratch_workspace(root: &Path, dir: &Path) -> Repo {
     fs::remove_dir_all(dir).ok();
     let manifest = Manifest::load(root).unwrap();
     let repo = Repo::init(dir);
-    for file in [manifest::FILE, manifest.oracle.pin.as_str(), "README.md"] {
+    let files = [manifest::FILE, "README.md"];
+    for file in files.into_iter().chain(manifest.pin_file()) {
         let text = fs::read(root.join(file)).unwrap_or_else(|err| panic!("reading {file}: {err}"));
         repo.write(file, text);
     }

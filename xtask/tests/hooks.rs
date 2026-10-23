@@ -7,6 +7,7 @@
 //! the hook did, the commit it allowed or refused, the files it staged
 //! and the base it handed `done`, since a hook that exits without doing
 //! its job is invisible to a substring over its text.
+#![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};

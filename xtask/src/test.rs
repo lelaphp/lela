@@ -65,8 +65,8 @@ use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::oracle::SKIPPED_VARIABLE;
 use crate::reading::{Number, Reading, Status, Store, millis, plural};
-use crate::sources;
 use crate::tally::{self, Apart};
+use crate::{git, sources};
 
 /// The instrument name the reading carries.
 pub(crate) const INSTRUMENT: &str = "test";
@@ -274,10 +274,38 @@ fn reading(
             reading.message
         );
     }
+    if let Some((unbuilt, why)) = not_built(snapshot.root(), krate)? {
+        reading.count("skipped_untracked", unbuilt)?;
+        reading.message = format!("{}; {why}", reading.message);
+    }
     if !passed {
         reading.message = format!("{}\n{}", reading.message, tail(&all.text, 40));
     }
     Ok((reading, left_out))
+}
+
+/// How many items of `krate`'s tests its build left out under
+/// `cfg(tracked)`, each a line carrying the attribute, and why: none where
+/// the workspace carries every file [`crate::inputs::TRACKED`] names, or
+/// where the crate leaves nothing out under that cfg (#3188).
+fn not_built(root: &Path, krate: &Crate) -> Result<Option<(u64, String)>> {
+    let Some(why) = crate::inputs::untracked(root) else {
+        return Ok(None);
+    };
+    let mut unbuilt = 0;
+    for file in git::files(root, &krate.path())? {
+        if Path::new(&file).extension().is_some_and(|ext| ext == "rs") {
+            let text = crate::read(&root.join(&file))?;
+            let under = |line: &str| matches!(line.trim(), "#[cfg(tracked)]" | "#![cfg(tracked)]");
+            unbuilt += text.lines().filter(|line| under(line)).count() as u64;
+        }
+    }
+    Ok((unbuilt > 0).then(|| {
+        (
+            unbuilt,
+            format!("{unbuilt} items under cfg(tracked) not built, since {why}"),
+        )
+    }))
 }
 
 /// How a crate's test executables stand beside each other, as its

@@ -569,6 +569,7 @@ fn rendered<'a>(code: &str, lines: impl Iterator<Item = &'a str>, body: &[u8]) -
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use std::fs;
 

@@ -369,7 +369,8 @@ fn said(laid: Result<new_ext::Laid>) -> Result<()> {
 /// `steer`: one proposal judged against the harness's own file and
 /// applied where it only adds, as one reading.
 fn steer(root: &Path, store: &Store, file: &str, from: &Path, dry: bool) -> Result<()> {
-    record(store, &[steer::run(root, file, from, dry)?])
+    let manifest = steer::binding(root)?;
+    record(store, &[steer::run(root, &manifest, file, from, dry)?])
 }
 
 /// What every instrument ends with: each reading printed as one line and

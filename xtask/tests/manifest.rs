@@ -5,10 +5,6 @@ use std::path::Path;
 
 use xtask::manifest::{AvoidFrom, Crate, Edge, Manifest, OneOrMany, Rule, Scripts, Seam};
 
-fn workspace() -> &'static Path {
-    xtask::package_dir().parent().unwrap()
-}
-
 const MINIMAL: &str = r#"
 [oracle]
 pin = "oracle.toml"
@@ -22,6 +18,29 @@ clean_build_release_s = 1
 api_items = 1
 bindings = 1
 "#;
+
+/// A repository that runs no php has no `[oracle]` row: its manifest
+/// loads with no pin, and `phpt`, which runs php under one, refuses naming
+/// the absent pin (#3181).
+#[test]
+fn a_manifest_with_no_oracle_row_loads_and_phpt_refuses_naming_the_pin() {
+    let root = xtask::scratch::Tree::new("manifest-no-pin").unwrap();
+    let text = MINIMAL.replace("[oracle]\npin = \"oracle.toml\"\n", "");
+    std::fs::write(root.join("seams.toml"), text).unwrap();
+    let manifest = Manifest::load(&root).unwrap();
+    assert!(manifest.pin.is_none() && manifest.pin_file().is_none());
+    let refused = xtask::phpt::run(
+        &root,
+        &manifest,
+        &xtask::divergence::Registry::default(),
+        &xtask::phpt::Ask::default(),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{refused:#}").contains("seams.toml has no `[oracle]` row, so no oracle pin"),
+        "{refused:#}"
+    );
+}
 
 /// `[budget] scripts` is one row, the ceiling and the generators it leaves
 /// out, read as the file writes it and absent when the file has none; the
@@ -64,7 +83,7 @@ fn a_row_built_by_name_is_the_row_the_file_would_parse() {
     let built = Manifest::named("php_heap");
     assert_eq!(built.budget, parsed.budget);
     assert_eq!(built.crates, parsed.crates);
-    assert_eq!(built.oracle.pin, parsed.oracle.pin);
+    assert_eq!(built.pin_file(), parsed.pin_file());
     assert_eq!(Seam::named("api", "php_engine"), parsed.seams[0]);
     assert_eq!(Edge::between("php_bundle", "php_ext"), parsed.edges[0]);
     assert_eq!(Rule::named("x.deny", "ext/*"), parsed.rules[0]);
@@ -245,19 +264,6 @@ fn a_wildcard_of_macros_or_methods_is_refused() {
             "{err}"
         );
     }
-}
-
-fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
-    let mut out = Vec::new();
-    for entry in std::fs::read_dir(dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            out.extend(walk(&path));
-        } else {
-            out.push(path);
-        }
-    }
-    out
 }
 
 /// `[telemetry] silent_days` is the window of the silent query (harness
@@ -484,8 +490,26 @@ fn a_crate_row_round_trips_through_its_serialisation() {
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
+#[cfg(tracked)]
 mod tracked {
     use super::*;
+
+    fn walk(dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                out.extend(walk(&path));
+            } else {
+                out.push(path);
+            }
+        }
+        out
+    }
+
+    fn workspace() -> &'static Path {
+        xtask::package_dir().parent().unwrap()
+    }
 
     #[test]
     fn the_tracked_manifest_loads_with_its_rules_and_the_oracle_pin() {
@@ -497,13 +521,13 @@ mod tracked {
         assert_eq!(no_locks.adr, ["0005"]);
         assert!(manifest.crate_named("php_engine").is_some());
         assert!(manifest.seams.iter().any(|s| s.lock == "api.lock"));
-        assert_eq!(manifest.oracle.pin, "oracle.toml");
+        assert_eq!(manifest.pin_file(), Some("oracle.toml"));
     }
 
     #[test]
     fn the_oracle_version_comes_from_the_pin_and_is_written_in_no_source_file() {
         let manifest = Manifest::load(workspace()).unwrap();
-        let version = &manifest.pin.oracle.version;
+        let version = &manifest.pin().unwrap().oracle.version;
         assert!(!version.is_empty());
         let src = xtask::package_dir().join("src");
         for entry in walk(&src) {
@@ -514,7 +538,7 @@ mod tracked {
                 entry.display()
             );
             assert!(
-                !text.contains(&manifest.pin.oracle.md5),
+                !text.contains(&manifest.pin().unwrap().oracle.md5),
                 "{} states the oracle digest",
                 entry.display()
             );

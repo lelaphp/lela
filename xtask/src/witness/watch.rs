@@ -247,7 +247,7 @@ pub(crate) fn watch(root: &Path, manifest: &Manifest, store: &Store, ask: &Ask) 
     // The tree before the served run starts: what a crate it died before
     // sending a reading for is stamped with.
     let snapshot = Snapshot::disk(root)?;
-    let grace = Duration::from_secs(manifest.pin.recipe.limits.timeout_s);
+    let grace = Duration::from_secs(manifest.pin()?.recipe.limits.timeout_s);
     let mut removed = sysv::Removed::new(INSTRUMENT);
     let claim = sysv::Claim::taken(INSTRUMENT, grace, &mut removed)?;
     let journal: PathBuf = claim.path().to_path_buf();
@@ -335,7 +335,7 @@ fn died(
         } else {
             "before it reached this crate".to_owned()
         };
-        let mut reading = under_rule(krate, snapshot, rule)?.under(&manifest.pin);
+        let mut reading = under_rule(krate, snapshot, rule)?.under(manifest.pin()?);
         reading.status = Status::Fail;
         reading.message = format!(
             "{name}: the witness run died on {signal} {when}; nothing it judged of this crate was written, and this reading stands for the run"

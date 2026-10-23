@@ -7,6 +7,7 @@
 //! refuses.
 //! The fixture is copied to a scratch directory first; nothing is generated
 //! in place, and the workspace's own `ext/` gains no crate.
+#![cfg(tracked)]
 
 use std::path::Path;
 

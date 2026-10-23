@@ -351,6 +351,7 @@ pub(super) fn round<'a>(
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     /// A pool is `pm = static` with the children asked for: one for a
     /// fence, eight for the throughput bar (#2660).

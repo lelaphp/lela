@@ -41,11 +41,11 @@ pub(crate) fn compare(
     files: &[PathBuf],
     jobs: Option<std::num::NonZeroUsize>,
 ) -> Result<()> {
-    let source = manifest.pin.source.tree()?;
+    let source = manifest.pin()?.source.tree()?;
     let subset = Subset::resolve(manifest, &source, name)?;
     let tests = named(&source, &subset, files)?;
     let variants = manifest.variants();
-    let oracles = Oracles::new(&manifest.pin, &variants);
+    let oracles = Oracles::new(manifest.pin()?, &variants);
     let oracle = oracles.of(manifest.variant_of(&subset.scope))?;
     oracle.asserted()?;
     let own = Own::of(oracle, &subset, &subset.scope, true)?;

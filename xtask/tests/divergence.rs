@@ -3,6 +3,7 @@
 //! status `open`; the `divergence-reason` instrument fails an accepted row
 //! without a reason; `status --section divergence` renders it and
 //! `docs/divergence.md` is that rendering as a computed region.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 

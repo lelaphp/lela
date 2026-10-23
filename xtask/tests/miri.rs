@@ -4,6 +4,7 @@
 //! though Miri ends the test binary at the first. Where the pinned nightly
 //! is not installed, the reading is a skip naming the command that
 //! installs it, and the control returns; CI's Miri job installs it.
+#![cfg(tracked)]
 
 use xtask::manifest::Manifest;
 use xtask::miri;

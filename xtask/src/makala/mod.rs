@@ -168,7 +168,7 @@ fn entry(phpt: &Phpt, path: &Path, file: &Path) -> Option<Entry> {
 /// `script_name`, the request the server's bench series has sent since it
 /// began (#2351).
 pub(crate) fn workloads(root: &Path) -> Result<Vec<Entry>> {
-    let script = Manifest::load(root)?.pin.recipe.script_name;
+    let script = Manifest::load(root)?.pin()?.recipe.script_name.clone();
     let dir = root.join(WORKLOADS);
     let mut paths: Vec<PathBuf> = std::fs::read_dir(&dir)
         .with_context(|| format!("reading {}", dir.display()))?

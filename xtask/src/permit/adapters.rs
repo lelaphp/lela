@@ -275,6 +275,7 @@ fn record_the_refusal(root: &Path, call: &Call, refusal: &Refusal) {
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use std::path::Path;
     use std::process::Command;

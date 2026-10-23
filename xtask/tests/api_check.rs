@@ -1,6 +1,7 @@
 //! `xtask api-check` over the fixtures of `xtask/fixtures/api-check`, judged
 //! by the tracked manifest: locks, edges and bundle order (ticket #4). One
 //! fixture per rule the instrument evaluates must fail; `clean` must pass.
+#![cfg(tracked)]
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -316,12 +317,12 @@ mod tracked {
     fn a_marker_naming_what_the_pinned_header_does_not_declare_fails() {
         let mut manifest = Manifest::load(workspace()).unwrap();
         let root = fixture("mirrors");
-        manifest.pin = manifest.pin.on_this_machine(Some(root.join("php-src")));
+        manifest.pin = (manifest.pin).map(|pin| pin.on_this_machine(Some(root.join("php-src"))));
         let readings = api_check::hold(&manifest, &root, false).unwrap();
         let random = of(&readings, "ext/random");
         assert_eq!(random.status, Status::Fail, "{}", random.message);
         assert_eq!(random.rule, "ext.pub-beyond-extension");
-        let tag = &manifest.pin.source.tag;
+        let tag = &manifest.pin().unwrap().source.tag;
         assert_eq!(
             random.message,
             format!(

@@ -11,6 +11,7 @@
 //! since its bytes are not the oracle's. They say so on stderr and return
 //! when the pinned binary is not on this machine, unless the machine
 //! promised it (#38); the rest run anywhere.
+#![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,7 +56,7 @@ fn manifest() -> Manifest {
 /// for as long as it reads the manifest.
 fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
     let mut manifest = Manifest::of(rows);
-    manifest.pin = pin_over(tree);
+    manifest.pin = Some(pin_over(tree));
     manifest
 }
 
@@ -127,7 +128,7 @@ impl Scratch {
             fs::set_permissions(&engine, fs::Permissions::from_mode(0o755)).unwrap();
         }
         let mut manifest = Manifest::named("ext/fixture");
-        manifest.pin = pin_over(&corpus);
+        manifest.pin = Some(pin_over(&corpus));
         Scratch {
             root,
             manifest,
@@ -226,7 +227,7 @@ fn the_control_with_unkept_runs_only_a_subset_whose_kept_target_does_not_stand()
         ..Ask::default()
     };
     let run = || phpt::run(&scratch.root, &scratch.manifest, &registry(""), &ask(&php));
-    let pin = &scratch.manifest.pin;
+    let pin = scratch.manifest.pin().unwrap();
     let kept = scratch.root.join(format!(
         "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
         pin.source.tag, pin.oracle.md5
@@ -540,7 +541,7 @@ fn a_run_with_no_subset_runs_the_lane_rather_than_refusing() {
 fn the_reading_of_an_extension_subset_is_stamped_over_the_crate_so_done_can_read_it() {
     let tree = fixture_tree();
     let mut manifest = manifest();
-    manifest.pin = pin_over(&tree);
+    manifest.pin = Some(pin_over(&tree));
     let ask = Ask {
         subset: Some("pcre".to_owned()),
         ..Ask::default()
@@ -2315,7 +2316,7 @@ fn a_run_writes_nothing_into_the_pinned_tree() {
     let mut scratch = Scratch::new("writes", &tests);
     let corpus = scratch.root.join("corpus");
     Repo::init(&corpus);
-    scratch.manifest.pin.source.commit = commit_all(&corpus, "the pin");
+    scratch.manifest.pin.as_mut().unwrap().source.commit = commit_all(&corpus, "the pin");
     fs::write(
         corpus.join("ext/fixture/tests/stray.php"),
         "<?php echo 'a stray';\n",
@@ -2435,7 +2436,7 @@ fn the_control_keeps_the_target_and_the_engines_reading_is_met_of_target() {
         "{}",
         control.message
     );
-    let pin = &scratch.manifest.pin;
+    let pin = scratch.manifest.pin().unwrap();
     let kept = scratch.root.join(format!(
         "target/harness/phpt-runs/pin-{}-{}/ext/fixture.json",
         pin.source.tag, pin.oracle.md5

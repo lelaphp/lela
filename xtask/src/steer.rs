@@ -72,11 +72,38 @@ use crate::reading::{Reading, Status};
 /// The instrument name every reading of steer carries.
 pub(crate) const INSTRUMENT: &str = "steer";
 
-/// The files this instrument may write: the harness's own, the ones
-/// `permit` denies the agent under `harness.self`. A path outside this
-/// list is refused before anything is read, since steering is for the
-/// files no other hand may touch and every other file is an `Edit` away.
-pub const STEERABLE: [&str; 3] = ["seams.toml", "oracle.toml", "docs/divergence.toml"];
+/// The rule whose scope names the harness's own files, the ones `permit`
+/// denies the agent.
+const RULE: &str = "harness.self";
+
+/// Whether this instrument may write `file`: a TOML file the scope of the
+/// manifest's `harness.self` names as written, not by a glob, and does not
+/// exempt (#3183). That scope is the one list of the harness's own files,
+/// and every reader of it asks here: `steer` before anything is read,
+/// since steering is for the files no other hand may touch and every other
+/// file is an `Edit` away, `permit`'s guard on what steer wrote, and a
+/// ticket's sanctioned write.
+pub(crate) fn steerable(manifest: &Manifest, file: &str) -> bool {
+    let path = Path::new(file);
+    path.extension().is_some_and(|ext| ext == "toml")
+        && manifest
+            .rule(RULE)
+            .is_some_and(|rule| rule.scope.iter().any(|named| named == file) && !rule.exempts(path))
+}
+
+/// The manifest as `HEAD` carries it, whose `harness.self` says what
+/// steer may write: the committed one, which no write steer judges has
+/// moved, and which parses while a merge leaves the working file
+/// conflicted.
+pub(crate) fn binding(root: &Path) -> Result<Manifest> {
+    let text = git::show(root, "HEAD", manifest::FILE)?.with_context(|| {
+        format!(
+            "HEAD carries no {}, so no {RULE} rule names a file steer writes",
+            manifest::FILE
+        )
+    })?;
+    Manifest::parse(&text)
+}
 
 /// The keys an array-of-tables row is identified by, in order: a proposal
 /// that adds a row whose identity an existing row already carries is
@@ -207,12 +234,17 @@ impl Ground {
 
 /// Apply a proposal to one of the harness's own files, writing it only
 /// when the judge finds it additive; the reading either way.
-pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Reading> {
-    if !STEERABLE.contains(&file) {
+pub fn run(
+    root: &Path,
+    manifest: &Manifest,
+    file: &str,
+    proposal: &Path,
+    dry_run: bool,
+) -> Result<Reading> {
+    if !steerable(manifest, file) {
         bail!(
-            "steer writes the harness's own files and no others: {file} is not one of {}; \
-             every other file is an Edit away",
-            STEERABLE.join(", ")
+            "steer writes the harness's own files and no others: {file} is no TOML file the \
+             manifest's {RULE} names; every other file is an Edit away"
         );
     }
     let path = root.join(file);
@@ -227,7 +259,7 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
         Reading::stamped_over(INSTRUMENT, file, &Snapshot::disk_over(root, over)?, over)
     };
     let mut reading = stamped()?;
-    if let Err(unread) = loads(file, ground.tracked(), &proposed) {
+    if let Err(unread) = loads(manifest, file, ground.tracked(), &proposed) {
         reading.status = Status::Fail;
         reading.message = format!(
             "{file}: the proposal would not load, so every instrument that reads the file would \
@@ -294,12 +326,12 @@ pub fn run(root: &Path, file: &str, proposal: &Path, dry_run: bool) -> Result<Re
 /// here rather than written to stop every instrument after it. The pin
 /// and the manifest are held so only where the tracked file loads, since
 /// a proposal can be held to no more than the file it replaces.
-fn loads(file: &str, tracked: &str, proposed: &str) -> Result<()> {
+fn loads(manifest: &Manifest, file: &str, tracked: &str, proposed: &str) -> Result<()> {
     match file {
         divergence::FILE => {
             Registry::parse(proposed)?;
         }
-        "oracle.toml" if Pin::parse(tracked).is_ok() => {
+        _ if manifest.pin_file() == Some(file) && Pin::parse(tracked).is_ok() => {
             Pin::parse(proposed)?;
         }
         manifest::FILE if Manifest::parse(tracked).is_ok() => {

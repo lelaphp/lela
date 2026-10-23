@@ -26,6 +26,7 @@ fn reading_of(diff: Result<Diff, String>) -> Reading {
 }
 
 /// A tally of one test of `ext/ctype`, met: a run the engine keeps.
+#[cfg(tracked)]
 fn one_met() -> Tally {
     let id = "phpt:php-src/ext/ctype/tests/one.phpt";
     let judged = crate::phpt::Judged::new(id, "one.phpt", Judgement::Pass, "");
@@ -272,6 +273,7 @@ fn a_carried_run_replaces_an_older_one_under_another_pin_and_no_other() {
 /// nothing, however many subsets it runs (#2972); a source written while
 /// a subset ran is still the comparison's skip that says so, and a file
 /// touched and not written is asked of git once and then stands.
+#[cfg(tracked)]
 #[test]
 fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
     let tree = crate::key::fixture("against-after");
@@ -353,6 +355,7 @@ fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
 /// `target/release-da/php` is built from, as the dep-info beside it says,
 /// and whose `php_jit`, generated clippy configuration, guide and manifest
 /// it is not; committed once.
+#[cfg(tracked)]
 fn workspace_with_a_binary(name: &str) -> (Tree, PathBuf) {
     let tree = Tree::new(name).unwrap();
     committing(&tree, &["init", "-q", "-b", "main"]);
@@ -387,6 +390,7 @@ fn workspace_with_a_binary(name: &str) -> (Tree, PathBuf) {
 }
 
 /// `files` written with new text at `root`, and committed.
+#[cfg(tracked)]
 fn commit_writing(root: &Path, files: &[&str]) {
     for file in files {
         let path = root.join(file);
@@ -405,12 +409,13 @@ fn commit_writing(root: &Path, files: &[&str]) {
 /// `origin/main`, as the next branch's base without a `--base` run
 /// (#3110); a commit that writes a source the binary is compiled from
 /// moves the key, and the kept run is refused, here and as the base.
+#[cfg(tracked)]
 #[test]
 fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not() {
     let (tree, binary) = workspace_with_a_binary("against-built-from");
     let root: &Path = &tree;
     let manifest = Manifest::load(&crate::built_root()).unwrap();
-    let pin = &manifest.pin;
+    let pin = manifest.pin().unwrap();
     let (scope, engine) = ("ext/ctype", Runner::Engine(binary));
     let runs = Runs::new(root, &manifest, None).unwrap();
     let subset = Reading::new(INSTRUMENT, scope);
@@ -468,12 +473,13 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
 /// corpus's `ext/ctype` at 37474a3, is read as no run, at the base and
 /// here. So `phpt --base` takes the base's run where only that one stands,
 /// and the run it carries in replaces it, after which `done` has a verdict.
+#[cfg(tracked)]
 #[test]
 fn a_run_of_no_test_is_no_run_and_the_bases_run_carried_in_replaces_it() {
     let (tree, binary) = workspace_with_a_binary("against-none");
     let root: &Path = &tree;
     let manifest = Manifest::load(&crate::built_root()).unwrap();
-    let pin = &manifest.pin;
+    let pin = manifest.pin().unwrap();
     let (scope, engine) = (Scope::of("ext/ctype"), Runner::Engine(binary));
     let runs = Runs::new(root, &manifest, None).unwrap();
     let after = |tally: &Tally| {

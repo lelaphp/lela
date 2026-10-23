@@ -94,6 +94,7 @@ impl Binary {
     /// for `host`'s, so a test serves a fence or a host's line by a host
     /// whose bytes or failure it chooses.
     #[cfg(test)]
+    #[cfg(tracked)]
     pub(crate) fn standing(root: &Path, host: EngineHost, path: PathBuf) -> Binary {
         let binary = Binary::of(root);
         binary.stand(host, &[], path);
@@ -102,12 +103,14 @@ impl Binary {
 
     /// The same with `path` standing in for `php` built with `features`.
     #[cfg(test)]
+    #[cfg(tracked)]
     pub(crate) fn featuring(self, features: &[&str], path: PathBuf) -> Binary {
         self.stand(CLI, features, path);
         self
     }
 
     #[cfg(test)]
+    #[cfg(tracked)]
     fn stand(&self, host: EngineHost, features: &[&str], path: PathBuf) {
         let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
         let key = (host.krate, owned(features));
