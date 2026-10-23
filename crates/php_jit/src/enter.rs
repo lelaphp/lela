@@ -84,8 +84,11 @@ impl Crossed for Request {
 /// reads `req` at offset zero, `interrupt` at [`lower::INTERRUPT_AT`],
 /// `at` at [`lower::ENTRY_AT`], `stood` at [`lower::STOOD_AT`], `stack` at
 /// [`lower::STACK_AT`], `images` at [`lower::IMAGES_AT`], `root` at
-/// [`lower::ROOT_AT`] and `ready` at [`lower::READY_AT`], and nothing
-/// else; `pending` has no C layout
+/// [`lower::ROOT_AT`], `ready` at [`lower::READY_AT`], `rows` at
+/// [`lower::ROWS_AT`] and `trace` at [`lower::TRACE_AT`], and nothing
+/// else; a jump to another trace writes the entry fields, `at` to
+/// `ready` and `trace`, as `enter` writes them (`lower`'s *The entry*);
+/// `pending` has no C layout
 /// and is the wrappers' alone. It borrows the request mutably for `'a`,
 /// so the request outlives it and nothing else touches the request
 /// while compiled code may.
@@ -112,6 +115,12 @@ pub(crate) struct ExitCtx<'a, R = Request> {
     /// this request: each one's header is the request's, and the caches of
     /// the callees it enters are laid down ([`Trace::laid`]).
     ready: u32,
+    /// The request's rows ([`Rows`]), by which a jump finds the row of the
+    /// trace it enters: [`NO_ROWS`] for a request that keeps none.
+    rows: *const usize,
+    /// The number of the trace entered: the one `enter` calls, and then
+    /// whichever a jump entered, which answers.
+    trace: u32,
     pending: Option<Pending>,
     /// The epoch the trace was taken from, which holds every op array it
     /// recorded: what a kernel serves those op arrays out of
@@ -150,6 +159,14 @@ const _: () = assert!(
     lower::READY_AT >= 0
         && offset_of!(ExitCtx<'static>, ready) == lower::READY_AT.unsigned_abs() as usize
 );
+const _: () = assert!(
+    lower::ROWS_AT >= 0
+        && offset_of!(ExitCtx<'static>, rows) == lower::ROWS_AT.unsigned_abs() as usize
+);
+const _: () = assert!(
+    lower::TRACE_AT >= 0
+        && offset_of!(ExitCtx<'static>, trace) == lower::TRACE_AT.unsigned_abs() as usize
+);
 
 impl<'a, R: Crossed> ExitCtx<'a, R> {
     /// The `ExitCtx` over `req`, which it borrows for as long as it lives,
@@ -166,6 +183,8 @@ impl<'a, R: Crossed> ExitCtx<'a, R> {
             images: ptr::null(),
             root: 0,
             ready: 0,
+            rows: NO_ROWS.as_ptr(),
+            trace: 0,
             pending: None,
             holding: None,
             lent: PhantomData,
@@ -728,19 +747,33 @@ pub(crate) struct Exited {
     pub(crate) frame: FrameRef,
 }
 
-/// What compiled code is entered as (`jit-design.md` §4.3): the
-/// `ExitCtx` and the room of the frame the trace was recorded in, and the
-/// exit it left through, [`lower::UNWOUND`] or [`lower::ABANDONED`].
-type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
+/// What compiled code is entered as (`jit-design.md` §4.3): the trace's
+/// prologue, called with the `ExitCtx`, the room of the frame it enters
+/// on and the address of its body, which it calls on the tail convention,
+/// answering the exit it left through, or another of `lower`'s answers.
+type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8, *const u8) -> u32;
+
+/// What a call of [`enter`] answered: how the request was given back, and
+/// the trace that gave it back, the one entered or one it jumped to,
+/// whose exit it is.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Answered<'t> {
+    pub(crate) left: Left,
+    pub(crate) by: &'t Trace,
+}
 
 /// `trace` called on `frame` (`jit-design.md` §4.6), out of `epoch`, the
 /// epoch whose table holds it and whose rows hold every op array it
 /// recorded, which its kernels serve from, with the request's
 /// trace number, php's `EG(jit_trace_num)`, the trace's for the length of
-/// the call and the one before it again after. A panic a wrapper caught
+/// the call and the one before it again after. The trace's row is laid
+/// down in the request's rows ([`Rows`]) before it is called, so a jump
+/// from another trace finds it ready. A panic a wrapper caught
 /// is resumed and a fatal returned, read before the exit; an unwind hands
-/// back the frame that stands, and an exit is landed ([`land`]). Reads no
-/// word and follows no link: what happens next is `dispatch`'s.
+/// back the frame that stands, and an exit is landed ([`land`]), of the
+/// trace that answered, which is `trace` or one it jumped to, named in
+/// the `ExitCtx`. Reads no word and follows no link: what happens next
+/// is `dispatch`'s.
 ///
 /// The crossing's invariant is per fiber stack (§4.6): a fiber's compiled
 /// loop suspends from inside the kernel that serves `Fiber::suspend`, its
@@ -757,12 +790,12 @@ type Entry = unsafe extern "C" fn(*mut ExitCtx<'_>, *mut u8) -> u32;
 /// ```expect exit=0 regime=jit-force process
 /// 44850 44850
 /// ```
-pub(crate) fn enter(
+pub(crate) fn enter<'t>(
     req: &mut Request,
     frame: FrameRef,
-    (epoch, trace): (&Epoch, &Trace),
+    (epoch, trace): (&'t Epoch, &'t Trace),
     at: At,
-) -> Result<Left, Fatal> {
+) -> Result<Answered<'t>, Fatal> {
     let room = tier::room(req, frame)
         .ok_or_else(|| internal("a trace entered on a frame with no room"))?;
     // SAFETY: the table published bytes `lower` compiled for this ABI at
@@ -783,9 +816,10 @@ pub(crate) fn enter(
         None
     };
     // The stack the trace's calls in place are made on, their headers in
-    // this request, and whether they are made in place.
+    // this request, and whether they are made in place, laid down in the
+    // trace's row for the jumps to it.
     let stack = tier::stack(req).as_ptr();
-    let images = Images::of(req, trace);
+    let (images, rows) = Images::of(req, (epoch, trace));
     let ready = images.ready();
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
@@ -793,52 +827,66 @@ pub(crate) fn enter(
     cx.at = at;
     (cx.stack, cx.images) = (stack, images.addresses());
     (cx.root, cx.ready) = (frame.0, u32::from(ready));
+    (cx.rows, cx.trace) = (rows, trace.id.get());
     if let Some(stood) = stood {
         cx.stood = stood;
     }
     cx.holding = Some(Holding::of(epoch));
     // SAFETY: `cx` lives on this frame for the whole call and nothing but
     // the code and its wrappers touches the request meanwhile; `room` is
-    // the room of a frame on the request's stack.
-    let answer = unsafe { entry(&raw mut cx, room.as_ptr()) };
-    let pending = cx.take_pending();
+    // the room of a frame on the request's stack, and the body is the
+    // trace's, as the prologue asks.
+    let answer = unsafe { entry(&raw mut cx, room.as_ptr(), trace.body().as_ptr()) };
+    let (pending, by) = (cx.take_pending(), cx.trace);
     tier::set_trace_num(req, before);
     match pending {
         Some(Pending::Panic(payload)) => resume_unwind(payload),
         Some(Pending::Bailout(fatal)) => return Err(fatal),
         None => {}
     }
-    match Answer::of(answer, trace.exits.len()) {
+    let by = if by == trace.id.get() {
+        trace
+    } else {
+        crate::table::TraceId::new(by)
+            .and_then(|id| crate::table::of_epoch(epoch)?.get(id))
+            .ok_or_else(|| internal("a trace answered as one its table does not hold"))?
+    };
+    let left = match Answer::of(answer, by.exits.len()) {
         Answer::Exit(exit) => {
-            let frame = land(req, &trace.exits[usize::from(exit.0)])?;
-            Ok(Left::Exit(Exited { exit, frame }))
+            let frame = land(req, &by.exits[usize::from(exit.0)])?;
+            Left::Exit(Exited { exit, frame })
         }
         Answer::Unwound if req.unwinding() => {
             let frame =
                 tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
-            Ok(Left::Unwound(frame))
+            Left::Unwound(frame)
         }
-        Answer::Unwound => Err(internal("a trace unwound with no throwable pending")),
-        Answer::Declined if at == At::Body => Ok(Left::Declined),
-        Answer::Declined => Err(internal("a trace declined an entry at its first op")),
+        Answer::Unwound => return Err(internal("a trace unwound with no throwable pending")),
+        Answer::Declined if at == At::Body && ptr::eq(by, trace) => Left::Declined,
+        Answer::Declined => {
+            return Err(internal("a trace declined an entry at its first op"));
+        }
         Answer::Interrupted => {
-            let header = trace
+            let header = by
                 .stub
                 .ok_or_else(|| internal("a trace took an interrupt stub it does not have"))?;
             let frame =
                 tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
             tier::stand(req, frame, header);
-            Ok(Left::Interrupted(frame))
+            Left::Interrupted(frame)
         }
         Answer::Escaped => {
             let frame =
                 tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
-            Ok(Left::Escaped(frame))
+            Left::Escaped(frame)
         }
-        Answer::Abandoned => Err(internal(
-            "a trace left through no exit of its own and kept nothing",
-        )),
-    }
+        Answer::Abandoned => {
+            return Err(internal(
+                "a trace left through no exit of its own and kept nothing",
+            ));
+        }
+    };
+    Ok(Answered { left, by })
 }
 
 /// The request's headers of the calls a trace pushes in place, one address
@@ -869,16 +917,32 @@ enum Images {
 }
 
 impl Images {
-    /// The headers of `trace`'s calls in place as `req` lays them out.
-    fn of(req: &Request, trace: &Trace) -> Images {
+    /// The headers of `trace`'s calls in place as `req` lays them out, and
+    /// the request's rows with the trace's laid down as they say, which a
+    /// jump to the trace reads ([`Rows`]); a request that keeps no state of
+    /// the tier's keeps no rows, and its rows are [`NO_ROWS`].
+    fn of(req: &Request, (epoch, trace): (&Epoch, &Trace)) -> (Images, *const usize) {
+        if let Some(state) = tier::state::<crate::JitRequest>(req) {
+            let images = if trace.calls.is_empty() {
+                Images::None
+            } else {
+                (state.headers.entered(req, trace))
+                    .map_or(Images::Unready, |(at, laid)| Images::Kept { at, laid })
+            };
+            let rows = (state.headers).rows(|| {
+                crate::table::of_epoch(epoch).map_or(0, crate::table::TraceTable::segments)
+            });
+            rows.lay(trace.id, images.addresses(), images.ready());
+            return (images, rows.base());
+        }
+        (Images::own(req, trace), NO_ROWS.as_ptr())
+    }
+
+    /// The headers of `trace`'s calls laid out for one entry, by a request
+    /// that keeps no state of the tier's.
+    fn own(req: &Request, trace: &Trace) -> Images {
         if trace.calls.is_empty() {
             return Images::None;
-        }
-        if let Some(state) = tier::state::<crate::JitRequest>(req) {
-            return state
-                .headers
-                .entered(req, trace)
-                .map_or(Images::Unready, |(at, laid)| Images::Kept { at, laid });
         }
         let Some(images) = (trace.calls.iter())
             .map(|call| tier::call_image(req, call))
@@ -930,9 +994,12 @@ fn callees_laid(req: &Request, trace: &Trace) -> bool {
 /// the request. A header's bytes and an address list stand where they
 /// were laid out for as long as the request runs, which is as long as the
 /// code that reads them can. An entry reads its trace's row by its
-/// number, with no hash taken.
+/// number, with no hash taken; compiled code reads the [`Rows`].
 #[derive(Debug, Default)]
-pub(crate) struct Headers(std::cell::RefCell<HeadersKept>);
+pub(crate) struct Headers {
+    kept: std::cell::RefCell<HeadersKept>,
+    rows: std::cell::OnceCell<Rows>,
+}
 
 #[derive(Debug, Default)]
 struct HeadersKept {
@@ -952,7 +1019,7 @@ impl Headers {
     /// the request enters it, and whether its calls are made in place:
     /// none while a call's function is not the request's.
     fn entered(&self, req: &Request, trace: &Trace) -> Option<(*const usize, bool)> {
-        let mut kept = self.0.borrow_mut();
+        let mut kept = self.kept.borrow_mut();
         let row = usize::try_from(trace.id.get()).ok()?;
         if let Some(Some(entered)) = kept.traces.get_mut(row) {
             if !entered.laid {
@@ -983,6 +1050,82 @@ impl Headers {
         }
         kept.traces[row] = Some(entered);
         Some(found)
+    }
+
+    /// The request's rows, laid down the first time a trace is entered,
+    /// as many segments as `segments` counts: as many as the trace table
+    /// of the request's epoch has.
+    fn rows(&self, segments: impl FnOnce() -> usize) -> &Rows {
+        self.rows.get_or_init(|| Rows::new(segments()))
+    }
+}
+
+/// A request's rows (`jit-design.md` §4.6, `lower::ROWS_AT`): per trace
+/// the crossing entered in the request, by the trace's number, where its
+/// calls' headers are in the request and whether they are ready, which a
+/// jump from another trace reads before it enters the trace and finds
+/// unready for a trace the crossing has not entered. The first table
+/// holds one address per segment of `lower::ROW_SEGMENT` rows, zero until
+/// a trace of that segment is entered, and the table and every segment
+/// stand where they were laid for as long as the request runs, written
+/// only through cells, so the code that reads them reads them whole.
+#[derive(Debug)]
+struct Rows {
+    segments: Box<[std::cell::OnceCell<Box<[Row]>>]>,
+    firsts: Box<[std::cell::Cell<usize>]>,
+}
+
+/// One trace's row in a request's [`Rows`], as compiled code reads it.
+#[repr(C)]
+#[derive(Debug, Default)]
+struct Row {
+    images: std::cell::Cell<usize>,
+    ready: std::cell::Cell<u32>,
+}
+
+const _: () = assert!(
+    size_of::<Row>() == 16
+        && lower::ROW_BYTES == 16
+        && offset_of!(Row, images) == lower::ROW_IMAGES.unsigned_abs() as usize
+        && offset_of!(Row, ready) == lower::ROW_READY.unsigned_abs() as usize
+        && size_of::<std::cell::Cell<usize>>() == size_of::<usize>()
+);
+
+/// The rows of a request that keeps none: every segment absent, for any
+/// trace a table numbers, so a jump finds no row ready.
+static NO_ROWS: [usize; (crate::table::TraceId::LIMIT as usize).div_ceil(lower::ROW_SEGMENT)] =
+    [0; (crate::table::TraceId::LIMIT as usize).div_ceil(lower::ROW_SEGMENT)];
+
+impl Rows {
+    /// `segments` segments, none laid down.
+    fn new(segments: usize) -> Rows {
+        Rows {
+            segments: (0..segments).map(|_| std::cell::OnceCell::new()).collect(),
+            firsts: (0..segments).map(|_| std::cell::Cell::new(0)).collect(),
+        }
+    }
+
+    /// The row of the trace `id` names: where its calls' headers are,
+    /// `images`, and whether they are `ready`; nothing for a number past
+    /// the segments.
+    fn lay(&self, id: crate::table::TraceId, images: *const usize, ready: bool) {
+        let n = id.get() as usize;
+        let (segment, at) = (n / lower::ROW_SEGMENT, n % lower::ROW_SEGMENT);
+        let (Some(cell), Some(first)) = (self.segments.get(segment), self.firsts.get(segment))
+        else {
+            return;
+        };
+        let rows = cell.get_or_init(|| (0..lower::ROW_SEGMENT).map(|_| Row::default()).collect());
+        first.set(rows.as_ptr().expose_provenance());
+        if let Some(row) = rows.get(at) {
+            row.images.set(images.expose_provenance());
+            row.ready.set(u32::from(ready));
+        }
+    }
+
+    /// The first table's address, which compiled code reads past.
+    fn base(&self) -> *const usize {
+        self.firsts.as_ptr().cast()
     }
 }
 

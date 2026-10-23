@@ -121,6 +121,7 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
     Compiled {
         bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
         entry_offset: 0,
+        body_offset: 0,
         align: 4,
         exits: exits.into(),
         leaves: None,
@@ -129,6 +130,7 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
         entry_stood: false,
         body: None,
         fuzzed: Fuzzed::default(),
+        slots: crate::lower::EntrySlots::default(),
         calls: Box::new([]),
         callee_caches: Box::new([]),
         map_ptrs: Box::new([]),

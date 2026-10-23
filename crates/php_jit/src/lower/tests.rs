@@ -55,7 +55,7 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
     let ir = goldens::built(fixture, &recorded)?;
     let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
     let clif = backend
-        .clif(&ir)
+        .clif(&ir, None)
         .map_err(|abort| format!("{}: {abort:?}", fixture.name))?
         .display()
         .to_string();
@@ -71,7 +71,7 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
     let host = Backend::new(&policy(&[]), symbols()).map_err(|e| format!("{e:?}"))?;
     for backend in [&backend, &host] {
         let compiled = backend
-            .compile(&ir, named(fixture))
+            .compile(&ir, named(fixture), None)
             .map_err(|abort| format!("{}: {abort:?}", fixture.name))?;
         assert!(!compiled.bytes.is_empty());
         assert!(compiled.align.is_power_of_two());
@@ -207,11 +207,12 @@ fn compiled(plan: &[(&str, &str)], program: &str) -> Result<(TraceIr, String), S
                     at: b"f".as_slice().into(),
                     line: 1,
                 },
+                None,
             )
             .map_err(|abort| format!("{abort:?}"))?;
     }
     let clif = golden
-        .clif(&ir)
+        .clif(&ir, None)
         .map_err(|abort| format!("{abort:?}"))?
         .display()
         .to_string();
@@ -599,7 +600,7 @@ fn a_side_trace_returning_an_array_its_parent_knew_compiles() -> Result<(), Stri
     let ir = crate::types::build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
     let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
     backend
-        .compile(&ir, named(SPECTRALNORM))
+        .compile(&ir, named(SPECTRALNORM), None)
         .map(|_| ())
         .map_err(|abort| format!("{abort:?}\n{}", super::dump::render(&ir)))
 }
@@ -637,7 +638,7 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
     );
     let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
     let clif = backend
-        .clif(&ir)
+        .clif(&ir, None)
         .map_err(|abort| format!("{abort:?}"))?
         .display()
         .to_string();

@@ -5,10 +5,31 @@
 //! Nothing but `lower` names a Cranelift type, so a Cranelift bump is a
 //! change here alone.
 //!
-//! **What compiled code is.** A trace is one function,
-//! `extern "C" fn(cx: *mut ExitCtx, frame: *mut u8) -> u32`, entered with
-//! the crossing's `ExitCtx` and the room of the frame it was recorded in,
-//! php's `execute_data`, and answering the [`ExitId`] it left through.
+//! **What compiled code is.** A trace is one function, its body,
+//! `fn(cx: *mut ExitCtx, frame: *mut u8) -> u32` on Cranelift's tail
+//! convention, entered with the crossing's `ExitCtx` and the room of the
+//! frame it runs in, php's `execute_data`, and answering the [`ExitId`]
+//! it left through. Its bytes begin with the prologue,
+//! `extern "C" fn(cx, frame, body) -> u32` on the host's convention,
+//! which `enter` calls and which calls the body: php's trace prologue,
+//! which a jump from another trace passes over
+//! (`Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`). A body hands on to
+//! another trace by a tail call, which gives its own machine frame up
+//! where php's jump keeps the one frame every trace shares: a link jumps
+//! to the trace it links to, and an exit whose side trace is published
+//! jumps to it through the exit's [entry slot](EntrySlots), each laying
+//! down the entry the trace it enters reads.
+//!
+//! **The entry** (`jit-design.md` §4.6). What a body reads as it enters
+//! is the room it was handed and the `ExitCtx`'s entry fields: where it
+//! is entered ([`ENTRY_AT`]), where the frame stands as a kernel would
+//! say ([`STOOD_AT`]), the frame's place on the stack
+//! ([`ROOT_AT`]), its calls' headers in this request and whether they
+//! are ready ([`IMAGES_AT`], [`READY_AT`]), and its own number
+//! ([`TRACE_AT`]), by which `enter` reads the exit it answers. `enter`
+//! lays them down as it calls the prologue, and a jump lays them down as
+//! the exit it leaves through would have left the frame, so a trace is
+//! entered alike whichever way it is reached.
 //! It runs on the interpreter's frames: a slot is a load and a store at
 //! `room + ROOM_BYTES + 16 * var` with the zval layout `php_heap` defines,
 //! so an exit leaves every frame as the interpreter reads it once it has
@@ -44,7 +65,7 @@ pub(crate) mod dump;
 mod tests;
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicU8;
+use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
 
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::SourceLoc;
@@ -54,7 +75,7 @@ use cranelift_codegen::{Context, Final, MachSrcLoc};
 use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall};
 use php_unit::OplineIdx;
 
-use crate::policy::{JitDebug, Mode, Policy};
+use crate::policy::{Mode, Policy};
 use crate::record::{Began, Stop};
 use crate::table::TraceName;
 use crate::types::{Abort, Check, End, ExitId, ExitSpec, GuardAt, Interrupt, Op, TraceIr};
@@ -68,8 +89,12 @@ use crate::types::{Abort, Check, End, ExitId, ExitSpec, GuardAt, Interrupt, Op, 
 #[derive(Debug, Clone)]
 pub(crate) struct Compiled {
     pub(crate) bytes: Vec<u8>,
-    /// The offset in `bytes` the trace is entered at.
+    /// The offset in `bytes` the trace is entered at: its prologue,
+    /// which `enter` calls on the host's convention.
     pub(crate) entry_offset: usize,
+    /// The offset in `bytes` of its body, on the tail convention, which
+    /// the prologue calls and a jump from another trace enters.
+    pub(crate) body_offset: usize,
     /// A power of two.
     pub(crate) align: usize,
     pub(crate) exits: Box<[ExitSpec]>,
@@ -105,6 +130,10 @@ pub(crate) struct Compiled {
     /// the guard fails once, once per trace and so per process; the code
     /// holds their address, so they live as long as it. Empty otherwise.
     pub(crate) fuzzed: Fuzzed,
+    /// One entry slot per exit, which the code reads where the exit may
+    /// jump to its side trace; the code holds their address, so they live
+    /// as long as it.
+    pub(crate) slots: EntrySlots,
     /// The plain calls the code pushes in place, in the order it reads
     /// their headers in, the request's, at [`IMAGES_AT`].
     pub(crate) calls: Box<[PlainCall]>,
@@ -150,6 +179,99 @@ impl Fuzzed {
             len: self.0.len(),
         }
     }
+}
+
+/// How a trace is entered by a jump from another (`jit-design.md` §4.6):
+/// the address of its body and its number, which the jump writes at
+/// [`TRACE_AT`] and finds the request's row of the trace by. The table
+/// lays one down in each trace it publishes, which never moves while the
+/// table stands, and an exit's [entry slot](EntrySlots) names it.
+#[repr(C)]
+#[derive(Debug)]
+pub(crate) struct Entrance {
+    pub(crate) body: usize,
+    pub(crate) trace: u32,
+}
+
+/// Where compiled code reads an [`Entrance`]'s body and number.
+pub(crate) const ENTRANCE_BODY: i32 = 0;
+pub(crate) const ENTRANCE_TRACE: i32 = 8;
+const _: () = assert!(
+    std::mem::offset_of!(Entrance, body) == ENTRANCE_BODY.unsigned_abs() as usize
+        && std::mem::offset_of!(Entrance, trace) == ENTRANCE_TRACE.unsigned_abs() as usize
+);
+
+/// One entry slot per exit of a trace (#3229's ruling, `jit-design.md`
+/// §4.4, §4.6): null until the side trace grown from the exit is
+/// published, then the side's [`Entrance`], written once, with release,
+/// by the publish that placed it. The exit's code loads its slot with
+/// acquire and jumps to the side where it is set, and answers its
+/// [`ExitId`](crate::types::ExitId) as before where it is not; no
+/// published byte is written again, which is what php's patch of the
+/// exit's jump (`zend_jit_link_side_trace`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:17413`) would have done.
+///
+/// A slot never names code that outlives the code that reads it: a side
+/// is published only into the table its parent stands in
+/// ([`crate::table::TraceTable::publish`]), the parent's trace holds its
+/// slots and the side's trace its `Entrance`, and the table drops every
+/// trace together, with its epoch, once no request, job or claim holds
+/// it, so a trace running in a request whose epoch holds the table runs
+/// beside every trace a slot of it names.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct EntrySlots(Arc<[AtomicPtr<Entrance>]>);
+
+impl EntrySlots {
+    /// `n` slots, none set.
+    pub(crate) fn new(n: usize) -> EntrySlots {
+        EntrySlots(
+            (0..n)
+                .map(|_| AtomicPtr::new(std::ptr::null_mut()))
+                .collect(),
+        )
+    }
+
+    /// The address of the first slot, which the code reads past.
+    fn base(&self) -> usize {
+        self.0.as_ptr().addr()
+    }
+
+    /// `side` written to the slot of `exit`, once: false where the slot
+    /// is set already or the trace has no such exit, which writes
+    /// nothing.
+    pub(crate) fn open(&self, exit: ExitId, side: &Entrance) -> bool {
+        let entrance = std::ptr::from_ref(side).cast_mut();
+        self.0.get(usize::from(exit.0)).is_some_and(|slot| {
+            slot.compare_exchange(
+                std::ptr::null_mut(),
+                entrance,
+                Ordering::Release,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        })
+    }
+
+    /// The address the slot of `exit` holds, null where it is unset.
+    #[cfg(test)]
+    pub(crate) fn opened(&self, exit: ExitId) -> Option<usize> {
+        let slot = self.0.get(usize::from(exit.0))?;
+        Some(slot.load(Ordering::Acquire).addr())
+    }
+}
+
+/// The trace a link jumps to (`jit-design.md` §4.3), published before the
+/// trace that links to it is compiled, so the jump is in that trace's
+/// bytes before they are published, as php's `zend_jit_trace_link_to_root`
+/// writes it (`Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`): its
+/// [`Entrance`], and whether the jump tests the interrupt first, which
+/// php's does where a side trace links to its own root and the root loops
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:7285-7303`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Linked {
+    pub(crate) body: usize,
+    pub(crate) trace: u32,
+    pub(crate) interrupt: bool,
 }
 
 /// Where one recorded opline's code begins: the op array, named with
@@ -249,6 +371,30 @@ pub(crate) const ROOT_AT: i32 = 72;
 /// the cache of a callee it enters ([`Compiled::laid`]) is not laid down,
 /// so that it serves them through the kernels instead.
 pub(crate) const READY_AT: i32 = 76;
+
+/// Where compiled code reads, in the `ExitCtx`, the address of the
+/// request's rows (`enter::Rows`): one address per segment of
+/// [`ROW_SEGMENT`] rows, zero for a segment no trace of it was entered
+/// in, and in a row, at [`ROW_IMAGES`], the address of the trace's calls'
+/// headers in the request and, at [`ROW_READY`], a `u32` that is not
+/// zero once the crossing has entered the trace in the request with its
+/// calls ready. A jump enters a trace only where its row is ready.
+pub(crate) const ROWS_AT: i32 = 80;
+
+/// Where compiled code writes, in the `ExitCtx`, the number of the trace
+/// it enters by a jump, which `enter` reads the exit it answers against:
+/// `enter` writes the number of the trace it calls.
+pub(crate) const TRACE_AT: i32 = 88;
+
+/// The rows a segment of a request's rows holds, as many as a segment of
+/// the trace table holds slots, so a trace's number names its row.
+pub(crate) const ROW_SEGMENT: usize = crate::table::SEGMENT;
+const _: () = assert!(ROW_SEGMENT.is_power_of_two());
+
+/// A row's bytes, and where in it its fields are (`enter::Row`).
+pub(crate) const ROW_BYTES: i64 = 16;
+pub(crate) const ROW_IMAGES: i32 = 0;
+pub(crate) const ROW_READY: i32 = 8;
 
 /// Whether `ir`'s code reads where the frame stands as it enters: its
 /// first op holds it, php's IP guard; a call its frame began before
@@ -428,13 +574,25 @@ impl Stood {
 }
 
 /// The host's `Backend` (`jit-design.md` §4.3): its ISA with the flags the
-/// [`Policy`] asks for, and the kernel table compiled code calls. It holds
-/// no state of one compile, so one serves every compile of the engine.
+/// [`Policy`] asks for, the kernel table compiled code calls, and the
+/// prologue every trace's bytes begin with. It holds no state of one
+/// compile, so one serves every compile of the engine.
+///
+/// **The prologue** is php's trace prologue
+/// (`zend_jit_trace_prologue_size`, `Z/ext/opcache/jit/zend_jit_ir.c:3252`):
+/// one host-convention function, `extern "C" fn(cx, frame, body) -> u32`,
+/// that calls the body at `body` on the tail convention and answers what
+/// it answers, so `enter` crosses into any trace through it and a trace
+/// that jumps to another passes over it, as php's link jumps past the
+/// prologue to the code after it. It is compiled once, with the
+/// `Backend`, and copied ahead of each body.
 pub(crate) struct Backend {
     isa: OwnedTargetIsa,
     symbols: Symbols,
     /// Whether every guard fails once, `jit.mode=exit-fuzz`.
     fuzz: bool,
+    /// The prologue's bytes and the alignment they need.
+    prologue: (Box<[u8]>, usize),
 }
 
 impl std::fmt::Debug for Backend {
@@ -455,6 +613,14 @@ const _: () = {
 /// How a host's ISA is found: `cranelift-native`'s lookup on a real host.
 type Host = fn() -> Result<isa::Builder, &'static str>;
 
+/// A function Cranelift compiled: its bytes, the alignment their first
+/// needs, and where each op's code is.
+struct Machine {
+    bytes: Vec<u8>,
+    align: usize,
+    srclocs: Vec<MachSrcLoc<Final>>,
+}
+
 impl Backend {
     /// The host's `Backend`, its ISA found through `cranelift-native`, with the
     /// flags `policy` asks for, calling the kernels `symbols` names; or
@@ -468,56 +634,68 @@ impl Backend {
     fn on(host: Host, policy: &Policy, symbols: Symbols) -> Result<Backend, Unsupported> {
         let builder = host().map_err(Unsupported)?;
         let isa = builder
-            .finish(flags(policy)?)
+            .finish(flags()?)
             .map_err(|_| Unsupported("the host's ISA refused the tier's flags"))?;
         if isa.pointer_bits() != 64 {
             return Err(Unsupported("a 32-bit host"));
         }
+        let prologue = machine(&*isa, clif::prologue(isa.frontend_config()))
+            .map_err(|_| Unsupported("the host's ISA refused the trace prologue"))?;
         Ok(Backend {
             isa,
             symbols,
             fuzz: policy.mode() == Mode::ExitFuzz,
+            prologue: (prologue.bytes.into_boxed_slice(), prologue.align),
         })
     }
 
-    /// `ir` in final bytes, named `name`: the function [`clif::lower`]
-    /// builds, compiled for the host, with a [`Mark`] per recorded
-    /// opline. Bytes that would need relocating are php's
+    /// `ir` in final bytes, named `name`: the prologue, then the body
+    /// [`clif::lower`] builds, compiled for the host, with a [`Mark`] per
+    /// recorded opline, its link a jump to `linked` where it links to a
+    /// trace with code. Bytes that would need relocating are php's
     /// `COMPILER_ERROR`, as is any refusal of Cranelift's: kernel
-    /// addresses are constants, so a trace's bytes work wherever the arena
-    /// places them.
-    pub(crate) fn compile(&self, ir: &TraceIr, name: TraceName) -> Result<Compiled, Abort> {
+    /// addresses, the entry slots' and a link's are constants, so a trace's
+    /// bytes work wherever the arena places them.
+    pub(crate) fn compile(
+        &self,
+        ir: &TraceIr,
+        name: TraceName,
+        linked: Option<Linked>,
+    ) -> Result<Compiled, Abort> {
         let config = self.isa.frontend_config();
         let (calls, callee_caches) = in_place(ir);
+        let slots = EntrySlots::new(ir.exits.len());
+        let joins = clif::Joins {
+            slots: slots.base(),
+            linked,
+        };
         // Under exit-fuzz a first pass counts the guards, one byte each.
         let fuzzed = if self.fuzz {
             let (_, sites) = clif::lower(
                 ir,
                 config,
                 (&self.symbols, &calls),
-                Some(clif::Fuzz::COUNTING),
+                (Some(clif::Fuzz::COUNTING), joins),
             )?;
             Fuzzed::new(sites)
         } else {
             Fuzzed::default()
         };
         let fuzz = self.fuzz.then(|| fuzzed.fuzz());
-        let (func, _) = clif::lower(ir, config, (&self.symbols, &calls), fuzz)?;
-        let mut ctx = Context::for_function(func);
-        let code = ctx
-            .compile(&*self.isa, &mut ControlPlane::default())
-            .map_err(|_| refused("Cranelift refused the trace's function"))?;
-        if !code.buffer.relocs().is_empty() {
-            return Err(refused("the trace's code needs relocating"));
-        }
-        let bytes = code.code_buffer().to_vec();
-        let align = usize::try_from(code.buffer.alignment.max(1))
-            .map_err(|_| refused("an alignment past the host's"))?;
-        let marks = marks(ir, code.buffer.get_srclocs_sorted(), bytes.len());
+        let (func, _) = clif::lower(ir, config, (&self.symbols, &calls), (fuzz, joins))?;
+        let body = machine(&*self.isa, func)?;
+        let (prologue, prologue_align) = (&self.prologue.0, self.prologue.1);
+        let body_offset = prologue.len().next_multiple_of(body.align);
+        let mut bytes = Vec::with_capacity(body_offset + body.bytes.len());
+        bytes.extend_from_slice(prologue);
+        bytes.resize(body_offset, 0);
+        bytes.extend_from_slice(&body.bytes);
+        let marks = marks(ir, &body.srclocs, (body_offset, bytes.len()));
         Ok(Compiled {
             bytes,
             entry_offset: 0,
-            align,
+            body_offset,
+            align: prologue_align.max(body.align),
             exits: ir.exits.clone().into_boxed_slice(),
             leaves: match ir.end {
                 End::Leave(exit) | End::Return(exit) => Some(exit),
@@ -531,30 +709,63 @@ impl Backend {
             marks,
             name,
             fuzzed,
+            slots,
             callee_caches,
             calls,
         })
     }
 
-    /// The function `ir` lowers to, before Cranelift's passes: the CLIF
-    /// the goldens hold.
+    /// The body `ir` lowers to, before Cranelift's passes: the CLIF the
+    /// goldens hold, its entry slots at a made-up address so the text is
+    /// one on every machine.
     #[cfg(test)]
-    fn clif(&self, ir: &TraceIr) -> Result<cranelift_codegen::ir::Function, Abort> {
+    fn clif(
+        &self,
+        ir: &TraceIr,
+        linked: Option<Linked>,
+    ) -> Result<cranelift_codegen::ir::Function, Abort> {
         let (calls, _) = in_place(ir);
+        let joins = clif::Joins {
+            slots: 0x6000_0000,
+            linked,
+        };
         clif::lower(
             ir,
             self.isa.frontend_config(),
             (&self.symbols, &calls),
-            None,
+            (None, joins),
         )
         .map(|(func, _)| func)
     }
 }
 
+/// `func` compiled for `isa`: none where Cranelift refuses it or its
+/// bytes would need relocating, php's `COMPILER_ERROR`.
+fn machine(
+    isa: &dyn isa::TargetIsa,
+    func: cranelift_codegen::ir::Function,
+) -> Result<Machine, Abort> {
+    let mut ctx = Context::for_function(func);
+    let code = ctx
+        .compile(isa, &mut ControlPlane::default())
+        .map_err(|_| refused("Cranelift refused the trace's function"))?;
+    if !code.buffer.relocs().is_empty() {
+        return Err(refused("the trace's code needs relocating"));
+    }
+    let align = usize::try_from(code.buffer.alignment.max(1))
+        .map_err(|_| refused("an alignment past the host's"))?;
+    Ok(Machine {
+        bytes: code.code_buffer().to_vec(),
+        align,
+        srclocs: code.buffer.get_srclocs_sorted().to_vec(),
+    })
+}
+
 /// The ISA's flags (`jit-design.md` §4.3): optimised for speed, the
-/// verifier where assertions are, and the frame pointers a profiler walks
-/// where `opcache.jit_debug` asks for `PERF` or `PERF_DUMP`.
-fn flags(policy: &Policy) -> Result<settings::Flags, Unsupported> {
+/// verifier where assertions are, and frame pointers, which a body's tail
+/// call is made over and a profiler walks where `opcache.jit_debug` asks
+/// for `PERF` or `PERF_DUMP`.
+fn flags() -> Result<settings::Flags, Unsupported> {
     let mut flags = settings::builder();
     let mut set = |name: &str, value: &str| {
         flags
@@ -570,9 +781,9 @@ fn flags(policy: &Policy) -> Result<settings::Flags, Unsupported> {
             "false"
         },
     )?;
-    if policy.debug().any(JitDebug::PERF | JitDebug::PERF_DUMP) {
-        set("preserve_frame_pointers", "true")?;
-    }
+    // A body hands on by a tail call, which Cranelift makes over the frame
+    // pointer on x86-64; macOS on aarch64 keeps one in every frame anyway.
+    set("preserve_frame_pointers", "true")?;
     Ok(settings::Flags::new(flags))
 }
 
@@ -584,18 +795,20 @@ fn refused(why: &'static str) -> Abort {
     }
 }
 
-/// Where each recorded opline's code begins: the lowest offset of the
-/// code its op left, and where Cranelift folded an op's code away, where
-/// the next op's begins.
-fn marks(ir: &TraceIr, srclocs: &[MachSrcLoc<Final>], len: usize) -> Box<[Mark]> {
+/// Where each recorded opline's code begins in a trace's bytes, its body
+/// at `body` of `len`: the lowest offset of the code its op left, and
+/// where Cranelift folded an op's code away, where the next op's begins.
+fn marks(ir: &TraceIr, srclocs: &[MachSrcLoc<Final>], (body, len): (usize, usize)) -> Box<[Mark]> {
     let end = u32::try_from(len).unwrap_or(u32::MAX);
+    let body = u32::try_from(body).unwrap_or(u32::MAX);
     let mut starts = vec![None::<u32>; ir.ops.len()];
     for loc in srclocs {
         if loc.loc.is_default() {
             continue;
         }
         if let Some(start) = starts.get_mut(loc.loc.bits() as usize) {
-            *start = Some(start.map_or(loc.start, |s| s.min(loc.start)));
+            let at = loc.start.saturating_add(body);
+            *start = Some(start.map_or(at, |s| s.min(at)));
         }
     }
     let mut next = end;

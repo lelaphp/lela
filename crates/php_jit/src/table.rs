@@ -43,7 +43,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
 
-use crate::lower::{Compiled, Fuzzed, Mark};
+use crate::lower::{Compiled, Entrance, EntrySlots, Fuzzed, Linked, Mark};
 use crate::policy::{Place, Policy};
 use crate::record::{Entered, Start, Stop};
 use crate::types::{ExitId, Grows, Landing};
@@ -149,6 +149,14 @@ pub(crate) enum Kind {
 pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) code: Code<P>,
     entry_offset: usize,
+    body_offset: usize,
+    /// How a jump from another trace enters it: its body and its number,
+    /// which an entry slot of the exit it grew from names once it is
+    /// published (`lower::EntrySlots`).
+    pub(crate) entrance: Entrance,
+    /// One entry slot per exit, which its code reads where the exit jumps
+    /// to its side trace, and which the publish of that side writes.
+    pub(crate) slots: EntrySlots,
     pub(crate) id: TraceId,
     #[cfg_attr(
         not(test),
@@ -207,11 +215,32 @@ pub(crate) struct Trace<P: Pages = Native> {
 }
 
 impl<P: Pages> Trace<P> {
-    /// The address the trace is entered at, in the executable view.
+    /// The address the trace is entered at, in the executable view: its
+    /// prologue, which `enter` calls.
     pub(crate) fn entry(&self) -> std::ptr::NonNull<u8> {
         self.code
             .entry()
             .map_addr(|addr| addr.saturating_add(self.entry_offset))
+    }
+
+    /// The address of its body, in the executable view, which its prologue
+    /// calls and a jump from another trace enters.
+    pub(crate) fn body(&self) -> std::ptr::NonNull<u8> {
+        self.code
+            .entry()
+            .map_addr(|addr| addr.saturating_add(self.body_offset))
+    }
+
+    /// What a link to it jumps to (`lower::Linked`), from a trace that
+    /// `start` grew: its entrance, and whether the jump tests the
+    /// interrupt first, which php's does where a side trace links to its
+    /// own root and the root loops (`zend_jit_trace.c:7285-7303`).
+    pub(crate) fn linked(&self, from_root: Option<TraceId>) -> Linked {
+        Linked {
+            body: self.entrance.body,
+            trace: self.entrance.trace,
+            interrupt: from_root == Some(self.id) && self.leaves.is_none(),
+        }
     }
 }
 
@@ -641,7 +670,9 @@ impl<P: Pages> TraceTable<P> {
             .ok_or(Unpublished::Malformed("more exits than an ExitId names"))?;
         let next = self.next.load(Ordering::Relaxed);
         let admitted = writer.counts.admit(self.bounds, next, start, exits)?;
-        if compiled.entry_offset >= compiled.bytes.len() {
+        if compiled.entry_offset >= compiled.bytes.len()
+            || compiled.body_offset >= compiled.bytes.len()
+        {
             return Err(Unpublished::Malformed("an entry past the trace's bytes"));
         }
         if compiled
@@ -694,9 +725,19 @@ impl<P: Pages> TraceTable<P> {
             .perf
             .published(id, &compiled.name, entry, &compiled.bytes);
         let (bytes, oplines) = (compiled.bytes.len(), compiled.marks.len());
+        let body = entry
+            .as_ptr()
+            .expose_provenance()
+            .saturating_add(compiled.body_offset);
         let trace = Box::new(Trace {
             code,
             entry_offset: compiled.entry_offset,
+            body_offset: compiled.body_offset,
+            entrance: Entrance {
+                body,
+                trace: id.get(),
+            },
+            slots: compiled.slots,
             id,
             kind: Kind::Trace,
             start,
@@ -715,11 +756,44 @@ impl<P: Pages> TraceTable<P> {
             links: links.into_boxed_slice(),
         });
         self.fill(id, trace)?;
+        self.open(start, id);
         writer.counts.count(admitted, exits);
         writer.perf.counted(bytes, oplines);
         self.next
             .store(id.get().saturating_add(1), Ordering::Release);
         Ok(id)
+    }
+
+    /// The entry slot of the exit `start` grew the trace `id` from set to
+    /// the trace's entrance, with release, once the trace is in its slot
+    /// (#3229's ruling, `jit-design.md` §4.5): its parent's code jumps to
+    /// it from then on. The parent is this table's, so the slot and the
+    /// entrance it names are dropped together, with the table. A root
+    /// grows from no exit, and a slot set already is left as it is.
+    fn open(&self, start: Start, id: TraceId) {
+        let Some((parent, exit)) = start.grew() else {
+            return;
+        };
+        if let (Some(parent), Some(side)) = (self.get(parent), self.get(id)) {
+            parent.slots.open(exit, &side.entrance);
+        }
+    }
+
+    /// How many segments of slots the table holds, which a request's rows
+    /// of its traces hold as many of (`enter::Rows`).
+    pub(crate) fn segments(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// What the link of a trace `start` grows, linking to `link`, jumps
+    /// to: none where `link` has no code.
+    pub(crate) fn linked(&self, link: TraceId, start: Start) -> Option<Linked> {
+        let to = self.get(link)?;
+        let root = start
+            .grew()
+            .and_then(|(parent, _)| self.get(parent))
+            .map(|parent| parent.root);
+        Some(to.linked(root))
     }
 
     /// Whether the slot `id` names stands unwritten, so [`TraceTable::fill`]

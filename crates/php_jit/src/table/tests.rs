@@ -57,9 +57,11 @@ fn exit(link: Option<TraceId>) -> ExitSpec {
 
 /// `bytes` with `exits`, entered at their start, named `f` at line 3.
 fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
+    let slots = crate::lower::EntrySlots::new(exits.len());
     Compiled {
         bytes: bytes.to_vec(),
         entry_offset: 0,
+        body_offset: 0,
         align: 4,
         exits: exits.into(),
         leaves: None,
@@ -68,6 +70,7 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         entry_stood: false,
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
+        slots,
         calls: Box::new([]),
         callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
@@ -84,6 +87,36 @@ fn side(parent: u32) -> Start {
         parent: trace(parent),
         exit: ExitId(0),
     }
+}
+
+/// A side trace's publish writes the entry slot of the exit it grew
+/// from, once, to its entrance, its body and its number (#3229's ruling):
+/// the parent's other slots stay unset, a root sets none, and a second
+/// trace grown from the same exit leaves the slot naming the first.
+#[test]
+fn a_sides_publish_writes_its_exits_entry_slot_once() -> Result<(), String> {
+    let table = table(&[]);
+    let root = (table.publish(compiled(&[0; 8], vec![exit(None), exit(None)]), Start::Loop))
+        .map_err(|e| format!("{e:?}"))?;
+    let parent = table.get(root).ok_or("the root")?;
+    assert_eq!(parent.slots.opened(ExitId(0)), Some(0));
+    let grown = Start::Side {
+        parent: root,
+        exit: ExitId(1),
+    };
+    let first = (table.publish(compiled(&[0; 8], vec![exit(None)]), grown))
+        .map_err(|e| format!("{e:?}"))?;
+    let side = table.get(first).ok_or("the side")?;
+    let entrance = std::ptr::from_ref(&side.entrance).addr();
+    assert_eq!(parent.slots.opened(ExitId(1)), Some(entrance));
+    assert_eq!(parent.slots.opened(ExitId(0)), Some(0));
+    assert_eq!(side.entrance.trace, first.get());
+    assert_eq!(side.entrance.body, side.body().as_ptr().addr());
+    let second = (table.publish(compiled(&[0; 8], vec![exit(None)]), grown))
+        .map_err(|e| format!("{e:?}"))?;
+    assert_ne!(second, first);
+    assert_eq!(parent.slots.opened(ExitId(1)), Some(entrance));
+    Ok(())
 }
 
 /// Two traces published and read back: numbered from one, each exit
