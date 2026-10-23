@@ -68,6 +68,8 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         entry_stood: false,
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
+        calls: Box::new([]),
+        callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
         name: TraceName {
@@ -160,6 +162,24 @@ fn what_the_published_traces_take_is_counted_as_each_is_published() {
     assert!(table.publish(refused, Start::Loop).is_err());
     let used = table.usage();
     assert_eq!((used.bytes, used.oplines, used.traces), (12, 5, 2));
+}
+
+/// Each epoch's table counts what its own traces take, as php's restart
+/// empties its one buffer (`zend_jit_restart`): a table made after
+/// another over the engine's outputs starts at none, and the first keeps
+/// its own count.
+#[test]
+fn each_epochs_table_counts_what_its_own_traces_take() {
+    let outputs = perf::Outputs::none();
+    let policy = testing::policy(&[("opcache.jit_buffer_size", "64K")]);
+    let old: Heap = TraceTable::new(&policy, &outputs);
+    let body = || compiled(&[1, 2, 3, 4], vec![exit(None)]);
+    assert_eq!(old.publish(body(), Start::Loop), Ok(trace(1)));
+    let new: Heap = TraceTable::new(&policy, &outputs);
+    assert_eq!(new.usage(), super::Usage::default());
+    assert_eq!(new.publish(body(), Start::Loop), Ok(trace(1)));
+    assert_eq!(new.publish(body(), Start::Loop), Ok(trace(2)));
+    assert_eq!((old.usage().bytes, new.usage().bytes), (4, 8));
 }
 
 /// Ids go on across the first segment into the second, each read back

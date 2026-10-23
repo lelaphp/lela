@@ -105,6 +105,8 @@ fn body(len: usize) -> Compiled {
         entry_stood: false,
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
+        calls: Box::new([]),
+        callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
         name: TraceName {

@@ -226,10 +226,11 @@ fn lines(served: &php_engine::test::Served) -> Vec<String> {
 
 /// A destructor that runs a hot loop inside a recording: the loop is
 /// bumped and not recorded, so one `TRACE start` is written, the root's;
-/// the next request enters that root, which leaves where its call's
-/// cache slot, the request's, holds no callee yet, and records a side
-/// trace from that exit's word, which follows the call into `f` and goes on to the
-/// file's return, as php's `zend_jit_trace_hot_side` records one.
+/// the next request enters that root, which makes its call to `f` with no
+/// exit, as php's `INIT_FCALL` of a user function takes none (#3230), and
+/// the destructor's loop, hot where nothing records, roots a trace of its
+/// own, whose exit past the loop grows a side trace to the destructor's
+/// return, as php's `zend_jit_trace_hot_side` records one.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
@@ -255,10 +256,16 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
     assert_eq!(
         lines(&second),
         [
-            "     TRACE 1 exit 0 $main() body.php:4",
-            "---- TRACE 2 start (side trace 1/0) $main() body.php:4",
-            "---- TRACE 2 stop (return)",
+            "---- TRACE 2 start (enter) D::__destruct() body.php:2",
+            "---- TRACE 2 abort (inner loop)",
+            "---- TRACE 2 start (loop) D::__destruct() body.php:2",
+            "---- TRACE 2 stop (loop)",
             "---- TRACE 2 compiled",
+            "",
+            "     TRACE 2 exit 2 D::__destruct() body.php:2",
+            "---- TRACE 3 start (side trace 2/2) D::__destruct() body.php:2",
+            "---- TRACE 3 stop (return)",
+            "---- TRACE 3 compiled",
             "",
         ]
     );
@@ -394,11 +401,12 @@ fn the_exclusion_is_clear_after_a_recording_a_panic_unwound() {
 
 /// A fiber suspended inside a recording: the request records, as php's
 /// `JIT_G(tracing)` stays set while the fiber's recorder is suspended, so
-/// the resumer's hot `work()` records no root; destroying the fiber
-/// unwinds the recording and clears the exclusion, so the next hot
-/// `work()` is recorded (revision 30). The first request records
-/// `$main`, inside which nothing else roots; the second finds `$main`
-/// numbered and roots in the fiber, and its last `work()` enters the
+/// the resumer's hot `W::__toString()`, which the echo's cast serves from
+/// a native, outside `$main`'s compiled code, records no root; destroying
+/// the fiber unwinds the recording and clears the exclusion, so the next
+/// hot `W::__toString()` is recorded (revision 30). The first request
+/// records `$main`, inside which nothing else roots; the second finds
+/// `$main` numbered and roots in the fiber, and its last cast enters the
 /// trace the one before compiled, whose end writes no exit line, as php's
 /// return to the interpreter at a trace's end writes none.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -407,12 +415,12 @@ fn a_fiber_suspended_inside_a_recording_keeps_its_resumer_from_recording_until_d
     let scratch = testing::Scratch::new();
     let engine = testing::engine::<Lane>(&DUMPED);
     let program = "function body() { Fiber::suspend(1); echo \"never\\n\"; }
-        function work() { return 2; }
+        class W { function __toString(): string { return '2'; } }
         $f = new Fiber('body');
         $f->start();
-        echo work(), \"\\n\";
+        echo new W, \"\\n\";
         $f = null;
-        echo work(), \"\\n\";";
+        echo new W, \"\\n\";";
     let first = scratch.serve(&engine, program);
     assert_eq!(testing::stdout(&first), "2\n2\n", "{:?}", lines(&first));
     let second = scratch.serve(&engine, program);
@@ -423,7 +431,7 @@ fn a_fiber_suspended_inside_a_recording_keeps_its_resumer_from_recording_until_d
             "---- TRACE 2 start (enter) body() body.php:2",
             "---- TRACE 2 abort (exception)",
             "",
-            "---- TRACE 2 start (enter) work() body.php:3",
+            "---- TRACE 2 start (enter) W::__toString() body.php:3",
             "---- TRACE 2 stop (return)",
             "---- TRACE 2 compiled",
             "",

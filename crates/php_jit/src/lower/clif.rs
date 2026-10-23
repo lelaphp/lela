@@ -40,14 +40,16 @@ use cranelift_codegen::ir::{
 };
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use php_engine::tier::FuncRef;
+use php_engine::tier::{FuncRef, PlainCall};
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, STOOD_AT, Stood,
-    Symbols, UNWOUND, located,
+    ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT,
+    STOOD_AT, Stood, Symbols, UNWOUND, located,
 };
+
+mod calls;
 use crate::record::{Began, Callee, Stop};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
@@ -122,7 +124,7 @@ fn mismatch(why: &'static str) -> Abort {
 pub(super) fn lower(
     ir: &TraceIr,
     config: TargetFrontendConfig,
-    symbols: &Symbols,
+    (symbols, held): (&Symbols, &[PlainCall]),
     fuzz: Option<Fuzz>,
 ) -> Result<(Function, usize), Abort> {
     let call_conv = config.default_call_conv;
@@ -132,7 +134,7 @@ pub(super) fn lower(
     let mut func = Function::with_name_signature(UserFuncName::user(0, 0), sig);
     let mut context = FunctionBuilderContext::new();
     let builder = FunctionBuilder::new(&mut func, &mut context);
-    let mut emit = Emit::new(ir, builder, call_conv, symbols);
+    let mut emit = Emit::new(ir, builder, call_conv, (symbols, held));
     emit.fuzz = fuzz;
     emit.trace()?;
     let sites = emit.fuzzed_sites;
@@ -241,6 +243,18 @@ struct Emit<'a> {
     b: FunctionBuilder<'a>,
     call_conv: CallConv,
     symbols: &'a Symbols,
+    /// The plain calls whose headers the code copies, where they live as
+    /// long as it ([`super::Compiled::calls`]).
+    held: &'a [PlainCall],
+    /// The request's VM stack, read once at entry by a trace that pushes,
+    /// makes or leaves a call in place.
+    stack: Option<Value>,
+    /// Per frame of the trace, its place on the stack, a `FrameRef`'s
+    /// number, kept where `stack` is.
+    refs: Vec<Variable>,
+    /// The place of the frame the last `RETURN` leaves to, which its
+    /// `Op::Back` names the frame it lands in by.
+    returned_to: Option<Variable>,
     /// The `ExitCtx`, the function's first parameter.
     cx: Option<Value>,
     /// The address of the request's interrupt byte, read once as a
@@ -252,8 +266,9 @@ struct Emit<'a> {
     rooms: Vec<Variable>,
     /// Per value the trace keeps in a register, its variable.
     regs: Vec<Option<Variable>>,
-    /// The rooms of the calls under way, the innermost last.
-    calls: Vec<CallRoom>,
+    /// The rooms of the calls under way, the innermost last, each with
+    /// the plain call it is where compiled code pushed it in place.
+    calls: Vec<(CallRoom, Option<&'a PlainCall>)>,
     /// Per kernel, its signature once imported.
     sigs: [Option<SigRef>; Kernel::ALL.len()],
     /// Per exit, its block once a site branches to it.
@@ -282,9 +297,10 @@ impl<'a> Emit<'a> {
         ir: &'a TraceIr,
         mut b: FunctionBuilder<'a>,
         call_conv: CallConv,
-        symbols: &'a Symbols,
+        (symbols, held): (&'a Symbols, &'a [PlainCall]),
     ) -> Emit<'a> {
         let rooms = ir.frames.iter().map(|_| b.declare_var(I64)).collect();
+        let refs = ir.frames.iter().map(|_| b.declare_var(I64)).collect();
         let stood = b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             u32::try_from(size_of::<Stood>()).unwrap_or(u32::MAX),
@@ -295,6 +311,10 @@ impl<'a> Emit<'a> {
             b,
             call_conv,
             symbols,
+            held,
+            stack: None,
+            refs,
+            returned_to: None,
             cx: None,
             interrupt: None,
             stood,
@@ -332,11 +352,22 @@ impl<'a> Emit<'a> {
         self.b.def_var(self.room_var(Frame::ROOT)?, room);
         let header = match self.ir.end {
             End::Loop(header) => Some(header),
-            End::Leave(_) => None,
+            End::Leave(_) | End::Return(_) => None,
         };
         if header.is_some() {
             self.interrupt = Some(self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT));
         }
+        if calls::in_place(self.ir) {
+            // The stack and the entered frame's place on it, which calls
+            // made in place read.
+            self.stack = Some(self.b.ins().load(I64, trusted(), cx, STACK_AT));
+            let place = self.b.ins().load(I32, trusted(), cx, ROOT_AT);
+            let place = self.b.ins().uextend(I64, place);
+            self.b.def_var(self.ref_var(Frame::ROOT)?, place);
+        }
+        // Laid down before either way in: a guard at the body's entry
+        // reads it too.
+        self.stood_at_entry(cx);
         // A trace entered at its loop's body goes there; at its first op,
         // on.
         let body = match &self.ir.body {
@@ -350,16 +381,6 @@ impl<'a> Emit<'a> {
             }
             None => None,
         };
-        if super::stood_at_entry(self.ir) {
-            // Where the frame stands as the trace enters, which `enter`
-            // laid down, held as where the last kernel left it.
-            // Its frame, its call, in one word its op array and opline,
-            // and the stack's room, laid out alike in both.
-            for at in [STOOD_FRAME, STOOD_CALL, STOOD_FUNC, STOOD_ROOM] {
-                let word = self.b.ins().load(I64, trusted(), cx, STOOD_AT + at);
-                self.b.ins().stack_store(I64, word, self.stood, at);
-            }
-        }
         for guard in self.ir.guards.iter().filter(|g| g.at == GuardAt::Entry) {
             self.guard(*guard)?;
         }
@@ -402,6 +423,10 @@ impl<'a> Emit<'a> {
                     };
                     let last = self.room(self.running)?;
                     self.b.def_var(self.room_var(looped)?, last);
+                    if self.stack.is_some() {
+                        let place = self.frame_ref(self.running)?;
+                        self.b.def_var(self.ref_var(looped)?, place);
+                    }
                 }
                 self.b.ins().jump(head, &[]);
                 self.b.seal_block(head);
@@ -410,6 +435,8 @@ impl<'a> Emit<'a> {
                 let block = self.exit_block(exit)?;
                 self.b.ins().jump(block, &[]);
             }
+            // The `RETURN` left in place went on to the escape or the exit.
+            (End::Return(_), _) => {}
             (End::Loop(_), None) => return Err(mismatch("a loop with no interrupt flag")),
         }
         if let Some((entry, into, block)) = body {
@@ -420,6 +447,21 @@ impl<'a> Emit<'a> {
             self.b.seal_block(block);
         }
         self.exit_blocks()
+    }
+
+    /// Where the frame stands as the trace enters, which `enter` laid
+    /// down in `cx`, held as where the last kernel left it, for a trace
+    /// whose code reads it ([`super::stood_at_entry`]): its frame, its
+    /// call, in one word its op array and opline, and the stack's room,
+    /// laid out alike in both.
+    fn stood_at_entry(&mut self, cx: Value) {
+        if !super::stood_at_entry(self.ir) {
+            return;
+        }
+        for at in [STOOD_FRAME, STOOD_CALL, STOOD_FUNC, STOOD_ROOM] {
+            let word = self.b.ins().load(I64, trusted(), cx, STOOD_AT + at);
+            self.b.ins().stack_store(I64, word, self.stood, at);
+        }
     }
 
     /// The ops of `range`, the way in at the body (`body`: the entry, its
@@ -616,31 +658,43 @@ impl<'a> Emit<'a> {
                 }
             }
             Op::InitCall {
-                began: Began::Here, ..
+                began: Began::Here,
+                plain,
+                ..
             } => {
                 let call = self.stood_word(I64, STOOD_CALL);
                 let var = self.b.declare_var(I64);
                 self.b.def_var(var, call);
-                self.calls.push(CallRoom::Held(var));
+                self.calls.push((CallRoom::Held(var), plain.as_ref()));
                 Ok(())
             }
             Op::InitCall {
                 began: Began::Before,
                 ..
             } => {
-                self.calls.push(CallRoom::Stood);
+                self.calls.push((CallRoom::Stood, None));
                 Ok(())
             }
             Op::Enter { frame } => {
                 let room = self.stood_word(I64, STOOD_FRAME);
                 self.b.def_var(self.room_var(*frame)?, room);
                 self.running = *frame;
+                if let Some(stack) = self.stack {
+                    // The frame entered is the stack's top record.
+                    let len = self.b.ins().load(I64, trusted(), stack, calls::FRAMES_LEN);
+                    let place = self.b.ins().iadd_imm_s(len, -1);
+                    self.b.def_var(self.ref_var(*frame)?, place);
+                }
                 Ok(())
             }
             Op::Back { frame, escapes, .. } => {
                 let room = self.stood_word(I64, STOOD_FRAME);
                 self.b.def_var(self.room_var(*frame)?, room);
                 self.running = *frame;
+                if let Some(var) = self.returned_to.take() {
+                    let place = self.b.use_var(var);
+                    self.b.def_var(self.ref_var(*frame)?, place);
+                }
                 if let Some((func, opline)) = *escapes {
                     self.escapes(func, opline)?;
                 }
@@ -1071,6 +1125,18 @@ impl<'a> Emit<'a> {
     /// registers stored first, so the interpreter reads them in their
     /// slots, and the way a jump it served went held to its guards.
     fn stepped(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        if line.opcode == Opcode::Return {
+            self.returns_to(line)?;
+        }
+
+        self.step_kernel(at, line)?;
+        self.after_step(at, line)
+    }
+
+    /// The kernel that serves `line` whole, [`Kernel::Step`], or
+    /// [`Kernel::Call`] for a call the trace follows into its callee, its
+    /// operands held in registers stored to their slots first.
+    fn step_kernel(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         for operand in [line.op1, line.op2, line.data] {
             if let Operand::Value(value) = operand
                 && self.value(value)?.home == Home::Register
@@ -1093,6 +1159,13 @@ impl<'a> Emit<'a> {
             }
             None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
         }
+        Ok(())
+    }
+
+    /// What follows a stepped `line`: a call it made off the calls under
+    /// way, and the way a jump it served went held to its guards, read off
+    /// the `Stood` the kernel, or the code that served it in place, wrote.
+    fn after_step(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         if matches!(
             line.opcode,
             Opcode::DoFcall | Opcode::DoIcall | Opcode::DoUcall | Opcode::DoFcallByName
@@ -1229,7 +1302,7 @@ impl<'a> Emit<'a> {
                 Some(Op::Line(line)) => Some(line),
                 _ => None,
             },
-            (None, End::Leave(_)) => None,
+            (None, End::Leave(_) | End::Return(_)) => None,
         };
         next.filter(|line| line.frame == frame)
             .map(|line| line.opline.0)
@@ -1295,13 +1368,23 @@ impl<'a> Emit<'a> {
             Opcode::FetchDimR => self.fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
-            Opcode::SendValEx
-            | Opcode::DoUcall
-            | Opcode::DoFcall
-            | Opcode::DoFcallByName
-            | Opcode::Return => self.stepped(at, line),
+            // A send to a callee that takes the argument by value.
+            Opcode::SendValEx if matches!(line.imm, Imm::Arg(_)) => self.send(at, line),
+            Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => match line.imm {
+                Imm::Make { returns } => self.make_in_place(at, line, returns),
+                _ => self.stepped(at, line),
+            },
+            Opcode::Return if matches!(line.imm, Imm::Leave { .. }) => {
+                self.leave_in_place(at, line)
+            }
+            Opcode::SendValEx | Opcode::Return => self.stepped(at, line),
             Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
-                self.push_call(at, line)
+                match self.ir.ops.get(at.index() + 1) {
+                    Some(Op::InitCall {
+                        plain: Some(plain), ..
+                    }) => self.push_in_place(line, plain),
+                    _ => self.push_call(at, line),
+                }
             }
             _ => Err(mismatch("an inline opline the lowering does not serve")),
         }
@@ -1816,7 +1899,7 @@ impl<'a> Emit<'a> {
         let Imm::Arg(number) = line.imm else {
             return Err(mismatch("a send with no argument number"));
         };
-        let call = *self
+        let (call, _) = *self
             .calls
             .last()
             .ok_or_else(|| mismatch("a send with no call under way"))?;
@@ -2088,6 +2171,20 @@ impl<'a> Emit<'a> {
             .get(usize::from(frame.0))
             .copied()
             .ok_or_else(|| mismatch("a frame past the trace's"))
+    }
+
+    /// The variable of `frame`'s place on the stack.
+    fn ref_var(&self, frame: Frame) -> Result<Variable, Abort> {
+        self.refs
+            .get(usize::from(frame.0))
+            .copied()
+            .ok_or_else(|| mismatch("a frame past the trace's"))
+    }
+
+    /// `frame`'s place on the stack, a `FrameRef`'s number.
+    fn frame_ref(&mut self, frame: Frame) -> Result<Value, Abort> {
+        let var = self.ref_var(frame)?;
+        Ok(self.b.use_var(var))
     }
 
     /// `frame`'s room.

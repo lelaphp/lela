@@ -90,7 +90,8 @@ pub use resource::{Res, ResourceType};
 pub use sensed::Origin;
 pub use sort::zend_sort;
 pub use stack::{
-    EntryGuard, FakeRoom, Frame, FrameRef, FramesAside, HEADER_AT, ROOM_BYTES, Slot, VmStack,
+    EntryGuard, FakeRoom, Frame, FrameRef, FramesAside, FramesLayout, HEADER_AT, HEADER_WORDS,
+    HeaderImage, ROOM_BYTES, Slot, StackLayout, VmStack,
 };
 pub use standalone::StandaloneHeap;
 pub use string::{FreshStr, Intern, Made, Pending, Str, Strings};
