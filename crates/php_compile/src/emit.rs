@@ -146,6 +146,7 @@ mod memo;
 mod pipe;
 mod target;
 mod types;
+pub use self::types::is_reserved_class_name;
 mod user_call;
 pub(crate) mod walk;
 

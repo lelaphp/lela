@@ -1247,26 +1247,7 @@ fn reserved_class_name(lowered: &[u8]) -> bool {
         .iter()
         .rposition(|b| *b == b'\\')
         .map_or(lowered, |at| &lowered[at + 1..]);
-    [
-        &b"bool"[..],
-        b"false",
-        b"float",
-        b"int",
-        b"null",
-        b"parent",
-        b"self",
-        b"static",
-        b"string",
-        b"true",
-        b"void",
-        b"never",
-        b"iterable",
-        b"object",
-        b"mixed",
-        b"array",
-        b"callable",
-    ]
-    .contains(&unqualified)
+    php_compile::is_reserved_class_name(unqualified)
 }
 
 /// `class_alias(string $class, string $alias, bool $autoload = true):
