@@ -1789,6 +1789,10 @@ impl Shared {
                 room: php_compile::Room::default(),
             },
         );
+        debug_assert!(
+            (unit.as_ref().ok()).is_none_or(crate::api::request::declares_no_counted_array),
+            "a unit for every request declares a counted array"
+        );
         let answers = home.settle(strings_kept(&unit));
         Fresh { unit, answers }
     }

@@ -923,7 +923,7 @@ fn unlined(expr: &ConstExpr) -> ConstExpr {
             | E::Long { .. }
             | E::Double(_)
             | E::Str(_)
-            | E::ImmutableArray(_)
+            | E::UnitArray(_)
             | E::Closure { .. }
             | E::ScopeClass => {}
         }

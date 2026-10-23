@@ -6296,7 +6296,7 @@ fn double_string(req: &mut Request, f: f64) -> String {
 /// ```
 fn exported(req: &mut Request, expr: &ConstExpr) -> String {
     match expr {
-        ConstExpr::ImmutableArray(_) => folded_array(req, expr, exported_value),
+        ConstExpr::UnitArray(_) => folded_array(req, expr, exported_value),
         _ => default_value_string(req, expr),
     }
 }
@@ -6376,7 +6376,7 @@ fn default_value_string(req: &mut Request, expr: &ConstExpr) -> String {
         ConstExpr::Str(s) => format!("'{}'", escaped(s)),
         // The array the compiler folded is the value it is, whose keys
         // print unless it is a list.
-        ConstExpr::ImmutableArray(_) => folded_array(req, expr, value_default_string),
+        ConstExpr::UnitArray(_) => folded_array(req, expr, value_default_string),
         // `zend_ast_export`'s `ZEND_AST_ARRAY`, an array some element of
         // which is still to evaluate: a key where one is written, and
         // each element as the export writes it ([`exported`]).
