@@ -515,31 +515,13 @@ mod dispatch {
 
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 
-    /// The arm of a handler the loop does not hold in its body: the
-    /// frame stood at `at`, php's `SAVE_OPLINE()`, and `handler` called
-    /// out of line, so what it holds live is its own and not the loop's.
+    /// The arm of a handler the loop does not hold in its body: `handler`
+    /// called out of line, so what it holds live is its own and not the
+    /// loop's. An arm whose handler does not take its opline's place
+    /// stands the frame at `at` first, php's `SAVE_OPLINE()`.
     #[cold]
     #[inline(never)]
     fn aside<F>(
-        req: &mut Request,
-        frame: FrameRef,
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-        handler: F,
-    ) -> Result<Next, Fatal>
-    where
-        F: FnOnce(&mut Request, FrameRef, &OpArray, &Opline) -> Result<Next, Fatal>,
-    {
-        req.vm_mut().stand(frame, at);
-        handler(req, frame, code, op)
-    }
-
-    /// [`aside`] for a handler that takes its opline's place and stands
-    /// the frame there itself.
-    #[cold]
-    #[inline(never)]
-    fn aside_at<F>(
         req: &mut Request,
         frame: FrameRef,
         code: &OpArray,

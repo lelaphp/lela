@@ -379,7 +379,7 @@ fn tails(calls: &[(String, Vec<String>)]) -> String {
          use crate::tier::tail::{{Tail, Table, onward}};\n\
          use crate::tier::{{Next, Tier}};\n\
          \n\
-         use super::{{aside, aside_at}};\n\
+         use super::aside;\n\
          \n\
          /// How many `php_unit::Handler`s there are, one entry of the table\n\
          /// each.\n\
@@ -757,8 +757,13 @@ fn call(handler: &Handler, variant: &str, generics: &str) -> String {
              \x20           {path}(req, frame, code, op)\n\
              \x20       }}"
         ),
-        (false, true) => format!("aside_at(req, frame, code, op, at, {path})"),
-        (false, false) => format!("aside(req, frame, code, op, at, {path})"),
+        (false, true) => format!("aside(req, frame, code, op, at, {path})"),
+        (false, false) => format!(
+            "aside(req, frame, code, op, at, |req, frame, code, op, at| {{\n\
+             \x20           req.vm_mut().stand(frame, at);\n\
+             \x20           {path}(req, frame, code, op)\n\
+             \x20       }})"
+        ),
     }
 }
 
