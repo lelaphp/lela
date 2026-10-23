@@ -21709,14 +21709,7 @@ fn inline_identical<T: Tier, const NOT: bool>(
     let y = side(b.kind(), b.read(slots, code, op.op2))?;
     let answer = inline::identical(x, y)? != NOT;
     if let Some(jump) = branch::Peeked::fused(code, op, at) {
-        return Some(branch_fused::<T>(
-            req,
-            frame,
-            code,
-            at.saturating_add(1),
-            jump,
-            answer,
-        ));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
     write_owning_nothing(slots, op, Zval::bool(answer))?;
     Some(Ok(advanced()))
@@ -22017,14 +22010,7 @@ fn inline_type_check<T: Tier>(
         *slots.get_mut(operand)? = Zval::UNDEF;
     }
     if let Some(jump) = fused {
-        return Some(branch_fused::<T>(
-            req,
-            frame,
-            code,
-            at.saturating_add(1),
-            jump,
-            answer,
-        ));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
     write_owning_nothing(slots, op, Zval::bool(answer))?;
     Some(Ok(advanced()))
@@ -22516,14 +22502,7 @@ fn inline_isset_dim<T: Tier>(
         exec::free_operand(req, frame, op.op2_type, op.op2);
     }
     if let Some(jump) = fused {
-        return Some(branch_fused::<T>(
-            req,
-            frame,
-            code,
-            at.saturating_add(1),
-            jump,
-            answer,
-        ));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
     write_owning_nothing(req.slots_mut(frame), op, Zval::bool(answer))?;
     Some(Ok(advanced()))
@@ -23164,11 +23143,13 @@ pub(crate) fn jmp<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, code, at, op.op1, op.out)
+    jumped::<T>(req, frame, code, (at, at), op.op1, op.out)
 }
 
-/// `ZEND_VM_JMP` from the opline at `at` to `target`, the frame left at
-/// the target; a target at or before `at` is the back-edge, where the
+/// `ZEND_VM_JMP` from the jump at `at` to `target`, the frame left at
+/// the target, answered as the distance from `served`, the opline the
+/// loop dispatched, which is `at` or the comparison a fused jump
+/// follows; a target at or before `at` is the back-edge, where the
 /// interrupt is tested and then the loop safepoint raised with
 /// `number`, the one the compiler wrote into the jump's `result`.
 ///
@@ -23228,7 +23209,7 @@ fn jumped<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
-    at: u32,
+    (served, at): (u32, u32),
     target: u32,
     number: u32,
 ) -> Edge {
@@ -23255,7 +23236,7 @@ fn jumped<T: Tier>(
             flow => return crate::tier::resumed(req, flow, frame),
         }
     }
-    Ok(Next::jump(target))
+    Ok(Next::by(target.wrapping_sub(served)))
 }
 
 /// `ZEND_JMPNZ`: the jump `zend_emit_cond_jump` leaves at the end of a
@@ -23425,7 +23406,7 @@ fn branched<T: Tier, const ON: bool, const EX: bool>(
         return jump_to(op.op2);
     }
     let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, code, at, op.op2, op.out)
+    jumped::<T>(req, frame, code, (at, at), op.op2, op.out)
 }
 
 /// `ZEND_JMP_SET`: the left operand of `a ?: c`
@@ -24148,14 +24129,7 @@ fn smart_branch<T: Tier, S: Branch>(
     if req.is_pending() {
         return Ok(Stepped::Threw(frame).into());
     }
-    branch_fused::<T>(
-        req,
-        frame,
-        code,
-        exec::after(at),
-        jump,
-        answer.as_bool() == Some(true),
-    )
+    branch_fused::<T>(req, frame, code, at, jump, answer.as_bool() == Some(true))
 }
 
 /// A comparison's handler past its inline path: [`binary_kernel`] and
@@ -24250,8 +24224,8 @@ pub(crate) mod branch {
     }
 }
 
-/// The fused jump at `at` over the comparison's `answer`: on past the
-/// jump where it is not taken, and taken as [`jumped`] takes it from the
+/// The fused jump after the comparison at `at` over its `answer`: on
+/// past the jump where it is not taken, and taken as [`jumped`] takes it from the
 /// jump's own opline, a backward one raising the loop safepoint with
 /// the jump's number.
 #[inline(always)] // as `branch::Branch::fused`
@@ -24265,9 +24239,12 @@ fn branch_fused<T: Tier>(
     answer: bool,
 ) -> Edge {
     if answer != fused.on {
-        return jump_to(exec::after(at));
+        // Past the comparison and its jump, `ZEND_VM_SMART_BRANCH`'s
+        // `ZEND_VM_SET_NEXT_OPCODE(opline + 2)`.
+        return Ok(Next::by(2));
     }
-    jumped::<T>(req, frame, code, at, fused.jump.op2, fused.jump.out)
+    let jump = exec::after(at);
+    jumped::<T>(req, frame, code, (at, jump), fused.jump.op2, fused.jump.out)
 }
 
 /// The inline path of the binary operators (design §5.8,
@@ -24323,14 +24300,7 @@ fn inline_compare<T: Tier, S: Branch>(
         holds,
     )?;
     if let Some(jump) = S::fused(code, op, at) {
-        return Some(branch_fused::<T>(
-            req,
-            frame,
-            code,
-            exec::after(at),
-            jump,
-            answer,
-        ));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
     write_owning_nothing(req.slots_mut(frame), op, Zval::bool(answer))?;
     Some(Ok(advanced()))
@@ -24367,7 +24337,7 @@ fn inline_branch<T: Tier, const ON: bool, const EX: bool>(
     if EX {
         return Some(jump_to(op.op2));
     }
-    Some(jumped::<T>(req, frame, code, at, op.op2, op.out))
+    Some(jumped::<T>(req, frame, code, (at, at), op.op2, op.out))
 }
 
 /// The inline path of `ZEND_BOOL` (`NOT` false) and `ZEND_BOOL_NOT`

@@ -381,17 +381,24 @@ pub enum Stepped {
 ///
 /// One word, so that a handler's answer, `Result<Next, Fatal>`, is two
 /// registers and never a slot in memory the loop reads back: the way in
-/// the high half and the opline or the frame in the low, which
-/// [`Next::way`] reads back as a [`Way`].
+/// the high half and the opline, the distance to it or the frame in the
+/// low, which [`Next::way`] reads back as a [`Way`]. Going on in the
+/// frame is the high half zero and the distance from the opline served,
+/// so `ZEND_VM_NEXT_OPCODE` and a jump whose handler holds its own place
+/// are one way, read by one compare of the word and one add.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Next(u64);
 
 /// What a [`Next`] says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Way {
-    /// `ZEND_VM_NEXT_OPCODE`: the opline after this one.
-    Advance,
-    /// `ZEND_VM_SET_OPCODE`: this opline of the same frame.
+    /// `ZEND_VM_NEXT_OPCODE`, and `ZEND_VM_SET_OPCODE` from a handler
+    /// that holds its own place: the opline this many places on from the
+    /// one served, the add wrapping, so a jump back is the distance's
+    /// two's complement.
+    On(u32),
+    /// `ZEND_VM_SET_OPCODE` from a handler that does not hold its place:
+    /// this opline of the same frame.
     Jump(u32),
     /// Any other edge, the positions on the chain written.
     Left(Stepped),
@@ -400,7 +407,7 @@ pub(crate) enum Way {
 impl Next {
     /// The high half of each way, written by the constructors below and
     /// read by [`Next::way`] and nowhere else.
-    const ADVANCE_WAY: u64 = 0;
+    const ON_WAY: u64 = 0;
     const JUMP_WAY: u64 = 1;
     const SAME_WAY: u64 = 2;
     const PUSHED_WAY: u64 = 3;
@@ -410,9 +417,17 @@ impl Next {
     const DONE_WAY: u64 = 7;
 
     /// `ZEND_VM_NEXT_OPCODE`.
-    pub(crate) const ADVANCE: Next = Next(Next::ADVANCE_WAY << 32);
+    pub(crate) const ADVANCE: Next = Next::by(1);
 
-    /// `ZEND_VM_SET_OPCODE(to)`.
+    /// The opline `places` on from the one served, `ZEND_VM_NEXT_OPCODE`
+    /// at one and `ZEND_VM_SET_OPCODE(opline + places)` at any other;
+    /// a jump from `at` to `to` is `by(to.wrapping_sub(at))`.
+    pub(crate) const fn by(places: u32) -> Next {
+        Next(Next::ON_WAY << 32 | places as u64)
+    }
+
+    /// `ZEND_VM_SET_OPCODE(to)`, from a handler that does not hold the
+    /// place of the opline it serves.
     pub(crate) const fn jump(to: u32) -> Next {
         Next(Next::JUMP_WAY << 32 | to as u64)
     }
@@ -424,8 +439,12 @@ impl Next {
         // The low half is the opline or the frame, as the high half says.
         #[allow(clippy::cast_possible_truncation)]
         let low = self.0 as u32;
+        // On, tested on the whole word first, so the way met most is one
+        // compare and not a search of the high half.
+        if self.0 <= u32::MAX as u64 {
+            return Way::On(low);
+        }
         match self.0 >> 32 {
-            Next::ADVANCE_WAY => Way::Advance,
             Next::JUMP_WAY => Way::Jump(low),
             Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
             Next::PUSHED_WAY => Way::Left(Stepped::Pushed(FrameRef(low))),
@@ -461,7 +480,7 @@ impl From<Stepped> for Next {
 pub(crate) fn settled(req: &mut Request, frame: FrameRef, at: u32, next: Next) -> Stepped {
     let to = match next.way() {
         Way::Left(stepped) => return stepped,
-        Way::Advance => at.saturating_add(1),
+        Way::On(places) => at.wrapping_add(places),
         Way::Jump(to) => to,
     };
     req.vm_mut().stand(frame, to);
@@ -954,7 +973,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
             match way {
-                Way::Advance => at = exec::after(at),
+                Way::On(places) => at = at.wrapping_add(places),
                 Way::Jump(to) => at = to,
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
