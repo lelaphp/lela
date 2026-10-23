@@ -57,7 +57,7 @@ fn an_assign_into_a_cv_holding_a_reference_writes_the_referent() {
     req.replace_slot(frame, 0, cell.as_value());
 
     assert_eq!(
-        served!(req, frame, at => assign::<Nop, crate::operand::Cv, crate::operand::Const>(&mut req, frame, code, &op, at)),
+        served!(req, frame, at => assign::<Nop, crate::operand::Cv, crate::operand::Const, crate::operand::RetvalUsed>(&mut req, frame, code, &op, at)),
         Ok(Stepped::Same(frame))
     );
     assert_eq!(
