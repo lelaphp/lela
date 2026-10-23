@@ -6,7 +6,7 @@
 use php_engine::tier::Sample;
 use php_heap::ZvalType;
 use php_unit::decl::{Parameter, Type};
-use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline};
+use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::{Constant, Frame, Imm, Layout, Line, Slot};
@@ -390,6 +390,39 @@ pub(super) fn params(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<Para
                 declared,
             })
         })
+        .collect()
+}
+
+/// The `RECV` oplines of `code`'s prologue at which php's `zend_jit_recv`
+/// takes a `ZEND_JIT_EXIT_TO_VM` exit for a root frame whose argument
+/// count the trace does not know (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10872`),
+/// in order: none unless a parameter has a type, php's
+/// `ZEND_ACC_HAS_TYPE_HINTS`, without which php's entry trace starts past
+/// the prologue (`zend_jit_setup_hot_trace_counters`,
+/// `Z/ext/opcache/jit/zend_jit_trace.c:8983-9001`); and then one per
+/// `RECV` whose parameter has a type or that no `RECV` follows. A
+/// `RECV_INIT` and a `RECV_VARIADIC` take none. A parameter the view
+/// does not list has a type where its `RECV`'s mask is not `MAY_BE_ANY`.
+pub(super) fn recv_exits(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<OplineIdx> {
+    let prologue = (code.oplines.iter()).take_while(|op| {
+        matches!(
+            op.opcode,
+            Opcode::Recv | Opcode::RecvInit | Opcode::RecvVariadic
+        )
+    });
+    let typed = |op: &Opline| match declared {
+        Some(list) => (list.get(op.op1.saturating_sub(1) as usize)).is_some_and(|p| p.ty.is_some()),
+        None => op.opcode == Opcode::Recv && op.op2 != Type::MAY_BE_ANY,
+    };
+    if !prologue.clone().any(typed) {
+        return Vec::new();
+    }
+    (prologue.enumerate())
+        .filter(|(at, op)| {
+            let next = code.oplines.get(at + 1).map(|next| next.opcode);
+            op.opcode == Opcode::Recv && (typed(op) || next != Some(Opcode::Recv))
+        })
+        .filter_map(|(at, _)| u32::try_from(at).ok().map(OplineIdx))
         .collect()
 }
 

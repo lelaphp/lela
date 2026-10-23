@@ -16,8 +16,8 @@ use super::opcodes::{
     Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, compiled_inline,
     compound_in_place, constant, constant_types, goes_one_way, guard_sites, held_as_is,
     inline_may_leave, is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard,
-    param_types, params, reads, reads_by_name, referenced, slot_of, within, writes, written,
-    written_after_entry,
+    param_types, params, reads, reads_by_name, recv_exits, referenced, slot_of, within, writes,
+    written, written_after_entry,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
@@ -2288,7 +2288,8 @@ impl<'a> Builder<'a> {
         })
     }
 
-    /// The exits numbered in the order the trace meets them: the guards
+    /// The exits numbered in the order the trace meets them: an entered
+    /// trace's `RECV` exits ([`Builder::reserve_recv_exits`]), the guards
     /// held at entry, then op by op the guards before it, those it holds
     /// itself and its own exit, and last a loop's interrupt test, which
     /// php takes where it closes the loop, or the exit a trace that does
@@ -2301,6 +2302,7 @@ impl<'a> Builder<'a> {
     fn number(&mut self, closes: Closes) -> Result<Numbered, Abort> {
         let (order, stubbed) = self.order(closes);
         let mut exits = Exits::default();
+        let interrupt_reuses = self.reserve_recv_exits(&mut exits)?;
         let mut unwinds: Vec<Unwind> = Vec::new();
         let mut known: HashMap<ValueId, ZvalType> = HashMap::new();
         let mut numbered = Numbered {
@@ -2371,10 +2373,16 @@ impl<'a> Builder<'a> {
                     }
                 }
                 Source::Interrupt(repeat) => {
+                    let exit = match interrupt_reuses {
+                        Some(first) if spec.stores.is_empty() && spec.landing == Landing::Plain => {
+                            first
+                        }
+                        _ => exits.take(spec, level.clone())?,
+                    };
                     numbered.end = Some(End::Loop(LoopHeader {
                         at: self.header,
                         repeat,
-                        interrupt: Interrupt::Exit(exits.take(spec, level.clone())?),
+                        interrupt: Interrupt::Exit(exit),
                     }));
                 }
                 Source::End => {
@@ -2390,6 +2398,47 @@ impl<'a> Builder<'a> {
         numbered.exits = exits.specs;
         numbered.unwinds = unwinds;
         Ok(numbered)
+    }
+
+    /// php's `RECV` exits, numbered ahead of every other exit of an
+    /// entered trace (`jit-design.md` §4.2, #3269): one
+    /// `ZEND_JIT_EXIT_TO_VM` exit per `RECV` [`recv_exits`] names in the
+    /// root's prologue. The prologue ran before `Site::Entry`, so no code
+    /// tests them, and each lands where the interpreter goes on past it,
+    /// at the entry's opline, the only place this engine's dispatch
+    /// serves the root frame from. The first is the one a loop's
+    /// interrupt test leaves through where it is the `RECV` at opline
+    /// zero, php's trace's first, as php's `zend_jit_trace_get_exit_point`
+    /// reuses it for the test it takes at the trace's first opline
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7223`, the reuse at `:168-185`)
+    /// where the test stores no register, its stack map then php's
+    /// `RECV`'s.
+    fn reserve_recv_exits(&self, exits: &mut Exits) -> Result<Option<ExitId>, Abort> {
+        if self.rec.start != Start::Enter {
+            return Ok(None);
+        }
+        let meta = self.meta(Frame::ROOT);
+        let recvs = recv_exits(meta.code, meta.parameters);
+        let Some(&first) = recvs.first() else {
+            return Ok(None);
+        };
+        let entry = (meta.code.safepoints.first().copied())
+            .ok_or_else(|| mismatch("an entered op array with no entry safepoint"))?;
+        let mut reserved = None;
+        for _ in &recvs {
+            let id = exits.push(ExitSpec {
+                frame: Frame::ROOT,
+                opline: Some(entry),
+                landing: Landing::Plain,
+                stores: Vec::new(),
+                known: Vec::new(),
+                grows: Grows::Never,
+                link: None,
+                layout: false,
+            })?;
+            reserved.get_or_insert(id);
+        }
+        Ok(reserved.filter(|_| first == OplineIdx(0)))
     }
 
     /// What the slots hold at `point`; none at the trace's start, where
@@ -3206,6 +3255,17 @@ impl Exits {
         if let Some(id) = key.as_ref().and_then(|key| self.taken.get(key)) {
             return Ok(*id);
         }
+        let id = self.push(spec)?;
+        if let Some(key) = key {
+            self.taken.insert(key, id);
+        }
+        Ok(id)
+    }
+
+    /// A new exit that leaves as `spec` says, which no later place takes
+    /// by its spec: refused with `TooManyExits` past
+    /// `ZEND_JIT_TRACE_MAX_EXITS`, as php refuses any exit point there.
+    fn push(&mut self, spec: ExitSpec) -> Result<ExitId, Abort> {
         if self.specs.len() == MAX_EXITS {
             return Err(Abort {
                 stop: Stop::TooManyExits,
@@ -3213,9 +3273,6 @@ impl Exits {
             });
         }
         let id = ExitId(u16::try_from(self.specs.len()).map_err(|_| mismatch("too many exits"))?);
-        if let Some(key) = key {
-            self.taken.insert(key, id);
-        }
         self.specs.push(spec);
         Ok(id)
     }

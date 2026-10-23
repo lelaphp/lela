@@ -128,9 +128,10 @@ fn binary_trees_sends_a_long_by_value_and_keeps_its_type() -> Result<(), String>
 /// direction in both levels it inlines, as php's `exit_1`, at opline
 /// `0003`, serves both: php's stack map is relative to the frame pointer,
 /// so the same guard at the same opline with the same types known is one
-/// exit (`zend_jit_trace_get_exit_point`, #3203). php numbers it 1 behind
-/// its `RECV`'s argument count guard, `exit_0`, which a trace entered
-/// past the prologue does not hold (`jit-design.md` §4.1).
+/// exit (`zend_jit_trace_get_exit_point`, #3203). It is numbered 1, behind
+/// the `RECV`'s argument count guard, php's `exit_0`, which the trace
+/// numbers though it entered past the prologue, and which its interrupt
+/// test leaves through (`jit-design.md` §4.2, #3269).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
@@ -147,11 +148,16 @@ fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
         .collect();
     assert_eq!(
         directions,
-        [(Frame(0), ExitId(0)), (Frame(1), ExitId(0))],
+        [(Frame(0), ExitId(1)), (Frame(1), ExitId(1))],
         "{directions:?}"
     );
-    let landing = ir.exits.first().map(|exit| (exit.frame, exit.opline));
+    let landing = ir.exits.get(1).map(|exit| (exit.frame, exit.opline));
     assert_eq!(landing, Some((Frame(0), Some(OplineIdx(3)))));
+    assert!(
+        matches!(ir.end, End::Loop(header) if header.interrupt == Interrupt::Exit(ExitId(0))),
+        "{}",
+        dump::render(&ir)
+    );
     Ok(())
 }
 
@@ -1542,5 +1548,99 @@ fn a_call_the_trace_follows_takes_no_exit() -> Result<(), String> {
         call.is_some_and(|line| line.exit.is_none() && line.unwind.is_some()),
         "{rendered}"
     );
+    Ok(())
+}
+
+/// An entered trace of a function with typed parameters numbers php's
+/// `RECV` exits ahead of its own (`jit-design.md` §4.2, #3269): one per
+/// `RECV` that has a type or that no `RECV` follows, as php's
+/// `zend_jit_recv` takes them for a root frame whose argument count the
+/// trace does not know (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10872`),
+/// none for a `RECV_INIT`, and none at all where no parameter has a
+/// type. Each lands at the entry's opline and grows nothing, and the
+/// recursion's interrupt test leaves through the first where it is the
+/// `RECV` at opline zero, php's reuse there; where the first `RECV` takes
+/// none, the test numbers its own, last, as php's does. The direction
+/// exit after them carries php's number: the pinned php's `TRACE 1 exit
+/// info` under the trace-dump regime lists `exit_0` at `0000` and
+/// `exit_1` at `0003` then the direction's `exit_2` at `0007` for the
+/// first; `exit_0` at `0001`, the direction's `exit_1` and the test's own
+/// `exit_4` at `0000` for the second; `exit_0` and `exit_1` at `0000` and
+/// `0001`, then `exit_2` for the third; and for the fourth no `RECV`
+/// exit, its guard's `exit_0` at `0002` then the direction's `exit_1`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_entered_trace_numbers_phps_recv_exits_ahead_of_its_own() -> Result<(), String> {
+    for (program, recvs, direction, reuses) in [
+        (
+            "function f(int $a, $b, $c, int $d, $e = 1) {
+                if ($a < 1) { return 0; } return f($a - 1, 0, 0, $d);
+            }
+            echo f(20, 1, 2, 3), \"\\n\";",
+            2,
+            2,
+            true,
+        ),
+        (
+            "function f($b, int $a) { if ($a < 1) { return 0; } return f(0, $a - 1); }
+            echo f(1, 20), \"\\n\";",
+            1,
+            1,
+            false,
+        ),
+        (
+            "function f(int $a, $b) { if ($a < 1) { return 0; } return f($a - 1, 0); }
+            echo f(20, 1), \"\\n\";",
+            2,
+            2,
+            true,
+        ),
+        (
+            "function f($a, $b) { if ($a < 1) { return 0; } return f($a - 1, 0); }
+            echo f(20, 1), \"\\n\";",
+            0,
+            1,
+            false,
+        ),
+    ] {
+        let ir = built(
+            &[("record.function", "f"), ("record.start", "enter")],
+            program,
+        )?;
+        let rendered = dump::render(&ir);
+        let Some(Op::Line(first)) = ir.ops.first() else {
+            return Err(format!("no first opline: {rendered}"));
+        };
+        let reserved = (ir.exits.iter())
+            .take_while(|exit| {
+                (exit.frame, exit.opline, exit.grows, exit.stores.len())
+                    == (Frame::ROOT, Some(first.opline), Grows::Never, 0)
+            })
+            .count();
+        let directions: Vec<ExitId> = (ir.guards.iter())
+            .filter(|guard| matches!(guard.check, Check::Direction { .. }))
+            .map(|guard| guard.exit)
+            .collect();
+        let End::Loop(header) = ir.end else {
+            return Err(format!("no loop: {rendered}"));
+        };
+        let interrupt = match header.interrupt {
+            Interrupt::Exit(exit) => exit,
+            Interrupt::Stub(_) => return Err(format!("a stub: {rendered}")),
+        };
+        assert_eq!(
+            (
+                reserved.min(recvs + 1),
+                directions.first().map(|exit| exit.0),
+                interrupt == ExitId(0)
+            ),
+            (recvs, Some(direction), reuses),
+            "{program}\n{rendered}"
+        );
+        assert!(
+            (ir.guards.iter()).all(|guard| usize::from(guard.exit.0) >= recvs),
+            "no guard tests a RECV exit: {rendered}"
+        );
+    }
     Ok(())
 }

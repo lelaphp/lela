@@ -54,6 +54,11 @@
 //!   there, whether a side trace may grow from it, and the trace a `Link`
 //!   stop links to. Places that leave with an equal spec naming an opline
 //!   share one exit, php's reuse in `zend_jit_trace_get_exit_point`.
+//! - **php's `RECV` exits first.** An entered trace of a function with
+//!   typed parameters numbers the exits php's `zend_jit_recv` takes in
+//!   its prologue ahead of its own, though the prologue ran before
+//!   `Site::Entry` and no code tests them, so every later exit carries
+//!   php's number (#3269).
 //! - **No exit for a throw.** A kernel that leaves a throwable pending,
 //!   bails out or panics leaves through an [`Unwind`], which stores the
 //!   registers and is numbered apart from the exits, as php's compiled
@@ -515,7 +520,9 @@ pub(crate) enum Grows {
     Side,
     /// The exit goes back to the interpreter alone and never grows one,
     /// php's `ZEND_JIT_EXIT_TO_VM`: a loop's interrupt test
-    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7223`).
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7223`), and an entered trace's
+    /// `RECV` exits, which `zend_jit_recv` takes
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10872`).
     Never,
 }
 
@@ -619,7 +626,11 @@ pub(crate) enum Interrupt {
     /// loop's header, which never grows a side trace, numbered after
     /// every exit of the loop's body as php takes it where it closes the
     /// loop: where php's code does not keep the instruction pointer the
-    /// trace entered with, or keeps values in registers there.
+    /// trace entered with, or keeps values in registers there. In an
+    /// entered trace whose first `RECV` takes an exit, and where the test
+    /// stores no register, it is that `RECV`'s, exit 0, landing at the
+    /// entry's opline, as php's test reuses the exit at opline zero
+    /// (`jit-design.md` §4.2, #3269).
     Exit(ExitId),
     /// Through php's interrupt stub, `jit_stub_interrupt_handler`, which
     /// takes no exit: the interrupt is handled and the trace entered again
