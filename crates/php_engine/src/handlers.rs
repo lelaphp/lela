@@ -23176,9 +23176,20 @@ fn jumped<T: Tier>(
     number: u32,
 ) -> Edge {
     if target <= at {
-        req.vm_mut().stand(frame, target);
-        if crate::interrupt::check(req)? {
-            return Ok(Stepped::Threw(frame).into());
+        // The frame stands at the target where something reads it: the
+        // interrupt, whose timeout names the target's line and whose
+        // handlers' backtrace starts there, and a tier the engine asks
+        // at its safepoints (ADR-0006). `Nop`'s loop goes on at the
+        // target in its own hand, as every other jump's does.
+        if crate::interrupt::raised(req) {
+            std::hint::cold_path();
+            req.vm_mut().stand(frame, target);
+            if crate::interrupt::interrupted(req)? {
+                return Ok(Stepped::Threw(frame).into());
+            }
+        }
+        if crate::tier::asks::<T>() {
+            req.vm_mut().stand(frame, target);
         }
         let held = crate::tier::Held::of(code);
         match T::safepoint(req, frame, Site::Loop(SafepointIdx(number)), held) {

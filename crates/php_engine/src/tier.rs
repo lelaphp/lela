@@ -216,6 +216,16 @@ impl Tier for Nop {
     }
 }
 
+/// Whether the loop of `T` asks a tier at its safepoints, which every
+/// tier but [`Nop`] is: what only a safepoint reads, the frame stood at
+/// a back-edge's target, is written for it alone. A constant of the
+/// instantiation, so the test folds.
+#[inline(always)] // a constant of the instantiation
+#[allow(clippy::inline_always)]
+pub(crate) fn asks<T: Tier>() -> bool {
+    std::any::TypeId::of::<T>() != std::any::TypeId::of::<Nop>()
+}
+
 /// Where a request keeps its tier's [`Tier::State`]
 /// (`jit-design.md` §2.2, #3144): laid once with the request, by the
 /// loop the engine bound ([`Loops::bound`]), and read by [`state`].
