@@ -137,9 +137,11 @@ pub struct Options<'a> {
     /// then, [`RequestClasses`].
     pub request_classes: RequestClasses<'a>,
     /// The constants the request the source compiles for has defined by
-    /// then, for a compile php runs without
-    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, [`RequestConstants`].
-    pub request_constants: RequestConstants<'a>,
+    /// then, [`RequestConstants`], for a compile php runs without
+    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`; `None` is the option set,
+    /// as opcache sets it around a file it caches, where only the
+    /// persistent constants and the active class's own are substituted.
+    pub request_constants: Option<RequestConstants<'a>>,
     /// The stack limit of the thread the compiler runs on, php's
     /// `EG(stack_limit)`, which the engine works out once per request
     /// (`zend_call_stack_init`) and the compiler's recursion is held to
@@ -197,7 +199,7 @@ impl Default for Options<'_> {
             frameless: &[],
             classes: Indexed::default(),
             request_classes: RequestClasses::default(),
-            request_constants: RequestConstants::default(),
+            request_constants: None,
             stack: StackLimit::UNCHECKED,
             keys_before: 0,
             multibyte: None,
@@ -281,8 +283,8 @@ impl std::fmt::Debug for RequestClasses<'_> {
 /// string and `-r`'s code, compiled under `ZEND_COMPILE_DEFAULT_FOR_EVAL`,
 /// and a file no cache keeps. opcache sets the option around every file it
 /// caches (`persistent_compile_file`), so a file compiled for the cache
-/// is handed none, the default, and fetches each such name as the
-/// program serves. A global constant is asked by the name the compile
+/// is handed none ([`Options::request_constants`]) and fetches each such
+/// name as the program serves. A global constant is asked by the name the compile
 /// resolved, a leading `\` stripped, from `EG(zend_constants)` past the
 /// engine's persistent ones ([`Options::persistent`]); a class constant
 /// by the class's lowered name and the constant's, from any class
@@ -349,15 +351,6 @@ impl<'a> RequestConstants<'a> {
     #[must_use]
     pub fn class_constant(&self, class: &[u8], name: &[u8]) -> Option<DefinedClassConstant> {
         (self.class_constants)(class, name)
-    }
-}
-
-impl Default for RequestConstants<'_> {
-    fn default() -> Self {
-        RequestConstants {
-            constants: &|_| None,
-            class_constants: &|_, _| None,
-        }
     }
 }
 

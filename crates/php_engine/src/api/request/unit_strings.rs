@@ -85,7 +85,22 @@ pub(super) struct UnitsHeld<'a> {
     files: usize,
 }
 
-impl UnitsHeld<'_> {
+impl<'a> UnitsHeld<'a> {
+    /// The view over the fields of [`UnitStrings`] it reads.
+    fn of(
+        units: &'a [Held],
+        by_bytes: &'a HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
+        kept: &'a HashMap<Box<[u8]>, PhpString, NameHasher>,
+        files: usize,
+    ) -> UnitsHeld<'a> {
+        UnitsHeld {
+            units,
+            by_bytes,
+            kept,
+            files,
+        }
+    }
+
     /// The string a request-only unit that lives holds for the name
     /// `bytes`, else the one the request keeps for it to its end; a
     /// view, no owner taken.
@@ -443,12 +458,7 @@ impl UnitStrings {
     /// What the request's units hold, read apart from the compile under
     /// way ([`UnitsHeld`]).
     fn units_held(&self) -> UnitsHeld<'_> {
-        UnitsHeld {
-            units: &self.units,
-            by_bytes: &self.by_bytes,
-            kept: &self.kept,
-            files: self.files,
-        }
+        UnitsHeld::of(&self.units, &self.by_bytes, &self.kept, self.files)
     }
 
     /// The compile under way, which the home its constants are made in
@@ -456,12 +466,7 @@ impl UnitStrings {
     /// so a compile can read a class's constant strings while it makes
     /// its own ([`super::Request::compiling`]).
     pub(super) fn compiling_beside(&mut self) -> (&mut Compiling, UnitsHeld<'_>) {
-        let held = UnitsHeld {
-            units: &self.units,
-            by_bytes: &self.by_bytes,
-            kept: &self.kept,
-            files: self.files,
-        };
+        let held = UnitsHeld::of(&self.units, &self.by_bytes, &self.kept, self.files);
         (&mut self.compiling, held)
     }
 
@@ -627,11 +632,7 @@ impl Request {
     /// declared, an `eval`'s or an uncached include's, whose constant
     /// strings are its own rather than the engine's.
     pub(crate) fn declared_for_the_request(&self, class: crate::api::values::ClassId) -> bool {
-        self.declared_row(class).is_some_and(|row| {
-            self.unit_strings
-                .units_held()
-                .holds(PublishedUnit::as_ptr(&row.unit))
-        })
+        (self.class_lookup()).declared_for_the_request(self.unit_strings.units_held(), class)
     }
 
     /// The constant strings the compile just made, given to `unit`, the

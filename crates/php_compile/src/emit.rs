@@ -485,7 +485,7 @@ pub(crate) struct Emit<'a> {
     /// The request's, [`Options::request_classes`].
     request_classes: crate::RequestClasses<'a>,
     /// The request's, [`Options::request_constants`].
-    request_constants: crate::RequestConstants<'a>,
+    request_constants: Option<crate::RequestConstants<'a>>,
     /// `zend_flf_functions` over them, [`Options::frameless`].
     frameless: &'a [FramelessEntry],
     /// `FC(current_namespace)`: the namespace a `namespace` statement
@@ -608,6 +608,12 @@ pub(crate) struct Emit<'a> {
     /// Which of [`Emit::classes`] were bound early, in the order bound:
     /// the file's classes `CG(class_table)` holds while it compiles.
     bound: Vec<usize>,
+    /// The strings each class the unit declared holds for its constants,
+    /// beside the class's place in [`Emit::classes`], once its body has
+    /// compiled ([`ActiveClass::strings`]): what a class bound early is
+    /// read by when a later name substitutes one of its constants
+    /// ([`Emit::bound_class_constant`]).
+    class_strings: Vec<(usize, Vec<(usize, Zval)>)>,
     /// [`Unit::top_level`]: each top-level function and class, in the
     /// order compiled.
     top_level: Vec<TopLevel>,
@@ -1593,6 +1599,7 @@ impl<'a> Emit<'a> {
             diagnostics: Vec::new(),
             classes: Vec::new(),
             bound: Vec::new(),
+            class_strings: Vec::new(),
             top_level: Vec::new(),
             completed: Vec::new(),
             runtime_keys: Vec::new(),
@@ -5899,10 +5906,13 @@ impl<'a> Emit<'a> {
             }
         }
         self.own_bodies_last(mark, at);
-        let hooked_variance_checks = self
-            .active_class
-            .take()
-            .map_or(0, |active| active.hooked_variance_checks);
+        let (hooked_variance_checks, strings) =
+            self.active_class.take().map_or((0, Vec::new()), |active| {
+                (active.hooked_variance_checks, active.strings)
+            });
+        if !strings.is_empty() {
+            self.class_strings.push((at, strings));
+        }
         if let Some(decl) = self.classes.get_mut(at) {
             decl.flags.hooked_variance = hooked_variance_checks > 0;
         }
@@ -20160,7 +20170,7 @@ impl<'a> Emit<'a> {
             );
             return (!deprecated && scalar).then_some(Found::Declared(&declared.value));
         }
-        let defined = self.request_constants.find(name)?;
+        let defined = self.request_constants.as_ref()?.find(name)?;
         (!defined.deprecated && substitutable(defined.value))
             .then_some(Found::Defined(defined.value))
     }
@@ -20181,7 +20191,9 @@ impl<'a> Emit<'a> {
     /// constant whose value is still a constant expression is left to the
     /// fetch, as php reads `IS_CONSTANT_AST` past `IS_ARRAY`, and so is
     /// one a cached file's class declared as one even once evaluated,
-    /// where an `eval`'d class's evaluated constant is its value.
+    /// where an `eval`'d class's evaluated constant is its value. A class
+    /// the same compile bound early is in the table from its declaration
+    /// on ([`Self::bound_class_constant`]).
     ///
     /// ```php
     /// $f = sys_get_temp_dir() . '/w3266-class-constants.inc';
@@ -20211,6 +20223,8 @@ impl<'a> Emit<'a> {
     ///     'function fu17() { return B4::L; }',
     ///     'function fu18() { return B6::L; }',
     ///     'function fu19() { return B7::L; }',
+    ///     'class X9 { const K = 1; } function f9() { return X9::K; }',
+    ///     'class X7 { const S = "zyxwvutsrq"; } class X6 extends X7 {} function f7() { return X6::S; }',
     ///     'class B5 { const K = B4::K + 1; }',
     ///     '$GLOBALS["a"] = B5::K;',
     /// ] as $c) echo m($c), "  ", $c, "\n";
@@ -20235,12 +20249,21 @@ impl<'a> Emit<'a> {
     /// 384  function fu17() { return B4::L; }
     /// 256  function fu18() { return B6::L; }
     /// 320  function fu19() { return B7::L; }
+    /// 640  class X9 { const K = 1; } function f9() { return X9::K; }
+    /// 1064  class X7 { const S = "zyxwvutsrq"; } class X6 extends X7 {} function f7() { return X6::S; }
     /// 496  class B5 { const K = B4::K + 1; }
     /// 512  $GLOBALS["a"] = B5::K;
     /// 1abcdefghijx2Y-m-d\TH:i:sP1
     /// ```
     fn request_class_constant(&mut self, class: &[u8], name: &[u8]) -> Option<Operated> {
-        let found = (self.request_constants).class_constant(&class.to_ascii_lowercase(), name)?;
+        self.request_constants.as_ref()?;
+        if let Some(at) = (self.bound.iter().copied()).find(|at| {
+            (self.classes.get(*at)).is_some_and(|decl| decl.name.0.eq_ignore_ascii_case(class))
+        }) {
+            return self.bound_class_constant(at, name, 0);
+        }
+        let found =
+            (self.request_constants.as_ref()?).class_constant(&class.to_ascii_lowercase(), name)?;
         let accessible =
             !found.deprecated && !found.in_trait && found.visibility == Visibility::Public;
         if !accessible || !substitutable(found.value) {
@@ -20356,6 +20379,55 @@ impl<'a> Emit<'a> {
             Some(s) => self.strings.hold_made(s).map(Operated::Made),
             None => self.strings.hold(value).then_some(Operated::Kept(value)),
         }
+    }
+
+    /// [`Self::request_class_constant`] over a class of the unit that
+    /// was bound early, which `CG(class_table)` holds from its
+    /// declaration on, so a name after it in the same compile substitutes
+    /// its constant: its own, or what it inherits from its parent, looked
+    /// for as any class's is. The constant is held to the access and the
+    /// value test as any other, its string the one its declaration holds
+    /// ([`Emit::class_strings`]), and one whose string the compile kept no
+    /// record of is left to the fetch. The walk up its parents stops at a
+    /// depth of 64, as [`Self::linked_method`]'s does.
+    fn bound_class_constant(&mut self, at: usize, name: &[u8], depth: u32) -> Option<Operated> {
+        let decl = self.classes.get(at)?;
+        let Some((index, constant)) =
+            (decl.constants.iter().enumerate()).find(|(_, c)| *c.name.0 == *name)
+        else {
+            let parent = decl.parent.as_ref()?.0.to_vec();
+            if depth >= 64 {
+                return None;
+            }
+            if let Some(parent_at) = (self.bound.iter().copied()).find(|at| {
+                (self.classes.get(*at)).is_some_and(|d| d.name.0.eq_ignore_ascii_case(&parent))
+            }) {
+                return self.bound_class_constant(parent_at, name, depth + 1);
+            }
+            return self.request_class_constant(&parent, name);
+        };
+        let accessible = !constant.is_case
+            && constant.visibility == Visibility::Public
+            && !attributes::is_deprecated(&constant.attributes);
+        if !accessible {
+            return None;
+        }
+        let value = match &constant.value {
+            ConstExpr::Null => Zval::null(),
+            ConstExpr::Bool(b) => Zval::bool(*b),
+            ConstExpr::Long { value: n, .. } => Zval::long(*n),
+            ConstExpr::Double(d) => Zval::double(*d),
+            ConstExpr::Str(_) => (self.class_strings.iter())
+                .find(|(class, _)| *class == at)
+                .and_then(|(_, strings)| strings.iter().find(|(held, _)| *held == index))
+                .map(|(_, value)| *value)?,
+            ConstExpr::ImmutableArray(array) => array.value(),
+            _ => return None,
+        };
+        if !substitutable(value) {
+            return None;
+        }
+        self.request_constant(value)
     }
 }
 
@@ -20935,6 +21007,7 @@ mod tests {
             diagnostics: Vec::new(),
             classes: Vec::new(),
             bound: Vec::new(),
+            class_strings: Vec::new(),
             top_level: Vec::new(),
             completed: Vec::new(),
             runtime_keys: Vec::new(),

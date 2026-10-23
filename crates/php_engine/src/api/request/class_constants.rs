@@ -66,7 +66,7 @@ impl Request {
         class: ClassId,
         row: Row<ClassId>,
     ) -> Option<(ClassId, &ClassConstDecl)> {
-        self.class_tables().row_constant(class, row)
+        self.class_lookup().row_constant(class, row)
     }
 
     /// `zend_fetch_class_constant`'s lookup (`Z/Zend/zend_constants.c:355`):
@@ -716,7 +716,7 @@ impl<'r> Symbols<&'r Request> {
         class: ClassId,
         name: &[u8],
     ) -> Option<(ClassId, &'r ClassConstDecl)> {
-        self.0.class_tables().class_constant_of(class, name)
+        self.0.class_lookup().class_constant_of(class, name)
     }
 
     /// `CE_CONSTANTS_TABLE(ce)` of a linked class in php's order, each

@@ -675,7 +675,7 @@ impl Request {
             // none of the request's constants.
             let request = ForRequest {
                 classes,
-                constants: php_compile::RequestConstants::default(),
+                constants: None,
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
                 keys_before,
             };

@@ -931,19 +931,15 @@ impl Request {
 
     /// The row of a class the request declared, or the engine published
     /// into its arena, the preload's among them; none for an engine's
-    /// class ([`ClassTables::declared_row`]).
+    /// class ([`ClassLookup::declared_row`]).
     pub(super) fn declared_row(&self, class: ClassId) -> Option<&Declared> {
-        self.class_tables().declared_row(class)
+        self.class_lookup().declared_row(class)
     }
 
     /// The tables a class's declaration and linked record are read off,
-    /// borrowed apart from the rest of the request ([`ClassTables`]).
-    pub(super) fn class_tables(&self) -> ClassTables<'_> {
-        ClassTables {
-            shared: &self.shared,
-            own_classes: &self.own_classes,
-            arena: &self.arena,
-        }
+    /// borrowed apart from the rest of the request ([`ClassLookup`]).
+    pub(super) fn class_lookup(&self) -> ClassLookup<'_> {
+        ClassLookup::of(&self.shared, &self.own_classes, &self.arena)
     }
 
     /// The row of a class the request declared, to bind; none for an
@@ -2034,11 +2030,7 @@ impl Request {
         let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
         let constants = &self.constants;
         let defined = |name: &[u8]| constants.defined(name);
-        let tables = ClassTables {
-            shared,
-            own_classes: &self.own_classes,
-            arena: &self.arena,
-        };
+        let tables = ClassLookup::of(shared, &self.own_classes, &self.arena);
         let class_data = &self.class_data;
         let (made, units) = self.unit_strings.compiling_beside();
         let class_constants = |class: &[u8], name: &[u8]| {
@@ -2143,7 +2135,7 @@ impl Request {
     /// Where an engine's class stands among the engine's; none for any
     /// other class.
     pub(crate) fn native_class_at(&self, class: ClassId) -> Option<usize> {
-        self.class_tables().native_class_at(class)
+        self.class_lookup().native_class_at(class)
     }
 
     /// `ZEND_FLF_FUNC(opline)` and `ZEND_FLF_HANDLER(opline)`: the native
@@ -2269,7 +2261,7 @@ impl<'r> Symbols<&'r Request> {
     /// The declaration of a linked class.
     #[must_use]
     pub fn class_decl(self, class: ClassId) -> Option<&'r ClassDecl> {
-        self.0.class_tables().class_decl(class)
+        self.0.class_lookup().class_decl(class)
     }
 
     /// `ce->ce_flags` of a linked class: its declaration's flags with
@@ -2388,13 +2380,6 @@ impl Symbols<&mut Request> {
     }
 }
 
-/// The class `EG(class_table)` holds under `name`, any case: an engine's
-/// class or a native class's alias, a class the request declared, then
-/// an alias the request added; what [`Request::class_named`] answers.
-/// Each is one lookup in its table's keys, as `zend_hash_find` over the
-/// lowered name is, the case folded by the table and nothing lowered: a
-/// class declared at `at` of the request's rows is the `ClassId` past
-/// the engine's classes.
 /// The tables `EG(class_table)`'s classes are read off: the engine's
 /// natives and their linked records, the rows the request declared and
 /// the engine's published arena. Borrowed apart from the rest of the
@@ -2402,13 +2387,38 @@ impl Symbols<&mut Request> {
 /// class ([`Request::compiling`]); the request's own readers of a
 /// declaration, a linked record and a constant's row go through it.
 #[derive(Clone, Copy)]
-pub(super) struct ClassTables<'r> {
+pub(super) struct ClassLookup<'r> {
     shared: &'r Shared,
     own_classes: &'r [Declared],
     arena: &'r crate::arena::Arena,
 }
 
-impl<'r> ClassTables<'r> {
+impl<'r> ClassLookup<'r> {
+    /// The lookup over the request's fields, borrowed apart.
+    fn of(
+        shared: &'r Shared,
+        own_classes: &'r [Declared],
+        arena: &'r crate::arena::Arena,
+    ) -> ClassLookup<'r> {
+        ClassLookup {
+            shared,
+            own_classes,
+            arena,
+        }
+    }
+
+    /// Whether `class` is one a unit the request compiled for itself
+    /// declared, no cache keeping it, php's class without
+    /// `ZEND_ACC_IMMUTABLE` as the engine reads it
+    /// ([`Request::declared_for_the_request`]).
+    pub(super) fn declared_for_the_request(
+        self,
+        units: super::unit_strings::UnitsHeld<'_>,
+        class: ClassId,
+    ) -> bool {
+        (self.declared_row(class)).is_some_and(|row| units.holds(PublishedUnit::as_ptr(&row.unit)))
+    }
+
     /// Where an engine's class stands among the engine's; none for any
     /// other class.
     pub(super) fn native_class_at(self, class: ClassId) -> Option<usize> {
@@ -2485,7 +2495,7 @@ impl<'r> ClassTables<'r> {
 /// read only once evaluated. An enum's case is its object, never a value
 /// substituted.
 fn defined_class_constant(
-    tables: ClassTables<'_>,
+    tables: ClassLookup<'_>,
     class_data: &super::class_data::ClassDataTables,
     units: super::unit_strings::UnitsHeld<'_>,
     class: ClassId,
@@ -2496,8 +2506,7 @@ fn defined_class_constant(
     if constant.is_case {
         return None;
     }
-    let mutable = (tables.declared_row(declaring))
-        .is_some_and(|row| units.holds(PublishedUnit::as_ptr(&row.unit)));
+    let mutable = tables.declared_for_the_request(units, declaring);
     let evaluated = (class_data.evaluated_constant(declaring, name)).filter(|_| mutable);
     let value = match (evaluated, &constant.value) {
         (Some(value), _) => value.to_zval(),
@@ -2505,10 +2514,13 @@ fn defined_class_constant(
         (None, ConstExpr::Bool(b)) => php_heap::Zval::bool(*b),
         (None, ConstExpr::Long { value: n, .. }) => php_heap::Zval::long(*n),
         (None, ConstExpr::Double(d)) => php_heap::Zval::double(*d),
-        (None, ConstExpr::Str(bytes)) => match tables.shared.existing_interned(bytes) {
-            Some(held) => php_heap::Zval::string(held),
-            None => Value::string(units.find(bytes)?).to_zval(),
-        },
+        // The string the declaring unit's compile made, which its class
+        // holds: the request's for a class the request compiled, the
+        // engine's for one the cache keeps.
+        (None, ConstExpr::Str(bytes)) if mutable => Value::string(units.find(bytes)?).to_zval(),
+        (None, ConstExpr::Str(bytes)) => {
+            php_heap::Zval::string(tables.shared.existing_interned(bytes)?)
+        }
         (None, ConstExpr::ImmutableArray(array)) if !mutable => array.value(),
         (None, _) => return None,
     };
@@ -2522,6 +2534,13 @@ fn defined_class_constant(
     })
 }
 
+/// The class `EG(class_table)` holds under `name`, any case: an engine's
+/// class or a native class's alias, a class the request declared, then
+/// an alias the request added; what [`Request::class_named`] answers.
+/// Each is one lookup in its table's keys, as `zend_hash_find` over the
+/// lowered name is, the case folded by the table and nothing lowered: a
+/// class declared at `at` of the request's rows is the `ClassId` past
+/// the engine's classes.
 fn class_in(
     shared: &Shared,
     declared: &Keyed<Named>,

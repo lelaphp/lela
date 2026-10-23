@@ -1553,7 +1553,7 @@ struct Origin<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct ForRequest<'a> {
     pub(crate) classes: RequestClasses<'a>,
-    pub(crate) constants: RequestConstants<'a>,
+    pub(crate) constants: Option<RequestConstants<'a>>,
     pub(crate) multibyte: Option<Multibyte<'a>>,
     pub(crate) keys_before: u32,
 }
@@ -1564,7 +1564,7 @@ impl<'a> ForRequest<'a> {
     pub(crate) fn none(multibyte: Option<Multibyte<'a>>) -> ForRequest<'a> {
         ForRequest {
             classes: RequestClasses::default(),
-            constants: RequestConstants::default(),
+            constants: None,
             multibyte,
             keys_before: 0,
         }
@@ -1910,7 +1910,7 @@ impl Shared {
                 kind,
                 request: ForRequest {
                     classes: request_classes,
-                    constants: request_constants,
+                    constants: Some(request_constants),
                     multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
                     keys_before,
                 },
