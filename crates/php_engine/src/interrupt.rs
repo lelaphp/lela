@@ -30,8 +30,9 @@ use php_heap::Fatal;
 use crate::api::request::{Interrupt, Request};
 
 /// The interrupt check (design §5.8): one relaxed load and a branch, at
-/// the loop's four sites and nowhere else. php's check costs the same load,
-/// and an interrupt nobody raised costs nothing beyond it. `Ok(true)`
+/// the loop's four sites, and where compiled code hands it the check
+/// through `tier::interrupted`, and nowhere else. php's check costs the
+/// same load, and an interrupt nobody raised costs nothing beyond it. `Ok(true)`
 /// is a check whose extension hooks left a throwable pending, which the
 /// site hands to the loop as thrown where it stands, as `zend_interrupt_helper`
 /// leaves `EG(exception)` for the opline it re-enters.
