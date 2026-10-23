@@ -23809,22 +23809,24 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_return::<T>(req, frame, code, op, A::default()) {
-        return edge;
+    if req.stack_mut().entry() != frame {
+        if let Some(edge) = raise_return::<T>(req, frame, code, op) {
+            return edge;
+        }
+        if let Some(edge) = inline_return(req, frame, code, op, A::default()) {
+            return edge;
+        }
     }
     req.vm_mut().stand(frame, at);
-    returned::<T>(req, frame, code, op)
+    returned(req, frame, code, op)
 }
 
-/// `RETURN` past its inline path: the operand taken as the handler's
-/// own ([`exec::take_operand`]) and the frame left with it
-/// ([`returned_to_caller`]). A call of its own, so that the inline path
-/// before it keeps to the registers it needs.
+/// `RETURN` past its return safepoint and its inline path: the operand
+/// taken as the handler's own ([`exec::take_operand`]) and the frame
+/// left with it ([`returned_to_caller`]). A call of its own, so that the
+/// inline path before it keeps to the registers it needs.
 #[inline(never)]
-fn returned<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    if let Some(edge) = return_site::<T>(req, frame, code, op) {
-        return edge;
-    }
+fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     returned_to_caller(req, frame, returned)
 }
@@ -23832,7 +23834,7 @@ fn returned<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Op
 /// The return safepoint of a `RETURN*` (design §5.8, `jit-design.md`
 /// §2.2), raised for every frame but the entry frame of this serving
 /// with the number the compiler wrote in `result`, before the handler
-/// takes its operand: `None` where the tier answered `Continue`, and
+/// reads its operand: `None` where the tier answered `Continue`, and
 /// otherwise the edge it resumed at, since a tier that recorded ran the
 /// return and the caller's landing already and nothing of the return is
 /// left to do here.
@@ -23846,6 +23848,17 @@ fn return_site<T: Tier>(
     if req.stack_mut().entry() == frame {
         return None;
     }
+    raise_return::<T>(req, frame, code, op)
+}
+
+/// [`return_site`] over a frame that is not the serving's entry frame.
+#[inline(always)] // as `return_site`
+fn raise_return<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Option<Edge> {
     let held = crate::tier::Held::of(code);
     match T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)), held) {
         Flow::Continue => None,
@@ -23855,18 +23868,15 @@ fn return_site<T: Tier>(
 
 /// The inline path of `ZEND_RETURN` (`ZEND_RETURN_SPEC_CONST`, `_TMP`,
 /// `_CV`, `Z/Zend/zend_vm_def.h:4598`, into `zend_leave_helper`'s first
-/// arm): the value copied into the caller's temporary, a temporary's
-/// moved, and a frame whose leave destroys nothing popped, the caller
-/// going on past its call. php's arm frees the CVs, which here gives up
-/// strings at most; so no destructor runs and nothing can be pending
-/// after it. The return safepoint is raised as
-/// [`returned_to_caller`] raises it, once every test has passed, so the
-/// kernel is never asked after it. `None`, with nothing touched, while
-/// an observer is declared, on the serving's entry frame, for a value
-/// that is a reference, or a CV's or a constant's that counts owners,
-/// one nothing reads that would have to be given up, a caller's
-/// temporary that holds an owner, and a frame [`Request::leaves_plainly`]
-/// refuses.
+/// arm), past the return safepoint: the value copied into the caller's
+/// temporary, a temporary's moved, and a frame whose leave destroys
+/// nothing popped, the caller going on past its call
+/// ([`Request::leave_plainly`]). php's arm frees the CVs, which here
+/// gives up strings at most; so no destructor runs and nothing can be
+/// pending after it. `None`, with nothing touched, while an observer is
+/// declared, for a value that is a reference, or a CV's or a constant's
+/// that counts owners, and for a frame [`Request::leave_plainly`]
+/// refuses. Never asked of the serving's entry frame.
 ///
 /// A temporary string is moved into the caller's temporary, a string
 /// parameter and a local are given up with the frame, a string nothing
@@ -23892,48 +23902,30 @@ fn return_site<T: Tier>(
 /// int(32)
 /// ```
 #[inline(always)] // as `inline_send`
-fn inline_return<T: Tier>(
+fn inline_return(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
 ) -> Option<Edge> {
-    if crate::observer::observing(req) || req.stack_mut().entry() == frame {
+    if crate::observer::observing(req) {
         return None;
     }
-    let z = a.read(req.slots_mut(frame), code, op.op1);
-    let moved = match a.kind() {
-        OperandKind::Tmp | OperandKind::Var if crate::operand::movable(z) => a.slot(op.op1),
-        OperandKind::Const | OperandKind::Cv | OperandKind::Tmp | OperandKind::Var
-            if crate::operand::owns_nothing(z) =>
-        {
-            None
-        }
-        _ => return None,
+    let operand = |slots: &[Zval]| {
+        let z = a.read(slots, code, op.op1);
+        let moved = match a.kind() {
+            OperandKind::Tmp | OperandKind::Var if crate::operand::movable(z) => a.slot(op.op1),
+            OperandKind::Const | OperandKind::Cv | OperandKind::Tmp | OperandKind::Var
+                if crate::operand::owns_nothing(z) =>
+            {
+                None
+            }
+            _ => return None,
+        };
+        Some((z, moved))
     };
-    return_plainly::<T>(req, frame, (code, moved), z, SafepointIdx(op.out))
-}
-
-/// [`inline_return`] once its operand is read: the frame left by
-/// [`Request::leave_plainly`] where [`Request::leaves_plainly`] finds it
-/// can be, after the return safepoint.
-#[inline(always)] // as `inline_return`
-fn return_plainly<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    (code, moved): (&OpArray, Option<usize>),
-    z: Zval,
-    site: SafepointIdx,
-) -> Option<Edge> {
-    let leave = req.leaves_plainly(frame, code.num_cvs, moved, z)?;
-    match T::safepoint(req, frame, Site::Return(site), crate::tier::Held::of(code)) {
-        Flow::Continue => {}
-        // The tier ran the return and the caller's landing
-        // (`jit-design.md` §2.2); the frame it left is not this one.
-        flow => return Some(crate::tier::resumed(req, flow, frame)),
-    }
-    Some(Ok(req.leave_plainly(leave, z).into()))
+    Some(Ok(req.leave_plainly(frame, code.num_cvs, operand)?.into()))
 }
 
 /// The half of `RETURN` that leaves the frame, which `RETURN_BY_REF`

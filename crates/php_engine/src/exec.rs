@@ -840,7 +840,7 @@ impl CallInfo {
         self.0
     }
 
-    /// The flags a frame [`crate::api::request::Request::leaves_plainly`]
+    /// The flags a frame [`crate::api::request::Request::leave_plainly`]
     /// refuses to leave with no lookup: a call not made a user frame, and
     /// arguments moved past the declared parameters.
     pub(crate) const LEAVES_BY_KERNEL: u32 = Self::CALL | Self::EXTRA_ARGS;
