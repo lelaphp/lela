@@ -38,7 +38,8 @@ pub use execution::Execution;
 /// it, its `base` and `max_size` ([`Limits::call_stack_bounds`]).
 pub use php_heap::CallStack;
 pub use unit_cache::{
-    CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
+    CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, TierStatus,
+    UnitCache,
 };
 
 mod autoload;

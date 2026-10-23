@@ -24,6 +24,7 @@ api::request::Request::response_mut
 api::request::Request::state
 api::request::Response
 api::request::Response::write_stderr
+api::request::TierStatus
 api::values::Value
 test::Capture
 test::Engine
