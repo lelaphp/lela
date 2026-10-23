@@ -321,17 +321,18 @@ impl Build {
 /// difference: the featured engine's `Policy` asks for tracing and runs
 /// `Mode::Off` (`jit-design.md` §4.7), and the other has no tier to ask.
 pub(crate) fn door(root: &Path) -> [Declared; 2] {
-    let under = ("jit-tracing", Some("opcache.jit_buffer_size=0"));
-    [
+    let pairs = [
         ("g1", [Build::Jit, Build::Plain], Held::Bound),
         ("g1-aa", [Build::Plain, Build::Plain], Held::Control),
-    ]
-    .map(|(id, [a, b], held)| {
-        let (a_name, b_name) = (a.name(), b.name());
-        let about = format!(
-            "the engine built as {a_name} with opcache.jit_buffer_size=0 against {b_name} over the seven kernels"
-        );
-        builds(root, (id, held, about), [a, b], under)
+    ];
+    let under = Under {
+        regime: "jit-tracing",
+        ini: Some("opcache.jit_buffer_size=0"),
+    };
+    builds(root, pairs, under, |a, b| {
+        format!(
+            "the engine built as {a} with opcache.jit_buffer_size=0 against {b} over the seven kernels"
+        )
     })
 }
 
@@ -344,49 +345,63 @@ pub(crate) fn door(root: &Path) -> [Declared; 2] {
 /// its A/A control. The arm without the test is a cfg only this build
 /// sets, never a `Policy` value: production code always tests.
 pub(crate) fn interrupt(root: &Path) -> [Declared; 2] {
-    [
+    let pairs = [
         ("interrupt", [Build::Jit, Build::Untested], Held::Series),
         ("interrupt-aa", [Build::Jit, Build::Jit], Held::Control),
-    ]
-    .map(|(id, [a, b], held)| {
-        let (a_name, b_name) = (a.name(), b.name());
-        let about = format!(
-            "the engine built as {a_name} against {b_name} under [regime.jit-force] over the seven kernels"
-        );
-        builds(root, (id, held, about), [a, b], ("jit-force", None))
+    ];
+    let under = Under {
+        regime: "jit-force",
+        ini: None,
+    };
+    builds(root, pairs, under, |a, b| {
+        let regime = under.regime;
+        format!(
+            "the engine built as {a} against {b} under [regime.{regime}] over the seven kernels"
+        )
     })
 }
 
-/// A bar over the seven kernels whose arms are two builds of the engine
-/// run under one command line, `regime` and `ini`, so the binary is the
-/// one difference.
+/// The one command line both arms of a bar of two builds run under: a
+/// regime of the pin, and an ini line after it.
+#[derive(Clone, Copy)]
+struct Under {
+    regime: &'static str,
+    ini: Option<&'static str>,
+}
+
+/// A bar and its control over the seven kernels, each pair's arms two
+/// builds of the engine run `under` one command line, so the binary is
+/// the one difference, `about` naming the pair from its builds' names.
 fn builds(
     root: &Path,
-    (id, held, about): (&str, Held, String),
-    [a, b]: [Build; 2],
-    (regime, ini): (&'static str, Option<&'static str>),
-) -> Declared {
-    bar(
-        root,
-        (id, KERNELS, Read::Time),
-        about,
-        held,
-        move |root, _| {
-            let arm = |name: String, build: Build| -> Result<Php> {
-                Ok(Php {
-                    name,
-                    binary: build.built(root)?,
-                    regimes: vec![regime],
-                    ini: ini.into_iter().map(str::to_owned).collect(),
-                })
-            };
-            let (a_name, b_name) = (a.name(), b.name());
-            Ok(Ok([
-                arm(a_name.to_owned(), a)?,
-                arm(second(a_name, b_name), b)?,
-            ]))
-        },
-    )
+    pairs: [(&str, [Build; 2], Held); 2],
+    under: Under,
+    about: impl Fn(&str, &str) -> String,
+) -> [Declared; 2] {
+    pairs.map(|(id, [a, b], held)| {
+        let (a_name, b_name) = (a.name(), b.name());
+        let about = about(a_name, b_name);
+        bar(
+            root,
+            (id, KERNELS, Read::Time),
+            about,
+            held,
+            move |root, _| {
+                let arm = |name: String, build: Build| -> Result<Php> {
+                    Ok(Php {
+                        name,
+                        binary: build.built(root)?,
+                        regimes: vec![under.regime],
+                        ini: under.ini.into_iter().map(str::to_owned).collect(),
+                    })
+                };
+                Ok(Ok([
+                    arm(a_name.to_owned(), a)?,
+                    arm(second(a_name, b_name), b)?,
+                ]))
+            },
+        )
+    })
 }
 
 /// What `step` costs per opline under recording (#2946, `jit-design.md`
@@ -599,7 +614,7 @@ mod tests {
     /// the stepping loop and the interrupt test are each a series beside
     /// its control (#2946, #2960).
     #[test]
-    fn each_tier_and_the_stepping_loop_is_a_series_beside_its_control_and_the_door_a_bound() {
+    fn each_tier_and_each_cost_is_a_series_beside_its_control_and_the_door_a_bound() {
         let root = Path::new(".");
         let bars = [
             oracle(root),
