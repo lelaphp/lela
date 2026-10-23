@@ -205,7 +205,6 @@ fn compiled(ir: &TraceIr) -> Option<Compiled> {
         Kernel::Step => (refusing::refused as *const ()).addr(),
         Kernel::PushCall | Kernel::Call => (refusing::refused_call as *const ()).addr(),
         Kernel::Release => (super::super::super::wrapped::release as *const ()).addr(),
-        Kernel::Copy => (super::super::super::wrapped::copy as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend

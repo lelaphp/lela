@@ -355,6 +355,13 @@ impl Zval {
     /// Where php's `Z_TYPE_FLAGS` is, the byte that says whether the
     /// value is refcounted ([`Zval::TYPE_REFCOUNTED`]).
     pub const FLAGS_AT: usize = std::mem::offset_of!(Zval, info) + 1;
+    /// Where the block a refcounted zval's word points at keeps its count,
+    /// php's `GC_REFCOUNT`, a 32-bit word: what the compiled tier adds an
+    /// owner through, as php's code adds one with `GC_ADDREF` inline.
+    pub const COUNT_AT: usize = crate::gc::REFCOUNT_AT;
+    /// The bits of that word that are the count, beneath the pin a walk
+    /// sets; an owner added past them saturates, as the heap's own adds do.
+    pub const COUNT_BITS: u32 = crate::gc::COUNT;
 
     /// The all-zero zval, `IS_UNDEF`.
     pub const UNDEF: Zval = Zval {

@@ -633,20 +633,15 @@ pub(crate) enum Kernel {
     /// php's `zval_ptr_dtor` of the counted value the zval names, a
     /// destructor's throw answered as one.
     Release,
-    /// `copy(cx, frame, opline: u32, word: u64, type_info: u32, out: *mut
-    /// Zval)`: php's `ZVAL_COPY_DEREF` of the value the zval names into
-    /// `out`.
-    Copy,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 5] = [
+    pub(crate) const ALL: [Kernel; 4] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
         Kernel::Release,
-        Kernel::Copy,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

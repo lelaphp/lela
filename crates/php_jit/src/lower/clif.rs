@@ -1201,7 +1201,6 @@ impl<'a> Emit<'a> {
             Kernel::Step => &[I64, I64, I32, I32, I64],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release => &[I64, I64, I32, I64, I32],
-            Kernel::Copy => &[I64, I64, I32, I64, I32, I64],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -1704,9 +1703,9 @@ impl<'a> Emit<'a> {
                 let element = self.deref(element);
                 let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
                 let out_slot = self.value(out)?.slot;
-                self.copy(line, element, info, out_slot)?;
+                self.copy(element, info, out_slot)?;
             }
-            [in_place, through] => self.held_element(line, [*in_place, *through], element, out)?,
+            [in_place, through] => self.held_element([*in_place, *through], element, out)?,
             _ => {
                 return Err(mismatch(
                     "a fetch holds other guards than its element's two",
@@ -1740,7 +1739,6 @@ impl<'a> Emit<'a> {
     /// hold it, then written to what the fetch writes.
     fn held_element(
         &mut self,
-        line: &Line,
         [in_place, through]: [Guard; 2],
         element: Value,
         out: ValueId,
@@ -1771,7 +1769,7 @@ impl<'a> Emit<'a> {
         self.b.ins().brif(is_ref, referred, &[], direct, &[]);
         self.b.switch_to_block(direct);
         self.b.seal_block(direct);
-        self.element_guard(line, in_place, element, out, out_slot)?;
+        self.element_guard(in_place, element, out, out_slot)?;
         self.b.ins().jump(read, &[element.into()]);
         self.b.switch_to_block(referred);
         self.b.seal_block(referred);
@@ -1780,7 +1778,7 @@ impl<'a> Emit<'a> {
             .b
             .ins()
             .iadd_imm_s(reference, i64::from(imm(Ref::VALUE_AT)));
-        self.element_guard(line, through, inner, out, out_slot)?;
+        self.element_guard(through, inner, out, out_slot)?;
         self.b.ins().jump(read, &[inner.into()]);
         self.b.switch_to_block(read);
         self.b.seal_block(read);
@@ -1789,7 +1787,7 @@ impl<'a> Emit<'a> {
             self.define(out, read)
         } else {
             let info = self.b.ins().load(I32, trusted(), held, TYPE_AT);
-            self.copy(line, held, info, out_slot)
+            self.copy(held, info, out_slot)
         }
     }
 
@@ -1799,7 +1797,6 @@ impl<'a> Emit<'a> {
     /// fetch; go on otherwise.
     fn element_guard(
         &mut self,
-        line: &Line,
         guard: Guard,
         element: Value,
         out: ValueId,
@@ -1829,8 +1826,11 @@ impl<'a> Emit<'a> {
         self.b.seal_block(failed);
         if goes_on {
             // The exit goes on past the fetch: the element is the slot's,
-            // copied as the fetch copies it.
-            self.copy(line, element, info, out_slot)?;
+            // copied as the fetch copies it, through the reference it may
+            // be.
+            let element = self.deref(element);
+            let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+            self.copy(element, info, out_slot)?;
         }
         let (to, args) = self.guard_exit(guard.exit)?;
         self.b.ins().jump(to, &args);
@@ -2007,14 +2007,43 @@ impl<'a> Emit<'a> {
         at
     }
 
-    /// The zval at `zval`, of type word `info`, copied to `slot` by
-    /// [`Kernel::Copy`].
-    fn copy(&mut self, line: &Line, zval: Value, info: Value, slot: Slot) -> Result<(), Abort> {
+    /// The zval at `zval`, no reference, of type word `info`, copied to
+    /// `slot` with one owner more where it is counted, php's `ZVAL_COPY`
+    /// with `GC_ADDREF` inline (`jit_ZVAL_COPY` and `jit_GC_ADDREF`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:1610-1613`, `:1672-1719`); the count saturates
+    /// beneath the heap's pin, as the heap's own adds do. A string, an
+    /// array and the array a reference element holds, each read by a long
+    /// key and kept past the writes after:
+    ///
+    /// ```php
+    /// function pick($a, $n) { $s = []; for ($i = 0; $i < $n; $i++) { $s[] = $a[$i % 3]; } return $s; }
+    /// $r = [7]; $b = [str_repeat("ab", 2), [1, 2], &$r];
+    /// $out = pick($b, 6);
+    /// $b[1][] = 3; $r[] = 8; unset($b);
+    /// echo json_encode($out), " ", json_encode($r), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// ["abab",[1,2],[7],"abab",[1,2],[7]] [7,8]
+    /// ```
+    fn copy(&mut self, zval: Value, info: Value, slot: Slot) -> Result<(), Abort> {
         let word = self.b.ins().load(I64, trusted(), zval, 0);
         let (room, at) = self.place(slot)?;
-        let out = self.b.ins().iadd_imm_s(room, i64::from(at));
-        let [room, opline] = self.served(line)?;
-        self.call(Kernel::Copy, &[room, opline, word, info, out], None)
+        self.b.ins().store(trusted(), word, room, at);
+        self.b.ins().store(trusted(), info, room, at + TYPE_AT);
+        let counted = self.b.ins().band_imm_u(info, COUNTED);
+        self.when(counted, |emit| {
+            let count_at = imm(Zval::COUNT_AT);
+            let count = emit.b.ins().load(I32, trusted(), word, count_at);
+            let bits = emit.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+            let room = emit
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, bits, i64::from(Zval::COUNT_BITS));
+            let room = emit.b.ins().uextend(I32, room);
+            let count = emit.b.ins().iadd(count, room);
+            emit.b.ins().store(trusted(), count, word, count_at);
+            Ok(())
+        })
     }
 
     /// A send of a scalar: the call's slot for the argument written.

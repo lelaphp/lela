@@ -481,7 +481,6 @@ kernels! {
         PushCall => push_call(func: u32, callee: u32) -> Stood = tier::step_held;
         Call => call(func: u32, callee: u32) -> Stood = tier::call_held;
         Release => release(word: u64, type_info: u32) = tier::release;
-        Copy => copy(word: u64, type_info: u32) -> Zval;
     }
 }
 
@@ -550,19 +549,6 @@ fn release(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Resu
     standing(req, on.room, on.at)?;
     tier::release(req, zval(word, type_info));
     Ok(())
-}
-
-/// The `copy` kernel: php's `ZVAL_COPY_DEREF`, the value a reference
-/// holds in place of the reference, with one owner more.
-#[allow(
-    clippy::unnecessary_wraps,
-    reason = "a kernel answers a Result; this one never fails"
-)]
-fn copy(_: &mut Request, _: On<'_, '_>, word: u64, type_info: u32) -> Result<Zval, Fatal> {
-    let z = zval(word, type_info);
-    let z = z.as_reference().map_or(z, |reference| reference.val());
-    z.addref();
-    Ok(z)
 }
 
 /// The frame whose room compiled code handed a kernel, stood at the

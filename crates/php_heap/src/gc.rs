@@ -68,7 +68,7 @@ pub(crate) const REFCOUNT_AT: usize = std::mem::offset_of!(Refcounted, refcount)
 /// count to zero asks it once there, from the word it has in hand.
 const PINNED: u32 = 1 << 31;
 /// The count's thirty-one bits beneath the pin.
-const COUNT: u32 = !PINNED;
+pub(crate) const COUNT: u32 = !PINNED;
 
 /// What one owner given up left of a block's count
 /// ([`Counted::release`]).

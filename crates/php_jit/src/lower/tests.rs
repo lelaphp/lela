@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use cranelift_codegen::isa;
 
-use super::{ABANDONED, Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
+use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT, NBODY,
@@ -255,8 +255,8 @@ const IN_F: [(&str, &str); 2] = [("record.function", "f"), ("record.start", "loo
 
 /// A fetch from a temporary array frees it through [`Kernel::Release`],
 /// whose refusal leaves through the unwind `types` gives the free, never
-/// abandoned and taking no exit; the fetched element's guard copies it
-/// through [`Kernel::Copy`] for the exit that goes on past the fetch.
+/// abandoned and taking no exit; the fetched element's guard copies it,
+/// its owner added inline, for the exit that goes on past the fetch.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_temporary_arrays_free_leaves_through_an_unwind() -> Result<(), String> {
@@ -285,17 +285,8 @@ fn a_temporary_arrays_free_leaves_through_an_unwind() -> Result<(), String> {
             "{clif}"
         );
     }
-    // A copy names no exit of its own: a fatal or a panic in it is
-    // answered as abandoned, for `enter` to read what the kernel kept.
-    let copies = calls_of(&clif, Kernel::Copy);
-    assert!(!copies.is_empty(), "{clif}");
-    for to in copies {
-        assert_eq!(
-            answer(&clif, &to),
-            Some(i64::from(ABANDONED.cast_signed())),
-            "{clif}"
-        );
-    }
+    // The element's copy adds its owner inline, as php's `GC_ADDREF`,
+    // calling no kernel.
     Ok(())
 }
 
