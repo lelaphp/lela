@@ -2364,14 +2364,14 @@ fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
 /// C::r(): Argument #1 ($x) could not be passed by reference
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
-pub(crate) fn send_val_ex<T: Tier>(
+pub(crate) fn send_val_ex<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), Sending::Declared) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), Sending::Declared) {
         return edge;
     }
     req.vm_mut().stand(frame, at);

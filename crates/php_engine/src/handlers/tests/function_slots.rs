@@ -74,7 +74,7 @@ fn a_call_by_name_resolves_the_lowered_constant_and_serves_the_native() {
     );
     assert!(!req.is_pending(), "the lowered constant is the table's key");
     assert_eq!(
-        served!(req, frame, at => send_val_ex::<Nop>(&mut req, frame, code, &send, at)),
+        served!(req, frame, at => send_val_ex::<Nop, crate::operand::Const>(&mut req, frame, code, &send, at)),
         Ok(Stepped::Same(frame))
     );
     assert_eq!(
