@@ -272,6 +272,9 @@ enum Build {
     /// writes `JIT usage: <bytes> bytes, <oplines> oplines, <traces>
     /// traces`, what its traces took (G4, #2961).
     Usage,
+    /// [`Build::Jit`] with `cfg(php_jit_untested_loops)` set, whose loops
+    /// compile without the interrupt test at their header (#2960).
+    Untested,
 }
 
 impl Build {
@@ -284,6 +287,7 @@ impl Build {
             Build::Plain => ("no-jit-feature", None, None),
             Build::Stepping => ("stepping", Some("stepping"), Some("php_jit_stepping")),
             Build::Usage => ("usage", Some("usage"), Some("php_jit_usage")),
+            Build::Untested => ("untested", Some("untested"), Some("php_jit_untested_loops")),
         }
     }
 
@@ -317,26 +321,86 @@ impl Build {
 /// difference: the featured engine's `Policy` asks for tracing and runs
 /// `Mode::Off` (`jit-design.md` §4.7), and the other has no tier to ask.
 pub(crate) fn door(root: &Path) -> [Declared; 2] {
-    [
-        ("g1", Build::Jit, Held::Bound),
-        ("g1-aa", Build::Plain, Held::Control),
-    ]
-    .map(|(id, first, held)| {
-        let (a, b) = (first.name(), Build::Plain.name());
-        let about = format!(
+    let pairs = [
+        ("g1", [Build::Jit, Build::Plain], Held::Bound),
+        ("g1-aa", [Build::Plain, Build::Plain], Held::Control),
+    ];
+    let under = Under {
+        regime: "jit-tracing",
+        ini: Some("opcache.jit_buffer_size=0"),
+    };
+    builds(root, pairs, under, |a, b| {
+        format!(
             "the engine built as {a} with opcache.jit_buffer_size=0 against {b} over the seven kernels"
-        );
-        bar(root, (id, KERNELS, Read::Time), about, held, move |root, _| {
-            let arm = |name: String, build: Build| -> Result<Php> {
-                Ok(Php {
-                    name,
-                    binary: build.built(root)?,
-                    regimes: vec!["jit-tracing"],
-                    ini: vec!["opcache.jit_buffer_size=0".to_owned()],
-                })
-            };
-            Ok(Ok([arm(a.to_owned(), first)?, arm(second(a, b), Build::Plain)?]))
-        })
+        )
+    })
+}
+
+/// What the interrupt test costs a compiled loop, one load and one branch
+/// at its header (`jit-design.md` §4.3, §10), and its control (#2960): the
+/// engine built as [`Build::Jit`] against [`Build::Untested`], whose loops
+/// compile the same traces without the test, both under
+/// `[regime.jit-force]`, every eligible root compiled at its first
+/// execution, over the seven kernels; and [`Build::Jit`] against itself,
+/// its A/A control. The arm without the test is a cfg only this build
+/// sets, never a `Policy` value: production code always tests.
+pub(crate) fn interrupt(root: &Path) -> [Declared; 2] {
+    let pairs = [
+        ("interrupt", [Build::Jit, Build::Untested], Held::Series),
+        ("interrupt-aa", [Build::Jit, Build::Jit], Held::Control),
+    ];
+    let under = Under {
+        regime: "jit-force",
+        ini: None,
+    };
+    builds(root, pairs, under, |a, b| {
+        let regime = under.regime;
+        format!(
+            "the engine built as {a} against {b} under [regime.{regime}] over the seven kernels"
+        )
+    })
+}
+
+/// The one command line both arms of a bar of two builds run under: a
+/// regime of the pin, and an ini line after it.
+#[derive(Clone, Copy)]
+struct Under {
+    regime: &'static str,
+    ini: Option<&'static str>,
+}
+
+/// A bar and its control over the seven kernels, each pair's arms two
+/// builds of the engine run `under` one command line, so the binary is
+/// the one difference, `about` naming the pair from its builds' names.
+fn builds(
+    root: &Path,
+    pairs: [(&str, [Build; 2], Held); 2],
+    under: Under,
+    about: impl Fn(&str, &str) -> String,
+) -> [Declared; 2] {
+    pairs.map(|(id, [a, b], held)| {
+        let (a_name, b_name) = (a.name(), b.name());
+        let about = about(a_name, b_name);
+        bar(
+            root,
+            (id, KERNELS, Read::Time),
+            about,
+            held,
+            move |root, _| {
+                let arm = |name: String, build: Build| -> Result<Php> {
+                    Ok(Php {
+                        name,
+                        binary: build.built(root)?,
+                        regimes: vec![under.regime],
+                        ini: under.ini.into_iter().map(str::to_owned).collect(),
+                    })
+                };
+                Ok(Ok([
+                    arm(a_name.to_owned(), a)?,
+                    arm(second(a_name, b_name), b)?,
+                ]))
+            },
+        )
     })
 }
 
@@ -547,11 +611,18 @@ mod tests {
 
     /// The engine's tier and php's are each a series beside its A/A
     /// control, named for whose tier it is, G1 is held to its bound, and
-    /// the stepping loop is a series beside its control (#2946).
+    /// the stepping loop and the interrupt test are each a series beside
+    /// its control (#2946, #2960).
     #[test]
-    fn each_tier_and_the_stepping_loop_is_a_series_beside_its_control_and_the_door_a_bound() {
+    fn each_tier_and_each_cost_is_a_series_beside_its_control_and_the_door_a_bound() {
         let root = Path::new(".");
-        let bars = [oracle(root), compiled(root), door(root), stepping(root)];
+        let bars = [
+            oracle(root),
+            compiled(root),
+            door(root),
+            stepping(root),
+            interrupt(root),
+        ];
         let bars = bars.map(|b| b.map(|b| (b.id, b.held)));
         let g4 = g4(root).map(|b| (b.id, b.held));
         let rss = [("g4-rss", Held::Series), ("g4-rss-aa", Held::Control)];
@@ -570,6 +641,7 @@ mod tests {
             series("engine-jit"),
             door,
             series("step"),
+            series("interrupt"),
         ];
         assert_eq!(bars, tiers);
     }

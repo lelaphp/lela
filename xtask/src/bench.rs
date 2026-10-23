@@ -917,6 +917,7 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     bars.extend(kernels::compiled(root));
     bars.extend(kernels::door(root));
     bars.extend(kernels::stepping(root));
+    bars.extend(kernels::interrupt(root));
     bars.extend(kernels::g4(root));
     bars.extend(
         [
