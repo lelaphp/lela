@@ -177,6 +177,8 @@ pub(crate) mod entered {
     use crate::testing::{self, Scratch, function_of, stdout};
     use crate::types::Landing;
 
+    mod parity;
+
     /// What a test enters, by the function whose activation enters it.
     trait Plan: 'static {
         /// The trace entered at the activation of `frame`, which serves

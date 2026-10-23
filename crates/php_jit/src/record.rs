@@ -1018,7 +1018,7 @@ impl<'p> Recorder<'p> {
             let went = match edge {
                 Stepped::Same(next) => {
                     frame = next;
-                    self.same(req, frame, &op, at, after.as_ref(), call)
+                    self.same(req, view, frame, (&op, at, after.as_ref()), call)
                 }
                 Stepped::Pushed(callee) => {
                     frame = callee;
@@ -1165,14 +1165,15 @@ impl<'p> Recorder<'p> {
 
     /// A step that went on in a frame: the direction of a conditional
     /// jump, or of the fused compare-and-branch the opline began,
-    /// written on its `Op`, and a call an `INIT_*` began written down.
+    /// written on its `Op`, and a call an `INIT_*` began written down,
+    /// a plain one taken into `view` for compiled code to write in place
+    /// ([`UnitView::hold_call`]).
     fn same(
         &mut self,
         req: &Request,
+        view: &mut UnitView,
         frame: FrameRef,
-        op: &Opline,
-        at: OplineIdx,
-        after: Option<&Opline>,
+        (op, at, after): (&Opline, OplineIdx, Option<&Opline>),
         before: Option<Building>,
     ) -> Went {
         let now = position(req, frame);
@@ -1201,8 +1202,12 @@ impl<'p> Recorder<'p> {
         if self.policy.max_polymorphic_calls() == 0 && call.target.is_some() && polymorphic(op) {
             self.megamorphic.push(call.call);
         }
+        let callee = Callee::of(req, call);
+        if callee.user().is_some() {
+            view.hold_call(req, call.call);
+        }
         self.events.push(Event::InitCall {
-            callee: Callee::of(req, call),
+            callee,
             began: Began::Here,
         });
         if self.count(1) {
@@ -1546,7 +1551,7 @@ impl<'p> Recorder<'p> {
 /// `op2` where they name a slot and the opcode reads a value there, and
 /// the `OP_DATA`'s `op1` after an assignment, whose class php does not
 /// record.
-fn sampled(
+pub(crate) fn sampled(
     req: &Request,
     frame: FrameRef,
     op: &Opline,
@@ -1635,7 +1640,7 @@ fn ended(at: FrameRef, stepped: bool) -> Ended {
 }
 
 /// The opline `frame` stands at.
-fn position(req: &Request, frame: FrameRef) -> OplineIdx {
+pub(crate) fn position(req: &Request, frame: FrameRef) -> OplineIdx {
     tier::frame(req, frame).map_or(OplineIdx(0), |view| view.opline())
 }
 

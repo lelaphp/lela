@@ -222,7 +222,8 @@ impl Served {
         threads: Option<usize>,
     ) -> Result<Served> {
         let recipe = &manifest.pin()?.recipe;
-        let binary = profile::released(root, (&MAKALA.package(), MAKALA.binary), None, None)?;
+        let binary =
+            profile::released(root, (&MAKALA.package(), MAKALA.binary), None, (None, None))?;
         let own = Tree::new("bench-makala")?;
         own.write(&entry.script, &entry.program)?;
         let log = own.path().join("errors");

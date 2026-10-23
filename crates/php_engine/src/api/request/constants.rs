@@ -39,11 +39,13 @@ pub(crate) fn halt_offset_key(file: &[u8]) -> Vec<u8> {
 /// extension that registers one while the request runs; or the program,
 /// `PHP_USER_CONSTANT`, with the file `zend_register_constant` read off
 /// `zend_get_executed_filename_ex` where one was executing.
-#[derive(Debug, Clone, PartialEq, Eq)]
 enum ConstantOwner {
     Core,
     Extension(ExtensionId),
-    User(Option<Box<[u8]>>),
+    /// `c->filename`, `zend_get_executed_filename_ex()` with one more
+    /// owner ([`Request::executed_file_string`]): an `eval`'s name string
+    /// among them, which the row keeps past the `eval`.
+    User(Option<Owner<PhpString>>),
 }
 
 /// `sizeof(zend_constant)`: the value, the name, the attributes and the
@@ -62,11 +64,12 @@ struct ConstantRow {
     /// the engine's own shape; none where the memory limit refused it,
     /// whose fatal ends the request.
     room: Option<Emalloc>,
-    /// `c->name` where the registration made it, a host's or an
-    /// extension's name through `zend_string_init_interned`
-    /// ([`Request::interned`]), released with the row; none for
-    /// `define()`'s and `const`'s, which is the program's own string, or
-    /// where the memory limit refused it.
+    /// `c->name`, released with the row: a host's or an extension's
+    /// name through `zend_string_init_interned` ([`Request::interned`]),
+    /// and for `define()`'s and `const`'s one more owner of the
+    /// program's string (`zend_string_copy`), the one a declaration
+    /// holds for the bytes where any does ([`Request::declared_string`]);
+    /// none where the memory limit refused it.
     named: Option<Owner<PhpString>>,
     owner: ConstantOwner,
     /// The key `EG(zend_constants)` holds the row under: the name with
@@ -173,18 +176,17 @@ impl Constants {
         Some((row.value, row.deprecated))
     }
 
-    /// The constant the request holds under `name` as a compile of its
+    /// The constant the request added under `name` as a compile of its
     /// own reads `EG(zend_constants)` past the persistent table
-    /// ([`php_compile::RequestConstants`]). `PHP_SAPI` is among them, so
-    /// an `eval` substitutes it as php does; a file compiled for the
-    /// cache is handed none, where php's persistent arm substitutes
-    /// `PHP_SAPI` there too, since the engine's cache keeps no unit of
-    /// one host's.
+    /// ([`php_compile::RequestConstants`]). `PHP_SAPI` is not among them:
+    /// php registers it `CONST_PERSISTENT`, so every compile, a file the
+    /// cache keeps among them, substitutes it from the persistent table
+    /// ([`php_compile::Persistent::host`]).
     pub(super) fn defined(&self, name: &[u8]) -> Option<php_compile::Defined> {
-        let (value, deprecated) = self.request(name)?;
+        let (_, row) = self.find(name)?;
         Some(php_compile::Defined {
-            value: value.to_zval(),
-            deprecated,
+            value: row.value.to_zval(),
+            deprecated: row.deprecated,
         })
     }
 
@@ -223,8 +225,12 @@ impl Request {
         if let Some(room) = row.room {
             room.free(self);
         }
-        if let Some(named) = row.named {
-            named.give_up(self);
+        let file = match row.owner {
+            ConstantOwner::User(file) => file,
+            ConstantOwner::Core | ConstantOwner::Extension(_) => None,
+        };
+        for string in [row.named, file].into_iter().flatten() {
+            string.give_up(self);
         }
     }
 
@@ -319,6 +325,37 @@ impl Request {
         self.define_attributed_constant(name, value, Vec::new())
     }
 
+    /// The name and the file a constant the program defines is kept
+    /// with are strings the row holds an owner of, as
+    /// `zend_register_constant` copies `c->name` and
+    /// `zend_get_executed_filename_ex()`: a constant an `eval` defines
+    /// keeps the `eval`'s name string past it (the file under the
+    /// recipe's `TMPDIR`, so that name has one length):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3259-constants.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } }');
+    /// m('$q0 = 1;');
+    /// foreach ([
+    ///     'class R { const B = 1; } class Rlonger { const Blonger = 2; } const X1 = "y"; const X2 = 3; const X3 = 4; const Xlongname4 = 5;',
+    ///     'const X5 = 3;',
+    ///     'define("X6", 3);',
+    ///     '$q = 1;',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1144  class R { const B = 1; } class Rlonger { const Blonger = 2; } const X1 = "y"; const X2 = 3; const X3 = 4; const Xlongname4 = 5;
+    /// 184  const X5 = 3;
+    /// 184  define("X6", 3);
+    /// 0  $q = 1;
+    /// ```
+    ///
     /// `ZEND_DECLARE_ATTRIBUTED_CONST`'s `zend_register_constant` and
     /// `zend_constant_add_attributes`: [`Request::define_constant`] with
     /// the attributes the declaration carries hung on the row, and
@@ -351,9 +388,11 @@ impl Request {
             .map(|code| code.filename.0.clone());
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         let room = self.constant_room();
+        let named = self.declared_string(given).ok();
+        let file = file.and_then(|file| self.executed_file_string(&file).ok());
         self.constants.push(ConstantRow {
             room,
-            named: None,
+            named,
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             given: given.to_vec(),
@@ -609,7 +648,7 @@ impl<'r> Symbols<&'r Request> {
     /// constants` walks for the program's own.
     #[must_use]
     pub fn constant_table(self) -> Vec<(Option<&'r str>, &'r [u8], Value)> {
-        let decls = self.0.shared.declared().constants.rows();
+        let decls = self.0.shared.declared().constants.declared.rows();
         let modules =
             (self.0.shared.constant_modules.iter()).map(|&at| self.0.extensions().name(at));
         let mut rows: Vec<(Option<&str>, &[u8], Value)> =
@@ -654,7 +693,7 @@ impl<'r> Symbols<&'r Request> {
             .constants
             .find(name)
             .and_then(|(_, row)| match &row.owner {
-                ConstantOwner::User(file) => file.as_deref(),
+                ConstantOwner::User(file) => file.as_ref().map(|file| file.as_bytes()),
                 ConstantOwner::Core | ConstantOwner::Extension(_) => None,
             })
     }
@@ -692,6 +731,7 @@ impl<'r> Symbols<&'r Request> {
             .shared
             .declared()
             .constants
+            .declared
             .find(name)
             .map_or(&[], |(_, decl)| decl.attributes.as_slice())
     }

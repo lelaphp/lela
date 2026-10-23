@@ -698,9 +698,15 @@ pub(crate) const WORKSPACE: &str = "{workspace}";
 impl Regime {
     /// Whether one of the regime's ini lines sets `directive`.
     pub(crate) fn sets(&self, directive: &str) -> bool {
-        (self.ini.iter()).any(|line| {
-            line.split_once('=')
-                .is_some_and(|(name, _)| name.trim() == directive)
+        self.value(directive).is_some()
+    }
+
+    /// The value the regime's ini lines set `directive` to, the last
+    /// where several do, as php reads repeated `-d`s.
+    pub(crate) fn value(&self, directive: &str) -> Option<&str> {
+        (self.ini.iter()).rev().find_map(|line| {
+            let (name, value) = line.split_once('=')?;
+            (name.trim() == directive).then(|| value.trim())
         })
     }
 

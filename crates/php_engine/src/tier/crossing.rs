@@ -36,6 +36,25 @@ pub fn stack_room(req: &Request) -> usize {
     req.vm().stack.room()
 }
 
+/// The address of the request's VM stack, the running one's, where
+/// [`super::FRAME`]'s stack offsets are taken from: what compiled code
+/// that pushes and pops a plain call's frame reads and writes the top, the
+/// end, the frame table and the innermost room through. It is the
+/// request's for as long as the request runs; a fiber's switch swaps the
+/// stacks standing there and moves none.
+#[must_use]
+pub fn stack(req: &mut Request) -> NonNull<u8> {
+    NonNull::from(&mut req.vm_mut().stack).cast()
+}
+
+/// Whether the runtime cache of the op array `f` names is laid down in
+/// the request, `RUN_TIME_CACHE(op_array)` not `NULL`: what a call's
+/// activation in place reads its callee's cache from.
+#[must_use]
+pub fn laid(req: &Request, f: FuncRef) -> bool {
+    req.cache_laid(exec::CacheAt::of(f.offset()))
+}
+
 /// The frame whose room is at `room` ([`room`]), looked for from the
 /// innermost down, where the frames compiled code runs in stand.
 #[must_use]

@@ -155,6 +155,7 @@ impl Request {
                 class_name.map_or_else(|| req.symbols().class_name(class), str::to_owned);
             format!("{class_name}::{}", String::from_utf8_lossy(name))
         };
+        self.separate_constants(class)?;
         let Some((declaring, constant)) = self.symbols().class_constant_of(class, name) else {
             let message = format!("Undefined constant {}", shown(self));
             return Err(crate::api::raising::throw_error(self, "Error", &message));
@@ -199,17 +200,18 @@ impl Request {
         if fetch == ConstantFetch::Opline {
             self.update_enum_constants(class)?;
         }
+        let holder = super::class_data::constant_holder(asked, class);
         let value = if is_case {
             self.enum_case(class, name).map(|case| case.as_value())
         } else {
             match fetch {
-                ConstantFetch::Opline => self.evaluated_class_constant(class, name),
+                ConstantFetch::Opline => self.evaluated_in(holder, class, name),
                 ConstantFetch::Lookup => {
                     let class_name = class_name.map_or_else(
                         || std::borrow::Cow::Owned(self.symbols().class_name(class)),
                         std::borrow::Cow::Borrowed,
                     );
-                    self.visited_class_constant(class, name, &class_name)
+                    self.visited_class_constant((holder, class), name, &class_name)
                 }
             }
         };

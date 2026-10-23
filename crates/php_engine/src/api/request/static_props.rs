@@ -9,7 +9,7 @@ use php_unit::decl::{ClassKind, Visibility};
 
 use crate::api::abi::PropertyRead;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpRef, TypeTag, Value, ValueRef};
+use crate::api::values::{ClassId, Emalloc, PhpRef, TypeTag, Value, ValueRef};
 
 use super::{PropertyInfo, Request, WordMap};
 
@@ -29,6 +29,13 @@ pub(super) struct StaticProps {
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
     /// is the request's; so is this one.
     slots: WordMap<PropertyInfo, Value>,
+    /// The table itself, by the class it is laid for: the block
+    /// `zend_class_init_statics` `emalloc`s, a zval for each of the
+    /// class's `default_static_members_count` slots, an inherited one
+    /// among them ([`Request::init_statics`]).
+    /// A class whose chain has no slot is kept with none, so its next
+    /// access walks nothing.
+    tables: WordMap<ClassId, Option<Emalloc>>,
     /// The rows in the order their slots were laid down, which a debug
     /// build's teardown gives them up in.
     #[cfg(debug_assertions)]
@@ -56,10 +63,85 @@ impl Request {
     /// to the heap's mass release.
     #[cfg(debug_assertions)]
     pub(super) fn free_static_members(&mut self) {
-        let StaticProps { mut slots, laid } = std::mem::take(&mut self.static_props);
+        let StaticProps {
+            mut slots,
+            tables,
+            laid,
+        } = std::mem::take(&mut self.static_props);
         for value in laid.iter().filter_map(|info| slots.remove(info)) {
             self.release(value);
         }
+        for table in tables.into_values().flatten() {
+            table.free(self);
+        }
+    }
+
+    /// `zend_class_init_statics` (`Z/Zend/zend_object_handlers.c:2094`): the table of
+    /// `class`'s static members laid down on its first static access or
+    /// the first update of a class with expressions still to evaluate,
+    /// its parent's before it, one zval a slot of each class of the chain
+    /// that has any, as `CE_STATIC_MEMBERS` is the request's. The slots'
+    /// values are laid one by one ([`Request::lay_down_static`]). A
+    /// table is 16 bytes a slot, the parent's slots among a child's; a
+    /// class whose table stands lays none again, and one whose
+    /// declaration holds no expression lays its own at its first static
+    /// access, not at its first object:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } }');
+    /// m('$q0 = 1;');
+    /// foreach ([
+    ///     'class C17 { const K = R17::B; public static $s = 1; } class R17 { const B = 2; }',
+    ///     '$GLOBALS["g"] = C17::$s;',
+    ///     '$GLOBALS["h"] = C17::K;',
+    ///     'class Q10 { public static $p = R::B; } class R { const B = 1; }',
+    ///     '$GLOBALS["m2"] = Q10::$p;',
+    ///     'class S1 { public static $a = 1, $b = 2; } class S2 extends S1 { public static $c = 3; }',
+    ///     '$GLOBALS["s2"] = S2::$c;',
+    ///     '$GLOBALS["s1"] = S1::$a;',
+    ///     'class S3 { public static $a = 1; public $x = 2; }',
+    ///     '$GLOBALS["s3"] = new S3;',
+    ///     '$GLOBALS["s3a"] = S3::$a;',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1312  class C17 { const K = R17::B; public static $s = 1; } class R17 { const B = 2; }
+    /// 416  $GLOBALS["g"] = C17::$s;
+    /// 0  $GLOBALS["h"] = C17::K;
+    /// 896  class Q10 { public static $p = R::B; } class R { const B = 1; }
+    /// 48  $GLOBALS["m2"] = Q10::$p;
+    /// 944  class S1 { public static $a = 1, $b = 2; } class S2 extends S1 { public static $c = 3; }
+    /// 112  $GLOBALS["s2"] = S2::$c;
+    /// 32  $GLOBALS["s1"] = S1::$a;
+    /// 512  class S3 { public static $a = 1; public $x = 2; }
+    /// 88  $GLOBALS["s3"] = new S3;
+    /// 48  $GLOBALS["s3a"] = S3::$a;
+    /// ```
+    pub(super) fn init_statics(&mut self, class: ClassId) -> Result<(), Thrown> {
+        if self.static_props.tables.contains_key(&class) {
+            return Ok(());
+        }
+        let lineage: Vec<ClassId> = self.symbols().lineage(class).collect();
+        for class in lineage.into_iter().rev() {
+            if self.static_props.tables.contains_key(&class) {
+                continue;
+            }
+            let count = if self.native_class(class) {
+                0
+            } else {
+                self.static_members(class)
+            };
+            let table = match count {
+                0 => None,
+                count => Some(Emalloc::new(
+                    self,
+                    count * std::mem::size_of::<php_heap::Zval>(),
+                )?),
+            };
+            self.static_props.tables.insert(class, table);
+        }
+        Ok(())
     }
 
     /// `zend_std_get_static_property_with_info`
@@ -151,6 +233,7 @@ impl Request {
             ));
         };
         self.update_class_constants(class)?;
+        self.init_statics(class)?;
         self.lay_down_static(info)?;
         if self
             .symbols()

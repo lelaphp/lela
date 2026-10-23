@@ -39,10 +39,12 @@ mod tracked {
         }
         let xtask = readings.iter().find(|r| r.scope == "xtask").unwrap();
         assert_eq!(xtask.status, Status::Pass);
-        // The bench reader's four, in its home `xtask::bench::spent::read`
-        // (#3062's ruling); on another platform the module is not compiled,
-        // but its source is read all the same.
-        assert_eq!(xtask.numbers["sites"], 4.into());
+        // The bench reader's six, in its home `xtask::bench::spent::read`
+        // (#3062's ruling): four reading a server's totals, and two waiting
+        // on a process arm unreaped to read its own (#2946); on another
+        // platform the module is not compiled, but its source is read all
+        // the same.
+        assert_eq!(xtask.numbers["sites"], 6.into());
         assert_eq!(xtask.numbers["outside"], 0.into());
         assert!(!xtask.key().is_empty(), "stamped");
     }

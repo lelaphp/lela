@@ -187,11 +187,64 @@ pub(super) struct ClassBlocks {
     /// `ce->interfaces`.
     interfaces: Option<Emalloc>,
     emalloced: Vec<Emalloc>,
-    /// The blocks of each constant's and case's copied expression
-    /// ([`AstCopy`]), by the constant's place among the class's
-    /// constants as its unit wrote them, until the constant is evaluated
+    /// Each copied constant expression ([`AstCopy`]) by what it is the
+    /// value of, until its last holder evaluates it.
+    copies: Vec<Copied>,
+}
+
+/// What a copied constant expression is the value of, by its place among
+/// the class's declarations as its unit wrote them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CopyOf {
+    /// A constant's or a case's, given back where it is evaluated
     /// ([`Request::constant_evaluated`]).
-    copies: Vec<(usize, Emalloc)>,
+    Constant(usize),
+    /// An instance property's default in `default_properties_table`,
+    /// given back where the last table holding it is evaluated
+    /// ([`Request::default_evaluated`]).
+    Default(usize),
+    /// A static property's default in `default_static_members_table`,
+    /// which keeps it: `zend_class_init_statics` copies it into the
+    /// request's table, and that copy is what is evaluated.
+    Static(usize),
+}
+
+/// One constant expression's copy: its blocks, and how many default
+/// tables hold it, the declaring class's and each subclass's whose link
+/// copied the slot with one more owner (`do_inherit_property`).
+struct Copied {
+    of: CopyOf,
+    holders: usize,
+    blocks: Vec<Emalloc>,
+}
+
+impl Copied {
+    /// The blocks `copy` lays for what `of` names, held by the declaring
+    /// class alone.
+    fn lay(req: &mut Request, of: CopyOf, copy: &AstCopy) -> Result<Copied, Thrown> {
+        let mut laid = Copied {
+            of,
+            holders: 1,
+            blocks: Vec::new(),
+        };
+        for len in copy.blocks() {
+            match Emalloc::new(req, len) {
+                Ok(block) => laid.blocks.push(block),
+                Err(thrown) => {
+                    laid.free(req);
+                    return Err(thrown);
+                }
+            }
+        }
+        Ok(laid)
+    }
+
+    /// Every block given back.
+    fn free(self, req: &mut Request) {
+        for block in self.blocks {
+            block.free(req);
+        }
+    }
 }
 
 impl ClassBlocks {
@@ -212,7 +265,7 @@ impl ClassBlocks {
                 .into_iter()
                 .flatten(),
         );
-        emalloced.extend(self.copies.into_iter().map(|(_, block)| block));
+        emalloced.extend(self.copies.into_iter().flat_map(|copied| copied.blocks));
         Blocks {
             emalloced,
             arrays: Vec::new(),
@@ -453,7 +506,11 @@ impl Blocks {
 /// grows it. An uninitialised table is laid down as a hash at the first,
 /// as `zend_hash_real_init_mixed` lays a table a string key is first
 /// written to, never as the packed list an integer key would lay.
-fn add_rows(req: &mut Request, table: php_heap::Arr, count: usize) -> Result<(), Thrown> {
+pub(super) fn add_rows(
+    req: &mut Request,
+    table: php_heap::Arr,
+    count: usize,
+) -> Result<(), Thrown> {
     if count == 0 {
         return Ok(());
     }
@@ -651,8 +708,9 @@ fn op_array(
     req: &mut Request,
     blocks: &mut Blocks,
     code: &OpArray,
-    args: usize,
+    declared: Option<(&FunctionDecl, bool)>,
 ) -> Result<(), Thrown> {
+    let args = declared.map_or(0, |(decl, method)| arg_infos(decl, method));
     blocks.emalloced.push(Emalloc::new(req, REFCOUNT)?);
     // `get_next_op` grows the oplines fourfold from
     // `INITIAL_OP_ARRAY_SIZE`, and `pass_two` reallocates them to the
@@ -688,6 +746,20 @@ fn op_array(
     ] {
         if len > 0 {
             blocks.emalloced.push(Emalloc::new(req, len)?);
+        }
+    }
+    // Each parameter's default the compile left a tree, copied as the
+    // `RECV_INIT`'s literal (`zend_compile_params`' `zend_const_expr_to_zval`),
+    // which the op array keeps.
+    let defaults = declared.map_or(&[][..], |(decl, _)| &decl.parameters);
+    for default in defaults
+        .iter()
+        .filter_map(|parameter| parameter.default.expr())
+    {
+        if !super::linking::is_literal(default) {
+            for len in AstCopy::of(default).blocks() {
+                blocks.emalloced.push(Emalloc::new(req, len)?);
+            }
         }
     }
     // `zend_new_array(8)` at the first `static` or bound variable, and
@@ -1009,9 +1081,11 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
         }
     }
     // Each constant expression, copied out of the compile's arena as its
-    // constant's value (`zend_const_expr_to_zval`'s `zend_ast_copy`): a
-    // case's `ZEND_AST_CONST_ENUM_INIT`, and a constant's tree where the
-    // compile left one, which a value written out is not.
+    // constant's or its property's value (`zend_const_expr_to_zval`'s
+    // `zend_ast_copy`, from `zend_compile_class_const_decl` and
+    // `zend_compile_prop_decl`): a case's `ZEND_AST_CONST_ENUM_INIT`, and
+    // a constant's or a default's tree where the compile left one, which
+    // a value written out is not.
     for (at, constant) in class.constants.iter().enumerate() {
         let copy = if constant.is_case {
             AstCopy::of_case(&constant.value)
@@ -1020,9 +1094,23 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
         } else {
             AstCopy::of(&constant.value)
         };
-        for len in copy.blocks() {
-            blocks.copies.push((at, Emalloc::new(req, len)?));
-        }
+        blocks
+            .copies
+            .push(Copied::lay(req, CopyOf::Constant(at), &copy)?);
+    }
+    for (at, property) in class.properties.iter().enumerate() {
+        let Some(default) = (property.default.as_ref()).filter(|d| !super::linking::is_literal(d))
+        else {
+            continue;
+        };
+        let of = if property.is_instance {
+            CopyOf::Default(at)
+        } else {
+            CopyOf::Static(at)
+        };
+        blocks
+            .copies
+            .push(Copied::lay(req, of, &AstCopy::of(default))?);
     }
     // `zend_compile_use_trait`'s `trait_names`, a `zend_class_name` a
     // trait, reallocated a `use` at a time; the names themselves are the
@@ -1118,7 +1206,7 @@ pub(super) fn of_unit(req: &mut Request, unit: &Unit) -> Result<Laid, Thrown> {
 /// [`of_unit`]'s blocks, laid into `laid` one by one.
 fn lay(req: &mut Request, unit: &Unit, laid: &mut Laid) -> Result<(), Thrown> {
     for (decl, code) in &unit.functions {
-        op_array(req, &mut laid.tables, code, arg_infos(decl, false))?;
+        op_array(req, &mut laid.tables, code, Some((decl, false)))?;
     }
     for decl in &unit.classes {
         let blocks = class(req, decl)?;
@@ -1129,8 +1217,8 @@ fn lay(req: &mut Request, unit: &Unit, laid: &mut Laid) -> Result<(), Thrown> {
             .classes
             .get(method.class as usize)
             .and_then(|class| class.methods.get(method.method as usize));
-        let args = decl.map_or(0, |decl| arg_infos(&decl.function, true));
-        op_array(req, &mut laid.tables, &method.body, args)?;
+        let declared = decl.map(|decl| (&decl.function, true));
+        op_array(req, &mut laid.tables, &method.body, declared)?;
     }
     for hook in &unit.hooks {
         let decl = unit
@@ -1139,8 +1227,8 @@ fn lay(req: &mut Request, unit: &Unit, laid: &mut Laid) -> Result<(), Thrown> {
             .and_then(|class| class.properties.get(hook.property as usize))
             .and_then(|property| property.hooks.as_deref())
             .and_then(|hooks| hooks.of(hook.kind));
-        let args = decl.map_or(0, |decl| arg_infos(&decl.function, true));
-        op_array(req, &mut laid.tables, &hook.body, args)?;
+        let declared = decl.map(|decl| (&decl.function, true));
+        op_array(req, &mut laid.tables, &hook.body, declared)?;
     }
     // Each definition's declarer: the main op array, another dynamic
     // definition, or else what the request's tables hold.
@@ -1158,7 +1246,7 @@ fn lay(req: &mut Request, unit: &Unit, laid: &mut Laid) -> Result<(), Thrown> {
     }
     for ((decl, code), declarer) in unit.dynamic.iter().zip(declarers) {
         let mut blocks = Blocks::default();
-        let made = op_array(req, &mut blocks, code, arg_infos(decl, false));
+        let made = op_array(req, &mut blocks, code, Some((decl, false)));
         laid.dynamic.push((blocks, declarer));
         made?;
     }
@@ -1209,6 +1297,7 @@ impl Request {
             None => blocks.into_blocks().free(self),
         }
         linked?;
+        self.hold_inherited_copies(class);
         self.hold_trait_property_names(class)
     }
 
@@ -1255,14 +1344,103 @@ impl Request {
         }) else {
             return;
         };
+        self.copy_released(unit, at, CopyOf::Constant(constant));
+    }
+
+    /// One holder fewer of the copy of what `of` names in the class at
+    /// `at` of `unit`, and its blocks given back with the last.
+    fn copy_released(&mut self, unit: *const Unit, at: usize, of: CopyOf) {
         let Some(blocks) = (self.unit_strings.class_slot(unit, at)).and_then(Option::as_mut) else {
             return;
         };
-        let copy: Vec<Emalloc> = (blocks.copies.extract_if(.., |(held, _)| *held == constant))
-            .map(|(_, block)| block)
+        let Some(place) = blocks.copies.iter().position(|copied| copied.of == of) else {
+            return;
+        };
+        let last = (blocks.copies.get_mut(place)).is_some_and(|copied| {
+            copied.holders = copied.holders.saturating_sub(1);
+            copied.holders == 0
+        });
+        if last {
+            blocks.copies.swap_remove(place).free(self);
+        }
+    }
+
+    /// The default `info` names evaluated in a class's
+    /// `default_properties_table`, which a unit the request compiled for
+    /// itself declared, by that class's own update: one holder fewer of
+    /// its expression's copy ([`AstCopy`]), which
+    /// `zend_update_class_constants` destroys in place once the value
+    /// stands, given back by the last holder. A subclass's table holds it
+    /// past both classes' updates, as php's does. So the first object of
+    /// an `eval`'d class gives the copy back, and of a class with a
+    /// subclass gives nothing back; a static's copy and a parameter's
+    /// stand with the class and the op array:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } }');
+    /// m('$q0 = 1;');
+    /// foreach ([
+    ///     'class Q9 { public $p = R::B; }',
+    ///     'class Q10 { public static $p = R::B; }',
+    ///     'class Q11 { function f($a = R::B) {} }',
+    ///     'class R { const B = 1; }',
+    ///     '$GLOBALS["l"] = new Q9;',
+    ///     'class D1 { public $p = R::B; } class D2 extends D1 {}',
+    ///     '$GLOBALS["d1"] = new D1;',
+    ///     '$GLOBALS["d2"] = new D2;',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 576  class Q9 { public $p = R::B; }
+    /// 576  class Q10 { public static $p = R::B; }
+    /// 720  class Q11 { function f($a = R::B) {} }
+    /// 416  class R { const B = 1; }
+    /// 488  $GLOBALS["l"] = new Q9;
+    /// 896  class D1 { public $p = R::B; } class D2 extends D1 {}
+    /// 88  $GLOBALS["d1"] = new D1;
+    /// 88  $GLOBALS["d2"] = new D2;
+    /// ```
+    pub(super) fn default_evaluated(&mut self, info: super::PropertyInfo) {
+        if self.unit_strings.is_empty() {
+            return;
+        }
+        let Some((unit, at)) = self.declared_row(info.declaring).and_then(|row| {
+            let written = row.unit.classes.get(row.at as usize)?;
+            (written.properties.get(info.at as usize)).filter(|p| p.is_instance)?;
+            Some((php_unit::PublishedUnit::as_ptr(&row.unit), row.at as usize))
+        }) else {
+            return;
+        };
+        self.copy_released(unit, at, CopyOf::Default(info.at as usize));
+    }
+
+    /// One more holder of each instance default's copy `class`'s link
+    /// took from a class above it, as `do_inherit_property` copies the
+    /// parent's `default_properties_table` with one more owner of each
+    /// value.
+    fn hold_inherited_copies(&mut self, class: ClassId) {
+        let inherited: Vec<(*const Unit, usize, usize)> = (self.placed_properties(class).iter())
+            .filter(|info| info.declaring != class)
+            .filter_map(|info| {
+                let row = self.declared_row(info.declaring)?;
+                Some((
+                    php_unit::PublishedUnit::as_ptr(&row.unit),
+                    row.at as usize,
+                    info.at as usize,
+                ))
+            })
             .collect();
-        for block in copy {
-            block.free(self);
+        for (unit, at, property) in inherited {
+            let Some(blocks) = (self.unit_strings.class_slot(unit, at)).and_then(Option::as_mut)
+            else {
+                continue;
+            };
+            if let Some(copied) =
+                (blocks.copies.iter_mut()).find(|c| c.of == CopyOf::Default(property))
+            {
+                copied.holders += 1;
+            }
         }
     }
 
@@ -1435,6 +1613,11 @@ impl Request {
             Table::Properties => &decl.properties.get(at)?.name,
         };
         Some(&name.0)
+    }
+
+    /// `default_static_members_count` of a linked class ([`Self::slots`]).
+    pub(super) fn static_members(&self, class: ClassId) -> usize {
+        self.slots(class).statics
     }
 
     /// `default_properties_count` and `default_static_members_count` of

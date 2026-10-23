@@ -70,7 +70,7 @@ impl<'a> Dump<'a> {
         self.head(text)?;
         let header = match self.ir.end {
             End::Loop(header) => Some(header),
-            End::Leave(_) => None,
+            End::Leave(_) | End::Return(_) => None,
         };
         for (at, op) in (0u32..).map(OpId).zip(&self.ir.ops) {
             if let Some(header) = header.filter(|header| header.at == at) {
@@ -104,6 +104,7 @@ impl<'a> Dump<'a> {
         match self.ir.end {
             End::Loop(header) => writeln!(text, "end: back to {}", header.at.0)?,
             End::Leave(exit) => writeln!(text, "end: exit {}", exit.0)?,
+            End::Return(exit) => writeln!(text, "end: return in place, else exit {}", exit.0)?,
         }
         for (at, exit) in self.ir.exits.iter().enumerate() {
             self.exit(text, at, exit)?;
@@ -188,9 +189,16 @@ impl<'a> Dump<'a> {
                 frame,
                 callee,
                 began,
+                plain,
             } => {
                 let target = callee.user().map_or("native".to_owned(), func);
-                writeln!(text, "     f{} {} {target}", frame.0, began.word())
+                let in_place = if plain.is_some() { " in-place" } else { "" };
+                writeln!(
+                    text,
+                    "     f{} {} {target}{in_place}",
+                    frame.0,
+                    began.word()
+                )
             }
             Op::Enter { frame } => {
                 let named = self

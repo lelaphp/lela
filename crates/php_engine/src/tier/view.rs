@@ -322,6 +322,10 @@ pub struct UnitView {
     epoch: Epoch,
     funcs: Vec<FuncRef>,
     classes: Vec<ClassId>,
+    /// The plain calls the recording took ([`UnitView::hold_call`]).
+    calls: Vec<super::PlainCall>,
+    /// Whether an observer of calls was declared ([`UnitView::observed`]).
+    observed: bool,
 }
 
 /// A view and an epoch hold leave the request's thread with a claim and
@@ -342,6 +346,8 @@ impl UnitView {
             epoch: epoch(req),
             funcs: Vec::new(),
             classes: Vec::new(),
+            calls: Vec::new(),
+            observed: crate::observer::observing(req),
         }
     }
 
@@ -371,6 +377,40 @@ impl UnitView {
             self.classes.push(c);
         }
         true
+    }
+
+    /// Whether an observer of calls was declared for the engine, which
+    /// compiled code tells of every call and return its trace makes, so
+    /// that it leaves no frame in place (design §4.3 seam 9).
+    #[must_use]
+    pub fn observed(&self) -> bool {
+        self.observed
+    }
+
+    /// Take the call being built at `call` where it is a plain call
+    /// ([`super::plain_call`]) to an op array the view holds, so a trace
+    /// that recorded it writes it in place; `false`, taking nothing, for
+    /// any other.
+    pub fn hold_call(&mut self, req: &Request, call: FrameRef) -> bool {
+        let Some(plain) = super::plain_call(req, call) else {
+            return false;
+        };
+        if !self.hold(req, plain.callee()) {
+            return false;
+        }
+        if !self.calls.contains(&plain) {
+            self.calls.push(plain);
+        }
+        true
+    }
+
+    /// The plain call to the op array `f` names with `count` arguments;
+    /// none unless [`UnitView::hold_call`] took one.
+    #[must_use]
+    pub fn call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
+        self.calls
+            .iter()
+            .find(|call| call.callee() == f && call.count() == count)
     }
 
     /// The op array `f` names; none unless [`UnitView::hold`] accepted it.

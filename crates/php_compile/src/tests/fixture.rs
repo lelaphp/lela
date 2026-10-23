@@ -204,7 +204,10 @@ pub(super) fn bundled() -> Options<'static> {
     Options {
         functions: Indexed::new(&NATIVES, &NAMES),
         frameless: &FRAMELESS,
-        persistent: Indexed::new(&PERSISTENT, &CONSTANT_NAMES),
+        persistent: crate::Persistent {
+            declared: Indexed::new(&PERSISTENT, &CONSTANT_NAMES),
+            host: None,
+        },
         ..Options::default()
     }
 }
