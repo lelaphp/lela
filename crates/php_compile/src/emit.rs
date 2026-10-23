@@ -1306,6 +1306,9 @@ impl Operated {
 enum Folded {
     Line(i64),
     Text(Vec<u8>),
+    /// The name of the class or the function the constant stands in,
+    /// whose own string php copies (`ZVAL_STR_COPY`).
+    Name(Vec<u8>),
     /// `__CLASS__` in a trait, the one magic constant
     /// `zend_try_ct_eval_magic_const` leaves to the program: the class
     /// that uses the trait, fetched as `FETCH_CLASS_NAME` of `self`.
@@ -2165,6 +2168,15 @@ impl<'a> Emit<'a> {
     pub(crate) fn string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
         match self.strings.intern(bytes) {
             Ok(s) => Ok(Zval::string(s)),
+            Err(fatal) => Err(self.fatal_of(fatal)),
+        }
+    }
+
+    /// [`Self::string`] of a declaration's own name or lowered key, which
+    /// php copies where this compile asks for it ([`Intern::intern_name`]).
+    fn own_string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
+        match self.strings.intern_name(bytes) {
+            Ok(made) => Ok(Zval::string(made.str())),
             Err(fatal) => Err(self.fatal_of(fatal)),
         }
     }
@@ -3934,7 +3946,7 @@ impl<'a> Emit<'a> {
         self.dynamic.push(None);
         let offset = u32::try_from(self.dynamic_func_defs.len()).unwrap_or(u32::MAX);
         self.dynamic_func_defs.push(at);
-        let lowered = self.string(self.arena.lowercase(name))?;
+        let lowered = self.own_string(self.arena.lowercase(name))?;
         let op1 = self.literal(lowered);
         self.push(Opline {
             opcode: Opcode::DeclareFunction,
@@ -6135,7 +6147,7 @@ impl<'a> Emit<'a> {
             }
             None => (OperandKind::Unused, 0),
         };
-        let lowered = self.string(self.arena.lowercase(&name))?;
+        let lowered = self.own_string(self.arena.lowercase(&name))?;
         let op1 = self.literal(lowered);
         let extended_value = self.cache_slot();
         let out = self.temporary();
@@ -7974,7 +7986,7 @@ impl<'a> Emit<'a> {
         key.extend_from_slice(lowered);
         key.extend_from_slice(self.filename);
         key.extend_from_slice(format!(":{line}${:x}", self.keys_made()).as_bytes());
-        let lowered = self.string(lowered)?;
+        let lowered = self.own_string(lowered)?;
         let op1 = self.literal(lowered);
         let filed = self.string(&key)?;
         self.literal(filed);
@@ -12153,6 +12165,7 @@ impl<'a> Emit<'a> {
         match self.magic_const(which, line) {
             Folded::Line(n) => Ok(Zval::long(n)),
             Folded::Text(text) => self.string(&text),
+            Folded::Name(name) => self.own_string(&name),
             Folded::UsingClass => {
                 Err(self.unread("a `__CLASS__` in a trait's constant expression"))
             }
@@ -17978,7 +17991,8 @@ impl<'a> Emit<'a> {
             _ => return Ok(None),
         };
         Ok(Some(if fetch == FETCH_CLASS_SELF {
-            Operated::Made(self.string_made(&name, false)?)
+            let made = self.strings.intern_name(&name);
+            Operated::Made(made.map_err(|fatal| self.fatal_of(fatal))?)
         } else {
             Operated::Kept(self.string(&name)?)
         }))
@@ -18541,14 +18555,10 @@ impl<'a> Emit<'a> {
         self.resolved_class_literal(resolved)
     }
 
-    /// `zend_add_class_name_literal` over a name already resolved.
+    /// `zend_add_class_name_literal` over a name already resolved, which
+    /// is [`Self::func_name_literal`]'s pair.
     fn resolved_class_literal(&mut self, resolved: &[u8]) -> Result<u32, CompileError> {
-        let lowered = self.arena.lowercase(resolved);
-        let written = self.string(resolved)?;
-        let lowered = self.string(lowered)?;
-        let at = self.literal(written);
-        self.literal(lowered);
-        Ok(at)
+        self.func_name_literal(resolved)
     }
 
     /// `zend_is_scope_known` (`Z/Zend/zend_compile.c:1696`): whether the
@@ -18808,13 +18818,59 @@ impl<'a> Emit<'a> {
     /// the engine reads the second as the one after the first
     /// (`Z_STR_P(function_name+1)`).
     fn func_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
-        let written = name;
-        let lowered = self.arena.lowercase(written);
-        let written = self.string(written)?;
-        let lowered = self.string(lowered)?;
+        let written = self.string(name)?;
+        let lowered = self.lowered(written, name)?;
         let at = self.literal(written);
         self.literal(lowered);
         Ok(at)
+    }
+
+    /// `zend_string_tolower` of the string `written` holds, whose bytes
+    /// are `bytes`: a string of its own where a byte is upper case, and
+    /// else `written` itself with one more owner, as `zend_string_tolower`
+    /// copies a string it would not change. So a call's method name
+    /// written lower case is one string in its two slots, where the
+    /// class's name is two:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3283-lowered.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// m('class X9 { static function sm(&$r) { $r = 7; } static function sv($r) { } }');
+    /// foreach ([
+    ///     'function f13() { X9::sm($b); return $b; }',
+    ///     'function f14() { X9::sv(1); }',
+    ///     'function f15() { X9::sv($b); }',
+    ///     'function f16() { Y9::sv($b); }',
+    ///     'function f17() { x9::sv(1); }',
+    ///     'function f18() { \\X9::sv(1); }',
+    ///     'function f19() { foo_undefined(); }',
+    ///     'function f20($o) { $o->method_name(); }',
+    ///     'function f21($o) { return $o instanceof x9; }',
+    /// ] as $c) echo m($c), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 528
+    /// 480
+    /// 496
+    /// 496
+    /// 448
+    /// 480
+    /// 360
+    /// 440
+    /// 432
+    /// ```
+    fn lowered(&mut self, written: Zval, bytes: &[u8]) -> Result<Zval, CompileError> {
+        let lowered = self.arena.lowercase(bytes);
+        if lowered == bytes && self.strings.hold(written) {
+            return Ok(written);
+        }
+        self.string(lowered)
     }
 
     /// `zend_compile_function_name` over `zend_resolve_function_name`:
@@ -19067,12 +19123,14 @@ impl<'a> Emit<'a> {
             }
             Magic::Namespace => self.namespace.clone().unwrap_or_default(),
             Magic::Class if self.in_trait() => return Folded::UsingClass,
-            Magic::Class => self.active_name().unwrap_or_default(),
+            Magic::Class => return Folded::Name(self.active_name().unwrap_or_default()),
             Magic::Property => self.active_property.clone().unwrap_or_default(),
             // `zend_compile_func_decl` names the op array; the main one
             // has no `function_name`, and a member's constant expression
             // stands directly inside the class.
-            Magic::Function => self.active_function.clone().unwrap_or_default(),
+            Magic::Function => {
+                return Folded::Name(self.active_function.clone().unwrap_or_default());
+            }
             // `__METHOD__` is `Class::method` inside a method, the op
             // array's own name inside a function or a closure, whose
             // scope the compiler leaves unset, and nothing directly
@@ -19086,11 +19144,13 @@ impl<'a> Emit<'a> {
                     text
                 }
                 (Some(_), Some(_)) if !self.fn_flags.closure => Vec::new(),
-                (_, Some(function)) => function.clone(),
+                (_, Some(function)) => return Folded::Name(function.clone()),
                 (_, None) => Vec::new(),
             },
             // The trait's own name inside one, and none elsewhere.
-            Magic::Trait if self.in_trait() => self.active_name().unwrap_or_default(),
+            Magic::Trait if self.in_trait() => {
+                return Folded::Name(self.active_name().unwrap_or_default());
+            }
             Magic::Trait => Vec::new(),
         };
         Folded::Text(text)
@@ -19484,15 +19544,12 @@ impl<'a> Emit<'a> {
     /// slots in a row, which the engine reads as the two after the first
     /// (`Z_STR_P(function_name + 1)`, `+ 2`).
     fn ns_func_name_literal(&mut self, name: &[u8]) -> Result<u32, CompileError> {
-        let lowered = self.arena.lowercase(name);
-        let unqualified = lowered
-            .rsplit(|b| *b == b'\\')
+        let unqualified = (self.arena.lowercase(name).rsplit(|b| *b == b'\\'))
             .next()
-            .unwrap_or_default()
-            .to_vec();
+            .unwrap_or_default();
         let written = self.string(name)?;
-        let lowered = self.string(lowered)?;
-        let unqualified = self.string(&unqualified)?;
+        let lowered = self.lowered(written, name)?;
+        let unqualified = self.string(unqualified)?;
         let at = self.literal(written);
         self.literal(lowered);
         self.literal(unqualified);

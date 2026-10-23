@@ -141,6 +141,17 @@ impl Intern for RequestStrings<'_> {
         Ok(s)
     }
 
+    /// A declaration's own string, kept as its name or its key when the
+    /// unit is taken ([`Request::hold_compiled`]), where it is one this
+    /// home made.
+    fn intern_name(&mut self, bytes: &[u8]) -> Result<php_heap::Made, Fatal> {
+        let made = self.intern_made(bytes, false)?;
+        if Zval::string(made.str()).is_refcounted() {
+            self.made.name(made.str());
+        }
+        Ok(made)
+    }
+
     /// A constant the request defined, substituted where an `eval`
     /// names it: one more owner of its value, `ZVAL_COPY_OR_DUP`, which
     /// the unit keeps as it keeps a constant its compile made, so the
