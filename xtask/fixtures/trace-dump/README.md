@@ -17,6 +17,13 @@ reading is a fail naming both lines of the loop's root; the same binary
 writing `oracle.lines` is a pass, and the lines the run keeps for the
 oracle are `oracle.lines`.
 
+`fib-moved.toml` is #3291's control: an accepted `trace:dump/fib` row
+pinning `oracle.lines` and `engine-pinned.lines`, which is `engine.lines`
+with one exit line more. `trace_dump`'s unit tests hold it: against
+`engine.lines` the row accepts nothing and the verdict names the engine's
+side as the one that moved; against the lines it pins it accepts the
+difference.
+
 `fiber_hot_loop.php` suspends a fiber on every pass of a hot loop and
 resumes it until it ends, so the loop's recording takes the suspension
 inside it: the program #627's diff is run on, `cargo xtask trace-dump

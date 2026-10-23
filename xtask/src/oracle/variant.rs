@@ -18,7 +18,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
-use super::{ClosureDigest, Oracle, Pin};
+use super::{Oracle, Pin};
+use crate::sha256::Sha256;
 
 /// One platform an oracle build is pinned for, by the key its table
 /// carries in `oracle.toml`: the maintainer's macOS arm64, and the two
@@ -105,7 +106,7 @@ impl Variant {
     /// `[closure]` it was made against (#2935), so a bump of the record
     /// refuses the build it left behind until a person re-pins it. `name`
     /// is the variant's, for the refusal.
-    pub(super) fn held(&self, name: &str, closure: Option<&ClosureDigest>) -> Result<()> {
+    pub(super) fn held(&self, name: &str, closure: Option<&Sha256>) -> Result<()> {
         for platform in Platform::ALL {
             let Some(build) = self.build(platform) else {
                 continue;
@@ -186,7 +187,7 @@ pub struct Build {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Provenance {
     pub image: Option<String>,
-    pub closure: Option<ClosureDigest>,
+    pub closure: Option<Sha256>,
 }
 
 impl Provenance {
@@ -262,7 +263,7 @@ mod tests {
     }
 
     /// The digest of a one-keg `[closure]` at `version`.
-    fn digest(version: &str) -> ClosureDigest {
+    fn digest(version: &str) -> Sha256 {
         let text = format!("zstd = \"{version}\"");
         toml::from_str::<super::super::Closure>(&text)
             .unwrap()
@@ -273,7 +274,7 @@ mod tests {
     fn a_linux_build_names_its_image_and_the_macos_build_names_its_closure() {
         let (md5, recorded) = ("md5 = \"0\"", digest("1.5.7_1"));
         let closure = format!("closure = \"{recorded}\"");
-        let refused = |text: &str, closure: Option<&ClosureDigest>| {
+        let refused = |text: &str, closure: Option<&Sha256>| {
             variant(&format!("flags = []\n{text}\n"))
                 .held("zend-test", closure)
                 .unwrap_err()
@@ -380,7 +381,12 @@ mod tests {
             );
             super::super::digest(&text).unwrap()
         };
-        assert_eq!(pin(""), pin(", closure = \"sha256:1\""));
+        assert_eq!(
+            pin(""),
+            pin(
+                ", closure = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\""
+            )
+        );
         assert_ne!(pin(""), pin(", md5x = \"1\""));
     }
 
@@ -388,7 +394,7 @@ mod tests {
     /// provenance was a type of its own (#2969).
     #[test]
     fn an_unknown_key_in_a_build_is_refused() {
-        let text = "flags = []\ndarwin-arm64 = { path = \"php\", md5 = \"0\", closure = \"sha256:1\", built = \"0\" }\n";
+        let text = "flags = []\ndarwin-arm64 = { path = \"php\", md5 = \"0\", closure = \"sha256:0000000000000000000000000000000000000000000000000000000000000000\", built = \"0\" }\n";
         let err = toml::from_str::<Variant>(text).unwrap_err().to_string();
         assert!(err.contains("unknown field `built`"), "{err}");
     }
