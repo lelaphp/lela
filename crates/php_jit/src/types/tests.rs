@@ -954,9 +954,11 @@ fn repeated(statement: &str, n: usize) -> String {
 /// trace knows of the frame's slots differ from an earlier one's. A
 /// jump on a condition its guard holds as `true` or `false` goes one way
 /// and takes no exit of its own, php's unconditional branch: `if (!$b)`
-/// takes its `BOOL_NOT`'s guard on `$b` and its `JMPZ`'s on what the `BOOL_NOT` wrote
-/// alone, the pinned php's two under `opcache.optimization_level=0`, so
-/// that its op arrays are this engine's (#3203).
+/// takes its `BOOL_NOT`'s guard on `$b` and its `JMPZ`'s on what the
+/// `BOOL_NOT` wrote alone, and `$b || $i` its `JMPNZ_EX`'s guard on `$b`
+/// and none for its direction, the pinned php's two and three under
+/// `opcache.optimization_level=0`, so that its op arrays are this
+/// engine's (#3203).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
@@ -973,6 +975,7 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
         ("$s += $i * 5;", 2),
         ("$x = $b && $i;", 4),
         ("if (!$b) { $x = 1; }", 2),
+        ("$x = $b || $i;", 3),
         ("$x = $y;", 1),
     ] {
         let two = built(&IN_MAIN, &repeated(statement, 2))?;
@@ -984,6 +987,30 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
             dump::render(&three)
         );
     }
+    Ok(())
+}
+
+/// A jump whose condition its guard holds as one kind goes one way, so
+/// `if (!$b)` three times in a loop of the file's own code leaves at the
+/// oplines php's `TRACE 1 exit info` lists, exit by exit, under
+/// `opcache.optimization_level=0`: the loop's test and its direction at
+/// `0017` and `0019`, then each statement's `BOOL_NOT` and `JMPZ` guards
+/// (`0007`, `0008`, `0010`, `0011`, `0013`, `0014`), the increment's at
+/// `0016`, with no exit for a `JMPZ`'s direction
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`, #3203). php's tenth,
+/// its interrupt test's at `0017`, is there because its register
+/// allocator holds the `BOOL_NOT`s' temporaries in registers, which an
+/// exit must store (`:7214-7230`); here the loop takes the interrupt stub
+/// (#3270).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {
+    let ir = built(&IN_MAIN, &repeated("if (!$b) { $x = 1; }", 3))?;
+    let oplines: Vec<Option<u32>> = (ir.exits.iter())
+        .map(|exit| exit.opline.map(|at| at.0))
+        .collect();
+    let php = [17, 19, 7, 8, 10, 11, 13, 14, 16].map(Some);
+    assert_eq!(oplines, php, "{}", dump::render(&ir));
     Ok(())
 }
 

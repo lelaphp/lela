@@ -533,14 +533,14 @@ impl<'a> Builder<'a> {
         self.successor = went(at, &op, target, len, branch);
         self.own_exit(idx, frame, &op, form, t1);
         self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
-        if let Some(taken) = branch
-            && !goes_one_way(op.opcode, t1)
-        {
+        if let Some(taken) = branch {
             let to = Branched {
                 taken,
                 fused,
                 len,
                 target,
+                opcode: op.opcode,
+                held: t1,
             };
             self.direction(idx, frame, at, op1, form, to);
         }
@@ -723,9 +723,16 @@ impl<'a> Builder<'a> {
             fused,
             len,
             target,
+            opcode,
+            held,
         } = to;
         if !fused && matches!(op1, Operand::Constant(_)) {
             // A constant condition goes one way; nothing to hold.
+            return;
+        }
+        if goes_one_way(opcode, held) {
+            // Nor does one its guards hold as one kind no greater than
+            // `true`: php's unconditional branch.
             return;
         }
         // Where the jump goes the way it did not go, as php's exit lands
@@ -2304,13 +2311,17 @@ fn went(
 }
 
 /// Which way a conditional jump went, the jump fused to a comparison or
-/// the opline's own, and where it goes: `len` oplines on, or to `target`.
+/// the opline's own, and where it goes: `len` oplines on, or to `target`;
+/// the opline's `opcode` and what its condition holds once its guards
+/// held, `held`.
 #[derive(Clone, Copy)]
 struct Branched {
     taken: bool,
     fused: bool,
     len: u32,
     target: Option<OplineIdx>,
+    opcode: Opcode,
+    held: Types,
 }
 
 /// The jump after `op` it is fused to, where it is a comparison whose

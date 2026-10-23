@@ -558,7 +558,10 @@ pub(super) fn may_exit(op: &Opline, after: Option<&Opline>) -> bool {
 /// a `JMPZ`, `JMPNZ`, `JMPZ_EX` or `JMPNZ_EX` whose condition, once its
 /// guards held, is one kind no greater than `true` (`has_concrete_type`,
 /// `concrete_type(op1_info) <= IS_TRUE`) goes the way the record went
-/// and takes no exit for the way it did not.
+/// and takes no exit for the way it did not. php's test ignores
+/// `MAY_BE_REF`; a condition that may be a reference has no one tag here,
+/// so it keeps its exit, one more than php's at worst and never the other
+/// way taken.
 pub(super) fn goes_one_way(opcode: Opcode, held: Types) -> bool {
     matches!(
         opcode,
