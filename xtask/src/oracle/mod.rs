@@ -33,7 +33,6 @@ mod variant;
 
 use built_from::BuiltFrom;
 pub(crate) use closure::Closure;
-pub use closure::ClosureDigest;
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub use variant::{Build, Oracles, Platform, Provenance, Variant};
 
@@ -53,7 +52,7 @@ use std::time::{Duration, Instant, SystemTime};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::divergence::{Divergence, Registry};
+use crate::divergence::{Digests, Divergence, Moved, Registry};
 use crate::layout::Layout;
 use crate::reading::joined;
 use crate::scratch::{self, Tree};
@@ -2258,6 +2257,9 @@ pub enum Verdict {
     Same,
     /// The bytes differ and the registry accepts it under this row.
     Diverged(Divergence),
+    /// The bytes differ, and the row that accepted the difference pins
+    /// lines of a side that are not these (#3291).
+    Moved(Moved),
     /// The bytes differ and nothing accepts it: the line diff, expected as
     /// `-`, actual as `+`.
     Differs(String),
@@ -2265,8 +2267,10 @@ pub enum Verdict {
 
 /// Compare the oracle's bytes with the engine's for the divergence key `id`.
 /// Equal bytes are `Same` whatever the registry says; a difference is
-/// `Diverged` under an accepted row for `id` and `Differs` otherwise. An
-/// `open` or `fixed` row accepts nothing. Proposing a row for a `Differs`
+/// `Diverged` under an accepted row for `id`, `Moved` where the row's
+/// digests are not the lines' (#3291), and `Differs` otherwise. An
+/// `open` or `fixed` row accepts nothing, and nor does a `trace:dump/`
+/// row that names no digests, which `divergence-reason` refuses. Proposing a row for a `Differs`
 /// is the caller's, through `Registry::propose`.
 pub fn compare(registry: &Registry, id: &str, expected: &[u8], actual: &[u8]) -> Verdict {
     verdict(registry, id, expected == actual, expected, actual)
@@ -2287,9 +2291,20 @@ pub fn verdict(
     if met {
         return Verdict::Same;
     }
-    match registry.accepted(id) {
-        Some(row) => Verdict::Diverged(row.clone()),
-        None => Verdict::Differs(diff(expected, actual)),
+    let Some(row) = registry.accepted(id) else {
+        return Verdict::Differs(diff(expected, actual));
+    };
+    match row.digests {
+        None if row.must_pin() => Verdict::Differs(diff(expected, actual)),
+        None => Verdict::Diverged(row.clone()),
+        Some(pinned) => match Digests::of(expected, actual) {
+            now if now == pinned => Verdict::Diverged(row.clone()),
+            now => Verdict::Moved(Moved {
+                id: row.id.clone(),
+                pinned,
+                now,
+            }),
+        },
     }
 }
 

@@ -10,7 +10,9 @@
 //! php ignores. The oracle's lines are kept in the store under the kernel
 //! and the pin's digest, the engine's beside them, and the two are held
 //! through [`oracle::compare`] under the divergence key
-//! `trace:dump/<kernel>`, one reading per kernel.
+//! `trace:dump/<kernel>`, one reading per kernel. A row that accepts a
+//! kernel's difference pins both sides' lines by their [`Digests`], so
+//! one whose lines moved accepts nothing (#3291).
 //!
 //! **The lines held.** What the regime's six bits print, as
 //! `opcache.jit_debug` pins them and with no mask of the instrument's
@@ -35,7 +37,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::bench::kernels::{KERNELS, MEMORY};
 use crate::crosscheck::first_difference;
-use crate::divergence::{Kind, Registry};
+use crate::divergence::{DUMP, Digests, Registry, Side};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{self, Ended, Invocation, Observation, Oracle, Program, Regime, Verdict};
@@ -122,27 +124,7 @@ impl Ask {
 
 /// The divergence key of a program's lines.
 pub(crate) fn id_of(scope: &str) -> String {
-    format!("{}dump/{scope}", Kind::Trace.prefix())
-}
-
-/// The two sides a run keeps lines for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Side {
-    /// The pinned php's.
-    Oracle,
-    /// The engine's.
-    Engine,
-}
-
-impl Side {
-    /// The extension of the file the side's lines are kept in, and the
-    /// side's name in a reading's message.
-    pub fn name(self) -> &'static str {
-        match self {
-            Side::Oracle => "oracle",
-            Side::Engine => "engine",
-        }
-    }
+    format!("{DUMP}{scope}")
 }
 
 /// Where `side`'s lines for `scope` are kept: under the store, the
@@ -324,7 +306,15 @@ fn judged(registry: &Registry, id: &str, expected: &[u8], actual: &[u8]) -> (Sta
                 format!("the engine's trace lines differ from the oracle's, and {accepts}"),
             )
         }
-        Verdict::Differs(diff) => (Status::Fail, first_difference(&diff, "trace dump")),
+        Verdict::Moved(moved) => (Status::Fail, moved.to_string()),
+        Verdict::Differs(diff) => {
+            let first = first_difference(&diff, "trace dump");
+            let pins = Digests::of(expected, actual);
+            (
+                Status::Fail,
+                format!("{first}; a row accepting it pins {pins}"),
+            )
+        }
     }
 }
 
@@ -425,6 +415,58 @@ mod tests {
         assert_eq!(
             (status, said.as_str()),
             (Status::Pass, "the engine's 9 trace lines are the oracle's")
+        );
+        let pins = Digests::of(&oracle, &engine);
+        assert!(said_of(&registry, "trace:dump/loop", &engine).contains(&pins.to_string()));
+    }
+
+    /// What the verdict on the fixture's engine lines says under `registry`.
+    fn said_of(registry: &Registry, id: &str, engine: &[u8]) -> String {
+        let oracle = fs::read(crate::package_dir().join("fixtures/trace-dump/oracle.lines"));
+        judged(registry, id, &oracle.unwrap(), engine).1
+    }
+
+    /// #3291's negative control: the fixture's accepted `trace:dump/fib`
+    /// row pins an engine dump one exit line longer than the engine's now,
+    /// so the engine's lines fail naming the engine's side alone, and an
+    /// oracle's moved by a line fails naming the oracle's; against the
+    /// lines it pins, the row accepts the difference. A dump row that pins
+    /// nothing accepts nothing, as an open one, and a pinned one beside it
+    /// accepts its own.
+    #[test]
+    fn a_dump_row_accepts_only_the_lines_it_pins_and_names_the_side_that_moved() {
+        let fixtures = crate::package_dir().join("fixtures/trace-dump");
+        let read = |name: &str| fs::read_to_string(fixtures.join(name)).unwrap();
+        let (oracle, engine) = (read("oracle.lines"), read("engine.lines"));
+        let pinned = read("engine-pinned.lines");
+        let registry = Registry::parse(&read("fib-moved.toml")).unwrap();
+        let id = "trace:dump/fib";
+        let (status, said) = judged(&registry, id, oracle.as_bytes(), engine.as_bytes());
+        assert_eq!(status, Status::Fail, "{said}");
+        assert!(
+            said.contains("trace:dump/fib accepts the difference it was ruled on, and the engine's lines moved")
+                && !said.contains("oracle's lines moved"),
+            "{said}"
+        );
+        let (status, said) = judged(&registry, id, oracle.as_bytes(), pinned.as_bytes());
+        assert_eq!(status, Status::Pass, "{said}");
+        let bumped = oracle.replacen("loop.php:2", "loop.php:1", 1);
+        let (status, said) = judged(&registry, id, bumped.as_bytes(), pinned.as_bytes());
+        assert_eq!(status, Status::Fail, "{said}");
+        assert!(
+            said.contains("the oracle's lines moved") && !said.contains("engine's lines moved"),
+            "{said}"
+        );
+
+        let rules = crate::package_dir().join("fixtures/rules/divergence.reason");
+        let text = fs::read_to_string(rules.join("trace-dump-unpinned.toml")).unwrap();
+        let registry = Registry::parse(&text).unwrap();
+        let said = said_of(&registry, "trace:dump/fixture-unpinned", engine.as_bytes());
+        assert!(said.contains("at line 3"), "{said}");
+        let said = said_of(&registry, "trace:dump/fixture-in-order", engine.as_bytes());
+        assert!(
+            said.contains("trace:dump/fixture-in-order accepts it"),
+            "{said}"
         );
     }
 }

@@ -7,9 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
-use xtask::divergence::{self, Cause, Kind, Registry, Retires, Status};
+use xtask::divergence::{self, Cause, Digests, Kind, Registry, Retires, Status};
 use xtask::manifest::Manifest;
 use xtask::scratch::Tree;
+use xtask::sha256::Sha256;
 
 mod common {
     pub mod manifest;
@@ -161,6 +162,32 @@ owner = "me"
         err.contains("witness:x") && err.contains("two rows"),
         "{err}"
     );
+
+    // A row pins both sides' lines or neither, each a digest as the file
+    // spells one (#3291), and its digests serialise back as they were read.
+    let oracle = format!("oracle = \"{}\"\n", Sha256::of(b"php"));
+    let engine = format!("engine = \"{}\"\n", Sha256::of(b"engine"));
+    let pinned = Registry::parse(&format!("{text}{oracle}{engine}")).unwrap();
+    let row = &pinned.rows()[0];
+    assert_eq!(row.digests, Some(Digests::of(b"php", b"engine")));
+    let written = toml::to_string(row).unwrap();
+    assert!(
+        written.contains(&oracle) && written.contains(&engine),
+        "{written}"
+    );
+    let err = format!(
+        "{:#}",
+        Registry::parse(&format!("{text}{engine}")).unwrap_err()
+    );
+    assert!(
+        err.contains("witness:x names one side's digest and not the other's"),
+        "{err}"
+    );
+    let err = format!(
+        "{:#}",
+        Registry::parse(&format!("{text}oracle = \"sha256:1\"\n")).unwrap_err()
+    );
+    assert!(err.contains("is not a digest spelt sha256:"), "{err}");
 }
 
 #[test]
@@ -717,7 +744,7 @@ fn status_counts_debt_against_the_manifests_target_and_each_other_cause_on_its_o
 /// `oracle-build` row with no `retires`. The row beside each, in order,
 /// is not named, and the rule's text is printed.
 #[test]
-fn the_guard_refuses_an_uncited_by_design_row_and_an_unretired_oracle_build_row() {
+fn the_guard_refuses_an_uncited_by_design_row_an_unretired_oracle_build_row_and_an_unpinned_dump() {
     let manifest = reasoned();
     for (file, number, named, says) in [
         (
@@ -731,6 +758,12 @@ fn the_guard_refuses_an_uncited_by_design_row_and_an_unretired_oracle_build_row(
             "unretired",
             "crosscheck:fixture-unretired",
             "carries no `retires`",
+        ),
+        (
+            "trace-dump-unpinned.toml",
+            "unpinned",
+            "trace:dump/fixture-unpinned",
+            "pins neither side's lines",
         ),
     ] {
         let path = fixture("divergence.reason").with_file_name(file);

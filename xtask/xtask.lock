@@ -31,8 +31,12 @@ divergence::Counts
 divergence::Counts::debt
 divergence::Counts::rows_of
 divergence::Counts::total
+divergence::DUMP
+divergence::Digests
+divergence::Digests::of
 divergence::Divergence
 divergence::Divergence::ids
+divergence::Divergence::must_pin
 divergence::FILE
 divergence::INSTRUMENT
 divergence::Id
@@ -42,6 +46,8 @@ divergence::Kind
 divergence::Kind::ALL
 divergence::Kind::as_str
 divergence::Kind::prefix
+divergence::Moved
+divergence::Moved::sides
 divergence::Registry
 divergence::Registry::accepted
 divergence::Registry::counts
@@ -53,6 +59,8 @@ divergence::Registry::row
 divergence::Registry::rows
 divergence::Retires
 divergence::Retires::as_str
+divergence::Side
+divergence::Side::name
 divergence::Status
 divergence::Status::ALL
 divergence::Status::as_str
@@ -156,7 +164,6 @@ oracle::Binary::absent
 oracle::Binary::file
 oracle::Binary::variant
 oracle::Build
-oracle::ClosureDigest
 oracle::ENGINE
 oracle::Ended
 oracle::Host
@@ -316,6 +323,8 @@ scratch::UNHOOKED
 scratch::cargo
 scratch::repository
 scratch::xtask
+sha256::Sha256
+sha256::Sha256::of
 status::Against
 status::render
 status::session
@@ -365,8 +374,6 @@ ticket::run
 ticket::stranded
 ticket::ticket_of
 trace_dump::Ask
-trace_dump::Side
-trace_dump::Side::name
 trace_dump::kept
 trace_dump::run
 track::Ticket

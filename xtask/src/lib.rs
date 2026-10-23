@@ -71,6 +71,7 @@ mod reply;
 mod rust;
 pub mod scratch;
 mod seat;
+pub mod sha256;
 mod sources;
 pub mod status;
 pub mod steer;
