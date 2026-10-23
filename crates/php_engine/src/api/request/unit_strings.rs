@@ -40,6 +40,11 @@ use super::declared_bytes::{self, Blocks, ClassBlocks, Declared, Gone};
 use crate::api::raising::Thrown;
 use crate::api::values::{PhpString, Value};
 
+/// `ZEND_BIND_EXPLICIT` (`Z/Zend/zend_compile.h:1196`): the bit of the
+/// `extended_value` of the `BIND_STATIC` a closure's body binds a `use`
+/// variable with.
+const BIND_EXPLICIT: u32 = 4;
+
 /// The strings of the request-only units the request holds: each unit's,
 /// one owner apiece, beside the unit they go with, the newest name string
 /// held for each name, where a copy finds it, and the constants of the
@@ -317,16 +322,7 @@ fn taken(made: &mut Vec<Zval>, z: Zval) -> bool {
 /// [[[1,2],"z"],[3,4],[[5],"z"],[[6],"z"],[7],[[8],"z"],[[9],"z"],[[10],"z"],[[11],"z"],[[12],"z"],[[13],"z"],[[14],"z"],[[15],"z"],[[16],"z"],[[17],"z"],[[18],"z"],[[19],"z"],[[20],"z"],[[21],"z"],[[22],"z"],[[23],"z"],[[24],"z"],[[25],"z"],[[26],"z"],[[27],"z"],[[28],"z"],[[29],3],[[30],4]]
 /// ```
 fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Holder, Zval)> {
-    let body_owner = |at: usize| function_owner(unit, at);
-    let bodies = || {
-        (unit.functions.iter().chain(&unit.dynamic))
-            .map(|(_, body)| body)
-            .chain(unit.methods.iter().map(|method| &method.body))
-            .chain(unit.hooks.iter().map(|hook| &hook.body))
-            .enumerate()
-            .map(move |(at, body)| (body_owner(at), body))
-    };
-    let mut literals: Vec<(Zval, Holder)> = bodies()
+    let mut literals: Vec<(Zval, Holder)> = bodies(unit)
         .flat_map(|(owner, body)| {
             (body.literals.iter().copied())
                 .chain(body.bound_vars.iter().map(|bound| bound.value))
@@ -336,7 +332,7 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Holder, Zval)> {
     // And a value a constant expression the op array keeps whole holds
     // inside its tree (`IS_CONSTANT_AST`), a parameter's default that did
     // not fold among them, whose `RECV_INIT` holds the tree.
-    for (owner, body) in bodies() {
+    for (owner, body) in bodies(unit) {
         for expr in &body.const_exprs {
             php_compile::values::unit_values(expr, &mut |z| literals.push((z, owner)));
         }
@@ -431,14 +427,19 @@ fn point(by_bytes: &mut HashMap<Box<[u8]>, Option<PhpString>, NameHasher>, s: Ph
     }
 }
 
-/// The op array that is the function at `at` of the unit's functions
-/// followed by its dynamic definitions: a definition's own, or the
-/// unit's tables for a function and for any place past them.
-fn function_owner(unit: &Unit, at: usize) -> Holder {
-    match at.checked_sub(unit.functions.len()) {
-        Some(at) if at < unit.dynamic.len() => Holder::Dynamic(at),
-        _ => Holder::Unit,
-    }
+/// Each op array `unit` declares beside what holds it: a function's, a
+/// method's and a hook's the unit, a dynamic definition's its own.
+fn bodies(unit: &Unit) -> impl Iterator<Item = (Holder, &php_unit::OpArray)> {
+    let dynamic =
+        (unit.dynamic.iter().enumerate()).map(|(at, (_, body))| (Holder::Dynamic(at), body));
+    (unit.functions.iter().map(|(_, body)| (Holder::Unit, body)))
+        .chain(dynamic)
+        .chain(
+            unit.methods
+                .iter()
+                .map(|method| (Holder::Unit, &method.body)),
+        )
+        .chain(unit.hooks.iter().map(|hook| (Holder::Unit, &hook.body)))
 }
 
 impl Held {
@@ -1004,6 +1005,35 @@ impl Request {
     /// 776
     /// NS1\NQ23
     /// ```
+    ///
+    /// A `static` variable's key, and an arrow function's capture's, is a
+    /// string of its own where opcache holds the bytes, and a `use`
+    /// variable's is the interned one:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3311-static-key.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;'); m('function w0() {}');
+    /// $abcdefg = 1; $abcdefh = 2; $abcdefi = 3;
+    /// echo m('function stve() { static $stve = 1; return $stve; }'), "\n";
+    /// echo m('$abcdefg = 1; $GLOBALS["k"] = function () use ($abcdefg) { return $abcdefg; };'), "\n";
+    /// echo m('$GLOBALS["l"] = function () { static $abcdefh = 4; return $abcdefh; };'), "\n";
+    /// echo m('$abcdefi = 3; $GLOBALS["n"] = fn () => $abcdefi;'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode([stve(), $k(), $l(), $n()]), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 696
+    /// 2032
+    /// 1552
+    /// 1552
+    /// [1,1,4,3]
+    /// ```
     pub(crate) fn hold_unit_names(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
         let at = self.unit_strings.held(unit);
         let Some(held) = self.unit_strings.units.get_mut(at) else {
@@ -1052,6 +1082,24 @@ impl Request {
             // Its vector kept for the next unit's.
             held.unnamed = unnamed;
             held.unnamed.clear();
+        }
+        // And the key of each `static` variable and arrow function's
+        // capture of an op array the unit declares where opcache holds
+        // its bytes: the scanner's string, which
+        // `zend_compile_static_var_common` keys `static_variables` by and
+        // `lookup_cv` names its CV by, no `zval_make_interned_string`
+        // having asked for it, where `zend_compile_closure_binding`
+        // interns a `use` variable's (`ZEND_BIND_EXPLICIT`).
+        for (holder, body) in bodies(unit) {
+            let explicit = (body.oplines.iter()).any(|op| {
+                op.opcode == php_unit::Opcode::BindStatic && op.extended_value & BIND_EXPLICIT != 0
+            });
+            for bound in (body.bound_vars.iter()).filter(|bound| !(bound.lexical && explicit)) {
+                let name = &bound.name.0;
+                if name.len() > 1 && self.shared.existing_interned(name).is_some() {
+                    self.hold_name(at, holder, name)?;
+                }
+            }
         }
         // And each trait a class uses, `zend_compile_use_trait`'s
         // `trait_names`: the name as it resolved, and its lowered form
