@@ -1578,7 +1578,7 @@ impl<'a> ForRequest<'a> {
 /// ([`php_compile::Options::op_array_extensions`]).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Declared<'a> {
-    pub(crate) constants: Indexed<'a, ConstDecl, Exact>,
+    pub(crate) constants: php_compile::Persistent<'a>,
     pub(crate) functions: Indexed<'a, FunctionDecl, Folded>,
     pub(crate) frameless: &'a [FramelessEntry],
     pub(crate) classes: Indexed<'a, ClassDecl, Folded>,
@@ -1660,7 +1660,10 @@ impl Shared {
     /// The tables the compiler reads, as [`Declared`].
     pub(crate) fn declared(&self) -> Declared<'_> {
         Declared {
-            constants: Indexed::new(&self.constants, &self.constant_names),
+            constants: php_compile::Persistent {
+                declared: Indexed::new(&self.constants, &self.constant_names),
+                host: self.host_sapi(),
+            },
             functions: Indexed::new(&self.functions, &self.function_names),
             frameless: &self.frameless,
             classes: Indexed::new(&self.classes, &self.class_keys.names),
@@ -2170,23 +2173,38 @@ impl Shared {
         self.configured(name).and_then(Configured::text)
     }
 
-    /// The value of the constant `name` as the bundle declared it, or as
-    /// the engine's own table has it: a value nothing owns, since the
-    /// string ones are the engine's interned strings.
     /// `PHP_SAPI` for a request its host named `sapi`: the string the
     /// engine interned for that name at build, or, for a name no host
     /// of [`crate::constants::HOSTS`] has, one interned into the
     /// engine's table the first time a request asks, where every later
     /// request finds it.
     pub(crate) fn sapi_constant(&self, sapi: &[u8]) -> Option<Value> {
-        if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
-            return Some(Value::of_slot(*z));
+        if let Some(z) = self.sapi_named(sapi) {
+            return Some(Value::of_slot(z));
         }
         let mut strings = self.interned.strings();
         let interned = strings.intern(sapi).ok()?;
         Some(Value::of_slot(Zval::string(interned)))
     }
 
+    /// `PHP_SAPI` of the engine's own host, interned at build
+    /// ([`crate::constants::host_names`]), read without waiting on the
+    /// table, which a compile holds while it asks; none for an engine
+    /// built for no host, a test's, whose requests name one each.
+    fn host_sapi(&self) -> Option<Zval> {
+        self.sapi_named(self.host.as_bytes())
+    }
+
+    /// The interned name of the host `sapi` among those built in.
+    fn sapi_named(&self, sapi: &[u8]) -> Option<Zval> {
+        (self.sapi_names.iter())
+            .find(|(n, _)| n.as_ref() == sapi)
+            .map(|(_, z)| *z)
+    }
+
+    /// The value of the constant `name` as the bundle declared it, or as
+    /// the engine's own table has it: a value nothing owns, since the
+    /// string ones are the engine's interned strings.
     pub(crate) fn constant(&self, name: &[u8]) -> Option<Value> {
         self.constant_at(self.constant_names.find(&self.constants, name)?)
     }
@@ -3731,7 +3749,7 @@ impl EngineBuilder {
         let constant_names = Names::over(&constants);
         let default_strings = default_strings(&functions, &classes);
         let mut strings = Strings::new();
-        let sapi_names = crate::constants::host_names(&mut strings);
+        let sapi_names = crate::constants::host_names(&mut strings, self.sapi_name);
         let interned = crate::arena::Interned {
             names: Arc::new(names),
             strings: Arc::new(Mutex::new(strings)),
@@ -4602,8 +4620,8 @@ impl Drop for EngineEnd {
 }
 
 impl Engine {
-    /// A builder under the CLI's `HARDCODED_INI` (`Z/sapi/cli/php_cli.c:116-121`),
-    /// for the tests that hold what php's CLI writes.
+    /// A builder under the CLI's `HARDCODED_INI` (`Z/sapi/cli/php_cli.c:116-121`)
+    /// and its name, for the tests that hold what php's CLI writes.
     #[cfg(test)]
     pub(crate) fn cli_builder() -> EngineBuilder {
         let hardcoded = [
@@ -4613,11 +4631,10 @@ impl Engine {
             ("max_execution_time", "0"),
             ("max_input_time", "-1"),
         ];
-        hardcoded
-            .into_iter()
-            .fold(Engine::builder(), |builder, (name, value)| {
-                builder.ini(name, value)
-            })
+        hardcoded.into_iter().fold(
+            Engine::builder().sapi_name("cli"),
+            |builder, (name, value)| builder.ini(name, value),
+        )
     }
 
     /// A builder with no extensions, `Nop` as the tier and the core ini.

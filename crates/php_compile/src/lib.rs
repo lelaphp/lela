@@ -107,10 +107,12 @@ pub struct Options<'a> {
     /// once a request has started. An `eval`'s string begins after an
     /// open tag whatever it says.
     pub shebang: Shebang,
-    /// The persistent constants the engine's extensions declared
-    /// (`CONST_PERSISTENT`), which `zend_try_ct_eval_const` substitutes
-    /// where they are written; a name not here is fetched as the program serves.
-    pub persistent: Indexed<'a, ConstDecl, Exact>,
+    /// The engine's persistent constants, [`Persistent`], which
+    /// `zend_try_ct_eval_const` substitutes where they are written in
+    /// every compile, a file the cache keeps among them; a name not here
+    /// is the request's ([`Options::request_constants`]) or fetched as
+    /// the program serves.
+    pub persistent: Persistent<'a>,
     /// The natives the engine's bundle declared, php's `CG(function_table)`
     /// as `zend_compile_call` reads it: what `zend_try_compile_special_func`
     /// requires a name to be one of before it serves the call itself
@@ -194,7 +196,7 @@ impl Default for Options<'_> {
             short_open_tag: true,
             assertions: true,
             shebang: Shebang::Read,
-            persistent: Indexed::default(),
+            persistent: Persistent::default(),
             functions: Indexed::default(),
             frameless: &[],
             classes: Indexed::default(),
@@ -235,6 +237,28 @@ impl Hooked {
         user: false,
         natives: false,
     };
+}
+
+/// The rows of `EG(zend_constants)` php registers `CONST_PERSISTENT`,
+/// which `can_ct_eval_const`'s first arm (`Z/Zend/zend_compile.c:1650`)
+/// lets `zend_try_ct_eval_const` substitute in every compile, one opcache
+/// caches under `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION` among them: the
+/// constants the engine's extensions declared, and `PHP_SAPI`, which
+/// `php_module_startup` registers from `sapi_module.name`
+/// (`Z/main/main_arginfo.h:85`). php marks `PHP_SAPI` `CONST_NO_FILE_CACHE`
+/// as well, which only `opcache.file_cache`'s compile reads, and the
+/// engine has no file cache. One engine is built for one host
+/// ([`Persistent::host`]), so a unit its cache shares across requests
+/// substitutes the one name every request of it reads.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Persistent<'a> {
+    /// The constants the engine's extensions declared, each a scalar
+    /// written out or a declaration the compiler does not fold.
+    pub declared: Indexed<'a, ConstDecl, Exact>,
+    /// `PHP_SAPI`'s value, the name of the host the engine was built for,
+    /// a string nothing counts owners of; none for a compile no host's
+    /// engine runs, where the name is fetched as the program serves.
+    pub host: Option<php_heap::Zval>,
 }
 
 /// The names of the classes a request has declared, as the compiler

@@ -108,10 +108,17 @@ pub(crate) const HOSTS: [&str; 6] = [
 ];
 
 /// [`HOSTS`] interned into the engine's table, each beside its name,
-/// what `Shared::sapi_constant` reads `PHP_SAPI` from.
-pub(crate) fn host_names(strings: &mut Strings) -> Vec<(Box<[u8]>, Zval)> {
+/// and `host`, the name the engine is built for, where it is none of
+/// them and not empty, the name of no host: what `Shared::sapi_constant`
+/// reads `PHP_SAPI` from, so the engine's own host is found without
+/// waiting on the table, which a compile holds while it asks
+/// ([`php_compile::Persistent::host`]).
+pub(crate) fn host_names(strings: &mut Strings, host: &str) -> Vec<(Box<[u8]>, Zval)> {
+    let own = (!host.is_empty() && !HOSTS.contains(&host)).then_some(host);
     HOSTS
         .iter()
+        .copied()
+        .chain(own)
         .filter_map(|name| {
             let interned = strings.intern(name.as_bytes()).ok()?;
             Some((Box::from(name.as_bytes()), Zval::string(interned)))

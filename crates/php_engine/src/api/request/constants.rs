@@ -173,18 +173,17 @@ impl Constants {
         Some((row.value, row.deprecated))
     }
 
-    /// The constant the request holds under `name` as a compile of its
+    /// The constant the request added under `name` as a compile of its
     /// own reads `EG(zend_constants)` past the persistent table
-    /// ([`php_compile::RequestConstants`]). `PHP_SAPI` is among them, so
-    /// an `eval` substitutes it as php does; a file compiled for the
-    /// cache is handed none, where php's persistent arm substitutes
-    /// `PHP_SAPI` there too, since the engine's cache keeps no unit of
-    /// one host's.
+    /// ([`php_compile::RequestConstants`]). `PHP_SAPI` is not among them:
+    /// php registers it `CONST_PERSISTENT`, so every compile, a file the
+    /// cache keeps among them, substitutes it from the persistent table
+    /// ([`php_compile::Persistent::host`]).
     pub(super) fn defined(&self, name: &[u8]) -> Option<php_compile::Defined> {
-        let (value, deprecated) = self.request(name)?;
+        let (_, row) = self.find(name)?;
         Some(php_compile::Defined {
-            value: value.to_zval(),
-            deprecated,
+            value: row.value.to_zval(),
+            deprecated: row.deprecated,
         })
     }
 
@@ -609,7 +608,7 @@ impl<'r> Symbols<&'r Request> {
     /// constants` walks for the program's own.
     #[must_use]
     pub fn constant_table(self) -> Vec<(Option<&'r str>, &'r [u8], Value)> {
-        let decls = self.0.shared.declared().constants.rows();
+        let decls = self.0.shared.declared().constants.declared.rows();
         let modules =
             (self.0.shared.constant_modules.iter()).map(|&at| self.0.extensions().name(at));
         let mut rows: Vec<(Option<&str>, &[u8], Value)> =
@@ -692,6 +691,7 @@ impl<'r> Symbols<&'r Request> {
             .shared
             .declared()
             .constants
+            .declared
             .find(name)
             .map_or(&[], |(_, decl)| decl.attributes.as_slice())
     }

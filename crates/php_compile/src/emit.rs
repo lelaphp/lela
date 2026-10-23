@@ -105,7 +105,7 @@ use php_heap::{
     Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Zval, ZvalType, double_to_string,
     numeric_prefix,
 };
-use php_link::{Exact, Indexed};
+use php_link::Indexed;
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
     ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind,
@@ -472,7 +472,7 @@ pub(crate) struct Emit<'a> {
     /// What an `assert()` compiles to, [`Options::assertions`].
     assertions: assert::Assertions,
     /// The engine's persistent constants, [`Options::persistent`].
-    persistent: Indexed<'a, ConstDecl, Exact>,
+    persistent: crate::Persistent<'a>,
     /// The engine's natives, [`Options::functions`].
     functions: Indexed<'a, FunctionDecl, php_link::Folded>,
     /// The engine's classes, [`Options::classes`].
@@ -1253,7 +1253,8 @@ enum Found<'a> {
     /// A persistent constant the engine declared, its value a scalar
     /// written out.
     Declared(&'a ConstExpr),
-    /// A constant the request defined, a view of its value.
+    /// A constant whose table holds its value, a view of it: one the
+    /// request defined, or `PHP_SAPI` ([`crate::Persistent::host`]).
     Defined(Zval),
 }
 
@@ -20123,7 +20124,9 @@ impl<'a> Emit<'a> {
     /// ([`Substitution::NoPersistent`]). A constant's name is
     /// case-sensitive, and a leading `\` names the same global constant
     /// as none. The engine's persistent constants are looked for first
-    /// ([`Options::persistent`]): one `CONST_DEPRECATED` marks is refused
+    /// ([`Options::persistent`]), `PHP_SAPI` the host's name in every
+    /// compile, a file the cache keeps among them, as php registers it
+    /// `CONST_PERSISTENT`: one `CONST_DEPRECATED` marks is refused
     /// before anything else is read, so the `FETCH_CONSTANT` stands and
     /// the deprecation is raised where the constant is read, the bit
     /// being the `#[\Deprecated]` attribute on the declaration; and a
@@ -20148,6 +20151,27 @@ impl<'a> Emit<'a> {
     /// float(INF)
     /// float(-INF)
     /// ```
+    ///
+    /// A file the cache keeps substitutes `PHP_SAPI` too, where the
+    /// request's own constants are not handed its compile: `RETURN
+    /// string("cli")`, with no `FETCH_CONSTANT` and no cache slot, as
+    /// opcache's dump of the file reads in php:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3272-sapi.inc';
+    /// file_put_contents("$f.tmp", '<?php function f1() { return PHP_SAPI; }');
+    /// touch("$f.tmp", time() - 10);
+    /// rename("$f.tmp", $f);
+    /// $dump = shell_exec(escapeshellarg(PHP_BINARY) . ' -n -d opcache.enable_cli=1 -d opcache.jit=off -d opcache.opt_debug_level=0x10000 ' . escapeshellarg($f) . ' 2>&1');
+    /// preg_match_all('/^\d{4} .*$/m', $dump, $ops);
+    /// echo implode("\n", $ops[0]), "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect process regime=jit-off
+    /// 0000 RETURN int(1)
+    /// 0000 RETURN string("cli")
+    /// 0001 RETURN null
+    /// ```
     fn ct_found(&self, name: &[u8]) -> Option<Found<'a>> {
         if self.substitution == Substitution::NoPersistent {
             return None;
@@ -20157,7 +20181,12 @@ impl<'a> Emit<'a> {
             at += 1;
         }
         let name = name.get(at..).unwrap_or(&[]);
-        if let Some((_, declared)) = self.persistent.find(name) {
+        if name == b"PHP_SAPI"
+            && let Some(host) = self.persistent.host
+        {
+            return Some(Found::Defined(host));
+        }
+        if let Some((_, declared)) = self.persistent.declared.find(name) {
             let deprecated = (declared.attributes.iter())
                 .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"));
             let scalar = matches!(
