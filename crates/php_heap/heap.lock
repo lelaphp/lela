@@ -389,6 +389,7 @@ VmStack::push_frameless
 VmStack::put_back
 VmStack::restore_frame
 VmStack::resume_frame
+VmStack::room
 VmStack::set_aside
 VmStack::top
 VmStack::top_and_frame_mut

@@ -30,9 +30,10 @@ use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, OplineIdx};
 
-use super::{Entered, Event, Landed, Start, Stop, TraceRecord, func_name as func};
+use super::{Began, Callee, Entered, Event, Landed, Start, Stop, TraceRecord, func_name as func};
 use crate::table::TraceId;
 use crate::types::ExitId;
+use crate::types::Types;
 
 /// Why a text is no [`TraceRecord`]: the line, from one, and what it
 /// held where a field was due.
@@ -101,9 +102,15 @@ impl TraceRecord {
                         Some(false) => "fell",
                     }
                 ),
-                Event::InitCall { target } => {
-                    writeln!(text, "init {}", target.map_or("-".to_owned(), func))
-                }
+                Event::InitCall { callee, began } => writeln!(
+                    text,
+                    "{} {}",
+                    began.word(),
+                    match callee {
+                        Callee::User(f) => func(*f),
+                        Callee::Native(returns) => format!("native:{:04x}", returns.bits()),
+                    }
+                ),
                 Event::Enter { func: f } => writeln!(text, "enter {}", func(*f)),
                 Event::Back => writeln!(text, "back"),
             }
@@ -314,10 +321,17 @@ fn parse_event(line: &str) -> Option<Event> {
                 _ => return None,
             },
         },
-        "init" => Event::InitCall {
-            target: match words.next()? {
-                "-" => None,
-                f => Some(parse_func(f)?),
+        word @ ("init" | "fake-init") => Event::InitCall {
+            callee: match words.next()? {
+                native if native.starts_with("native:") => Callee::Native(Types::of_bits(
+                    u16::from_str_radix(native.strip_prefix("native:")?, 16).ok()?,
+                )?),
+                f => Callee::User(parse_func(f)?),
+            },
+            began: if word == Began::Here.word() {
+                Began::Here
+            } else {
+                Began::Before
             },
         },
         "enter" => Event::Enter {

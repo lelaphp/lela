@@ -110,8 +110,9 @@ fn the_hook_modules_are_a_persons_files_under_the_widened_rows() {
 /// #2915 built: a shell write to `docs/divergence.toml` is refused in a
 /// checkout, the main one or a linked worktree, however the line reaches
 /// it, and let through in a scratch repository outside every checkout,
-/// by either spelling of a linked temporary directory; a place `permit`
-/// cannot follow is read as a checkout.
+/// by either spelling of a linked temporary directory, past a `cd` there
+/// that cannot fail whatever joins it (#3257); a place `permit` cannot
+/// follow is read as a checkout.
 #[test]
 fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
     let mut manifest = Manifest::load(workspace()).unwrap();
@@ -146,6 +147,13 @@ fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
     }
     let piped = format!("cd {scratch}/repo && printf x 2>&1 | tee -a docs/divergence.toml");
     assert!(!refused(main, &piped), "{piped}");
+    for line in [
+        format!("cd {scratch}/repo; {write}"),
+        format!("cd {scratch}/repo || true && {write}"),
+        format!("cd {scratch}/repo\n{write}"),
+    ] {
+        assert!(!refused(main, &line), "{line}");
+    }
     std::fs::create_dir(outside.join("links")).unwrap();
     std::os::unix::fs::symlink(main.join("seams.toml"), outside.join("links/seams.toml")).unwrap();
     std::fs::write(outside.join("file"), "").unwrap();
@@ -166,11 +174,11 @@ fn harness_self_shell_judges_a_write_where_it_runs_and_only_in_a_checkout() {
         format!("cd {scratch}/repo && cd - && {write}"),
         format!("cd {scratch}/missing && {write}"),
         format!("cd {scratch}/file && {write}"),
-        format!("cd {scratch}/repo; {write}"),
-        format!("cd {scratch}/repo || true && {write}"),
+        format!("cd {scratch}/file; {write}"),
+        format!("cd {scratch}/missing || true && {write}"),
         format!("cd {scratch}/repo & {write}"),
         format!("cd {scratch}/repo | true && {write}"),
-        format!("cd {scratch}/repo\n{write}"),
+        format!("cd {scratch}/file\n{write}"),
         format!("cd {scratch}/repo && xargs sh -c 'cd {worktree} && {write}' < /dev/null"),
         format!("cd {scratch}/repo && env -C {worktree} sed -i '' 's/a/b/' seams.toml"),
         format!("cd {scratch}/repo && patch -d {worktree} seams.toml < fix.diff"),

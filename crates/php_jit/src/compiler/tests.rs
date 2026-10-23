@@ -102,7 +102,7 @@ fn body(len: usize) -> Compiled {
         leaves: None,
         stub: None,
         opens: None,
-        ip_guard: false,
+        entry_stood: false,
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
         map_ptrs: Box::new([]),

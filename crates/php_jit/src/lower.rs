@@ -55,7 +55,7 @@ use php_engine::tier::{FuncRef, MapPtrRaw};
 use php_unit::OplineIdx;
 
 use crate::policy::{JitDebug, Mode, Policy};
-use crate::record::Stop;
+use crate::record::{Began, Stop};
 use crate::table::TraceName;
 use crate::types::{Abort, Check, End, ExitId, ExitSpec, GuardAt, Interrupt, Op, TraceIr};
 
@@ -84,11 +84,13 @@ pub(crate) struct Compiled {
     /// The op array and opline the trace's first recorded opline stands
     /// at, where a frame entering it stands.
     pub(crate) opens: Option<(FuncRef, OplineIdx)>,
-    /// Whether its first op holds where the frame stands, php's IP guard
-    /// of a side trace whose parent's exit named no opline
-    /// (`record::Landed::Stood`): `enter` hands the code the frame's op
-    /// array and opline at [`STANDS_AT`].
-    pub(crate) ip_guard: bool,
+    /// Whether its code reads where the frame stands as it enters, which
+    /// `enter` hands it at [`STOOD_AT`] as a kernel reports it: for php's
+    /// IP guard of a side trace whose parent's exit named no opline
+    /// (`record::Landed::Stood`), and for a call its frame began before
+    /// the trace, php's fake init, whose room it reads there
+    /// ([`stood_at_entry`]).
+    pub(crate) entry_stood: bool,
     /// Where a loop's trace is entered at its body too: the opline its
     /// back edge lands on (`types::BodyEntry`).
     pub(crate) body: Option<OplineIdx>,
@@ -210,16 +212,32 @@ pub(crate) const ENTRY_AT: i32 = 16;
 pub(crate) const INTERRUPT_AT: i32 = 8;
 
 /// Where compiled code reads, in the `ExitCtx`, where the frame stands
-/// as the trace enters: the engine offset of its op array, a `u32`, and
-/// its opline at four past, the fields `enter` lays down past where it
-/// is entered for a trace whose first op holds them
-/// ([`Compiled::ip_guard`]).
-pub(crate) const STANDS_AT: i32 = 20;
+/// as the trace enters, a [`Stood`] as a kernel writes one, which `enter`
+/// lays down past where it is entered for a trace whose code reads it
+/// there ([`Compiled::entry_stood`]).
+pub(crate) const STOOD_AT: i32 = 24;
 
-/// Whether `ir`'s first op holds where the frame stands, php's IP guard.
-fn ip_guarded(ir: &TraceIr) -> bool {
-    (ir.guards.iter())
-        .any(|guard| guard.at == GuardAt::Entry && matches!(guard.check, Check::Stands { .. }))
+/// Whether `ir`'s code reads where the frame stands as it enters: its
+/// first op holds it, php's IP guard; a call its frame began before
+/// the trace is under way before any kernel stood the frame, whose room
+/// is the stood call's; or it holds the stack's room, php's stack check,
+/// at its entry or at a call it pushes.
+fn stood_at_entry(ir: &TraceIr) -> bool {
+    let ip_guarded = (ir.guards.iter())
+        .any(|guard| guard.at == GuardAt::Entry && matches!(guard.check, Check::Stands { .. }));
+    let begun_before = (ir.ops.iter())
+        .take_while(|op| !matches!(op, Op::Line(_)))
+        .any(|op| {
+            matches!(
+                op,
+                Op::InitCall {
+                    began: Began::Before,
+                    ..
+                }
+            )
+        });
+    let room_held = (ir.guards.iter()).any(|guard| matches!(guard.check, Check::Room { .. }));
+    ip_guarded || begun_before || room_held
 }
 
 /// Where the trace's first recorded opline stands.
@@ -321,11 +339,13 @@ impl Symbols {
 /// ([`Kernel::Step`], [`Kernel::PushCall`]): the room of the frame that
 /// runs, php's `EX`; the room of the call under way in it, `EX(call)`,
 /// null where none is; the op array it serves, by the engine offset that
-/// numbers it (`FuncRef`); and the opline it goes on at. A local of
-/// compiled code the kernel writes, by which compiled code follows the
-/// frame chain: the call it enters, the return it lands from, the call
-/// its sends write, the caller php's IP guard holds, and the way a
-/// stepped jump went.
+/// numbers it (`FuncRef`); the opline it goes on at; and the bytes the
+/// stack's top page has left for frames, php's `EG(vm_stack_end) -
+/// EG(vm_stack_top)`. A local of compiled code the kernel writes, by
+/// which compiled code follows the frame chain: the call it enters, the
+/// return it lands from, the call its sends write, the caller php's IP
+/// guard holds, the way a stepped jump went, and the room php's stack
+/// check holds against the frames the trace pushes.
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Stood {
@@ -333,6 +353,18 @@ pub(crate) struct Stood {
     pub(crate) call: *mut u8,
     pub(crate) func: u32,
     pub(crate) opline: u32,
+    pub(crate) room: usize,
+}
+
+impl Stood {
+    /// Where nothing stood: a null frame and call, and no room.
+    pub(crate) const NOWHERE: Stood = Stood {
+        frame: std::ptr::null_mut(),
+        call: std::ptr::null_mut(),
+        func: 0,
+        opline: 0,
+        room: 0,
+    };
 }
 
 /// The host's `Backend` (`jit-design.md` §4.3): its ISA with the flags the
@@ -427,7 +459,7 @@ impl Backend {
             },
             stub: stub_at(ir),
             opens: opens_at(ir),
-            ip_guard: ip_guarded(ir),
+            entry_stood: stood_at_entry(ir),
             body: ir.body.as_ref().map(|body| body.opline),
             map_ptrs: ir.map_ptrs.clone().into_boxed_slice(),
             marks,

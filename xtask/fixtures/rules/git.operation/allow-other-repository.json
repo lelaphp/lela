@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cd /tmp && S=/var/empty; R=(results/x.md); git add -- \"${R[@]}\" && git commit -q -F $S/m.txt -- \"${R[@]}\"","description":"Commit by pathspec in another repository, past a cd that cannot fail and a ; after it (#3257)"}}
