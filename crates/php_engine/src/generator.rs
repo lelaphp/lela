@@ -580,9 +580,7 @@ fn update_current(req: &mut Request, generator: PhpObject) -> PhpObject {
             let value = read(req, root_parent, |g| g.value).unwrap_or_else(Value::null);
             req.addref(&value);
             let old = with(req, root, |g| std::mem::replace(&mut g.value, value));
-            if let Some(old) = old {
-                req.release(old);
-            }
+            req.release(old.unwrap_or_else(Value::null));
             req.addref(&retval);
             let out = suspended_op(req, root).map(|op| op.out);
             let written = with(req, root, |g| {
@@ -931,9 +929,7 @@ pub(crate) fn yielded(
 /// returned kept, and the frame closed as a finished one.
 pub(crate) fn returned(req: &mut Request, generator: PhpObject, value: Value) {
     let old = with(req, generator, |g| std::mem::replace(&mut g.retval, value));
-    if let Some(old) = old {
-        req.release(old);
-    }
+    req.release(old.unwrap_or_else(Value::null));
     close(req, generator, true);
 }
 

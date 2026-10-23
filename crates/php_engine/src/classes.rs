@@ -1371,21 +1371,17 @@ pub(crate) fn const_expr_closure(
     at: u32,
     scope: Option<ClassId>,
 ) -> Result<PhpObject, Thrown> {
+    let missing =
+        "InternalError: a constant expression's closure naming a function its unit has not";
     let Some((_, body)) = unit.dynamic.get(at as usize) else {
-        return Err(crate::api::raising::fatal(
-            req,
-            "InternalError: a constant expression's closure naming a function its unit has not",
-        ));
+        return Err(crate::api::raising::fatal(req, missing));
     };
     let bound = crate::exec::starting_statics(req, body)?;
     let Some(function) = req.closure_function(unit, at) else {
         if let Some(bound) = bound {
             req.release(Value::array(bound));
         }
-        return Err(crate::api::raising::fatal(
-            req,
-            "InternalError: a constant expression's closure naming a function its unit has not",
-        ));
+        return Err(crate::api::raising::fatal(req, missing));
     };
     let info = ClosureInfo {
         function,

@@ -623,9 +623,7 @@ impl Request {
         let case = match self.new_object(class) {
             Ok(case) => case,
             Err(thrown) => {
-                if let Some(value) = value {
-                    self.release(value);
-                }
+                self.release(value.unwrap_or_else(Value::null));
                 return Err(thrown);
             }
         };
@@ -635,9 +633,7 @@ impl Request {
         let spelled = match self.declared_string(name) {
             Ok(spelled) => spelled.into_value(),
             Err(thrown) => {
-                if let Some(value) = value {
-                    self.release(value);
-                }
+                self.release(value.unwrap_or_else(Value::null));
                 self.release(case.as_value());
                 return Err(thrown);
             }
@@ -645,9 +641,7 @@ impl Request {
         // A slot takes the value it is handed, written or given back; an
         // error leaves the case, and a value not yet handed on, to go.
         if let Err(thrown) = case.set_slot(self, CASE_NAME, spelled) {
-            if let Some(value) = value {
-                self.release(value);
-            }
+            self.release(value.unwrap_or_else(Value::null));
             self.release(case.as_value());
             return Err(thrown);
         }

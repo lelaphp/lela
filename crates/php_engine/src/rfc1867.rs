@@ -378,18 +378,14 @@ impl Translation {
 /// leading white space taken out.
 fn normalize_protected(name: &[u8]) -> Vec<u8> {
     let name = &name[name.iter().take_while(|b| **b == b' ').count()..];
-    let mut out: Vec<u8> = Vec::new();
-    let Some(open) = name.iter().position(|b| *b == b'[') else {
-        return name
-            .iter()
-            .map(|b| if matches!(b, b' ' | b'.') { b'_' } else { *b })
-            .collect();
+    let open = name.iter().position(|b| *b == b'[');
+    let head = name.get(..open.unwrap_or(name.len())).unwrap_or_default();
+    let mut out: Vec<u8> = (head.iter())
+        .map(|b| if matches!(b, b' ' | b'.') { b'_' } else { *b })
+        .collect();
+    let Some(open) = open else {
+        return out;
     };
-    out.extend(
-        name[..open]
-            .iter()
-            .map(|b| if matches!(b, b' ' | b'.') { b'_' } else { *b }),
-    );
     out.push(b'[');
     let mut index = open + 1;
     loop {

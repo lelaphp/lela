@@ -3583,21 +3583,13 @@ impl Request {
     ) -> Result<bool, Thrown> {
         let class = object.class();
         let bytes = key.as_bytes().to_vec();
-        let (mangled_class, name) = match bytes.strip_prefix(b"\0") {
-            Some(rest) => match rest.iter().position(|b| *b == 0) {
-                Some(end) => (Some(rest[..end].to_vec()), rest[end + 1..].to_vec()),
-                None => (None, bytes.clone()),
-            },
-            None => (None, bytes.clone()),
-        };
+        let (mangled_class, name) = mangled_parts(&bytes);
+        let (mangled_class, name) = (mangled_class.map(<[u8]>::to_vec), name.to_vec());
         let class_name = self.class_name_bytes(class);
         // `is_property_visibility_changed`'s `ZEND_ACC_VIRTUAL` arm: a
         // key the class's table holds a virtual property under has no
         // slot to take the value, and the whole unserialization fails.
-        let reaches = match &mangled_class {
-            None => true,
-            Some(c) => c.as_slice() == b"*" || c.eq_ignore_ascii_case(&class_name),
-        };
+        let reaches = reaches_mangled(mangled_class.as_deref(), &class_name);
         if reaches
             && let Some(hooked) = self.hooked(class, &name)
             && hooked.is_virtual
@@ -3655,13 +3647,7 @@ impl Request {
             return None;
         }
         let class = object.class();
-        let (mangled_class, name) = match key.strip_prefix(b"\0") {
-            Some(rest) => match rest.iter().position(|b| *b == 0) {
-                Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
-                None => (None, key),
-            },
-            None => (None, key),
-        };
+        let (mangled_class, name) = mangled_parts(key);
         let class_name = self.class_name_bytes(class);
         let exact = self.placed(class).rev().find(|(_, declaring, p)| {
             if *p.name.0 != *name {
@@ -3675,9 +3661,7 @@ impl Request {
             }
         });
         exact.map(|(slot, _, _)| slot).or_else(|| {
-            let reachable =
-                mangled_class.is_none_or(|c| c == b"*" || c.eq_ignore_ascii_case(&class_name));
-            if !reachable {
+            if !reaches_mangled(mangled_class, &class_name) {
                 return None;
             }
             // `ce->properties_info` holds a parent's private property
@@ -5027,4 +5011,23 @@ impl Frames<&mut Request> {
     pub fn with_fake_scope<R>(self, class: ClassId, f: impl FnOnce(&mut Request) -> R) -> R {
         self.0.in_fake_scope(Some(class), f)
     }
+}
+
+/// A serialized property key's parts: the class a `\0C\0p` or `\0*\0p`
+/// key names, none for a plain one, and the property's name.
+fn mangled_parts(key: &[u8]) -> (Option<&[u8]>, &[u8]) {
+    let Some(rest) = key.strip_prefix(b"\0") else {
+        return (None, key);
+    };
+    match rest.iter().position(|b| *b == 0) {
+        Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
+        None => (None, key),
+    }
+}
+
+/// Whether a key that names `mangled_class` reaches a property of the
+/// class named `class_name`: a plain key, a protected one, or the
+/// class's own private one.
+fn reaches_mangled(mangled_class: Option<&[u8]>, class_name: &[u8]) -> bool {
+    mangled_class.is_none_or(|c| c == b"*" || c.eq_ignore_ascii_case(class_name))
 }

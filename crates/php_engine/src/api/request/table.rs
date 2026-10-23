@@ -334,6 +334,12 @@ impl Request {
     /// php's positions.
     pub(crate) fn std_properties(&mut self, object: PhpObject) -> Result<Table, Thrown> {
         let owner = self.lazy_init(object)?;
+        self.owner_table(owner)
+    }
+
+    /// `owner`'s property table, laid down where it has none, as a walk
+    /// reads it.
+    fn owner_table(&mut self, owner: PhpObject) -> Result<Table, Thrown> {
         let table = self.heap.object_property_table(owner.heap());
         let table = self.fatal_of(table)?;
         self.object_table(owner, table).map(Table::Object)
@@ -373,9 +379,7 @@ impl Request {
             return handlers.get_properties(self, object);
         }
         let owner = self.lay_properties_no_lazy_init(object)?;
-        let table = self.heap.object_property_table(owner.heap());
-        let table = self.fatal_of(table)?;
-        self.object_table(owner, table).map(Table::Object)
+        self.owner_table(owner)
     }
 
     /// `zend_get_properties_for(obj, purpose)`: the class's
@@ -424,31 +428,28 @@ impl Request {
         purpose: PropertyPurpose,
     ) -> Result<PropertiesFor, Thrown> {
         let handlers = self.object_handlers(object.heap());
-        match purpose {
-            PropertyPurpose::Debug => match handlers.get_debug_info(self, object)? {
-                Some(info) => Ok(PropertiesFor::Debug(info)),
-                None => self
-                    .properties_no_lazy_init(object)
-                    .map(PropertiesFor::Table),
-            },
+        // Whether the table is read with no lazy object initialised.
+        let no_lazy_init = match purpose {
+            PropertyPurpose::Debug => {
+                if let Some(info) = handlers.get_debug_info(self, object)? {
+                    return Ok(PropertiesFor::Debug(info));
+                }
+                true
+            }
             PropertyPurpose::Json | PropertyPurpose::GetObjectVars | PropertyPurpose::VarExport => {
                 if let Some(hooked) = self.hooked_properties_for(object, purpose)? {
                     return Ok(hooked);
                 }
-                handlers
-                    .get_properties(self, object)
-                    .map(PropertiesFor::Table)
+                false
             }
-            PropertyPurpose::ArrayCast => self
-                .properties_no_lazy_init(object)
-                .map(PropertiesFor::Table),
-            PropertyPurpose::Serialize if self.lazy_skips_serialize(object.heap()) => self
-                .properties_no_lazy_init(object)
-                .map(PropertiesFor::Table),
-            PropertyPurpose::Serialize => handlers
-                .get_properties(self, object)
-                .map(PropertiesFor::Table),
-        }
+            PropertyPurpose::ArrayCast => true,
+            PropertyPurpose::Serialize => self.lazy_skips_serialize(object.heap()),
+        };
+        Ok(PropertiesFor::Table(if no_lazy_init {
+            self.properties_no_lazy_init(object)?
+        } else {
+            handlers.get_properties(self, object)?
+        }))
     }
 
     /// `owner`'s table `table`, laid down, in php's positions, each

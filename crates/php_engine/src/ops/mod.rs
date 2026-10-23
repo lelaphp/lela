@@ -1653,10 +1653,9 @@ fn conflicting_coercion(
     first: usize,
     second: usize,
 ) -> Thrown {
-    let Some((one_at, one_name, one_ty)) = listed.get(first) else {
-        return type_error(req, "Cannot assign to reference");
-    };
-    let Some((two_at, two_name, two_ty)) = listed.get(second) else {
+    let (Some((one_at, one_name, one_ty)), Some((two_at, two_name, two_ty))) =
+        (listed.get(first), listed.get(second))
+    else {
         return type_error(req, "Cannot assign to reference");
     };
     let one_class = req.symbols().class_name(*one_at);
