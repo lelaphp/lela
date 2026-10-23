@@ -14,9 +14,10 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 use super::lattice::{self, Types};
 use super::opcodes::{
     Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, compiled_inline,
-    constant, constant_types, goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call,
-    keeps_temporaries, may_exit, op1_types, out_types, packed_guard, param_types, params, reads,
-    reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
+    compound_in_place, constant, constant_types, goes_one_way, guard_sites, held_as_is,
+    inline_may_leave, is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard,
+    param_types, params, reads, reads_by_name, referenced, slot_of, within, writes, written,
+    written_after_entry,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
@@ -966,7 +967,7 @@ impl<'a> Builder<'a> {
                     || (op.opcode == Opcode::TypeCheck
                         && self.is_temp(op1)
                         && !old.within(UNCOUNTED))
-                    || op.opcode == Opcode::AssignDim
+                    || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
                     || matches!(
                         op.opcode,
                         Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
@@ -1687,11 +1688,33 @@ impl<'a> Builder<'a> {
         {
             let types = self.val(value).types;
             let slot = self.val(value).slot;
-            if types.either_layout() && !self.aliased(slot) {
+            if seen.referenced[0] {
+                // An array read through a reference, held to its layout at
+                // this read and narrowed for this opline alone, as its type
+                // is (`zend_jit_fetch_reference`).
+                if seen.types[0].either_layout() {
+                    seen.types[0] = seen.types[0].laid_out(layout);
+                    seen.inferred[0] = seen.types[0];
+                    self.guards.push(Placed {
+                        at: GuardAt::Before(idx),
+                        check: Check::Layout {
+                            value,
+                            layout,
+                            read: Read::Through,
+                        },
+                        exit: draft(Point::Before(idx), slot.frame, At::Opline(here)),
+                    });
+                }
+            } else if types.either_layout() && !self.aliased(slot) {
                 self.val_mut(value).types = types.laid_out(layout);
                 seen.types[0] = types.laid_out(layout);
                 seen.inferred[0] = types.laid_out(layout);
-                self.place(idx, here, value, Check::Layout { value, layout }, None);
+                let check = Check::Layout {
+                    value,
+                    layout,
+                    read: Read::InPlace,
+                };
+                self.place(idx, here, value, check, None);
             } else if self.aliased(slot)
                 && seen.types[0].either_layout()
                 && matches!(
@@ -1705,7 +1728,11 @@ impl<'a> Builder<'a> {
                 seen.types[0] = seen.types[0].laid_out(layout);
                 self.guards.push(Placed {
                     at: GuardAt::Before(idx),
-                    check: Check::Layout { value, layout },
+                    check: Check::Layout {
+                        value,
+                        layout,
+                        read: Read::InPlace,
+                    },
                     exit: draft(Point::Before(idx), slot.frame, At::Opline(here)),
                 });
             }
@@ -2002,6 +2029,7 @@ impl<'a> Builder<'a> {
                     && long(t2)
                     && scalar(td)
             }
+            Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
             // A send that moves what a temporary holds into the call, as
             // php's `zend_jit_send_var` moves a `TMP` or a `VAR` that is
             // no reference (`Z/ext/opcache/jit/zend_jit_ir.c:9628-9790`).
@@ -2688,10 +2716,8 @@ impl<'a> Builder<'a> {
             else {
                 continue;
             };
-            let (value, narrowed) = match check {
-                Check::Type { value, tag } => (value, Narrowed::Tag(tag)),
-                Check::Layout { value, layout } => (value, Narrowed::Layout(layout)),
-                _ => continue,
+            let Some((value, narrowed)) = Narrowed::of(check) else {
+                continue;
             };
             let phi = *self.val(value);
             let Def::Phi { entry, back } = phi.def else {
@@ -2741,9 +2767,10 @@ impl<'a> Builder<'a> {
                 at: GuardAt::Entry,
                 check: match check {
                     Check::Type { tag, .. } => Check::Type { value: entry, tag },
-                    Check::Layout { layout, .. } => Check::Layout {
+                    Check::Layout { layout, read, .. } => Check::Layout {
                         value: entry,
                         layout,
+                        read,
                     },
                     other => other,
                 },
@@ -3035,7 +3062,9 @@ fn returned(op: &Opline, code: &OpArray, t1: Types) -> Returned {
 fn imm(op: &Opline) -> Imm {
     match op.opcode {
         Opcode::SendVal | Opcode::SendVar if op.op2_type == OperandKind::Unused => Imm::Arg(op.op2),
-        Opcode::AssignOp => lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary),
+        Opcode::AssignOp | Opcode::AssignDimOp => {
+            lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary)
+        }
         Opcode::TypeCheck => Imm::Mask(op.extended_value),
         _ => Imm::None,
     }
@@ -3263,6 +3292,23 @@ enum Source {
 enum Narrowed {
     Tag(ZvalType),
     Layout(Layout),
+}
+
+impl Narrowed {
+    /// What a guard before an op narrows a loop's phi to, where it may
+    /// move to the loop's entry: a type, or a variable's layout; a
+    /// reference's array is held at each read, never once.
+    fn of(check: Check) -> Option<(ValueId, Narrowed)> {
+        match check {
+            Check::Type { value, tag } => Some((value, Narrowed::Tag(tag))),
+            Check::Layout {
+                value,
+                layout,
+                read: Read::InPlace,
+            } => Some((value, Narrowed::Layout(layout))),
+            _ => None,
+        }
+    }
 }
 
 fn restored(calls: bool) -> Landing {
