@@ -624,7 +624,10 @@ impl Request {
             if throwable && fatal_errors(level) {
                 self.exception_error(Level::Warning).ok();
             }
-        } else if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+        } else if self.raised.is_none()
+            && self.ini_flag(b"fatal_error_backtraces")
+            && fatal_errors(level)
+        {
             self.diagnostics.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         // The string the native raised is its caller's; the one made of
@@ -810,7 +813,7 @@ impl Request {
         if display == Display::Off {
             return;
         }
-        if self.xmlrpc_errors() {
+        if self.ini_flag(b"xmlrpc_errors") {
             // php's first display form, one `methodResponse` fault with
             // `xmlrpc_error_number` as its code and the diagnostic as
             // its string, the message unescaped and no space after the
@@ -818,14 +821,14 @@ impl Request {
             let text = said(
                 format!(
                     "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:",
-                    self.xmlrpc_error_number()
+                    self.ini().long(b"xmlrpc_error_number")
                 ),
                 &format!(
                     "{site}</string></value></member></struct></value></fault></methodResponse>"
                 ),
             );
             self.printed(&text);
-        } else if self.html_errors() {
+        } else if self.ini_flag(b"html_errors") {
             // php's two html formats: the message of an `E_ERROR` or an
             // `E_PARSE` escaped and no trace after it, and every other
             // level's as it is with the trace between the `<br />` and
@@ -957,26 +960,6 @@ impl Request {
         }
     }
 
-    /// `fatal_error_backtraces`, `EG(fatal_error_backtrace_on)` through
-    /// `OnUpdateBool` (`Z/Zend/zend.c:263`), `PHP_INI_ALL`: whether a
-    /// fatal fetches its trace. The engine's default is php's, `1`, which
-    /// `fatal_error_backtraces_is_on_by_default` in `engine` holds; the
-    /// recipe's `fatal_error_backtraces=Off` reaches the table through the
-    /// ini scanner as the empty string, which is what php answers under
-    /// the same `-d`, and `ini_set()` moves it.
-    ///
-    /// ```php
-    /// var_dump(ini_get('fatal_error_backtraces'), ini_set('fatal_error_backtraces', '1'), ini_get('fatal_error_backtraces'));
-    /// ```
-    /// ```expect
-    /// string(0) ""
-    /// string(0) ""
-    /// string(1) "1"
-    /// ```
-    fn fatal_error_backtraces(&self) -> bool {
-        self.ini_flag(b"fatal_error_backtraces")
-    }
-
     /// php's `display`, the first branch of `php_error_cb`: a diagnostic
     /// stands unless `ignore_repeated_errors` is on and it repeats the
     /// last one stored. It repeats when the message is the same and
@@ -1026,12 +1009,6 @@ impl Request {
                     || display_errors_mode_of(self.ini().get(b"display_errors")) == 0))
     }
 
-    /// `html_errors`, which of php's two display forms a diagnostic
-    /// takes: the plain one, or `<br />\n<b>Warning</b>:  …`.
-    fn html_errors(&self) -> bool {
-        self.ini_flag(b"html_errors")
-    }
-
     /// `determine_charset(NULL, quiet)` (`Z/ext/standard/html.c:364`),
     /// the charset [`escape_html`] reads a message in: the name
     /// `get_default_charset` gives, `internal_encoding` where it is set
@@ -1048,17 +1025,6 @@ impl Request {
             })
             .and_then(Charset::named)
             .unwrap_or(Charset::Utf8)
-    }
-
-    /// `xmlrpc_errors`, whether a diagnostic takes php's xml fault form
-    /// ahead of both of the others.
-    fn xmlrpc_errors(&self) -> bool {
-        self.ini_flag(b"xmlrpc_errors")
-    }
-
-    /// `xmlrpc_error_number`, the fault's code, `OnUpdateLong`.
-    fn xmlrpc_error_number(&self) -> i64 {
-        self.ini().long(b"xmlrpc_error_number")
     }
 
     /// `display_errors`, php's three values: off, the body, and the

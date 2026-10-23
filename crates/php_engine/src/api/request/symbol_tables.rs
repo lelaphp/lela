@@ -1033,8 +1033,7 @@ impl Request {
         let mut array = self.table_copy(copied.buckets, size)?;
         for (name, value) in copied.rows {
             let key = Key::from_string(self, Owner::take(self, name));
-            let value = self.dup_value(value, None);
-            let value = Owner::adopt(value);
+            let value = Owner::adopt(self.dup_value(value, None));
             array.set(self, key, value)?;
         }
         Ok(array)
@@ -1067,8 +1066,7 @@ impl Request {
         let mut array = self.table_copy(copied.buckets, size)?;
         for (name, value) in copied.rows {
             let key = Owner::take(self, name).into_key();
-            let value = self.dup_value(value, None);
-            let value = Owner::adopt(value);
+            let value = Owner::adopt(self.dup_value(value, None));
             array.set(self, key, value)?;
         }
         Ok(array)

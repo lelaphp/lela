@@ -2316,18 +2316,8 @@ impl Vm {
     /// `ZEND_OBSERVER_DATA(EX(func))`: the observer slot of the op array
     /// `frame` serves, in the request's map table; unresolved for a frame
     /// that stands nowhere.
-    pub(crate) fn observer_slot(
-        &self,
-        map: &RuntimeCaches,
-        frame: FrameRef,
-    ) -> crate::observer::Slot {
-        self.observer_slot_held(map, frame)
-            .cloned()
-            .unwrap_or_default()
-    }
-
-    /// [`Vm::observer_slot`] borrowed where it stands, for the walks that
-    /// read one handler of it at a time.
+    /// Borrowed where it stands, for the walks that read one handler of
+    /// it at a time.
     pub(crate) fn observer_slot_held<'map>(
         &self,
         map: &'map RuntimeCaches,

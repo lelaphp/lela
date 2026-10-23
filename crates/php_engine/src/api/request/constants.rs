@@ -790,8 +790,7 @@ impl Symbols<&mut Request> {
     /// request, each name a string of the request's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn constants(self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.constants_made();
-        adopted(made)
+        adopted(self.0.constants_made())
     }
 
     /// `REGISTER_STRINGL_CONSTANT` and its kin while a request runs:

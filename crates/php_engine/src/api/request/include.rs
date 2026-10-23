@@ -1379,7 +1379,7 @@ impl Code<&mut Request> {
             return Err(Thrown::of(self.0.take_pending_view()));
         }
         let standing = self.0.vm.depth();
-        let from = (self.0.caller_frame()).map_or(super::CodeFrom::Top(None), |frame| {
+        let from = (self.0.innermost_user_frame()).map_or(super::CodeFrom::Top(None), |frame| {
             super::CodeFrom::Nested(frame, None)
         });
         let callee = self.0.push_code_frame(unit, from);

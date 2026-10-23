@@ -907,8 +907,7 @@ fn parent_hook_get(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 fn parent_hook_set(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
     let value = req.frames().argument(1).unwrap_or_else(Value::null).deref();
-    let key = req.string(&name)?;
-    let key = Owner::adopt(key);
+    let key = Owner::adopt(req.string(&name)?);
     // The return's owner, and the write's.
     let returned = Owner::take(req, value);
     let written = Owner::take(req, value);

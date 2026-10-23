@@ -472,7 +472,6 @@ impl Variables<&mut Request> {
     /// before `$_GET` and `$_COOKIE` are made; empty for any other input.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn input_variables(self, input: super::Input) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.input_variables_made(input);
-        adopted(made)
+        adopted(self.0.input_variables_made(input))
     }
 }

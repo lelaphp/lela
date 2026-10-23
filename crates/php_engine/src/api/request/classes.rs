@@ -2341,8 +2341,7 @@ impl Symbols<&mut Request> {
     /// table; a method is none either, being its class's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn defined_functions(self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.defined_functions_made();
-        adopted(made)
+        adopted(self.0.defined_functions_made())
     }
 }
 

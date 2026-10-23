@@ -157,14 +157,12 @@ fn cases(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 /// Level::from(): Argument #1 ($value) must be of type int, string given
 /// ```
 fn from(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let made = by_value(req, false);
-    adopted(made)
+    adopted(by_value(req, false))
 }
 
 /// `BackedEnum::tryFrom()`: `null` where `from` raises its `ValueError`.
 fn try_from(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let made = by_value(req, true);
-    adopted(made)
+    adopted(by_value(req, true))
 }
 
 /// The key `zend_enum_from_base` parses the argument into, one owner

@@ -739,8 +739,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         let name = match key {
             Key::Int(n) => {
                 if !array.contains(&key) {
-                    let value = req.dup_value(value, None);
-                    let value = Owner::adopt(value);
+                    let value = Owner::adopt(req.dup_value(value, None));
                     array.add_new(req, Owner::index(n), value)?;
                 }
                 continue;
@@ -807,8 +806,7 @@ fn answered_vars(
         // properties, which no access rule holds (`zend_hash_index_add`).
         let name = match key {
             Key::Int(n) => {
-                let value = req.dup_value(value, None);
-                let value = Owner::adopt(value);
+                let value = Owner::adopt(req.dup_value(value, None));
                 array.set(req, Owner::index(n), value)?;
                 continue;
             }

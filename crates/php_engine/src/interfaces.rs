@@ -786,7 +786,7 @@ fn iterator_methods_native(req: &Request, object: PhpObject) -> bool {
         .all(|name| {
             req.symbols()
                 .method_named(object.class(), name)
-                .is_some_and(|function| req.is_native_function(function))
+                .is_some_and(|function| req.user_function(function).is_none())
         })
 }
 

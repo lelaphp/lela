@@ -230,15 +230,13 @@ impl Iter {
     /// the caller's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn value(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
-        let made = crate::interfaces::current(req, self.0);
-        adopted(made)
+        adopted(crate::interfaces::current(req, self.0))
     }
 
     /// `funcs->get_current_key`, one owner, the caller's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn key(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
-        let made = crate::interfaces::key(req, self.0);
-        adopted(made)
+        adopted(crate::interfaces::key(req, self.0))
     }
 
     /// `funcs->move_forward`.
@@ -414,8 +412,7 @@ pub fn call(
     callable: &Callable,
     arguments: &[Value],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = call_made(req, callable, arguments);
-    adopted(made)
+    adopted(call_made(req, callable, arguments))
 }
 
 /// What [`call`] makes, its one owner not yet named.
@@ -447,8 +444,7 @@ pub fn call_named(
     arguments: &[Value],
     named: &[(PhpString, Value)],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = call_named_made(req, callable, arguments, named);
-    adopted(made)
+    adopted(call_named_made(req, callable, arguments, named))
 }
 
 /// What [`call_named`] makes, its one owner not yet named.
@@ -516,8 +512,7 @@ pub fn call_array(
     callable: &Callable,
     array: PhpArray,
 ) -> Result<Owner<Value>, Thrown> {
-    let made = call_array_made(req, callable, array);
-    adopted(made)
+    adopted(call_array_made(req, callable, array))
 }
 
 /// What [`call_array`] makes, its one owner not yet named.
@@ -1013,8 +1008,7 @@ pub fn call_method(
     method: &[u8],
     arguments: &[Value],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = call_method_made(req, object, method, arguments);
-    adopted(made)
+    adopted(call_method_made(req, object, method, arguments))
 }
 
 /// What [`call_method`] makes, its one owner not yet named.
@@ -1148,8 +1142,7 @@ pub fn read_raw_property(
     object: &PhpObject,
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = req.read_raw(*object, name);
-    adopted(made)
+    adopted(req.read_raw(*object, name))
 }
 
 /// A hooked property's backing value written past its hooks, as the
@@ -1212,8 +1205,7 @@ pub fn instantiate_named(
     arguments: &[Value],
     named: &[(PhpString, Value)],
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = instantiate_named_made(req, class, arguments, named);
-    adopted(made)
+    adopted(instantiate_named_made(req, class, arguments, named))
 }
 
 /// What [`instantiate_named`] makes, its one owner not yet named.
@@ -1440,8 +1432,7 @@ pub fn attribute_object(
     scope: Option<ClassId>,
     file: Option<&[u8]>,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = attribute_object_made(req, class, attribute, scope, file);
-    adopted(made)
+    adopted(attribute_object_made(req, class, attribute, scope, file))
 }
 
 /// What [`attribute_object`] makes, its one owner not yet named.
@@ -1643,8 +1634,7 @@ pub fn load_file(req: &mut Request, path: &[u8]) -> Result<bool, Thrown> {
 /// abstract class is php's `Error` for what cannot be instantiated.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn new_object(req: &mut Request, class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
-    let made = new_object_made(req, class);
-    adopted(made)
+    adopted(new_object_made(req, class))
 }
 
 /// What [`new_object`] makes, its one owner not yet named.
@@ -1676,24 +1666,12 @@ pub fn clone_with<T: std::any::Any + Send>(
     object: &PhpObject,
     payload: T,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = clone_with_made(req, object, payload);
-    adopted(made)
-}
-
-/// What [`clone_with`] makes, its one owner not yet named.
-// The face's signature, which the engine's callers share.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-pub(crate) fn clone_with_made<T: std::any::Any + Send>(
-    req: &mut Request,
-    object: &PhpObject,
-    payload: T,
-) -> Result<PhpObject, Thrown> {
     let copy = req.clone_with_payload(*object, payload)?;
     if let Err(thrown) = req.serve_clone_method(copy) {
         req.release(copy.as_value());
         return Err(thrown);
     }
-    Ok(copy)
+    Ok(Owner::adopt(copy))
 }
 
 /// `zend_objects_clone_members(new, old)`, what a class's `clone_obj`
@@ -1731,8 +1709,7 @@ pub fn internal_iterator(
     req: &mut Request,
     object: &PhpObject,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = crate::interfaces::internal_iterator(req, *object);
-    adopted(made)
+    adopted(crate::interfaces::internal_iterator(req, *object))
 }
 
 /// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry the
@@ -2089,12 +2066,6 @@ pub fn constant(req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown>
 /// witness is the one that pins each arm at the oracle.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Owner<Value>, Thrown> {
-    let made = fetch_constant_made(req, name);
-    adopted(made)
-}
-
-/// What [`fetch_constant`] makes, its one owner not yet named.
-pub(crate) fn fetch_constant_made(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
     // `zend_get_constant_ex`'s own strip; the class part is then handed
     // to the class lookup as written, which strips a `\` of its own, as
     // `zend_fetch_class` does: `constant("\\\\ArrayObject::STD_PROP_LIST")`
@@ -2107,9 +2078,9 @@ pub(crate) fn fetch_constant_made(req: &mut Request, name: &[u8]) -> Result<Valu
         let (class_name, constant_name) = (&name[..colon - 1], &name[colon + 1..]);
         let class = fetch_class(req, class_name)?;
         let shown = String::from_utf8_lossy(class_name).into_owned();
-        return req.class_constant_shown(class, constant_name, &shown);
+        return adopted(req.class_constant_shown(class, constant_name, &shown));
     }
-    global_constant(req, name, None)
+    adopted(global_constant(req, name, None))
 }
 
 /// `zend_get_constant_ex`'s arm for a constant that is no class's
@@ -2176,30 +2147,9 @@ fn special_constant(name: &[u8]) -> Option<Value> {
 /// `zend_lookup_class_ex`, the table and then the autoloaders, with
 /// `Class "X" not found` where neither has it.
 pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
-    if name.eq_ignore_ascii_case(b"self") {
-        return req.frames().scope().ok_or_else(|| {
-            throw_error(
-                req,
-                "Error",
-                "Cannot access \"self\" when no class scope is active",
-            )
-        });
-    }
-    if name.eq_ignore_ascii_case(b"parent") {
-        let Some(scope) = req.frames().scope() else {
-            return Err(throw_error(
-                req,
-                "Error",
-                "Cannot access \"parent\" when no class scope is active",
-            ));
-        };
-        return req.symbols().class_parent(scope).ok_or_else(|| {
-            throw_error(
-                req,
-                "Error",
-                "Cannot access \"parent\" when current class scope has no parent",
-            )
-        });
+    if name.eq_ignore_ascii_case(b"self") || name.eq_ignore_ascii_case(b"parent") {
+        let scope = req.frames().scope();
+        return const_class(req, name, scope);
     }
     if name.eq_ignore_ascii_case(b"static") {
         return req.frames().called_scope().ok_or_else(|| {
@@ -2251,8 +2201,7 @@ pub fn class_constant(
     class: ClassId,
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = req.updated_class_constant(class, name);
-    adopted(made)
+    adopted(req.updated_class_constant(class, name))
 }
 
 /// Evaluate a constant expression in `scope`, `zval_update_constant_ex`:
@@ -2342,8 +2291,7 @@ pub fn eval_const_expr(
     expr: &ConstExpr,
     scope: Option<ClassId>,
 ) -> Result<Owner<Value>, Thrown> {
-    let made = eval_const_expr_made(req, expr, scope);
-    adopted(made)
+    adopted(eval_const_expr_made(req, expr, scope))
 }
 
 /// What [`eval_const_expr`] makes, its one owner not yet named.
@@ -2375,8 +2323,7 @@ pub fn eval_declared(
     expr: &ConstExpr,
     scope: Option<ClassId>,
 ) -> Result<Owner<Value>, Thrown> {
-    let made = eval_declared_made(req, expr, scope);
-    adopted(made)
+    adopted(eval_declared_made(req, expr, scope))
 }
 
 /// What [`eval_declared`] makes, its one owner not yet named.
@@ -3428,8 +3375,7 @@ fn binary(req: &mut Request, op: &[u8], lhs: &Value, rhs: &Value) -> Result<Valu
 /// ```
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn iterate(req: &mut Request, object: &PhpObject) -> Result<Owner<Iter>, Thrown> {
-    let made = crate::interfaces::get_iterator(req, *object, false).map(Iter);
-    adopted(made)
+    adopted(crate::interfaces::get_iterator(req, *object, false).map(Iter))
 }
 
 /// `zend_create_fake_closure` over a resolved callable, what
@@ -3457,8 +3403,7 @@ pub fn closure_from_callable(
     req: &mut Request,
     callable: &Callable,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = crate::classes::fake_closure(req, callable);
-    adopted(made)
+    adopted(crate::classes::fake_closure(req, callable))
 }
 
 /// Read a property through the class's `read_property` handler: a
@@ -3504,8 +3449,7 @@ pub fn read_static_prop(
     class: ClassId,
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = req.static_property(class, name, Some(class), PropertyRead::Warning);
-    adopted(made)
+    adopted(req.static_property(class, name, Some(class), PropertyRead::Warning))
 }
 
 /// Address a `static` property of `class` silently — a property of the
@@ -3565,8 +3509,7 @@ pub fn new_lazy_ghost(
     initializer: &Callable,
     options: i64,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = req.make_lazy(None, class, initializer, Strategy::Ghost, options);
-    adopted(made)
+    adopted(req.make_lazy(None, class, initializer, Strategy::Ghost, options))
 }
 
 /// `zend_object_make_lazy` under `ZEND_LAZY_OBJECT_STRATEGY_PROXY`, what
@@ -3580,8 +3523,7 @@ pub fn new_lazy_proxy(
     factory: &Callable,
     options: i64,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = req.make_lazy(None, class, factory, Strategy::Proxy, options);
-    adopted(made)
+    adopted(req.make_lazy(None, class, factory, Strategy::Proxy, options))
 }
 
 /// `zend_object_make_lazy(obj, class, ...)` under the ghost strategy,

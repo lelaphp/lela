@@ -68,8 +68,7 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Owner<Value>, Thrown> {
-        let made = self.serve_method_made(function, this, called_scope, arguments, extra_named);
-        adopted(made)
+        adopted(self.serve_method_made(function, this, called_scope, arguments, extra_named))
     }
 
     /// What [`serve_method`](Self::serve_method) makes, its one owner not yet named.
@@ -251,11 +250,6 @@ impl Request {
     /// extension declared, and not one a program did.
     pub(crate) fn class_is_internal(&self, class: ClassId) -> bool {
         self.native_class_at(class).is_some()
-    }
-
-    /// `func->common.function_name`: a function's name as declared.
-    pub(crate) fn function_name(&self, function: Function) -> String {
-        self.declared_name(function)
     }
 
     /// The `Closure` whose body is the first user frame standing, what
@@ -711,9 +705,7 @@ impl Request {
         let activated = match pushed {
             Ok(activated) => activated,
             Err(fatal) => {
-                while self.vm.depth() > standing {
-                    self.pop_frame();
-                }
+                self.pop_frames_to(standing);
                 return self.fatal_of(Err(fatal));
             }
         };
@@ -727,9 +719,7 @@ impl Request {
         let raised = match self.fatal_of(raised) {
             Ok(raised) => raised,
             Err(thrown) => {
-                while self.vm.depth() > standing {
-                    self.pop_frame();
-                }
+                self.pop_frames_to(standing);
                 return Err(thrown);
             }
         };
@@ -739,9 +729,7 @@ impl Request {
             // here it is left at once.
             self.vm.stand_at_exception_op(frame, true);
             crate::observer::returned(self, frame, None);
-            while self.vm.depth() > standing {
-                self.pop_frame();
-            }
+            self.pop_frames_to(standing);
             return match self.take_pending_view() {
                 Some(pending) => Err(Thrown::of(Some(pending))),
                 None => Ok(Value::null()),
@@ -754,9 +742,7 @@ impl Request {
         // it is: the site a timeout names inside a callback, or inside a
         // fiber's body, is the callback's and not its caller's.
         let served = self.fatal_of(served);
-        while self.vm.depth() > standing {
-            self.pop_frame();
-        }
+        self.pop_frames_to(standing);
         served?;
         match self.take_pending_view() {
             Some(pending) => Err(Thrown::of(Some(pending))),
@@ -846,12 +832,6 @@ impl Request {
         // One row per native function, so a number past them is none.
         let at = usize::try_from(function.0).ok()?;
         self.shared.entries.get(at).copied()
-    }
-
-    /// Whether `function` is a native, php's `ZEND_INTERNAL_FUNCTION`:
-    /// numbered below the user functions and methods.
-    pub(crate) fn is_native_function(&self, function: Function) -> bool {
-        self.user_function(function).is_none()
     }
 
     /// The native function no table carries whose declaration is named
@@ -1127,6 +1107,13 @@ impl Request {
         }
     }
 
+    /// Every frame above the depth `standing` popped.
+    fn pop_frames_to(&mut self, standing: usize) {
+        while self.vm.depth() > standing {
+            self.pop_frame();
+        }
+    }
+
     /// `serve` served as code of `extension`, one of its lifecycle hooks:
     /// in a debug build, what the heap allocates meanwhile is tagged
     /// with the extension ([`php_heap::Heap::set_origin`]), so a leak it
@@ -1136,13 +1123,8 @@ impl Request {
         extension: ExtensionId,
         serve: impl FnOnce(&mut Request) -> T,
     ) -> T {
-        #[cfg(not(debug_assertions))]
-        let _ = extension;
-        let supplier = Supplier {
-            #[cfg(debug_assertions)]
-            origin: extension.origin(),
-        };
-        self.code_mut().serve_supplied(supplier, serve)
+        self.code_mut()
+            .serve_supplied(Supplier::of(extension), serve)
     }
 
     /// The extension whose code a native is, for a debug build's heap to
@@ -1273,11 +1255,6 @@ impl Request {
             bound: None,
             fake: true,
         })
-    }
-
-    /// The native being served, by identity.
-    pub(crate) fn serving_function(&self) -> Option<Function> {
-        self.active_native_function()
     }
 }
 

@@ -465,7 +465,7 @@ impl ObjectHandlers for ClosureHandlers {
             && x.called_scope == y.called_scope
             && kind(x.function) == kind(y.function)
             && req.method_class(x.function) == req.method_class(y.function)
-            && req.function_name(x.function) == req.function_name(y.function);
+            && req.declared_name(x.function) == req.declared_name(y.function);
         Ok(same.then_some(Ordering::Equal))
     }
 }
@@ -2400,7 +2400,7 @@ fn valid_closure_binding(
             && let Some(own) = info.scope
             && !req.symbols().instance_of(this.class(), own)
         {
-            let method = req.function_name(info.function);
+            let method = req.declared_name(info.function);
             let message = format!(
                 "Cannot bind method {}::{method}() to object of class {}, this will be an error in PHP 9",
                 req.symbols().class_name(own),

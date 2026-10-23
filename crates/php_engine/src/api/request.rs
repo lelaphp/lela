@@ -200,13 +200,6 @@ impl ExtensionId {
     pub(crate) fn origin(self) -> php_heap::Origin {
         php_heap::Origin::new(u16::try_from(self.0).unwrap_or(u16::MAX))
     }
-
-    /// The extension a debug build's heap names by `origin`, the inverse
-    /// of [`ExtensionId::origin`].
-    #[cfg(debug_assertions)]
-    pub(crate) fn of_origin(origin: php_heap::Origin) -> ExtensionId {
-        ExtensionId(u32::from(origin.number()))
-    }
 }
 
 pub use crate::interrupt::Periodic;
@@ -1036,19 +1029,12 @@ impl Declared {
 /// declared at its top level, or one a `DECLARE_FUNCTION` bound where
 /// it stood. None for a method, whose declaration is its class's.
 fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
-    match user.body {
-        exec::Body::Function(at) => user
-            .unit
-            .functions
-            .get(usize::try_from(at).ok()?)
-            .map(|(decl, _)| decl),
-        exec::Body::Dynamic(at) => user
-            .unit
-            .dynamic
-            .get(usize::try_from(at).ok()?)
-            .map(|(decl, _)| decl),
-        exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => None,
-    }
+    let table = match user.body {
+        exec::Body::Function(at) => (&user.unit.functions, at),
+        exec::Body::Dynamic(at) => (&user.unit.dynamic, at),
+        exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => return None,
+    };
+    Some(&table.0.get(usize::try_from(table.1).ok()?)?.0)
 }
 
 impl Request {

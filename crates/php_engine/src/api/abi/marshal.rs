@@ -247,7 +247,10 @@ fn evaluated(
     position: u32,
     declared: fn() -> Option<Type>,
 ) -> Result<Value, Thrown> {
-    let key = (req.serving_function().unwrap_or(Function::PASS), position);
+    let key = (
+        req.active_native_function().unwrap_or(Function::PASS),
+        position,
+    );
     if let Some(kept) = req.default_argument(key) {
         return Ok(kept);
     }

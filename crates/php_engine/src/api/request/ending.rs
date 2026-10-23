@@ -463,7 +463,9 @@ impl Request {
             php_heap::FatalReason::Error(message) => self.end_in_fatal(message),
             php_heap::FatalReason::OutOfMemory(bytes) => self.end_in_fatal(&format!(
                 "Allowed memory size of {} bytes exhausted (tried to allocate {bytes} bytes)",
-                self.ini_parse_bytes_of("memory_limit")
+                self.ini()
+                    .get(b"memory_limit")
+                    .map_or(0, super::Ini::parse_bytes)
             )),
         }
         // A fatal the heap raised lifted its limit for the rendering, as

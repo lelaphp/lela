@@ -552,8 +552,7 @@ impl Request {
                     |code| code.filename.0.to_vec(),
                 ),
         };
-        let trace = self.debug_backtrace()?;
-        let trace = Owner::adopt(trace);
+        let trace = Owner::adopt(self.debug_backtrace()?);
         let file = match PhpString::new(self, &file) {
             Ok(file) => file,
             Err(thrown) => {

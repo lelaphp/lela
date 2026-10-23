@@ -79,23 +79,8 @@ fn configure(switches: &[&str]) -> String {
 /// padded with a space as `__DATE__` pads it, in UTC, as a compiler
 /// renders it under `SOURCE_DATE_EPOCH`.
 fn date(seconds: i64) -> String {
-    const MONTHS: [&str; 12] = [
-        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    const DAY: i64 = 86_400;
-    let (year, month, day) = super::zone::civil_from_days(seconds.div_euclid(DAY));
-    let of_day = seconds.rem_euclid(DAY);
-    let name = usize::try_from(month - 1)
-        .ok()
-        .and_then(|at| MONTHS.get(at))
-        .copied()
-        .unwrap_or_default();
-    format!(
-        "{name} {day:>2} {year} {:02}:{:02}:{:02}",
-        of_day / 3600,
-        of_day % 3600 / 60,
-        of_day % 60
-    )
+    let (year, name, day, [h, m, s]) = super::zone::civil_parts(seconds);
+    format!("{name} {day:>2} {year} {h:02}:{m:02}:{s:02}")
 }
 
 /// `php_build_date`, this build's ([`BuildDefs::date`]), which

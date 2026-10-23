@@ -139,7 +139,7 @@ impl Request {
                 Ok(object.as_value())
             }
             Target::Function(function) => {
-                let name = self.function_name(function);
+                let name = self.declared_name(function);
                 Ok(Value::string(self.string(name.as_bytes())?))
             }
             Target::Method {
@@ -154,7 +154,7 @@ impl Request {
                     let class = Value::string(self.string(class.as_bytes())?);
                     Owner::adopt(class)
                 };
-                let name = self.function_name(function);
+                let name = self.declared_name(function);
                 let mut pair = self.array()?;
                 pair.append(self, first)?;
                 let name = Value::string(self.string(name.as_bytes())?);

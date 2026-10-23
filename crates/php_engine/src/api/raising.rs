@@ -1184,8 +1184,7 @@ pub fn new_throwable(
     class: &str,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Result<Owner<Value>, Thrown> {
-    let made = new_throwable_made(req, class, message);
-    adopted(made)
+    adopted(new_throwable_made(req, class, message))
 }
 
 /// What [`new_throwable`] makes, its one owner not yet named.

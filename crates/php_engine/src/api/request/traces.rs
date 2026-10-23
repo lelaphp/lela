@@ -1413,8 +1413,7 @@ impl Frames<&mut Request> {
     /// served: the rows below it, under php's options and limit.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn backtrace(self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.fetch_debug_backtrace(true, options, limit);
-        adopted(made)
+        adopted(self.0.fetch_debug_backtrace(true, options, limit))
     }
 
     /// `zend_fetch_debug_backtrace(return_value, 0, options, limit)`,
@@ -1424,7 +1423,6 @@ impl Frames<&mut Request> {
     /// limit.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn backtrace_here(self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.fetch_debug_backtrace(false, options, limit);
-        adopted(made)
+        adopted(self.0.fetch_debug_backtrace(false, options, limit))
     }
 }

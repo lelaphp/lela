@@ -36,24 +36,21 @@ impl Request {
             return Ok(false);
         }
         self.note_included(&path)?;
-        if super::is_wrapper_url(&path) {
+        let unit = if super::is_wrapper_url(&path) {
             let opened = self.include_stream(exec::IncludeKind::Require, written, &path)?;
             let super::Opened::Unit(unit) = opened else {
                 return Ok(false);
             };
-            if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
-                return Err(Thrown::of(self.take_pending_view()));
+            unit
+        } else {
+            match self.compile_file(&path, Some(written), super::HandlePath::Opened)? {
+                Some(Ok(unit)) => unit,
+                Some(Err(refused)) => {
+                    let kind = php_compile::SourceKind::File;
+                    return Err(self.refused_include(&refused, &path, kind));
+                }
+                None => return Ok(false),
             }
-            self.serve_top_code(unit)?;
-            return Ok(true);
-        }
-        let compiled = self.compile_file(&path, Some(written), super::HandlePath::Opened)?;
-        let unit = match compiled {
-            Some(Ok(unit)) => unit,
-            Some(Err(refused)) => {
-                return Err(self.refused_include(&refused, &path, php_compile::SourceKind::File));
-            }
-            None => return Ok(false),
         };
         if !crate::engine::note_compiled(self, &unit, php_compile::SourceKind::File) {
             return Err(Thrown::of(self.take_pending_view()));
