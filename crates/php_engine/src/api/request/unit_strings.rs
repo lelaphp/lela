@@ -249,6 +249,7 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
         .map(|(owner, z)| (z, owner))
         .collect();
     let names = declared_names(unit);
+    let mut values = class_constant_values(unit);
     // Each dynamic definition's variables, one string each it takes, the
     // last definition's first, to be taken from the end.
     let mut vars: HashMap<&[u8], Vec<usize>, NameHasher> = HashMap::with_hasher(NameHasher);
@@ -272,7 +273,13 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
                         match var {
                             Some(at) => Owner::Definition(at),
                             None if names.contains(bytes) => Owner::Tables,
-                            None => Owner::Main,
+                            None => match values.get_mut(bytes) {
+                                Some(left) if *left > 0 => {
+                                    *left -= 1;
+                                    Owner::Tables
+                                }
+                                _ => Owner::Main,
+                            },
                         }
                     })
                 }
@@ -286,14 +293,23 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
 }
 
 /// The names `unit`'s declarations are read by
-/// ([`php_compile::declared_names`]), as a set, beside each class
-/// constant's string value: the string the compile made for it, written
-/// or folded, is the class's from its declaration, as php's
-/// `constants_table` holds the zval `zend_compile_class_const_decl` put
-/// there, and its first read finds it ([`Request::declared_string`])
-/// rather than make one. An enum case's is not, its value standing in
-/// the case's copied expression ([`declared_bytes::AstCopy`]). The main
-/// op array's variables are not among them.
+/// ([`php_compile::declared_names`]), as a set; the main op array's
+/// variables are not among them.
+fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
+    php_compile::declared_names(unit)
+        .map(Cow::into_owned)
+        .collect()
+}
+
+/// The string values `unit`'s classes declare their constants with, each
+/// beside how many constants hold it: the string the compile made for
+/// one, written or folded, is the class's from its declaration, as
+/// php's `constants_table` holds the zval `zend_compile_class_const_decl`
+/// put there, and its first read finds it ([`Request::declared_string`])
+/// rather than make one. A value is told by its bytes, so the compile's
+/// strings of those bytes are taken for it in the order made, as many as
+/// constants hold it. An enum case's is not among them, its value
+/// standing in the case's copied expression ([`declared_bytes::AstCopy`]).
 ///
 /// ```php
 /// $f = sys_get_temp_dir() . '/w3263-class-values.inc';
@@ -321,18 +337,17 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
 /// 536  interface S3 { const K = "abcdefghij" . "5"; }
 /// 0  $GLOBALS["a"] = S3::K;
 /// ```
-fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
-    let values = (unit.classes.iter())
+fn class_constant_values(unit: &Unit) -> HashMap<&[u8], usize, NameHasher> {
+    let mut values = HashMap::with_hasher(NameHasher);
+    let constants = (unit.classes.iter())
         .flat_map(|class| &class.constants)
-        .filter(|constant| !constant.is_case)
-        .filter_map(|constant| match &constant.value {
-            php_unit::decl::ConstExpr::Str(value) => Some(Cow::Borrowed(&**value)),
-            _ => None,
-        });
-    php_compile::declared_names(unit)
-        .chain(values)
-        .map(Cow::into_owned)
-        .collect()
+        .filter(|constant| !constant.is_case);
+    for constant in constants {
+        if let php_unit::decl::ConstExpr::Str(value) = &constant.value {
+            *values.entry(&**value).or_insert(0) += 1;
+        }
+    }
+    values
 }
 
 /// `by_bytes`'s entry for `bytes` pointed at `s`.
@@ -633,11 +648,15 @@ impl Request {
         } else {
             made.drain(..).map(|z| (Owner::Main, z)).collect()
         };
-        let names = if owned.iter().any(|(owner, _)| *owner != Owner::Main) {
-            declared_names(unit)
+        let (names, values) = if owned.iter().any(|(owner, _)| *owner != Owner::Main) {
+            (declared_names(unit), class_constant_values(unit))
         } else {
-            HashSet::default()
+            (HashSet::default(), HashMap::default())
         };
+        // What a declaration finds by its bytes: a name it is read by, or
+        // a class constant's value.
+        let found =
+            |s: &PhpString| names.contains(s.as_bytes()) || values.contains_key(s.as_bytes());
         for (owner, z) in owned {
             let name = z.as_str().map(PhpString::of);
             match owner {
@@ -650,7 +669,7 @@ impl Request {
                 }
                 Owner::Tables => {
                     held.constants.push(z);
-                    if let Some(s) = name.filter(|s| names.contains(s.as_bytes())) {
+                    if let Some(s) = name.filter(found) {
                         held.found.push(s);
                         point(&mut strings.by_bytes, s);
                     }

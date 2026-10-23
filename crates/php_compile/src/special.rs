@@ -194,9 +194,9 @@ impl Emit<'_> {
     /// special constants, `true`, `false` and `null` in any case
     /// (`zend_get_special_const`), then a constant the compile
     /// substitutes ([`Emit::ct_substitutes`]).
-    fn ct_eval_const(&mut self, name: &[u8]) -> Result<bool, CompileError> {
+    fn ct_eval_const(&self, name: &[u8]) -> bool {
         match name.to_ascii_lowercase().as_slice() {
-            b"true" | b"false" | b"null" => Ok(true),
+            b"true" | b"false" | b"null" => true,
             _ => self.ct_substitutes(name),
         }
     }
@@ -373,8 +373,21 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_func_strlen`: one argument, compiled, and a constant
-    /// string is its length; `ZEND_STRLEN` over anything else, a
-    /// constant that is not a string included (`strlen(1)`).
+    /// string is its length, the string given back as php's
+    /// `zval_ptr_dtor_str` destroys it; `ZEND_STRLEN` over anything else, a
+    /// constant that is not a string included (`strlen(1)`). So a constant
+    /// the request defined keeps no owner of the function's:
+    ///
+    /// ```php
+    /// define('S', str_repeat('q', count($argv) + 9));
+    /// eval('function g() { return strlen(S) + strlen("abcdefghij"); }');
+    /// debug_zval_dump(S);
+    /// var_dump(g());
+    /// ```
+    /// ```expect regime=jit-off
+    /// string(10) "qqqqqqqqqq" refcount(2)
+    /// int(20)
+    /// ```
     fn strlen(&mut self, arguments: &[Source]) -> Result<Option<Where>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
@@ -383,7 +396,14 @@ impl Emit<'_> {
         if let Where::Constant(constant) = value
             && let Some(s) = constant.as_str()
         {
-            return Ok(Some(Where::Constant(length(s.len()))));
+            // `zval_ptr_dtor_str` of the argument once its length stands:
+            // a string it alone held, a constant's copy among them, given
+            // back.
+            let length = length(s.len());
+            if let Some(argument) = argument.tree() {
+                self.side_folded(argument);
+            }
+            return Ok(Some(Where::Constant(length)));
         }
         Ok(Some(self.emit_unary(Opcode::Strlen, value, 0)))
     }
@@ -788,7 +808,7 @@ impl Emit<'_> {
             return Ok(None);
         };
         if let tree::Expr::NameRef(token) = self.peel(flag) {
-            return self.named_constant_truth(token);
+            return Ok(self.named_constant_truth(token));
         }
         Ok(self.written(flag)?.map(truth))
     }
@@ -839,7 +859,7 @@ impl Emit<'_> {
         let Some(bytes) = name.as_str() else {
             return Ok(None);
         };
-        if self.ct_eval_const(bytes.bytes())? {
+        if self.ct_eval_const(bytes.bytes()) {
             return Ok(Some(Where::Constant(Zval::bool(true))));
         }
         let slot = self.cache_slot();
@@ -861,7 +881,7 @@ impl Emit<'_> {
             return Ok(None);
         };
         Ok(self
-            .ct_eval_const(bytes.bytes())?
+            .ct_eval_const(bytes.bytes())
             .then_some(Zval::bool(true)))
     }
 

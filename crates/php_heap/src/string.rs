@@ -747,13 +747,17 @@ pub trait Intern {
     }
 
     /// One more owner of `value`, a value another place owns that a
-    /// compile substitutes where its name is written, as
-    /// `zend_try_ct_eval_const` copies a constant the request defined
-    /// (`ZVAL_COPY_OR_DUP`), kept for the unit as what this home made is
-    /// kept: whether this home holds it. A value nothing counts owners
-    /// of, an interned string or an immutable array, is held by any home;
-    /// a counted one only by a home of the request's whose values it is,
-    /// and the asker leaves the name to be fetched where the home cannot.
+    /// compile hands on where the program wrote something else, kept for
+    /// the unit as what this home made is kept: whether this home holds
+    /// it. php's compile takes that owner wherever it copies a counted
+    /// value it did not make into what it compiles (`ZVAL_COPY_OR_DUP`,
+    /// `ZVAL_COPY`): a constant the request defined that
+    /// `zend_try_ct_eval_const` substitutes for its name, and an element
+    /// a fold reads out of an array the request owns. A value nothing
+    /// counts owners of, an interned string or an immutable array, is
+    /// held by any home and takes nothing; a counted one only by a home of
+    /// the request's whose values it is, and where the home cannot the
+    /// asker leaves what was written standing, the fetch or the node.
     fn hold(&mut self, value: Zval) -> bool {
         !value.is_refcounted()
     }

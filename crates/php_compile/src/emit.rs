@@ -1239,6 +1239,32 @@ enum Under {
     Value(Where),
 }
 
+/// A constant `zend_try_ct_eval_const` found and `can_ct_eval_const`
+/// lets be its value, before it is copied where its name was written
+/// ([`Emit::ct_found`]).
+#[derive(Clone, Copy)]
+enum Found<'a> {
+    /// A persistent constant the engine declared, its value a scalar
+    /// written out.
+    Declared(&'a ConstExpr),
+    /// A constant the request defined, a view of its value.
+    Defined(Zval),
+}
+
+impl Found<'_> {
+    /// `zend_is_true` over the value, read without copying it.
+    fn truth(self) -> bool {
+        match self {
+            Found::Declared(ConstExpr::Bool(b)) => *b,
+            Found::Declared(ConstExpr::Long { value, .. }) => *value != 0,
+            Found::Declared(ConstExpr::Double(d)) => *d != 0.0,
+            Found::Declared(ConstExpr::Str(bytes)) => !(bytes.is_empty() || &**bytes == b"0"),
+            Found::Declared(_) => false,
+            Found::Defined(value) => truth(value),
+        }
+    }
+}
+
 /// What an operator's fold answered: a string the fold made that the
 /// node over it reads once, held as the operand's own claim
 /// ([`eval::Claims`]), or a value some other place keeps, a
@@ -14772,7 +14798,7 @@ impl<'a> Emit<'a> {
     /// "" || "mn": 2
     /// "op" && $q: 2
     /// ```
-    fn side_folded(&mut self, side: tree::Expr) {
+    pub(crate) fn side_folded(&mut self, side: tree::Expr) {
         let side = self.peel(side);
         if let Some(made) = self.claims.take_top(side) {
             self.strings.give_back(made);
@@ -18836,45 +18862,44 @@ impl<'a> Emit<'a> {
     /// of the copy, as `zend_compile_func_in_array` reads a `$strict`
     /// written as a constant: its truth, and nothing where the name is
     /// left to the fetch.
-    pub(crate) fn named_constant_truth(
-        &mut self,
-        token: TokenId,
-    ) -> Result<Option<bool>, CompileError> {
-        Ok(match self.named_constant(token)? {
-            Some(Operated::Made(made)) => {
-                let truth = truth(Zval::string(made.str()));
-                self.strings.give_back(made);
-                Some(truth)
-            }
-            Some(Operated::Kept(value)) => Some(truth(value)),
-            None => None,
-        })
+    pub(crate) fn named_constant_truth(&self, token: TokenId) -> Option<bool> {
+        if let Some(value) = self.constant_name(token) {
+            return Some(truth(value));
+        }
+        let resolved = self.constant_resolved(self.text(token));
+        self.ct_found(&resolved.resolved().0).map(Found::truth)
     }
 
     /// `zend_try_ct_eval_const` over the name `zend_resolve_const_name`
-    /// resolved ([`Self::ct_constant`]); an unqualified name in a
-    /// namespace is never substituted, its global fallback being the
-    /// fetch's to make.
+    /// resolved ([`Self::ct_constant`]): a bare name inside a namespace is
+    /// looked for under the namespace, as `zend_compile_const` asks for
+    /// `resolved_name` whatever `is_fully_qualified` says, and its global
+    /// fallback is the fetch's to make. A function's copy is one more
+    /// owner of the constant's string, where `b`'s fetch takes none:
+    ///
+    /// ```php
+    /// define('a\S', str_repeat('q', count($argv) + 9));
+    /// eval('namespace a; function f() { return S; } function g() { return \strlen(S); }');
+    /// eval('namespace b; function h() { return S; }');
+    /// debug_zval_dump(\a\S);
+    /// var_dump(\a\f(), \a\g());
+    /// ```
+    /// ```expect regime=jit-off
+    /// string(10) "qqqqqqqqqq" refcount(3)
+    /// string(10) "qqqqqqqqqq"
+    /// int(10)
+    /// ```
     fn const_name(&mut self, name: &[u8]) -> Result<Option<Operated>, CompileError> {
-        match self.constant_resolved(name) {
-            ConstantName::Resolved(resolved) => self.ct_constant(&resolved.0),
-            ConstantName::UnqualifiedInNamespace(_) => Ok(None),
-        }
+        let resolved = self.constant_resolved(name);
+        self.ct_constant(&resolved.resolved().0)
     }
 
     /// Whether `zend_try_ct_eval_const` substitutes a name with no
-    /// namespace in it ([`Self::ct_constant`]), what
-    /// `zend_compile_func_defined` folds to `true`: the copy it made is
-    /// destroyed at once (`zval_ptr_dtor`), a claim given back.
-    pub(crate) fn ct_substitutes(&mut self, name: &[u8]) -> Result<bool, CompileError> {
-        Ok(match self.ct_constant(name)? {
-            Some(Operated::Made(made)) => {
-                self.strings.give_back(made);
-                true
-            }
-            Some(Operated::Kept(_)) => true,
-            None => false,
-        })
+    /// namespace in it ([`Self::ct_found`]), what
+    /// `zend_compile_func_defined` folds to `true`: php destroys the copy
+    /// it made at once (`zval_ptr_dtor`), so nothing is copied here.
+    pub(crate) fn ct_substitutes(&self, name: &[u8]) -> bool {
+        self.ct_found(name).is_some()
     }
 
     /// `zend_compile_const`'s second half (`Z/Zend/zend_compile.c:11048`),
@@ -19861,6 +19886,23 @@ enum Substitution {
     NoPersistent,
 }
 
+/// `can_ct_eval_const`'s test of
+/// the value itself: a type below `IS_ARRAY`, a scalar or a string, or
+/// an array `array_is_const` takes; an object, a resource and a constant
+/// expression not yet evaluated are not substituted.
+fn substitutable(value: Zval) -> bool {
+    match value.kind() {
+        ZvalType::Null
+        | ZvalType::False
+        | ZvalType::True
+        | ZvalType::Long
+        | ZvalType::Double
+        | ZvalType::String => true,
+        ZvalType::Array => array_is_const(value),
+        _ => false,
+    }
+}
+
 /// `array_is_const` (`Z/Zend/zend_compile.c:1644`): at most 50
 /// elements, each a scalar. php's walk descends into the array itself
 /// where an element is an array, not into that element, until its 50
@@ -19997,7 +20039,7 @@ fn used_stack(arguments: u32, callee: Option<&OpArray>) -> u32 {
     slots.saturating_mul(zval)
 }
 
-impl Emit<'_> {
+impl<'a> Emit<'a> {
     /// `zend_hash_find_ptr(CG(function_table), lcname)` with php's
     /// `fbc->type == ZEND_INTERNAL_FUNCTION` test folded in: whether the
     /// lowered name is one of the natives the engine declared
@@ -20017,40 +20059,50 @@ impl Emit<'_> {
     /// `zend_try_ct_eval_const` past the three special names: the
     /// constant `EG(zend_constants)` holds under the resolved name, where
     /// `can_ct_eval_const` (`Z/Zend/zend_compile.c:1650`) lets it be its
-    /// value where it is written, and nothing where the name is left to
-    /// the `FETCH_CONSTANT` the program serves. A parameter's default
-    /// substitutes none, since `zend_compile_params` sets both
+    /// value where it is written ([`Self::ct_found`]), copied as php's
+    /// `ZVAL_COPY_OR_DUP` copies it: a persistent constant's value
+    /// written out ([`Found::Declared`]), and a constant the request
+    /// defined one more owner of its own value ([`Self::request_constant`]).
+    /// Nothing where the name is left to the `FETCH_CONSTANT` the program
+    /// serves.
+    fn ct_constant(&mut self, name: &[u8]) -> Result<Option<Operated>, CompileError> {
+        Ok(match self.ct_found(name) {
+            Some(Found::Declared(value)) => Some(Operated::Kept(match value {
+                ConstExpr::Str(bytes) => self.string(bytes)?,
+                ConstExpr::Bool(b) => Zval::bool(*b),
+                ConstExpr::Long { value: n, .. } => Zval::long(*n),
+                ConstExpr::Double(d) => Zval::double(*d),
+                _ => Zval::null(),
+            })),
+            Some(Found::Defined(value)) => self.request_constant(value),
+            None => None,
+        })
+    }
+
+    /// The constant `zend_try_ct_eval_const` would copy for `name`, found
+    /// and judged by `can_ct_eval_const` but not copied, no owner taken
+    /// and no string made. A parameter's default substitutes none, since
+    /// `zend_compile_params` sets both
     /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION` and
     /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION` around it
     /// ([`Substitution::NoPersistent`]). A constant's name is
     /// case-sensitive, and a leading `\` names the same global constant
     /// as none. The engine's persistent constants are looked for first
-    /// ([`Self::persistent`]), then the ones the request defined, which a
-    /// compile php runs without `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`
-    /// is handed ([`Self::request_constant`]).
-    fn ct_constant(&mut self, name: &[u8]) -> Result<Option<Operated>, CompileError> {
-        if self.substitution == Substitution::NoPersistent {
-            return Ok(None);
-        }
-        let mut at = 0;
-        while name.get(at) == Some(&b'\\') {
-            at += 1;
-        }
-        let name = name.get(at..).unwrap_or(&[]);
-        if self.persistent.find(name).is_some() {
-            return Ok(self.persistent(name)?.map(Operated::Kept));
-        }
-        Ok(self.request_constant(name))
-    }
-
-    /// `can_ct_eval_const`'s first arm: a persistent constant's value
-    /// where it stands, so a `T_*` of the tokenizer reaches no opline.
-    /// The table is the engine's, what its extensions declared
-    /// ([`Options::persistent`]). A declared value that is no scalar is
-    /// not folded, as php folds none whose value is not yet evaluated.
+    /// ([`Options::persistent`]): one `CONST_DEPRECATED` marks is refused
+    /// before anything else is read, so the `FETCH_CONSTANT` stands and
+    /// the deprecation is raised where the constant is read, the bit
+    /// being the `#[\Deprecated]` attribute on the declaration; and a
+    /// declared value that is no scalar is not folded, as php folds none
+    /// whose value is not yet evaluated. Then the constants the request
+    /// defined, which a compile php runs without
+    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION` is handed
+    /// ([`Options::request_constants`]): one `CONST_DEPRECATED` marks is
+    /// refused first, as a persistent one is; then a scalar or a string is
+    /// its value, and an array where `array_is_const` takes it, and an
+    /// object, a resource or a larger array is left to the fetch.
     ///
-    /// `ext/standard`'s `INF` and `NAN` are two of them, folded where
-    /// they are written:
+    /// `ext/standard`'s `INF` and `NAN` are two persistent ones, folded
+    /// where they are written:
     ///
     /// ```php
     /// var_dump(INF, -NAN, \INF, -INF);
@@ -20061,39 +20113,36 @@ impl Emit<'_> {
     /// float(INF)
     /// float(-INF)
     /// ```
-    fn persistent(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
-        let Some((_, declared)) = self.persistent.find(name) else {
-            return Ok(None);
-        };
-        // `can_ct_eval_const` refuses a constant `CONST_DEPRECATED`
-        // marks before it looks at anything else, so the
-        // `FETCH_CONSTANT` stands and the deprecation is raised where
-        // the constant is read and not where it was declared. The bit is
-        // the `#[\Deprecated]` attribute on the declaration, which is the
-        // whole of what php raises the flag from.
-        if declared
-            .attributes
-            .iter()
-            .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"))
-        {
-            return Ok(None);
+    fn ct_found(&self, name: &[u8]) -> Option<Found<'a>> {
+        if self.substitution == Substitution::NoPersistent {
+            return None;
         }
-        Ok(match &declared.value {
-            ConstExpr::Null => Some(Zval::null()),
-            ConstExpr::Bool(b) => Some(Zval::bool(*b)),
-            ConstExpr::Long { value: n, .. } => Some(Zval::long(*n)),
-            ConstExpr::Double(d) => Some(Zval::double(*d)),
-            ConstExpr::Str(bytes) => Some(self.string(bytes)?),
-            _ => None,
-        })
+        let mut at = 0;
+        while name.get(at) == Some(&b'\\') {
+            at += 1;
+        }
+        let name = name.get(at..).unwrap_or(&[]);
+        if let Some((_, declared)) = self.persistent.find(name) {
+            let deprecated = (declared.attributes.iter())
+                .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"));
+            let scalar = matches!(
+                declared.value,
+                ConstExpr::Null
+                    | ConstExpr::Bool(_)
+                    | ConstExpr::Long { .. }
+                    | ConstExpr::Double(_)
+                    | ConstExpr::Str(_)
+            );
+            return (!deprecated && scalar).then_some(Found::Declared(&declared.value));
+        }
+        let defined = self.request_constants.find(name)?;
+        (!defined.deprecated && substitutable(defined.value))
+            .then_some(Found::Defined(defined.value))
     }
 
-    /// `can_ct_eval_const`'s other arms, for a constant the request
-    /// defined ([`Options::request_constants`]): one `CONST_DEPRECATED`
-    /// marks is refused first, as a persistent one is; then a scalar or a
-    /// string is its value, and an array where `array_is_const` takes it,
-    /// and an object, a resource or a larger array is left to the fetch.
-    /// The value is the constant's own with one more owner,
+    /// The copy of a constant the request defined that `can_ct_eval_const`
+    /// lets through ([`Self::ct_found`]): the value is the constant's own
+    /// with one more owner,
     /// `ZVAL_COPY_OR_DUP`, not a copy of its bytes ([`Intern::hold`]): the
     /// unit keeps it where it lands, and a fold over a string gives the
     /// owner back once it stands, as `zend_eval_const_expr` destroys its
@@ -20193,22 +20242,7 @@ impl Emit<'_> {
     /// int(7)
     /// bool(true)
     /// ```
-    fn request_constant(&mut self, name: &[u8]) -> Option<Operated> {
-        let defined = self.request_constants.find(name)?;
-        let value = defined.value;
-        let substitutes = match value.kind() {
-            ZvalType::Null
-            | ZvalType::False
-            | ZvalType::True
-            | ZvalType::Long
-            | ZvalType::Double
-            | ZvalType::String => true,
-            ZvalType::Array => array_is_const(value),
-            _ => false,
-        };
-        if defined.deprecated || !substitutes {
-            return None;
-        }
+    fn request_constant(&mut self, value: Zval) -> Option<Operated> {
         match value.as_str() {
             Some(s) => self.strings.hold_made(s).map(Operated::Made),
             None => self.strings.hold(value).then_some(Operated::Kept(value)),
