@@ -24,9 +24,10 @@
 use std::path::Path;
 use std::process::Command;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::batch::{self, tail};
+use crate::carried::Carried;
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
 use crate::reading::{Reading, Status};
@@ -45,23 +46,29 @@ pub const TOOLCHAIN: &str = "nightly-2026-02-20";
 /// [`TOOLCHAIN`] it takes exposed provenance.
 const MODEL: &str = "-Zmiri-tree-borrows";
 
-/// The crates a run takes when none is named: the memory model, design
-/// §9's.
-pub const CRATES: [&str; 1] = ["php_heap"];
-
-/// Run every crate of `only`, or [`CRATES`], under Miri; one reading each.
-/// A crate whose sources do not exist yet writes none; a machine without
-/// the toolchain writes a skip naming the command that installs it.
+/// Run every crate of `only`, or where none is named each crate the
+/// manifest's `[[owed]]` rows owe a `miri` reading, as `done` asks it
+/// ([`crate::done::owed`]; design §9's memory model, #3206), under Miri;
+/// one reading each. Rows that owe it of no crate are refused, naming
+/// `--crate`. A crate whose sources do not exist yet writes none; a
+/// machine without the toolchain writes a skip naming the command that
+/// installs it.
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
-    let named: Vec<String> = if only.is_empty() {
-        CRATES.map(str::to_owned).into()
+    let crates = if only.is_empty() {
+        let carried = Carried::binary(root)?;
+        let asked = |k: &&Crate| crate::done::owed(manifest, k, &carried).contains(&INSTRUMENT);
+        let crates: Vec<&Crate> = manifest.crates.iter().filter(asked).collect();
+        if crates.is_empty() {
+            bail!("no [[owed]] row owes {INSTRUMENT} of a crate; name the crates with --crate");
+        }
+        crates
     } else {
-        only.to_vec()
+        manifest.crates_named(only)?
     };
     let snapshot = Snapshot::disk(root)?;
     let installed = installed(root);
     let mut readings = Vec::new();
-    for krate in manifest.crates_named(&named)? {
+    for krate in crates {
         let name = &krate.name;
         if !sources::exists(root, krate) {
             continue;

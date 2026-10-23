@@ -213,8 +213,8 @@ pub fn render(
         Section::Edges => return graph::edges(manifest, format),
         Section::Modules => return modules(manifest, &readings, format),
         Section::Git => return git_section(root, format),
-        Section::Oracle => return oracle_section(&manifest.pin, format),
-        Section::Corpus => return corpus_section(&manifest.pin, format),
+        Section::Oracle => return oracle_section(manifest.pin()?, format),
+        Section::Corpus => return corpus_section(manifest.pin()?, format),
         Section::Invocation => return invocation::render(root, format),
         Section::Conditions => return conditions::render(root, format),
         Section::Parity => {
@@ -1751,6 +1751,7 @@ pub(crate) fn grid<R: IntoIterator<Item = String>>(
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use super::{LOCAL_SECTIONS, Row, compared, local_template, outermost, outlived};
     use serde_json::json;

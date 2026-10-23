@@ -57,6 +57,40 @@ pub(crate) const SPECTRALNORM: Fixture = Fixture {
     ],
 };
 
+/// `array_write` of the bench scripts: a packed array written by a long key
+/// in a loop (#3228).
+pub(crate) const ARRAY_WRITE: Fixture = Fixture {
+    name: "array_write",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "1"),
+    ],
+};
+
+/// `sieve` of the bench scripts: its inner loop, a packed array of booleans
+/// written `false` by a long key (#3228).
+pub(crate) const SIEVE: Fixture = Fixture {
+    name: "sieve",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "1"),
+    ],
+};
+
+/// `fannkuch`'s first loop, recorded for the view it holds of
+/// `fannkuch()`, which a side trace's record written out by hand is built
+/// through (#3270).
+pub(crate) const FANNKUCH: Fixture = Fixture {
+    name: "fannkuch",
+    plan: &[
+        ("record.function", "fannkuch"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// Where `types`' goldens are, the programs and their records among them.
 pub(crate) fn types() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/types/goldens")

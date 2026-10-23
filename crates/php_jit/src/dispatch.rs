@@ -738,11 +738,11 @@ fn visit_landing(
 /// ```
 ///
 /// A `match` over strings jumps through a table, so its loop's trace
-/// holds where the frame stood past it, an exit that names no opline.
-/// The second arm's key leaves through it, and the side trace grows from
-/// that arm behind php's IP guard, so the exit's line is written once,
-/// as php's, and not at every key; php numbers the exit by the arm
-/// (#3203):
+/// takes an exit per opline the jump may go to but the one it went to,
+/// the default's and then each arm's, as php's `zend_jit_switch` takes
+/// them. The second arm's key leaves through that arm's own exit, 5, and
+/// the side trace grows from it, so the exit's line is written once, as
+/// php's, and not at every key (#3203):
 ///
 /// ```php
 /// function f($keys) { $s = 0; foreach ($keys as $k) { $s += match ($k) { 'a' => 1, 'b' => 2 }; } return $s; }
@@ -758,8 +758,8 @@ fn visit_landing(
 /// ---- TRACE 1 stop (loop)
 /// ---- TRACE 1 compiled
 ///
-///      TRACE 1 exit %d f() %s:2
-/// ---- TRACE 2 start (side trace 1/%d) f() %s:2
+///      TRACE 1 exit 5 f() %s:2
+/// ---- TRACE 2 start (side trace 1/5) f() %s:2
 /// ---- TRACE 2 stop (link to 1)
 /// ---- TRACE 2 compiled
 ///

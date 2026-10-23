@@ -1,6 +1,7 @@
 //! The seam manifest, `seams.toml`, and the oracle pin it points at,
 //! `oracle.toml`, loaded by one reader (harness-design.md §4.1, §4.3); the
-//! pin's grammar is the oracle module's.
+//! pin's grammar is the oracle module's. A manifest with no `[oracle]` row
+//! loads with no pin, and [`Manifest::pin`] refuses whatever asks for one.
 //!
 //! The grammar is `[oracle] [budget] [telemetry] [[crate]] [[seam]]
 //! [[edge]] [[rule]] [[bench]]`, each rule carrying exactly one predicate.
@@ -13,13 +14,18 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::layout;
 use crate::oracle::Pin;
 use crate::phpt::Scope;
 use crate::track::Ticket;
+
+pub use crate::layout::Layout;
+pub use owed::{Instrument, Owed, When};
+
+mod owed;
 
 /// The file name of the manifest at the workspace root.
 pub const FILE: &str = "seams.toml";
@@ -34,7 +40,8 @@ pub const SCRIPTS: &str = "scripts";
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Manifest {
-    pub oracle: PinRow,
+    /// `[oracle]`: absent in a repository that runs no php (#3181).
+    pub oracle: Option<PinRow>,
     pub budget: Budget,
     pub telemetry: Option<Telemetry>,
     #[serde(rename = "crate", default)]
@@ -45,6 +52,10 @@ pub struct Manifest {
     pub edges: Vec<Edge>,
     #[serde(rename = "rule", default)]
     pub rules: Vec<Rule>,
+    /// `[[owed]]`: the instruments a crate owes a fresh reading of before
+    /// `done`, one row per instrument ([`Owed`], #3206).
+    #[serde(default)]
+    pub owed: Vec<Owed>,
     /// `[lock_home]`: the crate a lock's file lives with, for a lock no
     /// `[[crate]]` row names. A seam whose producer is a file and not a
     /// crate (`ops`, generated from `ops.toml`) has no row to carry it,
@@ -59,13 +70,15 @@ pub struct Manifest {
     /// to; `None` where the file has no table, which `status` says.
     pub divergence: Option<DivergenceTable>,
     /// `[[bench]]`: each perf bar's tolerance and the nights it was
-    /// derived over (#2659); a bar without a row is a series held to none.
+    /// derived over (#2659), the one place a bar's bound is written
+    /// (#3130); a bar without a row is a series held to none.
     #[serde(rename = "bench", default)]
     pub(crate) tolerances: Vec<Tolerance>,
     /// The pin the `[oracle]` row names, loaded from that file by the
-    /// oracle module, whose grammar it is.
+    /// oracle module, whose grammar it is; absent with the row, and read
+    /// through [`Manifest::pin`].
     #[serde(skip)]
-    pub pin: Pin,
+    pub pin: Option<Pin>,
     /// The workspace the manifest was loaded from; empty for `parse`.
     #[serde(skip)]
     pub root: PathBuf,
@@ -94,18 +107,22 @@ pub struct DivergenceTable {
     pub target: u64,
 }
 
-/// One `[[bench]]` row (#2659): a bar's tolerance, the 75th percentile of
-/// its A/A control's nightly |paired delta| over `from` to `to`, floored at
-/// 2%, in percentage points of the second arm; the first baseline is the
-/// median of the bar's own nights over the same dates.
+/// One `[[bench]]` row (#2659): a bar's tolerance, in percentage points
+/// of the second arm, the 75th percentile of its A/A control's nightly
+/// |paired delta| over `nights`, floored at 2%, or the floor alone while
+/// the control has no two weeks of nights (#3130). A series is held to it
+/// beside its baseline, the first the median of its own nights over the
+/// same dates; a bar held to a bound is held to one plus it (protocol
+/// §12.3).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Tolerance {
     pub bar: String,
     #[serde(rename = "tolerance_pct")]
     pub pct: f64,
-    pub from: toml::value::Datetime,
-    pub to: toml::value::Datetime,
+    /// The first and the last night it was derived over; none while it is
+    /// the floor.
+    pub nights: Option<[toml::value::Datetime; 2]>,
 }
 
 /// `[parity]`: the suites php builds that parity does not count (design
@@ -187,7 +204,10 @@ pub struct PinRow {
     pub pin: String,
 }
 
-/// `[budget]`: the workspace-wide ceilings (design §4.1, §10).
+/// `[budget]`: the workspace-wide ceilings (design §4.1, §10). The php
+/// measures, `clean_build_release_s`, `api_items` and `bindings`, are
+/// optional: a manifest that omits one states no budget for it, and
+/// nothing is held to it (#3187's ruling, #3207).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -197,14 +217,14 @@ pub struct Budget {
     pub docs: u64,
     pub harness: u64,
     pub lock_packages: u64,
-    pub clean_build_release_s: u64,
-    pub api_items: u64,
+    pub clean_build_release_s: Option<u64>,
+    pub api_items: Option<u64>,
     /// `api.lock`'s `__private` lines, the helpers only a macro expansion
     /// names, held apart from `api_items` (design §4.4, revision 34);
     /// absent while a person has not written the row, and the whole lock
     /// is then held to `api_items`.
     pub api_private_items: Option<u64>,
-    pub bindings: u64,
+    pub bindings: Option<u64>,
     /// `scripts/**` against its ceiling, with what under it is a generator
     /// and not counted; absent while a person has not written the row,
     /// and `budget` then counts the tree and holds it to nothing.
@@ -222,10 +242,10 @@ impl Budget {
             docs: n,
             harness: n,
             lock_packages: n,
-            clean_build_release_s: n,
-            api_items: n,
+            clean_build_release_s: Some(n),
+            api_items: Some(n),
             api_private_items: None,
-            bindings: n,
+            bindings: Some(n),
             scripts: None,
         }
     }
@@ -932,9 +952,9 @@ impl Manifest {
     /// tracked manifest when the rows are resolved against the pinned tree.
     pub fn of(crates: impl IntoIterator<Item = Crate>) -> Manifest {
         Manifest {
-            oracle: PinRow {
+            oracle: Some(PinRow {
                 pin: "oracle.toml".to_owned(),
-            },
+            }),
             budget: Budget::flat(1),
             crates: crates.into_iter().collect(),
             ..Manifest::default()
@@ -946,14 +966,37 @@ impl Manifest {
         Manifest::of([Crate::named(krate)])
     }
 
-    /// Load `seams.toml` from the workspace root, then the pin it names.
+    /// Load `seams.toml` from the workspace root, then the pin it names,
+    /// where it names one.
     pub fn load(root: &Path) -> Result<Manifest> {
         let path = root.join(FILE);
         let text = crate::read(&path)?;
         let mut manifest = Manifest::parse(&text).with_context(|| format!("{}", path.display()))?;
-        manifest.pin = Pin::load(&root.join(&manifest.oracle.pin))?;
+        manifest.pin = (manifest.oracle.as_ref())
+            .map(|row| Pin::load(&root.join(&row.pin)))
+            .transpose()?;
         manifest.root = root.to_path_buf();
         Ok(manifest)
+    }
+
+    /// The oracle pin, which every instrument that runs php asks for here
+    /// and nowhere else: refused, naming it, where the manifest has no
+    /// `[oracle]` row (#3181).
+    pub fn pin(&self) -> Result<&Pin> {
+        self.pin.as_ref().ok_or_else(|| {
+            anyhow!("{FILE} has no `[oracle]` row, so no oracle pin names the php to run or the php-src it is held to")
+        })
+    }
+
+    /// The file the `[oracle]` row names, where the manifest has one.
+    pub fn pin_file(&self) -> Option<&str> {
+        self.oracle.as_ref().map(|row| row.pin.as_str())
+    }
+
+    /// The pin's [`Pin::digest`], which a reading under the recipe is
+    /// fresh for; empty with no pin, which no such reading is fresh for.
+    pub(crate) fn pin_digest(&self) -> &str {
+        self.pin.as_ref().map_or("", Pin::digest)
     }
 
     /// Every oracle variant a `[[crate]]` row names and the pin carries,
@@ -967,7 +1010,7 @@ impl Manifest {
         self.crates
             .iter()
             .filter_map(|k| k.oracle.as_deref())
-            .filter_map(|name| Some((name.to_owned(), self.pin.variant(name).ok()?)))
+            .filter_map(|name| Some((name.to_owned(), self.pin.as_ref()?.variant(name).ok()?)))
             .collect()
     }
 
@@ -1069,6 +1112,7 @@ impl Manifest {
             }
         }
         manifest.parity.hold(&manifest.crates)?;
+        owed::hold(&manifest.owed, &manifest.crates)?;
         Ok(manifest)
     }
 
@@ -1086,11 +1130,12 @@ impl Manifest {
     }
 
     /// The ceilings on a seam's lock width: `[budget] api_items` and
-    /// `api_private_items` for the api seam (design §4.4, §4.5); no other
-    /// lock has one.
+    /// `api_private_items` for the api seam (design §4.4, §4.5), where the
+    /// manifest states `api_items`; no other lock has one.
     pub fn lock_ceiling(&self, seam: &Seam) -> Option<LockCeiling> {
-        (seam.name == "api").then_some(LockCeiling {
-            items: self.budget.api_items,
+        let items = self.budget.api_items.filter(|_| seam.name == "api")?;
+        Some(LockCeiling {
+            items,
             private: self.budget.api_private_items,
         })
     }
@@ -1111,8 +1156,21 @@ impl Manifest {
             .map(|t| t.trim().to_owned())
     }
 
+    /// The directories its crates are laid down in, derived from its
+    /// `[[crate]]` rows ([`Layout`], #3207).
+    pub fn layout(&self) -> Layout {
+        Layout::of(&self.crates)
+    }
+
     pub fn crate_named(&self, name: &str) -> Option<&Crate> {
         self.crates.iter().find(|c| c.name == name)
+    }
+
+    /// The `[[owed]]` row of `instrument`, where the manifest has one.
+    pub fn owing(&self, instrument: &str) -> Option<&Owed> {
+        self.owed
+            .iter()
+            .find(|row| row.instrument.name() == instrument)
     }
 
     /// The rows `only` names, in the manifest's order, or every row where
@@ -1245,7 +1303,7 @@ impl Manifest {
             let dir = name.rsplit_once('/').map_or(".", |(dir, _)| dir);
             return Some(PathBuf::from(dir));
         }
-        if let Ok(corpus) = self.pin.source.tree()
+        if let Some(Ok(corpus)) = self.pin.as_ref().map(|pin| pin.source.tree())
             && corpus.join(name).is_dir()
         {
             return Some(PathBuf::from("."));
@@ -1255,4 +1313,5 @@ impl Manifest {
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests;

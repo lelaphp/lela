@@ -2,7 +2,8 @@
 //! (`jit-design.md` §4.6, §5.3): a frame by its room, php's
 //! `execute_data`, which compiled code is entered with and reads its
 //! slots past; the frame the loop stands in once a trace has left;
-//! `SAVE_OPLINE`; the callee an `INIT_*`'s cache slot holds; and the two
+//! `SAVE_OPLINE`; the callee an `INIT_*`'s cache slot holds; the room
+//! the stack has left for the frames compiled code pushes; and the two
 //! releases, a kernel's `zval_ptr_dtor` and an exit's freeing of the
 //! temporaries an opline read. Compiled code holds a frame by its room
 //! and the engine by its position, and these are the two ways across.
@@ -25,6 +26,14 @@ use crate::exec;
 pub fn room(req: &mut Request, frame: FrameRef) -> Option<NonNull<u8>> {
     let slots = req.vm_mut().stack.frame_mut(frame)?.slots_mut();
     NonNull::new(slots.as_mut_ptr().cast::<u8>().wrapping_sub(ROOM_BYTES))
+}
+
+/// The bytes the request's stack has left on its top page for frames,
+/// php's `EG(vm_stack_end) - EG(vm_stack_top)`, which compiled code holds
+/// against the frames it pushes as php's `zend_jit_stack_check` does.
+#[must_use]
+pub fn stack_room(req: &Request) -> usize {
+    req.vm().stack.room()
 }
 
 /// The frame whose room is at `room` ([`room`]), looked for from the

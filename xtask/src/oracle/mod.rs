@@ -54,6 +54,7 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::divergence::{Divergence, Registry};
+use crate::layout::Layout;
 use crate::scratch::{self, Tree};
 
 /// The environment variable that names the pinned php-src tree on this
@@ -1894,7 +1895,8 @@ pub enum Runner {
 impl Runner {
     /// The binary to run: the one named, or the engine's where cargo puts
     /// it. A binary whose digest is the pin's is the lane's control, and
-    /// the engine's own is held to the tree by [`against_the_tree`].
+    /// the engine's own is held to the tree by [`against_the_tree`], over
+    /// the crate directories of `layout`.
     ///
     /// The profiles are tried in [`profile::PREFERRED`]'s order, the
     /// lanes' own first (revision 82). A binary the tree has moved past is
@@ -1904,7 +1906,12 @@ impl Runner {
     /// every run after, however far the tree moved, and a debug build could
     /// not displace it (#475). Where every binary found is behind the tree,
     /// the first is the one the skip names.
-    pub fn resolve(root: &Path, pin: &Pin, named: Option<&Path>) -> Result<Runner> {
+    pub fn resolve(
+        root: &Path,
+        layout: &Layout,
+        pin: &Pin,
+        named: Option<&Path>,
+    ) -> Result<Runner> {
         if let Some(path) = named {
             let path = named_binary(path)?;
             let digest = md5_of(&path, "")?;
@@ -1914,7 +1921,7 @@ impl Runner {
                 // about it; the pin holds it by its digest instead.
                 Runner::Control(path)
             } else {
-                against_the_tree(root, path)
+                against_the_tree(root, layout, path)
             });
         }
         let mut behind = None;
@@ -1924,7 +1931,7 @@ impl Runner {
             if !built.is_file() {
                 continue;
             }
-            match against_the_tree(root, built) {
+            match against_the_tree(root, layout, built) {
                 Runner::Stale(why) => {
                     behind.get_or_insert(Runner::Stale(why));
                 }
@@ -2019,7 +2026,7 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
 /// held to the tree with the engine's, and the lot is behind the tree when
 /// any is. Each is held to its own dep-info, so writing `sapi/fpm` moves
 /// no `php`, as cargo relinks none.
-fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
+fn against_the_tree(root: &Path, layout: &Layout, path: PathBuf) -> Runner {
     let behind = hosts::HOSTS.iter().find_map(|host| {
         // The binary under test is `path`, whatever its name; the other
         // hosts stand beside it by theirs.
@@ -2029,7 +2036,8 @@ fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
             path.with_file_name(host.binary)
         };
         let built = binary.metadata().and_then(|at| at.modified()).ok()?;
-        let (source, written) = BuiltFrom::of(&binary).newest(root, Path::new(host.krate))?;
+        let host_dir = Path::new(host.krate);
+        let (source, written) = BuiltFrom::of(&binary).newest(root, layout, host_dir)?;
         (written > built).then_some((binary, source))
     });
     let Some((path, source)) = behind else {

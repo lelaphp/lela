@@ -32,7 +32,7 @@
 //!
 //! What `permit` denies is the `Edit` and the `Write`, and for three of
 //! those paths that is no longer the whole of it: `xtask steer`
-//! ([`crate::steer::STEERABLE`]) is the sanctioned writer of `seams.toml`,
+//! ([`crate::steer::steerable`]) is the sanctioned writer of `seams.toml`,
 //! `oracle.toml` and the divergence registry, and an agent may run it for
 //! an addition a person has settled. #152 is the measurement: the
 //! maintainer settled the `[regime.dump]` block on the ticket, labelled it
@@ -183,7 +183,6 @@ use serde::{Deserialize, Serialize};
 use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
 use crate::reading::{Reading, Status, millis};
-use crate::steer::STEERABLE;
 use crate::track::{MAIN, Ticket, Track};
 use crate::track_next::{READY, TRACK_LABEL, tracks_of};
 
@@ -658,7 +657,7 @@ pub struct Denied {
 /// The criteria of a ticket carrying `ready-for-agent` that ask for a
 /// write into a denied path: one row per criterion, at the first path of
 /// its main clause a rule covers, carrying the `xtask steer` that writes
-/// it where the path is one of [`STEERABLE`]. A ticket without the label
+/// it where [`crate::steer::steerable`] says so. A ticket without the label
 /// is not read, and neither is a path a rule exempts.
 pub fn denied(manifest: &Manifest, labels: &[Label], criteria: &Criteria) -> Vec<Denied> {
     if !labels.iter().any(|label| label.name == READY) {
@@ -698,8 +697,7 @@ pub fn denied(manifest: &Manifest, labels: &[Label], criteria: &Criteria) -> Vec
                     criterion: criterion.clone(),
                     path: named.to_owned(),
                     rule: rule.id.clone(),
-                    sanctioned: STEERABLE
-                        .contains(&named)
+                    sanctioned: crate::steer::steerable(manifest, named)
                         .then(|| format!("cargo xtask steer {named} --from <proposal>")),
                 });
                 break;

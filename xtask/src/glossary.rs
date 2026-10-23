@@ -438,6 +438,7 @@ mod tests {
         assert!(err.contains("Engine, Harness"), "{err}");
     }
     /// The tracked glossary, read as the sensor reads it.
+    #[cfg(tracked)]
     #[test]
     fn the_glossary_reads_each_term_with_its_avoided_phrases() {
         let glossary = Glossary::load(&crate::built_root().join("CONTEXT.md")).unwrap();

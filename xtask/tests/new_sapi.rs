@@ -13,6 +13,7 @@
 //! many parameters as the real one and each written alike where it names
 //! no generic, and each method the real `OutputSink` requires declared
 //! (#2545).
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 

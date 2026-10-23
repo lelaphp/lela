@@ -3,6 +3,7 @@
 //! reading at the crate the lock lives with, the negative control that
 //! names an `api` item the lock does not carry, and the two ways a tree
 //! is read — regenerated, or skipped and said to be.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 

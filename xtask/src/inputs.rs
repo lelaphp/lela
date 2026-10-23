@@ -86,3 +86,28 @@ fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// The files of the workspace the harness is written in that its own tests
+/// read: dax-php's pin, glossary, map, readme and divergence registry.
+/// Where one is absent, as in a repository that copied `xtask/` in, the
+/// tests that read them are not built: `build.rs` leaves `cfg(tracked)`
+/// unset and names the absent files, and `test` counts what it left out
+/// (#3188). libtest has no skip at run time, so the build leaves them out.
+pub const TRACKED: [&str; 5] = [
+    "oracle.toml",
+    "CONTEXT.md",
+    "AGENTS.md",
+    "README.md",
+    "docs/divergence.toml",
+];
+
+/// Which of [`TRACKED`] the workspace at `root` lacks, as the sentence the
+/// build's warning and `test`'s reading both say; none where it carries
+/// every one.
+pub fn untracked(root: &Path) -> Option<String> {
+    let absent: Vec<&str> = TRACKED
+        .into_iter()
+        .filter(|file| !root.join(file).is_file())
+        .collect();
+    (!absent.is_empty()).then(|| format!("{} has no {}", root.display(), absent.join(", ")))
+}

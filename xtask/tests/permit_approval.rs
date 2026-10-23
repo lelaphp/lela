@@ -5,6 +5,7 @@
 //! stdin of one `Edit` of the fixture's registry and the session's
 //! transcript: `admit` must be admitted, each `deny-*` a forged or
 //! mismatched answer that must stay denied.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};

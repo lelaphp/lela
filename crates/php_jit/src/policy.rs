@@ -1230,7 +1230,8 @@ pub(crate) fn claim(holder: Holder, policy: &Policy, start: Start) -> Option<Cla
 /// such an exit, for the interpreter to warn of, and the ninth firing
 /// blacklists it, `opcache.jit_hot_side_exit` plus
 /// `opcache.jit_blacklist_side_trace` under the recipe's thresholds; the
-/// thirteen after it write nothing:
+/// thirteen after it write nothing (the exit numbers are #3176's: php's
+/// inference types `$i` and holds no guard on it at entry):
 ///
 /// ```php
 /// function h($a) {
@@ -1264,7 +1265,7 @@ pub(crate) fn claim(holder: Holder, policy: &Policy, start: Start) -> Option<Cla
 ///      TRACE 1 exit %d h() %s:5
 /// ---- EXIT 1/%d blacklisted
 ///      TRACE 1 exit %d h() %s:7
-/// ---- TRACE 2 start (side trace 1/3) h() %s:7
+/// ---- TRACE 2 start (side trace 1/%d) h() %s:7
 /// ---- TRACE 2 stop (return)
 /// ---- TRACE 2 compiled
 ///

@@ -1,5 +1,6 @@
 //! `xtask status`, the one renderer (harness-design.md §4.6): it reads the
 //! manifest and the store and computes nothing else.
+#![cfg(tracked)]
 
 use std::path::Path;
 

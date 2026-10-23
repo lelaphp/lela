@@ -108,7 +108,58 @@ pub struct Building {
 /// (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:1233-1288`).
 #[must_use]
 pub fn building(req: &Request) -> Option<Building> {
-    let call = building_call(req)?;
+    building_at(req, building_call(req)?)
+}
+
+/// The return type the native a call being built at `call` serves
+/// declares, php's `arg_info[-1]` that `zend_jit_trace_build_tssa` types
+/// what a `DO_ICALL` writes by: none for a user function's call, and for a
+/// native that declares none or returns by reference.
+#[must_use]
+pub fn native_returns(req: &Request, call: FrameRef) -> Option<php_unit::decl::Type> {
+    let function = req.vm().stack.frame(call)?.header().function?;
+    if req.user_function(function).is_some() {
+        return None;
+    }
+    let decl = req.symbols().function_decl(function)?;
+    if decl.returns_by_ref {
+        return None;
+    }
+    decl.return_type.clone()
+}
+
+/// The calls `frame` began and has not made yet, the outermost first:
+/// php's `EX(call)` and the `prev_execute_data` chain under it, which a
+/// recording that starts in `frame`, or follows a return into it, writes
+/// down as its fake inits, one per call
+/// (`zend_jit_trace_record_fake_init_call`,
+/// `Z/ext/opcache/jit/zend_jit_vm_helpers.c:631-682`). Each is a record
+/// on the stack above `frame`, the innermost on top.
+#[must_use]
+pub fn under_way(req: &Request, frame: FrameRef) -> Vec<Building> {
+    let mut calls = Vec::new();
+    let Some((top, _)) = req.vm().stack.top() else {
+        return calls;
+    };
+    for at in (frame.0.saturating_add(1)..=top.0).rev() {
+        let call = FrameRef(at);
+        let built = req
+            .vm()
+            .stack
+            .frame(call)
+            .is_some_and(|record| record.header().info.building());
+        match building_at(req, call).filter(|_| built) {
+            Some(building) => calls.push(building),
+            None => break,
+        }
+    }
+    calls.reverse();
+    calls
+}
+
+/// The call being built at `call`, and its callee's op array where it is
+/// a user function.
+fn building_at(req: &Request, call: FrameRef) -> Option<Building> {
     let header = req.vm().stack.frame(call)?.header();
     let target = header
         .function

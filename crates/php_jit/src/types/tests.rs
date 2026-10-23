@@ -16,16 +16,17 @@
 use std::fmt::Write as _;
 
 use php_heap::ZvalType;
-use php_unit::Opcode;
+use php_unit::{Opcode, OplineIdx};
 
 use super::{
-    Check, Def, End, Form, Frame, Grows, GuardAt, Home, Landing, Op, OpId, Operand, Repeat, Slot,
-    TraceIr, Types, ValueId, build,
+    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Landing, Op, OpId, Operand, Repeat,
+    Slot, TraceIr, Types, ValueId, build,
 };
 use crate::lower::dump;
-use crate::record::{Landed, Stop};
+use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
-    self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held, traced as built,
+    self, ARRAY_WRITE, FANNKUCH, FIB, Fixture, MANDELBROT, NBODY, SIEVE, SPECTRALNORM, held,
+    traced as built,
 };
 use crate::testing::records::recording;
 
@@ -57,6 +58,229 @@ fn fib_enters_and_recurses() -> Result<(), String> {
     Ok(())
 }
 
+/// `fib`'s recursive trace leaves through one exit at its comparison's
+/// direction in both levels it inlines, as php's `exit_1`, at opline
+/// `0003`, serves both: php's stack map is relative to the frame pointer,
+/// so the same guard at the same opline with the same types known is one
+/// exit (`zend_jit_trace_get_exit_point`, #3203). php numbers it 1 behind
+/// its `RECV`'s argument count guard, `exit_0`, which a trace entered
+/// past the prologue does not hold (`jit-design.md` §4.1).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
+    let ir = golden(FIB)?;
+    let directions: Vec<(Frame, ExitId)> = (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Direction { .. }))
+        .filter_map(|guard| match guard.at {
+            GuardAt::Within(at) => match ir.ops.get(at.index()) {
+                Some(Op::Line(line)) => Some((line.frame, guard.exit)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        directions,
+        [(Frame(0), ExitId(0)), (Frame(1), ExitId(0))],
+        "{directions:?}"
+    );
+    let landing = ir.exits.first().map(|exit| (exit.frame, exit.opline));
+    assert_eq!(landing, Some((Frame(0), Some(OplineIdx(3)))));
+    Ok(())
+}
+
+/// A `foreach` over a packed array writes its key as a long, as php's
+/// inference types what `FE_FETCH_R` writes from the array's layout, so
+/// no guard holds it; the exit its end takes knows nothing of it, as
+/// php's stack map types what an op writes only once the op's exits are
+/// taken; and the `+=` that reads it leaves through exit 4 at `0005`,
+/// as php's trace takes `exit_0` to `exit_2` at `0003`, `exit_3` at
+/// `0007` and `exit_4` at `0005` (#3203).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($a) { $s = 0; foreach ($a as $k => $v) { $s += $k; } return $s; }
+        echo f([1, 2, 3, 4, 5, 6, 7, 8, 9]), \"\\n\";",
+    )?;
+    let at = stepped(&ir, Opcode::FeFetchR)?;
+    let Some(Op::Line(fetch)) = ir.ops.get(at.index()) else {
+        return Err("no FE_FETCH_R".to_owned());
+    };
+    let key = fetch.out.ok_or("FE_FETCH_R writes no key")?;
+    assert_eq!(ir.values[key.0 as usize].types, Types::LONG);
+    let on_key = (ir.guards.iter()).any(|guard| {
+        matches!(guard.check, Check::Type { value, .. } | Check::Deref { value, .. } if value == key)
+    });
+    assert!(!on_key, "{}", dump::render(&ir));
+    let oplines: Vec<Option<u32>> = (ir.exits.iter().take(5))
+        .map(|exit| exit.opline.map(|at| at.0))
+        .collect();
+    assert_eq!(
+        oplines,
+        [Some(3), Some(3), Some(3), Some(7), Some(5)],
+        "{}",
+        dump::render(&ir)
+    );
+    let slot = ir.values[key.0 as usize].slot;
+    assert!(
+        !ir.exits[3].known.iter().any(|known| known.slot == slot),
+        "{:?}",
+        ir.exits[3]
+    );
+    Ok(())
+}
+
+/// A trace that does not loop holds a guard on what its frame entered
+/// with before the op that first reads it, as php's code generator
+/// holds a loop-invariant type at entry only where the trace loops by
+/// its own loop or recursive call (`Z/ext/opcache/jit/zend_jit_trace.c:4237-4272`),
+/// and a side's guard at the read (#3203): the array's layout among
+/// them, held where the array is read by a long key, as php's side holds
+/// `MAY_BE_PACKED_GUARD` there; and `$n`, read once. `$i`, which php's
+/// allocator loads into a register as the trace enters, read by the
+/// comparison, the fetch and the increment, is held at entry, as php's
+/// code holds a `ZREG_LOAD` value there (`:4283-4310`, #3270).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), String> {
+    let (mut recorded, _) = recording(
+        &IN_F,
+        "function f($a, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $a[$i]; } return $s; }
+        echo f([1, 2, 3], 3), \"\\n\";",
+    )?;
+    let looping = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let at_entry = |ir: &TraceIr| ir.guards.iter().filter(|g| g.at == GuardAt::Entry).count();
+    assert!(at_entry(&looping) > 0, "{}", dump::render(&looping));
+    recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
+    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let entered: Vec<u32> = (linked.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Entry)
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => Some(linked.values[value.0 as usize].slot.var),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entered, [3], "{}", dump::render(&linked));
+    assert_eq!(at_entry(&linked), 1, "{}", dump::render(&linked));
+    let layout = (linked.guards.iter())
+        .find(|guard| matches!(guard.check, Check::Layout { .. }))
+        .map(|guard| guard.at);
+    assert!(
+        matches!(layout, Some(GuardAt::Before(_))),
+        "{layout:?}: {}",
+        dump::render(&linked)
+    );
+    Ok(())
+}
+
+/// fannkuch's side trace at `0049` (`TRACE 10`, side trace 9/2 under the
+/// pinned php at `opcache.optimization_level=0`, whose op arrays are this
+/// engine's) does not loop, and php's allocator loads `$maxFlips` at its
+/// entry, read by `0054`'s `IS_SMALLER` and written by `0056`'s `ASSIGN`
+/// (its `TRACE 10 Live Ranges` list `#5.CV5($maxFlips) load`), so php
+/// holds its type there: `exit_0` and `exit_1` land at `0049`, the guard
+/// on `$maxFlips` and then the one on `$flips`, which `PRE_INC` reads
+/// once (#3270). The record is the engine's own for that trace.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_value_phps_allocator_loads_is_held_at_entry() -> Result<(), String> {
+    let recorded = goldens::recorded(FANNKUCH)?;
+    let root = crate::record::func_name(recorded.record.root);
+    let text = "start side 9/3\nroot {root}\nentered 1:array 11:long 12:long
+op {root} 49 long - - -\nop {root} 50 array.packed - - -\nop {root} 51 long long - -
+op {root} 52 long - - fell\nop {root} 54 long long - fell\nop {root} 56 long long - -
+op {root} 57 long - - -\nop {root} 58 long - - taken\nop {root} 62 long - - -
+op {root} 63 long - - -\nop {root} 64 long long - -\nop {root} 65 - - - -
+op {root} 93 - - - taken\nop {root} 66 long long - taken\nop {root} 72 array.packed - - -
+op {root} 73 long long - -\nop {root} 74 long - - -\nop {root} 75 - - - -
+link-at {root} 82\nstop link 6\n"
+        .replace("{root}", &root);
+    let record = TraceRecord::parse(&text).map_err(|e| format!("{e:?}"))?;
+    let ir = build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let first: Vec<Option<(u32, Option<u32>, bool)>> = (ir.guards.iter().take(2))
+        .map(|guard| match guard.check {
+            Check::Type { value, .. } => {
+                let var = ir.values[value.0 as usize].slot.var;
+                let lands = ir.exits[usize::from(guard.exit.0)].opline.map(|at| at.0);
+                Some((var, lands, guard.at == GuardAt::Entry))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        first,
+        [Some((5, Some(49), true)), Some((9, Some(49), false))],
+        "{}",
+        dump::render(&ir)
+    );
+    let exits: Vec<u16> = ir.guards.iter().take(2).map(|guard| guard.exit.0).collect();
+    assert_eq!(exits, [0, 1], "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// An element write and its `OP_DATA` are two ops of php's trace SSA, so
+/// `$a[$k] = $k` reads `$k` twice, as the key and as the value the
+/// `OP_DATA` takes an owner of, and php's allocator loads it at the entry
+/// of a trace that does not loop where nothing else reads it
+/// (`zend_jit_trace_allocate_registers`, `Z/ext/opcache/jit/zend_jit_trace.c:3290-3300`;
+/// #3270).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_key_written_as_its_own_value_is_read_twice() -> Result<(), String> {
+    let (mut recorded, _) = recording(
+        &IN_F,
+        "function f($a, $k, $n) { for ($i = 0; $i < $n; $i++) { $a[$k] = $k; } return $a; }
+        echo f([1, 2, 3], 1, 3)[1], \"\\n\";",
+    )?;
+    recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
+    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let entered: Vec<u32> = (linked.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Entry)
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => Some(linked.values[value.0 as usize].slot.var),
+            _ => None,
+        })
+        .collect();
+    assert!(entered.contains(&1), "{}", dump::render(&linked));
+    Ok(())
+}
+
+/// A `match` takes an exit per opline its table may jump to but the one
+/// the trace goes on at, the default's first and then each arm's in the
+/// table's order, as php's `zend_jit_switch` takes them: its trace's
+/// `exit_4` at `0005`, the `UnhandledMatchError`, and `exit_5` at `0008`,
+/// the second arm (#3203). Each lands where the jump went.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_tables_jump_takes_an_exit_per_arm_as_phps_does() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($keys) { $s = 0; foreach ($keys as $k) { $s += match ($k) { 'a' => 1, 'b' => 2 }; } return $s; }
+        echo f(['a', 'a', 'a', 'b', 'b', 'b']), \"\\n\";",
+    )?;
+    let arms: Vec<(u32, u16, Option<u32>)> = (ir.guards.iter())
+        .filter_map(|guard| match guard.check {
+            Check::Arm { opline } => Some((
+                opline.0,
+                guard.exit.0,
+                ir.exits[usize::from(guard.exit.0)].opline.map(|at| at.0),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        arms,
+        [(5, 4, Some(5)), (8, 5, Some(8))],
+        "{}",
+        dump::render(&ir)
+    );
+    let stands = (ir.guards.iter()).any(|guard| matches!(guard.check, Check::Stands { .. }));
+    assert!(!stands, "{}", dump::render(&ir));
+    Ok(())
+}
+
 /// `mandelbrot`'s escape loop, in the file's own code: every variable a
 /// symbol table reaches, guarded at each read and never narrowed.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -77,6 +301,47 @@ fn nbody_advances_in_a_loop() -> Result<(), String> {
     Ok(())
 }
 
+/// The element writes of `array_write` and `sieve`, a scalar by a long
+/// key to a packed array recorded packed, are inline, as php's
+/// `zend_jit_assign_dim` compiles them, with no layout guard, which php
+/// adds only to an array recorded hash
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`): the array is of
+/// either layout, which the write tests. They take no exit, since php's
+/// code calls its helpers where it cannot write in place, and the handler
+/// serves it here; the handler may throw, so they unwind (#3228).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_element_write_is_inline_and_takes_no_exit() -> Result<(), String> {
+    for fixture in [ARRAY_WRITE, SIEVE] {
+        let ir = golden(fixture)?;
+        assert_eq!(ir.entry.stop, Stop::Loop);
+        let writes: Vec<_> = (ir.ops.iter())
+            .filter_map(|op| match op {
+                Op::Line(line) if line.opcode == Opcode::AssignDim => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes.len(), 1, "{}", dump::render(&ir));
+        for line in writes {
+            assert_eq!(line.form, Form::Inline, "{}", dump::render(&ir));
+            assert!(line.exit.is_none() && line.unwind.is_some());
+            let Operand::Value(array) = line.op1 else {
+                return Err(format!("{}: a write to no array", fixture.name));
+            };
+            let types = ir.values[array.0 as usize].types;
+            assert!(types.meets(Types::PACKED) && types.meets(Types::HASH));
+        }
+        assert!(
+            !ir.guards
+                .iter()
+                .any(|guard| matches!(guard.check, Check::Layout { .. })),
+            "{}",
+            dump::render(&ir)
+        );
+    }
+    Ok(())
+}
+
 /// `spectralnorm`'s inner loop of `eval_A_times_u`, which inlines its
 /// call to `eval_A`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -85,6 +350,231 @@ fn spectralnorm_inlines_its_call() -> Result<(), String> {
     let ir = golden(SPECTRALNORM)?;
     assert_eq!(ir.entry.stop, Stop::Loop);
     assert!(ir.ops.iter().any(|op| matches!(op, Op::Enter { .. })));
+    Ok(())
+}
+
+/// An inline fetch takes its exits in the order php's
+/// `zend_jit_fetch_dim_read` takes them: the exit its code opens with,
+/// php's `ZEND_JIT_EXIT_TO_VM`, before the guards on the element it
+/// copies, as `spectralnorm`'s `$u[$j]` at `0012` takes php's `exit_9`
+/// before `exit_10` and `exit_11` at `0013`; and a layout guard leaves
+/// through an exit of its own, php's `ZEND_JIT_EXIT_PACKED_GUARD`,
+/// which no type guard's place shares (#3203).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_fetch_takes_its_exits_in_phps_order() -> Result<(), String> {
+    let ir = golden(SPECTRALNORM)?;
+    let fetch = (ir.ops.iter()).find_map(|op| match op {
+        Op::Line(line) if line.opcode == Opcode::FetchDimR && line.form == Form::Inline => {
+            Some(line)
+        }
+        _ => None,
+    });
+    let fetch = fetch.ok_or("no inline FETCH_DIM_R")?;
+    let own = fetch.exit.ok_or("the fetch has no exit of its own")?;
+    let at = (ir.ops.iter()).position(|op| matches!(op, Op::Line(line) if line == fetch));
+    let at = OpId(u32::try_from(at.ok_or("no fetch")?).map_err(|e| e.to_string())?);
+    let elements: Vec<ExitId> = (ir.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Within(at))
+        .map(|guard| guard.exit)
+        .collect();
+    assert_eq!(
+        elements,
+        [ExitId(own.0 + 1), ExitId(own.0 + 2)],
+        "{}",
+        dump::render(&ir)
+    );
+    let layouts: Vec<ExitId> = (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Layout { .. }))
+        .map(|guard| guard.exit)
+        .collect();
+    let shared = (ir.guards.iter())
+        .any(|guard| !matches!(guard.check, Check::Layout { .. }) && layouts.contains(&guard.exit));
+    assert!(!layouts.is_empty() && !shared, "{}", dump::render(&ir));
+    assert!(
+        layouts
+            .iter()
+            .all(|exit| ir.exits[usize::from(exit.0)].layout)
+    );
+    Ok(())
+}
+
+/// php's stack check (`zend_jit_stack_check`, #3203): a loop whose calls
+/// push frames holds the stack's room for them once, at its entry, its
+/// first exit, back to the interpreter at the loop's first opline, as
+/// php's trace for `$s += g($i)` takes `exit_0` `0009/----/0/VM`; a trace
+/// that does not loop holds it at each `INIT_*` instead, after the call's
+/// own exit, as `zend_jit_push_call_frame` follows `zend_jit_init_fcall`'s
+/// guard on the callee.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
+    let (mut recorded, _) = recording(
+        &IN_F,
+        "function g($x) { return $x + 1; }
+        function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += g($i); } return $s; }
+        echo f(10), \"\\n\";",
+    )?;
+    let rooms = |ir: &TraceIr| -> Vec<(GuardAt, u16)> {
+        (ir.guards.iter())
+            .filter(|guard| matches!(guard.check, Check::Room { .. }))
+            .map(|guard| (guard.at, guard.exit.0))
+            .collect()
+    };
+    let looping = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    assert_eq!(
+        rooms(&looping),
+        [(GuardAt::Entry, 0)],
+        "{}",
+        dump::render(&looping)
+    );
+    let first = looping.exits.first().ok_or("no exit")?;
+    assert_eq!(
+        (first.opline, first.grows, first.known.len()),
+        (Some(OplineIdx(9)), Grows::Never, 0)
+    );
+    recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
+    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let init = (linked.ops.iter())
+        .position(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::InitFcall))
+        .and_then(|at| u32::try_from(at).ok())
+        .map(OpId)
+        .ok_or("no INIT_FCALL")?;
+    let Some(Op::Line(line)) = linked.ops.get(init.index()) else {
+        return Err("no INIT_FCALL".to_owned());
+    };
+    let own = line.exit.ok_or("the INIT_FCALL has no exit of its own")?;
+    assert_eq!(
+        rooms(&linked),
+        [(GuardAt::Before(init), own.0 + 1)],
+        "{}",
+        dump::render(&linked)
+    );
+    Ok(())
+}
+
+/// A side trace enters with the types its parent's exit knew, an array's
+/// without its layout, and holds the layout at its first read by a long
+/// key, as php's holds `MAY_BE_PACKED_GUARD` (#3255's ruling, #3262).
+/// #3196's program: php's `side trace 1/6` takes `exit_0` at `0007`, the
+/// fetch's exit to the interpreter, then `exit_1` there, the layout
+/// guard's, then the element's two at `0008`, and holds nothing at entry.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_side_holds_an_arrays_layout_at_its_first_read() -> Result<(), String> {
+    use php_engine::tier::Sample;
+
+    use crate::record::{Entered, Event, Start, TraceRecord};
+    use crate::table::TraceId;
+
+    let (recorded, _) = recording(
+        &IN_F,
+        "function f($a, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { if ($i > 50) { $s += $a[$i]; } else { $s -= $a[$i]; } } return $s; }
+        echo f([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 10), \"\\n\";",
+    )?;
+    let f = recorded.record.root;
+    let of = |kind, packed| {
+        Some(Sample {
+            kind,
+            indirect: false,
+            reference: false,
+            packed,
+            class: None,
+        })
+    };
+    let op = |at: u32, op1, op2| Event::Op {
+        func: f,
+        opline: OplineIdx(at),
+        op1,
+        op2,
+        data: None,
+        branch: None,
+    };
+    let parent = TraceId::new(1).ok_or("no trace 1")?;
+    let side = TraceRecord {
+        start: Start::Side {
+            parent,
+            exit: ExitId(6),
+        },
+        root: f,
+        entered: [
+            ZvalType::Array,
+            ZvalType::Long,
+            ZvalType::Long,
+            ZvalType::Long,
+        ]
+        .into_iter()
+        .zip(0..)
+        .map(|(tag, var)| Entered { var, tag })
+        .collect(),
+        landed: Landed::Named,
+        events: vec![
+            op(7, of(ZvalType::Array, true), of(ZvalType::Long, false)),
+            op(8, of(ZvalType::Long, false), of(ZvalType::Long, false)),
+            op(9, None, None),
+            op(12, of(ZvalType::Long, false), None),
+        ],
+        stop: Stop::Link(parent),
+        link_at: Some((f, OplineIdx(13))),
+    };
+    let ir = build(&side, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let layouts: Vec<(GuardAt, u16)> = (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Layout { .. }))
+        .map(|guard| (guard.at, guard.exit.0))
+        .collect();
+    assert_eq!(
+        layouts,
+        [(GuardAt::Before(OpId(0)), 1)],
+        "{}",
+        dump::render(&ir)
+    );
+    let entry = (ir.guards.iter()).any(|guard| guard.at == GuardAt::Entry);
+    assert!(!entry, "{}", dump::render(&ir));
+    let first: Vec<(Option<u32>, Grows, bool)> = (ir.exits.iter().take(4))
+        .map(|exit| (exit.opline.map(|at| at.0), exit.grows, exit.layout))
+        .collect();
+    assert_eq!(
+        first,
+        [
+            (Some(7), Grows::Never, false),
+            (Some(7), Grows::Side, true),
+            (Some(8), Grows::Side, false),
+            (Some(8), Grows::Side, false),
+        ],
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
+/// A native's call returns what its declaration says, as php's trace
+/// TSSA types what a `DO_ICALL` writes by the function its record names
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`): `strcmp()` returns
+/// an `int`, so the `+=` that reads what it wrote holds no guard on it, as
+/// php's holds none (#3264).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_natives_call_returns_what_it_declares() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += strcmp(\"a\", \"b\"); } return $s; }
+        echo f(10), \"\\n\";",
+    )?;
+    let at = stepped(&ir, Opcode::DoIcall)?;
+    let Some(Op::Line(call)) = ir.ops.get(at.index()) else {
+        return Err("no DO_ICALL".to_owned());
+    };
+    let out = call.out.ok_or("the call keeps no result")?;
+    assert_eq!(
+        ir.values[out.0 as usize].types,
+        Types::LONG,
+        "{}",
+        dump::render(&ir)
+    );
+    let on_out = (ir.guards.iter()).any(|guard| {
+        matches!(guard.check, Check::Type { value, .. } | Check::Deref { value, .. } if value == out)
+    });
+    assert!(!on_out, "{}", dump::render(&ir));
     Ok(())
 }
 
@@ -586,7 +1076,14 @@ fn repeated(statement: &str, n: usize) -> String {
 /// generator holds its recorded type at, a cast to string of an int and
 /// a rope part or an element of an array written out take none of their own, a
 /// throw none at all, and an exit at an opline is new where the types the
-/// trace knows of the frame's slots differ from an earlier one's.
+/// trace knows of the frame's slots differ from an earlier one's. A
+/// jump on a condition its guard holds as `true` or `false` goes one way
+/// and takes no exit of its own, php's unconditional branch: `if (!$b)`
+/// takes its `BOOL_NOT`'s guard on `$b` and its `JMPZ`'s on what the
+/// `BOOL_NOT` wrote alone, and `$b || $i` its `JMPNZ_EX`'s guard on `$b`
+/// and none for its direction, the pinned php's two and three under
+/// `opcache.optimization_level=0`, so that its op arrays are this
+/// engine's (#3203).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
@@ -602,6 +1099,8 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
         ("$x = 5;", 1),
         ("$s += $i * 5;", 2),
         ("$x = $b && $i;", 4),
+        ("if (!$b) { $x = 1; }", 2),
+        ("$x = $b || $i;", 3),
         ("$x = $y;", 1),
     ] {
         let two = built(&IN_MAIN, &repeated(statement, 2))?;
@@ -613,6 +1112,30 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
             dump::render(&three)
         );
     }
+    Ok(())
+}
+
+/// A jump whose condition its guard holds as one kind goes one way, so
+/// `if (!$b)` three times in a loop of the file's own code leaves at the
+/// oplines php's `TRACE 1 exit info` lists, exit by exit, under
+/// `opcache.optimization_level=0`: the loop's test and its direction at
+/// `0017` and `0019`, then each statement's `BOOL_NOT` and `JMPZ` guards
+/// (`0007`, `0008`, `0010`, `0011`, `0013`, `0014`), the increment's at
+/// `0016`, with no exit for a `JMPZ`'s direction
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`, #3203). php's tenth,
+/// its interrupt test's at `0017`, is there because its code no longer
+/// uses the instruction pointer it entered with, its register allocator
+/// holding nothing (`:7214-7230`); here the loop takes the interrupt stub
+/// (#3277).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {
+    let ir = built(&IN_MAIN, &repeated("if (!$b) { $x = 1; }", 3))?;
+    let oplines: Vec<Option<u32>> = (ir.exits.iter())
+        .map(|exit| exit.opline.map(|at| at.0))
+        .collect();
+    let php = [17, 19, 7, 8, 10, 11, 13, 14, 16].map(Some);
+    assert_eq!(oplines, php, "{}", dump::render(&ir));
     Ok(())
 }
 

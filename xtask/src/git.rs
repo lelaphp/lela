@@ -12,7 +12,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 /// What a reading is stamped with: the scope's key
 /// ([`crate::key::Snapshot::key`]) and the commit it was taken at.
@@ -27,11 +27,19 @@ pub struct Stamp {
 /// not know. Seven is fixed, not git's own `--short`, which grows with the
 /// repository (eight since `d32ff307`) and would make one commit two
 /// stamps. A stamp is taken at every denial, so it spawns git once
-/// (`ls-files`) and not four times.
+/// (`ls-files`) and not four times. A repository with no commit yet has
+/// no `HEAD` to stamp with, and is refused in a sentence rather than in
+/// git's "Needed a single revision" (#3189).
 pub fn head_commit(root: &Path) -> Result<String> {
     match read_head(root) {
         Some(id) => Ok(id),
-        None => rev_parse(root, &["--short=7", "HEAD"]),
+        None => rev_parse(root, &["--short=7", "HEAD"]).map_err(|err| match git_dir(root) {
+            Some(_) if !has_ref(root, "HEAD") => anyhow!(
+                "{} has no commit yet; a reading is stamped with one",
+                root.display()
+            ),
+            _ => err,
+        }),
     }
 }
 
@@ -350,7 +358,7 @@ mod recorder {
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, PoisonError};
 
-    /// The questions asked of git in each directory [`asked`] listens at,
+    /// The questions asked of git in each directory `asked` listens at,
     /// or below it, each as its arguments.
     static ASKED: Mutex<BTreeMap<PathBuf, Vec<Vec<String>>>> = Mutex::new(BTreeMap::new());
 
@@ -375,6 +383,7 @@ mod recorder {
     /// (#2972). Each test lays a repository of its own, so its `root` is
     /// its own and no other test's questions are counted, from whichever
     /// thread they are asked (#2994).
+    #[cfg(tracked)]
     pub(crate) fn asked<T>(root: &Path, f: impl FnOnce() -> T) -> (T, Vec<Vec<String>>) {
         listening(|listeners| listeners.insert(root.to_path_buf(), Vec::new()));
         let out = f();
@@ -384,6 +393,7 @@ mod recorder {
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 pub(crate) use recorder::asked;
 
 fn utf8(stdout: Vec<u8>) -> Result<String> {
@@ -468,6 +478,22 @@ pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
+    /// A repository `git init` laid down and nothing committed has no
+    /// commit to stamp a reading with, and says so (#3189).
+    #[test]
+    fn a_repository_with_no_commit_is_refused_in_a_sentence() {
+        let dir = crate::scratch::Tree::new("git-unborn").unwrap();
+        super::git(&dir, &["init", "-q"], None).unwrap();
+        let refused = super::head_commit(&dir).unwrap_err();
+        assert_eq!(
+            format!("{refused:#}"),
+            format!(
+                "{} has no commit yet; a reading is stamped with one",
+                dir.display()
+            )
+        );
+    }
+
     /// Run by [`elsewhere_reads_the_repository_it_names_under_a_hooks_git_dir`]
     /// with `GIT_DIR` naming another repository, as a hook in a linked
     /// worktree runs an instrument; run by nothing else, it does nothing.

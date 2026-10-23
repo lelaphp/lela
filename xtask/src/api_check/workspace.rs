@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use toml::Value;
 
-use crate::layout;
+use crate::layout::{Layout, normalize};
 use crate::manifest::Manifest;
 
 /// One crate that exists, by its manifest name (`php_heap`, `ext/random`,
@@ -94,7 +94,7 @@ pub struct Crates {
 impl Crates {
     /// Scan `root` for the manifest's crates.
     pub fn scan(manifest: &Manifest, root: &Path) -> Result<Crates> {
-        let mut present = Vec::new();
+        let (mut present, layout) = (Vec::new(), manifest.layout());
         for row in &manifest.crates {
             let dir = root.join(row.path());
             let cargo = dir.join("Cargo.toml");
@@ -115,7 +115,7 @@ impl Crates {
                 == Some(true);
             present.push(Present {
                 name: row.name.clone(),
-                deps: deps(&table, &dir, root),
+                deps: deps(&table, &dir, root, &layout),
                 inherits_lints,
                 dir,
                 package,
@@ -147,7 +147,7 @@ impl Crates {
 
 /// The workspace dependencies of one `Cargo.toml`, of every kind, one
 /// entry per crate depended on: linked when any of its entries is.
-fn deps(table: &toml::Table, dir: &Path, root: &Path) -> Vec<Dep> {
+fn deps(table: &toml::Table, dir: &Path, root: &Path, layout: &Layout) -> Vec<Dep> {
     const KINDS: [(&str, bool); 3] = [
         ("dependencies", true),
         ("dev-dependencies", false),
@@ -167,7 +167,7 @@ fn deps(table: &toml::Table, dir: &Path, root: &Path) -> Vec<Dep> {
     let mut out: Vec<Dep> = Vec::new();
     for (section, linked) in sections {
         for (key, value) in section {
-            let Some(name) = dep_crate(key, value, dir, root) else {
+            let Some(name) = dep_crate(key, value, dir, root, layout) else {
                 continue;
             };
             let alias = key.replace('-', "_");
@@ -185,19 +185,19 @@ fn deps(table: &toml::Table, dir: &Path, root: &Path) -> Vec<Dep> {
 }
 
 /// The manifest crate one dependency entry names: by its `path` when it
-/// has one, else by its package name. An entry that names neither is not
-/// a workspace crate.
-fn dep_crate(key: &str, value: &Value, dir: &Path, root: &Path) -> Option<String> {
+/// has one, else by its package name, as `layout` reads either. An entry
+/// that names neither is not a workspace crate.
+fn dep_crate(key: &str, value: &Value, dir: &Path, root: &Path, layout: &Layout) -> Option<String> {
     let entry = value.as_table()?;
     if let Some(path) = entry.get("path").and_then(Value::as_str) {
-        let target = layout::normalize(&dir.join(path));
-        let rel = target.strip_prefix(layout::normalize(root)).ok()?;
-        return layout::name_of_path(rel);
+        let target = normalize(&dir.join(path));
+        let rel = target.strip_prefix(normalize(root)).ok()?;
+        return layout.name_of_path(rel);
     }
     let package = entry
         .get("package")
         .and_then(Value::as_str)
         .unwrap_or(key)
         .replace('-', "_");
-    layout::name_of_package(&package)
+    layout.name_of_package(&package)
 }

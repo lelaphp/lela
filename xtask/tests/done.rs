@@ -6,12 +6,13 @@
 //! beside them; here a reading is
 //! written by hand into the store, since what is under test is how `done`
 //! reads it, not how it was measured.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 
 use xtask::divergence::Registry;
 use xtask::done::Base;
-use xtask::done::{self, FRESH, Verdict};
+use xtask::done::{self, Verdict};
 use xtask::manifest::Manifest;
 use xtask::oracle::Promise;
 use xtask::reading::{Reading, Status, Store, UNDER_RECIPE};
@@ -31,12 +32,13 @@ use common::run::{Ran, Run, xtask};
 use common::tracker::{Tracker, issue};
 
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
-/// change: [`FRESH`] less `port-map`, which is asked of the crate
+/// change: the manifest's `[[owed]]` instruments less `port-map`, which is
+/// asked of the crate
 /// `api.lock` lives with and of no other (§4.5 condition 1, #148), less
 /// `miri`, asked of `php_heap` alone (#2416), and
 /// with `crosscheck`, asked of a default extension (#269) at both its
 /// scopes, the crate's name and `ext/<name>/ri` (#361). That this is
-/// [`FRESH`] less those two rows is asserted in
+/// the rows less those two is asserted in
 /// `the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is`.
 const ASKED: [&str; 8] = [
     "clippy",
@@ -166,7 +168,7 @@ fn fresh(root: &Path, instrument: &str, scope: &str) -> Reading {
         .unwrap(),
     };
     if UNDER_RECIPE.contains(&instrument) {
-        reading = reading.under(&manifest.pin);
+        reading = reading.under(manifest.pin().unwrap());
     }
     reading.status = Status::Pass;
     reading.message = format!("{scope}: measured");
@@ -216,6 +218,11 @@ fn unrun(scope: &str) -> impl Fn(&String) -> bool {
     move |line| line.starts_with(&head)
 }
 
+/// The crate directories of the manifest at `root`.
+fn layout(root: &Path) -> xtask::manifest::Layout {
+    xtask::manifest::Manifest::load(root).unwrap().layout()
+}
+
 /// A run of `scope` holding one test at `verdict`, or none where it is
 /// empty, kept at `at`'s engine tree, the tree now where `at` is `None`,
 /// as `xtask phpt` keeps one.
@@ -227,12 +234,17 @@ fn keep_run(root: &Path, at: Option<&str>, scope: &str, verdict: &str) {
         }
         None => std::sync::Arc::new(xtask::key::Snapshot::disk(root).unwrap()),
     };
-    let file = xtask::phpt::kept_run(&snapshot, scope).unwrap();
+    let file = xtask::phpt::kept_run(&snapshot, &layout(root), scope).unwrap();
     let mut verdicts = serde_json::Map::new();
     if !verdict.is_empty() {
         verdicts.insert(format!("phpt:php-src/{scope}/tests/a.phpt"), verdict.into());
     }
-    let recipe = Manifest::load(root).unwrap().pin.digest().to_owned();
+    let recipe = Manifest::load(root)
+        .unwrap()
+        .pin()
+        .unwrap()
+        .digest()
+        .to_owned();
     let run = serde_json::json!({"commit": "0", "corpus": "c", "engine": "e", "recipe": recipe, "verdicts": verdicts});
     std::fs::create_dir_all(file.parent().unwrap()).unwrap();
     std::fs::write(&file, run.to_string()).unwrap();
@@ -316,8 +328,9 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
 /// edit of `api.lock` alone stales the reading and the condition says so.
 #[test]
 fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is() {
-    let asked_of_every_other_crate: Vec<&str> = FRESH
-        .into_iter()
+    let manifest = Manifest::load(workspace()).unwrap();
+    let asked_of_every_other_crate: Vec<&str> = (manifest.owed.iter())
+        .map(|row| row.instrument.name())
         .filter(|i| !matches!(*i, "port-map" | "miri"))
         .collect();
     assert_eq!(asked_of_every_other_crate, ASKED);
@@ -643,9 +656,16 @@ fn an_instrument_named_not_run_is_a_note_and_never_a_silent_pass() {
     let out = xtask(&unchanged, &args).ok();
     assert!(out.contains("no touched crate is asked for one"), "{out}");
 
-    // What `--not-run` names is an instrument condition 1 knows.
+    // What `--not-run` names is an instrument an `[[owed]]` row names
+    // (#3206), and the refusal names the rows' instruments.
     let ran = xtask(&unchanged, &["done", "--not-run", "oracle"]);
-    assert_eq!(ran.code(), 2, "{ran}");
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(
+        ran.stderr
+            .contains("--not-run oracle: no [[owed]] row names it")
+            && ran.stderr.contains("the rows name clippy, test, witness"),
+        "{ran}"
+    );
 }
 
 #[test]
@@ -740,7 +760,7 @@ fn a_reading_through_the_constructor_is_fresh_for_its_scope_and_stale_after_one_
             .unwrap()
         };
         if UNDER_RECIPE.contains(&instrument) {
-            reading = reading.under(&manifest.pin);
+            reading = reading.under(manifest.pin().unwrap());
         }
         reading.status = Status::Pass;
         reading.message = "measured".into();
@@ -928,6 +948,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
     }
     let kept = xtask::phpt::kept_run(
         &xtask::key::Snapshot::commit(&root, &Repo::at(&root).git(&["rev-parse", "HEAD"])).unwrap(),
+        &layout(&root),
         "ext/pcre",
     )
     .unwrap();
@@ -955,7 +976,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
 #[test]
 fn an_extension_with_no_tests_of_its_own_is_met_with_no_run_kept() {
     let manifest = Manifest::load(workspace()).unwrap();
-    let tree = manifest.pin.source.tree();
+    let tree = manifest.pin().unwrap().source.tree();
     if Promise::Tree.or_skip(tree).unwrap().is_none() {
         return;
     }
@@ -1493,6 +1514,7 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
 /// for its absence (#2477).
 #[test]
 fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
+    let manifest = Manifest::load(workspace()).unwrap();
     let text = read(".github/workflows/harness.yml");
     let oracle = &text[text.find("\n  oracle:\n").unwrap()..text.find("\n  done:\n").unwrap()];
     assert!(
@@ -1503,7 +1525,7 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
         .lines()
         .filter_map(|l| l.trim().strip_prefix("- run: cargo xtask "))
         .filter_map(|l| l.split_whitespace().next())
-        .filter(|i| FRESH.contains(i))
+        .filter(|i| manifest.owing(i).is_some())
         .collect();
     assert_eq!(
         runs,
@@ -2092,7 +2114,11 @@ fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not(
         reading
     };
     record_asked(&store, &root, "ext/pcre");
-    let here = xtask::phpt::kept_run(&xtask::key::Snapshot::disk(&root).unwrap(), "ext/pcre");
+    let here = xtask::phpt::kept_run(
+        &xtask::key::Snapshot::disk(&root).unwrap(),
+        &layout(&root),
+        "ext/pcre",
+    );
     std::fs::remove_file(here.unwrap()).unwrap();
 
     // The corpus could not run at all, and nothing else is unmet: the

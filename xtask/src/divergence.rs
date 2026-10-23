@@ -422,6 +422,15 @@ pub(crate) fn named_ids(text: &str) -> Result<BTreeSet<String>> {
 mod tests {
     use super::named_ids;
 
+    /// A workspace with no registry, a repository that runs no php, has no
+    /// row, so `done` and `status` read it rather than stop (#3181).
+    #[test]
+    fn a_workspace_without_the_registry_has_no_row() {
+        let root = crate::scratch::Tree::new("divergence-none").unwrap();
+        let registry = super::Registry::load(&root).unwrap();
+        assert!(registry.rows().is_empty());
+    }
+
     #[test]
     fn an_older_registrys_ids_are_read_whatever_its_kinds() {
         let old = r#"
@@ -441,10 +450,12 @@ covers = ["php-ub:other-site"]
 }
 
 impl Registry {
-    /// Load `docs/divergence.toml` from the workspace root.
+    /// Load `docs/divergence.toml` from the workspace root; a workspace
+    /// without the file has no row, so nothing it measures is an accepted
+    /// divergence.
     pub fn load(root: &Path) -> Result<Registry> {
         let path = root.join(FILE);
-        let text = crate::read(&path)?;
+        let text = crate::read_if(&path)?.unwrap_or_default();
         let mut registry = Registry::parse(&text).with_context(|| format!("{}", path.display()))?;
         registry.path = Some(path);
         Ok(registry)

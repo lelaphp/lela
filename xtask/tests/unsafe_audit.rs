@@ -1,9 +1,7 @@
 //! `xtask unsafe-audit` over the tracked workspace (design §4.1).
 
-use std::path::Path;
-
 use xtask::manifest::Manifest;
-use xtask::reading::Status;
+use xtask::reading::{Outcome, Status};
 use xtask::unsafe_audit;
 
 mod common {
@@ -11,18 +9,19 @@ mod common {
 }
 use common::repo::Repo;
 
-fn workspace() -> &'static Path {
-    xtask::package_dir().parent().unwrap()
-}
-
 /// The tests whose subject is the tracked workspace itself: each reads the
 /// `seams.toml`, `oracle.toml`, registry or sources standing in the
 /// workspace, so a person's edit there is what may turn one red (#3091).
 /// Every other test here judges by a manifest it builds, or by a
 /// scratch's byte-for-byte copy of the tracked one where the binary's
 /// hook or `permit` refuses any other (`built.rs`).
+#[cfg(tracked)]
 mod tracked {
     use super::*;
+
+    fn workspace() -> &'static std::path::Path {
+        xtask::package_dir().parent().unwrap()
+    }
 
     #[test]
     fn the_tracked_workspace_has_no_unsafe_outside_the_homes() {
@@ -109,4 +108,35 @@ mod tracked {
             phpdbg.message
         );
     }
+}
+
+/// A manifest without `unsafe.homes` names no home, so nothing is
+/// audited: a skip per crate naming the rule, which the run meets (#3182).
+/// The crate's `unsafe` outside any home would fail it under the rule.
+#[test]
+fn a_manifest_without_the_rule_is_a_skip_per_crate_naming_it() {
+    let tree = xtask::scratch::Tree::new("unsafe-audit-no-rule").unwrap();
+    let repo = Repo::init(&tree);
+    repo.write(
+        "crates/php_heap/Cargo.toml",
+        "[package]\nname = \"php_heap\"\n",
+    );
+    repo.write(
+        "crates/php_heap/src/lib.rs",
+        "pub fn f() -> i32 {\n    unsafe { 0 }\n}\n",
+    );
+    repo.commit("a crate");
+    let manifest = Manifest::of([xtask::manifest::Crate::named("php_heap")]);
+    let readings = unsafe_audit::run(&tree, &manifest).unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert_eq!(reading.rule, "unsafe.homes");
+    assert!(
+        reading.message.contains("no rule unsafe.homes"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(Outcome::of(&readings), Outcome::Met);
 }

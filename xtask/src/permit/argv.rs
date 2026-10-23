@@ -49,12 +49,16 @@ pub(super) struct Argv {
 pub(super) enum Move {
     /// It runs there: `env -C`, git's `-C`, `patch -d`.
     Into(String),
-    /// It reaches there besides: `GIT_DIR` and `GIT_WORK_TREE`, prefixed
-    /// or assigned by the line, git's `--git-dir` and `--work-tree`, the
-    /// target directory of `cp`, `mv`, `install` or `ln`, and the
-    /// directory of each operand of `ln`, a link through which a later
-    /// write lands there.
+    /// It reaches there besides: `GIT_WORK_TREE`, prefixed or assigned by
+    /// the line, git's `--work-tree`, the target directory of `cp`, `mv`,
+    /// `install` or `ln`, and the directory of each operand of `ln`, a
+    /// link through which a later write lands there.
     Reaches(String),
+    /// git's repository is there: `GIT_DIR`, prefixed or assigned by the
+    /// line, and git's `--git-dir`. Every reader takes it as a place the
+    /// program reaches; the one asking which repository git reads takes it
+    /// in place of where the program runs (#3271).
+    GitDir(String),
     /// Somewhere its words do not say: `find -execdir`, or a variable the
     /// line did not assign.
     Unsaid,
@@ -64,10 +68,13 @@ pub(super) enum Move {
 /// list the command stands in (#2995).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum Joint {
-    /// `;`, `||`, a newline, the line's edge or a subshell's close: what
+    /// `;`, a newline, the line's edge or a subshell's close: what
     /// follows may run whether this succeeded or not.
     #[default]
     Then,
+    /// `||`: what follows runs only where this failed, and begins a chain
+    /// as `;` does (#3257).
+    Or,
     /// `&&`: what follows runs only where this succeeded.
     And,
     /// `|` or `|&`: both sides run at once, each in a shell of its own.
@@ -392,6 +399,7 @@ impl Lexer {
                             self.eat('&');
                             Joint::Pipe
                         }
+                        '|' => Joint::Or,
                         _ => Joint::Then,
                     };
                     self.end(&mut command, after);
@@ -655,10 +663,10 @@ impl Lexer {
         self.assigned.read(&words);
         let empty = words.is_empty() && !redirected;
         let Some(argv) = Argv::running(words, &self.assigned) else {
-            let begins =
-                !self.commands.is_empty() && matches!(self.before, Joint::Then | Joint::Background);
+            let begins = !self.commands.is_empty()
+                && matches!(self.before, Joint::Then | Joint::Or | Joint::Background);
             self.before = match after {
-                Joint::Then if empty => self.before,
+                Joint::Then | Joint::Or if empty => self.before,
                 Joint::And | Joint::Pipe if !empty && begins => Joint::Then,
                 _ => after,
             };
@@ -943,7 +951,8 @@ fn is_name(name: &str) -> bool {
 }
 
 /// The options of the programs named that move one into a directory
-/// ([`Move::Into`]), name one it reaches besides ([`Move::Reaches`]), or
+/// ([`Move::Into`]), name one it reaches besides ([`Move::Reaches`]) or
+/// its repository ([`Move::GitDir`]), or
 /// take a value and move nothing (`None`), each as [`valued`] reads it;
 /// git's stand before its subcommand, so a `-C` after it is the
 /// subcommand's own (`git commit -C HEAD`).
@@ -951,7 +960,7 @@ const MOVING: [(&[&str], &str, Moving); 12] = [
     (&["env"], "-C", Some(Move::Into)),
     (&["env"], "--chdir", Some(Move::Into)),
     (&["git"], "-C", Some(Move::Into)),
-    (&["git"], "--git-dir", Some(Move::Reaches)),
+    (&["git"], "--git-dir", Some(Move::GitDir)),
     (&["git"], "--work-tree", Some(Move::Reaches)),
     (&["git"], "-c", None),
     (&["git"], "--namespace", None),
@@ -1028,11 +1037,15 @@ impl Move {
             .map_or(Move::Unsaid, make)
     }
 
-    /// The tree git reaches by an assignment of `value` to `name`, where
-    /// it is `GIT_DIR` or `GIT_WORK_TREE`.
+    /// The tree git reaches by an assignment of `value` to `name`: its
+    /// repository for `GIT_DIR`, a place it reaches for `GIT_WORK_TREE`.
     fn git_tree(name: &str, value: &str, assigned: &Assigned) -> Option<Move> {
-        let tree = matches!(name, "GIT_DIR" | "GIT_WORK_TREE");
-        tree.then(|| Move::to(value, Move::Reaches, assigned))
+        let make: fn(String) -> Move = match name {
+            "GIT_DIR" => Move::GitDir,
+            "GIT_WORK_TREE" => Move::Reaches,
+            _ => return None,
+        };
+        Some(Move::to(value, make, assigned))
     }
 }
 
@@ -1614,14 +1627,15 @@ mod tests {
         let moves = |line: &str| -> Vec<Vec<Move>> {
             commands(line).into_iter().map(|argv| argv.moves).collect()
         };
-        let (into, reaches) = (
+        let (into, reaches, git_dir) = (
             |d: &str| Move::Into(d.into()),
             |d: &str| Move::Reaches(d.into()),
+            |d: &str| Move::GitDir(d.into()),
         );
         assert_eq!(moves("env -C /wt git add x"), [[into("/wt")]]);
         assert_eq!(
             moves("env --chdir=/wt A=1 git -C sub --git-dir=.git add -C x"),
-            [[into("/wt"), into("sub"), reaches(".git")]]
+            [[into("/wt"), into("sub"), git_dir(".git")]]
         );
         assert_eq!(
             moves("W=/a && git -c x=y -C $W -C sub commit -C HEAD"),
@@ -1631,7 +1645,7 @@ mod tests {
         assert_eq!(moves("GIT_DIR+=/x git status"), [[Move::Unsaid]]);
         assert_eq!(
             moves("export GIT_DIR=/wt/.git; git status"),
-            [vec![], vec![reaches("/wt/.git")]]
+            [vec![], vec![git_dir("/wt/.git")]]
         );
         assert_eq!(
             moves("patch -d /wt -p1 < f; cp -t /wt a; ln -sf -- /m/seams.toml ."),
@@ -1657,7 +1671,7 @@ mod tests {
     /// substitution's are joined as the separator before them.
     #[test]
     fn each_command_is_joined_by_the_separators_either_side_of_it() {
-        use Joint::{And, Background, Pipe, Then};
+        use Joint::{And, Background, Or, Pipe, Then};
         let joints = |line: &str| -> Vec<(Joint, Joint)> {
             let line = Line::read(line);
             line.joints().iter().map(|j| (j.before, j.after)).collect()
@@ -1666,8 +1680,8 @@ mod tests {
             joints("a && b || c | d & e; f\ng"),
             [
                 (Then, And),
-                (And, Then),
-                (Then, Pipe),
+                (And, Or),
+                (Or, Pipe),
                 (Pipe, Background),
                 (Background, Then),
                 (Then, Then),

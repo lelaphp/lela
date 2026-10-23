@@ -54,31 +54,26 @@ fn manifest() -> Manifest {
 /// manifest.
 fn manifest_of(rows: impl IntoIterator<Item = Crate>, tree: &Path) -> Manifest {
     let mut manifest = Manifest::of(rows);
-    manifest.pin = self::manifest()
-        .pin
-        .on_this_machine(Some(tree.to_path_buf()));
+    manifest.pin = (self::manifest().pin).map(|pin| pin.on_this_machine(Some(tree.to_path_buf())));
     manifest
 }
 
 /// The tracked manifest with its tree the one given.
 fn tracked_over_fixture(tree: &Path) -> Manifest {
     let mut manifest = manifest();
-    manifest.pin = manifest
-        .pin
-        .clone()
-        .on_this_machine(Some(tree.to_path_buf()));
+    manifest.pin = (manifest.pin.clone()).map(|pin| pin.on_this_machine(Some(tree.to_path_buf())));
     manifest
 }
 
 /// `Subset::resolve` over the tree the manifest's pin answers.
 fn resolve(manifest: &Manifest, name: &str) -> Result<Subset> {
-    Subset::resolve(manifest, &manifest.pin.source.tree()?, name)
+    Subset::resolve(manifest, &manifest.pin().unwrap().source.tree()?, name)
 }
 
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
-    let pin = manifest().pin;
+    let pin = manifest().pin.unwrap();
     Promise::Oracle
         .or_skip(pin.oracle.file().map(Path::to_path_buf))
         .unwrap()
@@ -87,7 +82,9 @@ fn oracle() -> Option<PathBuf> {
 /// The tracked pin's php-src tree, when it is on this machine; a failure
 /// where this machine promised the tree (#38).
 fn source() -> Option<PathBuf> {
-    Promise::Tree.or_skip(manifest().pin.source.tree()).unwrap()
+    Promise::Tree
+        .or_skip(manifest().pin().unwrap().source.tree())
+        .unwrap()
 }
 
 /// A subset of one directory of this test's own, standing where
@@ -113,7 +110,7 @@ fn subset(name: &str, tests: &[(&str, &str)]) -> (Tree, Subset) {
 fn run(subset: &Subset, registry: &Registry) -> Tally {
     let binary = oracle().unwrap();
     let manifest = manifest();
-    let oracle = manifest.pin.oracle();
+    let oracle = manifest.pin().unwrap().oracle();
     let locks = Tree::new("phpt-locks").unwrap();
     let runner = Runner::Engine(binary);
     let under = Under::of(&runner, locks.path());
@@ -288,8 +285,8 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
     );
     let binary = oracle().unwrap();
     let manifest = manifest();
-    assert_eq!(manifest.pin.digests_asserted(), 0);
-    let oracle = manifest.pin.oracle();
+    assert_eq!(manifest.pin().unwrap().digests_asserted(), 0);
+    let oracle = manifest.pin().unwrap().oracle();
     let locks = Tree::new("phpt-locks").unwrap();
     let runner = Runner::Engine(binary);
     let under = Under::of(&runner, locks.path());
@@ -301,7 +298,7 @@ fn the_digest_is_asserted_once_over_a_run_of_three_tests() {
         tally.judged.iter().all(|j| j.judgement == Judgement::Pass),
         "{tally:#?}"
     );
-    assert_eq!(manifest.pin.digests_asserted(), 1);
+    assert_eq!(manifest.pin().unwrap().digests_asserted(), 1);
 }
 
 #[test]
@@ -375,8 +372,8 @@ fn a_program_past_the_recipes_limit_fails_its_test_and_the_lane_goes_on() {
     fs::write(tree.join("c.phpt"), echo(3)).unwrap();
     let binary = oracle().unwrap();
     let mut manifest = manifest();
-    manifest.pin.recipe.limits.timeout_s = LIMIT;
-    let oracle = manifest.pin.oracle();
+    manifest.pin.as_mut().unwrap().recipe.limits.timeout_s = LIMIT;
+    let oracle = manifest.pin().unwrap().oracle();
     let locks = Tree::new("phpt-locks").unwrap();
     let runner = Runner::Engine(binary);
     let under = Under::of(&runner, locks.path());
@@ -526,7 +523,7 @@ fn a_program_the_compiler_refused_is_unread_and_names_the_construct() {
 /// the alternative syntax php runs and no test of Zend/tests writes.
 #[test]
 fn a_refusal_of_the_compiler_is_read_as_unread() {
-    let pin = manifest().pin;
+    let pin = manifest().pin.unwrap();
     let fixture = crate::package_dir().join(FIXTURE);
     let phpt = file::Phpt::load(&fixture).unwrap();
     let program = phpt.section("FILE").expect("the fixture has a --FILE--");
@@ -600,7 +597,7 @@ fn an_xfail_test_that_passes_is_warned_alike_by_both_runners() {
     let (tree, subset) = subset("xpass", &[("xpass.phpt", test)]);
     let ours = only(&run(&subset, &registry(""))).0;
     fs::copy(source.join("run-tests.php"), tree.join("run-tests.php")).unwrap();
-    let pin = manifest().pin;
+    let pin = manifest().pin.unwrap();
     let said = upstream::upstream(pin.oracle().pin(), &tree, &["xpass.phpt".into()]).unwrap();
     let theirs = upstream::verdict(&said, Path::new("xpass.phpt"));
     assert_eq!((ours, theirs), (Judgement::Warn, Some("WARN")));
@@ -627,7 +624,7 @@ fn a_green_message_accounts_for_every_test_it_is_over() {
         &subset,
         false,
         source,
-        &manifest(),
+        &manifest().pin().unwrap().source.tag,
     );
     let counts = "2 passed, 1 skipped, 1 xfailed, 1 warned, 1 diverged, 1 unread, 1 unsent";
     assert_eq!(message, format!("ext/fixture: {counts} of 8 tests"));
@@ -714,7 +711,7 @@ fn a_post_test_runs_through_the_cgi_host() {
 /// pins.
 #[test]
 fn a_test_of_sapi_fpm_finds_the_process_manager() {
-    if oracle().is_none() || manifest().pin.sapi.fpm.is_none() {
+    if oracle().is_none() || manifest().pin().unwrap().sapi.fpm.is_none() {
         return;
     }
     let tree = Tree::new("phpt-judge-fpm").unwrap();
@@ -756,7 +753,7 @@ fn a_test_of_sapi_fpm_finds_the_process_manager() {
 /// stands in for the engine, so the phpdbg is the one `[sapi]` pins.
 #[test]
 fn a_phpdbg_test_runs_through_the_debugger() {
-    if oracle().is_none() || manifest().pin.sapi.phpdbg.is_none() {
+    if oracle().is_none() || manifest().pin().unwrap().sapi.phpdbg.is_none() {
         return;
     }
     let (_tree, subset) = fixture_subset("phpdbg");
@@ -996,7 +993,7 @@ fn a_subset_resolves_under_the_tree_the_pin_was_handed_ahead_of_the_pins_path() 
     // maintainer's tree or nothing, is not consulted while it is there.
     let tree = fixture_tree();
     let manifest = manifest_of([Crate::named("ext/pcre")], &tree);
-    assert_eq!(manifest.pin.source.tree().unwrap(), *tree);
+    assert_eq!(manifest.pin().unwrap().source.tree().unwrap(), *tree);
     let corpus = resolve(&manifest, "Zend/tests").unwrap();
     assert_eq!(corpus.scope, "Zend/tests");
     assert_eq!(corpus.dirs[0].dir, tree.join("Zend/tests"));
@@ -1231,13 +1228,13 @@ fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
     // the manifest has and the tree holds.
     subset.scope = "ext/pcre".to_owned();
     let mut manifest = manifest();
-    manifest.pin.oracle.path = PathBuf::from("/nowhere/php");
+    manifest.pin.as_mut().unwrap().oracle.path = PathBuf::from("/nowhere/php");
     let engine = Runner::Engine(std::env::current_exe().unwrap());
     let why = format!(
         "the pinned php is not at {}",
-        manifest.pin.oracle.path.display()
+        manifest.pin().unwrap().oracle.path.display()
     );
-    let oracle = manifest.pin.oracle();
+    let oracle = manifest.pin().unwrap().oracle();
     let locks = Tree::new("phpt-locks").unwrap();
     let under = Under {
         oracle_absent: Some(&why),
@@ -1248,8 +1245,8 @@ fn a_pinned_php_not_on_this_machine_runs_nothing_and_asserts_no_digest() {
         .0;
     assert!(tally.judged.is_empty(), "{tally:#?}");
     assert_eq!(tally.found, 1);
-    assert_eq!(manifest.pin.digests_asserted(), 0);
-    let source = manifest.pin.source.tree().unwrap_or_default();
+    assert_eq!(manifest.pin().unwrap().digests_asserted(), 0);
+    let source = manifest.pin().unwrap().source.tree().unwrap_or_default();
     let reading = reading(
         &tally,
         &crate::key::Snapshot::disk(&workspace()).unwrap(),
@@ -1679,7 +1676,7 @@ fn a_reading_counts_the_files_its_subset_holds_beside_the_tests_a_redirect_ran()
     let locks = Tree::new("phpt-locks").unwrap();
     let runner = Runner::Engine(binary);
     let under = Under::of(&runner, locks.path());
-    let source = manifest.pin.source.tree().unwrap_or_default();
+    let source = manifest.pin().unwrap().source.tree().unwrap_or_default();
     let reading = reading(
         &tally,
         &crate::key::Snapshot::disk(&workspace()).unwrap(),
@@ -1701,8 +1698,8 @@ fn a_reading_counts_the_files_its_subset_holds_beside_the_tests_a_redirect_ran()
 fn run_on(subset: &Subset, jobs: usize, limit_s: u64) -> Tally {
     let binary = oracle().unwrap();
     let mut manifest = manifest();
-    manifest.pin.recipe.limits.timeout_s = limit_s;
-    let oracle = manifest.pin.oracle();
+    manifest.pin.as_mut().unwrap().recipe.limits.timeout_s = limit_s;
+    let oracle = manifest.pin().unwrap().oracle();
     let locks = Tree::new("phpt-locks").unwrap();
     let runner = Runner::Engine(binary);
     let under = Under {
@@ -2037,11 +2034,11 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
     };
     assert!(server::needs(&subset));
     let mut down = manifest();
-    down.pin.recipe.env.insert(
+    down.pin.as_mut().unwrap().recipe.env.insert(
         "PDO_MYSQL_TEST_DSN".to_owned(),
         "mysql:host=127.0.0.1;port=1;dbname=test".to_owned(),
     );
-    let refused = server::version(&down.pin.oracle(), &subset.scope).unwrap_err();
+    let refused = server::version(&down.pin().unwrap().oracle(), &subset.scope).unwrap_err();
     assert!(
         refused.to_string().contains("refused, not skipped"),
         "{refused:#}"
@@ -2050,10 +2047,10 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
     let runner = Runner::Engine(binary);
     let locks = Tree::new("phpt-locks").unwrap();
     let under = Under::of(&runner, locks.path());
-    let unserved = run_subset(&down.pin.oracle(), &registry(""), &subset, under);
+    let unserved = run_subset(&down.pin().unwrap().oracle(), &registry(""), &subset, under);
     assert!(unserved.is_err(), "{unserved:#?}");
     let manifest = manifest();
-    let oracle = manifest.pin.oracle();
+    let oracle = manifest.pin().unwrap().oracle();
     let Ok(version) = server::version(&oracle, &subset.scope) else {
         return;
     };
@@ -2086,7 +2083,7 @@ fn a_lane_whose_second_subset_is_refused_still_writes_the_first_subsets_reading(
         [Crate::named("ext/hollow"), Crate::named("ext/pdo_mysql")],
         &tree,
     );
-    manifest.pin.recipe.env.insert(
+    manifest.pin.as_mut().unwrap().recipe.env.insert(
         "PDO_MYSQL_TEST_DSN".to_owned(),
         "mysql:host=127.0.0.1;port=1;dbname=test".to_owned(),
     );
@@ -2158,7 +2155,7 @@ fn a_mysql_subset_runs_in_a_database_of_its_own() {
         return;
     }
     let manifest = manifest();
-    let oracle = manifest.pin.oracle();
+    let oracle = manifest.pin().unwrap().oracle();
     if server::version(&oracle, "ext/mysqli").is_err() {
         eprintln!("skipped: the MySQL server the recipe names does not answer");
         return;
@@ -2188,7 +2185,7 @@ fn a_mysql_subset_runs_in_a_database_of_its_own() {
     assert_eq!(made.exit, crate::oracle::Ended::Status(0), "{made:?}");
     let name = {
         let database = server::Database::made(&oracle, "ext/mysqli").unwrap();
-        let mut pin = manifest.pin.clone();
+        let mut pin = manifest.pin().unwrap().clone();
         database.lay_over(&mut pin);
         let beside = oracle.beside(&pin);
         let seen = said(&beside);
@@ -2219,7 +2216,7 @@ fn an_expectregex_is_matched_as_pcre_matches_it() {
         return;
     }
     let manifest = manifest();
-    let oracle = manifest.pin.oracle();
+    let oracle = manifest.pin().unwrap().oracle();
     let leak = Expectation::Pattern("ok((?!memory leaks detected).)*".into());
     assert!(leak.met(b"ok").is_err(), "the RE2 engine took a lookahead");
     assert!(leak.met_under(&oracle, b"ok").unwrap());
@@ -2292,7 +2289,7 @@ fn held_to_fixture(judged: &[(&str, Judgement)], target: &Target, registry: &Reg
         (&tally, "ext/fixture"),
         (Some(target), false, None),
         registry,
-        (&Runner::Linked, &manifest().pin),
+        (&Runner::Linked, manifest().pin().unwrap()),
     )
     .unwrap();
     reading

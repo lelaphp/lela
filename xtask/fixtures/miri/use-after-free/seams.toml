@@ -16,3 +16,8 @@ bindings = 1000
 [[crate]]
 name = "php_heap"
 budget = 1000
+
+# What a run with no crate named takes (#3206).
+[[owed]]
+instrument = "miri"
+crates = ["php_heap"]

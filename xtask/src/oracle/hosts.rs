@@ -113,6 +113,7 @@ mod tests {
     /// Each host is a crate of the workspace, and its package and its
     /// binary are what the crate's Cargo.toml declares. A
     /// `sapi/*` crate the lane hands no test to is not asked to be one.
+    #[cfg(tracked)]
     #[test]
     fn every_host_is_a_sapi_crate_of_the_workspace_as_its_cargo_toml_declares_it() {
         let root = crate::package_dir().join("..");

@@ -184,9 +184,13 @@ impl<'a> Dump<'a> {
                 }
                 writeln!(text)
             }
-            Op::InitCall { frame, target } => {
-                let target = target.map_or("native".to_owned(), func);
-                writeln!(text, "     f{} init {target}", frame.0)
+            Op::InitCall {
+                frame,
+                callee,
+                began,
+            } => {
+                let target = callee.user().map_or("native".to_owned(), func);
+                writeln!(text, "     f{} {} {target}", frame.0, began.word())
             }
             Op::Enter { frame } => {
                 let named = self
@@ -240,6 +244,9 @@ impl<'a> Dump<'a> {
         }
         if exit.grows == Grows::Never {
             write!(text, " to vm")?;
+        }
+        if exit.layout {
+            write!(text, " packed guard")?;
         }
         if let Some(link) = exit.link {
             write!(text, " link {}", link.get())?;
@@ -334,5 +341,7 @@ fn check(check: Check) -> String {
             format!("direction {}", if taken { "taken" } else { "fell" })
         }
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
+        Check::Arm { opline } => format!("arm {:04}", opline.0),
+        Check::Room { bytes } => format!("room {bytes}"),
     }
 }

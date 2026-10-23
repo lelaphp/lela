@@ -400,6 +400,7 @@ fn a_reading_is_written_beside_its_file_and_renamed_over_it() {
 /// A reading is written under the reading's version, `v = 2`, with the
 /// scope's key spelled `key` (harness-design.md §4.2, #1719): in the
 /// scope's file, its index entry and its line of the log alike.
+#[cfg(tracked)]
 #[test]
 fn a_reading_is_written_under_its_version_with_its_key() {
     let dir = scratch("v2");

@@ -12,7 +12,7 @@ use anyhow::Result;
 use serde::Serialize;
 
 use super::{Table, cell, grid};
-use crate::layout::{CRATE_DIRS, HARNESS};
+use crate::layout::HARNESS;
 use crate::manifest::{Edge, Manifest};
 use crate::sources;
 
@@ -39,10 +39,9 @@ pub(super) fn crates(
     uncut: bool,
 ) -> Result<String> {
     if format == Table::Md && !uncut {
-        let homes = CRATE_DIRS
-            .iter()
-            .map(|d| (format!("{}/", d.dir), Path::new(d.dir)))
-            .chain(std::iter::once((HARNESS.to_owned(), Path::new(HARNESS))));
+        let layout = manifest.layout();
+        let homes = (layout.dirs().map(|dir| (format!("{dir}/"), dir)))
+            .chain(std::iter::once((HARNESS.to_owned(), HARNESS)));
         let lines = homes.map(|(label, dir)| {
             let rows: Vec<_> = manifest
                 .crates

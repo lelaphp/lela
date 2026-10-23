@@ -58,14 +58,15 @@ mod sampled;
 #[cfg(dispatch = "tailcall")]
 mod tail;
 mod view;
-pub use crossing::{at_room, current, free_operands, primed, release, room, stand};
+pub use crossing::{at_room, current, free_operands, primed, release, room, stack_room, stand};
 pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 use held::{Entered, Kept, Scope, Units};
 pub use sampled::{
-    Building, Sample, building, building_call, class_number, numbered_class, on_heap, sample,
+    Building, Sample, building, building_call, class_number, native_returns, numbered_class,
+    on_heap, sample, under_way,
 };
 pub use view::{
     Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, frame_cache, func, landing,

@@ -180,12 +180,16 @@ pub(super) fn render(
 ) -> Result<String> {
     let rows = standing(manifest, store, root)?;
     let readings: Vec<&Reading> = rows.iter().filter_map(|row| row.reading.as_ref()).collect();
-    let corpus: Option<Vec<PathBuf>> = manifest.pin.source.tree().ok().map(|tree| {
-        Subset::corpus(&tree)
-            .into_iter()
-            .map(|subset| PathBuf::from(subset.scope))
-            .collect()
-    });
+    let corpus: Option<Vec<PathBuf>> = manifest
+        .pin
+        .as_ref()
+        .and_then(|pin| pin.source.tree().ok())
+        .map(|tree| {
+            Subset::corpus(&tree)
+                .into_iter()
+                .map(|subset| PathBuf::from(subset.scope))
+                .collect()
+        });
     let parity = parity(manifest, &readings, corpus.as_deref());
     Ok(match format {
         Table::Json => serde_json::to_string_pretty(&parity)? + "\n",

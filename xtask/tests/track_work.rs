@@ -8,6 +8,7 @@
 //! `fixtures/stand-ins/claude` first on `PATH`, recording what it was
 //! started with, committing on the branch and closing the ticket or not,
 //! as the act the test wrote down says, for every ticket or for one.
+#![cfg(tracked)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

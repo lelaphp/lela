@@ -214,10 +214,12 @@ fn a_rule_where_ticketed_judges_only_a_checkout_whose_branch_records_a_ticket() 
     assert!(denied(&manifest, main.path(), line));
 }
 
-/// #2995: a `cd` joined to what follows by anything but `&&` may fail,
-/// or runs in a shell of its own, so `where = "ticketed"` judges what
-/// follows where the line stood as well, at the root; a program moved by
-/// its own words is judged where they move it.
+/// #2995: a `cd` into a place it cannot enter, joined to what follows by
+/// anything but `&&`, may fail, and one piped runs in a shell of its own,
+/// so `where = "ticketed"` judges what follows where the line stood as
+/// well, at the root; one into a directory it can enter moves the line
+/// however it is joined (#3257); a program moved by its own words is
+/// judged where they move it.
 #[test]
 fn a_rule_where_ticketed_judges_past_a_change_that_may_not_move_the_line() {
     let manifest = probe(|rule| {
@@ -228,12 +230,13 @@ fn a_rule_where_ticketed_judges_past_a_change_that_may_not_move_the_line() {
     let main = checkout("where-main-joints", None);
     let (wt, root) = (ticketed.path(), main.path());
     let denied = |root: &Path, line: String| denied(&manifest, root, &line);
-    // Judged at the root, the ticketed checkout, though the `cd` names
-    // main's; joined by `&&`, the `cd` moves it.
+    // Judged at the root, the ticketed checkout, though the `cd` names a
+    // file of main's; into main itself, the `cd` moves it.
     let other = root.display();
-    assert!(denied(wt, format!("cd {other}; git add x")));
+    assert!(denied(wt, format!("cd {other}/seams.toml; git add x")));
     assert!(denied(wt, format!("cd {other} | true; git add x")));
     assert!(!denied(wt, format!("cd {other} && git add x")));
+    assert!(!denied(wt, format!("cd {other}; git add x")));
     // From main: piped, the `cd` moves nothing; sequenced, it may.
     let into = wt.display();
     assert!(!denied(root, format!("cd {into} | true; git add x")));

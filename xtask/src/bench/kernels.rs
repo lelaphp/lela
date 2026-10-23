@@ -12,8 +12,8 @@
 //! the same pair and control on the engine built with the tier's feature,
 //! what the engine's tier buys. G1 (#2947, [`door`]): the engine built
 //! with the tier's feature against the engine built without it over the
-//! seven kernels alone, [`KERNELS`], held to a geomean of at most
-//! [`DOOR`].
+//! seven kernels alone, [`KERNELS`], its geomean held to a bound, one
+//! plus the tolerance of its `[[bench]]` row in `seams.toml` (#3130).
 //!
 //! **What every arm runs under.** The recipe, as the oracle's every run
 //! is, then the regimes, then [`INI`]: php.ini-production's values for the
@@ -113,12 +113,13 @@ pub(crate) fn bar(
     (id, programs): (&str, &'static [&'static str]),
     about: String,
     held: Held,
-    arms: impl FnOnce(&Pin) -> Result<Result<[Php; 2], String>> + 'static,
+    arms: impl FnOnce(&Path, &Pin) -> Result<Result<[Php; 2], String>> + 'static,
 ) -> Declared {
     let root = root.to_path_buf();
     let start = move || -> Result<Sides> {
-        let pin = Manifest::load(&root)?.pin;
-        let arms = match arms(&pin)? {
+        let manifest = Manifest::load(&root)?;
+        let pin = manifest.pin()?;
+        let arms = match arms(&root, pin)? {
             Ok(arms) => arms,
             Err(why) => return Ok(Err(why)),
         };
@@ -132,7 +133,7 @@ pub(crate) fn bar(
             let script = workloads.join(format!("{program}.php"));
             let [a, b] = &arms;
             let side = |php: &Php| -> Result<Box<dyn Side>> {
-                Ok(Box::new(Spawned::from(php.running(&pin, &script, &env)?)))
+                Ok(Box::new(Spawned::from(php.running(pin, &script, &env)?)))
             };
             set.push(((*program).to_owned(), [side(a)?, side(b)?]));
         }
@@ -161,19 +162,16 @@ fn tracing(root: &Path, (id, whose): (&str, &str), binary: Binary) -> [Declared;
         let about = format!(
             "{whose} under [regime.{a}] against [regime.{b}] over the seven kernels and Zend/bench.php"
         );
-        let at = root.to_path_buf();
-        bar(root, (&format!("{id}{aa}"), PROGRAMS), about, held, move |pin| {
-            let binary = match binary(&at, pin)? {
-                Ok(binary) => binary,
-                Err(why) => return Ok(Err(why)),
-            };
-            let arm = |name: String, regime| Php {
-                name,
-                binary: binary.clone(),
-                regimes: vec![regime],
-                ini: Vec::new(),
-            };
-            Ok(Ok([arm(a.to_owned(), a), arm(second(a, b), b)]))
+        bar(root, (&format!("{id}{aa}"), PROGRAMS), about, held, move |root, pin| {
+            Ok(binary(root, pin)?.map(|binary| {
+                let arm = |name: String, regime| Php {
+                    name,
+                    binary: binary.clone(),
+                    regimes: vec![regime],
+                    ini: Vec::new(),
+                };
+                [arm(a.to_owned(), a), arm(second(a, b), b)]
+            }))
         })
     })
 }
@@ -200,10 +198,6 @@ pub(crate) fn compiled(root: &Path) -> [Declared; 2] {
     let bar = ("engine-jit", "the engine built as jit-feature");
     tracing(root, bar, |root, _| Build::Jit.built(root).map(Ok))
 }
-
-/// G1's bound (design §9.2): the tier's door may cost the build without
-/// the feature 2% and no more, above which `jit-design.md` §3 is revisited.
-const DOOR: f64 = 1.02;
 
 /// A build of the engine's `php` an arm runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,14 +231,16 @@ impl Build {
 /// G1, the door cost, and its control (#2947): the engine built with the
 /// tier's feature, `php_jit::Jit` bound and `opcache.jit_buffer_size=0`,
 /// against the engine built without the feature, over the seven kernels
-/// and held to [`DOOR`]; and the build without the feature against
+/// and held to a bound, its `[[bench]]` row's: within the A/A drift,
+/// floored at 2%, above which `jit-design.md` §3 is revisited (design
+/// §9.2, protocol §12.3, #3130); and the build without the feature against
 /// itself, its A/A control. Both arms of each run one command line,
 /// `[regime.jit-tracing]` and the zero buffer, so the binary is the one
 /// difference: the featured engine's `Policy` asks for tracing and runs
 /// `Mode::Off` (`jit-design.md` §4.7), and the other has no tier to ask.
 pub(crate) fn door(root: &Path) -> [Declared; 2] {
     [
-        ("g1", Build::Jit, Held::Bound(DOOR)),
+        ("g1", Build::Jit, Held::Bound),
         ("g1-aa", Build::Plain, Held::Control),
     ]
     .map(|(id, first, held)| {
@@ -252,12 +248,11 @@ pub(crate) fn door(root: &Path) -> [Declared; 2] {
         let about = format!(
             "the engine built as {a} with opcache.jit_buffer_size=0 against {b} over the seven kernels"
         );
-        let at = root.to_path_buf();
-        bar(root, (id, KERNELS), about, held, move |_| {
+        bar(root, (id, KERNELS), about, held, move |root, _| {
             let arm = |name: String, build: Build| -> Result<Php> {
                 Ok(Php {
                     name,
-                    binary: build.built(&at)?,
+                    binary: build.built(root)?,
                     regimes: vec!["jit-tracing"],
                     ini: vec!["opcache.jit_buffer_size=0".to_owned()],
                 })
@@ -279,13 +274,14 @@ mod tests {
         let bars = [oracle(root), compiled(root), door(root)].map(|b| b.map(|b| (b.id, b.held)));
         let pair = |id: &str, held| [(id.to_owned(), held), (format!("{id}-aa"), Held::Control)];
         let series = |id| pair(id, Held::Series);
-        let door = pair("g1", Held::Bound(DOOR));
+        let door = pair("g1", Held::Bound);
         assert_eq!(bars, [series("oracle-jit"), series("engine-jit"), door]);
     }
 
     /// Each program is committed where the protocol keeps its workloads
     /// (§11), and each arm runs it under the recipe, its regime and
     /// [`INI`], in that order, with the program's path last.
+    #[cfg(tracked)]
     #[test]
     fn each_program_is_committed_and_run_under_the_recipe_then_the_regime() {
         let root = crate::package_dir().parent().unwrap().to_path_buf();
@@ -293,7 +289,7 @@ mod tests {
             let path = root.join(format!("docs/perf/workloads/{program}.php"));
             assert!(path.is_file(), "{}", path.display());
         }
-        let pin = Manifest::load(&root).unwrap().pin;
+        let pin = Manifest::load(&root).unwrap().pin.unwrap();
         let php = Php {
             name: "jit-off".to_owned(),
             binary: PathBuf::from("php"),

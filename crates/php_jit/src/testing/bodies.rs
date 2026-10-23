@@ -126,7 +126,7 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
         leaves: None,
         stub: None,
         opens: None,
-        ip_guard: false,
+        entry_stood: false,
         body: None,
         fuzzed: Fuzzed::default(),
         map_ptrs: Box::new([]),
@@ -147,6 +147,7 @@ pub(crate) fn landing(opline: u32, landing: Landing) -> ExitSpec {
         stores: Vec::new(),
         known: Vec::new(),
         grows: Grows::Side,
+        layout: false,
         link: None,
     }
 }

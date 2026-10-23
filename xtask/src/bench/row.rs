@@ -62,9 +62,10 @@ impl PerReading for Row {
             delta_median: of("delta_median"),
             delta_iqr: of("delta_iqr"),
             paired_pct: n("paired_pct"),
-            verdict: reps
-                .zip(quartiles)
-                .map(|(reps, (q1, q3))| sign(usize::try_from(reps).unwrap_or(usize::MAX), q1, q3)),
+            verdict: reps.zip(quartiles).map(|(reps, (q1, q3))| {
+                let reps = usize::try_from(reps).unwrap_or(usize::MAX);
+                sign(reps, q1, q3, unit).as_str()
+            }),
             to_go_pct: n("to_go_pct"),
             baseline_pct: n("baseline_pct"),
             reps,

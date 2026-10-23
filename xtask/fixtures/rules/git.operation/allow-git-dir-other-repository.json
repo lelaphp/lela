@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"S=/var/empty; GIT_DIR=/tmp/.git GIT_WORK_TREE=/tmp git commit -q -F $S/m.txt -- results/x.md","description":"Commit by pathspec into another repository named by GIT_DIR, from the checkout the merge stands in (#3271)"}}

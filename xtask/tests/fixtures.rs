@@ -6,6 +6,7 @@
 //! (budget); the ceilings, which are `[[crate]]` rows and not rules, have
 //! their fixtures under `xtask/fixtures/budget/`. Rules other instruments
 //! evaluate have their fixtures beside those instruments.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 

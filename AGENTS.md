@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=e8e462b7fdd710ead01895486dea8f455e4981a0a631888f9635a03d9b9f5cb6 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=6361512c5db7606347fb1d60b72b20901c9569213bca684dd926aa10c94bb4b3 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=49c53fd3eee93f07505f181ce55770deebbb17f8d60164034b38c0d5df90e69f out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=c061bf4e7a90331aaf4a132a5c4970767c32ffa3f39bae957bf2784a35640cc4 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -115,24 +115,25 @@ third-engine-design.md
 - ADR-0012 (accepted, 2026-10-07): The linker is a crate of its own, `php_link`, between the unit format and the crates that call it
 - ADR-0013 (accepted, 2026-10-08): A foreign library's object that PHP code can free during a call is the request's, and the call holds it
 - ADR-0014 (accepted, 2026-10-09): A request's heap is lent to C for the length of one call
+- ADR-0015 (accepted, 2026-10-21): The compiled tier keeps php's function-level analysis, computed on a trace's first pass through an op array, in a crate of its own below the tier
 
-<!-- /computed in=6bedcc497502c69bde72e728ec0c76082f53c845d70e9c9f56c2ed27e6274d1e out=07b156eb367e4808b5ab265a98eacce2b26c2bea1cc6995e46abdfb60be97eab -->
+<!-- /computed in=cee9c3e30cf9e82d533366f466b49769b2f7496e78e6ae64b816524964520387 out=0a41d11bd1e1ec46e6cf036fa8a0efec74543299546ef7fcbf6e292517dded4f -->
 <!-- computed exec cmd="cargo xtask status --section locks --format md --tracked" inputs=seams.toml,crates/**/*.lock,xtask/xtask.lock,xtask/src/status.rs name=seams | do not edit; run computed -->
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 462 |  |
+| heap | heap.lock | 463 |  |
 | process | process.lock | 40 |  |
 | unit | unit.lock | 125 |  |
 | link | link.lock | 62 |  |
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1499 | 1500 |
 | sapi | sapi.lock | 58 |  |
-| tier | tier.lock | 127 |  |
+| tier | tier.lock | 130 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 416 |  |
+| harness | xtask.lock | 424 |  |
 
-<!-- /computed in=fd0792dcc68c670d9bc0e5ddd2f53dbe414c518204ab6885e3fcd3837a1f2b2a out=a36d4b88365413cfe2de3dab661975db1959dfd3395e674e15c8096fa2caaf8c -->
+<!-- /computed in=7d023b7c20acd78490e30dc26f72b7911027c3bfe2d728c099d5d5bd3a6712ee out=b0bfeb281c2a2a1c9104e3b2ddc295038ecc3af1428f3b3a8ed5eaad16fbc499 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -174,7 +175,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=0f5e980ef15f93ae076f8116757ac7a6dcd67fa0db206f9d0f0e71dde7de54fc out=3cd3cb054942af5a16b72ec93f51ae9766812a0b5d3e22db3c68a63e5cd94e26 -->
+<!-- /computed in=be5b23d21ed327e97a5644c7320cef485a1b378b1b096d019bdc970b51d79774 out=3cd3cb054942af5a16b72ec93f51ae9766812a0b5d3e22db3c68a63e5cd94e26 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .

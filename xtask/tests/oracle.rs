@@ -5,6 +5,7 @@
 //! The tests that spawn php need the pinned binary at the path the pin names
 //! and say so on stderr when it is absent; the rest run anywhere, the tree
 //! `Source::tree` answers being a fixture's.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -395,6 +396,13 @@ fn pin_with_path(path: &Path) -> Pin {
 }
 
 /// A directory standing where the pinned php-src would.
+/// The crate directories of a manifest laying crates down in `crates`,
+/// `ext` and `sapi`.
+fn layout() -> xtask::manifest::Layout {
+    let rows = ["php_engine", "ext/standard", "sapi/cli"];
+    xtask::manifest::Manifest::of(rows.map(xtask::manifest::Crate::named)).layout()
+}
+
 fn fixture_tree(name: &str) -> Tree {
     Tree::new(&format!("oracle-{name}")).unwrap()
 }
@@ -1267,13 +1275,13 @@ fn a_binary_the_tree_has_moved_past_is_passed_over_for_one_it_has_not() {
     let fresh = built(root.path(), "debug", 0);
     let pin = pin_with_path(root.path());
     assert_eq!(
-        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
         Runner::Engine(fresh),
         "the debug binary the tree has not moved past is the lane's engine"
     );
     // And the release binary alone is the skip, not a silent engine.
     std::fs::remove_file(root.path().join("target/debug/php")).unwrap();
-    let behind = Runner::resolve(root.path(), &pin, None).unwrap();
+    let behind = Runner::resolve(root.path(), &layout(), &pin, None).unwrap();
     let Runner::Stale(why) = &behind else {
         panic!("{behind:?}")
     };
@@ -1300,13 +1308,13 @@ fn the_lanes_build_is_the_engine_before_release_and_passed_over_when_behind() {
     let lanes = built(root.path(), "release-da", 0);
     let pin = pin_with_path(root.path());
     assert_eq!(
-        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
         Runner::Engine(lanes),
         "the lanes' build is the engine before a release binary as fresh"
     );
     built(root.path(), "release-da", 3600);
     assert_eq!(
-        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
         Runner::Engine(release),
         "a lanes' build the tree has moved past leaves the release binary the engine"
     );
@@ -1332,7 +1340,7 @@ fn a_php_cgi_the_tree_has_moved_past_holds_back_the_php_beside_it() {
     engine_sources(root.path());
     let fresh = built(root.path(), "debug", 0);
     let pin = pin_with_path(root.path());
-    let behind = Runner::resolve(root.path(), &pin, None).unwrap();
+    let behind = Runner::resolve(root.path(), &layout(), &pin, None).unwrap();
     let Runner::Stale(why) = &behind else {
         panic!("{behind:?}")
     };
@@ -1344,7 +1352,7 @@ fn a_php_cgi_the_tree_has_moved_past_holds_back_the_php_beside_it() {
         .set_modified(SystemTime::now())
         .unwrap();
     assert_eq!(
-        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
         Runner::Engine(fresh),
         "a php-cgi the tree has not moved past leaves the php beside it the engine"
     );
@@ -1383,12 +1391,12 @@ fn a_binary_cargo_leaves_standing_is_the_engine_and_one_it_relinks_is_not() {
     }
     let pin = pin_with_path(root.path());
     assert_eq!(
-        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
         Runner::Engine(binary.clone()),
         "nothing the binary is built from moved"
     );
     std::fs::write(&source, "// the kernels, written again\n").unwrap();
-    let behind = Runner::resolve(root.path(), &pin, None).unwrap();
+    let behind = Runner::resolve(root.path(), &layout(), &pin, None).unwrap();
     let Runner::Stale(why) = &behind else {
         panic!("{behind:?}")
     };
@@ -1404,7 +1412,7 @@ fn a_binary_the_tree_has_not_moved_past_is_the_engine_and_stamps_its_reading() {
     engine_sources(root.path());
     let fresh = built(root.path(), "release", 0);
     let pin = pin_with_path(root.path());
-    let runner = Runner::resolve(root.path(), &pin, None).unwrap();
+    let runner = Runner::resolve(root.path(), &layout(), &pin, None).unwrap();
     assert_eq!(runner, Runner::Engine(fresh.clone()));
     assert_eq!(runner.binary(), Some(fresh.as_path()));
     let stamp = runner.stamp().unwrap();
@@ -1426,7 +1434,7 @@ fn a_tree_with_no_engine_source_leaves_every_binary_the_engine() {
     let old = built(root.path(), "release", 86_400);
     let pin = pin_with_path(root.path());
     assert_eq!(
-        Runner::resolve(root.path(), &pin, None).unwrap(),
+        Runner::resolve(root.path(), &layout(), &pin, None).unwrap(),
         Runner::Engine(old)
     );
 }
@@ -1449,12 +1457,17 @@ fn a_named_binary_is_handed_on_by_its_absolute_path_and_one_not_there_is_refused
         .chain(binary.components().skip(1))
         .collect();
     assert!(relative.is_relative(), "{}", relative.display());
-    let runner = Runner::resolve(root.path(), &pin, Some(&relative)).unwrap();
+    let runner = Runner::resolve(root.path(), &layout(), &pin, Some(&relative)).unwrap();
     let absolute = std::fs::canonicalize(&binary).unwrap();
     assert_eq!(runner, Runner::Engine(absolute));
 
-    let refused = Runner::resolve(root.path(), &pin, Some(Path::new("target/no-such-php")))
-        .expect_err("a path that names no file is refused");
+    let refused = Runner::resolve(
+        root.path(),
+        &layout(),
+        &pin,
+        Some(Path::new("target/no-such-php")),
+    )
+    .expect_err("a path that names no file is refused");
     assert!(
         format!("{refused:#}").contains("target/no-such-php"),
         "{refused:#}"

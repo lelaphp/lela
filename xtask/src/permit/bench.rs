@@ -141,12 +141,8 @@ pub(crate) fn scratch_workspace(root: &Path, dir: &Path) -> Result<()> {
     fs::remove_dir_all(dir).ok();
     fs::create_dir_all(dir.join("docs")).with_context(|| format!("creating {}", dir.display()))?;
     let manifest = Manifest::load(root)?;
-    for file in [
-        manifest::FILE,
-        manifest.oracle.pin.as_str(),
-        "docs/divergence.toml",
-        "README.md",
-    ] {
+    let files = [manifest::FILE, "docs/divergence.toml", "README.md"];
+    for file in files.into_iter().chain(manifest.pin_file()) {
         fs::copy(root.join(file), dir.join(file)).with_context(|| format!("copying {file}"))?;
     }
     git(dir, &["init", "-q", "-b", "main"], None)?;
@@ -193,7 +189,7 @@ pub(crate) fn run_bench(
     for (name, q) in &measured.shapes {
         println!("  {}", line(name, q));
     }
-    let mut reading = Reading::for_scope(INSTRUMENT, crate::done::HARNESS, manifest, &snapshot)?;
+    let mut reading = Reading::for_scope(INSTRUMENT, crate::layout::HARNESS, manifest, &snapshot)?;
     reading.status = Status::of(measured.meets_the_bar(bar_ms));
     reading.set("runs", i64::try_from(measured.runs)?);
     reading.set("bar_ms", bar_ms);

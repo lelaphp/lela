@@ -46,6 +46,17 @@ defect.** An instrument that refused on the first resolved row would be red
 for no reason about once a run in seventeen, which is why `bench` records
 the verdict and exits 0 (`harness-design.md` §4.2).
 
+**An A/A control over a set** of programs (§10) is held to a count, as
+Mitchell ruled on #3127. It fails when at least k of its n rows resolve,
+k the smallest count whose chance of being reached, each row resolving
+at the rate above, one in seventeen, is at most 1%: the binomial's upper
+tail. For n = 8, P(≥ 2) ≈ 7.7% and P(≥ 3) ≈ 0.9%, so k = 3; a set of one
+has no such k and fails on none. k is computed from n and the rate,
+never typed in, and the reading keeps how many rows resolved, so §12's
+series can show a pattern across nights. One pair is held to its one
+row, as above. Holding each row of a set as one pair would read `fail`
+on about 38% of a set of eight's runs with nothing wrong.
+
 ## 3. The knobs
 
 | knob | value |
@@ -212,7 +223,14 @@ request-shaped arm has, paired under §2 to §5 rather than as percentiles
 set of programs pairs each program under §2 to §5, states each one's
 ratio as `1 + paired_pct / 100`, and their geometric mean, which inherits
 the floor — one `NOISE-SWAMPED` constituent and the aggregate is
-published unsigned.
+published unsigned. A geomean has a sign only when every row resolves
+the same way, as Mitchell ruled on #3127: one whose rows resolve in
+opposite directions is published unsigned as `mixed`, with the count
+each way, since +20% on one program and −17% on another make a geomean
+near 1.00, and signing it would claim no change while hiding a
+regression. A bar held to a bound does not read the value of a `mixed`
+geomean and fails on it, since a row of it resolved slower; a
+`NOISE-SWAMPED` one is never a regression (§1.2) and passes.
 
 ## 11. Where a workload lives
 
@@ -265,7 +283,12 @@ A night is one reading of the bar: its paired delta's median, Q1 and Q3
    (`third-engine-design.md` §9.2's revisit line for G1). The derived
    number and the dates it came from land in `seams.toml` as one
    `[[bench]]` row per bar, through `xtask steer`. A bar without a row is a
-   series and fails nothing.
+   series and fails nothing. Until the bar's A/A control has its two
+   weeks of nights, the row carries the 2% floor alone and names no
+   nights, as Mitchell ruled for G1 on #3130. A bar held to a bound and
+   not a baseline, G1, whose door should cost nothing, is held to one
+   plus its row's tolerance: its ratio, a set's geomean, at most
+   1.02 at the floor. The row is the one place that bound is written.
 4. **The baseline ratchets, and is a reading.** The baseline is a reading
    of the store, `<bar>/baseline`, never a manifest value. The first is the
    median of the bar's nights over the tolerance's dates. It moves only
