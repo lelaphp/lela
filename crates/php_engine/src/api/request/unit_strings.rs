@@ -668,6 +668,12 @@ impl Request {
         (self.class_lookup()).declared_for_the_request(self.unit_strings.units_held(), class)
     }
 
+    /// Whether `class` is php's class without `ZEND_ACC_IMMUTABLE`
+    /// (`ClassLookup::mutable`).
+    pub(super) fn mutable_class(&self, class: crate::api::values::ClassId) -> bool {
+        (self.class_lookup()).mutable(self.unit_strings.units_held(), class)
+    }
+
     /// The constant strings the compile just made, given to `unit`, the
     /// unit it made: its main op array's held while it runs, the rest
     /// while the unit lives ([`main_constants`]). So an `eval` that

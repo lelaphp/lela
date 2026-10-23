@@ -213,6 +213,9 @@ impl Request {
                 }
             }
         };
+        if !is_case && let Ok(value) = &value {
+            self.evaluated_through(asked, class, name, value);
+        }
         value.map(|value| {
             if kept {
                 ConstantRead::Kept(value)

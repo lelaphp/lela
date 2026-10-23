@@ -479,6 +479,7 @@ impl Request {
                 .collect();
             for (declaring, name) in constants {
                 let value = self.evaluated_class_constant(declaring, &name)?;
+                self.evaluated_through(class, declaring, &name, &value);
                 self.release(value);
             }
         }
@@ -587,6 +588,33 @@ impl Request {
         // or the type refused.
         self.constant_evaluated(declaring, name);
         Ok(value)
+    }
+
+    /// The constant `name` that `declaring` declares, evaluated to `value`
+    /// where it was read through `class`: php's class without
+    /// `ZEND_ACC_IMMUTABLE` that inherits it from an immutable one holds
+    /// a copy of its own (`do_inherit_class_constant`), which
+    /// `zend_update_class_constant` evaluates in place, so the value is
+    /// kept in `class`'s row too, one more owner, where
+    /// `zend_try_ct_eval_class_const` reads it ([`super::classes`]'s
+    /// `defined_class_constant`); a read through the declaring class
+    /// leaves the copy unevaluated.
+    pub(super) fn evaluated_through(
+        &mut self,
+        class: ClassId,
+        declaring: ClassId,
+        name: &[u8],
+        value: &Value,
+    ) {
+        if class == declaring || self.class_data.evaluated_constant(class, name).is_some() {
+            return;
+        }
+        if !self.mutable_class(class) || self.mutable_class(declaring) {
+            return;
+        }
+        self.addref(value);
+        let row = self.class_data.rows.row(class);
+        row.constants.push((name.into(), *value));
     }
 
     /// `zend_update_class_constant` over the constant `name` of `class`
