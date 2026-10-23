@@ -137,31 +137,77 @@ fn the_git_operation_rule_refuses_staging_where_another_hand_s_merge_stands() {
 /// stands, `allow-array.json`, a `cd` into a linked worktree joined by
 /// `&&` to `P=(…)` and the commit, and `allow-git-c.json`'s `git -C` are
 /// judged in the worktree alone and let through; `deny-array-then.json`'s
-/// `;` after the `cd` runs the commit where the line started as well
-/// (#2995), and is refused.
+/// `;` after a `cd` into the worktree's `.git` file, which fails, runs the
+/// commit where the line started (#2995), and is refused.
 #[test]
 fn an_array_assignment_after_a_cd_leaves_the_commit_in_the_worktree() {
     let manifest = Manifest::load(workspace()).unwrap();
     let merging = operating("operation-array");
     Repo::at(&merging).git(&["worktree", "add", "-q", "-b", "own", "own"]);
-    let linked = merging.path().join("own").display().to_string();
-    let dir = fixtures().join("rules/git.operation");
-    for name in [
-        "allow-array.json",
-        "allow-git-c.json",
-        "deny-array-then.json",
+    let linked = merging.path().join("own");
+    for (name, to) in [
+        ("allow-array.json", linked.clone()),
+        ("allow-git-c.json", linked.clone()),
+        ("deny-array-then.json", linked.join(".git")),
     ] {
-        let mut fixture = call(&dir.join(name));
-        let line = fixture
-            .tool_input
-            .command
-            .as_deref()
-            .map(|l| l.replace("/var/empty/wt", &linked));
-        fixture.tool_input.command = line;
-        let judged = judge(&manifest, merging.path(), &fixture).unwrap();
-        let refused = judged.denial().is_some_and(|d| d.rule == "git.operation");
-        assert_eq!(refused, name.starts_with("deny"), "{name}: {judged:?}");
+        let refused = operation_refuses(&manifest, merging.path(), name, "/var/empty/wt", &to);
+        assert_eq!(refused, name.starts_with("deny"), "{name}");
     }
+}
+
+/// #3257 as it happened: from a checkout where another session's merge
+/// stands, `allow-other-repository.json` `cd`s into another repository
+/// and, past a `;`, stages and commits there by pathspec. The `cd` into a
+/// directory it can enter does not fail, so the commit writes that
+/// repository's index and not the merge's, and is let through, as is
+/// `allow-git-c-other-repository.json`'s `-C` form; so are both into a
+/// linked worktree of the merging checkout, whose index is its own. Both
+/// moved into the merging checkout are refused, as the walks of
+/// `rule_fixtures.rs` refuse `deny-own-checkout.json` and
+/// `deny-git-c-own-checkout.json`, and so is a `cd` into a file there,
+/// which fails and leaves the commit where the line started (#2995), as
+/// the walks refuse `deny-or-then-cd.json`'s and `deny-and-then-cd.json`'s
+/// `cd`, which may not run.
+#[test]
+fn a_commit_in_another_repository_is_judged_where_its_cd_or_c_moves_it() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let merging = operating("operation-elsewhere");
+    let other = checkout("operation-elsewhere-other", None);
+    Repo::at(&merging).git(&["worktree", "add", "-q", "-b", "own", "own"]);
+    let linked = merging.path().join("own");
+    let file = merging.path().join("seams.toml");
+    let elsewhere = [
+        "allow-other-repository.json",
+        "allow-git-c-other-repository.json",
+    ];
+    for name in elsewhere {
+        for (to, expected) in [
+            (other.path(), false),
+            (linked.as_path(), false),
+            (merging.path(), true),
+        ] {
+            let refused = operation_refuses(&manifest, merging.path(), name, "/tmp", to);
+            assert_eq!(refused, expected, "{name} in {}", to.display());
+        }
+    }
+    let failed = operation_refuses(&manifest, merging.path(), elsewhere[0], "/tmp", &file);
+    assert!(failed, "a cd into a file");
+}
+
+/// Whether `git.operation` refuses the fixture `name`, its line's `from`
+/// spelled `to`, judged in `merging`.
+fn operation_refuses(
+    manifest: &Manifest,
+    merging: &Path,
+    name: &str,
+    from: &str,
+    to: &Path,
+) -> bool {
+    let mut fixture = call(&fixtures().join("rules/git.operation").join(name));
+    let line = fixture.tool_input.command.as_deref();
+    fixture.tool_input.command = line.map(|l| l.replace(from, &to.display().to_string()));
+    let judged = judge(manifest, merging, &fixture).unwrap();
+    judged.denial().is_some_and(|d| d.rule == "git.operation")
 }
 
 /// `git.merge-commits-itself` as #2751 ruled it: a merge that commits

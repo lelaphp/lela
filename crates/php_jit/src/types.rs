@@ -78,7 +78,7 @@ use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 pub(crate) use lattice::Types;
 
-use crate::record::{Start, Stop, TraceRecord};
+use crate::record::{Began, Callee, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
 /// One exit of a trace, by its place among the trace's exits.
@@ -234,11 +234,14 @@ pub(crate) enum Home {
 pub(crate) enum Op {
     /// One recorded opline, or a comparison and the jump fused to it.
     Line(Line),
-    /// A call an `INIT_*` began in `frame`, to the op array named, none
-    /// for a native's.
+    /// A call an `INIT_*` began in `frame`, to `callee`: at an opline of
+    /// the trace, or before it reached `frame`, php's fake init, whose
+    /// call compiled code finds where the interpreter stands, `EX(call)`,
+    /// once the calls begun after it are made.
     InitCall {
         frame: Frame,
-        target: Option<FuncRef>,
+        callee: Callee,
+        began: Began,
     },
     /// The frame a call pushed runs.
     Enter { frame: Frame },
@@ -382,6 +385,16 @@ pub(crate) enum Check {
     /// no opline, so the interpreter goes on where it stands and the exit
     /// is right whatever the guard held.
     Stands { func: FuncRef, opline: OplineIdx },
+    /// The VM stack's top page has room for this many bytes of frames,
+    /// php's `zend_jit_stack_check`: at a loop's entry for what its calls
+    /// push, and before an `INIT_*` that pushes past what that held. Its
+    /// exit goes back to the interpreter, which pushes the frame on a page
+    /// of its own.
+    Room { bytes: u32 },
+    /// A table's jump went elsewhere than this opline: php's exit per
+    /// target of `zend_jit_switch`, taken where the stepped jump went
+    /// there and landing where it went, so exit-fuzz fails it never.
+    Arm { opline: OplineIdx },
 }
 
 /// How an array is laid out, php's `HASH_FLAG_PACKED` set or clear.
@@ -421,6 +434,11 @@ pub(crate) struct ExitSpec {
     pub(crate) known: Vec<Known>,
     pub(crate) grows: Grows,
     pub(crate) link: Option<TraceId>,
+    /// Whether a guard on an array's layout takes it, php's
+    /// `ZEND_JIT_EXIT_PACKED_GUARD` (`Z/ext/opcache/jit/zend_jit_ir.c:11967`,
+    /// `:13779`): a bit nothing reads but the reuse, so a layout guard
+    /// leaves through an exit of its own beside a type guard at its place.
+    pub(crate) layout: bool,
 }
 
 /// One slot whose type the trace knows where an exit leaves, php's
@@ -587,6 +605,13 @@ pub(crate) fn cannot_raise(op: Opcode, by: Operand) -> bool {
         (Opcode::Div | Opcode::Mod | Opcode::Sl | Opcode::Sr, _) => false,
         _ => true,
     }
+}
+
+/// The types a value of the declared type `ty` may be, as php's
+/// `zend_fetch_arg_info_type` reads an `arg_info`: what a native's call
+/// returns, where it declares a return type.
+pub(crate) fn declared(ty: &php_unit::decl::Type) -> Types {
+    opcodes::of_type(Some(ty), false)
 }
 
 /// The trace `rec` builds, read through `view`, or why it builds none.

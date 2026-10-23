@@ -50,6 +50,7 @@ fn exit(link: Option<TraceId>) -> ExitSpec {
         stores: Vec::new(),
         known: Vec::new(),
         grows: Grows::Side,
+        layout: false,
         link,
     }
 }
@@ -64,7 +65,7 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         leaves: None,
         stub: None,
         opens: None,
-        ip_guard: false,
+        entry_stood: false,
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
         map_ptrs: Box::new([]),
