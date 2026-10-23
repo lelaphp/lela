@@ -1311,9 +1311,80 @@ impl<'a> Emit<'a> {
                     .ins()
                     .stack_store(I64, next, self.stood, STOOD_OPLINE);
             }
+            None if line.opcode == Opcode::DoIcall && self.within(at).is_empty() => {
+                match self.outer_call() {
+                    Some(outer) => {
+                        self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
+                        // Past it, in its frame, the native's call popped
+                        // and the call under way the one it was sent in.
+                        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
+                        self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
+                        self.b
+                            .ins()
+                            .stack_store(I64, next, self.stood, STOOD_OPLINE);
+                        self.b.ins().stack_store(I64, outer, self.stood, STOOD_CALL);
+                    }
+                    None => {
+                        self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?;
+                    }
+                }
+            }
             None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
         }
         Ok(())
+    }
+
+    /// The room of the call under way past the innermost, the one a
+    /// `DO_ICALL` leaves standing as it pops its own, where compiled code
+    /// knows it: none under way is null, one it pushed is its room, and
+    /// one begun before the trace, whose room the push of the innermost
+    /// wrote over in the `Stood`, is not known (`None`), so the
+    /// `DO_ICALL` is stepped, which reads where it stands. A native's call
+    /// served by the handler with no step ([`Kernel::Handle`]), as php's
+    /// `zend_jit_do_fcall` calls `internal_function.handler` directly
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10511-10600`); `sqrt` in a loop,
+    /// a native whose return is unused, one sent as another's argument,
+    /// and one that throws out of the loop:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $s = 0.0; $t = 0;
+    ///     for ($i = 1; $i <= $n; $i++) { $s += sqrt($i); abs($i); $t += strlen(str_repeat("a", $i % 4)); }
+    ///     return [round($s, 6), $t];
+    /// }
+    /// function g($n) { $t = 0; for ($i = 1; $i <= $n; $i++) { $t += strlen(str_repeat("b", 4 - $i)); } return $t; }
+    /// echo json_encode(f(30)), "\n";
+    /// try { g(10); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [112.082845,45]
+    /// str_repeat(): Argument #2 ($times) must be greater than or equal to 0
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $s = 0.0; $t = 0;
+    ///     for ($i = 1; $i <= $n; $i++) { $s += sqrt($i); abs($i); $t += strlen(str_repeat("a", $i % 4)); }
+    ///     return [round($s, 6), $t];
+    /// }
+    /// function g($n) { $t = 0; for ($i = 1; $i <= $n; $i++) { $t += strlen(str_repeat("b", 4 - $i)); } return $t; }
+    /// echo json_encode(f(30)), "\n";
+    /// try { g(10); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [112.082845,45]
+    /// str_repeat(): Argument #2 ($times) must be greater than or equal to 0
+    /// ```
+    fn outer_call(&mut self) -> Option<Value> {
+        let Some(outer) = self.calls.len().checked_sub(2) else {
+            return Some(self.b.ins().iconst(I64, 0));
+        };
+        match self.calls.get(outer).map(|(room, _)| *room) {
+            Some(CallRoom::Held(var)) => Some(self.b.use_var(var)),
+            _ => None,
+        }
     }
 
     /// What follows a stepped `line`: a call it made off the calls under

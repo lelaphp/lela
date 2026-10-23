@@ -26,7 +26,7 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
-    NBODY, SIEVE, SPECTRALNORM, held, traced as built,
+    NATIVE_CALL, NBODY, SIEVE, SPECTRALNORM, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -375,6 +375,25 @@ fn nbody_advances_in_a_loop() -> Result<(), String> {
 /// either layout, which the write tests. They take no exit, since php's
 /// code calls its helpers where it cannot write in place, and the handler
 /// serves it here; the handler may throw, so they unwind (#3228).
+/// A native's call in a loop: its `INIT_FCALL` inline, the call pushed
+/// in place as php's `zend_jit_push_call_frame` pushes a native's, its
+/// sends inline, and its `DO_ICALL` served by the handler (#2963).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_natives_call_is_pushed_in_place() -> Result<(), String> {
+    let ir = golden(NATIVE_CALL)?;
+    let pushed = ir.ops.iter().any(
+        |op| matches!(op, Op::InitCall { plain: Some(plain), .. } if plain.callee().is_none()),
+    );
+    assert!(pushed, "{}", dump::render(&ir));
+    let init = (ir.ops.iter()).find_map(|op| match op {
+        Op::Line(line) if line.opcode == Opcode::InitFcall => Some(line.form),
+        _ => None,
+    });
+    assert_eq!(init, Some(Form::Inline), "{}", dump::render(&ir));
+    Ok(())
+}
+
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn an_element_write_is_inline_and_takes_no_exit() -> Result<(), String> {

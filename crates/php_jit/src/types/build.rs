@@ -996,7 +996,7 @@ impl<'a> Builder<'a> {
         let plain = self
             .pushing
             .take()
-            .filter(|plain| began == Began::Here && callee.user() == Some(plain.callee()));
+            .filter(|plain| began == Began::Here && callee.user() == plain.callee());
         // A function's call by its full name serves the function the name
         // resolves to, the one recorded, since no function is declared
         // twice; a method's or a dynamic call's may serve another, and an
@@ -1123,15 +1123,28 @@ impl<'a> Builder<'a> {
         match op.opcode {
             Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
                 let Some(Event::InitCall {
-                    callee: Callee::User(callee),
+                    callee,
                     began: Began::Here,
                 }) = next
                 else {
                     return None;
                 };
-                let known = op.opcode == Opcode::InitFcall || *callee == func;
-                let plain = self.view.call(*callee, op.extended_value)?;
-                known.then(|| InPlace::Push(plain.clone()))
+                let plain = match callee {
+                    Callee::User(callee) => {
+                        let known = op.opcode == Opcode::InitFcall || *callee == func;
+                        known.then(|| self.view.call(*callee, op.extended_value))??
+                    }
+                    // A native named in full, which php's trace pushes as
+                    // it pushes a user function's call
+                    // (`zend_jit_push_call_frame`, `:8466-8650`).
+                    Callee::Native(_) if op.opcode == Opcode::InitFcall => {
+                        let code = self.meta(frame).code;
+                        let name = code.literals.get(op.op2 as usize)?.str_bytes()?;
+                        self.view.native_call(name, op.extended_value)?
+                    }
+                    Callee::Native(_) => return None,
+                };
+                Some(InPlace::Push(plain.clone()))
             }
             Opcode::SendValEx if op.op2_type == OperandKind::Unused => {
                 self.sends_by_value(op.op2)?.then_some(InPlace::Send)
@@ -2051,15 +2064,19 @@ impl<'a> Builder<'a> {
                         .last()
                         .is_some_and(|call| call.last_send == LastSend::ByValue)
             }
-            Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
-                matches!(
-                    next,
-                    Some(Event::InitCall {
-                        callee: Callee::User(_),
-                        began: Began::Here,
-                    })
-                )
-            }
+            Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => match next {
+                Some(Event::InitCall {
+                    callee: Callee::User(_),
+                    began: Began::Here,
+                }) => true,
+                // A native's call is pushed in place or stepped: the
+                // `push_call` kernel knows a user function's alone.
+                Some(Event::InitCall {
+                    callee: Callee::Native(_),
+                    began: Began::Here,
+                }) => self.in_place(frame, op, next).is_some(),
+                _ => false,
+            },
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => {
                 matches!(next, Some(Event::Enter { .. }))
             }

@@ -15,8 +15,8 @@ use cranelift_codegen::isa;
 use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT, NBODY,
-    SIEVE, SPECTRALNORM, held,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT,
+    NATIVE_CALL, NBODY, SIEVE, SPECTRALNORM, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{Check, End, Guard, GuardAt, Imm, Interrupt, Op, Returned, TraceIr};
@@ -231,6 +231,14 @@ fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), Stri
     Ok(())
 }
 
+/// A native's call pushed in place and its `DO_ICALL` served by the
+/// `handle` kernel, the `Stood` written past it (#2963).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_natives_call_lowers_in_place() -> Result<(), String> {
+    lowered(NATIVE_CALL).map(drop)
+}
+
 /// A host Cranelift has no ISA for is `Unsupported`, which runs the
 /// tier `Off` (`jit-design.md` §4.3): the ISA lookup stubbed to find none.
 #[test]
@@ -372,11 +380,12 @@ fn a_link_answers_its_last_exit() -> Result<(), String> {
     Ok(())
 }
 
-/// A native's call is served whole through [`Kernel::Step`], the operands
-/// it reads stored first.
+/// A native's call is pushed in place, its sends of constants stepped,
+/// the operands they read stored first, and its `DO_ICALL` served by its
+/// handler through [`Kernel::Handle`] (#2963).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_natives_call_is_stepped() -> Result<(), String> {
+fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
     let (_, clif) = compiled(
         &IN_F,
         "function f(array &$a, int $n) {
@@ -387,6 +396,7 @@ fn a_natives_call_is_stepped() -> Result<(), String> {
         $x = [1]; echo f($x, 3), \"\\n\";",
     )?;
     assert!(!calls_of(&clif, Kernel::Step).is_empty(), "{clif}");
+    assert!(!calls_of(&clif, Kernel::Handle).is_empty(), "{clif}");
     Ok(())
 }
 

@@ -88,6 +88,19 @@ pub(crate) const SIEVE: Fixture = Fixture {
     ],
 };
 
+/// A native's call in a loop, `strcmp`, a Core native: its `INIT_FCALL`
+/// pushed in place and its `DO_ICALL` served by the handler, as nbody's
+/// `sqrt` is (#2963).
+pub(crate) const NATIVE_CALL: Fixture = Fixture {
+    name: "native_call",
+    program: "native_call",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "1"),
+    ],
+};
+
 /// `fannkuch`'s first loop, recorded for the view it holds of
 /// `fannkuch()`, which a side trace's record written out by hand is built
 /// through (#3270).

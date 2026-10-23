@@ -395,7 +395,9 @@ impl UnitView {
         let Some(plain) = super::plain_call(req, call) else {
             return false;
         };
-        if !self.hold(req, plain.callee()) {
+        if let Some(callee) = plain.callee()
+            && !self.hold(req, callee)
+        {
             return false;
         }
         if !self.calls.contains(&plain) {
@@ -410,7 +412,15 @@ impl UnitView {
     pub fn call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
         self.calls
             .iter()
-            .find(|call| call.callee() == f && call.count() == count)
+            .find(|call| call.callee() == Some(f) && call.count() == count)
+    }
+
+    /// The plain call to the native named `name`, lowered, with `count`
+    /// arguments; none unless [`UnitView::hold_call`] took one.
+    #[must_use]
+    pub fn native_call(&self, name: &[u8], count: u32) -> Option<&super::PlainCall> {
+        (self.calls.iter())
+            .find(|call| call.callee().is_none() && call.name() == name && call.count() == count)
     }
 
     /// The op array `f` names; none unless [`UnitView::hold`] accepted it.

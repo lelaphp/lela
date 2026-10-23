@@ -997,9 +997,13 @@ pub(crate) struct Headers {
     rows: std::cell::OnceCell<Rows>,
 }
 
+/// A call's header by the op array a user function's call serves, or
+/// the name a native's has, and the argument count.
+type CallKey = (Option<FuncRef>, Box<[u8]>, u32);
+
 #[derive(Debug, Default)]
 struct HeadersKept {
-    calls: std::collections::HashMap<(FuncRef, u32), HeaderImage>,
+    calls: std::collections::HashMap<CallKey, HeaderImage>,
     traces: Vec<Option<Entered>>,
 }
 
@@ -1025,7 +1029,12 @@ impl Headers {
         }
         let mut addresses = Vec::with_capacity(trace.calls.len());
         for call in &trace.calls {
-            let key = (call.callee(), call.count());
+            let named = if call.callee().is_none() {
+                call.name()
+            } else {
+                &[]
+            };
+            let key = (call.callee(), Box::<[u8]>::from(named), call.count());
             let address = if let Some(image) = kept.calls.get(&key) {
                 image.address()
             } else {
