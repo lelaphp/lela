@@ -240,6 +240,9 @@ impl<'a> Adapter<'a> {
             (Compared::Diverged(row), _) => {
                 Judged::new(&id, &name, Judgement::Diverged, row.reason)
             }
+            (Compared::Moved(moved), _) => {
+                Judged::new(&id, &name, Judgement::Fail, moved.to_string())
+            }
             (Compared::Differs(difference), Some(why)) => {
                 Judged::new(&id, &name, Judgement::XFail, format!("{why}\n{difference}"))
             }

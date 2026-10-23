@@ -14,12 +14,12 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use xtask::divergence::Registry;
+use xtask::divergence::{Digests, Registry, Side};
 use xtask::manifest::Manifest;
 use xtask::oracle::Promise;
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
-use xtask::trace_dump::{self, Ask, Side};
+use xtask::trace_dump::{self, Ask};
 
 mod common {
     pub mod manifest;
@@ -162,17 +162,21 @@ fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
     }
 }
 
-/// An accepted `trace:dump/<program>` row is what a difference passes
-/// under, naming the row; an `open` one accepts nothing.
+/// An accepted `trace:dump/<program>` row pinning both sides' lines as
+/// the run keeps them is what a difference passes under, naming the row
+/// (#3291); an `open` one accepts nothing.
 #[test]
 fn an_accepted_row_passes_the_difference_and_an_open_one_does_not() {
     if oracle().is_none() {
         return;
     }
     let scratch = Scratch::new("row");
+    let read = |name: &str| fs::read(fixtures().join(name)).unwrap();
+    let pins = Digests::of(&read("oracle.lines"), &read("engine.lines"));
     let row = |status: &str| {
         let row = format!(
-            "[[divergence]]\nid = \"trace:dump/loop\"\nkind = \"trace\"\nreason = \"a for loop's root (#3134)\"\nstatus = \"{status}\"\nsince = \"2026-10-21\"\n"
+            "[[divergence]]\nid = \"trace:dump/loop\"\nkind = \"trace\"\nreason = \"a for loop's root (#3134)\"\nstatus = \"{status}\"\nsince = \"2026-10-21\"\noracle = \"{}\"\nengine = \"{}\"\n",
+            pins.oracle, pins.engine
         );
         registry(&row)
     };

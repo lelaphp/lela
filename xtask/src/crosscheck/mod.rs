@@ -244,6 +244,7 @@ pub(crate) fn judge(registry: &Registry, id: &str, oracle: &[u8], engine: &Rende
         Rendering::Bytes(bytes) => match oracle::compare(registry, id, oracle, bytes) {
             Verdict::Same => Judgement::Pass,
             Verdict::Diverged(row) => Judgement::Diverged(row.reason.clone()),
+            Verdict::Moved(moved) => Judgement::Fail(moved.to_string()),
             Verdict::Differs(diff) => Judgement::Fail(first_difference(&diff, "rendering")),
         },
     }

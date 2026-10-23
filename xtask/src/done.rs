@@ -106,6 +106,7 @@ fn holds(when: When, manifest: &Manifest, krate: &Crate, carried: &Carried) -> b
             port_map::home_of_the_lock(manifest).is_ok_and(|home| home.name == krate.name)
         }
         When::Carried => carried.carries(krate),
+        When::Engine => crate::manifest::of_the_engine(krate),
     }
 }
 
@@ -1204,8 +1205,9 @@ mod tests {
     use crate::manifest::{Crate, Manifest, Owed, Rule};
     use crate::reading::{Reading, Status};
 
-    /// The `[[owed]]` rows the tracked manifest carries (#3206), stated
-    /// here so these tests hold the rows' mechanics and a person's edit to
+    /// The `[[owed]]` rows the tracked manifest carries (#3206), the
+    /// witness row as #3278 ruled it (`when = "engine"`), stated here so
+    /// these tests hold the rows' mechanics and a person's edit to
     /// `seams.toml` turns none of them red; the tracked rows are held to
     /// what `done` asked before them by
     /// `the_tracked_rows_ask_every_crate_what_done_asked_before_them`.
@@ -1221,7 +1223,7 @@ crates = "*"
 [[owed]]
 instrument = "witness"
 crates = "*"
-exempt = ["xtask"]                         # the harness has no kernel and no native
+when = "engine"                            # the harness has no kernel and no native
 
 [[owed]]
 instrument = "api-check"
@@ -1317,6 +1319,17 @@ crates = ["php_heap"]                      # design §9's memory model; also wha
         );
         let asked = asked_of(&Crate::named("ext/pcre"));
         assert_eq!(asked, ASKED_OF_A_DEFAULT_EXTENSION);
+    }
+
+    /// `when = "engine"` holds of every crate but the harness (#3278): a
+    /// bare crate, a host and an extension alike owe the witness row's
+    /// reading, `xtask` alone does not.
+    #[test]
+    fn the_engine_predicate_holds_of_every_crate_but_the_harness() {
+        for name in ["php_heap", "timelib_sys", "sapi/cli", "ext/pcre"] {
+            assert!(asked_of(&Crate::named(name)).contains(&"witness"), "{name}");
+        }
+        assert!(!asked_of(&Crate::named(crate::layout::HARNESS)).contains(&"witness"));
     }
 
     /// `crosscheck` renders every extension the binary carries per commit
