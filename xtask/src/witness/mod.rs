@@ -731,7 +731,7 @@ fn find<'a>(
         }
         // The harness measures the engine and carries no witness of its
         // own; `done` asks it for none either (§4.5).
-        let unrun = if krate.name == crate::done::HARNESS {
+        let unrun = if krate.name == crate::layout::HARNESS {
             Some("the harness carries no witness")
         } else {
             (!sources::exists(root, krate)).then_some(sources::NOT_YET_CREATED)

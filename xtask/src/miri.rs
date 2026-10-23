@@ -45,23 +45,23 @@ pub const TOOLCHAIN: &str = "nightly-2026-02-20";
 /// [`TOOLCHAIN`] it takes exposed provenance.
 const MODEL: &str = "-Zmiri-tree-borrows";
 
-/// The crates a run takes when none is named: the memory model, design
-/// §9's.
-pub const CRATES: [&str; 1] = ["php_heap"];
-
-/// Run every crate of `only`, or [`CRATES`], under Miri; one reading each.
-/// A crate whose sources do not exist yet writes none; a machine without
-/// the toolchain writes a skip naming the command that installs it.
+/// Run every crate of `only`, or where none is named the crates the
+/// manifest's `miri` row covers ([`Manifest::owing`], design §9's memory
+/// model, #3206), under Miri; one reading each. A crate whose sources do
+/// not exist yet writes none; a machine without the toolchain writes a
+/// skip naming the command that installs it.
 pub fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Reading>> {
-    let named: Vec<String> = if only.is_empty() {
-        CRATES.map(str::to_owned).into()
+    let crates = if only.is_empty() {
+        let row = manifest.owing(INSTRUMENT);
+        let owed = |krate: &&Crate| row.is_some_and(|row| row.covers(&krate.name));
+        manifest.crates.iter().filter(owed).collect()
     } else {
-        only.to_vec()
+        manifest.crates_named(only)?
     };
     let snapshot = Snapshot::disk(root)?;
     let installed = installed(root);
     let mut readings = Vec::new();
-    for krate in manifest.crates_named(&named)? {
+    for krate in crates {
         let name = &krate.name;
         if !sources::exists(root, krate) {
             continue;

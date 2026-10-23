@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::layout;
 pub use crate::layout::Layout;
+pub use owed::{Owed, When};
+
+mod owed;
 use crate::oracle::Pin;
 use crate::phpt::Scope;
 use crate::track::Ticket;
@@ -48,6 +51,10 @@ pub struct Manifest {
     pub edges: Vec<Edge>,
     #[serde(rename = "rule", default)]
     pub rules: Vec<Rule>,
+    /// `[[owed]]`: the instruments a crate owes a fresh reading of before
+    /// `done`, one row per instrument ([`Owed`], #3206).
+    #[serde(default)]
+    pub owed: Vec<Owed>,
     /// `[lock_home]`: the crate a lock's file lives with, for a lock no
     /// `[[crate]]` row names. A seam whose producer is a file and not a
     /// crate (`ops`, generated from `ops.toml`) has no row to carry it,
@@ -1099,6 +1106,7 @@ impl Manifest {
             }
         }
         manifest.parity.hold(&manifest.crates)?;
+        owed::hold(&manifest.owed)?;
         Ok(manifest)
     }
 
@@ -1155,6 +1163,11 @@ impl Manifest {
     /// The rows `only` names, in the manifest's order, or every row where
     /// it names none: an instrument's `--crate`, refused for a name no row
     /// carries.
+    /// The `[[owed]]` row of `instrument`, where the manifest has one.
+    pub fn owing(&self, instrument: &str) -> Option<&Owed> {
+        self.owed.iter().find(|row| row.instrument == instrument)
+    }
+
     pub(crate) fn crates_named(&self, only: &[String]) -> Result<Vec<&Crate>> {
         if let Some(name) = only.iter().find(|n| self.crate_named(n).is_none()) {
             bail!("the manifest has no crate named {name:?}");

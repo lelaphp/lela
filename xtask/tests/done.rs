@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 
 use xtask::divergence::Registry;
 use xtask::done::Base;
-use xtask::done::{self, FRESH, Verdict};
+use xtask::done::{self, Verdict};
 use xtask::manifest::Manifest;
 use xtask::oracle::Promise;
 use xtask::reading::{Reading, Status, Store, UNDER_RECIPE};
@@ -32,12 +32,13 @@ use common::run::{Ran, Run, xtask};
 use common::tracker::{Tracker, issue};
 
 /// What condition 1 asks of `ext/pcre`, the crate most of these tests
-/// change: [`FRESH`] less `port-map`, which is asked of the crate
+/// change: the manifest's `[[owed]]` instruments less `port-map`, which is
+/// asked of the crate
 /// `api.lock` lives with and of no other (§4.5 condition 1, #148), less
 /// `miri`, asked of `php_heap` alone (#2416), and
 /// with `crosscheck`, asked of a default extension (#269) at both its
 /// scopes, the crate's name and `ext/<name>/ri` (#361). That this is
-/// [`FRESH`] less those two rows is asserted in
+/// the rows less those two is asserted in
 /// `the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is`.
 const ASKED: [&str; 8] = [
     "clippy",
@@ -327,8 +328,9 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
 /// edit of `api.lock` alone stales the reading and the condition says so.
 #[test]
 fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is() {
-    let asked_of_every_other_crate: Vec<&str> = FRESH
-        .into_iter()
+    let manifest = Manifest::load(workspace()).unwrap();
+    let asked_of_every_other_crate: Vec<&str> = (manifest.owed.iter())
+        .map(|row| row.instrument.as_str())
         .filter(|i| !matches!(*i, "port-map" | "miri"))
         .collect();
     assert_eq!(asked_of_every_other_crate, ASKED);
@@ -654,9 +656,16 @@ fn an_instrument_named_not_run_is_a_note_and_never_a_silent_pass() {
     let out = xtask(&unchanged, &args).ok();
     assert!(out.contains("no touched crate is asked for one"), "{out}");
 
-    // What `--not-run` names is an instrument condition 1 knows.
+    // What `--not-run` names is an instrument an `[[owed]]` row names
+    // (#3206), and the refusal names the rows' instruments.
     let ran = xtask(&unchanged, &["done", "--not-run", "oracle"]);
-    assert_eq!(ran.code(), 2, "{ran}");
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(
+        ran.stderr
+            .contains("--not-run oracle: no [[owed]] row names it")
+            && ran.stderr.contains("the rows name clippy, test, witness"),
+        "{ran}"
+    );
 }
 
 #[test]
@@ -1505,6 +1514,7 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
 /// for its absence (#2477).
 #[test]
 fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
+    let manifest = Manifest::load(workspace()).unwrap();
     let text = read(".github/workflows/harness.yml");
     let oracle = &text[text.find("\n  oracle:\n").unwrap()..text.find("\n  done:\n").unwrap()];
     assert!(
@@ -1515,7 +1525,7 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
         .lines()
         .filter_map(|l| l.trim().strip_prefix("- run: cargo xtask "))
         .filter_map(|l| l.split_whitespace().next())
-        .filter(|i| FRESH.contains(i))
+        .filter(|i| manifest.owing(i).is_some())
         .collect();
     assert_eq!(
         runs,

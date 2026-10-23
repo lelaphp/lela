@@ -436,6 +436,46 @@ fn generated_decodes_as_a_list_of_files_and_any_other_shape_is_refused() {
     }
 }
 
+/// `[[owed]]` rows are refused by name (#3206): the fixtures name an
+/// instrument no `xtask` subcommand is and a predicate the harness does not
+/// derive, and a second row of one instrument is refused as well. The
+/// rows the grammar reads load.
+#[test]
+fn an_owed_row_naming_an_unknown_instrument_or_predicate_is_refused_by_name() {
+    let refused = |fixture: &str| {
+        let path = xtask::package_dir().join("fixtures/done").join(fixture);
+        let row = std::fs::read_to_string(path).unwrap();
+        format!(
+            "{:#}",
+            Manifest::parse(&format!("{MINIMAL}{row}")).unwrap_err()
+        )
+    };
+    let err = refused("owed-unknown-instrument.toml");
+    assert!(
+        err.contains("[[owed]] names the instrument \"lint\", which is no `xtask` subcommand"),
+        "{err}"
+    );
+    let err = refused("owed-unknown-when.toml");
+    assert!(
+        err.contains("unknown variant `phpt-lane`") && err.contains("`phpt-subset`"),
+        "{err}"
+    );
+    let row =
+        |instrument: &str| format!("[[owed]]\ninstrument = \"{instrument}\"\ncrates = \"*\"\n");
+    let twice = format!("{MINIMAL}{}{}", row("test"), row("test"));
+    let err = format!("{:#}", Manifest::parse(&twice).unwrap_err());
+    assert!(err.contains("[[owed]] names \"test\" twice"), "{err}");
+    let held = format!(
+        "{MINIMAL}{}[[owed]]\ninstrument = \"miri\"\ncrates = [\"php_heap\"]\nexempt = [\"x\"]\nwhen = \"lock-home\"\n",
+        row("test")
+    );
+    let manifest = Manifest::parse(&held).unwrap();
+    assert_eq!(manifest.owed.len(), 2);
+    assert!(manifest.owing("test").unwrap().covers("ext/pcre"));
+    assert!(manifest.owing("miri").unwrap().covers("php_heap"));
+    assert!(!manifest.owing("miri").unwrap().covers("php_heap_x"));
+}
+
 /// `allow_in_tests` lists lints its rule denies that clippy exempts tests
 /// from by a key (#3078). The fixture lists `clippy::todo`, which has no
 /// such key, and is refused naming the lint; so is a lint the rule does

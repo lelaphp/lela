@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=fa98fe1ade9ad47f861d62595760ac390b0da87712ea3e73819dee5fdf3b48c6 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=0681d8d3cedcf8d1151f4106c3dba578d1fcb2db5f0ffa89bb08bb969230c3b9 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=428ed6bb5f212c73d74fe6a079ec874be8b3ad34d50639d5b36cce82777dfcb8 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=983ebaab56ef2058d0144f6c2e59cf56269c91e6d9da118be65c0f8027f376c0 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -131,9 +131,9 @@ third-engine-design.md
 | sapi | sapi.lock | 58 |  |
 | tier | tier.lock | 130 |  |
 | layer | layer.lock | 38 |  |
-| harness | xtask.lock | 420 |  |
+| harness | xtask.lock | 422 |  |
 
-<!-- /computed in=21cd9808f631f3363fb38d2d5d03fc4331b8c2017f607fe2ce80f0d379e2cdaf out=24642984c891955127fe0028bd19b6a85018d7e0e9838bbe7c71ff110d6d2fe6 -->
+<!-- /computed in=6cdc5aede696a21a133202bb4211bc21ee92ad98f4d7dc7db9e0665ebebcc983 out=9c758d58c492358492ab8320459df4f25a7a84b23c6dd94a51507be61460bc60 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
@@ -175,7 +175,7 @@ Options:
       --root <DIR>  The workspace root; defaults to the workspace this binary runs in
   -h, --help        Print help
 ```
-<!-- /computed in=0f5e980ef15f93ae076f8116757ac7a6dcd67fa0db206f9d0f0e71dde7de54fc out=3cd3cb054942af5a16b72ec93f51ae9766812a0b5d3e22db3c68a63e5cd94e26 -->
+<!-- /computed in=be5b23d21ed327e97a5644c7320cef485a1b378b1b096d019bdc970b51d79774 out=3cd3cb054942af5a16b72ec93f51ae9766812a0b5d3e22db3c68a63e5cd94e26 -->
 <!-- computed tree src=crates depth=1 name=layout | do not edit; run computed -->
 ```
 .
