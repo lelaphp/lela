@@ -13192,8 +13192,9 @@ pub(crate) fn assign_op<T: Tier, A: Operand + Default, B: Operand + Default>(
 /// The inline path of `ZEND_ASSIGN_OP` over a CV
 /// (`ZEND_ASSIGN_OP_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:1257`): a CV
 /// holding a number and a value that is a number as it stands, under an
-/// operator [`inline::compound`] names, computed by [`inline::binary`]
-/// as the binary opcode's own inline pair computes it, written into the
+/// operator [`inline::compound`] names, computed by
+/// [`inline::compounded`] as the binary opcode's own inline pair
+/// computes it, written into the
 /// CV in place and, under `RETURN_VALUE_USED`, into the temporary.
 /// A CV holding a number is no reference, so no type a property carries
 /// is read and neither is the frame's `strict_types` regime, which is
@@ -13220,10 +13221,9 @@ fn inline_assign_op(
     if !matches!(value.kind(), ZvalType::Long | ZvalType::Double) {
         return None;
     }
-    let rule = inline::compound(op.extended_value)?;
     let at = a.slot(op.op1)?;
     let held = *slots.get(at)?;
-    let z = inline::binary(rule, held, value)?;
+    let z = inline::compounded(op.extended_value, held, value)?;
     if op.out_type != OperandKind::Unused {
         write_owning_nothing(slots, op, z)?;
     }

@@ -102,9 +102,6 @@ pub(crate) enum Binary {
 #[inline]
 pub(crate) fn compound(extended_value: u32) -> Option<Binary> {
     // php's numbers for the opcodes, matched as the field holds them.
-    const ADD: u32 = Opcode::Add as u32;
-    const SUB: u32 = Opcode::Sub as u32;
-    const MUL: u32 = Opcode::Mul as u32;
     const DIV: u32 = Opcode::Div as u32;
     const MOD: u32 = Opcode::Mod as u32;
     const SL: u32 = Opcode::Sl as u32;
@@ -125,6 +122,41 @@ pub(crate) fn compound(extended_value: u32) -> Option<Binary> {
         BW_AND => Binary::Bitwise(Bitwise::And),
         _ => return None,
     })
+}
+
+/// `ZEND_ADD`'s, `ZEND_SUB`'s and `ZEND_MUL`'s numbers, as a compound
+/// assignment's `extended_value` holds them.
+const ADD: u32 = Opcode::Add as u32;
+const SUB: u32 = Opcode::Sub as u32;
+const MUL: u32 = Opcode::Mul as u32;
+
+/// [`binary`] under the operator of a compound assignment as its
+/// `extended_value` holds it: [`Arith`]'s three matched on the field
+/// itself, each to its own inline pair, and every other operator
+/// through [`compound`], so `$s += $i` makes one compare of the field
+/// where [`compound`] builds a [`Binary`] the pair then branches on
+/// again. None where [`compound`] names no operator or the rule leaves
+/// the pair to the kernel.
+///
+/// ```php
+/// function c($a, $b) { $x = $a; $x += $b; $y = $a; $y -= $b; $z = $a; $z *= $b; $w = $a; $w /= $b; $t = $a; $t .= $b; echo implode(" ", [$x, $y, $z, $w, $t]), "\n"; }
+/// c(7, 2); c(1.5, 2); c(PHP_INT_MAX, 1); c(-3, 0.5);
+/// ```
+/// ```expect
+/// 9 5 14 3.5 72
+/// 3.5 -0.5 3 0.75 1.52
+/// 9.2233720368548E+18 9223372036854775806 9223372036854775807 9223372036854775807 92233720368547758071
+/// -2.5 -3.5 -1.5 -6 -30.5
+/// ```
+#[inline(always)] // as `computed`
+#[allow(clippy::inline_always)]
+pub(crate) fn compounded(extended_value: u32, a: Zval, b: Zval) -> Option<Zval> {
+    match extended_value {
+        ADD => arith(Arith::Add, a, b),
+        SUB => arith(Arith::Sub, a, b),
+        MUL => arith(Arith::Mul, a, b),
+        other => binary(compound(other)?, a, b),
+    }
 }
 
 /// A zval that is a number as it stands, nothing converted.
