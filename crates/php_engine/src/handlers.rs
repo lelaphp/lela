@@ -24146,7 +24146,7 @@ fn smart_branch<T: Tier, S: Branch>(
         req,
         frame,
         code,
-        at.saturating_add(1),
+        exec::after(at),
         jump,
         answer.as_bool() == Some(true),
     )
@@ -24218,7 +24218,7 @@ pub(crate) mod branch {
         #[inline(always)] // the jump's one read, in the loop
         #[allow(clippy::inline_always)]
         fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
-            exec::opline_at(code, at.saturating_add(1)).map(|jump| Fused { jump, on: false })
+            exec::opline_at(code, exec::after(at)).map(|jump| Fused { jump, on: false })
         }
     }
 
@@ -24226,7 +24226,7 @@ pub(crate) mod branch {
         #[inline(always)] // the jump's one read, in the loop
         #[allow(clippy::inline_always)]
         fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
-            exec::opline_at(code, at.saturating_add(1)).map(|jump| Fused { jump, on: true })
+            exec::opline_at(code, exec::after(at)).map(|jump| Fused { jump, on: true })
         }
     }
 
@@ -24234,7 +24234,7 @@ pub(crate) mod branch {
         #[inline(always)] // the comparison's inline path, which is in the loop
         #[allow(clippy::inline_always)]
         fn fused<'c>(code: &'c OpArray, op: &Opline, at: u32) -> Option<Fused<'c>> {
-            exec::opline_at(code, at.saturating_add(1))
+            exec::opline_at(code, exec::after(at))
                 .filter(|jump| op.fuses(jump))
                 .map(|jump| Fused {
                     jump,
@@ -24259,7 +24259,7 @@ fn branch_fused<T: Tier>(
     answer: bool,
 ) -> Edge {
     if answer != fused.on {
-        return jump_to(at.saturating_add(1));
+        return jump_to(exec::after(at));
     }
     jumped::<T>(req, frame, code, at, fused.jump.op2, fused.jump.out)
 }
@@ -24321,7 +24321,7 @@ fn inline_compare<T: Tier, S: Branch>(
             req,
             frame,
             code,
-            at.saturating_add(1),
+            exec::after(at),
             jump,
             answer,
         ));

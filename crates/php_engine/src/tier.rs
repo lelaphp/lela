@@ -954,10 +954,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
             match way {
-                // `at` is the index of an opline that stands, so it is
-                // under the length of an op array, which no 32-byte opline
-                // count brings to `u32::MAX`: the add does not wrap.
-                Way::Advance => at = at.wrapping_add(1),
+                Way::Advance => at = exec::after(at),
                 Way::Jump(to) => at = to,
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
