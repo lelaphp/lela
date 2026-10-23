@@ -32,6 +32,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use php_engine::api::raising::{self, Level};
+use php_engine::api::request::TierStatus;
 use php_engine::tier::{
     self, Extension, ExtensionBuilder, Flow, FrameRef, Refusal, Request, Site, Start, Started,
     StartupIni, Thrown, Tier,
@@ -95,6 +96,19 @@ impl Tier for Jit {
     /// `Jit`'s loop.
     fn lay(started: &Started<'_>) -> Option<JitRequest> {
         JitRequest::laid(*started)
+    }
+
+    /// php's `zend_jit_status` ([`policy::Policy::status`]): `JIT_G` as
+    /// the directives set it at engine start, and the buffer less what
+    /// the traces of `req`'s epoch take ([`table::TraceTable::usage`]),
+    /// none where no request of the epoch made its table.
+    fn status(req: &Request) -> TierStatus {
+        let Some(engine) = req.engine::<JitEngine>() else {
+            return TierStatus::default();
+        };
+        let epoch = tier::epoch(req);
+        let used = table::of_epoch(&epoch).map_or(0, |table| table.usage().bytes);
+        engine.shared.policy.status(used)
     }
 
     /// The tier's state (`jit-design.md` §4): its two directives and
@@ -265,7 +279,7 @@ impl JitEngine {
     }
 
     /// The G4 bar's line (#2961), at a request's end in the bench's
-    /// build alone: the bytes the engine's traces take, the oplines they
+    /// build alone: the bytes the epoch's traces take, the oplines they
     /// compiled and how many there are, as its tables counted them
     /// ([`table::TraceTable::usage`]); php's count of compiled oplines is
     /// its `TRACE_BYTECODE` listing, which this tier does not write.

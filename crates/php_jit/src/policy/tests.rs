@@ -99,12 +99,139 @@ fn opcache_jit_is_read_as_php_reads_it() {
     assert_eq!(Setting::of(b"1235"), Setting::On { crto: 1235 });
     assert_eq!(
         Setting::of(b"1245"),
-        Setting::Invalid,
-        "trigger 4 is php's refusal"
+        Setting::Invalid { crto: 5 },
+        "trigger 4 is php's refusal, after the opt level it wrote"
     );
-    assert_eq!(Setting::of(b"1250"), Setting::Invalid, "opt level 0");
-    assert_eq!(Setting::of(b"11255"), Setting::Invalid, "five digits");
-    assert_eq!(Setting::of(b"sideways"), Setting::Invalid);
+    assert_eq!(
+        Setting::of(b"1250"),
+        Setting::Invalid { crto: 0 },
+        "opt level 0"
+    );
+    assert_eq!(
+        Setting::of(b"11255"),
+        Setting::Invalid { crto: 1255 },
+        "five digits"
+    );
+    assert_eq!(Setting::of(b"-1254"), Setting::Invalid { crto: 0 });
+    assert_eq!(Setting::of(b"sideways"), Setting::Invalid { crto: 0 });
+}
+
+/// `zend_jit_status` once php's start is over, as the oracle reports it
+/// on this target (`opcache.enable_cli=1`; 16368 and 67108848 under 16K
+/// and 64M on its 16 KiB page): `JIT_G` as `opcache.jit` set it,
+/// the digits a refused number wrote kept, a zero buffer and a buffer
+/// past the target's reach neither enabled nor on, and the buffer
+/// rounded to the page less two pointers, free but for the code of the
+/// traces published.
+#[test]
+fn the_status_is_zend_jit_status() {
+    let status = |entries: &[(&str, &str)]| {
+        let (mut policy, _) = read_ini(entries);
+        policy.check_support(|_| false);
+        let s = policy.status(0);
+        (
+            (s.enabled, s.on),
+            (s.kind, s.opt_level, s.opt_flags),
+            s.buffer_size,
+            s.buffer_free,
+        )
+    };
+    let buffer = |size: u64| u64::try_from(crate::table::code::capacity(size) - 16).unwrap_or(0);
+    let big = buffer(64 << 20);
+    for (asked, expected) in [
+        (&[][..], ((false, false), (0, 0, 0), 0, 0)),
+        (
+            &[("opcache.jit", "disable")],
+            ((false, false), (0, 0, 0), 0, 0),
+        ),
+        (
+            &[("opcache.jit", "off")],
+            ((true, false), (0, 0, 0), big, big),
+        ),
+        (
+            &[("opcache.jit", "tracing")],
+            ((true, true), (5, 4, 6), big, big),
+        ),
+        (
+            &[("opcache.jit", "function")],
+            ((true, true), (0, 5, 6), big, big),
+        ),
+        (
+            &[("opcache.jit", "1235")],
+            ((true, true), (3, 5, 6), big, big),
+        ),
+        (
+            &[("opcache.jit", "0205")],
+            ((true, true), (0, 5, 2), big, big),
+        ),
+        (
+            &[("opcache.jit", "1294")],
+            ((false, false), (0, 4, 0), 0, 0),
+        ),
+        (&[("opcache.jit", "abc")], ((false, false), (0, 0, 0), 0, 0)),
+        (
+            &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")],
+            ((false, false), (5, 4, 6), 0, 0),
+        ),
+        (
+            &[
+                ("opcache.jit", "tracing"),
+                ("opcache.jit_buffer_size", "16K"),
+            ],
+            ((true, true), (5, 4, 6), buffer(16 << 10), buffer(16 << 10)),
+        ),
+        (
+            &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "1")],
+            ((true, true), (5, 4, 6), buffer(1), buffer(1)),
+        ),
+        (
+            &[
+                ("opcache.jit", "tracing"),
+                ("opcache.jit_buffer_size", "4G"),
+            ],
+            ((false, false), (5, 4, 6), 0, 0),
+        ),
+    ] {
+        assert_eq!(status(asked), expected, "{asked:?}");
+    }
+    let (policy, _) = read_ini(&[("opcache.jit", "tracing")]);
+    let used = policy.status(1000);
+    assert_eq!((used.buffer_size, used.buffer_free), (big, big - 1000));
+    assert_eq!(policy.status(usize::MAX).buffer_free, 0);
+}
+
+/// `zend_jit_check_support` refuses a buffer the target's code cannot
+/// reach once it set the tier up, with php's warning, and refuses no
+/// lane over a tier php never set up.
+#[test]
+fn a_buffer_past_the_targets_reach_is_refused() {
+    let past = if cfg!(target_arch = "aarch64") {
+        "129M"
+    } else {
+        "3G"
+    };
+    let (mut policy, _) = read_ini(&[
+        ("opcache.jit", "tracing"),
+        ("opcache.jit_buffer_size", past),
+    ]);
+    policy.check_support(|_| false);
+    assert_eq!(policy.refused(), Some(Refused::BufferSize));
+    assert_eq!(policy.mode(), Mode::Off);
+    let (mut policy, _) = read_ini(&[("jit.mode", "force"), ("opcache.jit_buffer_size", past)]);
+    policy.check_support(|_| false);
+    assert_eq!((policy.refused(), policy.mode()), (None, Mode::Force));
+    let (mut policy, _) = read_ini(&[
+        ("opcache.jit", "tracing"),
+        ("opcache.jit_buffer_size", "128M"),
+    ]);
+    policy.check_support(|_| false);
+    assert_eq!(policy.refused(), None);
+    let expected = if cfg!(target_arch = "aarch64") {
+        "JIT on AArch64 doesn't support opcache.jit_buffer_size above 128M."
+    } else {
+        "JIT on x86_64 doesn't support opcache.jit_buffer_size above 2G."
+    };
+    assert_eq!(Refused::BufferSize.to_string(), expected);
 }
 
 /// `function` and any trigger but `HOT_TRACE` trace as tracing does and say so

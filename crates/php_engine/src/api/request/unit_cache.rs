@@ -105,6 +105,34 @@ pub struct CacheStatus {
     /// What `opcache.preload` preloaded, `ZCSG(preload_script)`; none
     /// where nothing was.
     pub preload: Option<PreloadStatistics>,
+    /// The compiled tier as the engine's tier reports it
+    /// ([`crate::tier::Tier::status`]).
+    pub tier: TierStatus,
+}
+
+/// `opcache_get_status()['jit']`, what php's `zend_jit_status` reports
+/// (`Z/ext/opcache/jit/zend_jit.c:825-842`): `JIT_G` as php's start left
+/// it, and the code buffer. A tier that compiles nothing reports every
+/// field zero, the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TierStatus {
+    /// `JIT_G(enabled)`: `opcache.jit` set the tier up and php's start
+    /// kept it.
+    pub enabled: bool,
+    /// `JIT_G(on)`: set up and on.
+    pub on: bool,
+    /// `JIT_G(trigger)`, the `T` of the `CRTO` digits: 5 for tracing.
+    pub kind: u8,
+    /// `JIT_G(opt_level)`, the `O` digit.
+    pub opt_level: u8,
+    /// `JIT_G(opt_flags)`: the `R` digit, with `ZEND_JIT_CPU_AVX`,
+    /// `1<<2`, for a `C` of one.
+    pub opt_flags: u8,
+    /// `dasm_end - dasm_buf`: the buffer less the two pointers php keeps
+    /// at its end; none where the tier was not set up.
+    pub buffer_size: u64,
+    /// `dasm_end - *dasm_ptr`: what of it no code takes yet.
+    pub buffer_free: u64,
 }
 
 /// `opcache_get_status()['preload_statistics']`: what the preload
@@ -868,7 +896,8 @@ impl UnitCache<'_> {
     #[must_use]
     pub fn status(&self) -> CacheStatus {
         let req = &self.req;
-        (req.shared.units).status(&req.arena.files, req.shared.interned_strings())
+        let tier = (req.shared.loops.status)(req);
+        (req.shared.units).status(&req.arena.files, req.shared.interned_strings(), tier)
     }
 
     /// `filename_is_in_cache`: whether a unit is held under the name
@@ -1298,7 +1327,12 @@ mod tests {
                 let third = start();
                 assert_eq!(third.arena.counts(), [0, 0, 0], "an empty arena");
                 assert!(!third.arena.files.restart_pending());
-                assert_eq!(units.status(&third.arena.files, 0).manual_restarts, 1);
+                assert_eq!(
+                    units
+                        .status(&third.arena.files, 0, super::TierStatus::default())
+                        .manual_restarts,
+                    1
+                );
                 to_second.send(()).ok();
                 at_first.recv().ok();
                 drop(third);
@@ -1321,7 +1355,11 @@ mod tests {
         });
         assert_eq!(
             units
-                .status(&engine.shared.arena.current().files, 0)
+                .status(
+                    &engine.shared.arena.current().files,
+                    0,
+                    super::TierStatus::default()
+                )
                 .manual_restarts,
             1
         );
