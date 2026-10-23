@@ -778,8 +778,8 @@ impl Request {
     /// `TMPDIR`):
     ///
     /// ```php
-    /// $f = sys_get_temp_dir() . '/w3311-colliding-names.inc';
-    /// file_put_contents($f, <<<'PHP'
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3311-colliding-names.inc', <<<'PHP'
     /// <?php
     /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
     /// m('class W {}'); m('$q0 = 1;');
