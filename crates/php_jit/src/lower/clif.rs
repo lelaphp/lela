@@ -446,7 +446,7 @@ impl<'a> Emit<'a> {
             End::Loop(header) => Some(header),
             End::Leave(_) | End::Return(_) => None,
         };
-        if header.is_some() {
+        if header.is_some_and(|header| header.interrupt.tested()) {
             self.interrupt = Some(self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT));
         }
         // The stack and the entered frame's place on it, which calls made
@@ -476,8 +476,8 @@ impl<'a> Emit<'a> {
         }
         let split = header.map_or(self.ir.ops.len(), |header| header.at.index());
         self.ops(0..split, body)?;
-        match (self.ir.end, self.interrupt) {
-            (End::Loop(header), Some(_)) => {
+        match self.ir.end {
+            End::Loop(header) => {
                 let phis = self.register_phis();
                 let entered = phis
                     .iter()
@@ -490,11 +490,13 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.switch_to_block(head);
                 self.b.set_srcloc(located(header.at.index()));
-                // The interrupt test, one load and one branch (§4.3).
-                self.interrupt_test(match header.interrupt {
-                    Interrupt::Exit(exit) => Raised::Exit(exit),
-                    Interrupt::Stub(_) => Raised::Stub,
-                })?;
+                // The interrupt test, one load and one branch (§4.3); a
+                // loop by recursive return takes none, as php's takes none.
+                match header.interrupt {
+                    Interrupt::Exit(exit) => self.interrupt_test(Raised::Exit(exit))?,
+                    Interrupt::Stub(_) => self.interrupt_test(Raised::Stub)?,
+                    Interrupt::None => {}
+                }
                 self.ops(split..self.ir.ops.len(), body)?;
                 let brought = phis
                     .iter()
@@ -521,10 +523,9 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.seal_block(head);
             }
-            (End::Leave(exit), _) => self.leave_at_end(exit)?,
+            End::Leave(exit) => self.leave_at_end(exit)?,
             // The `RETURN` left in place went on to the escape or the exit.
-            (End::Return(_), _) => {}
-            (End::Loop(_), None) => return Err(mismatch("a loop with no interrupt flag")),
+            End::Return(_) => {}
         }
         if let Some((entry, into, block)) = body {
             self.b.set_srcloc(SourceLoc::default());
