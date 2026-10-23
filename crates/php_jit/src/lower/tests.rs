@@ -14,7 +14,9 @@ use cranelift_codegen::isa;
 
 use super::{ABANDONED, Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
-use crate::testing::goldens::{self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held};
+use crate::testing::goldens::{
+    self, ARRAY_WRITE, FIB, Fixture, MANDELBROT, NBODY, SIEVE, SPECTRALNORM, held,
+};
 use crate::testing::{self, Lane, policy};
 use crate::types::{End, Interrupt, Op, TraceIr};
 
@@ -168,6 +170,19 @@ fn nbody_lowers_its_inner_loop_with_the_interrupt_test() -> Result<(), String> {
 #[test]
 fn spectralnorm_lowers_its_inlined_call_with_the_interrupt_test() -> Result<(), String> {
     lowered(SPECTRALNORM).map(drop)
+}
+
+/// `array_write`'s and `sieve`'s element writes, inline: written in
+/// place, or through `step` where the array is not the variable's own,
+/// not packed, or the element is past `nNumUsed`, a hole or counted,
+/// taking no exit (#3228).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), String> {
+    for fixture in [ARRAY_WRITE, SIEVE] {
+        lowered(fixture)?;
+    }
+    Ok(())
 }
 
 /// A host Cranelift has no ISA for is `Unsupported`, which runs the
