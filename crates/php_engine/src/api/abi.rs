@@ -263,11 +263,12 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
     }
 
     /// The `value` built from what it replaces held for `key`, or what
-    /// another thread put there while this one built it, which is kept
-    /// and nothing built: the one both are answered. A value held there
-    /// that `stale` answers true for is replaced, under every key that
-    /// held it, as one bucket of php's hash that several keys point to is
-    /// updated in place.
+    /// another thread held there first, which is kept and nothing built:
+    /// the one both are answered. A value held there that `stale` answers
+    /// true for is replaced, under every key that held it, as one bucket
+    /// of php's hash that several keys point to is updated in place.
+    /// `value` is built while the cache's `Mutex` is held, so it reads
+    /// only what it is handed.
     pub(crate) fn insert_over(
         &self,
         key: K,

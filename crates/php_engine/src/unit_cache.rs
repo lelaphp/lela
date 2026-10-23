@@ -1160,13 +1160,15 @@ impl UnitCache {
             Validation::Window { seconds } => now.saturating_add(i64::from(seconds)),
             Validation::Never | Validation::EveryHit => 0,
         };
-        let mut entered = false;
+        let mut built = false;
         let held = files
             .held
             .insert_over(UnitKey::full(path), Held::discarded, |replaced| {
-                entered = true;
+                built = true;
                 // `zend_accel_hash_update` puts the file in a discarded copy's
-                // entry, where that stands in its bucket's chain.
+                // entry, where that stands in its bucket's chain; a refusal,
+                // which php never puts in its hash, has none.
+                let replaced = replaced.filter(|was| was.unit.is_ok());
                 let next = || self.taken.fetch_add(1, Ordering::Relaxed);
                 Held {
                     unit,
@@ -1181,7 +1183,7 @@ impl UnitCache {
                     discarded: AtomicBool::new(false),
                 }
             });
-        if entered {
+        if built {
             files.used.fetch_add(size, Ordering::Relaxed);
             if let Ok(unit) = &held.unit {
                 files.funcs.publish(unit);
@@ -1356,16 +1358,15 @@ impl UnitCache {
             u64::saturating_add,
         );
         listed_files.extend(held.into_iter().map(|(_, held)| listed(&held)));
-        // Each file's index here is the order its name entered the hash.
-        let (buckets, root) = self
-            .budget
-            .get()
-            .map_or((u64::MAX, 0), |b| (b.keys.max(1), b.root));
+        // Each file's index here is the order its name entered the hash,
+        // which no budget told leaves as it is.
         let mut listed_files: Vec<_> = listed_files.into_iter().enumerate().collect();
-        listed_files.sort_by_key(|(entered, file)| {
-            let bucket = (php_heap::Str::hash_of(&file.path) ^ root) % buckets;
-            (bucket, std::cmp::Reverse(*entered))
-        });
+        if let Some(&CacheBudget { keys, root, .. }) = self.budget.get() {
+            listed_files.sort_by_key(|(entered, file)| {
+                let bucket = (php_heap::Str::hash_of(&file.path) ^ root) % keys.max(1);
+                (bucket, std::cmp::Reverse(*entered))
+            });
+        }
         CacheStatus {
             restart_pending: files.restart_pending(),
             hits: files.hits.load(Ordering::Relaxed),
