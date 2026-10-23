@@ -822,3 +822,7 @@ when = "carried"                           # an extension the binary under test 
 [[owed]]
 instrument = "miri"
 crates = ["php_heap"]                      # design §9's memory model; also what `xtask miri` runs by default
+
+[[bench]]
+bar = "g1"
+tolerance_pct = 2.0                        # protocol §12.3's floor alone until g1-aa has two weeks of nights (#3130)
