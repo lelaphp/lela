@@ -1336,7 +1336,7 @@ fn native_placed(
             .properties
             .get(usize::try_from(info.at).ok()?)
     };
-    let place = |at: usize, parent: &[PropertyInfo]| {
+    let place = |at: usize, parent: &Placed| {
         let class = ClassId(u32::try_from(at).unwrap_or(u32::MAX));
         let decl = classes.get(at)?;
         Some(placed_of(class, decl, records.get(at), parent, decl_of))
@@ -1354,7 +1354,7 @@ fn native_placed(
                     .ok()
                     .and_then(|parent| placed.get(parent)?.clone()),
             };
-            let built = parent.and_then(|parent| place(at, parent.slots()));
+            let built = parent.and_then(|parent| place(at, &parent));
             if let (Some(built), Some(slot)) = (built, placed.get_mut(at)) {
                 *slot = Some(built);
                 progress = true;
@@ -1364,7 +1364,11 @@ fn native_placed(
     placed
         .into_iter()
         .enumerate()
-        .map(|(at, built)| built.or_else(|| place(at, &[])).unwrap_or_default())
+        .map(|(at, built)| {
+            built
+                .or_else(|| place(at, &Placed::default()))
+                .unwrap_or_default()
+        })
         .collect()
 }
 

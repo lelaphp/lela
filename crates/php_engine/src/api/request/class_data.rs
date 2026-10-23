@@ -280,6 +280,7 @@ impl Request {
     #[cold]
     fn resolve_made(&mut self, class: ClassId) -> Made {
         const ZEND_OBJECT: usize = 56;
+        const ZVAL: usize = size_of::<php_heap::Zval>();
         let (size, declared_by) = self
             .symbols()
             .lineage(class)
@@ -293,7 +294,7 @@ impl Request {
         let guards = if self.uses_guards(class) { 16 } else { 0 };
         let made = Made {
             slots: self.class_slots(class),
-            custom: size.saturating_sub(ZEND_OBJECT) + guards + 16 * self.redeclared_slots(class),
+            custom: size.saturating_sub(ZEND_OBJECT) + guards + ZVAL * self.redeclared_slots(class),
             declared_by,
             create: self.native_new_of(class),
             handlers: self.handlers_of(class),
@@ -311,13 +312,13 @@ impl Request {
     }
 
     /// The slots `do_inherit_property` leaves `IS_UNDEF` in `class`'s
-    /// `default_properties_table`, one for each backed property a class of
-    /// its lineage redeclares over its parent's, whose own slot the
-    /// parent's takes the place of: php's object keeps them, so
-    /// `zend_object_alloc` counts them, where this engine places the
-    /// property in the parent's slot alone. The first `new` of a class
-    /// that redeclares a property costs php's (the file under the
-    /// recipe's `TMPDIR`):
+    /// `default_properties_table` ([`super::Placed::holes`]), one for each
+    /// property a class of its lineage redeclares over its parent's:
+    /// php's object keeps them, so `zend_object_alloc` counts them, where
+    /// this engine places the property in one slot alone. The first `new`
+    /// of a class that redeclares a property costs php's, hooks over a
+    /// backed property among them (the file under the recipe's
+    /// `TMPDIR`):
     ///
     /// ```php
     /// $f = sys_get_temp_dir() . '/w3286-redeclared.inc';
@@ -335,6 +336,12 @@ impl Request {
     ///     '$GLOBALS["l2"] = new L2;',
     ///     'class P1 { private $p = 1; } class P2 extends P1 { public $p = 2; }',
     ///     '$GLOBALS["p2"] = new P2;',
+    ///     'class N1 { public $p = 1; } class N2 extends N1 { public $q = R::B; }',
+    ///     '$GLOBALS["n2"] = new N2;',
+    ///     'class A6 { public $p = 1; } class B6 extends A6 { public $p { get => 5; } }',
+    ///     '$GLOBALS["b6"] = new B6;',
+    ///     'class A8 { public $p = 1; } class B8 extends A8 { public $p = 3 { get => 5; } }',
+    ///     '$GLOBALS["b8"] = new B8;',
     /// ] as $c) echo m($c), "  ", $c, "\n";
     /// var_dump($k3);
     /// PHP);
@@ -351,6 +358,12 @@ impl Request {
     /// 112  $GLOBALS["l2"] = new L2;
     /// 960  class P1 { private $p = 1; } class P2 extends P1 { public $p = 2; }
     /// 112  $GLOBALS["p2"] = new P2;
+    /// 928  class N1 { public $p = 1; } class N2 extends N1 { public $q = R::B; }
+    /// 112  $GLOBALS["n2"] = new N2;
+    /// 1072  class A6 { public $p = 1; } class B6 extends A6 { public $p { get => 5; } }
+    /// 112  $GLOBALS["b6"] = new B6;
+    /// 1072  class A8 { public $p = 1; } class B8 extends A8 { public $p = 3 { get => 5; } }
+    /// 112  $GLOBALS["b8"] = new B8;
     /// object(K3)#2 (2) {
     ///   ["p"]=>
     ///   int(3)
@@ -359,21 +372,8 @@ impl Request {
     /// }
     /// ```
     fn redeclared_slots(&self, class: ClassId) -> usize {
-        let lineage: Vec<ClassId> = self.symbols().lineage(class).collect();
-        (lineage.iter().enumerate())
-            .map(|(at, &held)| {
-                let parent = lineage
-                    .get(at + 1)
-                    .map_or(0, |&parent| self.class_slots(parent));
-                let added = self.class_slots(held).saturating_sub(parent) as usize;
-                let backed = (self.symbols().class_decl(held)).map_or(0, |decl| {
-                    (decl.properties.iter())
-                        .filter(|property| property.is_instance && !property.is_virtual)
-                        .count()
-                });
-                backed.saturating_sub(added)
-            })
-            .sum()
+        self.placement(class)
+            .map_or(0, |placed| placed.holes() as usize)
     }
 
     /// The `emalloc`s `create_object` makes beside a new `object`, each

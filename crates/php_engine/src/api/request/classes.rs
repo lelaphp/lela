@@ -769,7 +769,10 @@ impl Request {
         record: Option<&LinkedClass<ClassId>>,
         parent: Option<ClassId>,
     ) -> super::Placed {
-        let above = parent.map_or(&[][..], |parent| self.placed_properties(parent));
+        let none = super::Placed::default();
+        let above = parent
+            .and_then(|parent| self.placement(parent))
+            .unwrap_or(&none);
         super::placed_of(class, decl, record, above, |info| self.property_decl(info))
     }
 
