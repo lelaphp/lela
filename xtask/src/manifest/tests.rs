@@ -117,3 +117,20 @@ fn a_suite_ruled_out_twice_or_inside_another_is_refused_naming_both() {
     );
     assert!(Manifest::parse(&apart).is_ok());
 }
+
+/// `needed_in` names where tests that name an extension stand, so a row
+/// that is no extension's carries it and is refused, naming the row
+/// (#3309); an extension's row carries it.
+#[test]
+fn needed_in_is_an_extension_rows_alone() {
+    let row = |name: &str| {
+        format!("{MINIMAL}[[crate]]\nname = \"{name}\"\nbudget = 1\nneeded_in = [\"Zend/tests\"]\n")
+    };
+    let refused = format!("{:#}", Manifest::parse(&row("php_engine")).unwrap_err());
+    assert!(
+        refused.contains("php_engine") && refused.contains("needed_in"),
+        "{refused}"
+    );
+    let held = Manifest::parse(&row("ext/zend_test")).unwrap();
+    assert_eq!(held.crates[0].needed_in, ["Zend/tests"]);
+}

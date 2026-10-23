@@ -306,6 +306,13 @@ pub struct Crate {
     /// not asked for a phpt reading.
     #[serde(default)]
     pub phpt: Vec<String>,
+    /// The directories of the pinned tree beyond an extension's own whose
+    /// tests name it in `--EXTENSIONS--`: its subset holds those too, run
+    /// under its row's oracle and feature, where the main oracle skips
+    /// them for want of the extension (`Zend/tests` for `zend_test`,
+    /// #3309). A row that is no extension's carries none.
+    #[serde(default)]
+    pub needed_in: Vec<String>,
     /// Whether this extension's port is not finished, so that its
     /// `crosscheck` and `phpt` readings are the port's meter and not a
     /// condition of done: `done` prints their numbers and holds the row
@@ -385,10 +392,13 @@ impl Crate {
         if !self.phpt.is_empty() {
             return self.phpt.iter().map(PathBuf::from).collect();
         }
-        match self.name.strip_prefix("ext/") {
-            Some(extension) => vec![derived_subset(extension)],
-            None => Vec::new(),
-        }
+        self.extension().map(derived_subset).into_iter().collect()
+    }
+
+    /// The extension the row is, `pcre` for `ext/pcre`; none for a crate
+    /// of any other directory.
+    pub(crate) fn extension(&self) -> Option<&str> {
+        self.name.strip_prefix("ext/")
     }
 
     /// Whether the crate's subset is the one the design derives for an
@@ -1097,6 +1107,14 @@ impl Manifest {
                     rule.id
                 );
             }
+        }
+        if let Some(krate) = (manifest.crates.iter())
+            .find(|krate| !krate.needed_in.is_empty() && krate.extension().is_none())
+        {
+            bail!(
+                "[[crate]] {} has `needed_in`, the places of tests that name an extension in `--EXTENSIONS--`; the row is no extension's, so no test names it",
+                krate.name
+            );
         }
         manifest.parity.hold(&manifest.crates)?;
         owed::hold(&manifest.owed, &manifest.crates)?;
