@@ -903,6 +903,42 @@ fn a_leave_that_frees_its_variables_reloads_nothing() -> Result<(), String> {
     Ok(())
 }
 
+/// A return trace that lands past a recursive call and never reads the
+/// typed parameter knows it holds what its declaration says all the same:
+/// the `VERIFY_RETURN_TYPE` of `return $n;` under an `int` return leaves
+/// an `int` as it is, so it is no write of another type, as php's
+/// inference types it, and the `RETURN` left in place frees nothing.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_typed_parameter_its_return_type_keeps_is_no_owner_at_the_leave() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "f"), ("record.start", "return")],
+        "function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
+        echo f(20), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let leaves: Vec<_> = (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::Return => Some(line.imm),
+            _ => None,
+        })
+        .collect();
+    assert!(!leaves.is_empty(), "{rendered}");
+    for imm in leaves {
+        assert!(
+            matches!(
+                imm,
+                super::Imm::Leave {
+                    owners: super::Owners::Uncounted,
+                    ..
+                }
+            ),
+            "{rendered}"
+        );
+    }
+    Ok(())
+}
+
 /// A kernel that may throw and calls nothing, a cast to string, reads
 /// nothing again: it may only unwind, which takes no exit, as php's
 /// compiled code jumps to its stub for a throwable and takes no exit point.

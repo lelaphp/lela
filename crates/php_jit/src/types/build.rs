@@ -1640,10 +1640,8 @@ impl<'a> Builder<'a> {
             Place::Root if self.rec.start == Start::Enter => {
                 param.map_or(Types::UNDEF, |p| param_types(p.declared, None))
             }
-            _ => match param {
-                Some(p) if !written_after_entry(meta.code, slot.var) => {
-                    param_types(p.declared, None)
-                }
+            _ => match param.map(|p| param_types(p.declared, None)) {
+                Some(holds) if !written_after_entry(meta.code, slot.var, holds) => holds,
                 _ => unknown,
             },
         }

@@ -511,8 +511,36 @@ pub(super) fn referenced(code: &OpArray, var: u32) -> bool {
     })
 }
 
-/// Whether an opline past the leading `RECV` oplines writes variable `var`.
-pub(super) fn written_after_entry(code: &OpArray, var: u32) -> bool {
+/// Whether an opline past the leading `RECV` oplines writes variable
+/// `var`, which `holds` what it was passed: a `VERIFY_RETURN_TYPE` of it
+/// that leaves what it holds as it is, its declaration holding every kind
+/// `holds` may be, writes nothing it did not hold, as php's inference
+/// types that definition (`zend_update_type_info`'s `ZEND_VERIFY_RETURN_TYPE`):
+/// `return $n;` of `function f(int $n): int`. One that coerces it, an
+/// `int` returned as a `string`, writes a string the leave frees:
+///
+/// ```php
+/// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
+/// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
+/// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
+/// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// 99 500 32
+/// ```
+///
+/// The same where every guard fails once:
+///
+/// ```php
+/// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
+/// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
+/// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
+/// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// 99 500 32
+/// ```
+pub(super) fn written_after_entry(code: &OpArray, var: u32, holds: Types) -> bool {
     let start = code
         .oplines
         .iter()
@@ -525,7 +553,8 @@ pub(super) fn written_after_entry(code: &OpArray, var: u32) -> bool {
         .count();
     code.oplines.iter().enumerate().skip(start).any(|(at, op)| {
         let after = code.oplines.get(at + 1);
-        written(op, after).contains(&var)
+        let kept = op.opcode == Opcode::VerifyReturnType && returned(code, holds).within(holds);
+        !kept && written(op, after).contains(&var)
     })
 }
 
