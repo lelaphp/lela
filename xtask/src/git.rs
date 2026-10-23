@@ -478,9 +478,6 @@ pub fn show(root: &Path, rev: &str, path: &str) -> Result<Option<String>> {
 
 #[cfg(test)]
 mod tests {
-    /// Run by [`elsewhere_reads_the_repository_it_names_under_a_hooks_git_dir`]
-    /// with `GIT_DIR` naming another repository, as a hook in a linked
-    /// worktree runs an instrument; run by nothing else, it does nothing.
     /// A repository `git init` laid down and nothing committed has no
     /// commit to stamp a reading with, and says so (#3189).
     #[test]
@@ -497,6 +494,9 @@ mod tests {
         );
     }
 
+    /// Run by [`elsewhere_reads_the_repository_it_names_under_a_hooks_git_dir`]
+    /// with `GIT_DIR` naming another repository, as a hook in a linked
+    /// worktree runs an instrument; run by nothing else, it does nothing.
     #[test]
     #[ignore = "elsewhere_reads_the_repository_it_names_under_a_hooks_git_dir runs it"]
     fn elsewhere_under_git_dir() {
