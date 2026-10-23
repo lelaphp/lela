@@ -576,38 +576,34 @@ fn restore(checkout: &Path, path: &str, was: Option<&str>, now: Option<&str>) ->
 /// put back. What neither can see is a comment written before steer in the
 /// same call, which binds nothing.
 fn steered(checkout: &Path, path: &str, was: Option<&str>, since: i64) -> bool {
-    let Some(was) = was else {
-        return false;
-    };
-    if !steer::binding(checkout).is_ok_and(|manifest| steer::steerable(&manifest, path)) {
-        return false;
-    }
-    let Ok(Some(reading)) = Store::of_workspace(checkout).read(steer::INSTRUMENT, path) else {
-        return false;
-    };
+    was.and_then(|was| steered_by(checkout, path, was, since))
+        .is_some()
+}
+
+/// [`steered`], `None` at the first thing that says it was not.
+fn steered_by(checkout: &Path, path: &str, was: &str, since: i64) -> Option<()> {
+    let manifest = steer::binding(checkout).ok()?;
+    steer::steerable(&manifest, path).then_some(())?;
+    let reading = Store::of_workspace(checkout)
+        .read(steer::INSTRUMENT, path)
+        .ok()??;
     let taken_since = reading::epoch_seconds(&reading.at).is_ok_and(|at| at >= since);
-    if reading.status != Status::Pass
-        || !taken_since
-        || reading.message.contains("dry run")
-        || on_disk(&checkout.join(path))
-            .is_none_or(|now| reading.key() != git::file_hash(path, &now))
-    {
-        return false;
-    }
-    let Ok(before) = cat_blob(checkout, was).map(|b| String::from_utf8_lossy(&b).into_owned())
-    else {
-        return false;
-    };
-    let Ok(now) = fs::read_to_string(checkout.join(path)) else {
-        return false;
-    };
-    let Ok(verdict) = steer::Ground::of(checkout, path, before).and_then(|g| g.judge(&now)) else {
-        return false;
-    };
+    (reading.status == Status::Pass
+        && taken_since
+        && !reading.message.contains("dry run")
+        && on_disk(&checkout.join(path))
+            .is_some_and(|now| reading.key() == git::file_hash(path, &now)))
+    .then_some(())?;
+    let before = String::from_utf8_lossy(&cat_blob(checkout, was).ok()?).into_owned();
+    let now = fs::read_to_string(checkout.join(path)).ok()?;
+    let verdict = steer::Ground::of(checkout, path, before)
+        .and_then(|g| g.judge(&now))
+        .ok()?;
     let added = verdict.additions();
-    !added.is_empty()
+    (!added.is_empty()
         && reading.numbers.get("added") == Some(&Number::count(added.len()))
-        && reading.message.ends_with(&added.join(", "))
+        && reading.message.ends_with(&added.join(", ")))
+    .then_some(())
 }
 
 /// Whether one of the command's simple commands runs `xtask steer`,
