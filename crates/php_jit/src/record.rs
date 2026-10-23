@@ -759,8 +759,9 @@ pub(crate) enum Headed {
 
 /// `frame`, which a back edge of loop `header` left where it lands,
 /// stepped on to where php's trace of the loop is rooted and entered:
-/// php's heat and its trace stand at the loop's header, the condition
-/// of a `for` or a `while`, which the interpreter reaches past the body
+/// php's heat and its trace stand at the loop's header ([`loop_root`]),
+/// the condition of a `for` or a `while` that php's optimizer keeps,
+/// which the interpreter reaches past the body
 /// the back edge lands on, so a recording starts there and a trace is
 /// entered there, as php's handler at that opline is the trace. A call
 /// the body makes is stepped through; a fatal is the step's.
@@ -1670,11 +1671,12 @@ pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
 /// other loop is entered where its back edge lands.
 ///
 /// php's CFG is built over the op array its optimizer left, which this
-/// engine runs none of (design §6.1, #1220), so a condition php folds is
-/// read as folded: a `while (true)` or a `for (;;)`, whose condition is a
-/// jump on a constant php makes a `JMP` back to the body
-/// ([`folds_to_jmp`]), is headed at the body, where the back edge lands,
-/// and its condition is no header. The opline past a call that ends the
+/// engine runs none of (design §6.1, #1220), so a condition pass 1 folds
+/// as it is written, a jump on a constant operand, is read as folded: a
+/// `while (true)` or a `for (;;)`, whose condition is a jump on a
+/// constant php makes a `JMP` back to the body ([`folds_to_jmp`]), is
+/// headed at the body, where the back edge lands, and its condition is
+/// no header. The opline past a call that ends the
 /// body is then a landing a compiled trace arms ([`landings`]), as php's
 /// `zend_jit_trace_setup_ret_counter` arms the folded `JMP`, so a return
 /// trace is rooted there and links to the loop's (#3317):
@@ -1741,7 +1743,9 @@ fn rooted(code: &OpArray, site: OplineIdx) -> OplineIdx {
 /// a `NOP`; `Z/Zend/Optimizer/pass1.c:315-333`). Standing where a `for`'s
 /// or a `while`'s `JMP` enters the loop, it is the whole of the
 /// condition's block, which the block pass then threads that `JMP`
-/// through onto the body, so php's CFG enters the loop at the body.
+/// through onto the body, and drops as a jump to the next block
+/// (`Z/Zend/Optimizer/block_pass.c:1272-1295`), so php's CFG enters the
+/// loop at the body.
 fn folds_to_jmp(code: &OpArray, at: OplineIdx, to: OplineIdx) -> bool {
     code.oplines.get(at.0 as usize).is_some_and(|op| {
         let jumps_when = match op.opcode {
@@ -1764,7 +1768,9 @@ fn constant_truth(code: &OpArray, at: u32) -> Option<bool> {
         ZvalType::False => Scalar::Bool(false),
         ZvalType::True => Scalar::Bool(true),
         ZvalType::Long => Scalar::Long(value.as_long()?),
-        ZvalType::Double => Scalar::Double(value.as_double()?),
+        // A NAN, which `Scalar::is_true` is not asked of, is true, as
+        // pass 1's `zend_is_true` reads it.
+        ZvalType::Double => return value.as_double().map(|d| d != 0.0),
         ZvalType::String => Scalar::Str(value.str_bytes()?),
         ZvalType::Array => return value.as_arr().map(|arr| !arr.is_empty()),
         _ => return None,
