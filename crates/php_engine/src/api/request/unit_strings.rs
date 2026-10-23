@@ -303,7 +303,7 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
         .collect();
     let mut declared = declared_arrays(unit);
     let names = declared_names(unit);
-    let mut values = class_constant_values(unit);
+    let mut values = declared_values(unit);
     // Each dynamic definition's variables, one string each it takes, the
     // last definition's first, to be taken from the end.
     let mut vars: HashMap<&[u8], Vec<usize>, NameHasher> = HashMap::with_hasher(NameHasher);
@@ -497,15 +497,17 @@ fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
         .collect()
 }
 
-/// The string values `unit`'s classes declare their constants with, each
-/// beside how many constants hold it: the string the compile made for
-/// one, written or folded, is the class's from its declaration, as
-/// php's `constants_table` holds the zval `zend_compile_class_const_decl`
-/// put there, and its first read finds it ([`Request::declared_string`])
-/// rather than make one. A value is told by its bytes, so the compile's
-/// strings of those bytes are taken for it in the order made, as many as
-/// constants hold it. An enum case's is not among them, its value
-/// standing in the case's copied expression ([`declared_bytes::AstCopy`]).
+/// The string values `unit`'s classes declare their constants and
+/// properties' defaults with, each beside how many declarations hold it:
+/// the string the compile made for one, written or folded, is the
+/// class's from its declaration, as php's `constants_table`,
+/// `default_properties_table` and `default_static_members_table` hold
+/// the zval the compile put there, and its first read finds it
+/// ([`Request::declared_string`]) rather than make one. A value is told
+/// by its bytes, so the compile's strings of those bytes are taken for it
+/// in the order made, as many as declarations hold it. An enum case's is
+/// not among them, its value standing in the case's copied expression
+/// ([`declared_bytes::AstCopy`]).
 ///
 /// ```php
 /// $f = sys_get_temp_dir() . '/w3263-class-values.inc';
@@ -566,14 +568,16 @@ fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
 /// 512  $GLOBALS["a"] = B10::K;
 /// 216  $GLOBALS["b"] = [B9::K, B11::K, B12::K];
 /// ```
-fn class_constant_values(unit: &Unit) -> HashMap<&[u8], usize, NameHasher> {
+fn declared_values(unit: &Unit) -> HashMap<&[u8], usize, NameHasher> {
     let mut values = HashMap::with_hasher(NameHasher);
-    let constants = (unit.classes.iter())
-        .flat_map(|class| &class.constants)
-        .filter(|constant| !constant.is_case);
-    for constant in constants {
-        if let php_unit::decl::ConstExpr::Str(value) = &constant.value {
-            *values.entry(&**value).or_insert(0) += 1;
+    for class in &unit.classes {
+        let constants = (class.constants.iter())
+            .filter(|constant| !constant.is_case)
+            .map(|constant| &constant.value);
+        for value in constants.chain(class.properties.iter().filter_map(|p| p.default.as_ref())) {
+            if let ConstExpr::Str(value) = value {
+                *values.entry(&**value).or_insert(0) += 1;
+            }
         }
     }
     values
@@ -886,7 +890,7 @@ impl Request {
         // `eval`'s made none, and they are made as it is noted
         // ([`Request::hold_unit_names`]). A compile that made no string
         // has none of them to find.
-        let values = class_constant_values(unit);
+        let values = declared_values(unit);
         if !made.is_empty() {
             let mut seen = HashSet::with_hasher(NameHasher);
             for (index, name) in php_compile::op_array_names(unit).enumerate() {
@@ -928,10 +932,27 @@ impl Request {
         } else {
             HashSet::default()
         };
-        // What a declaration finds by its bytes: a name it is read by, or
-        // a class constant's value.
-        let found =
-            |s: &PhpString| names.contains(s.as_bytes()) || values.contains_key(s.as_bytes());
+        // What a declaration finds by its bytes: a name it is read by, a
+        // value it holds, or a parameter's default, which `RECV_INIT`'s
+        // constant holds and Reflection copies (`get_parameter_default`).
+        let defaults: HashSet<&[u8], NameHasher> = (unit.functions.iter().chain(&unit.dynamic))
+            .map(|(decl, _)| decl)
+            .chain(
+                unit.classes
+                    .iter()
+                    .flat_map(|class| &class.methods)
+                    .map(|m| &m.function),
+            )
+            .flat_map(|decl| &decl.parameters)
+            .filter_map(|parameter| match parameter.default.expr() {
+                Some(ConstExpr::Str(bytes)) => Some(&**bytes),
+                _ => None,
+            })
+            .collect();
+        let found = |s: &PhpString| {
+            let bytes = s.as_bytes();
+            names.contains(bytes) || values.contains_key(bytes) || defaults.contains(bytes)
+        };
         for (owner, z) in owned {
             let name = z.as_str().map(PhpString::of);
             match owner {
@@ -955,12 +976,77 @@ impl Request {
                         continue;
                     };
                     own.constants.push(z);
-                    if let Some(s) = name.filter(|s| names.contains(s.as_bytes())) {
+                    if let Some(s) = name.filter(found) {
                         own.found.push(s);
                         point(&mut strings.by_bytes, s);
                     }
                 }
             }
+        }
+    }
+
+    /// The owner a request-only unit holds of `value` for a declaration
+    /// written as a value, given up as the request's row takes the
+    /// declaration's slot over: php's `constants_table` and
+    /// `default_properties_table` are the declaration's slot, one owner
+    /// where the engine keeps the declaration and the row apart. Nothing
+    /// for a value no unit holds, an immutable one or one an evaluation
+    /// made. So a request's class constant reads php's count, an
+    /// object's default one more, the object's, and a static two, the
+    /// default's and the slot's (`ZVAL_COPY_OR_DUP`); a parameter's
+    /// default string is the `RECV_INIT` constant's, which Reflection
+    /// copies:
+    ///
+    /// ```php
+    /// eval('class K { const S = "abcdefghijk" . "x"; public $p = "abcdefghijk" . "y"; public static $s = "abcdefghijk" . "z"; }');
+    /// eval('class KA { const C = [1, 2]; public $p = [3]; public static $s = [4]; }');
+    /// eval('function f($p = "abcdefghijk" . "w", $q = [5]) {}');
+    /// $k = new K;
+    /// $ka = new KA;
+    /// debug_zval_dump(K::S, $k->p, K::$s, KA::C, $ka->p, KA::$s, K::S, KA::C);
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) {
+    ///     debug_zval_dump($p->getDefaultValue());
+    /// }
+    /// ```
+    /// ```expect regime=jit-off
+    /// string(12) "abcdefghijkx" refcount(3)
+    /// string(12) "abcdefghijky" refcount(3)
+    /// string(12) "abcdefghijkz" refcount(3)
+    /// array(2) packed refcount(3){
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// array(1) packed refcount(3){
+    ///   [0]=>
+    ///   int(3)
+    /// }
+    /// array(1) packed refcount(3){
+    ///   [0]=>
+    ///   int(4)
+    /// }
+    /// string(12) "abcdefghijkx" refcount(3)
+    /// array(2) packed refcount(3){
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// string(12) "abcdefghijkw" refcount(2)
+    /// array(1) packed refcount(2){
+    ///   [0]=>
+    ///   int(5)
+    /// }
+    /// ```
+    pub(super) fn take_declaration_slot(&mut self, value: Value) {
+        let z = value.to_zval();
+        let held = (self.unit_strings.units.iter_mut()).find_map(|held| {
+            let at = held.constants.iter().position(|c| c.is_same_value(z))?;
+            Some(held.constants.swap_remove(at))
+        });
+        if held.is_some() {
+            self.release(value);
         }
     }
 
