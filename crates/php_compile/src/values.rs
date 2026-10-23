@@ -1,17 +1,21 @@
 //! The values a unit's declarations hold, its arrays and its strings
 //! ([`ConstExpr::UnitValue`]): the walks over its
 //! declarations and its constant expressions that the engine gives the
-//! compile's owner of each value by, as [`crate::declared_names`] walks
-//! the names a unit's declarations are read by.
+//! compile's owner of each value by, as [`crate::named`] walks the
+//! names a unit's declarations own.
 
 use php_heap::Zval;
 use php_unit::Unit;
 use php_unit::decl::{Attribute, ConstExpr, FunctionDecl};
 
-/// What holds a value of [`declared_values`]: the unit, for a function,
-/// a class and its members, or the dynamic definition at its place.
+/// What holds a value of [`declared_values`] or a name of
+/// [`crate::named`]: the unit, for a function, a class and its members,
+/// the dynamic definition at its place, or the main op array, whose
+/// variables' names alone it holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Holder {
+    /// The main op array, held while it runs.
+    Main,
     /// The unit's tables, held while the unit lives.
     Unit,
     /// The dynamic definition at this place of [`Unit::dynamic`].
