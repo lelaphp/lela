@@ -19,7 +19,7 @@ use crate::testing::goldens::{
     SIEVE, SPECTRALNORM, held,
 };
 use crate::testing::{self, Lane, policy};
-use crate::types::{Check, End, Guard, GuardAt, Interrupt, Op, TraceIr};
+use crate::types::{Check, End, Guard, GuardAt, Imm, Interrupt, Op, Returned, TraceIr};
 
 /// Where `lower`'s goldens are.
 fn goldens_dir() -> PathBuf {
@@ -48,6 +48,36 @@ fn named(fixture: Fixture) -> TraceName {
     }
 }
 
+/// `clif` with the address of each constant the trace copies, which the
+/// process's allocation decides, named by its place among them, so a golden
+/// holds what the code does with it.
+fn constants_named(ir: &TraceIr, clif: &str) -> String {
+    let mut named = clif.to_owned();
+    let constants = ir.ops.iter().filter_map(|op| match op {
+        Op::Line(line) => match line.imm {
+            Imm::Leave {
+                value: Returned::Constant(address),
+                ..
+            } => Some(address),
+            _ => None,
+        },
+        _ => None,
+    });
+    for (at, address) in constants.enumerate() {
+        // CLIF prints a constant in groups of four hex digits.
+        let digits = format!("{address:x}");
+        let mut grouped = String::new();
+        for (i, digit) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i).is_multiple_of(4) {
+                grouped.push('_');
+            }
+            grouped.push(digit);
+        }
+        named = named.replace(&format!("0x{grouped}"), &format!("constant#{at}"));
+    }
+    named
+}
+
 /// The fixture's trace lowered: its CLIF held to `<name>.clif`, the
 /// interrupt test found in it where the trace loops, and the function
 /// compiled for the golden's ISA and the host's.
@@ -60,7 +90,10 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
         .map_err(|abort| format!("{}: {abort:?}", fixture.name))?
         .display()
         .to_string();
-    held(&goldens_dir().join(format!("{}.clif", fixture.name)), &clif)?;
+    held(
+        &goldens_dir().join(format!("{}.clif", fixture.name)),
+        &constants_named(&ir, &clif),
+    )?;
     if let End::Loop(header) = ir.end {
         let answers = match header.interrupt {
             Interrupt::Exit(exit) => i64::from(exit.0),

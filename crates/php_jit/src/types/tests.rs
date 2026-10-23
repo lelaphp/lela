@@ -1431,7 +1431,14 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
         return Err(format!("no last line: {rendered}"));
     };
     assert_eq!(last.opcode, Opcode::Return, "{rendered}");
-    assert_eq!(last.imm, super::Imm::Leave { owners: true }, "{rendered}");
+    assert_eq!(
+        last.imm,
+        super::Imm::Leave {
+            owners: true,
+            value: super::Returned::Scalar,
+        },
+        "{rendered}"
+    );
     assert_eq!(
         ir.exits
             .get(usize::from(exit.0))

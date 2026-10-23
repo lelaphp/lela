@@ -21,8 +21,8 @@ use super::opcodes::{
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
     Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
-    LoopHeader, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Unwind,
-    UnwindId, Value, ValueId,
+    LoopHeader, Op, OpId, Operand, Place, Read, Repeat, Returned, Slot, Store, Stored, TraceIr,
+    Unwind, UnwindId, Value, ValueId,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -657,6 +657,7 @@ impl<'a> Builder<'a> {
                 Some(InPlace::Send) => Imm::Arg(op.op2),
                 Some(InPlace::Leave) => Imm::Leave {
                     owners: !self.uncounted(frame),
+                    value: returned(&op, code, t1),
                 },
                 Some(InPlace::Make) => Imm::Make {
                     returns: (op.out_type != OperandKind::Unused).then_some(op.out),
@@ -1812,25 +1813,7 @@ impl<'a> Builder<'a> {
             Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx => {
                 op.op2_type == OperandKind::Unused && scalar(t1)
             }
-            // php's `zend_jit_type_check` (`Z/ext/opcache/jit/zend_jit_ir.c:8162-8330`)
-            // over a value the trace reads as it stands: a temporary, which
-            // is never a reference, or a variable that is neither a
-            // reference nor unset, which would warn; `is_resource()`, which
-            // asks whether the resource is closed, is the handler's, as
-            // php's code generator leaves it to it
-            // (`Z/ext/opcache/jit/zend_jit_trace.c:5536-5540`).
-            Opcode::TypeCheck => {
-                op.extended_value & MAY_BE_RESOURCE == 0
-                    && match op.op1_type {
-                        OperandKind::Tmp => true,
-                        OperandKind::Cv | OperandKind::Var => {
-                            !seen.referenced[0]
-                                && t1.kinds() != Types::NONE
-                                && !t1.meets(Types::REF.or(Types::UNDEF))
-                        }
-                        OperandKind::Const | OperandKind::Unused => false,
-                    }
-            }
+            Opcode::TypeCheck => type_checked(op, t1, seen.referenced[0]),
             // A check of an argument the trace knows the callee takes by
             // value, php's `zend_jit_check_func_arg` (`:9925-9960`).
             Opcode::CheckFuncArg => {
@@ -1853,8 +1836,11 @@ impl<'a> Builder<'a> {
                 matches!(next, Some(Event::Enter { .. }))
             }
             Opcode::Return => {
+                let code = self.meta(frame).code;
                 (matches!(next, Some(Event::Back)) || self.returns_at_end)
-                    && (scalar(t1) || op.op1_type == OperandKind::Unused)
+                    && (scalar(t1)
+                        || op.op1_type == OperandKind::Unused
+                        || returned(op, code, t1) != Returned::Scalar)
                     && (self.uncounted(frame) || self.leaves_in_place(frame))
             }
             Opcode::VerifyReturnType => {
@@ -2806,6 +2792,43 @@ fn sent_by_value(params: &[Parameter], n: u32) -> bool {
         .get(at)
         .or_else(|| params.last().filter(|param| param.variadic))
         .is_none_or(|param| !param.by_ref || param.prefer_ref)
+}
+
+/// Whether a `TYPE_CHECK` is compiled inline, php's `zend_jit_type_check`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:8162-8330`), over a value the trace
+/// reads as it stands: a temporary, which is never a reference, or a
+/// variable that is neither a reference, `referenced` or of a type that
+/// may be one, nor unset, which would warn. `is_resource()`, which asks
+/// whether the resource is closed, is the handler's, as php's code
+/// generator leaves it to it (`Z/ext/opcache/jit/zend_jit_trace.c:5536-5540`).
+fn type_checked(op: &Opline, t1: Types, referenced: bool) -> bool {
+    op.extended_value & MAY_BE_RESOURCE == 0
+        && match op.op1_type {
+            OperandKind::Tmp => true,
+            OperandKind::Cv | OperandKind::Var => {
+                !referenced && t1.kinds() != Types::NONE && !t1.meets(Types::REF.or(Types::UNDEF))
+            }
+            OperandKind::Const | OperandKind::Unused => false,
+        }
+}
+
+/// What a `RETURN` of `code` hands its caller where it leaves in place:
+/// a constant no reference counts, copied as it is; a temporary that is
+/// no reference, moved; a scalar otherwise, which the form holds it to
+/// (`zend_jit_return`, `Z/ext/opcache/jit/zend_jit_ir.c:11265-11400`).
+fn returned(op: &Opline, code: &OpArray, t1: Types) -> Returned {
+    match op.op1_type {
+        OperandKind::Const if !t1.scalar() => code
+            .literals
+            .get(op.op1 as usize)
+            .filter(|literal| !literal.is_refcounted())
+            .map_or(Returned::Scalar, |literal| {
+                Returned::Constant(std::ptr::from_ref(literal).addr())
+            }),
+        OperandKind::Tmp if !t1.scalar() => Returned::Moved,
+        OperandKind::Var if !t1.scalar() && !t1.meets(Types::REF) => Returned::Moved,
+        _ => Returned::Scalar,
+    }
 }
 
 /// What `op` names beside its operands that its inline form reads.

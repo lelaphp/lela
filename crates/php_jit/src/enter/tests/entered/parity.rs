@@ -25,7 +25,7 @@ use crate::table::{self, Outputs, TraceName};
 use crate::testing::{self, Scratch, function_of, stdout};
 use crate::types::{
     Constant, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Grows, Imm, Landing, Line, Op,
-    Operand, Place, TraceIr, Unwind,
+    Operand, Place, Returned, TraceIr, Unwind,
 };
 
 /// What a read of the stack holds: the room of the frame read, its link,
@@ -358,10 +358,30 @@ fn make_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
     read(req, g)
 }
 
-/// `g`'s return of `7` left in place, the trace leaving in `f` past its
-/// call.
+/// What `g`'s `RETURN` at `ret` returns, as `types` names it: `7`, or the
+/// constant array it returns, copied as it is.
+fn returning(req: &Request, g: FrameRef, ret: u32) -> Option<(Operand, Returned)> {
+    let f = func(req, g)?;
+    let mut view = tier::UnitView::new(req);
+    view.hold(req, f).then_some(())?;
+    let code = view.op_array(f)?;
+    let op = code.oplines.get(ret as usize)?;
+    let literal = code.literals.get(op.op1 as usize)?;
+    Some(if literal.as_long() == Some(7) {
+        (Operand::Constant(Constant::Long(7)), Returned::Scalar)
+    } else {
+        (
+            Operand::Constant(Constant::Other(php_unit::ConstIdx(op.op1))),
+            Returned::Constant(std::ptr::from_ref(literal).addr()),
+        )
+    })
+}
+
+/// `g`'s return of `7`, or of a constant array, left in place, the trace
+/// leaving in `f` past its call.
 fn leave_in_place(req: &mut Request, g: FrameRef) -> Option<(FrameRef, Read)> {
     let (ret, _) = named(req, g, Opcode::Return)?;
+    let (returned, value) = returning(req, g, ret)?;
     let f = tier::below(req, g)?;
     let (call, _) = named(req, f, Opcode::DoUcall)?;
     let (me, caller) = (func(req, g)?, func(req, f)?);
@@ -370,8 +390,11 @@ fn leave_in_place(req: &mut Request, g: FrameRef) -> Option<(FrameRef, Read)> {
             Frame::ROOT,
             ret,
             Opcode::Return,
-            Operand::Constant(Constant::Long(7)),
-            Imm::Leave { owners: true },
+            returned,
+            Imm::Leave {
+                owners: true,
+                value,
+            },
         )),
         Op::Back {
             frame: Frame(1),
@@ -480,5 +503,30 @@ fn a_call_made_in_place_leaves_the_stack_as_the_engines_own() {
     assert!(pushed.is_some() && made.is_some() && left.is_some());
     assert_eq!(parity.in_place.pushed, pushed, "the push");
     assert_eq!(parity.in_place.made, made, "the call");
+    assert_eq!(parity.in_place.left, left, "the leave");
+}
+
+/// A constant array returned in place, copied as it is, as php's
+/// `zend_jit_return` copies a constant (`ZVAL_COPY_CONST`), leaves the
+/// caller's slot and the stack as `leave_plainly` leaves them (#2963).
+#[test]
+fn an_array_returned_in_place_leaves_the_stack_as_the_engines_own() {
+    let engine = testing::engine::<Paired>(&[]);
+    let (served, parity) = Scratch::new().serve_kept::<Parity>(
+        &engine,
+        "function g($a, $b) { return [7, 8]; }
+        function f() { $r = g(1, 2); echo $r[0], \",\", $r[1], \"\\n\"; }
+        f(); f(); f(); f();",
+    );
+    assert_eq!(
+        stdout(&served),
+        "7,8\n7,8\n7,8\n7,8\n",
+        "{:?}",
+        served.fatal
+    );
+    let parity = parity.unwrap_or_default();
+    assert_eq!(parity.calls, 5);
+    let Reads { left, .. } = parity.by_kernel;
+    assert!(left.is_some());
     assert_eq!(parity.in_place.left, left, "the leave");
 }

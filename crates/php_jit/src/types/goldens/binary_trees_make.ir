@@ -25,12 +25,12 @@ loop at 0, recursive return, interrupt exit 7
   -> #4 f1.CV0 [long]
 0001 f1 IS_IDENTICAL #4, int(0) fused inline
   checks direction fell -> exit 2
-0003 f1 RETURN const#1 step unwinds -> unwind 0
+0003 f1 RETURN const#1 inline
      f0 back to #5
   -> #5 f0.T5 [packed array]
 0013 f0 ADD_ARRAY_ELEMENT #5 step unwinds -> unwind 0
   -> #6 f0.T4 [array]
-0014 f0 RETURN #6 step unwinds -> unwind 0
+0014 f0 RETURN #6 inline
      f2 back to #7 escapes unless e1 0009
   -> #7 f2.T3 [array]
 0009 f2 INIT_ARRAY #7 step unwinds -> unwind 0
@@ -59,7 +59,7 @@ loop at 0, recursive return, interrupt exit 7
   -> #14 f4.CV0 [long]
 0001 f4 IS_IDENTICAL #14, int(0) fused inline
   checks direction fell -> exit 5
-0003 f4 RETURN const#1 step unwinds -> unwind 1
+0003 f4 RETURN const#1 inline
      f3 back to #15
   -> #15 f3.T3 [packed array]
 0009 f3 INIT_ARRAY #15 step unwinds -> unwind 1
@@ -73,17 +73,17 @@ loop at 0, recursive return, interrupt exit 7
   -> #17 f5.CV0 [long]
 0001 f5 IS_IDENTICAL #17, int(0) fused inline
   checks direction fell -> exit 5
-0003 f5 RETURN const#1 step unwinds -> unwind 1
+0003 f5 RETURN const#1 inline
      f3 back to #18
   -> #18 f3.T5 [packed array]
 0013 f3 ADD_ARRAY_ELEMENT #18 step unwinds -> unwind 1
   -> #19 f3.T4 [array]
-0014 f3 RETURN #19 step unwinds -> unwind 1
+0014 f3 RETURN #19 inline
      f2 back to #20
   -> #20 f2.T5 [array]
 0013 f2 ADD_ARRAY_ELEMENT #20 step unwinds -> unwind 0
   -> #21 f2.T4 [array]
-0014 f2 RETURN #21 step unwinds -> unwind 0
+0014 f2 RETURN #21 inline
      f6 back to #22 escapes unless e1 0009
   -> #22 f6.T3 [array]
 end: back to 0
