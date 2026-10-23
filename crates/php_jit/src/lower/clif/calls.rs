@@ -21,6 +21,7 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
+use cranelift_frontend::Variable;
 use php_engine::tier::{FRAME, FrameLayout, PlainCall};
 use php_heap::{Zval, ZvalType};
 
@@ -69,6 +70,40 @@ const FRAMES: i32 = at(L.frames());
 pub(super) const FRAMES_LEN: i32 = at(L.frames_len());
 const FRAMES_CAP: i32 = at(L.frames_cap());
 const INNERMOST: i32 = at(L.innermost());
+
+/// What a leave in place reads of the frame table before it frees its
+/// variables, held in variables a kernel call among the frees reads again:
+/// the table, the caller's slots and the slot taking the value.
+struct Reread {
+    /// The stack, the caller's place and the slot the call returns into.
+    from: (Value, Value, Value),
+    /// The frame table, the caller's slots and the slot taking the value.
+    vars: [Variable; 3],
+}
+
+impl Reread {
+    /// The reads `values` held in variables of `emit`'s function.
+    fn new(emit: &mut Emit<'_>, from: (Value, Value, Value), values: [Value; 3]) -> Reread {
+        let vars = values.map(|value| {
+            let var = emit.b.declare_var(I64);
+            emit.b.def_var(var, value);
+            var
+        });
+        Reread { from, vars }
+    }
+
+    /// The frame table, the caller's record and the slot read again, after
+    /// a kernel that may have served PHP code.
+    fn again(&self, emit: &mut Emit<'_>) {
+        let (stack, place, returns) = self.from;
+        let frames = emit.b.ins().load(I64, trusted(), stack, FRAMES);
+        let callers = emit.record_word(frames, place, L.record_at());
+        let target = emit.taken_at(callers, returns);
+        for (var, value) in self.vars.iter().zip([frames, callers, target]) {
+            emit.b.def_var(*var, value);
+        }
+    }
+}
 
 impl Emit<'_> {
     /// The request's VM stack, read at entry.
@@ -432,14 +467,15 @@ impl Emit<'_> {
             self.divert_if(dropped, slow);
         }
         // Nothing refuses the leave from here: what the variables own is
-        // given up, and a destructor that ran may have grown the frame
-        // table, whose records are read again after it.
+        // given up, and a destructor the kernel served may have grown the
+        // frame table, whose records are read again after each kernel
+        // call alone ([`Reread`]), so a leave that calls none reads them
+        // once.
         let (threw, frames, callers, target) = match owners {
             Owners::Each(vars) => {
-                let threw = self.free_cvs(room, line, vars)?;
-                let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
-                let callers = self.record_word(frames, place, L.record_at());
-                let target = self.taken_at(callers, returns);
+                let read = Reread::new(self, (stack, place, returns), [frames, callers, target]);
+                let threw = self.free_cvs(room, line, vars, &read)?;
+                let [frames, callers, target] = read.vars.map(|var| self.b.use_var(var));
                 (Some(threw), frames, callers, target)
             }
             Owners::Uncounted | Owners::Kernel => (None, frames, callers, target),
@@ -641,7 +677,13 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// 1225 100 100
     /// ```
-    fn free_cvs(&mut self, room: Value, line: &Line, vars: Vars) -> Result<Value, Abort> {
+    fn free_cvs(
+        &mut self,
+        room: Value,
+        line: &Line,
+        vars: Vars,
+        read: &Reread,
+    ) -> Result<Value, Abort> {
         let unwind = line
             .unwind
             .ok_or_else(|| mismatch("a leave that frees with no unwind"))?;
@@ -715,6 +757,7 @@ impl Emit<'_> {
             let before = self.b.use_var(threw);
             let now = self.b.ins().bor(before, thrown);
             self.b.def_var(threw, now);
+            read.again(self);
             self.b.ins().jump(next, &[]);
             self.b.switch_to_block(next);
             self.b.seal_block(next);
