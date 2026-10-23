@@ -1336,3 +1336,40 @@ fn a_side_of_an_exit_that_names_no_opline_holds_where_the_frame_stands() -> Resu
     assert_eq!(ir.exits.len(), named.exits.len() + 1, "one exit more");
     Ok(())
 }
+
+/// A trace that stops at a function's `RETURN` compiles the `RETURN`,
+/// leaving the frame in place and going on in the caller, as php's code
+/// goes on through `zend_jit_trace_return`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:6532-6556`): its last op is the
+/// `RETURN` left in place, its end the exit the interpreter serves the
+/// `RETURN` through where the leave cannot be made in place
+/// ([`End::Return`]). A variable the trace does not hold uncounted, here
+/// a string, is tested as the frame leaves, as php's `zend_jit_free_cv`
+/// tests it, where the leave had been refused whole.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "f"), ("record.start", "enter")],
+        "function f($i) { $d = \"s$i\"; return $i; }
+        $s = 0; for ($i = 0; $i < 100; $i++) { $s += f($i); } echo $s, \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    assert_eq!(ir.entry.stop, Stop::Return, "{rendered}");
+    let End::Return(exit) = ir.end else {
+        return Err(format!("no return in place: {rendered}"));
+    };
+    let Some(Op::Line(last)) = ir.ops.last() else {
+        return Err(format!("no last line: {rendered}"));
+    };
+    assert_eq!(last.opcode, Opcode::Return, "{rendered}");
+    assert_eq!(last.imm, super::Imm::Leave { owners: true }, "{rendered}");
+    assert_eq!(
+        ir.exits
+            .get(usize::from(exit.0))
+            .and_then(|exit| exit.opline),
+        Some(last.opline),
+        "{rendered}"
+    );
+    Ok(())
+}

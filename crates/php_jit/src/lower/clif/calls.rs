@@ -28,7 +28,7 @@ use super::{
     imm, leave_of, mismatch, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT};
-use crate::types::{Abort, Imm, Line, Op, OpId, Operand, TraceIr};
+use crate::types::{Abort, End, ExitId, Frame, Imm, Line, Op, OpId, Operand, TraceIr};
 
 /// The engine's frame layout, as compiled.
 const L: FrameLayout = FRAME;
@@ -55,7 +55,7 @@ const INNERMOST: i32 = at(L.innermost());
 pub(super) fn in_place(ir: &TraceIr) -> bool {
     ir.ops.iter().any(|op| match op {
         Op::InitCall { plain, .. } => plain.is_some(),
-        Op::Line(line) => matches!(line.imm, Imm::Leave | Imm::Make { .. }),
+        Op::Line(line) => matches!(line.imm, Imm::Leave { .. } | Imm::Make { .. }),
         Op::Enter { .. } | Op::Back { .. } => false,
     })
 }
@@ -281,6 +281,27 @@ impl Emit<'_> {
         self.after_step(id, line)
     }
 
+    /// Whether a variable of `frame`, whose room is `room`, owns
+    /// something: its type word counted, every variable's folded into one
+    /// test, as `Request::leaves_plainly` folds them.
+    fn owners(&mut self, room: Value, frame: Frame) -> Result<Value, Abort> {
+        let cvs = (self.ir.frames.get(usize::from(frame.0)))
+            .ok_or_else(|| mismatch("a leave in a frame the trace does not hold"))?
+            .cvs;
+        let mut words = self.b.ins().iconst(I32, 0);
+        for var in 0..cvs {
+            let slot = u64::from(L.room()) + u64::from(SLOT) * u64::from(var);
+            let slot = i32::try_from(slot).map_err(|_| mismatch("a variable past an immediate"))?;
+            let word = self
+                .b
+                .ins()
+                .load(I32, trusted(), room, slot + super::TYPE_AT);
+            words = self.b.ins().bor(words, word);
+        }
+        let counted = self.b.ins().band_imm_u(words, COUNTED);
+        Ok(self.b.ins().icmp_imm_s(IntCC::NotEqual, counted, 0))
+    }
+
     /// The place of the frame `line`'s `RETURN` leaves to, read off its
     /// header's caller before it leaves, for the `Op::Back` after it.
     pub(super) fn returns_to(&mut self, line: &Line) -> Result<Option<Value>, Abort> {
@@ -305,10 +326,51 @@ impl Emit<'_> {
     /// a frame `leaves_plainly` finds: the value into the caller's slot
     /// where the call reads it, the frame's record off the table, the word
     /// moved back to its link and the top back to its room, and the caller
-    /// on past its call. `types` holds its variables uncounted and its
-    /// value a scalar ([`Imm::Leave`]); the frame's header and the caller's
-    /// slot are read here, and where the leave kernel would serve the
-    /// frame, the opline is stepped.
+    /// on past its call. `types` holds its value a scalar ([`Imm::Leave`]);
+    /// the frame's header, its variables where `types` does not hold them
+    /// uncounted and the caller's slot are read here, and where the leave
+    /// kernel would serve the frame, the opline is stepped.
+    ///
+    /// A variable that owns something is given up by the leave kernel, its
+    /// destructor called at the return, before the caller goes on:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "freed\n"; } }
+    /// function f($i) { $d = $i == 30 ? new D : "s$i"; return $i; }
+    /// $s = 0;
+    /// for ($i = 0; $i < 40; $i++) { $s += f($i); }
+    /// echo $s, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// freed
+    /// 780
+    /// ```
+    ///
+    /// and what that destructor throws unwinds from the return:
+    ///
+    /// ```php
+    /// class T { function __destruct() { throw new Exception("at return"); } }
+    /// function g($i) { $t = $i == 30 ? new T : null; return $i; }
+    /// try {
+    ///     for ($i = 0; $i < 40; $i++) { g($i); }
+    /// } catch (Exception $e) { echo $e->getMessage(), " ", $i, "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// at return 30
+    /// ```
+    ///
+    /// A trace that stops at a `RETURN` leaves its frame in place and goes
+    /// on in the caller ([`End::Return`]); the interpreter serves the
+    /// `RETURN` of a frame a native called, through the trace's end:
+    ///
+    /// ```php
+    /// function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
+    /// function sq($x) { return $x * $x; }
+    /// echo fib(20), " ", array_sum(array_map('sq', range(1, 100))), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 6765 338350
+    /// ```
     pub(super) fn leave_in_place(&mut self, id: OpId, line: &Line) -> Result<(), Abort> {
         let returned = match line.op1 {
             Operand::Unused => Scalar::Null,
@@ -320,46 +382,13 @@ impl Emit<'_> {
             .ok_or_else(|| mismatch("a leave in place with no stack read"))?;
         let room = self.room(line.frame)?;
         let (slow, join) = self.split();
-        // What the header says the leave kernel serves: a receiver, a
-        // closure, an annex, a call not made a frame or arguments past
-        // the parameters, and a caller that is none or the loop's.
-        let this = self.b.ins().load(I64, trusted(), room, at(L.this()));
-        let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
-        let held = self.b.ins().bor(this, closure);
-        let mut refused = self.b.ins().icmp_imm_s(IntCC::NotEqual, held, 0);
-        let annex = self.b.ins().load(I32, trusted(), room, at(L.annex()));
-        let info = self.b.ins().load(I32, trusted(), room, at(L.info()));
-        let flagged = self
-            .b
-            .ins()
-            .band_imm_u(info, i64::from(L.leaves_by_kernel()));
-        let owns = self.b.ins().bor(annex, flagged);
-        let owns = self.b.ins().icmp_imm_s(IntCC::NotEqual, owns, 0);
-        refused = self.b.ins().bor(refused, owns);
-        let none = self.b.ins().icmp_imm_s(IntCC::Equal, caller, 0);
-        let looped = self.b.ins().band_imm_u(caller, i64::from(L.caller_loop()));
-        let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
-        let outside = self.b.ins().bor(none, looped);
-        refused = self.b.ins().bor(refused, outside);
+        let refused = self.leave_refused(room, caller, line)?;
         self.divert_if(refused, slow);
         // The frame is the table's last record, on the top page.
         let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
         let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
         let last = self.b.ins().iadd_imm_s(len, -1);
-        let offset = self.b.ins().imul_imm_s(last, i64::from(L.record()));
-        let record = self.b.ins().iadd(frames, offset);
-        let first = self.b.ins().load(I64, trusted(), record, at(L.record_at()));
-        let own = self.b.ins().iadd_imm_s(room, i64::from(L.room()));
-        let elsewhere = self.b.ins().icmp(IntCC::NotEqual, first, own);
-        let tag = self
-            .b
-            .ins()
-            .load(I8, trusted(), record, at(L.record_placed()));
-        let off_page = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::NotEqual, tag, i64::from(L.on_page()));
-        let refused = self.b.ins().bor(elsewhere, off_page);
+        let refused = self.not_on_top(frames, last, room);
         self.divert_if(refused, slow);
         // The caller's room, by its record, and the slot of its that takes
         // the return, which holds nothing counted.
@@ -367,9 +396,7 @@ impl Emit<'_> {
             .b
             .ins()
             .iadd_imm_s(caller, -i64::from(L.numbered_from()));
-        let offset = self.b.ins().imul_imm_s(place, i64::from(L.record()));
-        let record = self.b.ins().iadd(frames, offset);
-        let callers = self.b.ins().load(I64, trusted(), record, at(L.record_at()));
+        let callers = self.record_word(frames, place, L.record_at());
         let named = self.b.ins().load(I32, trusted(), room, at(L.returns_to()));
         let returns = self.b.ins().uextend(I64, named);
         let taken = self
@@ -401,9 +428,7 @@ impl Emit<'_> {
         // Where the interpreter stands: in the caller, the call under way
         // in it the record now on top where that is not the caller's own.
         let under = self.b.ins().iadd_imm_s(len, -2);
-        let offset = self.b.ins().imul_imm_s(under, i64::from(L.record()));
-        let record = self.b.ins().iadd(frames, offset);
-        let first = self.b.ins().load(I64, trusted(), record, at(L.record_at()));
+        let first = self.record_word(frames, under, L.record_at());
         let built = self.b.ins().iadd_imm_s(first, -i64::from(L.room()));
         let own = self.b.ins().icmp(IntCC::Equal, under, place);
         let nothing = self.b.ins().iconst(I64, 0);
@@ -412,12 +437,106 @@ impl Emit<'_> {
         let left = self.left_past(stack, room);
         self.stand([back, call, func, past, left]);
         self.b.ins().jump(join, &[]);
+        self.left_or_not(id, line, (slow, join))
+    }
+
+    /// What the header of the frame in `room`, which leaves to `caller`,
+    /// says the leave kernel serves: a receiver, a closure, an annex, a
+    /// call not made a frame or arguments past the parameters, a caller
+    /// that is none or the loop's, and, where `types` does not hold them
+    /// uncounted, a variable that owns something, every variable's type
+    /// word tested at once.
+    fn leave_refused(&mut self, room: Value, caller: Value, line: &Line) -> Result<Value, Abort> {
+        let this = self.b.ins().load(I64, trusted(), room, at(L.this()));
+        let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
+        let held = self.b.ins().bor(this, closure);
+        let mut refused = self.b.ins().icmp_imm_s(IntCC::NotEqual, held, 0);
+        let annex = self.b.ins().load(I32, trusted(), room, at(L.annex()));
+        let info = self.b.ins().load(I32, trusted(), room, at(L.info()));
+        let flagged = self
+            .b
+            .ins()
+            .band_imm_u(info, i64::from(L.leaves_by_kernel()));
+        let owns = self.b.ins().bor(annex, flagged);
+        let owns = self.b.ins().icmp_imm_s(IntCC::NotEqual, owns, 0);
+        refused = self.b.ins().bor(refused, owns);
+        let none = self.b.ins().icmp_imm_s(IntCC::Equal, caller, 0);
+        let looped = self.b.ins().band_imm_u(caller, i64::from(L.caller_loop()));
+        let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
+        let outside = self.b.ins().bor(none, looped);
+        refused = self.b.ins().bor(refused, outside);
+        if let Imm::Leave { owners: true } = line.imm {
+            let owners = self.owners(room, line.frame)?;
+            refused = self.b.ins().bor(refused, owners);
+        }
+        Ok(refused)
+    }
+
+    /// Whether the record `last` of the frame table at `frames` is not the
+    /// frame in `room`, or not on the top page.
+    fn not_on_top(&mut self, frames: Value, last: Value, room: Value) -> Value {
+        let offset = self.b.ins().imul_imm_s(last, i64::from(L.record()));
+        let record = self.b.ins().iadd(frames, offset);
+        let first = self.b.ins().load(I64, trusted(), record, at(L.record_at()));
+        let own = self.b.ins().iadd_imm_s(room, i64::from(L.room()));
+        let elsewhere = self.b.ins().icmp(IntCC::NotEqual, first, own);
+        let tag = self
+            .b
+            .ins()
+            .load(I8, trusted(), record, at(L.record_placed()));
+        let off_page = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::NotEqual, tag, i64::from(L.on_page()));
+        self.b.ins().bor(elsewhere, off_page)
+    }
+
+    /// The word at `field` of record `place` of the frame table at
+    /// `frames`.
+    fn record_word(&mut self, frames: Value, place: Value, field: u32) -> Value {
+        let offset = self.b.ins().imul_imm_s(place, i64::from(L.record()));
+        let record = self.b.ins().iadd(frames, offset);
+        self.b.ins().load(I64, trusted(), record, at(field))
+    }
+
+    /// A leave's way out where it was not made in place, from `slow`, and
+    /// on from `join`: the leave kernel, or, for the `RETURN` a trace stops
+    /// at, its end exit, through which the interpreter serves it; and past
+    /// that `RETURN` left in place, the interpreter goes on in the caller,
+    /// php's `zend_jit_trace_return`, with no exit taken.
+    fn left_or_not(
+        &mut self,
+        id: OpId,
+        line: &Line,
+        (slow, join): (Block, Block),
+    ) -> Result<(), Abort> {
         self.b.switch_to_block(slow);
         self.b.seal_block(slow);
-        self.step_kernel(id, line)?;
-        self.b.ins().jump(join, &[]);
+        let at_end = self.returns_at_end(id);
+        if let Some(exit) = at_end {
+            let block = self.exit_block(exit)?;
+            self.b.ins().jump(block, &[]);
+        } else {
+            self.step_kernel(id, line)?;
+            self.b.ins().jump(join, &[]);
+        }
         self.b.switch_to_block(join);
         self.b.seal_block(join);
-        self.after_step(id, line)
+        if at_end.is_some() {
+            let escape = self.escape_block();
+            self.b.ins().jump(escape, &[]);
+            Ok(())
+        } else {
+            self.after_step(id, line)
+        }
+    }
+
+    /// The exit the trace takes where the `RETURN` at `id`, its last op,
+    /// is not left in place ([`End::Return`]); none for any other.
+    fn returns_at_end(&self, id: OpId) -> Option<ExitId> {
+        match self.ir.end {
+            End::Return(exit) if id.index() + 1 == self.ir.ops.len() => Some(exit),
+            End::Return(_) | End::Leave(_) | End::Loop(_) => None,
+        }
     }
 }

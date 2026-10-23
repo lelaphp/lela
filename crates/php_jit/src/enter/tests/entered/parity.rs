@@ -367,7 +367,7 @@ fn leave_in_place(req: &mut Request, g: FrameRef) -> Option<(FrameRef, Read)> {
             ret,
             Opcode::Return,
             Operand::Constant(Constant::Long(7)),
-            Imm::Leave,
+            Imm::Leave { owners: true },
         )),
         Op::Back {
             frame: Frame(1),

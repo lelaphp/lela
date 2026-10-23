@@ -244,6 +244,10 @@ struct Builder<'a> {
     header: OpId,
     /// The exit a trace that does not loop leaves through.
     end_draft: Option<Draft>,
+    /// Whether the trace leaves its lowest frame in place by the `RETURN`
+    /// it stops at, and goes on in the interpreter where the return left
+    /// it ([`End::Return`]).
+    returns_at_end: bool,
     /// What the trace repeats, where its stop makes it loop.
     repeat: Option<Repeat>,
     /// An inlined callee's untyped parameter, by the value it entered
@@ -282,6 +286,7 @@ impl<'a> Builder<'a> {
             successor: None,
             header: OpId(0),
             end_draft: None,
+            returns_at_end: false,
             repeat: match rec.stop {
                 Stop::Loop => Some(Repeat::Loop),
                 Stop::RecursiveCall => Some(Repeat::Call),
@@ -395,8 +400,78 @@ impl<'a> Builder<'a> {
             }
         }
         self.end(events.get(body.len()))?;
+        if let (Stop::Return, Some(last)) = (rec.stop, events.get(body.len()))
+            && self.returns_in_place(last)?
+        {
+            self.return_at_end(last)?;
+        }
         self.stack_checks();
         Ok(())
+    }
+
+    /// Whether the `RETURN` a trace stops at, `last`, leaves its frame in
+    /// place: php's code compiles the `RETURN` a trace stops at, leaves the
+    /// frame and goes on in the interpreter where the return left it
+    /// (`zend_jit_leave_func`, then `zend_jit_trace_return`,
+    /// `Z/ext/opcache/jit/zend_jit_trace.c:6532-6556`). Here only where its
+    /// frame leaves in place and its value, held as the opline's guard
+    /// holds it ([`Builder::guard_use`]), is a scalar; otherwise the
+    /// interpreter serves it, through the trace's end.
+    fn returns_in_place(&self, last: &Event) -> Result<bool, Abort> {
+        let Event::Op {
+            func, opline, op1, ..
+        } = last
+        else {
+            return Ok(false);
+        };
+        let frame = self.running()?;
+        let code = self.meta(frame).code;
+        let Some(op) = code.oplines.get(opline.0 as usize) else {
+            return Err(mismatch("an opline past its op array"));
+        };
+        if op.opcode != Opcode::Return
+            || self.frames[usize::from(frame.0)].func != *func
+            || !self.leaves_in_place(frame)
+        {
+            return Ok(false);
+        }
+        let scalar = match (op.op1_type, op1) {
+            (OperandKind::Unused, _) => true,
+            (OperandKind::Const, _) => constant_types(constant(code, op.op1), code).scalar(),
+            (_, Some(sample)) if !sample.indirect => Types::of_tag(sample.kind).scalar(),
+            (kind, _) => slot_of(frame, kind, op.op1).is_some_and(|slot| {
+                let held = self.slots[usize::from(frame.0)].get(slot.var as usize);
+                match held {
+                    Some(Some(value)) => self.val(*value).types,
+                    _ => self.entry_types(slot),
+                }
+                .scalar()
+            }),
+        };
+        Ok(scalar)
+    }
+
+    /// The `RETURN` the trace stops at, `last`, left in place, after the
+    /// trace's end took what an exit there stores
+    /// ([`Builder::returns_in_place`]).
+    fn return_at_end(&mut self, last: &Event) -> Result<(), Abort> {
+        let Event::Op {
+            func,
+            opline,
+            op1,
+            op2,
+            data,
+            branch,
+        } = last
+        else {
+            return Err(mismatch("a trace's last return that is no opline"));
+        };
+        self.returns_at_end = true;
+        self.line(*func, *opline, [*op1, *op2, *data], *branch, &[])?;
+        match self.ops.last() {
+            Some(Op::Line(line)) if matches!(line.imm, Imm::Leave { .. }) => Ok(()),
+            _ => Err(mismatch("a trace's last return not left in place")),
+        }
     }
 
     /// The phis of a loop: every slot of the root's frame that its body
@@ -570,7 +645,9 @@ impl<'a> Builder<'a> {
             fused,
             imm: match in_place {
                 Some(InPlace::Send) => Imm::Arg(op.op2),
-                Some(InPlace::Leave) => Imm::Leave,
+                Some(InPlace::Leave) => Imm::Leave {
+                    owners: !self.uncounted(frame),
+                },
                 Some(InPlace::Make) => Imm::Make {
                     returns: (op.out_type != OperandKind::Unused).then_some(op.out),
                 },
@@ -867,6 +944,9 @@ impl<'a> Builder<'a> {
                     || (op.opcode == Opcode::FetchDimR && self.is_temp(op1))
                     || op.opcode == Opcode::AssignDim
                     || matches!(in_place, Some(Served::Make))
+                    // The leave kernel a variable that owns something
+                    // leaves through frees it, and a destructor may throw.
+                    || (matches!(in_place, Some(Served::Leave)) && !self.uncounted(frame))
             }
             Form::Step => op.opcode.effects().contains(Effects::THROW),
         };
@@ -945,10 +1025,7 @@ impl<'a> Builder<'a> {
                     && self.calls.last().is_some_and(|call| call.plain);
                 made.then_some(InPlace::Make)
             }
-            Opcode::Return => {
-                let function = self.view.is_main(func) == Some(false);
-                (function && !self.view.observed()).then_some(InPlace::Leave)
-            }
+            Opcode::Return => self.leaves_in_place(frame).then_some(InPlace::Leave),
             _ => None,
         }
     }
@@ -1667,9 +1744,9 @@ impl<'a> Builder<'a> {
                 matches!(next, Some(Event::Enter { .. }))
             }
             Opcode::Return => {
-                matches!(next, Some(Event::Back))
+                (matches!(next, Some(Event::Back)) || self.returns_at_end)
                     && (scalar(t1) || op.op1_type == OperandKind::Unused)
-                    && self.uncounted(frame)
+                    && (self.uncounted(frame) || self.leaves_in_place(frame))
             }
             Opcode::VerifyReturnType => {
                 let declared = Types::of_mask(self.meta(frame).code.return_mask)
@@ -1685,6 +1762,14 @@ impl<'a> Builder<'a> {
             _ => false,
         };
         if inline { Form::Inline } else { Form::Step }
+    }
+
+    /// Whether a `RETURN` of `frame` leaves it in place: a function's
+    /// frame, with no observer declared, whose variables the leave tests
+    /// as it leaves where they may own something ([`Imm::Leave`]).
+    fn leaves_in_place(&self, frame: Frame) -> bool {
+        let func = self.frames[usize::from(frame.0)].func;
+        self.view.is_main(func) == Some(false) && !self.view.observed()
     }
 
     /// Whether every variable of `frame` holds what no reference counts,
@@ -1960,7 +2045,14 @@ impl<'a> Builder<'a> {
                         interrupt: Interrupt::Exit(exits.take(spec, level.clone())?),
                     }));
                 }
-                Source::End => numbered.end = Some(End::Leave(exits.take(spec, level.clone())?)),
+                Source::End => {
+                    let exit = exits.take(spec, level.clone())?;
+                    numbered.end = Some(if self.returns_at_end {
+                        End::Return(exit)
+                    } else {
+                        End::Leave(exit)
+                    });
+                }
             }
         }
         numbered.exits = exits.specs;

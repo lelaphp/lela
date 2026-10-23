@@ -334,9 +334,14 @@ pub(crate) enum Imm {
     /// A `RETURN` compiled code leaves its frame by in place where the
     /// frame holds nothing the leave kernel must give up
     /// (`zend_jit_leave_func`, `Z/ext/opcache/jit/zend_jit_ir.c:11035-11263`):
-    /// a function's frame, its variables uncounted and its value a
-    /// scalar, with no observer declared.
-    Leave,
+    /// a function's frame and its value a scalar, with no observer
+    /// declared. `owners` where a variable of the frame may own something,
+    /// which the leave then tests as it leaves, leaving through the leave
+    /// kernel where one does, as php's `zend_jit_free_cv` tests each
+    /// variable its inference does not hold uncounted.
+    Leave {
+        owners: bool,
+    },
 }
 
 /// An operand as the op reads it.
@@ -556,6 +561,12 @@ pub(crate) enum End {
     Loop(LoopHeader),
     /// It leaves through this exit.
     Leave(ExitId),
+    /// Its last op, the `RETURN` it stops at, leaves its frame in place,
+    /// and the interpreter goes on where the return left it, as php's
+    /// code goes on through `zend_jit_trace_return`, taking no exit; it
+    /// leaves through this exit, at that `RETURN`, where the leave is not
+    /// made in place.
+    Return(ExitId),
 }
 
 /// Where a looping trace goes back to, and how.

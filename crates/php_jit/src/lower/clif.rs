@@ -352,7 +352,7 @@ impl<'a> Emit<'a> {
         self.b.def_var(self.room_var(Frame::ROOT)?, room);
         let header = match self.ir.end {
             End::Loop(header) => Some(header),
-            End::Leave(_) => None,
+            End::Leave(_) | End::Return(_) => None,
         };
         if header.is_some() {
             self.interrupt = Some(self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT));
@@ -378,16 +378,7 @@ impl<'a> Emit<'a> {
             }
             None => None,
         };
-        if super::stood_at_entry(self.ir) {
-            // Where the frame stands as the trace enters, which `enter`
-            // laid down, held as where the last kernel left it.
-            // Its frame, its call, in one word its op array and opline,
-            // and the stack's room, laid out alike in both.
-            for at in [STOOD_FRAME, STOOD_CALL, STOOD_FUNC, STOOD_ROOM] {
-                let word = self.b.ins().load(I64, trusted(), cx, STOOD_AT + at);
-                self.b.ins().stack_store(I64, word, self.stood, at);
-            }
-        }
+        self.stood_at_entry(cx);
         for guard in self.ir.guards.iter().filter(|g| g.at == GuardAt::Entry) {
             self.guard(*guard)?;
         }
@@ -442,6 +433,8 @@ impl<'a> Emit<'a> {
                 let block = self.exit_block(exit)?;
                 self.b.ins().jump(block, &[]);
             }
+            // The `RETURN` left in place went on to the escape or the exit.
+            (End::Return(_), _) => {}
             (End::Loop(_), None) => return Err(mismatch("a loop with no interrupt flag")),
         }
         if let Some((entry, into, block)) = body {
@@ -452,6 +445,21 @@ impl<'a> Emit<'a> {
             self.b.seal_block(block);
         }
         self.exit_blocks()
+    }
+
+    /// Where the frame stands as the trace enters, which `enter` laid
+    /// down in `cx`, held as where the last kernel left it, for a trace
+    /// whose code reads it ([`super::stood_at_entry`]): its frame, its
+    /// call, in one word its op array and opline, and the stack's room,
+    /// laid out alike in both.
+    fn stood_at_entry(&mut self, cx: Value) {
+        if !super::stood_at_entry(self.ir) {
+            return;
+        }
+        for at in [STOOD_FRAME, STOOD_CALL, STOOD_FUNC, STOOD_ROOM] {
+            let word = self.b.ins().load(I64, trusted(), cx, STOOD_AT + at);
+            self.b.ins().stack_store(I64, word, self.stood, at);
+        }
     }
 
     /// The ops of `range`, the way in at the body (`body`: the entry, its
@@ -1292,7 +1300,7 @@ impl<'a> Emit<'a> {
                 Some(Op::Line(line)) => Some(line),
                 _ => None,
             },
-            (None, End::Leave(_)) => None,
+            (None, End::Leave(_) | End::Return(_)) => None,
         };
         next.filter(|line| line.frame == frame)
             .map(|line| line.opline.0)
@@ -1364,7 +1372,9 @@ impl<'a> Emit<'a> {
                 Imm::Make { returns } => self.make_in_place(at, line, returns),
                 _ => self.stepped(at, line),
             },
-            Opcode::Return if line.imm == Imm::Leave => self.leave_in_place(at, line),
+            Opcode::Return if matches!(line.imm, Imm::Leave { .. }) => {
+                self.leave_in_place(at, line)
+            }
             Opcode::SendValEx | Opcode::Return => self.stepped(at, line),
             Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
                 match self.ir.ops.get(at.index() + 1) {

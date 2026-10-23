@@ -528,7 +528,7 @@ impl Backend {
             align,
             exits: ir.exits.clone().into_boxed_slice(),
             leaves: match ir.end {
-                End::Leave(exit) => Some(exit),
+                End::Leave(exit) | End::Return(exit) => Some(exit),
                 End::Loop(_) => None,
             },
             stub: stub_at(ir),
