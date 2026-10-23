@@ -19,8 +19,8 @@ use php_heap::ZvalType;
 use php_unit::{Opcode, OplineIdx};
 
 use super::{
-    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Landing, Op, OpId, Operand, Repeat,
-    Slot, TraceIr, Types, ValueId, build,
+    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Interrupt, Landing, Op, OpId,
+    Operand, Repeat, Slot, TraceIr, Types, ValueId, build,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
@@ -403,9 +403,10 @@ fn a_fetch_takes_its_exits_in_phps_order() -> Result<(), String> {
 /// push frames holds the stack's room for them once, at its entry, its
 /// first exit, back to the interpreter at the loop's first opline, as
 /// php's trace for `$s += g($i)` takes `exit_0` `0009/----/0/VM`; a trace
-/// that does not loop holds it at each `INIT_*` instead, after the call's
-/// own exit, as `zend_jit_push_call_frame` follows `zend_jit_init_fcall`'s
-/// guard on the callee.
+/// that does not loop holds it at each `INIT_*` instead, in
+/// `zend_jit_push_call_frame`, an `INIT_FCALL` of a user function taking no
+/// exit of its own, as `zend_jit_init_fcall` holds no guard on such a
+/// callee (`Z/ext/opcache/jit/zend_jit_ir.c:8790-8906`, #3230).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
@@ -443,10 +444,9 @@ fn a_trace_holds_the_stacks_room_where_php_does() -> Result<(), String> {
     let Some(Op::Line(line)) = linked.ops.get(init.index()) else {
         return Err("no INIT_FCALL".to_owned());
     };
-    let own = line.exit.ok_or("the INIT_FCALL has no exit of its own")?;
-    assert_eq!(
-        rooms(&linked),
-        [(GuardAt::Before(init), own.0 + 1)],
+    assert_eq!(line.exit, None, "{}", dump::render(&linked));
+    assert!(
+        matches!(rooms(&linked).as_slice(), [(GuardAt::Before(at), _)] if *at == init),
         "{}",
         dump::render(&linked)
     );
@@ -1122,11 +1122,13 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
 /// `0017` and `0019`, then each statement's `BOOL_NOT` and `JMPZ` guards
 /// (`0007`, `0008`, `0010`, `0011`, `0013`, `0014`), the increment's at
 /// `0016`, with no exit for a `JMPZ`'s direction
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`, #3203). php's tenth,
-/// its interrupt test's at `0017`, is there because its code no longer
-/// uses the instruction pointer it entered with, its register allocator
-/// holding nothing (`:7214-7230`); here the loop takes the interrupt stub
-/// (#3277).
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`, #3203), and tenth
+/// its interrupt test's own at `0017`, php's `ZEND_JIT_EXIT_TO_VM`: no
+/// code of the trace's reads the instruction pointer it entered with,
+/// since php compiles every one of its oplines inline, the `BOOL_NOT`s by
+/// `zend_jit_bool_jmpznz` (`:5644-5654`) where this tier steps them, so
+/// `zend_jit_trace_uses_initial_ip` says no and the test takes an exit
+/// (`:7210-7228`, #3277).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {
@@ -1134,7 +1136,7 @@ fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {
     let oplines: Vec<Option<u32>> = (ir.exits.iter())
         .map(|exit| exit.opline.map(|at| at.0))
         .collect();
-    let php = [17, 19, 7, 8, 10, 11, 13, 14, 16].map(Some);
+    let php = [17, 19, 7, 8, 10, 11, 13, 14, 16, 17].map(Some);
     assert_eq!(oplines, php, "{}", dump::render(&ir));
     Ok(())
 }
@@ -1334,5 +1336,119 @@ fn a_side_of_an_exit_that_names_no_opline_holds_where_the_frame_stands() -> Resu
         "{exit:?}"
     );
     assert_eq!(ir.exits.len(), named.exits.len() + 1, "one exit more");
+    Ok(())
+}
+
+/// A trace that stops at a function's `RETURN` compiles the `RETURN`,
+/// leaving the frame in place and going on in the caller, as php's code
+/// goes on through `zend_jit_trace_return`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:6532-6556`): its last op is the
+/// `RETURN` left in place, its end the exit the interpreter serves the
+/// `RETURN` through where the leave cannot be made in place
+/// ([`End::Return`]). A variable the trace does not hold uncounted, here
+/// a string, is tested as the frame leaves, as php's `zend_jit_free_cv`
+/// tests it, where the leave had been refused whole.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "f"), ("record.start", "enter")],
+        "function f($i) { $d = \"s$i\"; return $i; }
+        $s = 0; for ($i = 0; $i < 100; $i++) { $s += f($i); } echo $s, \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    assert_eq!(ir.entry.stop, Stop::Return, "{rendered}");
+    let End::Return(exit) = ir.end else {
+        return Err(format!("no return in place: {rendered}"));
+    };
+    let Some(Op::Line(last)) = ir.ops.last() else {
+        return Err(format!("no last line: {rendered}"));
+    };
+    assert_eq!(last.opcode, Opcode::Return, "{rendered}");
+    assert_eq!(last.imm, super::Imm::Leave { owners: true }, "{rendered}");
+    assert_eq!(
+        ir.exits
+            .get(usize::from(exit.0))
+            .and_then(|exit| exit.opline),
+        Some(last.opline),
+        "{rendered}"
+    );
+    Ok(())
+}
+
+/// A loop whose first opline php compiles inline but whose code may call
+/// into php's runtime keeps php's initial instruction pointer, the code
+/// standing the frame at that opline first (`jit_SET_EX_OPLINE`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:1100-1109`): `!$done` over a variable
+/// recorded through a reference calls `zend_is_true` (`:7790-7792`), so
+/// the pinned php's `TRACE 1 exit info` lists five exits and no `/VM` one,
+/// its interrupt test taking the stub; with no reference, seven, the last
+/// the interrupt test's `0006/VM` (under `opcache.optimization_level=0`,
+/// #3277).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_keeps_the_initial_pointer_where_its_first_opline_may_call_the_runtime()
+-> Result<(), String> {
+    for (program, php, stub) in [
+        (
+            "$done = false; $r = &$done; $n = 0;
+            while (!$done) { $n++; $done = $n > 50; } echo $n, \"\\n\";",
+            5,
+            true,
+        ),
+        (
+            "$done = false; $n = 0;
+            while (!$done) { $n++; $done = $n > 50; } echo $n, \"\\n\";",
+            7,
+            false,
+        ),
+    ] {
+        let ir = built(&IN_MAIN, program)?;
+        let End::Loop(header) = ir.end else {
+            return Err(format!("no loop: {}", dump::render(&ir)));
+        };
+        assert_eq!(
+            (
+                ir.exits.len(),
+                matches!(header.interrupt, Interrupt::Stub(_))
+            ),
+            (php, stub),
+            "{program}\n{}",
+            dump::render(&ir)
+        );
+    }
+    Ok(())
+}
+
+/// A `DO_*CALL` the trace follows into a callee its `INIT_*` pushed
+/// through the `push_call` kernel takes no exit, as php's code takes none
+/// for the call (#3203's measurement): what the call's kernel throws
+/// unwinds. A loop calling `g`, declared after it, by name takes the
+/// pinned php's first six exits (`TRACE 1 exit info` under
+/// `opcache.optimization_level=0`): the stack check, three guards at
+/// entry, the direction at `0011`, and the find-function guard of the
+/// `INIT_FCALL_BY_NAME` at `0004`; the call at `0006` none.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_the_trace_follows_takes_no_exit() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += g($i); } return $s; }
+        function g($a) { return $a + 1; }
+        echo f(50), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let oplines: Vec<Option<u32>> = (ir.exits.iter().take(6))
+        .map(|exit| exit.opline.map(|at| at.0))
+        .collect();
+    assert_eq!(oplines, [9, 9, 9, 9, 11, 4].map(Some), "{rendered}");
+    let call = ir.ops.iter().find_map(|op| match op {
+        Op::Line(line) if line.opcode == Opcode::DoFcallByName => Some(line),
+        _ => None,
+    });
+    assert!(
+        call.is_some_and(|line| line.exit.is_none() && line.unwind.is_some()),
+        "{rendered}"
+    );
     Ok(())
 }

@@ -87,6 +87,7 @@ Frame::slots
 Frame::slots_mut
 FrameRef
 FramesAside
+FramesLayout
 FreshStr
 FreshStr::bytes
 FreshStr::bytes_mut
@@ -97,6 +98,10 @@ FreshStr::set_len
 GcStatus
 GcTable
 HEADER_AT
+HEADER_WORDS
+HeaderImage
+HeaderImage::address
+HeaderImage::of
 Heap
 Heap::addref
 Heap::array
@@ -334,6 +339,7 @@ Scalar
 Scalar::is_true
 Slot
 SortEntry
+StackLayout
 StackRefused
 StandaloneHeap
 StandaloneHeap::gc
@@ -365,6 +371,7 @@ Suspensions
 Switched
 TableRow
 VmStack
+VmStack::LAYOUT
 VmStack::close
 VmStack::current
 VmStack::entry

@@ -53,17 +53,21 @@ pub use php_heap::{Fatal, FrameRef};
 mod crossing;
 mod frames;
 mod held;
+mod layout;
 pub(crate) mod published;
 mod sampled;
 #[cfg(dispatch = "tailcall")]
 mod tail;
 mod view;
-pub use crossing::{at_room, current, free_operands, primed, release, room, stack_room, stand};
+pub use crossing::{
+    at_room, current, free_operands, laid, primed, release, room, stack, stack_room, stand,
+};
 pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
 use held::{Entered, Kept, Scope, Units};
+pub use layout::{Activation, FRAME, FrameLayout, PlainCall, call_image, plain_call};
 pub use sampled::{
     Building, Sample, building, building_call, class_number, native_returns, numbered_class,
     on_heap, sample, under_way,

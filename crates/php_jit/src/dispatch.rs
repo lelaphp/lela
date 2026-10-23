@@ -68,6 +68,8 @@ pub struct JitRequest {
     pub(crate) submitter: compiler::Submitter,
     pub(crate) recording: Cell<bool>,
     pub(crate) submitted: Cell<Option<Submitted>>,
+    /// The headers of the calls its traces push in place, the request's.
+    pub(crate) headers: enter::Headers,
 }
 
 /// What a visit to a word decided.
