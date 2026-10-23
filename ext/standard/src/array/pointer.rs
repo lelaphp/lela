@@ -551,6 +551,32 @@ fn min(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value
 /// int(1)
 /// string(1) "1"
 /// ```
+///
+/// The frameless form reads its two operands before anything else, the
+/// second from a tail held in place, so it builds no `Vec`, and compares
+/// the left with the right as `zend_compare(lhs, rhs)` does: a NaN on
+/// either side answers neither way, so the right is kept, and equal
+/// operands keep `max`'s left and `min`'s right.
+///
+/// ```php
+/// var_dump(max(NAN, 1), max(1, NAN), min(NAN, 1), min(1, NAN));
+/// var_dump(max(0, "a"), max("a", 0), min(null, false), min(false, null), max([1], 2), min("10", "9a"));
+/// ```
+/// ```expect
+/// int(1)
+/// float(NAN)
+/// int(1)
+/// float(NAN)
+/// string(1) "a"
+/// string(1) "a"
+/// bool(false)
+/// NULL
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// string(2) "10"
+/// ```
 #[php_function(frameless(2))]
 fn max(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value, Thrown> {
     extreme(req, value, values, Ordering::Greater)
@@ -564,6 +590,12 @@ fn extreme(
     values: Variadic<Value>,
     wanted: Ordering,
 ) -> Result<Value, Thrown> {
+    // The frameless arity's two operands, read before anything else.
+    if let [other] = values[..]
+        && req.frames().frameless()
+    {
+        return frameless_extreme(req, value, other, wanted);
+    }
     if values.is_empty() {
         // One argument is the array to walk, held to `array` as php's
         // `IS_ARRAY` check past `Z_PARAM_VARIADIC` refuses it, where the
@@ -590,14 +622,10 @@ fn extreme(
         };
         return Ok(best);
     }
-    let values: Vec<Value> = std::iter::once(value).chain(values).collect();
-    if values.len() == 2 && req.frames().frameless() {
-        return frameless_extreme(req, values[0], values[1], wanted);
-    }
-    let mut best = values[0];
-    for value in &values[1..] {
-        if beyond(req, value, &best, wanted)? {
-            best = *value;
+    let mut best = value;
+    for value in values {
+        if beyond(req, &value, &best, wanted)? {
+            best = value;
         }
     }
     Ok(best)
