@@ -293,7 +293,7 @@ impl Request {
         let guards = if self.uses_guards(class) { 16 } else { 0 };
         let made = Made {
             slots: self.class_slots(class),
-            custom: size.saturating_sub(ZEND_OBJECT) + guards,
+            custom: size.saturating_sub(ZEND_OBJECT) + guards + 16 * self.redeclared_slots(class),
             declared_by,
             create: self.native_new_of(class),
             handlers: self.handlers_of(class),
@@ -308,6 +308,72 @@ impl Request {
         };
         self.class_data.rows.row(class).made = Some(made);
         made
+    }
+
+    /// The slots `do_inherit_property` leaves `IS_UNDEF` in `class`'s
+    /// `default_properties_table`, one for each backed property a class of
+    /// its lineage redeclares over its parent's, whose own slot the
+    /// parent's takes the place of: php's object keeps them, so
+    /// `zend_object_alloc` counts them, where this engine places the
+    /// property in the parent's slot alone. The first `new` of a class
+    /// that redeclares a property costs php's (the file under the
+    /// recipe's `TMPDIR`):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3286-redeclared.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } }'); m('$q0 = 1;');
+    /// foreach ([
+    ///     'class R { const B = 1; }',
+    ///     'class K1 { public $p = 1; } class K2 extends K1 { public $p = 2; }',
+    ///     '$GLOBALS["k2"] = new K2;',
+    ///     'class K3 extends K2 { public $p = 3; protected $q = 4; }',
+    ///     '$GLOBALS["k3"] = new K3;',
+    ///     'class L1 { public $p = R::B; } class L2 extends L1 { public $q = 2; }',
+    ///     '$GLOBALS["l2"] = new L2;',
+    ///     'class P1 { private $p = 1; } class P2 extends P1 { public $p = 2; }',
+    ///     '$GLOBALS["p2"] = new P2;',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// var_dump($k3);
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 432  class R { const B = 1; }
+    /// 928  class K1 { public $p = 1; } class K2 extends K1 { public $p = 2; }
+    /// 624  $GLOBALS["k2"] = new K2;
+    /// 560  class K3 extends K2 { public $p = 3; protected $q = 4; }
+    /// 112  $GLOBALS["k3"] = new K3;
+    /// 928  class L1 { public $p = R::B; } class L2 extends L1 { public $q = 2; }
+    /// 112  $GLOBALS["l2"] = new L2;
+    /// 960  class P1 { private $p = 1; } class P2 extends P1 { public $p = 2; }
+    /// 112  $GLOBALS["p2"] = new P2;
+    /// object(K3)#2 (2) {
+    ///   ["p"]=>
+    ///   int(3)
+    ///   ["q":protected]=>
+    ///   int(4)
+    /// }
+    /// ```
+    fn redeclared_slots(&self, class: ClassId) -> usize {
+        let lineage: Vec<ClassId> = self.symbols().lineage(class).collect();
+        (lineage.iter().enumerate())
+            .map(|(at, &held)| {
+                let parent = lineage
+                    .get(at + 1)
+                    .map_or(0, |&parent| self.class_slots(parent));
+                let added = self.class_slots(held).saturating_sub(parent) as usize;
+                let backed = (self.symbols().class_decl(held)).map_or(0, |decl| {
+                    (decl.properties.iter())
+                        .filter(|property| property.is_instance && !property.is_virtual)
+                        .count()
+                });
+                backed.saturating_sub(added)
+            })
+            .sum()
     }
 
     /// The `emalloc`s `create_object` makes beside a new `object`, each
