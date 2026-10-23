@@ -222,6 +222,11 @@ impl Request {
     /// `zend_constant` freed, `free_zend_constant`.
     fn free_row(&mut self, row: ConstantRow) {
         self.release(row.value);
+        let mut arrays = Vec::new();
+        php_compile::arrays::attribute_arrays(&row.attributes, &mut |z| arrays.push(z));
+        for z in arrays {
+            self.release(Value::of_slot(z));
+        }
         if let Some(room) = row.room {
             room.free(self);
         }
@@ -387,6 +392,9 @@ impl Request {
             .and_then(crate::exec::FrameAt::code)
             .map(|code| code.filename.0.clone());
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
+        // `zend_constant_add_attributes`: an owner of the table, which
+        // outlives the op array that declared it.
+        php_compile::arrays::attribute_arrays(&attributes, &mut |z| self.heap.addref(z));
         let room = self.constant_room();
         let named = self.declared_string(given).ok();
         let file = file.and_then(|file| self.executed_file_string(&file).ok());

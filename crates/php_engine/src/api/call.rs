@@ -2399,6 +2399,32 @@ fn evaluate(req: &mut Request, expr: &ConstExpr, scope: Option<ClassId>) -> Resu
 
 /// `zend_ast_evaluate_inner`: one node of [`eval_const_expr`] under the
 /// site `zend_ast_evaluate_ex` stood the request at.
+///
+/// A unit's array is copied with an owner, so an `eval`'s default costs
+/// a call nothing and an attributed `const`'s keeps the constant's own
+/// owner past the `eval`'s main op array:
+///
+/// ```php
+/// eval('function h($p = [5 => 1]) { return $p; }');
+/// h(); $m = memory_get_usage(); h(); h(); echo memory_get_usage() - $m, "\n";
+/// eval('#[Attribute] class B {} #[B] const Y = [1, 2]; debug_zval_dump(Y);');
+/// debug_zval_dump(Y);
+/// ```
+/// ```expect regime=jit-off
+/// 0
+/// array(2) packed refcount(3){
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// array(2) packed refcount(2){
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// ```
 fn evaluate_node(
     req: &mut Request,
     expr: &ConstExpr,
@@ -2410,9 +2436,13 @@ fn evaluate_node(
         ConstExpr::Long { value: n, .. } => Ok(Value::int(*n)),
         ConstExpr::Double(f) => Ok(Value::float(*f)),
         ConstExpr::Str(s) => Ok(Value::string(req.string(s)?)),
-        // The unit's constant array as it stands, which takes no owner,
-        // as `ZVAL_COPY` takes none of an `IS_ARRAY_IMMUTABLE`.
-        ConstExpr::ImmutableArray(array) => Ok(Value::of_zval(array.value())),
+        // `ZVAL_COPY` of the unit's array: one more owner of a request's,
+        // none of an `IS_ARRAY_IMMUTABLE`.
+        ConstExpr::UnitArray(array) => {
+            let value = Value::of_zval(array.value());
+            req.addref(&value);
+            Ok(value)
+        }
         // `zend_get_constant_ex` under the node's `attr`, which words a
         // `CONST_DEPRECATED` constant's deprecation after it found it.
         ConstExpr::Constant { name, .. } => {

@@ -2549,6 +2549,43 @@ impl<'r> ClassLookup<'r> {
 /// 88
 /// 408
 /// ```
+///
+/// A request's class holds its constant's array from its declaration
+/// on ([`ConstExpr::UnitArray`]), so its first read lays nothing and a
+/// name in a later `eval` substitutes it, as php's
+/// `zend_try_ct_eval_class_const` copies it:
+///
+/// [`ConstExpr::UnitArray`]: php_unit::decl::ConstExpr::UnitArray
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3267-array-constant.inc';
+/// file_put_contents($f, <<<'PHP'
+/// <?php
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// m('class W {}'); m('$q0 = 1;');
+/// const EVALNAMED = 5;
+/// foreach ([
+///     'class S8 { const K = [5 => 1]; }',
+///     '$GLOBALS["a"] = S8::K;',
+///     'class B8 { const K = [EVALNAMED => 1]; }',
+///     '$GLOBALS["b"] = B8::K;',
+///     'class B9 { const A = [1, 2]; }',
+///     'function g() { return B9::A; }',
+/// ] as $c) echo m($c), "\n";
+/// echo json_encode([g(), $a, $b]), "\n";
+/// PHP);
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// 712
+/// 512
+/// 712
+/// 0
+/// 712
+/// 224
+/// [[1,2],{"5":1},{"5":1}]
+/// ```
 fn defined_class_constant(
     tables: ClassLookup<'_>,
     class_data: &super::class_data::ClassDataTables,
@@ -2583,7 +2620,7 @@ fn defined_class_constant(
         (None, ConstExpr::Str(bytes)) => {
             php_heap::Zval::string(tables.shared.existing_interned(bytes)?)
         }
-        (None, ConstExpr::ImmutableArray(array)) if !mutable => array.value(),
+        (None, ConstExpr::UnitArray(array)) => array.value(),
         (None, _) => return None,
     };
     Some(php_compile::DefinedClassConstant {

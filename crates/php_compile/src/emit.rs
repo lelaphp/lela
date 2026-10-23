@@ -109,8 +109,8 @@ use php_link::Indexed;
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, ClassConstDecl, ClassDecl, ClassFlags, ClassKind,
     ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking, FunctionDecl, HookKind,
-    ImmutableArray, MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl,
-    TraitAdaptation, TraitMethodRef, Type, Visibility,
+    MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, TraitAdaptation,
+    TraitMethodRef, Type, UnitArray, Visibility,
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, FramelessEntry, HookBody, Level, MethodBody,
@@ -1455,7 +1455,7 @@ fn valid_default(ty: &Type, default: &mut ConstExpr) -> Result<(), ZvalType> {
         ConstExpr::Long { .. } => ZvalType::Long,
         ConstExpr::Double(_) => ZvalType::Double,
         ConstExpr::Str(_) => ZvalType::String,
-        ConstExpr::ImmutableArray(_) => ZvalType::Array,
+        ConstExpr::UnitArray(_) => ZvalType::Array,
         _ => return Ok(()),
     };
     if ty.contains_code(kind as u8) {
@@ -1482,14 +1482,33 @@ fn zval_type_name(kind: ZvalType) -> &'static str {
     }
 }
 
-/// The `ConstExpr` a folded constant is, which a declaration carries in
-/// the form `zend_eval_const_expr` left it; `None` for a value no
-/// constant expression of the unit format holds. An array is the
-/// constant array it folded to, laid down where the unit's strings are,
-/// which is where every array this compiler folds is laid.
+/// The constant expression that stands for a value `zend_eval_const_expr`
+/// folded, or `None` where the value is of a kind the unit format has no
+/// constant expression for. A scalar becomes its own variant. An array is
+/// not taken apart again: the array the fold built is kept, as a
+/// [`UnitArray`], so a declaration reads that one array, and a write
+/// through a copy of it separates first. That is so for code `eval`
+/// compiles as for a file's, where a parameter defaults to an array
+/// (#3121):
+///
+/// ```php
+/// eval('function settings($o = ["depth" => [2, 3], "strict" => false]) { $o[] = count($o); return $o; }');
+/// echo json_encode(settings()), " ", json_encode(settings()), "\n";
+/// eval('function total(array $parts = [4, 5, 6]) { return array_sum($parts); }');
+/// echo total(), "\n";
+/// eval('function i($a = [1], $b = ["a" => 1], $c = [[]]) { return [$a, $b, $c]; }');
+/// echo json_encode(i()), "\n";
+/// eval('$f = fn ($v = [1]) => $v; echo json_encode($f()), "\n";');
+/// ```
+/// ```expect regime=jit-off
+/// {"depth":[2,3],"strict":false,"0":2} {"depth":[2,3],"strict":false,"0":2}
+/// 15
+/// [[1],{"a":1},[[]]]
+/// [1]
+/// ```
 fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
     if folded.as_arr().is_some() {
-        return ImmutableArray::new(folded).map(ConstExpr::ImmutableArray);
+        return UnitArray::new(folded).map(ConstExpr::UnitArray);
     }
     Some(match folded.kind() {
         ZvalType::Null => ConstExpr::Null,
@@ -5167,13 +5186,62 @@ impl<'a> Emit<'a> {
     /// an array it folded to is the declaration's too, and anything else
     /// is the expression as written, compiled as `zend_compile_params`
     /// compiles it.
+    ///
+    /// The array is the constant's, which holds it; the declaration is a
+    /// view of it. So an `eval`'d default folded to an array reads php's
+    /// value as written and folded, in a call, in Reflection and in
+    /// `debug_zval_dump`, the constant, `$v` and the argument in the
+    /// body, the constant and the copy from `getDefaultValue`:
+    ///
+    /// ```php
+    /// eval('function g($v = null ?? [1], $w = [1] + [5 => 2], $x = [[1]][0], $y = 1 ? [2] : 3, $z = (array) "x") { debug_zval_dump($v); return [$v, $w, $x, $y, $z]; }');
+    /// echo json_encode(g()), "\n";
+    /// foreach ((new ReflectionFunction('g'))->getParameters() as $p) {
+    ///     echo $p, "\n";
+    ///     debug_zval_dump($p->getDefaultValue());
+    /// }
+    /// ```
+    /// ```expect regime=jit-off
+    /// array(1) packed refcount(3){
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// [[1],{"0":1,"5":2},[1],[2],["x"]]
+    /// Parameter #0 [ <optional> $v = [1] ]
+    /// array(1) packed refcount(2){
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// Parameter #1 [ <optional> $w = [0 => 1, 5 => 2] ]
+    /// array(2) packed refcount(2){
+    ///   [0]=>
+    ///   int(1)
+    ///   [5]=>
+    ///   int(2)
+    /// }
+    /// Parameter #2 [ <optional> $x = [1] ]
+    /// array(1) packed refcount(2){
+    ///   [0]=>
+    ///   int(1)
+    /// }
+    /// Parameter #3 [ <optional> $y = [2] ]
+    /// array(1) packed refcount(2){
+    ///   [0]=>
+    ///   int(2)
+    /// }
+    /// Parameter #4 [ <optional> $z = ['x'] ]
+    /// array(1) packed refcount(2){
+    ///   [0]=>
+    ///   string(1) "x" interned
+    /// }
+    /// ```
     fn declared_default(
         &mut self,
         parameter: &walk::Parameter,
         folded: Zval,
     ) -> Result<Option<ConstExpr>, CompileError> {
-        if let Some(array) = ImmutableArray::new(folded) {
-            return Ok(Some(ConstExpr::ImmutableArray(array)));
+        if let Some(array) = UnitArray::new(folded) {
+            return Ok(Some(ConstExpr::UnitArray(array)));
         }
         let written = self.without_persistent_substitution(|this| {
             parameter
@@ -8266,7 +8334,7 @@ impl<'a> Emit<'a> {
                     });
                 }
                 if let Some(array) = self.folded_array(&items)? {
-                    return Ok(ConstExpr::ImmutableArray(array));
+                    return Ok(ConstExpr::UnitArray(array));
                 }
                 Ok(ConstExpr::Array {
                     elements: items,
@@ -8475,7 +8543,7 @@ impl<'a> Emit<'a> {
     fn folded_array(
         &mut self,
         items: &[(Option<ConstExpr>, ConstExpr)],
-    ) -> Result<Option<ImmutableArray>, CompileError> {
+    ) -> Result<Option<UnitArray>, CompileError> {
         let mut folded = Vec::with_capacity(items.len());
         for (key, value) in items {
             if let ConstExpr::Unpack(inner) = value {
@@ -8501,7 +8569,7 @@ impl<'a> Emit<'a> {
             return Ok(None);
         };
         let array = self.lay_array(&entries)?;
-        Ok(ImmutableArray::new(array))
+        Ok(UnitArray::new(array))
     }
 
     /// The value a folded constant expression stands for, a string
@@ -8544,7 +8612,7 @@ impl<'a> Emit<'a> {
             ConstExpr::Long { value, .. } => Operated::Kept(Zval::long(*value)),
             ConstExpr::Double(d) => Operated::Kept(Zval::double(*d)),
             ConstExpr::Str(bytes) => Operated::Made(self.string_made(bytes, false)?),
-            ConstExpr::ImmutableArray(array) => Operated::Kept(array.value()),
+            ConstExpr::UnitArray(array) => Operated::Kept(array.value()),
             _ => return Ok(None),
         }))
     }
@@ -16657,6 +16725,27 @@ impl<'a> Emit<'a> {
     ///   string(1) "y"
     /// }
     /// ```
+    ///
+    /// The element is one more owner of what the array holds
+    /// (`ZVAL_COPY_OR_DUP`), so an `eval`'s, whose array goes with its
+    /// main op array, outlives it in the static that keeps it, the heap
+    /// churned between:
+    ///
+    /// ```php
+    /// eval('function f() { static $s = [[1, 2]][0]; return $s; }');
+    /// eval('function g() { static $s = [["ab" . "cd", "k" => "efgh"]]["0"]["k"]; return $s; }');
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// var_dump(f(), g());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// string(4) "efgh"
+    /// ```
     fn dimension_fold(&mut self, base: tree::Expr, index: tree::Expr) -> Result<Zval, Unfolded> {
         let (container, dim) = self.constant_pair(base, index)?;
         let refused = || Unfolded::NoConstant("a dimension this compiler leaves to the request");
@@ -16669,7 +16758,14 @@ impl<'a> Emit<'a> {
                 },
                 (None, None) => return Err(refused()),
             };
-            return array.get(key).ok_or_else(refused);
+            // `ZVAL_COPY_OR_DUP`: one more owner of the element, the
+            // unit's, where the array is the request's; else the fetch.
+            let element = array.get(key).ok_or_else(refused)?;
+            return if self.strings.hold(element) {
+                Ok(element)
+            } else {
+                Err(refused())
+            };
         }
         if let Some(text) = container.as_str() {
             let offset = match (dim.as_long(), dim.as_str()) {
@@ -18214,7 +18310,7 @@ impl<'a> Emit<'a> {
             return Ok(Some(Operated::Kept(held)));
         }
         let value = value.clone();
-        if let ConstExpr::ImmutableArray(array) = &value
+        if let ConstExpr::UnitArray(array) = &value
             && !array_is_const(array.value())
         {
             return Ok(None);
@@ -20555,7 +20651,7 @@ impl<'a> Emit<'a> {
                 .find(|(class, _)| *class == at)
                 .and_then(|(_, strings)| strings.iter().find(|(held, _)| *held == index))
                 .map(|(_, value)| *value)?,
-            ConstExpr::ImmutableArray(array) => array.value(),
+            ConstExpr::UnitArray(array) => array.value(),
             _ => return None,
         };
         if !substitutable(value) {

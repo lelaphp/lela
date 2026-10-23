@@ -1016,8 +1016,8 @@ fn a_cast_inside_an_array_expression_folds_and_one_outside_it_does_not() {
         .constant_array(&[(php_heap::Key::Long(0), php_heap::Zval::long(1))])
         .map(php_heap::Zval::array)
         .ok()
-        .and_then(php_unit::decl::ImmutableArray::new)
-        .map_or(ConstExpr::Null, ConstExpr::ImmutableArray);
+        .and_then(php_unit::decl::UnitArray::new)
+        .map_or(ConstExpr::Null, ConstExpr::UnitArray);
     assert_eq!(
         unit.classes[0]
             .constants
