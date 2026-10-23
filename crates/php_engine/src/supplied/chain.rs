@@ -220,9 +220,10 @@ impl<'a> FileArgs<'a> {
 
     /// Whether `persistent_compile_file` caches the file
     /// (`ZendAccelerator.c:2051`): every file but a wrapper's stream whose
-    /// path [`is_cacheable_stream_path`] does not admit, so a file read
-    /// through `phar://` is held and its arrays and strings are the
-    /// cache's, as a plain file's are:
+    /// path as written [`is_cacheable_stream_path`] does not admit, so a
+    /// file read through `phar://` is held and its arrays and strings are
+    /// the cache's, as a plain file's are, and one read through `PHAR://`
+    /// is the request's own, however its wrapper names it opened:
     ///
     /// ```php
     /// function member($name, $data) {
@@ -247,6 +248,8 @@ impl<'a> FileArgs<'a> {
     /// $after = $after['opcache_statistics'];
     /// var_dump($after['num_cached_scripts'] - $before['num_cached_scripts'], $after['hits'] - $before['hits'], $after['num_cached_keys'] - $before['num_cached_keys']);
     /// var_dump(($held['timestamp'] ?? 0) === filemtime("phar://$t/def.php"), opcache_is_script_cached("phar://$t/r.php"));
+    /// $hits = $s()['opcache_statistics']['hits'];
+    /// var_dump(include "PHAR://$t/r.php", $s()['opcache_statistics']['hits'] - $hits);
     /// unlink($t);
     /// ```
     /// ```expect regime=jit-off
@@ -264,9 +267,12 @@ impl<'a> FileArgs<'a> {
     /// int(2)
     /// bool(true)
     /// bool(true)
+    /// int(1)
+    /// int(0)
     /// ```
     pub(crate) fn cached(&self) -> bool {
-        self.handle != HandlePath::Stream || is_cacheable_stream_path(self.path)
+        self.handle != HandlePath::Stream
+            || is_cacheable_stream_path(self.written.unwrap_or(self.path))
     }
 }
 

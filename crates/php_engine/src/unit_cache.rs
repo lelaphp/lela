@@ -130,7 +130,7 @@ pub(crate) fn full_path(path: &[u8], cwd: &Path) -> Vec<u8> {
 /// caller: a request, which reaches a stream wrapper's `url_stat`
 /// (`crate::api::request::Request`'s), or no request, which stats a
 /// plain file alone.
-pub(crate) trait Observe {
+pub(crate) trait Stat {
     /// The file at the full path `path` as it stands now; none where
     /// nothing is there or nothing keeps a time for it.
     fn stamp(&mut self, path: &[u8]) -> Option<Stamp> {
@@ -138,7 +138,7 @@ pub(crate) trait Observe {
     }
 }
 
-impl Observe for () {}
+impl Stat for () {}
 
 /// What the system reported of a file as it was compiled, the
 /// `zend_stat_t` php's `validate_timestamps` reads: when it was last
@@ -283,17 +283,17 @@ impl Held {
     /// at `now` is served, the file as it stands stat'ed only where a
     /// hit is due, and the next revalidation time recorded where a
     /// window's stat finds the file unchanged.
-    pub(crate) fn validated(&self, validation: Validation, now: i64, by: &mut dyn Observe) -> bool {
+    pub(crate) fn validated(&self, validation: Validation, now: i64, stat: &mut dyn Stat) -> bool {
         match self.due(validation, now) {
             Due::Nothing => true,
             Due::Seconds { was, next } => {
-                let fresh = by.stamp(&self.path).map(Stamp::seconds) == Some(was);
+                let fresh = stat.stamp(&self.path).map(Stamp::seconds) == Some(was);
                 if fresh {
                     self.revalidate.store(next, Ordering::Relaxed);
                 }
                 fresh
             }
-            Due::Exact(held) => held.is_some() && by.stamp(&self.path) == held,
+            Due::Exact(held) => held.is_some() && stat.stamp(&self.path) == held,
         }
     }
 }
@@ -980,7 +980,7 @@ impl UnitCache {
     /// `compile` and `publish` are handed `caller`, the request the file
     /// is compiled and its classes published for, or nothing.
     #[allow(clippy::too_many_arguments)] // the table, the question, the caller and the four steps, each one fact
-    pub(crate) fn file<A: Observe>(
+    pub(crate) fn file<A: Stat>(
         &self,
         caller: &mut A,
         files: &Files,
@@ -1097,7 +1097,7 @@ impl UnitCache {
     /// is discarded, and a discarded one is a miss.
     fn held_hit(
         &self,
-        by: &mut dyn Observe,
+        stat: &mut dyn Stat,
         files: &Files,
         path: &[u8],
         written: Option<&UnitKey>,
@@ -1120,7 +1120,7 @@ impl UnitCache {
             .held
             .get(&UnitKey::full(path))
             .filter(|held| !held.discarded())?;
-        if stale.validated(validation, now, by) {
+        if stale.validated(validation, now, stat) {
             files.hit(&stale, validation, now);
             if let Some(written) = written {
                 self.add_key(files, written.clone(), &stale);
@@ -1196,7 +1196,7 @@ impl UnitCache {
         files: &Files,
         key: &UnitKey,
         force: bool,
-        by: &mut dyn Observe,
+        stat: &mut dyn Stat,
     ) -> bool {
         let Some(held) = files.held.get(key).filter(|held| !held.discarded()) else {
             return false;
@@ -1206,9 +1206,9 @@ impl UnitCache {
         }
         let changed = force
             || key.0 != held.path
-            || held
-                .stamp
-                .is_none_or(|was| by.stamp(&held.path).map(Stamp::seconds) != Some(was.seconds()));
+            || held.stamp.is_none_or(|was| {
+                stat.stamp(&held.path).map(Stamp::seconds) != Some(was.seconds())
+            });
         if changed {
             self.discard_held(files, &held);
         }

@@ -23,7 +23,7 @@ use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
 use crate::supplied::tell;
 use crate::unit_cache::{
-    Asked, Cached, CompileRefused, Disk, Filed, Fresh, Held, Levels, Observe, Stamp, UnitKey,
+    Asked, Cached, CompileRefused, Disk, Filed, Fresh, Held, Levels, Stamp, Stat, UnitKey,
     full_path,
 };
 
@@ -898,7 +898,7 @@ impl Request {
     }
 }
 
-impl Observe for Request {
+impl Stat for Request {
     /// `zend_get_file_handle_timestamp`: a plain file's `stat(2)`, and a
     /// stream wrapper's path's `zend_get_stream_timestamp`, its wrapper's
     /// `url_stat` asked quietly through the stream layer
