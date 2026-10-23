@@ -214,21 +214,31 @@ impl Default for Opline {
 }
 
 /// Whether a comparison whose handler line says `SMART_BRANCH` is fused
-/// to the opline after it, and to which jump ([`Opline::fuses`]).
+/// to the opline after it, to which jump ([`Opline::fuses`]), and
+/// whether the jump goes back, to its own place or before it, which is
+/// a loop's back-edge (design §5.7): forward for `Jmpz` and `Jmpnz`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Fused {
     No,
     Jmpz,
     Jmpnz,
+    JmpzBack,
+    JmpnzBack,
 }
 
 impl Fused {
-    /// What `op` is fused to, `next` the opline after it.
-    pub(crate) fn of(op: &Opline, next: Option<&Opline>) -> Fused {
-        match next {
-            Some(jump) if op.fuses(jump) && jump.opcode == Opcode::Jmpz => Fused::Jmpz,
-            Some(jump) if op.fuses(jump) => Fused::Jmpnz,
-            _ => Fused::No,
+    /// What `op`, the opline at `at`, is fused to, `next` the opline
+    /// after it.
+    pub(crate) fn of(op: &Opline, next: Option<&Opline>, at: usize) -> Fused {
+        let Some(jump) = next.filter(|jump| op.fuses(jump)) else {
+            return Fused::No;
+        };
+        let back = jump.op2 as usize <= at.saturating_add(1);
+        match (jump.opcode == Opcode::Jmpz, back) {
+            (true, false) => Fused::Jmpz,
+            (true, true) => Fused::JmpzBack,
+            (false, false) => Fused::Jmpnz,
+            (false, true) => Fused::JmpnzBack,
         }
     }
 }
@@ -553,7 +563,7 @@ impl OpArray {
     pub(crate) fn resolve(&mut self) {
         for at in 0..self.oplines.len() {
             let handler = match self.oplines.get(at) {
-                Some(op) => Handler::of(op, self.oplines.get(at + 1)),
+                Some(op) => Handler::of(op, self.oplines.get(at + 1), at),
                 None => continue,
             };
             if let Some(op) = self.oplines.get_mut(at) {
@@ -726,18 +736,25 @@ mod tests {
     }
 
     /// The handlers publication resolves: a comparison whose line says
-    /// `SMART_BRANCH` takes the variant of the jump after it where the
-    /// jump branches on its temporary and the plain one otherwise, a
+    /// `SMART_BRANCH` takes the variant of the jump after it, and of its
+    /// direction, where the jump branches on its temporary and the plain
+    /// one otherwise, a
     /// specialised opcode the variant of its operands' kinds, one over a
     /// `JMP_ADDR` operand none for it, and the kinds a row does not list
     /// a variant of their own.
     #[test]
     fn publication_resolves_each_oplines_handler_from_it_and_the_jump_after_it() {
+        // A jump forward, to the opline past both.
         let jump = |opcode, op1| Opline {
             opcode,
             op1_type: OperandKind::Tmp,
             op1,
+            op2: 9,
             ..Opline::default()
+        };
+        let back = |opcode, op1| Opline {
+            op2: 0,
+            ..jump(opcode, op1)
         };
         let (cv, konst, tmp) = (OperandKind::Cv, OperandKind::Const, OperandKind::Tmp);
         assert_eq!(
@@ -757,6 +774,21 @@ mod tests {
                 jump(Opcode::Jmpz, 3)
             ]),
             [Handler::IsSmallerOrEqualJmpz, Handler::JmpzTmp]
+        );
+        assert_eq!(
+            resolved(vec![
+                over(Opcode::IsSmaller, cv, cv),
+                back(Opcode::Jmpnz, 3)
+            ]),
+            [Handler::IsSmallerCvCvJmpnzBack, Handler::JmpnzTmp],
+            "a jump to the comparison or before it is a loop's back-edge"
+        );
+        assert_eq!(
+            resolved(vec![
+                over(Opcode::IsEqual, cv, konst),
+                back(Opcode::Jmpz, 3)
+            ]),
+            [Handler::IsEqualCvConstJmpzBack, Handler::JmpzTmp]
         );
         assert_eq!(
             resolved(vec![over(Opcode::IsSmaller, cv, cv), jump(Opcode::Jmpz, 4)]),
@@ -806,6 +838,38 @@ mod tests {
             resolved(vec![over(Opcode::AssignObj, OperandKind::Unused, konst)]),
             [Handler::AssignObjUnlisted],
             "an assignment with no OP_DATA after it is no unit the compiler writes"
+        );
+    }
+
+    /// An opcode whose line says `SPEC(RETVAL)` is resolved over whether
+    /// its `out` is read, as php's `_RETVAL_UNUSED` and `_RETVAL_USED`
+    /// handlers are, and the kinds a row does not list keep their one
+    /// variant whatever its `out` is.
+    #[test]
+    fn publication_resolves_a_retval_opcode_over_whether_its_result_is_read() {
+        let (cv, tmp, unused) = (OperandKind::Cv, OperandKind::Tmp, OperandKind::Unused);
+        let unread = |opcode, op1_type, op2_type| Opline {
+            out_type: unused,
+            out: 0,
+            ..over(opcode, op1_type, op2_type)
+        };
+        assert_eq!(
+            resolved(vec![
+                unread(Opcode::PreInc, cv, unused),
+                over(Opcode::PreInc, cv, unused),
+                unread(Opcode::PreDec, OperandKind::Var, unused),
+                unread(Opcode::Assign, cv, tmp),
+                over(Opcode::Assign, cv, tmp),
+                unread(Opcode::Assign, tmp, tmp),
+            ]),
+            [
+                Handler::PreIncCvRetvalUnused,
+                Handler::PreIncCvRetvalUsed,
+                Handler::PreDecVarRetvalUnused,
+                Handler::AssignCvTmpRetvalUnused,
+                Handler::AssignCvTmpRetvalUsed,
+                Handler::AssignUnlisted,
+            ]
         );
     }
 }

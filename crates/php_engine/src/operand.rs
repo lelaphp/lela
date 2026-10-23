@@ -12,7 +12,7 @@
 //! kind.
 
 use php_heap::{Zval, ZvalType};
-use php_unit::{OpArray, OperandKind};
+use php_unit::{OpArray, OperandKind, Opline};
 
 /// One way of addressing an operand: where it stands, read without an
 /// owner taken.
@@ -152,6 +152,52 @@ impl Operand for ByKind {
             OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => Some(field as usize),
             OperandKind::Const | OperandKind::Unused => None,
         }
+    }
+}
+
+/// Whether an opline's `out` is read, `RETURN_VALUE_USED(opline)`: a
+/// constant of the handler where the opcode's line says `SPEC(RETVAL)`
+/// and the hot list specialises it, as php resolves `_RETVAL_UNUSED`
+/// and `_RETVAL_USED` where it publishes the opline
+/// (`php_unit::Handler`), and read off the opline's `out_type` byte
+/// everywhere else ([`RetvalByte`]).
+pub(crate) trait Retval {
+    /// Whether `op`'s `out` is read.
+    fn used(op: &Opline) -> bool;
+}
+
+/// php's `_RETVAL_UNUSED` handler: the compiler wrote `UNUSED` into the
+/// `out_type`, as `zend_do_free` does where nothing reads the value.
+pub(crate) struct RetvalUnused;
+
+/// php's `_RETVAL_USED` handler.
+pub(crate) struct RetvalUsed;
+
+/// An `out` whose use the opline's `out_type` byte says, read while
+/// the request is served: a handler the spec does not resolve over it.
+pub(crate) struct RetvalByte;
+
+impl Retval for RetvalUnused {
+    #[inline(always)] // a constant, so the write of `out` folds away
+    #[allow(clippy::inline_always)]
+    fn used(_: &Opline) -> bool {
+        false
+    }
+}
+
+impl Retval for RetvalUsed {
+    #[inline(always)] // a constant, as `RetvalUnused`'s
+    #[allow(clippy::inline_always)]
+    fn used(_: &Opline) -> bool {
+        true
+    }
+}
+
+impl Retval for RetvalByte {
+    #[inline(always)] // a test of the opline's byte, on an inline path
+    #[allow(clippy::inline_always)]
+    fn used(op: &Opline) -> bool {
+        op.out_type != OperandKind::Unused
     }
 }
 

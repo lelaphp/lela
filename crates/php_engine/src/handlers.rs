@@ -77,7 +77,7 @@ use crate::exec::{
     cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
 };
 use crate::observer::OnThrow;
-use crate::operand::{ByKind, Operand, Var};
+use crate::operand::{ByKind, Operand, Retval, RetvalByte, Var};
 use crate::ops::inline::{self, Arith, Binary, Bitwise, Shift};
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
 use crate::tier::{Flow, Next, SafepointIdx, Site, Stepped, Tier};
@@ -626,7 +626,7 @@ pub(crate) fn declare_attributed_const<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let at = req.vm().opline(frame);
-    let data = exec::opline_at(code, at.saturating_add(1))
+    let data = exec::opline_at(code, exec::after(at))
         .filter(|next| next.opcode == Opcode::OpData && next.op1_type == OperandKind::Const);
     let (Some(written), Some(data)) = (
         exec::constant(code, ConstIdx(op.op1))
@@ -658,7 +658,7 @@ pub(crate) fn declare_attributed_const<T: Tier>(
     };
     let value = crate::api::values::Owner::adopt(value);
     req.define_attributed_constant(&written, value, attributes);
-    Ok(advance_over_data(req, frame, at))
+    Ok(advance_over_data(req, frame))
 }
 
 /// `ZEND_DECLARE_LAMBDA_FUNCTION` (`Z/Zend/zend_vm_def.h:8343`):
@@ -5376,10 +5376,10 @@ pub(crate) fn new<T: Tier>(
     };
     if constructor.is_none() {
         let at = req.vm().opline(frame);
-        let next_is_do_fcall = exec::opline_at(code, at.saturating_add(1))
+        let next_is_do_fcall = exec::opline_at(code, exec::after(at))
             .is_some_and(|next| next.opcode == php_unit::Opcode::DoFcall);
         if count == 0 && next_is_do_fcall {
-            return Ok(advance_over_data(req, frame, at));
+            return Ok(advance_over_data(req, frame));
         }
     }
     let function = constructor.unwrap_or(Function::PASS);
@@ -12446,19 +12446,19 @@ pub(crate) fn fetch_class<T: Tier>(
     }
 }
 
-/// The opline a handler that is two oplines stands at, and the
-/// `OP_DATA` after it that carries its value (`OP_DATA` in php's
-/// `zend_vm_def.h`, read with `opline + 1`).
+/// The `OP_DATA` after the opline a handler that is two oplines stands
+/// at, which carries its value (`OP_DATA` in php's `zend_vm_def.h`,
+/// read with `opline + 1`).
 fn data_after(
     req: &Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
-) -> Result<(u32, Opline), Fatal> {
+) -> Result<Opline, Fatal> {
     let at = req.vm().opline(frame);
-    exec::opline_at(code, at.saturating_add(1))
+    exec::opline_at(code, exec::after(at))
         .filter(|next| next.opcode == Opcode::OpData)
-        .map(|data| (at, *data))
+        .copied()
         .ok_or_else(|| {
             Fatal::error(format!(
                 "InternalError: {} with no OP_DATA after it",
@@ -12834,7 +12834,7 @@ pub(crate) fn frameless_icall_3<T: Tier>(
     at: u32,
 ) -> Edge {
     req.vm_mut().stand(frame, at);
-    let (_, data) = data_after(req, frame, code, op)?;
+    let data = data_after(req, frame, code, op)?;
     let arguments = [
         (op.op1_type, op.op1),
         (op.op2_type, op.op2),
@@ -13059,14 +13059,14 @@ fn frameless_call<const N: usize>(
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn assign<T: Tier, A: Operand + Default, B: Operand + Default>(
+pub(crate) fn assign<T: Tier, A: Operand + Default, B: Operand + Default, R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_assign(req, frame, code, op, (A::default(), B::default())) {
+    if let Some(edge) = inline_assign::<R>(req, frame, code, op, (A::default(), B::default())) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -13175,24 +13175,26 @@ fn assigned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> 
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn assign_op<T: Tier>(
+pub(crate) fn assign_op<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-    if let Some(edge) = inline_assign_op(req, frame, code, op, kinds) {
+    if let Some(edge) = inline_assign_op(req, frame, code, op, (A::default(), B::default())) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     assigned_op(req, frame, code, op)
 }
 
 /// The inline path of `ZEND_ASSIGN_OP` over a CV
 /// (`ZEND_ASSIGN_OP_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:1257`): a CV
 /// holding a number and a value that is a number as it stands, under an
-/// operator [`inline::compound`] names, computed by [`inline::binary`]
-/// as the binary opcode's own inline pair computes it, written into the
+/// operator [`inline::compound`] names, computed by
+/// [`inline::compounded`] as the binary opcode's own inline pair
+/// computes it, written into the
 /// CV in place and, under `RETURN_VALUE_USED`, into the temporary.
 /// A CV holding a number is no reference, so no type a property carries
 /// is read and neither is the frame's `strict_types` regime, which is
@@ -13208,6 +13210,10 @@ fn inline_assign_op(
     op: &Opline,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
+    // The kind is the arm's, so a `VAR` arm has no inline path at all.
+    if a.kind() != OperandKind::Cv {
+        return None;
+    }
     // The value first: one that is no number, a numeric string among
     // them, is the refusal met most, and it reads nothing else.
     let slots = req.slots_mut(frame);
@@ -13215,13 +13221,9 @@ fn inline_assign_op(
     if !matches!(value.kind(), ZvalType::Long | ZvalType::Double) {
         return None;
     }
-    let rule = inline::compound(op.extended_value)?;
-    if a.kind() != OperandKind::Cv {
-        return None;
-    }
     let at = a.slot(op.op1)?;
     let held = *slots.get(at)?;
-    let z = inline::binary(rule, held, value)?;
+    let z = inline::compounded(op.extended_value, held, value)?;
     if op.out_type != OperandKind::Unused {
         write_owning_nothing(slots, op, z)?;
     }
@@ -13599,7 +13601,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let (at, data) = data_after(req, frame, code, op)?;
+    let data = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let mut member = exec::Member::default();
     let found = property_place(req, frame, code, op, PropertyRead::Silent, &mut member);
@@ -13639,7 +13641,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         write_out(req, frame, op, &landed);
         req.release(garbage);
         exec::free_operand(req, frame, data_type, data_at);
-        return Ok(advance_over_data(req, frame, at));
+        return Ok(advance_over_data(req, frame));
     }
     // The owner the source had of `held` is the cell's now.
     let cell = match req.make_ref(source) {
@@ -13686,7 +13688,7 @@ pub(crate) fn assign_obj_ref<T: Tier>(
     write_out(req, frame, op, &bound);
     req.release(garbage);
     exec::free_operand(req, frame, data_type, data_at);
-    Ok(advance_over_data(req, frame, at))
+    Ok(advance_over_data(req, frame))
 }
 
 /// `ZEND_ASSIGN_OBJ` (`Z/Zend/zend_vm_def.h:2466`), `$o->p = v`, two
@@ -14016,6 +14018,16 @@ fn inline_assign_obj(
     at: u32,
     (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
+    #[cfg(debug_assertions)]
+    if sensed_unmovable(
+        req,
+        frame,
+        code,
+        op,
+        (data, exec::opline_at(code, exec::after(at))?.op1),
+    ) {
+        return None;
+    }
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
     let (place, ty) = inline_place(
         req,
@@ -14054,8 +14066,8 @@ fn data_value(
     ty: exec::SlotType,
     container: Held,
 ) -> Option<Zval> {
-    let field = exec::opline_at(code, at.saturating_add(1))?.op1;
-    let taking = taking(slots, code, op, data, field)?;
+    let field = exec::opline_at(code, exec::after(at))?.op1;
+    let taking = taking::<RetvalByte>(slots, code, op, data, field)?;
     if !ty.admits(taking.z) {
         return None;
     }
@@ -14078,7 +14090,7 @@ struct Taking {
 /// The [`Taking`] of the value `field` names, by [`taken_value`]'s rule.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
-fn taking(
+fn taking<R: Retval>(
     slots: &[Zval],
     code: &OpArray,
     op: &Opline,
@@ -14086,19 +14098,25 @@ fn taking(
     field: u32,
 ) -> Option<Taking> {
     let z = value.read(slots, code, field);
-    if !crate::operand::movable(z)
+    // A `TMP` holds a value a variable may hold, never a reference, an
+    // `IS_INDIRECT` or nothing, so it is taken untested, as php's
+    // `ZEND_ASSIGN_SPEC_CV_TMP` takes it (`zend_copy_to_variable`). A
+    // debug build keeps the test, and every inline path that takes a
+    // `TMP` here senses one that breaks it first ([`sensed_unmovable`]).
+    let untested = value.kind() == OperandKind::Tmp && !cfg!(debug_assertions);
+    if !(untested || crate::operand::movable(z))
         || (value.kind() == OperandKind::Const && !crate::operand::owns_nothing(z))
     {
         return None;
     }
-    let out = if op.out_type == OperandKind::Unused {
-        None
-    } else {
+    let out = if R::used(op) {
         let out = op.out as usize;
         if slots.get(out)?.is_refcounted() {
             return None;
         }
         Some(out)
+    } else {
+        None
     };
     let moved = match value.kind() {
         OperandKind::Tmp | OperandKind::Var => Some(value.slot(field)?),
@@ -14126,6 +14144,31 @@ impl Taking {
     }
 }
 
+/// A debug build's sensor where an inline path takes the `TMP` `field`
+/// names as php's `_TMP` handlers take it, untested ([`taking`]): one
+/// holding what no `TMP` holds is recorded
+/// ([`Request::sense_unmovable_temporary`]) and the inline path is
+/// refused, so the kernel serves the opline and the loop's sensing
+/// point after it ends the request naming what was found.
+#[cfg(debug_assertions)]
+fn sensed_unmovable(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    (value, field): (impl Operand, u32),
+) -> bool {
+    if value.kind() != OperandKind::Tmp {
+        return false;
+    }
+    let z = value.read(req.slots_mut(frame), code, field);
+    if crate::operand::movable(z) {
+        return false;
+    }
+    req.sense_unmovable_temporary(op, field, z.kind());
+    true
+}
+
 /// The value an assignment's inline path takes, one rule for `ASSIGN`'s
 /// `op2` and the `OP_DATA` of `ASSIGN_OBJ` and `ASSIGN_DIM`, as
 /// `zend_assign_to_variable` takes it: a constant that counts no owner
@@ -14149,14 +14192,14 @@ impl Taking {
 /// ```
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
-fn taken_value(
+fn taken_value<R: Retval>(
     slots: &mut [Zval],
     code: &OpArray,
     op: &Opline,
     value: impl Operand,
     field: u32,
 ) -> Option<Zval> {
-    taking(slots, code, op, value, field)?.take(slots)
+    taking::<R>(slots, code, op, value, field)?.take(slots)
 }
 
 /// `ASSIGN_OBJ` over a `VAR` container, its inline path and then its
@@ -14180,7 +14223,7 @@ fn assigned_obj_nested<B: Operand + Default, D: Operand + Default>(
 /// A call of its own, as [`fetched_obj`] is.
 #[inline(never)]
 fn assigned_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    let (at, data) = data_after(req, frame, code, op)?;
+    let data = data_after(req, frame, code, op)?;
     // A CV is read through its slot after the value, as php reads
     // `object` after `GET_OP_DATA_ZVAL_PTR`: an undefined value's
     // handler may have replaced it.
@@ -14239,7 +14282,7 @@ fn assigned_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    Ok(advance_over_data(req, frame, at))
+    Ok(advance_over_data(req, frame))
 }
 
 /// `ASSIGN_OBJ`'s body over an object: the name placed
@@ -14542,7 +14585,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let (at, data) = data_after(req, frame, code, op)?;
+    let data = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let slot = CacheSlot(op.extended_value);
     let placed = match static_slot_at(req, frame, code, op, slot, PropertyRead::Warning) {
@@ -14556,7 +14599,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     };
     let Some(StaticSlot { info, name }) = placed else {
         exec::free_operand(req, frame, data_type, data_at);
-        return Ok(advance_over_data(req, frame, at));
+        return Ok(advance_over_data(req, frame));
     };
     let value = exec::take_operand(req, frame, code, data_type, data_at);
     // `zend_assign_to_typed_prop`'s set-visibility arm, after the value
@@ -14576,7 +14619,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
         Ok(pair) => landed_out(req, frame, op, pair),
         Err(thrown) => return threw(req, frame, &thrown),
     }
-    Ok(advance_over_data(req, frame, at))
+    Ok(advance_over_data(req, frame))
 }
 
 /// The slot one of the five read-modify-write opcodes over a
@@ -14833,7 +14876,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             op.extended_value
         )));
     };
-    let (at, data) = data_after(req, frame, code, op)?;
+    let data = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     // `(opline+1)->extended_value`: the slots stand on the `OP_DATA`.
     let placed = match static_place(req, frame, code, op, CacheSlot(data.extended_value)) {
@@ -14845,7 +14888,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     };
     let Some(placed) = placed else {
         exec::free_operand(req, frame, data_type, data_at);
-        return Ok(advance_over_data(req, frame, at));
+        return Ok(advance_over_data(req, frame));
     };
     let info = placed.info;
     let value = exec::take_operand(req, frame, code, data_type, data_at);
@@ -14906,7 +14949,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
             return threw(req, frame, &thrown);
         }
         write_out(req, frame, op, &cell.get());
-        return Ok(advance_over_data(req, frame, at));
+        return Ok(advance_over_data(req, frame));
     }
     let stepped = match placed.verified_against(req, &stepped) {
         None => stepped,
@@ -14926,7 +14969,7 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // time: a weak conversion raises a deprecation and php raises it
     // once.
     req.store_static_property(info, stepped);
-    Ok(advance_over_data(req, frame, at))
+    Ok(advance_over_data(req, frame))
 }
 
 /// `zend_binary_assign_op_typed_prop` (`Z/Zend/zend_execute.c:1693`):
@@ -15265,7 +15308,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let (at, data) = data_after(req, frame, code, op)?;
+    let data = data_after(req, frame, code, op)?;
     let (data_type, data_at) = (data.op1_type, data.op1);
     let slot = CacheSlot(op.extended_value & !RETURNS_FUNCTION);
     let placed = match static_place(req, frame, code, op, slot) {
@@ -15282,7 +15325,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
     }) = placed
     else {
         exec::free_operand(req, frame, data_type, data_at);
-        return Ok(advance_over_data(req, frame, at));
+        return Ok(advance_over_data(req, frame));
     };
     let Some(source) = write_place(req, frame, data_type, data_at) else {
         return Err(Fatal::error(
@@ -15354,7 +15397,7 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
             },
         );
     }
-    Ok(advance_over_data(req, frame, at))
+    Ok(advance_over_data(req, frame))
 }
 
 /// `zend_assign_to_variable` (`Z/Zend/zend_execute.h:171`) over a place:
@@ -15813,8 +15856,12 @@ fn inline_assign_dim(
     at: u32,
     (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
-    let field = exec::opline_at(code, at.saturating_add(1))?.op1;
-    let taking = taking(req.slots_mut(frame), code, op, data, field)?;
+    let field = exec::opline_at(code, exec::after(at))?.op1;
+    #[cfg(debug_assertions)]
+    if sensed_unmovable(req, frame, code, op, (data, field)) {
+        return None;
+    }
+    let taking = taking::<RetvalByte>(req.slots_mut(frame), code, op, data, field)?;
     let placed = match owned_entry(req, frame, (code, op, at), DimRead::Silent, (a, b))? {
         Ok(placed) => placed,
         Err(edge) => return Some(edge),
@@ -15832,7 +15879,7 @@ fn inline_assign_dim(
     }
     req.vm_mut().stand(frame, at);
     req.release(Value::of_slot(garbage));
-    Some(Ok(advance_over_data(req, frame, at)))
+    Some(Ok(advance_over_data(req, frame)))
 }
 
 /// `ASSIGN_DIM` past its inline path: the container placed for the
@@ -15840,7 +15887,8 @@ fn inline_assign_dim(
 /// takes. A call of its own, as [`fetched_obj`] is.
 #[inline(never)]
 fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    let (at, data) = data_after(req, frame, code, op)?;
+    let at = req.vm().opline(frame);
+    let data = data_after(req, frame, code, op)?;
     let Some(place) = write_place(req, frame, op.op1_type, op.op1) else {
         return Err(Fatal::error(
             "InternalError: ZEND_ASSIGN_DIM over a constant or a temporary, which php compiles no write over",
@@ -15920,7 +15968,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
         });
         return threw(req, frame, &thrown);
     }
-    Ok(advance_over_data(req, frame, at))
+    Ok(advance_over_data(req, frame))
 }
 
 /// The value `$a[] = $v` appends, read as `ZEND_ASSIGN_DIM` reads it
@@ -16409,8 +16457,8 @@ fn inline_assign_dim_op(
     if a.kind() != OperandKind::Cv {
         return None;
     }
-    let data = *exec::opline_at(code, at.saturating_add(1))
-        .filter(|data| data.opcode == Opcode::OpData)?;
+    let data =
+        *exec::opline_at(code, exec::after(at)).filter(|data| data.opcode == Opcode::OpData)?;
     let slots = req.slots_mut(frame);
     let array = owned_array(slots, code, op, a)?;
     let (key, free_dim) = inline_key(slots, code, op, b)?;
@@ -16439,7 +16487,7 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
             op.extended_value
         )));
     };
-    let (at, data) = data_after(req, frame, code, op)?;
+    let data = data_after(req, frame, code, op)?;
     let step = Compound {
         op,
         data,
@@ -16512,7 +16560,7 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
         });
         return threw(req, frame, &thrown);
     }
-    Ok(advance_over_data(req, frame, at))
+    Ok(advance_over_data(req, frame))
 }
 
 /// The kernel over what one place holds and the `OP_DATA`'s value, and
@@ -16829,7 +16877,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
             op.extended_value
         )));
     };
-    let (at, data) = data_after(req, frame, code, op)?;
+    let data = data_after(req, frame, code, op)?;
     // The name, and then an undefined CV's warning, before the container
     // is read, whose handler may have replaced it
     // (`Z/Zend/zend_vm_def.h:1023-1026`).
@@ -16887,7 +16935,7 @@ pub(crate) fn assign_obj_op<T: Tier>(
     if let Err(thrown) = written {
         return threw(req, frame, &thrown);
     }
-    Ok(advance_over_data(req, frame, at))
+    Ok(advance_over_data(req, frame))
 }
 
 /// The inline path of `ZEND_ASSIGN_OBJ_OP` over a constant name or one a
@@ -16957,7 +17005,7 @@ fn inline_assign_obj_op(
     let rule = inline::compound(op.extended_value)?;
     let b = ByKind(op.op2_type);
     let (object, container) = inline_receiver(req, frame, code, op, a, b)?;
-    let (at, data) = data_after(req, frame, code, op).ok()?;
+    let data = data_after(req, frame, code, op).ok()?;
     // `CACHE_ADDR((opline+1)->extended_value)`: the operator is in the
     // opline's own field, so the slot is in the `OP_DATA`'s.
     let slot = CacheSlot(data.extended_value);
@@ -16974,7 +17022,7 @@ fn inline_assign_obj_op(
     }
     container.give_up(slots)?;
     place.write(z);
-    Some(Ok(Next::jump(at.saturating_add(2))))
+    Some(Ok(Next::by(2)))
 }
 
 /// The operation of a compound assignment over a declared property
@@ -21534,7 +21582,8 @@ fn rope_piece(
 /// into the temporary the opline's `result` field names. php's handler
 /// takes the long pair and the double pairs before it calls
 /// `zend_compare`, and those are the kernel's first arms.
-#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `pre_inc`
+#[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
 #[allow(clippy::inline_always)]
 pub(crate) fn is_smaller<T: Tier, A: Operand + Default, B: Operand + Default, S: Branch>(
     req: &mut Request,
@@ -21584,7 +21633,8 @@ pub(crate) fn is_smaller_or_equal<T: Tier, S: Branch>(
 /// `ZEND_IS_EQUAL`: [`crate::ops::is_equal`], the same way. Each
 /// comparison branches over a `JMPZ` or a `JMPNZ` after it
 /// ([`smart_branch`]).
-#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `pre_inc`
+#[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
 #[allow(clippy::inline_always)]
 pub(crate) fn is_equal<T: Tier, A: Operand + Default, B: Operand + Default, S: Branch>(
     req: &mut Request,
@@ -21701,14 +21751,7 @@ fn inline_identical<T: Tier, const NOT: bool>(
     let y = side(b.kind(), b.read(slots, code, op.op2))?;
     let answer = inline::identical(x, y)? != NOT;
     if let Some(jump) = branch::Peeked::fused(code, op, at) {
-        return Some(branch_fused::<T>(
-            req,
-            frame,
-            code,
-            at.saturating_add(1),
-            jump,
-            answer,
-        ));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
     write_owning_nothing(slots, op, Zval::bool(answer))?;
     Some(Ok(advanced()))
@@ -21802,14 +21845,14 @@ pub(crate) fn spaceship<T: Tier>(
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn pre_inc<T: Tier, A: Operand + Default>(
+pub(crate) fn pre_inc<T: Tier, A: Operand + Default, R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_incdec(req, frame, op, (Arith::Add, false), A::default()) {
+    if let Some(edge) = inline_incdec::<R>(req, frame, op, (Arith::Add, false), A::default()) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -21825,7 +21868,7 @@ pub(crate) fn post_inc<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let step = (Arith::Add, true);
-    if let Some(edge) = inline_incdec(req, frame, op, step, ByKind(op.op1_type)) {
+    if let Some(edge) = inline_incdec::<RetvalByte>(req, frame, op, step, ByKind(op.op1_type)) {
         return edge;
     }
     incdec(req, frame, code, op, true, crate::ops::increment)
@@ -21859,14 +21902,14 @@ pub(crate) fn post_inc<T: Tier>(
 #[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `pre_inc`
 #[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
 #[allow(clippy::inline_always)]
-pub(crate) fn pre_dec<T: Tier, A: Operand + Default>(
+pub(crate) fn pre_dec<T: Tier, A: Operand + Default, R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_incdec(req, frame, op, (Arith::Sub, false), A::default()) {
+    if let Some(edge) = inline_incdec::<R>(req, frame, op, (Arith::Sub, false), A::default()) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -21906,7 +21949,7 @@ pub(crate) fn post_dec<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let step = (Arith::Sub, true);
-    if let Some(edge) = inline_incdec(req, frame, op, step, ByKind(op.op1_type)) {
+    if let Some(edge) = inline_incdec::<RetvalByte>(req, frame, op, step, ByKind(op.op1_type)) {
         return edge;
     }
     incdec(req, frame, code, op, true, crate::ops::decrement)
@@ -22009,14 +22052,7 @@ fn inline_type_check<T: Tier>(
         *slots.get_mut(operand)? = Zval::UNDEF;
     }
     if let Some(jump) = fused {
-        return Some(branch_fused::<T>(
-            req,
-            frame,
-            code,
-            at.saturating_add(1),
-            jump,
-            answer,
-        ));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
     write_owning_nothing(slots, op, Zval::bool(answer))?;
     Some(Ok(advanced()))
@@ -22508,14 +22544,7 @@ fn inline_isset_dim<T: Tier>(
         exec::free_operand(req, frame, op.op2_type, op.op2);
     }
     if let Some(jump) = fused {
-        return Some(branch_fused::<T>(
-            req,
-            frame,
-            code,
-            at.saturating_add(1),
-            jump,
-            answer,
-        ));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
     write_owning_nothing(req.slots_mut(frame), op, Zval::bool(answer))?;
     Some(Ok(advanced()))
@@ -23156,27 +23185,93 @@ pub(crate) fn jmp<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, code, at, op.op1, op.out)
+    jumped::<T>(req, frame, code, at, (op.op1, op.op1 <= at), op.out)
 }
 
-/// `ZEND_VM_JMP` from the opline at `at` to `target`, the frame left at
-/// the target; a target at or before `at` is the back-edge, where the
-/// interrupt is tested and then the loop safepoint raised with
-/// `number`, the one the compiler wrote into the jump's `result`.
+/// `ZEND_VM_JMP` to `target`, the frame left at the target, answered as
+/// the distance from `served`, the opline the loop dispatched, the jump
+/// or the comparison a fused jump follows; `back` says the target is at
+/// or before the jump's own place, the back-edge, where the interrupt
+/// is tested and then the loop safepoint raised with `number`, the one
+/// the compiler wrote into the jump's `result`. A fused jump's direction
+/// was resolved with its handler where the unit was published; every
+/// other jump's is the compare its caller makes.
+///
+/// Under `Nop` the frame is stood at the target only where the
+/// interrupt is raised: every line read after a back-edge is the line
+/// of the opline that reads it, which stands the frame itself, a
+/// warning's, a backtrace's from a call, and a throwable's where it is
+/// caught and where nothing catches it, each on a line apart from the
+/// loop's condition.
+///
+/// ```php
+/// function g() { return debug_backtrace()[0]['line']; }
+/// function f($n) {
+///     $s = [];
+///     for ($i = 0;
+///          $i < $n;
+///          $i++)
+///     {
+///         $s[] = g();
+///         echo $v;
+///     }
+///     for ($i = 0; $i < 3;
+///          $i++) {
+///         try { if ($i) throw new Exception(); } catch (Exception $e) { $s[] = $e->getLine(); }
+///     }
+///     return $s;
+/// }
+/// echo implode(",", f(2)), "\n";
+/// $i = 0;
+/// do {
+///     $x = $i++ % 2 ? 1 : $undefined;
+/// } while ($i < 3);
+/// for ($i = 0; $i < 3;
+///      $i++)
+/// {
+///     if ($i == 2) throw new LogicException("e");
+/// }
+/// ```
+/// ```expect exit=255
+/// Warning: Undefined variable $v in %s on line 10
+///
+/// Warning: Undefined variable $v in %s on line 10
+/// 9,9,14,14
+///
+/// Warning: Undefined variable $undefined in %s on line 21
+///
+/// Warning: Undefined variable $undefined in %s on line 21
+///
+/// Fatal error: Uncaught LogicException: e in %s:26
+/// Stack trace:
+/// #0 {main}
+///   thrown in %s on line 26
+/// ```
 #[inline(always)] // the back-edge of every loop, in the loop
 #[allow(clippy::inline_always)]
 fn jumped<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
-    at: u32,
-    target: u32,
+    served: u32,
+    (target, back): (u32, bool),
     number: u32,
 ) -> Edge {
-    if target <= at {
-        req.vm_mut().stand(frame, target);
-        if crate::interrupt::check(req)? {
-            return Ok(Stepped::Threw(frame).into());
+    if back {
+        // The frame stands at the target where something reads it: the
+        // interrupt, whose timeout names the target's line and whose
+        // handlers' backtrace starts there, and a tier the engine asks
+        // at its safepoints (ADR-0006). `Nop`'s loop goes on at the
+        // target in its own hand, as every other jump's does.
+        if crate::interrupt::raised(req) {
+            std::hint::cold_path();
+            req.vm_mut().stand(frame, target);
+            if crate::interrupt::interrupted(req)? {
+                return Ok(Stepped::Threw(frame).into());
+            }
+        }
+        if !crate::tier::interpreted::<T>() {
+            req.vm_mut().stand(frame, target);
         }
         let held = crate::tier::Held::of(code);
         match T::safepoint(req, frame, Site::Loop(SafepointIdx(number)), held) {
@@ -23185,7 +23280,7 @@ fn jumped<T: Tier>(
             flow => return crate::tier::resumed(req, flow, frame),
         }
     }
-    Ok(Next::jump(target))
+    jump_from(served, target)
 }
 
 /// `ZEND_JMPNZ`: the jump `zend_emit_cond_jump` leaves at the end of a
@@ -23355,7 +23450,7 @@ fn branched<T: Tier, const ON: bool, const EX: bool>(
         return jump_to(op.op2);
     }
     let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, code, at, op.op2, op.out)
+    jumped::<T>(req, frame, code, at, (op.op2, op.op2 <= at), op.out)
 }
 
 /// `ZEND_JMP_SET`: the left operand of `a ?: c`
@@ -24078,14 +24173,7 @@ fn smart_branch<T: Tier, S: Branch>(
     if req.is_pending() {
         return Ok(Stepped::Threw(frame).into());
     }
-    branch_fused::<T>(
-        req,
-        frame,
-        code,
-        at.saturating_add(1),
-        jump,
-        answer.as_bool() == Some(true),
-    )
+    branch_fused::<T>(req, frame, code, at, jump, answer.as_bool() == Some(true))
 }
 
 /// A comparison's handler past its inline path: [`binary_kernel`] and
@@ -24117,12 +24205,14 @@ pub(crate) mod branch {
 
     use crate::exec;
 
-    /// The jump a comparison is fused to, and the truth that takes it:
-    /// `false` for a `JMPZ`, `true` for a `JMPNZ`.
+    /// The jump a comparison is fused to, the truth that takes it,
+    /// `false` for a `JMPZ`, `true` for a `JMPNZ`, and whether it goes
+    /// back, a loop's back-edge.
     #[derive(Clone, Copy)]
     pub(crate) struct Fused<'c> {
         pub(crate) jump: &'c Opline,
         pub(crate) on: bool,
+        pub(crate) back: bool,
     }
 
     /// Which of a comparison's handlers serves it.
@@ -24133,10 +24223,12 @@ pub(crate) mod branch {
 
     /// The handler with no jump fused: the answer is written.
     pub(crate) struct Unfused;
-    /// The handler fused to the `JMPZ` after it, php's `_JMPZ`.
-    pub(crate) struct OnJmpz;
-    /// The handler fused to the `JMPNZ` after it, php's `_JMPNZ`.
-    pub(crate) struct OnJmpnz;
+    /// The handler fused to the jump after it, php's `_JMPZ` (`ON`
+    /// false) and `_JMPNZ` (`ON` true), resolved with the jump's
+    /// direction where the unit was published: `BACK` for a target at
+    /// the jump or before it, a loop's back-edge, such as the `JMPNZ` a
+    /// `for`, a `while` and a `do` end in.
+    pub(crate) struct OnJump<const ON: bool, const BACK: bool>;
     /// A comparison whose handler line says no `SMART_BRANCH`, which
     /// tests the opline after it on every execution
     /// ([`Opline::fuses`]).
@@ -24150,19 +24242,15 @@ pub(crate) mod branch {
         }
     }
 
-    impl Branch for OnJmpz {
+    impl<const ON: bool, const BACK: bool> Branch for OnJump<ON, BACK> {
         #[inline(always)] // the jump's one read, in the loop
         #[allow(clippy::inline_always)]
         fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
-            exec::opline_at(code, at.saturating_add(1)).map(|jump| Fused { jump, on: false })
-        }
-    }
-
-    impl Branch for OnJmpnz {
-        #[inline(always)] // the jump's one read, in the loop
-        #[allow(clippy::inline_always)]
-        fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
-            exec::opline_at(code, at.saturating_add(1)).map(|jump| Fused { jump, on: true })
+            exec::opline_at(code, exec::after(at)).map(|jump| Fused {
+                jump,
+                on: ON,
+                back: BACK,
+            })
         }
     }
 
@@ -24170,20 +24258,22 @@ pub(crate) mod branch {
         #[inline(always)] // the comparison's inline path, which is in the loop
         #[allow(clippy::inline_always)]
         fn fused<'c>(code: &'c OpArray, op: &Opline, at: u32) -> Option<Fused<'c>> {
-            exec::opline_at(code, at.saturating_add(1))
+            exec::opline_at(code, exec::after(at))
                 .filter(|jump| op.fuses(jump))
                 .map(|jump| Fused {
                     jump,
                     on: jump.opcode == Opcode::Jmpnz,
+                    back: jump.op2 <= exec::after(at),
                 })
         }
     }
 }
 
-/// The fused jump at `at` over the comparison's `answer`: on past the
-/// jump where it is not taken, and taken as [`jumped`] takes it from the
-/// jump's own opline, a backward one raising the loop safepoint with
-/// the jump's number.
+/// The fused jump after the comparison at `at` over its `answer`: on
+/// past the jump where it is not taken, and taken as [`jumped`] takes
+/// it, the distance counted from the comparison, the direction the
+/// jump's own, a backward one raising the loop safepoint with the
+/// jump's number.
 #[inline(always)] // as `branch::Branch::fused`
 #[allow(clippy::inline_always)]
 fn branch_fused<T: Tier>(
@@ -24195,9 +24285,12 @@ fn branch_fused<T: Tier>(
     answer: bool,
 ) -> Edge {
     if answer != fused.on {
-        return jump_to(at.saturating_add(1));
+        // Past the comparison and its jump, `ZEND_VM_SMART_BRANCH`'s
+        // `ZEND_VM_SET_NEXT_OPCODE(opline + 2)`.
+        return Ok(Next::by(2));
     }
-    jumped::<T>(req, frame, code, at, fused.jump.op2, fused.jump.out)
+    let target = (fused.jump.op2, fused.back);
+    jumped::<T>(req, frame, code, at, target, fused.jump.out)
 }
 
 /// The inline path of the binary operators (design §5.8,
@@ -24229,8 +24322,8 @@ fn inline_arith(
 
 /// The inline path of the comparisons that branch (`ZEND_IS_SMALLER`,
 /// `ZEND_IS_SMALLER_OR_EQUAL`, `ZEND_IS_EQUAL`, `ZEND_IS_NOT_EQUAL`):
-/// two numbers as they stand ordered by [`inline::order`], and the
-/// answer `holds` reads off the order branched on where a `JMPZ` or a
+/// two numbers as they stand ordered by [`inline::order`], which reads
+/// the answer `holds` off the order, branched on where a `JMPZ` or a
 /// `JMPNZ` is fused to the comparison ([`branch::Branch`]), or written into
 /// the temporary as a bool where none is. `None`, with nothing touched,
 /// where the operands are not two numbers, or the temporary holds an
@@ -24243,23 +24336,17 @@ fn inline_compare<T: Tier, S: Branch>(
     code: &OpArray,
     op: &Opline,
     at: u32,
-    holds: impl FnOnce(Ordering) -> bool,
+    holds: impl Fn(Ordering) -> bool + Copy,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let slots = req.slots_mut(frame);
-    let answer = holds(inline::order(
+    let answer = inline::order(
         a.read(slots, code, op.op1),
         b.read(slots, code, op.op2),
-    )?);
+        holds,
+    )?;
     if let Some(jump) = S::fused(code, op, at) {
-        return Some(branch_fused::<T>(
-            req,
-            frame,
-            code,
-            at.saturating_add(1),
-            jump,
-            answer,
-        ));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
     write_owning_nothing(req.slots_mut(frame), op, Zval::bool(answer))?;
     Some(Ok(advanced()))
@@ -24296,7 +24383,14 @@ fn inline_branch<T: Tier, const ON: bool, const EX: bool>(
     if EX {
         return Some(jump_to(op.op2));
     }
-    Some(jumped::<T>(req, frame, code, at, op.op2, op.out))
+    Some(jumped::<T>(
+        req,
+        frame,
+        code,
+        at,
+        (op.op2, op.op2 <= at),
+        op.out,
+    ))
 }
 
 /// The inline path of `ZEND_BOOL` (`NOT` false) and `ZEND_BOOL_NOT`
@@ -24359,7 +24453,7 @@ fn inline_truth<const NOT: bool>(
 /// ```
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
-fn inline_incdec(
+fn inline_incdec<R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     op: &Opline,
@@ -24372,7 +24466,7 @@ fn inline_incdec(
         OperandKind::Cv => {
             let held = *slots.get(at)?;
             let stepped = inline::step(arith, held)?;
-            if op.out_type != OperandKind::Unused {
+            if R::used(op) {
                 write_owning_nothing(slots, op, if post { held } else { stepped })?;
             }
             *slots.get_mut(at)? = stepped;
@@ -24381,7 +24475,7 @@ fn inline_incdec(
             let entry = slots.get(at)?.as_indirect()?;
             let held = entry.read();
             let stepped = inline::step(arith, held)?;
-            if op.out_type != OperandKind::Unused {
+            if R::used(op) {
                 write_owning_nothing(slots, op, if post { held } else { stepped })?;
             }
             entry.write(stepped);
@@ -24413,7 +24507,7 @@ fn inline_incdec(
 /// ```
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
-fn inline_assign(
+fn inline_assign<R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
@@ -24423,6 +24517,10 @@ fn inline_assign(
     if a.kind() != OperandKind::Cv {
         return None;
     }
+    #[cfg(debug_assertions)]
+    if sensed_unmovable(req, frame, code, op, (b, op.op2)) {
+        return None;
+    }
     let at = a.slot(op.op1)?;
     let slots = req.slots_mut(frame);
     let held = *slots.get(at)?;
@@ -24430,7 +24528,7 @@ fn inline_assign(
     if held.is_refcounted() && garbage.is_none() {
         return None;
     }
-    let value = taken_value(slots, code, op, b, op.op2)?;
+    let value = taken_value::<R>(slots, code, op, b, op.op2)?;
     *slots.get_mut(at)? = value;
     if let Some(garbage) = garbage {
         req.heap_mut().release_string(garbage);
@@ -24738,11 +24836,11 @@ fn advance(req: &Request, frame: FrameRef) -> Next {
 /// int(1)
 /// caught d
 /// ```
-fn advance_over_data(req: &Request, frame: FrameRef, at: u32) -> Next {
+fn advance_over_data(req: &Request, frame: FrameRef) -> Next {
     if req.is_pending() {
         return Stepped::Threw(frame).into();
     }
-    Next::jump(at.saturating_add(2))
+    Next::jump(req.vm().opline(frame).saturating_add(2))
 }
 
 /// The body the by-value `SEND_*` handlers share: the operand placed in
@@ -25330,6 +25428,13 @@ fn free_throwing_result(req: &mut Request, frame: FrameRef, op: &Opline) {
 /// interrupt test nor the pending test the loop's own jumps make.
 fn jump_to(at: u32) -> Edge {
     Ok(Next::jump(at))
+}
+
+/// [`jump_to`] from a handler that holds the place it serves, `at`: the
+/// distance on to `to`, which the loop adds where it goes on
+/// ([`Next::by`]).
+fn jump_from(at: u32, to: u32) -> Edge {
+    Ok(Next::by(to.wrapping_sub(at)))
 }
 
 /// `ZEND_RETURN_BY_REF` (`Z/Zend/zend_vm_def.h:4586`), what a function

@@ -3109,6 +3109,17 @@ pub(crate) fn opline_at(code: &OpArray, at: u32) -> Option<&Opline> {
     code.oplines.get(at as usize)
 }
 
+/// The place of the opline after the one at `at`, `ZEND_VM_NEXT_OPCODE`'s
+/// `opline + 1`. `at` is the place of an opline that stands, so it is
+/// under the length of an op array, which no count of 32-byte oplines
+/// brings to `u32::MAX`: the add does not wrap, and costs one
+/// instruction where a saturating one costs two.
+#[inline(always)] // one add, in the loop and its fused branches
+#[allow(clippy::inline_always)]
+pub(crate) const fn after(at: u32) -> u32 {
+    at.wrapping_add(1)
+}
+
 /// `i_init_func_execute_data`'s skip (`Z/Zend/zend_execute.c:4426-4437`)
 /// and `zend_copy_extra_args`' (`:4363-4369`): where a frame just pushed
 /// stands before the observer's begin, as php's `ZEND_DO_UCALL` lays the
