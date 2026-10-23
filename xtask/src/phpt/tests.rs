@@ -98,7 +98,8 @@ fn subset(name: &str, tests: &[(&str, &str)]) -> (Tree, Subset) {
         scope: "ext/fixture".to_owned(),
         dirs: vec![Dir {
             under: PathBuf::from("ext/fixture/tests"),
-            dir: dir.path().to_path_buf(),
+            path: dir.path().to_path_buf(),
+            needs: None,
         }],
         root: dir.path().to_path_buf(),
         holds: Holds::Every,
@@ -217,7 +218,8 @@ fn rooted(name: &str, text: &str) -> (Tree, Subset) {
         scope: "ext/fixture".to_owned(),
         dirs: vec![Dir {
             under: PathBuf::from("ext/fixture/tests"),
-            dir,
+            path: dir,
+            needs: None,
         }],
         root: root.path().to_path_buf(),
         holds: Holds::Every,
@@ -239,7 +241,7 @@ fn a_test_s_dir_is_its_own_directory_and_stands_in_what_it_printed() {
     let tally = run(&subset, &registry(""));
     assert_eq!(only(&tally).0, Judgement::Pass, "{tally:#?}");
     assert!(
-        !subset.dirs[0].dir.join("dir.php").exists(),
+        !subset.dirs[0].path.join("dir.php").exists(),
         "the program is taken away after its run"
     );
 }
@@ -721,7 +723,8 @@ fn a_test_of_sapi_fpm_finds_the_process_manager() {
         scope: "sapi/fpm".to_owned(),
         dirs: vec![Dir {
             under: PathBuf::from("sapi/fpm/tests"),
-            dir: tests.clone(),
+            path: tests.clone(),
+            needs: None,
         }],
         root: tree.path().to_path_buf(),
         holds: Holds::Every,
@@ -788,12 +791,12 @@ fn the_subset_of_an_extension_is_its_tests_at_the_pinned_tag_and_the_scope_is_th
         assert_eq!(subset.dirs.len(), 1, "{subset:#?}");
         assert_eq!(subset.dirs[0].under, Path::new("ext/pcre"));
         assert_eq!(
-            subset.dirs[0].dir,
+            subset.dirs[0].path,
             tree.join("ext/pcre"),
             "the subset is the tree's the variable names"
         );
         assert_eq!(
-            subset.id(&subset.dirs[0].dir.join("tests/preg_match_basic.phpt")),
+            subset.id(&subset.dirs[0].path.join("tests/preg_match_basic.phpt")),
             "phpt:php-src/ext/pcre/tests/preg_match_basic.phpt",
             "the divergence key names the corpus, not this machine"
         );
@@ -990,9 +993,9 @@ fn a_subset_resolves_under_the_tree_the_pin_was_handed_ahead_of_the_pins_path() 
     assert_eq!(manifest.pin().unwrap().source.tree().unwrap(), *tree);
     let corpus = resolve(&manifest, "Zend/tests").unwrap();
     assert_eq!(corpus.scope, "Zend/tests");
-    assert_eq!(corpus.dirs[0].dir, tree.join("Zend/tests"));
+    assert_eq!(corpus.dirs[0].path, tree.join("Zend/tests"));
     let extension = resolve(&manifest, "pcre").unwrap();
-    assert_eq!(extension.dirs[0].dir, tree.join("ext/pcre"));
+    assert_eq!(extension.dirs[0].path, tree.join("ext/pcre"));
     assert_eq!(extension.absent(), Vec::<&Path>::new(), "{extension:#?}");
 }
 
@@ -1023,10 +1026,51 @@ fn a_crate_resolves_to_every_subset_its_row_names() {
     let under: Vec<&Path> = subset.dirs.iter().map(|d| d.under.as_path()).collect();
     assert_eq!(under, [Path::new("Zend/tests"), Path::new("tests")]);
     assert_eq!(
-        subset.id(&subset.dirs[1].dir.join("basic/lambda.phpt")),
+        subset.id(&subset.dirs[1].path.join("basic/lambda.phpt")),
         "phpt:php-src/tests/basic/lambda.phpt",
         "the key names where the test stands in the corpus, whichever directory it came from"
     );
+}
+
+/// A row's `needed_in` holds, beside the extension's own tests, each test
+/// of the directory it names whose `--EXTENSIONS--` names the extension on
+/// a line of its own, among others, and no other: not one that spells it
+/// otherwise, which run-tests.php finds missing whatever loads it. So they
+/// run under the row's oracle where the main one skips them; a copy of
+/// the tree keeps the filter (#3309).
+#[test]
+fn a_row_holds_the_tests_elsewhere_that_need_its_extension() {
+    let tree = fixture_tree();
+    let write = |at: &str, extensions: &str| {
+        let body = format!("--TEST--\n{at}\n{extensions}--FILE--\n<?php\n--EXPECT--\n");
+        fs::create_dir_all(tree.join(at).parent().unwrap()).unwrap();
+        fs::write(tree.join(at), body).unwrap();
+    };
+    write("ext/zend_test/tests/own.phpt", "");
+    write("Zend/tests/needs.phpt", "--EXTENSIONS--\nzend_test\n");
+    write(
+        "Zend/tests/among.phpt",
+        "--EXTENSIONS--\nstandard\nzend_test\n",
+    );
+    write("Zend/tests/other.phpt", "--EXTENSIONS--\nzend_testing\n");
+    write("Zend/tests/cased.phpt", "--EXTENSIONS--\nZEND_TEST\n");
+    let mut row = Crate::named("ext/zend_test");
+    row.needed_in = vec!["Zend/tests".to_owned()];
+    let subset = resolve(&manifest_of([row], &tree), "zend_test").unwrap();
+    let names = |subset: &Subset| -> Vec<String> {
+        let tests = subset.tests().unwrap();
+        tests.iter().map(|test| subset.name(test)).collect()
+    };
+    let held = [
+        "ext/zend_test/tests/own.phpt",
+        "Zend/tests/among.phpt",
+        "Zend/tests/needs.phpt",
+    ];
+    assert_eq!(names(&subset), held);
+    let copy = Tree::new("phpt-needed-in").unwrap();
+    let moved = subset.rooted(&copy);
+    assert_eq!(moved.dirs[1].path, copy.join("Zend/tests"));
+    assert_eq!(moved.dirs[1].needs.as_deref(), Some("zend_test"));
 }
 
 #[test]
@@ -2021,7 +2065,8 @@ fn a_mysql_subset_with_no_server_is_refused_and_not_skipped() {
         scope: "ext/pdo_mysql".to_owned(),
         dirs: vec![Dir {
             under: PathBuf::from("ext/pdo_mysql/tests"),
-            dir: tests,
+            path: tests,
+            needs: None,
         }],
         root: tree.path().to_path_buf(),
         holds: Holds::Every,
