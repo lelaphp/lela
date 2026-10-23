@@ -390,6 +390,39 @@ fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
 /// 536  interface S3 { const K = "abcdefghij" . "5"; }
 /// 0  $GLOBALS["a"] = S3::K;
 /// ```
+///
+/// A class name a constant resolves to is such a value: `B10::class` and
+/// `Bxyz::class` a string of their own, as php's scanner made one for the
+/// name written, even where it names the class itself, whose own name is
+/// another string ([`Request::hold_compiled`] leaves the value to the
+/// constant); `self::class` the class's name itself (`ZVAL_STR_COPY`):
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3268-class-names.inc';
+/// file_put_contents($f, <<<'PHP'
+/// <?php
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// m('class W {}'); m('$q0 = 1;');
+/// foreach ([
+///     'class B9 { const K = "abcdefghij"; }',
+///     'class B10 { const K = B10::class; }',
+///     'class B11 { const K = Bxyz::class; }',
+///     'class B12 { const K = self::class; }',
+///     '$GLOBALS["a"] = B10::K;',
+///     '$GLOBALS["b"] = [B9::K, B11::K, B12::K];',
+/// ] as $c) echo m($c), "  ", $c, "\n";
+/// PHP);
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// 536  class B9 { const K = "abcdefghij"; }
+/// 528  class B10 { const K = B10::class; }
+/// 528  class B11 { const K = Bxyz::class; }
+/// 496  class B12 { const K = self::class; }
+/// 512  $GLOBALS["a"] = B10::K;
+/// 216  $GLOBALS["b"] = [B9::K, B11::K, B12::K];
+/// ```
 fn class_constant_values(unit: &Unit) -> HashMap<&[u8], usize, NameHasher> {
     let mut values = HashMap::with_hasher(NameHasher);
     let constants = (unit.classes.iter())
@@ -668,13 +701,20 @@ impl Request {
         // `eval`'s made none, and they are made as it is noted
         // ([`Request::hold_unit_names`]). A compile that made no string
         // has none of them to find.
+        let values = class_constant_values(unit);
         if !made.is_empty() {
             let mut seen = HashSet::with_hasher(NameHasher);
             for (index, name) in php_compile::op_array_names(unit).enumerate() {
-                let Some(at) = made
-                    .iter()
-                    .rposition(|z| z.as_str().is_some_and(|s| s.bytes() == name))
-                else {
+                let of_name = |z: &Zval| z.as_str().is_some_and(|s| s.bytes() == name);
+                // A class constant's value of the name's bytes is its
+                // class's, never the name: `class B10 { const K =
+                // B10::class; }` holds two strings, as php's scanner made
+                // one for each token.
+                let reserved = values.get(name).copied().unwrap_or(0);
+                if made.iter().filter(|z| of_name(z)).count() <= reserved {
+                    continue;
+                }
+                let Some(at) = made.iter().rposition(of_name) else {
                     continue;
                 };
                 if !seen.insert(name) {
@@ -698,10 +738,10 @@ impl Request {
         } else {
             made.drain(..).map(|z| (Owner::Main, z)).collect()
         };
-        let (names, values) = if owned.iter().any(|(owner, _)| *owner != Owner::Main) {
-            (declared_names(unit), class_constant_values(unit))
+        let names = if owned.iter().any(|(owner, _)| *owner != Owner::Main) {
+            declared_names(unit)
         } else {
-            (HashSet::default(), HashMap::default())
+            HashSet::default()
         };
         // What a declaration finds by its bytes: a name it is read by, or
         // a class constant's value.

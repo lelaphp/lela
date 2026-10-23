@@ -8140,8 +8140,20 @@ impl<'a> Emit<'a> {
                 // it (`zend_compile_const_expr_class_name`).
                 Scoped::ClassName { class } => {
                     let operand = self.decoded_class(class)?;
-                    if let Some(folded) = self.resolved_class_name(operand)? {
-                        return self.folded(folded);
+                    match self.resolved_class_name(operand)? {
+                        Some(Operated::Kept(folded)) => return self.folded(folded),
+                        // `self::class` and `parent::class` are the
+                        // class's own name string (`ZVAL_STR_COPY`), no
+                        // string of their own: the one made to fold is
+                        // given back, and the value's string is the
+                        // name's.
+                        Some(Operated::Made(made)) => {
+                            let folded = self.folded(Zval::string(made.str()));
+                            self.folded_string = None;
+                            self.strings.give_back(made);
+                            return folded;
+                        }
+                        None => {}
                     }
                     let ClassSpec::Name(token) = class else {
                         return Err(self.compile_error(
@@ -16491,6 +16503,7 @@ impl<'a> Emit<'a> {
             Scoped::ClassName { class } => {
                 let operand = self.decoded_class(class)?;
                 self.resolved_class_name(operand)?
+                    .map(Operated::kept)
                     .ok_or(Unfolded::NoConstant("a class name is fetched at run time"))
             }
         }
@@ -17757,8 +17770,15 @@ impl<'a> Emit<'a> {
     /// name it extends where the scope is known; nothing for `static`,
     /// for `self` and `parent` where the scope is not known, and for a
     /// class the program computes. `self`, `parent` and `static` are
-    /// held to [`Self::ensure_valid_class_fetch_type`] first.
-    fn resolved_class_name(&mut self, operand: ClassOperand) -> Result<Option<Zval>, CompileError> {
+    /// held to [`Self::ensure_valid_class_fetch_type`] first. A name
+    /// written out is a string of its own, as php's scanner made one for
+    /// the token; `self` and `parent` are the name the class holds
+    /// (`ZVAL_STR_COPY`), a claim the caller keeps where it needs a
+    /// string or gives back where the name stands for it.
+    fn resolved_class_name(
+        &mut self,
+        operand: ClassOperand,
+    ) -> Result<Option<Operated>, CompileError> {
         let written = match operand {
             ClassOperand::Name(token) => self.text(token).to_vec(),
             ClassOperand::Value(value) => self.value_class_name(value)?,
@@ -17779,7 +17799,11 @@ impl<'a> Emit<'a> {
             },
             _ => return Ok(None),
         };
-        Ok(Some(self.string(&name)?))
+        Ok(Some(if fetch == FETCH_CLASS_DEFAULT {
+            Operated::Kept(self.string(&name)?)
+        } else {
+            Operated::Made(self.string_made(&name, false)?)
+        }))
     }
 
     /// `zend_compile_class_name` (`Z/Zend/zend_compile.c:11105`),
@@ -17844,7 +17868,7 @@ impl<'a> Emit<'a> {
     fn class_name_of(&mut self, class: ClassSpec) -> Result<Where, CompileError> {
         let operand = self.decoded_class(class)?;
         if let Some(value) = self.resolved_class_name(operand)? {
-            return Ok(Where::Constant(value));
+            return Ok(Where::Constant(value.kept()));
         }
         // `class_ast->kind == ZEND_AST_ZVAL`: the fetch type of the name.
         let (op1_type, op1) = match operand {
