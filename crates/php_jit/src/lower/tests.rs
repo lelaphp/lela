@@ -18,7 +18,7 @@ use crate::testing::goldens::{
     self, ARRAY_WRITE, FIB, Fixture, MANDELBROT, NBODY, SIEVE, SPECTRALNORM, held,
 };
 use crate::testing::{self, Lane, policy};
-use crate::types::{End, Interrupt, Op, TraceIr};
+use crate::types::{Check, End, Guard, GuardAt, Interrupt, Op, TraceIr};
 
 /// Where `lower`'s goldens are.
 fn goldens_dir() -> PathBuf {
@@ -602,4 +602,52 @@ fn a_side_trace_returning_an_array_its_parent_knew_compiles() -> Result<(), Stri
         .compile(&ir, named(SPECTRALNORM))
         .map(|_| ())
         .map_err(|abort| format!("{abort:?}\n{}", super::dump::render(&ir)))
+}
+
+/// A trace entered at its loop's body reads where the frame stands as
+/// `enter` laid it down, as one entered at its first op does: a guard at
+/// the body's entry on the stack's room, php's stack check before the
+/// calls the trace pushes, read it from a `Stood` no one had written, and
+/// took its exit at random (`binary_trees`' `TRACE 9 exit 2` at `0037`,
+/// which the pinned php does not take). The words are copied from the
+/// `ExitCtx` before the entry block branches to the body; here a loop
+/// with a way in at its body, held to the room a call would take.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
+    let mut ir = goldens::traced(
+        &[("record.function", "f"), ("record.start", "loop")],
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $i; } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    let exit = (ir.guards.iter())
+        .find(|guard| guard.at == GuardAt::Entry)
+        .map(|guard| guard.exit)
+        .ok_or("no guard at entry")?;
+    ir.guards.push(Guard {
+        at: GuardAt::Entry,
+        check: Check::Room { bytes: 112 },
+        exit,
+    });
+    let rendered = crate::lower::dump::render(&ir);
+    assert!(ir.body.is_some(), "no way in at the body:\n{rendered}");
+    assert!(
+        super::stood_at_entry(&ir),
+        "no stood read at entry:\n{rendered}"
+    );
+    let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
+    let clif = backend
+        .clif(&ir)
+        .map_err(|abort| format!("{abort:?}"))?
+        .display()
+        .to_string();
+    let lines: Vec<&str> = clif.lines().map(instruction).collect();
+    let stood = format!("load.i64 notrap aligned v0+{}", super::STOOD_AT);
+    let read = lines.iter().position(|line| line.ends_with(&stood));
+    let branch = lines.iter().position(|line| line.starts_with("brif "));
+    assert!(
+        matches!((read, branch), (Some(read), Some(branch)) if read < branch),
+        "the stood is read after the entry branches:\n{clif}"
+    );
+    Ok(())
 }
