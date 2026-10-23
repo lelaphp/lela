@@ -835,6 +835,50 @@ fn ticks_reload_what_a_reference_holds() -> Result<(), String> {
     clobbers(&ir, Opcode::Ticks, &[0], &[1, 2, 3])
 }
 
+/// The leave of an inlined callee whose variables own something, a
+/// `RETURN` left in place that frees them and may serve a destructor, has
+/// no `call` effect: the caller's variables, a reference among them, are
+/// read again after it by nothing, as php's code keeps every type and
+/// register across `zend_jit_free_cv` (`Builder::clobber`'s witnesses
+/// hold a destructor there that writes them).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_leave_that_frees_its_variables_reloads_nothing() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "class D {}
+        function h($i) { $d = new D; return $i; }
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += $a[0]; $s += h($i); $s += $a[0]; }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let (at, leave) = ir
+        .ops
+        .iter()
+        .enumerate()
+        .find_map(|(at, op)| match op {
+            Op::Line(line) if line.opcode == Opcode::Return => Some((at, line)),
+            _ => None,
+        })
+        .ok_or_else(|| format!("no RETURN in\n{rendered}"))?;
+    // `$d` is the callee's CV1.
+    let d = super::Vars::default().with(1).ok_or("a set of one")?;
+    assert_eq!(leave.form, Form::Inline, "{rendered}");
+    assert!(
+        matches!(leave.imm, super::Imm::Leave { owners: super::Owners::Each(vars), .. } if vars == d),
+        "{rendered}"
+    );
+    assert!(leave.unwind.is_some(), "a destructor may throw: {rendered}");
+    let at = OpId(u32::try_from(at).map_err(|_| "a long trace")?);
+    assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
+    assert!(rendered.contains("frees CV1"), "{rendered}");
+    Ok(())
+}
+
 /// A kernel that may throw and calls nothing, a cast to string, reads
 /// nothing again: it may only unwind, which takes no exit, as php's
 /// compiled code jumps to its stub for a throwable and takes no exit point.
@@ -1431,8 +1475,8 @@ fn a_side_of_an_exit_that_names_no_opline_holds_where_the_frame_stands() -> Resu
 /// `RETURN` left in place, its end the exit the interpreter serves the
 /// `RETURN` through where the leave cannot be made in place
 /// ([`End::Return`]). A variable the trace does not hold uncounted, here
-/// a string, is tested as the frame leaves, as php's `zend_jit_free_cv`
-/// tests it, where the leave had been refused whole.
+/// a string, is named to be freed as the frame leaves, as php's
+/// `zend_jit_free_cv` frees it, and no other.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), String> {
@@ -1450,10 +1494,12 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
         return Err(format!("no last line: {rendered}"));
     };
     assert_eq!(last.opcode, Opcode::Return, "{rendered}");
+    // `$d`, the second variable, may own a string; `$i` owns nothing.
+    let d = super::Vars::default().with(1).ok_or("a set of one")?;
     assert_eq!(
         last.imm,
         super::Imm::Leave {
-            owners: true,
+            owners: super::Owners::Each(d),
             value: super::Returned::Scalar,
         },
         "{rendered}"

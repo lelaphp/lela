@@ -22,13 +22,14 @@ use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
 use php_engine::tier::{FRAME, FrameLayout, PlainCall};
+use php_heap::{Zval, ZvalType};
 
 use super::{
     COUNTED, Emit, Kernel, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM, Scalar,
     imm, leave_of, mismatch, trusted,
 };
-use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT};
-use crate::types::{Abort, End, ExitId, Frame, Imm, Line, OpId, Operand, Returned};
+use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, THREW};
+use crate::types::{Abort, End, ExitId, Frame, Imm, Line, OpId, Operand, Owners, Returned, Vars};
 
 /// What a leave in place writes into the caller's slot: a scalar, or a
 /// zval's two words, copied from a constant or moved from a temporary.
@@ -45,6 +46,18 @@ const L: FrameLayout = FRAME;
 /// A layout offset as the immediate a load or a store takes.
 const fn at(word: u32) -> i32 {
     imm(word as usize)
+}
+
+/// Where a counted block keeps its count and its `GC_TYPE_INFO`.
+const COUNT_AT: i32 = imm(Zval::COUNT_AT);
+const GC_INFO_AT: i32 = imm(Zval::GC_INFO_AT);
+/// A throw's status, as compiled code compares it.
+const EXCEPTION: i64 = THREW as i64;
+
+/// Where variable `var` of a frame stands past its room.
+fn var_at(var: u32) -> Result<i32, Abort> {
+    let slot = u64::from(L.room()) + u64::from(SLOT) * u64::from(var);
+    i32::try_from(slot).map_err(|_| mismatch("a variable past an immediate"))
 }
 
 /// A slot, `sizeof(zval)`, the layout's.
@@ -283,19 +296,18 @@ impl Emit<'_> {
 
     /// Whether a variable of `frame`, whose room is `room`, owns
     /// something: its type word counted, every variable's folded into one
-    /// test, as `Request::leaves_plainly` folds them.
+    /// test, as `Request::leaves_plainly` folds them. What a leave over
+    /// more variables than it frees one by one ([`Owners::Kernel`]) asks.
     fn owners(&mut self, room: Value, frame: Frame) -> Result<Value, Abort> {
         let cvs = (self.ir.frames.get(usize::from(frame.0)))
             .ok_or_else(|| mismatch("a leave in a frame the trace does not hold"))?
             .cvs;
         let mut words = self.b.ins().iconst(I32, 0);
         for var in 0..cvs {
-            let slot = u64::from(L.room()) + u64::from(SLOT) * u64::from(var);
-            let slot = i32::try_from(slot).map_err(|_| mismatch("a variable past an immediate"))?;
             let word = self
                 .b
                 .ins()
-                .load(I32, trusted(), room, slot + super::TYPE_AT);
+                .load(I32, trusted(), room, var_at(var)? + super::TYPE_AT);
             words = self.b.ins().bor(words, word);
         }
         let counted = self.b.ins().band_imm_u(words, COUNTED);
@@ -328,11 +340,16 @@ impl Emit<'_> {
     /// moved back to its link and the top back to its room, and the caller
     /// on past its call. `types` holds its value a scalar, a constant no
     /// reference counts or a temporary ([`Imm::Leave`], [`Returned`]);
-    /// the frame's header, its variables where `types` does not hold them
-    /// uncounted and the caller's slot are read here, and where the leave
-    /// kernel would serve the frame, the opline is stepped.
+    /// the frame's header and the caller's slot are read here, and where
+    /// the leave kernel would serve the frame, the opline is stepped.
+    /// Once nothing refuses it, the variables `types` does not hold
+    /// uncounted are given up in place ([`Owners`], `Emit::free_cvs`)
+    /// before the value is written and the frame popped, as php's trace
+    /// frees them before `zend_jit_leave_func`; the order is the
+    /// interpreter's owning leave's, the variables before the receiver
+    /// and the closure, of which a frame left in place holds neither.
     ///
-    /// A variable that owns something is given up by the leave kernel, its
+    /// A variable that owns something is given up as its frame leaves, its
     /// destructor called at the return, before the caller goes on:
     ///
     /// ```php
@@ -373,11 +390,14 @@ impl Emit<'_> {
     /// 6765 338350
     /// ```
     pub(super) fn leave_in_place(&mut self, id: OpId, line: &Line) -> Result<(), Abort> {
+        let Imm::Leave { owners, .. } = line.imm else {
+            return Err(mismatch("a leave in place with no value named"));
+        };
         let returned = self.returned(id, line)?;
         let stack = self.stack()?;
         let caller = self
             .returns_to(line)?
-            .ok_or_else(|| mismatch("a leave in place with no stack read"))?;
+            .ok_or_else(|| mismatch("a leave in place with no caller read"))?;
         let room = self.room(line.frame)?;
         let (slow, join) = self.split();
         let refused = self.leave_refused(room, caller, line)?;
@@ -388,22 +408,16 @@ impl Emit<'_> {
         let last = self.b.ins().iadd_imm_s(len, -1);
         let refused = self.not_on_top(frames, last, room);
         self.divert_if(refused, slow);
-        // The caller's room, by its record, and the slot of its that takes
-        // the return, which holds nothing counted.
+        // The caller's place, and the slot of its that takes the return,
+        // which holds nothing counted.
         let place = self
             .b
             .ins()
             .iadd_imm_s(caller, -i64::from(L.numbered_from()));
-        let callers = self.record_word(frames, place, L.record_at());
         let named = self.b.ins().load(I32, trusted(), room, at(L.returns_to()));
         let returns = self.b.ins().uextend(I64, named);
-        let taken = self
-            .b
-            .ins()
-            .iadd_imm_s(returns, -i64::from(L.numbered_from()));
-        let offset = self.b.ins().imul_imm_s(taken, i64::from(SLOT));
-        let target = self.b.ins().iadd(callers, offset);
         let reads = self.b.ins().icmp_imm_s(IntCC::NotEqual, returns, 0);
+        let (callers, target) = self.taken_at(frames, place, returns);
         let kind = self.b.ins().load(I32, trusted(), target, super::TYPE_AT);
         let counted = self.b.ins().band_imm_u(kind, COUNTED);
         let counted = self.b.ins().icmp_imm_s(IntCC::NotEqual, counted, 0);
@@ -418,6 +432,18 @@ impl Emit<'_> {
             let dropped = self.b.ins().band(owned, unread);
             self.divert_if(dropped, slow);
         }
+        // Nothing refuses the leave from here: what the variables own is
+        // given up, and a destructor that ran may have grown the frame
+        // table, whose records are read again after it.
+        let (threw, frames, callers, target) = match owners {
+            Owners::Each(vars) => {
+                let threw = self.free_cvs(room, line, vars)?;
+                let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
+                let (callers, target) = self.taken_at(frames, place, returns);
+                (Some(threw), frames, callers, target)
+            }
+            Owners::None | Owners::Kernel => (None, frames, callers, target),
+        };
         self.when(reads, |emit| {
             match returned {
                 Out::Scalar(scalar) => emit.write(target, 0, scalar),
@@ -433,10 +459,16 @@ impl Emit<'_> {
         let below = self.b.ins().load(I64, trusted(), room, at(L.link()));
         self.b.ins().store(trusted(), below, stack, INNERMOST);
         self.b.ins().store(trusted(), room, stack, TOP);
-        // The caller on past its call, `LOAD_NEXT_OPLINE()`.
+        // The caller on past its call, `LOAD_NEXT_OPLINE()`; or, where a
+        // destructor threw, at its call, where the throwable is raised,
+        // `zend_rethrow_exception` with the return written, which
+        // `HANDLE_EXCEPTION` frees as the call's result.
         let back = self.b.ins().iadd_imm_s(callers, -i64::from(L.room()));
         let at_call = self.b.ins().load(I32, trusted(), back, at(L.opline()));
-        let past = self.b.ins().iadd_imm_s(at_call, 1);
+        let mut past = self.b.ins().iadd_imm_s(at_call, 1);
+        if let Some(threw) = threw {
+            past = self.b.ins().select(threw, at_call, past);
+        }
         self.b.ins().store(trusted(), past, back, at(L.opline()));
         // Where the interpreter stands: in the caller, the call under way
         // in it the record now on top where that is not the caller's own.
@@ -449,8 +481,238 @@ impl Emit<'_> {
         let func = self.b.ins().load(I32, trusted(), back, at(L.cache()));
         let left = self.left_past(stack, room);
         self.stand([back, call, func, past, left]);
-        self.b.ins().jump(join, &[]);
+        if let Some(threw) = threw {
+            // php's `jit_stub_leave_throw` after `zend_jit_leave_func`: the
+            // caller unwinds from its call.
+            let unwind = line
+                .unwind
+                .ok_or_else(|| mismatch("a leave that frees with no unwind"))?;
+            let to = self.unwind_block(unwind)?;
+            self.b.ins().brif(threw, to, &[], join, &[]);
+        } else {
+            self.b.ins().jump(join, &[]);
+        }
         self.left_or_not(id, line, (slow, join))
+    }
+
+    /// The caller's slots, by its record in the frame table at `frames`,
+    /// and the slot of them a call that returns into `returns`, numbered
+    /// past [`FrameLayout::numbered_from`], takes the value in.
+    fn taken_at(&mut self, frames: Value, place: Value, returns: Value) -> (Value, Value) {
+        let callers = self.record_word(frames, place, L.record_at());
+        let taken = self
+            .b
+            .ins()
+            .iadd_imm_s(returns, -i64::from(L.numbered_from()));
+        let offset = self.b.ins().imul_imm_s(taken, i64::from(SLOT));
+        (callers, self.b.ins().iadd(callers, offset))
+    }
+
+    /// php's `zend_jit_free_cv` over each of `vars`, the variables of the
+    /// frame in `room` that `line`'s `RETURN` gives up, in slot order as
+    /// `i_free_compiled_variables` gives them up, each owner given up as
+    /// `jit_ZVAL_PTR_DTOR` gives it up
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:1819-1903`): a type test, then,
+    /// where another owner stands and the collector holds the value already
+    /// or never takes it (`GC_MAY_LEAK`'s bits, [`Zval::LEAK_BITS`]), a
+    /// `GC_DELREF` inline; the last owner, a value the collector may take
+    /// and a reference, whose value the collector looks through to, are
+    /// [`Kernel::FreeCv`]'s, which takes the frame off the chain first, as
+    /// `zend_jit_leave_frame` does before the first free. Each slot is left
+    /// `UNDEF` before its owner goes, so the frame owns only what is still
+    /// to be freed whatever a destructor does. Whether a destructor threw,
+    /// an `i32`: the frees go on past a throw, as php's do, and a fatal
+    /// or a panic unwinds.
+    ///
+    /// A destructor served at the leave sees the caller as the frame that
+    /// runs, the leaving frame off the chain:
+    ///
+    /// ```php
+    /// class D {
+    ///     function __construct(public $n) {}
+    ///     function __destruct() {
+    ///         if ($this->n % 10 == 7) {
+    ///             echo __LINE__, " ", $this->n;
+    ///             foreach (debug_backtrace() as $f) { echo " ", $f['function'], "@", $f['line'] ?? '-'; }
+    ///             echo "\n";
+    ///         }
+    ///     }
+    /// }
+    /// function f($i) { $d = new D($i); $s = "s$i"; return $i; }
+    /// $t = 0;
+    /// for ($i = 0; $i < 30; $i++) { $t += f($i); }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 6 7 __destruct@14
+    /// 6 17 __destruct@14
+    /// 6 27 __destruct@14
+    /// 435
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D {
+    ///     function __construct(public $n) {}
+    ///     function __destruct() {
+    ///         if ($this->n % 10 == 7) {
+    ///             echo __LINE__, " ", $this->n;
+    ///             foreach (debug_backtrace() as $f) { echo " ", $f['function'], "@", $f['line'] ?? '-'; }
+    ///             echo "\n";
+    ///         }
+    ///     }
+    /// }
+    /// function f($i) { $d = new D($i); $s = "s$i"; return $i; }
+    /// $t = 0;
+    /// for ($i = 0; $i < 30; $i++) { $t += f($i); }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 6 7 __destruct@14
+    /// 6 17 __destruct@14
+    /// 6 27 __destruct@14
+    /// 435
+    /// ```
+    ///
+    /// A destructor that throws: the variable after it is freed all the
+    /// same, the array returned is freed once, and the caller unwinds from
+    /// its call:
+    ///
+    /// ```php
+    /// class T { function __construct(public $n) {} function __destruct() { if ($this->n == 25) { throw new Exception("at leave {$this->n}"); } } }
+    /// class U { function __destruct() { echo "u"; } }
+    /// function g($i) { $t = new T($i); $u = new U; return [$i]; }
+    /// $s = 0;
+    /// for ($i = 0; $i < 30; $i++) {
+    ///     try { $r = g($i); $s += $r[0]; } catch (Exception $e) { echo $e->getMessage(), " ", $i, "\n"; }
+    /// }
+    /// echo "\n", $s, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// uuuuuuuuuuuuuuuuuuuuuuuuuuat leave 25 25
+    /// uuuu
+    /// 410
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class T { function __construct(public $n) {} function __destruct() { if ($this->n == 25) { throw new Exception("at leave {$this->n}"); } } }
+    /// class U { function __destruct() { echo "u"; } }
+    /// function g($i) { $t = new T($i); $u = new U; return [$i]; }
+    /// $s = 0;
+    /// for ($i = 0; $i < 30; $i++) {
+    ///     try { $r = g($i); $s += $r[0]; } catch (Exception $e) { echo $e->getMessage(), " ", $i, "\n"; }
+    /// }
+    /// echo "\n", $s, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// uuuuuuuuuuuuuuuuuuuuuuuuuuat leave 25 25
+    /// uuuu
+    /// 410
+    /// ```
+    ///
+    /// Cycles left as possible roots, an array through a reference to
+    /// itself and an object that holds itself, each counted by the
+    /// collection after as php counts them:
+    ///
+    /// ```php
+    /// function f($i) { $a = [$i]; $a[] = &$a; $b = [$i]; $o = new stdClass; $o->self = $o; return $i; }
+    /// function g($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += f($i); } return $s; }
+    /// gc_collect_cycles();
+    /// echo g(50), " ";
+    /// $s = gc_status();
+    /// echo $s['roots'], " ", gc_collect_cycles(), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 1225 100 100
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function f($i) { $a = [$i]; $a[] = &$a; $b = [$i]; $o = new stdClass; $o->self = $o; return $i; }
+    /// function g($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += f($i); } return $s; }
+    /// gc_collect_cycles();
+    /// echo g(50), " ";
+    /// $s = gc_status();
+    /// echo $s['roots'], " ", gc_collect_cycles(), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 1225 100 100
+    /// ```
+    fn free_cvs(&mut self, room: Value, line: &Line, vars: Vars) -> Result<Value, Abort> {
+        let unwind = line
+            .unwind
+            .ok_or_else(|| mismatch("a leave that frees with no unwind"))?;
+        let threw = self.b.declare_var(I32);
+        let none = self.b.ins().iconst(I32, 0);
+        self.b.def_var(threw, none);
+        let [_, opline] = self.served(line)?;
+        for var in vars.iter() {
+            let slot = var_at(var)?;
+            let (owned, kernel, next) = (
+                self.b.create_block(),
+                self.b.create_block(),
+                self.b.create_block(),
+            );
+            self.b.set_cold_block(kernel);
+            let info = self
+                .b
+                .ins()
+                .load(I32, trusted(), room, slot + super::TYPE_AT);
+            let counted = self.b.ins().band_imm_u(info, COUNTED);
+            self.b.ins().brif(counted, owned, &[], next, &[]);
+            self.b.switch_to_block(owned);
+            self.b.seal_block(owned);
+            let undef = self.b.ins().iconst(I32, super::tag(ZvalType::Undef));
+            self.b
+                .ins()
+                .store(trusted(), undef, room, slot + super::TYPE_AT);
+            let word = self.b.ins().load(I64, trusted(), room, slot);
+            let count = self.b.ins().load(I32, trusted(), word, COUNT_AT);
+            let owners = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+            let last = self.b.ins().icmp_imm_u(IntCC::Equal, owners, 1);
+            let kind = self.b.ins().band_imm_u(info, 0xff);
+            let reference =
+                self.b
+                    .ins()
+                    .icmp_imm_u(IntCC::Equal, kind, super::tag(ZvalType::Reference));
+            let gc = self.b.ins().load(I32, trusted(), word, GC_INFO_AT);
+            let held = self.b.ins().band_imm_u(gc, i64::from(Zval::LEAK_BITS));
+            let leaks = self.b.ins().icmp_imm_u(IntCC::Equal, held, 0);
+            let called = self.b.ins().bor(last, reference);
+            let called = self.b.ins().bor(called, leaks);
+            let inline = self.b.create_block();
+            self.b.ins().brif(called, kernel, &[], inline, &[]);
+            self.b.switch_to_block(inline);
+            self.b.seal_block(inline);
+            let fewer = self.b.ins().iadd_imm_s(count, -1);
+            self.b.ins().store(trusted(), fewer, word, COUNT_AT);
+            self.b.ins().jump(next, &[]);
+            self.b.switch_to_block(kernel);
+            self.b.seal_block(kernel);
+            let status = self.call_status(Kernel::FreeCv, &[room, opline, word, info])?;
+            let unwinds = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::UnsignedGreaterThan, status, EXCEPTION);
+            let to = self.unwind_block(unwind)?;
+            let on = self.b.create_block();
+            self.b.ins().brif(unwinds, to, &[], on, &[]);
+            self.b.switch_to_block(on);
+            self.b.seal_block(on);
+            let thrown = self.b.ins().icmp_imm_u(IntCC::Equal, status, EXCEPTION);
+            let thrown = self.b.ins().uextend(I32, thrown);
+            let before = self.b.use_var(threw);
+            let now = self.b.ins().bor(before, thrown);
+            self.b.def_var(threw, now);
+            self.b.ins().jump(next, &[]);
+            self.b.switch_to_block(next);
+            self.b.seal_block(next);
+        }
+        Ok(self.b.use_var(threw))
     }
 
     /// What a `RETURN` left in place hands its caller ([`Returned`]): a
@@ -498,9 +760,13 @@ impl Emit<'_> {
     /// What the header of the frame in `room`, which leaves to `caller`,
     /// says the leave kernel serves: a receiver, a closure, an annex, a
     /// call not made a frame or arguments past the parameters, a caller
-    /// that is none or the loop's, and, where `types` does not hold them
-    /// uncounted, a variable that owns something, every variable's type
-    /// word tested at once.
+    /// that is none or the loop's, and, where the frame has more variables
+    /// than the leave frees one by one ([`Owners::Kernel`]), a variable
+    /// that owns something, every variable's type word tested at once.
+    /// The interpreter's owning leave gives up the receiver and the
+    /// closure after the variables; a frame that holds either is the leave
+    /// kernel's, so the variables are the last of what a leave in place
+    /// gives up.
     fn leave_refused(&mut self, room: Value, caller: Value, line: &Line) -> Result<Value, Abort> {
         let this = self.b.ins().load(I64, trusted(), room, at(L.this()));
         let closure = self.b.ins().load(I64, trusted(), room, at(L.closure()));
@@ -520,7 +786,11 @@ impl Emit<'_> {
         let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
         let outside = self.b.ins().bor(none, looped);
         refused = self.b.ins().bor(refused, outside);
-        if let Imm::Leave { owners: true, .. } = line.imm {
+        if let Imm::Leave {
+            owners: Owners::Kernel,
+            ..
+        } = line.imm
+        {
             let owners = self.owners(room, line.frame)?;
             refused = self.b.ins().bor(refused, owners);
         }

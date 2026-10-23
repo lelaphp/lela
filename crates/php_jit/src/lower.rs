@@ -424,6 +424,12 @@ pub(crate) struct Mark {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Unsupported(pub(crate) &'static str);
 
+/// The status a kernel's wrapper answers where the kernel left a
+/// throwable pending, `enter::Status::Exception`; a fatal and a panic
+/// answer more. What compiled code that goes on past a throw, a leave's
+/// frees, tells apart from them.
+pub(crate) const THREW: u32 = 1;
+
 /// What compiled code answers where a kernel answered other than zero
 /// and the opline that called it names no exit: past every
 /// [`ExitId`](crate::types::ExitId), which is sixteen bits. `enter` reads
@@ -645,16 +651,23 @@ pub(crate) enum Kernel {
     /// stands after it, as php's code calls such an opline's handler
     /// directly (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`).
     Handle,
+    /// `free_cv(cx, frame, opline: u32, word: u64, type_info: u32)`:
+    /// php's `zend_jit_free_cv` of a variable a `RETURN` left in place
+    /// gives up where an inline `GC_DELREF` cannot, the last owner or a
+    /// possible root of the collector, the frame taken off the chain a
+    /// backtrace reads first, as `zend_jit_leave_frame` takes it.
+    FreeCv,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 5] = [
+    pub(crate) const ALL: [Kernel; 6] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
         Kernel::Release,
         Kernel::Handle,
+        Kernel::FreeCv,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].
