@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use crate::git;
 use crate::key;
-use crate::layout;
+use crate::layout::HARNESS;
 use crate::lock;
 use crate::manifest::{AvoidFrom, Crate, Manifest};
 use crate::reading::{Reading, Status, Store, listed};
@@ -61,29 +61,30 @@ pub fn exists(root: &Path, krate: &Crate) -> bool {
     root.join(krate.path()).join("Cargo.toml").is_file()
 }
 
-/// Every crate directory on disk (each of [`layout::CRATE_DIRS`]' crates
-/// and `xtask`, by the presence of a `Cargo.toml`) that has no
+/// Every crate directory on disk (each of the manifest's [`Layout`](crate::layout::Layout)'s
+/// crates and `xtask`, by the presence of a `Cargo.toml`) that has no
 /// `[[crate]]` row, as its manifest name (`ext/<name>`, `sapi/<name>` or
 /// `<name>`).
 pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
     let mut out = Vec::new();
-    for dir in layout::CRATE_DIRS {
-        let mut names = crate::entries(&root.join(dir.dir)).unwrap_or_default();
-        names.sort();
-        for path in names {
+    let layout = manifest.layout();
+    for dir in layout.dirs() {
+        let mut paths = crate::entries(&root.join(dir)).unwrap_or_default();
+        paths.sort();
+        for path in paths {
             if !path.join("Cargo.toml").is_file() {
                 continue;
             }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let Some(name) = layout.name_of_path(rel) else {
                 continue;
             };
-            let name = dir.name(name);
             if manifest.crate_named(&name).is_none() {
                 out.push(name);
             }
         }
     }
-    let harness = layout::HARNESS;
+    let harness = HARNESS;
     if root.join(harness).join("Cargo.toml").is_file() && manifest.crate_named(harness).is_none() {
         out.push(harness.to_owned());
     }

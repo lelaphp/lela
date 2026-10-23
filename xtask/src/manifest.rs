@@ -18,6 +18,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 
 use crate::layout;
+pub use crate::layout::Layout;
 use crate::oracle::Pin;
 use crate::phpt::Scope;
 use crate::track::Ticket;
@@ -1135,6 +1136,12 @@ impl Manifest {
         text.lines()
             .find_map(|l| l.strip_prefix("# "))
             .map(|t| t.trim().to_owned())
+    }
+
+    /// The directories its crates are laid down in, derived from its
+    /// `[[crate]]` rows ([`Layout`], #3207).
+    pub fn layout(&self) -> Layout {
+        Layout::of(&self.crates)
     }
 
     pub fn crate_named(&self, name: &str) -> Option<&Crate> {

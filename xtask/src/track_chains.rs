@@ -26,6 +26,7 @@ use std::path::Path;
 use anyhow::Result;
 use serde::Serialize;
 
+use crate::manifest::{Layout, Manifest};
 use crate::ticket::{Gh, Open};
 use crate::track::{Records, Ticket};
 use crate::track_next::{PERSON, READY, is_tracks};
@@ -89,18 +90,19 @@ pub struct Chains {
 
 impl Chains {
     /// The rows of `track` among the open tickets, `krate` narrowing them
-    /// to the ones naming it, `records` answering what the branches of
-    /// the clone record; a function of the tracker's answer and those.
+    /// to the ones naming it, a crate being one `layout` lays down,
+    /// `records` answering what the branches of the clone record; a
+    /// function of the tracker's answer and those.
     pub(crate) fn of(
         open: Vec<Open>,
         track: &str,
-        krate: Option<&str>,
+        krate: Option<(&str, &Layout)>,
         records: &Records,
     ) -> Chains {
         let mut kept: Vec<Open> = open
             .into_iter()
             .filter(|ticket| is_tracks(ticket, track))
-            .filter(|ticket| krate.is_none_or(|name| names(&ticket.title, name)))
+            .filter(|ticket| krate.is_none_or(|(name, layout)| names(&ticket.title, name, layout)))
             .collect();
         kept.sort_by_key(|ticket| ticket.number);
         let shown: BTreeSet<u64> = kept.iter().map(|ticket| ticket.number).collect();
@@ -225,15 +227,15 @@ fn write_chain(
 }
 
 /// Whether the title names `krate` before its colon, the crates being
-/// `php`, `xtask`, `php_*` and `ext/*`; [`NO_CRATE`] matches a title
-/// naming none.
-fn names(title: &str, krate: &str) -> bool {
+/// `php`, `xtask`, `php_*` and those under a directory of `layout`;
+/// [`NO_CRATE`] matches a title naming none.
+fn names(title: &str, krate: &str, layout: &Layout) -> bool {
     let named: Vec<&str> = title
         .split_once(':')
         .map(|(head, _)| {
             head.split(',')
                 .filter_map(|part| part.split_whitespace().next())
-                .filter(|word| is_crate(word))
+                .filter(|word| is_crate(word, layout))
                 .collect()
         })
         .unwrap_or_default();
@@ -245,23 +247,24 @@ fn names(title: &str, krate: &str) -> bool {
 }
 
 /// Whether a word of a title's head is a workspace crate's name: the
-/// harness, a `php_*` crate, or one under a directory crates are laid
+/// harness, a `php_*` crate, or one under a directory `layout` lays crates
 /// down in (`ext/pcre`, `sapi/cli`); `php`, the binary's crate before
 /// ADR-0008, names the binary still.
-fn is_crate(word: &str) -> bool {
+fn is_crate(word: &str, layout: &Layout) -> bool {
     word == "php"
         || word == crate::layout::HARNESS
         || word.starts_with("php_")
-        || crate::layout::CRATE_DIRS.iter().any(|d| {
-            word.strip_prefix(d.dir)
-                .is_some_and(|rest| rest.starts_with('/'))
-        })
+        || word
+            .split_once('/')
+            .is_some_and(|(dir, _)| layout.dirs().any(|d| d == dir))
 }
 
 /// `xtask track chains`: the track named and its chains printed as text
 /// or as one JSON object; no reading.
 pub fn command(root: &Path, track: &str, krate: Option<&str>, json: bool) -> Result<()> {
+    let layout = Manifest::load(root)?.layout();
     let open = Gh::on_path().open(root)?;
+    let krate = krate.map(|name| (name, &layout));
     let chains = Chains::of(open, track, krate, &Records::read(root));
     if json {
         println!("{}", serde_json::to_string_pretty(&chains)?);
@@ -358,11 +361,16 @@ mod tests {
     /// `none` the ones naming no crate.
     #[test]
     fn a_crate_is_named_before_the_colon() {
+        let rows = ["php_engine", "ext/standard"].map(crate::manifest::Crate::named);
+        let layout = &super::Layout::of(&rows);
+        let names = |title, krate| names(title, krate, layout);
         assert!(names("php_engine, ext/standard: a native", "ext/standard"));
         assert!(names("php_engine api: a lock line", "php_engine"));
         assert!(!names("php_engine: a native", "php_compile"));
         assert!(names("seams.toml: a row", "none"));
         assert!(names("a title with no colon", "none"));
         assert!(!names("php_engine: a native", "none"));
+        assert!(names("docs/adr: a reversal", "none"));
+        assert!(names("sapi/cli: a host", "none"));
     }
 }

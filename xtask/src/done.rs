@@ -811,7 +811,8 @@ fn no_regression(
         Some(Ok(variant)) => variant,
         None => pin.clone(),
     };
-    match against::regressed(asking.snapshot, asking.base, &pin, scope)? {
+    let layout = asking.manifest.layout();
+    match against::regressed(asking.snapshot, &layout, asking.base, &pin, scope)? {
         Against::Held => {}
         // An extension with no tests of its own keeps no run (#3143) and
         // holds nothing against any base (#725).

@@ -217,6 +217,11 @@ fn unrun(scope: &str) -> impl Fn(&String) -> bool {
     move |line| line.starts_with(&head)
 }
 
+/// The crate directories of the manifest at `root`.
+fn layout(root: &Path) -> xtask::manifest::Layout {
+    xtask::manifest::Manifest::load(root).unwrap().layout()
+}
+
 /// A run of `scope` holding one test at `verdict`, or none where it is
 /// empty, kept at `at`'s engine tree, the tree now where `at` is `None`,
 /// as `xtask phpt` keeps one.
@@ -228,7 +233,7 @@ fn keep_run(root: &Path, at: Option<&str>, scope: &str, verdict: &str) {
         }
         None => std::sync::Arc::new(xtask::key::Snapshot::disk(root).unwrap()),
     };
-    let file = xtask::phpt::kept_run(&snapshot, scope).unwrap();
+    let file = xtask::phpt::kept_run(&snapshot, &layout(root), scope).unwrap();
     let mut verdicts = serde_json::Map::new();
     if !verdict.is_empty() {
         verdicts.insert(format!("phpt:php-src/{scope}/tests/a.phpt"), verdict.into());
@@ -934,6 +939,7 @@ fn a_subset_is_held_to_no_regression_against_the_runs_kept_at_the_base() {
     }
     let kept = xtask::phpt::kept_run(
         &xtask::key::Snapshot::commit(&root, &Repo::at(&root).git(&["rev-parse", "HEAD"])).unwrap(),
+        &layout(&root),
         "ext/pcre",
     )
     .unwrap();
@@ -2098,7 +2104,11 @@ fn the_phpt_skip_the_missing_engine_binary_causes_is_met_and_the_others_are_not(
         reading
     };
     record_asked(&store, &root, "ext/pcre");
-    let here = xtask::phpt::kept_run(&xtask::key::Snapshot::disk(&root).unwrap(), "ext/pcre");
+    let here = xtask::phpt::kept_run(
+        &xtask::key::Snapshot::disk(&root).unwrap(),
+        &layout(&root),
+        "ext/pcre",
+    );
     std::fs::remove_file(here.unwrap()).unwrap();
 
     // The corpus could not run at all, and nothing else is unmet: the

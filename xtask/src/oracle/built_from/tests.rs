@@ -53,6 +53,12 @@ fn built(name: &str, target: Option<&Path>, listed: &[&str]) -> (Tree, PathBuf) 
     (tree, binary)
 }
 
+/// The crate directories of a manifest laying crates down in `crates`,
+/// `ext` and `sapi`.
+fn layout() -> Layout {
+    Layout::of(&["php_engine", "ext/standard", "sapi/cli"].map(crate::manifest::Crate::named))
+}
+
 /// `path` written, and dated `at` where named.
 fn written(path: &Path, at: Option<SystemTime>) {
     fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -79,7 +85,7 @@ fn a_run_is_kept_under_the_packages_the_binary_links_and_nothing_else() {
     let (tree, binary) = built("keyed", None, &LISTED);
     let built = BuiltFrom::of(&binary);
     assert!(matches!(built, BuiltFrom::Listed(_)), "{built:?}");
-    let keyed: Vec<String> = (built.keyed(&tree).iter())
+    let keyed: Vec<String> = (built.keyed(&tree, &layout()).iter())
         .map(|p| p.display().to_string())
         .collect();
     assert_eq!(
@@ -120,9 +126,9 @@ fn a_binary_without_a_dep_info_of_its_own_is_built_from_every_crate_directory() 
         "sapi",
     ];
     let every: Vec<PathBuf> = every.into_iter().map(PathBuf::from).collect();
-    assert_eq!(BuiltFrom::Unlisted.keyed(&tree), every);
+    assert_eq!(BuiltFrom::Unlisted.keyed(&tree, &layout()), every);
     let (tree, binary) = built("outside", None, &["/usr/include/zlib.h"]);
-    assert_eq!(BuiltFrom::of(&binary).keyed(&tree), every);
+    assert_eq!(BuiltFrom::of(&binary).keyed(&tree, &layout()), every);
 }
 
 /// The binary is behind only what its build read, as cargo relinks it:
@@ -144,7 +150,7 @@ fn the_binary_is_behind_only_a_path_its_build_read() {
         "crates/php_engine/tests/kernels.rs",
     ] {
         written(&tree.join(beside), Some(made + Duration::from_mins(1)));
-        let (_, when) = built.newest(&tree, cli).unwrap();
+        let (_, when) = built.newest(&tree, &layout(), cli).unwrap();
         assert!(when < made, "{beside} moved the binary");
     }
     for (moved, at) in [
@@ -153,7 +159,7 @@ fn the_binary_is_behind_only_a_path_its_build_read() {
         ("crates/php_engine/Cargo.toml", 240),
     ] {
         written(&tree.join(moved), Some(made + Duration::from_secs(at)));
-        let (newest, _) = built.newest(&tree, cli).unwrap();
+        let (newest, _) = built.newest(&tree, &layout(), cli).unwrap();
         assert_eq!(newest, tree.join(moved));
     }
 }
@@ -175,9 +181,9 @@ fn a_binary_with_no_dep_info_is_behind_only_an_engine_source() {
         written(&tree.join(beside), later);
     }
     let cli = Path::new("sapi/cli");
-    let (_, when) = BuiltFrom::Unlisted.newest(&tree, cli).unwrap();
+    let (_, when) = BuiltFrom::Unlisted.newest(&tree, &layout(), cli).unwrap();
     assert!(when < made);
     written(&tree.join("crates/php_jit/src/lib.rs"), later);
-    let (newest, _) = BuiltFrom::Unlisted.newest(&tree, cli).unwrap();
+    let (newest, _) = BuiltFrom::Unlisted.newest(&tree, &layout(), cli).unwrap();
     assert_eq!(newest, tree.join("crates/php_jit/src/lib.rs"));
 }

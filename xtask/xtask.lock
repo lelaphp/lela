@@ -91,6 +91,8 @@ manifest::Edge::between
 manifest::FILE
 manifest::Generated
 manifest::Generated::files
+manifest::Layout
+manifest::Layout::of
 manifest::LockCeiling
 manifest::Manifest
 manifest::Manifest::adr_title
@@ -98,6 +100,7 @@ manifest::Manifest::crate_named
 manifest::Manifest::crate_of
 manifest::Manifest::crates_of
 manifest::Manifest::generated_files
+manifest::Manifest::layout
 manifest::Manifest::load
 manifest::Manifest::lock_ceiling
 manifest::Manifest::lock_home
