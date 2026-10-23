@@ -389,7 +389,7 @@ fn in_main(root: &Path, rule: &Rule, line: Option<&Line>) -> bool {
 /// such command, where the call stands ([`runs_in`]).
 fn scoped_in(root: &Path, rule: &Rule, line: Option<&Line>) -> Vec<PathBuf> {
     let mut checkouts = line.map_or_else(Vec::new, |line| {
-        fired_in(root, line, Reading::Places, |argv| fires(rule, argv))
+        fired_in(root, line, Places::Every, |argv| fires(rule, argv))
     });
     if checkouts.is_empty() {
         checkouts.push(runs_in(root, line));
@@ -482,29 +482,23 @@ pub(super) fn runs_in(root: &Path, line: Option<&Line>) -> PathBuf {
 }
 
 /// The commands of `line` whose place is read, each with every place of
-/// it `reading` asks for, one pair per place ([`Walk::placed`]). What
+/// it `asked` names, one pair per place ([`Walk::placed`]). What
 /// records whose operation stands in a checkout reads a command past a
 /// later change where that change took the shell, never where the shell
 /// started (#2720): an orchestrator's `cat $S/owner; cd <main>; git merge
 /// --no-commit t1955` started a merge no record named (#2723).
-pub(super) fn placed<'a>(
-    root: &Path,
-    line: &'a Line,
-    reading: Reading,
-) -> Vec<(&'a Argv, PathBuf)> {
+pub(super) fn placed<'a>(root: &Path, line: &'a Line, asked: Places) -> Vec<(&'a Argv, PathBuf)> {
     let walk = Walk::of(root, Some(line));
-    let kept = walk
-        .placed
-        .into_iter()
-        .filter(|p| reading.keeps(p.argv, p.runs));
+    let kept = walk.placed.into_iter();
+    let kept = kept.filter(|p| asked.keeps(p.argv, p.via));
     kept.map(|p| (p.argv, p.dir)).collect()
 }
 
 /// Which of a command's places a reader asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Reading {
+pub(super) enum Places {
     /// Every place it runs or reaches.
-    Places,
+    Every,
     /// The places git reads a repository in: where it runs, unless its
     /// words name a git dir ([`Move::GitDir`]), which git reads in its
     /// place, and every place it reaches besides. Under `GIT_DIR` the
@@ -513,17 +507,25 @@ pub(super) enum Reading {
     Repositories,
 }
 
-impl Reading {
-    /// Whether this reading asks for a place of `argv`, one it only
-    /// `runs` at or one it reaches.
-    fn keeps(self, argv: &Argv, runs: bool) -> bool {
+impl Places {
+    /// Whether these places take one `argv` stands at `via`.
+    fn keeps(self, argv: &Argv, via: Via) -> bool {
         let named = || argv.moves().iter().any(|m| matches!(m, Move::GitDir(_)));
-        self == Reading::Places || !runs || !named()
+        self == Places::Every || via == Via::Reaches || !named()
     }
 }
 
-/// Where each command of `line` that `fires` may run or reach, as much of
-/// it as `reading` asks for ([`Walk::placed`]), or, for one placed
+/// How a command stands at a place the walk gives it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Via {
+    /// It runs there, and reaches it by no word of its own.
+    Runs,
+    /// A word of its own reaches it ([`Move::Reaches`], [`Move::GitDir`]).
+    Reaches,
+}
+
+/// Where each command of `line` that `fires` may run or reach, the places
+/// `asked` names ([`Walk::placed`]), or, for one placed
 /// nowhere, past a change the line
 /// does not say where it goes, where the line stands moved by its own
 /// words ([`moved`]): a rule scoped by `where` judges the commands it
@@ -534,21 +536,19 @@ impl Reading {
 pub(super) fn fired_in(
     root: &Path,
     line: &Line,
-    reading: Reading,
+    asked: Places,
     fires: impl Fn(&Argv) -> bool,
 ) -> Vec<PathBuf> {
     let walk = Walk::of(root, Some(line));
     let mut checkouts = Vec::new();
     for argv in line.commands().iter().filter(|argv| fires(argv)) {
-        let mut at: Vec<PathBuf> = walk.places_of(argv, reading).cloned().collect();
+        let placed = walk.places_of(argv).map(|(dir, via)| (dir.clone(), via));
+        let mut at: Vec<(PathBuf, Via)> = placed.collect();
         if at.is_empty() {
-            let moved = moved(&walk.runs_in(root), argv).into_iter();
-            at = moved
-                .filter(|(_, runs)| reading.keeps(argv, *runs))
-                .map(|(dir, _)| dir)
-                .collect();
+            at = moved(&walk.runs_in(root), argv);
         }
-        for dir in at {
+        let kept = at.into_iter().filter(|(_, via)| asked.keeps(argv, *via));
+        for (dir, _) in kept {
             add(&mut checkouts, dir);
         }
     }
@@ -568,7 +568,7 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
     let walk = Walk::of(root, line);
     let dir = walk.runs_in(root);
     let mut named = walk.rest.iter().map(|argv| {
-        let mut at = walk.places_of(argv, Reading::Places);
+        let mut at = walk.places_of(argv).map(|(dir, _)| dir);
         let one = at.next().filter(|_| at.next().is_none());
         one.filter(|_| argv.program() == "git")
     });
@@ -634,13 +634,12 @@ struct Walk<'a> {
     lost: bool,
 }
 
-/// One place the walk gives a command: whether it only `runs` there, or
-/// reaches it by a word of its own ([`moved`]), where [`Reading`] tells
-/// the two apart.
+/// One place the walk gives a command, and how it stands there, which
+/// [`Places`] tells apart.
 struct Placed<'a> {
     argv: &'a Argv,
     dir: PathBuf,
-    runs: bool,
+    via: Via,
 }
 
 /// One shell the walk is in: its id, the places it may stand where every
@@ -777,14 +776,16 @@ impl<'a> Walk<'a> {
                 shell.certain = false;
             }
             walk.lost |= argv.moves().contains(&Move::Unsaid);
-            for (dir, runs) in at.iter().flat_map(|dir| moved(dir, argv)) {
+            for (dir, via) in at.iter().flat_map(|dir| moved(dir, argv)) {
                 if changes || shell.lost {
                     continue;
                 }
                 let same = |p: &&mut Placed| std::ptr::eq(p.argv, argv) && p.dir == dir;
                 match walk.placed.iter_mut().find(same) {
-                    Some(placed) => placed.runs &= runs,
-                    None => walk.placed.push(Placed { argv, dir, runs }),
+                    // A place it runs at and reaches is one it reaches.
+                    Some(placed) if via == Via::Reaches => placed.via = via,
+                    Some(_) => {}
+                    None => walk.placed.push(Placed { argv, dir, via }),
                 }
             }
             let read_past = exports || (changes && (apart || !shell.lost));
@@ -817,15 +818,13 @@ impl<'a> Walk<'a> {
     }
 
     /// Each place `argv`, one of the line's commands, may run or reach,
-    /// as much of it as `reading` asks for.
-    fn places_of(&self, argv: &'a Argv, reading: Reading) -> impl Iterator<Item = &PathBuf> {
+    /// and how it stands there.
+    fn places_of(&self, argv: &'a Argv) -> impl Iterator<Item = (&PathBuf, Via)> {
         let placed = self
             .placed
             .iter()
             .filter(move |p| std::ptr::eq(p.argv, argv));
-        placed
-            .filter(move |p| reading.keeps(argv, p.runs))
-            .map(|p| &p.dir)
+        placed.map(|p| (&p.dir, p.via))
     }
 }
 
@@ -847,8 +846,8 @@ fn add<T: PartialEq>(set: &mut Vec<T>, one: T) {
 /// [`Move::Into`] of its words, then each place it reaches besides
 /// ([`Move::Reaches`], [`Move::GitDir`]), read from where the moves into
 /// left the program, as git reads `GIT_DIR` once its `-C` has moved it;
-/// each with whether the command only runs there.
-fn moved(dir: &Path, argv: &Argv) -> Vec<(PathBuf, bool)> {
+/// each with how it stands there.
+fn moved(dir: &Path, argv: &Argv) -> Vec<(PathBuf, Via)> {
     let mut runs = dir.to_path_buf();
     for one in argv.moves() {
         if let Move::Into(to) = one {
@@ -856,11 +855,11 @@ fn moved(dir: &Path, argv: &Argv) -> Vec<(PathBuf, bool)> {
         }
     }
     let reached = argv.moves().iter().filter_map(|one| match one {
-        Move::Reaches(to) | Move::GitDir(to) => Some((at(&runs, to), false)),
+        Move::Reaches(to) | Move::GitDir(to) => Some((at(&runs, to), Via::Reaches)),
         Move::Into(_) | Move::Unsaid => None,
     });
-    let reached: Vec<(PathBuf, bool)> = reached.collect();
-    std::iter::once((runs, true)).chain(reached).collect()
+    let reached: Vec<(PathBuf, Via)> = reached.collect();
+    std::iter::once((runs, Via::Runs)).chain(reached).collect()
 }
 
 /// `to` read as a path from `dir`, `~/` as the home.
@@ -1020,9 +1019,9 @@ mod tests {
         assert_eq!(runs_in(root, Some(&line)), root);
         assert_eq!(acts_in(root, Some(&line)), root);
         let adds = |argv: &Argv| argv.words().get(1).is_some_and(|w| w == "add");
-        assert_eq!(fired_in(root, &line, Reading::Places, adds), [root]);
+        assert_eq!(fired_in(root, &line, Places::Every, adds), [root]);
         let statuses = |argv: &Argv| argv.words().get(1).is_some_and(|w| w == "status");
-        assert_eq!(fired_in(root, &line, Reading::Places, statuses), [other]);
+        assert_eq!(fired_in(root, &line, Places::Every, statuses), [other]);
         let inside = Line::read("(cd /other && git add x && git commit -m y)");
         assert_eq!(runs_in(root, Some(&inside)), root);
         assert_eq!(acts_in(root, Some(&inside)), other);
@@ -1038,12 +1037,12 @@ mod tests {
     #[test]
     fn git_reads_the_repository_its_git_dir_names_in_place_of_where_it_runs() {
         let (root, wt, git_dir) = (Path::new("/shell"), Path::new("/wt"), Path::new("/o/.git"));
-        let read = |text: &str, reading: Reading| {
-            fired_in(root, &Line::read(text), reading, |argv| {
+        let read = |text: &str, asked: Places| {
+            fired_in(root, &Line::read(text), asked, |argv| {
                 argv.program() == "git"
             })
         };
-        let repositories = |text: &str| read(text, Reading::Repositories);
+        let repositories = |text: &str| read(text, Places::Repositories);
         assert_eq!(
             repositories("GIT_DIR=/o/.git git commit -F m -- x"),
             [git_dir]
@@ -1067,7 +1066,7 @@ mod tests {
         // A variable the line did not assign says nowhere: it runs where
         // it runs, and the line is lost.
         assert_eq!(repositories("GIT_DIR=$X git commit"), [root]);
-        let places = read("GIT_DIR=/o/.git git commit", Reading::Places);
+        let places = read("GIT_DIR=/o/.git git commit", Places::Every);
         assert_eq!(places, [root, git_dir]);
     }
 
@@ -1078,7 +1077,7 @@ mod tests {
     fn a_change_is_followed_as_far_as_its_and_chain_and_a_program_where_its_words_say() {
         let (root, wt) = (Path::new("/shell"), Path::new("/wt"));
         let fired = |text: &str, program: &str| {
-            fired_in(root, &Line::read(text), Reading::Places, |argv| {
+            fired_in(root, &Line::read(text), Places::Every, |argv| {
                 argv.program() == program
             })
         };

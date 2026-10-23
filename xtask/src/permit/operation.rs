@@ -80,7 +80,7 @@ use serde::{Deserialize, Serialize};
 
 use super::argv::{Argv, Line};
 use super::call::Call;
-use super::rules::{Reading, acts_in, fired_in, placed};
+use super::rules::{Places, acts_in, fired_in, placed};
 use crate::manifest::OneOrMany;
 use crate::reading::{self, Store};
 use crate::{git, track};
@@ -257,7 +257,7 @@ impl Starter {
 /// The operation standing where a command of `line` that `fires` runs
 /// git, from `root` moved by the line's leading `cd` or `pushd` and the
 /// command's own `-C`, or in the git dir its `GIT_DIR` or `--git-dir`
-/// names in place of where it runs ([`fired_in`], [`Reading::Repositories`],
+/// names in place of where it runs ([`fired_in`], [`Places::Repositories`],
 /// #3271), when the session making `call` did not start it; `None` where
 /// nothing stands or it is the caller's own. A call with no line is
 /// judged in `root`.
@@ -268,11 +268,11 @@ pub(crate) fn foreign(
     fires: impl Fn(&Argv) -> bool,
 ) -> Option<Foreign> {
     let checkouts = match line {
-        Some(line) => fired_in(root, line, Reading::Repositories, fires),
+        Some(line) => fired_in(root, line, Places::Repositories, fires),
         None => vec![root.to_path_buf()],
     };
     let caller = Session::of(call);
-    checkouts.into_iter().find_map(|checkout| {
+    checkouts.into_iter().map(checkout_at).find_map(|checkout| {
         let git_dir = git::git_dir(&checkout)?;
         let operation = Operation::in_progress(&git_dir)?;
         let ours = read(&starter_file(&checkout, &git_dir)).is_some_and(|starter| {
@@ -285,6 +285,17 @@ pub(crate) fn foreign(
             checkout,
         })
     })
+}
+
+/// The checkout a place git reads its repository in stands for: itself,
+/// or, for a gitfile, the `.git` file of a linked worktree that `GIT_DIR`
+/// names, the worktree it stands in, whose git dir the file points at
+/// (#3271).
+fn checkout_at(place: PathBuf) -> PathBuf {
+    match place.parent() {
+        Some(dir) if place.is_file() => dir.to_path_buf(),
+        _ => place,
+    }
 }
 
 /// Before a call: what `line` does to the records of the checkouts it runs
@@ -433,10 +444,11 @@ fn tend<'a>(
     caller: Option<&Session>,
     line: &'a Line,
 ) -> Result<(Vec<fs::File>, Vec<Tended<'a>>)> {
-    let placed: Vec<_> = placed(root, line, Reading::Repositories)
+    let placed: Vec<_> = placed(root, line, Places::Repositories)
         .into_iter()
         .filter(|(argv, _)| argv.runs("git"))
-        .filter_map(|(git, checkout)| {
+        .filter_map(|(git, place)| {
+            let checkout = checkout_at(place);
             let git_dir = git::git_dir(&checkout)?;
             let file = starter_file(&checkout, &git_dir);
             Some((git, checkout, git_dir, file))
@@ -1105,6 +1117,19 @@ mod tests {
         assert_eq!(standing(&dir, &format!("git {commit}"), "s1", None), None);
         let refused = standing(&other, &named, "s2", None);
         assert_eq!(refused, Some(Operation::Merge));
+        ended(&dir);
+
+        // A linked worktree's `.git` is a file naming its git dir, and git
+        // takes it as `GIT_DIR`: a merge standing there is judged there.
+        let linked = dir.join("linked");
+        worktree(&dir, &linked);
+        merging(&linked);
+        let line = format!("GIT_DIR={}/.git git {commit}", linked.display());
+        assert_eq!(standing(&other, &line, "s1", None), Some(Operation::Merge));
+        assert_eq!(
+            standing(&linked, &format!("GIT_DIR=.git git {commit}"), "s1", None),
+            Some(Operation::Merge)
+        );
     }
 
     /// The checkout a call ran in is its workspace moved by a leading
