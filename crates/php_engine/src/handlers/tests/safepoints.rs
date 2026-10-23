@@ -42,7 +42,7 @@ fn a_backward_jump_raises_the_loop_safepoint_and_a_forward_one_does_not() {
     req.vm_mut().stand(frame, 1);
 
     assert_eq!(
-        served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &back)),
+        served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &back, at)),
         Ok(Stepped::Same(frame))
     );
     assert_eq!(req.vm().opline(frame), 0);
@@ -57,7 +57,7 @@ fn a_backward_jump_raises_the_loop_safepoint_and_a_forward_one_does_not() {
         ..Opline::default()
     };
     assert_eq!(
-        served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &forward)),
+        served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &forward, at)),
         Ok(Stepped::Same(frame))
     );
     assert_eq!(req.vm().opline(frame), 1);
@@ -79,7 +79,7 @@ fn the_interrupt_is_tested_at_a_back_edge() {
     req.limits().interrupt().elapsed(1);
 
     assert_eq!(
-        served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &back)),
+        served!(req, frame, at => jmp::<Probe>(&mut req, frame, code, &back, at)),
         Err(Fatal::error("Maximum execution time of 1 second exceeded"))
     );
     assert_eq!(req.state::<Asked>().sites, vec![]);

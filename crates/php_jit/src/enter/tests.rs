@@ -177,6 +177,7 @@ pub(crate) mod entered {
     use crate::testing::{self, Scratch, function_of, stdout};
     use crate::types::Landing;
 
+    mod doors;
     mod parity;
 
     /// What a test enters, by the function whose activation enters it.
@@ -225,7 +226,9 @@ pub(crate) mod entered {
             else {
                 return Flow::Bail(Fatal::error("the body was not published"));
             };
-            match enter(req, frame, (&epoch, trace), crate::enter::At::First) {
+            match enter(req, frame, (&epoch, trace), crate::enter::At::First)
+                .map(|answered| answered.left)
+            {
                 Ok(crate::enter::Left::Exit(exited)) => {
                     req.state::<Seen>().exits.push((function, exited.exit.0));
                     Flow::Resume(exited.frame)

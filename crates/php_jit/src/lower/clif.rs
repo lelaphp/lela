@@ -35,21 +35,22 @@ use std::mem::offset_of;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F64, I8, I32, I64};
 use cranelift_codegen::ir::{
-    AbiParam, Block, Function, InstBuilder, MemFlagsData, SigRef, Signature, SourceLoc, StackSlot,
-    StackSlotData, StackSlotKind, Type, UserFuncName, Value,
+    AbiParam, Block, BlockArg, Function, InstBuilder, MemFlagsData, SigRef, Signature, SourceLoc,
+    StackSlot, StackSlotData, StackSlotKind, Type, UserFuncName, Value,
 };
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use php_engine::tier::{FuncRef, PlainCall};
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
-use php_unit::{MapPtrOffset, Opcode, OplineIdx};
+use php_unit::{Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT,
-    STOOD_AT, Stood, Symbols, UNWOUND, located,
+    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
+    Stood, Symbols, UNWOUND, located,
 };
 
 mod calls;
+mod doors;
 use crate::record::{Began, Callee, Stop};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
@@ -98,6 +99,19 @@ enum CallRoom {
     Stood,
 }
 
+/// Where the code goes where the interrupt test finds the interrupt
+/// raised ([`Emit::interrupt_test`]).
+#[derive(Debug, Clone, Copy)]
+enum Raised {
+    /// Through this exit, php's exit point at a loop's header.
+    Exit(ExitId),
+    /// To php's interrupt stub, [`INTERRUPTED`].
+    Stub,
+    /// To this block, which answers a link's exit: the root it links to
+    /// meets the interrupt at its own header.
+    Answer(Block),
+}
+
 /// The type byte of `tag`, as an immediate.
 fn tag(tag: ZvalType) -> i64 {
     i64::from(tag as u8)
@@ -118,28 +132,69 @@ fn mismatch(why: &'static str) -> Abort {
     }
 }
 
-/// The function `ir` lowers to on the target `config` describes, calling
+/// The body `ir` lowers to on the target `config` describes, calling
 /// the kernels at `symbols`, and, under exit-fuzz, failing each guard
-/// once by its byte of `fuzz`; with how many such guards it holds.
+/// once by its byte of `fuzz`; jumping through its entry slots and its
+/// link as `joins` says; with how many such guards it holds.
 pub(super) fn lower(
     ir: &TraceIr,
     config: TargetFrontendConfig,
     (symbols, held): (&Symbols, &[PlainCall]),
-    fuzz: Option<Fuzz>,
+    (fuzz, joins): (Option<Fuzz>, Joins),
 ) -> Result<(Function, usize), Abort> {
-    let call_conv = config.default_call_conv;
-    let mut sig = Signature::new(call_conv);
-    sig.params.extend([AbiParam::new(I64), AbiParam::new(I64)]);
-    sig.returns.push(AbiParam::new(I32));
-    let mut func = Function::with_name_signature(UserFuncName::user(0, 0), sig);
+    let mut func = Function::with_name_signature(UserFuncName::user(0, 0), body_signature());
     let mut context = FunctionBuilderContext::new();
     let builder = FunctionBuilder::new(&mut func, &mut context);
-    let mut emit = Emit::new(ir, builder, call_conv, (symbols, held));
+    let mut emit = Emit::new(ir, builder, config.default_call_conv, (symbols, held));
     emit.fuzz = fuzz;
+    emit.joins = joins;
     emit.trace()?;
     let sites = emit.fuzzed_sites;
     emit.b.finalize(config);
     Ok((func, sites))
+}
+
+/// A trace's body's signature: the `ExitCtx` and the room of the frame
+/// it enters on, the exit or the answer it leaves with, on Cranelift's
+/// tail convention, so a body hands on to another by a tail call.
+fn body_signature() -> Signature {
+    let mut sig = Signature::new(CallConv::Tail);
+    sig.params.extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    sig.returns.push(AbiParam::new(I32));
+    sig
+}
+
+/// The trace prologue (`super::Backend`): on the host's convention, the
+/// `ExitCtx`, the room and the body's address, the body called on the
+/// tail convention and its answer answered.
+pub(super) fn prologue(config: TargetFrontendConfig) -> Function {
+    let mut sig = Signature::new(config.default_call_conv);
+    sig.params.extend([AbiParam::new(I64); 3]);
+    sig.returns.push(AbiParam::new(I32));
+    let mut func = Function::with_name_signature(UserFuncName::user(0, 1), sig);
+    let mut context = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut func, &mut context);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let params = b.block_params(entry).to_vec();
+    let body = b.import_signature(body_signature());
+    let call = b.ins().call_indirect(body, params[2], &params[..2]);
+    let answer = b.inst_results(call).to_vec();
+    b.ins().return_(&answer);
+    b.finalize(config);
+    func
+}
+
+/// Where a body jumps besides its exits (#3229's ruling): the address of
+/// its first entry slot, one per exit, of its first landing slot, and the
+/// trace its link jumps to, where it links to one with code.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Joins {
+    pub(super) slots: usize,
+    pub(super) landings: usize,
+    pub(super) linked: Option<super::Linked>,
 }
 
 /// Exit-fuzz's bytes as the lowering hands them out (`jit.mode=exit-fuzz`):
@@ -290,6 +345,14 @@ struct Emit<'a> {
     fuzz: Option<Fuzz>,
     /// How many of them the guards met so far took.
     fuzzed_sites: usize,
+    /// Its entry slots and its link (`doors`).
+    joins: Joins,
+    /// Per exit, the block a failed guard leaves it through where the
+    /// exit may jump to its side trace, taking the call under way there.
+    doors: Vec<Option<Block>>,
+    /// Per exit, the block that answers its number and stores nothing,
+    /// where a jump finds no trace to enter.
+    answers: Vec<Option<Block>>,
 }
 
 impl<'a> Emit<'a> {
@@ -331,6 +394,13 @@ impl<'a> Emit<'a> {
             running: Frame::ROOT,
             fuzz: None,
             fuzzed_sites: 0,
+            joins: Joins {
+                slots: 0,
+                landings: 0,
+                linked: None,
+            },
+            doors: vec![None; ir.exits.len()],
+            answers: vec![None; ir.exits.len()],
         }
     }
 
@@ -357,14 +427,12 @@ impl<'a> Emit<'a> {
         if header.is_some() {
             self.interrupt = Some(self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT));
         }
-        if calls::in_place(self.ir) {
-            // The stack and the entered frame's place on it, which calls
-            // made in place read.
-            self.stack = Some(self.b.ins().load(I64, trusted(), cx, STACK_AT));
-            let place = self.b.ins().load(I32, trusted(), cx, ROOT_AT);
-            let place = self.b.ins().uextend(I64, place);
-            self.b.def_var(self.ref_var(Frame::ROOT)?, place);
-        }
+        // The stack and the entered frame's place on it, which calls made
+        // in place read, and a jump to another trace hands it.
+        self.stack = Some(self.b.ins().load(I64, trusted(), cx, STACK_AT));
+        let place = self.b.ins().load(I32, trusted(), cx, ROOT_AT);
+        let place = self.b.ins().uextend(I64, place);
+        self.b.def_var(self.ref_var(Frame::ROOT)?, place);
         // Laid down before either way in: a guard at the body's entry
         // reads it too.
         self.stood_at_entry(cx);
@@ -387,7 +455,7 @@ impl<'a> Emit<'a> {
         let split = header.map_or(self.ir.ops.len(), |header| header.at.index());
         self.ops(0..split, body)?;
         match (self.ir.end, self.interrupt) {
-            (End::Loop(header), Some(interrupt)) => {
+            (End::Loop(header), Some(_)) => {
                 let phis = self.register_phis();
                 let entered = phis
                     .iter()
@@ -400,10 +468,14 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.switch_to_block(head);
                 self.b.set_srcloc(located(header.at.index()));
-                let flag = self.b.ins().load(I8, trusted(), interrupt, 0);
-                match header.interrupt {
-                    Interrupt::Exit(exit) => self.leave_if(flag, exit)?,
-                    Interrupt::Stub(_) => self.stub_if(flag)?,
+                // The interrupt test, one load and one branch (§4.3); the
+                // bench's untested build alone leaves it out, to measure
+                // what it costs (#2960, §10).
+                if cfg!(not(php_jit_untested_loops)) {
+                    self.interrupt_test(match header.interrupt {
+                        Interrupt::Exit(exit) => Raised::Exit(exit),
+                        Interrupt::Stub(_) => Raised::Stub,
+                    })?;
                 }
                 self.ops(split..self.ir.ops.len(), body)?;
                 let brought = phis
@@ -431,10 +503,7 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.seal_block(head);
             }
-            (End::Leave(exit), _) => {
-                let block = self.exit_block(exit)?;
-                self.b.ins().jump(block, &[]);
-            }
+            (End::Leave(exit), _) => self.leave_at_end(exit)?,
             // The `RETURN` left in place went on to the escape or the exit.
             (End::Return(_), _) => {}
             (End::Loop(_), None) => return Err(mismatch("a loop with no interrupt flag")),
@@ -890,8 +959,11 @@ impl<'a> Emit<'a> {
     /// jump the guard did not expect went, and a refused call, whose exit
     /// is right only where nothing was pushed.
     fn leave_where(&mut self, cond: Value, exit: ExitId) -> Result<(), Abort> {
-        let to = self.exit_block(exit)?;
-        self.divert_if(cond, to);
+        let (to, args) = self.guard_exit(exit)?;
+        let on = self.b.create_block();
+        self.b.ins().brif(cond, to, &args, on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
         Ok(())
     }
 
@@ -949,6 +1021,36 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
+    /// The request's interrupt tested, the one emitter of every test a
+    /// compiled loop makes of it (`jit-design.md` §4.3), php's
+    /// `vm_interrupt` test: at a loop's header (`zend_jit_trace_end_loop`),
+    /// and before a side trace's link to its own root where the root loops
+    /// (`zend_jit_check_timeout` in `zend_jit_trace_link_to_root`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`). The byte the
+    /// `ExitCtx`'s pointer names is loaded, and where it is not zero, or
+    /// under exit-fuzz on the test's first pass, the code goes where
+    /// `raised` says.
+    fn interrupt_test(&mut self, raised: Raised) -> Result<(), Abort> {
+        let pointer = if let Some(pointer) = self.interrupt {
+            pointer
+        } else {
+            let cx = self
+                .cx
+                .ok_or_else(|| mismatch("an interrupt test before the entry"))?;
+            self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT)
+        };
+        let byte = self.b.ins().load(I8, trusted(), pointer, 0);
+        match raised {
+            Raised::Exit(exit) => self.leave_if(byte, exit),
+            Raised::Stub => self.stub_if(byte),
+            Raised::Answer(block) => {
+                let byte = self.fuzzed(byte)?;
+                self.divert_if(byte, block);
+                Ok(())
+            }
+        }
+    }
+
     /// The block a kernel's refusal answers [`ABANDONED`] from.
     fn abandoned(&mut self) -> Block {
         if let Some(block) = self.abandon {
@@ -981,6 +1083,17 @@ impl<'a> Emit<'a> {
             let number = self.b.ins().iconst(I32, i64::from(number));
             self.b.ins().return_(&[number]);
         }
+        self.door_blocks()?;
+        for at in 0..self.answers.len() {
+            let Some(block) = self.answers[at] else {
+                continue;
+            };
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let number = u32::try_from(at).map_err(|_| mismatch("too many exits"))?;
+            let number = self.b.ins().iconst(I32, i64::from(number));
+            self.b.ins().return_(&[number]);
+        }
         for at in 0..self.unwinds.len() {
             let Some(block) = self.unwinds[at] else {
                 continue;
@@ -1002,10 +1115,7 @@ impl<'a> Emit<'a> {
             self.b.ins().return_(&[answer]);
         }
         if let Some(block) = self.escape {
-            self.b.switch_to_block(block);
-            self.b.seal_block(block);
-            let answer = self.b.ins().iconst(I32, i64::from(ESCAPED));
-            self.b.ins().return_(&[answer]);
+            self.escaped(block)?;
         }
         if let Some(block) = self.stub {
             self.b.switch_to_block(block);
@@ -1248,7 +1358,7 @@ impl<'a> Emit<'a> {
 
     /// php's IP guard past a trace's lowest frame (`zend_jit_leave_func`):
     /// on unless the last kernel left the interpreter elsewhere than
-    /// `opline` of `func`, where the trace escapes ([`ESCAPED`]) with
+    /// `opline` of `func`, where the trace escapes ([`ESCAPED`](super::ESCAPED)) with
     /// nothing to store, as php's `jit_stub_trace_escape` takes no exit.
     /// Never failed by exit-fuzz, as it names no exit.
     fn escapes(&mut self, func: FuncRef, opline: OplineIdx) -> Result<(), Abort> {
@@ -1264,21 +1374,27 @@ impl<'a> Emit<'a> {
             .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
         let other = self.b.ins().bor(other_func, other_opline);
         let to = self.escape_block();
+        let place = self.frame_ref(self.running)?;
         let on = self.b.create_block();
-        self.b.ins().brif(other, to, &[], on, &[]);
+        self.b
+            .ins()
+            .brif(other, to, &[BlockArg::Value(place)], on, &[]);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
         Ok(())
     }
 
     /// The trace's one escape block, made the first time a return
-    /// branches to it: [`ESCAPED`] answered, nothing stored.
+    /// branches to it with the place of the frame it returned into:
+    /// [`ESCAPED`](super::ESCAPED) answered, nothing stored, past the jump to the trace a
+    /// landing slot names ([`Emit::escaped`]).
     fn escape_block(&mut self) -> Block {
         if let Some(block) = self.escape {
             return block;
         }
         let block = self.b.create_block();
         self.b.set_cold_block(block);
+        self.b.append_block_param(block, I64);
         self.escape = Some(block);
         block
     }
@@ -1698,7 +1814,6 @@ impl<'a> Emit<'a> {
                     .iter()
                     .any(|store| matches!(store.from, Stored::Copied { value, .. } if value == out))
             });
-        let to = self.exit_block(guard.exit)?;
         let failed = self.b.create_block();
         self.b.set_cold_block(failed);
         let on = self.b.create_block();
@@ -1710,7 +1825,8 @@ impl<'a> Emit<'a> {
             // copied as the fetch copies it.
             self.copy(line, element, info, out_slot)?;
         }
-        self.b.ins().jump(to, &[]);
+        let (to, args) = self.guard_exit(guard.exit)?;
+        self.b.ins().jump(to, &args);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
         Ok(())
@@ -2403,8 +2519,5 @@ fn slot_offset(var: u32) -> Result<i32, Abort> {
 /// The engine offset that numbers an op array a trace holds; a
 /// request-scoped one is never held (`jit-design.md` §4.1).
 fn engine_offset(func: FuncRef) -> Result<u32, Abort> {
-    match func.offset() {
-        MapPtrOffset::Engine(n) => Ok(n),
-        MapPtrOffset::Request(_) => Err(mismatch("a request-scoped op array in a trace")),
-    }
+    super::engine_offset(func).ok_or_else(|| mismatch("a request-scoped op array in a trace"))
 }

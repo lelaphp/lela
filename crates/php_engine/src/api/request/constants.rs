@@ -223,7 +223,7 @@ impl Request {
     fn free_row(&mut self, row: ConstantRow) {
         self.release(row.value);
         let mut arrays = Vec::new();
-        php_compile::arrays::attribute_arrays(&row.attributes, &mut |z| arrays.push(z));
+        php_compile::values::attribute_arrays(&row.attributes, &mut |z| arrays.push(z));
         for z in arrays {
             self.release(Value::of_slot(z));
         }
@@ -394,7 +394,7 @@ impl Request {
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         // `zend_constant_add_attributes`: an owner of the table, which
         // outlives the op array that declared it.
-        php_compile::arrays::attribute_arrays(&attributes, &mut |z| self.heap.addref(z));
+        php_compile::values::attribute_arrays(&attributes, &mut |z| self.heap.addref(z));
         let room = self.constant_room();
         let named = self.declared_string(given).ok();
         let file = file.and_then(|file| self.executed_file_string(&file).ok());

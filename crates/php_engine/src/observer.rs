@@ -541,7 +541,6 @@ pub struct Removed<H> {
 /// Whether any observer is declared, which every home tests first: what
 /// an inline path that serves no home asks before it stands in for one.
 #[inline(always)] // as `call`
-#[allow(clippy::inline_always)]
 pub(crate) fn observing(req: &Request) -> bool {
     req.shared.observers != 0
 }
@@ -554,7 +553,6 @@ pub(crate) fn observing(req: &Request) -> bool {
 /// the observers declined it. One load and one compare while no
 /// observer is declared.
 #[inline(always)] // as `call`
-#[allow(clippy::inline_always)]
 pub(crate) fn frameless_observed(req: &Request, function: Function) -> bool {
     observing(req) && !req.native_unobserved(function)
 }
@@ -562,7 +560,6 @@ pub(crate) fn frameless_observed(req: &Request, function: Function) -> bool {
 /// The call home: `frame` pushed, its prologue not yet served. One load and
 /// one compare while no observer is declared.
 #[inline(always)] // design §4.3 seam 9: the home pays the load and the branch, never a call
-#[allow(clippy::inline_always)]
 pub(crate) fn call(req: &mut Request, frame: FrameRef) {
     if req.shared.observers != 0 {
         begin(req, Observable::Code(frame));
@@ -573,7 +570,6 @@ pub(crate) fn call(req: &mut Request, frame: FrameRef) {
 /// it returned, or by an unwind with nothing. As [`call`] while no
 /// observer is declared.
 #[inline(always)] // as `call`
-#[allow(clippy::inline_always)]
 pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>) {
     if req.shared.observers != 0 {
         end(req, Observable::Code(frame), value);
@@ -587,7 +583,6 @@ pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>
 /// none where no observer is declared, after one load and one compare,
 /// or where nothing observes the call's end.
 #[inline(always)] // as `call`
-#[allow(clippy::inline_always)]
 pub(crate) fn native_call(req: &mut Request, function: Function) -> Option<NativeCall> {
     if req.shared.observers != 0 {
         begin_native(req, function)
@@ -604,7 +599,6 @@ pub(crate) fn native_call(req: &mut Request, function: Function) -> Option<Nativ
 /// `Z/Zend/zend_vm_def.h:4140`). One branch on what [`native_call`]
 /// answered, and no load.
 #[inline(always)] // as `call`
-#[allow(clippy::inline_always)]
 pub(crate) fn native_returned(
     req: &mut Request,
     begun: Option<NativeCall>,
@@ -642,7 +636,6 @@ fn begin(req: &mut Request, at: Observable) {
 /// called at `Z/Zend/zend_generators.c:847`). As [`call`] while no
 /// observer is declared.
 #[inline(always)] // as `call`
-#[allow(clippy::inline_always)]
 pub(crate) fn generator_resumed(req: &mut Request, frame: FrameRef) {
     if req.shared.observers != 0 {
         begin_resumed(req, frame);
@@ -663,7 +656,6 @@ fn begin_resumed(req: &mut Request, frame: FrameRef) {
 /// what it yielded, or, at a `yield from`, what it yielded last. As
 /// [`call`] while no observer is declared.
 #[inline(always)] // as `call`
-#[allow(clippy::inline_always)]
 pub(crate) fn generator_yielded(req: &mut Request, frame: FrameRef, generator: PhpObject) {
     if req.shared.observers != 0 {
         end_yielded(req, frame, generator);

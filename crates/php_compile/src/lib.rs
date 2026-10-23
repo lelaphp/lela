@@ -21,7 +21,6 @@
     clippy::unimplemented
 )]
 
-pub mod arrays;
 mod emit;
 mod live;
 pub mod multibyte;
@@ -32,6 +31,7 @@ pub mod multibyte;
 mod skip;
 mod special;
 mod stack;
+pub mod values;
 
 pub use stack::{Reentered, StackLimit};
 
