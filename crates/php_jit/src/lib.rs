@@ -264,8 +264,8 @@ impl JitEngine {
     }
 
     /// The G4 bar's line (#2961), at a request's end in the bench's
-    /// build alone: the bytes the epoch's traces take, the oplines they
-    /// compiled and how many there are, as the table counted them
+    /// build alone: the bytes the engine's traces take, the oplines they
+    /// compiled and how many there are, as its tables counted them
     /// ([`table::TraceTable::usage`]); php's count of compiled oplines is
     /// its `TRACE_BYTECODE` listing, which this tier does not write.
     #[cfg(php_jit_usage)]

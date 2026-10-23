@@ -11,7 +11,11 @@
 //! frame's op array through the view, samples the opline's three operands
 //! as the recorder samples them ([`record::sampled`]) and keeps them in a
 //! buffer it throws away, then steps and follows the frame `Stepped`
-//! names. Where the serving ends it writes `stepped <n> oplines` to the
+//! names. What it leaves out is the record and the recorder's stop
+//! rules: it writes no event, counts no length and stops at nothing short
+//! of the serving's end, and a step that throws hands the frame back to
+//! the interpreter, which asks again at its next safepoint. Where the
+//! serving ends it writes `stepped <n> oplines` to the
 //! second stream, the count the bar divides each process's time and
 //! instructions by; the first stream is the program's, which the bar holds
 //! equal to the same program's under `execute::<Nop>` before it measures.
@@ -36,7 +40,7 @@ pub(crate) fn driven(req: &mut Request, mut frame: FrameRef) -> Flow {
     let mut stepped: u64 = 0;
     let flow = loop {
         if let Some(code) = func.and_then(|f| view.op_array(f)) {
-            let at = tier::frame(req, frame).map_or(0, |view| view.opline().0) as usize;
+            let at = record::position(req, frame).0 as usize;
             if let Some(op) = code.oplines.get(at) {
                 let (op1, op2, data) = record::sampled(req, frame, op, code.oplines.get(at + 1));
                 if kept.len() == KEPT {

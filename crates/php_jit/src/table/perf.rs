@@ -194,12 +194,20 @@ impl Drop for Outputs {
 }
 
 impl Perf {
-    /// Nowhere: no line and no record.
     /// What the traces published through this `Perf` take.
     pub(crate) fn usage(&self) -> Usage {
         self.used.now()
     }
 
+    /// One trace published, `bytes` of code compiled from `oplines`
+    /// oplines, counted in [`Used`] once nothing of its publish can fail.
+    pub(crate) fn counted(&self, bytes: usize, oplines: usize) {
+        self.used.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.used.oplines.fetch_add(oplines, Ordering::Relaxed);
+        self.used.traces.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Nowhere: no line and no record.
     #[cfg(test)]
     pub(crate) fn none() -> Perf {
         Perf {
@@ -247,20 +255,16 @@ impl Perf {
         }
     }
 
-    /// Trace `id`, named `name`, placed at `entry` with `bytes` compiled
-    /// from `oplines` oplines: counted in [`Used`], and its map line and
-    /// its jitdump record, each where asked. A write that fails is
-    /// dropped, as php drops it.
+    /// Trace `id`, named `name`, placed at `entry` with `bytes`: its map
+    /// line and its jitdump record, each where asked. A write that fails
+    /// is dropped, as php drops it.
     pub(crate) fn published(
         &mut self,
-        (id, name): (TraceId, &TraceName),
+        id: TraceId,
+        name: &TraceName,
         entry: NonNull<u8>,
         bytes: &[u8],
-        oplines: usize,
     ) {
-        self.used.bytes.fetch_add(bytes.len(), Ordering::Relaxed);
-        self.used.oplines.fetch_add(oplines, Ordering::Relaxed);
-        self.used.traces.fetch_add(1, Ordering::Relaxed);
         let symbol = symbol(id, name);
         let start = entry.as_ptr().addr();
         if let Some(map) = &mut self.map {

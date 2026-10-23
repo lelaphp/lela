@@ -547,8 +547,8 @@ impl<P: Pages> TraceTable<P> {
         }
     }
 
-    /// What the traces published so far take (#2961), read
-    /// under the compile mutex, so no publish is half counted.
+    /// What the traces published so far take (#2961), the engine's
+    /// count across its epochs, each trace counted last in its publish.
     #[cfg_attr(
         not(any(test, php_jit_usage)),
         expect(
@@ -684,8 +684,10 @@ impl<P: Pages> TraceTable<P> {
         if !self.vacant(id) {
             return Err(Unpublished::Malformed("a slot written twice"));
         }
-        let (bytes, oplines) = (&compiled.bytes, compiled.marks.len());
-        (writer.perf).published((id, &compiled.name), entry, bytes, oplines);
+        writer
+            .perf
+            .published(id, &compiled.name, entry, &compiled.bytes);
+        let (bytes, oplines) = (compiled.bytes.len(), compiled.marks.len());
         let trace = Box::new(Trace {
             code,
             entry_offset: compiled.entry_offset,
@@ -706,6 +708,7 @@ impl<P: Pages> TraceTable<P> {
         });
         self.fill(id, trace)?;
         writer.counts.count(admitted, exits);
+        writer.perf.counted(bytes, oplines);
         self.next
             .store(id.get().saturating_add(1), Ordering::Release);
         Ok(id)
