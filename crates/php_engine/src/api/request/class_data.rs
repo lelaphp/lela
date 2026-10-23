@@ -638,6 +638,9 @@ impl Request {
         // or the type refused.
         if holder == declaring {
             self.constant_evaluated(declaring, name);
+            if super::linking::is_literal(&expr) {
+                self.take_declaration_slot(value);
+            }
         }
         Ok(value)
     }
@@ -935,7 +938,11 @@ impl Request {
                 Some(expr) => {
                     let declaring = Some(info.declaring);
                     let value = crate::api::call::eval_declared_made(self, &expr, declaring)?;
-                    Some(self.strictly_held(value, info)?)
+                    let value = self.strictly_held(value, info)?;
+                    if info.declaring == class && super::linking::is_literal(&expr) {
+                        self.take_declaration_slot(value);
+                    }
+                    Some(value)
                 }
                 None if typed => None,
                 None => Some(Value::null()),
