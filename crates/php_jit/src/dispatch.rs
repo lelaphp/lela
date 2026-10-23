@@ -560,6 +560,10 @@ fn followed<'t>(
             Left::Escaped(frame) => match visit_landing(req, shared, frame, None) {
                 Visited::Enter(id) => match table.get(id) {
                     Some(next) => {
+                        // The escaping trace's code goes on into it from
+                        // now on, as php's escape goes on into the
+                        // landing's handler.
+                        enter::remembered(req, frame, trace, next);
                         trace = next;
                         entered = enter::enter(req, frame, (epoch, trace), At::First);
                         continue;

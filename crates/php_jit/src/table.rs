@@ -43,7 +43,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
 
-use crate::lower::{Compiled, Entrance, EntrySlots, Fuzzed, Linked, Mark};
+use crate::lower::{Compiled, Entrance, EntrySlots, Fuzzed, LandingSlots, Linked, Mark};
 use crate::policy::{Place, Policy};
 use crate::record::{Entered, Start, Stop};
 use crate::types::{ExitId, Grows, Landing};
@@ -157,6 +157,10 @@ pub(crate) struct Trace<P: Pages = Native> {
     /// One entry slot per exit, which its code reads where the exit jumps
     /// to its side trace, and which the publish of that side writes.
     pub(crate) slots: EntrySlots,
+    /// Its landing slots, which its code reads where it escapes, and
+    /// which the crossing writes as it enters a trace at a landing it
+    /// escaped to (`lower::LandingSlots`).
+    pub(crate) landings: LandingSlots,
     pub(crate) id: TraceId,
     #[cfg_attr(
         not(test),
@@ -738,6 +742,7 @@ impl<P: Pages> TraceTable<P> {
                 trace: id.get(),
             },
             slots: compiled.slots,
+            landings: compiled.landings,
             id,
             kind: Kind::Trace,
             start,

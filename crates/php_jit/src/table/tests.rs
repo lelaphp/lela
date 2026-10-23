@@ -71,6 +71,7 @@ fn compiled(bytes: &[u8], exits: Vec<ExitSpec>) -> Compiled {
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
         slots,
+        landings: crate::lower::LandingSlots::new(),
         calls: Box::new([]),
         callee_caches: Box::new([]),
         map_ptrs: Box::new([]),

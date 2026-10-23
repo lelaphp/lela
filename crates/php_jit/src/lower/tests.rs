@@ -652,3 +652,34 @@ fn a_body_entry_reads_where_the_frame_stands() -> Result<(), String> {
     );
     Ok(())
 }
+
+/// A trace's landing slots (`jit-design.md` §4.9): each written once, to
+/// the first trace entered at its landing, every key tagged so none is a
+/// free slot's zero, and a landing past the slots left to the crossing.
+#[test]
+fn a_landing_slot_names_the_first_trace_entered_at_its_landing() {
+    use super::{Entrance, LANDING_TAG, LANDINGS, LandingSlots};
+    let entrance = |trace| Entrance {
+        body: 0x1000,
+        trace,
+    };
+    let (first, second, third) = (entrance(1), entrance(2), entrance(3));
+    let slots = LandingSlots::new();
+    let key = LandingSlots::key(0, 0);
+    assert_eq!(
+        key, LANDING_TAG,
+        "the first opline of op array 0 is no free slot"
+    );
+    slots.remember(key, &first);
+    slots.remember(key, &second);
+    let at = |entrance: &Entrance| std::ptr::from_ref(entrance).addr();
+    assert_eq!(slots.landed(key), Some(at(&first)));
+    let other = LandingSlots::key(7, 9);
+    assert_eq!(other, 7 | 9 << 32 | LANDING_TAG);
+    slots.remember(other, &second);
+    assert_eq!(slots.landed(other), Some(at(&second)));
+    assert_eq!(LANDINGS, 2);
+    let past = LandingSlots::key(7, 10);
+    slots.remember(past, &third);
+    assert_eq!(slots.landed(past), None);
+}

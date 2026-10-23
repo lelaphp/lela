@@ -131,6 +131,7 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
         body: None,
         fuzzed: Fuzzed::default(),
         slots: crate::lower::EntrySlots::default(),
+        landings: crate::lower::LandingSlots::default(),
         calls: Box::new([]),
         callee_caches: Box::new([]),
         map_ptrs: Box::new([]),

@@ -35,8 +35,8 @@ use std::mem::offset_of;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F64, I8, I32, I64};
 use cranelift_codegen::ir::{
-    AbiParam, Block, Function, InstBuilder, MemFlagsData, SigRef, Signature, SourceLoc, StackSlot,
-    StackSlotData, StackSlotKind, Type, UserFuncName, Value,
+    AbiParam, Block, BlockArg, Function, InstBuilder, MemFlagsData, SigRef, Signature, SourceLoc,
+    StackSlot, StackSlotData, StackSlotKind, Type, UserFuncName, Value,
 };
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -45,8 +45,8 @@ use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{MapPtrOffset, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, ESCAPED, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT,
-    STOOD_AT, Stood, Symbols, UNWOUND, located,
+    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
+    Stood, Symbols, UNWOUND, located,
 };
 
 mod calls;
@@ -188,11 +188,12 @@ pub(super) fn prologue(config: TargetFrontendConfig) -> Function {
 }
 
 /// Where a body jumps besides its exits (#3229's ruling): the address of
-/// its first entry slot, one per exit, and the trace its link jumps to,
-/// where it links to one with code.
+/// its first entry slot, one per exit, of its first landing slot, and the
+/// trace its link jumps to, where it links to one with code.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Joins {
     pub(super) slots: usize,
+    pub(super) landings: usize,
     pub(super) linked: Option<super::Linked>,
 }
 
@@ -395,6 +396,7 @@ impl<'a> Emit<'a> {
             fuzzed_sites: 0,
             joins: Joins {
                 slots: 0,
+                landings: 0,
                 linked: None,
             },
             doors: vec![None; ir.exits.len()],
@@ -1108,10 +1110,7 @@ impl<'a> Emit<'a> {
             self.b.ins().return_(&[answer]);
         }
         if let Some(block) = self.escape {
-            self.b.switch_to_block(block);
-            self.b.seal_block(block);
-            let answer = self.b.ins().iconst(I32, i64::from(ESCAPED));
-            self.b.ins().return_(&[answer]);
+            self.escaped(block)?;
         }
         if let Some(block) = self.stub {
             self.b.switch_to_block(block);
@@ -1354,7 +1353,7 @@ impl<'a> Emit<'a> {
 
     /// php's IP guard past a trace's lowest frame (`zend_jit_leave_func`):
     /// on unless the last kernel left the interpreter elsewhere than
-    /// `opline` of `func`, where the trace escapes ([`ESCAPED`]) with
+    /// `opline` of `func`, where the trace escapes ([`ESCAPED`](super::ESCAPED)) with
     /// nothing to store, as php's `jit_stub_trace_escape` takes no exit.
     /// Never failed by exit-fuzz, as it names no exit.
     fn escapes(&mut self, func: FuncRef, opline: OplineIdx) -> Result<(), Abort> {
@@ -1370,21 +1369,27 @@ impl<'a> Emit<'a> {
             .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
         let other = self.b.ins().bor(other_func, other_opline);
         let to = self.escape_block();
+        let place = self.frame_ref(self.running)?;
         let on = self.b.create_block();
-        self.b.ins().brif(other, to, &[], on, &[]);
+        self.b
+            .ins()
+            .brif(other, to, &[BlockArg::Value(place)], on, &[]);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
         Ok(())
     }
 
     /// The trace's one escape block, made the first time a return
-    /// branches to it: [`ESCAPED`] answered, nothing stored.
+    /// branches to it with the place of the frame it returned into:
+    /// [`ESCAPED`](super::ESCAPED) answered, nothing stored, past the jump to the trace a
+    /// landing slot names ([`Emit::escaped`]).
     fn escape_block(&mut self) -> Block {
         if let Some(block) = self.escape {
             return block;
         }
         let block = self.b.create_block();
         self.b.set_cold_block(block);
+        self.b.append_block_param(block, I64);
         self.escape = Some(block);
         block
     }

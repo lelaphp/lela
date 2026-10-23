@@ -20,7 +20,7 @@
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
-use cranelift_codegen::ir::{Block, InstBuilder, Value};
+use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, Value};
 use php_engine::tier::{FRAME, FrameLayout, PlainCall};
 
 use super::{
@@ -515,7 +515,11 @@ impl Emit<'_> {
         self.b.seal_block(join);
         if at_end.is_some() {
             let escape = self.escape_block();
-            self.b.ins().jump(escape, &[]);
+            let place = self
+                .returned_to
+                .ok_or_else(|| mismatch("a leave in place with no caller read"))?;
+            let place = self.b.use_var(place);
+            self.b.ins().jump(escape, &[BlockArg::Value(place)]);
             Ok(())
         } else {
             self.after_step(id, line)

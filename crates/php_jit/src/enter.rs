@@ -1129,6 +1129,19 @@ impl Rows {
     }
 }
 
+/// The trace `landed`, compiled at the landing `frame` stands at, which
+/// `escaped` escaped to, written into a landing slot of `escaped`'s
+/// (`lower::LandingSlots`), keyed as its code reads where the frame stands
+/// after the return: the frame's own cache, which names its op array, and
+/// its opline. Nothing where the frame's op array is not the engine's.
+pub(crate) fn remembered(req: &Request, frame: FrameRef, escaped: &Trace, landed: &Trace) {
+    let func = tier::frame_cache(req, frame).and_then(engine_offset);
+    let opline = tier::frame(req, frame).map(|view| view.opline().0);
+    if let (Some(func), Some(opline)) = (func, opline) {
+        (escaped.landings).remember(lower::LandingSlots::key(func, opline), &landed.entrance);
+    }
+}
+
 /// What compiled code answered `enter`, decoded once: an exit of the
 /// trace's, [`lower::UNWOUND`], [`lower::INTERRUPTED`], [`lower::DECLINED`],
 /// [`lower::ESCAPED`], or anything else, [`lower::ABANDONED`]

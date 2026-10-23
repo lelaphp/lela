@@ -29,12 +29,13 @@ use php_engine::tier::FRAME;
 
 use super::calls::TOP;
 use super::{
-    CallRoom, Emit, Raised, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
-    body_signature, engine_offset, imm, mismatch, trusted,
+    CallRoom, Emit, Raised, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_ROOM, body_signature,
+    engine_offset, imm, mismatch, trusted,
 };
 use crate::lower::{
-    ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, IMAGES_AT, Linked, READY_AT, ROOT_AT, ROW_BYTES,
-    ROW_IMAGES, ROW_READY, ROW_SEGMENT, ROWS_AT, STOOD_AT, TRACE_AT,
+    ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, ESCAPED, IMAGES_AT, LANDING_BYTES, LANDING_KEY,
+    LANDING_TAG, LANDINGS, Linked, READY_AT, ROOT_AT, ROW_BYTES, ROW_IMAGES, ROW_READY,
+    ROW_SEGMENT, ROWS_AT, STOOD_AT, TRACE_AT,
 };
 use crate::types::{Abort, End, ExitId, Grows, Landing};
 
@@ -43,9 +44,26 @@ use crate::types::{Abort, End, ExitId, Grows, Landing};
 enum Target {
     /// Through the entry slot at this address, set or not.
     Slot(usize),
+    /// At this entrance, read from a landing slot.
+    Entrance(Value),
     /// The trace a link names, whose entrance is known as the body is
     /// compiled.
     Linked(Linked),
+}
+
+/// Where the frame a jump enters on stands as the trace leaves it, which
+/// the jump lays down as the entry: its room and place, the call under
+/// way in it, its op array and opline as one word, as a `Stood` holds them,
+/// the stack's room, and the opline to stand the frame at where the jump
+/// leaves through an exit, which the frame does not stand at yet.
+#[derive(Debug, Clone, Copy)]
+struct Leaving {
+    room: Value,
+    place: Value,
+    call: Value,
+    at: Value,
+    left: Value,
+    stand: Option<Value>,
 }
 
 /// Where the frame's opline is in its room, `EX(opline)`.
@@ -143,7 +161,9 @@ impl Emit<'_> {
                 .and_then(|past| self.joins.slots.checked_add(past))
                 .ok_or_else(|| mismatch("an entry slot past the host's addresses"))?;
             let exit = ExitId(u16::try_from(at).map_err(|_| mismatch("too many exits"))?);
-            self.hand_on(exit, call, Target::Slot(slot))?;
+            let closed = self.answer_block(exit)?;
+            let leaving = self.exit_leaving(exit, call)?;
+            self.hand_on(leaving, Target::Slot(slot), closed)?;
         }
         Ok(())
     }
@@ -194,7 +214,9 @@ impl Emit<'_> {
             (Some(linked), Some(link)) if linked.trace == link.get() && self.jumps(exit) => {
                 let call = self.call_under_way();
                 self.stores(&spec.stores)?;
-                self.hand_on(exit, call, Target::Linked(linked))
+                let closed = self.answer_block(exit)?;
+                let leaving = self.exit_leaving(exit, call)?;
+                self.hand_on(leaving, Target::Linked(linked), closed)
             }
             _ => {
                 let block = self.exit_block(exit)?;
@@ -221,24 +243,85 @@ impl Emit<'_> {
         Ok(block)
     }
 
+    /// The escape `block`, which takes the place of the frame the return
+    /// left: where the frame stands, its op array and opline as the last
+    /// `Stood` says, compared with each landing slot, and the jump to the
+    /// trace the slot that holds it names, as php's escape goes on into
+    /// the handler of the opline the frame stands at, the trace compiled
+    /// there (`jit_stub_trace_escape`); [`ESCAPED`] answered where none
+    /// does or the jump finds the trace's row unready.
+    pub(super) fn escaped(&mut self, block: Block) -> Result<(), Abort> {
+        self.b.switch_to_block(block);
+        self.b.seal_block(block);
+        let place = *self
+            .b
+            .block_params(block)
+            .first()
+            .ok_or_else(|| mismatch("an escape that takes no place"))?;
+        let answer = self.b.create_block();
+        self.b.set_cold_block(answer);
+        if self.joins.landings != 0 {
+            let at = self.stood_word(I64, STOOD_FUNC);
+            let key = self.b.ins().bor_imm_u(at, LANDING_TAG.cast_signed());
+            let found = self.b.create_block();
+            self.b.set_cold_block(found);
+            self.b.append_block_param(found, I64);
+            for slot in 0..LANDINGS {
+                let address = (slot.checked_mul(LANDING_BYTES))
+                    .and_then(|past| self.joins.landings.checked_add(past))
+                    .and_then(|address| i64::try_from(address).ok())
+                    .ok_or_else(|| mismatch("a landing slot past the host's addresses"))?;
+                let address = self.b.ins().iconst(I64, address);
+                let entrance = self.b.ins().atomic_load(I64, trusted(), address);
+                let next = self.b.create_block();
+                self.b.set_cold_block(next);
+                self.closed_unless(entrance, next);
+                let held = self.b.ins().load(I64, trusted(), address, LANDING_KEY);
+                let other = self.b.ins().icmp(IntCC::NotEqual, held, key);
+                self.b
+                    .ins()
+                    .brif(other, next, &[], found, &[BlockArg::Value(entrance)]);
+                self.b.switch_to_block(next);
+                self.b.seal_block(next);
+            }
+            self.b.ins().jump(answer, &[]);
+            self.b.switch_to_block(found);
+            self.b.seal_block(found);
+            let entrance = *self
+                .b
+                .block_params(found)
+                .first()
+                .ok_or_else(|| mismatch("a landing found with no entrance"))?;
+            let leaving = Leaving {
+                room: self.stood_word(I64, STOOD_FRAME),
+                place,
+                call: self.stood_word(I64, STOOD_CALL),
+                at,
+                left: self.stood_word(I64, STOOD_ROOM),
+                stand: None,
+            };
+            self.hand_on(leaving, Target::Entrance(entrance), answer)?;
+        } else {
+            self.b.ins().jump(answer, &[]);
+        }
+        self.b.switch_to_block(answer);
+        self.b.seal_block(answer);
+        let escaped = self.b.ins().iconst(I32, i64::from(ESCAPED));
+        self.b.ins().return_(&[escaped]);
+        Ok(())
+    }
+
     /// Go to `closed` where `value` is zero; go on otherwise.
     fn closed_unless(&mut self, value: Value, closed: Block) {
         let zero = self.b.ins().icmp_imm_s(IntCC::Equal, value, 0);
         self.divert_if(zero, closed);
     }
 
-    /// Hand on from `exit`, its stores made, to the trace `target` finds,
-    /// with `call` the call under way: the jump (`jit-design.md` §4.6).
-    /// Where the slot is unset, a link's interrupt is raised, or the
-    /// request's row of the trace is not ready, the exit's number is
-    /// answered. Otherwise the entry is laid down as `enter` lays it, at
-    /// the trace's first op: where the frame stands as a kernel would
-    /// say, the exit's op array and opline, the call under way and
-    /// the stack's room; the frame's place; the trace's calls' headers in
-    /// the request, ready; and its number. The frame is stood at the
-    /// exit's opline, as `enter`'s landing stands it, and the trace's body
-    /// is called in tail position with the `ExitCtx` and the frame's room.
-    fn hand_on(&mut self, exit: ExitId, call: Value, target: Target) -> Result<(), Abort> {
+    /// Where an exit leaves the frame (`enter::land`): the frame the exit
+    /// names, its place, `call` under way in it, the exit's op array and
+    /// opline, the stack's room, and the frame to be stood at the exit's
+    /// opline.
+    fn exit_leaving(&mut self, exit: ExitId, call: Value) -> Result<Leaving, Abort> {
         let ir = self.ir;
         let spec = ir
             .exits
@@ -252,21 +335,52 @@ impl Emit<'_> {
             .get(usize::from(spec.frame.0))
             .ok_or_else(|| mismatch("an exit's frame past the trace's"))?
             .func;
-        let func = engine_offset(func)?;
+        let at = u64::from(engine_offset(func)?) | u64::from(opline.0) << 32;
+        let at = self.b.ins().iconst(I64, at.cast_signed());
+        let stack = self.stack()?;
+        let top = self.b.ins().load(I64, trusted(), stack, TOP);
+        Ok(Leaving {
+            room: self.room(spec.frame)?,
+            place: self.frame_ref(spec.frame)?,
+            call,
+            at,
+            left: self.left_past(stack, top),
+            stand: Some(self.b.ins().iconst(I32, i64::from(opline.0))),
+        })
+    }
+
+    /// Hand on, from where `leaving` says the frame stands, to the trace
+    /// `target` finds: the jump (`jit-design.md` §4.6). Where the slot is
+    /// unset, a link's interrupt is raised, or the request's row of the
+    /// trace is not ready, the code goes to `closed`, which answers what
+    /// the trace answers without the jump. Otherwise the entry is laid
+    /// down as `enter` lays it, at the trace's first op: where the frame
+    /// stands as a kernel would say, its op array and opline, the call
+    /// under way and the stack's room; the frame's place; the trace's
+    /// calls' headers in the request, ready; and its number. The frame is
+    /// stood at the opline an exit names, as `enter`'s landing stands it,
+    /// and the trace's body is called in tail position with the `ExitCtx`
+    /// and the frame's room.
+    fn hand_on(&mut self, leaving: Leaving, target: Target, closed: Block) -> Result<(), Abort> {
         let cx = self.cx.ok_or_else(|| mismatch("a jump before the entry"))?;
-        let closed = self.answer_block(exit)?;
-        let (body, trace) = match target {
+        let entrance = match target {
             Target::Slot(slot) => {
                 let slot = i64::try_from(slot)
                     .map_err(|_| mismatch("an entry slot past the host's addresses"))?;
                 let slot = self.b.ins().iconst(I64, slot);
                 let entrance = self.b.ins().atomic_load(I64, trusted(), slot);
                 self.closed_unless(entrance, closed);
-                let body = self.b.ins().load(I64, trusted(), entrance, ENTRANCE_BODY);
-                let trace = self.b.ins().load(I32, trusted(), entrance, ENTRANCE_TRACE);
-                (body, trace)
+                Some(entrance)
             }
-            Target::Linked(linked) => {
+            Target::Entrance(entrance) => Some(entrance),
+            Target::Linked(_) => None,
+        };
+        let (body, trace) = match (entrance, target) {
+            (Some(entrance), _) => (
+                self.b.ins().load(I64, trusted(), entrance, ENTRANCE_BODY),
+                self.b.ins().load(I32, trusted(), entrance, ENTRANCE_TRACE),
+            ),
+            (None, Target::Linked(linked)) => {
                 if linked.interrupt {
                     self.interrupt_test(Raised::Answer(closed))?;
                 }
@@ -277,6 +391,7 @@ impl Emit<'_> {
                     self.b.ins().iconst(I32, i64::from(linked.trace)),
                 )
             }
+            (None, _) => return Err(mismatch("a jump with no trace to enter")),
         };
         // The request's row of the trace: its segment, then the row in it.
         let rows = self.b.ins().load(I64, trusted(), cx, ROWS_AT);
@@ -299,16 +414,17 @@ impl Emit<'_> {
         self.closed_unless(ready, closed);
         let images = self.b.ins().load(I64, trusted(), row, ROW_IMAGES);
         // The entry, as `enter` lays it.
-        let room = self.room(spec.frame)?;
-        let place = self.frame_ref(spec.frame)?;
+        let Leaving {
+            room,
+            place,
+            call,
+            at,
+            left,
+            stand,
+        } = leaving;
         let place = self.b.ins().ireduce(I32, place);
         let first_op = self.b.ins().iconst(I32, 0);
         let one = self.b.ins().iconst(I32, 1);
-        let func = self.b.ins().iconst(I32, i64::from(func));
-        let at = self.b.ins().iconst(I32, i64::from(opline.0));
-        let stack = self.stack()?;
-        let top = self.b.ins().load(I64, trusted(), stack, TOP);
-        let left = self.left_past(stack, top);
         for (value, field) in [
             (first_op, ENTRY_AT),
             (images, IMAGES_AT),
@@ -317,14 +433,15 @@ impl Emit<'_> {
             (trace, TRACE_AT),
             (room, STOOD_AT + STOOD_FRAME),
             (call, STOOD_AT + STOOD_CALL),
-            (func, STOOD_AT + STOOD_FUNC),
-            (at, STOOD_AT + STOOD_OPLINE),
+            (at, STOOD_AT + STOOD_FUNC),
             (left, STOOD_AT + STOOD_ROOM),
         ] {
             self.b.ins().store(trusted(), value, cx, field);
         }
         // The frame stood where the exit lands it.
-        self.b.ins().store(trusted(), at, room, OPLINE);
+        if let Some(opline) = stand {
+            self.b.ins().store(trusted(), opline, room, OPLINE);
+        }
         let sig = self.b.import_signature(body_signature());
         self.b.ins().return_call_indirect(sig, body, &[cx, room]);
         Ok(())

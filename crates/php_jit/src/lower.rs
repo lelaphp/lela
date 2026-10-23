@@ -65,7 +65,7 @@ pub(crate) mod dump;
 mod tests;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering};
 
 use cranelift_codegen::control::ControlPlane;
 use cranelift_codegen::ir::SourceLoc;
@@ -134,6 +134,8 @@ pub(crate) struct Compiled {
     /// jump to its side trace; the code holds their address, so they live
     /// as long as it.
     pub(crate) slots: EntrySlots,
+    /// Its landing slots, which the code reads where it escapes.
+    pub(crate) landings: LandingSlots,
     /// The plain calls the code pushes in place, in the order it reads
     /// their headers in, the request's, at [`IMAGES_AT`].
     pub(crate) calls: Box<[PlainCall]>,
@@ -257,6 +259,100 @@ impl EntrySlots {
     pub(crate) fn opened(&self, exit: ExitId) -> Option<usize> {
         let slot = self.0.get(usize::from(exit.0))?;
         Some(slot.load(Ordering::Acquire).addr())
+    }
+}
+
+/// A trace's landing slots (`jit-design.md` §4.9): where a trace escapes,
+/// a return that leaves its lowest frame at an opline it does not go on at,
+/// php's `jit_stub_trace_escape`, which goes on into the handler of that
+/// opline, the trace compiled there where one is
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11250`), its code compares where
+/// the frame stands, its op array and opline, with each slot and jumps to
+/// the trace the slot names where one holds it, and answers
+/// [`ESCAPED`] as before where none does. A slot is written once, its
+/// place before its trace with release, by the crossing the first time it
+/// enters a trace compiled at a landing the trace escaped to
+/// ([`LandingSlots::remember`]); a landing's word that reads compiled
+/// reads so for as long as the table stands, so the slot names what the
+/// interpreter would have entered there. [`LANDINGS`] of them, the
+/// landings first entered; an escape to another is answered as before.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LandingSlots(Arc<[LandingSlot]>);
+
+/// One landing slot: the trace entered there, and where, as
+/// [`LandingSlots::key`] writes it, zero while the slot is free.
+#[repr(C)]
+#[derive(Debug, Default)]
+pub(crate) struct LandingSlot {
+    entrance: AtomicPtr<Entrance>,
+    key: AtomicU64,
+}
+
+/// How many landing slots a trace has.
+pub(crate) const LANDINGS: usize = 2;
+
+/// Where compiled code reads a landing slot's fields, and its stride.
+pub(crate) const LANDING_ENTRANCE: i32 = 0;
+pub(crate) const LANDING_KEY: i32 = 8;
+pub(crate) const LANDING_BYTES: usize = 16;
+const _: () = assert!(
+    std::mem::offset_of!(LandingSlot, entrance) == LANDING_ENTRANCE.unsigned_abs() as usize
+        && std::mem::offset_of!(LandingSlot, key) == LANDING_KEY.unsigned_abs() as usize
+        && size_of::<LandingSlot>() == LANDING_BYTES
+);
+
+/// The bit every written key carries, so no key is zero, a free slot's.
+pub(crate) const LANDING_TAG: u64 = 1 << 63;
+
+impl LandingSlots {
+    /// [`LANDINGS`] slots, none written.
+    pub(crate) fn new() -> LandingSlots {
+        LandingSlots((0..LANDINGS).map(|_| LandingSlot::default()).collect())
+    }
+
+    /// The address of the first slot, which the code reads past.
+    fn base(&self) -> usize {
+        self.0.as_ptr().addr()
+    }
+
+    /// The key of the landing at `opline` of the op array the engine
+    /// numbers `func`: the two words a `Stood` holds them in, read as one,
+    /// with [`LANDING_TAG`]. An op array's oplines are numbered below
+    /// `2^31`.
+    pub(crate) fn key(func: u32, opline: u32) -> u64 {
+        u64::from(func) | u64::from(opline) << 32 | LANDING_TAG
+    }
+
+    /// `landed` remembered as the trace compiled at the landing `key`
+    /// names, in the first free slot, once: nothing where a slot holds the
+    /// landing already or none is free.
+    pub(crate) fn remember(&self, key: u64, landed: &Entrance) {
+        if self
+            .0
+            .iter()
+            .any(|slot| slot.key.load(Ordering::Relaxed) == key)
+        {
+            return;
+        }
+        let claimed = self.0.iter().find(|slot| {
+            slot.key
+                .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        });
+        if let Some(slot) = claimed {
+            slot.entrance
+                .store(std::ptr::from_ref(landed).cast_mut(), Ordering::Release);
+        }
+    }
+
+    /// The entrance the slot holding `key` names, none where no slot does.
+    #[cfg(test)]
+    pub(crate) fn landed(&self, key: u64) -> Option<usize> {
+        let slot = self
+            .0
+            .iter()
+            .find(|slot| slot.key.load(Ordering::Relaxed) == key)?;
+        Some(slot.entrance.load(Ordering::Acquire).addr())
     }
 }
 
@@ -665,8 +761,10 @@ impl Backend {
         let config = self.isa.frontend_config();
         let (calls, callee_caches) = in_place(ir);
         let slots = EntrySlots::new(ir.exits.len());
+        let landings = LandingSlots::new();
         let joins = clif::Joins {
             slots: slots.base(),
+            landings: landings.base(),
             linked,
         };
         // Under exit-fuzz a first pass counts the guards, one byte each.
@@ -710,6 +808,7 @@ impl Backend {
             name,
             fuzzed,
             slots,
+            landings,
             callee_caches,
             calls,
         })
@@ -727,6 +826,7 @@ impl Backend {
         let (calls, _) = in_place(ir);
         let joins = clif::Joins {
             slots: 0x6000_0000,
+            landings: 0x6100_0000,
             linked,
         };
         clif::lower(
