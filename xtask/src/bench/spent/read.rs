@@ -39,12 +39,14 @@ pub(super) fn totals(pid: u32) -> Option<[u64; 4]> {
     Some(sum)
 }
 
-/// What the child `pid` retired over its life, read once it has exited and
-/// before it is reaped: `waitid` with `WNOWAIT` waits for the exit and
-/// leaves the child for the caller's own wait, and `proc_pid_rusage` reads
-/// the zombie's totals, as `time -l` reads them. None where either call
-/// fails; a wait a signal cut short is waited again.
-pub(super) fn exited(pid: u32) -> Option<[u64; 4]> {
+/// What the child `pid` retired over its life, and the most memory it
+/// held at once, its peak physical footprint in bytes, read once it has
+/// exited and before it is reaped: `waitid` with `WNOWAIT` waits for the
+/// exit and leaves the child for the caller's own wait, and
+/// `proc_pid_rusage` reads the zombie's totals, as `time -l` reads them.
+/// None where either call fails; a wait a signal cut short is waited
+/// again.
+pub(super) fn exited(pid: u32) -> Option<([u64; 4], u64)> {
     let id = libc::id_t::from(pid);
     loop {
         // SAFETY: `siginfo_t` is integers and pointers, for which every bit
@@ -67,7 +69,10 @@ pub(super) fn exited(pid: u32) -> Option<[u64; 4]> {
         }
     }
     let info = usage(libc::pid_t::try_from(pid).ok()?)?;
-    Some(figures(&info, timebase()?))
+    Some((
+        figures(&info, timebase()?),
+        info.ri_lifetime_max_phys_footprint,
+    ))
 }
 
 /// One process's instructions, cycles, CPU (user and system) and runnable

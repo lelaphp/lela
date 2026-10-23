@@ -328,16 +328,20 @@ pub(crate) struct Sample {
     pub(crate) value: f64,
     pub(crate) wrote: Vec<u8>,
     pub(crate) spent: Spent,
+    /// A process arm's peak physical footprint in bytes, where it asked
+    /// for what its process retired and the platform states it (#2961).
+    pub(crate) peak: Option<u64>,
 }
 
 impl Sample {
     /// A run that states its value and what it wrote, and nothing it spent.
     pub(crate) fn of(value: f64, wrote: Vec<u8>) -> Sample {
-        let spent = Spent::Unasked;
+        let (spent, peak) = (Spent::Unasked, None);
         Sample {
             value,
             wrote,
             spent,
+            peak,
         }
     }
 }
@@ -353,6 +357,9 @@ pub(crate) enum Unit {
     Ms,
     Ns,
     Rps,
+    /// Bytes, a cost: a process's peak footprint, or its traces' code per
+    /// opline compiled (G4, #2961).
+    Bytes,
 }
 
 impl Unit {
@@ -362,6 +369,7 @@ impl Unit {
             Unit::Ms => "ms",
             Unit::Ns => "ns",
             Unit::Rps => "rps",
+            Unit::Bytes => "bytes",
         }
     }
 
@@ -375,7 +383,7 @@ impl Unit {
     /// a time, and less of a rate.
     pub(crate) fn worse(self) -> f64 {
         match self {
-            Unit::Ms | Unit::Ns => 1.0,
+            Unit::Ms | Unit::Ns | Unit::Bytes => 1.0,
             Unit::Rps => -1.0,
         }
     }
@@ -384,7 +392,7 @@ impl Unit {
     /// suffix a figure is kept under, milliseconds where none is another's.
     pub(crate) fn of(reading: &Reading) -> Unit {
         let kept = |unit: Unit| (reading.numbers.keys()).any(|k| k.ends_with(&unit.key("")));
-        [Unit::Rps, Unit::Ns]
+        [Unit::Rps, Unit::Ns, Unit::Bytes]
             .into_iter()
             .find(|unit| kept(*unit))
             .unwrap_or(Unit::Ms)
@@ -703,9 +711,9 @@ fn ran(arm: &Arm, program: &Path) -> Result<(Sample, Vec<u8>)> {
         pipe.write_all(arm.stdin.as_bytes())
             .with_context(|| format!("feeding the arm {}", arm.name))?;
     }
-    let (done, value, spent) = if arm.retired {
+    let (done, value, (spent, peak)) = if arm.retired {
         let (stdout, stderr) = (drained(child.stdout.take()), drained(child.stderr.take()));
-        let retired = spent::Retired::exited(child.id());
+        let (retired, peak) = spent::Retired::exited(child.id()).unzip();
         let value = start.elapsed().as_secs_f64() * 1000.0;
         let status = child.wait();
         let status = status.with_context(|| format!("waiting for the arm {}", arm.name))?;
@@ -715,11 +723,15 @@ fn ran(arm: &Arm, program: &Path) -> Result<(Sample, Vec<u8>)> {
             stdout,
             stderr,
         };
-        (done, value, Spent::run(retired))
+        (done, value, (Spent::run(retired), peak))
     } else {
         let done = child.wait_with_output();
         let done = done.with_context(|| format!("waiting for the arm {}", arm.name))?;
-        (done, start.elapsed().as_secs_f64() * 1000.0, Spent::Unasked)
+        (
+            done,
+            start.elapsed().as_secs_f64() * 1000.0,
+            (Spent::Unasked, None),
+        )
     };
     if !done.status.success() {
         bail!(
@@ -731,6 +743,7 @@ fn ran(arm: &Arm, program: &Path) -> Result<(Sample, Vec<u8>)> {
     }
     let sample = Sample {
         spent,
+        peak,
         ..Sample::of(value, done.stdout)
     };
     Ok((sample, done.stderr))
@@ -895,6 +908,7 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     bars.extend(kernels::compiled(root));
     bars.extend(kernels::door(root));
     bars.extend(kernels::stepping(root));
+    bars.extend(kernels::g4(root));
     bars.extend(
         [
             ("jit-wrapper", [WRAPPER, DIRECT], Held::Series),

@@ -63,17 +63,17 @@ impl Retired {
         None
     }
 
-    /// What the child `pid` retired over its life, waited for until it
-    /// exits and left unreaped for its owner's wait; none where it cannot
-    /// be read.
+    /// What the child `pid` retired over its life, and its peak physical
+    /// footprint in bytes, waited for until it exits and left unreaped for
+    /// its owner's wait; none where it cannot be read.
     #[cfg(target_os = "macos")]
-    pub(crate) fn exited(pid: u32) -> Option<Retired> {
-        read::exited(pid).map(Retired)
+    pub(crate) fn exited(pid: u32) -> Option<(Retired, u64)> {
+        read::exited(pid).map(|(figures, peak)| (Retired(figures), peak))
     }
 
     /// None: this platform has no `proc_pid_rusage`.
     #[cfg(not(target_os = "macos"))]
-    pub(crate) fn exited(_pid: u32) -> Option<Retired> {
+    pub(crate) fn exited(_pid: u32) -> Option<(Retired, u64)> {
         None
     }
 
