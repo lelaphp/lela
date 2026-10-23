@@ -1096,10 +1096,10 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
 /// (`0007`, `0008`, `0010`, `0011`, `0013`, `0014`), the increment's at
 /// `0016`, with no exit for a `JMPZ`'s direction
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`, #3203). php's tenth,
-/// its interrupt test's at `0017`, is there because its register
-/// allocator holds the `BOOL_NOT`s' temporaries in registers, which an
-/// exit must store (`:7214-7230`); here the loop takes the interrupt stub
-/// (#3270).
+/// its interrupt test's at `0017`, is there because its code no longer
+/// uses the instruction pointer it entered with, its register allocator
+/// holding nothing (`:7214-7230`); here the loop takes the interrupt stub
+/// (#3277).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {
