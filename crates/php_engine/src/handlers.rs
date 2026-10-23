@@ -4663,6 +4663,7 @@ pub(crate) fn verify_return_type<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if op.op1_type != OperandKind::Const {
         let at = ByKind(op.op1_type).read(req.slots_mut(frame), code, op.op1);
@@ -4674,15 +4675,22 @@ pub(crate) fn verify_return_type<T: Tier>(
             return Ok(advanced());
         }
     }
-    return_mask_missed(req, frame, code, op)
+    return_mask_missed(req, (frame, at), code, op)
 }
 
-/// [`verify_return_type`] past its mask: `zend_check_type_slow` over the
-/// declared type, the coercion beside it and the `TypeError`, out of
-/// line so the hit saves no register for it.
+/// [`verify_return_type`] past its mask, the frame stood at `at`
+/// (`SAVE_OPLINE()`): `zend_check_type_slow` over the declared type,
+/// the coercion beside it and the `TypeError`, out of line so the hit
+/// saves no register for it and writes no position.
 #[cold]
 #[inline(never)]
-fn return_mask_missed(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+fn return_mask_missed(
+    req: &mut Request,
+    (frame, at): (FrameRef, u32),
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    req.vm_mut().stand(frame, at);
     let Some((_, by_ref)) = declared_return(req, frame) else {
         return Ok(advance(req, frame));
     };
