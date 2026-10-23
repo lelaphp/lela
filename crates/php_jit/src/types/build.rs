@@ -571,7 +571,11 @@ impl<'a> Builder<'a> {
         // A native's call returns what its declaration says, as php's
         // trace TSSA types a `DO_ICALL`'s result by the `func` its record
         // names (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`).
-        let returns = is_call(op.opcode)
+        // Only a `DO_ICALL`'s callee is fixed where the opline is
+        // compiled: a call by name, a method's or a dynamic one may serve
+        // another function than the one recorded, which php's trace holds
+        // with a guard on the callee this tier does not take.
+        let returns = (op.opcode == Opcode::DoIcall)
             .then(|| self.calls.last().and_then(|call| call.returns))
             .flatten();
         let out = match slot {
