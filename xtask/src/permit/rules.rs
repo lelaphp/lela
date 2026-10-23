@@ -497,8 +497,8 @@ pub(super) fn placed<'a>(root: &Path, line: &'a Line) -> Vec<(&'a Argv, PathBuf)
 /// words ([`moved`]): a rule scoped by `where` judges the commands it
 /// fires on there, so `git -C /wt commit` is judged in `/wt`, `(cd /wt &&
 /// ls); git add x` where the shell stands (#2764), and `cd /wt; git add
-/// x` both in `/wt` and where it started, the `cd` being one that may
-/// fail (#2995).
+/// x` both in `/wt` and where it started where `/wt` is no directory it
+/// can enter, the `cd` being one that may fail (#2995, #3257).
 pub(super) fn fired_in(root: &Path, line: &Line, fires: impl Fn(&Argv) -> bool) -> Vec<PathBuf> {
     let walk = Walk::of(root, Some(line));
     let mut checkouts = Vec::new();
@@ -548,13 +548,19 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
 /// Each `cd`, `pushd` and `popd` the line says the target of moves the
 /// shell it runs in, from the call's `root`, `~/` being the home; a `cd`
 /// or `pushd` to a variable the line assigned before it, `W=/wt && cd
-/// "$W"`, goes where the value names ([`Argv::directory`]). A change may
-/// fail, a file or a directory without search permission, and the shell
-/// then stays where it stood: each shell keeps the places it may stand
-/// where every command since the last separator other than `&&`
+/// "$W"`, goes where the value names ([`Argv::directory`]). A change into
+/// a place the shell cannot enter as the line is judged ([`enters`]), a
+/// file, a directory without search permission or none, may fail, and the
+/// shell then stays where it stood: each shell keeps the places it may
+/// stand where every command since the last separator other than `&&`
 /// succeeded apart from those where one of them failed, and a command
-/// after any other separator ([`Joint`]) runs at both, so `cd /wt && x;
-/// y` runs `x` in `/wt` and `y` in `/wt` and where the line started. A
+/// after any other separator ([`Joint`]) runs at both, so where `/wt` is
+/// no directory, `cd /wt && x; y` runs `x` in `/wt` and `y` in `/wt` and
+/// where the line started. One into a directory it can enter does not
+/// fail, so `cd <another repository> && S=x; git commit` commits there
+/// alone (#3257); what that leaves open, stated: a directory the line
+/// itself removes or makes unsearchable before its change is read as
+/// entered. A
 /// change piped or sent to the background runs in a shell of its own and
 /// moves nothing. A change inside a subshell, a substitution or a child
 /// shell moves the commands in it alone ([`Line::shells`], #2764), and
@@ -646,11 +652,12 @@ impl Shell {
             self.lost = true;
             return;
         };
+        let may_fail = !moved.iter().all(|dir| enters(dir));
         self.sure.clear();
         for dir in moved {
             add(&mut self.sure, dir);
         }
-        for dir in from {
+        for dir in from.into_iter().filter(|_| may_fail) {
             add(&mut self.failed, dir);
         }
     }
@@ -740,6 +747,13 @@ impl<'a> Walk<'a> {
         let placed = self.placed.iter();
         placed.filter_map(move |(at, dir)| std::ptr::eq(*at, argv).then_some(dir))
     }
+}
+
+/// Whether a change into `dir` succeeds as the line is judged: `dir/.`
+/// resolves to a directory only where `dir` is one the shell may search,
+/// as `cd` needs it to be (#3257).
+fn enters(dir: &Path) -> bool {
+    dir.join(".").is_dir()
 }
 
 /// `one` added to `set` where it is not there already.

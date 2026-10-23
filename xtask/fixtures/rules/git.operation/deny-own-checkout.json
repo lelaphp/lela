@@ -1,0 +1,1 @@
+{"tool_name":"Bash","tool_input":{"command":"cd . && S=/var/empty; R=(AGENTS.md); git add -- \"${R[@]}\" && git commit -q -F $S/m.txt -- \"${R[@]}\"","description":"Commit by pathspec in the checkout the merge stands in, after a cd into it (#3257)"}}

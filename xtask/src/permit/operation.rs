@@ -1116,9 +1116,11 @@ mod tests {
         let at = linked.display();
         assert_eq!(ran_in(&format!("W={at} && cd \"$W\" && touch x")), top);
         assert_eq!(ran_in(&format!("W={at}; cd $W/sub && touch x")), top);
-        // #2995: a `cd` joined by `;` may fail, and the line may run where
-        // it started as well, so it is held there.
-        assert_eq!(ran_in(&format!("W={at}; cd $W/sub; touch x")), workspace);
+        // #2995: a `cd` into a file joined by `;` fails, and the line may
+        // run where it started as well, so it is held there; one into a
+        // directory it can enter does not fail (#3257).
+        assert_eq!(ran_in(&format!("W={at}; cd $W/.git; touch x")), workspace);
+        assert_eq!(ran_in(&format!("W={at}; cd $W/sub; touch x")), top);
         let exported = format!("export A=1 W={at} && cd \"${{W}}\" && touch x");
         assert_eq!(ran_in(&exported), top);
         assert_eq!(ran_in("cd \"$UNSET_BY_THE_LINE\" && touch x"), workspace);
