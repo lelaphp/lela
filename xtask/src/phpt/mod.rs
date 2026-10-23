@@ -430,11 +430,25 @@ impl Subset {
     /// Every `.phpt` of the directory `under` of the pinned tree at
     /// `source`, a subset of its own named by its place in the tree.
     fn whole(source: &Path, under: PathBuf) -> Subset {
+        let scope = under.to_string_lossy().into_owned();
+        Subset::over(scope, source, [under], Holds::Every)
+    }
+
+    /// The subset named `scope` of the directories `unders` of the tree
+    /// at `root`, run from there.
+    fn over(
+        scope: String,
+        root: &Path,
+        unders: impl IntoIterator<Item = PathBuf>,
+        holds: Holds,
+    ) -> Subset {
+        let dirs = unders.into_iter().map(|under| Dir::at(root, under));
+        let root = root.to_path_buf();
         Subset {
-            scope: under.to_string_lossy().into_owned(),
-            dirs: vec![Dir::at(source, under)],
-            root: source.to_path_buf(),
-            holds: Holds::Every,
+            scope,
+            dirs: dirs.collect(),
+            root,
+            holds,
         }
     }
 
@@ -445,33 +459,16 @@ impl Subset {
     /// `done` asking a crate for a phpt reading nothing could write, which
     /// is the hole #18 closed.
     pub(crate) fn of(source: &Path, krate: &Crate) -> Option<Subset> {
-        let dirs: Vec<Dir> = krate
-            .subsets()
-            .into_iter()
-            .map(|under| Dir::at(source, under))
-            .collect();
-        (!dirs.is_empty()).then(|| Subset {
-            scope: krate.name.clone(),
-            dirs,
-            root: source.to_path_buf(),
-            holds: Holds::Every,
-        })
+        let unders = krate.subsets();
+        (!unders.is_empty()).then(|| Subset::over(krate.name.clone(), source, unders, Holds::Every))
     }
 
     /// The same subset standing in the tree at `root`, a copy of the one
     /// it was resolved in: its directories at their places there, and its
     /// programs run from there.
     pub(crate) fn rooted(&self, root: &Path) -> Subset {
-        Subset {
-            scope: self.scope.clone(),
-            dirs: self
-                .dirs
-                .iter()
-                .map(|place| Dir::at(root, place.under.clone()))
-                .collect(),
-            root: root.to_path_buf(),
-            holds: self.holds,
-        }
+        let unders = self.dirs.iter().map(|place| place.under.clone());
+        Subset::over(self.scope.clone(), root, unders, self.holds)
     }
 
     /// Whether the subset's tests make System V objects naming no process,
