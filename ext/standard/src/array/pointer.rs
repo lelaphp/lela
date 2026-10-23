@@ -577,6 +577,23 @@ fn min(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value
 /// }
 /// string(2) "10"
 /// ```
+///
+/// The framed walk of more than two compares directly over a stretch of
+/// numbers and, from the first argument that leaves it, through
+/// `zend_compare` to the last, which orders a NaN above everything:
+///
+/// ```php
+/// var_dump(max(1, "0", NAN), max(1, "0", NAN, 0), min(1, "2", NAN), max(1, 2.5, NAN), max(NAN, 1, 2), max(5, 1.5, 9007199254740993, NAN), min(2, 3, 1.5));
+/// ```
+/// ```expect
+/// float(NAN)
+/// int(0)
+/// int(1)
+/// float(2.5)
+/// float(NAN)
+/// float(NAN)
+/// float(1.5)
+/// ```
 #[php_function(frameless(2))]
 fn max(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value, Thrown> {
     extreme(req, value, values, Ordering::Greater)
@@ -622,13 +639,43 @@ fn extreme(
         };
         return Ok(best);
     }
+    // The framed walk: a stretch of ints, then of floats once a float
+    // arrives beside an int that is exactly a double, compared directly,
+    // and `zend_compare` from the first argument neither stretch takes
+    // on to the last, as php's `goto generic_compare` never comes back.
     let mut best = value;
-    for value in values {
-        if beyond(req, &value, &best, wanted)? {
-            best = value;
+    let mut walk = match value.as_ref() {
+        ValueRef::Int(_) => Walk::Int,
+        ValueRef::Float(_) => Walk::Float,
+        _ => Walk::Generic,
+    };
+    for candidate in values {
+        walk = match (walk, candidate.as_ref(), best.as_ref()) {
+            (Walk::Int, ValueRef::Int(_), _) => Walk::Int,
+            (Walk::Int, ValueRef::Float(_), ValueRef::Int(held)) if exact(held) => Walk::Float,
+            (Walk::Float, ValueRef::Float(_), _) => Walk::Float,
+            (Walk::Float, ValueRef::Int(n), _) if exact(n) => Walk::Float,
+            _ => Walk::Generic,
+        };
+        let beyond = match walk {
+            Walk::Generic => compare(req, &candidate, &best)? == wanted,
+            Walk::Int | Walk::Float => dedicated(&candidate, &best) == Numeric::Ordered(wanted),
+        };
+        if beyond {
+            best = candidate;
         }
     }
     Ok(best)
+}
+
+/// Where the framed walk of `PHP_FUNCTION(min)` and `(max)` stands
+/// (`Z/ext/standard/array.c:1210`): its dedicated int loop, its dedicated
+/// double loop, or the generic loop it jumps to and stays in.
+#[derive(Clone, Copy)]
+enum Walk {
+    Int,
+    Float,
+    Generic,
 }
 
 /// What php's dedicated numeric comparison answers where it applies.
@@ -654,21 +701,6 @@ fn dedicated(a: &Value, b: &Value) -> Numeric {
         _ => return Numeric::Generic,
     };
     ordering.map_or(Numeric::Unordered, Numeric::Ordered)
-}
-
-/// Whether `candidate` is strictly beyond `best` the way `wanted`
-/// points, as the framed loops ask it.
-fn beyond(
-    req: &mut Request,
-    candidate: &Value,
-    best: &Value,
-    wanted: Ordering,
-) -> Result<bool, Thrown> {
-    match dedicated(candidate, best) {
-        Numeric::Ordered(ordering) => Ok(ordering == wanted),
-        Numeric::Unordered => Ok(false),
-        Numeric::Generic => Ok(compare(req, candidate, best)? == wanted),
-    }
 }
 
 /// `zend_dval_to_lval_silent((double) n) == n`: whether the int is
