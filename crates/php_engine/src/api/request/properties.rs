@@ -1681,9 +1681,8 @@ impl Request {
         }
         let class = self.symbols().class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name);
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!(
                 "Cannot access uninitialized non-nullable property {class}::${shown} by reference"
             ),
@@ -2051,9 +2050,8 @@ impl Request {
         let class = self.symbols().class_name(declaring);
         let ty = php_unit::type_to_string(ty);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::type_error(
             self,
-            "TypeError",
             &format!(
                 "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
             ),
@@ -4713,18 +4711,13 @@ impl Request {
         if issetter.is_some() && test == PropertyTest::Exists {
             return Ok(false);
         }
+        let issetter = issetter.filter(|_| self.guard_word(object, name) & IN_ISSET == 0);
         let Some(issetter) = issetter else {
             if initialises(self) {
                 return self.lazy_has(object, name, test);
             }
             return Ok(false);
         };
-        if self.guard_word(object, name) & IN_ISSET != 0 {
-            if initialises(self) {
-                return self.lazy_has(object, name, test);
-            }
-            return Ok(false);
-        }
         // php holds `IN_ISSET` across both calls, so the `__get` the
         // `empty` arm asks for runs with the `__isset`'s guard still
         // standing, and the object across both (`GC_ADDREF(zobj)`,

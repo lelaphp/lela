@@ -193,48 +193,49 @@ impl Code<&mut Request> {
 /// than a parse error, ends.
 fn eval(req: &mut Request, code: &[u8], name: &[u8], uncaught: Option<Level>) -> bool {
     let shared = Arc::clone(&req.shared);
-    {
-        let unit = match req.host_string(|req| {
-            req.compile_string(code, name, php_compile::syntax::Position::AfterOpenTag)
-        }) {
-            Ok(Ok(unit)) => unit,
-            Ok(Err(refused)) => {
-                crate::engine::refused_program(req, &refused, name);
-                return refused.error.level == Level::Parse && dont_bail(req);
-            }
-            Err(thrown) => {
-                req.leave_pending(&thrown);
-                return uncaught.map_or(!req.diagnostics().bailing_out(), |level| {
-                    take_uncaught(req, level)
-                });
-            }
-        };
-        if !crate::engine::note_compiled(req, &unit, SourceKind::EVAL) {
-            return uncaught.map_or(!req.diagnostics().bailing_out(), |level| {
-                take_uncaught(req, level)
-            });
+    let unit = match req.host_string(|req| {
+        req.compile_string(code, name, php_compile::syntax::Position::AfterOpenTag)
+    }) {
+        Ok(Ok(unit)) => unit,
+        Ok(Err(refused)) => {
+            crate::engine::refused_program(req, &refused, name);
+            return refused.error.level == Level::Parse && dont_bail(req);
         }
-        let standing = req.vm().depth();
-        let program = crate::api::request::CodeFrom::Top(None);
-        let frame = match req.push_code_frame(php_unit::PublishedUnit::clone(&unit), program) {
-            Ok(frame) => frame,
-            Err(fatal) => {
-                req.end_in(&fatal);
-                return false;
-            }
-        };
-        let served = req.serve_host_string(|req| (shared.loops.entry)(req, frame));
-        // What a fatal left standing above the main frame, as
-        // `serve_unit` pops it.
-        req.leave_code(standing, frame);
-        if let Err(fatal) = served {
+        Err(thrown) => {
+            req.leave_pending(&thrown);
+            return left(req, uncaught);
+        }
+    };
+    if !crate::engine::note_compiled(req, &unit, SourceKind::EVAL) {
+        return left(req, uncaught);
+    }
+    let standing = req.vm().depth();
+    let program = crate::api::request::CodeFrom::Top(None);
+    let frame = match req.push_code_frame(php_unit::PublishedUnit::clone(&unit), program) {
+        Ok(frame) => frame,
+        Err(fatal) => {
             req.end_in(&fatal);
             return false;
         }
-        uncaught.map_or(!req.diagnostics().bailing_out(), |level| {
-            take_uncaught(req, level)
-        })
+    };
+    let served = req.serve_host_string(|req| (shared.loops.entry)(req, frame));
+    // What a fatal left standing above the main frame, as
+    // `serve_unit` pops it.
+    req.leave_code(standing, frame);
+    if let Err(fatal) = served {
+        req.end_in(&fatal);
+        return false;
     }
+    left(req, uncaught)
+}
+
+/// What the code left once it ends: rendered uncaught at `uncaught`
+/// ([`take_uncaught`]), or for `None` left pending, the request going on
+/// unless it is bailing out.
+fn left(req: &mut Request, uncaught: Option<Level>) -> bool {
+    uncaught.map_or(!req.diagnostics().bailing_out(), |level| {
+        take_uncaught(req, level)
+    })
 }
 
 /// `zend_exception_error(EG(exception), severity)` over what the code

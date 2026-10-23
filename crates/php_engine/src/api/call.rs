@@ -13,7 +13,7 @@ use php_unit::{ConstIdx, Opcode, Unit};
 
 use crate::api::abi::{Callable, PropertyRead};
 use crate::api::raising::{
-    Thrown, argument_error, class_not_found, error, non_static_method_call, throw_error,
+    Thrown, argument_error, class_not_found, error, non_static_method_call, type_error,
     undefined_function, undefined_method,
 };
 use crate::api::request::{Request, Strategy};
@@ -295,7 +295,7 @@ fn without_frame(req: &mut Request, served: Result<Value, Thrown>) -> Result<Val
 /// The `zend_function` behind a target, `fcc.function_handler`: a
 /// closure's is its payload's, `zend_get_closure_method_def`. What the
 /// named arguments are placed against.
-fn callee(req: &Request, target: Target) -> Option<Function> {
+pub(crate) fn callee(req: &Request, target: Target) -> Option<Function> {
     match target {
         Target::Function(function) | Target::Method { function, .. } => Some(function),
         Target::Closure(object) => object.closure(req).map(|closure| closure.function),
@@ -1273,11 +1273,7 @@ fn construct_object(
             && let Some((name, _)) = named.first()
         {
             object.mark_destructor_called();
-            let message = format!(
-                "Unknown named parameter ${}",
-                String::from_utf8_lossy(name.as_bytes())
-            );
-            return Err(error(req, &message));
+            return Err(NamedRefused::Unknown.throw(req, *name));
         }
         return Ok(());
     };
@@ -1831,11 +1827,9 @@ pub fn bound_variables(
     callable: &Callable,
 ) -> Result<Vec<(Owner<PhpString>, Value)>, Thrown> {
     let rows = req.static_variables(callable.target());
-    let mut out = Vec::with_capacity(rows.len());
-    for (name, value) in rows {
-        out.push((PhpString::new(req, &name)?, value));
-    }
-    Ok(out)
+    (rows.into_iter())
+        .map(|(name, value)| Ok((PhpString::new(req, &name)?, value)))
+        .collect()
 }
 
 /// Serve the autoloaders for `name`, `zend_lookup_class_ex` after the
@@ -2407,7 +2401,7 @@ fn evaluate_node(
                     named.type_name()
                 );
                 req.release(named);
-                return Err(throw_error(req, "TypeError", &message));
+                return Err(type_error(req, &message));
             };
             req.release(named);
             class_constant_expr(req, class, &Name(bytes.into_boxed_slice()), scope)

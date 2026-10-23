@@ -117,7 +117,10 @@ pub(crate) trait Host {
     /// `zend_get_configuration_directive`.
     fn directive(&mut self, name: &[u8]) -> Option<Vec<u8>>;
     /// `zend_getenv`, then `getenv`.
-    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>>;
+    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
+        std::env::var_os(&*String::from_utf8_lossy(name))
+            .map(std::ffi::OsString::into_encoded_bytes)
+    }
     /// `convert_to_string` of a double.
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error>;
     /// The callback, after which the event's strings are the host's to

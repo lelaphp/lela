@@ -2178,12 +2178,8 @@ impl Callable {
     /// ```
     #[must_use]
     pub fn required(&self, req: &Request) -> usize {
-        let function = match self.target {
-            Target::Function(function) | Target::Method { function, .. } => function,
-            Target::Closure(closure) => match closure.closure(req) {
-                Some(info) => info.function,
-                None => return 0,
-            },
+        let Some(function) = crate::api::call::callee(req, self.target) else {
+            return 0;
         };
         req.symbols().function_decl(function).map_or(0, |decl| {
             decl.parameters

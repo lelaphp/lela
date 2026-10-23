@@ -1622,20 +1622,15 @@ impl Request {
             None => match target {
                 TypeTag::Int | TypeTag::Float => {
                     let class = self.symbols().class_name(object.class());
-                    let to = if target == TypeTag::Int {
-                        "int"
+                    let (to, one) = if target == TypeTag::Int {
+                        ("int", Value::int(1))
                     } else {
-                        "float"
+                        ("float", Value::float(1.0))
                     };
                     crate::api::raising::notice(
                         self,
                         &format!("Object of class {class} could not be converted to {to}"),
                     );
-                    let one = if target == TypeTag::Int {
-                        Value::int(1)
-                    } else {
-                        Value::float(1.0)
-                    };
                     Owner::take(self, one)
                 }
                 _ => {
@@ -1961,9 +1956,8 @@ impl Request {
             Some(with) => {
                 let Some(clone_obj_with) = table.clone_obj_with() else {
                     let class = self.symbols().class_name(object.class());
-                    return Err(crate::api::raising::throw_error(
+                    return Err(crate::api::raising::error(
                         self,
-                        "Error",
                         &format!(
                             "Cloning objects of class {class} with updated properties is not supported"
                         ),

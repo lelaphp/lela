@@ -2546,10 +2546,8 @@ impl Configuration {
         };
         if let Some(file) = &mut files.loaded {
             startup.read(&std::mem::take(&mut file.bytes), &file.path);
-            startup.set(
-                b"cfg_file_path".to_vec(),
-                Configured::Str(file.path.clone()),
-            );
+            let path = Configured::Str(file.path.clone());
+            upsert(&mut startup.table, b"cfg_file_path".to_vec(), path);
         }
         files
             .scanned
@@ -2626,11 +2624,6 @@ impl crate::ini_syntax::Host for Configure<'_> {
         self.shared.directive(name).map(<[u8]>::to_vec)
     }
 
-    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        std::env::var_os(&*String::from_utf8_lossy(name))
-            .map(std::ffi::OsString::into_encoded_bytes)
-    }
-
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
         Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper).into_bytes())
     }
@@ -2653,11 +2646,6 @@ impl crate::ini_syntax::Host for Startup<'_> {
             .iter()
             .find(|(n, _)| n.as_slice() == name)
             .and_then(|(_, value)| value.text().map(<[u8]>::to_vec))
-    }
-
-    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        std::env::var_os(&*String::from_utf8_lossy(name))
-            .map(std::ffi::OsString::into_encoded_bytes)
     }
 
     /// `zend_double_to_str` before any ini entry is registered, when
@@ -2689,11 +2677,6 @@ impl Startup<'_> {
             }
             Err(never) => match never {},
         }
-    }
-
-    /// `zend_hash_update` of the table.
-    fn set(&mut self, name: Vec<u8>, value: Configured) {
-        upsert(&mut self.table, name, value);
     }
 
     /// `php_ini_parser_cb` over one statement of the startup entries.
@@ -2748,7 +2731,7 @@ impl Startup<'_> {
                     upsert(rows, key, Configured::Str(value));
                     return;
                 }
-                self.set(label, Configured::Str(value));
+                upsert(&mut self.table, label, Configured::Str(value));
             }
             // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label in
             // the active table, a section's where one is active, made where

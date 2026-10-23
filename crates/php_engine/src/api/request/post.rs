@@ -42,11 +42,7 @@ impl PostEntry {
     /// The row a content type names: the type lowered and cut at its
     /// first `;`, `,` or space, as `sapi_read_post_data` cuts it.
     fn of(content_type: &[u8]) -> Option<PostEntry> {
-        let end = content_type
-            .iter()
-            .position(|b| matches!(b, b';' | b',' | b' '))
-            .unwrap_or(content_type.len());
-        let named = content_type[..end].to_ascii_lowercase();
+        let named = content_type[..type_end(content_type)].to_ascii_lowercase();
         match named.as_slice() {
             b"application/x-www-form-urlencoded" => Some(PostEntry::Form),
             b"multipart/form-data" => Some(PostEntry::Multipart),
@@ -136,10 +132,7 @@ impl Request {
             .web()
             .and_then(|web| web.content_type.clone())
             .unwrap_or_default();
-        let end = content_type
-            .iter()
-            .position(|b| matches!(b, b';' | b',' | b' '))
-            .unwrap_or(content_type.len());
+        let end = type_end(&content_type);
         let mut dup = content_type[..end].to_ascii_lowercase();
         dup.extend_from_slice(&content_type[end..]);
         let entry = PostEntry::of(&content_type);
@@ -355,19 +348,14 @@ impl Request {
         let handled = self.handle_post(post, limits);
         self.post.throwing = throwing;
         let files = std::mem::replace(&mut self.http_globals.files, kept).unwrap_or(files);
-        match handled {
-            Ok(()) if !self.is_pending() => Ok((post, files)),
-            Ok(()) => {
-                self.release(crate::api::values::Value::array(post));
-                self.release(crate::api::values::Value::array(files));
-                Err(Thrown::of(None))
-            }
-            Err(thrown) => {
-                self.release(crate::api::values::Value::array(post));
-                self.release(crate::api::values::Value::array(files));
-                Err(thrown)
-            }
-        }
+        let thrown = match handled {
+            Ok(()) if !self.is_pending() => return Ok((post, files)),
+            Ok(()) => Thrown::of(None),
+            Err(thrown) => thrown,
+        };
+        self.release(crate::api::values::Value::array(post));
+        self.release(crate::api::values::Value::array(files));
+        Err(thrown)
     }
 
     /// `destroy_uploaded_files_hash` (`Z/main/rfc1867.c:170`), at
@@ -474,4 +462,12 @@ impl Variables<&mut Request> {
     pub fn input_variables(self, input: super::Input) -> Result<Owner<PhpArray>, Thrown> {
         adopted(self.0.input_variables_made(input))
     }
+}
+
+/// Where a content type's type ends: its first `;`, `,` or space, as
+/// `sapi_read_post_data` cuts it.
+fn type_end(content_type: &[u8]) -> usize {
+    (content_type.iter())
+        .position(|b| matches!(b, b';' | b',' | b' '))
+        .unwrap_or(content_type.len())
 }

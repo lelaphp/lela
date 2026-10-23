@@ -1476,11 +1476,9 @@ impl PhpObject {
         req: &mut Request,
     ) -> Result<Vec<(Owner<PhpString>, Value)>, Thrown> {
         let bound = req.closure_bound(*self, true);
-        let mut out = Vec::with_capacity(bound.len());
-        for (name, value) in bound {
-            out.push((PhpString::new(req, &name)?, value));
-        }
-        Ok(out)
+        (bound.into_iter())
+            .map(|(name, value)| Ok((PhpString::new(req, &name)?, value)))
+            .collect()
     }
 
     /// The declared and dynamic properties in declaration order,

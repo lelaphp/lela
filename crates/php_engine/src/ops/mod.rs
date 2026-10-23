@@ -23,7 +23,7 @@ use crate::api::abi::{DimensionRead, PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{
     Level, Thrown, cannot_add_element, deprecated, error, illegal_container_offset, none_pending,
-    throw, throw_error, warning,
+    throw, throw_error, type_error, warning,
 };
 use crate::api::request::{HookedTable, Request};
 use crate::api::values::walk::{self, Table};
@@ -1528,9 +1528,8 @@ pub(crate) fn typed_ref_holds(
                 let one_declared = php_unit::type_to_string(&first_ty);
                 let two_declared = php_unit::type_to_string(ty);
                 let given = type_name(req, &held.undef_as_null());
-                return Err(throw_error(
+                return Err(type_error(
                     req,
-                    "TypeError",
                     &format!(
                         "Reference with value of type {given} held by property {class}::${} of type {one_declared} is not compatible with property {two}::${} of type {two_declared}",
                         String::from_utf8_lossy(&first_name),
@@ -1583,9 +1582,8 @@ pub(crate) fn incdec_prop_error(
         Holder::Property => "",
         Holder::Reference => "a reference held by ",
     };
-    let thrown = throw_error(
+    let thrown = type_error(
         req,
-        "TypeError",
         &format!(
             "Cannot {word} {what}property {class}::${} of type {declared} past its {edge} value",
             String::from_utf8_lossy(name)
@@ -1635,9 +1633,8 @@ fn ref_type_error(
     let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
-    throw_error(
+    type_error(
         req,
-        "TypeError",
         &format!(
             "Cannot assign {given} to reference held by property {class}::${} of type {declared}",
             String::from_utf8_lossy(name)
@@ -1657,19 +1654,18 @@ fn conflicting_coercion(
     second: usize,
 ) -> Thrown {
     let Some((one_at, one_name, one_ty)) = listed.get(first) else {
-        return throw_error(req, "TypeError", "Cannot assign to reference");
+        return type_error(req, "Cannot assign to reference");
     };
     let Some((two_at, two_name, two_ty)) = listed.get(second) else {
-        return throw_error(req, "TypeError", "Cannot assign to reference");
+        return type_error(req, "Cannot assign to reference");
     };
     let one_class = req.symbols().class_name(*one_at);
     let two_class = req.symbols().class_name(*two_at);
     let one_declared = php_unit::type_to_string(one_ty);
     let two_declared = php_unit::type_to_string(two_ty);
     let given = value_name(req, &value.undef_as_null());
-    throw_error(
+    type_error(
         req,
-        "TypeError",
         &format!(
             "Cannot assign {given} to reference held by property {one_class}::${} of type {one_declared} and property {two_class}::${} of type {two_declared}, as this would result in an inconsistent type conversion",
             String::from_utf8_lossy(one_name),
@@ -1735,9 +1731,8 @@ pub(crate) fn verify_class_constant_type(
         Some(object) => req.symbols().class_name(object.class()),
         None => held.type_name().to_string(),
     };
-    Err(throw_error(
+    Err(type_error(
         req,
-        "TypeError",
         &format!(
             "Cannot assign {given} to class constant {class}::{} of type {declared}",
             String::from_utf8_lossy(name)
@@ -1765,9 +1760,8 @@ fn property_type_error(
     let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
-    throw_error(
+    type_error(
         req,
-        "TypeError",
         &format!(
             "Cannot assign {given} to property {class}::${} of type {declared}",
             String::from_utf8_lossy(name)
@@ -2587,9 +2581,8 @@ pub(crate) fn bitwise_not(req: &mut Request, value: &Value) -> Result<Value, Thr
         return Ok(Value::string(negated));
     }
     let name = value_name(req, &value);
-    Err(throw_error(
+    Err(type_error(
         req,
-        "TypeError",
         &format!("Cannot perform bitwise not on {name}"),
     ))
 }
@@ -3916,11 +3909,7 @@ fn stepped_other(
         }
     }
     let name = value_name(req, value);
-    Err(throw_error(
-        req,
-        "TypeError",
-        &format!("Cannot {verb} {name}"),
-    ))
+    Err(type_error(req, &format!("Cannot {verb} {name}")))
 }
 
 /// `increment_string` (`Z/Zend/zend_operators.c:2613`), "Perl style
@@ -4081,9 +4070,8 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
         }
     }
     let name = value_name(req, value);
-    Err(throw_error(
+    Err(type_error(
         req,
-        "TypeError",
         &format!("strlen(): Argument #1 ($string) must be of type string, {name} given"),
     ))
 }
@@ -4280,9 +4268,8 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
     }
     let function = if sizeof { "sizeof" } else { "count" };
     let name = value_name(req, value);
-    Err(throw_error(
+    Err(type_error(
         req,
-        "TypeError",
         &format!(
             "{function}(): Argument #1 ($value) must be of type Countable|array, {name} given"
         ),
@@ -4703,14 +4690,7 @@ pub(crate) fn array_offset(
         }
         ValueRef::Float(f) => Ok(php_heap::Key::Long(double_to_long(req, f))),
         ValueRef::Bool(b) => Ok(php_heap::Key::Long(i64::from(b))),
-        ValueRef::Resource(r) => {
-            let id = r.id();
-            warning(
-                req,
-                &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
-            );
-            Ok(php_heap::Key::Long(id))
-        }
+        ValueRef::Resource(r) => Ok(php_heap::Key::Long(resource_offset(req, r.id()))),
         ValueRef::Undef => empty(req),
         ValueRef::Array(_) | ValueRef::Object(_) => Err(illegal_container_offset(
             req,
@@ -5037,14 +5017,7 @@ pub(crate) fn unset_dim(
             }
             php_heap::Key::Long(n)
         }
-        ValueRef::Resource(r) => {
-            let id = r.id();
-            warning(
-                req,
-                &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
-            );
-            php_heap::Key::Long(id)
-        }
+        ValueRef::Resource(r) => php_heap::Key::Long(resource_offset(req, r.id())),
         // `ZSTR_EMPTY_ALLOC()`, the key a `null` offset and a slot
         // nothing wrote both delete; the string is this function's to
         // give back, since `zend_hash_del` takes no owner of its key.
@@ -5108,10 +5081,7 @@ fn php_type(value: &Value) -> ZvalType {
 /// ```
 pub(crate) fn value_name(req: &Request, value: &Value) -> String {
     match value.as_ref() {
-        ValueRef::Object(o) => req.symbols().class_decl(o.class()).map_or_else(
-            || String::from("object"),
-            |decl| String::from_utf8_lossy(&decl.name.0).into_owned(),
-        ),
+        ValueRef::Object(_) => type_name(req, value),
         ValueRef::Bool(b) => String::from(if b { "true" } else { "false" }),
         _ => String::from(value.type_name()),
     }
@@ -5271,7 +5241,7 @@ fn operands<T>(
         zval_type_name(req, left),
         zval_type_name(req, right)
     );
-    Err(throw_error(req, "TypeError", &message))
+    Err(type_error(req, &message))
 }
 
 /// `zendi_try_get_long`: the long php works in, or nothing for an array,
@@ -5330,13 +5300,7 @@ pub(crate) fn to_long(req: &mut Request, value: &Value) -> Result<Option<i64>, T
         }
         let capped = dval_to_lval_cap(d);
         if !long_compatible(d, capped) {
-            deprecated(
-                req,
-                &format!(
-                    "Implicit conversion from float-string \"{}\" to int loses precision",
-                    String::from_utf8_lossy(s.as_bytes())
-                ),
-            );
+            float_string_loses_precision(req, s.as_bytes());
         }
         held.let_go(req);
         return Ok(Some(capped));
@@ -5411,13 +5375,7 @@ pub(crate) fn arg_long_weak(req: &mut Request, value: &Value) -> Option<i64> {
             }
             let l = truncated(d);
             if !long_compatible(d, l) {
-                deprecated(
-                    req,
-                    &format!(
-                        "Implicit conversion from float-string \"{}\" to int loses precision",
-                        String::from_utf8_lossy(s.as_bytes())
-                    ),
-                );
+                float_string_loses_precision(req, s.as_bytes());
             }
             Some(l)
         }
@@ -5705,6 +5663,25 @@ fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown>
         TypeTag::Null | TypeTag::Undef => Some(Number::Long(0)),
         _ => None,
     })
+}
+
+/// The deprecation of a numeric string read as an int that is a float
+/// the int does not hold whole.
+fn float_string_loses_precision(req: &mut Request, s: &[u8]) {
+    let shown = String::from_utf8_lossy(s);
+    deprecated(
+        req,
+        &format!("Implicit conversion from float-string \"{shown}\" to int loses precision"),
+    );
+}
+
+/// A resource used as an array offset: php's warning, then its id.
+fn resource_offset(req: &mut Request, id: i64) -> i64 {
+    warning(
+        req,
+        &format!("Resource ID#{id} used as offset, casting to integer ({id})"),
+    );
+    id
 }
 
 #[cfg(test)]

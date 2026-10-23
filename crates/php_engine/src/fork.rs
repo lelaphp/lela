@@ -304,11 +304,12 @@ impl std::fmt::Debug for Worker {
 /// what a fork joins first, whoever asks for it.
 static WORKERS: Mutex<Vec<Weak<Worker>>> = Mutex::new(Vec::new());
 
-/// [`WORKERS`], held, with the workers that have dropped let go.
-fn workers() -> MutexGuard<'static, Vec<Weak<Worker>>> {
-    let mut workers = WORKERS.lock().unwrap_or_else(PoisonError::into_inner);
-    workers.retain(|worker| worker.strong_count() > 0);
-    workers
+/// One of the process's lists of what a fork stops first, held, with
+/// what has dropped let go: [`WORKERS`], and the timers.
+pub(crate) fn living<T>(list: &'static Mutex<Vec<Weak<T>>>) -> MutexGuard<'static, Vec<Weak<T>>> {
+    let mut held = list.lock().unwrap_or_else(PoisonError::into_inner);
+    held.retain(|entry| entry.strong_count() > 0);
+    held
 }
 
 impl Worker {
@@ -324,7 +325,7 @@ impl Worker {
             thread: Mutex::new(None),
         });
         let _inside = Inside::enter();
-        workers().push(Arc::downgrade(&worker));
+        living(&WORKERS).push(Arc::downgrade(&worker));
         worker
     }
 
@@ -374,7 +375,7 @@ struct Workers(Vec<Arc<Worker>>);
 impl Workers {
     /// The workers that stand in the process.
     fn live() -> Workers {
-        Workers(workers().iter().filter_map(Weak::upgrade).collect())
+        Workers(living(&WORKERS).iter().filter_map(Weak::upgrade).collect())
     }
 
     /// How many of them have a thread: what stands inside the engine for

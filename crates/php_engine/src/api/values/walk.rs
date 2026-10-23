@@ -52,7 +52,7 @@ use std::ops::ControlFlow;
 use php_heap::{Arr, PropertyTable, Str, TableRow, Zval};
 
 use crate::api::abi::Ref;
-use crate::api::raising::{Thrown, fatal, throw_error, throw_error_chained};
+use crate::api::raising::{Thrown, fatal, throw_error_chained, type_error};
 use crate::api::request::{HookedBuild, HookedDeclared, HookedRows, Request};
 use crate::api::values::{
     HeldProperties, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, View,
@@ -1440,7 +1440,7 @@ fn next_row(req: &mut Request, holder: PhpRef, at: u32) -> Result<Option<Row>, T
         let (owner, table) = req.pointer_table(held, false)?;
         return object_row(req, holder, at, held, owner, table);
     }
-    Err(throw_error(req, "TypeError", NO_TABLE))
+    Err(type_error(req, NO_TABLE))
 }
 
 /// [`next_row`] over an object's property table in php's positions

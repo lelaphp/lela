@@ -1186,14 +1186,7 @@ impl Fiber {
         this: This<Self>,
         #[php(default = null)] value: Value,
     ) -> Result<Owner<Value>, Thrown> {
-        switch_refused(req)?;
-        let this = this.object();
-        if payload(req, this)?.coroutine.status != CoroutineStatus::Suspended {
-            return Err(fiber_error(
-                req,
-                "Cannot resume a fiber that is not suspended",
-            ));
-        }
+        let this = resumable(req, this.object())?;
         req.addref(&value);
         let back = switch_into::<ZendFiber>(req, this, Transfer::Value(value))?;
         delegate(req, back)
@@ -1237,14 +1230,7 @@ impl Fiber {
         exception: Instance<Throwable>,
     ) -> Result<Owner<Value>, Thrown> {
         let throwable = exception.object();
-        switch_refused(req)?;
-        let this = this.object();
-        if payload(req, this)?.coroutine.status != CoroutineStatus::Suspended {
-            return Err(fiber_error(
-                req,
-                "Cannot resume a fiber that is not suspended",
-            ));
-        }
+        let this = resumable(req, this.object())?;
         req.addref(&throwable.as_value());
         let back =
             switch_into::<ZendFiber>(req, this, Transfer::Throw(Thrown::of(Some(throwable))))?;
@@ -1445,9 +1431,8 @@ impl FiberError {
     #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let name = req.symbols().class_name(this.object().class());
-        Err(throw_error(
+        Err(error(
             req,
-            "Error",
             &format!(
                 "The \"{name}\" class is reserved for internal use and cannot be manually instantiated"
             ),
@@ -2482,6 +2467,19 @@ impl Coroutine {
             }
         }
     }
+}
+
+/// `Fiber::resume`'s and `Fiber::throw`'s refusals before either: a
+/// switch the request refuses, and a fiber that is not suspended.
+fn resumable(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
+    switch_refused(req)?;
+    if payload(req, this)?.coroutine.status != CoroutineStatus::Suspended {
+        return Err(fiber_error(
+            req,
+            "Cannot resume a fiber that is not suspended",
+        ));
+    }
+    Ok(this)
 }
 
 #[cfg(test)]

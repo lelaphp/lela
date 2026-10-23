@@ -413,9 +413,8 @@ impl Request {
             |class| self.symbols().class_name(class),
         );
         let from = self.scope_phrase(scope);
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!(
                 "Call to {shown} method {class}::{}() from {from}",
                 String::from_utf8_lossy(written)

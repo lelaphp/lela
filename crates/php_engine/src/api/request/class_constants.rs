@@ -438,12 +438,7 @@ impl Request {
         for name in crate::enums::case_names(self, class) {
             let row = self.held_case(class, &name).and_then(|case| {
                 let (spelled, value) = (case.slot(CASE_NAME)?, case.slot(CASE_VALUE)?);
-                let key = match (value.as_int(), value.as_php_string()) {
-                    (Some(n), _) => Key::Int(n),
-                    (None, Some(s)) => Key::Str(s),
-                    (None, None) => return None,
-                };
-                Some((spelled, key))
+                Some((spelled, backing_key(value)?))
             });
             let Some((spelled, key)) = row else {
                 self.release(Value::array(table));
@@ -477,10 +472,8 @@ impl Request {
         else {
             return ByValue::Unbuilt;
         };
-        let key = match (value.as_int(), value.as_php_string()) {
-            (Some(n), _) => Key::Int(n),
-            (None, Some(s)) => Key::Str(s),
-            (None, None) => return ByValue::Missing,
+        let Some(key) = backing_key(*value) else {
+            return ByValue::Missing;
         };
         table.get(&key).map_or(ByValue::Missing, ByValue::Named)
     }
@@ -494,21 +487,15 @@ impl Request {
         backing: php_unit::decl::EnumBacking,
         values: &[(Vec<u8>, bool, Value)],
     ) -> Result<(), Thrown> {
-        let wanted = match backing {
-            php_unit::decl::EnumBacking::Int => TypeTag::Int,
-            _ => TypeTag::String,
+        let (wanted, want) = match backing {
+            php_unit::decl::EnumBacking::Int => (TypeTag::Int, "int"),
+            _ => (TypeTag::String, "string"),
         };
         for (at, (name, _, value)) in values.iter().enumerate() {
             if value.tag() != wanted {
                 let given = value.type_name();
-                let want = if wanted == TypeTag::Int {
-                    "int"
-                } else {
-                    "string"
-                };
-                return Err(crate::api::raising::throw_error(
+                return Err(crate::api::raising::type_error(
                     self,
-                    "TypeError",
                     &format!("Enum case type {given} does not match enum backing type {want}"),
                 ));
             }
@@ -518,9 +505,8 @@ impl Request {
             let earlier = values.get(..at).unwrap_or_default();
             if let Some((earlier, _, _)) = earlier.iter().find(|(_, _, held)| held == value) {
                 let enum_name = self.symbols().class_name(class);
-                return Err(crate::api::raising::throw_error(
+                return Err(crate::api::raising::error(
                     self,
-                    "Error",
                     &format!(
                         "Duplicate value in enum {enum_name} for cases {} and {}",
                         String::from_utf8_lossy(earlier),
@@ -684,9 +670,8 @@ impl Request {
     /// php's `Error` for a case `class` does not declare.
     pub(super) fn undefined_case(&mut self, class: ClassId, name: &[u8]) -> Thrown {
         let class = self.symbols().class_name(class);
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!(
                 "Undefined constant {class}::{}",
                 String::from_utf8_lossy(name)
@@ -804,4 +789,14 @@ pub(crate) enum ConstantFetch {
     /// while it is evaluated and refuses one it finds marked
     /// ([`Request::visited_class_constant`]).
     Lookup,
+}
+
+/// The key a backed case's value is filed under: an int as an int, a
+/// string as a string; none for any other value.
+fn backing_key(value: Value) -> Option<Key> {
+    match (value.as_int(), value.as_php_string()) {
+        (Some(n), _) => Some(Key::Int(n)),
+        (None, Some(s)) => Some(Key::Str(s)),
+        (None, None) => None,
+    }
 }

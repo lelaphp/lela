@@ -749,9 +749,8 @@ impl Request {
         }
         let data = self.class_data.rows.row(declaring);
         if data.visiting.iter().any(|held| **held == *name) {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!(
                     "Cannot declare self-referencing constant {class_name}::{}",
                     String::from_utf8_lossy(name)

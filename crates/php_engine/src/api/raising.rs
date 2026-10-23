@@ -694,9 +694,8 @@ pub(crate) fn call_stack_entry(req: &mut Request) -> Result<(), Thrown> {
 
 /// `zend_call_stack_size_error`: php's sentence over `size`.
 fn call_stack_size_error(req: &mut Request, size: usize) -> Thrown {
-    throw_error(
+    error(
         req,
-        "Error",
         &format!(
             "Maximum call stack size of {size} bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"
         ),
@@ -833,6 +832,11 @@ pub fn throw_error(req: &mut Request, class: &str, message: &str) -> Thrown {
     }
 }
 
+/// `zend_type_error`: [`throw_error`] of php's `TypeError`.
+pub(crate) fn type_error(req: &mut Request, message: &str) -> Thrown {
+    throw_error(req, "TypeError", message)
+}
+
 /// `zend_throw_error(NULL, …)`: [`throw_error`] of php's `Error`.
 pub(crate) fn error(req: &mut Request, message: &str) -> Thrown {
     throw_error(req, "Error", message)
@@ -912,7 +916,7 @@ pub fn illegal_container_offset(
         DimensionRead::Unset => format!("Cannot unset offset of type {given} on {container}"),
         _ => format!("Cannot access offset of type {given} on {container}"),
     };
-    throw_error(req, "TypeError", &message)
+    type_error(req, &message)
 }
 
 /// `zend_cannot_add_element`: php's `Error` for `$a[] = v` where

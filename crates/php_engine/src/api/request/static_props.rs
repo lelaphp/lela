@@ -5,7 +5,7 @@
 //! type, and bound by reference. The slots are [`StaticProps`]'s, whose
 //! field no file but this one reads.
 
-use php_unit::decl::{ClassKind, Visibility};
+use php_unit::decl::ClassKind;
 
 use crate::api::abi::PropertyRead;
 use crate::api::raising::Thrown;
@@ -196,9 +196,7 @@ impl Request {
             Some((info, property.visibility, property.is_instance))
         });
         if let Some((info, visibility, _)) = found
-            && visibility != Visibility::Public
-            && Some(info.declaring) != scope
-            && (visibility == Visibility::Private || !self.check_protected(info.declaring, scope))
+            && !self.may_access_from(info.declaring, visibility, scope)
         {
             if silent {
                 return Ok(None);
@@ -210,9 +208,8 @@ impl Request {
                 return Ok(None);
             }
             let class = self.symbols().class_name(class);
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!(
                     "Access to undeclared static property {class}::${}",
                     String::from_utf8_lossy(name)

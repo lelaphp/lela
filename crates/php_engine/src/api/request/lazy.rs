@@ -22,7 +22,7 @@ use php_unit::decl::Bare;
 use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
 use crate::api::call::Target;
-use crate::api::raising::{Thrown, error, throw_error};
+use crate::api::raising::{Thrown, error, type_error};
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, TypeTag, Value};
 
 /// `ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE`.
@@ -265,9 +265,8 @@ impl Request {
             .ancestors(class)
             .find(|&parent| internal(self, parent))?;
         let parent = self.symbols().class_name(parent);
-        Some(throw_error(
+        Some(error(
             self,
-            "Error",
             &format!(
                 "Cannot make instance of internal class lazy: {name} inherits internal class {parent}"
             ),
@@ -642,9 +641,8 @@ impl Request {
             Ok(returned) if returned.tag() != TypeTag::Null => {
                 self.lazy_revert(o, snapshot, table);
                 self.release(returned);
-                Err(throw_error(
+                Err(type_error(
                     self,
-                    "TypeError",
                     "Lazy object initializer must return NULL or no value",
                 ))
             }
@@ -730,9 +728,8 @@ impl Request {
             o.set_laziness(Laziness::Proxy);
             let shown = crate::ops::value_name(self, &returned);
             self.release(returned);
-            return Err(throw_error(
+            return Err(type_error(
                 self,
-                "TypeError",
                 &format!(
                     "Lazy proxy factory must return an instance of a class compatible with {class}, {shown} returned"
                 ),
@@ -742,9 +739,8 @@ impl Request {
             o.set_laziness(Laziness::Proxy);
             let shown = self.symbols().class_name(instance.class());
             self.release(returned);
-            return Err(throw_error(
+            return Err(type_error(
                 self,
-                "TypeError",
                 &format!(
                     "The real instance class {shown} is not compatible with the proxy class {class}. The proxy must be a instance of the same class as the real instance, or a sub-class with no additional properties, and no overrides of the __destructor or __clone methods."
                 ),
