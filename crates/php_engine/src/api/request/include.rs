@@ -530,7 +530,7 @@ impl Request {
         }
         let held = self.held_as_written(written);
         let resolved = match &held {
-            Some(held) => Ok(held.path.clone()),
+            Some((held, _)) => Ok(held.path.clone()),
             None => self.code_mut().resolve_path(written),
         };
         if kind.once()
@@ -568,7 +568,10 @@ impl Request {
                 return self.failed_opening(kind, written);
             }
         };
-        if let Err(refused) = self.include_guard(kind, &path) {
+        // A file the lookup by the key serves is opened by nothing.
+        if held.is_none()
+            && let Err(refused) = self.include_guard(kind, &path)
+        {
             // The stream opens the resolved path, which its warning names.
             self.open_stream_failed(kind, &path, &refused.into());
             return self.failed_opening(kind, written);
@@ -589,8 +592,8 @@ impl Request {
         // A unit the lookup by the key served is opcache's answer above
         // every link; any other file is compiled through them all, inside
         // the include, as `zend_include_or_eval` calls `zend_compile_file`.
-        let cached = if let Some(held) = held {
-            Some(self.held_answer(&held))
+        let cached = if let Some((held, validation)) = held {
+            self.held_answer(&held, validation)
         } else {
             let outer = self.include.including.replace((kind, self.vm.depth()));
             let compiled = self.compile_file(&path, Some(written), handle);
@@ -690,6 +693,21 @@ impl Request {
     ///
     /// Warning: include(): Failed opening '/etc/hosts' for inclusion (include_path='%s') in %s on line 3
     /// bool(false)
+    /// ```
+    ///
+    /// A file opcache's lookup by the path as written serves with nothing
+    /// due is opened by nothing, so nothing guards it:
+    ///
+    /// ```php
+    /// ini_set('opcache.revalidate_freq', 60);
+    /// $f = __DIR__ . '/guarded.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// var_dump(include $f);
+    /// ini_set('open_basedir', '/nonexistent');
+    /// var_dump(include $f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// int(1)
+    /// int(1)
     /// ```
     fn include_guard(&mut self, kind: IncludeKind, path: &[u8]) -> Result<HostPath, Refused> {
         let outer = self.include.including.replace((kind, self.vm.depth()));

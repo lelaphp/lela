@@ -269,10 +269,25 @@ impl Request {
     }
 
     /// `persistent_compile_file`'s first lookup, by the path as written:
-    /// the file held under `written`'s name, a hit served without the
-    /// path resolved or the file stat'ed, where the answer for it looks
-    /// by the path as written and nothing is due; none where a hit would
-    /// need either, which the lookup by the full path gives.
+    /// the file held under `written`'s name and the validation the answer
+    /// for it gives, a hit [`Request::held_answer`] serves without the
+    /// path resolved or the file stat'ed, where the answer looks by the
+    /// path as written and nothing is due; none where a hit would need
+    /// either, which the lookup by the full path gives. Nothing is counted
+    /// until it is served, so an `include_once` of a file already
+    /// included is no hit, as `persistent_zend_resolve_path` counts none:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/once.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// $hits = fn () => opcache_get_status()['opcache_statistics']['hits'];
+    /// include $f; include $f; $before = $hits();
+    /// var_dump(include_once $f, $hits() - $before);
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// int(0)
+    /// ```
     ///
     /// ```php
     /// ini_set('opcache.validate_timestamps', 0);
@@ -292,7 +307,7 @@ impl Request {
     /// bool(true)
     /// bool(false)
     /// ```
-    pub(crate) fn held_as_written(&mut self, written: &[u8]) -> Option<Arc<Held>> {
+    pub(crate) fn held_as_written(&mut self, written: &[u8]) -> Option<(Arc<Held>, Validation)> {
         let key = self.written_key(written)?;
         let shared = Arc::clone(&self.shared);
         let held = shared.units.find(&self.arena.files, &key)?;
@@ -305,29 +320,24 @@ impl Request {
             return None;
         };
         let now = self.environment().request_time();
-        if !held.trusted(validation, now) {
-            return None;
-        }
-        self.arena.files.hit(&held, validation, now);
-        self.accel_loaded = (held.unit.as_ref().ok().cloned()).map(|unit| (unit, AccelServed::Hit));
-        self.early_bound = (held.unit.as_ref().ok())
-            .map(|unit| (PublishedUnit::clone(unit), Arc::clone(&held.early)));
-        if let Ok(unit) = &held.unit {
-            self.note_held(unit);
-        }
-        Some(held)
+        held.trusted(validation, now).then_some((held, validation))
     }
 
-    /// What `held` answers this request, as [`crate::unit_cache::served`]
-    /// serves a hit: the unit, or the refusal with what it had declared
-    /// made the request's own.
-    pub(crate) fn held_answer(&mut self, held: &Held) -> Result<PublishedUnit, CompileRefused> {
-        match &held.unit {
+    /// What `held`, found under `validation`, answers this request as a
+    /// hit, counted, as [`crate::unit_cache::served`] serves one: the unit,
+    /// or the refusal with what it had declared made the request's own.
+    pub(crate) fn held_answer(&mut self, held: &Held, validation: Validation) -> Cached {
+        let now = self.environment().request_time();
+        self.arena.files.hit(held, validation, now);
+        let answer = Some(match &held.unit {
             Ok(unit) => Ok(PublishedUnit::clone(unit)),
             Err(error) => Err(CompileRefused::published(error.clone(), |unit| {
                 self.take_unit(unit)
             })),
-        }
+        });
+        let early = Some(Arc::clone(&held.early));
+        self.note_load(&answer, validation, Filed::Hit, early);
+        answer
     }
 
     /// `persistent_zend_resolve_path` under `include_once` and
@@ -1011,7 +1021,7 @@ impl UnitCache<'_> {
             (Err(Unresolved::Missing(missing)), None)
         } else {
             match req.held_as_written(written) {
-                Some(held) => (Ok(held.path.clone()), Some(req.held_answer(&held))),
+                Some((held, how)) => (Ok(held.path.clone()), req.held_answer(&held, how)),
                 None => (req.code_mut().resolve_path(written), None),
             }
         };
