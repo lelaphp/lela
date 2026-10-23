@@ -13,10 +13,10 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Declared, ISEMPTY, Within, arith, assigned, check_sites, compiled_inline, constant,
-    constant_types, goes_one_way, guard_sites, inline_may_leave, is_call, keeps_temporaries,
-    may_exit, op1_types, out_types, packed_guard, param_types, params, reads, reads_by_name,
-    referenced, slot_of, within, writes, written, written_after_entry,
+    Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, compiled_inline,
+    constant, constant_types, goes_one_way, guard_sites, inline_may_leave, is_call,
+    keeps_temporaries, may_exit, op1_types, out_types, packed_guard, param_types, params, reads,
+    reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
@@ -170,6 +170,20 @@ struct Call {
     /// Whether compiled code pushed it in place ([`Op::InitCall`]'s
     /// `plain`), and so makes it in place.
     plain: bool,
+    /// How its last `CHECK_FUNC_ARG` found the argument it checked sent,
+    /// php's `TRACE_FRAME_IS_LAST_SEND_BY_VAL` and `_BY_REF`, which the
+    /// `FETCH_*_FUNC_ARG` after it reads.
+    last_send: LastSend,
+}
+
+/// How a call's last `CHECK_FUNC_ARG` found its argument sent, where the
+/// trace knows the callee (`zend_jit_trace.c:2199-2215`): by value, by
+/// reference, or not known, as at a call's start and past a named one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LastSend {
+    Unknown,
+    ByValue,
+    ByRef,
 }
 
 /// What compiled code serves an inline opline's work in place of the
@@ -570,10 +584,12 @@ impl<'a> Builder<'a> {
             return Err(mismatch("an opline of another op array than its frame's"));
         }
         let code = self.meta(frame).code;
-        let op = *code
-            .oplines
-            .get(at.0 as usize)
-            .ok_or_else(|| mismatch("an opline past its op array"))?;
+        let op = self.served(
+            *code
+                .oplines
+                .get(at.0 as usize)
+                .ok_or_else(|| mismatch("an opline past its op array"))?,
+        );
         let after = code.oplines.get(at.0 as usize + 1).copied();
         let fused = fused(&op, after.as_ref(), branch);
         let data_line = after.filter(|data| data.opcode == Opcode::OpData);
@@ -970,6 +986,7 @@ impl<'a> Builder<'a> {
             },
             callee,
             plain: plain.is_some(),
+            last_send: LastSend::Unknown,
         });
         self.ops.push(Op::InitCall {
             frame,
@@ -978,6 +995,61 @@ impl<'a> Builder<'a> {
             plain,
         });
         Ok(())
+    }
+
+    /// Whether the call under way takes its argument numbered `n` by
+    /// value, where the trace knows its callee, php's
+    /// `ARG_SHOULD_BE_SENT_BY_REF` over `frame->call->func`.
+    fn sends_by_value(&self, n: u32) -> Option<bool> {
+        let callee = self.calls.last()?.callee.user()?;
+        let params = self.view.parameters(callee)?;
+        Some(sent_by_value(params, n))
+    }
+
+    /// The opline as the trace compiles it, where the callee the trace
+    /// knows settles how an argument is sent: a `SEND_VAR_EX` or a
+    /// `SEND_FUNC_ARG` to a parameter taken by value is a `SEND_VAR`,
+    /// whose variable it leaves as it was (`Z/ext/opcache/jit/zend_jit_trace.c:2373-2382`,
+    /// `:5324-5378`), and a `FETCH_DIM_FUNC_ARG` after a `CHECK_FUNC_ARG`
+    /// that found its argument sent by value is a `FETCH_DIM_R`, as php's
+    /// code generator falls through to it (`:5822-5829`, the guards
+    /// `:2001-2010`). A `CHECK_FUNC_ARG` records what it found on the call
+    /// (`:2199-2215`). Every other opline is itself.
+    fn served(&mut self, mut op: Opline) -> Opline {
+        let numbered = op.op2_type == OperandKind::Unused;
+        match op.opcode {
+            Opcode::SendVarEx | Opcode::SendFuncArg
+                if numbered
+                    && (op.opcode == Opcode::SendFuncArg || op.op2 <= MAX_ARG_FLAG_NUM)
+                    && self.sends_by_value(op.op2) == Some(true) =>
+            {
+                op.opcode = Opcode::SendVar;
+            }
+            Opcode::CheckFuncArg => {
+                let found = if numbered && op.op2 <= MAX_ARG_FLAG_NUM {
+                    match self.sends_by_value(op.op2) {
+                        Some(true) => LastSend::ByValue,
+                        Some(false) => LastSend::ByRef,
+                        None => LastSend::Unknown,
+                    }
+                } else {
+                    LastSend::Unknown
+                };
+                if let Some(call) = self.calls.last_mut() {
+                    call.last_send = found;
+                }
+            }
+            Opcode::FetchDimFuncArg
+                if self
+                    .calls
+                    .last()
+                    .is_some_and(|call| call.last_send == LastSend::ByValue) =>
+            {
+                op.opcode = Opcode::FetchDimR;
+            }
+            _ => {}
+        }
+        op
     }
 
     /// What compiled code serves of the inline opline `op` of `frame` in
@@ -1064,6 +1136,11 @@ impl<'a> Builder<'a> {
         let caller = self.running()?;
         let idx = self.begin();
         let call = self.calls.pop();
+        let stores: Vec<ValueId> = (self.slots[usize::from(caller.0)].iter())
+            .flatten()
+            .copied()
+            .filter(|value| self.val(*value).home == Home::Register)
+            .collect();
         let frame = self.frame(func, Place::Callee(caller), self.call_at)?;
         self.stack.push(frame);
         let meta = self.meta(frame);
@@ -1083,7 +1160,7 @@ impl<'a> Builder<'a> {
                 self.held.insert(value, reg);
             }
         }
-        self.ops.push(Op::Enter { frame });
+        self.ops.push(Op::Enter { frame, stores });
         Ok(())
     }
 
@@ -1719,8 +1796,25 @@ impl<'a> Builder<'a> {
                     && long(t2)
                     && scalar(td)
             }
+            // A send that moves what a temporary holds into the call, as
+            // php's `zend_jit_send_var` moves a `TMP` or a `VAR` that is
+            // no reference (`Z/ext/opcache/jit/zend_jit_ir.c:9628-9790`).
+            Opcode::SendVar if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) => {
+                op.op2_type == OperandKind::Unused
+                    && t1.kinds() != Types::NONE
+                    && !t1.meets(Types::REF.or(Types::UNDEF))
+            }
             Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx => {
                 op.op2_type == OperandKind::Unused && scalar(t1)
+            }
+            // A check of an argument the trace knows the callee takes by
+            // value, php's `zend_jit_check_func_arg` (`:9925-9960`).
+            Opcode::CheckFuncArg => {
+                op.op2_type == OperandKind::Unused
+                    && self
+                        .calls
+                        .last()
+                        .is_some_and(|call| call.last_send == LastSend::ByValue)
             }
             Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
                 matches!(

@@ -16,6 +16,9 @@ use crate::types::{TraceIr, build};
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Fixture {
     pub(crate) name: &'static str,
+    /// The program it records, `types/goldens/<program>.php`, which
+    /// fixtures recording other traces of one program share.
+    pub(crate) program: &'static str,
     pub(crate) plan: &'static [(&'static str, &'static str)],
 }
 
@@ -23,12 +26,14 @@ pub(crate) struct Fixture {
 /// call.
 pub(crate) const FIB: Fixture = Fixture {
     name: "fib",
+    program: "fib",
     plan: &[("record.function", "fib"), ("record.start", "enter")],
 };
 
 /// `mandelbrot`'s escape loop, in the file's own code.
 pub(crate) const MANDELBROT: Fixture = Fixture {
     name: "mandelbrot",
+    program: "mandelbrot",
     plan: &[
         ("record.function", ""),
         ("record.start", "loop"),
@@ -39,6 +44,7 @@ pub(crate) const MANDELBROT: Fixture = Fixture {
 /// `nbody`'s inner loop of `advance`.
 pub(crate) const NBODY: Fixture = Fixture {
     name: "nbody",
+    program: "nbody",
     plan: &[
         ("record.function", "advance"),
         ("record.start", "loop"),
@@ -50,6 +56,7 @@ pub(crate) const NBODY: Fixture = Fixture {
 /// to `eval_A`.
 pub(crate) const SPECTRALNORM: Fixture = Fixture {
     name: "spectralnorm",
+    program: "spectralnorm",
     plan: &[
         ("record.function", "eval_A_times_u"),
         ("record.start", "loop"),
@@ -61,6 +68,7 @@ pub(crate) const SPECTRALNORM: Fixture = Fixture {
 /// in a loop (#3228).
 pub(crate) const ARRAY_WRITE: Fixture = Fixture {
     name: "array_write",
+    program: "array_write",
     plan: &[
         ("record.function", "k"),
         ("record.start", "loop"),
@@ -72,6 +80,7 @@ pub(crate) const ARRAY_WRITE: Fixture = Fixture {
 /// written `false` by a long key (#3228).
 pub(crate) const SIEVE: Fixture = Fixture {
     name: "sieve",
+    program: "sieve",
     plan: &[
         ("record.function", "k"),
         ("record.start", "loop"),
@@ -84,11 +93,30 @@ pub(crate) const SIEVE: Fixture = Fixture {
 /// through (#3270).
 pub(crate) const FANNKUCH: Fixture = Fixture {
     name: "fannkuch",
+    program: "fannkuch",
     plan: &[
         ("record.function", "fannkuch"),
         ("record.start", "loop"),
         ("record.headers", "0"),
     ],
+};
+
+/// `binary_trees`' `check_tree`, entered: a node's elements read by a
+/// constant key, held to `null`, and sent by value to the recursive
+/// calls by name, the `_FUNC_ARG` family (#2963).
+pub(crate) const BINARY_TREES_CHECK: Fixture = Fixture {
+    name: "binary_trees_check",
+    program: "binary_trees",
+    plan: &[("record.function", "check_tree"), ("record.start", "enter")],
+};
+
+/// `binary_trees`' `make_tree`, from the landing of its first recursive
+/// call's return: the node's array built and returned, recursively
+/// (#2963).
+pub(crate) const BINARY_TREES_MAKE: Fixture = Fixture {
+    name: "binary_trees_make",
+    program: "binary_trees",
+    plan: &[("record.function", "make_tree"), ("record.start", "return")],
 };
 
 /// Where `types`' goldens are, the programs and their records among them.
@@ -119,7 +147,7 @@ pub(crate) fn held(path: &Path, text: &str) -> Result<(), String> {
 /// The fixture's program, less its open tag, which the scratch file the
 /// tests serve writes itself.
 fn program(fixture: Fixture) -> Result<String, String> {
-    let path = types().join(format!("{}.php", fixture.name));
+    let path = types().join(format!("{}.php", fixture.program));
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     Ok(text.strip_prefix("<?php\n").unwrap_or(&text).to_owned())
 }

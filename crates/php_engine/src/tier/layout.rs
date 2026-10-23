@@ -57,6 +57,7 @@ pub struct FrameLayout {
     this: u32,
     closure: u32,
     leaves_by_kernel: u32,
+    send_by_ref: u32,
     caller_loop: u32,
     numbered_from: u32,
     top: u32,
@@ -89,6 +90,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     this: word(HEADER_AT + Header::THIS_AT),
     closure: word(HEADER_AT + Header::CLOSURE_AT),
     leaves_by_kernel: CallInfo::LEAVES_BY_KERNEL,
+    send_by_ref: CallInfo::SEND_BY_REF,
     caller_loop: Header::CALLER_LOOP,
     numbered_from: Header::NUMBERED_FROM,
     top: word(STACK.top),
@@ -226,6 +228,15 @@ impl FrameLayout {
     #[must_use]
     pub const fn leaves_by_kernel(&self) -> u32 {
         self.leaves_by_kernel
+    }
+
+    /// The bit of a call being built that says the argument its last
+    /// `CHECK_FUNC_ARG` checked is taken by reference, php's
+    /// `ZEND_CALL_SEND_ARG_BY_REF`, which the `_FUNC_ARG` fetch and the
+    /// `SEND_FUNC_ARG` after it read.
+    #[must_use]
+    pub const fn send_by_ref(&self) -> u32 {
+        self.send_by_ref
     }
 
     /// The caller's bit that says the call was served from outside the

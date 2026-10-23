@@ -349,7 +349,10 @@ fn make_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
         send(init + 1, 1),
         send(init + 2, 2),
         Op::Line(made),
-        Op::Enter { frame: Frame(1) },
+        Op::Enter {
+            frame: Frame(1),
+            stores: Vec::new(),
+        },
     ];
     let ir = trace(frames(me, callee), ops, (Frame(1), entry));
     let g = entered(req, f, &ir)?;

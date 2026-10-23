@@ -794,7 +794,7 @@ impl CallInfo {
     /// off the callee for the argument after it, whether its parameter
     /// takes it by reference, which the `_FUNC_ARG` fetch and the
     /// `SEND_FUNC_ARG` after it serve as a write or as a read by.
-    const SEND_BY_REF: u32 = 1 << 7;
+    pub(crate) const SEND_BY_REF: u32 = 1 << 7;
     /// A `FRAMELESS_ICALL_*`'s call, whose arguments are the opline's
     /// operands: a coercion of one is kept in the [`Annex`] and not
     /// written over the argument, as `Z_FLF_PARAM_STR` converts in a

@@ -15,7 +15,8 @@ use cranelift_codegen::isa;
 use super::{ABANDONED, Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, FIB, Fixture, MANDELBROT, NBODY, SIEVE, SPECTRALNORM, held,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT, NBODY,
+    SIEVE, SPECTRALNORM, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{Check, End, Guard, GuardAt, Interrupt, Op, TraceIr};
@@ -170,6 +171,18 @@ fn nbody_lowers_its_inner_loop_with_the_interrupt_test() -> Result<(), String> {
 #[test]
 fn spectralnorm_lowers_its_inlined_call_with_the_interrupt_test() -> Result<(), String> {
     lowered(SPECTRALNORM).map(drop)
+}
+
+/// `binary_trees`' two recursions, `check_tree` entered and `make_tree`
+/// from its call's landing, lowered with what php's code generator
+/// compiles inline of them (#2963).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn binary_trees_lowers_its_two_recursions() -> Result<(), String> {
+    for fixture in [BINARY_TREES_CHECK, BINARY_TREES_MAKE] {
+        lowered(fixture)?;
+    }
+    Ok(())
 }
 
 /// `array_write`'s and `sieve`'s element writes, inline: written in

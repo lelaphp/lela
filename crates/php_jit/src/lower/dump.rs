@@ -200,13 +200,18 @@ impl<'a> Dump<'a> {
                     began.word()
                 )
             }
-            Op::Enter { frame } => {
+            Op::Enter { frame, stores } => {
                 let named = self
                     .ir
                     .frames
                     .get(usize::from(frame.0))
                     .map_or("?".to_owned(), |info| func(info.func));
-                writeln!(text, "     f{} enter {named}", frame.0)
+                let mut listed = String::new();
+                for (at, value) in stores.iter().enumerate() {
+                    let lead = if at == 0 { " storing" } else { "" };
+                    write!(listed, "{lead} #{}", value.0)?;
+                }
+                writeln!(text, "     f{} enter {named}{listed}", frame.0)
             }
             Op::Back {
                 frame,

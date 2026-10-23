@@ -1,0 +1,47 @@
+start return
+root e1
+op e1 9 array.packed - - -
+op e1 10 - - - -
+init e1
+op e1 11 long - - -
+op e1 12 - - - -
+enter e1
+op e1 1 long - - fell
+op e1 3 - - - -
+back
+op e1 13 array.packed - - -
+op e1 14 array.packed - - -
+back
+op e1 9 array.packed - - -
+op e1 10 - - - -
+init e1
+op e1 11 long - - -
+op e1 12 - - - -
+enter e1
+op e1 1 long - - taken
+op e1 4 long - - -
+op e1 5 undef long - -
+op e1 6 - - - -
+init e1
+op e1 7 long - - -
+op e1 8 - - - -
+enter e1
+op e1 1 long - - fell
+op e1 3 - - - -
+back
+op e1 9 array.packed - - -
+op e1 10 - - - -
+init e1
+op e1 11 long - - -
+op e1 12 - - - -
+enter e1
+op e1 1 long - - fell
+op e1 3 - - - -
+back
+op e1 13 array.packed - - -
+op e1 14 array.packed - - -
+back
+op e1 13 array.packed - - -
+op e1 14 array.packed - - -
+back
+stop recursive return

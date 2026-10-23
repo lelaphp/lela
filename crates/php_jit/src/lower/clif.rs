@@ -40,7 +40,7 @@ use cranelift_codegen::ir::{
 };
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use php_engine::tier::{FuncRef, PlainCall};
+use php_engine::tier::{FRAME, FuncRef, PlainCall};
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
 use php_unit::{Opcode, OplineIdx};
 
@@ -740,7 +740,11 @@ impl<'a> Emit<'a> {
                 self.calls.push((CallRoom::Stood, None));
                 Ok(())
             }
-            Op::Enter { frame } => {
+            Op::Enter { frame, stores } => {
+                for &value in stores {
+                    let held = self.register(value)?;
+                    self.store(self.value(value)?.slot, held)?;
+                }
                 let room = self.stood_word(I64, STOOD_FRAME);
                 self.b.def_var(self.room_var(*frame)?, room);
                 self.running = *frame;
@@ -1334,7 +1338,7 @@ impl<'a> Emit<'a> {
             return None;
         }
         match self.ir.ops.get(at.index() + 1) {
-            Some(Op::Enter { frame }) => Some(*frame),
+            Some(Op::Enter { frame, .. }) => Some(*frame),
             _ => None,
         }
     }
@@ -1485,6 +1489,7 @@ impl<'a> Emit<'a> {
             Opcode::FetchDimR => self.fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
+            Opcode::CheckFuncArg => self.check_func_arg(),
             // A send to a callee that takes the argument by value.
             Opcode::SendValEx if matches!(line.imm, Imm::Arg(_)) => self.send(at, line),
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => match line.imm {
@@ -2016,21 +2021,80 @@ impl<'a> Emit<'a> {
         let Imm::Arg(number) = line.imm else {
             return Err(mismatch("a send with no argument number"));
         };
-        let (call, _) = *self
-            .calls
-            .last()
-            .ok_or_else(|| mismatch("a send with no call under way"))?;
-        let held = self.scalar(at, line.op1)?;
-        let call = match call {
-            CallRoom::Held(var) => self.b.use_var(var),
-            CallRoom::Stood => self.stood_word(I64, STOOD_CALL),
-        };
-        let at = slot_offset(
+        let arg = slot_offset(
             number
                 .checked_sub(1)
                 .ok_or_else(|| mismatch("an argument numbered zero"))?,
         )?;
-        self.write(call, at, held);
+        if let Operand::Value(value) = line.op1
+            && Kind::of(self.value(value)?.types).is_none()
+            && self.value(value)?.slot.var >= self.frame_cvs(line.frame)?
+        {
+            // What a temporary holds, moved into the call whole, its
+            // owner with it, as `ZVAL_COPY_VALUE` moves it, and the slot
+            // it leaves `UNDEF`, as the handler takes the operand.
+            let (room, from) = self.place(self.value(value)?.slot)?;
+            let word = self.b.ins().load(I64, trusted(), room, from);
+            let info = self.b.ins().load(I32, trusted(), room, from + TYPE_AT);
+            let call = self.call_room()?;
+            self.b.ins().store(trusted(), word, call, arg);
+            self.b.ins().store(trusted(), info, call, arg + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b.ins().store(trusted(), undef, room, from + TYPE_AT);
+            return Ok(());
+        }
+        let held = self.scalar(at, line.op1)?;
+        let call = self.call_room()?;
+        self.write(call, arg, held);
+        Ok(())
+    }
+
+    /// The room of the call under way, php's `EX(call)`: in a register
+    /// where compiled code pushed it, as the kernel that pushed it stood
+    /// it otherwise.
+    fn call_room(&mut self) -> Result<Value, Abort> {
+        let (call, _) = *self
+            .calls
+            .last()
+            .ok_or_else(|| mismatch("an argument with no call under way"))?;
+        Ok(match call {
+            CallRoom::Held(var) => self.b.use_var(var),
+            CallRoom::Stood => self.stood_word(I64, STOOD_CALL),
+        })
+    }
+
+    /// A `CHECK_FUNC_ARG` of an argument the callee takes by value:
+    /// the call's bit that says the argument after it is taken by
+    /// reference cleared, as `zend_jit_check_func_arg` clears
+    /// `ZEND_CALL_SEND_ARG_BY_REF` (`Z/ext/opcache/jit/zend_jit_ir.c:9925-9960`).
+    /// The `FETCH_DIM_FUNC_ARG` and the `SEND_FUNC_ARG` after it are then
+    /// a read and a send by value, compiled inline, and a `SEND_VAR_EX` to
+    /// a parameter taken by value is a `SEND_VAR`, which leaves its
+    /// variable as it was; a parameter taken by reference is still the
+    /// handlers', a write to the element:
+    ///
+    /// ```php
+    /// function count_nodes($node) {
+    ///     if ($node[0] === null) { return 1; }
+    ///     return 1 + count_nodes($node[0]) + count_nodes($node[1]);
+    /// }
+    /// function make($d) { if ($d === 0) { return [null, null]; } $e = $d - 1; return [make($e), make($e)]; }
+    /// function mark(&$x) { $x = 7; }
+    /// function marks($a, $n) { for ($i = 0; $i < $n; $i++) { mark($a[$i]); } return $a; }
+    /// echo count_nodes(make(8)), " ", implode(",", marks([1, 2, 3], 3)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 511 7,7,7
+    /// ```
+    fn check_func_arg(&mut self) -> Result<(), Abort> {
+        let call = self.call_room()?;
+        let info = imm(FRAME.info() as usize);
+        let flags = self.b.ins().load(I32, trusted(), call, info);
+        let flags = self
+            .b
+            .ins()
+            .band_imm_u(flags, i64::from(!FRAME.send_by_ref()));
+        self.b.ins().store(trusted(), flags, call, info);
         Ok(())
     }
 
