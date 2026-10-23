@@ -90,6 +90,31 @@ const WARMUP: usize = 2;
 /// back signed.
 const MIN_REPS_TO_RESOLVE: usize = 4;
 
+/// §2: how often an A/A row resolves on a null effect, as the second
+/// engine measured it, one row in seventeen.
+const AA_RESOLVES: f64 = 1.0 / 17.0;
+
+/// §2: the chance at or below which a count of an A/A set's rows resolving
+/// is the pattern that is the defect, and not evidence (#3127).
+const PATTERN: f64 = 0.01;
+
+/// The fewest of an A/A set's `n` rows whose resolving is §2's pattern:
+/// the smallest count whose chance of being reached or passed, each row
+/// resolving at [`AA_RESOLVES`], is at most [`PATTERN`], the binomial's
+/// upper tail (#3127): 3 of 8. None where no count is that unlikely, a set
+/// of one, whose one row is evidence alone.
+#[allow(clippy::cast_precision_loss)]
+fn pattern(n: usize) -> Option<usize> {
+    let (p, q) = (AA_RESOLVES, 1.0 - AA_RESOLVES);
+    // At count k, `each` is P(X = k - 1) and `below` becomes P(X < k).
+    let (mut each, mut below) = (q.powi(i32::try_from(n).ok()?), 0.0);
+    (1..=n).find(|&k| {
+        below += each;
+        each *= (n + 1 - k) as f64 / k as f64 * p / q;
+        1.0 - below <= PATTERN
+    })
+}
+
 /// §8: what standing a run's numbers are offered with. `PROVISIONAL` and
 /// `BASELINE-OF-RECORD` owe a written reservation, since a standing with
 /// none is a word and not a label; which one a run deserves is part of the
@@ -429,9 +454,9 @@ pub(crate) type Sides = Result<Arms, String>;
 /// How a bar's reading is held.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Held {
-    /// An A/A control: a pass while every row's paired delta has its sign
-    /// swamped (§2, §4.3), a set's rows each held as one pair's is until a
-    /// person rules otherwise (#3127).
+    /// An A/A control: a pair passes while its paired delta has its sign
+    /// swamped (§2, §4.3), and a set until its rows resolve in the count
+    /// [`pattern`] makes §2's pattern (#3127).
     Control,
     /// A series: two arms that differ, its reading stating the measurement
     /// and the distance to go to the second arm, and held by [`series`]'s
@@ -446,8 +471,8 @@ pub(crate) enum Held {
 }
 
 impl Held {
-    /// The reading's status for what a bar `took`: a control fails where a
-    /// row's sign resolved, a bound where the ratio is established above
+    /// The reading's status for what a bar `took`: a control fails at
+    /// [`Took::pattern`] resolved rows, a bound where the ratio is established above
     /// it, is mixed or is no number, and a series is held to no bound.
     fn status(self, took: &Took) -> Status {
         let (value, sign) = (took.ratio(), took.sign());
@@ -456,7 +481,7 @@ impl Held {
             value.is_nan() || mixed || (sign == Sign::Slower && value > at_most)
         };
         match self {
-            Held::Control if took.resolved() > 0 => Status::Fail,
+            Held::Control if took.pattern().is_some_and(|k| took.resolved() >= k) => Status::Fail,
             Held::Bound(at_most) if above(at_most) => Status::Fail,
             Held::Control | Held::Series | Held::Bound(_) => Status::Pass,
         }
@@ -540,6 +565,16 @@ impl Took {
     /// How many rows' paired deltas have their sign established.
     fn resolved(&self) -> usize {
         self.each_way().iter().sum()
+    }
+
+    /// How many resolved rows fail an A/A control over them: a pair's one,
+    /// and a set's [`pattern`].
+    fn pattern(&self) -> Option<usize> {
+        if self.set() {
+            pattern(self.rows.len())
+        } else {
+            Some(1)
+        }
     }
 
     /// The bar's ratio: the geometric mean of its rows' ratios, one row's
@@ -1167,7 +1202,17 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
         }
     };
     match bar.held {
-        Held::Control => format!("the bar is the A/A control of {PROTOCOL} §2"),
+        Held::Control if !took.set() => format!("the bar is the A/A control of {PROTOCOL} §2"),
+        Held::Control => {
+            let (rows, rate, chance) = (took.rows.len(), 1.0 / AA_RESOLVES, PATTERN * 100.0);
+            let fails = (took.pattern()).map_or_else(
+                || "at no count of them, none's chance".to_owned(),
+                |k| format!("where {k} of them resolve, the fewest whose chance"),
+            );
+            format!(
+                "the bar is the A/A control of {PROTOCOL} §2 over {rows} rows, failing {fails} at 1 row in {rate:.0} is at most {chance}% (#3127)"
+            )
+        }
         Held::Series => format!("{series}; {to_go}"),
         Held::Bound(at_most) => format!("a bound, its ratio held to at most {at_most:.4}"),
     }
@@ -1420,11 +1465,10 @@ mod tests {
     /// A set's ratio is the geomean of its rows', 0.5 and 2.0 making 1.0,
     /// its sign established only where every row's is (protocol §10) and
     /// signed only where every row points one way, `mixed` with the count
-    /// each way where they do not (#3127); a control over a set fails on
-    /// any one resolved row, and a bound on a geomean established above it
-    /// or mixed, and not on a swamped one (#2947).
+    /// each way where they do not (#3127); and a bound on a geomean
+    /// established above it or mixed, and not on a swamped one (#2947).
     #[test]
-    fn a_set_is_held_by_its_geomean_and_a_control_by_each_row() {
+    fn a_set_is_held_by_its_geomean() {
         let set = took(vec![row(Ms, &AHEAD, -50.0), row(Ms, &BEHIND, 100.0)], true);
         assert!(close(set.ratio(), 1.0), "{}", set.ratio());
         let mixed = Sign::Mixed {
@@ -1449,7 +1493,7 @@ mod tests {
             None,
             "one swamped row leaves the geomean unsigned"
         );
-        assert_eq!(Held::Control.status(&swamped), Status::Fail);
+        assert_eq!(Held::Control.status(&swamped), Status::Pass, "1 of 2");
         assert_eq!(Held::Bound(1.02).status(&swamped), Status::Pass);
         let at = took(vec![row(Ms, &BEHIND, 0.0), row(Ms, &BEHIND, 0.0)], true);
         assert_eq!(at.sign(), Sign::Slower);
@@ -1459,13 +1503,6 @@ mod tests {
         let ahead = took(vec![row(Ms, &AHEAD, -10.0), row(Ms, &AHEAD, -10.0)], true);
         assert_eq!(ahead.sign(), Sign::Faster);
         assert_eq!(Held::Bound(1.02).status(&ahead), Status::Pass);
-        let quiet = took(vec![row(Ms, &STRADDLES, 3.0), row(Ms, &AHEAD, 3.0)], true);
-        assert_eq!(Held::Control.status(&quiet), Status::Fail);
-        let quiet = took(
-            vec![row(Ms, &STRADDLES, 3.0), row(Ms, &STRADDLES, 3.0)],
-            true,
-        );
-        assert_eq!(Held::Control.status(&quiet), Status::Pass);
         let shown = super::geomean(&set);
         assert!(
             shown.contains(
@@ -1477,6 +1514,36 @@ mod tests {
             super::geomean(&took(vec![row(Ms, &BEHIND, 1.0)], false)),
             ""
         );
+    }
+
+    /// An A/A set fails at the fewest resolved rows whose chance at §2's
+    /// one in seventeen is at most 1% (#3127): P(>= 2 of 8) is 7.7% and
+    /// P(>= 3 of 8) 0.9%; P(>= 4 of 17) is 1.5% and P(>= 5 of 17) 0.24%;
+    /// one row resolves 5.9% of the time, so a set of one fails at none,
+    /// where a pair fails on its one row (§2).
+    #[test]
+    fn an_aa_set_fails_at_the_fewest_resolved_rows_whose_chance_is_at_most_one_percent() {
+        assert_eq!(
+            [0, 1, 2, 7, 8, 17].map(super::pattern),
+            [None, None, Some(2), Some(3), Some(3), Some(5)]
+        );
+        let set = |resolved: usize, n: usize| {
+            let deltas = |i| if i < resolved { &BEHIND } else { &STRADDLES };
+            took((0..n).map(|i| row(Ms, deltas(i), 1.0)).collect(), true)
+        };
+        assert_eq!(Held::Control.status(&set(2, 8)), Status::Pass);
+        assert_eq!(Held::Control.status(&set(3, 8)), Status::Fail);
+        assert_eq!(Held::Control.status(&set(1, 1)), Status::Pass);
+        let shown = super::held_by(
+            &super::Shown {
+                id: "aa",
+                about: "",
+                held: Held::Control,
+                names: ["a", "b"],
+            },
+            &set(3, 8),
+        );
+        assert!(shown.contains("over 8 rows, failing where 3 of them resolve, the fewest whose chance at 1 row in 17 is at most 1%"), "{shown}");
     }
 
     /// A rate arm's reps are paired as a time's are, the delta in requests

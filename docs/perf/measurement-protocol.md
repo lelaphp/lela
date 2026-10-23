@@ -46,6 +46,17 @@ defect.** An instrument that refused on the first resolved row would be red
 for no reason about once a run in seventeen, which is why `bench` records
 the verdict and exits 0 (`harness-design.md` §4.2).
 
+**An A/A control over a set** of programs (§10) is held to a count, as
+Mitchell ruled on #3127. It fails when at least k of its n rows resolve,
+k the smallest count whose chance of being reached, each row resolving
+at the rate above, one in seventeen, is at most 1%: the binomial's upper
+tail. For n = 8, P(≥ 2) ≈ 7.7% and P(≥ 3) ≈ 0.9%, so k = 3; a set of one
+has no such k and fails on none. k is computed from n and the rate,
+never typed in, and the reading keeps how many rows resolved, so §12's
+series can show a pattern across nights. One pair is held to its one
+row, as above. Holding each row of a set as one pair would read `fail`
+on about 38% of a set of eight's runs with nothing wrong.
+
 ## 3. The knobs
 
 | knob | value |
