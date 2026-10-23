@@ -485,11 +485,13 @@ pub(crate) enum Levels<'a> {
 /// file's own where one did, the path as written it is filed under too
 /// where given, how a hit is validated at the request time `now`, how
 /// new a file is kept, and where, and what opcache's optimizer makes of
-/// what it compiles.
+/// what it compiles; `opened` where the `zend_file_handle` holds the
+/// file's opened path, by which the file cache reads it.
 pub(crate) struct Asked<'a> {
     pub(crate) path: &'a [u8],
     pub(crate) source: Option<&'a [u8]>,
     pub(crate) written: Option<UnitKey>,
+    pub(crate) opened: bool,
     pub(crate) validation: Validation,
     pub(crate) protection: u32,
     pub(crate) now: i64,
@@ -1011,6 +1013,7 @@ impl UnitCache {
             path,
             source: handed,
             written,
+            opened,
             validation,
             protection,
             now,
@@ -1022,7 +1025,15 @@ impl UnitCache {
             Levels::Both(disk) => (true, Some(disk)),
             Levels::Disk(disk) => (false, Some(disk)),
         };
+        // A key that names a discarded copy is a miss that looks no full
+        // path up, and a handle holding the path alone leaves no opened
+        // path for the file cache to read the file by, as
+        // `do_validate_timestamps` gives its resolved path back
+        // (`Z/ext/opcache/ZendAccelerator.c:1157-1160`, `zend_file_cache.c:1901`).
+        let keyed = (written.as_ref())
+            .is_some_and(|key| files.held.get(key).is_some_and(|held| held.discarded()));
         if memory
+            && !keyed
             && let Some(hit) = self.held_hit(caller, files, path, written.as_ref(), validation, now)
         {
             return answered_by(&hit, Filed::Hit);
@@ -1033,7 +1044,7 @@ impl UnitCache {
         // The second level, `zend_file_cache_script_load`: read back
         // where it keeps the file at the `mtime` it has now, where
         // timestamps are validated.
-        if let Some(disk) = &disk
+        if let Some(disk) = disk.as_ref().filter(|_| opened || !keyed)
             && (!validated || observed.is_some())
             && let Some(kept) = disk.load(path, observed.filter(|_| validated).map(Stamp::seconds))
             && let Some(unit) = decode(&kept.body)
@@ -1173,9 +1184,7 @@ impl UnitCache {
     /// whose timestamp php keeps at zero, served as held without the
     /// file looked at, whatever the window, and a held file `validation`
     /// finds fresh at `now`; each filed under `written` too. A stale copy
-    /// is discarded, and a discarded one is a miss, as is any file where
-    /// `written` names a discarded copy, which `persistent_compile_file`
-    /// takes for a miss without looking up the full path.
+    /// is discarded, and a discarded one is a miss.
     fn held_hit(
         &self,
         stat: &mut dyn Stat,
@@ -1185,9 +1194,6 @@ impl UnitCache {
         validation: Validation,
         now: i64,
     ) -> Option<Arc<Held>> {
-        if written.is_some_and(|key| files.held.get(key).is_some_and(|held| held.discarded())) {
-            return None;
-        }
         // The cache bypassed, `EveryHit`, compiles afresh.
         if validation != Validation::EveryHit
             && let Some(held) = self

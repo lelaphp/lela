@@ -59,6 +59,14 @@ pub(crate) enum HandlePath {
     Stream,
 }
 
+impl HandlePath {
+    /// Whether the `zend_file_handle` holds the path alone and no opened
+    /// path.
+    fn path_alone(self) -> bool {
+        matches!(self, HandlePath::Filename | HandlePath::Kept)
+    }
+}
+
 /// The unit cache for one request: [`Code::unit_cache`].
 pub struct UnitCache<'r> {
     req: &'r mut Request,
@@ -348,7 +356,7 @@ impl Request {
         if held.trusted(validation, now) {
             return Ok(true);
         }
-        if matches!(handle, HandlePath::Filename | HandlePath::Kept) && !is_wrapper_url(written) {
+        if handle.path_alone() && !is_wrapper_url(written) {
             match self.code_mut().resolve_path(written) {
                 Ok(path) => {
                     self.revalidated_path(written, &path);
@@ -418,6 +426,24 @@ impl Request {
     /// bool(true)
     /// string(1) "y"
     /// 0 2 1
+    /// ```
+    ///
+    /// and so it is under a file cache, which the miss does not read: the
+    /// `zend_file_handle` holds the path alone, which
+    /// `do_validate_timestamps` gives back unopened. Served by the binary, since the child is
+    /// `PHP_BINARY`:
+    ///
+    /// ```php
+    /// $d = realpath(sys_get_temp_dir()) . '/kept' . getmypid(); @mkdir("$d/x", 0777, true); @mkdir("$d/y"); @mkdir("$d/c");
+    /// foreach (['x', 'y'] as $t) { file_put_contents("$d/$t/a.inc", "<?php return '$t';"); touch("$d/$t/a.inc", time() - 60); }
+    /// symlink("$d/x", "$d/to");
+    /// $code = '$d = $argv[1]; $s = fn () => opcache_get_status()["opcache_statistics"]; echo include "$d/to/a.inc", include "$d/y/a.inc"; $a = $s(); unlink("$d/to"); symlink("$d/y", "$d/to"); echo include "$d/to/a.inc", include "$d/to/a.inc"; $b = $s(); echo " ", $b["hits"] - $a["hits"], " ", $b["misses"] - $a["misses"], "\n";';
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.revalidate_freq=0', '-d', "opcache.file_cache=$d/c", '-r', $code, $d], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off process
+    /// xyyy 0 2
     /// ```
     pub(crate) fn held_answer(
         &mut self,
@@ -687,6 +713,7 @@ impl Request {
             path: &full,
             source,
             written,
+            opened: !handle.path_alone(),
             validation,
             protection,
             now,

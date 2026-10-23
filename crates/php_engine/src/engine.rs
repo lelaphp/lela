@@ -1969,6 +1969,7 @@ impl Shared {
             path: &full,
             source: None,
             written: None,
+            opened: true,
             validation: Validation::EveryHit,
             protection: 0,
             now: crate::unit_cache::now(),
