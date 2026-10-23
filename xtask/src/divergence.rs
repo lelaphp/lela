@@ -45,9 +45,9 @@ pub const FILE: &str = "docs/divergence.toml";
 /// The instrument that holds the registry to its rule: the subcommand, the
 /// reading's `instrument`, and what the manifest's `check` predicate names.
 pub const INSTRUMENT: &str = "divergence-reason";
-/// What the id of a trace-dump row starts with, `trace:dump/<kernel>`:
-/// the rows that must name their [`Digests`] (#3291's ruling).
-pub const DUMP: &str = "trace:dump/";
+/// What a trace dump's id starts with, `trace:dump/<kernel>`, a `trace:`
+/// id: a row holding one must name its [`Digests`] (#3291's ruling).
+pub(crate) const DUMP_PREFIX: &str = "trace:dump/";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
 /// `crosscheck:<name>`, `trace:<site>`, `wire:<suite>/<case>` or
@@ -142,8 +142,8 @@ pub enum Side {
 }
 
 impl Side {
-    /// The side's key in a row, the extension of the file `trace-dump`
-    /// keeps its lines in, and its name in a message.
+    /// The side's name: its digest's key in a row, and what a message
+    /// and a file kept for it call it.
     pub fn name(self) -> &'static str {
         match self {
             Side::Oracle => "oracle",
@@ -159,14 +159,17 @@ impl Side {
 /// person's hand edit, as a new acceptance is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Digests {
+    /// The expected side's: the oracle's lines, where a lane holds the
+    /// engine's to them.
     pub oracle: Sha256,
+    /// The engine's lines.
     pub engine: Sha256,
 }
 
 impl Digests {
-    /// The digests of the lines a comparison held, the oracle's
-    /// `expected` and the engine's `actual`: the one place a row's
-    /// digests are computed, for the check and for the row proposed.
+    /// The digests of the lines a comparison held, the expected side's
+    /// and the engine's `actual`: the one place a row's digests are
+    /// computed, for the check and for the row proposed.
     pub fn of(expected: &[u8], actual: &[u8]) -> Digests {
         Digests {
             oracle: Sha256::of(expected),
@@ -208,7 +211,7 @@ pub struct Moved {
 impl Moved {
     /// The sides whose lines are not the ones the row pins, the oracle's
     /// first; empty where both stand.
-    pub fn sides(&self) -> Vec<Side> {
+    pub(crate) fn sides(&self) -> Vec<Side> {
         let moved = |side: &Side| self.pinned.of_side(*side) != self.now.of_side(*side);
         [Side::Oracle, Side::Engine]
             .into_iter()
@@ -771,11 +774,11 @@ impl Lack {
 
 impl Divergence {
     /// Whether the row accepts its difference only as its [`Digests`]
-    /// pin it: a `trace:dump/` row, as #3291 ruled. Which other kinds must
-    /// is a later ruling; a row of any kind that names digests is held to
-    /// them.
-    pub fn must_pin(&self) -> bool {
-        self.id.as_str().starts_with(DUMP)
+    /// pin it: a row holding a `trace:dump/` id, its own or one it covers,
+    /// as #3291 ruled. Which other kinds must is a later ruling; a row of
+    /// any kind that names digests is held to them.
+    pub(crate) fn must_pin(&self) -> bool {
+        self.ids().any(|id| id.as_str().starts_with(DUMP_PREFIX))
     }
 
     /// What the guard finds missing from the row were it accepted: a

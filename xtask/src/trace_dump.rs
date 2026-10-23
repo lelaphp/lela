@@ -37,7 +37,7 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::bench::kernels::{KERNELS, MEMORY};
 use crate::crosscheck::first_difference;
-use crate::divergence::{DUMP, Digests, Registry, Side};
+use crate::divergence::{DUMP_PREFIX, Digests, Registry, Side};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{self, Ended, Invocation, Observation, Oracle, Program, Regime, Verdict};
@@ -124,7 +124,7 @@ impl Ask {
 
 /// The divergence key of a program's lines.
 pub(crate) fn id_of(scope: &str) -> String {
-    format!("{DUMP}{scope}")
+    format!("{DUMP_PREFIX}{scope}")
 }
 
 /// Where `side`'s lines for `scope` are kept: under the store, the
@@ -468,5 +468,15 @@ mod tests {
             said.contains("trace:dump/fixture-in-order accepts it"),
             "{said}"
         );
+
+        // A cause row that covers a dump's id pins it as a dump row would,
+        // and accepts nothing while it pins nothing.
+        let cause = text.split("\n[[divergence]]").nth(1).unwrap().replace(
+            "id = \"trace:dump/fixture-unpinned\"",
+            "id = \"trace:fixture-cause\"\ncovers = [\"trace:dump/fib\"]",
+        );
+        let registry = Registry::parse(&format!("[[divergence]]{cause}")).unwrap();
+        assert!(said_of(&registry, id, engine.as_bytes()).contains("at line 3"));
+        assert_eq!(registry.refused().len(), 1);
     }
 }

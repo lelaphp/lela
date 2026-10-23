@@ -98,7 +98,7 @@ pub enum When {
 /// [`crate::layout::HARNESS`], which measures the engine and carries no
 /// kernel, native or witness of its own. [`When::Engine`]'s predicate,
 /// stated here once, which the witness instrument reads as well.
-pub fn of_the_engine(krate: &Crate) -> bool {
+pub(crate) fn of_the_engine(krate: &Crate) -> bool {
     krate.name != crate::layout::HARNESS
 }
 
