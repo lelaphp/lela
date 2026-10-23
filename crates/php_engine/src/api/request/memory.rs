@@ -416,10 +416,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     #[inline]
     pub(crate) fn release(&mut self, value: Value) {
-        let z = value.to_zval();
-        if z.is_refcounted() {
-            Heap::release(&mut Hooks(self), z);
-        }
+        self.release_zval(value.to_zval());
     }
 
     /// `GC_DELREF` and `gc_check_possible_root` over a value the caller
@@ -442,10 +439,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     #[inline]
     pub(crate) fn release_nogc(&mut self, value: Value) {
-        let z = value.to_zval();
-        if z.is_refcounted() {
-            Heap::release_nogc(&mut Hooks(self), z);
-        }
+        self.release_zval_nogc(value.to_zval());
     }
 
     /// [`Request::release`] over a zval a slot held, the owner it held
@@ -815,8 +809,7 @@ impl Request {
     /// of the request's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn gc_status(&mut self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.gc_status_made();
-        adopted(made)
+        adopted(self.gc_status_made())
     }
 
     /// What [`gc_status`](Self::gc_status) makes, its one owner not yet named.
@@ -834,17 +827,17 @@ impl Request {
             ("roots", Value::int(i64::from(status.roots))),
             (
                 "application_time",
-                Value::float(seconds(status.application_time)),
+                Value::float(status.application_time.as_secs_f64()),
             ),
             (
                 "collector_time",
-                Value::float(seconds(status.collector_time)),
+                Value::float(status.collector_time.as_secs_f64()),
             ),
             (
                 "destructor_time",
-                Value::float(seconds(status.destructor_time)),
+                Value::float(status.destructor_time.as_secs_f64()),
             ),
-            ("free_time", Value::float(seconds(status.free_time))),
+            ("free_time", Value::float(status.free_time.as_secs_f64())),
         ] {
             let key = PhpString::new(self, name.as_bytes())?.into_key();
             array.set(self, key, Owner::take(self, value))?;
@@ -1178,11 +1171,6 @@ impl Memory<&mut Request> {
     pub fn gc_possible_root(self, value: &Value) {
         Heap::gc_check_possible_root(&mut Hooks(self.0), value.to_zval());
     }
-}
-
-/// `(double) hrtime / ZEND_NANO_IN_SEC`, a collector time in seconds.
-fn seconds(d: std::time::Duration) -> f64 {
-    d.as_secs_f64()
 }
 
 /// `sizeof(zend_loop_var)`.

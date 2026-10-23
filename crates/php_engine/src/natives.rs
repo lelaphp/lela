@@ -34,9 +34,7 @@ use crate::api::abi::{
     Callable, Entry, Never, OrFalse, Passed, PropertyPurpose, Raw, Union, Variadic,
 };
 use crate::api::coerce::to_string;
-use crate::api::raising::{
-    Thrown, arg_type_error, argument_error, deprecated, throw_error, warning,
-};
+use crate::api::raising::{Thrown, arg_type_error, argument_error, deprecated, error, warning};
 use crate::api::request::Request;
 use crate::api::values::walk::{self, GiveUp, Hold, Unwritten};
 use crate::api::values::{
@@ -814,9 +812,8 @@ fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<Owner<PhpSt
                 scope
             }
             None => {
-                return Err(throw_error(
+                return Err(error(
                     req,
-                    "Error",
                     "get_class() without arguments must be called from within a class",
                 ));
             }
@@ -1532,26 +1529,21 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
 /// by level (#3159).
 #[inline(never)]
 fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
-    if let Some(b) = value.as_bool() {
-        req.response_mut()
-            .write(format!("{common}bool({b})\n").as_bytes());
+    let line = if let Some(b) = value.as_bool() {
+        format!("{common}bool({b})\n")
     } else if let Some(n) = value.as_int() {
-        req.response_mut()
-            .write(format!("{common}int({n})\n").as_bytes());
+        format!("{common}int({n})\n")
     } else if let Some(f) = value.as_float() {
         // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
-        let text = php_heap::double_to_string(
-            f,
-            req.ini().serialize_precision(),
-            php_heap::Exponent::Upper,
-        );
-        req.response_mut()
-            .write(format!("{common}float({text})\n").as_bytes());
+        let precision = req.ini().serialize_precision();
+        let text = php_heap::double_to_string(f, precision, php_heap::Exponent::Upper);
+        format!("{common}float({text})\n")
     } else if let Some(s) = value.as_php_string() {
         req.response_mut()
             .write(format!("{common}string({}) \"", s.len()).as_bytes());
         req.response_mut().write(s.as_bytes());
         req.response_mut().write(b"\"\n");
+        return;
     } else if let Some(resource) = value.as_resource() {
         // `IS_RESOURCE`: the list's id and the type's name through
         // `zend_rsrc_list_get_rsrc_type`, which is `Unknown` once
@@ -1560,16 +1552,14 @@ fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
             || String::from("Unknown"),
             |name| String::from_utf8_lossy(name).into_owned(),
         );
-        req.response_mut()
-            .write(format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes());
+        format!("{common}resource({}) of type ({name})\n", resource.id())
     } else if value.tag() == crate::api::values::TypeTag::Undef {
         // `php_var_dump`'s `default:` arm.
-        req.response_mut()
-            .write(format!("{common}UNKNOWN:0\n").as_bytes());
+        format!("{common}UNKNOWN:0\n")
     } else {
-        req.response_mut()
-            .write(format!("{common}NULL\n").as_bytes());
-    }
+        format!("{common}NULL\n")
+    };
+    req.response_mut().write(line.as_bytes());
 }
 
 /// `php_var_dump`'s `IS_ARRAY` arm: `GC_IS_RECURSIVE`, then
@@ -1753,11 +1743,7 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
 fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize) {
     // `php_var_dump`'s `ZEND_ACC_ENUM` arm, ahead of the recursion
     // guard as php has it.
-    if req
-        .symbols()
-        .class_decl(object.class())
-        .is_some_and(|decl| decl.kind == ClassKind::Enum)
-    {
+    if req.class_is(object.class(), ClassKind::Enum) {
         dump_enum(req, common, object);
         return;
     }

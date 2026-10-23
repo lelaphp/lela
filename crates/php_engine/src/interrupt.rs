@@ -260,13 +260,6 @@ pub(crate) struct Timer(Arc<Mutex<Control>>);
 /// the engine alive: what a fork stops first, whoever asks for it.
 static TIMERS: Mutex<Vec<Weak<Mutex<Control>>>> = Mutex::new(Vec::new());
 
-/// [`TIMERS`], held, with the timers of engines that have ended let go.
-fn registered() -> MutexGuard<'static, Vec<Weak<Mutex<Control>>>> {
-    let mut timers = TIMERS.lock().unwrap_or_else(PoisonError::into_inner);
-    timers.retain(|timer| timer.strong_count() > 0);
-    timers
-}
-
 impl Default for Timer {
     /// A timer with no deadline and no thread, entered among the
     /// process's timers so a fork finds it. The entry stands inside the
@@ -274,7 +267,7 @@ impl Default for Timer {
     fn default() -> Timer {
         let timer = Timer(Arc::default());
         let _inside = crate::fork::Inside::enter();
-        registered().push(Arc::downgrade(&timer.0));
+        crate::fork::living(&TIMERS).push(Arc::downgrade(&timer.0));
         timer
     }
 }
@@ -319,7 +312,7 @@ impl Timers {
     /// The timers of every engine that stands in the process.
     pub(crate) fn live() -> Timers {
         Timers(
-            registered()
+            crate::fork::living(&TIMERS)
                 .iter()
                 .filter_map(Weak::upgrade)
                 .map(Timer)
@@ -378,10 +371,7 @@ impl Stopped {
     pub(crate) fn resume(self) {
         let _inside = crate::fork::Inside::enter();
         for timer in &self.0 {
-            let mut control = timer.control();
-            if control.thread.is_none() {
-                control.start();
-            }
+            timer.stand();
         }
     }
 }

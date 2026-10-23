@@ -9,15 +9,8 @@
 
 use php_compile::multibyte::{Dummy, Encoding, Multibyte};
 
-use crate::api::abi::{EncodingsHook, Multibyte as Provided};
+use crate::api::abi::Multibyte as Provided;
 use crate::api::request::Request;
-use crate::engine::Shared;
-
-/// `zend_multibyte_get_functions`: the functions the last extension in
-/// bundle order handed the engine, none where no extension did.
-pub(crate) fn provider(shared: &Shared) -> Option<EncodingsHook> {
-    shared.supplied.encodings.get()
-}
 
 /// The functions bound to one request, with what the scanner reads
 /// beside them: what the compiler's [`Multibyte`] borrows.
@@ -102,7 +95,9 @@ pub(crate) fn script_encoding(req: &mut Request, value: &[u8]) -> Option<Vec<Enc
     if !req.ini_flag(b"zend.multibyte") {
         return None;
     }
-    if provider(&req.shared).is_none() || value.is_empty() {
+    // `zend_multibyte_get_functions`: none where no extension handed
+    // the engine its functions.
+    if req.shared.supplied.encodings.get().is_none() || value.is_empty() {
         return Some(Vec::new());
     }
     req.extensions_mut()

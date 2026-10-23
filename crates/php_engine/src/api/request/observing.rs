@@ -64,18 +64,9 @@ pub(super) struct Observing {
 
 impl Request {
     /// `ZEND_OBSERVER_DATA(EX(func))`: the observer slot of the op array
-    /// a frame serves ([`exec::Vm::observer_slot`]), or of a native.
-    ///
-    /// [`exec::Vm::observer_slot`]: crate::exec::Vm::observer_slot
+    /// a frame serves, or of a native.
     pub(crate) fn observer_slot(&self, at: Observable) -> Slot {
-        match at {
-            Observable::Code(frame) => self.vm.observer_slot(&self.map, frame),
-            Observable::Native(call) => self
-                .native_place(call.function)
-                .and_then(|place| self.observing.natives.get(place))
-                .cloned()
-                .unwrap_or_default(),
-        }
+        self.observer_slot_held(at).cloned().unwrap_or_default()
     }
 
     /// The begin handler at `next` of that slot as it stands now, read

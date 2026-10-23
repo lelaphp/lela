@@ -546,7 +546,7 @@ impl UnitStrings {
     /// as its file's name `file`: [`Held::file`], or its name among the
     /// names of one that declares.
     fn file_of(&self, unit: *const Unit, file: &[u8]) -> Option<PhpString> {
-        let held = (self.units.iter()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))?;
+        let held = self.units.get(self.position(unit)?)?;
         (held.file.into_iter().chain(held.names.iter().copied()))
             .find(|name| name.as_bytes() == file)
     }
@@ -698,11 +698,7 @@ impl UnitStrings {
 
     /// The entry for `unit`, laid down where there is none.
     fn held(&mut self, unit: &PublishedUnit) -> usize {
-        if let Some(at) = self
-            .units
-            .iter()
-            .position(|held| std::ptr::eq(held.unit.as_ptr(), PublishedUnit::as_ptr(unit)))
-        {
+        if let Some(at) = self.position(PublishedUnit::as_ptr(unit)) {
             return at;
         }
         let spare = self.spare.pop().unwrap_or_default();

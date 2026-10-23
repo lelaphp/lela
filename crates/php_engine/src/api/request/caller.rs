@@ -108,12 +108,6 @@ impl Request {
         }
     }
 
-    /// The innermost user frame, the one a native's variable access
-    /// reads: `EG(current_execute_data)`'s caller.
-    pub(super) fn caller_frame(&self) -> Option<FrameRef> {
-        self.innermost_user_frame()
-    }
-
     /// The call being served read once: how many arguments it was given
     /// and the first `N` of them as [`Frames::argument`] reads each,
     /// `UNDEF` past the count; none given and all `UNDEF` outside a
@@ -373,7 +367,7 @@ impl Request {
     /// native being served.
     pub(crate) fn dynamic_call(&mut self) -> Thrown {
         let name = self.frames().active_function_name();
-        throw_error(self, "Error", &format!("Cannot call {name}() dynamically"))
+        crate::api::raising::error(self, &format!("Cannot call {name}() dynamically"))
     }
 
     /// `zend_active_function()`: the native being served, which is the
@@ -383,7 +377,7 @@ impl Request {
     /// back, as `EG(current_execute_data)` is then that frame. The
     /// raisers render its declared name and its parameters' names off
     /// the declaration, never off the caller's spelling.
-    pub(super) fn active_native_function(&self) -> Option<Function> {
+    pub(crate) fn active_native_function(&self) -> Option<Function> {
         self.serving_call()?.function()
     }
 
@@ -948,7 +942,7 @@ impl Frames<&mut Request> {
     /// rebuild it in php. A view: no owner taken.
     #[must_use]
     pub fn caller_var(self, name: &[u8]) -> Option<Value> {
-        let frame = self.0.caller_frame()?;
+        let frame = self.0.innermost_user_frame()?;
         let table = self.0.rebuild_symbol_table(frame);
         let value = self.0.symbol_value(table, name)?;
         (value.tag() != TypeTag::Undef).then_some(value)
@@ -968,7 +962,7 @@ impl Frames<&mut Request> {
     /// name it made, of which a table that adds the name takes an owner,
     /// as php's `zend_hash_update_ind` takes one of its key.
     pub fn set_caller_var(self, name: PhpString, value: Owner<Value>, order: Overwrite) {
-        let Some(frame) = self.0.caller_frame() else {
+        let Some(frame) = self.0.innermost_user_frame() else {
             value.give_up(self.0);
             return;
         };
@@ -985,7 +979,7 @@ impl Frames<&mut Request> {
     /// `force` php adds no table to a frame that has none. A sink: the
     /// variable takes the value's owner.
     pub fn set_local_var(self, name: &[u8], value: Owner<Value>) -> bool {
-        let Some(frame) = self.0.caller_frame() else {
+        let Some(frame) = self.0.innermost_user_frame() else {
             value.give_up(self.0);
             return false;
         };

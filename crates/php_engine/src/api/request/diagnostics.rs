@@ -810,7 +810,7 @@ impl Request {
         if display == Display::Off {
             return;
         }
-        if self.xmlrpc_errors() {
+        if self.ini_flag(b"xmlrpc_errors") {
             // php's first display form, one `methodResponse` fault with
             // `xmlrpc_error_number` as its code and the diagnostic as
             // its string, the message unescaped and no space after the
@@ -818,14 +818,14 @@ impl Request {
             let text = said(
                 format!(
                     "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:",
-                    self.xmlrpc_error_number()
+                    self.ini().long(b"xmlrpc_error_number")
                 ),
                 &format!(
                     "{site}</string></value></member></struct></value></fault></methodResponse>"
                 ),
             );
             self.printed(&text);
-        } else if self.html_errors() {
+        } else if self.ini_flag(b"html_errors") {
             // php's two html formats: the message of an `E_ERROR` or an
             // `E_PARSE` escaped and no trace after it, and every other
             // level's as it is with the trace between the `<br />` and
@@ -1026,12 +1026,6 @@ impl Request {
                     || display_errors_mode_of(self.ini().get(b"display_errors")) == 0))
     }
 
-    /// `html_errors`, which of php's two display forms a diagnostic
-    /// takes: the plain one, or `<br />\n<b>Warning</b>:  …`.
-    fn html_errors(&self) -> bool {
-        self.ini_flag(b"html_errors")
-    }
-
     /// `determine_charset(NULL, quiet)` (`Z/ext/standard/html.c:364`),
     /// the charset [`escape_html`] reads a message in: the name
     /// `get_default_charset` gives, `internal_encoding` where it is set
@@ -1048,17 +1042,6 @@ impl Request {
             })
             .and_then(Charset::named)
             .unwrap_or(Charset::Utf8)
-    }
-
-    /// `xmlrpc_errors`, whether a diagnostic takes php's xml fault form
-    /// ahead of both of the others.
-    fn xmlrpc_errors(&self) -> bool {
-        self.ini_flag(b"xmlrpc_errors")
-    }
-
-    /// `xmlrpc_error_number`, the fault's code, `OnUpdateLong`.
-    fn xmlrpc_error_number(&self) -> i64 {
-        self.ini().long(b"xmlrpc_error_number")
     }
 
     /// `display_errors`, php's three values: off, the body, and the

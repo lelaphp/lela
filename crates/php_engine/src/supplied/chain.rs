@@ -69,6 +69,20 @@ pub(crate) mod sealed {
     }
 }
 
+/// A kind's [`sealed::Kind::link`] where the link is a function of the
+/// request and the links beneath, called as it stands.
+macro_rules! linked {
+    () => {
+        fn link(
+            link: Self::Link,
+            req: &mut Request,
+            beneath: Beneath<'_, Self>,
+        ) -> <Self as ChainKind>::Answer {
+            link(req, beneath)
+        }
+    };
+}
+
 /// What a link holds of the pointer it saved: every link beneath it
 /// and, beneath them all, php's own function of the kind, with what the
 /// link was handed. [`Beneath::serve`] serves the one beneath; a link
@@ -172,13 +186,7 @@ impl sealed::Kind for Interrupt {
     type Link = InterruptHook;
     type Args<'a> = ();
 
-    fn link(
-        link: InterruptHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(_: &mut Request, (): ()) -> <Self as ChainKind>::Answer {
         Ok(())
@@ -284,13 +292,7 @@ impl sealed::Kind for CompileFile {
     type Link = CompileFileHook;
     type Args<'a> = FileArgs<'a>;
 
-    fn link(
-        link: CompileFileHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(req: &mut Request, args: FileArgs<'_>) -> <Self as ChainKind>::Answer {
         if let Some(opened) = args.opened {
@@ -399,13 +401,7 @@ impl sealed::Kind for CompileString {
     type Link = CompileStringHook;
     type Args<'a> = StringArgs<'a>;
 
-    fn link(
-        link: CompileStringHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(req: &mut Request, args: StringArgs<'_>) -> <Self as ChainKind>::Answer {
         Ok(Compiled(req.compile_string_own(
@@ -469,9 +465,7 @@ impl sealed::Kind for Error {
     type Link = ErrorHook;
     type Args<'a> = ErrorArgs<'a>;
 
-    fn link(link: ErrorHook, req: &mut Request, beneath: Beneath<'_, Self>) {
-        link(req, beneath);
-    }
+    linked!();
 
     fn own(req: &mut Request, args: ErrorArgs<'_>) {
         req.php_error_cb(args);
@@ -524,9 +518,7 @@ impl sealed::Kind for GcCollect {
     type Link = GcCollectHook;
     type Args<'a> = ();
 
-    fn link(link: GcCollectHook, req: &mut Request, beneath: Beneath<'_, Self>) -> i64 {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(req: &mut Request, (): ()) -> i64 {
         req.gc_collect_own()
@@ -541,9 +533,7 @@ impl sealed::Kind for Throw {
     type Link = ThrownHook;
     type Args<'a> = PhpObject;
 
-    fn link(link: ThrownHook, req: &mut Request, beneath: Beneath<'_, Self>) {
-        link(req, beneath);
-    }
+    linked!();
 
     fn own(_: &mut Request, _: PhpObject) {}
 }
@@ -564,13 +554,7 @@ impl sealed::Kind for ResolvePath {
     type Link = ResolvePathHook;
     type Args<'a> = &'a [u8];
 
-    fn link(
-        link: ResolvePathHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(req: &mut Request, written: &[u8]) -> <Self as ChainKind>::Answer {
         req.resolve_path_own(written)
@@ -594,13 +578,7 @@ impl sealed::Kind for PostStartup {
     type Link = PostStartupHook;
     type Args<'a> = ();
 
-    fn link(
-        link: PostStartupHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(_: &mut Request, (): ()) -> <Self as ChainKind>::Answer {
         crate::api::abi::PostStartup::Serve
@@ -615,13 +593,7 @@ impl sealed::Kind for Upload {
     type Link = UploadHook;
     type Args<'a> = crate::api::request::Upload<'a>;
 
-    fn link(
-        link: UploadHook,
-        req: &mut Request,
-        beneath: Beneath<'_, Self>,
-    ) -> <Self as ChainKind>::Answer {
-        link(req, beneath)
-    }
+    linked!();
 
     fn own(_: &mut Request, _: crate::api::request::Upload<'_>) -> <Self as ChainKind>::Answer {
         Ok(true)

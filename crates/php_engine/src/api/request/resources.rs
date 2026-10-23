@@ -38,22 +38,6 @@ impl Resources {
         kind
     }
 
-    /// The type's name, `zend_rsrc_list_get_rsrc_type` over the table.
-    fn type_name(&self, kind: ResourceType) -> Option<&[u8]> {
-        self.types
-            .get(kind.0 as usize)
-            .map(|(name, _)| name.as_slice())
-    }
-
-    /// `zend_fetch_list_dtor_id`: the type registered under `name`.
-    fn type_named(&self, name: &[u8]) -> Option<ResourceType> {
-        self.types
-            .iter()
-            .position(|(registered, _)| registered == name)
-            .and_then(|at| u32::try_from(at).ok())
-            .map(ResourceType)
-    }
-
     /// The type's destructor, if it registered one.
     pub(super) fn dtor(&self, kind: ResourceType) -> Option<ResourceDtor> {
         self.types.get(kind.0 as usize).and_then(|(_, dtor)| *dtor)
@@ -79,7 +63,10 @@ impl Request {
     /// `zend_fetch_list_dtor_id`: the resource type registered under
     /// `name`, as `get_resources()` is given it.
     pub(crate) fn resource_type_named(&self, name: &[u8]) -> Option<ResourceType> {
-        self.resources.type_named(name)
+        (self.resources.types.iter())
+            .position(|(registered, _)| registered == name)
+            .and_then(|at| u32::try_from(at).ok())
+            .map(ResourceType)
     }
 
     /// `zend_register_resource`, what [`Resource::new`] is: the
@@ -96,9 +83,10 @@ impl Request {
         self.fatal_of(allocated).map(Resource::of)
     }
 
-    /// The type's name as registered.
+    /// The type's name as registered, `zend_rsrc_list_get_rsrc_type`.
     pub(crate) fn resource_type_name(&self, kind: ResourceType) -> Option<&[u8]> {
-        self.resources.type_name(kind)
+        let (name, _) = self.resources.types.get(kind.0 as usize)?;
+        Some(name)
     }
 
     /// `zend_list_close`, what [`Resource::close`] is.

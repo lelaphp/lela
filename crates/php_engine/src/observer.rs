@@ -114,7 +114,6 @@
 
 mod opcodes;
 
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef};
@@ -254,26 +253,7 @@ pub struct Observed<'a> {
     at: Handed<'a>,
 }
 
-impl Deref for Observed<'_> {
-    type Target = Request;
-    fn deref(&self) -> &Request {
-        self.req
-    }
-}
-
-impl DerefMut for Observed<'_> {
-    fn deref_mut(&mut self) -> &mut Request {
-        self.req
-    }
-}
-
-impl AsMut<Request> for Observed<'_> {
-    /// The request whose time limit a [`TimeLimitSuspended`] over the
-    /// frame suspends.
-    fn as_mut(&mut self) -> &mut Request {
-        self.req
-    }
-}
+crate::statement::over_request!(Observed);
 
 impl<'a> Observed<'a> {
     /// A call that stands, handed to a handler.

@@ -108,6 +108,14 @@ pub struct FrameView<'a> {
     at: FrameRef,
 }
 
+impl<'a> FrameView<'a> {
+    /// The view of the frame at `at` of the stack `stack`, whose state
+    /// is `vm`.
+    fn of(req: &'a Request, stack: usize, vm: &'a Vm, at: FrameRef) -> FrameView<'a> {
+        FrameView { req, stack, vm, at }
+    }
+}
+
 impl std::fmt::Debug for FrameView<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FrameView")
@@ -231,12 +239,12 @@ impl<'a> FrameView<'a> {
             vm = self.req.executions().nth(stack)?;
             above = vm.depth();
         };
-        Some(FrameView {
-            req: self.req,
+        Some(FrameView::of(
+            self.req,
             stack,
             vm,
-            at: FrameRef(u32::try_from(at).ok()?),
-        })
+            FrameRef(u32::try_from(at).ok()?),
+        ))
     }
 }
 
@@ -327,12 +335,12 @@ impl<'a> ChainFrame<'a> {
     /// it expands into (`zend_generator_check_placeholder_frame`).
     fn of(req: &'a Request, stack: usize, vm: &'a Vm, link: &Link<'a>) -> Option<ChainFrame<'a>> {
         let read = match *link {
-            Link::Frame(Slots::Stack(_, at), _) => Read::Stack(FrameView {
+            Link::Frame(Slots::Stack(_, at), _) => Read::Stack(FrameView::of(
                 req,
                 stack,
                 vm,
-                at: FrameRef(u32::try_from(at).unwrap_or(u32::MAX)),
-            }),
+                FrameRef(u32::try_from(at).unwrap_or(u32::MAX)),
+            )),
             Link::Frame(Slots::Kept, state) => Read::Kept(state),
             Link::Call(call) => Read::Native(call.callee()),
             Link::Site(site) => Read::Site(site),
@@ -476,12 +484,7 @@ impl Request {
     /// `frame` on the running stack, read: what an observer's handler is
     /// handed ([`crate::observer`]).
     pub(crate) fn frame_view(&self, frame: FrameRef) -> FrameView<'_> {
-        FrameView {
-            req: self,
-            stack: 0,
-            vm: &self.vm,
-            at: frame,
-        }
+        FrameView::of(self, 0, &self.vm, frame)
     }
 
     /// The innermost user frame on the chain, not being popped: where a
@@ -490,12 +493,12 @@ impl Request {
     pub(crate) fn innermost_frame_view(&self) -> Option<FrameView<'_>> {
         self.executions().enumerate().find_map(|(stack, vm)| {
             let at = vm.innermost_at()?;
-            Some(FrameView {
-                req: self,
+            Some(FrameView::of(
+                self,
                 stack,
                 vm,
-                at: FrameRef(u32::try_from(at).ok()?),
-            })
+                FrameRef(u32::try_from(at).ok()?),
+            ))
         })
     }
 
@@ -574,12 +577,7 @@ impl<'r> Frames<&'r Request> {
                     .find_map(|(stack, vm)| Some((stack, vm, id.moved_on(vm)?)))
             });
         let (stack, vm, at) = found?;
-        Some(FrameView {
-            req: self.0,
-            stack,
-            vm,
-            at,
-        })
+        Some(FrameView::of(self.0, stack, vm, at))
     }
 }
 

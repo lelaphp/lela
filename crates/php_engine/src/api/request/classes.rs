@@ -18,8 +18,8 @@ use crate::engine::Shared;
 use crate::exec;
 
 use super::{
-    Bound, Declared, Deprecations, FrameShape, Keyed, Member, MemberAt, Named, Request,
-    UserFunction, preload, user_function_decl,
+    Bound, Declared, Deprecations, Keyed, Member, MemberAt, Named, Request, UserFunction, preload,
+    user_function_decl,
 };
 
 /// The request's symbols facet (design §4.4): the symbol tables:
@@ -39,6 +39,12 @@ impl Request {
     /// The symbols facet, to change.
     pub fn symbols_mut(&mut self) -> Symbols<&mut Request> {
         Symbols(self)
+    }
+
+    /// Whether `class` is linked and declared a `kind`: a trait, an
+    /// interface, an enum.
+    pub(crate) fn class_is(&self, class: ClassId, kind: ClassKind) -> bool {
+        (self.symbols().class_decl(class)).is_some_and(|decl| decl.kind == kind)
     }
 }
 
@@ -527,11 +533,7 @@ impl Request {
     /// runtime definition key ([`Request::bind_at_load`]), and
     /// [`Request::bind_class`] where it did not, the key still standing.
     pub(crate) fn bind_delayed(&mut self, unit: &PublishedUnit, key: &[u8]) -> Result<(), Thrown> {
-        let at = unit
-            .runtime_keys
-            .iter()
-            .find(|(filed, _)| *filed.0 == *key)
-            .map(|(_, at)| *at);
+        let at = runtime_class(unit, key);
         if let Some(bound) = self
             .classes
             .bound_at_load
@@ -558,11 +560,7 @@ impl Request {
         if !crate::observer::classes_linked_observed(self) {
             return Ok(());
         }
-        let at = unit
-            .runtime_keys
-            .iter()
-            .find(|(filed, _)| *filed.0 == *key)
-            .and_then(|(_, at)| usize::try_from(*at).ok());
+        let at = runtime_class(unit, key).and_then(|at| usize::try_from(at).ok());
         // The opline of a class the preload holds is a `NOP`, which tells
         // nothing.
         let name = at
@@ -815,19 +813,9 @@ impl Request {
                 class,
                 at: MemberAt::Method(method),
             });
-            let flags = crate::attributes::Flags::of(&decl.function.attributes);
-            let shape = FrameShape::of(&decl.function, exec::body_of(&unit, body), observed);
-            let record = UserFunction::record(&unit, body, &decl.function.name.0);
             rows.push(MemberRow {
                 method: Some(method),
-                user: UserFunction {
-                    unit,
-                    body,
-                    member,
-                    flags,
-                    shape,
-                    record,
-                },
+                user: UserFunction::of(unit, body, member, &decl.function, observed),
                 cache,
             });
         }
@@ -845,19 +833,9 @@ impl Request {
                     class,
                     at: MemberAt::Hook { property, kind },
                 });
-                let flags = crate::attributes::Flags::of(&hook.function.attributes);
-                let shape = FrameShape::of(&hook.function, exec::body_of(&unit, body), observed);
-                let record = UserFunction::record(&unit, body, &hook.function.name.0);
                 rows.push(MemberRow {
                     method: None,
-                    user: UserFunction {
-                        unit,
-                        body,
-                        member,
-                        flags,
-                        shape,
-                        record,
-                    },
+                    user: UserFunction::of(unit, body, member, &hook.function, observed),
                     cache,
                 });
             }
@@ -1312,12 +1290,7 @@ impl Request {
     /// Fatal error: Interface J cannot implement previously implemented interface I in %s on line 3
     /// ```
     pub(crate) fn bind_class(&mut self, unit: &PublishedUnit, key: &[u8]) -> Result<(), Thrown> {
-        let Some(at) = unit
-            .runtime_keys
-            .iter()
-            .find(|(filed, _)| *filed.0 == *key)
-            .and_then(|(_, at)| usize::try_from(*at).ok())
-        else {
+        let Some(at) = runtime_class(unit, key).and_then(|at| usize::try_from(at).ok()) else {
             return Err(crate::api::raising::fatal(
                 self,
                 "InternalError: a DECLARE_CLASS carries a key the unit files no class under",
@@ -1377,7 +1350,7 @@ impl Request {
                     String::from_utf8_lossy(name),
                     self.symbols().class_name(found)
                 );
-                let thrown = crate::api::raising::throw_error(self, "Error", &message);
+                let thrown = crate::api::raising::error(self, &message);
                 return Err(self.link_abandoned(name, thrown, false));
             }
             if let Err(thrown) = self.deprecated_trait(found, name) {
@@ -1407,11 +1380,8 @@ impl Request {
         unit: &PublishedUnit,
         key: &[u8],
     ) -> Result<ClassId, Thrown> {
-        let name = unit
-            .runtime_keys
-            .iter()
-            .find(|(filed, _)| *filed.0 == *key)
-            .and_then(|(_, at)| unit.classes.get(usize::try_from(*at).ok()?))
+        let name = runtime_class(unit, key)
+            .and_then(|at| unit.classes.get(usize::try_from(at).ok()?))
             .map(|decl| decl.name.0.to_vec());
         let Some(name) = name else {
             return Err(crate::api::raising::fatal(
@@ -1585,9 +1555,8 @@ impl Request {
     ) -> Result<ClassId, Thrown> {
         let found = crate::api::call::autoload(self, &name.0)?;
         found.ok_or_else(|| {
-            crate::api::raising::throw_error(
+            crate::api::raising::error(
                 self,
-                "Error",
                 &format!("{what} \"{}\" not found", String::from_utf8_lossy(&name.0)),
             )
         })
@@ -1639,15 +1608,15 @@ impl Request {
             return Err(crate::api::raising::fatal(self, &message));
         }
         let declared = Function::local(self.user_functions.len());
-        let (flags, shape) = dynamic_traits(unit, at, crate::observer::observing(self));
-        self.user_functions.push(UserFunction {
-            unit: PublishedUnit::clone(unit),
-            body: exec::Body::Dynamic(at),
-            member: None,
-            flags,
-            shape,
-            record: UserFunction::record(unit, exec::Body::Dynamic(at), &decl.name.0),
-        });
+        let observed = crate::observer::observing(self);
+        let unit_of = PublishedUnit::clone(unit);
+        (self.user_functions).push(UserFunction::of(
+            unit_of,
+            exec::Body::Dynamic(at),
+            None,
+            decl,
+            observed,
+        ));
         // `do_bind_function`'s `zend_observer_function_declared_notify`
         // (`Z/Zend/zend_compile.c:1300`).
         if let Some(declared) = declared {
@@ -1670,7 +1639,7 @@ impl Request {
     /// name is no entry of the function table under a callable name: a
     /// closure is reached through its object and never by name.
     pub(crate) fn closure_function(&mut self, unit: &PublishedUnit, at: u32) -> Option<Function> {
-        unit.dynamic.get(usize::try_from(at).ok()?)?;
+        let (decl, _) = unit.dynamic.get(usize::try_from(at).ok()?)?;
         let body = exec::Body::Dynamic(at);
         if let Some(position) = self
             .user_functions
@@ -1680,19 +1649,14 @@ impl Request {
             return Function::local(position);
         }
         let function = Function::local(self.user_functions.len())?;
-        let (flags, shape) = dynamic_traits(unit, at, crate::observer::observing(self));
-        let name = unit
-            .dynamic
-            .get(usize::try_from(at).ok()?)
-            .map_or(&[][..], |(decl, _)| &decl.name.0);
-        self.user_functions.push(UserFunction {
-            unit: PublishedUnit::clone(unit),
+        let observed = crate::observer::observing(self);
+        (self.user_functions).push(UserFunction::of(
+            PublishedUnit::clone(unit),
             body,
-            member: None,
-            flags,
-            shape,
-            record: UserFunction::record(unit, body, name),
-        });
+            None,
+            decl,
+            observed,
+        ));
         Some(function)
     }
 
@@ -1764,22 +1728,31 @@ impl Request {
             }
         } else {
             for declared in &unit.top_level {
-                let declared = match *declared {
-                    TopLevel::Function(at) => {
-                        self.declare_function_told(unit, usize::try_from(at).unwrap_or(usize::MAX))
-                    }
-                    TopLevel::Class(at) => self.declare_classes_through(
-                        unit,
-                        load,
-                        Some(usize::try_from(at).unwrap_or(usize::MAX)),
-                    ),
-                };
-                if !declared {
+                if !self.declare_top_level(unit, load, *declared) {
                     return false;
                 }
             }
         }
         self.declare_classes_through(unit, load, None) && self.declare_delayed(unit, load)
+    }
+
+    /// The declaration at `top` of `unit`'s top level declared: a
+    /// function, or each class through one. Whether it stood.
+    fn declare_top_level(
+        &mut self,
+        unit: &PublishedUnit,
+        load: &mut ClassLoad,
+        top: TopLevel,
+    ) -> bool {
+        match top {
+            TopLevel::Function(at) => {
+                self.declare_function_told(unit, usize::try_from(at).unwrap_or(usize::MAX))
+            }
+            TopLevel::Class(at) => {
+                let at = usize::try_from(at).unwrap_or(usize::MAX);
+                self.declare_classes_through(unit, load, Some(at))
+            }
+        }
     }
 
     /// Whether the function at `at` of `unit` names one the request
@@ -1914,16 +1887,7 @@ impl Request {
                 self.note_error_in(raised.level, &raised.message, file, raised.line);
             }
             noted = noted.max(*before);
-            let standing = match *landed {
-                TopLevel::Function(at) => {
-                    self.declare_function_told(unit, usize::try_from(at).unwrap_or(usize::MAX))
-                }
-                TopLevel::Class(at) => {
-                    let at = usize::try_from(at).unwrap_or(usize::MAX);
-                    self.declare_classes_through(unit, &mut load, Some(at))
-                }
-            };
-            if !standing {
+            if !self.declare_top_level(unit, &mut load, *landed) {
                 return None;
             }
         }
@@ -1985,18 +1949,14 @@ impl Request {
         let Some(declared) = Function::local(self.user_functions.len()) else {
             return Some(false);
         };
-        self.user_functions.push(UserFunction {
-            unit: PublishedUnit::clone(unit),
+        let observed = crate::observer::observing(self);
+        (self.user_functions).push(UserFunction::of(
+            PublishedUnit::clone(unit),
             body,
-            member: None,
-            flags: crate::attributes::Flags::of(&decl.attributes),
-            shape: FrameShape::of(
-                decl,
-                exec::body_of(unit, body),
-                crate::observer::observing(self),
-            ),
-            record: UserFunction::record(unit, body, &decl.name.0),
-        });
+            None,
+            decl,
+            observed,
+        ));
         self.functions.push(&decl.name.0, declared);
         Some(true)
     }
@@ -2380,8 +2340,7 @@ impl Symbols<&mut Request> {
     /// table; a method is none either, being its class's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn defined_functions(self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.defined_functions_made();
-        adopted(made)
+        adopted(self.0.defined_functions_made())
     }
 }
 
@@ -2682,22 +2641,6 @@ fn class_in(
     })
 }
 
-/// The flags and the arity of the function at `at` of a unit's
-/// `dynamic` table, one a `DECLARE_FUNCTION` binds or a closure is made
-/// of.
-fn dynamic_traits(unit: &Unit, at: u32, observed: bool) -> (crate::attributes::Flags, FrameShape) {
-    usize::try_from(at)
-        .ok()
-        .and_then(|at| unit.dynamic.get(at))
-        .map(|(decl, code)| {
-            (
-                crate::attributes::Flags::of(&decl.attributes),
-                FrameShape::of(decl, Some(code), observed),
-            )
-        })
-        .unwrap_or_default()
-}
-
 /// `zend_class_redeclaration_error_ex`'s two wordings over the earlier
 /// declaration: what it is, the name redeclared, and the earlier one's
 /// site when it was a user class. `zend_class_redeclaration_error` names
@@ -2713,4 +2656,12 @@ fn redeclaration(earlier: &ClassDecl, name: &[u8]) -> String {
         String::from_utf8_lossy(&earlier.file.0),
         earlier.line
     )
+}
+
+/// The class at its place in `unit`'s classes that the unit files under
+/// the runtime definition key `key` ([`Unit::runtime_keys`]).
+fn runtime_class(unit: &Unit, key: &[u8]) -> Option<u32> {
+    (unit.runtime_keys.iter())
+        .find(|(filed, _)| *filed.0 == *key)
+        .map(|(_, at)| *at)
 }

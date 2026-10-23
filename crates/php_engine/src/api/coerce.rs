@@ -192,8 +192,7 @@ pub fn to_double(req: &mut Request, value: &Value) -> Result<f64, Thrown> {
 /// everything else.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn to_string(req: &mut Request, value: &Value) -> Result<Owner<PhpString>, Thrown> {
-    let made = crate::ops::to_string(req, value);
-    adopted(made)
+    adopted(crate::ops::to_string(req, value))
 }
 
 /// `zval_get_tmp_string` and `zend_tmp_string_release` around one read:
@@ -259,8 +258,7 @@ pub fn to_number(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
 /// request's otherwise.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn to_array(req: &mut Request, value: &Value) -> Result<Owner<PhpArray>, Thrown> {
-    let made = crate::ops::to_array(req, value);
-    adopted(made)
+    adopted(crate::ops::to_array(req, value))
 }
 
 /// `(object)`, the kernel [`crate::ops::to_object`] through the face:
@@ -271,8 +269,7 @@ pub fn to_array(req: &mut Request, value: &Value) -> Result<Owner<PhpArray>, Thr
 /// otherwise.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn to_object(req: &mut Request, value: &Value) -> Result<Owner<PhpObject>, Thrown> {
-    let made = crate::ops::to_object(req, value);
-    adopted(made)
+    adopted(crate::ops::to_object(req, value))
 }
 
 /// `zend_is_callable` with the request's scope.
@@ -301,20 +298,14 @@ pub fn callable_checked(req: &mut Request, value: &Value) -> Result<Callable, St
 /// string, as `zval_get_string` makes it.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn callable_name(req: &mut Request, value: &Value) -> Result<Owner<PhpString>, Thrown> {
-    let made = callable_name_made(req, value);
-    adopted(made)
-}
-
-/// What [`callable_name`] makes, its one owner not yet named.
-pub(crate) fn callable_name_made(req: &mut Request, value: &Value) -> Result<PhpString, Thrown> {
     let held = value.deref();
-    match held.as_ref() {
+    adopted(match held.as_ref() {
         ValueRef::Str(_) | ValueRef::Array(_) | ValueRef::Object(_) => {
             let named = req.callable_name(&held);
             req.string(named.as_bytes())
         }
         _ => crate::ops::to_string(req, &held),
-    }
+    })
 }
 
 /// The callable a value names as `zend_call_function` resolves one it
@@ -411,12 +402,6 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
 /// ```
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn key_of(req: &mut Request, value: &Value) -> Result<Owner<Key>, Thrown> {
-    let made = key_of_made(req, value);
-    adopted(made)
-}
-
-/// What [`key_of`] makes, its one owner not yet named.
-pub(crate) fn key_of_made(req: &mut Request, value: &Value) -> Result<Key, Thrown> {
     let value = value.deref();
     let key = Key::of(crate::ops::array_offset(req, &value, false)?);
     // The kernel names a string offset's own string; a `null`'s `""` it
@@ -424,7 +409,7 @@ pub(crate) fn key_of_made(req: &mut Request, value: &Value) -> Result<Key, Throw
     if let (Key::Str(s), ValueRef::Str(_)) = (&key, value.as_ref()) {
         req.addref(&Value::string(*s));
     }
-    Ok(key)
+    Ok(Owner::adopt(key))
 }
 
 /// `count()` of a countable value, the kernel [`crate::ops::count`]
@@ -534,17 +519,6 @@ pub fn binary_op(
     lhs: &Value,
     rhs: &Value,
 ) -> Result<Owner<Value>, Thrown> {
-    let made = binary_op_made(req, op, lhs, rhs);
-    adopted(made)
-}
-
-/// What [`binary_op`] makes, its one owner not yet named.
-pub(crate) fn binary_op_made(
-    req: &mut Request,
-    op: BinaryOp,
-    lhs: &Value,
-    rhs: &Value,
-) -> Result<Value, Thrown> {
     let kernel = match op {
         BinaryOp::Add => crate::ops::add,
         BinaryOp::Sub => crate::ops::sub,
@@ -558,9 +532,9 @@ pub(crate) fn binary_op_made(
         BinaryOp::BitwiseXor => crate::ops::bitwise_xor,
         BinaryOp::ShiftLeft => crate::ops::shift_left,
         BinaryOp::ShiftRight => crate::ops::shift_right,
-        BinaryOp::BitwiseNot => return crate::ops::bitwise_not(req, lhs),
+        BinaryOp::BitwiseNot => return adopted(crate::ops::bitwise_not(req, lhs)),
     };
-    kernel(req, lhs, rhs)
+    adopted(kernel(req, lhs, rhs))
 }
 
 /// `ZEND_ARG_USES_STRICT_TYPES()` (`Z/Zend/zend_compile.h:723`): whether

@@ -187,13 +187,10 @@ impl Request {
     /// down there. Empty for a native and for a function with none.
     pub(crate) fn static_variables(&mut self, target: Target) -> Vec<(Vec<u8>, Value)> {
         let function = match target {
-            Target::Closure(object) => {
-                let fake = object.closure(self).is_some_and(|closure| closure.fake);
-                match object.closure(self).map(|closure| closure.function) {
-                    Some(function) if fake => function,
-                    _ => return self.closure_bound(object, false),
-                }
-            }
+            Target::Closure(object) => match object.closure(self).map(|c| (c.fake, c.function)) {
+                Some((true, function)) => function,
+                _ => return self.closure_bound(object, false),
+            },
             Target::Function(function) | Target::Method { function, .. } => function,
         };
         let Some((unit, body)) = self

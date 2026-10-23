@@ -18,7 +18,7 @@ use crate::generator;
 /// A generator's or a fiber's execution where it stands, one view for
 /// both: what the object was made to serve, and the frame it stands at.
 /// A view: it takes no owner of anything it names.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Execution {
     /// `generator->func`, which outlives the generator's frame; none for
     /// a fiber, which serves `callable`.
@@ -93,10 +93,7 @@ impl Request {
             function,
             scope: function.and_then(|function| self.method_class(function)),
             closure,
-            callable: None,
-            executing: None,
-            site: None,
-            this: None,
+            ..Execution::default()
         };
         if !generator::has_frame(self, object) {
             return execution;
@@ -231,13 +228,9 @@ impl Frames<&mut Request> {
         }
         let (callable, standing) = crate::fiber::view(self.0, object)?;
         let mut execution = Execution {
-            function: None,
-            scope: None,
-            closure: None,
             callable,
             executing: standing.is_some().then_some(object),
-            site: None,
-            this: None,
+            ..Execution::default()
         };
         // Where php's `fiber->execute_data` reads: the innermost frame of
         // user code on the fiber's stack, or, from its bottom frame, the

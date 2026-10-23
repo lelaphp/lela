@@ -153,6 +153,17 @@ pub(crate) struct TypedProperty {
     pub(crate) readonly: bool,
 }
 
+impl TypedProperty {
+    /// The property `p` that `declaring` declared, where it is typed.
+    fn of(declaring: ClassId, p: &PropertyDecl) -> Option<TypedProperty> {
+        Some(TypedProperty {
+            declaring,
+            ty: p.ty.clone()?,
+            readonly: p.is_readonly,
+        })
+    }
+}
+
 /// One row of an object's property table as [`Request::property_rows`]
 /// reads it: the name, the value, and for a declared slot the class
 /// that declared it and its visibility.
@@ -262,6 +273,35 @@ impl Default for Properties {
 }
 
 impl Request {
+    /// php's warning for a read of the property `name` that an object
+    /// of `class` holds no value for.
+    pub(crate) fn undefined_property(&mut self, class: ClassId, name: &[u8]) {
+        let class = self.symbols().class_name(class);
+        let shown = String::from_utf8_lossy(name);
+        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+    }
+
+    /// The truth of `value`, an answer the caller holds, given up once
+    /// read.
+    pub(crate) fn truth_of(&mut self, value: Value) -> Result<bool, Thrown> {
+        let truth = crate::api::coerce::truthy(self, &value);
+        self.release(value);
+        truth
+    }
+
+    /// A write of `value` to the property `name` refused with `thrown`,
+    /// the two owners it was handed given up, the value's first.
+    pub(super) fn refused_write<T>(
+        &mut self,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
+        thrown: Thrown,
+    ) -> Result<T, Thrown> {
+        value.give_up(self);
+        name.give_up(self);
+        Err(thrown)
+    }
+
     /// `EG(fake_scope) = scope` for the length of `f`, and the scope
     /// that stood put back after it, whatever `f` answers: the one form
     /// every save of php's fake scope takes, so `properties.fake_scope`
@@ -920,13 +960,7 @@ impl Request {
     fn property_root(&self, declaring: ClassId, name: &[u8]) -> ClassId {
         let mut root = declaring;
         for here in self.ancestors(declaring) {
-            let own = self.symbols().class_decl(here).and_then(|decl| {
-                decl.properties
-                    .iter()
-                    .find(|p| &*p.name.0 == name)
-                    .map(|p| p.visibility)
-            });
-            match own {
+            match self.declared_property(here, name).map(|p| p.visibility) {
                 Some(Visibility::Private) => break,
                 Some(_) => root = here,
                 None => {}
@@ -961,13 +995,7 @@ impl Request {
         if placed.visibility == Visibility::Public {
             return true;
         }
-        let scope = scope();
-        match placed.visibility {
-            Visibility::Public => true,
-            _ if scope == Some(placed.declaring) => true,
-            Visibility::Private => false,
-            Visibility::Protected => self.check_protected(placed.root, scope),
-        }
+        self.reaches_member(placed.declaring, placed.root, placed.visibility, scope())
     }
 
     /// `zend_get_property_offset` where the row `ce->properties_info`
@@ -1019,17 +1047,8 @@ impl Request {
         if scope != Some(declaring) {
             // `ZEND_ACC_CHANGED`: the scope's own private `static` wins
             // where the row is a `static` too.
-            let own = scope.is_some_and(|scope| {
-                scope != class
-                    && self.symbols().instance_of(class, scope)
-                    && self.symbols().class_decl(scope).is_some_and(|decl| {
-                        decl.properties.iter().any(|p| {
-                            !p.is_instance
-                                && p.visibility == Visibility::Private
-                                && &*p.name.0 == name
-                        })
-                    })
-            });
+            let own =
+                scope.is_some_and(|scope| self.parent_declares_private(class, scope, name, false));
             match visibility {
                 _ if is_instance => return None,
                 _ if own => {}
@@ -1065,15 +1084,30 @@ impl Request {
             InfoFound::Absent => return None,
             InfoFound::Unrecorded => {}
         }
-        self.symbols().lineage(class).find_map(|here| {
-            let p = self
-                .symbols()
-                .class_decl(here)?
-                .properties
-                .iter()
-                .find(|p| &*p.name.0 == name)?;
-            Some((here, p))
-        })
+        (self.symbols().lineage(class))
+            .find_map(|here| Some((here, self.declared_property(here, name)?)))
+    }
+
+    /// The property `name` as `class` declares it itself; none for one
+    /// it inherits.
+    fn declared_property(&self, class: ClassId, name: &[u8]) -> Option<&PropertyDecl> {
+        (self.symbols().class_decl(class)?.properties.iter()).find(|p| &*p.name.0 == name)
+    }
+
+    /// Whether `scope` is a parent of `class` that declares `name` as a
+    /// private property of its own, an instance one where `instance`,
+    /// a `static` one where not.
+    fn parent_declares_private(
+        &self,
+        class: ClassId,
+        scope: ClassId,
+        name: &[u8],
+        instance: bool,
+    ) -> bool {
+        scope != class
+            && self.symbols().instance_of(class, scope)
+            && (self.declared_property(scope, name))
+                .is_some_and(|p| p.is_instance == instance && p.visibility == Visibility::Private)
     }
 
     /// `ZEND_WRONG_PROPERTY_OFFSET` for a name no instance row placed:
@@ -1140,15 +1174,8 @@ impl Request {
     /// is a parent of `class` that declares `name` as a private instance
     /// property of its own.
     pub(crate) fn parent_private(&self, class: ClassId, name: &[u8]) -> Option<ClassId> {
-        self.property_scope().filter(|&scope| {
-            scope != class
-                && self.symbols().instance_of(class, scope)
-                && self.symbols().class_decl(scope).is_some_and(|decl| {
-                    decl.properties.iter().any(|p| {
-                        p.is_instance && p.visibility == Visibility::Private && &*p.name.0 == name
-                    })
-                })
-        })
+        (self.property_scope())
+            .filter(|&scope| self.parent_declares_private(class, scope, name, true))
     }
 
     fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, &PropertyDecl)> {
@@ -1336,15 +1363,11 @@ impl Request {
             _ if readonly => "protected(set) readonly",
             _ => "protected(set)",
         };
-        let from = match self.executed_scope() {
-            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
-            None => String::from("global scope"),
-        };
+        let from = self.scope_phrase(self.executed_scope());
         let class = self.symbols().class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot {operation} {word} property {class}::${shown} from {from}"),
         )
     }
@@ -1365,11 +1388,24 @@ impl Request {
         visibility: Visibility,
         scope: Option<ClassId>,
     ) -> bool {
+        self.reaches_member(class, class, visibility, scope)
+    }
+
+    /// Whether `scope` reaches a member `declaring` declared as
+    /// `visibility`, a protected one measured against `root`, the class
+    /// that first declared it (`is_protected_compatible_scope`).
+    pub(super) fn reaches_member(
+        &self,
+        declaring: ClassId,
+        root: ClassId,
+        visibility: Visibility,
+        scope: Option<ClassId>,
+    ) -> bool {
         match visibility {
             Visibility::Public => true,
-            _ if scope == Some(class) => true,
+            _ if scope == Some(declaring) => true,
             Visibility::Private => false,
-            Visibility::Protected => self.check_protected(class, scope),
+            Visibility::Protected => self.check_protected(root, scope),
         }
     }
 
@@ -1645,9 +1681,8 @@ impl Request {
         }
         let class = self.symbols().class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name);
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!(
                 "Cannot access uninitialized non-nullable property {class}::${shown} by reference"
             ),
@@ -1663,13 +1698,7 @@ impl Request {
         slot: u32,
     ) -> Option<(TypedProperty, Vec<u8>)> {
         let (declaring, p) = self.placed_property(class, slot)?;
-        let name = p.name.0.to_vec();
-        let typed = TypedProperty {
-            declaring,
-            ty: p.ty.clone()?,
-            readonly: p.is_readonly,
-        };
-        Some((typed, name))
+        Some((TypedProperty::of(declaring, p)?, p.name.0.to_vec()))
     }
 
     /// `ZEND_REF_ADD_TYPE_SOURCE` over the property whose slot `slot` of
@@ -1876,9 +1905,7 @@ impl Request {
     ) -> Result<Option<Value>, Thrown> {
         if self.guard_word(object, name) & IN_ISSET == 0 {
             let answered = self.call_accessor(object, issetter, IN_ISSET, name, &[])?;
-            let truthy = crate::api::coerce::truthy(self, &answered);
-            self.release(answered);
-            if !truthy? {
+            if !self.truth_of(answered)? {
                 return Ok(Some(Value::null()));
             }
         }
@@ -2023,9 +2050,8 @@ impl Request {
         let class = self.symbols().class_name(declaring);
         let ty = php_unit::type_to_string(ty);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::type_error(
             self,
-            "TypeError",
             &format!(
                 "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
             ),
@@ -2072,9 +2098,8 @@ impl Request {
     ) -> Thrown {
         let class = self.symbols().class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot {operation} readonly property {class}::${shown}"),
         )
     }
@@ -2085,9 +2110,8 @@ impl Request {
     pub(crate) fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
         let class = self.symbols().class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Typed property {class}::${shown} must not be accessed before initialization"),
         )
     }
@@ -2135,11 +2159,7 @@ impl Request {
     /// bool(false)
     /// ```
     pub(crate) fn bad_property_name_error(&mut self) -> Thrown {
-        crate::api::raising::throw_error(
-            self,
-            "Error",
-            "Cannot access property starting with \"\\0\"",
-        )
+        crate::api::raising::error(self, "Cannot access property starting with \"\\0\"")
     }
 
     /// `zend_wrong_offset`: the placement a magic accessor's guard
@@ -2168,16 +2188,11 @@ impl Request {
         visibility: Visibility,
         name: &[u8],
     ) -> Thrown {
-        let word = match visibility {
-            Visibility::Public => "public",
-            Visibility::Protected => "protected",
-            Visibility::Private => "private",
-        };
+        let word = super::methods::visibility_string(visibility);
         let class = self.symbols().class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot access {word} property {class}::${shown}"),
         )
     }
@@ -2606,9 +2621,7 @@ impl Request {
             return self.read_property(instance, name, read);
         }
         if !quiet {
-            let class = self.symbols().class_name(class);
-            let shown = String::from_utf8_lossy(name);
-            crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+            self.undefined_property(class, name);
         }
         Ok(Owner::null())
     }
@@ -2886,9 +2899,7 @@ impl Request {
         // `ZVAL_NULL(retval)` before the warning, so what an error handler
         // writes into the slot is what the fetch then reads.
         self.write_declared_slot(o, placed.slot, Value::null())?;
-        let class = self.symbols().class_name(class);
-        let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        self.undefined_property(class, name);
         Ok(())
     }
 
@@ -2931,11 +2942,7 @@ impl Request {
         name: &[u8],
     ) -> Option<TypedProperty> {
         let (_, declaring, p) = self.placed_row(class, name)?;
-        p.ty.clone().map(|ty| TypedProperty {
-            declaring,
-            ty,
-            readonly: p.is_readonly,
-        })
+        TypedProperty::of(declaring, p)
     }
 
     /// [`Request::declared_typed_property`] of the property in slot
@@ -2944,11 +2951,7 @@ impl Request {
     /// with no find of the name.
     pub(crate) fn typed_property_at(&self, class: ClassId, slot: u32) -> Option<TypedProperty> {
         let (declaring, p) = self.placed_property(class, slot)?;
-        p.ty.clone().map(|ty| TypedProperty {
-            declaring,
-            ty,
-            readonly: p.is_readonly,
-        })
+        TypedProperty::of(declaring, p)
     }
 
     /// [`Request::declared_typed_property`] for the `static` property
@@ -2956,12 +2959,7 @@ impl Request {
     /// `zend_fetch_static_property_address` hands on, its type and the
     /// class that declared it, where the property is typed.
     pub(crate) fn typed_static(&self, info: PropertyInfo) -> Option<TypedProperty> {
-        let p = self.property_decl(info)?;
-        p.ty.clone().map(|ty| TypedProperty {
-            declaring: info.declaring,
-            ty,
-            readonly: p.is_readonly,
-        })
+        TypedProperty::of(info.declaring, self.property_decl(info)?)
     }
 
     /// `zend_verify_property_type` over a value about to land in a typed
@@ -3032,9 +3030,8 @@ impl Request {
         }
         let class = self.symbols().class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        let error = crate::api::raising::throw_error(
+        let error = crate::api::raising::error(
             self,
-            "Error",
             &format!("Object was released while assigning to property {class}::${shown}"),
         );
         held.let_go(self);
@@ -3213,9 +3210,7 @@ impl Request {
             }
             if !self.serves_accessor(class, Accessor::Set) {
                 let thrown = self.inaccessible_property(class, hooked.visibility, name.as_bytes());
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
+                return self.refused_write(name, value, thrown);
             }
         }
         let placed = self.declared_slot(class, name.as_bytes());
@@ -3224,9 +3219,7 @@ impl Request {
         {
             if !o.slot(p.slot).is_undef() {
                 if let Some(thrown) = self.found_refusal(o, p, name.as_bytes()) {
-                    value.give_up(self);
-                    name.give_up(self);
-                    return Err(thrown);
+                    return self.refused_write(name, value, thrown);
                 }
                 return self.write_std_property(object, name, value);
             }
@@ -3248,16 +3241,12 @@ impl Request {
             && !self.serves_accessor(class, Accessor::Set)
         {
             let thrown = self.inaccessible_property(class, p.visibility, name.as_bytes());
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         let bad_name = placed.is_none() && Self::bad_property_name(name.as_bytes());
         if bad_name && !self.serves_accessor(class, Accessor::Set) {
             let thrown = self.bad_property_name_error();
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         let (name, value) = if placed.is_none() && !bad_name {
             match self.write_held_dynamic(o, name, value) {
@@ -3293,9 +3282,7 @@ impl Request {
         // `zend_wrong_offset`: the guard stands, so the placement is
         // made again and the `Error` it raises is the answer.
         if wrong && let Some(thrown) = self.wrong_offset(class, &bytes) {
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         if lazy {
             return self.lazy_write(object, name, value, true);
@@ -3306,9 +3293,7 @@ impl Request {
             && !placed.readonly
             && let Some(thrown) = self.set_refusal(&placed, &bytes, "modify")
         {
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         self.write_std_property(object, name, value)
     }
@@ -3327,11 +3312,7 @@ impl Request {
     ) -> Result<(), Thrown> {
         let instance = match self.lazy_init(object) {
             Ok(instance) => instance,
-            Err(thrown) => {
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
-            }
+            Err(thrown) => return self.refused_write(name, value, thrown),
         };
         let bytes = name.as_bytes().to_vec();
         if guarded && self.guard_word(instance, &bytes) & IN_SET == 0 {
@@ -3466,17 +3447,11 @@ impl Request {
             };
             let key = php_heap::Key::Str(name.heap());
             if let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
+                return self.refused_write(name, value, thrown);
             }
             let table = match self.separated_properties(o) {
                 Ok(table) => table,
-                Err(thrown) => {
-                    value.give_up(self);
-                    name.give_up(self);
-                    return Err(thrown);
-                }
+                Err(thrown) => return self.refused_write(name, value, thrown),
             };
             let written = self.array_update(table, key, value.hand_on());
             name.give_up(self);
@@ -3608,21 +3583,13 @@ impl Request {
     ) -> Result<bool, Thrown> {
         let class = object.class();
         let bytes = key.as_bytes().to_vec();
-        let (mangled_class, name) = match bytes.strip_prefix(b"\0") {
-            Some(rest) => match rest.iter().position(|b| *b == 0) {
-                Some(end) => (Some(rest[..end].to_vec()), rest[end + 1..].to_vec()),
-                None => (None, bytes.clone()),
-            },
-            None => (None, bytes.clone()),
-        };
+        let (mangled_class, name) = mangled_parts(&bytes);
+        let (mangled_class, name) = (mangled_class.map(<[u8]>::to_vec), name.to_vec());
         let class_name = self.class_name_bytes(class);
         // `is_property_visibility_changed`'s `ZEND_ACC_VIRTUAL` arm: a
         // key the class's table holds a virtual property under has no
         // slot to take the value, and the whole unserialization fails.
-        let reaches = match &mangled_class {
-            None => true,
-            Some(c) => c.as_slice() == b"*" || c.eq_ignore_ascii_case(&class_name),
-        };
+        let reaches = reaches_mangled(mangled_class.as_deref(), &class_name);
         if reaches
             && let Some(hooked) = self.hooked(class, &name)
             && hooked.is_virtual
@@ -3680,13 +3647,7 @@ impl Request {
             return None;
         }
         let class = object.class();
-        let (mangled_class, name) = match key.strip_prefix(b"\0") {
-            Some(rest) => match rest.iter().position(|b| *b == 0) {
-                Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
-                None => (None, key),
-            },
-            None => (None, key),
-        };
+        let (mangled_class, name) = mangled_parts(key);
         let class_name = self.class_name_bytes(class);
         let exact = self.placed(class).rev().find(|(_, declaring, p)| {
             if *p.name.0 != *name {
@@ -3700,9 +3661,7 @@ impl Request {
             }
         });
         exact.map(|(slot, _, _)| slot).or_else(|| {
-            let reachable =
-                mangled_class.is_none_or(|c| c == b"*" || c.eq_ignore_ascii_case(&class_name));
-            if !reachable {
+            if !reaches_mangled(mangled_class, &class_name) {
                 return None;
             }
             // `ce->properties_info` holds a parent's private property
@@ -3866,29 +3825,22 @@ impl Request {
         }
         let shown = String::from_utf8_lossy(name).into_owned();
         let class_name = self.symbols().class_name(class);
+        let cannot = format!("Cannot create dynamic property {class_name}::${shown}");
         if carries == DynamicProperties::Forbidden {
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!("Cannot create dynamic property {class_name}::${shown}"),
-            ));
+            return Err(crate::api::raising::error(self, &cannot));
         }
         let held = Owner::take(self, object.as_value());
         crate::api::raising::deprecated(
             self,
             &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
         );
-        if object.as_value().refcount() > 1 {
-            held.let_go(self);
+        let shared = object.as_value().refcount() > 1;
+        held.let_go(self);
+        if shared {
             return Ok(());
         }
-        held.let_go(self);
         none_pending(self)?;
-        Err(crate::api::raising::throw_error(
-            self,
-            "Error",
-            &format!("Cannot create dynamic property {class_name}::${shown}"),
-        ))
+        Err(crate::api::raising::error(self, &cannot))
     }
 
     /// `ZEND_FE_RESET_R`'s separation of a shared property table
@@ -4462,9 +4414,7 @@ impl Request {
             return Err(thrown);
         }
         if read == PropertyRead::Warning {
-            let class = self.symbols().class_name(object.class());
-            let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
-            crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+            self.undefined_property(object.class(), name.as_bytes());
         }
         // `zend_hash_add(zobj->properties, name, &EG(uninitialized_zval))`
         // after the warning: the table as the handler the warning reached
@@ -4745,18 +4695,13 @@ impl Request {
         if issetter.is_some() && test == PropertyTest::Exists {
             return Ok(false);
         }
+        let issetter = issetter.filter(|_| self.guard_word(object, name) & IN_ISSET == 0);
         let Some(issetter) = issetter else {
             if initialises(self) {
                 return self.lazy_has(object, name, test);
             }
             return Ok(false);
         };
-        if self.guard_word(object, name) & IN_ISSET != 0 {
-            if initialises(self) {
-                return self.lazy_has(object, name, test);
-            }
-            return Ok(false);
-        }
         // php holds `IN_ISSET` across both calls, so the `__get` the
         // `empty` arm asks for runs with the `__isset`'s guard still
         // standing, and the object across both (`GC_ADDREF(zobj)`,
@@ -4801,9 +4746,7 @@ impl Request {
         issetter: Function,
     ) -> Result<bool, Thrown> {
         let answered = self.serve_accessor(object, issetter, name, &[])?;
-        let truthy = crate::api::coerce::truthy(self, &answered);
-        self.release(answered);
-        let truthy = truthy?;
+        let truthy = self.truth_of(answered)?;
         if test != PropertyTest::NotEmpty || !truthy {
             return Ok(truthy);
         }
@@ -4814,9 +4757,7 @@ impl Request {
             return Ok(false);
         };
         let answered = self.call_accessor(object, getter, IN_GET, name, &[])?;
-        let truthy = crate::api::coerce::truthy(self, &answered);
-        self.release(answered);
-        truthy
+        self.truth_of(answered)
     }
 
     /// `zend_std_has_property`'s `lazy_init:` arm: the object
@@ -5070,4 +5011,23 @@ impl Frames<&mut Request> {
     pub fn with_fake_scope<R>(self, class: ClassId, f: impl FnOnce(&mut Request) -> R) -> R {
         self.0.in_fake_scope(Some(class), f)
     }
+}
+
+/// A serialized property key's parts: the class a `\0C\0p` or `\0*\0p`
+/// key names, none for a plain one, and the property's name.
+fn mangled_parts(key: &[u8]) -> (Option<&[u8]>, &[u8]) {
+    let Some(rest) = key.strip_prefix(b"\0") else {
+        return (None, key);
+    };
+    match rest.iter().position(|b| *b == 0) {
+        Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
+        None => (None, key),
+    }
+}
+
+/// Whether a key that names `mangled_class` reaches a property of the
+/// class named `class_name`: a plain key, a protected one, or the
+/// class's own private one.
+fn reaches_mangled(mangled_class: Option<&[u8]>, class_name: &[u8]) -> bool {
+    mangled_class.is_none_or(|c| c == b"*" || c.eq_ignore_ascii_case(class_name))
 }

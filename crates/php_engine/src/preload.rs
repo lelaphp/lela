@@ -50,10 +50,7 @@ impl Engine {
         };
         let mut req = Request::lent(
             Arc::clone(&self.shared),
-            RequestDescription {
-                sapi_name: host.sapi_name.clone(),
-                ..RequestDescription::default()
-            },
+            RequestDescription::of_host(&host.sapi_name),
             sink,
         );
         let failed = self.show_startup_raised(&mut req);

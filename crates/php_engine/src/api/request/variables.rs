@@ -885,13 +885,7 @@ impl Request {
             }
             count += 1;
             if count > max_input_vars {
-                docref(
-                    self,
-                    Level::Warning,
-                    &format!(
-                        "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
-                    ),
-                );
+                too_many_vars(self, max_input_vars);
                 break;
             }
             let eq = var.iter().position(|b| *b == b'=');
@@ -959,13 +953,7 @@ impl Request {
             }
             count += 1;
             if count > max_input_vars {
-                docref(
-                    self,
-                    Level::Warning,
-                    &format!(
-                        "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
-                    ),
-                );
+                too_many_vars(self, max_input_vars);
                 break;
             }
         }
@@ -1388,4 +1376,13 @@ impl HttpGlobals {
             AutoGlobal::Request | AutoGlobal::Session => None,
         }
     }
+}
+
+/// php's warning where a request's input holds more variables than
+/// `max_input_vars` lets through.
+fn too_many_vars(req: &mut Request, max_input_vars: i64) {
+    let message = format!(
+        "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
+    );
+    docref(req, Level::Warning, &message);
 }

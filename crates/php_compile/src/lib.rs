@@ -33,6 +33,7 @@ mod special;
 mod stack;
 pub mod values;
 
+pub use emit::is_reserved_class_name;
 pub use stack::{Reentered, StackLimit};
 
 /// The token stream and the tree (design §4.9), handed up for

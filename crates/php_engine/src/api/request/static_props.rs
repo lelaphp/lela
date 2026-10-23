@@ -5,7 +5,7 @@
 //! type, and bound by reference. The slots are [`StaticProps`]'s, whose
 //! field no file but this one reads.
 
-use php_unit::decl::{ClassKind, Visibility};
+use php_unit::decl::ClassKind;
 
 use crate::api::abi::PropertyRead;
 use crate::api::raising::Thrown;
@@ -40,19 +40,6 @@ pub(super) struct StaticProps {
     /// build's teardown gives them up in.
     #[cfg(debug_assertions)]
     laid: Vec<PropertyInfo>,
-}
-
-impl StaticProps {
-    /// The slot of the `static` property `info` names; none where it is
-    /// not laid down.
-    fn slot(&self, info: PropertyInfo) -> Option<&Value> {
-        self.slots.get(&info)
-    }
-
-    /// [`StaticProps::slot`] to write.
-    fn slot_mut(&mut self, info: PropertyInfo) -> Option<&mut Value> {
-        self.slots.get_mut(&info)
-    }
 }
 
 impl Request {
@@ -209,9 +196,7 @@ impl Request {
             Some((info, property.visibility, property.is_instance))
         });
         if let Some((info, visibility, _)) = found
-            && visibility != Visibility::Public
-            && Some(info.declaring) != scope
-            && (visibility == Visibility::Private || !self.check_protected(info.declaring, scope))
+            && !self.may_access_from(info.declaring, visibility, scope)
         {
             if silent {
                 return Ok(None);
@@ -223,9 +208,8 @@ impl Request {
                 return Ok(None);
             }
             let class = self.symbols().class_name(class);
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!(
                     "Access to undeclared static property {class}::${}",
                     String::from_utf8_lossy(name)
@@ -235,11 +219,7 @@ impl Request {
         self.update_class_constants(class)?;
         self.init_statics(class)?;
         self.lay_down_static(info)?;
-        if self
-            .symbols()
-            .class_decl(class)
-            .is_some_and(|decl| decl.kind == ClassKind::Trait)
-        {
+        if self.class_is(class, ClassKind::Trait) {
             let shown = format!(
                 "{}::${}",
                 self.symbols().class_name(info.declaring),
@@ -261,7 +241,7 @@ impl Request {
     /// evaluated in the declaring scope and held to its type under the
     /// strict rule, and `IS_UNDEF` for a typed one with no default.
     pub(super) fn lay_down_static(&mut self, info: PropertyInfo) -> Result<(), Thrown> {
-        if self.static_props.slot(info).is_some() {
+        if self.static_props.slots.contains_key(&info) {
             return Ok(());
         }
         let declaring = info.declaring;
@@ -290,7 +270,8 @@ impl Request {
     /// `IS_UNDEF` where the slot stands unwritten or the table has none.
     pub(crate) fn held_static(&self, info: PropertyInfo) -> Value {
         self.static_props
-            .slot(info)
+            .slots
+            .get(&info)
             .map_or_else(Value::undef, |value| *value)
     }
 
@@ -341,7 +322,7 @@ impl Request {
                     self.symbols().class_name(info.declaring),
                     String::from_utf8_lossy(&property.name.0)
                 );
-                return Err(crate::api::raising::throw_error(self, "Error", &message));
+                return Err(crate::api::raising::error(self, &message));
             }
             return Ok(Value::null());
         }
@@ -477,7 +458,8 @@ impl Request {
         // another `static` than this one (`Test::$x =& Test::$y`).
         let held = |req: &Request| {
             req.static_props
-                .slot(info)
+                .slots
+                .get(&info)
                 .map_or(Value::null(), Value::deref)
         };
         let garbage = held(self);
@@ -521,7 +503,7 @@ impl Request {
     /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
     /// ```
     pub(crate) fn store_static_property(&mut self, info: PropertyInfo, value: Value) {
-        let Some(slot) = self.static_props.slot_mut(info) else {
+        let Some(slot) = self.static_props.slots.get_mut(&info) else {
             self.release(value);
             return;
         };
@@ -570,7 +552,7 @@ impl Request {
         // The row owns what it holds and the cell takes that owner, so
         // the row's value is replaced and never released.
         let cell = self.reference(held)?;
-        if let Some(slot) = self.static_props.slot_mut(info) {
+        if let Some(slot) = self.static_props.slots.get_mut(&info) {
             *slot = Value::reference(cell);
         }
         Ok(cell.heap().val_ref())
@@ -582,7 +564,8 @@ impl Request {
     /// `ZEND_ASSIGN_STATIC_PROP_OP`); none where the slot holds a value.
     pub(crate) fn static_slot_cell(&self, info: PropertyInfo) -> Option<PhpRef> {
         self.static_props
-            .slot(info)
+            .slots
+            .get(&info)
             .and_then(super::super::values::Value::as_php_ref)
     }
 
@@ -595,7 +578,7 @@ impl Request {
     /// which writes *through* a reference standing there; a bind
     /// replaces it.
     pub(crate) fn bind_static_property(&mut self, info: PropertyInfo, bound: Value) {
-        let Some(slot) = self.static_props.slot_mut(info) else {
+        let Some(slot) = self.static_props.slots.get_mut(&info) else {
             self.release(bound);
             return;
         };
