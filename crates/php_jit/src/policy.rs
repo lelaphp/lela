@@ -20,7 +20,7 @@
 use std::io::{self, Write};
 use std::sync::atomic::Ordering;
 
-use php_engine::api::request::Ini;
+use php_engine::api::request::{Ini, TierStatus};
 use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
 use php_unit::{Opcode, OplineIdx};
 
@@ -28,7 +28,7 @@ use crate::types::ExitId;
 use php_unit::decl::{IniDecl, Name};
 
 use crate::record::{Start, Stop};
-use crate::table::TraceId;
+use crate::table::{TraceId, code};
 
 /// The state bits of a word's second half.
 const STATE: u32 = 0b11;
@@ -138,8 +138,10 @@ pub(crate) enum Setting {
     /// On, as php's four `CRTO` digits: `on` and `tracing` are 1254,
     /// `function` 1205.
     On { crto: u32 },
-    /// What php refuses with its warning, and runs with the tier off.
-    Invalid,
+    /// What php refuses with its warning, and runs with the tier off;
+    /// `crto` the digits php wrote to `JIT_G` before the one it refused,
+    /// the rest zero.
+    Invalid { crto: u32 },
 }
 
 impl Setting {
@@ -155,27 +157,71 @@ impl Setting {
                 .ok()
                 .map(|text| text.trim_start_matches(|c: char| c.is_ascii_whitespace()))
                 .and_then(|text| text.parse::<i64>().ok())
-                .map_or(Setting::Invalid, Setting::of_number),
+                .map_or(Setting::Invalid { crto: 0 }, Setting::of_number),
         }
     }
 
     /// `zend_jit_parse_config_num`: zero is off; otherwise each digit in
-    /// its range, `O` 1 to 5, `T` 0 to 5 but 4, `R` 0 to 2, `C` 0 or 1.
+    /// its range from the right, `O` 1 to 5, `T` 0 to 5 but 4, `R` 0 to
+    /// 2, `C` 0 or 1, and nothing past them. php writes each digit to
+    /// `JIT_G` as it passes it, so a refused number keeps those it
+    /// passed.
     fn of_number(jit: i64) -> Setting {
         if jit == 0 {
             return Setting::Off;
         }
-        let digit = |place: u32| (jit / 10_i64.pow(place)) % 10;
-        let valid = jit > 0
-            && (1..=5).contains(&digit(0))
-            && (0..=5).contains(&digit(1))
-            && digit(1) != 4
-            && (0..=2).contains(&digit(2))
-            && (0..=1).contains(&digit(3))
-            && jit / 10_000 == 0;
-        match u32::try_from(jit) {
-            Ok(crto) if valid => Setting::On { crto },
-            _ => Setting::Invalid,
+        if jit < 0 {
+            return Setting::Invalid { crto: 0 };
+        }
+        let ranges: [fn(i64) -> bool; 4] = [
+            |o| (1..=5).contains(&o),
+            |t| t <= 5 && t != 4,
+            |r| r <= 2,
+            |c| c <= 1,
+        ];
+        let (mut rest, mut crto, mut place) = (jit, 0, 1);
+        for valid in ranges {
+            let digit = rest % 10;
+            if !valid(digit) {
+                return Setting::Invalid { crto };
+            }
+            // A digit below ten, at a place below ten thousand.
+            crto += u32::try_from(digit).unwrap_or(0) * place;
+            (rest, place) = (rest / 10, place * 10);
+        }
+        if rest == 0 {
+            Setting::On { crto }
+        } else {
+            Setting::Invalid { crto }
+        }
+    }
+
+    /// `JIT_G` as `zend_jit_config` leaves it: `enabled` but under
+    /// `disable` and a refused setting, `on` where on, and the `CRTO`
+    /// digits php wrote, `ZEND_JIT_CPU_AVX` for a `C` of one. No buffer
+    /// yet: php's start lays it down ([`SetUp`]).
+    fn status(self) -> TierStatus {
+        let digits = |crto: u32| {
+            let digit = |place: u32| u8::try_from(crto / 10_u32.pow(place) % 10).unwrap_or(0);
+            TierStatus {
+                kind: digit(1),
+                opt_level: digit(0),
+                opt_flags: digit(2) | (digit(3) << 2),
+                ..TierStatus::default()
+            }
+        };
+        match self {
+            Setting::Disable => TierStatus::default(),
+            Setting::Off => TierStatus {
+                enabled: true,
+                ..TierStatus::default()
+            },
+            Setting::On { crto } => TierStatus {
+                enabled: true,
+                on: true,
+                ..digits(crto)
+            },
+            Setting::Invalid { crto } => digits(crto),
         }
     }
 }
@@ -355,6 +401,38 @@ pub(crate) struct Policy {
     /// host, which is where `zend_jit_check_support` runs and so where its
     /// refusal warns ([`Policy::check_support`]).
     set_up: SetUp,
+    /// What php's `zend_jit_status` reports once its start is over, no
+    /// code in the buffer ([`Policy::status`]).
+    started: TierStatus,
+}
+
+/// What `zend_jit_status` reports once php's start is over: `JIT_G` as
+/// `opcache.jit` set it ([`Setting::status`]), kept where php sets the
+/// tier up and its buffer down, `dasm_end - dasm_buf` the buffer
+/// ([`code::capacity`]) less the two pointers `zend_jit_startup` keeps at
+/// its end (`Z/ext/opcache/jit/zend_jit.c:3790`), all free; `enabled`
+/// and `on` dropped for a buffer of no bytes, as `accel_post_startup`
+/// drops them (`Z/ext/opcache/ZendAccelerator.c:3322-3325`).
+fn started(setting: Setting, set_up: SetUp, buffer_size: i64) -> TierStatus {
+    let status = setting.status();
+    match set_up {
+        SetUp::Yes => {
+            let buffer = code::capacity(u64::try_from(buffer_size).unwrap_or(0))
+                .saturating_sub(2 * size_of::<usize>());
+            let buffer = u64::try_from(buffer).unwrap_or(0);
+            TierStatus {
+                buffer_size: buffer,
+                buffer_free: buffer,
+                ..status
+            }
+        }
+        SetUp::Disabled => TierStatus {
+            enabled: false,
+            on: false,
+            ..status
+        },
+        SetUp::Unstarted | SetUp::Refused(_) => status,
+    }
 }
 
 /// The value the host set for `name`, none where it set none.
@@ -474,7 +552,7 @@ impl Policy {
         // lane gives way to (#3136's ruling); a zero buffer is the line
         // below's. `off` is not one: php may turn it on from a request.
         let disabled = value(ini, "opcache.jit").is_some()
-            && matches!(setting, Setting::Disable | Setting::Invalid);
+            && matches!(setting, Setting::Disable | Setting::Invalid { .. });
         let asked = match (lane, setting, set_up) {
             (Some(mode), ..) if !disabled => mode,
             (None, Setting::On { crto }, SetUp::Yes) => {
@@ -536,6 +614,7 @@ impl Policy {
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
             debug,
             set_up,
+            started: started(setting, set_up, buffer_size),
         };
         if mode == Mode::Off {
             policy.off();
@@ -565,7 +644,8 @@ impl Policy {
     /// through the interpreter's handler, which tells their observers.
     /// Past them, a tier php set up whose `opcache.jit_buffer_size` the
     /// target's code cannot reach is refused too ([`Refused::BufferSize`],
-    /// `:3759-3772`).
+    /// `:3759-3772`). A refused tier reports neither enabled nor on, and
+    /// no buffer ([`Policy::status`]).
     pub(crate) fn check_support(&mut self, observes: impl Fn(Opcode) -> bool) {
         let beyond = (0..=u8::MAX)
             .filter_map(Opcode::from_u8)
@@ -581,6 +661,26 @@ impl Policy {
         self.off();
         if self.set_up == SetUp::Yes {
             self.set_up = SetUp::Refused(refused);
+            self.started = TierStatus {
+                enabled: false,
+                on: false,
+                buffer_size: 0,
+                buffer_free: 0,
+                ..self.started
+            };
+        }
+    }
+
+    /// `zend_jit_status` (`Z/ext/opcache/jit/zend_jit.c:825-842`): `JIT_G`
+    /// as php's start left it, and the buffer, of which the code of
+    /// `used` bytes is taken. php's stubs take some of it before any
+    /// trace; this tier has none, so a buffer no trace was published
+    /// into is free whole.
+    pub(crate) fn status(&self, used: usize) -> TierStatus {
+        let used = u64::try_from(used).unwrap_or(u64::MAX);
+        TierStatus {
+            buffer_free: self.started.buffer_free.saturating_sub(used),
+            ..self.started
         }
     }
 

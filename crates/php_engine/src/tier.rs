@@ -40,6 +40,7 @@ use crate::{exec, interrupt};
 use php_unit::OpArray;
 
 pub use crate::api::request::Request;
+use crate::api::request::TierStatus;
 /// The compiled tier's compile thread (`jit-design.md` §4.8), an engine's
 /// thread as ADR-0010's Threads has them: started through the engine's
 /// one home and joined before every fork.
@@ -186,6 +187,18 @@ pub trait Tier: 'static {
     fn asked(started: &Started<'_>) -> bool {
         let _ = started;
         true
+    }
+
+    /// What php's `zend_jit_status` reports of the tier on `req`'s
+    /// engine, `opcache_get_status()['jit']`, whether or not the engine
+    /// binds the tier's loop, as php reports it whether or not its
+    /// compiled tier runs: read by `UnitCache::status` alone, never on
+    /// the dispatch path. A tier that compiles nothing, all zero, by
+    /// default.
+    #[must_use]
+    fn status(req: &Request) -> TierStatus {
+        let _ = req;
+        TierStatus::default()
     }
 }
 
@@ -581,6 +594,9 @@ pub(crate) struct Loops {
     /// The tier's state a request of the engine is laid with, the bound
     /// tier's ([`Tier::lay`]).
     pub(crate) lay: fn(Started<'_>) -> TierState,
+    /// The engine's tier's [`Tier::status`], its own whichever loop is
+    /// bound; read by `UnitCache::status` alone.
+    pub(crate) status: fn(&Request) -> TierStatus,
 }
 
 impl Loops {
@@ -592,7 +608,10 @@ impl Loops {
         if T::HOLDS || T::HOOKED != Hooked::NONE || T::asked(&Started { shared }) {
             Loops::told::<T>(&shared.opcodes)
         } else {
-            Loops::told::<Nop>(&shared.opcodes)
+            Loops {
+                status: T::status,
+                ..Loops::told::<Nop>(&shared.opcodes)
+            }
         }
     }
 
@@ -619,6 +638,7 @@ impl Loops {
             reenter: reenter::<T, D>,
             resume: resume::<T, D>,
             lay: TierState::of::<T>,
+            status: T::status,
         }
     }
 }

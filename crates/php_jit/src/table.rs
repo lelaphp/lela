@@ -52,7 +52,7 @@ use crate::types::{ExitId, Grows, Landing};
     unsafe_code,
     reason = "seams.toml rule unsafe.homes: php_jit::table::code"
 )]
-mod code;
+pub(crate) mod code;
 mod perf;
 #[cfg(test)]
 mod tests;
@@ -554,14 +554,9 @@ impl<P: Pages> TraceTable<P> {
     }
 
     /// What the traces published into this epoch's table so far take
-    /// (#2961), each trace counted last in its publish.
-    #[cfg_attr(
-        not(any(test, php_jit_usage)),
-        expect(
-            dead_code,
-            reason = "the bench's build alone reads it, at a request's end"
-        )
-    )]
+    /// (#2961), each trace counted last in its publish: what
+    /// `opcache_get_status()['jit']` reads of the buffer
+    /// ([`crate::policy::Policy::status`]).
     pub(crate) fn usage(&self) -> Usage {
         self.writer().perf.usage()
     }
