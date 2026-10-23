@@ -889,7 +889,7 @@ impl TokenList {
         this: This<Self>,
         tokens: Variadic<Raw<PhpString>>,
     ) -> Result<(), Thrown> {
-        let added = varargs(req, &tokens.0)?;
+        let added = varargs(req, &tokens)?;
         let this = this.object();
         with_set(req, this, |set| {
             for token in added {
@@ -908,7 +908,7 @@ impl TokenList {
         this: This<Self>,
         tokens: Variadic<Raw<PhpString>>,
     ) -> Result<(), Thrown> {
-        let removed = varargs(req, &tokens.0)?;
+        let removed = varargs(req, &tokens)?;
         let this = this.object();
         with_set(req, this, |set| {
             for bucket in &mut set.buckets {

@@ -856,7 +856,7 @@ fn array_multisort(
     #[php(prefer_ref)] rest: Variadic<Ref<Untyped<Value>>>,
 ) -> Result<True, Thrown> {
     use php_ext::raising::{arg_type_error, throw_error};
-    let given: Vec<Ref<Untyped<Value>>> = std::iter::once(array).chain(rest.0).collect();
+    let given: Vec<Ref<Untyped<Value>>> = std::iter::once(array).chain(rest).collect();
     // Each array with the cell it came in, and the comparison each array
     // is sorted by, `(flags, descending)`.
     let mut arrays: Vec<(PhpArray, Ref<Untyped<Value>>)> = Vec::new();

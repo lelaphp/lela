@@ -181,7 +181,7 @@ fn array_push(
     values: Variadic<Value>,
 ) -> Result<i64, Thrown> {
     Stack::over(req, array, |req, stack| {
-        for value in values.0 {
+        for value in values {
             stack.array.append(req, Owner::take(req, value))?;
         }
         Ok(i64::try_from(stack.array.len()).unwrap_or(i64::MAX))
@@ -454,8 +454,8 @@ fn array_unshift(
 ) -> Result<i64, Thrown> {
     Stack::over(req, array, |req, stack| {
         let mut rebuilt = PhpArray::new(req)?;
-        let argc = values.0.len();
-        for value in values.0 {
+        let argc = values.len();
+        for value in values {
             rebuilt.append(req, Owner::take(req, value))?;
         }
         // The rebuild runs no code of the program, as php's in-place one runs

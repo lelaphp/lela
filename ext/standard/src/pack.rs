@@ -96,7 +96,7 @@ fn pack(
     format: PhpString,
     values: Variadic<Value>,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let mut argv = values.0;
+    let mut argv: Vec<Value> = values.into_iter().collect();
     let mut converted = Vec::new();
     let format = format.as_bytes().to_vec();
     let packed = packed(req, &format, &mut argv, &mut converted);

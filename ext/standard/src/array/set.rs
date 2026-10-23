@@ -236,7 +236,7 @@ fn plain_user(
 /// The arrays of an `array $array, array ...$arrays` native as they came.
 fn listed(array: Raw<PhpArray>, arrays: &Variadic<Raw<PhpArray>>) -> Vec<Value> {
     std::iter::once(array.value())
-        .chain(arrays.0.iter().map(Raw::value))
+        .chain(arrays.iter().map(Raw::value))
         .collect()
 }
 
@@ -244,7 +244,7 @@ fn listed(array: Raw<PhpArray>, arrays: &Variadic<Raw<PhpArray>>) -> Vec<Value> 
 /// `$rest` ending in its callbacks.
 fn rested(array: Raw<PhpArray>, rest: Variadic<Untyped<Value>>) -> Vec<Value> {
     std::iter::once(array.value())
-        .chain(rest.0.into_iter().map(|value| value.0))
+        .chain(rest.into_iter().map(|value| value.0))
         .collect()
 }
 

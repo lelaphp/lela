@@ -151,7 +151,6 @@ fn array_merge_recursive(
     req: &mut Request,
     arrays: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    let arrays = arrays.0;
     let Some((first, rest)) = arrays.split_first() else {
         return Ok(Owner::take(req, PhpArray::empty()));
     };
@@ -306,7 +305,7 @@ fn array_replace(
     array: PhpArray,
     replacements: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    replace(req, array, &replacements.0, false)
+    replace(req, array, &replacements, false)
 }
 
 /// `array_replace_recursive(array $array, array ...$replacements):
@@ -342,7 +341,7 @@ fn array_replace_recursive(
     array: PhpArray,
     replacements: Variadic<PhpArray>,
 ) -> Result<Owner<PhpArray>, Thrown> {
-    replace(req, array, &replacements.0, true)
+    replace(req, array, &replacements, true)
 }
 
 fn replace(
