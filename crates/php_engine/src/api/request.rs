@@ -120,7 +120,7 @@ pub(crate) use observing::{ObservedChain, OpenCall};
 pub use op_arrays::{ConstIdx, OpArrayView, Opcode, Operand, OplineIdx, OplineView};
 pub(crate) mod paths;
 pub use paths::RealpathEntry;
-pub(crate) use paths::is_wrapper_url;
+pub(crate) use paths::{is_cacheable_stream_path, is_wrapper_url};
 mod pending;
 pub(crate) use pending::Leaving;
 pub use pending::Raised;
