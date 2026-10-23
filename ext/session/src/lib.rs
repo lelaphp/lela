@@ -375,7 +375,7 @@ fn started_error(req: &mut Request, level: Level, message: &str) {
 fn sent_error(req: &mut Request, message: &str) {
     let text = match req.response().started_at() {
         Some((file, line)) if !file.is_empty() => {
-            format!("{message} (sent from {} on line {line})", shown(&file))
+            format!("{message} (sent from {} on line {line})", shown(file))
         }
         _ => message.to_owned(),
     };

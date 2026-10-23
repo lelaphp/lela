@@ -141,6 +141,20 @@ impl Intern for RequestStrings<'_> {
         Ok(s)
     }
 
+    /// A constant the request defined, substituted where an `eval`
+    /// names it: one more owner of its value, `ZVAL_COPY_OR_DUP`, which
+    /// the unit keeps as it keeps a constant its compile made, so the
+    /// unit costs nothing for it and gives the owner back with its op
+    /// array ([`super::unit_strings`]); a value the request's heap holds
+    /// is always one this home can hold.
+    fn hold(&mut self, value: Zval) -> bool {
+        if value.is_refcounted() {
+            self.heap.addref(value);
+            self.made.add(value);
+        }
+        true
+    }
+
     /// A string the fold that made it has read, given up, as
     /// `zend_eval_const_expr` frees an operand once the value it made stands; one
     /// the engine's table holds is no string of the compile's.
