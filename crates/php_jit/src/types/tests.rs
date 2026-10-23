@@ -26,7 +26,7 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, SIEVE, SPECTRALNORM, held, traced as built,
+    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -383,6 +383,30 @@ fn a_natives_call_is_pushed_in_place() -> Result<(), String> {
         _ => None,
     });
     assert_eq!(init, Some(Form::Inline), "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// A callee's `RETURN` over variables that own something, an array its
+/// caller keeps too and a string it built, is left in place and names
+/// both to be freed, as php's trace frees each before
+/// `zend_jit_leave_func` (#3313).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_leave_over_owning_variables_is_made_in_place() -> Result<(), String> {
+    let ir = golden(OWNING_LEAVE)?;
+    let rendered = dump::render(&ir);
+    let leave = (ir.ops.iter()).find_map(|op| match op {
+        Op::Line(line) if line.opcode == Opcode::Return => Some(line),
+        _ => None,
+    });
+    let leave = leave.ok_or_else(|| format!("no RETURN in\n{rendered}"))?;
+    // `$a` is CV0, `$i` CV1 and `$s` CV2.
+    let owners = (super::Vars::default().with(0)).and_then(|vars| vars.with(2));
+    assert_eq!(leave.form, Form::Inline, "{rendered}");
+    assert!(
+        matches!(leave.imm, super::Imm::Leave { owners: super::Owners::Each(vars), .. } if Some(vars) == owners),
+        "{rendered}"
+    );
     Ok(())
 }
 

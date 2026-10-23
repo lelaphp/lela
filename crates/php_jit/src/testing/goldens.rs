@@ -101,6 +101,18 @@ pub(crate) const NATIVE_CALL: Fixture = Fixture {
     ],
 };
 
+/// A loop whose callee's variables own an array and a string as it
+/// returns: the `RETURN` left in place, freeing each (#3313).
+pub(crate) const OWNING_LEAVE: Fixture = Fixture {
+    name: "owning_leave",
+    program: "owning_leave",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// `fannkuch`'s first loop, recorded for the view it holds of
 /// `fannkuch()`, which a side trace's record written out by hand is built
 /// through (#3270).
