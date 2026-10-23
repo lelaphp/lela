@@ -130,7 +130,7 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
         body: None,
         fuzzed: Fuzzed::default(),
         calls: Box::new([]),
-        laid: Box::new([]),
+        callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
         name: TraceName {

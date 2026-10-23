@@ -785,7 +785,8 @@ pub(crate) fn enter(
     // The stack the trace's calls in place are made on, their headers in
     // this request, and whether they are made in place.
     let stack = tier::stack(req).as_ptr();
-    let (images, ready) = Images::of(req, trace);
+    let images = Images::of(req, trace);
+    let ready = images.ready();
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
     let mut cx = ExitCtx::new(&mut *req);
@@ -844,67 +845,81 @@ pub(crate) fn enter(
 /// a call in its order (`lower::Compiled::calls`), each the header
 /// `push_call` lays down for the call in this request
 /// ([`tier::call_image`]), since the function's number and its record are
-/// the request's. A request keeps what it laid out for every trace it
-/// entered ([`Headers`]); the stand-in tiers of the tests, which keep no
-/// state of the tier's, lay them out for the one entry.
+/// the request's, and whether its code makes them in place: every header
+/// laid out and the cache of every callee it enters laid down
+/// ([`Trace::callee_caches`]). A request keeps what it laid out for every
+/// trace it entered ([`Headers`]); the stand-in tiers of the tests, which
+/// keep no state of the tier's, lay them out for the one entry.
 enum Images {
     /// None to read: the trace pushes nothing in place.
     None,
     /// The request's, kept in its state for as long as it runs.
-    Kept(*const usize),
+    Kept { at: *const usize, laid: bool },
     /// Laid out for this entry alone: the headers, held while the code
     /// reads them, and their addresses.
-    Own(
-        #[expect(dead_code, reason = "read by the code alone")] Box<[HeaderImage]>,
-        Box<[usize]>,
-    ),
+    Own {
+        #[expect(dead_code, reason = "read by the code alone")]
+        images: Box<[HeaderImage]>,
+        addresses: Box<[usize]>,
+        laid: bool,
+    },
     /// A call's function is not the request's yet: the calls are served
     /// through the kernels.
     Unready,
 }
 
 impl Images {
-    /// The headers of `trace`'s calls in place as `req` lays them out, and
-    /// whether its code makes them in place in `req`: every header laid
-    /// out and the cache of every callee it enters laid down
-    /// ([`Trace::laid`]).
-    fn of(req: &Request, trace: &Trace) -> (Images, bool) {
-        if trace.calls.is_empty() && trace.laid.is_empty() {
-            return (Images::None, true);
+    /// The headers of `trace`'s calls in place as `req` lays them out.
+    fn of(req: &Request, trace: &Trace) -> Images {
+        if trace.calls.is_empty() {
+            return Images::None;
         }
         if let Some(state) = tier::state::<crate::JitRequest>(req) {
-            return match state.headers.entered(req, trace) {
-                Some((at, ready)) => (Images::Kept(at), ready),
-                None => (Images::Unready, false),
-            };
-        }
-        if trace.calls.is_empty() {
-            return (Images::None, callees_laid(req, trace));
+            return state
+                .headers
+                .entered(req, trace)
+                .map_or(Images::Unready, |(at, laid)| Images::Kept { at, laid });
         }
         let Some(images) = (trace.calls.iter())
             .map(|call| tier::call_image(req, call))
             .collect::<Option<Box<[HeaderImage]>>>()
         else {
-            return (Images::Unready, false);
+            return Images::Unready;
         };
         let addresses = images.iter().map(HeaderImage::address).collect();
-        (Images::Own(images, addresses), callees_laid(req, trace))
+        Images::Own {
+            images,
+            addresses,
+            laid: callees_laid(req, trace),
+        }
+    }
+
+    /// Whether the trace's code makes its calls in place.
+    fn ready(&self) -> bool {
+        match self {
+            Images::None => true,
+            Images::Kept { laid, .. } | Images::Own { laid, .. } => *laid,
+            Images::Unready => false,
+        }
     }
 
     /// Where compiled code reads the addresses, null where it reads none.
     fn addresses(&self) -> *const usize {
         match self {
-            Images::Kept(at) => *at,
-            Images::Own(_, addresses) => addresses.as_ptr(),
+            Images::Kept { at, .. } => *at,
+            Images::Own { addresses, .. } => addresses.as_ptr(),
             Images::None | Images::Unready => ptr::null(),
         }
     }
 }
 
 /// Whether the cache of every op array `trace`'s calls in place enter is
-/// laid down in `req` ([`Trace::laid`]).
+/// laid down in `req` ([`Trace::callee_caches`]).
 fn callees_laid(req: &Request, trace: &Trace) -> bool {
-    trace.laid.iter().all(|callee| tier::laid(req, *callee))
+    trace
+        .callee_caches
+        .iter()
+        .all(|callee| tier::laid(req, *callee))
 }
 
 /// What a request keeps of the headers its traces push calls in place

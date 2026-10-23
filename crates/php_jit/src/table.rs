@@ -196,8 +196,8 @@ pub(crate) struct Trace<P: Pages = Native> {
     /// lays out in the request ([`lower::Compiled::calls`]).
     pub(crate) calls: Box<[PlainCall]>,
     /// The callees of the calls its code makes in place whose caches
-    /// `enter` asks are laid down (`lower::Compiled::laid`).
-    pub(crate) laid: Box<[FuncRef]>,
+    /// `enter` asks are laid down (`lower::Compiled::callee_caches`).
+    pub(crate) callee_caches: Box<[FuncRef]>,
     /// Every trace an exit links to, each once, ascending.
     #[cfg_attr(
         not(test),
@@ -697,7 +697,7 @@ impl<P: Pages> TraceTable<P> {
             marks: compiled.marks,
             fuzzed: compiled.fuzzed,
             calls: compiled.calls,
-            laid: compiled.laid,
+            callee_caches: compiled.callee_caches,
             links: links.into_boxed_slice(),
         });
         self.fill(id, trace)?;

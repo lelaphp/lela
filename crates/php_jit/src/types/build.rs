@@ -184,16 +184,6 @@ enum InPlace {
     Leave,
 }
 
-/// What an inline opline serves in place, once its plain call is the
-/// call's ([`InPlace`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Served {
-    Push,
-    Send,
-    Make,
-    Leave,
-}
-
 /// What a send wrote into a call's argument: the types of what it sent,
 /// where it sent a value, and the register value it sent from, which an
 /// untyped parameter of an inlined callee goes on being held in, as
@@ -263,7 +253,7 @@ struct Builder<'a> {
 
 /// php's `MAY_BE_RESOURCE`, `1 << IS_RESOURCE`, the mask a `TYPE_CHECK`
 /// for `is_resource()` names.
-const MAY_BE_RESOURCE: u32 = 1 << 9;
+const MAY_BE_RESOURCE: u32 = 1 << ZvalType::Resource as u32;
 
 impl<'a> Builder<'a> {
     fn new(rec: &'a TraceRecord, view: &'a UnitView) -> Result<Builder<'a>, Abort> {
@@ -667,16 +657,10 @@ impl<'a> Builder<'a> {
         let jump = if fused { after } else { Some(op) };
         let target = jump.and_then(|jump| jump.jump_target());
         self.successor = went(at, &op, target, len, branch);
-        let in_place = in_place.map(|in_place| match in_place {
-            InPlace::Push(plain) => {
-                self.pushing = Some(plain);
-                Served::Push
-            }
-            InPlace::Send => Served::Send,
-            InPlace::Make => Served::Make,
-            InPlace::Leave => Served::Leave,
-        });
-        self.own_exit(idx, frame, &op, (form, in_place), t1);
+        self.own_exit(idx, frame, &op, (form, in_place.as_ref()), t1);
+        if let Some(InPlace::Push(plain)) = in_place {
+            self.pushing = Some(plain);
+        }
         self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
         if let Some(taken) = branch {
             let to = Branched {
@@ -913,7 +897,7 @@ impl<'a> Builder<'a> {
         idx: OpId,
         frame: Frame,
         op: &Opline,
-        (form, in_place): (Form, Option<Served>),
+        (form, in_place): (Form, Option<&InPlace>),
         old: Types,
     ) {
         let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
@@ -953,7 +937,7 @@ impl<'a> Builder<'a> {
                     )
                     // The leave kernel a variable that owns something
                     // leaves through frees it, and a destructor may throw.
-                    || (matches!(in_place, Some(Served::Leave)) && !self.uncounted(frame))
+                    || (matches!(in_place, Some(InPlace::Leave)) && !self.uncounted(frame))
             }
             Form::Step => op.opcode.effects().contains(Effects::THROW),
         };

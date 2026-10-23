@@ -114,7 +114,7 @@ pub(crate) struct Compiled {
     /// push (`Z/ext/opcache/jit/zend_jit_ir.c:8840-8850`): every callee
     /// but one of a recursive call, which runs in a frame of its own op
     /// array and so finds its cache laid.
-    pub(crate) laid: Box<[FuncRef]>,
+    pub(crate) callee_caches: Box<[FuncRef]>,
 }
 
 /// The bytes compiled code reads and writes under `jit.mode=exit-fuzz`
@@ -274,38 +274,30 @@ fn stood_at_entry(ir: &TraceIr) -> bool {
 }
 
 /// The plain calls `ir` pushes in place, each once, which the compiled
-/// code's copies of their headers are read from.
-fn in_place(ir: &TraceIr) -> Box<[PlainCall]> {
+/// code's copies of their headers are read from, and the op arrays they
+/// enter but the frame's own, whose caches `enter` asks are laid
+/// ([`Compiled::callee_caches`]).
+fn in_place(ir: &TraceIr) -> (Box<[PlainCall]>, Box<[FuncRef]>) {
     let mut calls: Vec<PlainCall> = Vec::new();
+    let mut caches: Vec<FuncRef> = Vec::new();
     for op in &ir.ops {
-        if let Op::InitCall {
-            plain: Some(plain), ..
-        } = op
-            && !calls.contains(plain)
-        {
-            calls.push(plain.clone());
-        }
-    }
-    calls.into_boxed_slice()
-}
-
-/// The callees of the calls `ir` pushes in place and is not the frame's own
-/// op array, whose caches `enter` asks are laid ([`Compiled::laid`]).
-fn laid(ir: &TraceIr) -> Box<[FuncRef]> {
-    let mut laid = Vec::new();
-    for op in &ir.ops {
-        if let Op::InitCall {
+        let Op::InitCall {
             frame,
             plain: Some(plain),
             ..
         } = op
-            && ir.frames.get(usize::from(frame.0)).map(|info| info.func) != Some(plain.callee())
-            && !laid.contains(&plain.callee())
-        {
-            laid.push(plain.callee());
+        else {
+            continue;
+        };
+        if !calls.contains(plain) {
+            calls.push(plain.clone());
+        }
+        let own = ir.frames.get(usize::from(frame.0)).map(|info| info.func);
+        if own != Some(plain.callee()) && !caches.contains(&plain.callee()) {
+            caches.push(plain.callee());
         }
     }
-    laid.into_boxed_slice()
+    (calls.into_boxed_slice(), caches.into_boxed_slice())
 }
 
 /// Where the trace's first recorded opline stands.
@@ -496,7 +488,7 @@ impl Backend {
     /// places them.
     pub(crate) fn compile(&self, ir: &TraceIr, name: TraceName) -> Result<Compiled, Abort> {
         let config = self.isa.frontend_config();
-        let calls = in_place(ir);
+        let (calls, callee_caches) = in_place(ir);
         // Under exit-fuzz a first pass counts the guards, one byte each.
         let fuzzed = if self.fuzz {
             let (_, sites) = clif::lower(
@@ -539,7 +531,7 @@ impl Backend {
             marks,
             name,
             fuzzed,
-            laid: laid(ir),
+            callee_caches,
             calls,
         })
     }
@@ -548,7 +540,7 @@ impl Backend {
     /// the goldens hold.
     #[cfg(test)]
     fn clif(&self, ir: &TraceIr) -> Result<cranelift_codegen::ir::Function, Abort> {
-        let calls = in_place(ir);
+        let (calls, _) = in_place(ir);
         clif::lower(
             ir,
             self.isa.frontend_config(),
