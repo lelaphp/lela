@@ -246,6 +246,20 @@ impl HeaderLine {
     }
 }
 
+/// `OG(output_start_filename)` and `OG(output_start_lineno)`: where
+/// the body started. The file is one owner of the executing file's
+/// name string, `zend_string_addref` of `zend_get_executed_filename_ex`
+/// (`Z/main/output.c:110-114`), which `php_output_deactivate` gives back
+/// (`Z/main/output.c:201-204`): the engine's string for a file the
+/// cache holds, which costs the request nothing, and the request's own
+/// for an `eval`'s, `"<file>(<line>) : eval()'d code"`, which so stands
+/// to the layer's end after its unit has let it go. None where nothing
+/// was executing.
+struct Started {
+    file: Option<Owner<PhpString>>,
+    line: u32,
+}
+
 /// `zend_output_globals` (`Z/main/php_output.h:139-146`), and the
 /// `sapi_globals` the header ops and the first write move:
 /// `SG(sapi_headers)` and `SG(headers_sent)`.
@@ -263,8 +277,8 @@ pub(crate) struct Output {
     /// `OG(running)`, by position.
     running: Option<usize>,
     flags: u32,
-    /// `OG(output_start_filename)` and `OG(output_start_lineno)`.
-    started: Option<(Vec<u8>, u32)>,
+    /// Where the body started, once it has ([`Started`]).
+    started: Option<Started>,
     /// `SG(headers_sent)`.
     headers_sent: bool,
     /// `SG(request_info).no_headers`: the host writes no head, and a
@@ -377,8 +391,15 @@ impl Output {
         }
     }
 
-    pub(crate) fn started_at(&self) -> Option<(Vec<u8>, u32)> {
-        self.started.clone()
+    /// Where the body started, the file's name read off the string the
+    /// start holds, empty where nothing was executing.
+    pub(crate) fn started_at(&self) -> Option<(&[u8], u32)> {
+        let started = self.started.as_ref()?;
+        let file = started
+            .file
+            .as_ref()
+            .map_or(&[][..], |file| file.as_bytes());
+        Some((file, started.line))
     }
 
     /// `php_output_get_status` (`Z/main/output.c:218`): `OG(flags)` with
@@ -1046,20 +1067,52 @@ pub(crate) fn disable(req: &mut Request) {
 }
 
 /// `php_output_header` (`Z/main/output.c:102`): where the body started,
-/// taken once, and the header block committed through `php_header`;
-/// the layer is disabled when that refuses it.
+/// taken once ([`Started`]), and the header block committed through
+/// `php_header`; the layer is disabled when that refuses it.
+///
+/// An `eval` that writes the request's first byte leaves its file's
+/// name charged past its end, held by where the body started, with
+/// opcache and without. The file is written under `sys_get_temp_dir()`,
+/// which the recipe's `TMPDIR` pins to the harness's own directory, a
+/// name of one length on every machine, so the eval's name, 81 bytes
+/// resolved under macOS's `/private/tmp` and 73 under `/tmp`, is one
+/// 112-byte string beside the 32 a first byte costs outside an eval:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3245-started-at.inc';
+/// file_put_contents($f, "<?php\n\$m = memory_get_usage(); eval('echo \"a\";'); \$d = memory_get_usage() - \$m; headers_sent(\$file, \$line);\necho \"\\n\$d \", basename(\$file), \" \$line\\n\"; header('X-A: b');\n");
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect
+/// a
+/// 144 w3245-started-at.inc(2) : eval()'d code 1
+///
+/// Warning: Cannot modify header information - headers already sent by (output started at %s/w3245-started-at.inc(2) : eval()'d code:1) in %s/w3245-started-at.inc on line 3
+/// ```
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3245-started-at.inc';
+/// file_put_contents($f, "<?php\n\$m = memory_get_usage(); eval('echo \"a\";'); \$d = memory_get_usage() - \$m; headers_sent(\$file, \$line);\necho \"\\n\$d \", basename(\$file), \" \$line\\n\"; header('X-A: b');\n");
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// a
+/// 144 w3245-started-at.inc(2) : eval()'d code 1
+///
+/// Warning: Cannot modify header information - headers already sent by (output started at %s/w3245-started-at.inc(2) : eval()'d code:1) in %s/w3245-started-at.inc on line 3
+/// ```
 pub(crate) fn header(req: &mut Request) {
     if req.output().headers_sent {
         return;
     }
     if req.output().started.is_none() {
-        let file = req
-            .frames()
-            .current_file()
-            .map(<[u8]>::to_vec)
-            .unwrap_or_default();
+        let name = req.frames().current_file().map(<[u8]>::to_vec);
+        // The memory limit refusing a name no unit holds is recorded
+        // and ends the request.
+        let file = name.and_then(|name| req.declared_string(&name).ok());
         let line = req.frames().current_line();
-        req.output_mut().started = Some((file, line));
+        req.output_mut().started = Some(Started { file, line });
     }
     // `php_header`: a `HEAD` request's body goes nowhere once its head
     // is sent.
@@ -1151,7 +1204,7 @@ fn header_modifiable(req: &mut Request) -> bool {
     let message = match req.output().started_at() {
         Some((file, line)) => format!(
             "Cannot modify header information - headers already sent by (output started at {}:{line})",
-            String::from_utf8_lossy(&file)
+            String::from_utf8_lossy(file)
         ),
         None => String::from("Cannot modify header information - headers already sent"),
     };
@@ -1639,8 +1692,13 @@ pub(crate) fn deactivate(req: &mut Request) {
         }
         output.max = 0;
     }
+    if let Some(Started {
+        file: Some(file), ..
+    }) = req.output_mut().started.take()
+    {
+        file.give_up(req);
+    }
     let (output, heap) = req.output_and_heap();
-    output.started = None;
     if let Some(mimetype) = output.mimetype.take() {
         heap.free_block(mimetype);
     }
