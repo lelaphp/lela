@@ -8102,9 +8102,11 @@ impl<'a> Emit<'a> {
                         });
                     };
                     // `zend_eval_const_expr`'s `ZEND_AST_CLASS_CONST`
-                    // arm: a constant of the class being declared is
-                    // its value ([`Self::active_class_constant`]).
-                    if let Some(value) = self.active_class_constant(&class, name)? {
+                    // arm: a constant `zend_try_ct_eval_class_const`
+                    // substitutes is its value
+                    // ([`Self::ct_class_constant`]), which keeps its
+                    // owner.
+                    if let Some(value) = self.ct_class_constant(&class, name)? {
                         return self.folded(value.kept());
                     }
                     Ok(ConstExpr::ClassConstant {
@@ -11989,7 +11991,7 @@ impl<'a> Emit<'a> {
         line: u32,
     ) -> Result<Where, CompileError> {
         match self.scoped_of(id, line)? {
-            Scoped::Constant { class, name } => self.class_const(class, &name),
+            Scoped::Constant { class, name } => self.class_const(id, class, &name),
             Scoped::Property { class, name } => self.static_prop(class, &name),
             Scoped::ClassName { class } => self.class_name_of(class),
         }
@@ -16446,10 +16448,10 @@ impl<'a> Emit<'a> {
         })
     }
 
-    /// `zend_try_ct_eval_class_const` folds nothing under
-    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, which opcache sets, but a
-    /// constant of the class being compiled, so any other is fetched as
-    /// the program serves; a class's property is a variable; and a
+    /// What `zend_try_ct_eval_class_const` substitutes
+    /// ([`Self::ct_class_constant`]), the node's claim where it is a
+    /// string the request's constant holds, and any other constant
+    /// fetched as the program serves; a class's property is a variable; and a
     /// class's name folds where
     /// `zend_try_compile_const_expr_resolve_class_name` answers.
     fn scoped_constant(
@@ -16462,7 +16464,7 @@ impl<'a> Emit<'a> {
                 let operand = self.evaluated_class(class)?;
                 let folded = match self.folded_name(&name)? {
                     Some(name) => match self.constant_class(operand)? {
-                        Some(class) => self.active_class_constant(class, name)?,
+                        Some(class) => self.ct_class_constant(class, name)?,
                         None => None,
                     },
                     None => None,
@@ -17870,13 +17872,15 @@ impl<'a> Emit<'a> {
     }
 
     /// `zend_compile_class_const` (`Z/Zend/zend_compile.c:11064`): a
-    /// constant of the class whose body is being compiled, named `self`
-    /// where the scope is known or by the class's own name, is the value
-    /// `zend_try_ct_eval_class_const` substitutes where the class
-    /// declared it before this point and it folded to a scalar
-    /// ([`Self::active_class_constant`]); every other constant is
-    /// fetched as the program serves, since opcache's
-    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION` folds no other class's.
+    /// constant `zend_try_ct_eval_class_const` substitutes is its value
+    /// ([`Self::ct_class_constant`]): one of the class whose body is being
+    /// compiled, named `self` where the scope is known or by the class's
+    /// own name, where the class declared it before this point and it
+    /// folded to a scalar, and, in a compile php runs without
+    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, one of a class the
+    /// request's table holds; every other constant is fetched as the
+    /// program serves, since opcache's option folds no other class's in
+    /// a file it caches.
     /// The class is compiled as `zend_compile_class_ref` compiles it,
     /// then `FETCH_CLASS_CONSTANT` with the constant's name in `op2`, into
     /// a temporary (`zend_emit_op_tmp`), then the class in `op1`
@@ -17933,6 +17937,7 @@ impl<'a> Emit<'a> {
     /// ```
     fn class_const(
         &mut self,
+        id: NodeId<tree::ScopedAccessExpr>,
         class: ClassSpec,
         name: &ScopedName<'a>,
     ) -> Result<Where, CompileError> {
@@ -17941,9 +17946,10 @@ impl<'a> Emit<'a> {
         let operand = self.evaluated_class(class)?;
         if let Some(written) = self.folded_name(name)?
             && let Some(resolved) = self.constant_class(operand)?
-            && let Some(value) = self.active_class_constant(resolved, written)?
+            && let Some(value) = self.ct_class_constant(resolved, written)?
         {
-            return Ok(Where::Constant(value.kept()));
+            let value = self.claimed(tree::Expr::ScopedAccessExpr(id), value);
+            return Ok(Where::Constant(value));
         }
         let class = self.class_ref_of(operand, FETCH_CLASS_EXCEPTION)?;
         let name = match name {
@@ -17985,15 +17991,52 @@ impl<'a> Emit<'a> {
         })
     }
 
-    /// `zend_try_ct_eval_class_const`'s one arm opcache leaves standing,
+    /// `zend_try_ct_eval_class_const` (`Z/Zend/zend_compile.c:1863`): a
+    /// constant of the class whose body is being compiled where the name
+    /// refers to it ([`Self::active_class_constant`]), and otherwise, for
+    /// a class named as written, one of a class the request's table
+    /// holds ([`Self::request_class_constant`]); nothing under
+    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`
+    /// ([`Substitution::NoPersistent`], a parameter's default), and
+    /// nothing for `parent`, `static`, or `self` where the scope is not
+    /// known.
+    fn ct_class_constant(
+        &mut self,
+        class: &[u8],
+        name: &[u8],
+    ) -> Result<Option<Operated>, CompileError> {
+        if self.substitution == Substitution::NoPersistent {
+            return Ok(None);
+        }
+        if self.refers_to_active_class(class) {
+            return self.active_class_constant(name);
+        }
+        if class_fetch_type(class) != FETCH_CLASS_DEFAULT {
+            return Ok(None);
+        }
+        Ok(self.request_class_constant(class, name))
+    }
+
     /// `class_name_refers_to_active_ce` (`Z/Zend/zend_compile.c:1720`):
     /// `self` where the scope is known, or the name of the class whose
-    /// body is being compiled, over a constant that class declared
+    /// body is being compiled, whatever its case.
+    fn refers_to_active_class(&self, class: &[u8]) -> bool {
+        let Some(active) = self.active_name() else {
+            return false;
+        };
+        match class_fetch_type(class) {
+            FETCH_CLASS_SELF => self.scope_known(),
+            FETCH_CLASS_DEFAULT => class.eq_ignore_ascii_case(&active),
+            _ => false,
+        }
+    }
+
+    /// `zend_try_ct_eval_class_const`'s one arm opcache leaves standing,
+    /// a name that refers to the class whose body is being compiled
+    /// ([`Self::refers_to_active_class`]): a constant that class declared
     /// before the member being compiled and that folded to a scalar or
     /// to an array `array_is_const` takes, which is the constant's
-    /// value; nothing for every other, and nothing at all under
-    /// `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`
-    /// ([`Substitution::NoPersistent`], a parameter's default).
+    /// value; nothing for every other.
     ///
     /// A declaration's constant expression substitutes it too
     /// (`zend_eval_const_expr`'s `ZEND_AST_CLASS_CONST` arm), so a class
@@ -18043,25 +18086,7 @@ impl<'a> Emit<'a> {
     /// Parameter #0 [ <optional> $a = self::Z ]
     /// Parameter #1 [ <optional> $b = [self::Z] ]
     /// ```
-    fn active_class_constant(
-        &mut self,
-        class: &[u8],
-        name: &[u8],
-    ) -> Result<Option<Operated>, CompileError> {
-        if self.substitution == Substitution::NoPersistent {
-            return Ok(None);
-        }
-        let Some(active) = self.active_name() else {
-            return Ok(None);
-        };
-        let refers = match class_fetch_type(class) {
-            FETCH_CLASS_SELF => self.scope_known(),
-            FETCH_CLASS_DEFAULT => class.eq_ignore_ascii_case(&active),
-            _ => false,
-        };
-        if !refers {
-            return Ok(None);
-        }
+    fn active_class_constant(&mut self, name: &[u8]) -> Result<Option<Operated>, CompileError> {
         let Some((at, value)) = self.foldable_constant(name) else {
             return Ok(None);
         };
@@ -19886,7 +19911,7 @@ enum Substitution {
     NoPersistent,
 }
 
-/// `can_ct_eval_const`'s test of
+/// `can_ct_eval_const`'s and `zend_try_ct_eval_class_const`'s test of
 /// the value itself: a type below `IS_ARRAY`, a scalar or a string, or
 /// an array `array_is_const` takes; an object, a resource and a constant
 /// expression not yet evaluated are not substituted.
@@ -20138,6 +20163,90 @@ impl<'a> Emit<'a> {
         let defined = self.request_constants.find(name)?;
         (!defined.deprecated && substitutable(defined.value))
             .then_some(Found::Defined(defined.value))
+    }
+
+    /// `zend_try_ct_eval_class_const`'s arm for a class named as written,
+    /// in a compile php runs without `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`
+    /// ([`Options::request_constants`]): the constant of the class
+    /// `EG(class_table)` holds under the lowered name, a native's or one
+    /// the request declared, where `zend_verify_ct_const_access` lets it
+    /// through and its value is one `can_ct_eval_const` would take, copied
+    /// as a request's constant is ([`Self::request_constant`]). The access
+    /// refuses a `#[\Deprecated]` constant and one read directly off a
+    /// trait, and lets a public one through; a private one only where the
+    /// scope is the class that declared it and a protected one only where
+    /// the scope is that class or one it descends from, and the scope is
+    /// the class being compiled, which no class the table held before it
+    /// is or descends from, so neither is ever substituted here. A
+    /// constant whose value is still a constant expression is left to the
+    /// fetch, as php reads `IS_CONSTANT_AST` past `IS_ARRAY`, and so is
+    /// one a cached file's class declared as one even once evaluated,
+    /// where an `eval`'d class's evaluated constant is its value.
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3266-class-constants.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// m('class B4 { const K = 1; const S = "abcdefghij"; private const P = 2; protected const Q = 3; #[\Deprecated] const D = 4; const L = UNDEFINED_YET; }');
+    /// m('trait T4 { const K = 5; } enum E4 { case A; } class C4 extends B4 {}');
+    /// class B7 { const L = LATE; }
+    /// m('class B6 { const L = LATE; }');
+    /// define('LATE', 7);
+    /// $read = B6::L + B7::L;
+    /// foreach ([
+    ///     'function fu1() { return 1; }',
+    ///     'function fu7() { return B4::K; }',
+    ///     'function fu8() { return b4::S . "x"; }',
+    ///     'function fu9() { return ArrayObject::ARRAY_AS_PROPS; }',
+    ///     'function fu10() { return DateTimeInterface::ATOM; }',
+    ///     'function fu20() { return PDO::PARAM_INT; }',
+    ///     'function fu11() { return C4::K; }',
+    ///     'function fu12() { return B4::P; }',
+    ///     'function fu13() { return B4::Q; }',
+    ///     'function fu14() { return B4::D; }',
+    ///     'function fu15() { return T4::K; }',
+    ///     'function fu16() { return E4::A; }',
+    ///     'function fu17() { return B4::L; }',
+    ///     'function fu18() { return B6::L; }',
+    ///     'function fu19() { return B7::L; }',
+    ///     'class B5 { const K = B4::K + 1; }',
+    ///     '$GLOBALS["a"] = B5::K;',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// echo fu7(), fu8(), fu9(), fu10(), fu11(), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 256  function fu1() { return 1; }
+    /// 256  function fu7() { return B4::K; }
+    /// 296  function fu8() { return b4::S . "x"; }
+    /// 256  function fu9() { return ArrayObject::ARRAY_AS_PROPS; }
+    /// 256  function fu10() { return DateTimeInterface::ATOM; }
+    /// 256  function fu20() { return PDO::PARAM_INT; }
+    /// 256  function fu11() { return C4::K; }
+    /// 384  function fu12() { return B4::P; }
+    /// 384  function fu13() { return B4::Q; }
+    /// 384  function fu14() { return B4::D; }
+    /// 384  function fu15() { return T4::K; }
+    /// 384  function fu16() { return E4::A; }
+    /// 384  function fu17() { return B4::L; }
+    /// 256  function fu18() { return B6::L; }
+    /// 320  function fu19() { return B7::L; }
+    /// 496  class B5 { const K = B4::K + 1; }
+    /// 512  $GLOBALS["a"] = B5::K;
+    /// 1abcdefghijx2Y-m-d\TH:i:sP1
+    /// ```
+    fn request_class_constant(&mut self, class: &[u8], name: &[u8]) -> Option<Operated> {
+        let found = (self.request_constants).class_constant(&class.to_ascii_lowercase(), name)?;
+        let accessible =
+            !found.deprecated && !found.in_trait && found.visibility == Visibility::Public;
+        if !accessible || !substitutable(found.value) {
+            return None;
+        }
+        self.request_constant(found.value)
     }
 
     /// The copy of a constant the request defined that `can_ct_eval_const`

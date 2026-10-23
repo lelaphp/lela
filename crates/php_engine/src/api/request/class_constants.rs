@@ -66,9 +66,7 @@ impl Request {
         class: ClassId,
         row: Row<ClassId>,
     ) -> Option<(ClassId, &ClassConstDecl)> {
-        let holder = row.holder_in(class);
-        let decl = self.symbols().class_decl(holder)?;
-        Some((holder, decl.constants.get(usize::try_from(row.at).ok()?)?))
+        self.class_tables().row_constant(class, row)
     }
 
     /// `zend_fetch_class_constant`'s lookup (`Z/Zend/zend_constants.c:355`):
@@ -718,12 +716,7 @@ impl<'r> Symbols<&'r Request> {
         class: ClassId,
         name: &[u8],
     ) -> Option<(ClassId, &'r ClassConstDecl)> {
-        let row = self.0.linked_class(class)?.constants.find(name, |row| {
-            self.0
-                .row_constant(class, *row)
-                .map_or(&[][..], |(_, constant)| &constant.name.0)
-        })?;
-        self.0.row_constant(class, *row)
+        self.0.class_tables().class_constant_of(class, name)
     }
 
     /// `CE_CONSTANTS_TABLE(ce)` of a linked class in php's order, each

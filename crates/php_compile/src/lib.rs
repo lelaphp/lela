@@ -275,19 +275,30 @@ impl std::fmt::Debug for RequestClasses<'_> {
     }
 }
 
-/// The constants a request has defined, `EG(zend_constants)` past the
-/// engine's persistent ones ([`Options::persistent`]), as
-/// `zend_try_ct_eval_const` finds one while a source compiles for the
+/// The constants a request has defined, as `zend_try_ct_eval_const` and
+/// `zend_try_ct_eval_class_const` find one while a source compiles for the
 /// request without `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`: an `eval`'s
 /// string and `-r`'s code, compiled under `ZEND_COMPILE_DEFAULT_FOR_EVAL`,
 /// and a file no cache keeps. opcache sets the option around every file it
 /// caches (`persistent_compile_file`), so a file compiled for the cache
 /// is handed none, the default, and fetches each such name as the
-/// program serves. Asked by the name the compile resolved, a leading
-/// `\` stripped; the answer is the constant as the table holds it
-/// ([`Defined`]), and the compiler applies `can_ct_eval_const` to it.
+/// program serves. A global constant is asked by the name the compile
+/// resolved, a leading `\` stripped, from `EG(zend_constants)` past the
+/// engine's persistent ones ([`Options::persistent`]); a class constant
+/// by the class's lowered name and the constant's, from any class
+/// `EG(class_table)` holds, the engine's among them. Each answer is the
+/// constant as the table holds it ([`Defined`], [`DefinedClassConstant`]),
+/// and the compiler applies `can_ct_eval_const` and
+/// `zend_verify_ct_const_access` to it.
 #[derive(Clone, Copy)]
-pub struct RequestConstants<'a>(&'a dyn Fn(&[u8]) -> Option<Defined>);
+pub struct RequestConstants<'a> {
+    constants: &'a dyn Fn(&[u8]) -> Option<Defined>,
+    class_constants: &'a ClassConstantLookup<'a>,
+}
+
+/// What [`RequestConstants`] asks a class constant of: the class's
+/// lowered name and the constant's.
+pub type ClassConstantLookup<'a> = dyn Fn(&[u8], &[u8]) -> Option<DefinedClassConstant> + 'a;
 
 /// One constant a request defined as [`RequestConstants`] answers: its
 /// value, a view the table's owner keeps alive while the compile runs,
@@ -299,23 +310,54 @@ pub struct Defined {
     pub deprecated: bool,
 }
 
+/// One class constant as [`RequestConstants`] answers it, what
+/// `zend_try_ct_eval_class_const` reads off its `zend_class_constant`:
+/// `c->value`, a view the class keeps alive while the compile runs, where
+/// it holds a value and no constant expression still to evaluate; the
+/// constant's visibility and `ZEND_ACC_DEPRECATED`; and whether `c->ce`,
+/// the class that declared it, is a trait.
+#[derive(Clone, Copy, Debug)]
+pub struct DefinedClassConstant {
+    pub value: php_heap::Zval,
+    pub visibility: Visibility,
+    pub deprecated: bool,
+    pub in_trait: bool,
+}
+
 impl<'a> RequestConstants<'a> {
-    /// The request's constants as `find` answers for a name.
+    /// The request's constants as `constants` answers for a global name
+    /// and `class_constants` for a lowered class name and a constant's.
     #[must_use]
-    pub fn new(find: &'a dyn Fn(&[u8]) -> Option<Defined>) -> RequestConstants<'a> {
-        RequestConstants(find)
+    pub fn new(
+        constants: &'a dyn Fn(&[u8]) -> Option<Defined>,
+        class_constants: &'a ClassConstantLookup<'a>,
+    ) -> RequestConstants<'a> {
+        RequestConstants {
+            constants,
+            class_constants,
+        }
     }
 
     /// The constant the request defined under `name`, if it did.
     #[must_use]
     pub fn find(&self, name: &[u8]) -> Option<Defined> {
-        (self.0)(name)
+        (self.constants)(name)
+    }
+
+    /// The constant `name` of the class the request's table holds under
+    /// the lowered `class`, where it holds a value.
+    #[must_use]
+    pub fn class_constant(&self, class: &[u8], name: &[u8]) -> Option<DefinedClassConstant> {
+        (self.class_constants)(class, name)
     }
 }
 
 impl Default for RequestConstants<'_> {
     fn default() -> Self {
-        RequestConstants(&|_| None)
+        RequestConstants {
+            constants: &|_| None,
+            class_constants: &|_, _| None,
+        }
     }
 }
 

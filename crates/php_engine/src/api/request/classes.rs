@@ -931,11 +931,18 @@ impl Request {
 
     /// The row of a class the request declared, or the engine published
     /// into its arena, the preload's among them; none for an engine's
-    /// class.
+    /// class ([`ClassTables::declared_row`]).
     pub(super) fn declared_row(&self, class: ClassId) -> Option<&Declared> {
-        match class.local_at() {
-            Some(at) => self.own_classes.get(at),
-            None => self.arena.class(class),
+        self.class_tables().declared_row(class)
+    }
+
+    /// The tables a class's declaration and linked record are read off,
+    /// borrowed apart from the rest of the request ([`ClassTables`]).
+    pub(super) fn class_tables(&self) -> ClassTables<'_> {
+        ClassTables {
+            shared: &self.shared,
+            own_classes: &self.own_classes,
+            arena: &self.arena,
         }
     }
 
@@ -2027,16 +2034,27 @@ impl Request {
         let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
         let constants = &self.constants;
         let defined = |name: &[u8]| constants.defined(name);
+        let tables = ClassTables {
+            shared,
+            own_classes: &self.own_classes,
+            arena: &self.arena,
+        };
+        let class_data = &self.class_data;
+        let (made, units) = self.unit_strings.compiling_beside();
+        let class_constants = |class: &[u8], name: &[u8]| {
+            let class = class_in(shared, declared, aliases, class)?;
+            defined_class_constant(tables, class_data, units, class, name)
+        };
         let mut strings = super::memory::RequestStrings {
             shared,
             hold: self.shared_hold,
             heap: &mut self.heap,
-            made: self.unit_strings.compiling_mut(),
+            made,
         };
         compile(
             &mut strings,
             php_compile::RequestClasses::new(&holds),
-            php_compile::RequestConstants::new(&defined),
+            php_compile::RequestConstants::new(&defined, &class_constants),
             &mut self.compile_arena,
             &self.cwd,
         )
@@ -2125,9 +2143,7 @@ impl Request {
     /// Where an engine's class stands among the engine's; none for any
     /// other class.
     pub(crate) fn native_class_at(&self, class: ClassId) -> Option<usize> {
-        usize::try_from(class.published_number()?)
-            .ok()
-            .filter(|at| *at < self.shared.classes.len())
+        self.class_tables().native_class_at(class)
     }
 
     /// `ZEND_FLF_FUNC(opline)` and `ZEND_FLF_HANDLER(opline)`: the native
@@ -2253,10 +2269,7 @@ impl<'r> Symbols<&'r Request> {
     /// The declaration of a linked class.
     #[must_use]
     pub fn class_decl(self, class: ClassId) -> Option<&'r ClassDecl> {
-        if let Some(native) = self.0.native_class_at(class) {
-            return self.0.shared.classes.get(native);
-        }
-        self.0.declared_row(class)?.decl()
+        self.0.class_tables().class_decl(class)
     }
 
     /// `ce->ce_flags` of a linked class: its declaration's flags with
@@ -2382,6 +2395,133 @@ impl Symbols<&mut Request> {
 /// lowered name is, the case folded by the table and nothing lowered: a
 /// class declared at `at` of the request's rows is the `ClassId` past
 /// the engine's classes.
+/// The tables `EG(class_table)`'s classes are read off: the engine's
+/// natives and their linked records, the rows the request declared and
+/// the engine's published arena. Borrowed apart from the rest of the
+/// request, so a compile that holds the request's heap can still read a
+/// class ([`Request::compiling`]); the request's own readers of a
+/// declaration, a linked record and a constant's row go through it.
+#[derive(Clone, Copy)]
+pub(super) struct ClassTables<'r> {
+    shared: &'r Shared,
+    own_classes: &'r [Declared],
+    arena: &'r crate::arena::Arena,
+}
+
+impl<'r> ClassTables<'r> {
+    /// Where an engine's class stands among the engine's; none for any
+    /// other class.
+    pub(super) fn native_class_at(self, class: ClassId) -> Option<usize> {
+        usize::try_from(class.published_number()?)
+            .ok()
+            .filter(|at| *at < self.shared.classes.len())
+    }
+
+    /// The row of a class the request declared, or the engine published
+    /// into its arena; none for an engine's class.
+    pub(super) fn declared_row(self, class: ClassId) -> Option<&'r Declared> {
+        match class.local_at() {
+            Some(at) => self.own_classes.get(at),
+            None => self.arena.class(class),
+        }
+    }
+
+    /// The declaration of a linked class.
+    pub(super) fn class_decl(self, class: ClassId) -> Option<&'r ClassDecl> {
+        if let Some(native) = self.native_class_at(class) {
+            return self.shared.classes.get(native);
+        }
+        self.declared_row(class)?.decl()
+    }
+
+    /// The linked record of a class: a native class's as startup linked
+    /// it, a declared class's as it bound.
+    pub(super) fn linked_class(self, class: ClassId) -> Option<&'r LinkedClass<ClassId>> {
+        match self.native_class_at(class) {
+            Some(native) => self.shared.records.get(native),
+            None => self.declared_row(class)?.bound.record.as_ref(),
+        }
+    }
+
+    /// The constant a row of `class`'s constants table is, beside the
+    /// class that declared it.
+    pub(super) fn row_constant(
+        self,
+        class: ClassId,
+        row: php_link::Row<ClassId>,
+    ) -> Option<(ClassId, &'r php_unit::decl::ClassConstDecl)> {
+        let holder = row.holder_in(class);
+        let decl = self.class_decl(holder)?;
+        Some((holder, decl.constants.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `zend_hash_find_ptr(CE_CONSTANTS_TABLE(ce), name)`: the constant
+    /// `name` of `class`, beside the class that declared it.
+    pub(super) fn class_constant_of(
+        self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Option<(ClassId, &'r php_unit::decl::ClassConstDecl)> {
+        let row = self.linked_class(class)?.constants.find(name, |row| {
+            self.row_constant(class, *row)
+                .map_or(&[][..], |(_, constant)| &constant.name.0)
+        })?;
+        self.row_constant(class, *row)
+    }
+}
+
+/// The constant `name` of `class` as `zend_try_ct_eval_class_const`
+/// reads its `zend_class_constant` ([`php_compile::DefinedClassConstant`]):
+/// `c->value` where it holds a value, the class that declared it, its
+/// visibility and deprecation. A class of a unit the request compiled for
+/// itself is php's mutable class, whose constant `zend_update_class_constant`
+/// replaced by its value in place once evaluated, so the value the
+/// request evaluated is read first; any other class's constants table
+/// holds what its declaration was compiled to, a value written out or an
+/// expression, which no evaluation in the request replaces
+/// (`CE_CONSTANTS_TABLE` is the mutable data's copy, not the table the
+/// compiler reads). A string written out is the string the engine or the
+/// declaring unit holds for it; a request-only class's constant array is
+/// read only once evaluated. An enum's case is its object, never a value
+/// substituted.
+fn defined_class_constant(
+    tables: ClassTables<'_>,
+    class_data: &super::class_data::ClassDataTables,
+    units: super::unit_strings::UnitsHeld<'_>,
+    class: ClassId,
+    name: &[u8],
+) -> Option<php_compile::DefinedClassConstant> {
+    use php_unit::decl::ConstExpr;
+    let (declaring, constant) = tables.class_constant_of(class, name)?;
+    if constant.is_case {
+        return None;
+    }
+    let mutable = (tables.declared_row(declaring))
+        .is_some_and(|row| units.holds(PublishedUnit::as_ptr(&row.unit)));
+    let evaluated = (class_data.evaluated_constant(declaring, name)).filter(|_| mutable);
+    let value = match (evaluated, &constant.value) {
+        (Some(value), _) => value.to_zval(),
+        (None, ConstExpr::Null) => php_heap::Zval::null(),
+        (None, ConstExpr::Bool(b)) => php_heap::Zval::bool(*b),
+        (None, ConstExpr::Long { value: n, .. }) => php_heap::Zval::long(*n),
+        (None, ConstExpr::Double(d)) => php_heap::Zval::double(*d),
+        (None, ConstExpr::Str(bytes)) => match tables.shared.existing_interned(bytes) {
+            Some(held) => php_heap::Zval::string(held),
+            None => Value::string(units.find(bytes)?).to_zval(),
+        },
+        (None, ConstExpr::ImmutableArray(array)) if !mutable => array.value(),
+        (None, _) => return None,
+    };
+    Some(php_compile::DefinedClassConstant {
+        value,
+        visibility: constant.visibility,
+        deprecated: crate::attributes::Flags::of(&constant.attributes).deprecated,
+        in_trait: tables
+            .class_decl(declaring)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait),
+    })
+}
+
 fn class_in(
     shared: &Shared,
     declared: &Keyed<Named>,

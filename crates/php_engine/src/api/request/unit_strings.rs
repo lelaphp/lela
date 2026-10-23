@@ -74,6 +74,44 @@ pub(crate) struct UnitStrings {
     compiling: Compiling,
 }
 
+/// What the request-only units the request holds hold, read apart from
+/// the compile under way: which units they are, and the strings a copy
+/// of a name finds ([`UnitStrings::find`]).
+#[derive(Clone, Copy)]
+pub(super) struct UnitsHeld<'a> {
+    units: &'a [Held],
+    by_bytes: &'a HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
+    kept: &'a HashMap<Box<[u8]>, PhpString, NameHasher>,
+    files: usize,
+}
+
+impl UnitsHeld<'_> {
+    /// The string a request-only unit that lives holds for the name
+    /// `bytes`, else the one the request keeps for it to its end; a
+    /// view, no owner taken.
+    pub(super) fn find(self, bytes: &[u8]) -> Option<PhpString> {
+        (self.by_bytes.get(bytes).copied().flatten())
+            .or_else(|| self.kept.get(bytes).copied())
+            .or_else(|| {
+                (self.files > 0)
+                    .then(|| {
+                        (self.units.iter().rev())
+                            .find_map(|held| held.file.filter(|file| file.as_bytes() == bytes))
+                    })
+                    .flatten()
+            })
+    }
+
+    /// Whether `unit` is one the request compiled for itself and holds,
+    /// no cache keeping it: php's class of such a unit is mutable, its
+    /// constants updated in place as they are evaluated.
+    pub(super) fn holds(self, unit: *const Unit) -> bool {
+        self.units
+            .iter()
+            .any(|held| std::ptr::eq(held.unit.as_ptr(), unit))
+    }
+}
+
 /// The vectors one unit's strings and arrays stood in, emptied, kept
 /// together for the next unit's: an `eval` in a loop takes them back
 /// with one pop.
@@ -399,28 +437,38 @@ impl UnitStrings {
     /// `bytes`, else the one the request keeps for it to its end
     /// ([`Request::kept_string`]); a view, no owner taken.
     pub(super) fn find(&self, bytes: &[u8]) -> Option<PhpString> {
-        (self.by_bytes.get(bytes).copied().flatten())
-            .or_else(|| self.kept.get(bytes).copied())
-            .or_else(|| {
-                (self.files > 0)
-                    .then(|| {
-                        (self.units.iter().rev())
-                            .find_map(|held| held.file.filter(|file| file.as_bytes() == bytes))
-                    })
-                    .flatten()
-            })
+        self.units_held().find(bytes)
+    }
+
+    /// What the request's units hold, read apart from the compile under
+    /// way ([`UnitsHeld`]).
+    fn units_held(&self) -> UnitsHeld<'_> {
+        UnitsHeld {
+            units: &self.units,
+            by_bytes: &self.by_bytes,
+            kept: &self.kept,
+            files: self.files,
+        }
+    }
+
+    /// The compile under way, which the home its constants are made in
+    /// keeps them in, beside what the request's units hold, borrowed apart
+    /// so a compile can read a class's constant strings while it makes
+    /// its own ([`super::Request::compiling`]).
+    pub(super) fn compiling_beside(&mut self) -> (&mut Compiling, UnitsHeld<'_>) {
+        let held = UnitsHeld {
+            units: &self.units,
+            by_bytes: &self.by_bytes,
+            kept: &self.kept,
+            files: self.files,
+        };
+        (&mut self.compiling, held)
     }
 
     /// `s`, a string of the request's with one owner, the kept string
     /// for `bytes` to the request's end ([`Request::kept_string`]).
     pub(super) fn keep(&mut self, bytes: &[u8], s: PhpString) {
         self.kept.insert(bytes.into(), s);
-    }
-
-    /// The compile under way, which the home its constants are made in
-    /// keeps them in ([`super::memory::RequestStrings`]).
-    pub(super) fn compiling_mut(&mut self) -> &mut Compiling {
-        &mut self.compiling
     }
 
     /// The strings that are over taken out: those of each unit nothing
@@ -580,8 +628,9 @@ impl Request {
     /// strings are its own rather than the engine's.
     pub(crate) fn declared_for_the_request(&self, class: crate::api::values::ClassId) -> bool {
         self.declared_row(class).is_some_and(|row| {
-            let unit = PublishedUnit::as_ptr(&row.unit);
-            (self.unit_strings.units.iter()).any(|held| std::ptr::eq(held.unit.as_ptr(), unit))
+            self.unit_strings
+                .units_held()
+                .holds(PublishedUnit::as_ptr(&row.unit))
         })
     }
 
