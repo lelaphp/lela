@@ -1323,6 +1323,106 @@ impl<'a> Builder<'a> {
     /// The clobber rule (`jit-design.md` §4.2): after a call-effect
     /// kernel, every value of a live frame that a symbol table reaches or
     /// that may be a reference is read again.
+    ///
+    /// A kernel with no `call` effect may call user code too: `INIT_ARRAY`'s
+    /// and `ADD_ARRAY_ELEMENT`'s handler raise a null key's deprecation
+    /// through the error handler and release a duplicate key's value
+    /// (`Z/Zend/zend_vm_def.h:6278-6291`), and the release kernel compiled
+    /// code calls for a temporary runs a destructor. None clobbers, as
+    /// none has to: what that code can write is a variable a symbol table
+    /// reaches, whose every write [`Builder::define`] types as anything
+    /// and whose reads [`Builder::guard_use`] narrows for the reading
+    /// opline alone; a reference, whose inner type is held at every read;
+    /// or an array, which it separates before it writes it. So no fact the
+    /// trace keeps is one such code can change, as php's code generator
+    /// calls such an opline's handler and keeps every type and register
+    /// across it (`Z/ext/opcache/jit/zend_jit_trace.c:6480-6493`). An
+    /// error handler that writes a reference's inner value, a global, a
+    /// file's own variable and a reference's array at either site:
+    ///
+    /// ```php
+    /// function h() { global $g, $w; static $c = 0; if (++$c % 5 == 0) { $g = $c + 0.5; $GLOBALS['m'] = $c + 0.5; $GLOBALS['l'] = ["a" => 1, 2 => $c + 0.5]; $w(); } return true; }
+    /// set_error_handler('h');
+    /// function f(&$r, array &$v, $n, $k) {
+    ///     global $w; static $s = 0; $w = function () use (&$s) { $s = 0.5; }; $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $r = $i; $s = $i; $v = [1, 2, 3]; $x = $v[2]; $a = [$k => 1]; $t = $t + $r + $s + $v[2];
+    ///         $r = $i; $s = $i; $v = [1, 2, 3]; $x = $v[2]; $a = [1, $k => 2]; $t = $t + $r + $s + $v[2];
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0; $l = []; $t = 0; $k = null;
+    /// echo f($g, $l, 8, null), " ";
+    /// for ($i = 0; $i < 8; $i++) { $m = $i; $a = [$k => 1]; $t = $t + $m; }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 189.5 45.5
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function h() { global $g, $w; static $c = 0; if (++$c % 5 == 0) { $g = $c + 0.5; $GLOBALS['m'] = $c + 0.5; $GLOBALS['l'] = ["a" => 1, 2 => $c + 0.5]; $w(); } return true; }
+    /// set_error_handler('h');
+    /// function f(&$r, array &$v, $n, $k) {
+    ///     global $w; static $s = 0; $w = function () use (&$s) { $s = 0.5; }; $t = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $r = $i; $s = $i; $v = [1, 2, 3]; $x = $v[2]; $a = [$k => 1]; $t = $t + $r + $s + $v[2];
+    ///         $r = $i; $s = $i; $v = [1, 2, 3]; $x = $v[2]; $a = [1, $k => 2]; $t = $t + $r + $s + $v[2];
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0; $l = []; $t = 0; $k = null;
+    /// echo f($g, $l, 8, null), " ";
+    /// for ($i = 0; $i < 8; $i++) { $m = $i; $a = [$k => 1]; $t = $t + $m; }
+    /// echo $t, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 189.5 45.5
+    /// ```
+    ///
+    /// A destructor that writes a reference's inner value, called at a
+    /// duplicate key, at `FETCH_DIM_R`'s release of its temporary and at
+    /// `TYPE_CHECK`'s:
+    ///
+    /// ```php
+    /// class D { function __destruct() { global $g; static $c = 0; if (++$c % 7 == 0) { $g = $c + 0.5; } } }
+    /// function f(&$r, $n) {
+    ///     $t = 0; $k = 1;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $o = new D; $r = $i; $a = [$k => $o, $k => ($o = null)]; $t = $t + $r;
+    ///         $o = new D; $r = $i; $v = [$o, $o = null][1]; $t = $t + $r;
+    ///         $o = new D; $r = $i; $v = is_array([$o, $o = null]); $t = $t + $r;
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0;
+    /// var_dump(f($g, 10));
+    /// ```
+    /// ```expect regime=jit-force process
+    /// float(186)
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D { function __destruct() { global $g; static $c = 0; if (++$c % 7 == 0) { $g = $c + 0.5; } } }
+    /// function f(&$r, $n) {
+    ///     $t = 0; $k = 1;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $o = new D; $r = $i; $a = [$k => $o, $k => ($o = null)]; $t = $t + $r;
+    ///         $o = new D; $r = $i; $v = [$o, $o = null][1]; $t = $t + $r;
+    ///         $o = new D; $r = $i; $v = is_array([$o, $o = null]); $t = $t + $r;
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0;
+    /// var_dump(f($g, 10));
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// float(186)
+    /// ```
     fn clobber(&mut self, idx: OpId) {
         let live: Vec<Frame> = self.stack.clone();
         for frame in live {
