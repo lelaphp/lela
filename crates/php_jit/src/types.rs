@@ -234,11 +234,10 @@ pub(crate) enum Home {
 pub(crate) enum Op {
     /// One recorded opline, or a comparison and the jump fused to it.
     Line(Line),
-    /// A call an `INIT_*` began in `frame`, to the op array named, none
-    /// for a native's: at an opline of the trace, or before it reached
-    /// `frame`, php's fake init, whose call compiled code finds where the
-    /// interpreter stands, `EX(call)`, once the calls begun after it are
-    /// made.
+    /// A call an `INIT_*` began in `frame`, to `callee`: at an opline of
+    /// the trace, or before it reached `frame`, php's fake init, whose
+    /// call compiled code finds where the interpreter stands, `EX(call)`,
+    /// once the calls begun after it are made.
     InitCall {
         frame: Frame,
         callee: Callee,

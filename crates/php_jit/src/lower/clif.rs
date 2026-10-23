@@ -539,7 +539,6 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
-    /// Answer [`DECLINED`] where `cond` is not zero.
     /// Whether the stack's top page has less room than `bytes` for
     /// frames, where the last kernel, or `enter`, stood it.
     fn short_of(&mut self, bytes: u32) -> Value {
@@ -549,6 +548,7 @@ impl<'a> Emit<'a> {
             .icmp_imm_u(IntCC::UnsignedLessThan, room, i64::from(bytes))
     }
 
+    /// Answer [`DECLINED`] where `cond` is not zero.
     fn decline_if(&mut self, cond: Value) {
         let to = if let Some(block) = self.declined {
             block

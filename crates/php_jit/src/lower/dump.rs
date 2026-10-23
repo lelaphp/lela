@@ -25,7 +25,7 @@ use std::fmt::{self, Write as _};
 
 use php_heap::ZvalType;
 
-use crate::record::{Began, func_name as func};
+use crate::record::func_name as func;
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Interrupt, Landing,
     Layout, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Types, Unwind,
@@ -190,11 +190,7 @@ impl<'a> Dump<'a> {
                 began,
             } => {
                 let target = callee.user().map_or("native".to_owned(), func);
-                let init = match began {
-                    Began::Here => "init",
-                    Began::Before => "fake-init",
-                };
-                writeln!(text, "     f{} {init} {target}", frame.0)
+                writeln!(text, "     f{} {} {target}", frame.0, began.word())
             }
             Op::Enter { frame } => {
                 let named = self

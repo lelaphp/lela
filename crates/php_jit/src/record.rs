@@ -354,6 +354,17 @@ pub(crate) enum Began {
     Before,
 }
 
+impl Began {
+    /// The word a recorded trace's text form and `lower::dump` write the
+    /// call with, php's `>init` and `>fake_init`.
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Began::Here => "init",
+            Began::Before => "fake-init",
+        }
+    }
+}
+
 /// One recording: where it started, the op array whose word claimed it,
 /// what happened, and why it stopped. [`TraceRecord::dump`] and
 /// [`TraceRecord::parse`] are inverses, so a recorded trace is a fixture.

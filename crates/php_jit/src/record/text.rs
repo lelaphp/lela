@@ -105,10 +105,7 @@ impl TraceRecord {
                 Event::InitCall { callee, began } => writeln!(
                     text,
                     "{} {}",
-                    match began {
-                        Began::Here => "init",
-                        Began::Before => "fake-init",
-                    },
+                    began.word(),
                     match callee {
                         Callee::User(f) => func(*f),
                         Callee::Native(returns) => format!("native:{:04x}", returns.bits()),
@@ -331,7 +328,7 @@ fn parse_event(line: &str) -> Option<Event> {
                 )?),
                 f => Callee::User(parse_func(f)?),
             },
-            began: if word == "init" {
+            began: if word == Began::Here.word() {
                 Began::Here
             } else {
                 Began::Before

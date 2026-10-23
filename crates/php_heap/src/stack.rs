@@ -1128,7 +1128,7 @@ impl<H> VmStack<H> {
     pub fn room(&self) -> usize {
         self.pages
             .last()
-            .map_or(0, |page| (page.slots - page.top) * SLOT)
+            .map_or(0, |page| page.slots.saturating_sub(page.top) * SLOT)
     }
 
     /// How many frames stand on the stack.

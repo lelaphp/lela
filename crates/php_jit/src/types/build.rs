@@ -160,14 +160,21 @@ struct Placed {
 /// and what each argument was sent as, where the send says.
 struct Call {
     inline: bool,
-    args: Vec<Option<Types>>,
-    /// Per argument, the register value a send wrote it from, which an
-    /// untyped parameter of an inlined callee goes on being held in, as
-    /// php's send sets the callee's stack map to the register it sent
-    /// (`SET_STACK_REF`) where no `RECV` checks a type.
-    regs: Vec<Option<ValueId>>,
+    /// Per argument, what its send wrote, where it sent a value.
+    args: Vec<Sent>,
     /// For a native's call, what its declaration says it returns.
     returns: Option<Types>,
+}
+
+/// What a send wrote into a call's argument: the types of what it sent,
+/// where it sent a value, and the register value it sent from, which an
+/// untyped parameter of an inlined callee goes on being held in, as
+/// php's send sets the callee's stack map to the register it sent
+/// (`SET_STACK_REF`) where no `RECV` checks a type.
+#[derive(Debug, Clone, Copy, Default)]
+struct Sent {
+    types: Option<Types>,
+    reg: Option<ValueId>,
 }
 
 struct Builder<'a> {
@@ -796,7 +803,6 @@ impl<'a> Builder<'a> {
         self.calls.push(Call {
             inline,
             args: Vec::new(),
-            regs: Vec::new(),
             returns: match callee {
                 Callee::Native(returns) => Some(returns),
                 Callee::User(_) => None,
@@ -841,14 +847,10 @@ impl<'a> Builder<'a> {
         };
         let at = op.op2.saturating_sub(1) as usize;
         if call.args.len() <= at {
-            call.args.resize(at + 1, None);
-            call.regs.resize(at + 1, None);
+            call.args.resize(at + 1, Sent::default());
         }
         if let Some(arg) = call.args.get_mut(at) {
-            *arg = types;
-        }
-        if let Some(held) = call.regs.get_mut(at) {
-            *held = reg;
+            *arg = Sent { types, reg };
         }
     }
 
@@ -861,24 +863,18 @@ impl<'a> Builder<'a> {
         self.stack.push(frame);
         let meta = self.meta(frame);
         for param in params(meta.code, meta.parameters) {
-            let sent = call
-                .as_ref()
+            let sent = (call.as_ref())
                 .and_then(|call| call.args.get(param.number.saturating_sub(1) as usize))
                 .copied()
-                .flatten();
-            let types = param_types(param.declared, sent);
+                .unwrap_or_default();
+            let types = param_types(param.declared, sent.types);
             let slot = Slot {
                 frame,
                 var: param.cv,
             };
             let value = self.value(slot, types, Def::Op(idx), Home::Memory);
             self.set(slot, value);
-            let reg = call
-                .as_ref()
-                .and_then(|call| call.regs.get(param.number.saturating_sub(1) as usize))
-                .copied()
-                .flatten();
-            if let (Declared::Untyped, Some(reg)) = (param.declared, reg) {
+            if let (Declared::Untyped, Some(reg)) = (param.declared, sent.reg) {
                 self.held.insert(value, reg);
             }
         }
@@ -1749,14 +1745,17 @@ impl<'a> Builder<'a> {
             let func = (self.frames.get(usize::from(spec.frame.0)))
                 .ok_or_else(|| mismatch("an exit in no frame of the trace"))?
                 .func;
-            let func = (func, self.held_at(&draft));
+            let level = Level {
+                func,
+                held: self.held_at(&draft),
+            };
             match source {
                 Source::Guard(at) => {
                     let placed = self.guards[at];
                     numbered.guards.push(Guard {
                         at: placed.at,
                         check: placed.check,
-                        exit: exits.take(spec, func.clone())?,
+                        exit: exits.take(spec, level.clone())?,
                     });
                     let held = match placed.check {
                         Check::Type { value, tag } => Some((value, tag)),
@@ -1776,7 +1775,7 @@ impl<'a> Builder<'a> {
                 Source::Leave(at) => {
                     let (op, leaves, _) = self.leaves[at];
                     let leave = match leaves {
-                        Leaves::Unfinished => Leave::Exit(exits.take(spec, func.clone())?),
+                        Leaves::Unfinished => Leave::Exit(exits.take(spec, level.clone())?),
                         Leaves::Thrown => {
                             let unwind = Unwind {
                                 stores: spec.stores,
@@ -1802,15 +1801,26 @@ impl<'a> Builder<'a> {
                     numbered.end = Some(End::Loop(LoopHeader {
                         at: self.header,
                         repeat,
-                        interrupt: Interrupt::Exit(exits.take(spec, func.clone())?),
+                        interrupt: Interrupt::Exit(exits.take(spec, level.clone())?),
                     }));
                 }
-                Source::End => numbered.end = Some(End::Leave(exits.take(spec, func.clone())?)),
+                Source::End => numbered.end = Some(End::Leave(exits.take(spec, level.clone())?)),
             }
         }
         numbered.exits = exits.specs;
         numbered.unwinds = unwinds;
         Ok(numbered)
+    }
+
+    /// What the slots hold at `point`; none at the trace's start, where
+    /// everything is in memory.
+    fn snapshot_at(&self, point: Point) -> Option<&Snapshot> {
+        match point {
+            Point::Start => None,
+            Point::Before(at) => self.snapshots.get(at.index()),
+            Point::After(at) => self.snapshots.get(at.index() + 1),
+            Point::End => self.snapshots.last(),
+        }
     }
 
     /// The untyped parameters of `draft`'s frame that hold, where it
@@ -1821,12 +1831,7 @@ impl<'a> Builder<'a> {
     /// its slot and its stack map holds none.
     fn held_at(&self, draft: &Draft) -> Vec<(u32, ValueId)> {
         let empty = Snapshot::default();
-        let snapshot = match draft.point {
-            Point::Start => &empty,
-            Point::Before(at) => self.snapshots.get(at.index()).unwrap_or(&empty),
-            Point::After(at) => self.snapshots.get(at.index() + 1).unwrap_or(&empty),
-            Point::End => self.snapshots.last().unwrap_or(&empty),
-        };
+        let snapshot = self.snapshot_at(draft.point).unwrap_or(&empty);
         (snapshot.values.iter())
             .filter(|(slot, _)| slot.frame == draft.frame)
             .filter_map(|(slot, value)| Some((slot.var, *self.held.get(value)?)))
@@ -2181,12 +2186,7 @@ impl<'a> Builder<'a> {
     /// in `known` held by a guard before it.
     fn spec(&self, draft: &Draft, known: &HashMap<ValueId, ZvalType>) -> ExitSpec {
         let empty = Snapshot::default();
-        let snapshot = match draft.point {
-            Point::Start => &empty,
-            Point::Before(at) => self.snapshots.get(at.index()).unwrap_or(&empty),
-            Point::After(at) => self.snapshots.get(at.index() + 1).unwrap_or(&empty),
-            Point::End => self.snapshots.last().unwrap_or(&empty),
-        };
+        let snapshot = self.snapshot_at(draft.point).unwrap_or(&empty);
         let calls = snapshot.calls > 0;
         let mut extra = draft.extra;
         let (opline, landing) = match draft.at {
@@ -2411,26 +2411,30 @@ struct Exits {
 /// one leave from one frame.
 #[derive(Debug, PartialEq, Eq, Hash)]
 struct Reused {
-    func: FuncRef,
+    level: Level,
     spec: ExitSpec,
-    /// The frame's untyped parameters php's stack map holds in the
-    /// caller's registers they were sent from, by variable, which keep
-    /// an inlined level's exits apart from its caller's, as php's
-    /// register references do (`Builder::held_at`).
+}
+
+/// The frame an exit leaves from, as php's frame-relative stack map
+/// names it: the op array it runs, and its untyped parameters php's
+/// stack map holds in the caller's registers they were sent from, by
+/// variable, which keep an inlined level's exits apart from its
+/// caller's, as php's register references do (`Builder::held_at`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct Level {
+    func: FuncRef,
     held: Vec<(u32, ValueId)>,
 }
 
 impl Reused {
-    /// The key of `spec`, whose frame runs `func` with `held` in the
-    /// registers they were sent from.
-    fn of(spec: &ExitSpec, (func, held): (FuncRef, Vec<(u32, ValueId)>)) -> Reused {
+    /// The key of `spec`, which leaves from `level`.
+    fn of(spec: &ExitSpec, level: Level) -> Reused {
         let relative = |slot: Slot| Slot {
             frame: Frame::ROOT,
             ..slot
         };
         Reused {
-            func,
-            held,
+            level,
             spec: ExitSpec {
                 frame: Frame::ROOT,
                 known: (spec.known.iter())
@@ -2446,19 +2450,15 @@ impl Reused {
 }
 
 impl Exits {
-    /// The exit that leaves as `spec` says, in a frame that runs `func`:
+    /// The exit that leaves as `spec` says, from `level`:
     /// php's `zend_jit_trace_get_exit_point`, which reuses an exit whose
     /// opline, `flags` and stack map match one taken
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:168-185`), and refuses the
     /// trace with `TooManyExits` where a new one would pass
     /// `ZEND_JIT_TRACE_MAX_EXITS`. An exit that names no opline is never
     /// reused, as php reuses none whose `to_opline` is null.
-    fn take(
-        &mut self,
-        spec: ExitSpec,
-        func: (FuncRef, Vec<(u32, ValueId)>),
-    ) -> Result<ExitId, Abort> {
-        let key = spec.opline.is_some().then(|| Reused::of(&spec, func));
+    fn take(&mut self, spec: ExitSpec, level: Level) -> Result<ExitId, Abort> {
+        let key = spec.opline.is_some().then(|| Reused::of(&spec, level));
         if let Some(id) = key.as_ref().and_then(|key| self.taken.get(key)) {
             return Ok(*id);
         }

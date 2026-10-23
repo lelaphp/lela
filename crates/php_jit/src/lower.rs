@@ -356,6 +356,17 @@ pub(crate) struct Stood {
     pub(crate) room: usize,
 }
 
+impl Stood {
+    /// Where nothing stood: a null frame and call, and no room.
+    pub(crate) const NOWHERE: Stood = Stood {
+        frame: std::ptr::null_mut(),
+        call: std::ptr::null_mut(),
+        func: 0,
+        opline: 0,
+        room: 0,
+    };
+}
+
 /// The host's `Backend` (`jit-design.md` §4.3): its ISA with the flags the
 /// [`Policy`] asks for, and the kernel table compiled code calls. It holds
 /// no state of one compile, so one serves every compile of the engine.
