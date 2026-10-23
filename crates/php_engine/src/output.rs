@@ -1112,7 +1112,7 @@ pub(crate) fn header(req: &mut Request) {
         let name = req.frames().current_file().map(<[u8]>::to_vec);
         // The memory limit refusing a name no unit holds is recorded
         // and ends the request.
-        let file = name.and_then(|name| req.declared_string(&name).ok());
+        let file = name.and_then(|name| req.executed_file_string(&name).ok());
         let line = req.frames().current_line();
         req.output_mut().started = Some(Started { file, line });
     }

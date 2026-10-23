@@ -481,6 +481,15 @@ impl Held {
 }
 
 impl UnitStrings {
+    /// The string `unit`, a unit the request compiled for itself, holds
+    /// as its file's name `file`: [`Held::file`], or its name among the
+    /// names of one that declares.
+    fn file_of(&self, unit: *const Unit, file: &[u8]) -> Option<PhpString> {
+        let held = (self.units.iter()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))?;
+        (held.file.into_iter().chain(held.names.iter().copied()))
+            .find(|name| name.as_bytes() == file)
+    }
+
     /// The string a request-only unit that lives holds for the name
     /// `bytes`, else the one the request keeps for it to its end
     /// ([`Request::kept_string`]); a view, no owner taken.
@@ -666,6 +675,39 @@ impl Request {
     /// strings are its own rather than the engine's.
     pub(crate) fn declared_for_the_request(&self, class: crate::api::values::ClassId) -> bool {
         (self.class_lookup()).declared_for_the_request(self.unit_strings.units_held(), class)
+    }
+
+    /// `zend_get_executed_filename_ex()` for `file`, the bytes the
+    /// executing frame's file is named by, with one more owner: the
+    /// string the innermost frame's unit holds as its file's name where
+    /// the request compiled that unit for itself, as php's
+    /// `op_array->filename` is that unit's own string, so what keeps it
+    /// keeps that `eval`'s name and no other's of the same bytes; else
+    /// [`Request::declared_string`]'s. Where the body started and a
+    /// constant an `eval` defines each keep the `eval`'s own name, though
+    /// a class an `eval` of the same line declared holds one of the
+    /// same bytes (the file under the recipe's `TMPDIR`):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3259-own-name.inc';
+    /// file_put_contents($f, "<?php\neval('class Kh {}'); \$m = memory_get_usage(); eval('echo \"a\";'); \$d = memory_get_usage() - \$m; eval('class Kc {}'); \$n = memory_get_usage(); eval('const KC = 1;'); \$e = memory_get_usage() - \$n; echo \"\\n\$d \$e\\n\";\n");
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// a
+    /// 144 184
+    /// ```
+    pub(crate) fn executed_file_string(
+        &mut self,
+        file: &[u8],
+    ) -> Result<crate::api::values::Owner<PhpString>, Thrown> {
+        let unit = (self.innermost_frame().and_then(crate::exec::FrameAt::unit))
+            .map(|(unit, _)| PublishedUnit::as_ptr(unit));
+        match unit.and_then(|unit| self.unit_strings.file_of(unit, file)) {
+            Some(own) => Ok(crate::api::values::Owner::take(self, own)),
+            None => self.declared_string(file),
+        }
     }
 
     /// Whether `class` is php's class without `ZEND_ACC_IMMUTABLE`

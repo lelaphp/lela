@@ -62,12 +62,17 @@ struct ConstantRow {
     /// the engine's own shape; none where the memory limit refused it,
     /// whose fatal ends the request.
     room: Option<Emalloc>,
-    /// `c->name` where the registration made it, a host's or an
-    /// extension's name through `zend_string_init_interned`
-    /// ([`Request::interned`]), released with the row; none for
-    /// `define()`'s and `const`'s, which is the program's own string, or
-    /// where the memory limit refused it.
+    /// `c->name`, released with the row: a host's or an extension's
+    /// name through `zend_string_init_interned` ([`Request::interned`]),
+    /// and for `define()`'s and `const`'s one more owner of the
+    /// program's string (`zend_string_copy`), the one a declaration
+    /// holds for the bytes where any does ([`Request::declared_string`]);
+    /// none where the memory limit refused it.
     named: Option<Owner<PhpString>>,
+    /// `c->filename`, `zend_get_executed_filename_ex()` with one more
+    /// owner, for a constant the program defines: an `eval`'s name
+    /// string among them, which the row keeps past the `eval`.
+    filename: Option<Owner<PhpString>>,
     owner: ConstantOwner,
     /// The key `EG(zend_constants)` holds the row under: the name with
     /// its namespace lowered, which every lookup compares against.
@@ -90,6 +95,7 @@ impl ConstantRow {
         ConstantRow {
             room,
             named,
+            filename: None,
             owner,
             given: name.clone(),
             name,
@@ -222,8 +228,8 @@ impl Request {
         if let Some(room) = row.room {
             room.free(self);
         }
-        if let Some(named) = row.named {
-            named.give_up(self);
+        for string in [row.named, row.filename].into_iter().flatten() {
+            string.give_up(self);
         }
     }
 
@@ -318,6 +324,37 @@ impl Request {
         self.define_attributed_constant(name, value, Vec::new())
     }
 
+    /// The name and the file a constant the program defines is kept
+    /// with are strings the row holds an owner of, as
+    /// `zend_register_constant` copies `c->name` and
+    /// `zend_get_executed_filename_ex()`: a constant an `eval` defines
+    /// keeps the `eval`'s name string past it (the file under the
+    /// recipe's `TMPDIR`, so that name has one length):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3259-constants.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } }');
+    /// m('$q0 = 1;');
+    /// foreach ([
+    ///     'class R { const B = 1; } class Rlonger { const Blonger = 2; } const X1 = "y"; const X2 = 3; const X3 = 4; const Xlongname4 = 5;',
+    ///     'const X5 = 3;',
+    ///     'define("X6", 3);',
+    ///     '$q = 1;',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1144  class R { const B = 1; } class Rlonger { const Blonger = 2; } const X1 = "y"; const X2 = 3; const X3 = 4; const Xlongname4 = 5;
+    /// 184  const X5 = 3;
+    /// 184  define("X6", 3);
+    /// 0  $q = 1;
+    /// ```
+    ///
     /// `ZEND_DECLARE_ATTRIBUTED_CONST`'s `zend_register_constant` and
     /// `zend_constant_add_attributes`: [`Request::define_constant`] with
     /// the attributes the declaration carries hung on the row, and
@@ -350,9 +387,14 @@ impl Request {
             .map(|code| code.filename.0.clone());
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         let room = self.constant_room();
+        let named = self.declared_string(given).ok();
+        let filename = file
+            .as_deref()
+            .and_then(|file| self.executed_file_string(file).ok());
         self.constants.push(ConstantRow {
             room,
-            named: None,
+            named,
+            filename,
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             given: given.to_vec(),
@@ -792,6 +834,7 @@ impl Symbols<&mut Request> {
         self.0.constants.push(ConstantRow {
             room,
             named,
+            filename: None,
             owner: ConstantOwner::Extension(extension),
             name: name.to_vec(),
             given: name.to_vec(),

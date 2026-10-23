@@ -3390,13 +3390,14 @@ mod tests {
             Some(7),
             "the destructor ran once, reading the payload"
         );
-        // The destructor's `define()` took a `zend_constant`'s 40.
-        assert_eq!(req.memory().usage(false) - start, 160 + 32 + 40);
+        // The destructor's `define()` took a `zend_constant`'s 40 and its
+        // name's string, 32, which no unit holds here.
+        assert_eq!(req.memory().usage(false) - start, 160 + 32 + 40 + 32);
         req.release(v);
         assert_eq!(req.memory().resource(1), None);
         assert_eq!(
             req.memory().usage(false),
-            start + 160 + 40,
+            start + 160 + 40 + 32,
             "the list's table stays until the request ends"
         );
         let next = Resource::new(&mut req, kind, 0u8)
