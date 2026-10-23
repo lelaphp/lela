@@ -737,16 +737,15 @@ pub trait Intern {
         (self.intern_marked(bytes, valid_utf8)).map(|s| Made(Zval::string(s)))
     }
 
-    /// [`Intern::intern_made`] of a declaration's own name or lowered
-    /// key, where php's compile copies the string the declaration holds
-    /// (`zend_string_copy`) rather than make one: `__CLASS__`,
-    /// `__FUNCTION__` and `self::class`, and a runtime declaration's
-    /// lowered name, the key `do_bind_function` and `do_bind_class` bind
-    /// it under. A home that makes a string each time it is asked keeps
-    /// this one as the declaration's, so the declaration costs no string
-    /// more for it.
-    fn intern_name(&mut self, bytes: &[u8]) -> Result<Made, Fatal> {
-        self.intern_made(bytes, false)
+    /// The next of the names a compile hands over once its unit is
+    /// whole, in the order of the compiler's walk of what they name
+    /// (`php_compile::named`): `name`, the string this home gave for it,
+    /// where the compile asked for one. A home that makes a string each
+    /// time it is asked keeps it as that declaration's own, so the
+    /// declaration costs no string more for it, and what it is the name
+    /// of is told by its place in the walk, never by its bytes.
+    fn hand_name(&mut self, name: Option<Str>) {
+        let _ = name;
     }
 
     /// `made` read for the last time: the string this home made for the
