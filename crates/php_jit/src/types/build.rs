@@ -14,7 +14,7 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 use super::lattice::{self, Types};
 use super::opcodes::{
     Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, compiled_inline,
-    constant, constant_types, goes_one_way, guard_sites, inline_may_leave, is_call,
+    constant, constant_types, goes_one_way, guard_sites, held_as_is, inline_may_leave, is_call,
     keeps_temporaries, may_exit, op1_types, out_types, packed_guard, param_types, params, reads,
     reads_by_name, referenced, slot_of, within, writes, written, written_after_entry,
 };
@@ -170,6 +170,9 @@ struct Call {
     /// Whether compiled code pushed it in place ([`Op::InitCall`]'s
     /// `plain`), and so makes it in place.
     plain: bool,
+    /// Whether its activation passes over `RECV`s that check types
+    /// ([`PlainCall::checks`]).
+    checks: bool,
     /// How its last `CHECK_FUNC_ARG` found the argument it checked sent,
     /// php's `TRACE_FRAME_IS_LAST_SEND_BY_VAL` and `_BY_REF`, which the
     /// `FETCH_*_FUNC_ARG` after it reads.
@@ -992,6 +995,7 @@ impl<'a> Builder<'a> {
             },
             callee,
             plain: plain.is_some(),
+            checks: plain.as_ref().is_some_and(PlainCall::checks),
             last_send: LastSend::Unknown,
         });
         self.ops.push(Op::InitCall {
@@ -1091,12 +1095,64 @@ impl<'a> Builder<'a> {
             }
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => {
                 let made = matches!(next, Some(Event::Enter { .. }))
-                    && self.calls.last().is_some_and(|call| call.plain);
+                    && self.calls.last().is_some_and(|call| {
+                        call.plain && (!call.checks || self.sent_as_declared(call))
+                    });
                 made.then_some(InPlace::Make)
             }
             Opcode::Return => self.leaves_in_place(frame).then_some(InPlace::Leave),
             _ => None,
         }
+    }
+
+    /// Whether every argument of `call` is of a type its parameter
+    /// declares and holds as it is ([`held_as_is`]), so the callee's
+    /// `RECV` checks would pass each untouched, as the trace knows from
+    /// what each send wrote: where a call's activation passes over
+    /// checking `RECV`s ([`PlainCall::checks`]), it is made in place only
+    /// then, the checks php's trace makes in `zend_jit_recv`, each known to
+    /// pass. A long sent to an `int` is made in place; one sent to a
+    /// `float`, which the `RECV` coerces, and a string sent to an `int`
+    /// are the call kernel's, which serves the prologue:
+    ///
+    /// ```php
+    /// function fib(int $n): int { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
+    /// function half(float $x) { return $x / 2; }
+    /// function halves($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += half($i); } return $s; }
+    /// function twice(int $n) { return $n * 2; }
+    /// function many($n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += twice($i % 3 == 0 ? "4" : $i); } return $t; }
+    /// var_dump(fib(15), halves(10), many(9));
+    /// ```
+    /// ```expect regime=jit-force process
+    /// int(610)
+    /// float(22.5)
+    /// int(78)
+    /// ```
+    fn sent_as_declared(&self, call: &Call) -> bool {
+        let Some(params) = call
+            .callee
+            .user()
+            .and_then(|callee| self.view.parameters(callee))
+        else {
+            return false;
+        };
+        params.iter().enumerate().all(|(at, param)| {
+            if param.variadic || param.by_ref {
+                return false;
+            }
+            let Some(ty) = param.ty.as_ref() else {
+                return true;
+            };
+            let sent = call.args.get(at).and_then(|sent| sent.types);
+            match (held_as_is(ty), sent) {
+                (Some(held), Some(sent)) => {
+                    sent.kinds() != Types::NONE
+                        && !sent.meets(Types::REF.or(Types::UNDEF))
+                        && sent.kinds().within(held)
+                }
+                _ => false,
+            }
+        })
     }
 
     /// What a send wrote into the call under way, where it sends a value.

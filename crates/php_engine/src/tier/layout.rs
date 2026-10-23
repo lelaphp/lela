@@ -341,6 +341,7 @@ pub struct PlainCall {
     name: Box<[u8]>,
     slots: u32,
     activation: Option<Activation>,
+    checks: bool,
 }
 
 /// Two calls of one callee and one argument count are the same call.
@@ -413,11 +414,21 @@ impl PlainCall {
     }
 
     /// What the call's activation writes, where a `DO_*CALL`'s inline
-    /// path makes it with no `RECV*` to serve; none where the callee's
-    /// activation serves its prologue or reads a cache of its own.
+    /// path makes it with no `RECV*` to serve, or with `RECV`s that only
+    /// check ([`PlainCall::checks`]); none where the callee's activation
+    /// serves its prologue or reads a cache of its own.
     #[must_use]
     pub fn activation(&self) -> Option<Activation> {
         self.activation
+    }
+
+    /// Whether the activation passes over `RECV` oplines that check the
+    /// types the parameters declare, which compiled code makes in place
+    /// only where it knows each argument is of the type its parameter
+    /// declares, so no check would refuse or coerce it.
+    #[must_use]
+    pub fn checks(&self) -> bool {
+        self.checks
     }
 }
 
@@ -453,7 +464,16 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let slots = u32::try_from(laid.len()).ok()?;
     let count = header.num_args;
     let opline = crate::exec::skipped_recv(count, shape.parameters, shape.typed, shape.entry);
-    let enters = count <= shape.parameters && slots >= shape.slots && opline == Some(shape.entry);
+    // A function that declares a type keeps its `RECV*`, each a check; with
+    // every parameter passed and one `RECV` each, the checks are all its
+    // prologue does to an argument of the type declared, which compiled
+    // code that knows the argument's type makes in place of them, as
+    // php's trace compiles `zend_jit_recv` with no check
+    // (`Z/ext/opcache/jit/zend_jit_ir.c:10660-10760`).
+    let checks = shape.typed && count == shape.parameters && shape.entry == count;
+    let enters = count <= shape.parameters
+        && slots >= shape.slots
+        && (opline == Some(shape.entry) || checks);
     let activation = match shape.cache.offset() {
         MapPtrOffset::Engine(cache) if enters => {
             // What `enter_call` writes into the flags, applied to all of
@@ -483,6 +503,7 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         name: name.into_boxed_slice(),
         slots,
         activation,
+        checks,
     })
 }
 

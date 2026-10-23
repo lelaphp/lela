@@ -15,7 +15,7 @@ loop at 0, recursive call, interrupt exit 3
   -> #2 f0.T1 [long] reg
   checks #2 long -> exit 2
 0007 f0 SEND_VAL_EX #2 inline
-0008 f0 DO_FCALL_BY_NAME inline unwinds -> unwind 0
+0008 f0 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 0
      f1 enter e1
   -> #3 f1.CV0 [long]
 0001 f1 IS_SMALLER #3, int(2) fused inline
@@ -27,7 +27,7 @@ loop at 0, recursive call, interrupt exit 3
   -> #4 f1.T1 [long] reg
   checks #4 long -> exit 2
 0007 f1 SEND_VAL_EX #4 inline
-0008 f1 DO_FCALL_BY_NAME inline unwinds -> unwind 0
+0008 f1 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 0
      f2 enter e1
   -> #5 f2.CV0 [long]
 end: back to 0

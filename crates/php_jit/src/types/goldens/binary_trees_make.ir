@@ -20,17 +20,17 @@ loop at 0, recursive return, interrupt exit 7
      f0 init e1 in-place
   guard #3 long -> exit 1
 0011 f0 SEND_VAR #3 inline
-0012 f0 DO_FCALL_BY_NAME inline unwinds -> unwind 0
+0012 f0 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 0
      f1 enter e1
   -> #4 f1.CV0 [long]
 0001 f1 IS_IDENTICAL #4, int(0) fused inline
   checks direction fell -> exit 2
-0003 f1 RETURN const#1 inline
+0003 f1 RETURN const#1 inline in-place constant
      f0 back to #5
   -> #5 f0.T5 [packed array]
 0013 f0 ADD_ARRAY_ELEMENT #5 step unwinds -> unwind 0
   -> #6 f0.T4 [array]
-0014 f0 RETURN #6 inline
+0014 f0 RETURN #6 inline in-place moved
      f2 back to #7 escapes unless e1 0009
   -> #7 f2.T3 [array]
 0009 f2 INIT_ARRAY #7 step unwinds -> unwind 0
@@ -40,7 +40,7 @@ loop at 0, recursive return, interrupt exit 7
      f2 init e1 in-place
   guard #9 long -> exit 1
 0011 f2 SEND_VAR #9 inline
-0012 f2 DO_FCALL_BY_NAME inline unwinds -> unwind 0
+0012 f2 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 0
      f3 enter e1
   -> #10 f3.CV0 [long]
 0001 f3 IS_IDENTICAL #10, int(0) fused inline
@@ -54,12 +54,12 @@ loop at 0, recursive return, interrupt exit 7
 0006 f3 INIT_FCALL_BY_NAME const#3 inline map 1
      f3 init e1 in-place
 0007 f3 SEND_VAR #13 inline
-0008 f3 DO_FCALL_BY_NAME inline unwinds -> unwind 1
+0008 f3 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 1
      f4 enter e1 storing #13
   -> #14 f4.CV0 [long]
 0001 f4 IS_IDENTICAL #14, int(0) fused inline
   checks direction fell -> exit 5
-0003 f4 RETURN const#1 inline
+0003 f4 RETURN const#1 inline in-place constant
      f3 back to #15
   -> #15 f3.T3 [packed array]
 0009 f3 INIT_ARRAY #15 step unwinds -> unwind 1
@@ -68,22 +68,22 @@ loop at 0, recursive return, interrupt exit 7
 0010 f3 INIT_FCALL_BY_NAME const#5 inline map 0
      f3 init e1 in-place
 0011 f3 SEND_VAR #13 inline
-0012 f3 DO_FCALL_BY_NAME inline unwinds -> unwind 1
+0012 f3 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 1
      f5 enter e1 storing #13
   -> #17 f5.CV0 [long]
 0001 f5 IS_IDENTICAL #17, int(0) fused inline
   checks direction fell -> exit 5
-0003 f5 RETURN const#1 inline
+0003 f5 RETURN const#1 inline in-place constant
      f3 back to #18
   -> #18 f3.T5 [packed array]
 0013 f3 ADD_ARRAY_ELEMENT #18 step unwinds -> unwind 1
   -> #19 f3.T4 [array]
-0014 f3 RETURN #19 inline
+0014 f3 RETURN #19 inline in-place moved
      f2 back to #20
   -> #20 f2.T5 [array]
 0013 f2 ADD_ARRAY_ELEMENT #20 step unwinds -> unwind 0
   -> #21 f2.T4 [array]
-0014 f2 RETURN #21 inline
+0014 f2 RETURN #21 inline in-place moved
      f6 back to #22 escapes unless e1 0009
   -> #22 f6.T3 [array]
 end: back to 0

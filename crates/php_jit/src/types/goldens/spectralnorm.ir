@@ -22,7 +22,7 @@ loop at 0, loop, interrupt exit 17
      f0 init e1 in-place
 0009 f0 SEND_VAR #5 inline
 0010 f0 SEND_VAR #3 inline
-0011 f0 DO_UCALL inline unwinds -> unwind 0
+0011 f0 DO_UCALL inline in-place unwinds -> unwind 0
      f1 enter e1
   -> #6 f1.CV0 [long]
   -> #7 f1.CV1 [long]
@@ -50,7 +50,7 @@ loop at 0, loop, interrupt exit 17
   -> #16 f1.T7 [double] reg
 0010 f1 VERIFY_RETURN_TYPE #16 inline
   -> #17 f1.T7 [double] reg
-0011 f1 RETURN #17 inline
+0011 f1 RETURN #17 inline in-place
      f0 back to #18
   -> #18 f0.T4 [double]
 0012 f0 FETCH_DIM_R #19, #3 inline leaves -> exit 13

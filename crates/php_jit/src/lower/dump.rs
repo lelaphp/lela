@@ -27,9 +27,9 @@ use php_heap::ZvalType;
 
 use crate::record::func_name as func;
 use crate::types::{
-    Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Interrupt, Landing,
-    Layout, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Types, Unwind,
-    ValueId,
+    Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
+    Landing, Layout, Op, OpId, Operand, Place, Read, Repeat, Returned, Slot, Store, Stored,
+    TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -174,6 +174,28 @@ impl<'a> Dump<'a> {
                     Form::Step => "step",
                 };
                 write!(text, " {form}")?;
+                // What compiled code makes or leaves in place, and what a
+                // leave hands its caller where it is no scalar.
+                match line.imm {
+                    Imm::Make { .. }
+                    | Imm::Leave {
+                        value: Returned::Scalar,
+                        ..
+                    } => {
+                        write!(text, " in-place")?;
+                    }
+                    Imm::Leave {
+                        value: Returned::Constant(_),
+                        ..
+                    } => {
+                        write!(text, " in-place constant")?;
+                    }
+                    Imm::Leave {
+                        value: Returned::Moved,
+                        ..
+                    } => write!(text, " in-place moved")?,
+                    _ => {}
+                }
                 if let Some(map) = line.map_ptr {
                     write!(text, " map {map}")?;
                 }
