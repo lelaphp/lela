@@ -590,12 +590,20 @@ impl Request {
         // opens it: an include's through the path as written again, a once
         // form's at the path it put in the table.
         let served = held.map(|(held, how)| self.held_answer(&held, how, written, handle));
-        let cached = match served.transpose()? {
+        let served = served.transpose()?;
+        // What the opening names where it fails, `file_handle->filename`:
+        // a once form's stale file's the path it put in the table.
+        let named = if matches!(served, Some(None)) {
+            &path[..]
+        } else {
+            written
+        };
+        let cached = match served {
             Some(Some(answer)) => Some(answer),
             Some(None) if !kind.once() => return self.include_through(kind, written, handle),
             stale => {
                 if stale.is_some()
-                    && let Some(failed) = self.include_guard(kind, &path, written)
+                    && let Some(failed) = self.include_guard(kind, &path, named)
                 {
                     return failed;
                 }
@@ -615,7 +623,7 @@ impl Request {
             // stat, or not readable. php's plain-files opener fails with
             // the system's `errno`, which its warning prints, so the
             // reason is what opening the path answers now.
-            None => self.not_opened(kind, written, &unreadable(&path), written),
+            None => self.not_opened(kind, named, &unreadable(&path), named),
         }
     }
 
@@ -748,6 +756,28 @@ impl Request {
     /// bool(false)
     /// bool(true)
     /// bool(true)
+    /// ```
+    ///
+    /// Its failure names that path, as `file_handle->filename` is, and
+    /// not the path as written:
+    ///
+    /// ```php
+    /// chdir(__DIR__);
+    /// file_put_contents('r2.inc', '<?php return 1;'); touch('r2.inc', time() - 60);
+    /// var_dump(opcache_compile_file('r2.inc'));
+    /// file_put_contents('r2.inc', '<?php return 2;'); touch('r2.inc', time() - 30);
+    /// ini_set('open_basedir', '/nonexistent');
+    /// var_dump(include_once 'r2.inc');
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    ///
+    /// Warning: include_once(): open_basedir restriction in effect. File(%s/r2.inc) is not within the allowed path(s): (/nonexistent) in %s on line 7
+    ///
+    /// Warning: include_once(%s/r2.inc): Failed to open stream: Operation not permitted in %s on line 7
+    ///
+    /// Warning: include_once(): Failed opening '%s/r2.inc' for inclusion (include_path='%s') in %s on line 7
+    /// bool(false)
     /// ```
     fn include_guard(
         &mut self,

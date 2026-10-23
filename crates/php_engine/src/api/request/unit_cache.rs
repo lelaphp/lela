@@ -324,7 +324,8 @@ impl Request {
         else {
             return None;
         };
-        Some((held, validation))
+        // The cache bypassed, `EveryHit`, looks nothing up by the key.
+        (validation != Validation::EveryHit).then_some((held, validation))
     }
 
     /// `validate_timestamp_and_record` over `held`, found by the key the
@@ -348,8 +349,12 @@ impl Request {
         }
         if matches!(handle, HandlePath::Filename | HandlePath::Kept) && !is_wrapper_url(written) {
             match self.code_mut().resolve_path(written) {
-                Ok(path) if path != held.path => return Ok(false),
-                Ok(_) => self.revalidated_path(written, &held.path),
+                Ok(path) => {
+                    self.revalidated_path(written, &path);
+                    if path != held.path {
+                        return Ok(false);
+                    }
+                }
                 Err(Unresolved::Missing(_)) => {}
                 Err(Unresolved::Threw(thrown)) => return Err(thrown),
             }
@@ -1085,7 +1090,7 @@ impl UnitCache<'_> {
     pub fn compile(&mut self, written: &[u8]) -> Result<bool, Thrown> {
         let req = &mut *self.req;
         let nul = written.contains(&0);
-        let served = match req.held_as_written(written).filter(|_| !nul) {
+        let served = match (!nul).then(|| req.held_as_written(written)).flatten() {
             Some((held, how)) => (req.held_answer(&held, how, written, HandlePath::Filename)?)
                 .map(|unit| (unit, held.path.clone())),
             None => None,
