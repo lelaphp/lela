@@ -150,7 +150,6 @@ pub trait FromArgument: Sized {
     /// [`coerce::argument`], with the 8.1 null deprecation and php's
     /// `TypeError`; `None` where the call gave none.
     #[inline(always)] // a type byte's test in every native's entry; the coercion is out of line
-    #[allow(clippy::inline_always)]
     fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
         let Some(given) = self::given(given) else {
             return Ok(None);
@@ -423,7 +422,6 @@ impl<T: FromArgument> FromArgument for Option<T> {
         }
     }
     #[inline(always)] // as `FromArgument::hold`
-    #[allow(clippy::inline_always)]
     fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
         let Some(given) = self::given(given) else {
             return Ok(None);
@@ -668,7 +666,6 @@ impl<T: FromArgument> FromArgument for Passed<T> {
         T::from_value(req, value).map(Passed::Given)
     }
     #[inline(always)] // as `FromArgument::hold`
-    #[allow(clippy::inline_always)]
     fn hold(req: &mut Request, given: Value, position: u32) -> Result<Option<Self>, Thrown> {
         Ok(Some(match T::hold(req, given, position)? {
             Some(held) => Passed::Given(held),
