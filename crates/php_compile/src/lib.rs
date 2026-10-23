@@ -920,19 +920,15 @@ pub(crate) fn refused_after(
     mut refused: CompileError,
     mut raised: Vec<Diagnostic>,
     options: &Options<'_>,
-    own: &[(Slot, php_heap::Str)],
+    own: &[(Named, php_heap::Str)],
     strings: &mut dyn Intern,
 ) -> CompileError {
     if let Some(declared) = &mut refused.declared {
         for before in &mut declared.raised_before {
             *before += raised.len();
         }
-        let making = match options.kind {
-            SourceKind::File => Making::All,
-            SourceKind::Eval(_) => Making::None,
-        };
         if Parts::of(&declared.unit)
-            .intern(making, own, strings)
+            .intern(Making::refused(options.kind), own, strings)
             .is_err()
         {
             refused.declared = None;
@@ -980,71 +976,65 @@ impl<'u> Parts<'u> {
     pub(crate) fn intern(
         self,
         making: Making,
-        own: &[(Slot, php_heap::Str)],
+        own: &[(Named, php_heap::Str)],
         strings: &mut dyn Intern,
     ) -> Result<(), Fatal> {
-        let own: HashMap<Slot, php_heap::Str> = own.iter().copied().collect();
-        for (slot, named, bytes) in self.walk() {
-            let made = match (slot.and_then(|slot| own.get(&slot)), named) {
-                (Some(own), _) => Some(*own),
-                (None, Named::Read(_)) if making != Making::None => Some(strings.intern(&bytes)?),
-                (None, Named::File | Named::Function(_) | Named::Class)
-                    if making == Making::All =>
-                {
+        let own: HashMap<Named, php_heap::Str> = own.iter().copied().collect();
+        for (named, bytes) in self.walk() {
+            let made = match (own.get(&named), making, named) {
+                (Some(own), ..) => Some(*own),
+                (None, Making::All | Making::Read, Named::Read(_))
+                | (None, Making::All, Named::File | Named::Function(_) | Named::Class(_)) => {
                     Some(strings.intern(&bytes)?)
                 }
-                (None, _) => None,
+                (None, ..) => None,
             };
             strings.hand_name(made);
         }
         Ok(())
     }
 
-    /// [`named`], each name beside the place a string the compile made
-    /// as it went stands at, where one may ([`Slot`]): the file's, each
-    /// function's, dynamic definition's, method's, hook's and class's,
-    /// as [`intern_names`] interns them; the lowered keys; then the
-    /// main op array's variables' and the names the declarations are
-    /// read by.
-    fn walk(self) -> impl Iterator<Item = (Option<Slot>, Named, Cow<'u, [u8]>)> {
-        let unit = Holder::Unit;
+    /// [`named`]: the file's, each function's, dynamic definition's,
+    /// method's, hook's and class's, as [`intern_names`] interns them;
+    /// the lowered keys; then the main op array's variables' and the
+    /// names the declarations are read by.
+    fn walk(self) -> impl Iterator<Item = (Named, Cow<'u, [u8]>)> {
         let functions = (self.functions.iter().enumerate())
-            .map(move |(at, (decl, _))| (Slot::Function(at), Named::Function(unit), &decl.name));
-        let dynamic = (self.dynamic.iter().enumerate()).map(|(at, (decl, _))| {
-            let named = Named::Function(Holder::Dynamic(at));
-            (Slot::Dynamic(at), named, &decl.name)
-        });
-        let members = (self.classes.iter().enumerate()).flat_map(move |(class, decl)| {
+            .map(|(at, (decl, _))| (FunctionAt::Top(at), &decl.name));
+        let dynamic = (self.dynamic.iter().enumerate())
+            .map(|(at, (decl, _))| (FunctionAt::Dynamic(at), &decl.name));
+        let members = (self.classes.iter().enumerate()).flat_map(|(class, decl)| {
             // An enum's `cases`, `from` and `tryFrom` are php's internal
             // functions, named by its known strings.
             let methods = (php_unit::written_methods(decl).iter().enumerate())
-                .map(move |(method, m)| (Slot::Method { class, method }, &m.function.name));
+                .map(move |(method, m)| (FunctionAt::Method { class, method }, &m.function.name));
             let hooks = (decl.properties.iter().enumerate())
                 .filter_map(|(property, p)| Some((property, p.hooks.as_deref()?)))
                 .flat_map(move |(property, hooks)| {
                     let get = hooks.get.iter().map(|m| (HookKind::Get, m));
                     get.chain(hooks.set.iter().map(|m| (HookKind::Set, m)))
                         .map(move |(kind, m)| {
-                            let slot = Slot::Hook {
+                            let at = FunctionAt::Hook {
                                 class,
                                 property,
                                 kind,
                             };
-                            (slot, &m.function.name)
+                            (at, &m.function.name)
                         })
                 });
-            methods
-                .chain(hooks)
-                .map(move |(slot, name)| (slot, Named::Function(unit), name))
+            methods.chain(hooks)
         });
-        let classes = (self.classes.iter().enumerate())
-            .map(|(at, class)| (Slot::Class(at), Named::Class, &class.name));
-        let names = (functions.chain(dynamic).chain(members).chain(classes))
-            .map(|(slot, named, name)| (Some(slot), named, Cow::Borrowed(&*name.0)));
-        let file = (None, Named::File, Cow::Borrowed(&*self.file.0));
-        std::iter::once(file).chain(names).chain(self.keys()).chain(
+        let functions =
+            (functions.chain(dynamic).chain(members)).map(|(at, name)| (Named::Function(at), name));
+        let classes =
+            (self.classes.iter().enumerate()).map(|(at, class)| (Named::Class(at), &class.name));
+        let names = (std::iter::once((Named::File, self.file))
+            .chain(functions)
+            .chain(classes))
+        .map(|(named, name)| (named, Cow::Borrowed(&*name.0)));
+        names.chain(self.keys()).chain(
             self.reads()
-                .map(|(holder, name)| (None, Named::Read(holder), name)),
+                .map(|(holder, name)| (Named::Read(holder), name)),
         )
     }
 
@@ -1053,28 +1043,21 @@ impl<'u> Parts<'u> {
     /// `DECLARE_FUNCTION` binds among them, a class's, which the
     /// `class_table` keeps however it was bound, and a method's, the
     /// class's `function_table` key. A closure has none.
-    fn keys(self) -> impl Iterator<Item = (Option<Slot>, Named, Cow<'u, [u8]>)> {
-        use Named::Key;
-        let unit = Holder::Unit;
-        let functions = (self.functions.iter()).map(move |(decl, _)| (None, Key(unit), &decl.name));
+    fn keys(self) -> impl Iterator<Item = (Named, Cow<'u, [u8]>)> {
+        let functions = (self.functions.iter().enumerate())
+            .map(|(at, (decl, _))| (Named::FunctionKey(at), &decl.name));
         let dynamic = (self.dynamic.iter().enumerate())
             .filter(|(_, (decl, _))| !decl.name.0.starts_with(b"{"))
-            .map(|(at, (decl, _))| {
-                (
-                    Some(Slot::DynamicKey(at)),
-                    Key(Holder::Dynamic(at)),
-                    &decl.name,
-                )
-            });
-        let classes = (self.classes.iter().enumerate())
-            .map(|(at, class)| (Some(Slot::ClassKey(at)), Named::InternedKey, &class.name));
-        let methods = (self.classes.iter()).flat_map(|class| {
-            (php_unit::written_methods(class).iter())
-                .map(|method| (None, Named::InternedKey, &method.function.name))
+            .map(|(at, (decl, _))| (Named::DefinitionKey(at), &decl.name));
+        let classes =
+            (self.classes.iter().enumerate()).map(|(at, class)| (Named::ClassKey(at), &class.name));
+        let methods = (self.classes.iter().enumerate()).flat_map(|(class, decl)| {
+            (php_unit::written_methods(decl).iter().enumerate())
+                .map(move |(method, m)| (Named::MethodKey { class, method }, &m.function.name))
         });
         (functions.chain(dynamic).chain(classes).chain(methods))
-            .filter(|(_, _, name)| name.0.iter().any(u8::is_ascii_uppercase))
-            .map(|(slot, named, name)| (slot, named, Cow::Owned(name.0.to_ascii_lowercase())))
+            .filter(|(_, name)| name.0.iter().any(u8::is_ascii_uppercase))
+            .map(|(named, name)| (named, Cow::Owned(name.0.to_ascii_lowercase())))
     }
 
     /// The names the declarations are read by, beside what holds each
@@ -1135,41 +1118,79 @@ impl Making {
             SourceKind::Eval(_) => Making::Read,
         }
     }
+
+    /// What a refused compile of `kind` that declared something makes.
+    pub(crate) fn refused(kind: SourceKind) -> Making {
+        match kind {
+            SourceKind::File => Making::All,
+            SourceKind::Eval(_) => Making::None,
+        }
+    }
 }
 
 /// What a name a compile hands its home names ([`Intern::hand_name`]), in
 /// the order [`named`] walks them: one string a declaration owns, given
-/// to what holds it by its place in the walk, never told by its bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// to what holds it ([`Named::holder`]) by what it names, never told by
+/// its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Named {
     /// The unit's file's, `op_array->filename`.
     File,
     /// A function's, a closure's, a method's or a hook's,
     /// `function_name`.
-    Function(Holder),
-    /// A class's, `ce->name`.
-    Class,
-    /// The lowered key a function is bound under where lowering changes
-    /// its name, `zend_begin_func_decl`'s `zend_string_tolower`: a
-    /// top-level one's the function table's key, a dynamic definition's
-    /// its `DECLARE_FUNCTION`'s constant.
-    Key(Holder),
-    /// The lowered key a class or a method is bound under where lowering
-    /// changes its name, which php's compile interns
+    Function(FunctionAt),
+    /// The class's at this place of [`Unit::classes`], `ce->name`.
+    Class(usize),
+    /// The lowered key the top-level function at this place of
+    /// [`Unit::functions`] is bound under where lowering changes its
+    /// name, the function table's: `zend_begin_func_decl`'s
+    /// `zend_string_tolower`.
+    FunctionKey(usize),
+    /// The lowered key the dynamic definition at this place of
+    /// [`Unit::dynamic`] is bound under where lowering changes its
+    /// name, its `DECLARE_FUNCTION`'s constant.
+    DefinitionKey(usize),
+    /// The lowered key the class at this place is bound under where
+    /// lowering changes its name, which php's compile interns
     /// (`zend_new_interned_string`).
-    InternedKey,
+    ClassKey(usize),
+    /// The lowered key the method at `method` of the class at `class` is
+    /// bound under where lowering changes its name, which
+    /// `zend_begin_method_decl` interns.
+    MethodKey { class: usize, method: usize },
     /// A name a declaration is read by: a variable's, a declared
     /// property's and a class constant's or enum case's.
     Read(Holder),
 }
 
-/// Where a name the compile made as it went stands in the unit, which
-/// [`Parts::intern`] finds it by: what it is the name of, or the key of.
+impl Named {
+    /// What holds the name: the dynamic definition it is the name, the
+    /// key or a variable of, the main op array a variable of, and the
+    /// unit any other.
+    #[must_use]
+    pub fn holder(self) -> Holder {
+        match self {
+            Named::Function(FunctionAt::Dynamic(at)) | Named::DefinitionKey(at) => {
+                Holder::Dynamic(at)
+            }
+            Named::Read(holder) => holder,
+            Named::File
+            | Named::Function(_)
+            | Named::Class(_)
+            | Named::FunctionKey(_)
+            | Named::ClassKey(_)
+            | Named::MethodKey { .. } => Holder::Unit,
+        }
+    }
+}
+
+/// Where a function's op array stands in its unit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Slot {
+pub enum FunctionAt {
     /// The top-level function at this place of [`Unit::functions`].
-    Function(usize),
-    /// The dynamic definition at this place of [`Unit::dynamic`].
+    Top(usize),
+    /// The dynamic definition at this place of [`Unit::dynamic`], a
+    /// closure among them.
     Dynamic(usize),
     /// The method at `method` of the class at `class`.
     Method { class: usize, method: usize },
@@ -1180,12 +1201,6 @@ pub(crate) enum Slot {
         property: usize,
         kind: HookKind,
     },
-    /// The class at this place of [`Unit::classes`].
-    Class(usize),
-    /// The key the dynamic definition at this place is bound under.
-    DynamicKey(usize),
-    /// The key the class at this place is bound under.
-    ClassKey(usize),
 }
 
 /// The names a file's op arrays carry interned into `strings`, the home
@@ -1261,9 +1276,7 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
 /// 32
 /// ```
 pub fn named(unit: &Unit) -> impl Iterator<Item = (Named, Cow<'_, [u8]>)> {
-    Parts::of(unit)
-        .walk()
-        .map(|(_, named, bytes)| (named, bytes))
+    Parts::of(unit).walk()
 }
 
 /// `zend_mangle_property_name`'s prefix (`Z/Zend/zend_compile.c`) for a

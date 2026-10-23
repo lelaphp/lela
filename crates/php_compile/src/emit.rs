@@ -516,7 +516,7 @@ pub(crate) struct Emit<'a> {
     /// The strings this compile made as it went that a declaration owns
     /// as its name or its key, each beside where that stands, handed to
     /// the home once the unit is whole ([`crate::Parts::intern`]).
-    own_names: Vec<(crate::Slot, Str)>,
+    own_names: Vec<(crate::Named, Str)>,
     /// `this_guaranteed_exists`: whether the op array being compiled is
     /// an instance method's, whose `$this` is the frame's own and needs
     /// no `FETCH_THIS` as a receiver.
@@ -1348,17 +1348,17 @@ struct ActiveClass {
 /// bound under asked, which each of them copies (`zend_string_copy`).
 struct ActiveFunction {
     name: Vec<u8>,
-    slot: crate::Slot,
+    at: crate::FunctionAt,
     own: Option<Str>,
 }
 
 impl ActiveFunction {
-    /// The function named `name` that lands at `slot`, no string made
-    /// for its name yet.
-    fn at(name: &[u8], slot: crate::Slot) -> ActiveFunction {
+    /// The function named `name` that lands at `at`, no string made for
+    /// its name yet.
+    fn at(name: &[u8], at: crate::FunctionAt) -> ActiveFunction {
         ActiveFunction {
             name: name.to_vec(),
-            slot,
+            at,
             own: None,
         }
     }
@@ -2247,7 +2247,7 @@ impl<'a> Emit<'a> {
         }
         let key = self.own_string(lowered)?;
         if let Some(key) = key.as_str() {
-            self.own_names.push((crate::Slot::ClassKey(at), key));
+            self.own_names.push((crate::Named::ClassKey(at), key));
         }
         Ok(key)
     }
@@ -4044,8 +4044,8 @@ impl<'a> Emit<'a> {
             return self.nested_function_decl(function, &name);
         }
         let line = self.line;
-        let slot = crate::Slot::Function(self.functions_declared.len());
-        let active = ActiveFunction::at(&name, slot);
+        let at = crate::FunctionAt::Top(self.functions_declared.len());
+        let active = ActiveFunction::at(&name, at);
         let declared = self.body(function, active, None, false, FnFlags::default())?;
         // "Only register the function after a successful compile": what
         // the body raised is raised before a name the table holds is
@@ -4107,13 +4107,13 @@ impl<'a> Emit<'a> {
         // string where lowering changes nothing.
         let lowercase = self.arena.lowercase(name);
         let lowered = self.own_string(lowercase)?;
-        let mut active = ActiveFunction::at(name, crate::Slot::Dynamic(at as usize));
+        let mut active = ActiveFunction::at(name, crate::FunctionAt::Dynamic(at as usize));
         if let Some(key) = lowered.as_str() {
             if lowercase == name {
                 active.own = Some(key);
             } else {
                 self.own_names
-                    .push((crate::Slot::DynamicKey(at as usize), key));
+                    .push((crate::Named::DefinitionKey(at as usize), key));
             }
         }
         let op1 = self.literal(lowered);
@@ -4193,7 +4193,7 @@ impl<'a> Emit<'a> {
             is_static: closure.is_static,
             ..FnFlags::default()
         };
-        let active = ActiveFunction::at(&name, crate::Slot::Dynamic(at as usize));
+        let active = ActiveFunction::at(&name, crate::FunctionAt::Dynamic(at as usize));
         let saved = self.begin_body(active, this_in_scope, flags);
         let outcome = self.parameters_and_body(
             &closure.function,
@@ -4652,13 +4652,13 @@ impl<'a> Emit<'a> {
             is_final: method.is_final,
             signature: None,
         }));
-        let slot = crate::Slot::Method {
+        let at = crate::FunctionAt::Method {
             class,
             method: self.classes.get(class).map_or(0, |decl| decl.methods.len()),
         };
         let compiled = self.body(
             &method.function,
-            ActiveFunction::at(&name, slot),
+            ActiveFunction::at(&name, at),
             Some(&class_name),
             method.is_static,
             FnFlags {
@@ -5749,12 +5749,10 @@ impl<'a> Emit<'a> {
         self.try_catch_offset = saved.try_catch_offset;
         // The string made for the body's name is the declaration's.
         if let Some(ActiveFunction {
-            slot,
-            own: Some(own),
-            ..
+            at, own: Some(own), ..
         }) = std::mem::replace(&mut self.active_function, saved.active_function)
         {
-            self.own_names.push((slot, own));
+            self.own_names.push((crate::Named::Function(at), own));
         }
         self.this_in_scope = saved.this_in_scope;
         self.return_type = saved.return_type;
@@ -6155,7 +6153,7 @@ impl<'a> Emit<'a> {
             attribute_validator: None,
         };
         let own = self.own_string(&name)?.as_str();
-        (self.own_names).extend(own.map(|own| (crate::Slot::Class(at), own)));
+        (self.own_names).extend(own.map(|own| (crate::Named::Class(at), own)));
         self.active_class = Some(ActiveClass::entered(&name, class.kind, at, anonymous, own));
         self.active_parent.clone_from(&parent);
         // The class takes its place `at` in the unit before its body, so
@@ -9065,7 +9063,7 @@ impl<'a> Emit<'a> {
             is_static: true,
             ..FnFlags::default()
         };
-        let active = ActiveFunction::at(&name, crate::Slot::Dynamic(at as usize));
+        let active = ActiveFunction::at(&name, crate::FunctionAt::Dynamic(at as usize));
         let saved = self.begin_body(active, false, flags);
         let outcome = self.parameters_and_body(&closure.function, &name, None, &[], None);
         self.end_body(saved);

@@ -12,7 +12,7 @@ use php_unit::decl::{Attribute, ConstExpr, FunctionDecl};
 /// [`crate::named`]: the unit, for a function, a class and its members,
 /// the dynamic definition at its place, or the main op array, whose
 /// variables' names alone it holds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Holder {
     /// The main op array, held while it runs.
     Main,
