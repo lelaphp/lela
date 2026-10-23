@@ -6,7 +6,7 @@
 
 use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
-use php_unit::{MapPtrOffset, Opcode, OplineIdx};
+use php_unit::{MapPtrOffset, Opcode, OperandKind, OplineIdx};
 
 use super::{Began, Callee, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -306,6 +306,52 @@ fn a_for_loop_roots_at_its_condition_as_php_does() -> Result<(), String> {
             [Opcode::IsSmaller, Opcode::Assign, Opcode::PreInc].as_slice()
         )
     );
+    Ok(())
+}
+
+/// A `while (true)`'s trace roots at its body, where its back edge
+/// lands, and not at its condition: php's optimizer makes the `JMPNZ` on
+/// `true` a `JMP` back to the body and threads the `JMP` into the loop
+/// onto the body, so php's CFG heads the loop there
+/// (`Z/Zend/Optimizer/pass1.c:315-333`, #3317). The back edge lands on
+/// the root, so nothing is stepped on to a condition or recorded from
+/// behind one ([`super::behind`]), and the condition is no header, so a
+/// trace arms a landing there ([`super::landings`]).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
+    let (recorded, out) = testing::records::recording(
+        &at("a", "loop"),
+        "function a($n) { $s = 0; while (true) { $s += $n; if ($s > 20) { break; } } return $s; }
+        echo a(5), \"\\n\";",
+    )?;
+    assert_eq!(out, "25\n");
+    let record = &recorded.record;
+    assert_eq!((record.start, record.stop), (Start::Loop, Stop::Loop));
+    let code = recorded
+        .view
+        .op_array(record.root)
+        .ok_or("the view holds a()")?;
+    // The `JMP` into the loop, the first, lands on the condition, whose
+    // `JMPNZ` on `true` goes back to the body past the `JMP`.
+    let (entry, condition) = (code.oplines.iter().enumerate())
+        .find_map(|(at, op)| (op.opcode == Opcode::Jmp).then(|| (at, op.jump_target())))
+        .and_then(|(at, to)| Some((u32::try_from(at).ok()?, to?)))
+        .ok_or("a() has no JMP")?;
+    let body = OplineIdx(entry + 1);
+    let jump = &code.oplines[condition.0 as usize];
+    assert_eq!(
+        (jump.opcode, jump.op1_type, jump.jump_target()),
+        (Opcode::Jmpnz, OperandKind::Const, Some(body))
+    );
+    assert_eq!(super::header_at(code, condition), None);
+    let header = super::header_at(code, body).ok_or("the body is no header")?;
+    assert_eq!(super::loop_root(code, header), Some(body));
+    let first = record.events.iter().find_map(|event| match event {
+        Event::Op { opline, .. } => Some(*opline),
+        _ => None,
+    });
+    assert_eq!(first, Some(body));
     Ok(())
 }
 

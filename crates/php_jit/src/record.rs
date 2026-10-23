@@ -35,7 +35,7 @@ use php_engine::tier::{
     self, Building, Epoch, Fatal, FrameRef, FuncRef, Request, SafepointIdx, Sample, Stepped,
     UnitView,
 };
-use php_heap::ZvalType;
+use php_heap::{Scalar, ZvalType};
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use crate::JitRequest;
@@ -1668,6 +1668,52 @@ pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
 /// the loop is entered at its condition, which dominates the body and is
 /// its header, while the back edge's `JMPNZ` lands on the body; every
 /// other loop is entered where its back edge lands.
+///
+/// php's CFG is built over the op array its optimizer left, which this
+/// engine runs none of (design §6.1, #1220), so a condition php folds is
+/// read as folded: a `while (true)` or a `for (;;)`, whose condition is a
+/// jump on a constant php makes a `JMP` back to the body
+/// ([`folds_to_jmp`]), is headed at the body, where the back edge lands,
+/// and its condition is no header. The opline past a call that ends the
+/// body is then a landing a compiled trace arms ([`landings`]), as php's
+/// `zend_jit_trace_setup_ret_counter` arms the folded `JMP`, so a return
+/// trace is rooted there and links to the loop's (#3317):
+///
+/// ```php
+/// set_time_limit(1);
+/// function f($n) { return $n ? f($n - 1) + 1 : 0; }
+/// while (true) { f(50); }
+/// ```
+/// ```expect exit=255 regime=jit-inline process wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %s:4
+/// ---- TRACE 1 abort (deep recursion)
+///
+/// ---- TRACE 1 start (enter) f() %s:3
+/// ---- TRACE 1 stop (recursive call)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 f() %s:3
+/// ---- TRACE 2 start (side trace 1/1) f() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (return) f() %s:3
+/// ---- TRACE 3 stop (recursive return)
+/// ---- TRACE 3 compiled
+///
+/// ---- TRACE 4 start (loop) $main() %s:4
+/// ---- TRACE 4 stop (link to 1)
+/// ---- TRACE 4 compiled
+///
+/// ---- TRACE 5 start (return) $main() %s:4
+/// ---- TRACE 5 stop (link to 4)
+/// ---- TRACE 5 compiled
+/// ```
 pub(crate) fn loop_root(code: &OpArray, header: SafepointIdx) -> Option<OplineIdx> {
     code.safepoints
         .get(header.0 as usize)
@@ -1678,13 +1724,52 @@ pub(crate) fn loop_root(code: &OpArray, header: SafepointIdx) -> Option<OplineId
 fn rooted(code: &OpArray, site: OplineIdx) -> OplineIdx {
     before_body(code, site)
         .filter(|condition| {
-            // The condition's own jump back to the body, at or past the
-            // `JMP`'s target: a `JMP` past a loop entered where it lands,
-            // an `else`'s or a `break`'s, is followed by none.
-            (code.oplines.iter().skip(condition.0 as usize))
-                .any(|op| op.jump_target() == Some(site))
+            // A condition php keeps, with its own jump back to the body
+            // at or past the `JMP`'s target: a `JMP` past a loop entered
+            // where it lands, an `else`'s or a `break`'s, is followed by
+            // none.
+            !folds_to_jmp(code, *condition, site)
+                && (code.oplines.iter().skip(condition.0 as usize))
+                    .any(|op| op.jump_target() == Some(site))
         })
         .unwrap_or(site)
+}
+
+/// Whether the opline at `at` is a jump to `to` that php's optimizer
+/// makes a `JMP` there: a `JMPZ` or a `JMPNZ` on a constant whose truth
+/// takes it, which pass 1 rewrites as a `JMP` (and one that does not, as
+/// a `NOP`; `Z/Zend/Optimizer/pass1.c:315-333`). Standing where a `for`'s
+/// or a `while`'s `JMP` enters the loop, it is the whole of the
+/// condition's block, which the block pass then threads that `JMP`
+/// through onto the body, so php's CFG enters the loop at the body.
+fn folds_to_jmp(code: &OpArray, at: OplineIdx, to: OplineIdx) -> bool {
+    code.oplines.get(at.0 as usize).is_some_and(|op| {
+        let jumps_when = match op.opcode {
+            Opcode::Jmpnz => true,
+            Opcode::Jmpz => false,
+            _ => return false,
+        };
+        op.op1_type == OperandKind::Const
+            && op.jump_target() == Some(to)
+            && constant_truth(code, op.op1) == Some(jumps_when)
+    })
+}
+
+/// `zend_is_true` over the constant operand at `at`: a scalar's truth, and an
+/// array's, which is whether it has an element. None for any other.
+fn constant_truth(code: &OpArray, at: u32) -> Option<bool> {
+    let value = code.literals.get(at as usize)?;
+    let scalar = match value.kind() {
+        ZvalType::Null => Scalar::Null,
+        ZvalType::False => Scalar::Bool(false),
+        ZvalType::True => Scalar::Bool(true),
+        ZvalType::Long => Scalar::Long(value.as_long()?),
+        ZvalType::Double => Scalar::Double(value.as_double()?),
+        ZvalType::String => Scalar::Str(value.str_bytes()?),
+        ZvalType::Array => return value.as_arr().map(|arr| !arr.is_empty()),
+        _ => return None,
+    };
+    Some(scalar.is_true())
 }
 
 /// Where the `JMP` right before `site` goes, where it goes past it: a
