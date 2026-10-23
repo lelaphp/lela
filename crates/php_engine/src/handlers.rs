@@ -3949,9 +3949,10 @@ pub(crate) fn do_ucall<T: Tier>(
 /// `DO_FCALL_BY_NAME` where `flagged`: a call to a user function that
 /// `i_init_func_execute_data` makes a frame of by writing words alone
 /// ([`Request::enter_call`]), entered with no call out of the loop. The
-/// answer is [`Stepped::Pushed`], as [`enter`]'s; `None`, with nothing
-/// touched but the caller's position, `SAVE_OPLINE()` at `at`, for
-/// every other call, which [`do_call`] serves.
+/// answer is [`Stepped::Pushed`], the caller stood at `at`
+/// (`SAVE_OPLINE()`) as the callee is entered; `None`, with nothing
+/// touched, for every other call, which [`do_call`] serves once the
+/// handler has stood the caller there.
 #[inline(always)] // as `inline_init_fcall`
 fn inline_enter(
     req: &mut Request,
@@ -4676,8 +4677,8 @@ pub(crate) fn verify_return_type<T: Tier>(
     at: u32,
 ) -> Edge {
     if op.op1_type != OperandKind::Const {
-        let at = ByKind(op.op1_type).read(req.slots_mut(frame), code, op.op1);
-        let returned = crate::operand::deref(at);
+        let operand = ByKind(op.op1_type).read(req.slots_mut(frame), code, op.op1);
+        let returned = crate::operand::deref(operand);
         // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
         // would test bit 12, which is `callable`'s.
         let code_bit = 1u32 << (returned.kind() as u32);
@@ -23784,8 +23785,8 @@ pub(crate) fn copy_tmp<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_RETURN`: the operand taken as the caller's (`ZVAL_COPY` of a
-/// CV or a constant, a temporary moved), then the return safepoint, then
+/// `ZEND_RETURN`: the return safepoint, then the operand taken as the
+/// caller's (`ZVAL_COPY` of a CV or a constant, a temporary moved), then
 /// the frame popped (design §4.3 seam 8, §5.8), its CVs, temporaries
 /// and receiver given up with it (`zend_leave_helper`), and the value
 /// written into the caller's slot where the call wanted it and given up

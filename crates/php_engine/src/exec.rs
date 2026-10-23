@@ -3241,9 +3241,13 @@ pub(crate) struct Activated {
 /// parameter with no type). php's test reads a by-reference argument's
 /// `IS_REFERENCE` and passes it to `zend_verify_recv_arg_type`, whose
 /// `zend_check_type` follows it to the same mask, so the two pass the
-/// same arguments. A by-reference argument the mask holds is passed
-/// here, and one it does not, a string bound to an `int`, is the
-/// handler's, which converts it in the caller's variable:
+/// same arguments. The answer is the first opline that does not pass,
+/// where the handlers take over, at most `entry`, and the frame stands
+/// there where it moved; nothing observes these, so no observer is told.
+///
+/// A by-reference argument the mask holds is passed here, and one it
+/// does not, a string bound to an `int`, is the handler's, which converts
+/// it in the caller's variable:
 ///
 /// ```php
 /// function f(array &$a, int &$i, ?string &$s) { $a[] = $i; $s .= "!"; return count($a); }
@@ -3254,10 +3258,7 @@ pub(crate) struct Activated {
 /// int(2)
 /// int(7)
 /// string(1) "!"
-/// ``` The answer is the first opline that does
-/// not pass, where the handlers take over, at most `entry`, and the
-/// frame stands there where it moved; nothing observes these, so no
-/// observer is told.
+/// ```
 #[inline]
 pub(crate) fn recv_passed(
     req: &mut Request,

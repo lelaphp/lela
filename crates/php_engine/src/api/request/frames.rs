@@ -1663,8 +1663,10 @@ impl Request {
         }
         entered_words((top, from), (caller, at), returns_to, shape, cache);
         // The callee's place, the top's, which the lend found standing
-        // above its caller.
-        #[allow(clippy::cast_possible_truncation)] // a frame's place is `FrameRef`'s `u32`
+        // above its caller, so the length is at least two. A place past
+        // `u32::MAX` would be 2^32 frames of at least eighty bytes each,
+        // which the memory limit refuses long before.
+        #[allow(clippy::cast_possible_truncation)] // 2^32 frames is no stack a request holds
         let call = FrameRef(self.vm.stack.len().wrapping_sub(1) as u32);
         crate::observer::call(self, call);
         Some(call)
