@@ -1753,11 +1753,7 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
 fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize) {
     // `php_var_dump`'s `ZEND_ACC_ENUM` arm, ahead of the recursion
     // guard as php has it.
-    if req
-        .symbols()
-        .class_decl(object.class())
-        .is_some_and(|decl| decl.kind == ClassKind::Enum)
-    {
+    if req.class_is(object.class(), ClassKind::Enum) {
         dump_enum(req, common, object);
         return;
     }

@@ -613,7 +613,7 @@ impl Request {
         let Some((initializer, lazy)) = self.lazy_waiting(o) else {
             return Ok(object);
         };
-        let defaults = self.property_defaults(object.class())?;
+        let defaults = self.default_properties(object.class())?;
         self.addref(&object.as_value());
         o.set_laziness(Laziness::Eager);
         let table = o.properties();
@@ -851,7 +851,7 @@ impl Request {
         let Some((_, lazy)) = self.lazy_waiting(o) else {
             return Ok(());
         };
-        let defaults = self.property_defaults(object.class())?;
+        let defaults = self.default_properties(object.class())?;
         o.set_laziness(Laziness::Eager);
         for (i, default) in (0..o.slots()).zip(defaults) {
             let Some(value) = default else { continue };
@@ -908,7 +908,7 @@ impl Request {
                     return Ok(());
                 }
                 self.lazy_set_waiting(o, slot, false);
-                let defaults = self.property_defaults(object.class())?;
+                let defaults = self.default_properties(object.class())?;
                 for (i, default) in defaults.into_iter().enumerate() {
                     let Some(default) = default else { continue };
                     if i == slot as usize {

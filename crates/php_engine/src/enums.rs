@@ -84,11 +84,7 @@ pub(crate) static ENUM: Refusals = Refusals::NONE.cloning().comparison();
 fn called_enum(req: &mut Request) -> Result<ClassId, Thrown> {
     req.frames()
         .called_scope()
-        .filter(|class| {
-            req.symbols()
-                .class_decl(*class)
-                .is_some_and(|decl| decl.kind == ClassKind::Enum)
-        })
+        .filter(|class| req.class_is(*class, ClassKind::Enum))
         .ok_or_else(|| {
             throw_error(
                 req,

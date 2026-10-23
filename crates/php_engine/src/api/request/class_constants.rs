@@ -7,8 +7,7 @@
 //! and the constants being worded are [`ClassConstants`]'s, whose fields
 //! no file but this one reads.
 
-use php_link::Row;
-use php_unit::decl::{ClassConstDecl, ClassKind, ConstExpr, Visibility};
+use php_unit::decl::{ClassConstDecl, ClassKind, ConstExpr};
 
 use crate::api::raising::Thrown;
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, TypeTag, Value};
@@ -57,16 +56,6 @@ impl Request {
         for (_, case) in std::mem::take(&mut self.class_constants.enum_cases) {
             self.release(case.as_value());
         }
-    }
-
-    /// The constant a row of `class`'s constants table is, beside the
-    /// class that declared it.
-    fn row_constant(
-        &self,
-        class: ClassId,
-        row: Row<ClassId>,
-    ) -> Option<(ClassId, &ClassConstDecl)> {
-        self.class_lookup().row_constant(class, row)
     }
 
     /// `zend_fetch_class_constant`'s lookup (`Z/Zend/zend_constants.c:355`):
@@ -167,21 +156,13 @@ impl Request {
         let asked = class;
         let class = declaring;
         if !self.may_access_from(class, visibility, scope) {
-            let word = match visibility {
-                Visibility::Public => "public",
-                Visibility::Protected => "protected",
-                Visibility::Private => "private",
-            };
+            let word = super::methods::visibility_string(visibility);
             let message = format!("Cannot access {word} constant {}", shown(self));
             return Err(crate::api::raising::throw_error(self, "Error", &message));
         }
         // A constant a trait declares is the composing class's to hand
         // out, never the trait's own.
-        if self
-            .symbols()
-            .class_decl(asked)
-            .is_some_and(|decl| decl.kind == ClassKind::Trait)
-        {
+        if self.class_is(asked, ClassKind::Trait) {
             let message = format!("Cannot access trait constant {} directly", shown(self));
             return Err(crate::api::raising::throw_error(self, "Error", &message));
         }
@@ -229,10 +210,7 @@ impl Request {
     /// executed scope may reach, not through a trait, with nothing
     /// raised and nothing evaluated.
     pub(crate) fn class_constant_defined(&self, class: ClassId, name: &[u8]) -> bool {
-        let trait_asked = self
-            .symbols()
-            .class_decl(class)
-            .is_some_and(|decl| decl.kind == ClassKind::Trait);
+        let trait_asked = self.class_is(class, ClassKind::Trait);
         self.symbols()
             .class_constant_of(class, name)
             .is_some_and(|(declaring, constant)| {
@@ -418,7 +396,7 @@ impl Request {
             .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
             .collect();
         for (declaring, name) in constants {
-            let value = self.evaluated_class_constant(declaring, &name)?;
+            let value = self.evaluated_in(declaring, declaring, &name)?;
             self.release(value);
         }
         let table = self.backed_enum_table(class)?;
@@ -704,7 +682,7 @@ impl Request {
     }
 
     /// php's `Error` for a case `class` does not declare.
-    fn undefined_case(&mut self, class: ClassId, name: &[u8]) -> Thrown {
+    pub(super) fn undefined_case(&mut self, class: ClassId, name: &[u8]) -> Thrown {
         let class = self.symbols().class_name(class);
         crate::api::raising::throw_error(
             self,
@@ -768,7 +746,7 @@ impl<'r> Symbols<&'r Request> {
             .constants
             .rows()
             .iter()
-            .filter_map(|row| self.0.row_constant(class, *row))
+            .filter_map(|row| self.0.class_lookup().row_constant(class, *row))
             .collect()
     }
 }

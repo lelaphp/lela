@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Obj, Ref, Res, ResourceType, Zval, ZvalRef};
 use php_link::LinkedClass;
+use php_unit::PublishedUnit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
-use php_unit::{PublishedUnit, Unit};
 
 use crate::api::abi::GcTable;
 use crate::api::call::Function;
@@ -642,12 +642,29 @@ pub(crate) struct UserFunction {
 }
 
 impl UserFunction {
-    /// The record of `body` of `unit` under `name`; none for a body
-    /// the unit has not.
-    pub(crate) fn record(unit: &Unit, body: exec::Body, name: &[u8]) -> crate::readable::Record {
-        exec::body_of(unit, body).map_or_else(crate::readable::Record::default, |code| {
-            crate::readable::Record::user(name, code)
-        })
+    /// The row of `body` of `unit`, declared as `decl`: its flags, its
+    /// frame's shape and its record read off the declaration and the op
+    /// array, where the unit has the body.
+    pub(crate) fn of(
+        unit: PublishedUnit,
+        body: exec::Body,
+        member: Option<Member>,
+        decl: &FunctionDecl,
+        observed: bool,
+    ) -> UserFunction {
+        let code = exec::body_of(&unit, body);
+        let shape = FrameShape::of(decl, code, observed);
+        let record = code.map_or_else(crate::readable::Record::default, |code| {
+            crate::readable::Record::user(&decl.name.0, code)
+        });
+        UserFunction {
+            flags: crate::attributes::Flags::of(&decl.attributes),
+            unit,
+            body,
+            member,
+            shape,
+            record,
+        }
     }
 
     /// Where the function's record stands, what a frame serving it

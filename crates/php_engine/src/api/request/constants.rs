@@ -82,27 +82,6 @@ struct ConstantRow {
     deprecated: bool,
 }
 
-impl ConstantRow {
-    fn new(
-        room: Option<Emalloc>,
-        named: Option<Owner<PhpString>>,
-        owner: ConstantOwner,
-        name: Vec<u8>,
-        value: Value,
-    ) -> ConstantRow {
-        ConstantRow {
-            room,
-            named,
-            owner,
-            given: name.clone(),
-            name,
-            value,
-            attributes: Vec::new(),
-            deprecated: false,
-        }
-    }
-}
-
 /// The request's rows of `EG(zend_constants)` and `PHP_SAPI`, whose
 /// fields no file but this one reads.
 /// Where a constant the table holds stands, what a `FETCH_CONSTANT`'s
@@ -434,15 +413,31 @@ impl Request {
     /// `Core`'s group and before what the program defines. A sink: the
     /// row takes the value's owner.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Owner<Value>) {
+        self.push_native_constant(ConstantOwner::Core, name, value, Vec::new());
+    }
+
+    /// A row of a native constant pushed, its key the name it was given,
+    /// taking the value's owner.
+    fn push_native_constant(
+        &mut self,
+        owner: ConstantOwner,
+        name: &[u8],
+        value: Owner<Value>,
+        attributes: Vec<Attribute>,
+    ) {
+        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         let named = self.constant_name(name);
         let room = self.constant_room();
-        self.constants.push(ConstantRow::new(
+        self.constants.push(ConstantRow {
             room,
             named,
-            ConstantOwner::Core,
-            name.to_vec(),
-            value.hand_on(),
-        ));
+            owner,
+            name: name.to_vec(),
+            given: name.to_vec(),
+            value: value.hand_on(),
+            attributes,
+            deprecated,
+        });
     }
 
     /// `PHP_CLI_PROCESS_TITLE`, which `do_cli` registers after
@@ -834,19 +829,8 @@ impl Symbols<&mut Request> {
             self.0.refuse_constant(name, value);
             return false;
         }
-        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
-        let named = self.0.constant_name(name);
-        let room = self.0.constant_room();
-        self.0.constants.push(ConstantRow {
-            room,
-            named,
-            owner: ConstantOwner::Extension(extension),
-            name: name.to_vec(),
-            given: name.to_vec(),
-            value: value.hand_on(),
-            attributes,
-            deprecated,
-        });
+        let owner = ConstantOwner::Extension(extension);
+        self.0.push_native_constant(owner, name, value, attributes);
         true
     }
 }

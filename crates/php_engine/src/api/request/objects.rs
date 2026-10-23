@@ -94,44 +94,12 @@ impl Request {
         custom: usize,
     ) -> Result<PhpObject, Thrown> {
         self.update_class_constants(class)?;
-        let slots = self.made(class).slots;
-        let allocated = self.heap.object_with(class.0, slots, custom, payload);
+        let made = self.made(class);
+        let allocated = self.heap.object_with(class.0, made.slots, custom, payload);
         let object = self.fatal_of(allocated).map(PhpObject::of)?;
         self.init_properties(object);
-        self.object_created(object)?;
+        self.object_made(object, made)?;
         Ok(object)
-    }
-
-    /// `object_properties_init`: each declared instance property's slot
-    /// takes its default, `zend_update_class_constants` having evaluated
-    /// the expression it was written as in the scope of the class that
-    /// declared it (`ce->properties_info_table[i]->ce`); a property with
-    /// no default is `null` where it is untyped and stays uninitialised
-    /// where it is typed, as `zend_declare_typed_property` leaves it.
-    /// The slots are [`Request::placed_properties`]', so an inherited
-    /// property takes the parent's default in the parent's slot.
-    ///
-    /// The defaults are evaluated before the object is made, as
-    /// `zend_update_class_constants` runs inside `object_init_ex` before
-    /// `zend_objects_new`, so an object a default makes, an enum's case
-    /// among them, takes its number in the object store before the object being made does.
-    ///
-    /// ```php
-    /// class A { public $p = E::V; }
-    /// enum E { case V; }
-    /// var_dump(new A);
-    /// ```
-    /// ```expect
-    /// object(A)#2 (1) {
-    ///   ["p"]=>
-    ///   enum(E::V)
-    /// }
-    /// ```
-    pub(super) fn property_defaults(
-        &mut self,
-        class: ClassId,
-    ) -> Result<Vec<Option<Value>>, Thrown> {
-        self.default_properties(class)
     }
 
     /// `ce->default_properties_table` beside `ce->properties_info_table`
@@ -771,7 +739,7 @@ impl Request {
         if self.method_accessible(destructor) {
             return true;
         }
-        let from = self.scope_phrase();
+        let from = self.scope_phrase(self.executed_scope());
         let thrown = crate::api::raising::throw_error(
             self,
             "Error",
@@ -997,9 +965,7 @@ impl Request {
         {
             return Some(table);
         }
-        self.symbols()
-            .class_decl(class)
-            .is_some_and(|decl| decl.kind == ClassKind::Enum)
+        self.class_is(class, ClassKind::Enum)
             .then_some(&crate::enums::ENUM as &'static dyn ObjectHandlers)
     }
 
@@ -1107,18 +1073,10 @@ impl Request {
         self.array_access(object)?;
         let offset = offset.copied().unwrap_or_else(Value::null);
         let read = self.with_array_access(object, offset, |req, offset| {
-            if read == DimensionRead::Silent {
-                let exists = crate::api::call::call_method_made(
-                    req,
-                    &object,
-                    b"offsetExists",
-                    std::slice::from_ref(&offset),
-                )?;
-                let answer = crate::api::coerce::truthy(req, &exists);
-                req.release(exists);
-                if !answer? {
-                    return Ok(Value::null());
-                }
+            if read == DimensionRead::Silent
+                && !truth_of_call(req, object, b"offsetExists", offset)?
+            {
+                return Ok(Value::null());
             }
             crate::api::call::call_method_made(req, &object, b"offsetGet", &[offset])
         });
@@ -1176,27 +1134,11 @@ impl Request {
     ) -> Result<bool, Thrown> {
         self.array_access(object)?;
         self.with_array_access(object, *offset, |req, offset| {
-            let exists = crate::api::call::call_method_made(
-                req,
-                &object,
-                b"offsetExists",
-                std::slice::from_ref(&offset),
-            )?;
-            let answer = crate::api::coerce::truthy(req, &exists);
-            req.release(exists);
-            let answer = answer?;
+            let answer = truth_of_call(req, object, b"offsetExists", offset)?;
             if !answer || !not_empty {
                 return Ok(answer);
             }
-            let value = crate::api::call::call_method_made(
-                req,
-                &object,
-                b"offsetGet",
-                std::slice::from_ref(&offset),
-            )?;
-            let answer = crate::api::coerce::truthy(req, &value);
-            req.release(value);
-            answer
+            truth_of_call(req, object, b"offsetGet", offset)
         })
     }
 
@@ -1253,10 +1195,7 @@ impl Request {
             || String::from("object"),
             |class| self.symbols().class_name(class),
         );
-        let from = match scope {
-            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
-            None => String::from("global scope"),
-        };
+        let from = self.scope_phrase(scope);
         object.heap().set_destructor_called(true);
         Err(crate::api::raising::throw_error(
             self,
@@ -1743,13 +1682,7 @@ impl Request {
                 "InternalError: Std::clone_obj over an object of class {class}, whose native payload its own table must copy"
             ))));
         };
-        let new = PhpObject::of(new);
-        self.clone_slot_sources(new);
-        if let Err(thrown) = self.serve_clone_method(new) {
-            self.release(new.as_value());
-            return Err(thrown);
-        }
-        Ok(Owner::adopt(new))
+        self.cloned(PhpObject::of(new)).map(Owner::adopt)
     }
 
     /// `zend_objects_clone_members`' `ZEND_REF_ADD_TYPE_SOURCE`: a slot
@@ -1838,10 +1771,14 @@ impl Request {
         object: PhpObject,
         payload: T,
     ) -> Result<PhpObject, Thrown> {
-        let custom = self.object_custom(object.class());
-        let cloned = self.heap.object_clone_with(object.heap(), custom, payload);
-        let new = PhpObject::of(self.fatal_of(cloned)?);
-        self.lay_beside(new)?;
+        let new = self.clone_with_payload(object, payload)?;
+        self.cloned(new)
+    }
+
+    /// The end of a clone over `new`, the copy: its typed references
+    /// counted ([`Request::clone_slot_sources`]) and `__clone` served
+    /// on it, the copy released where it throws.
+    fn cloned(&mut self, new: PhpObject) -> Result<PhpObject, Thrown> {
         self.clone_slot_sources(new);
         if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
@@ -1978,11 +1915,7 @@ impl Request {
         let bytes = name.as_bytes().to_vec();
         let place = match table.get_property_ptr_ptr(self, object, &bytes) {
             Ok(place) => place,
-            Err(thrown) => {
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
-            }
+            Err(thrown) => return self.refused_write(name, value, thrown),
         };
         if place == crate::api::abi::PropertyPlace::Handlers {
             return table.write_property(self, object, name, value);
@@ -1990,11 +1923,7 @@ impl Request {
         let silent = self.serves_accessor(object.class(), super::Accessor::Set);
         let slot = match self.declared_slot_for_write(object, &bytes, "modify", silent) {
             Ok(placed) => placed.map(|(slot, _)| slot),
-            Err(thrown) => {
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
-            }
+            Err(thrown) => return self.refused_write(name, value, thrown),
         };
         table.write_property(self, object, name, value)?;
         if let Some(slot) = slot {
@@ -2072,4 +2001,16 @@ impl Request {
         self.lay_beside(new)?;
         Ok(new)
     }
+}
+
+/// The truth of what `object`'s `method` answers for `offset`, the
+/// answer given up once read.
+fn truth_of_call(
+    req: &mut Request,
+    object: PhpObject,
+    method: &[u8],
+    offset: Value,
+) -> Result<bool, Thrown> {
+    let answered = crate::api::call::call_method_made(req, &object, method, &[offset])?;
+    req.truth_of(answered)
 }

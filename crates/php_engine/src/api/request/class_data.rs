@@ -376,12 +376,6 @@ impl Request {
     /// runs ([`Request::records_throw_site`]), then what its class lays
     /// down with it ([`crate::api::abi::ObjectHandlers::create_object`]);
     /// the object released where any fails.
-    pub(crate) fn object_created(&mut self, object: PhpObject) -> Result<(), Thrown> {
-        let made = self.made(object.class());
-        self.object_made(object, made)
-    }
-
-    /// [`Request::object_created`] with what `new` read of the class.
     pub(super) fn object_made(&mut self, object: PhpObject, made: Made) -> Result<(), Thrown> {
         if made.declared_by.is_some() {
             self.lay_beside(object)?;
@@ -576,16 +570,8 @@ impl Request {
     /// as evaluated in `declaring`'s scope, held to its type, and kept.
     /// One more owner is the caller's. A value its type refuses is given
     /// up with the `TypeError`, as `zend_update_class_constant` gives up
-    /// `tmp` (`Z/Zend/zend_API.c:1504`), and nothing is kept.
-    pub(crate) fn evaluated_class_constant(
-        &mut self,
-        declaring: ClassId,
-        name: &[u8],
-    ) -> Result<Value, Thrown> {
-        self.evaluated_in(declaring, declaring, name)
-    }
-
-    /// [`Request::evaluated_class_constant`] in the table of `holder`
+    /// `tmp` (`Z/Zend/zend_API.c:1504`), and nothing is kept. In the
+    /// table of `holder`
     /// ([`constant_holder`]): the value kept in its row, else
     /// `declaring`'s expression evaluated in `declaring`'s scope and kept
     /// there; the expression's copy given back only where `holder` is
@@ -709,7 +695,7 @@ impl Request {
     /// `zend_update_class_constant` over the constant `name` of `class`
     /// (`Z/Zend/zend_API.c:1504`), found as the constants table has it:
     /// the case's instance for an enum's case, and otherwise the value
-    /// [`Request::evaluated_class_constant`] keeps, with no access
+    /// [`Request::evaluated_in`] keeps, with no access
     /// checked. `Undefined constant` where the class has no such
     /// constant.
     pub(crate) fn updated_class_constant(
@@ -722,21 +708,13 @@ impl Request {
             .class_constant_of(class, name)
             .map(|(declaring, constant)| (declaring, constant.is_case))
         else {
-            let class_name = self.symbols().class_name(class);
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!(
-                    "Undefined constant {class_name}::{}",
-                    String::from_utf8_lossy(name)
-                ),
-            ));
+            return Err(self.undefined_case(class, name));
         };
         self.update_enum_constants(declaring)?;
         if is_case {
             return self.enum_case(declaring, name).map(|case| case.as_value());
         }
-        self.evaluated_class_constant(declaring, name)
+        self.evaluated_in(declaring, declaring, name)
     }
 
     /// `zend_get_class_constant_ex`'s update of the constant `name` that
@@ -744,7 +722,7 @@ impl Request {
     /// yet evaluated is marked while its expression is, and one found
     /// marked is php's `Cannot declare self-referencing constant`, the
     /// class named as the fetch was handed it; then
-    /// [`Request::evaluated_class_constant`]. The opline's fetch marks
+    /// [`Request::evaluated_in`]. The opline's fetch marks
     /// nothing, so a cycle entered through it is refused one constant
     /// further in.
     ///
@@ -788,6 +766,32 @@ impl Request {
         evaluated
     }
 
+    /// `object_properties_init`: each declared instance property's slot
+    /// takes its default, `zend_update_class_constants` having evaluated
+    /// the expression it was written as in the scope of the class that
+    /// declared it (`ce->properties_info_table[i]->ce`); a property with
+    /// no default is `null` where it is untyped and stays uninitialised
+    /// where it is typed, as `zend_declare_typed_property` leaves it.
+    /// The slots are [`Request::placed_properties`]', so an inherited
+    /// property takes the parent's default in the parent's slot.
+    ///
+    /// The defaults are evaluated before the object is made, as
+    /// `zend_update_class_constants` runs inside `object_init_ex` before
+    /// `zend_objects_new`, so an object a default makes, an enum's case
+    /// among them, takes its number in the object store before the object being made does.
+    ///
+    /// ```php
+    /// class A { public $p = E::V; }
+    /// enum E { case V; }
+    /// var_dump(new A);
+    /// ```
+    /// ```expect
+    /// object(A)#2 (1) {
+    ///   ["p"]=>
+    ///   enum(E::V)
+    /// }
+    /// ```
+    ///
     /// The default properties table of `class` once the class is
     /// updated, each slot's value with one more owner the object's, as
     /// `_object_properties_init` copies the table (`ZVAL_COPY_PROP`).
