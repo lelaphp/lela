@@ -274,7 +274,7 @@ fn reading(
             reading.message
         );
     }
-    if let Some((unbuilt, why)) = untracked(snapshot.root(), krate)? {
+    if let Some((unbuilt, why)) = not_built(snapshot.root(), krate)? {
         reading.count("skipped_untracked", unbuilt)?;
         reading.message = format!("{}; {why}", reading.message);
     }
@@ -284,15 +284,14 @@ fn reading(
     Ok((reading, left_out))
 }
 
-/// How many tests and test modules of `krate` its build left out under
-/// `cfg(tracked)`, and why: none where the workspace carries every file
-/// [`crate::inputs::TRACKED`] names, or where the crate leaves nothing
-/// out under that cfg (#3188).
-fn untracked(root: &Path, krate: &Crate) -> Result<Option<(u64, String)>> {
-    let absent = crate::inputs::untracked(root);
-    if absent.is_empty() {
+/// How many items of `krate`'s tests its build left out under
+/// `cfg(tracked)`, each a line carrying the attribute, and why: none where
+/// the workspace carries every file [`crate::inputs::TRACKED`] names, or
+/// where the crate leaves nothing out under that cfg (#3188).
+fn not_built(root: &Path, krate: &Crate) -> Result<Option<(u64, String)>> {
+    let Some(why) = crate::inputs::untracked(root) else {
         return Ok(None);
-    }
+    };
     let mut unbuilt = 0;
     for file in git::files(root, &krate.path())? {
         if Path::new(&file).extension().is_some_and(|ext| ext == "rs") {
@@ -302,10 +301,9 @@ fn untracked(root: &Path, krate: &Crate) -> Result<Option<(u64, String)>> {
         }
     }
     Ok((unbuilt > 0).then(|| {
-        let why = format!("{} has no {}", root.display(), absent.join(", "));
         (
             unbuilt,
-            format!("{unbuilt} test modules and tests not built, since {why}"),
+            format!("{unbuilt} items under cfg(tracked) not built, since {why}"),
         )
     }))
 }

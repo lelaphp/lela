@@ -101,10 +101,13 @@ pub const TRACKED: [&str; 5] = [
     "docs/divergence.toml",
 ];
 
-/// Those of [`TRACKED`] the workspace at `root` does not carry.
-pub fn untracked(root: &Path) -> Vec<&'static str> {
-    TRACKED
+/// Which of [`TRACKED`] the workspace at `root` lacks, as the sentence the
+/// build's warning and `test`'s reading both say; none where it carries
+/// every one.
+pub fn untracked(root: &Path) -> Option<String> {
+    let absent: Vec<&str> = TRACKED
         .into_iter()
         .filter(|file| !root.join(file).is_file())
-        .collect()
+        .collect();
+    (!absent.is_empty()).then(|| format!("{} has no {}", root.display(), absent.join(", ")))
 }

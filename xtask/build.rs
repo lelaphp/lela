@@ -60,12 +60,10 @@ fn main() {
     // The tests that read the workspace's tracked files are built where it
     // carries every one of them, and the build says which it lacks (#3188).
     println!("cargo::rustc-check-cfg=cfg(tracked)");
-    match untracked(&root).as_slice() {
-        [] => println!("cargo::rustc-cfg=tracked"),
-        absent => println!(
-            "cargo::warning=the tests that read the workspace's tracked files are not built: {} has no {}",
-            root.display(),
-            absent.join(", ")
+    match untracked(&root) {
+        None => println!("cargo::rustc-cfg=tracked"),
+        Some(why) => println!(
+            "cargo::warning=the tests that read the workspace's tracked files are not built: {why}"
         ),
     }
     print_target_cfg();
