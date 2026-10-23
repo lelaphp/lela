@@ -547,8 +547,8 @@ impl<P: Pages> TraceTable<P> {
         }
     }
 
-    /// What the traces published so far take (#2961), the engine's
-    /// count across its epochs, each trace counted last in its publish.
+    /// What the traces published into this epoch's table so far take
+    /// (#2961), each trace counted last in its publish.
     #[cfg_attr(
         not(any(test, php_jit_usage)),
         expect(

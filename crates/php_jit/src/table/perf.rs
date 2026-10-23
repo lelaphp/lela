@@ -24,8 +24,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::{TraceId, TraceName, code};
 use crate::policy::JitDebug;
@@ -59,12 +59,14 @@ pub(crate) struct Perf {
     used: Arc<Used>,
 }
 
-/// What the traces published under one engine's [`Outputs`] take, counted
-/// as each is published (#2961): the bytes of their code in the arena,
-/// the oplines they compiled, one [`crate::lower::Mark`] each, and how
-/// many traces there are. php's `JIT memory usage` line counts its own
-/// buffer, its stubs and alignment with them; this counts the traces'
-/// bytes alone.
+/// What the traces published into one epoch's table take, counted as
+/// each is published (#2961): the bytes of their code in the epoch's
+/// arena, the oplines they compiled, one [`crate::lower::Mark`] each, and
+/// how many traces there are. Each epoch's table counts its own, as php's
+/// restart empties its one buffer (`zend_jit_restart`), so what php's
+/// `zend_jit_status` and its `JIT memory usage` line read is the buffer in
+/// use. php's line counts its stubs and alignment with them; this counts
+/// the traces' bytes alone.
 #[derive(Debug, Default)]
 pub(crate) struct Used {
     bytes: AtomicUsize,
@@ -134,7 +136,9 @@ pub(crate) struct Outputs {
     /// Whether the engine's end writes php's `JIT memory usage` line,
     /// `ZEND_JIT_DEBUG_SIZE`.
     size: bool,
-    used: Arc<Used>,
+    /// The counts of the table made last, the buffer in use at the
+    /// engine's end.
+    used: Mutex<Arc<Used>>,
 }
 
 impl Outputs {
@@ -145,7 +149,7 @@ impl Outputs {
             dump: false,
             code_id: Arc::new(AtomicU64::new(1)),
             size: false,
-            used: Arc::default(),
+            used: Mutex::default(),
         }
     }
 
@@ -170,7 +174,7 @@ impl Outputs {
             dump,
             code_id: Arc::new(AtomicU64::new(1)),
             size: debug.any(JitDebug::SIZE),
-            used: Arc::default(),
+            used: Mutex::default(),
         }
     }
 }
@@ -179,10 +183,11 @@ impl Drop for Outputs {
     /// The engine's end, php's `zend_jit_shutdown`: the jitdump's close
     /// record, and, under `ZEND_JIT_DEBUG_SIZE`, php's line of what the
     /// traces took (`Z/ext/opcache/jit/zend_jit.c:3866-3868`), the bytes
-    /// [`Used`] counted.
+    /// [`Used`] counted in the table made last.
     fn drop(&mut self) {
         if self.size {
-            eprint!("\nJIT memory usage: {}\n", self.used.now().bytes);
+            let used = self.used.get_mut().unwrap_or_else(PoisonError::into_inner);
+            eprint!("\nJIT memory usage: {}\n", used.now().bytes);
         }
         if self.dump
             && let Ok(mut file) = OpenOptions::new().append(true).open(dump_path())
@@ -217,8 +222,9 @@ impl Perf {
         }
     }
 
-    /// A table's writers, appending to the files `outputs` started;
-    /// one that does not open writes nothing.
+    /// A new table's writers, appending to the files `outputs` started,
+    /// one that does not open writing nothing, and its own [`Used`],
+    /// which `outputs` keeps as the last.
     pub(crate) fn of(outputs: &Outputs) -> Perf {
         let append = |started: bool, path: String| -> Option<Box<dyn Write + Send>> {
             let file = OpenOptions::new()
@@ -234,7 +240,11 @@ impl Perf {
                 to,
                 code_id: Arc::clone(&outputs.code_id),
             }),
-            used: Arc::clone(&outputs.used),
+            used: {
+                let used = Arc::<Used>::default();
+                *outputs.used.lock().unwrap_or_else(PoisonError::into_inner) = Arc::clone(&used);
+                used
+            },
         }
     }
 
