@@ -1076,7 +1076,9 @@ pub(crate) fn disable(req: &mut Request) {
 /// which the recipe's `TMPDIR` pins to the harness's own directory, a
 /// name of one length on every machine, so the eval's name, 81 bytes
 /// resolved under macOS's `/private/tmp` and 73 under `/tmp`, is one
-/// 112-byte string beside the 32 a first byte costs outside an eval:
+/// 112-byte string beside the 32 a first byte costs outside an eval.
+/// Each fence writes a file of its own, since the harness runs them at
+/// once under the one directory:
 ///
 /// ```php
 /// $f = sys_get_temp_dir() . '/w3245-started-at.inc';
@@ -1091,16 +1093,16 @@ pub(crate) fn disable(req: &mut Request) {
 /// Warning: Cannot modify header information - headers already sent by (output started at %s/w3245-started-at.inc(2) : eval()'d code:1) in %s/w3245-started-at.inc on line 3
 /// ```
 /// ```php
-/// $f = sys_get_temp_dir() . '/w3245-started-at.inc';
+/// $f = sys_get_temp_dir() . '/w3245-started-jo.inc';
 /// file_put_contents($f, "<?php\n\$m = memory_get_usage(); eval('echo \"a\";'); \$d = memory_get_usage() - \$m; headers_sent(\$file, \$line);\necho \"\\n\$d \", basename(\$file), \" \$line\\n\"; header('X-A: b');\n");
 /// include $f;
 /// unlink($f);
 /// ```
 /// ```expect regime=jit-off
 /// a
-/// 144 w3245-started-at.inc(2) : eval()'d code 1
+/// 144 w3245-started-jo.inc(2) : eval()'d code 1
 ///
-/// Warning: Cannot modify header information - headers already sent by (output started at %s/w3245-started-at.inc(2) : eval()'d code:1) in %s/w3245-started-at.inc on line 3
+/// Warning: Cannot modify header information - headers already sent by (output started at %s/w3245-started-jo.inc(2) : eval()'d code:1) in %s/w3245-started-jo.inc on line 3
 /// ```
 pub(crate) fn header(req: &mut Request) {
     if req.output().headers_sent {
