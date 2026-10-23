@@ -1348,6 +1348,21 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     (y, m, d)
 }
 
+/// Each of `items` as it displays, `separator` between.
+pub(crate) fn joined<T: std::fmt::Display>(
+    items: impl IntoIterator<Item = T>,
+    separator: &str,
+) -> String {
+    let mut out = String::new();
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 {
+            out.push_str(separator);
+        }
+        out.push_str(&item.to_string());
+    }
+    out
+}
+
 /// At most five names, and how many more there are: how a reading's
 /// message names what missed, the same way in every lane.
 pub(crate) fn listed(names: &[impl AsRef<str>]) -> String {

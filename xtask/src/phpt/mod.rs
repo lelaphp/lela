@@ -1922,10 +1922,7 @@ fn run_tests(
     let waited = Mutex::new(across::Waited::default());
     let tally = Tally::judge_apart(&held, jobs, batch, &apart, |(item, keys)| {
         let (_held, wait) = across::hold(locks, keys)?;
-        waited
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .add(wait);
+        crate::held(&waited).add(wait);
         adapter.judge(subset, item)
     })?;
     let waited = waited.into_inner().unwrap_or_else(PoisonError::into_inner);

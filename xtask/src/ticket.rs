@@ -182,7 +182,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::key::Snapshot;
 use crate::manifest::{Manifest, Rule};
-use crate::reading::{Reading, Status, millis};
+use crate::reading::{Reading, Status, joined, millis};
 use crate::track::{MAIN, Ticket, Track};
 use crate::track_next::{READY, TRACK_LABEL, tracks_of};
 
@@ -340,11 +340,7 @@ impl Successors {
             ),
             (false, true) => bail!(
                 "`--opens {}` and `--opens-nothing` contradict each other; give one of the two",
-                opens
-                    .iter()
-                    .map(u64::to_string)
-                    .collect::<Vec<_>>()
-                    .join(" --opens ")
+                joined(opens.iter().map(u64::to_string), " --opens ")
             ),
             (true, true) => Ok(Successors::Nothing),
             (false, false) => {
@@ -371,11 +367,9 @@ impl Successors {
     fn record(&self) -> String {
         match self {
             Successors::Nothing => String::from(NOTHING),
-            Successors::Tickets(tickets) => tickets
-                .iter()
-                .map(|t| t.number().to_string())
-                .collect::<Vec<_>>()
-                .join(" "),
+            Successors::Tickets(tickets) => {
+                joined(tickets.iter().map(|t| t.number().to_string()), " ")
+            }
         }
     }
 
@@ -433,11 +427,10 @@ impl Successors {
             let Some(first) = first else { continue };
             let its = tracks_of(issue.labels.iter().map(|l| l.name.as_str()));
             if !its.iter().any(|track| tracks.contains(track)) {
-                let wanted = tracks
-                    .iter()
-                    .map(|track| format!("`{TRACK_LABEL}{track}`"))
-                    .collect::<Vec<_>>()
-                    .join(" or ");
+                let wanted = joined(
+                    tracks.iter().map(|track| format!("`{TRACK_LABEL}{track}`")),
+                    " or ",
+                );
                 bail!(
                     "opens {successor}, which carries no {wanted} label; what a {} ticket opens is that track's, and a ticket with no `{TRACK_LABEL}` label is {MAIN}'s: `gh issue edit {} --add-label {TRACK_LABEL}{first}`",
                     tracks.join(" and "),
@@ -452,14 +445,7 @@ impl Successors {
     /// number, or the assertion with the session that made it.
     fn describe(&self, session_id: Option<&str>) -> String {
         match self {
-            Successors::Tickets(tickets) => format!(
-                "opens {}",
-                tickets
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+            Successors::Tickets(tickets) => format!("opens {}", joined(tickets, ", ")),
             Successors::Nothing => match session_id {
                 Some(id) => format!("opens nothing, asserted in session {id}"),
                 None => "opens nothing, asserted with no session named".to_owned(),
@@ -535,12 +521,13 @@ impl Criteria {
 
 /// Boxes by name, numbered so a comma in one is not a gap between two.
 fn named(boxes: &[String]) -> String {
-    boxes
-        .iter()
-        .enumerate()
-        .map(|(i, text)| format!("({}) {text}", i + 1))
-        .collect::<Vec<_>>()
-        .join("; ")
+    joined(
+        boxes
+            .iter()
+            .enumerate()
+            .map(|(i, text)| format!("({}) {text}", i + 1)),
+        "; ",
+    )
 }
 
 /// The opening line of a fenced block as `CommonMark` reads one: a run of
@@ -1094,11 +1081,7 @@ impl Gh {
             return Ok(());
         }
         let number = ticket.number().to_string();
-        let opened = successors
-            .iter()
-            .map(|t| t.number().to_string())
-            .collect::<Vec<_>>()
-            .join(",");
+        let opened = joined(successors.iter().map(|t| t.number().to_string()), ",");
         self.call(root, &["issue", "edit", &number, "--add-blocking", &opened])
             .with_context(|| format!("{ticket}'s edge to what it opened was not set"))?;
         Ok(())
@@ -1168,15 +1151,15 @@ fn no_issue(err: &anyhow::Error) -> bool {
 /// Every criterion of `rows` as the reading cites it: the criterion, the
 /// path its main clause names and the rule whose scope covers it.
 fn asked(rows: &[&Denied]) -> String {
-    rows.iter()
-        .map(|row| {
+    joined(
+        rows.iter().map(|row| {
             format!(
                 "{:?} asks for {}, which {} denies an agent",
                 row.criterion, row.path, row.rule
             )
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
+        }),
+        "; ",
+    )
 }
 
 /// What a reading says of a ticket an agent may take whose criteria ask
@@ -1219,12 +1202,12 @@ fn steerable(rows: &[&Denied]) -> String {
     if rows.is_empty() {
         return String::new();
     }
-    let calls = rows
-        .iter()
-        .filter_map(|row| row.sanctioned.as_deref())
-        .map(|call| format!("`{call}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let calls = joined(
+        rows.iter()
+            .filter_map(|row| row.sanctioned.as_deref())
+            .map(|call| format!("`{call}`")),
+        ", ",
+    );
     format!(
         "; {}; the write is an agent's through {calls}, which applies an addition a person has settled and refuses a change to what already binds",
         asked(rows)

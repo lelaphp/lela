@@ -35,7 +35,7 @@ use crate::oracle::hosts::{EngineHost, HOSTS};
 use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE};
 use crate::permit;
 use crate::phpt;
-use crate::reading::{self, Log, Reading, Store};
+use crate::reading::{self, Log, Reading, Store, joined};
 use crate::sources::NOT_YET_CREATED;
 use crate::track_work;
 use crate::usage;
@@ -514,12 +514,12 @@ impl Row {
         match self.facts.get(key) {
             None | Some(Value::Null) => String::new(),
             Some(Value::String(s)) => cell(s),
-            Some(Value::Array(a)) => a
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|n| format!("ADR-{n}"))
-                .collect::<Vec<_>>()
-                .join(", "),
+            Some(Value::Array(a)) => joined(
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|n| format!("ADR-{n}")),
+                ", ",
+            ),
             Some(other) => other.to_string(),
         }
     }
@@ -545,12 +545,13 @@ impl Row {
     /// space-separated.
     fn numbers_but(&self, shown: &[&str]) -> String {
         self.of(|x| {
-            x.numbers
-                .iter()
-                .filter(|(k, v)| !shown.contains(&k.as_str()) && v.as_f64() != 0.0)
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(" ")
+            joined(
+                x.numbers
+                    .iter()
+                    .filter(|(k, v)| !shown.contains(&k.as_str()) && v.as_f64() != 0.0)
+                    .map(|(k, v)| format!("{k}={v}")),
+                " ",
+            )
         })
     }
 

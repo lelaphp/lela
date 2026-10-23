@@ -198,6 +198,21 @@ pub(crate) fn make_dir(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
 }
 
+/// The file at `path` opened to be locked, made where it is not there yet
+/// and left as it stands where it is.
+pub(crate) fn lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::File::options();
+    options.read(true).write(true).create(true).truncate(false);
+    options.open(path)
+}
+
+/// The value under `lock`, a poisoned one included: a thread that panicked
+/// holding it leaves what it gathered as it was.
+pub(crate) fn held<T>(lock: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 /// The directory the file at `path` goes in, made as [`make_dir`] makes
 /// one, so the file can be written there.
 pub(crate) fn make_parent(path: &Path) -> Result<()> {

@@ -519,12 +519,8 @@ fn hold<'a>(files: impl Iterator<Item = &'a Path>) -> Result<Vec<fs::File>> {
             if let Some(dir) = lock.parent() {
                 fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             }
-            let file = fs::File::options()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(lock);
-            let file = file.with_context(|| format!("opening {}", lock.display()))?;
+            let file =
+                crate::lock_file(lock).with_context(|| format!("opening {}", lock.display()))?;
             file.lock()
                 .with_context(|| format!("locking {}", lock.display()))?;
             Ok(file)

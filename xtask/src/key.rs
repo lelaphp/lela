@@ -44,6 +44,7 @@ use serde::Deserialize;
 
 use crate::git::{self, Index, Stamp};
 use crate::layout::normalize;
+use crate::reading::joined;
 
 /// Each file of the workspace and its blob id, read once, and the key of
 /// any scope a lookup on it ([`Snapshot::key`]). Taken from one of three
@@ -302,11 +303,7 @@ impl Snapshot {
         if !outside.is_empty() {
             bail!(
                 "a snapshot read under {} has no key over {}",
-                covers
-                    .iter()
-                    .map(|c| c.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                joined(covers.iter().map(|c| c.display().to_string()), ", "),
                 outside.join(", ")
             );
         }

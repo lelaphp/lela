@@ -114,11 +114,7 @@ impl Seats {
         }
         std::fs::create_dir_all(&self.dir)?;
         for n in 0..self.count {
-            let mut file = File::options()
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(self.dir.join(n.to_string()))?;
+            let mut file = crate::lock_file(&self.dir.join(n.to_string()))?;
             if file.try_lock().is_err() {
                 continue;
             }

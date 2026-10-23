@@ -361,14 +361,14 @@ pub(crate) fn run(
 mod recorder {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
-    use std::sync::{Mutex, PoisonError};
+    use std::sync::Mutex;
 
     /// The questions asked of git in each directory `asked` listens at,
     /// or below it, each as its arguments.
     static ASKED: Mutex<BTreeMap<PathBuf, Vec<Vec<String>>>> = Mutex::new(BTreeMap::new());
 
     fn listening<T>(f: impl FnOnce(&mut BTreeMap<PathBuf, Vec<Vec<String>>>) -> T) -> T {
-        f(&mut ASKED.lock().unwrap_or_else(PoisonError::into_inner))
+        f(&mut crate::held(&ASKED))
     }
 
     /// One question asked of git in `root`, for each listener above it.

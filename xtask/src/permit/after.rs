@@ -100,7 +100,7 @@ use super::rules::{at, runs_in};
 use super::writes::{self, Place};
 use crate::key::Snapshot;
 use crate::manifest::OneOrMany;
-use crate::reading::{self, Number, Reading, Status, Store};
+use crate::reading::{self, Number, Reading, Status, Store, joined};
 use crate::{git, manifest, steer};
 
 /// The rule the sensor holds, whose scope and text it reads.
@@ -263,11 +263,7 @@ pub fn after(root: &Path, json: Option<&str>) -> Result<()> {
     if moved.is_empty() {
         return Ok(());
     }
-    let said = moved
-        .iter()
-        .map(|m| format!("{RULE}: {}", m.said))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let said = joined(moved.iter().map(|m| format!("{RULE}: {}", m.said)), "\n");
     // The answer names the event it answers. A failed call's event takes
     // no `decision`: the call has already failed, and what was put back is
     // said as context (#2762).

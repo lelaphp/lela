@@ -95,7 +95,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use anyhow::{Context, Result, bail};
 
 use crate::key::Snapshot;
-use crate::reading::{Reading, Status, Store};
+use crate::reading::{Reading, Status, Store, joined};
 use crate::tally::{Judged, Judgement, Outcome, Tally};
 use crate::ticket::{self, Gh, State};
 use crate::track::{Ticket, rev, short};
@@ -169,10 +169,10 @@ impl Skill {
             ),
             many => bail!(
                 "{ticket} is labelled {}, and a ticket is on one side of the frontier; a person takes one label off, and nothing is laid down",
-                many.iter()
-                    .map(|side| format!("{FRONTIER_LABEL}{side}"))
-                    .collect::<Vec<_>>()
-                    .join(" and ")
+                joined(
+                    many.iter().map(|side| format!("{FRONTIER_LABEL}{side}")),
+                    " and "
+                )
             ),
         }
     }
