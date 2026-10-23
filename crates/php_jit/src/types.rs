@@ -613,7 +613,8 @@ pub(crate) struct LoopHeader {
     /// The op the back edge goes to.
     pub(crate) at: OpId,
     pub(crate) repeat: Repeat,
-    /// Where the interrupt test leaves (`jit-design.md` §4.3).
+    /// Where the interrupt test leaves, or that the loop takes none
+    /// (`jit-design.md` §4.3).
     pub(crate) interrupt: Interrupt,
 }
 

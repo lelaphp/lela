@@ -1,6 +1,7 @@
 //! `lower` at its seam (`jit-design.md` §4.3 *Tested*, §7): the CLIF of
 //! each `types` fixture's trace, held to a golden file, every loop's
-//! carrying the interrupt test; the same function compiled to bytes for
+//! carrying the interrupt test but a recursive return's, which carries
+//! none; the same function compiled to bytes for
 //! the golden's ISA and the host's, a mark per recorded opline; and a
 //! host with no ISA refused as `Unsupported`.
 //!
@@ -177,11 +178,11 @@ fn untested(clif: &str) -> Result<(), String> {
             .collect()
     };
     let pointers = loaded(&|load| load == format!("load.i64 notrap aligned v0+{INTERRUPT_AT}"));
-    let flags = loaded(&|load| {
+    let bytes = loaded(&|load| {
         (pointers.iter()).any(|pointer| load == format!("load.i8 notrap aligned {pointer}"))
     });
     match (lines.iter())
-        .find(|line| (flags.iter()).any(|flag| line.starts_with(&format!("brif {flag}, "))))
+        .find(|line| (bytes.iter()).any(|byte| line.starts_with(&format!("brif {byte}, "))))
     {
         Some(branch) => Err(format!(
             "a loop by recursive return tests the interrupt, `{branch}`:\n{clif}"

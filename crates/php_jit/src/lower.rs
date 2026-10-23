@@ -48,7 +48,9 @@
 //! the interrupt pointer at offset [`INTERRUPT_AT`] of its `ExitCtx` once
 //! as it enters, and at its header loads the byte it points to and leaves
 //! through the header's interrupt exit when it is not zero: one load and
-//! one branch per iteration, php's cost (`rfc-jit.md:118`).
+//! one branch per iteration, php's cost (`rfc-jit.md:118`). A loop by
+//! recursive return takes no test, as php's takes none
+//! (`types::Interrupt::None`).
 //!
 //! [`ExitId`]: crate::types::ExitId
 

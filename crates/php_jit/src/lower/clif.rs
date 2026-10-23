@@ -335,7 +335,7 @@ struct Emit<'a> {
     /// The `ExitCtx`, the function's first parameter.
     cx: Option<Value>,
     /// The address of the request's interrupt byte, read once as a
-    /// looping trace enters.
+    /// looping trace whose header tests it enters.
     interrupt: Option<Value>,
     /// Where a kernel writes where the interpreter stands.
     stood: StackSlot,
@@ -1058,7 +1058,8 @@ impl<'a> Emit<'a> {
     /// The request's interrupt tested, the one emitter of every test a
     /// compiled loop makes of it (`jit-design.md` §4.3), php's
     /// `vm_interrupt` test: at a loop's header (`zend_jit_trace_end_loop`),
-    /// and before a side trace's link to its own root where the root loops
+    /// and before a side trace's link to its own root where the root's
+    /// header tests it
     /// (`zend_jit_check_timeout` in `zend_jit_trace_link_to_root`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`). The byte the
     /// `ExitCtx`'s pointer names is loaded, and where it is not zero, or

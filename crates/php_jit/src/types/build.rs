@@ -2300,7 +2300,7 @@ impl<'a> Builder<'a> {
     /// after a guard does. The places an opline unwinds from are numbered
     /// apart, one per set of stores.
     fn number(&mut self, closes: Closes) -> Result<Numbered, Abort> {
-        let (order, looped) = self.order(closes);
+        let (order, ended) = self.order(closes);
         let mut exits = Exits::default();
         let interrupt_reuses = self.reserve_recv_exits(&mut exits)?;
         let mut unwinds: Vec<Unwind> = Vec::new();
@@ -2309,7 +2309,7 @@ impl<'a> Builder<'a> {
             exits: Vec::new(),
             unwinds: Vec::new(),
             guards: Vec::with_capacity(self.guards.len()),
-            end: looped,
+            end: ended,
         };
         for (_, source) in order {
             let draft = match source {
@@ -2494,15 +2494,15 @@ impl<'a> Builder<'a> {
             let stage = if opens { Stage::Opens } else { Stage::Leaves };
             order.push((Order::At(*op, stage), Source::Leave(at)));
         }
-        let mut looped = None;
+        let mut ended = None;
         match closes {
-            Closes::Tested(repeat) => order.push((Order::End, Source::Interrupt(repeat))),
-            Closes::Header(header) => looped = Some(End::Loop(header)),
+            Closes::ThroughExit(repeat) => order.push((Order::End, Source::Interrupt(repeat))),
+            Closes::NoExit(header) => ended = Some(End::Loop(header)),
             Closes::Leave => order.push((Order::End, Source::End)),
         }
         // Stable: within one place, in the order they were placed.
         order.sort_by_key(|(key, _)| *key);
-        (order, looped)
+        (order, ended)
     }
 
     /// The slot a guard holds a value of; none for a guard on no value.
@@ -2531,23 +2531,25 @@ impl<'a> Builder<'a> {
         let Some(repeat) = self.repeat else {
             return Closes::Leave;
         };
-        let interrupt = match repeat {
-            Repeat::Return => Interrupt::None,
-            Repeat::Loop | Repeat::Call => {
-                let stub = self.rec.start.grew().is_none()
-                    && self.uses_initial_ip()
-                    && (self.spec(&self.interrupt(), &HashMap::new()).stores).is_empty();
-                match self.at_header_opline().filter(|_| stub) {
-                    Some(at) => Interrupt::Stub(at),
-                    None => return Closes::Tested(repeat),
-                }
-            }
+        let closed = |interrupt| {
+            Closes::NoExit(LoopHeader {
+                at: self.header,
+                repeat,
+                interrupt,
+            })
         };
-        Closes::Header(LoopHeader {
-            at: self.header,
-            repeat,
-            interrupt,
-        })
+        let stubbed = || {
+            self.rec.start.grew().is_none()
+                && self.uses_initial_ip()
+                && (self.spec(&self.interrupt(), &HashMap::new()).stores).is_empty()
+        };
+        match repeat {
+            Repeat::Return => closed(Interrupt::None),
+            Repeat::Loop | Repeat::Call => match self.at_header_opline().filter(|_| stubbed()) {
+                Some(at) => closed(Interrupt::Stub(at)),
+                None => Closes::ThroughExit(repeat),
+            },
+        }
     }
 
     /// php's `zend_jit_trace_uses_initial_ip` over the trace's ops as
@@ -3320,10 +3322,10 @@ struct Numbered {
 enum Closes {
     /// A loop whose interrupt test leaves through an exit at its header,
     /// numbered after every exit of its body.
-    Tested(Repeat),
-    /// A loop whose header numbers no exit: its test takes php's stub, or
-    /// it takes no test.
-    Header(LoopHeader),
+    ThroughExit(Repeat),
+    /// A loop whose header numbers no exit, whole before the numbering:
+    /// its test takes php's stub, or it takes no test.
+    NoExit(LoopHeader),
     /// A trace that does not loop, through the exit it ends by.
     Leave,
 }
