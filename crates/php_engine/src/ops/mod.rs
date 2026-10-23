@@ -2250,26 +2250,7 @@ pub(crate) fn pow(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn shift_left(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    if let Some(value) = inline::binary_values(Binary::Shift(Shift::Left), left, right) {
-        return Ok(value);
-    }
-    if let Some(value) = object_operation(req, BinaryOp::ShiftLeft, left, right)? {
-        return Ok(value);
-    }
-    let (a, b) = longs(req, "<<", left, right)?;
-    if let Some(n) = inline::shifted(Shift::Left, a, b) {
-        return Ok(Value::int(n));
-    }
-    // A count of 64 or more, which the rule leaves here, and a negative
-    // one.
-    match u64::try_from(b) {
-        Ok(by) => Ok(Value::int(php_heap::shift_left(a, by))),
-        Err(_) => Err(throw(
-            req,
-            "ArithmeticError",
-            "Bit shift by negative number",
-        )),
-    }
+    shift(req, Shift::Left, left, right)
 }
 
 /// `shift_right_function` (`Zend/zend_operators.c:1981`):
@@ -2292,20 +2273,30 @@ pub(crate) fn shift_left(req: &mut Request, left: &Value, right: &Value) -> Resu
 ///   thrown in %s on line 2
 /// ```
 pub(crate) fn shift_right(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
-    if let Some(value) = inline::binary_values(Binary::Shift(Shift::Right), left, right) {
+    shift(req, Shift::Right, left, right)
+}
+
+/// [`shift_left`] and [`shift_right`], which differ only in the
+/// direction: the inline pair, a class's `do_operation`, then two longs,
+/// a count of 64 or more, which the rule leaves here, shifted by
+/// [`php_heap`]'s and a negative one php's `ArithmeticError`.
+fn shift(req: &mut Request, side: Shift, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    if let Some(value) = inline::binary_values(Binary::Shift(side), left, right) {
         return Ok(value);
     }
-    if let Some(value) = object_operation(req, BinaryOp::ShiftRight, left, right)? {
+    let (op, word, by_heap): (_, _, fn(i64, u64) -> i64) = match side {
+        Shift::Left => (BinaryOp::ShiftLeft, "<<", php_heap::shift_left),
+        Shift::Right => (BinaryOp::ShiftRight, ">>", php_heap::shift_right),
+    };
+    if let Some(value) = object_operation(req, op, left, right)? {
         return Ok(value);
     }
-    let (a, b) = longs(req, ">>", left, right)?;
-    if let Some(n) = inline::shifted(Shift::Right, a, b) {
+    let (a, b) = longs(req, word, left, right)?;
+    if let Some(n) = inline::shifted(side, a, b) {
         return Ok(Value::int(n));
     }
-    // A count of 64 or more, which the rule leaves here, and a negative
-    // one.
     match u64::try_from(b) {
-        Ok(by) => Ok(Value::int(php_heap::shift_right(a, by))),
+        Ok(by) => Ok(Value::int(by_heap(a, by))),
         Err(_) => Err(throw(
             req,
             "ArithmeticError",
@@ -3240,33 +3231,9 @@ fn compare_values(req: &mut Request, left: &Value, right: &Value) -> Result<Orde
         // answer and what `cast_object` to `_IS_BOOL` answers for an
         // object; then an object's handler, then an array, then both
         // sides as numbers.
-        (ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false), _) => {
-            if is_true(req, right)? {
-                Ordering::Less
-            } else {
-                Ordering::Equal
-            }
-        }
-        (ValueRef::Bool(true), _) => {
-            if is_true(req, right)? {
-                Ordering::Equal
-            } else {
-                Ordering::Greater
-            }
-        }
-        (_, ValueRef::Undef | ValueRef::Null | ValueRef::Bool(false)) => {
-            if is_true(req, left)? {
-                Ordering::Greater
-            } else {
-                Ordering::Equal
-            }
-        }
-        (_, ValueRef::Bool(true)) => {
-            if is_true(req, left)? {
-                Ordering::Equal
-            } else {
-                Ordering::Less
-            }
+        (ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_), _)
+        | (_, ValueRef::Undef | ValueRef::Null | ValueRef::Bool(_)) => {
+            is_true(req, left)?.cmp(&is_true(req, right)?)
         }
         // `Z_OBJ_HANDLER_P(object, compare)(op1, op2)`, the object side's
         // table; `None` is `ZEND_UNCOMPARABLE`, which is `1`.
@@ -3694,6 +3661,12 @@ fn compare_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result
     Ok(decided.unwrap_or(Ordering::Equal))
 }
 
+/// `n` stepped by one, up for [`Arith::Add`] and down for
+/// [`Arith::Sub`], as `++` and `--` step a number.
+fn stepped(op: Arith, n: Number) -> Value {
+    inline::arith_numbers(op, n, Number::Long(1))
+}
+
 /// `increment_function` (`Z/Zend/zend_operators.c:2712`): the value
 /// `++` leaves in the variable. A long is one more, and the double past
 /// the long's edge where that overflowed (`fast_long_increment_function`);
@@ -3777,16 +3750,8 @@ fn compare_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result
 pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     let value = &value.deref();
     match value.as_ref() {
-        ValueRef::Int(n) => Ok(inline::arith_numbers(
-            Arith::Add,
-            Number::Long(n),
-            Number::Long(1),
-        )),
-        ValueRef::Float(f) => Ok(inline::arith_numbers(
-            Arith::Add,
-            Number::Double(f),
-            Number::Long(1),
-        )),
+        ValueRef::Int(n) => Ok(stepped(Arith::Add, Number::Long(n))),
+        ValueRef::Float(f) => Ok(stepped(Arith::Add, Number::Double(f))),
         // php's `IS_NULL` arm; an uninitialised zval reads as null here.
         ValueRef::Undef | ValueRef::Null => Ok(Value::int(1)),
         ValueRef::Str(s) => {
@@ -3794,7 +3759,7 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
             // `allow_errors` off: a string with anything past its number
             // is not a number here.
             match numeric_prefix(s.as_bytes()) {
-                Some((n, false)) => Ok(inline::arith_numbers(Arith::Add, n, Number::Long(1))),
+                Some((n, false)) => Ok(stepped(Arith::Add, n)),
                 _ => Ok(Value::string(increment_string(req, s.as_bytes())?)),
             }
         }
@@ -3882,16 +3847,8 @@ pub(crate) fn increment(req: &mut Request, value: &Value) -> Result<Value, Throw
 pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Thrown> {
     let value = &value.deref();
     match value.as_ref() {
-        ValueRef::Int(n) => Ok(inline::arith_numbers(
-            Arith::Sub,
-            Number::Long(n),
-            Number::Long(1),
-        )),
-        ValueRef::Float(f) => Ok(inline::arith_numbers(
-            Arith::Sub,
-            Number::Double(f),
-            Number::Long(1),
-        )),
+        ValueRef::Int(n) => Ok(stepped(Arith::Sub, Number::Long(n))),
+        ValueRef::Float(f) => Ok(stepped(Arith::Sub, Number::Double(f))),
         ValueRef::Str(s) if s.as_bytes().is_empty() => {
             deprecated(
                 req,
@@ -3902,7 +3859,7 @@ pub(crate) fn decrement(req: &mut Request, value: &Value) -> Result<Value, Throw
         }
         ValueRef::Str(s) => {
             if let Some((n, false)) = numeric_prefix(s.as_bytes()) {
-                return Ok(inline::arith_numbers(Arith::Sub, n, Number::Long(1)));
+                return Ok(stepped(Arith::Sub, n));
             }
             deprecated(
                 req,
@@ -5499,15 +5456,11 @@ pub(crate) fn arg_long_weak(req: &mut Request, value: &Value) -> Option<i64> {
 /// }
 /// ```
 pub(crate) fn double_to_long(req: &mut Request, d: f64) -> i64 {
-    let l = dval_to_lval(req, d);
-    if !long_compatible(d, l) && fits_long(d) {
-        let text = rendered(d);
-        deprecated(
-            req,
-            &format!("Implicit conversion from float {text} to int loses precision"),
-        );
+    if fits_long(d) {
+        double_to_long_strict(req, d)
+    } else {
+        dval_to_lval(req, d)
     }
-    l
 }
 
 /// `zval_get_long_func` with `is_strict` on over a double

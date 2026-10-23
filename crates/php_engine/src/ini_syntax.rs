@@ -207,49 +207,25 @@ impl Tok {
 
 /// `LABEL_CHAR`: `[^=\n\r\t;&|^$~(){}!"[\]\x00]`.
 fn label_char(c: u8) -> bool {
-    !matches!(
-        c,
-        b'=' | b'\n'
-            | b'\r'
-            | b'\t'
-            | b';'
-            | b'&'
-            | b'|'
-            | b'^'
-            | b'$'
-            | b'~'
-            | b'('
-            | b')'
-            | b'{'
-            | b'}'
-            | b'!'
-            | b'"'
-            | b'['
-            | b']'
-            | 0
-    )
+    !b"=\n\r\t;&|^$~(){}!\"[]\0".contains(&c)
 }
 
 /// `TOKENS`: `[:,.[\]"'()&|^+-/*=%$!~<>?@{}]`, `+-/` the range from
 /// `+` to `/`.
 fn token_char(c: u8) -> bool {
-    matches!(
-        c,
-        b':' | b',' | b'.' | b'[' | b']' | b'"' | b'\'' | b'(' | b')' | b'&' | b'|' | b'^' | b'+'
-            ..=b'/'
-                | b'*'
-                | b'='
-                | b'%'
-                | b'$'
-                | b'!'
-                | b'~'
-                | b'<'
-                | b'>'
-                | b'?'
-                | b'@'
-                | b'{'
-                | b'}'
-    )
+    matches!(c, b'+'..=b'/') || b":[]\"'()&|^*=%$!~<>?@{}".contains(&c)
+}
+
+/// The value of a step that answers `Result<Result<T, Syntax>, _>`:
+/// the host's error raised with `?`, and a syntax error the caller's
+/// answer, as the grammar's `YYERROR` unwinds every rule.
+macro_rules! syntax {
+    ($step:expr) => {
+        match $step? {
+            Ok(v) => v,
+            Err(e) => return Ok(Err(e)),
+        }
+    };
 }
 
 /// The scanner over one buffer, read past its end as NUL padding.
@@ -550,31 +526,7 @@ impl Scanner<'_> {
                 }
                 // 23: {VALUE_CHARS}+.
                 offer(
-                    self.units(
-                        p,
-                        |c| {
-                            !matches!(
-                                c,
-                                b'$' | b'='
-                                    | b' '
-                                    | b'\t'
-                                    | b'\n'
-                                    | b'\r'
-                                    | b';'
-                                    | b'&'
-                                    | b'|'
-                                    | b'^'
-                                    | b'~'
-                                    | b'('
-                                    | b')'
-                                    | b'!'
-                                    | b'"'
-                                    | b'\''
-                                    | 0
-                            )
-                        },
-                        false,
-                    ),
+                    self.units(p, |c| !b"$= \t\n\r;&|^~()!\"'\0".contains(&c), false),
                     23,
                 );
             }
@@ -1108,11 +1060,8 @@ impl<H: Host> Parser<'_, '_, H> {
             }
             Tok::Fallback => {
                 self.advance()?;
-                let fallback = match self.var_string_list(false)? {
-                    Ok(Some(v)) => v,
-                    Ok(None) => Val::string(b""),
-                    Err(e) => return Ok(Err(e)),
-                };
+                let fallback =
+                    syntax!(self.var_string_list(false)).unwrap_or_else(|| Val::string(b""));
                 if self.tok != Tok::Char(b'}') {
                     return Ok(Err(self.error(&[Tok::Char(b'}')])));
                 }
@@ -1132,10 +1081,10 @@ impl<H: Host> Parser<'_, '_, H> {
         let mut acc = Val::string(b"");
         loop {
             match self.tok {
-                Tok::DollarCurly => match self.cfg_var_ref()? {
-                    Ok(v) => acc = self.add(&acc, &v)?,
-                    Err(e) => return Ok(Err(e)),
-                },
+                Tok::DollarCurly => {
+                    let v = syntax!(self.cfg_var_ref());
+                    acc = self.add(&acc, &v)?;
+                }
                 Tok::QuotedString => {
                     let v = self.take();
                     self.advance()?;
@@ -1163,14 +1112,8 @@ impl<H: Host> Parser<'_, '_, H> {
         let mut acc: Option<Val> = None;
         loop {
             let item = match self.tok {
-                Tok::DollarCurly => match self.cfg_var_ref()? {
-                    Ok(v) => v,
-                    Err(e) => return Ok(Err(e)),
-                },
-                Tok::Char(b'"') => match self.encapsed()? {
-                    Ok(v) => v,
-                    Err(e) => return Ok(Err(e)),
-                },
+                Tok::DollarCurly => syntax!(self.cfg_var_ref()),
+                Tok::Char(b'"') => syntax!(self.encapsed()),
                 Tok::Constant | Tok::Raw | Tok::Number | Tok::Str | Tok::Whitespace => {
                     let tok = self.tok;
                     let mut v = self.take();
@@ -1267,10 +1210,7 @@ impl<H: Host> Parser<'_, '_, H> {
             }
             Tok::Char(b'(') => {
                 self.advance()?;
-                let inner = match self.expr()? {
-                    Ok(v) => v,
-                    Err(e) => return Ok(Err(e)),
-                };
+                let inner = syntax!(self.expr());
                 if self.tok != Tok::Char(b')') {
                     return Ok(Err(self.error(&[
                         Tok::Char(b'^'),
@@ -1293,16 +1233,10 @@ impl<H: Host> Parser<'_, '_, H> {
     /// `expr`: unary-level operands joined left to right by `|`, `&`
     /// and `^`, which share one precedence.
     fn expr(&mut self) -> Result<Result<Val, Syntax>, H::Error> {
-        let mut acc = match self.unary()? {
-            Ok(v) => v,
-            Err(e) => return Ok(Err(e)),
-        };
+        let mut acc = syntax!(self.unary());
         while let Tok::Char(op @ (b'|' | b'&' | b'^')) = self.tok {
             self.advance()?;
-            let rhs = match self.unary()? {
-                Ok(v) => v,
-                Err(e) => return Ok(Err(e)),
-            };
+            let rhs = syntax!(self.unary());
             acc = self.do_op(op, &acc, Some(&rhs))?;
         }
         Ok(Ok(acc))
@@ -1359,11 +1293,8 @@ impl<H: Host> Parser<'_, '_, H> {
                 Tok::EndOfLine => self.advance()?,
                 Tok::Section => {
                     self.advance()?;
-                    let name = match self.var_string_list(true)? {
-                        Ok(Some(v)) => v,
-                        Ok(None) => Val::string(b""),
-                        Err(e) => return Ok(Err(e)),
-                    };
+                    let name =
+                        syntax!(self.var_string_list(true)).unwrap_or_else(|| Val::string(b""));
                     if let Err(e) = self.expect(Tok::Char(b']'))? {
                         self.free(&name);
                         return Ok(Err(e));
