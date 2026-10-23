@@ -14,10 +14,12 @@ use std::sync::Arc;
 use php_compile::SourceKind;
 
 use super::Code;
+use super::include::unreadable;
 use super::{AccelServed, Request, Unresolved, is_cacheable_stream_path, is_wrapper_url};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
+use crate::c_number::c_str;
 use crate::engine::{CompileHeap, ForRequest};
 use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
@@ -101,8 +103,8 @@ pub struct CacheStatus {
     /// The names the files are held under, each file's full path and
     /// the paths as written beside it, `ZCSG(hash).num_entries`.
     pub keys: u64,
-    /// The files held, in the order the cache took them, the preload's
-    /// pseudo-file and its saved scripts first.
+    /// The files held, in `accelerator_get_scripts`' order, bucket by
+    /// bucket of opcache's hash ([`crate::unit_cache::UnitCache::status`]).
     pub files: Vec<CachedFile>,
     /// What `opcache.preload` preloaded, `ZCSG(preload_script)`; none
     /// where nothing was.
@@ -184,8 +186,12 @@ pub struct CacheBudget {
     /// must be wasted for a cache that runs out to restart.
     pub max_wasted: u32,
     /// `ZCSG(hash).max_num_entries`: how many names files are held
-    /// under.
+    /// under, and the buckets they are held in.
     pub keys: u64,
+    /// `ZCG(root_hash)`, which every name's hash is xored with before its
+    /// bucket is taken: the inode of `/` where `opcache.validate_root`
+    /// asks for it, and zero otherwise.
+    pub root: u64,
     /// Whether the tier started in the segment (`zend_jit_startup`, in
     /// `accel_post_startup` once the segment is laid down), which takes
     /// the `zend_get_op_array_extension_handle` every op array compiled
@@ -271,14 +277,12 @@ impl Request {
     }
 
     /// `persistent_compile_file`'s first lookup, by the path as written:
-    /// the file held under `written`'s name and the validation the answer
-    /// for it gives, a hit [`Request::held_answer`] serves without the
-    /// path resolved or the file stat'ed, where the answer looks by the
-    /// path as written and nothing is due, or a stream's path, which
-    /// resolves to none, stat'ed as written; none where a hit would need
-    /// more, which the lookup by the full path gives. Nothing is counted
-    /// until it is served, so an `include_once` of a file already
-    /// included is no hit, as `persistent_zend_resolve_path` counts none:
+    /// the file held under `written`'s name, where the answer looks by the
+    /// path as written, and the validation the answer for it gives, which
+    /// [`Request::held_answer`] holds it to where it is served. Nothing is
+    /// validated or counted until then, so an `include_once` of a file
+    /// already included is no hit, as `persistent_zend_resolve_path`
+    /// counts none:
     ///
     /// ```php
     /// $f = __DIR__ . '/once.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
@@ -322,16 +326,85 @@ impl Request {
         else {
             return None;
         };
-        let now = self.environment().request_time();
-        (held.trusted(validation, now)
-            || is_wrapper_url(written) && held.validated(validation, now, self))
-        .then_some((held, validation))
+        // The cache bypassed, `EveryHit`, looks nothing up by the key.
+        (validation != Validation::EveryHit).then_some((held, validation))
     }
 
-    /// What `held`, found under `validation`, answers this request as a
-    /// hit, counted, as [`crate::unit_cache::served`] serves one: the unit,
-    /// or the refusal with what it had declared made the request's own.
-    pub(crate) fn held_answer(&mut self, held: &Held, validation: Validation) -> Cached {
+    /// `validate_timestamp_and_record` over `held`, found by the key the
+    /// path `written` makes and handed over as `handle` holds it: fresh
+    /// where nothing is due, and else as `do_validate_timestamps` finds it
+    /// (`Z/ext/opcache/ZendAccelerator.c:1117-1187`), the path as written
+    /// resolved again where `handle` has no opened path, without the
+    /// file opened, so nothing guards it, a stream's to none
+    /// (`php_resolve_path`), and the file stat'ed where the path is
+    /// `held`'s. What a wrapper's `url_stat` throws on the way is thrown.
+    fn held_fresh(
+        &mut self,
+        held: &Held,
+        validation: Validation,
+        written: &[u8],
+        handle: HandlePath,
+    ) -> Result<bool, Thrown> {
+        let now = self.environment().request_time();
+        if held.trusted(validation, now) {
+            return Ok(true);
+        }
+        if matches!(handle, HandlePath::Filename | HandlePath::Kept) && !is_wrapper_url(written) {
+            match self.code_mut().resolve_path(written) {
+                Ok(path) => {
+                    self.revalidated_path(written, &path);
+                    if path != held.path {
+                        return Ok(false);
+                    }
+                }
+                Err(Unresolved::Missing(_)) => {}
+                Err(Unresolved::Threw(thrown)) => return Err(thrown),
+            }
+        }
+        Ok(held.validated(validation, now, self))
+    }
+
+    /// What `held`, found by the key `written` makes under `validation`
+    /// and handed over as `handle`, answers this request, as
+    /// `persistent_compile_file` answers a hit by its key: held to
+    /// [`Request::held_fresh`] and, fresh, a hit, counted, as
+    /// [`crate::unit_cache::served`] serves one, the unit or the refusal
+    /// with what it had declared made the request's own; none for a
+    /// stale one, discarded as `zend_accel_lock_discard_script` discards
+    /// it, which the miss after it opens and compiles.
+    ///
+    /// A hit whose stat is due opens nothing, so the `open_basedir` guard
+    /// is asked only of a file found changed:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/due.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// $g = realpath(__DIR__) . '/due2.inc'; file_put_contents($g, '<?php return 1;'); touch($g, time() - 60);
+    /// var_dump(include $f, include $g, opcache_compile_file($f));
+    /// file_put_contents($g, '<?php return 2;'); touch($g, time() - 30);
+    /// ini_set('open_basedir', '/nonexistent');
+    /// var_dump(include $f, opcache_compile_file($f), @include $g);
+    /// var_dump(opcache_get_status()['scripts'][$g]['timestamp']);
+    /// ```
+    /// ```expect regime=jit-off
+    /// int(1)
+    /// int(1)
+    /// bool(true)
+    /// int(1)
+    /// bool(true)
+    /// bool(false)
+    /// int(0)
+    /// ```
+    pub(crate) fn held_answer(
+        &mut self,
+        held: &Held,
+        validation: Validation,
+        written: &[u8],
+        handle: HandlePath,
+    ) -> Result<Cached, Thrown> {
+        if !self.held_fresh(held, validation, written, handle)? {
+            self.shared.units.discard_held(&self.arena.files, held);
+            return Ok(None);
+        }
         let now = self.environment().request_time();
         self.arena.files.hit(held, validation, now);
         let answer = Some(match &held.unit {
@@ -342,7 +415,7 @@ impl Request {
         });
         let early = Some(Arc::clone(&held.early));
         self.note_load(&answer, validation, Filed::Hit, early);
-        answer
+        Ok(answer)
     }
 
     /// `persistent_zend_resolve_path` under `include_once` and
@@ -545,13 +618,6 @@ impl Request {
             ),
         };
         let now = self.environment().request_time();
-        if memory
-            && matches!(handle, HandlePath::Filename | HandlePath::Kept)
-            && let Some(held) = shared.units.find(&self.arena.files, &UnitKey::full(&full))
-            && !held.trusted(validation, now)
-        {
-            self.revalidated_path(written.unwrap_or(path), &full);
-        }
         let resolved = lookup == Lookup::Resolved;
         let written = (written.filter(|_| lookup == Lookup::AsWritten))
             .and_then(|written| self.written_key(written));
@@ -930,10 +996,8 @@ impl UnitCache<'_> {
 
     /// `filename_is_in_cache`: whether a unit is held under the name
     /// `written` is filed under, as an include files it, and is fresh as
-    /// the answer for it validates a hit, which stats nothing where no
-    /// hit is due; one that is due is held to the file `written`
-    /// resolves to as `do_validate_timestamps` holds it, which throws
-    /// what a wrapper's `url_stat` throws. With `on_disk`, the question is
+    /// an include's hit by the key is ([`Request::held_fresh`]), a stale
+    /// one discarded by nothing. With `on_disk`, the question is
     /// the second level's, `filename_is_in_file_cache`: whether that file
     /// cache keeps a unit of the file `written` resolves to that it would
     /// read back, its `mtime` held to the one it was kept at where the
@@ -956,16 +1020,7 @@ impl UnitCache<'_> {
             Admission::KeptOut | Admission::OnDisk { .. } => return Ok(false),
             Admission::Held { validation, .. } => validation,
         };
-        let now = req.environment().request_time();
-        if held.trusted(validation, now) {
-            return Ok(true);
-        }
-        match req.code_mut().resolve_path(written) {
-            Ok(path) if path != held.path => return Ok(false),
-            Ok(_) | Err(Unresolved::Missing(_)) => {}
-            Err(Unresolved::Threw(thrown)) => return Err(thrown),
-        }
-        Ok(held.validated(validation, now, req))
+        req.held_fresh(&held, validation, written, HandlePath::Filename)
     }
 
     /// `zend_accel_invalidate`: the copies `how` names of the file
@@ -1024,9 +1079,11 @@ impl UnitCache<'_> {
     }
 
     /// `opcache_compile_file`'s `persistent_compile_file` without the
-    /// execution: the file `written` names resolved as an `include`
-    /// resolves it and held to the `open_basedir` guard as its open is,
-    /// failing with the include's warnings under the native's name,
+    /// execution: the file `written` names served by the key as an
+    /// `include` serves it ([`Request::held_answer`]), opened by nothing,
+    /// and else resolved as an `include` resolves it and held to the
+    /// `open_basedir` guard as its open is, failing with the include's
+    /// warnings under the native's name,
     /// compiled into the cache, and its functions and the
     /// classes it can bind declared in the request, which leaves
     /// `get_included_files()` as it was. `false` where nothing opens; a
@@ -1034,60 +1091,41 @@ impl UnitCache<'_> {
     /// after the parse ends the request.
     pub fn compile(&mut self, written: &[u8]) -> Result<bool, Thrown> {
         let req = &mut *self.req;
-        let (resolved, held) = if written.contains(&0) {
-            let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
-            (Err(Unresolved::Missing(missing)), None)
-        } else {
-            match req.held_as_written(written) {
-                Some((held, how)) => (Ok(held.path.clone()), req.held_answer(&held, how)),
-                None => (req.code_mut().resolve_path(written), None),
-            }
+        let nul = written.contains(&0);
+        let served = match (!nul).then(|| req.held_as_written(written)).flatten() {
+            Some((held, how)) => (req.held_answer(&held, how, written, HandlePath::Filename)?)
+                .map(|unit| (unit, held.path.clone())),
+            None => None,
         };
         // The plain files opener's guard, which warns under the native's
-        // name: of the resolved path, or the held unit's, and of the path
-        // as written where none resolved.
-        let resolved = match resolved {
-            Ok(path) => match req.environment_mut().check_open_basedir(&path, true) {
-                Ok(_) => Ok(path),
-                Err(refused) => {
-                    req.open_stream_failed(IncludeKind::Include, &path, &refused.into());
-                    return req
-                        .failed_opening(IncludeKind::Include, written)
-                        .map(|_| false);
+        // name: of the resolved path, and of the path as written where
+        // none resolved; the stream's warning names the same.
+        let opened = match served {
+            Some(served) => Ok(served),
+            None if nul => Err((written.to_vec(), unreadable(c_str(written)))),
+            None => match req.code_mut().resolve_path(written) {
+                Ok(path) => match req.environment_mut().check_open_basedir(&path, true) {
+                    Ok(_) => match req.cached_file(&path, Some(written), HandlePath::Filename) {
+                        Some(unit) => Ok((unit, path)),
+                        None => Err((written.to_vec(), unreadable(&path))),
+                    },
+                    Err(refused) => Err((path, refused.into())),
+                },
+                Err(Unresolved::Missing(reason)) => {
+                    let refused = req.environment_mut().check_open_basedir(written, true);
+                    Err((written.to_vec(), refused.err().map_or(reason, Into::into)))
                 }
+                Err(Unresolved::Threw(thrown)) => return Err(thrown),
             },
-            Err(Unresolved::Missing(reason)) if !written.contains(&0) => {
-                match req.environment_mut().check_open_basedir(written, true) {
-                    Ok(_) => Err(Unresolved::Missing(reason)),
-                    Err(refused) => Err(Unresolved::Missing(refused.into())),
-                }
-            }
-            other => other,
         };
-        let compiled = resolved.map(|path| {
-            let unit = held.or_else(|| req.cached_file(&path, Some(written), HandlePath::Filename));
-            (unit, path)
-        });
-        let unit = match compiled {
-            Ok((Some(Ok(unit)), _)) => unit,
-            Ok((Some(Err(refused)), path)) => {
+        let unit = match opened {
+            Ok((Ok(unit), _)) => unit,
+            Ok((Err(refused), path)) => {
                 return Err(req.refused_include(&refused, &path, php_compile::SourceKind::File));
             }
-            Ok((None, _)) => {
-                let reason = std::io::Error::from(std::io::ErrorKind::NotFound);
-                req.open_stream_failed(IncludeKind::Include, written, &reason);
-                return req
-                    .failed_opening(IncludeKind::Include, written)
-                    .map(|_| false);
-            }
-            Err(Unresolved::Threw(thrown)) => return Err(thrown),
-            Err(Unresolved::Missing(reason)) => {
-                if !written.contains(&0) {
-                    req.open_stream_failed(IncludeKind::Include, written, &reason);
-                }
-                return req
-                    .failed_opening(IncludeKind::Include, written)
-                    .map(|_| false);
+            Err((named, reason)) => {
+                let failed = req.not_opened(IncludeKind::Include, &named, &reason, written);
+                return failed.map(|_| false);
             }
         };
         if !crate::engine::note_compiled(req, &unit, php_compile::SourceKind::File) {
