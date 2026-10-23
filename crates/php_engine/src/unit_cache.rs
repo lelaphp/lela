@@ -177,14 +177,15 @@ impl Stamp {
     }
 }
 
-/// One file the cache holds, php's `zend_persistent_script`: what it
-/// compiled to, the path it was compiled from and the stamp it was
-/// compiled at, and its `dynamic_members`, the hits since it was cached,
-/// when it was last served and when it is next validated. The unit is
+/// One file the cache holds, php's `zend_persistent_script`: the unit
+/// it compiled to, never a refusal, which php persists none of, the path
+/// it was compiled from and the stamp it was compiled at, and its
+/// `dynamic_members`, the hits since it was cached, when it was last
+/// served and when it is next validated. The unit is
 /// never changed; the members are atomics a racing request may write
 /// over, which costs at most one more stat.
 pub(crate) struct Held {
-    pub(crate) unit: Result<PublishedUnit, CompileError>,
+    pub(crate) unit: PublishedUnit,
     /// Its early-bound classes, published as it was held, which a
     /// request loading the unit declares by their numbers.
     pub(crate) early: EarlyBound,
@@ -212,10 +213,10 @@ pub(crate) struct Held {
 }
 
 /// What a file read from disk came to, for [`UnitCache::hold`]: the
-/// unit or the compiler's refusal, its early-bound classes published,
-/// the bytes it was read from and its stamp as observed.
+/// unit, its early-bound classes published, the bytes it was read from
+/// and its stamp as observed.
 struct Read {
-    unit: Result<PublishedUnit, CompileError>,
+    unit: PublishedUnit,
     early: EarlyBound,
     size: u64,
     observed: Option<Stamp>,
@@ -239,7 +240,7 @@ impl Held {
     /// before, `last_used` zero.
     pub(crate) fn preloaded(unit: PublishedUnit, path: Vec<u8>, size: u64, order: u64) -> Held {
         Held {
-            unit: Ok(unit),
+            unit,
             early: Arc::new([]),
             path,
             stamp: None,
@@ -484,11 +485,13 @@ pub(crate) enum Levels<'a> {
 /// file's own where one did, the path as written it is filed under too
 /// where given, how a hit is validated at the request time `now`, how
 /// new a file is kept, and where, and what opcache's optimizer makes of
-/// what it compiles.
+/// what it compiles; `opened` where the `zend_file_handle` holds the
+/// file's opened path, by which the file cache reads it.
 pub(crate) struct Asked<'a> {
     pub(crate) path: &'a [u8],
     pub(crate) source: Option<&'a [u8]>,
     pub(crate) written: Option<UnitKey>,
+    pub(crate) opened: bool,
     pub(crate) validation: Validation,
     pub(crate) protection: u32,
     pub(crate) now: i64,
@@ -713,8 +716,8 @@ pub(crate) fn hit_keys(validation: Validation, unit: &Unit) -> u32 {
 /// The unit `held` holds, answered as `filed` with its early-bound
 /// classes.
 fn answered_by(held: &Held, filed: Filed) -> Answered {
-    let unit = held.unit.clone().map(Compiled::Published);
-    (Some(unit), filed, Some(Arc::clone(&held.early)))
+    let unit = Compiled::Published(held.unit.clone());
+    (Some(Ok(unit)), filed, Some(Arc::clone(&held.early)))
 }
 
 /// A unit held nowhere, answered as `filed`.
@@ -747,6 +750,11 @@ pub(crate) enum Filed {
     Hit,
     /// Compiled and held, `cache_script_in_shared_memory`.
     Held,
+    /// Compiled, and answered by the copy held under its full path
+    /// already, which `cache_script_in_shared_memory` prefers to what it
+    /// compiled (`Z/ext/opcache/ZendAccelerator.c:1588-1610`): neither a
+    /// hit nor held anew.
+    Existing,
     /// Held nowhere: read back from the file cache, or not read.
     Unheld,
     /// Compiled and kept in the file cache alone: under
@@ -758,6 +766,13 @@ pub(crate) enum Filed {
     /// Compiled and held nowhere, by `accelerator_orig_compile_file` as
     /// php without opcache compiles, whose classes bind early in place.
     Compiled,
+}
+
+/// What [`UnitCache::hold`] did with a compile: held it, or found the
+/// path's copy held already, which is kept.
+enum Holding {
+    Built(Arc<Held>),
+    Found(Arc<Held>),
 }
 
 /// `ZCSG(preload_script)`'s name in the cache, the one pseudo-file the
@@ -848,24 +863,25 @@ impl UnitCache {
     }
 
     /// `zend_accel_add_key`: `key` filed beside the names `held` is held
-    /// under in `files`.
+    /// under in `files`, where it names nothing yet, a discarded copy
+    /// being something.
     pub(crate) fn add_key(&self, files: &Files, key: UnitKey, held: &Arc<Held>) {
-        if files
-            .held
-            .get(&key)
-            .is_some_and(|found| Arc::ptr_eq(&found, held))
-        {
-            return;
+        if files.held.get(&key).is_none() {
+            self.update_key(files, key, held);
         }
-        if self.hash_full(files) {
-            return;
+    }
+
+    /// `zend_accel_hash_update` of `key` to `held`'s entry: in place of
+    /// what it names, or filed anew where the names are not full.
+    fn update_key(&self, files: &Files, key: UnitKey, held: &Arc<Held>) {
+        match files.held.get(&key) {
+            Some(found) if Arc::ptr_eq(&found, held) => return,
+            None if self.hash_full(files) => return,
+            _ => {}
         }
         // `accel_new_interned_key`: the name as written is one of the
-        // buffer's strings from here, a unit's alone, as php persists
-        // no refusal.
-        if held.unit.is_ok() {
-            php_heap::Intern::intern(&mut *self.interned.strings(), &key.0).ok();
-        }
+        // buffer's strings from here.
+        php_heap::Intern::intern(&mut *self.interned.strings(), &key.0).ok();
         files.held.alias(key, held);
     }
 
@@ -982,6 +998,7 @@ impl UnitCache {
     /// `compile` and `publish` are handed `caller`, the request the file
     /// is compiled and its classes published for, or nothing.
     #[allow(clippy::too_many_arguments)] // the table, the question, the caller and the four steps, each one fact
+    #[allow(clippy::too_many_lines)] // `persistent_compile_file` and its two levels, in php's order
     pub(crate) fn file<A: Stat>(
         &self,
         caller: &mut A,
@@ -996,6 +1013,7 @@ impl UnitCache {
             path,
             source: handed,
             written,
+            opened,
             validation,
             protection,
             now,
@@ -1007,7 +1025,15 @@ impl UnitCache {
             Levels::Both(disk) => (true, Some(disk)),
             Levels::Disk(disk) => (false, Some(disk)),
         };
+        // A key that names a discarded copy is a miss that looks no full
+        // path up, and a handle holding the path alone leaves no opened
+        // path for the file cache to read the file by, as
+        // `do_validate_timestamps` gives its resolved path back
+        // (`Z/ext/opcache/ZendAccelerator.c:1157-1160`, `zend_file_cache.c:1901`).
+        let keyed = (written.as_ref())
+            .is_some_and(|key| files.held.get(key).is_some_and(|held| held.discarded()));
         if memory
+            && !keyed
             && let Some(hit) = self.held_hit(caller, files, path, written.as_ref(), validation, now)
         {
             return answered_by(&hit, Filed::Hit);
@@ -1018,7 +1044,7 @@ impl UnitCache {
         // The second level, `zend_file_cache_script_load`: read back
         // where it keeps the file at the `mtime` it has now, where
         // timestamps are validated.
-        if let Some(disk) = &disk
+        if let Some(disk) = disk.as_ref().filter(|_| opened || !keyed)
             && (!validated || observed.is_some())
             && let Some(kept) = disk.load(path, observed.filter(|_| validated).map(Stamp::seconds))
             && let Some(unit) = decode(&kept.body)
@@ -1037,12 +1063,13 @@ impl UnitCache {
             let unit = share(unit);
             let early = publish(caller, &unit);
             let read = Read {
-                unit: Ok(unit),
+                unit,
                 early,
                 size: kept.size,
                 observed,
             };
-            let held = self.hold(files, path, validation, now, read);
+            let (Holding::Built(held) | Holding::Found(held)) =
+                self.hold(files, path, validation, now, read);
             files.hit(&held, validation, now);
             return answered_by(&held, Filed::Hit);
         }
@@ -1061,35 +1088,96 @@ impl UnitCache {
         if unheld || answers == Answers::Asker || named_by_request(validation, &unit) {
             return alone(unit, Filed::Compiled);
         }
+        // php persists no refusal, so its corrupted copy stays filed.
+        let Ok(unit) = unit else {
+            return alone(unit, Filed::Compiled);
+        };
         let optimizer = optimizer.on_miss(validation, disk.is_some() || !files.restart_pending());
-        let unit = unit.map(|unit| optimizer.optimized(unit));
-        if let (Some(disk), Ok(compiled)) = (&disk, &unit)
-            && let Some(body) = wire::encode(compiled)
+        let unit = optimizer.optimized(unit);
+        // `cache_script_in_shared_memory` looks for the path's copy before
+        // it asks for room or writes the file cache.
+        if memory
+            && !files.restart_pending()
+            && let Some(existing) = self.find(files, &UnitKey::full(path))
+        {
+            return self.existing(files, &existing, written, validation, observed, now);
+        }
+        if let Some(disk) = &disk
+            && let Some(body) = wire::encode(&unit)
         {
             let stamp = observed.filter(|_| validated).map_or(0, Stamp::seconds);
             disk.store(path, stamp, size, &body);
         }
         if !memory || files.restart_pending() || !self.room_for(files, size) {
-            return alone(unit, disk.map_or(Filed::Compiled, |_| Filed::Kept));
+            return alone(Ok(unit), disk.map_or(Filed::Compiled, |_| Filed::Kept));
         }
-        let unit = unit.map(share);
-        let early = match &unit {
-            Ok(compiled) => publish(caller, compiled),
-            Err(_) => Arc::new([]),
-        };
+        let unit = share(unit);
+        let early = publish(caller, &unit);
         let read = Read {
             unit,
             early,
             size,
             observed,
         };
-        let held = self.hold(files, path, validation, now, read);
+        let held = match self.hold(files, path, validation, now, read) {
+            Holding::Built(held) => held,
+            Holding::Found(existing) => {
+                return self.existing(files, &existing, written, validation, observed, now);
+            }
+        };
         // Not a `phar://` name, which may hold an alias the archive
         // keeps for the request alone (`ZendAccelerator.c:1669-1672`).
         if let Some(written) = written.filter(|key| !key.0.starts_with(b"phar://")) {
-            self.add_key(files, written, &held);
+            self.update_key(files, written, &held);
         }
         answered_by(&held, Filed::Held)
+    }
+
+    /// `cache_script_in_shared_memory`'s `existing_persistent_script`
+    /// (`Z/ext/opcache/ZendAccelerator.c:1588-1610`): `held`, the copy
+    /// the path's compile found held already, a preloaded one among them,
+    /// served at `now` in place of what was compiled, and filed under
+    /// `written` where that names nothing and `validation` reads no stamp
+    /// or the one `observed` as the compile's. It is looked for before
+    /// the cache is asked for room, so a key retargeted at a held file
+    /// leaves a cache filled to its last name as full as it was. Served by
+    /// the binary, since the child is `PHP_BINARY`:
+    ///
+    /// ```php
+    /// $d = realpath(sys_get_temp_dir()) . '/full' . getmypid(); @mkdir("$d/x", 0777, true); @mkdir("$d/y"); @mkdir("$d/n");
+    /// foreach (['x', 'y'] as $t) { file_put_contents("$d/$t/a.inc", "<?php return '$t';"); touch("$d/$t/a.inc", time() - 60); }
+    /// for ($i = 0; $i < 300; $i++) { file_put_contents("$d/n/$i.inc", '<?php return 0;'); touch("$d/n/$i.inc", time() - 60); }
+    /// symlink("$d/x", "$d/to");
+    /// $code = '$d = $argv[1]; $s = fn () => opcache_get_status(false); echo include "$d/to/a.inc", include "$d/y/a.inc";
+    /// for ($i = 0; $s()["opcache_statistics"]["num_cached_keys"] < $s()["opcache_statistics"]["max_cached_keys"]; $i++) include "$d/n/$i.inc";
+    /// var_dump($s()["cache_full"]); unlink("$d/to"); symlink("$d/y", "$d/to"); echo include "$d/to/a.inc", "\n"; var_dump($s()["cache_full"], $s()["restart_pending"]);';
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.revalidate_freq=0', '-d', 'opcache.max_accelerated_files=200', '-r', $code, $d], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off process
+    /// xybool(false)
+    /// y
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    fn existing(
+        &self,
+        files: &Files,
+        held: &Arc<Held>,
+        written: Option<UnitKey>,
+        validation: Validation,
+        observed: Option<Stamp>,
+        now: i64,
+    ) -> Answered {
+        held.last_used.store(now, Ordering::Relaxed);
+        if let Some(written) = written
+            && (validation == Validation::Never
+                || held.stamp.map(Stamp::seconds) == observed.map(Stamp::seconds))
+        {
+            self.add_key(files, written, held);
+        }
+        answered_by(held, Filed::Existing)
     }
 
     /// The first level's hit on `path`: a file the preload saved,
@@ -1136,8 +1224,8 @@ impl UnitCache {
     /// What `read` compiled from the file at `path`, held in `files`
     /// under its full path, in place of a discarded copy under every name
     /// that copy was filed under, as `cache_script_in_shared_memory`
-    /// updates the bucket every key of it points to; what another request
-    /// held for it meanwhile where it did.
+    /// updates the bucket every key of it points to; the copy another
+    /// request held for the path meanwhile where it did.
     fn hold(
         &self,
         files: &Files,
@@ -1145,7 +1233,7 @@ impl UnitCache {
         validation: Validation,
         now: i64,
         read: Read,
-    ) -> Arc<Held> {
+    ) -> Holding {
         let Read {
             unit,
             early,
@@ -1166,9 +1254,7 @@ impl UnitCache {
             .insert_over(UnitKey::full(path), Held::discarded, |replaced| {
                 built = true;
                 // `zend_accel_hash_update` puts the file in a discarded copy's
-                // entry, where that stands in its bucket's chain; a refusal,
-                // which php never puts in its hash, has none.
-                let replaced = replaced.filter(|was| was.unit.is_ok());
+                // entry, where that stands in its bucket's chain.
                 let next = || self.taken.fetch_add(1, Ordering::Relaxed);
                 Held {
                     unit,
@@ -1183,22 +1269,20 @@ impl UnitCache {
                     discarded: AtomicBool::new(false),
                 }
             });
-        if built {
-            files.used.fetch_add(size, Ordering::Relaxed);
-            if let Ok(unit) = &held.unit {
-                files.funcs.publish(unit);
-                self.persist_names(path, unit);
-            }
+        if !built {
+            return Holding::Found(held);
         }
-        held
+        files.used.fetch_add(size, Ordering::Relaxed);
+        files.funcs.publish(&held.unit);
+        self.persist_names(path, &held.unit);
+        Holding::Built(held)
     }
 
     /// `zend_accel_invalidate`'s discard of the file held under `key`:
     /// where `force`, and otherwise where it changed since,
     /// `do_validate_timestamps` finding it filed under another full path,
     /// held with no stamp, or written at another second. Whether a unit
-    /// was held under the name at all; a refusal is none, as php
-    /// persists none, and so is a copy discarded already.
+    /// was held under the name at all; a copy discarded already is none.
     pub(crate) fn discard(
         &self,
         files: &Files,
@@ -1209,9 +1293,6 @@ impl UnitCache {
         let Some(held) = files.held.get(key).filter(|held| !held.discarded()) else {
             return false;
         };
-        if held.unit.is_err() {
-            return false;
-        }
         let changed = force
             || key.0 != held.path
             || held.stamp.is_none_or(|was| {
@@ -1274,7 +1355,7 @@ impl UnitCache {
     /// bucket of `ZCSG(hash)` and each bucket's chain newest first, a
     /// name's bucket `(zend_string_hash_val(name) ^ ZCG(root_hash)) %
     /// max_num_entries` (`Z/ext/opcache/zend_accelerator_hash.c:88-92`)
-    /// and the preload's names the first in; a refusal is none of either.
+    /// and the preload's names the first in.
     ///
     /// ```php
     /// function bucket($s, $p) {
@@ -1310,6 +1391,30 @@ impl UnitCache {
     /// B A C
     /// B A C
     /// ```
+    ///
+    /// A discarded copy whose recompile is refused stays listed, its
+    /// timestamp zeroed, as php persists no refusal in its place, and each
+    /// include of the file is a miss:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/refused.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// include $f; include $f;
+    /// var_dump(opcache_invalidate($f, true));
+    /// file_put_contents($f, '<?php return ('); touch($f, time() - 30);
+    /// $s = fn () => array_values(array_intersect_key(opcache_get_status()['opcache_statistics'], ['hits' => 0, 'misses' => 0]));
+    /// [$h, $m] = $s();
+    /// foreach ([1, 2] as $_) { try { include $f; } catch (ParseError $e) { echo get_class($e), "\n"; } }
+    /// [$h2, $m2] = $s();
+    /// $listed = opcache_get_status(true)['scripts'][$f];
+    /// echo $h2 - $h, ' ', $m2 - $m, ' ', $listed['hits'], ' ', $listed['timestamp'], "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// ParseError
+    /// ParseError
+    /// 0 2 1 0
+    /// ```
     pub(crate) fn status(
         &self,
         files: &Files,
@@ -1317,7 +1422,6 @@ impl UnitCache {
         tier: TierStatus,
     ) -> CacheStatus {
         let mut held = files.held.held();
-        held.retain(|(_, held)| held.unit.is_ok());
         held.retain(|(_, held)| {
             self.preloaded()
                 .is_none_or(|preloaded| preloaded.script(&held.path).is_none())

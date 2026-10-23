@@ -528,7 +528,7 @@ impl Request {
         if written.contains(&0) {
             return self.failed_opening(kind, written);
         }
-        let held = self.held_as_written(written);
+        let mut held = self.held_as_written(written);
         let resolved = match &held {
             Some((held, _)) => Ok(held.path.clone()),
             None => self.code_mut().resolve_path(written),
@@ -537,7 +537,7 @@ impl Request {
             && held.is_none()
             && let Ok(path) = &resolved
         {
-            self.file_once_key(written, path);
+            held = self.file_once_key(written, path);
         }
         if kind.once()
             && let Ok(path) = &resolved
