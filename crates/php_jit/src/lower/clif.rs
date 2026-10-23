@@ -400,10 +400,15 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.switch_to_block(head);
                 self.b.set_srcloc(located(header.at.index()));
-                let flag = self.b.ins().load(I8, trusted(), interrupt, 0);
-                match header.interrupt {
-                    Interrupt::Exit(exit) => self.leave_if(flag, exit)?,
-                    Interrupt::Stub(_) => self.stub_if(flag)?,
+                // The interrupt test, one load and one branch (§4.3); the
+                // bench's untested build alone leaves it out, to measure
+                // what it costs (#2960, §10).
+                if cfg!(not(php_jit_untested_loops)) {
+                    let flag = self.b.ins().load(I8, trusted(), interrupt, 0);
+                    match header.interrupt {
+                        Interrupt::Exit(exit) => self.leave_if(flag, exit)?,
+                        Interrupt::Stub(_) => self.stub_if(flag)?,
+                    }
                 }
                 self.ops(split..self.ir.ops.len(), body)?;
                 let brought = phis
