@@ -564,7 +564,7 @@ fn extreme(
     values: Variadic<Value>,
     wanted: Ordering,
 ) -> Result<Value, Thrown> {
-    if values.0.is_empty() {
+    if values.is_empty() {
         // One argument is the array to walk, held to `array` as php's
         // `IS_ARRAY` check past `Z_PARAM_VARIADIC` refuses it, where the
         // stub declares `mixed $value`.
@@ -590,7 +590,7 @@ fn extreme(
         };
         return Ok(best);
     }
-    let values: Vec<Value> = std::iter::once(value).chain(values.0).collect();
+    let values: Vec<Value> = std::iter::once(value).chain(values).collect();
     if values.len() == 2 && req.frames().frameless() {
         return frameless_extreme(req, values[0], values[1], wanted);
     }

@@ -1192,7 +1192,7 @@ fn mb_convert_variables(
         return Err(value_error(req, 2, "must specify at least one encoding"));
     }
     let mut refs = vec![var];
-    refs.extend(vars.0);
+    refs.extend(vars);
     let from = if let [one] = list[..] {
         one
     } else {

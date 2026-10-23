@@ -2881,7 +2881,7 @@ fn fscanf(
 ) -> Result<Option<OrFalse<Scanned>>, Thrown> {
     // `php_sscanf_internal` assigns through the call's own arguments from
     // the third on, `vars` as the frame holds them.
-    let count = vars.0.len();
+    let count = vars.len();
     let Some(stream) = Stream::from_value(req, &stream.as_value()) else {
         return Err(throw_error(
             req,
