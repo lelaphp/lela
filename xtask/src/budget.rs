@@ -239,12 +239,14 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
         budget.total,
         "workspace lines",
     )?;
-    ceiling(
-        numbers::BINDINGS,
-        total.bindings,
-        budget.bindings,
-        "ext/*/src/ffi/** lines",
-    )?;
+    if let Some(bindings) = budget.bindings {
+        ceiling(
+            numbers::BINDINGS,
+            total.bindings,
+            bindings,
+            "ext/*/src/ffi/** lines",
+        )?;
+    }
     ceiling(
         numbers::DOCS,
         docs(root)?,
