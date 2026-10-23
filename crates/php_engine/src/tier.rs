@@ -397,6 +397,10 @@ pub(crate) enum Way {
     /// one served, the add wrapping, so a jump back is the distance's
     /// two's complement.
     On(u32),
+    /// [`Way::On`] over a back-edge the interpreter's loop took, from
+    /// which it serves the stretch of oplines inline paths serve
+    /// ([`Next::stretch`]).
+    Stretch(u32),
     /// `ZEND_VM_SET_OPCODE` from a handler that does not hold its place:
     /// this opline of the same frame.
     Jump(u32),
@@ -415,6 +419,7 @@ impl Next {
     const MOVED_WAY: u64 = 5;
     const THREW_WAY: u64 = 6;
     const DONE_WAY: u64 = 7;
+    const STRETCH_WAY: u64 = 8;
 
     /// `ZEND_VM_NEXT_OPCODE`.
     pub(crate) const ADVANCE: Next = Next::by(1);
@@ -424,6 +429,15 @@ impl Next {
     /// a jump from `at` to `to` is `by(to.wrapping_sub(at))`.
     pub(crate) const fn by(places: u32) -> Next {
         Next(Next::ON_WAY << 32 | places as u64)
+    }
+
+    /// [`Next::by`] over a back-edge the interpreter's loop took, its
+    /// interrupt tested and its safepoint folded: where the loop serves
+    /// the oplines past it that inline paths serve over the frame's slots
+    /// held across them. Every other way of reading it is on in the
+    /// frame, a step's among them.
+    pub(crate) const fn stretch(places: u32) -> Next {
+        Next(Next::STRETCH_WAY << 32 | places as u64)
     }
 
     /// `ZEND_VM_SET_OPCODE(to)`, from a handler that does not hold the
@@ -448,6 +462,7 @@ impl Next {
         }
         match self.0 >> 32 {
             Next::JUMP_WAY => Way::Jump(low),
+            Next::STRETCH_WAY => Way::Stretch(low),
             Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
             Next::PUSHED_WAY => Way::Left(Stepped::Pushed(FrameRef(low))),
             Next::POPPED_WAY => Way::Left(Stepped::Popped(FrameRef(low))),
@@ -456,6 +471,38 @@ impl Next {
             // `DONE_WAY`, the one high half left: the fields are private,
             // so no other is ever written.
             _ => Way::Left(Stepped::Done),
+        }
+    }
+}
+
+/// What a handler's inline path answers (design §5.8), the way on in
+/// the frame and nothing else, since an inline path reads and writes the
+/// frame's slots and the op array alone: the opline this many places on
+/// from the one served, the add wrapping, or the same over a back-edge,
+/// with the safepoint number its jump carries, where the loop tests the
+/// interrupt and a bound tier is asked before the loop goes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Inline {
+    /// On, as [`Next::by`] goes on.
+    On(u32),
+    /// On over a back-edge whose safepoint number is the second.
+    Back(u32, u32),
+}
+
+impl Inline {
+    /// `ZEND_VM_NEXT_OPCODE`.
+    pub(crate) const ADVANCE: Inline = Inline::On(1);
+
+    /// The jump from `at` to `to`, over a back-edge with the safepoint
+    /// `number` where `back` says it goes back.
+    #[inline(always)] // a select of two words, in the loop
+    #[allow(clippy::inline_always)]
+    pub(crate) const fn to(at: u32, to: u32, back: bool, number: u32) -> Inline {
+        let places = to.wrapping_sub(at);
+        if back {
+            Inline::Back(places, number)
+        } else {
+            Inline::On(places)
         }
     }
 }
@@ -482,22 +529,78 @@ impl From<Stepped> for Next {
 pub(crate) fn settled(req: &mut Request, frame: FrameRef, at: u32, next: Next) -> Stepped {
     let to = match next.way() {
         Way::Left(stepped) => return stepped,
-        Way::On(places) => at.wrapping_add(places),
+        Way::On(places) | Way::Stretch(places) => at.wrapping_add(places),
         Way::Jump(to) => to,
     };
     req.vm_mut().stand(frame, to);
     Stepped::Same(frame)
 }
 
+/// Where the loop lands at `at` in `frame` serving `code` past a
+/// back-edge it took: the stretch of oplines from there that inline
+/// paths serve ([`stretched`]), where the opline at `at` has one, and
+/// `at` itself where it has none. Only there: a stretch entered at a
+/// call or a return, which a function's first oplines or its caller's
+/// after the call mostly end at once, costs `fib` more than it saves
+/// (#3285).
+#[inline(always)] // at the loop's back-edge
+#[allow(clippy::inline_always)]
+fn stretch_from<T: Tier, D: Telling>(
+    req: &mut Request,
+    (frame, code): (FrameRef, &OpArray),
+    at: u32,
+    stretch: (D, &std::sync::atomic::AtomicBool),
+) -> u32 {
+    match code.oplines.get(at as usize) {
+        Some(op) if dispatch::has_inline_path(op.handler) => {
+            stretched::<T, D>(req.slots_mut(frame), code, at, stretch)
+        }
+        _ => at,
+    }
+}
+
+/// The oplines from `at` on that inline paths serve, served over the
+/// frame's `slots` held across them (design §5.8), with no handler and
+/// no lookup of the frame between them: what an inline path reads and
+/// writes is the slots and the op array, and nothing it does can move
+/// the frame. The stretch goes on for as long as each answers on in the
+/// frame and its observers are not told, a back-edge taken where the
+/// interrupt is not raised and the tier is the interpreter's, and it
+/// answers where it stopped, the opline the loop dispatches next.
+/// Out of the loop's body, so that what the stretch holds in registers
+/// is its alone.
+#[inline(never)]
+fn stretched<T: Tier, D: Telling>(
+    slots: &mut [php_heap::Zval],
+    code: &OpArray,
+    mut at: u32,
+    (told, raised): (D, &std::sync::atomic::AtomicBool),
+) -> u32 {
+    while let Some(op) = code.oplines.get(at as usize)
+        && !told.tells(op.opcode)
+    {
+        match dispatch::inline_path(slots, code, op, at) {
+            Some(Inline::On(places)) => at = at.wrapping_add(places),
+            Some(Inline::Back(places, _))
+                if interpreted::<T>() && !raised.load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                at = at.wrapping_add(places);
+            }
+            _ => break,
+        }
+    }
+    at
+}
+
 /// The generated dispatch (design §4.3 seam 7): one `match` arm per
 /// `php_unit::Handler` an opline is resolved to, over the handlers beside
 /// it.
 mod dispatch {
-    use php_heap::{Fatal, FrameRef};
+    use php_heap::{Fatal, FrameRef, Zval};
     use php_unit::{Handler, OpArray, Opline};
 
     use crate::api::request::Request;
-    use crate::tier::{Next, Tier};
+    use crate::tier::{Inline, Next, Tier};
 
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 
@@ -909,6 +1012,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
     scope: Scope<'u>,
 ) -> Result<Option<Stepped>, Fatal> {
     let declared = D::of(req);
+    // The request's interrupt, held for the loop's back-edges between
+    // handlers, where the slots are held and the request is not.
+    let interrupt = req.limits().interrupt().clone();
+    let raised = interrupt.raised();
     scope.measured(req);
     let mut kept = Kept::<'u>::default();
     let mut stepped = first;
@@ -1014,6 +1121,19 @@ fn serve_held<'u, T: Tier, D: Telling>(
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
             match way {
                 Way::On(places) => at = at.wrapping_add(places),
+                // A back-edge an inline path took, and the oplines past
+                // it that inline paths serve, over the frame's slots held
+                // across them, with no handler and no lookup of the frame
+                // between them, up to the first whose path stands aside,
+                // which the loop dispatches (design §5.8).
+                Way::Stretch(places) => {
+                    at = stretch_from::<T, D>(
+                        req,
+                        (frame, body),
+                        at.wrapping_add(places),
+                        (declared, raised),
+                    );
+                }
                 Way::Jump(to) => at = to,
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.

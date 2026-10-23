@@ -171,18 +171,15 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     let opcodes = opcodes(spec)?;
     let handlers = handlers(bodies)?;
     undispatched(bodies, &opcodes, &handlers)?;
+    let paths = inline_paths_of(bodies, &handlers)?;
     // Each call the dispatch makes, with every `php_unit::Handler` it
     // serves, in the order first met: one arm per call, so a handler that
     // serves two variants, a `SEND_VAL` whose handler is generic over
     // `op1` alone, is one body under both.
     let mut calls: Vec<(String, Vec<String>)> = Vec::new();
-    let mut serve = |variant: String, call: String| match calls
-        .iter_mut()
-        .find(|(served, _)| *served == call)
-    {
-        Some((_, variants)) => variants.push(variant),
-        None => calls.push((call, vec![variant])),
-    };
+    // The same for the inline paths the loop serves over the slots.
+    let mut inlines: Vec<(String, Vec<String>)> = Vec::new();
+    let mut serve = |variant: String, call: String| grouped(&mut calls, call, variant);
     for handler in &handlers {
         let Some(spec) = opcodes.get(&handler.name) else {
             return Err(format!(
@@ -191,9 +188,12 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
                 handler.ident
             ));
         };
-        for (variant, call) in
-            arms(handler, spec).map_err(|e| format!("{}: {e}", bodies.display()))?
+        for (variant, call, inline) in arms(handler, spec, paths.contains(&handler.ident))
+            .map_err(|e| format!("{}: {e}", bodies.display()))?
         {
+            if let Some(inline) = inline {
+                grouped(&mut inlines, inline, variant.clone());
+            }
             serve(variant, call);
         }
     }
@@ -256,6 +256,8 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
             .join("\n        | ");
         writeln!(arms, "        {pattern} => {call},").ok();
     }
+    let every: Vec<&String> = calls.iter().flat_map(|(_, variants)| variants).collect();
+    let inline_paths = inline_paths(&inlines, &every);
     Ok(format!(
         "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\
          /// `ops.toml` and the handlers beside it: the handler the opline at\n\
@@ -300,8 +302,78 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          {arms}\
          \x20   }}\n\
          }}\n\
+         {inline_paths}\
          {tails}"
     ))
+}
+
+/// `variant` among the variants of `call` in `calls`, the call added
+/// where it is not there yet: one arm per call, in the order first met.
+fn grouped(calls: &mut Vec<(String, Vec<String>)>, call: String, variant: String) {
+    match calls.iter_mut().find(|(served, _)| *served == call) {
+        Some((_, variants)) => variants.push(variant),
+        None => calls.push((call, vec![variant])),
+    }
+}
+
+/// The inline paths the loop serves over the frame's slots
+/// (`crate::handlers::inline_path`, design §5.8): whether the handler an
+/// opline was resolved to has one in the loop's body, which the loop
+/// asks before it takes the slots up, and the one `match` that serves
+/// it, `None` for every other of `every` variant, named so that the
+/// `match` names every variant and its table needs no test of the
+/// handler's range ahead of it.
+fn inline_paths(inlines: &[(String, Vec<String>)], every: &[&String]) -> String {
+    let mut has = Vec::new();
+    let mut arms = String::new();
+    for (call, variants) in inlines {
+        let pattern = variants
+            .iter()
+            .map(|variant| format!("Handler::{variant}"))
+            .collect::<Vec<_>>()
+            .join("\n        | ");
+        writeln!(arms, "        {pattern} => {call},").ok();
+        has.extend(variants.iter().map(|variant| format!("Handler::{variant}")));
+    }
+    let others = every
+        .iter()
+        .map(|variant| format!("Handler::{variant}"))
+        .filter(|variant| !has.contains(variant))
+        .collect::<Vec<_>>()
+        .join("\n        | ");
+    let has = has.join("\n        | ");
+    format!(
+        "\n/// Whether `handler` has an inline path the loop serves over the\n\
+         /// frame's slots ([`inline_path`]).\n\
+         #[allow(clippy::inline_always)]\n\
+         #[inline(always)]\n\
+         pub(crate) fn has_inline_path(handler: Handler) -> bool {{\n\
+         \x20   matches!(\n\
+         \x20       handler,\n\
+         \x20       {has}\n\
+         \x20   )\n\
+         }}\n\
+         \n\
+         /// The inline path of the handler the opline at `at` was resolved\n\
+         /// to, over the frame's slots (`crate::handlers::inline_path`), or\n\
+         /// `None` where it stands aside or the handler has none in the\n\
+         /// loop's body.\n\
+         #[allow(clippy::too_many_lines, clippy::match_same_arms, clippy::inline_always)]\n\
+         #[cfg_attr(not(debug_assertions), inline(always))]\n\
+         // A debug build's loop holds no arm's locals of it.\n\
+         #[cfg_attr(debug_assertions, inline(never))]\n\
+         pub(crate) fn inline_path(\n\
+         \x20   slots: &mut [Zval],\n\
+         \x20   code: &OpArray,\n\
+         \x20   op: &Opline,\n\
+         \x20   at: u32,\n\
+         ) -> Option<Inline> {{\n\
+         \x20   match op.handler {{\n\
+         {arms}\
+         \x20       {others} => None,\n\
+         \x20   }}\n\
+         }}\n"
+    )
 }
 
 /// The same calls threaded, `crate::tier::tail` (design §5.8): under
@@ -517,7 +589,7 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
 /// handler at the kinds each variant names, with the internal-error
 /// fatal for the kinds the spec does not list, which no unit the
 /// compiler wrote has.
-fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String> {
+fn arms(handler: &Handler, spec: &Spec, inline_path: bool) -> Result<Vec<Arm>, String> {
     let unlisted = "Err(Fatal::error(format!(\n\
                     \x20           \"InternalError: {} over operand kinds ops.toml does not list\",\n\
                     \x20           op.opcode.name()\n\
@@ -537,11 +609,13 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
         let mut out = Vec::new();
         for variant in variants(spec)? {
             if variant.kinds.is_none() && spec.specialise {
-                out.push((variant.name, unlisted.to_owned()));
+                out.push((variant.name, unlisted.to_owned(), None));
                 continue;
             }
-            let call = call(handler, &variant.name, &branch(&variant)?);
-            out.push((variant.name, call));
+            let generics = branch(&variant)?;
+            let call = call(handler, &variant.name, &generics);
+            let inline = inline_call(handler, inline_path, &variant.name, &generics);
+            out.push((variant.name, call, inline));
         }
         return Ok(out);
     }
@@ -561,7 +635,7 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
     let mut out = Vec::new();
     for variant in variants(spec)? {
         let Some(kinds) = &variant.kinds else {
-            out.push((variant.name, unlisted.to_owned()));
+            out.push((variant.name, unlisted.to_owned(), None));
             continue;
         };
         let mut params = String::new();
@@ -588,7 +662,8 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
             }
         }
         let call = call(handler, &variant.name, &params);
-        out.push((variant.name, call));
+        let inline = inline_call(handler, inline_path, &variant.name, &params);
+        out.push((variant.name, call, inline));
     }
     Ok(out)
 }
@@ -740,6 +815,37 @@ const IN_THE_LOOP: &[&str] = &[
     "TypeCheck",
     "VerifyReturnType",
 ];
+
+/// One arm of the dispatch: the variant, the call it makes, and the call
+/// to its handler's inline path where the loop serves one over the
+/// frame's slots.
+type Arm = (String, String, Option<String>);
+
+/// The call to the inline path of `handler` at `generics` for `variant`,
+/// which the loop serves over the frame's slots ahead of the handler:
+/// one for each variant in the loop's body whose handler has a function
+/// of `crate::handlers::inline_path`, generic over what the handler is
+/// generic over but its tier.
+fn inline_call(
+    handler: &Handler,
+    inline_path: bool,
+    variant: &str,
+    generics: &str,
+) -> Option<String> {
+    if !inline_path || !IN_THE_LOOP.contains(&variant) {
+        return None;
+    }
+    let generics = generics.strip_prefix(", ").unwrap_or(generics);
+    let turbofish = if generics.is_empty() {
+        String::new()
+    } else {
+        format!("::<{generics}>")
+    };
+    Some(format!(
+        "crate::handlers::inline_path::{}{turbofish}(slots, code, op, at)",
+        handler.ident
+    ))
+}
 
 /// The call one arm makes to `handler` at `generics` for `variant`:
 /// in the loop's body for a variant [`IN_THE_LOOP`] names, and out of
@@ -972,6 +1078,32 @@ fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
             branched: generics.contains(": Branch"),
             retval: generics.contains(": Retval"),
         });
+    }
+    Ok(out)
+}
+
+/// The handlers of `handlers` that have an inline path the loop serves
+/// over the frame's slots, a function of `crate::handlers::inline_path`
+/// of each one's name, read off `mod inline_path`'s lines in `path`.
+fn inline_paths_of(path: &Path, handlers: &[Handler]) -> Result<Vec<String>, String> {
+    let text = fs::read_to_string(path).map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    let mut within = false;
+    for line in text.lines() {
+        if line.starts_with("pub(crate) mod inline_path {") {
+            within = true;
+        } else if within && line.starts_with('}') {
+            within = false;
+        } else if let Some(rest) = line.strip_prefix("    pub(crate) fn ").filter(|_| within) {
+            let name = rest.split(['<', '(']).next().unwrap_or_default();
+            if !handlers.iter().any(|handler| handler.ident == name) {
+                return Err(format!(
+                    "{}: `inline_path::{name}` is the inline path of no handler",
+                    path.display()
+                ));
+            }
+            out.push(name.to_owned());
+        }
     }
     Ok(out)
 }
