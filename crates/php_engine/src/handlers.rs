@@ -13175,16 +13175,17 @@ fn assigned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> 
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn assign_op<T: Tier>(
+pub(crate) fn assign_op<T: Tier, A: Operand + Default, B: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-    if let Some(edge) = inline_assign_op(req, frame, code, op, kinds) {
+    if let Some(edge) = inline_assign_op(req, frame, code, op, (A::default(), B::default())) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     assigned_op(req, frame, code, op)
 }
 
@@ -13208,6 +13209,10 @@ fn inline_assign_op(
     op: &Opline,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
+    // The kind is the arm's, so a `VAR` arm has no inline path at all.
+    if a.kind() != OperandKind::Cv {
+        return None;
+    }
     // The value first: one that is no number, a numeric string among
     // them, is the refusal met most, and it reads nothing else.
     let slots = req.slots_mut(frame);
@@ -13216,9 +13221,6 @@ fn inline_assign_op(
         return None;
     }
     let rule = inline::compound(op.extended_value)?;
-    if a.kind() != OperandKind::Cv {
-        return None;
-    }
     let at = a.slot(op.op1)?;
     let held = *slots.get(at)?;
     let z = inline::binary(rule, held, value)?;
