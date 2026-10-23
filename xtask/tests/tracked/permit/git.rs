@@ -150,7 +150,7 @@ fn an_array_assignment_after_a_cd_leaves_the_commit_in_the_worktree() {
         ("allow-git-c.json", linked.clone()),
         ("deny-array-then.json", linked.join(".git")),
     ] {
-        let refused = operation_refuses(&manifest, merging.path(), name, ("/var/empty/wt", &to));
+        let refused = operation_refuses(&manifest, merging.path(), name, "/var/empty/wt", &to);
         assert_eq!(refused, name.starts_with("deny"), "{name}");
     }
 }
@@ -165,7 +165,9 @@ fn an_array_assignment_after_a_cd_leaves_the_commit_in_the_worktree() {
 /// moved into the merging checkout are refused, as the walks of
 /// `rule_fixtures.rs` refuse `deny-own-checkout.json` and
 /// `deny-git-c-own-checkout.json`, and so is a `cd` into a file there,
-/// which fails and leaves the commit where the line started (#2995).
+/// which fails and leaves the commit where the line started (#2995), as
+/// the walks refuse `deny-or-then-cd.json`'s and `deny-and-then-cd.json`'s
+/// `cd`, which may not run.
 #[test]
 fn a_commit_in_another_repository_is_judged_where_its_cd_or_c_moves_it() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -179,16 +181,16 @@ fn a_commit_in_another_repository_is_judged_where_its_cd_or_c_moves_it() {
         "allow-git-c-other-repository.json",
     ];
     for name in elsewhere {
-        for (to, refused) in [
+        for (to, expected) in [
             (other.path(), false),
             (linked.as_path(), false),
             (merging.path(), true),
         ] {
-            let judged = operation_refuses(&manifest, merging.path(), name, ("/tmp", to));
-            assert_eq!(judged, refused, "{name} in {}", to.display());
+            let refused = operation_refuses(&manifest, merging.path(), name, "/tmp", to);
+            assert_eq!(refused, expected, "{name} in {}", to.display());
         }
     }
-    let failed = operation_refuses(&manifest, merging.path(), elsewhere[0], ("/tmp", &file));
+    let failed = operation_refuses(&manifest, merging.path(), elsewhere[0], "/tmp", &file);
     assert!(failed, "a cd into a file");
 }
 
@@ -198,7 +200,8 @@ fn operation_refuses(
     manifest: &Manifest,
     merging: &Path,
     name: &str,
-    (from, to): (&str, &Path),
+    from: &str,
+    to: &Path,
 ) -> bool {
     let mut fixture = call(&fixtures().join("rules/git.operation").join(name));
     let line = fixture.tool_input.command.as_deref();

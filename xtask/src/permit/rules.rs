@@ -548,24 +548,28 @@ pub(super) fn acts_in(root: &Path, line: Option<&Line>) -> PathBuf {
 /// Each `cd`, `pushd` and `popd` the line says the target of moves the
 /// shell it runs in, from the call's `root`, `~/` being the home; a `cd`
 /// or `pushd` to a variable the line assigned before it, `W=/wt && cd
-/// "$W"`, goes where the value names ([`Argv::directory`]). A change into
-/// a place the shell cannot enter as the line is judged ([`enters`]), a
-/// file, a directory without search permission or none, may fail, and the
-/// shell then stays where it stood: each shell keeps the places it may
-/// stand where every command since the last separator other than `&&`
-/// succeeded apart from those where one of them failed, and a command
+/// "$W"`, goes where the value names ([`Argv::directory`]). A change may
+/// not run, past `||` or past a command of its `&&` chain that may fail,
+/// and may fail, into a place the shell cannot enter as the line is
+/// judged ([`enters`]): a file, a directory without search permission or
+/// none. The shell then stays where it stood: each shell keeps the places
+/// it may stand where every command since the last separator other than
+/// `&&` succeeded apart from those where one of them failed, and a command
 /// after any other separator ([`Joint`]) runs at both, so where `/wt` is
 /// no directory, `cd /wt && x; y` runs `x` in `/wt` and `y` in `/wt` and
-/// where the line started. One into a directory it can enter does not
-/// fail, so `cd <another repository> && S=x; git commit` commits there
-/// alone (#3257); what that leaves open, stated: a directory the line
-/// itself removes or makes unsearchable before its change is read as
-/// entered. A
-/// change piped or sent to the background runs in a shell of its own and
-/// moves nothing. A change inside a subshell, a substitution or a child
-/// shell moves the commands in it alone ([`Line::shells`], #2764), and
-/// never the line: `(cd /other && git status); git add x` stands where
-/// it started, and its `git add` runs there (#2787).
+/// where the line started, as `x || cd /wt; y` runs `y` wherever `/wt`
+/// is. A change sure to run into a directory it can enter is sure to move
+/// the shell, so `cd <another repository> && S=x; git commit` commits
+/// there alone (#3257). What that leaves open, stated: a directory the
+/// line itself makes, removes or makes unsearchable before its change, or
+/// one the shell's sandbox refuses where permit's process may enter it,
+/// is read as it stands when the line is read, before the call and again
+/// at `permit --after`, so the two may place it apart. A change piped or
+/// sent to the background runs in a shell of its own and moves nothing. A
+/// change inside a subshell, a substitution or a child shell moves the
+/// commands in it alone ([`Line::shells`], #2764), and never the line:
+/// `(cd /other && git status); git add x` stands where it started, and
+/// its `git add` runs there (#2787).
 ///
 /// A change the line does not say where it goes is not followed, and the
 /// line is lost there: a variable the line did not assign, `cd` with no
@@ -593,8 +597,9 @@ struct Walk<'a> {
 /// One shell the walk is in: its id, the places it may stand where every
 /// command of its `&&` chain succeeded, those where one of them failed,
 /// its `pushd` stack, each entry the places it pushed, whether it lost,
-/// and the places, stack and loss it began its chain with, which a chain
-/// sent to the background leaves it.
+/// whether every command of its chain so far is sure to have run and
+/// succeeded, and the places, stack and loss it began its chain with,
+/// which a chain sent to the background leaves it.
 #[derive(Default)]
 struct Shell {
     id: u32,
@@ -602,16 +607,18 @@ struct Shell {
     failed: Vec<PathBuf>,
     pushed: Vec<Vec<PathBuf>>,
     lost: bool,
+    certain: bool,
     chain: (Vec<PathBuf>, Vec<Vec<PathBuf>>, bool),
 }
 
 impl Shell {
-    fn new(id: u32, sure: Vec<PathBuf>, lost: bool) -> Shell {
+    fn new(id: u32, sure: Vec<PathBuf>, lost: bool, certain: bool) -> Shell {
         let chain = (sure.clone(), Vec::new(), lost);
         Shell {
             id,
             sure,
             lost,
+            certain,
             chain,
             ..Shell::default()
         }
@@ -619,13 +626,14 @@ impl Shell {
 
     /// Where a command joined by `before` runs: after `&&` or a pipe where
     /// the chain succeeded, and after any other separator wherever the
-    /// shell may stand, which begins a chain.
+    /// shell may stand, which begins a chain, sure to run but past `||`.
     fn runs_at(&mut self, before: Joint) -> Vec<PathBuf> {
         if !matches!(before, Joint::And | Joint::Pipe) {
             for dir in std::mem::take(&mut self.failed) {
                 add(&mut self.sure, dir);
             }
             self.chain = (self.sure.clone(), self.pushed.clone(), self.lost);
+            self.certain = before != Joint::Or;
         }
         self.sure.clone()
     }
@@ -652,13 +660,15 @@ impl Shell {
             self.lost = true;
             return;
         };
-        let may_fail = !moved.iter().all(|dir| enters(dir));
+        self.certain &= moved.iter().all(|dir| enters(dir));
         self.sure.clear();
         for dir in moved {
             add(&mut self.sure, dir);
         }
-        for dir in from.into_iter().filter(|_| may_fail) {
-            add(&mut self.failed, dir);
+        if !self.certain {
+            for dir in from {
+                add(&mut self.failed, dir);
+            }
         }
     }
 
@@ -677,21 +687,28 @@ impl<'a> Walk<'a> {
         let Some(line) = line else {
             return walk;
         };
-        let mut top = Shell::new(0, walk.stands.clone(), false);
+        let mut top = Shell::new(0, walk.stands.clone(), false, true);
         let (mut nested, mut leading): (Vec<Shell>, _) = (Vec::new(), true);
         let commands = line.commands();
         let each = commands.iter().zip(line.shells()).zip(line.joints());
         for (n, ((argv, ids), joints)) in each.enumerate() {
             let kept = nested.iter().zip(ids).take_while(|(s, id)| s.id == **id);
-            nested.truncate(kept.count());
+            let kept = kept.count();
+            if kept < nested.len() {
+                nested.truncate(kept);
+                // A shell that closed may have failed, and a change past it
+                // in its chain not run.
+                nested.last_mut().unwrap_or(&mut top).certain = false;
+            }
             let entering = ids.len() > nested.len();
             for id in ids.get(nested.len()..).unwrap_or_default() {
                 let parent = nested.last_mut().unwrap_or(&mut top);
-                let (sure, lost) = (parent.runs_at(joints.before), parent.lost);
+                let sure = parent.runs_at(joints.before);
+                let (lost, certain) = (parent.lost, parent.certain);
                 if leading && nested.is_empty() {
                     walk.stands.clone_from(&sure);
                 }
-                nested.push(Shell::new(*id, sure, lost));
+                nested.push(Shell::new(*id, sure, lost, certain));
             }
             let shell = nested.last_mut().unwrap_or(&mut top);
             let at = shell.runs_at(joints.before);
@@ -700,9 +717,15 @@ impl<'a> Walk<'a> {
             // opens one, a subshell or a substitution, which its own
             // changes move.
             let apart = (joints.before == Joint::Pipe && !entering) || joints.after == Joint::Pipe;
+            let words = argv.words();
+            let exports = words.first().is_some_and(|w| w == "export")
+                && words.iter().skip(1).all(|w| w.contains('='));
             if changes && !apart && !shell.lost {
                 shell.change(at.clone(), argv);
                 walk.lost |= shell.lost;
+            } else if !exports {
+                // It may fail, and a change past it in its chain not run.
+                shell.certain = false;
             }
             walk.lost |= argv.moves().contains(&Move::Unsaid);
             for dir in at.iter().flat_map(|dir| moved(dir, argv)) {
@@ -710,9 +733,6 @@ impl<'a> Walk<'a> {
                     walk.placed.push((argv, dir));
                 }
             }
-            let words = argv.words();
-            let exports = words.first().is_some_and(|w| w == "export")
-                && words.iter().skip(1).all(|w| w.contains('='));
             let read_past = exports || (changes && (apart || !shell.lost));
             let background = joints.after == Joint::Background;
             if background {
@@ -980,6 +1000,25 @@ mod tests {
         assert_eq!(
             fired("cd /a && GIT_DIR=/wt git x", "git"),
             [Path::new("/a"), wt]
+        );
+        // #3257: a change sure to run into a directory it can enter is sure
+        // to move the shell; one past `||` or past a command of its chain
+        // that may fail may not run.
+        let tmp = std::env::temp_dir();
+        let t = tmp.display();
+        assert_eq!(fired(&format!("cd / && cd {t}; y"), "y"), [tmp.as_path()]);
+        assert_eq!(
+            fired(&format!("x || cd {t}; y"), "y"),
+            [tmp.as_path(), root]
+        );
+        assert_eq!(
+            fired(&format!("x && cd {t}; y"), "y"),
+            [tmp.as_path(), root]
+        );
+        assert_eq!(fired(&format!("x; (cd {t}; y)"), "y"), [tmp.as_path()]);
+        assert_eq!(
+            fired(&format!("(x) && cd {t}; y"), "y"),
+            [tmp.as_path(), root]
         );
         let line = |text: &str| Line::read(text);
         assert_eq!(runs_in(root, Some(&line("cd /wt; git add x"))), root);

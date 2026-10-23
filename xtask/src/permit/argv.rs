@@ -64,10 +64,13 @@ pub(super) enum Move {
 /// list the command stands in (#2995).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) enum Joint {
-    /// `;`, `||`, a newline, the line's edge or a subshell's close: what
+    /// `;`, a newline, the line's edge or a subshell's close: what
     /// follows may run whether this succeeded or not.
     #[default]
     Then,
+    /// `||`: what follows runs only where this failed, and begins a chain
+    /// as `;` does (#3257).
+    Or,
     /// `&&`: what follows runs only where this succeeded.
     And,
     /// `|` or `|&`: both sides run at once, each in a shell of its own.
@@ -392,6 +395,7 @@ impl Lexer {
                             self.eat('&');
                             Joint::Pipe
                         }
+                        '|' => Joint::Or,
                         _ => Joint::Then,
                     };
                     self.end(&mut command, after);
@@ -655,10 +659,10 @@ impl Lexer {
         self.assigned.read(&words);
         let empty = words.is_empty() && !redirected;
         let Some(argv) = Argv::running(words, &self.assigned) else {
-            let begins =
-                !self.commands.is_empty() && matches!(self.before, Joint::Then | Joint::Background);
+            let begins = !self.commands.is_empty()
+                && matches!(self.before, Joint::Then | Joint::Or | Joint::Background);
             self.before = match after {
-                Joint::Then if empty => self.before,
+                Joint::Then | Joint::Or if empty => self.before,
                 Joint::And | Joint::Pipe if !empty && begins => Joint::Then,
                 _ => after,
             };
@@ -1657,7 +1661,7 @@ mod tests {
     /// substitution's are joined as the separator before them.
     #[test]
     fn each_command_is_joined_by_the_separators_either_side_of_it() {
-        use Joint::{And, Background, Pipe, Then};
+        use Joint::{And, Background, Or, Pipe, Then};
         let joints = |line: &str| -> Vec<(Joint, Joint)> {
             let line = Line::read(line);
             line.joints().iter().map(|j| (j.before, j.after)).collect()
@@ -1666,8 +1670,8 @@ mod tests {
             joints("a && b || c | d & e; f\ng"),
             [
                 (Then, And),
-                (And, Then),
-                (Then, Pipe),
+                (And, Or),
+                (Or, Pipe),
                 (Pipe, Background),
                 (Background, Then),
                 (Then, Then),
