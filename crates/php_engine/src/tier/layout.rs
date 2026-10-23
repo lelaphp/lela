@@ -488,11 +488,10 @@ pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     if FuncRef::at(code.runtime_cache) != call.callee {
         return None;
     }
-    let mut header = Header::call(function, call.count);
-    let (_, callee, sent) = req.call_room(function, call.count);
-    header.callee = callee;
-    header.info.join(sent);
-    if !header.info.plain_entry() {
+    let (_, header) = req.laid_call(Header::call(function, call.count))?;
+    // A header with no record of its callee is one `push_call` completes
+    // as it lays it down, and so not one to copy.
+    if !header.info.plain_entry() || header.callee.is_none() {
         return None;
     }
     HeaderImage::of(&header)
