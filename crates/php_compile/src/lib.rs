@@ -1014,8 +1014,11 @@ impl<'u> Parts<'u> {
         {
             return Ok(());
         }
+        // Each a declaration's own ([`Intern::intern_name`]), which a
+        // home that makes a string each time it is asked keeps as the
+        // name the declaration is read by.
         for name in self.declared_names() {
-            strings.intern(&name)?;
+            strings.intern_name(&name)?;
         }
         Ok(())
     }

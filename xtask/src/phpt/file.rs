@@ -205,6 +205,19 @@ impl Phpt {
         self.section(name).map(String::from_utf8_lossy)
     }
 
+    /// The extensions `--EXTENSIONS--` requires, as run-tests.php reads
+    /// the section: trimmed, split at line ends, each name as written
+    /// (run-tests.php:2025-2027), to be found exactly among the loaded
+    /// names it lowers (2040, 2908-2916).
+    pub fn extensions(&self) -> Vec<String> {
+        let text = self.text("EXTENSIONS").unwrap_or_default();
+        (text.trim_matches([' ', '\t', '\n', '\r', '\0', '\x0B']))
+            .split(['\n', '\r'])
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// The section when it is present and not empty, which is what
     /// upstream asks before it runs `SKIPIF`.
     pub fn filled(&self, name: &str) -> Option<&[u8]> {

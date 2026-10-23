@@ -230,7 +230,8 @@ mod tests {
             scope: "ext/a".to_owned(),
             dirs: vec![Dir {
                 under: PathBuf::from("ext/a"),
-                dir: tree.join("ext/a"),
+                path: tree.join("ext/a"),
+                needs: None,
             }],
             root: tree.to_path_buf(),
             holds: crate::phpt::Holds::Every,

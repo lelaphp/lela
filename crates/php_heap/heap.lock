@@ -245,6 +245,7 @@ Host::Transfer
 Host::suspensions
 Intern
 Intern::constant_array
+Intern::constant_array_made
 Intern::give_back
 Intern::hold
 Intern::hold_made
@@ -255,7 +256,7 @@ Intern::intern_name
 Key
 Laziness
 Made
-Made::str
+Made::value
 MapPtr
 MapPtr::new
 MapPtr::offset
@@ -304,6 +305,7 @@ Origin::number
 Pending
 Pending::constant_array
 Pending::give_back
+Pending::hold
 Pending::intern
 PropBit
 PropertyTable

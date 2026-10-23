@@ -734,7 +734,7 @@ pub trait Intern {
     /// folds into stands. The [`Made`] is the claim; dropped instead of
     /// given back, the string is kept as any other this home made.
     fn intern_made(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Made, Fatal> {
-        self.intern_marked(bytes, valid_utf8).map(Made)
+        (self.intern_marked(bytes, valid_utf8)).map(|s| Made(Zval::string(s)))
     }
 
     /// [`Intern::intern_made`] of a declaration's own name or lowered
@@ -774,12 +774,13 @@ pub trait Intern {
         !value.is_refcounted()
     }
 
-    /// [`Intern::hold`] of a string as a claim the asker holds alone and
-    /// gives back once it has read it ([`Intern::give_back`]), as a fold
-    /// over the substituted constant destroys its copy; none where this
-    /// home cannot hold it.
-    fn hold_made(&mut self, s: Str) -> Option<Made> {
-        self.hold(Zval::string(s)).then_some(Made(s))
+    /// [`Intern::hold`] of a string or an array as a claim the asker
+    /// holds alone and gives back once it has read it
+    /// ([`Intern::give_back`]), as a fold over the substituted constant,
+    /// or over an element it read out of an array, destroys its copy;
+    /// none where this home cannot hold it.
+    fn hold_made(&mut self, value: Zval) -> Option<Made> {
+        self.hold(value).then_some(Made(value))
     }
 
     /// A constant array of a unit in this home (design §5.3): the
@@ -789,22 +790,32 @@ pub trait Intern {
     /// makes one its unit owns. What a `switch` or a `match` jump table
     /// is (`zend_compile_switch`, `zend_compile_match`).
     fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal>;
+
+    /// [`Intern::constant_array`] of an array the asker alone holds and
+    /// gives back once it has read it ([`Intern::give_back`]), each entry
+    /// one owner the array took over: the array `zend_try_ct_eval_array`
+    /// made for a node, which `zend_eval_const_expr` destroys with its
+    /// strings once a fold over it stands (`zval_ptr_dtor`).
+    fn constant_array_made(&mut self, entries: &[(Key, Zval)]) -> Result<Made, Fatal> {
+        (self.constant_array(entries)).map(|a| Made(Zval::array(a)))
+    }
 }
 
-/// One string an [`Intern`] home made for an asker that holds it alone
-/// and hands it back with [`Intern::give_back`] once it has read it.
-/// Only [`Intern::intern_made`] makes one, and it is neither copied nor
-/// cloned, so a string another place made, a constant operand's, is
-/// never a claim to hand back. Its [`Made::str`] is a view: the asker
+/// One string or constant array an [`Intern`] home made for an asker
+/// that holds it alone and hands it back with [`Intern::give_back`] once
+/// it has read it. Only [`Intern::intern_made`], [`Intern::hold_made`]
+/// and [`Intern::constant_array_made`] make one, and it is neither copied
+/// nor cloned, so a value another place made, a constant operand's, is
+/// never a claim to hand back. Its [`Made::value`] is a view: the asker
 /// gives the claim back only once nothing it put the view in reads it
 /// again.
 #[derive(Debug)]
-pub struct Made(Str);
+pub struct Made(Zval);
 
 impl Made {
-    /// The string, a view: the claim stays the holder's.
+    /// The string or the array, a view: the claim stays the holder's.
     #[must_use]
-    pub fn str(&self) -> Str {
+    pub fn value(&self) -> Zval {
         self.0
     }
 }
@@ -867,7 +878,7 @@ impl Strings {
                 self.table.add(hash, s);
             }
         }
-        self.arrays.append(&mut pending.arrays);
+        (self.arrays).extend(pending.arrays.drain(..).map(|(a, _)| a));
     }
 
     /// Intern each of `known` and keep it at its position for
@@ -974,7 +985,8 @@ impl Drop for Strings {
 #[derive(Default)]
 pub struct Pending {
     slots: HashMap<u64, Vec<PendingString>>,
-    arrays: Vec<Arr>,
+    /// Each constant array beside the claims on it that stand.
+    arrays: Vec<(Arr, u32)>,
 }
 
 /// One string a compile made and the asks it answered that were not
@@ -1002,10 +1014,34 @@ impl Pending {
         Ok(s)
     }
 
-    /// One claim on `s` given back ([`Intern::give_back`]): the string
-    /// freed where no other ask stands on it; nothing for a string this
-    /// set did not make.
-    pub fn give_back(&mut self, s: Str) {
+    /// One claim on `z` given back ([`Intern::give_back`]): a string
+    /// freed where no other ask stands on it, and an array with each
+    /// string and array it holds given back in turn, the one ask on each
+    /// it took over as it was laid; nothing for a value this set did not
+    /// make.
+    pub fn give_back(&mut self, z: Zval) {
+        let Some(s) = z.as_str() else {
+            let Some(at) =
+                (z.as_arr()).and_then(|a| self.arrays.iter().position(|(held, _)| held.is_same(a)))
+            else {
+                return;
+            };
+            let asks = self.arrays.get_mut(at).map(|(_, asks)| {
+                *asks = asks.saturating_sub(1);
+                *asks
+            });
+            if asks == Some(0) {
+                let (a, _) = self.arrays.swap_remove(at);
+                for (key, value) in &a {
+                    if let Key::Str(key) = key {
+                        self.give_back(Zval::string(key));
+                    }
+                    self.give_back(value);
+                }
+                free_persistent_array(a);
+            }
+            return;
+        };
         let hash = hash_func(s.bytes());
         let Some(chain) = self.slots.get_mut(&hash) else {
             return;
@@ -1021,11 +1057,36 @@ impl Pending {
     }
 
     /// A constant array of the unit (design §5.3), laid as
-    /// [`Strings`] lays one and the table's once the unit is published.
+    /// [`Strings`] lays one and the table's once the unit is published,
+    /// with one claim on it: one ask on each string and array this set
+    /// made that it holds is the array's from here, as php's array takes
+    /// over the zvals `zend_try_ct_eval_array` folded.
     pub fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
         let a = persistent_array(entries)?;
-        self.arrays.push(a);
+        if !a.is_same(Arr::empty()) {
+            self.arrays.push((a, 1));
+        }
         Ok(a)
+    }
+
+    /// One ask more on `z` where this set made it ([`Intern::hold`]), a
+    /// string or an array a fold hands on out of an array it reads, so
+    /// giving that array back leaves it standing.
+    pub fn hold(&mut self, z: Zval) {
+        if let Some(a) = z.as_arr() {
+            if let Some((_, asks)) = self.arrays.iter_mut().find(|(held, _)| held.is_same(a)) {
+                *asks = asks.saturating_add(1);
+            }
+            return;
+        }
+        let Some(s) = z.as_str() else {
+            return;
+        };
+        let chain = self.slots.get_mut(&hash_func(s.bytes()));
+        if let Some(held) = chain.and_then(|chain| chain.iter_mut().find(|held| held.s.is_same(s)))
+        {
+            held.asks = held.asks.saturating_add(1);
+        }
     }
 
     /// How many strings stand made.
@@ -1045,7 +1106,7 @@ impl Drop for Pending {
     /// A set never published: what the compile made, its unit refused,
     /// given back.
     fn drop(&mut self) {
-        for a in self.arrays.drain(..) {
+        for (a, _) in self.arrays.drain(..) {
             free_persistent_array(a);
         }
         for s in self.take_strings() {
@@ -1273,13 +1334,13 @@ mod tests {
         let fold = pending.intern(b"fold", false).expect("a string");
         let again = pending.intern(b"fold", false).expect("the same string");
         assert!(fold.is_same(again));
-        pending.give_back(fold);
+        pending.give_back(Zval::string(fold));
         assert_eq!(pending.count(), 1);
-        pending.give_back(again);
+        pending.give_back(Zval::string(again));
         assert_eq!(pending.count(), 0);
         pending.intern(b"kept", true).expect("a string");
         pending.intern(b"held already", false).expect("a shadow");
-        pending.give_back(held);
+        pending.give_back(Zval::string(held));
         table.publish(pending);
         assert_eq!(table.count(), 2);
         assert!(table.find(b"kept").is_some_and(|s| s.is_valid_utf8()));
@@ -1288,6 +1349,36 @@ mod tests {
         refused.intern(b"refused", false).expect("a string");
         drop(refused);
         assert!(table.find(b"refused").is_none());
+    }
+
+    /// A pending array takes over the asks on what it holds: given back,
+    /// it gives back one ask on each string and array in it, so a string
+    /// another ask stands on stays, and one a hold kept for a fold's
+    /// value stays too.
+    #[test]
+    fn a_pending_array_given_back_gives_back_its_strings() {
+        let mut pending = Pending::default();
+        let key = pending.intern(b"key", false).expect("a string");
+        let kept = pending.intern(b"kept", false).expect("a string");
+        let value = pending.intern(b"value", false).expect("a string");
+        pending.intern(b"kept", false).expect("a second ask");
+        let inner = pending
+            .constant_array(&[(Key::Long(0), Zval::string(value))])
+            .expect("an array");
+        let outer = pending
+            .constant_array(&[
+                (Key::Str(key), Zval::string(kept)),
+                (Key::Long(1), Zval::array(inner)),
+            ])
+            .expect("an array");
+        pending.hold(Zval::string(value));
+        assert_eq!(pending.count(), 3);
+        pending.give_back(Zval::array(outer));
+        assert_eq!(pending.count(), 2);
+        assert!(pending.arrays.is_empty());
+        pending.give_back(Zval::string(kept));
+        pending.give_back(Zval::string(value));
+        assert_eq!(pending.count(), 0);
     }
 
     /// `zend_string_alloc` then `zend_string_truncate`: the bytes written

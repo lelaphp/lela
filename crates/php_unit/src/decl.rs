@@ -534,11 +534,13 @@ pub enum ConstExpr {
         elements: Vec<(Option<ConstExpr>, ConstExpr)>,
         line: u32,
     },
-    /// An array of a program's declaration whose every key and value
-    /// the compiler folded (`zend_try_ct_eval_array`): the unit's array,
-    /// which php's table of defaults holds as a value and not as a
-    /// tree, and which raises nothing where it is read.
-    UnitArray(UnitArray),
+    /// A value of a program's declaration the compiler folded and the
+    /// unit holds: an array whose every key and value folded
+    /// (`zend_try_ct_eval_array`), or the string a request's compile made
+    /// for a class constant, a default or a parameter's default, which
+    /// php's tables hold as a value and not as a tree, and which raises
+    /// nothing where it is read.
+    UnitValue(UnitValue),
     /// `...value` inside an array, php's `ZEND_AST_UNPACK`: the value
     /// of an element with no key, whose array or `Traversable` is
     /// spread into the array being built, under the array's line.
@@ -664,7 +666,7 @@ impl ConstExpr {
             | ConstExpr::Long { .. }
             | ConstExpr::Double(_)
             | ConstExpr::Str(_)
-            | ConstExpr::UnitArray(_)
+            | ConstExpr::UnitValue(_)
             | ConstExpr::Unpack(_)
             | ConstExpr::Conditional { .. }
             | ConstExpr::Closure { .. }
@@ -673,42 +675,47 @@ impl ConstExpr {
     }
 }
 
-/// An array a declaration of the unit holds as a value, every key and
-/// value folded (`zend_try_ct_eval_array`): one constant array laid down
-/// where the unit's strings are ([`php_heap::Intern::constant_array`]),
-/// as an op array's constant table holds one (design §5.3). Immutable in
-/// a unit the cache keeps (`IS_ARRAY_IMMUTABLE`, `zend_persist_zval`),
+/// A value a declaration of the unit holds, laid down where the unit's
+/// strings are, by identity: an array every key and value of which
+/// folded (`zend_try_ct_eval_array`, [`php_heap::Intern::constant_array`]),
+/// as an op array's constant table holds one (design §5.3), immutable in
+/// a unit the cache keeps (`IS_ARRAY_IMMUTABLE`, `zend_persist_zval`) and
 /// counted in a unit compiled for one request, which owns it through the
-/// request's unit strings, as php leaves an `eval`'s. A view: a copy
+/// request's unit strings, as php leaves an `eval`'s; or a counted string
+/// of such a unit, the zval php's `constants_table`,
+/// `default_properties_table` or `RECV_INIT` constant holds, where an
+/// interned one is [`ConstExpr::Str`], named by its bytes. A view: a copy
 /// takes an owner (`ZVAL_COPY`), which an immutable array does not count.
 #[derive(Debug, Clone, Copy)]
-pub struct UnitArray(php_heap::Zval);
+pub struct UnitValue(php_heap::Zval);
 
-impl UnitArray {
-    /// `value` where it is an array, none where it is any other value.
+impl UnitValue {
+    /// `value` where it is an array or a counted string, none for any
+    /// other value.
     #[must_use]
-    pub fn new(value: php_heap::Zval) -> Option<UnitArray> {
-        value.as_arr().map(|_| UnitArray(value))
+    pub fn new(value: php_heap::Zval) -> Option<UnitValue> {
+        let held = value.as_arr().is_some() || (value.as_str().is_some() && value.is_refcounted());
+        held.then_some(UnitValue(value))
     }
 
-    /// The array as the zval that names it, no owner taken.
+    /// The value as the zval that names it, no owner taken.
     #[must_use]
     pub const fn value(self) -> php_heap::Zval {
         self.0
     }
 
-    /// Whether the array holds no element.
+    /// Whether it is an array that holds no element.
     #[must_use]
     pub fn is_empty(self) -> bool {
-        self.0.as_arr().is_none_or(|array| array.is_empty())
+        self.0.as_arr().is_some_and(|array| array.is_empty())
     }
 }
 
-/// Two arrays are the same declaration where `zend_is_identical` finds
+/// Two values are the same declaration where `zend_is_identical` finds
 /// them so ([`php_heap::identical_constants`]), whichever unit laid
 /// either down: what a trait's default is compared to its user's by.
-impl PartialEq for UnitArray {
-    fn eq(&self, other: &UnitArray) -> bool {
+impl PartialEq for UnitValue {
+    fn eq(&self, other: &UnitValue) -> bool {
         php_heap::identical_constants(self.0, other.0)
     }
 }

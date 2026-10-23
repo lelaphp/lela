@@ -1336,7 +1336,7 @@ fn native_placed(
             .properties
             .get(usize::try_from(info.at).ok()?)
     };
-    let place = |at: usize, parent: &[PropertyInfo]| {
+    let place = |at: usize, parent: &Placed| {
         let class = ClassId(u32::try_from(at).unwrap_or(u32::MAX));
         let decl = classes.get(at)?;
         Some(placed_of(class, decl, records.get(at), parent, decl_of))
@@ -1354,7 +1354,7 @@ fn native_placed(
                     .ok()
                     .and_then(|parent| placed.get(parent)?.clone()),
             };
-            let built = parent.and_then(|parent| place(at, parent.slots()));
+            let built = parent.and_then(|parent| place(at, &parent));
             if let (Some(built), Some(slot)) = (built, placed.get_mut(at)) {
                 *slot = Some(built);
                 progress = true;
@@ -1364,7 +1364,11 @@ fn native_placed(
     placed
         .into_iter()
         .enumerate()
-        .map(|(at, built)| built.or_else(|| place(at, &[])).unwrap_or_default())
+        .map(|(at, built)| {
+            built
+                .or_else(|| place(at, &Placed::default()))
+                .unwrap_or_default()
+        })
         .collect()
 }
 
@@ -1767,8 +1771,8 @@ impl Shared {
             },
         );
         debug_assert!(
-            !(unit.as_ref().ok()).is_some_and(php_compile::values::holds_counted_array),
-            "a unit for every request holds a counted array"
+            !(unit.as_ref().ok()).is_some_and(php_compile::values::holds_counted_value),
+            "a unit for every request holds a counted value"
         );
         let answers = home.settle(strings_kept(&unit));
         Fresh { unit, answers }
@@ -1969,6 +1973,7 @@ impl Shared {
             path: &full,
             source: None,
             written: None,
+            opened: true,
             validation: Validation::EveryHit,
             protection: 0,
             now: crate::unit_cache::now(),
@@ -4130,17 +4135,27 @@ impl Intern for PermanentStrings<'_> {
     /// `zend_eval_const_expr` frees an operand once the value it made
     /// stands: the request's copy, and the string itself where the
     /// compile made it and nothing else asked for it; a string the table
-    /// held stays, the unit's to share.
+    /// held stays, the unit's to share. An array goes with the asks it
+    /// took over ([`php_heap::Pending::give_back`]).
     fn give_back(&mut self, made: php_heap::Made) {
-        let string = made.str();
-        if let CompileHeap::Request(heap) = &mut self.heap {
+        let value = made.value();
+        if let (CompileHeap::Request(heap), Some(string)) = (&mut self.heap, value.as_str()) {
             let named = |standing: &Standing| standing.interned.is_same(string);
             if let Some(at) = self.standing.iter().rposition(named) {
                 let standing = self.standing.swap_remove(at);
                 heap.release_string(standing.copy);
             }
         }
-        self.made.give_back(string);
+        self.made.give_back(value);
+    }
+
+    /// One more owner of `value`: an ask on a string or an array this
+    /// compile made, so giving back the array a fold read it out of
+    /// leaves it standing (`ZVAL_COPY_OR_DUP`); nothing counts any other
+    /// a cache-bound compile holds.
+    fn hold(&mut self, value: php_heap::Zval) -> bool {
+        self.made.hold(value);
+        !value.is_refcounted()
     }
 
     fn constant_array(

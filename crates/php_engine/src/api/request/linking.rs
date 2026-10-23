@@ -552,7 +552,7 @@ pub(super) fn is_literal(expr: &ConstExpr) -> bool {
             | ConstExpr::Long { .. }
             | ConstExpr::Double(_)
             | ConstExpr::Str(_)
-            | ConstExpr::UnitArray(_)
+            | ConstExpr::UnitValue(_)
     )
 }
 
