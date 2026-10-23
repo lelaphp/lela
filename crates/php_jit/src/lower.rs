@@ -368,6 +368,10 @@ pub(crate) struct Linked {
     pub(crate) body: usize,
     pub(crate) trace: u32,
     pub(crate) interrupt: bool,
+    /// The op array, by the engine's number, and the opline the trace
+    /// opens at, where a link that names no opline leaves the frame
+    /// standing.
+    pub(crate) opens: Option<(u32, u32)>,
 }
 
 /// Where one recorded opline's code begins: the op array, named with

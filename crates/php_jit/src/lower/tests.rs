@@ -683,3 +683,74 @@ fn a_landing_slot_names_the_first_trace_entered_at_its_landing() {
     slots.remember(past, &third);
     assert_eq!(slots.landed(past), None);
 }
+
+/// A link the trace was compiled against is a jump in its own bytes
+/// (#3229's ruling): its stores, the request's row of the linked trace,
+/// and a tail call to the linked body's address, a constant, with php's
+/// interrupt test before it where the trace is a side linking to its own
+/// looping root; with none to link to, its last exit as before.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
+    let ir = goldens::traced(
+        &[
+            ("record.function", "f"),
+            ("record.start", "enter"),
+            ("record.compiled", "g"),
+        ],
+        "function g($x) { return $x + 1; }
+        function f() { $a = g(1); return $a * 2; }
+        g(0); echo f(), \"\\n\";",
+    )?;
+    let backend = golden_backend().map_err(|e| format!("{e:?}"))?;
+    let lowered = |linked| -> Result<String, String> {
+        Ok(backend
+            .clif(&ir, linked)
+            .map_err(|abort| format!("{abort:?}"))?
+            .display()
+            .to_string())
+    };
+    let link = (ir.exits.iter())
+        .find_map(|exit| exit.link)
+        .ok_or("the trace links to nothing")?;
+    // The link stops at `g`'s entry, past its `RECV`, where the frame
+    // stands: its exit names no opline, and the linked trace opens there.
+    let end = (ir.exits.iter())
+        .find(|exit| exit.link.is_some())
+        .ok_or("no exit links")?;
+    assert_eq!(end.opline, None);
+    let g = (ir.frames.get(usize::from(end.frame.0)))
+        .and_then(|frame| match frame.func.offset() {
+            php_unit::MapPtrOffset::Engine(func) => Some(func),
+            php_unit::MapPtrOffset::Request(_) => None,
+        })
+        .ok_or("g's op array")?;
+    let body = 0x5000_0000_usize;
+    let linked = |interrupt| super::Linked {
+        body,
+        trace: link.get(),
+        interrupt,
+        opens: Some((g, 1)),
+    };
+    let plain = lowered(None)?;
+    assert!(!plain.contains("return_call_indirect"), "{plain}");
+    let clif = lowered(Some(linked(false)))?;
+    let constant = format!("iconst.i64 {body:#x}").replace("0x5000", "0x5000_");
+    assert!(
+        clif.contains("return_call_indirect") && clif.contains(&constant),
+        "the link jumps to the linked body:\n{clif}"
+    );
+    // A call made in place reads the interrupt too; the link's test is
+    // one read more.
+    let reads = |clif: &str| {
+        let pointer = format!("load.i64 notrap aligned v0+{INTERRUPT_AT}");
+        clif.lines().filter(|line| line.contains(&pointer)).count()
+    };
+    let tested = lowered(Some(linked(true)))?;
+    assert_eq!(
+        reads(&tested),
+        reads(&clif) + 1,
+        "a side's link to its looping root tests the interrupt:\n{tested}"
+    );
+    Ok(())
+}

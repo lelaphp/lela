@@ -240,10 +240,15 @@ impl<P: Pages> Trace<P> {
     /// interrupt first, which php's does where a side trace links to its
     /// own root and the root loops (`zend_jit_trace.c:7285-7303`).
     pub(crate) fn linked(&self, from_root: Option<TraceId>) -> Linked {
+        let opens = self.opens.and_then(|(func, opline)| match func.offset() {
+            php_unit::MapPtrOffset::Engine(func) => Some((func, opline.0)),
+            php_unit::MapPtrOffset::Request(_) => None,
+        });
         Linked {
             body: self.entrance.body,
             trace: self.entrance.trace,
             interrupt: from_root == Some(self.id) && self.leaves.is_none(),
+            opens,
         }
     }
 }

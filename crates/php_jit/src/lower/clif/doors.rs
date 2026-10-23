@@ -70,17 +70,31 @@ struct Leaving {
 const OPLINE: i32 = imm(FRAME.opline() as usize);
 
 impl Emit<'_> {
+    /// Where the frame goes on as a trace is entered from `exit`, its op
+    /// array by the engine's number and its opline, where the entry can be
+    /// laid in code: the opline the exit names, or, where it names none, the
+    /// opline a link's trace opens at, `linked`'s, where the link's frame
+    /// stands already, in a frame of that op array; and a landing that
+    /// frees nothing, as `enter`'s
+    /// landing of it does nothing but stand the frame.
+    fn goes_on_at(&self, exit: ExitId, linked: Option<Linked>) -> Option<(u32, u32)> {
+        let spec = self.ir.exits.get(usize::from(exit.0))?;
+        if !matches!(spec.landing, Landing::Plain | Landing::RestoreCall) {
+            return None;
+        }
+        if let Some(opline) = spec.opline {
+            let frame = self.ir.frames.get(usize::from(spec.frame.0))?;
+            return Some((engine_offset(frame.func).ok()?, opline.0));
+        }
+        let (func, opline) = linked?.opens?;
+        let running = self.ir.frames.get(usize::from(self.running.0))?;
+        (engine_offset(running.func).ok()? == func).then_some((func, opline))
+    }
+
     /// Whether the entry of a trace entered from `exit` can be laid in
-    /// code: the exit names its opline, so the frame's op array and opline
-    /// are the exit's, and its landing frees nothing, as `enter`'s landing
-    /// of it does nothing but stand the frame.
+    /// code ([`Emit::goes_on_at`]).
     fn jumps(&self, exit: ExitId) -> bool {
-        self.ir.exits.get(usize::from(exit.0)).is_some_and(|spec| {
-            spec.opline.is_some()
-                && matches!(spec.landing, Landing::Plain | Landing::RestoreCall)
-                && (self.ir.frames.get(usize::from(spec.frame.0)))
-                    .is_some_and(|frame| engine_offset(frame.func).is_ok())
-        })
+        self.goes_on_at(exit, None).is_some()
     }
 
     /// Whether a guard that fails into `exit` jumps through its entry
@@ -200,7 +214,9 @@ impl Emit<'_> {
                 .ok_or_else(|| mismatch("an entry slot past the host's addresses"))?;
             let exit = ExitId(u16::try_from(at).map_err(|_| mismatch("too many exits"))?);
             let closed = self.answer_block(exit)?;
-            let leaving = self.exit_leaving(exit, [call, room, place])?;
+            let at = (self.goes_on_at(exit, None))
+                .ok_or_else(|| mismatch("a door from an exit that names no opline"))?;
+            let leaving = self.exit_leaving(at, [call, room, place])?;
             self.hand_on(leaving, Target::Slot(slot), closed)?;
         }
         Ok(())
@@ -249,13 +265,16 @@ impl Emit<'_> {
             .get(usize::from(exit.0))
             .ok_or_else(|| mismatch("an exit past the trace's"))?;
         match (self.joins.linked, spec.link) {
-            (Some(linked), Some(link))
-                if linked.trace == link.get() && self.jumps(exit) && self.runs_in(exit) =>
-            {
+            (Some(linked), Some(link)) if linked.trace == link.get() && self.runs_in(exit) => {
+                let Some(at) = self.goes_on_at(exit, Some(linked)) else {
+                    let block = self.exit_block(exit)?;
+                    self.b.ins().jump(block, &[]);
+                    return Ok(());
+                };
                 let site = self.site()?;
                 self.stores(&spec.stores)?;
                 let closed = self.answer_block(exit)?;
-                let leaving = self.exit_leaving(exit, site)?;
+                let leaving = self.exit_leaving(at, site)?;
                 self.hand_on(leaving, Target::Linked(linked), closed)
             }
             _ => {
@@ -359,27 +378,14 @@ impl Emit<'_> {
 
     /// Where an exit leaves the frame (`enter::land`), from the `site` it
     /// leaves at: the call under way there, the room and the place of the
-    /// frame the code runs in, the exit's op array and opline, the
-    /// stack's room, and the frame to be stood at the exit's opline.
+    /// frame the code runs in, the op array and opline it goes on at, the
+    /// stack's room, and the frame to be stood at that opline.
     fn exit_leaving(
         &mut self,
-        exit: ExitId,
+        (func, opline): (u32, u32),
         [call, room, place]: [Value; 3],
     ) -> Result<Leaving, Abort> {
-        let ir = self.ir;
-        let spec = ir
-            .exits
-            .get(usize::from(exit.0))
-            .ok_or_else(|| mismatch("an exit past the trace's"))?;
-        let opline = spec
-            .opline
-            .ok_or_else(|| mismatch("a jump from an exit that names no opline"))?;
-        let func = ir
-            .frames
-            .get(usize::from(spec.frame.0))
-            .ok_or_else(|| mismatch("an exit's frame past the trace's"))?
-            .func;
-        let at = u64::from(engine_offset(func)?) | u64::from(opline.0) << 32;
+        let at = u64::from(func) | u64::from(opline) << 32;
         let at = self.b.ins().iconst(I64, at.cast_signed());
         let stack = self.stack()?;
         let top = self.b.ins().load(I64, trusted(), stack, TOP);
@@ -389,7 +395,7 @@ impl Emit<'_> {
             call,
             at,
             left: self.left_past(stack, top),
-            stand: Some(self.b.ins().iconst(I32, i64::from(opline.0))),
+            stand: Some(self.b.ins().iconst(I32, i64::from(opline))),
         })
     }
 
