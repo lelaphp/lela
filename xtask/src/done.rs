@@ -83,7 +83,7 @@ pub(crate) fn owed<'m>(manifest: &'m Manifest, krate: &Crate, carried: &Carried)
         row.covers(&krate.name) && row.when.is_none_or(|w| holds(w, manifest, krate, carried))
     };
     let rows = manifest.owed.iter().filter(owes);
-    rows.map(|row| row.instrument.as_str()).collect()
+    rows.map(|row| row.instrument.name()).collect()
 }
 
 /// Whether `when` holds of `krate`, derived from what the instrument
@@ -1094,11 +1094,7 @@ pub fn run(
     not_run: &[String],
 ) -> Result<()> {
     if let Some(unowed) = not_run.iter().find(|n| manifest.owing(n).is_none()) {
-        let owed: Vec<&str> = manifest
-            .owed
-            .iter()
-            .map(|r| r.instrument.as_str())
-            .collect();
+        let owed: Vec<&str> = manifest.owed.iter().map(|r| r.instrument.name()).collect();
         bail!(
             "--not-run {unowed}: no [[owed]] row names it, so no crate is asked for its reading; the rows name {}",
             owed.join(", ")
@@ -1469,7 +1465,7 @@ crates = ["php_heap"]                      # design §9's memory model; also wha
     #[test]
     fn the_crate_the_lock_lives_with_is_the_one_asked_for_a_port_map_reading() {
         let rest: Vec<&str> = (rows().owed.iter())
-            .map(|row| row.instrument.as_str())
+            .map(|row| row.instrument.name())
             .filter(|i| !matches!(*i, "port-map" | "crosscheck" | "miri"))
             .collect();
         assert_eq!(rest, ASKED_OF_EVERY_OTHER_CRATE);
@@ -1545,7 +1541,7 @@ crates = ["php_heap"]                      # design §9's memory model; also wha
             assert!(met_without_passing(&porting, "crosscheck", &reading));
             assert!(!met_without_passing(&held, "crosscheck", &reading));
         }
-        let instruments = rows().owed.iter().map(|row| row.instrument.as_str());
+        let instruments = rows().owed.iter().map(|row| row.instrument.name());
         for instrument in instruments.filter(|i| *i != "crosscheck") {
             assert!(!porting_meter(&porting, instrument), "{instrument}");
             assert!(

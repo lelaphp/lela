@@ -90,6 +90,8 @@ manifest::Edge::between
 manifest::FILE
 manifest::Generated
 manifest::Generated::files
+manifest::Instrument
+manifest::Instrument::name
 manifest::Layout
 manifest::Layout::of
 manifest::LockCeiling

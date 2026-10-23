@@ -23,7 +23,7 @@ use crate::phpt::Scope;
 use crate::track::Ticket;
 
 pub use crate::layout::Layout;
-pub use owed::{Owed, When};
+pub use owed::{Instrument, Owed, When};
 
 mod owed;
 
@@ -1107,7 +1107,7 @@ impl Manifest {
             }
         }
         manifest.parity.hold(&manifest.crates)?;
-        owed::hold(&manifest.owed)?;
+        owed::hold(&manifest.owed, &manifest.crates)?;
         Ok(manifest)
     }
 
@@ -1163,7 +1163,9 @@ impl Manifest {
 
     /// The `[[owed]]` row of `instrument`, where the manifest has one.
     pub fn owing(&self, instrument: &str) -> Option<&Owed> {
-        self.owed.iter().find(|row| row.instrument == instrument)
+        self.owed
+            .iter()
+            .find(|row| row.instrument.name() == instrument)
     }
 
     /// The rows `only` names, in the manifest's order, or every row where

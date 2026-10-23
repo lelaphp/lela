@@ -330,7 +330,7 @@ fn with_no_readings_every_instrument_of_the_touched_crate_is_unmet_and_the_exit_
 fn the_crate_the_lock_lives_with_is_asked_for_a_port_map_reading_and_no_other_crate_is() {
     let manifest = Manifest::load(workspace()).unwrap();
     let asked_of_every_other_crate: Vec<&str> = (manifest.owed.iter())
-        .map(|row| row.instrument.as_str())
+        .map(|row| row.instrument.name())
         .filter(|i| !matches!(*i, "port-map" | "miri"))
         .collect();
     assert_eq!(asked_of_every_other_crate, ASKED);

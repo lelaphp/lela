@@ -1,0 +1,7 @@
+# A negative-control fixture (harness-design.md §4.1): an [[owed]] row the
+# reader must refuse, read after a manifest's least table and a php_heap
+# row. It names `php_hep`, which matches no crate, a misspelling that would
+# drop the obligation from done unseen, and the refusal names it (#3206).
+[[owed]]
+instrument = "miri"
+crates = ["php_hep"]

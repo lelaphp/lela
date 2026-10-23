@@ -139,14 +139,25 @@ fn scratch(name: &str) -> Tree {
     }
     // The fixture's pin is by a path relative to the fixture; here the
     // pin stands beside the manifest, and what `done` asks of a crate is
-    // the workspace's `[[owed]]` rows (#3206).
+    // the workspace's `[[owed]]` rows (#3206), those whose every pattern
+    // names `php_heap`, the one crate here, as the manifest's reader holds.
     let text = std::fs::read_to_string(workspace().join("seams.toml")).unwrap();
     let rows = text.parse::<toml::Table>().unwrap()["owed"].clone();
+    let heap = |pattern: &toml::Value| matches!(pattern.as_str(), Some("*" | "php_heap"));
+    let names_heap = |row: &&toml::Table| {
+        let patterns = |key: &str| match row.get(key) {
+            Some(toml::Value::Array(list)) => list.iter().all(heap),
+            Some(one) => heap(one),
+            None => true,
+        };
+        patterns("crates") && patterns("exempt")
+    };
     let rows = rows
         .as_array()
         .unwrap()
         .iter()
         .map(|row| row.as_table().unwrap());
+    let rows = rows.filter(names_heap);
     let tracked = Tracked::of(&root).with_pin(Path::new("oracle.toml"));
     rows.fold(tracked, |tracked, row| {
         tracked.with_row("owed", row.clone())
@@ -238,7 +249,7 @@ fn judged(root: &Path, manifest: &Manifest, store: &Store) -> done::Verdict {
 /// asks but `test`, so the test reading is the one `done` judges.
 fn fresh_but_test(root: &Path, manifest: &Manifest, store: &Store) {
     for row in &manifest.owed {
-        let instrument = row.instrument.as_str();
+        let instrument = row.instrument.name();
         if instrument == "test" || instrument == "phpt" || instrument == "port-map" {
             continue;
         }
