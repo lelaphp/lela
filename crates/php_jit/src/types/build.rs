@@ -167,26 +167,37 @@ struct Call {
     returns: Option<Types>,
     /// Its callee, as the recording wrote it down.
     callee: Callee,
-    /// Whether compiled code pushed it in place ([`Op::InitCall`]'s
-    /// `plain`), and so makes it in place.
-    plain: bool,
-    /// Whether its activation passes over `RECV`s that check types
-    /// ([`PlainCall::checks`]).
-    checks: bool,
+    /// How compiled code makes it, where it pushed it in place
+    /// ([`Op::InitCall`]'s `plain`).
+    pushed: Option<Pushed>,
+    /// Whether a function's `INIT_*` by its name began it, so it serves
+    /// the callee recorded.
+    named: bool,
     /// How its last `CHECK_FUNC_ARG` found the argument it checked sent,
     /// php's `TRACE_FRAME_IS_LAST_SEND_BY_VAL` and `_BY_REF`, which the
     /// `FETCH_*_FUNC_ARG` after it reads.
     last_send: LastSend,
 }
 
+/// How compiled code makes a call it pushed in place: in place, or in
+/// place only where each argument is of the type its parameter declares,
+/// since the activation passes over `RECV`s that check them
+/// ([`PlainCall::checks`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pushed {
+    Activates,
+    Checks,
+}
+
 /// How a call's last `CHECK_FUNC_ARG` found its argument sent, where the
-/// trace knows the callee (`zend_jit_trace.c:2199-2215`): by value, by
-/// reference, or not known, as at a call's start and past a named one.
+/// trace knows the callee (`zend_jit_trace.c:2199-2215`): by value, which
+/// the `FETCH_*_FUNC_ARG` after it reads as a read; or not known to be, as
+/// at a call's start, past a named argument and by reference, which the
+/// handlers serve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LastSend {
     Unknown,
     ByValue,
-    ByRef,
 }
 
 /// What compiled code serves an inline opline's work in place of the
@@ -587,7 +598,7 @@ impl<'a> Builder<'a> {
             return Err(mismatch("an opline of another op array than its frame's"));
         }
         let code = self.meta(frame).code;
-        let op = self.served(
+        let op = self.as_compiled(
             *code
                 .oplines
                 .get(at.0 as usize)
@@ -985,6 +996,20 @@ impl<'a> Builder<'a> {
             .pushing
             .take()
             .filter(|plain| began == Began::Here && callee.user() == Some(plain.callee()));
+        // A function's call by its full name serves the function the name
+        // resolves to, the one recorded, since no function is declared
+        // twice; a method's or a dynamic call's may serve another, and an
+        // unqualified call in a namespace one declared there after the
+        // recording, which php's trace guards and this tier does not, so
+        // how it takes its arguments is not known.
+        let named = began == Began::Here
+            && matches!(
+                self.ops.last(),
+                Some(Op::Line(line)) if matches!(
+                    line.opcode,
+                    Opcode::InitFcall | Opcode::InitFcallByName
+                )
+            );
         self.begin();
         self.calls.push(Call {
             inline,
@@ -994,8 +1019,14 @@ impl<'a> Builder<'a> {
                 Callee::User(_) => None,
             },
             callee,
-            plain: plain.is_some(),
-            checks: plain.as_ref().is_some_and(PlainCall::checks),
+            pushed: plain.as_ref().map(|plain| {
+                if plain.checks() {
+                    Pushed::Checks
+                } else {
+                    Pushed::Activates
+                }
+            }),
+            named,
             last_send: LastSend::Unknown,
         });
         self.ops.push(Op::InitCall {
@@ -1008,10 +1039,24 @@ impl<'a> Builder<'a> {
     }
 
     /// Whether the call under way takes its argument numbered `n` by
-    /// value, where the trace knows its callee, php's
-    /// `ARG_SHOULD_BE_SENT_BY_REF` over `frame->call->func`.
+    /// value, where the trace knows its callee, a function's call by its
+    /// name, php's `ARG_SHOULD_BE_SENT_BY_REF` over `frame->call->func`.
+    /// A method's call may serve a method of another class than the one
+    /// recorded, which takes the same argument by reference, so its sends
+    /// are the handlers':
+    ///
+    /// ```php
+    /// class A { function f($x) { return $x + 1; } }
+    /// class B { function f(&$x) { $x++; return $x; } }
+    /// function g($objs) { $v = 1; $s = 0; foreach ($objs as $o) { $s += $o->f($v); } return [$s, $v]; }
+    /// echo json_encode(g([new A, new A, new A, new B, new B, new A])), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [15,3]
+    /// ```
     fn sends_by_value(&self, n: u32) -> Option<bool> {
-        let callee = self.calls.last()?.callee.user()?;
+        let call = self.calls.last().filter(|call| call.named)?;
+        let callee = call.callee.user()?;
         let params = self.view.parameters(callee)?;
         Some(sent_by_value(params, n))
     }
@@ -1025,7 +1070,7 @@ impl<'a> Builder<'a> {
     /// code generator falls through to it (`:5822-5829`, the guards
     /// `:2001-2010`). A `CHECK_FUNC_ARG` records what it found on the call
     /// (`:2199-2215`). Every other opline is itself.
-    fn served(&mut self, mut op: Opline) -> Opline {
+    fn as_compiled(&mut self, mut op: Opline) -> Opline {
         let numbered = op.op2_type == OperandKind::Unused;
         match op.opcode {
             Opcode::SendVarEx | Opcode::SendFuncArg
@@ -1036,12 +1081,11 @@ impl<'a> Builder<'a> {
                 op.opcode = Opcode::SendVar;
             }
             Opcode::CheckFuncArg => {
-                let found = if numbered && op.op2 <= MAX_ARG_FLAG_NUM {
-                    match self.sends_by_value(op.op2) {
-                        Some(true) => LastSend::ByValue,
-                        Some(false) => LastSend::ByRef,
-                        None => LastSend::Unknown,
-                    }
+                let by_value = numbered
+                    && op.op2 <= MAX_ARG_FLAG_NUM
+                    && self.sends_by_value(op.op2) == Some(true);
+                let found = if by_value {
+                    LastSend::ByValue
                 } else {
                     LastSend::Unknown
                 };
@@ -1089,14 +1133,14 @@ impl<'a> Builder<'a> {
                 known.then(|| InPlace::Push(plain.clone()))
             }
             Opcode::SendValEx if op.op2_type == OperandKind::Unused => {
-                let callee = self.calls.last()?.callee.user()?;
-                let params = self.view.parameters(callee)?;
-                sent_by_value(params, op.op2).then_some(InPlace::Send)
+                self.sends_by_value(op.op2)?.then_some(InPlace::Send)
             }
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => {
                 let made = matches!(next, Some(Event::Enter { .. }))
-                    && self.calls.last().is_some_and(|call| {
-                        call.plain && (!call.checks || self.sent_as_declared(call))
+                    && self.calls.last().is_some_and(|call| match call.pushed {
+                        Some(Pushed::Activates) => true,
+                        Some(Pushed::Checks) => self.sent_as_declared(call),
+                        None => false,
                     });
                 made.then_some(InPlace::Make)
             }

@@ -468,8 +468,10 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     // every parameter passed and one `RECV` each, the checks are all its
     // prologue does to an argument of the type declared, which compiled
     // code that knows the argument's type makes in place of them, as
-    // php's trace compiles `zend_jit_recv` with no check
-    // (`Z/ext/opcache/jit/zend_jit_ir.c:10660-10760`).
+    // php's trace compiles `zend_jit_recv` with no check where its stack
+    // map knows the argument of a type the declaration holds
+    // (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`, the skip in
+    // `zend_jit_verify_arg_type` at `:10773-10781`).
     let checks = shape.typed && count == shape.parameters && shape.entry == count;
     let enters = count <= shape.parameters
         && slots >= shape.slots

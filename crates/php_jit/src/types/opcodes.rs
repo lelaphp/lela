@@ -434,8 +434,10 @@ pub(super) fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
 
 /// The kinds a parameter's declared type `ty` holds as they are, which
 /// its `RECV` neither refuses nor coerces whatever the regime: the type
-/// byte's test php's `zend_jit_verify_arg_type` makes first
-/// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`). None for a type whose
+/// byte's test php's `zend_jit_verify_arg_type` makes first, and skips
+/// where its stack map knows the argument of one of them
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:10766-10823`, the skip at
+/// `:10773-10781`). None for a type whose
 /// check reads more than the type byte, a class, `callable` or
 /// `iterable`, or `never`.
 pub(super) fn held_as_is(ty: &Type) -> Option<Types> {
