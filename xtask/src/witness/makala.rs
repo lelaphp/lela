@@ -187,7 +187,7 @@ pub(crate) struct Ports {
 
 /// The directory a program stands in, which a server serves, and its
 /// name, which a request that names no target asks for.
-fn placed(program: &Path) -> Result<(&Path, &str)> {
+pub(crate) fn placed(program: &Path) -> Result<(&Path, &str)> {
     let dir = program.parent().context("a program with no directory")?;
     let name = (program.file_name().and_then(|name| name.to_str()))
         .context("a program with no name of text")?;
