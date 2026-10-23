@@ -903,7 +903,29 @@ impl AstCopy {
     }
 
     /// `zend_ast_tree_size` over `expr`'s node in php's tree, and the
-    /// strings it holds.
+    /// strings it holds. A trait's `self::class` and `parent::class` stay
+    /// a `ZEND_AST_CLASS_NAME` the using class evaluates, a node with no
+    /// child and no string (the file under the recipe's `TMPDIR`):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3310-trait-class-name.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('trait TT { const K = self::class; public $p = self::class; function g($a = self::class) { return [$a, self::K, $this->p]; } } class UT { use TT; } function ft() { return (new UT)->g(); }'), "\n";
+    /// echo m('trait TP { const K = parent::class; } class BP {} class CP extends BP { use TP; }'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode(eval('return [ft(), CP::K];')), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 3704
+    /// 1048
+    /// [["UT","UT","UT"],"BP"]
+    /// ```
     fn expr(&mut self, expr: &ConstExpr) {
         match expr {
             ConstExpr::Null
@@ -924,9 +946,15 @@ impl AstCopy {
                 self.expr(name);
             }
             ConstExpr::EnumCase { .. } => self.enum_init(),
+            // `self::class` and `parent::class` keep the fetch type in
+            // the node's `attr` and no child (`zend_compile_const_expr_class_name`).
             ConstExpr::ClassName { class, .. } => {
                 self.node(1);
-                self.string(&class.0);
+                if !(class.0.eq_ignore_ascii_case(b"self")
+                    || class.0.eq_ignore_ascii_case(b"parent"))
+                {
+                    self.string(&class.0);
+                }
             }
             ConstExpr::Unary { operand, .. }
             | ConstExpr::Unpack(operand)
