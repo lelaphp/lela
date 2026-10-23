@@ -270,7 +270,19 @@ pub(crate) enum Refused {
     /// An extension observes an opcode other than the two silence
     /// opcodes (design §7.1).
     ObservedOpcode,
+    /// `opcache.jit_buffer_size` is past what the target's code reaches,
+    /// [`LARGEST_BUFFER`].
+    BufferSize,
 }
+
+/// The largest `opcache.jit_buffer_size` `zend_jit_check_support` takes
+/// on the target (`Z/ext/opcache/jit/zend_jit.c:3759-3772`): 128 MiB on
+/// `aarch64`, 2 GiB on `x86_64`.
+const LARGEST_BUFFER: u64 = if cfg!(target_arch = "aarch64") {
+    128 << 20
+} else {
+    2 << 30
+};
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -278,6 +290,12 @@ impl std::fmt::Display for Refused {
             Refused::ObservedOpcode => f.write_str(
                 "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled.",
             ),
+            Refused::BufferSize if cfg!(target_arch = "aarch64") => f.write_str(
+                "JIT on AArch64 doesn't support opcache.jit_buffer_size above 128M.",
+            ),
+            Refused::BufferSize => {
+                f.write_str("JIT on x86_64 doesn't support opcache.jit_buffer_size above 2G.")
+            }
         }
     }
 }
@@ -545,16 +563,24 @@ impl Policy {
     /// runs as the directives say. At the
     /// two silence opcodes nothing is refused: compiled code serves them
     /// through the interpreter's handler, which tells their observers.
+    /// Past them, a tier php set up whose `opcache.jit_buffer_size` the
+    /// target's code cannot reach is refused too ([`Refused::BufferSize`],
+    /// `:3759-3772`).
     pub(crate) fn check_support(&mut self, observes: impl Fn(Opcode) -> bool) {
         let beyond = (0..=u8::MAX)
             .filter_map(Opcode::from_u8)
             .filter(|opcode| !matches!(opcode, Opcode::BeginSilence | Opcode::EndSilence))
             .any(observes);
-        if beyond {
-            self.off();
-            if self.set_up == SetUp::Yes {
-                self.set_up = SetUp::Refused(Refused::ObservedOpcode);
-            }
+        let refused = if beyond {
+            Refused::ObservedOpcode
+        } else if self.set_up == SetUp::Yes && self.buffer_size > LARGEST_BUFFER {
+            Refused::BufferSize
+        } else {
+            return;
+        };
+        self.off();
+        if self.set_up == SetUp::Yes {
+            self.set_up = SetUp::Refused(refused);
         }
     }
 

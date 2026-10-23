@@ -107,6 +107,40 @@ fn opcache_jit_is_read_as_php_reads_it() {
     assert_eq!(Setting::of(b"sideways"), Setting::Invalid);
 }
 
+/// `zend_jit_check_support` refuses a buffer the target's code cannot
+/// reach once it set the tier up, with php's warning, and refuses no
+/// lane over a tier php never set up.
+#[test]
+fn a_buffer_past_the_targets_reach_is_refused() {
+    let past = if cfg!(target_arch = "aarch64") {
+        "129M"
+    } else {
+        "3G"
+    };
+    let (mut policy, _) = read_ini(&[
+        ("opcache.jit", "tracing"),
+        ("opcache.jit_buffer_size", past),
+    ]);
+    policy.check_support(|_| false);
+    assert_eq!(policy.refused(), Some(Refused::BufferSize));
+    assert_eq!(policy.mode(), Mode::Off);
+    let (mut policy, _) = read_ini(&[("jit.mode", "force"), ("opcache.jit_buffer_size", past)]);
+    policy.check_support(|_| false);
+    assert_eq!((policy.refused(), policy.mode()), (None, Mode::Force));
+    let (mut policy, _) = read_ini(&[
+        ("opcache.jit", "tracing"),
+        ("opcache.jit_buffer_size", "128M"),
+    ]);
+    policy.check_support(|_| false);
+    assert_eq!(policy.refused(), None);
+    let expected = if cfg!(target_arch = "aarch64") {
+        "JIT on AArch64 doesn't support opcache.jit_buffer_size above 128M."
+    } else {
+        "JIT on x86_64 doesn't support opcache.jit_buffer_size above 2G."
+    };
+    assert_eq!(Refused::BufferSize.to_string(), expected);
+}
+
 /// `function` and any trigger but `HOT_TRACE` trace as tracing does and say so
 /// once; `HOT_TRACE` says nothing; `disable`, `off`, a refused setting and
 /// a zero buffer are `Off`, say nothing and read no `opcache.jit_debug`
