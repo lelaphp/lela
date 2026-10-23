@@ -1087,6 +1087,7 @@ request::Symbols::row_property_info
 request::Symbols::row_prototype
 request::Symbols::trampoline
 request::Syslog
+request::TierStatus
 request::TimeLimitSuspended
 request::UnitCache
 request::UnitCache::bound

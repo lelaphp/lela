@@ -27,7 +27,7 @@ use php_compile::CompileError;
 use php_unit::{PublishedUnit, Unit};
 
 use crate::api::abi::{Cache, Validation};
-use crate::api::request::{CacheBudget, CacheStatus, CachedFile, Preloaded, Restart};
+use crate::api::request::{CacheBudget, CacheStatus, CachedFile, Preloaded, Restart, TierStatus};
 
 use disk::build_identity;
 pub(crate) use disk::{BUILD, Disk};
@@ -1239,7 +1239,12 @@ impl UnitCache {
     /// in: the counters, the names held, and every file held under its
     /// full path, in the order the cache took them; a refusal is none of
     /// either.
-    pub(crate) fn status(&self, files: &Files, interned_strings: usize) -> CacheStatus {
+    pub(crate) fn status(
+        &self,
+        files: &Files,
+        interned_strings: usize,
+        tier: TierStatus,
+    ) -> CacheStatus {
         let mut held = files.held.held();
         held.retain(|(_, held)| held.unit.is_ok());
         held.retain(|(_, held)| {
@@ -1301,6 +1306,7 @@ impl UnitCache {
             preload: self
                 .preloaded()
                 .map(|preloaded| preloaded.statistics.clone()),
+            tier,
         }
     }
 }

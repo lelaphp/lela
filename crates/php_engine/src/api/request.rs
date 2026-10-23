@@ -38,7 +38,8 @@ pub use execution::Execution;
 /// it, its `base` and `max_size` ([`Limits::call_stack_bounds`]).
 pub use php_heap::CallStack;
 pub use unit_cache::{
-    CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
+    CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, TierStatus,
+    UnitCache,
 };
 
 mod autoload;
@@ -162,7 +163,6 @@ mod traces;
 mod unit_cache;
 mod unit_strings;
 pub(crate) use unit_cache::HandlePath;
-pub(crate) use unit_strings::declares_no_counted_array;
 mod variables;
 pub use variables::Variables;
 mod zone;

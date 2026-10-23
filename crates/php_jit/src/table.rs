@@ -38,9 +38,9 @@
 //! written under the mutex by the publish that places the code.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, Request, Word};
+use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
 
 use crate::lower::{Compiled, Fuzzed, Mark};
@@ -52,13 +52,13 @@ use crate::types::{ExitId, Grows, Landing};
     unsafe_code,
     reason = "seams.toml rule unsafe.homes: php_jit::table::code"
 )]
-mod code;
+pub(crate) mod code;
 mod perf;
 #[cfg(test)]
 mod tests;
 
 use code::{Arena, Code, Pages};
-pub(crate) use perf::{Outputs, Perf, Usage};
+pub(crate) use perf::{Outputs, Perf, Usage, Used};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
 /// (`jit-design.md` §4.4): `MAP_JIT` on macOS aarch64; under Miri the
@@ -192,6 +192,12 @@ pub(crate) struct Trace<P: Pages = Native> {
     /// held for as long as the code that names them.
     #[expect(dead_code, reason = "read and written by the trace's code alone")]
     pub(crate) fuzzed: Fuzzed,
+    /// The plain calls its code pushes in place, whose headers `enter`
+    /// lays out in the request ([`lower::Compiled::calls`]).
+    pub(crate) calls: Box<[PlainCall]>,
+    /// The callees of the calls its code makes in place whose caches
+    /// `enter` asks are laid down (`lower::Compiled::callee_caches`).
+    pub(crate) callee_caches: Box<[FuncRef]>,
     /// Every trace an exit links to, each once, ascending.
     #[cfg_attr(
         not(test),
@@ -384,6 +390,9 @@ pub(crate) struct TraceTable<P: Pages = Native> {
     stopped: AtomicBool,
     bounds: Bounds,
     compile: Mutex<Writer<P>>,
+    /// What the published traces take, the counts of the `Perf` behind
+    /// the compile mutex, read with nothing taken, as php reads `*dasm_ptr`.
+    used: Arc<Used>,
 }
 
 impl<P: Pages> std::fmt::Debug for TraceTable<P> {
@@ -534,6 +543,7 @@ impl<P: Pages> TraceTable<P> {
             exits: policy.max_exit_counters(),
         };
         let segments = (bounds.traces as usize).div_ceil(SEGMENT);
+        let used = perf.used();
         TraceTable {
             segments: (0..segments).map(|_| OnceLock::new()).collect(),
             next: AtomicU32::new(1),
@@ -544,20 +554,17 @@ impl<P: Pages> TraceTable<P> {
                 counts: Counts::default(),
                 perf,
             }),
+            used,
         }
     }
 
-    /// What the traces published so far take (#2961), the engine's
-    /// count across its epochs, each trace counted last in its publish.
-    #[cfg_attr(
-        not(any(test, php_jit_usage)),
-        expect(
-            dead_code,
-            reason = "the bench's build alone reads it, at a request's end"
-        )
-    )]
+    /// What the traces published into this epoch's table so far take
+    /// (#2961), each trace counted last in its publish: what
+    /// `opcache_get_status()['jit']` reads of the buffer
+    /// ([`crate::policy::Policy::status`]); atomics read with nothing
+    /// taken, so a reader never waits on a compile.
     pub(crate) fn usage(&self) -> Usage {
-        self.writer().perf.usage()
+        self.used.now()
     }
 
     /// The trace `id` names: two acquire loads, nothing taken. None for
@@ -704,6 +711,8 @@ impl<P: Pages> TraceTable<P> {
             map_ptrs: compiled.map_ptrs,
             marks: compiled.marks,
             fuzzed: compiled.fuzzed,
+            calls: compiled.calls,
+            callee_caches: compiled.callee_caches,
             links: links.into_boxed_slice(),
         });
         self.fill(id, trace)?;

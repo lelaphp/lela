@@ -129,6 +129,8 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
         entry_stood: false,
         body: None,
         fuzzed: Fuzzed::default(),
+        calls: Box::new([]),
+        callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
         name: TraceName {

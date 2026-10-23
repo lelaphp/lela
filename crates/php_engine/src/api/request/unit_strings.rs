@@ -31,7 +31,7 @@ use std::collections::{HashMap, HashSet};
 
 use php_heap::{Str, Zval};
 use php_link::NameHasher;
-use php_unit::decl::{Attribute, ConstExpr, FunctionDecl, TraitAdaptation};
+use php_unit::decl::{FunctionDecl, TraitAdaptation};
 use php_unit::{PublishedUnit, Unit, WeakUnit};
 
 use super::Request;
@@ -276,6 +276,51 @@ enum Owner {
 /// constants, its variables' names and what a fold made on the way,
 /// which php's compile frees as it goes. A constant is told by its
 /// allocation, not its bytes, since two written alike are two strings.
+///
+/// An array a declaration keeps inside a tree that did not fold whole is
+/// held where the tree is: the op array's constant expression for a
+/// parameter's default, a promoted one's and an abstract method's among
+/// them (`OpArray::const_exprs`), and the declaration for a class
+/// constant, a default, a static, an attribute's argument and a `const`
+/// ([`php_compile::arrays::declared_arrays`]). Each outlives the `eval` that declared it, read
+/// after the heap is churned:
+///
+/// ```php
+/// eval('#[Attribute(Attribute::TARGET_ALL)] class At { function __construct(public $v) {} } class Foo { function __construct(public $a) {} }');
+/// eval('function f1($p = [[1, 2], Z]) { return $p; }');
+/// eval('function f2($p = new Foo([3, 4])) { return $p->a; }');
+/// eval('$GLOBALS["c1"] = function ($p = [[5], Z]) { return $p; };');
+/// eval('class M { function m($p = [[6], Z]) { return $p; } static function s($p = new Foo([7])) { return $p->a; } function __construct(public $q = [[8], Z]) {} }');
+/// eval('abstract class AB { abstract function a($p = [[9], Z]); } interface IF1 { const IC = [[10], Z]; function i($p = [[11], Z]); }');
+/// eval('class D { const C = [[12], Z]; public $p = [[13], Z]; public static $s = [[14], Z]; }');
+/// eval('trait T { public $tp = [[15], Z]; public static $ts = [[16], Z]; } class UT { use T; }');
+/// eval('function f3() { static $s = [[17], Z]; return $s; }');
+/// eval('#[At([[18], Z])] class AC { #[At([[19], Z])] const K = 1; #[At([[20], Z])] public $p; #[At([[21], Z])] function m(#[At([[22], Z])] $a) {} public $h { #[At([[23], Z])] get => 1; } }');
+/// eval('enum EN { #[At([[24], Z])] case A; const L = [[25], Z]; }');
+/// eval('#[At([[26], Z])] function f4() {}');
+/// eval('$GLOBALS["c2"] = #[At([[27], Z])] fn () => 1;');
+/// eval('define("Z3", 3); #[At([[28], Z])] const Y1 = [[29], Z3];');
+/// eval('define("Z4", 4); const Y2 = [[30], Z4];');
+/// define('Z', 'z');
+/// $junk = array_fill(0, 2000, str_repeat("x", 100));
+/// $o = [];
+/// $o[] = f1(); $o[] = f2(); $o[] = $c1(); $o[] = (new M)->m(); $o[] = M::s(); $o[] = (new M)->q;
+/// $o[] = (new ReflectionMethod('AB', 'a'))->getParameters()[0]->getDefaultValue();
+/// $o[] = IF1::IC; $o[] = (new ReflectionMethod('IF1', 'i'))->getParameters()[0]->getDefaultValue();
+/// $o[] = D::C; $o[] = (new D)->p; $o[] = D::$s;
+/// $o[] = (new UT)->tp; $o[] = UT::$ts; $o[] = f3();
+/// $at = fn ($r) => $r->getAttributes()[0]->newInstance()->v;
+/// $o[] = $at(new ReflectionClass('AC')); $o[] = $at(new ReflectionClassConstant('AC', 'K')); $o[] = $at(new ReflectionProperty('AC', 'p'));
+/// $o[] = $at(new ReflectionMethod('AC', 'm')); $o[] = $at((new ReflectionMethod('AC', 'm'))->getParameters()[0]);
+/// $o[] = $at((new ReflectionProperty('AC', 'h'))->getHook(PropertyHookType::Get));
+/// $o[] = $at(new ReflectionEnumUnitCase('EN', 'A')); $o[] = EN::L;
+/// $o[] = $at(new ReflectionFunction('f4')); $o[] = $at(new ReflectionFunction($c2));
+/// $o[] = $at(new ReflectionConstant('Y1')); $o[] = Y1; $o[] = Y2;
+/// echo json_encode($o), "\n";
+/// ```
+/// ```expect regime=jit-off
+/// [[[1,2],"z"],[3,4],[[5],"z"],[[6],"z"],[7],[[8],"z"],[[9],"z"],[[10],"z"],[[11],"z"],[[12],"z"],[[13],"z"],[[14],"z"],[[15],"z"],[[16],"z"],[[17],"z"],[[18],"z"],[[19],"z"],[[20],"z"],[[21],"z"],[[22],"z"],[[23],"z"],[[24],"z"],[[25],"z"],[[26],"z"],[[27],"z"],[[28],"z"],[[29],3],[[30],4]]
+/// ```
 fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
     let owner_of = |at: usize| function_owner(unit, at);
     let bodies = || {
@@ -297,11 +342,24 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
         .filter_map(|(owner, z)| Some((z.as_str()?, owner)))
         .collect();
     held.sort_unstable_by(|a, b| a.0.bytes().cmp(b.0.bytes()));
-    let arrays: Vec<(Zval, Owner)> = constants()
+    let mut arrays: Vec<(Zval, Owner)> = constants()
         .filter(|(_, z)| z.as_arr().is_some())
         .map(|(owner, z)| (z, owner))
         .collect();
-    let mut declared = declared_arrays(unit);
+    // And an array a constant expression the op array keeps whole holds
+    // inside its tree (`IS_CONSTANT_AST`), a parameter's default that did
+    // not fold among them, whose `RECV_INIT` holds the tree.
+    for (owner, body) in bodies() {
+        for expr in &body.const_exprs {
+            php_compile::arrays::unit_arrays(expr, &mut |z| arrays.push((z, owner)));
+        }
+    }
+    let mut declared: Vec<(Zval, Owner)> = (php_compile::arrays::declared_arrays(unit).into_iter())
+        .map(|(z, holder)| match holder {
+            php_compile::arrays::Holder::Unit => (z, Owner::Tables),
+            php_compile::arrays::Holder::Dynamic(at) => (z, Owner::Definition(at)),
+        })
+        .collect();
     let names = declared_names(unit);
     let mut values = declared_values(unit);
     // Each dynamic definition's variables, one string each it takes, the
@@ -338,7 +396,7 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
                     })
                 }
                 // A declaration's, one owner for each slot that holds
-                // it, ahead of a literal's.
+                // it, ahead of an op array's constant's.
                 None => match (declared.iter()).position(|(held, _)| held.is_same_value(z)) {
                     Some(at) => declared.swap_remove(at).1,
                     None => (arrays.iter())
@@ -349,143 +407,6 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
             (owner, z)
         })
         .collect()
-}
-
-/// The arrays `unit`'s declarations hold as values
-/// ([`ConstExpr::UnitArray`]), each beside what holds it, as php's
-/// compile leaves each zval in a table of the declaration's: a class's
-/// constant, default, static default and attribute argument, its
-/// methods' and hooks' among them, the class's; a function's attribute
-/// argument the unit's, and a dynamic definition's its own. A
-/// parameter's default and a `const`'s value and attributes are not
-/// among them: the `RECV_INIT` or `DECLARE_CONST` constant, or the
-/// `DECLARE_ATTRIBUTED_CONST`'s data, holds the array, of which the
-/// declaration is a view, and the constant takes its own owner
-/// ([`Request::define_attributed_constant`]).
-///
-/// [`ConstExpr::UnitArray`]: php_unit::decl::ConstExpr::UnitArray
-///
-/// So each outlives the `eval` that declared it, read after the heap is
-/// churned:
-///
-/// ```php
-/// eval('class K { const C = [1, 2]; public $p = [3, 4]; public static $s = [5, 6]; }');
-/// eval('enum E1 { case A; const L = [7, 8]; }');
-/// eval('#[Attribute(Attribute::TARGET_ALL)] class At { function __construct(public $v) {} }');
-/// eval('#[At([9, 10])] class Q { #[At([11])] function m(#[At([12])] $a) {} }');
-/// eval('$GLOBALS["cl"] = #[At([13])] function () {};');
-/// eval('#[At([14])] const Z = 1;');
-/// $junk = array_fill(0, 1000, str_repeat("x", 100));
-/// echo json_encode([K::C, (new K)->p, K::$s, E1::L]), "\n";
-/// $m = new ReflectionMethod('Q', 'm');
-/// echo json_encode([
-///     (new ReflectionClass('Q'))->getAttributes()[0]->newInstance()->v,
-///     $m->getAttributes()[0]->newInstance()->v,
-///     $m->getParameters()[0]->getAttributes()[0]->newInstance()->v,
-///     (new ReflectionFunction($cl))->getAttributes()[0]->newInstance()->v,
-///     (new ReflectionConstant('Z'))->getAttributes()[0]->newInstance()->v,
-/// ]), "\n";
-/// ```
-/// ```expect regime=jit-off
-/// [[1,2],[3,4],[5,6],[7,8]]
-/// [[9,10],[11],[12],[13],[14]]
-/// ```
-fn declared_arrays(unit: &Unit) -> Vec<(Zval, Owner)> {
-    let mut found = Vec::new();
-    let function = |decl: &FunctionDecl, owner: Owner, found: &mut Vec<(Zval, Owner)>| {
-        let attributes = (decl.parameters.iter().map(|p| &p.attributes)).chain([&decl.attributes]);
-        for list in attributes {
-            attribute_arrays(list, &mut |z| found.push((z, owner)));
-        }
-    };
-    for (decl, _) in &unit.functions {
-        function(decl, Owner::Tables, &mut found);
-    }
-    for (at, (decl, _)) in unit.dynamic.iter().enumerate() {
-        function(decl, Owner::Definition(at), &mut found);
-    }
-    for class in &unit.classes {
-        let mut push = |z| found.push((z, Owner::Tables));
-        attribute_arrays(&class.attributes, &mut push);
-        for constant in &class.constants {
-            unit_arrays(&constant.value, &mut push);
-            attribute_arrays(&constant.attributes, &mut push);
-        }
-        for property in &class.properties {
-            property
-                .default
-                .iter()
-                .for_each(|d| unit_arrays(d, &mut push));
-            attribute_arrays(&property.attributes, &mut push);
-        }
-        let hooks = (class.properties.iter())
-            .filter_map(|property| property.hooks.as_deref())
-            .flat_map(|hooks| hooks.get.iter().chain(&hooks.set));
-        for method in class.methods.iter().chain(hooks) {
-            function(&method.function, Owner::Tables, &mut found);
-        }
-    }
-    found
-}
-
-/// Each array `expr` holds ([`ConstExpr::UnitArray`]) anywhere in its tree.
-///
-/// [`ConstExpr::UnitArray`]: php_unit::decl::ConstExpr::UnitArray
-fn unit_arrays(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
-    let mut each = |expr: &ConstExpr| unit_arrays(expr, found);
-    match expr {
-        ConstExpr::UnitArray(array) => found(array.value()),
-        ConstExpr::Unary { operand, .. }
-        | ConstExpr::Unpack(operand)
-        | ConstExpr::Cast { operand, .. }
-        | ConstExpr::DynamicClassConstant { name: operand, .. } => each(operand),
-        ConstExpr::Binary { lhs: a, rhs: b, .. }
-        | ConstExpr::Dim {
-            container: a,
-            dim: b,
-            ..
-        }
-        | ConstExpr::Prop {
-            object: a, name: b, ..
-        } => [a, b].into_iter().for_each(|e| each(e)),
-        ConstExpr::Conditional {
-            cond,
-            then,
-            otherwise,
-        } => {
-            [Some(cond), then.as_ref(), Some(otherwise)]
-                .into_iter()
-                .flatten()
-                .for_each(|e| each(e));
-        }
-        ConstExpr::Array { elements, .. } => {
-            for (key, value) in elements {
-                key.iter().chain([value]).for_each(&mut each);
-            }
-        }
-        ConstExpr::New { arguments, .. } => arguments.iter().for_each(|(_, value)| each(value)),
-        _ => {}
-    }
-}
-
-/// Each array the arguments of `attributes` hold.
-pub(super) fn attribute_arrays(attributes: &[Attribute], found: &mut dyn FnMut(Zval)) {
-    for argument in attributes.iter().flat_map(|attribute| &attribute.arguments) {
-        unit_arrays(&argument.value, found);
-    }
-}
-
-/// Whether every array `unit`'s declarations hold is immutable, as a
-/// unit the cache keeps holds no counted value (design §3.4).
-pub(crate) fn declares_no_counted_array(unit: &Unit) -> bool {
-    let mut counted = false;
-    for constant in &unit.constants {
-        attribute_arrays(&constant.attributes, &mut |z| counted |= z.is_refcounted());
-    }
-    !counted
-        && declared_arrays(unit)
-            .iter()
-            .all(|(z, _)| !z.is_refcounted())
 }
 
 /// The names `unit`'s declarations are read by

@@ -1287,14 +1287,25 @@ impl Request {
     /// its room ([`Request::call_room`]) for the `SEND_*` oplines to
     /// write its arguments into, `header` laid down whole; a page the
     /// memory limit refuses is the fatal php raises there.
-    pub(crate) fn push_call(&mut self, mut header: exec::Header) -> Result<FrameRef, Fatal> {
-        let Some(function) = header.function else {
+    pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
+        let Some((room, header)) = self.laid_call(header) else {
             return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
+        self.push_room(room, header)
+    }
+
+    /// The room a call `header` begins takes and the header
+    /// [`Request::push_call`] lays down for it: the callee's record and the
+    /// flags its arguments' sends start from joined in
+    /// ([`Request::call_room`]); none for a header that names no callee.
+    /// Compiled code that pushes the same call in place copies this header
+    /// (`tier::call_image`).
+    pub(crate) fn laid_call(&self, mut header: exec::Header) -> Option<(usize, exec::Header)> {
+        let function = header.function?;
         let (room, callee, sent) = self.call_room(function, header.num_args);
         header.callee = callee;
         header.info.join(sent);
-        self.push_room(room, header)
+        Some((room, header))
     }
 
     /// The call of the frameless native `function` over `operands`,

@@ -72,7 +72,7 @@ mod opcodes;
 #[cfg(test)]
 mod tests;
 
-use php_engine::tier::{FuncRef, MapPtrRaw, UnitView};
+use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall, UnitView};
 use php_heap::ZvalType;
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
@@ -237,11 +237,17 @@ pub(crate) enum Op {
     /// A call an `INIT_*` began in `frame`, to `callee`: at an opline of
     /// the trace, or before it reached `frame`, php's fake init, whose
     /// call compiled code finds where the interpreter stands, `EX(call)`,
-    /// once the calls begun after it are made.
+    /// once the calls begun after it are made. `plain` where compiled code
+    /// pushes it in place, as php's `zend_jit_push_call_frame` does for a
+    /// recorded `func` it needs no guard on: an `INIT_FCALL` of a user
+    /// function of the engine's arena, or a recursive call
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8790-8906`), whose push, the
+    /// `DO_*CALL` that makes it and the callee's `RETURN` take no exit.
     InitCall {
         frame: Frame,
         callee: Callee,
         began: Began,
+        plain: Option<PlainCall>,
     },
     /// The frame a call pushed runs.
     Enter { frame: Frame },
@@ -310,10 +316,32 @@ pub(crate) enum Fused {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Imm {
     None,
-    /// The argument a send writes, from one.
+    /// The argument a send writes, from one: a `SEND_VAL`'s or a
+    /// `SEND_VAR`'s, and a `SEND_VAL_EX`'s whose callee the trace recorded
+    /// takes it by value, which php decides as it compiles
+    /// (`zend_jit_send_val`, `Z/ext/opcache/jit/zend_jit_ir.c:9466-9506`).
     Arg(u32),
     /// The binary operator of an `ASSIGN_OP`.
     Binary(Opcode),
+    /// A `DO_*CALL` that makes a call compiled code pushed in place, and
+    /// makes it the callee's frame in place where nothing refuses it
+    /// (`zend_jit_do_fcall`, `Z/ext/opcache/jit/zend_jit_ir.c:10016-10600`):
+    /// the slot of its frame that takes what the callee returns, where the
+    /// opline reads it.
+    Make {
+        returns: Option<u32>,
+    },
+    /// A `RETURN` compiled code leaves its frame by in place where the
+    /// frame holds nothing the leave kernel must give up
+    /// (`zend_jit_leave_func`, `Z/ext/opcache/jit/zend_jit_ir.c:11035-11263`):
+    /// a function's frame and its value a scalar, with no observer
+    /// declared. `owners` where a variable of the frame may own something,
+    /// which the leave then tests as it leaves, leaving through the leave
+    /// kernel where one does, as php's `zend_jit_free_cv` tests each
+    /// variable its inference does not hold uncounted.
+    Leave {
+        owners: bool,
+    },
 }
 
 /// An operand as the op reads it.
@@ -533,6 +561,12 @@ pub(crate) enum End {
     Loop(LoopHeader),
     /// It leaves through this exit.
     Leave(ExitId),
+    /// Its last op, the `RETURN` it stops at, leaves its frame in place,
+    /// and the interpreter goes on where the return left it, as php's
+    /// code goes on through `zend_jit_trace_return`, taking no exit; it
+    /// leaves through this exit, at that `RETURN`, where the leave is not
+    /// made in place.
+    Return(ExitId),
 }
 
 /// Where a looping trace goes back to, and how.
