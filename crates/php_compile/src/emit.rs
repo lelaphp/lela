@@ -16657,6 +16657,27 @@ impl<'a> Emit<'a> {
     ///   string(1) "y"
     /// }
     /// ```
+    ///
+    /// The element is one more owner of what the array holds
+    /// (`ZVAL_COPY_OR_DUP`), so an `eval`'s, whose array goes with its
+    /// main op array, outlives it in the static that keeps it, the heap
+    /// churned between:
+    ///
+    /// ```php
+    /// eval('function f() { static $s = [[1, 2]][0]; return $s; }');
+    /// eval('function g() { static $s = [["ab" . "cd", "k" => "efgh"]]["0"]["k"]; return $s; }');
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// var_dump(f(), g());
+    /// ```
+    /// ```expect
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// string(4) "efgh"
+    /// ```
     fn dimension_fold(&mut self, base: tree::Expr, index: tree::Expr) -> Result<Zval, Unfolded> {
         let (container, dim) = self.constant_pair(base, index)?;
         let refused = || Unfolded::NoConstant("a dimension this compiler leaves to the request");
@@ -16669,7 +16690,14 @@ impl<'a> Emit<'a> {
                 },
                 (None, None) => return Err(refused()),
             };
-            return array.get(key).ok_or_else(refused);
+            // `ZVAL_COPY_OR_DUP`: one more owner of the element, the
+            // unit's, where the array is the request's; else the fetch.
+            let element = array.get(key).ok_or_else(refused)?;
+            return if self.strings.hold(element) {
+                Ok(element)
+            } else {
+                Err(refused())
+            };
         }
         if let Some(text) = container.as_str() {
             let offset = match (dim.as_long(), dim.as_str()) {
