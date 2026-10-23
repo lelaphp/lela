@@ -1757,7 +1757,7 @@ fn mysqli_stmt_bind_param(
     types: PhpString,
     vars: Variadic<Ref<Value>>,
 ) -> Answer<bool> {
-    stmt::bind_param(req, on_stmt(statement), types, &vars.0)
+    stmt::bind_param(req, on_stmt(statement), types, &vars)
 }
 
 /// `mysqli_stmt_bind_result(mysqli_stmt $statement, mixed &...$vars): bool`.
@@ -1780,7 +1780,7 @@ fn mysqli_stmt_bind_result(
     statement: Statement,
     vars: Variadic<Ref<Value>>,
 ) -> Answer<bool> {
-    stmt::bind_result(req, on_stmt(statement), &vars.0)
+    stmt::bind_result(req, on_stmt(statement), &vars)
 }
 
 /// `mysqli_stmt_close(mysqli_stmt $statement): true`.

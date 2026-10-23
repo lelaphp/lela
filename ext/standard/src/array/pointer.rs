@@ -551,6 +551,49 @@ fn min(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value
 /// int(1)
 /// string(1) "1"
 /// ```
+///
+/// The frameless form reads its two operands before anything else, the
+/// second from a tail held in place, so it builds no `Vec`, and compares
+/// the left with the right as `zend_compare(lhs, rhs)` does: a NaN on
+/// either side answers neither way, so the right is kept, and equal
+/// operands keep `max`'s left and `min`'s right.
+///
+/// ```php
+/// var_dump(max(NAN, 1), max(1, NAN), min(NAN, 1), min(1, NAN));
+/// var_dump(max(0, "a"), max("a", 0), min(null, false), min(false, null), max([1], 2), min("10", "9a"));
+/// ```
+/// ```expect
+/// int(1)
+/// float(NAN)
+/// int(1)
+/// float(NAN)
+/// string(1) "a"
+/// string(1) "a"
+/// bool(false)
+/// NULL
+/// array(1) {
+///   [0]=>
+///   int(1)
+/// }
+/// string(2) "10"
+/// ```
+///
+/// The framed walk of more than two compares directly over a stretch of
+/// numbers and, from the first argument that leaves it, through
+/// `zend_compare` to the last, which orders a NaN above everything:
+///
+/// ```php
+/// var_dump(max(1, "0", NAN), max(1, "0", NAN, 0), min(1, "2", NAN), max(1, 2.5, NAN), max(NAN, 1, 2), max(5, 1.5, 9007199254740993, NAN), min(2, 3, 1.5));
+/// ```
+/// ```expect
+/// float(NAN)
+/// int(0)
+/// int(1)
+/// float(2.5)
+/// float(NAN)
+/// float(NAN)
+/// float(1.5)
+/// ```
 #[php_function(frameless(2))]
 fn max(req: &mut Request, value: Value, values: Variadic<Value>) -> Result<Value, Thrown> {
     extreme(req, value, values, Ordering::Greater)
@@ -564,7 +607,13 @@ fn extreme(
     values: Variadic<Value>,
     wanted: Ordering,
 ) -> Result<Value, Thrown> {
-    if values.0.is_empty() {
+    // The frameless arity's two operands, read before anything else.
+    if let [other] = values[..]
+        && req.frames().frameless()
+    {
+        return frameless_extreme(req, value, other, wanted);
+    }
+    if values.is_empty() {
         // One argument is the array to walk, held to `array` as php's
         // `IS_ARRAY` check past `Z_PARAM_VARIADIC` refuses it, where the
         // stub declares `mixed $value`.
@@ -590,17 +639,43 @@ fn extreme(
         };
         return Ok(best);
     }
-    let values: Vec<Value> = std::iter::once(value).chain(values.0).collect();
-    if values.len() == 2 && req.frames().frameless() {
-        return frameless_extreme(req, values[0], values[1], wanted);
-    }
-    let mut best = values[0];
-    for value in &values[1..] {
-        if beyond(req, value, &best, wanted)? {
-            best = *value;
+    // The framed walk: a stretch of ints, then of floats once a float
+    // arrives beside an int that is exactly a double, compared directly,
+    // and `zend_compare` from the first argument neither stretch takes
+    // on to the last, as php's `goto generic_compare` never comes back.
+    let mut best = value;
+    let mut walk = match value.as_ref() {
+        ValueRef::Int(_) => Walk::Int,
+        ValueRef::Float(_) => Walk::Float,
+        _ => Walk::Generic,
+    };
+    for candidate in values {
+        walk = match (walk, candidate.as_ref(), best.as_ref()) {
+            (Walk::Int, ValueRef::Int(_), _) => Walk::Int,
+            (Walk::Int, ValueRef::Float(_), ValueRef::Int(held)) if exact(held) => Walk::Float,
+            (Walk::Float, ValueRef::Float(_), _) => Walk::Float,
+            (Walk::Float, ValueRef::Int(n), _) if exact(n) => Walk::Float,
+            _ => Walk::Generic,
+        };
+        let beyond = match walk {
+            Walk::Generic => compare(req, &candidate, &best)? == wanted,
+            Walk::Int | Walk::Float => dedicated(&candidate, &best) == Numeric::Ordered(wanted),
+        };
+        if beyond {
+            best = candidate;
         }
     }
     Ok(best)
+}
+
+/// Where the framed walk of `PHP_FUNCTION(min)` and `(max)` stands
+/// (`Z/ext/standard/array.c:1210`): its dedicated int loop, its dedicated
+/// double loop, or the generic loop it jumps to and stays in.
+#[derive(Clone, Copy)]
+enum Walk {
+    Int,
+    Float,
+    Generic,
 }
 
 /// What php's dedicated numeric comparison answers where it applies.
@@ -626,21 +701,6 @@ fn dedicated(a: &Value, b: &Value) -> Numeric {
         _ => return Numeric::Generic,
     };
     ordering.map_or(Numeric::Unordered, Numeric::Ordered)
-}
-
-/// Whether `candidate` is strictly beyond `best` the way `wanted`
-/// points, as the framed loops ask it.
-fn beyond(
-    req: &mut Request,
-    candidate: &Value,
-    best: &Value,
-    wanted: Ordering,
-) -> Result<bool, Thrown> {
-    match dedicated(candidate, best) {
-        Numeric::Ordered(ordering) => Ok(ordering == wanted),
-        Numeric::Unordered => Ok(false),
-        Numeric::Generic => Ok(compare(req, candidate, best)? == wanted),
-    }
 }
 
 /// `zend_dval_to_lval_silent((double) n) == n`: whether the int is

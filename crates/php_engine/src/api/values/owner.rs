@@ -526,7 +526,7 @@ impl Owner<Value> {
     /// the same count ([`Raw`]).
     #[must_use = "an owner is handed to a sink or given up with Owner::give_up"]
     pub fn into_raw<T: FromArgument>(self) -> Owner<Raw<T>> {
-        let raw = Raw::returned(self.view);
+        let raw = Raw::at(self.view, 0);
         self.recast(raw, ())
     }
 

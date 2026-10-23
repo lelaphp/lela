@@ -302,7 +302,7 @@ fn array_push(
     let Some(mut target) = array.separated(req)? else {
         return Ok(0);
     };
-    for value in values.0 {
+    for value in values {
         target.append(req, Owner::take(req, value))?;
     }
     Ok(i64::try_from(target.len()).unwrap_or(0))
@@ -586,13 +586,13 @@ fn proto_count(req: &mut Request, of: Iterable) -> Result<i64, Thrown> {
 /// or two.
 #[php_function(arity = manual)]
 fn proto_manual(req: &mut Request, n: Variadic<i64>) -> Result<Owner<PhpString>, Thrown> {
-    if !matches!(n.0.len(), 0 | 2) {
+    if !matches!(n.len(), 0 | 2) {
         return Err(php_ext::raising::arg_count_error(
             req,
             "exactly 0 or 2 arguments",
         ));
     }
-    let text = format!("{:?}", n.0);
+    let text = format!("{:?}", &n[..]);
     PhpString::new(req, text.as_bytes())
 }
 

@@ -1997,7 +1997,7 @@ impl PDO {
         let this = this.object();
         let sql = query.as_bytes().to_vec();
         let mode = fetchMode;
-        let extra: Vec<Value> = fetchModeArgs.0.iter().map(Value::deref).collect();
+        let extra: Vec<Value> = fetchModeArgs.iter().map(Value::deref).collect();
         constructed(req, this)?;
         if sql.is_empty() {
             return Err(argument_error(req, "ValueError", 1, "must not be empty"));
