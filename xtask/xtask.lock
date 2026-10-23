@@ -144,6 +144,7 @@ manifest::Section::readers
 manifest::Telemetry
 manifest::When
 manifest::Where
+manifest::of_the_engine
 manifest::scope_matches
 miri::TOOLCHAIN
 miri::run
