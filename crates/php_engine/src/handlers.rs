@@ -7158,9 +7158,7 @@ fn static_name<'c>(
     op: &Opline,
 ) -> Result<Cow<'c, [u8]>, Thrown> {
     if op.op1_type == OperandKind::Const {
-        return Ok(Cow::Borrowed(
-            exec::constant_str(code, ConstIdx(op.op1)).unwrap_or_default(),
-        ));
+        return Ok(written_name(code, op));
     }
     let name = fetched_name(req, frame, code, op).map(|name| {
         let bytes = name.as_bytes().to_vec();
@@ -7176,6 +7174,13 @@ fn static_name<'c>(
 struct StaticSlot<'c> {
     info: crate::api::request::PropertyInfo,
     name: Cow<'c, [u8]>,
+}
+
+/// The name of a `static` property the compiler wrote in `op1`, borrowed
+/// from the op array.
+#[inline]
+fn written_name<'c>(code: &'c OpArray, op: &Opline) -> Cow<'c, [u8]> {
+    Cow::Borrowed(exec::constant_str(code, ConstIdx(op.op1)).unwrap_or_default())
 }
 
 /// `zend_fetch_static_property_address` (`Z/Zend/zend_execute.c:3793`),
@@ -7274,16 +7279,15 @@ fn static_slot_at<'c>(
     let named = op.op1_type == OperandKind::Const;
     let mut asked = None;
     if named && let Cached::StaticProperty { class, info, .. } = req.cached_in_scope(frame, slot) {
-        if class_fixed(op.op2_type, op.op2) {
-            let name = static_name(req, frame, code, op)?;
+        let hit = class_fixed(op.op2_type, op.op2) || {
+            let now = class_operand(req, frame, code, op.op2_type, op.op2, None)?;
+            asked = Some(now);
+            now == class
+        };
+        if hit {
+            let name = written_name(code, op);
             return Ok(Some(StaticSlot { info, name }));
         }
-        let now = class_operand(req, frame, code, op.op2_type, op.op2, None)?;
-        if now == class {
-            let name = static_name(req, frame, code, op)?;
-            return Ok(Some(StaticSlot { info, name }));
-        }
-        asked = Some(now);
     }
     let class = match asked {
         Some(class) => class,
@@ -8164,6 +8168,7 @@ fn fetch_static_prop(
 /// [`static_slot_at`] and the value its slot holds, one more owner of it
 /// ([`Request::static_value`]), `null` for the silent miss: the read of
 /// `FETCH_STATIC_PROP_R`, `_IS` and `ISSET_ISEMPTY_STATIC_PROP`.
+#[inline]
 fn static_read(
     req: &mut Request,
     frame: FrameRef,

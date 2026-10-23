@@ -1057,7 +1057,8 @@ impl Request {
     /// function that wrote it, no closure's, or one of the scope it was
     /// written from; `Unprimed` otherwise, which is the pass that looks
     /// the name up.
-    #[inline]
+    #[inline(always)] // the hit path of every handler that reads such a slot, which an outlined call costs a fifth of
+    #[allow(clippy::inline_always)]
     pub(crate) fn cached_in_scope(&self, frame: FrameRef, slot: CacheSlot) -> exec::Cached {
         let Some(state) = self.frame_at(frame) else {
             return exec::Cached::Unprimed;

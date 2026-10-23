@@ -1647,6 +1647,7 @@ pub(crate) enum Cached {
 impl Cached {
     /// The frame a slot whose answer the access rule decides was primed
     /// from; none for a slot that answers every scope alike.
+    #[inline]
     pub(crate) fn primed_from(self) -> Option<PrimedFrom> {
         match self {
             Cached::ClassAndCallee { primed, .. }
