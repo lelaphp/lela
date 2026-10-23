@@ -365,6 +365,9 @@ impl<'a> Emit<'a> {
             let place = self.b.ins().uextend(I64, place);
             self.b.def_var(self.ref_var(Frame::ROOT)?, place);
         }
+        // Laid down before either way in: a guard at the body's entry
+        // reads it too.
+        self.stood_at_entry(cx);
         // A trace entered at its loop's body goes there; at its first op,
         // on.
         let body = match &self.ir.body {
@@ -378,7 +381,6 @@ impl<'a> Emit<'a> {
             }
             None => None,
         };
-        self.stood_at_entry(cx);
         for guard in self.ir.guards.iter().filter(|g| g.at == GuardAt::Entry) {
             self.guard(*guard)?;
         }
