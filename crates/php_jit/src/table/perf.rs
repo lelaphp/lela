@@ -199,9 +199,10 @@ impl Drop for Outputs {
 }
 
 impl Perf {
-    /// What the traces published through this `Perf` take.
-    pub(crate) fn usage(&self) -> Usage {
-        self.used.now()
+    /// The counts of what the traces published through this `Perf`
+    /// take, which its table reads without taking its compile mutex.
+    pub(crate) fn used(&self) -> Arc<Used> {
+        Arc::clone(&self.used)
     }
 
     /// One trace published, `bytes` of code compiled from `oplines`

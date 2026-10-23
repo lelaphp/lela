@@ -317,17 +317,26 @@ pub(crate) enum Refused {
     /// opcodes (design §7.1).
     ObservedOpcode,
     /// `opcache.jit_buffer_size` is past what the target's code reaches,
-    /// [`LARGEST_BUFFER`].
+    /// [`REACH`].
     BufferSize,
 }
 
 /// The largest `opcache.jit_buffer_size` `zend_jit_check_support` takes
-/// on the target (`Z/ext/opcache/jit/zend_jit.c:3759-3772`): 128 MiB on
-/// `aarch64`, 2 GiB on `x86_64`.
-const LARGEST_BUFFER: u64 = if cfg!(target_arch = "aarch64") {
-    128 << 20
+/// on the target, with php's warning past it
+/// (`Z/ext/opcache/jit/zend_jit.c:3759-3772`): 128 MiB on `aarch64`, 2 GiB
+/// on `x86_64`, and no bound on a target php checks none on.
+const REACH: (u64, &str) = if cfg!(target_arch = "aarch64") {
+    (
+        128 << 20,
+        "JIT on AArch64 doesn't support opcache.jit_buffer_size above 128M.",
+    )
+} else if cfg!(target_arch = "x86_64") {
+    (
+        2 << 30,
+        "JIT on x86_64 doesn't support opcache.jit_buffer_size above 2G.",
+    )
 } else {
-    2 << 30
+    (u64::MAX, "")
 };
 
 impl std::fmt::Display for Refused {
@@ -336,12 +345,7 @@ impl std::fmt::Display for Refused {
             Refused::ObservedOpcode => f.write_str(
                 "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled.",
             ),
-            Refused::BufferSize if cfg!(target_arch = "aarch64") => f.write_str(
-                "JIT on AArch64 doesn't support opcache.jit_buffer_size above 128M.",
-            ),
-            Refused::BufferSize => {
-                f.write_str("JIT on x86_64 doesn't support opcache.jit_buffer_size above 2G.")
-            }
+            Refused::BufferSize => f.write_str(REACH.1),
         }
     }
 }
@@ -653,7 +657,7 @@ impl Policy {
             .any(observes);
         let refused = if beyond {
             Refused::ObservedOpcode
-        } else if self.set_up == SetUp::Yes && self.buffer_size > LARGEST_BUFFER {
+        } else if self.set_up == SetUp::Yes && self.buffer_size > REACH.0 {
             Refused::BufferSize
         } else {
             return;
@@ -675,7 +679,9 @@ impl Policy {
     /// as php's start left it, and the buffer, of which the code of
     /// `used` bytes is taken. php's stubs take some of it before any
     /// trace; this tier has none, so a buffer no trace was published
-    /// into is free whole.
+    /// into is free whole. `JIT_G` is the start's: php's
+    /// `ini_set('opcache.jit', ...)` from a request rewrites `on` and the digits, which
+    /// this tier does not read yet (#3139).
     pub(crate) fn status(&self, used: usize) -> TierStatus {
         let used = u64::try_from(used).unwrap_or(u64::MAX);
         TierStatus {

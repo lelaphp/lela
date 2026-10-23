@@ -117,8 +117,8 @@ fn opcache_jit_is_read_as_php_reads_it() {
 }
 
 /// `zend_jit_status` once php's start is over, as the oracle reports it
-/// on this target (`opcache.enable_cli=1`, the page 16 KiB on
-/// `aarch64` macOS, 4 KiB elsewhere): `JIT_G` as `opcache.jit` set it,
+/// on this target (`opcache.enable_cli=1`; 16368 and 67108848 under 16K
+/// and 64M on its 16 KiB page): `JIT_G` as `opcache.jit` set it,
 /// the digits a refused number wrote kept, a zero buffer and a buffer
 /// past the target's reach neither enabled nor on, and the buffer
 /// rounded to the page less two pointers, free but for the code of the
@@ -136,14 +136,7 @@ fn the_status_is_zend_jit_status() {
             s.buffer_free,
         )
     };
-    let buffer = |size: usize| {
-        let page = if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
-            16 << 10
-        } else {
-            4 << 10
-        };
-        u64::try_from(size.next_multiple_of(page) - 16).unwrap_or(0)
-    };
+    let buffer = |size: u64| u64::try_from(crate::table::code::capacity(size) - 16).unwrap_or(0);
     let big = buffer(64 << 20);
     for (asked, expected) in [
         (&[][..], ((false, false), (0, 0, 0), 0, 0)),
