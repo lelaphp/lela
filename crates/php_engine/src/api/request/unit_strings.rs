@@ -282,7 +282,7 @@ enum Owner {
 /// parameter's default, a promoted one's and an abstract method's among
 /// them (`OpArray::const_exprs`), and the declaration for a class
 /// constant, a default, a static, an attribute's argument and a `const`
-/// ([`php_compile::arrays::declared_arrays`]). Each outlives the `eval` that declared it, read
+/// ([`php_compile::values::declared_arrays`]). Each outlives the `eval` that declared it, read
 /// after the heap is churned:
 ///
 /// ```php
@@ -351,13 +351,13 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
     // not fold among them, whose `RECV_INIT` holds the tree.
     for (owner, body) in bodies() {
         for expr in &body.const_exprs {
-            php_compile::arrays::unit_arrays(expr, &mut |z| arrays.push((z, owner)));
+            php_compile::values::unit_arrays(expr, &mut |z| arrays.push((z, owner)));
         }
     }
-    let mut declared: Vec<(Zval, Owner)> = (php_compile::arrays::declared_arrays(unit).into_iter())
+    let mut declared: Vec<(Zval, Owner)> = (php_compile::values::declared_arrays(unit).into_iter())
         .map(|(z, holder)| match holder {
-            php_compile::arrays::Holder::Unit => (z, Owner::Tables),
-            php_compile::arrays::Holder::Dynamic(at) => (z, Owner::Definition(at)),
+            php_compile::values::Holder::Unit => (z, Owner::Tables),
+            php_compile::values::Holder::Dynamic(at) => (z, Owner::Definition(at)),
         })
         .collect();
     let names = declared_names(unit);
@@ -491,15 +491,8 @@ fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
 /// ```
 fn declared_values(unit: &Unit) -> HashMap<&[u8], usize, NameHasher> {
     let mut values = HashMap::with_hasher(NameHasher);
-    for class in &unit.classes {
-        let constants = (class.constants.iter())
-            .filter(|constant| !constant.is_case)
-            .map(|constant| &constant.value);
-        for value in constants.chain(class.properties.iter().filter_map(|p| p.default.as_ref())) {
-            if let ConstExpr::Str(value) = value {
-                *values.entry(&**value).or_insert(0) += 1;
-            }
-        }
+    for value in php_compile::values::declared_strings(unit) {
+        *values.entry(value).or_insert(0) += 1;
     }
     values
 }
@@ -856,20 +849,8 @@ impl Request {
         // What a declaration finds by its bytes: a name it is read by, a
         // value it holds, or a parameter's default, which `RECV_INIT`'s
         // constant holds and Reflection copies (`get_parameter_default`).
-        let defaults: HashSet<&[u8], NameHasher> = (unit.functions.iter().chain(&unit.dynamic))
-            .map(|(decl, _)| decl)
-            .chain(
-                unit.classes
-                    .iter()
-                    .flat_map(|class| &class.methods)
-                    .map(|m| &m.function),
-            )
-            .flat_map(|decl| &decl.parameters)
-            .filter_map(|parameter| match parameter.default.expr() {
-                Some(ConstExpr::Str(bytes)) => Some(&**bytes),
-                _ => None,
-            })
-            .collect();
+        let defaults: HashSet<&[u8], NameHasher> =
+            php_compile::values::default_strings(unit).collect();
         let found = |s: &PhpString| {
             let bytes = s.as_bytes();
             names.contains(bytes) || values.contains_key(bytes) || defaults.contains(bytes)
@@ -962,11 +943,11 @@ impl Request {
     /// ```
     pub(super) fn take_declaration_slot(&mut self, value: Value) {
         let z = value.to_zval();
-        let held = (self.unit_strings.units.iter_mut()).find_map(|held| {
-            let at = held.constants.iter().position(|c| c.is_same_value(z))?;
-            Some(held.constants.swap_remove(at))
+        let held = (self.unit_strings.units.iter_mut()).any(|held| {
+            let at = held.constants.iter().position(|c| c.is_same_value(z));
+            at.map(|at| held.constants.swap_remove(at)).is_some()
         });
-        if held.is_some() {
+        if held {
             self.release(value);
         }
     }

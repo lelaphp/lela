@@ -1,8 +1,8 @@
-//! The arrays a unit holds as values ([`ConstExpr::UnitArray`]): the
-//! walks over its declarations and its constant expressions that the
-//! engine gives the compile's owner of each array by, as
-//! [`crate::declared_names`] walks the names a unit's declarations are
-//! read by.
+//! The values a unit's declarations hold, its arrays
+//! ([`ConstExpr::UnitArray`]) and its strings: the walks over its
+//! declarations and its constant expressions that the engine gives the
+//! compile's owner of each value by, as [`crate::declared_names`] walks
+//! the names a unit's declarations are read by.
 
 use php_heap::Zval;
 use php_unit::Unit;
@@ -57,20 +57,14 @@ pub enum Holder {
 /// ```
 pub fn declared_arrays(unit: &Unit) -> Vec<(Zval, Holder)> {
     let mut found = Vec::new();
-    let function = |decl: &FunctionDecl, holder: Holder, found: &mut Vec<(Zval, Holder)>| {
+    for (holder, decl) in function_decls(unit) {
         let attributes = (decl.parameters.iter().map(|p| &p.attributes)).chain([&decl.attributes]);
         for list in attributes {
             attribute_arrays(list, &mut |z| found.push((z, holder)));
         }
-    };
-    for (decl, _) in &unit.functions {
-        function(decl, Holder::Unit, &mut found);
     }
-    for (at, (decl, _)) in unit.dynamic.iter().enumerate() {
-        function(decl, Holder::Dynamic(at), &mut found);
-    }
+    let mut push = |z| found.push((z, Holder::Unit));
     for class in &unit.classes {
-        let mut push = |z| found.push((z, Holder::Unit));
         attribute_arrays(&class.attributes, &mut push);
         for constant in &class.constants {
             unit_arrays(&constant.value, &mut push);
@@ -83,14 +77,60 @@ pub fn declared_arrays(unit: &Unit) -> Vec<(Zval, Holder)> {
                 .for_each(|d| unit_arrays(d, &mut push));
             attribute_arrays(&property.attributes, &mut push);
         }
+    }
+    found
+}
+
+/// Each function `unit` declares beside what holds it: a function, a
+/// method and a hook the unit, a dynamic definition its own.
+fn function_decls(unit: &Unit) -> impl Iterator<Item = (Holder, &FunctionDecl)> {
+    let members = unit.classes.iter().flat_map(|class| {
         let hooks = (class.properties.iter())
             .filter_map(|property| property.hooks.as_deref())
             .flat_map(|hooks| hooks.get.iter().chain(&hooks.set));
-        for method in class.methods.iter().chain(hooks) {
-            function(&method.function, Holder::Unit, &mut found);
-        }
+        class
+            .methods
+            .iter()
+            .chain(hooks)
+            .map(|method| &method.function)
+    });
+    (unit.functions.iter().map(|(decl, _)| (Holder::Unit, decl)))
+        .chain((unit.dynamic.iter().enumerate()).map(|(at, (decl, _))| (Holder::Dynamic(at), decl)))
+        .chain(members.map(|decl| (Holder::Unit, decl)))
+}
+
+/// The strings `unit`'s classes declare their constants and properties'
+/// defaults with, one for each declaration that holds one: the string
+/// the compile made for each, written or folded, is the class's from its
+/// declaration, as php's `constants_table`, `default_properties_table`
+/// and `default_static_members_table` hold the zval the compile put
+/// there. An enum case's is not among them, its value standing in the
+/// case's copied expression.
+pub fn declared_strings(unit: &Unit) -> impl Iterator<Item = &[u8]> {
+    unit.classes.iter().flat_map(|class| {
+        let constants = (class.constants.iter())
+            .filter(|constant| !constant.is_case)
+            .map(|constant| &constant.value);
+        let defaults = class.properties.iter().filter_map(|p| p.default.as_ref());
+        constants.chain(defaults).filter_map(string_of)
+    })
+}
+
+/// The strings `unit`'s parameters' defaults are, each held by its
+/// function's `RECV_INIT` constant, which Reflection copies
+/// (`get_parameter_default`).
+pub fn default_strings(unit: &Unit) -> impl Iterator<Item = &[u8]> {
+    function_decls(unit)
+        .flat_map(|(_, decl)| &decl.parameters)
+        .filter_map(|parameter| parameter.default.expr().and_then(string_of))
+}
+
+/// The bytes a constant expression written as a string holds.
+fn string_of(expr: &ConstExpr) -> Option<&[u8]> {
+    match expr {
+        ConstExpr::Str(bytes) => Some(bytes),
+        _ => None,
     }
-    found
 }
 
 /// Each array `expr` holds ([`ConstExpr::UnitArray`]) anywhere in its tree.
