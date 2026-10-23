@@ -788,7 +788,7 @@ impl Emit<'_> {
         else {
             return Ok(None);
         };
-        let table = self.lay_array(&keys)?;
+        let table = self.lay_array(&keys, Vec::new())?.value();
         let needle = self.source(needle)?;
         Ok(Some(self.emit_binary(
             Opcode::InArray,

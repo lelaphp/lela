@@ -4130,17 +4130,27 @@ impl Intern for PermanentStrings<'_> {
     /// `zend_eval_const_expr` frees an operand once the value it made
     /// stands: the request's copy, and the string itself where the
     /// compile made it and nothing else asked for it; a string the table
-    /// held stays, the unit's to share.
+    /// held stays, the unit's to share. An array goes with the asks it
+    /// took over ([`php_heap::Pending::give_back`]).
     fn give_back(&mut self, made: php_heap::Made) {
-        let string = made.str();
-        if let CompileHeap::Request(heap) = &mut self.heap {
+        let value = made.value();
+        if let (CompileHeap::Request(heap), Some(string)) = (&mut self.heap, value.as_str()) {
             let named = |standing: &Standing| standing.interned.is_same(string);
             if let Some(at) = self.standing.iter().rposition(named) {
                 let standing = self.standing.swap_remove(at);
                 heap.release_string(standing.copy);
             }
         }
-        self.made.give_back(string);
+        self.made.give_back(value);
+    }
+
+    /// One more owner of `value`: an ask on a string or an array this
+    /// compile made, so giving back the array a fold read it out of
+    /// leaves it standing (`ZVAL_COPY_OR_DUP`); nothing counts any other
+    /// a cache-bound compile holds.
+    fn hold(&mut self, value: php_heap::Zval) -> bool {
+        self.made.hold(value);
+        !value.is_refcounted()
     }
 
     fn constant_array(

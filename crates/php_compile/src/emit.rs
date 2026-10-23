@@ -1281,7 +1281,7 @@ impl Operated {
     /// unit's as any other the compile made.
     fn kept(self) -> Zval {
         match self {
-            Operated::Made(made) => Zval::string(made.str()),
+            Operated::Made(made) => made.value(),
             Operated::Kept(value) => value,
         }
     }
@@ -1289,7 +1289,7 @@ impl Operated {
     /// The value, a view: a claim stays the holder's.
     fn value(&self) -> Zval {
         match self {
-            Operated::Made(made) => Zval::string(made.str()),
+            Operated::Made(made) => made.value(),
             Operated::Kept(value) => *value,
         }
     }
@@ -2167,7 +2167,7 @@ impl<'a> Emit<'a> {
     /// [`Self::string`] of a declaration's own name or lowered key, which
     /// php copies where this compile asks for it ([`Intern::intern_name`]).
     fn own_string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
-        self.own_made(bytes).map(|made| Zval::string(made.str()))
+        self.own_made(bytes).map(|made| made.value())
     }
 
     /// `zend_string_tolower(ce->name)`, the key `DECLARE_CLASS` and
@@ -8291,7 +8291,7 @@ impl<'a> Emit<'a> {
                         // (`ZVAL_STR_COPY`), no string of its own: the
                         // claim is one more owner of the name, kept for
                         // what holds the value.
-                        Some(Operated::Made(made)) => return self.folded(Zval::string(made.str())),
+                        Some(Operated::Made(made)) => return self.folded(made.value()),
                         None => {}
                     }
                     let ClassSpec::Name(token) = class else {
@@ -8567,22 +8567,33 @@ impl<'a> Emit<'a> {
         items: &[(Option<ConstExpr>, ConstExpr)],
     ) -> Result<Option<UnitValue>, CompileError> {
         let mut folded = Vec::with_capacity(items.len());
+        let mut claims = Vec::new();
+        let mut value_of = |this: &mut Self, expr: &ConstExpr| {
+            Ok::<_, CompileError>(this.operated_of(expr)?.map(|operated| match operated {
+                Operated::Made(made) => {
+                    let value = made.value();
+                    claims.push(made);
+                    value
+                }
+                Operated::Kept(value) => value,
+            }))
+        };
         for (key, value) in items {
             if let ConstExpr::Unpack(inner) = value {
-                let Some(inner) = self.value_of(inner)? else {
+                let Some(inner) = value_of(self, inner)? else {
                     return Ok(None);
                 };
                 folded.push(FoldedElement::Unpack(inner));
                 continue;
             }
             let key = match key {
-                Some(key) => match self.value_of(key)? {
+                Some(key) => match value_of(self, key)? {
                     Some(key) => Some(key),
                     None => return Ok(None),
                 },
                 None => None,
             };
-            let Some(value) = self.value_of(value)? else {
+            let Some(value) = value_of(self, value)? else {
                 return Ok(None);
             };
             folded.push(FoldedElement::Pair(key, value));
@@ -8590,18 +8601,12 @@ impl<'a> Emit<'a> {
         let Some(entries) = self.keyed_entries(folded)? else {
             return Ok(None);
         };
-        let array = self.lay_array(&entries)?;
-        Ok(UnitValue::new(array))
+        let array = self.lay_array(&entries, claims)?;
+        Ok(UnitValue::new(array.value()))
     }
 
-    /// The value a folded constant expression stands for, a string
-    /// interned where the unit's strings are; none for one still to
-    /// evaluate.
-    fn value_of(&mut self, expr: &ConstExpr) -> Result<Option<Zval>, CompileError> {
-        Ok(self.operated_of(expr)?.map(Operated::kept))
-    }
-
-    /// [`Self::value_of`] as its reader holds it: a string made afresh
+    /// The value a folded constant expression stands for, none for one
+    /// still to evaluate, as its reader holds it: a string made afresh
     /// for the read is the reader's alone ([`Operated::Made`]), which a
     /// fold gives back once the node over it stands, as php's operand
     /// that `ZVAL_COPY_OR_DUP` duplicated is freed there. A constant of
@@ -12061,6 +12066,10 @@ impl<'a> Emit<'a> {
     /// `ZEND_AST_ARRAY` read as a value.
     fn array_expr(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Where, CompileError> {
         let elements = self.list(self.parsed.tree[id].array_elements);
+        if let Some(made) = self.constant_array(elements)? {
+            let value = self.claimed(tree::Expr::ArrayExpr(id), Operated::Made(made));
+            return Ok(Where::Constant(value));
+        }
         self.array(elements)
     }
 
@@ -14997,7 +15006,8 @@ impl<'a> Emit<'a> {
     fn array_union(&mut self, left: Arr, right: Arr) -> Result<Zval, CompileError> {
         let mut entries: Vec<(Key, Zval)> = left.iter().collect();
         entries.extend(right.iter().filter(|(key, _)| left.get(*key).is_none()));
-        self.lay_array(&entries)
+        self.lay_array(&entries, Vec::new())
+            .map(|made| made.value())
     }
 
     /// `zend_compile_binary_op` once `zend_try_ct_eval_binary_op` has
@@ -15241,9 +15251,7 @@ impl<'a> Emit<'a> {
         left: Zval,
         right: Zval,
     ) -> Result<Option<Zval>, CompileError> {
-        Ok(self
-            .concat_made(left, right)?
-            .map(|made| Zval::string(made.str())))
+        Ok(self.concat_made(left, right)?.map(|made| made.value()))
     }
 
     /// [`Self::concat_fold`]'s string as the claim of the one who asked
@@ -15392,9 +15400,12 @@ impl<'a> Emit<'a> {
     /// `precision` and `(string)` of an array warns, so neither folds;
     /// and there is no `IS_OBJECT` arm at all, so `(object)` never
     /// folds.
-    fn cast_fold(&mut self, to: CastTo, value: Zval) -> Result<Option<Zval>, CompileError> {
+    fn cast_fold(&mut self, to: CastTo, value: Zval) -> Result<Option<Operated>, CompileError> {
         if value.as_double().is_some_and(f64::is_nan) {
             return Ok(None);
+        }
+        if to == CastTo::Array {
+            return self.array_of(value);
         }
         Ok(match to {
             CastTo::Bool => Some(Zval::bool(truth(value))),
@@ -15407,26 +15418,25 @@ impl<'a> Emit<'a> {
                 ZvalType::Array | ZvalType::Double => None,
                 _ => self.stringified(value)?,
             },
-            CastTo::Array => self.array_of(value)?,
-            CastTo::Object => None,
-        })
+            CastTo::Array | CastTo::Object => None,
+        }
+        .map(Operated::Kept))
     }
 
     /// `convert_to_array` over a folded constant: an array is itself,
     /// `null` is the empty array, and every other constant the
-    /// one-element array holding it at `0` (`convert_scalar_to_array`).
-    fn array_of(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
+    /// one-element array holding it at `0` (`convert_scalar_to_array`),
+    /// the cast's own claim.
+    fn array_of(&mut self, value: Zval) -> Result<Option<Operated>, CompileError> {
         if value.as_arr().is_some() {
-            return Ok(Some(value));
+            return Ok(Some(Operated::Kept(value)));
         }
         let entries: &[(Key, Zval)] = match value.kind() {
             ZvalType::Null => &[],
             _ => &[(Key::Long(0), value)],
         };
-        match self.strings.constant_array(entries) {
-            Ok(array) => Ok(Some(Zval::array(array))),
-            Err(fatal) => Err(self.fatal_of(fatal)),
-        }
+        self.lay_array(entries, Vec::new())
+            .map(|made| Some(Operated::Made(made)))
     }
 
     /// `zend_compile_unary_pm`: php folds unary `-` and `+` as the
@@ -15458,8 +15468,9 @@ impl<'a> Emit<'a> {
         if let Where::Constant(value) = operand
             && value.as_double().is_none()
         {
+            let folded = Zval::bool(!truth(value));
             self.side_folded(side);
-            return Ok(Where::Constant(Zval::bool(!truth(value))));
+            return Ok(Where::Constant(folded));
         }
         Ok(self.emit_unary(Opcode::BoolNot, operand, 0))
     }
@@ -16622,7 +16633,6 @@ impl<'a> Emit<'a> {
         self.fold_over(tree::Expr::CastExpr(id), [operand], |emit| {
             let value = emit.constant_expr(operand)?;
             emit.cast_fold(to, value)?
-                .map(Operated::Kept)
                 .ok_or(Unfolded::NoConstant("a cast this compiler cannot fold"))
         })
     }
@@ -16653,9 +16663,10 @@ impl<'a> Emit<'a> {
     /// `ZEND_AST_ARRAY` whose every element folds.
     fn array_constant(&mut self, id: NodeId<tree::ArrayExpr>) -> Result<Zval, Unfolded> {
         let elements = self.list(self.parsed.tree[id].array_elements);
-        self.constant_array(elements)?.ok_or(Unfolded::NoConstant(
+        let made = self.constant_array(elements)?.ok_or(Unfolded::NoConstant(
             "an array expression that is no constant",
-        ))
+        ))?;
+        Ok(self.claimed(tree::Expr::ArrayExpr(id), Operated::Made(made)))
     }
 
     /// A call of a name in [`crate::special`]'s table over constants
@@ -16694,7 +16705,7 @@ impl<'a> Emit<'a> {
             return Err(self.compile_error("Cannot use [] for reading").into());
         };
         self.fold_over(tree::Expr::SubscriptExpr(id), [base, index], |emit| {
-            emit.dimension_fold(base, index).map(Operated::Kept)
+            emit.dimension_fold(base, index)
         })
     }
 
@@ -16767,7 +16778,7 @@ impl<'a> Emit<'a> {
         match folded {
             Operated::Kept(value) => value,
             Operated::Made(made) => {
-                let value = Zval::string(made.str());
+                let value = made.value();
                 self.claims.hold(node, made);
                 value
             }
@@ -16856,7 +16867,11 @@ impl<'a> Emit<'a> {
     /// }
     /// string(4) "efgh"
     /// ```
-    fn dimension_fold(&mut self, base: tree::Expr, index: tree::Expr) -> Result<Zval, Unfolded> {
+    fn dimension_fold(
+        &mut self,
+        base: tree::Expr,
+        index: tree::Expr,
+    ) -> Result<Operated, Unfolded> {
         let (container, dim) = self.constant_pair(base, index)?;
         let refused = || Unfolded::NoConstant("a dimension this compiler leaves to the request");
         if let Some(array) = container.as_arr() {
@@ -16869,10 +16884,17 @@ impl<'a> Emit<'a> {
                 (None, None) => return Err(refused()),
             };
             // `ZVAL_COPY_OR_DUP`: one more owner of the element, the
-            // unit's, where the array is the request's; else the fetch.
+            // node's claim where it is a string; else the fetch.
             let element = array.get(key).ok_or_else(refused)?;
+            if let Some(s) = element.as_str() {
+                return self
+                    .strings
+                    .hold_made(s)
+                    .map(Operated::Made)
+                    .ok_or_else(refused);
+            }
             return if self.strings.hold(element) {
-                Ok(element)
+                Ok(Operated::Kept(element))
             } else {
                 Err(refused())
             };
@@ -16890,7 +16912,7 @@ impl<'a> Emit<'a> {
                 .ok()
                 .and_then(|at| text.bytes().get(at).copied());
             return match byte {
-                Some(byte) => Ok(self.string(&[byte])?),
+                Some(byte) => Ok(Operated::Kept(self.string(&[byte])?)),
                 None => Err(refused()),
             };
         }
@@ -16916,11 +16938,13 @@ impl<'a> Emit<'a> {
     fn constant_array(
         &mut self,
         elements: &[NodeId<tree::ArrayElement>],
-    ) -> Result<Option<Zval>, CompileError> {
-        match self.constant_entries(elements)? {
-            Some(entries) => self.lay_array(&entries).map(Some),
-            None => Ok(None),
-        }
+    ) -> Result<Option<Made>, CompileError> {
+        let mark = self.claims.mark();
+        let Some(entries) = self.constant_entries(elements)? else {
+            return Ok(None);
+        };
+        let claims = (self.claims.since(mark).into_iter()).map(|(_, made)| made);
+        self.lay_array(&entries, claims.collect()).map(Some)
     }
 
     /// `zend_try_ct_eval_array` over an argument php's tree holds as
@@ -17077,13 +17101,67 @@ impl<'a> Emit<'a> {
     }
 
     /// One constant array laid down in the home the unit's strings are
-    /// in ([`Intern::constant_array`]), and the fatal php's allocator
-    /// raises where there is no memory for it.
-    pub(crate) fn lay_array(&mut self, entries: &[(Key, Zval)]) -> Result<Zval, CompileError> {
-        match self.strings.constant_array(entries) {
-            Ok(array) => Ok(Zval::array(array)),
-            Err(fatal) => Err(self.fatal_of(fatal)),
+    /// in, as the claim of the one who asked ([`Intern::constant_array_made`]),
+    /// and the fatal php's allocator raises where there is no memory for
+    /// it. The array takes one owner of each key and value over, as
+    /// `zend_try_ct_eval_array` moves each element's zval in: the claim
+    /// among `claims` an entry was made with, else one more owner of it
+    /// ([`Intern::hold`]); a claim no entry holds, a numeric key's string
+    /// or an unpacked array, is given back. So an array a fold reads and
+    /// gives back takes its strings with it, and none joins opcache's
+    /// buffer with the unit (each file written where the cache keeps it):
+    ///
+    /// ```php
+    /// $n = fn () => opcache_get_status()['interned_strings_usage']['number_of_strings'];
+    /// foreach (['$z = ["a#"] == "a#";', '$z = ["a#"] + ["c#"];', 'class X { const A = ["a#"] == "a#"; }', '$z = [["a#"]] == 1;', '$z = [...["a#"]] == 1;', 'class D { const A = ["k#" => "l#"]["k#"]; }', '$z = [["a#"]][0];', '$z = ["a#"] ?? 2;'] as $i => $c) {
+    ///     $c = str_replace('#', "q$i", $c);
+    ///     $f = sys_get_temp_dir() . "/w3258-lay-$i.php";
+    ///     file_put_contents("$f.tmp", "<?php $c");
+    ///     touch("$f.tmp", time() - 10);
+    ///     rename("$f.tmp", $f);
+    ///     $a = $n();
+    ///     include $f;
+    ///     echo $n() - $a, '  ', $c, "\n";
+    ///     unlink($f);
+    /// }
+    /// echo json_encode([X::A, D::A, $z]), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1  $z = ["aq0"] == "aq0";
+    /// 2  $z = ["aq1"] + ["cq1"];
+    /// 1  class X { const A = ["aq2"] == "aq2"; }
+    /// 1  $z = [["aq3"]] == 1;
+    /// 1  $z = [...["aq4"]] == 1;
+    /// 2  class D { const A = ["kq5" => "lq5"]["kq5"]; }
+    /// 2  $z = [["aq6"]][0];
+    /// 2  $z = ["aq7"] ?? 2;
+    /// [false,"lq5",["aq7"]]
+    /// ```
+    pub(crate) fn lay_array(
+        &mut self,
+        entries: &[(Key, Zval)],
+        mut claims: Vec<Made>,
+    ) -> Result<Made, CompileError> {
+        let values = entries.iter().flat_map(|(key, value)| {
+            let key = match key {
+                Key::Str(s) => Some(Zval::string(*s)),
+                Key::Long(_) => None,
+            };
+            key.into_iter().chain([*value])
+        });
+        for value in values.filter(|z| z.as_str().is_some() || z.as_arr().is_some()) {
+            match claims
+                .iter()
+                .position(|made| made.value().is_same_value(value))
+            {
+                Some(at) => drop(claims.swap_remove(at)),
+                None => drop(self.strings.hold(value)),
+            }
         }
+        for made in claims {
+            self.strings.give_back(made);
+        }
+        (self.strings.constant_array_made(entries)).map_err(|fatal| self.fatal_of(fatal))
     }
 
     /// `zend_compile_array` (`Z/Zend/zend_compile.c:10935`): the constant
@@ -17140,9 +17218,6 @@ impl<'a> Emit<'a> {
     /// }
     /// ```
     fn array(&mut self, ids: &[NodeId<tree::ArrayElement>]) -> Result<Where, CompileError> {
-        if let Some(value) = self.constant_array(ids)? {
-            return Ok(Where::Constant(value));
-        }
         let elements = self.elements_of(ids)?;
         let count = u32::try_from(elements.len()).unwrap_or(u32::MAX);
         let mut init_at = 0usize;
