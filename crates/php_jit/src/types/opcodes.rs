@@ -655,7 +655,6 @@ pub(super) fn inline_may_leave(line: &Line) -> bool {
         line.opcode,
         Opcode::AssignOp
             | Opcode::FetchDimR
-            | Opcode::AssignDim
             | Opcode::InitFcall
             | Opcode::InitFcallByName
             | Opcode::InitNsFcallByName

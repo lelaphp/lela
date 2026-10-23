@@ -25,7 +25,7 @@ use super::{
 use crate::lower::dump;
 use crate::record::{Landed, Stop};
 use crate::testing::goldens::{
-    self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held, traced as built,
+    self, ARRAY_WRITE, FIB, Fixture, MANDELBROT, NBODY, SIEVE, SPECTRALNORM, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -214,6 +214,47 @@ fn mandelbrot_loops_in_file_scope() -> Result<(), String> {
 fn nbody_advances_in_a_loop() -> Result<(), String> {
     let ir = golden(NBODY)?;
     assert_eq!(ir.entry.stop, Stop::Loop);
+    Ok(())
+}
+
+/// The element writes of `array_write` and `sieve`, a scalar by a long
+/// key to a packed array recorded packed, are inline, as php's
+/// `zend_jit_assign_dim` compiles them, with no layout guard, which php
+/// adds only to an array recorded hash
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`): the array is of
+/// either layout, which the write tests. They take no exit, since php's
+/// code calls its helpers where it cannot write in place, and the handler
+/// serves it here; the handler may throw, so they unwind (#3228).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_element_write_is_inline_and_takes_no_exit() -> Result<(), String> {
+    for fixture in [ARRAY_WRITE, SIEVE] {
+        let ir = golden(fixture)?;
+        assert_eq!(ir.entry.stop, Stop::Loop);
+        let writes: Vec<_> = (ir.ops.iter())
+            .filter_map(|op| match op {
+                Op::Line(line) if line.opcode == Opcode::AssignDim => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes.len(), 1, "{}", dump::render(&ir));
+        for line in writes {
+            assert_eq!(line.form, Form::Inline, "{}", dump::render(&ir));
+            assert!(line.exit.is_none() && line.unwind.is_some());
+            let Operand::Value(array) = line.op1 else {
+                return Err(format!("{}: a write to no array", fixture.name));
+            };
+            let types = ir.values[array.0 as usize].types;
+            assert!(types.meets(Types::PACKED) && types.meets(Types::HASH));
+        }
+        assert!(
+            !ir.guards
+                .iter()
+                .any(|guard| matches!(guard.check, Check::Layout { .. })),
+            "{}",
+            dump::render(&ir)
+        );
+    }
     Ok(())
 }
 

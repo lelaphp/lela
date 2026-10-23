@@ -1636,49 +1636,128 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
-    /// A write of a scalar to a packed array's element by a long key, in
-    /// place: it leaves for the interpreter unless the array is counted
-    /// and held once, so no other holder sees the write and no separation
-    /// is due, and the element is there and counts nothing, so nothing is
-    /// freed.
+    /// A write of a scalar to an array's element by a long key, php's
+    /// `zend_jit_assign_dim` (`Z/ext/opcache/jit/zend_jit_ir.c:13352-13512`):
+    /// in place where the array is counted and held once, so php's
+    /// `SEPARATE_ARRAY` has nothing to do, packed, the key below
+    /// `nNumUsed` and the element there and counting nothing, so nothing
+    /// is freed (`zend_jit_fetch_dimension_address_inner`'s `BP_VAR_W`
+    /// path, `:11917-12054`); through the handler otherwise, where php's
+    /// code calls its helpers, the array's copy, the hash's lookup or
+    /// insert and the old value's release, so the write takes no exit.
+    ///
+    /// An immutable array, one shared, a key past `nNumUsed`, a counted
+    /// element, a hole and an array turned hash are each served by the
+    /// handler, in place of the write, and the loop goes on in the trace:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "freed\n"; } }
+    /// function w($n) {
+    ///     $a = [0, 0, 0, 0]; $b = null;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if ($i == 50) { $b = $a; }
+    ///         if ($i == 60) { $a[1] = new D; }
+    ///         if ($i == 70) { unset($a[2]); }
+    ///         if ($i == 80) { $a[1000] = -1; }
+    ///         $a[$i % 6] = $i;
+    ///     }
+    ///     foreach ($a as $k => $v) { echo "$k=$v "; }
+    ///     echo count($b), "\n";
+    /// }
+    /// w(100);
+    /// ```
+    /// ```expect regime=jit-force process
+    /// freed
+    /// 0=96 1=97 3=99 4=94 5=95 2=98 1000=-1 6
+    /// ```
+    ///
+    /// Under exit-fuzz the handler serves the write once in each trace, in
+    /// place of an exit:
+    ///
+    /// ```php
+    /// function s($n) {
+    ///     $a = []; for ($i = 0; $i < $n; $i++) { $a[] = true; }
+    ///     for ($i = 2; $i < $n; $i++) {
+    ///         if ($a[$i]) { for ($j = $i + $i; $j < $n; $j += $i) { $a[$j] = false; } }
+    ///     }
+    ///     $c = 0; foreach ($a as $p) { if ($p) { $c++; } }
+    ///     return $c;
+    /// }
+    /// echo s(1000), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 170
+    /// ```
     fn assign_dim(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let exit = line
-            .exit
-            .ok_or_else(|| mismatch("an element write that cannot leave"))?;
         let Operand::Value(array) = line.op1 else {
             return Err(mismatch("an element write to no array"));
         };
-        let (room, array_at) = self.place(self.value(array)?.slot)?;
+        let Scalar::Long(key) = self.scalar(at, line.op2)? else {
+            return Err(mismatch("an element write by no long key"));
+        };
+        let value = self.scalar(at, line.data)?;
+        let held = self.value(array)?;
+        let (room, array_at) = self.place(held.slot)?;
+        let handled = self.b.create_block();
+        let done = self.b.create_block();
         let info = self.b.ins().load(I32, trusted(), room, array_at + TYPE_AT);
         let counted = self.b.ins().band_imm_u(info, COUNTED);
         let immutable = self.b.ins().icmp_imm_s(IntCC::Equal, counted, 0);
-        self.leave_if(immutable, exit)?;
+        self.unless(immutable, handled);
         let arr = self.b.ins().load(I64, trusted(), room, array_at);
         let count = self
             .b
             .ins()
             .load(I32, trusted(), arr, imm(Arr::REFCOUNT_AT));
         let shared = self.b.ins().icmp_imm_s(IntCC::NotEqual, count, 1);
-        self.leave_if(shared, exit)?;
-        let Scalar::Long(key) = self.scalar(at, line.op2)? else {
-            return Err(mismatch("an element write by no long key"));
-        };
-        let element = self.element(arr, key, exit)?;
-        let held = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        let kind = self.b.ins().band_imm_u(held, 0xff);
+        self.unless(shared, handled);
+        if held.types.meets(Types::HASH) {
+            let flags = self.b.ins().load(I32, trusted(), arr, imm(Arr::FLAGS_AT));
+            let packed = self.b.ins().band_imm_u(flags, i64::from(Arr::PACKED));
+            let hash = self.b.ins().icmp_imm_s(IntCC::Equal, packed, 0);
+            self.unless(hash, handled);
+        }
+        let used = self.b.ins().load(I32, trusted(), arr, imm(Arr::USED_AT));
+        let used = self.b.ins().uextend(I64, used);
+        let past = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, key, used);
+        self.unless(past, handled);
+        let data = self.b.ins().load(I64, trusted(), arr, imm(Arr::DATA_AT));
+        let offset = self.b.ins().imul_imm_s(key, SLOT);
+        let element = self.b.ins().iadd(data, offset);
+        let old = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+        let kind = self.b.ins().band_imm_u(old, 0xff);
         let hole = self
             .b
             .ins()
             .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
-        self.leave_if(hole, exit)?;
-        let counts = self.b.ins().band_imm_u(held, COUNTED);
-        self.leave_if(counts, exit)?;
-        let value = self.scalar(at, line.data)?;
+        self.unless(hole, handled);
+        let counts = self.b.ins().band_imm_u(old, COUNTED);
+        let counts = self.fuzzed(counts)?;
+        self.unless(counts, handled);
         self.write(element, 0, value);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(handled);
+        self.b.seal_block(handled);
+        self.stepped(at, line)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
         if let Some(out) = line.out {
             self.define(out, value)?;
         }
         Ok(())
+    }
+
+    /// Go on where `cond` is zero, and to `to` otherwise, a block whose
+    /// branches the caller seals once every one is made.
+    fn unless(&mut self, cond: Value, to: Block) {
+        let on = self.b.create_block();
+        self.b.ins().brif(cond, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
     }
 
     /// The address of the slot `key` names in the packed array `arr`,

@@ -760,8 +760,9 @@ impl<'a> Builder<'a> {
     /// one cannot finish, before it does anything, which the interpreter
     /// runs again; through an unwind where a kernel it calls throws, a
     /// stepped one that may, an inline assignment over a counted value,
-    /// whose destructor may, and an inline fetch from a temporary array,
-    /// which frees it once its element is read.
+    /// whose destructor may, an inline fetch from a temporary array,
+    /// which frees it once its element is read, and an inline element
+    /// write, which its handler serves where it cannot write in place.
     fn own_exit(&mut self, idx: OpId, frame: Frame, op: &Opline, form: Form, old: Types) {
         let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
             return;
@@ -790,6 +791,7 @@ impl<'a> Builder<'a> {
             Form::Inline => {
                 (op.opcode == Opcode::Assign && !old.within(UNCOUNTED))
                     || (op.opcode == Opcode::FetchDimR && self.is_temp(op1))
+                    || op.opcode == Opcode::AssignDim
             }
             Form::Step => op.opcode.effects().contains(Effects::THROW),
         };
@@ -1504,7 +1506,16 @@ impl<'a> Builder<'a> {
                 cv1 && number(t1)
             }
             Opcode::FetchDimR => op.op1_type != OperandKind::Const && t1 == packed && long(t2),
-            Opcode::AssignDim => cv1 && t1 == packed && long(t2) && scalar(td),
+            // php compiles the write inline over an array that may be
+            // packed, testing its layout where it may be either, and adds
+            // no layout guard where the array was recorded packed
+            // (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`).
+            Opcode::AssignDim => {
+                cv1 && t1.tag() == Some(ZvalType::Array)
+                    && t1.meets(Types::PACKED)
+                    && long(t2)
+                    && scalar(td)
+            }
             Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx => {
                 op.op2_type == OperandKind::Unused && scalar(t1)
             }
