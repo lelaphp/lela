@@ -262,18 +262,24 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         self.entries().get(key).map(Arc::clone)
     }
 
-    /// `value` held for `key`, or what another thread put there while
-    /// this one built it, which is kept: the one both are answered. A
-    /// value held there that `stale` answers true for is replaced, under
-    /// every key that held it, as one bucket of php's hash that several
-    /// keys point to is updated in place.
-    pub(crate) fn insert_over(&self, key: K, stale: impl Fn(&V) -> bool, value: V) -> Arc<V> {
+    /// The `value` built from what it replaces held for `key`, or what
+    /// another thread put there while this one built it, which is kept
+    /// and nothing built: the one both are answered. A value held there
+    /// that `stale` answers true for is replaced, under every key that
+    /// held it, as one bucket of php's hash that several keys point to is
+    /// updated in place.
+    pub(crate) fn insert_over(
+        &self,
+        key: K,
+        stale: impl Fn(&V) -> bool,
+        value: impl FnOnce(Option<&V>) -> V,
+    ) -> Arc<V> {
         let mut entries = self.entries();
         let replaced = match entries.get(&key) {
             Some(found) if !stale(found) => return Arc::clone(found),
             found => found.map(Arc::clone),
         };
-        let value = Arc::new(value);
+        let value = Arc::new(value(replaced.as_deref()));
         let Some(replaced) = replaced else {
             self.make_room(&mut entries);
             entries.insert(key, Arc::clone(&value));

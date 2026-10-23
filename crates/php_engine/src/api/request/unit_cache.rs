@@ -101,8 +101,8 @@ pub struct CacheStatus {
     /// The names the files are held under, each file's full path and
     /// the paths as written beside it, `ZCSG(hash).num_entries`.
     pub keys: u64,
-    /// The files held, in the order the cache took them, the preload's
-    /// pseudo-file and its saved scripts first.
+    /// The files held, in `accelerator_get_scripts`' order, bucket by
+    /// bucket of opcache's hash ([`crate::unit_cache::UnitCache::status`]).
     pub files: Vec<CachedFile>,
     /// What `opcache.preload` preloaded, `ZCSG(preload_script)`; none
     /// where nothing was.
@@ -184,8 +184,12 @@ pub struct CacheBudget {
     /// must be wasted for a cache that runs out to restart.
     pub max_wasted: u32,
     /// `ZCSG(hash).max_num_entries`: how many names files are held
-    /// under.
+    /// under, and the buckets they are held in.
     pub keys: u64,
+    /// `ZCG(root_hash)`, which every name's hash is xored with before its
+    /// bucket is taken: the inode of `/` where `opcache.validate_root`
+    /// asks for it, and zero otherwise.
+    pub root: u64,
     /// Whether the tier started in the segment (`zend_jit_startup`, in
     /// `accel_post_startup` once the segment is laid down), which takes
     /// the `zend_get_op_array_extension_handle` every op array compiled

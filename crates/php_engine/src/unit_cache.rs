@@ -196,7 +196,9 @@ pub(crate) struct Held {
     stamp: Option<Stamp>,
     /// The bytes it was compiled from.
     size: u64,
-    /// The order the cache took it in, which its status lists it by.
+    /// The order its full path entered the cache's names in, which its
+    /// place in its bucket's chain is ([`UnitCache::status`]): a recompile
+    /// in place of a discarded copy keeps the copy's.
     order: u64,
     hits: AtomicU64,
     last_used: AtomicI64,
@@ -1158,24 +1160,28 @@ impl UnitCache {
             Validation::Window { seconds } => now.saturating_add(i64::from(seconds)),
             Validation::Never | Validation::EveryHit => 0,
         };
-        let order = self.taken.fetch_add(1, Ordering::Relaxed);
-        let held = files.held.insert_over(
-            UnitKey::full(path),
-            Held::discarded,
-            Held {
-                unit,
-                early,
-                path: path.to_vec(),
-                stamp,
-                size,
-                order,
-                hits: AtomicU64::new(0),
-                last_used: AtomicI64::new(now),
-                revalidate: AtomicI64::new(revalidate),
-                discarded: AtomicBool::new(false),
-            },
-        );
-        if held.order == order {
+        let mut entered = false;
+        let held = files
+            .held
+            .insert_over(UnitKey::full(path), Held::discarded, |replaced| {
+                entered = true;
+                // `zend_accel_hash_update` puts the file in a discarded copy's
+                // entry, where that stands in its bucket's chain.
+                let next = || self.taken.fetch_add(1, Ordering::Relaxed);
+                Held {
+                    unit,
+                    early,
+                    path: path.to_vec(),
+                    stamp,
+                    size,
+                    order: replaced.map_or_else(next, |was| was.order),
+                    hits: AtomicU64::new(0),
+                    last_used: AtomicI64::new(now),
+                    revalidate: AtomicI64::new(revalidate),
+                    discarded: AtomicBool::new(false),
+                }
+            });
+        if entered {
             files.used.fetch_add(size, Ordering::Relaxed);
             if let Ok(unit) = &held.unit {
                 files.funcs.publish(unit);
@@ -1261,8 +1267,47 @@ impl UnitCache {
 
     /// What `opcache_get_status()` reads in the epoch `files` are held
     /// in: the counters, the names held, and every file held under its
-    /// full path, in the order the cache took them; a refusal is none of
-    /// either.
+    /// full path, in `accelerator_get_scripts`' order
+    /// (`Z/ext/opcache/zend_accelerator_module.c:634-635`), bucket by
+    /// bucket of `ZCSG(hash)` and each bucket's chain newest first, a
+    /// name's bucket `(zend_string_hash_val(name) ^ ZCG(root_hash)) %
+    /// max_num_entries` (`Z/ext/opcache/zend_accelerator_hash.c:88-92`)
+    /// and the preload's names the first in; a refusal is none of either.
+    ///
+    /// ```php
+    /// function bucket($s, $p) {
+    ///     $hi = 0; $lo = 5381;
+    ///     foreach (unpack('C*', $s) as $c) { $lo = $lo * 33 + $c; $hi = ($hi * 33 + ($lo >> 32)) & 0xffffffff; $lo &= 0xffffffff; }
+    ///     return ((($hi | 0x80000000) % $p) * ((1 << 32) % $p) + $lo) % $p;
+    /// }
+    /// $p = current(array_filter([5, 11, 19, 53, 107, 223, 463, 983, 1979, 3907, 7963, 16229, 32531, 65407, 130987, 262237, 524521, 1048793], fn ($q) => $q >= ini_get('opcache.max_accelerated_files')));
+    /// $d = realpath(__DIR__) . '/order' . getmypid(); @mkdir($d);
+    /// $seen = [];
+    /// for ($i = 0; ; $i++) {
+    ///     $b = bucket("$d/n$i.inc", $p);
+    ///     if ($b == $p - 1) continue;
+    ///     if (isset($seen[$b])) { [$a, $bb] = ["$d/n{$seen[$b]}.inc", "$d/n$i.inc"]; break; }
+    ///     $seen[$b] = $i;
+    /// }
+    /// for ($j = $i + 1; bucket("$d/n$j.inc", $p) <= $b; $j++);
+    /// $c = "$d/n$j.inc";
+    /// $name = [$a => 'A', $bb => 'B', $c => 'C'];
+    /// foreach ($name as $f => $_) { file_put_contents($f, '<?php return 1;'); touch($f, time() - 60); }
+    /// $listed = fn () => implode(' ', array_map(fn ($f) => $name[$f], array_values(array_filter(array_keys(opcache_get_status(true)['scripts']), fn ($f) => isset($name[$f])))));
+    /// include $c; include $a; include $bb;
+    /// echo $listed(), "\n";
+    /// var_dump(opcache_invalidate($a, true));
+    /// echo $listed(), "\n";
+    /// include $a;
+    /// echo $listed(), "\n";
+    /// array_map('unlink', array_keys($name)); rmdir($d);
+    /// ```
+    /// ```expect regime=jit-off
+    /// B A C
+    /// bool(true)
+    /// B A C
+    /// B A C
+    /// ```
     pub(crate) fn status(
         &self,
         files: &Files,
@@ -1311,6 +1356,16 @@ impl UnitCache {
             u64::saturating_add,
         );
         listed_files.extend(held.into_iter().map(|(_, held)| listed(&held)));
+        // Each file's index here is the order its name entered the hash.
+        let (buckets, root) = self
+            .budget
+            .get()
+            .map_or((u64::MAX, 0), |b| (b.keys.max(1), b.root));
+        let mut listed_files: Vec<_> = listed_files.into_iter().enumerate().collect();
+        listed_files.sort_by_key(|(entered, file)| {
+            let bucket = (php_heap::Str::hash_of(&file.path) ^ root) % buckets;
+            (bucket, std::cmp::Reverse(*entered))
+        });
         CacheStatus {
             restart_pending: files.restart_pending(),
             hits: files.hits.load(Ordering::Relaxed),
@@ -1326,7 +1381,7 @@ impl UnitCache {
             cache_full: files.exhausted.load(Ordering::Relaxed),
             interned_strings: u64::try_from(interned_strings).unwrap_or(u64::MAX),
             keys,
-            files: listed_files,
+            files: listed_files.into_iter().map(|(_, file)| file).collect(),
             preload: self
                 .preloaded()
                 .map(|preloaded| preloaded.statistics.clone()),

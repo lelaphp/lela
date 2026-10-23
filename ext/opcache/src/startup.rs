@@ -46,6 +46,7 @@ pub(crate) fn post_startup(
         memory: u64::try_from(consumption(req)).unwrap_or(0),
         max_wasted: u32::try_from(atoi(value(req, "opcache.max_wasted_percentage"))).unwrap_or(5),
         keys: u64::try_from(max_cached_keys(req)).unwrap_or(u64::MAX),
+        root: root_hash(req),
         tier: crate::ini::jit_starts(req),
     };
     req.code_mut().unit_cache().bound(budget);
@@ -58,6 +59,16 @@ pub(crate) fn post_startup(
         );
     }
     preload(req, file_cache_only)
+}
+
+/// `ZCG(root_hash)` as `accel_activate` takes it
+/// (`Z/ext/opcache/ZendAccelerator.c:2676-2696`): the inode of `/` where
+/// `opcache.validate_root` is on and `/` stats, and zero otherwise.
+fn root_hash(req: &Request) -> u64 {
+    if !flag(req, "opcache.validate_root") {
+        return 0;
+    }
+    std::fs::metadata("/").map_or(0, |root| std::os::unix::fs::MetadataExt::ino(&root))
 }
 
 /// `accel_post_startup`'s refusals, in the order it meets them: the
