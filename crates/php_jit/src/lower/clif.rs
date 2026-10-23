@@ -337,7 +337,7 @@ struct Emit<'a> {
     /// The `ExitCtx`, the function's first parameter.
     cx: Option<Value>,
     /// The address of the request's interrupt byte, read once as a
-    /// looping trace enters.
+    /// looping trace whose header tests it enters.
     interrupt: Option<Value>,
     /// Where a kernel writes where the interpreter stands.
     stood: StackSlot,
@@ -448,7 +448,7 @@ impl<'a> Emit<'a> {
             End::Loop(header) => Some(header),
             End::Leave(_) | End::Return(_) => None,
         };
-        if header.is_some() {
+        if header.is_some_and(|header| header.interrupt.tested()) {
             self.interrupt = Some(self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT));
         }
         // The stack and the entered frame's place on it, which calls made
@@ -478,8 +478,8 @@ impl<'a> Emit<'a> {
         }
         let split = header.map_or(self.ir.ops.len(), |header| header.at.index());
         self.ops(0..split, body)?;
-        match (self.ir.end, self.interrupt) {
-            (End::Loop(header), Some(_)) => {
+        match self.ir.end {
+            End::Loop(header) => {
                 let phis = self.register_phis();
                 let entered = phis
                     .iter()
@@ -492,11 +492,13 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.switch_to_block(head);
                 self.b.set_srcloc(located(header.at.index()));
-                // The interrupt test, one load and one branch (§4.3).
-                self.interrupt_test(match header.interrupt {
-                    Interrupt::Exit(exit) => Raised::Exit(exit),
-                    Interrupt::Stub(_) => Raised::Stub,
-                })?;
+                // The interrupt test, one load and one branch (§4.3); a
+                // loop by recursive return takes none, as php's takes none.
+                match header.interrupt {
+                    Interrupt::Exit(exit) => self.interrupt_test(Raised::Exit(exit))?,
+                    Interrupt::Stub(_) => self.interrupt_test(Raised::Stub)?,
+                    Interrupt::None => {}
+                }
                 self.ops(split..self.ir.ops.len(), body)?;
                 let brought = phis
                     .iter()
@@ -523,10 +525,9 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.seal_block(head);
             }
-            (End::Leave(exit), _) => self.leave_at_end(exit)?,
+            End::Leave(exit) => self.leave_at_end(exit)?,
             // The `RETURN` left in place went on to the escape or the exit.
-            (End::Return(_), _) => {}
-            (End::Loop(_), None) => return Err(mismatch("a loop with no interrupt flag")),
+            End::Return(_) => {}
         }
         if let Some((entry, into, block)) = body {
             self.b.set_srcloc(SourceLoc::default());
@@ -1059,7 +1060,8 @@ impl<'a> Emit<'a> {
     /// The request's interrupt tested, the one emitter of every test a
     /// compiled loop makes of it (`jit-design.md` §4.3), php's
     /// `vm_interrupt` test: at a loop's header (`zend_jit_trace_end_loop`),
-    /// and before a side trace's link to its own root where the root loops
+    /// and before a side trace's link to its own root where the root's
+    /// header tests it
     /// (`zend_jit_check_timeout` in `zend_jit_trace_link_to_root`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`). The byte the
     /// `ExitCtx`'s pointer names is loaded, and where it is not zero, or

@@ -243,6 +243,7 @@ pub(super) fn verdict(
     match oracle::compare(registry, id, &expected.arrays, &actual.arrays) {
         Compared::Same => Judged::new(id, name, Judgement::Pass, ""),
         Compared::Diverged(row) => Judged::new(id, name, Judgement::Diverged, row.reason),
+        Compared::Moved(moved) => Judged::new(id, name, Judgement::Fail, moved.to_string()),
         Compared::Differs(difference) => Judged::new(
             id,
             name,

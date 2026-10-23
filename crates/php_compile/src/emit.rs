@@ -510,9 +510,13 @@ pub(crate) struct Emit<'a> {
     /// compiled extends, which `parent` needs one of.
     active_parent: Option<Vec<u8>>,
     /// `CG(active_op_array)->function_name`: the function or method whose
-    /// body is being compiled, by name, and none in the main op array,
-    /// which `__FUNCTION__` and `__METHOD__` fold to.
-    active_function: Option<Vec<u8>>,
+    /// body is being compiled, and none in the main op array, which
+    /// `__FUNCTION__` and `__METHOD__` fold to.
+    active_function: Option<ActiveFunction>,
+    /// The strings this compile made as it went that a declaration owns
+    /// as its name or its key, each beside where that stands, handed to
+    /// the home once the unit is whole ([`crate::Parts::intern`]).
+    own_names: Vec<(crate::Named, Str)>,
     /// `this_guaranteed_exists`: whether the op array being compiled is
     /// an instance method's, whose `$this` is the frame's own and needs
     /// no `FETCH_THIS` as a receiver.
@@ -1301,8 +1305,8 @@ enum Folded {
     Line(i64),
     Text(Vec<u8>),
     /// The name of the function the constant stands in, whose own
-    /// string php copies (`ZVAL_STR_COPY`).
-    Name(Vec<u8>),
+    /// string php copies (`ZVAL_STR_COPY`, [`Emit::function_name_made`]).
+    FunctionName,
     /// The name of the class the constant stands in, `ce->name`
     /// ([`Emit::class_name_made`]).
     ClassName,
@@ -1336,6 +1340,28 @@ struct ActiveClass {
     /// parameter's type could not be held to the property's while the
     /// file compiles.
     hooked_variance_checks: u32,
+}
+
+/// `CG(active_op_array)` as a function's body compiles: its
+/// `function_name` by its bytes, where it lands in the unit, and the
+/// string made for it once `__FUNCTION__`, `__METHOD__` or the key it is
+/// bound under asked, which each of them copies (`zend_string_copy`).
+struct ActiveFunction {
+    name: Vec<u8>,
+    at: crate::FunctionAt,
+    own: Option<Str>,
+}
+
+impl ActiveFunction {
+    /// The function named `name` that lands at `at`, no string made for
+    /// its name yet.
+    fn at(name: &[u8], at: crate::FunctionAt) -> ActiveFunction {
+        ActiveFunction {
+            name: name.to_vec(),
+            at,
+            own: None,
+        }
+    }
 }
 
 impl ActiveClass {
@@ -1590,6 +1616,7 @@ impl<'a> Emit<'a> {
             folded_string: None,
             active_parent: None,
             active_function: None,
+            own_names: Vec::new(),
             this_in_scope: false,
             return_type: None,
             returns_by_ref: false,
@@ -1751,7 +1778,13 @@ pub(crate) fn unit(
                 raised_before,
             }));
         }
-        return Err(crate::refused_after(refused, raised, options, emit.strings));
+        return Err(crate::refused_after(
+            refused,
+            raised,
+            options,
+            &emit.own_names,
+            emit.strings,
+        ));
     }
     // `CG(zend_lineno) = last_lineno` before `zend_emit_final_return`
     // (`Z/Zend/zend_language_scanner.l:622`): the implicit return stands
@@ -1759,7 +1792,13 @@ pub(crate) fn unit(
     // the last statement's.
     emit.line = lines.max(1);
     if let Err(refused) = emit.close(options.kind == SourceKind::File) {
-        return Err(crate::refused_after(refused, raised, options, emit.strings));
+        return Err(crate::refused_after(
+            refused,
+            raised,
+            options,
+            &emit.own_names,
+            emit.strings,
+        ));
     }
     let line = emit.line;
     let mut dynamic = Vec::with_capacity(emit.dynamic.len());
@@ -1779,7 +1818,13 @@ pub(crate) fn unit(
                 keys_made: 0,
             }
             .into();
-            return Err(crate::refused_after(refused, raised, options, emit.strings));
+            return Err(crate::refused_after(
+                refused,
+                raised,
+                options,
+                &emit.own_names,
+                emit.strings,
+            ));
         };
         dynamic.push(def);
     }
@@ -1802,7 +1847,11 @@ pub(crate) fn unit(
     };
     // `zend_mm`'s limit, raised as `E_ERROR` where the compile asked for
     // the memory.
-    if let Err(limit) = parts.intern(options.kind, emit.strings) {
+    if let Err(limit) = parts.intern(
+        crate::Making::of(options.kind),
+        &emit.own_names,
+        emit.strings,
+    ) {
         return Err(Refused {
             level: Level::Error,
             message: crate::fatal_message(limit).into(),
@@ -1861,7 +1910,7 @@ struct Saved {
     unwind: Vec<Unwind>,
     fast_call_var: Option<u32>,
     try_catch_offset: Option<u32>,
-    active_function: Option<Vec<u8>>,
+    active_function: Option<ActiveFunction>,
     this_in_scope: bool,
     return_type: Option<Type>,
     returns_by_ref: bool,
@@ -2167,10 +2216,12 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// [`Self::string`] of a declaration's own name or lowered key, which
-    /// php copies where this compile asks for it ([`Intern::intern_name`]).
+    /// [`Self::string`] of a declaration's own name or lowered key, one
+    /// string this compile makes for it, which php copies where the
+    /// compile asks for it again and which the declaration owns once the
+    /// unit is whole ([`Self::own_names`]).
     fn own_string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
-        match self.strings.intern_name(bytes) {
+        match self.strings.intern_made(bytes, false) {
             Ok(made) => Ok(made.value()),
             Err(fatal) => Err(self.fatal_of(fatal)),
         }
@@ -2181,7 +2232,12 @@ impl<'a> Emit<'a> {
     /// (`own`, [`ActiveClass::own`]) held once more where lowering
     /// changes nothing, as `zend_string_tolower` hands back the string it
     /// was given, else a key of its own.
-    fn class_key(&mut self, own: Option<Str>, name: &[u8]) -> Result<Zval, CompileError> {
+    fn class_key(
+        &mut self,
+        at: usize,
+        own: Option<Str>,
+        name: &[u8],
+    ) -> Result<Zval, CompileError> {
         let lowered = self.arena.lowercase(name);
         if lowered == name
             && let Some(own) = own.map(Zval::string)
@@ -2189,7 +2245,11 @@ impl<'a> Emit<'a> {
         {
             return Ok(own);
         }
-        self.own_string(lowered)
+        let key = self.own_string(lowered)?;
+        if let Some(key) = key.as_str() {
+            self.own_names.push((crate::Named::ClassKey(at), key));
+        }
+        Ok(key)
     }
 
     /// `CG(active_class_entry)->name` as the claim of the one who asked:
@@ -2229,9 +2289,51 @@ impl<'a> Emit<'a> {
         if let Some(made) = own.and_then(|own| self.strings.hold_made(Zval::string(own))) {
             return Ok(made);
         }
-        self.strings
-            .intern_name(&name)
-            .map_err(|fatal| self.fatal_of(fatal))
+        self.string_made(&name, false)
+    }
+
+    /// `CG(active_op_array)->function_name` as the claim of the one who
+    /// asked: one more owner of the string made for the function's name
+    /// the first time `__FUNCTION__`, `__METHOD__` or the key it is bound
+    /// under asked ([`ActiveFunction::own`]), which the function owns, so
+    /// each copy is that one string (`zend_string_copy`):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3311-function-name.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('function fqwertyu() { return [__FUNCTION__, __FUNCTION__, __METHOD__]; }'), "\n";
+    /// echo m('if (1) { function gqwertyu() { return __FUNCTION__ . __FUNCTION__; } }'), "\n";
+    /// echo m('class Kqwertyu { function hqwertyu() { return [__FUNCTION__, __FUNCTION__]; } }'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode(eval('return [fqwertyu(), gqwertyu(), (new Kqwertyu)->hqwertyu()];')), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 480
+    /// 312
+    /// 880
+    /// [["fqwertyu","fqwertyu","fqwertyu"],"gqwertyugqwertyu",["hqwertyu","hqwertyu"]]
+    /// ```
+    fn function_name_made(&mut self) -> Result<Made, CompileError> {
+        let Some(function) = &self.active_function else {
+            return self.string_made(b"", false);
+        };
+        if let Some(made) = (function.own).and_then(|own| self.strings.hold_made(Zval::string(own)))
+        {
+            return Ok(made);
+        }
+        let name = function.name.clone();
+        let own = self.own_string(&name)?;
+        let made = self.strings.hold_made(own);
+        if let Some(function) = &mut self.active_function {
+            function.own = own.as_str();
+        }
+        made.map_or_else(|| self.string_made(&name, false), Ok)
     }
 
     /// [`Self::string`] as a claim the one who asked holds alone
@@ -3942,7 +4044,9 @@ impl<'a> Emit<'a> {
             return self.nested_function_decl(function, &name);
         }
         let line = self.line;
-        let declared = self.body(function, &name, None, false, FnFlags::default())?;
+        let at = crate::FunctionAt::Top(self.functions_declared.len());
+        let active = ActiveFunction::at(&name, at);
+        let declared = self.body(function, active, None, false, FnFlags::default())?;
         // "Only register the function after a successful compile": what
         // the body raised is raised before a name the table holds is
         // refused, at the declaration's first line.
@@ -3999,7 +4103,19 @@ impl<'a> Emit<'a> {
         self.dynamic.push(None);
         let offset = u32::try_from(self.dynamic_func_defs.len()).unwrap_or(u32::MAX);
         self.dynamic_func_defs.push(at);
-        let lowered = self.own_string(self.arena.lowercase(name))?;
+        // `zend_string_tolower(op_array->function_name)`, which is that
+        // string where lowering changes nothing.
+        let lowercase = self.arena.lowercase(name);
+        let lowered = self.own_string(lowercase)?;
+        let mut active = ActiveFunction::at(name, crate::FunctionAt::Dynamic(at as usize));
+        if let Some(key) = lowered.as_str() {
+            if lowercase == name {
+                active.own = Some(key);
+            } else {
+                self.own_names
+                    .push((crate::Named::DefinitionKey(at as usize), key));
+            }
+        }
         let op1 = self.literal(lowered);
         self.push(Opline {
             opcode: Opcode::DeclareFunction,
@@ -4015,7 +4131,7 @@ impl<'a> Emit<'a> {
         // declares is no nested one.
         let class = self.active_class.take();
         let parent = self.active_parent.take();
-        let declared = self.body(function, name, None, false, FnFlags::default());
+        let declared = self.body(function, active, None, false, FnFlags::default());
         self.active_class = class;
         self.active_parent = parent;
         let declared = declared?;
@@ -4077,7 +4193,8 @@ impl<'a> Emit<'a> {
             is_static: closure.is_static,
             ..FnFlags::default()
         };
-        let saved = self.begin_body(&name, this_in_scope, flags);
+        let active = ActiveFunction::at(&name, crate::FunctionAt::Dynamic(at as usize));
+        let saved = self.begin_body(active, this_in_scope, flags);
         let outcome = self.parameters_and_body(
             &closure.function,
             &name,
@@ -4104,7 +4221,7 @@ impl<'a> Emit<'a> {
     /// line.
     fn closure_name(&self, line: u32) -> Vec<u8> {
         let mut name = b"{closure:".to_vec();
-        match &self.active_function {
+        match self.active_function.as_ref().map(|function| &function.name) {
             Some(enclosing) if self.fn_flags.closure => name.extend_from_slice(enclosing),
             Some(enclosing) => {
                 if let Some(class) = &self.active_class {
@@ -4535,9 +4652,13 @@ impl<'a> Emit<'a> {
             is_final: method.is_final,
             signature: None,
         }));
+        let at = crate::FunctionAt::Method {
+            class,
+            method: self.classes.get(class).map_or(0, |decl| decl.methods.len()),
+        };
         let compiled = self.body(
             &method.function,
-            &name,
+            ActiveFunction::at(&name, at),
             Some(&class_name),
             method.is_static,
             FnFlags {
@@ -4856,7 +4977,7 @@ impl<'a> Emit<'a> {
     fn body(
         &mut self,
         function: &Function,
-        name: &[u8],
+        active: ActiveFunction,
         scope: Option<&[u8]>,
         is_static: bool,
         fn_flags: FnFlags,
@@ -4865,8 +4986,9 @@ impl<'a> Emit<'a> {
             method: scope.is_some(),
             ..fn_flags
         };
-        let saved = self.begin_body(name, scope.is_some() && !is_static, flags);
-        let outcome = self.parameters_and_body(function, name, scope, &[], None);
+        let name = active.name.clone();
+        let saved = self.begin_body(active, scope.is_some() && !is_static, flags);
+        let outcome = self.parameters_and_body(function, &name, scope, &[], None);
         self.end_body(saved);
         outcome
     }
@@ -5566,7 +5688,12 @@ impl<'a> Emit<'a> {
     /// `CG(active_op_array)`: the state of the one being compiled set
     /// aside, and the emitter over an empty one whose entry safepoint
     /// stands at opline zero until the prologue is known.
-    fn begin_body(&mut self, name: &[u8], this_in_scope: bool, fn_flags: FnFlags) -> Saved {
+    fn begin_body(
+        &mut self,
+        function: ActiveFunction,
+        this_in_scope: bool,
+        fn_flags: FnFlags,
+    ) -> Saved {
         self.loop_var_pushed();
         Saved {
             return_type: self.return_type.take(),
@@ -5587,7 +5714,7 @@ impl<'a> Emit<'a> {
             unwind: std::mem::take(&mut self.unwind),
             fast_call_var: self.fast_call_var.take(),
             try_catch_offset: self.try_catch_offset.take(),
-            active_function: self.active_function.replace(name.to_vec()),
+            active_function: self.active_function.replace(function),
             this_in_scope: std::mem::replace(&mut self.this_in_scope, this_in_scope),
             dynamic_func_defs: std::mem::take(&mut self.dynamic_func_defs),
             static_vars: std::mem::take(&mut self.static_vars),
@@ -5620,7 +5747,13 @@ impl<'a> Emit<'a> {
         self.unwind = saved.unwind;
         self.fast_call_var = saved.fast_call_var;
         self.try_catch_offset = saved.try_catch_offset;
-        self.active_function = saved.active_function;
+        // The string made for the body's name is the declaration's.
+        if let Some(ActiveFunction {
+            at, own: Some(own), ..
+        }) = std::mem::replace(&mut self.active_function, saved.active_function)
+        {
+            self.own_names.push((crate::Named::Function(at), own));
+        }
         self.this_in_scope = saved.this_in_scope;
         self.return_type = saved.return_type;
         self.returns_by_ref = saved.returns_by_ref;
@@ -6020,6 +6153,7 @@ impl<'a> Emit<'a> {
             attribute_validator: None,
         };
         let own = self.own_string(&name)?.as_str();
+        (self.own_names).extend(own.map(|own| (crate::Named::Class(at), own)));
         self.active_class = Some(ActiveClass::entered(&name, class.kind, at, anonymous, own));
         self.active_parent.clone_from(&parent);
         // The class takes its place `at` in the unit before its body, so
@@ -6191,7 +6325,9 @@ impl<'a> Emit<'a> {
             self.active_property,
             self.active_hook,
         ) = enclosing;
-        let Entered { parent, own, .. } = entered?;
+        let Entered {
+            at, parent, own, ..
+        } = entered?;
         // "Reset lineno for final opcodes and errors".
         self.line = class.line;
         let (op2_type, op2) = match parent {
@@ -6201,7 +6337,7 @@ impl<'a> Emit<'a> {
             }
             None => (OperandKind::Unused, 0),
         };
-        let lowered = self.class_key(own, &name)?;
+        let lowered = self.class_key(at, own, &name)?;
         let op1 = self.literal(lowered);
         let extended_value = self.cache_slot();
         let out = self.temporary();
@@ -8033,7 +8169,7 @@ impl<'a> Emit<'a> {
         key.extend_from_slice(lowered);
         key.extend_from_slice(self.filename);
         key.extend_from_slice(format!(":{line}${:x}", self.keys_made()).as_bytes());
-        let lowered = self.class_key(own, name)?;
+        let lowered = self.class_key(at, own, name)?;
         let op1 = self.literal(lowered);
         let filed = self.string(&key)?;
         self.literal(filed);
@@ -8927,7 +9063,8 @@ impl<'a> Emit<'a> {
             is_static: true,
             ..FnFlags::default()
         };
-        let saved = self.begin_body(&name, false, flags);
+        let active = ActiveFunction::at(&name, crate::FunctionAt::Dynamic(at as usize));
+        let saved = self.begin_body(active, false, flags);
         let outcome = self.parameters_and_body(&closure.function, &name, None, &[], None);
         self.end_body(saved);
         if let Some(slot) = self.dynamic.get_mut(at as usize) {
@@ -12303,7 +12440,7 @@ impl<'a> Emit<'a> {
         match self.magic_const(which, line) {
             Folded::Line(n) => Ok(Zval::long(n)),
             Folded::Text(text) => self.string(&text),
-            Folded::Name(name) => self.own_string(&name),
+            Folded::FunctionName => self.function_name_made().map(|made| made.value()),
             Folded::ClassName => self.class_name_made().map(|made| made.value()),
             Folded::UsingClass => {
                 Err(self.unread("a `__CLASS__` in a trait's constant expression"))
@@ -19323,15 +19460,16 @@ impl<'a> Emit<'a> {
             // `zend_compile_func_decl` names the op array; the main one
             // has no `function_name`, and a member's constant expression
             // stands directly inside the class.
-            Magic::Function => {
-                return Folded::Name(self.active_function.clone().unwrap_or_default());
-            }
+            Magic::Function if self.active_function.is_some() => return Folded::FunctionName,
             // `__METHOD__` is `Class::method` inside a method, the op
             // array's own name inside a function or a closure, whose
             // scope the compiler leaves unset, and nothing directly
             // inside a class body, whatever op array the class stands in
             // (`zend_try_ct_eval_magic_const`'s `T_METHOD_C`).
-            Magic::Method => match (self.active_name(), &self.active_function) {
+            Magic::Method => match (
+                self.active_name(),
+                self.active_function.as_ref().map(|function| &function.name),
+            ) {
                 (Some(class), Some(function)) if self.fn_flags.method => {
                     let mut text = class;
                     text.extend_from_slice(b"::");
@@ -19339,12 +19477,12 @@ impl<'a> Emit<'a> {
                     text
                 }
                 (Some(_), Some(_)) if !self.fn_flags.closure => Vec::new(),
-                (_, Some(function)) => return Folded::Name(function.clone()),
+                (_, Some(_)) => return Folded::FunctionName,
                 (_, None) => Vec::new(),
             },
             // The trait's own name inside one, and none elsewhere.
             Magic::Trait if self.in_trait() => return Folded::ClassName,
-            Magic::Trait => Vec::new(),
+            Magic::Function | Magic::Trait => Vec::new(),
         };
         Folded::Text(text)
     }
@@ -21488,6 +21626,7 @@ mod tests {
             folded_string: None,
             active_parent: None,
             active_function: None,
+            own_names: Vec::new(),
             this_in_scope: false,
             return_type: None,
             returns_by_ref: false,

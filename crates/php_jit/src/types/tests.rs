@@ -128,9 +128,10 @@ fn binary_trees_sends_a_long_by_value_and_keeps_its_type() -> Result<(), String>
 /// direction in both levels it inlines, as php's `exit_1`, at opline
 /// `0003`, serves both: php's stack map is relative to the frame pointer,
 /// so the same guard at the same opline with the same types known is one
-/// exit (`zend_jit_trace_get_exit_point`, #3203). php numbers it 1 behind
-/// its `RECV`'s argument count guard, `exit_0`, which a trace entered
-/// past the prologue does not hold (`jit-design.md` §4.1).
+/// exit (`zend_jit_trace_get_exit_point`, #3203). It is numbered 1, behind
+/// the `RECV`'s argument count guard, php's `exit_0`, which the trace
+/// numbers though it entered past the prologue, and which its interrupt
+/// test leaves through (`jit-design.md` §4.2, #3269).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
@@ -147,11 +148,76 @@ fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
         .collect();
     assert_eq!(
         directions,
-        [(Frame(0), ExitId(0)), (Frame(1), ExitId(0))],
+        [(Frame(0), ExitId(1)), (Frame(1), ExitId(1))],
         "{directions:?}"
     );
-    let landing = ir.exits.first().map(|exit| (exit.frame, exit.opline));
+    let landing = ir.exits.get(1).map(|exit| (exit.frame, exit.opline));
     assert_eq!(landing, Some((Frame(0), Some(OplineIdx(3)))));
+    assert!(
+        matches!(ir.end, End::Loop(header) if header.interrupt == Interrupt::Exit(ExitId(0))),
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
+/// `fib`'s return trace loops by recursive return and takes no interrupt
+/// test, and numbers no exit for one, as php's `zend_jit_trace` sets no
+/// `timeout_exit_addr` for `ZEND_JIT_TRACE_STOP_RECURSIVE_RET`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:7214-7231`, #3314). The pinned
+/// php's `TRACE 3 exit info` under the trace-dump regime lists three
+/// exits, `exit_0: 0008/0000/3/VM`, `exit_1: 0004/0003/1` and
+/// `exit_2: 0012/0004/4`, and no interrupt exit after them: the stack
+/// check before the second call, the comparison's direction in the
+/// callee and the addition's overflow, each an opline later here, past
+/// the `VERIFY_RETURN_TYPE` php's optimiser drops from `return $n`. The
+/// trace takes those three and #3176's two, which php's function-level
+/// inference proves need no guard: the entry's guard on what the call
+/// before returned, exit 0, and the subtraction's overflow before the
+/// second call, exit 2. `$n` is held long by its declaration, as php's
+/// inference holds it, `return $n;`'s `VERIFY_RETURN_TYPE` keeping it as
+/// it is (`types::opcodes::written_after_entry`), so no guard reads it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "fib"), ("record.start", "return")],
+        "function fib(int $n): int
+        {
+            if ($n < 2) {
+                return $n;
+            }
+            return fib($n - 1) + fib($n - 2);
+        }
+        echo fib(6), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let End::Loop(header) = ir.end else {
+        return Err(format!("no loop: {rendered}"));
+    };
+    assert_eq!(
+        (header.repeat, header.interrupt),
+        (Repeat::Return, Interrupt::None),
+        "{rendered}"
+    );
+    let inferred = [0, 2];
+    let phps: Vec<(Frame, Option<u32>, Grows)> = (ir.exits.iter().enumerate())
+        .filter(|(at, _)| !inferred.contains(at))
+        .map(|(_, exit)| (exit.frame, exit.opline.map(|at| at.0), exit.grows))
+        .collect();
+    assert_eq!(
+        (ir.exits.len(), phps.as_slice()),
+        (
+            3 + inferred.len(),
+            [
+                (Frame(0), Some(9), Grows::Never),
+                (Frame(1), Some(5), Grows::Side),
+                (Frame(0), Some(13), Grows::Side),
+            ]
+            .as_slice()
+        ),
+        "{rendered}"
+    );
     Ok(())
 }
 
@@ -1646,6 +1712,151 @@ fn a_call_the_trace_follows_takes_no_exit() -> Result<(), String> {
     });
     assert!(
         call.is_some_and(|line| line.exit.is_none() && line.unwind.is_some()),
+        "{rendered}"
+    );
+    Ok(())
+}
+
+/// An entered trace of a function with typed parameters numbers php's
+/// `RECV` exits ahead of its own (`jit-design.md` §4.2, #3269): one per
+/// `RECV` that has a type or that no `RECV` follows, as php's
+/// `zend_jit_recv` takes them for a root frame whose argument count the
+/// trace does not know (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10872`),
+/// none for a `RECV_INIT`, and none at all where no parameter has a
+/// type. Each lands at the entry's opline and grows nothing, and the
+/// recursion's interrupt test leaves through the first where it is the
+/// `RECV` at opline zero, php's reuse there; where the first `RECV` takes
+/// none, the test numbers its own, last, as php's does. The direction
+/// exit after them carries php's number: the pinned php's `TRACE 1 exit
+/// info` under the trace-dump regime lists `exit_0` at `0000` and
+/// `exit_1` at `0003` then the direction's `exit_2` at `0007` for the
+/// first; `exit_0` at `0001`, the direction's `exit_1` and the test's own
+/// `exit_4` at `0000` for the second; `exit_0` and `exit_1` at `0000` and
+/// `0001`, then `exit_2` for the third; and for the fourth no `RECV`
+/// exit, its guard's `exit_0` at `0002` then the direction's `exit_1`.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_entered_trace_numbers_phps_recv_exits_ahead_of_its_own() -> Result<(), String> {
+    for (program, recvs, direction, reuses) in [
+        (
+            "function f(int $a, $b, $c, int $d, $e = 1) {
+                if ($a < 1) { return 0; } return f($a - 1, 0, 0, $d);
+            }
+            echo f(20, 1, 2, 3), \"\\n\";",
+            2,
+            2,
+            true,
+        ),
+        (
+            "function f($b, int $a) { if ($a < 1) { return 0; } return f(0, $a - 1); }
+            echo f(1, 20), \"\\n\";",
+            1,
+            1,
+            false,
+        ),
+        (
+            "function f(int $a, $b) { if ($a < 1) { return 0; } return f($a - 1, 0); }
+            echo f(20, 1), \"\\n\";",
+            2,
+            2,
+            true,
+        ),
+        (
+            "function f($a, $b) { if ($a < 1) { return 0; } return f($a - 1, 0); }
+            echo f(20, 1), \"\\n\";",
+            0,
+            1,
+            false,
+        ),
+    ] {
+        let ir = built(
+            &[("record.function", "f"), ("record.start", "enter")],
+            program,
+        )?;
+        let rendered = dump::render(&ir);
+        let Some(Op::Line(first)) = ir.ops.first() else {
+            return Err(format!("no first opline: {rendered}"));
+        };
+        let reserved = (ir.exits.iter())
+            .take_while(|exit| {
+                (exit.frame, exit.opline, exit.grows, exit.stores.len())
+                    == (Frame::ROOT, Some(first.opline), Grows::Never, 0)
+            })
+            .count();
+        let directions: Vec<ExitId> = (ir.guards.iter())
+            .filter(|guard| matches!(guard.check, Check::Direction { .. }))
+            .map(|guard| guard.exit)
+            .collect();
+        let End::Loop(header) = ir.end else {
+            return Err(format!("no loop: {rendered}"));
+        };
+        let interrupt = match header.interrupt {
+            Interrupt::Exit(exit) => exit,
+            Interrupt::Stub(_) => return Err(format!("a stub: {rendered}")),
+            Interrupt::None => return Err(format!("no test: {rendered}")),
+        };
+        // The test's own exit, where it takes one, is numbered last.
+        let last = u16::try_from(ir.exits.len().saturating_sub(1)).map_err(|e| e.to_string())?;
+        let interrupt_php = if reuses { ExitId(0) } else { ExitId(last) };
+        assert_eq!(
+            (reserved, directions.first().map(|exit| exit.0), interrupt),
+            (recvs, Some(direction), interrupt_php),
+            "{program}\n{rendered}"
+        );
+        assert!(
+            (ir.guards.iter()).all(|guard| usize::from(guard.exit.0) >= recvs),
+            "no guard tests a RECV exit: {rendered}"
+        );
+    }
+    Ok(())
+}
+
+/// `binary_trees`' `make_tree`, entered, leaves its second inlined level
+/// through the first level's exits where the levels leave alike: the
+/// caller's `$d`, held in a register, is stored to its slot as the call
+/// enters (`Op::Enter`), so an exit from the callee stores none of it, as
+/// php's stack map, relative to the frame an exit lands in, holds none of
+/// a caller's slots. So the trace takes the pinned php's five exits,
+/// `TRACE 1 exit info` under the trace-dump regime: the `RECV`'s
+/// `exit_0`, the direction's `exit_1` for both levels, the subtraction's
+/// overflow, and a stack check per level, `exit_3` and `exit_4`, which
+/// each store their own level's `$d` (#3203, #3290).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_callees_exit_stores_none_of_its_callers_registers() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "make_tree"), ("record.start", "enter")],
+        "function make_tree(int $depth)
+        {
+            if ($depth === 0) {
+                return [null, null];
+            }
+            $d = $depth - 1;
+            return [make_tree($d), make_tree($d)];
+        }
+        $t = make_tree(8); echo \"ok\", \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let directions: Vec<(Frame, ExitId)> = (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Direction { .. }))
+        .filter_map(|guard| match guard.at {
+            GuardAt::Within(at) => match ir.ops.get(at.index()) {
+                Some(Op::Line(line)) => Some((line.frame, guard.exit)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        (ir.exits.len(), directions.as_slice()),
+        (5, [(Frame(0), ExitId(1)), (Frame(1), ExitId(1))].as_slice()),
+        "{rendered}"
+    );
+    assert!(
+        (ir.exits.iter()).all(|exit| exit
+            .stores
+            .iter()
+            .all(|store| store.slot.frame == exit.frame)),
         "{rendered}"
     );
     Ok(())

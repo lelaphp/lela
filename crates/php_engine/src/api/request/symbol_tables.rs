@@ -436,7 +436,7 @@ impl Request {
     /// The names of the CVs of the op array `frame` serves, in the
     /// order the compiler numbered them, `op_array->vars`, one owner of
     /// each the caller's: the strings its unit's compile made of them
-    /// ([`php_compile::intern_declared`]), found where it made them, in
+    /// ([`php_compile::named`]), found where it made them, in
     /// the engine's table for a published unit and in the unit for one
     /// of the request's own ([`Request::declared_string`]), so a symbol
     /// table keys a variable by its CV's name, as php's

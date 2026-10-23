@@ -315,6 +315,51 @@ fn a_new_row_with_covers_is_one_addition_to_the_registry() {
     }
 }
 
+/// A trace-dump row's digests are part of the row a proposal adds
+/// (#3291): steer writes them as the proposal spells them, and refuses a
+/// row naming one side's alone, as the registry would at load.
+#[test]
+fn a_dump_rows_digests_are_written_with_the_row_and_one_alone_is_refused() {
+    use xtask::divergence::{Digests, FILE, Registry};
+    let root = scratch_at("digests", FILE, REGISTRY);
+    let proposal = root.join("proposed.toml");
+    let fixtures = xtask::package_dir().join("fixtures/trace-dump");
+    let read = |name: &str| fs::read_to_string(fixtures.join(name)).expect("the fixture");
+    let row = read("fib-moved.toml");
+    let half: String = row
+        .lines()
+        .filter(|l| !l.starts_with("oracle = "))
+        .flat_map(|l| [l, "\n"])
+        .collect();
+    for (rows, status, named) in [
+        (
+            &half,
+            Status::Fail,
+            "names one side's digest and not the other's",
+        ),
+        (&row, Status::Pass, "divergence[trace:dump/fib]"),
+    ] {
+        fs::write(&proposal, format!("{REGISTRY}\n{rows}")).expect("the proposal");
+        let reading =
+            steer::run(&root, &harness(), FILE, &proposal, false).expect("the instrument runs");
+        assert_eq!(reading.status, status, "{}", reading.message);
+        assert!(
+            reading.message.contains(named),
+            "{named}: {}",
+            reading.message
+        );
+    }
+    let written = Registry::load(&root).expect("the registry steer wrote");
+    let pinned = Digests::of(
+        read("oracle.lines").as_bytes(),
+        read("engine-pinned.lines").as_bytes(),
+    );
+    assert_eq!(
+        written.row("trace:dump/fib").and_then(|r| r.digests),
+        Some(pinned)
+    );
+}
+
 /// A proposal is held to the reader the harness reads its file with, where
 /// the tracked file loads through it: a table the pin's reader does not
 /// know is refused and written nowhere, since written it would stop every

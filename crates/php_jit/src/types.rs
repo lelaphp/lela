@@ -54,6 +54,11 @@
 //!   there, whether a side trace may grow from it, and the trace a `Link`
 //!   stop links to. Places that leave with an equal spec naming an opline
 //!   share one exit, php's reuse in `zend_jit_trace_get_exit_point`.
+//! - **php's `RECV` exits first.** An entered trace of a function with
+//!   typed parameters numbers the exits php's `zend_jit_recv` takes in
+//!   its prologue ahead of its own, though the prologue ran before
+//!   `Site::Entry` and no code tests them, so every later exit carries
+//!   php's number (#3269).
 //! - **No exit for a throw.** A kernel that leaves a throwable pending,
 //!   bails out or panics leaves through an [`Unwind`], which stores the
 //!   registers and is numbered apart from the exits, as php's compiled
@@ -555,7 +560,9 @@ pub(crate) enum Grows {
     Side,
     /// The exit goes back to the interpreter alone and never grows one,
     /// php's `ZEND_JIT_EXIT_TO_VM`: a loop's interrupt test
-    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7223`).
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7223`), and an entered trace's
+    /// `RECV` exits, which `zend_jit_recv` takes
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10872`).
     Never,
 }
 
@@ -646,20 +653,26 @@ pub(crate) struct LoopHeader {
     /// The op the back edge goes to.
     pub(crate) at: OpId,
     pub(crate) repeat: Repeat,
-    /// Where the interrupt test leaves (`jit-design.md` §4.3).
+    /// Where the interrupt test leaves, or that the loop takes none
+    /// (`jit-design.md` §4.3).
     pub(crate) interrupt: Interrupt,
 }
 
 /// Where a loop's interrupt test goes once the interrupt is raised, as
 /// php's `zend_jit_trace` chooses its `timeout_exit_addr`
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7228`).
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7234`), or that it takes
+/// none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Interrupt {
     /// Through this exit, php's `ZEND_JIT_EXIT_TO_VM` exit point at the
     /// loop's header, which never grows a side trace, numbered after
     /// every exit of the loop's body as php takes it where it closes the
     /// loop: where php's code does not keep the instruction pointer the
-    /// trace entered with, or keeps values in registers there.
+    /// trace entered with, or keeps values in registers there. In an
+    /// entered trace whose first `RECV` takes an exit, and where the test
+    /// stores no register, it is that `RECV`'s, exit 0, landing at the
+    /// entry's opline, as php's test reuses the exit at opline zero
+    /// (`jit-design.md` §4.2, #3269).
     Exit(ExitId),
     /// Through php's interrupt stub, `jit_stub_interrupt_handler`, which
     /// takes no exit: the interrupt is handled and the trace entered again
@@ -669,6 +682,95 @@ pub(crate) enum Interrupt {
     /// end, so the interpreter needs nothing back. The header's opline,
     /// where the frame is stood for the stub.
     Stub(OplineIdx),
+    /// Nowhere: a loop by recursive return takes no test and numbers no
+    /// exit for one, as php's `zend_jit_trace` sets no
+    /// `timeout_exit_addr` where the trace stops at
+    /// `ZEND_JIT_TRACE_STOP_RECURSIVE_RET` and `zend_jit_trace_end_loop`
+    /// emits no check without one (`Z/ext/opcache/jit/zend_jit_ir.c:17378-17386`).
+    /// Each turn returns one frame shallower, so the loop ends where the
+    /// stack it unwinds does. Nor does a side trace's link to it test the
+    /// interrupt, as php sets no `ZEND_JIT_TRACE_CHECK_INTERRUPT` for it
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7209-7212`).
+    ///
+    /// A recursion with no end that a trace by recursive return serves
+    /// meets the timeout all the same: the recursive call's loop tests
+    /// it, through the `RECV` exit its test reuses (#3269), and each
+    /// trace the recursion leaves hands the interpreter its interrupt
+    /// check, where the timeout's fatal is raised:
+    ///
+    /// ```php
+    /// set_time_limit(1);
+    /// function f(int $d) { if ($d === 0) { return 0; } $x = f($d - 1); $y = f($d - 1); return $x; }
+    /// echo f(60), "\n";
+    /// ```
+    /// ```expect exit=255 regime=jit-inline process wall=1s
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:2
+    /// ---- TRACE 1 abort (deep recursion)
+    ///
+    /// ---- TRACE 1 start (enter) f() %s:3
+    /// ---- TRACE 1 stop (recursive call)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 1 f() %s:3
+    /// ---- TRACE 2 start (side trace 1/1) f() %s:3
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (return) f() %s:3
+    /// ---- TRACE 3 stop (recursive return)
+    /// ---- TRACE 3 compiled
+    ///
+    ///      TRACE 3 exit 3 f() %s:3
+    /// ---- TRACE 4 start (side trace 3/3) f() %s:3
+    /// ---- TRACE 4 stop (link to 1)
+    /// ---- TRACE 4 compiled
+    /// ```
+    ///
+    /// So does a single recursion, whose returns the trace by recursive
+    /// return serves alone:
+    ///
+    /// ```php
+    /// set_time_limit(1);
+    /// function f($n) { return $n ? f($n - 1) + 1 : 0; } $t = true; while ($t) { f(50); }
+    /// ```
+    /// ```expect exit=255 regime=jit-inline process wall=1s
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:2
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 abort (deep recursion)
+    ///
+    /// ---- TRACE 1 start (enter) f() %s:3
+    /// ---- TRACE 1 stop (recursive call)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 1 f() %s:3
+    /// ---- TRACE 2 start (side trace 1/1) f() %s:3
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (return) f() %s:3
+    /// ---- TRACE 3 stop (recursive return)
+    /// ---- TRACE 3 compiled
+    ///
+    /// ---- TRACE 4 start (loop) $main() %s:3
+    /// ---- TRACE 4 stop (link to 1)
+    /// ---- TRACE 4 compiled
+    /// ```
+    None,
+}
+
+impl Interrupt {
+    /// Whether the loop tests the interrupt, at its header and before a
+    /// side trace's link to it.
+    pub(crate) fn tested(self) -> bool {
+        !matches!(self, Interrupt::None)
+    }
 }
 
 /// What a looping trace repeats: php's three stops that make a loop.

@@ -89,6 +89,17 @@ pub enum When {
     /// The binary under test carries the crate (`Carried::carries`), the
     /// extensions the per-commit lane renders.
     Carried,
+    /// The crate is the engine's: every crate but the harness
+    /// ([`of_the_engine`]), as #3278 ruled.
+    Engine,
+}
+
+/// Whether `krate` is the engine's: every crate but the harness,
+/// [`crate::layout::HARNESS`], which measures the engine and carries no
+/// kernel, native or witness of its own. [`When::Engine`]'s predicate,
+/// stated here once, which the witness instrument reads as well.
+pub(crate) fn of_the_engine(krate: &Crate) -> bool {
+    krate.name != crate::layout::HARNESS
 }
 
 impl Owed {

@@ -1,0 +1,19 @@
+# A negative control for the manifest rule `divergence.reason` (#3291): an
+# accepted trace:dump row that names neither side's digest, beside one
+# that names both.
+
+[[divergence]]
+id = "trace:dump/fixture-unpinned"
+kind = "trace"
+reason = "The engine's root is a line apart from php's (fixture)."
+status = "accepted"
+since = "2026-10-23"
+
+[[divergence]]
+id = "trace:dump/fixture-in-order"
+kind = "trace"
+reason = "The engine's root is a line apart from php's (fixture)."
+status = "accepted"
+since = "2026-10-23"
+oracle = "sha256:8f13bcce665a56c36a86f8621db11bb53e7fe3198c375e834a0da9a225377a7a"
+engine = "sha256:2243ee4655af8d24e639b1771af9766e1736d0f4f6655f771966235b3a5d2579"

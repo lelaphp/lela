@@ -141,19 +141,11 @@ impl Intern for RequestStrings<'_> {
         Ok(s)
     }
 
-    /// A declaration's own string, kept as its name or its key when the
-    /// unit is taken ([`Request::hold_compiled`]), where it is one this
-    /// home made.
-    fn intern_name(&mut self, bytes: &[u8]) -> Result<php_heap::Made, Fatal> {
-        let made = self.intern_made(bytes, false)?;
-        if let Some(s) = made
-            .value()
-            .as_str()
-            .filter(|_| made.value().is_refcounted())
-        {
-            self.made.name(s);
-        }
-        Ok(made)
+    /// A declaration's own string, kept as what its place in the
+    /// compile's walk names when the unit is taken
+    /// ([`Request::hold_compiled`]).
+    fn hand_name(&mut self, name: Option<Str>) {
+        self.made.hand(name);
     }
 
     /// A constant the request defined, substituted where an `eval`

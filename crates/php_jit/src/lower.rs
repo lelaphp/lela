@@ -48,7 +48,9 @@
 //! the interrupt pointer at offset [`INTERRUPT_AT`] of its `ExitCtx` once
 //! as it enters, and at its header loads the byte it points to and leaves
 //! through the header's interrupt exit when it is not zero: one load and
-//! one branch per iteration, php's cost (`rfc-jit.md:118`).
+//! one branch per iteration, php's cost (`rfc-jit.md:118`). A loop by
+//! recursive return takes no test, as php's takes none
+//! (`types::Interrupt::None`).
 //!
 //! [`ExitId`]: crate::types::ExitId
 
@@ -78,7 +80,7 @@ use php_unit::{MapPtrOffset, OplineIdx};
 use crate::policy::{Mode, Policy};
 use crate::record::{Began, Stop};
 use crate::table::TraceName;
-use crate::types::{Abort, Check, End, ExitId, ExitSpec, GuardAt, Interrupt, Op, Repeat, TraceIr};
+use crate::types::{Abort, Check, End, ExitId, ExitSpec, GuardAt, Interrupt, Op, TraceIr};
 
 /// A trace in final bytes (`jit-design.md` §4.3), what the `Backend` makes
 /// and `table::TraceTable::publish` copies into the code arena once:
@@ -99,8 +101,9 @@ pub(crate) struct Compiled {
     pub(crate) align: usize,
     pub(crate) exits: Box<[ExitSpec]>,
     /// Whether a side trace's link to it tests the interrupt first, php's
-    /// `ZEND_JIT_TRACE_CHECK_INTERRUPT`: a loop, but one of recursive
-    /// returns (`Z/ext/opcache/jit/zend_jit_trace.c:7209-7212`).
+    /// `ZEND_JIT_TRACE_CHECK_INTERRUPT`: a loop whose header tests it, every
+    /// loop but one of recursive returns (`types::Interrupt::None`,
+    /// `Z/ext/opcache/jit/zend_jit_trace.c:7209-7212`).
     pub(crate) checks_interrupt: bool,
     /// The exit a trace that does not loop ends through, none for a loop:
     /// php's return to the interpreter at a trace's end
@@ -609,7 +612,7 @@ fn stub_at(ir: &TraceIr) -> Option<OplineIdx> {
     };
     match header.interrupt {
         Interrupt::Stub(at) => Some(at),
-        Interrupt::Exit(_) => None,
+        Interrupt::Exit(_) | Interrupt::None => None,
     }
 }
 
@@ -857,7 +860,7 @@ impl Backend {
                 End::Leave(exit) | End::Return(exit) => Some(exit),
                 End::Loop(_) => None,
             },
-            checks_interrupt: matches!(ir.end, End::Loop(header) if header.repeat != Repeat::Return),
+            checks_interrupt: matches!(ir.end, End::Loop(header) if header.interrupt.tested()),
             stub: stub_at(ir),
             opens: opens_at(ir),
             entry_stood: stood_at_entry(ir),

@@ -247,12 +247,12 @@ Intern
 Intern::constant_array
 Intern::constant_array_made
 Intern::give_back
+Intern::hand_name
 Intern::hold
 Intern::hold_made
 Intern::intern
 Intern::intern_made
 Intern::intern_marked
-Intern::intern_name
 Key
 Laziness
 Made

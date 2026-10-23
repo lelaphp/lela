@@ -23,6 +23,7 @@ use crate::phpt::Scope;
 use crate::track::Ticket;
 
 pub use crate::layout::Layout;
+pub(crate) use owed::of_the_engine;
 pub use owed::{Instrument, Owed, When};
 
 mod owed;
