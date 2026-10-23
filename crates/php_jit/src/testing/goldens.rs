@@ -79,6 +79,18 @@ pub(crate) const SIEVE: Fixture = Fixture {
     ],
 };
 
+/// `fannkuch`'s first loop, recorded for the view it holds of
+/// `fannkuch()`, which a side trace's record written out by hand is built
+/// through (#3270).
+pub(crate) const FANNKUCH: Fixture = Fixture {
+    name: "fannkuch",
+    plan: &[
+        ("record.function", "fannkuch"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// Where `types`' goldens are, the programs and their records among them.
 pub(crate) fn types() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/types/goldens")

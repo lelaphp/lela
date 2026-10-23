@@ -27,6 +27,7 @@ use super::{
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
+mod loads;
 mod stack;
 
 /// php's `ZEND_JIT_TRACE_MAX_EXITS`: the most exits one trace has.
@@ -218,6 +219,12 @@ struct Builder<'a> {
     /// An inlined callee's untyped parameter, by the value it entered
     /// with, and the caller's register value it was sent from ([`Call::regs`]).
     held: HashMap<ValueId, ValueId>,
+    /// In a trace that does not loop, the guards held at the first read
+    /// of what the root frame entered with, which php's allocator may
+    /// load at entry ([`Builder::load_at_entry`]).
+    entry_reads: Vec<usize>,
+    /// Per op, the operands' types its recording saw, where it is a line.
+    sampled: Vec<Option<[Option<Sample>; 3]>>,
 }
 
 impl<'a> Builder<'a> {
@@ -251,6 +258,8 @@ impl<'a> Builder<'a> {
                 _ => None,
             },
             held: HashMap::new(),
+            entry_reads: Vec::new(),
+            sampled: Vec::new(),
         };
         let root = builder.frame(rec.root, Place::Root, None)?;
         builder.stack.push(root);
@@ -481,6 +490,10 @@ impl<'a> Builder<'a> {
             samples,
         );
         let form = self.form(frame, &op, seen, next);
+        if self.sampled.len() <= idx.index() {
+            self.sampled.resize(idx.index() + 1, None);
+        }
+        self.sampled[idx.index()] = Some(samples);
         let map_ptr = self.map_ptr(func, &op, form);
         self.record_send(frame, &op, op1);
         if !keeps_temporaries(op.opcode) {
@@ -1335,8 +1348,11 @@ impl<'a> Builder<'a> {
     /// holds a loop-invariant type there only for those stops
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:4237-4272`), and before the op
     /// that reads it first in any other trace, a side's among them, as
-    /// php's holds `MAY_BE_GUARD` and `MAY_BE_PACKED_GUARD` at the read; a
-    /// recursive return's loop holds only what the call wrote there, its
+    /// php's holds `MAY_BE_GUARD` and `MAY_BE_PACKED_GUARD` at the read,
+    /// but at entry again in a trace that does not loop where php's
+    /// register allocator loads the value as the trace enters
+    /// ([`Builder::load_at_entry`], `:4283-4310`), decided once the walk
+    /// has seen every read; a recursive return's loop holds only what the call wrote there, its
     /// phi ([`Builder::close_phis`]); by the inline op that
     /// computed it for an arithmetic's overflow and a fetched element's
     /// type, as php's code generator holds a guarded value it writes, an
@@ -1371,6 +1387,13 @@ impl<'a> Builder<'a> {
                     && matches!(self.repeat, Some(Repeat::Loop | Repeat::Call)) =>
             {
                 (GuardAt::Entry, self.start())
+            }
+            (Def::Entry, _) if held.slot.frame == Frame::ROOT && self.repeat.is_none() => {
+                self.entry_reads.push(self.guards.len());
+                (
+                    GuardAt::Before(idx),
+                    draft(Point::Before(idx), held.slot.frame, At::Opline(here)),
+                )
             }
             (_, Some((def, frame, opline, kind, op1, op2))) => {
                 let fetched = |read| At::Fetched {
@@ -1648,6 +1671,9 @@ impl<'a> Builder<'a> {
                     .flatten(),
             },
         };
+        if repeat.is_none() {
+            self.load_at_entry();
+        }
         let numbered = self.number(closes)?;
         let end = numbered
             .end

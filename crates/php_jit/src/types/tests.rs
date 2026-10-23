@@ -23,9 +23,10 @@ use super::{
     Slot, TraceIr, Types, ValueId, build,
 };
 use crate::lower::dump;
-use crate::record::{Landed, Stop};
+use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, FIB, Fixture, MANDELBROT, NBODY, SIEVE, SPECTRALNORM, held, traced as built,
+    self, ARRAY_WRITE, FANNKUCH, FIB, Fixture, MANDELBROT, NBODY, SIEVE, SPECTRALNORM, held,
+    traced as built,
 };
 use crate::testing::records::recording;
 
@@ -137,7 +138,10 @@ fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
 /// its own loop or recursive call (`Z/ext/opcache/jit/zend_jit_trace.c:4237-4272`),
 /// and a side's guard at the read (#3203): the array's layout among
 /// them, held where the array is read by a long key, as php's side holds
-/// `MAY_BE_PACKED_GUARD` there.
+/// `MAY_BE_PACKED_GUARD` there; and `$n`, read once. `$i`, which php's
+/// allocator loads into a register as the trace enters, read by the
+/// comparison, the fetch and the increment, is held at entry, as php's
+/// code holds a `ZREG_LOAD` value there (`:4283-4310`, #3270).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), String> {
@@ -151,7 +155,15 @@ fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), Strin
     assert!(at_entry(&looping) > 0, "{}", dump::render(&looping));
     recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
     let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
-    assert_eq!(at_entry(&linked), 0, "{}", dump::render(&linked));
+    let entered: Vec<u32> = (linked.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Entry)
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => Some(linked.values[value.0 as usize].slot.var),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entered, [3], "{}", dump::render(&linked));
+    assert_eq!(at_entry(&linked), 1, "{}", dump::render(&linked));
     let layout = (linked.guards.iter())
         .find(|guard| matches!(guard.check, Check::Layout { .. }))
         .map(|guard| guard.at);
@@ -160,6 +172,51 @@ fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), Strin
         "{layout:?}: {}",
         dump::render(&linked)
     );
+    Ok(())
+}
+
+/// fannkuch's side trace at `0049` (`TRACE 10`, side trace 9/2 under the
+/// pinned php at `opcache.optimization_level=0`, whose op arrays are this
+/// engine's) does not loop, and php's allocator loads `$maxFlips` at its
+/// entry, read by `0054`'s `IS_SMALLER` and written by `0056`'s `ASSIGN`
+/// (its `TRACE 10 Live Ranges` list `#5.CV5($maxFlips) load`), so php
+/// holds its type there: `exit_0` and `exit_1` land at `0049`, the guard
+/// on `$maxFlips` and then the one on `$flips`, which `PRE_INC` reads
+/// once (#3270). The record is the engine's own for that trace.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_value_phps_allocator_loads_is_held_at_entry() -> Result<(), String> {
+    let recorded = goldens::recorded(FANNKUCH)?;
+    let root = crate::record::func_name(recorded.record.root);
+    let text = "start side 9/3\nroot {root}\nentered 1:array 11:long 12:long
+op {root} 49 long - - -\nop {root} 50 array.packed - - -\nop {root} 51 long long - -
+op {root} 52 long - - fell\nop {root} 54 long long - fell\nop {root} 56 long long - -
+op {root} 57 long - - -\nop {root} 58 long - - taken\nop {root} 62 long - - -
+op {root} 63 long - - -\nop {root} 64 long long - -\nop {root} 65 - - - -
+op {root} 93 - - - taken\nop {root} 66 long long - taken\nop {root} 72 array.packed - - -
+op {root} 73 long long - -\nop {root} 74 long - - -\nop {root} 75 - - - -
+link-at {root} 82\nstop link 6\n"
+        .replace("{root}", &root);
+    let record = TraceRecord::parse(&text).map_err(|e| format!("{e:?}"))?;
+    let ir = build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let first: Vec<(u32, Option<u32>, bool)> = (ir.guards.iter().take(2))
+        .map(|guard| {
+            let var = match guard.check {
+                Check::Type { value, .. } => ir.values[value.0 as usize].slot.var,
+                _ => u32::MAX,
+            };
+            let lands = ir.exits[usize::from(guard.exit.0)].opline.map(|at| at.0);
+            (var, lands, guard.at == GuardAt::Entry)
+        })
+        .collect();
+    assert_eq!(
+        first,
+        [(5, Some(49), true), (9, Some(49), false)],
+        "{}",
+        dump::render(&ir)
+    );
+    let exits: Vec<u16> = ir.guards.iter().take(2).map(|guard| guard.exit.0).collect();
+    assert_eq!(exits, [0, 1], "{}", dump::render(&ir));
     Ok(())
 }
 
