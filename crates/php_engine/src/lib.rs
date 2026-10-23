@@ -20,6 +20,10 @@
     feature(explicit_tail_calls, rust_preserve_none_cc)
 )]
 #![cfg_attr(dispatch = "tailcall", allow(incomplete_features))]
+// Design §5.8: the loop dispatches into the handlers' bodies, so the
+// crate asks `#[inline(always)]` by design, and each one says why beside
+// it rather than beside one more `allow` of its own.
+#![allow(clippy::inline_always)]
 // seams.toml rule lints.no-panic: Internal invariant failures are InternalError fatals with a message, not panics (design §10).
 #![deny(
     clippy::unwrap_used,

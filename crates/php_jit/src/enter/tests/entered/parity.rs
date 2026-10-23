@@ -215,6 +215,7 @@ fn compiled(ir: &TraceIr) -> Option<Compiled> {
                 at: b"parity".to_vec().into_boxed_slice(),
                 line: 1,
             },
+            None,
         )
         .ok()
 }
@@ -229,6 +230,7 @@ fn entered(req: &mut Request, frame: FrameRef, ir: &TraceIr) -> Option<FrameRef>
     let trace = table.get(id)?;
     match super::super::super::enter(req, frame, (&epoch, trace), super::super::super::At::First)
         .ok()?
+        .left
     {
         super::super::super::Left::Exit(exited) => Some(exited.frame),
         _ => None,

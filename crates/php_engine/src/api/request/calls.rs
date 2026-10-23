@@ -574,7 +574,6 @@ impl Request {
     /// the declared ones. The shape's test is inline in the `SEND_*_EX`
     /// handlers that ask it, and the declaration is read out of line.
     #[inline(always)] // once per `SEND_*_EX`, in the loop's arms
-    #[allow(clippy::inline_always)]
     pub(crate) fn arg_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
         if self
             .user_function(function)
@@ -1069,7 +1068,6 @@ impl Request {
     /// that holds `function`'s entry already, as a frameless call's
     /// handler reads it off the frameless table (`ZEND_FLF_HANDLER`).
     #[inline(always)] // design §5.8: every native call's, frameless or not
-    #[allow(clippy::inline_always)]
     pub(crate) fn serve_entry(
         &mut self,
         function: Function,

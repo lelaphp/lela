@@ -204,7 +204,6 @@ impl Request {
     /// back through the stack, thirteen instructions on a computed name's
     /// placement.
     #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(super) fn properties_info(&self, class: ClassId) -> Option<PropertiesInfo<'_>> {
         let (record, placed, decl) = if let Some(native) = self.native_class_at(class) {
             (

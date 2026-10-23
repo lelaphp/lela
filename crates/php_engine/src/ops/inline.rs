@@ -152,7 +152,6 @@ const MUL: u32 = Opcode::Mul as u32;
 /// -2.5 -3.5 -1.5 -6 -30.5
 /// ```
 #[inline(always)] // as `computed`
-#[allow(clippy::inline_always)]
 pub(crate) fn compounded(extended_value: u32, a: Zval, b: Zval) -> Option<Zval> {
     match extended_value {
         ADD => binary(Binary::Arith(Arith::Add), a, b),
@@ -164,7 +163,6 @@ pub(crate) fn compounded(extended_value: u32, a: Zval, b: Zval) -> Option<Zval> 
 
 /// A zval that is a number as it stands, nothing converted.
 #[inline(always)] // a test of the type byte, on every inline path
-#[allow(clippy::inline_always)]
 fn number(z: Zval) -> Option<Number> {
     match z.kind() {
         ZvalType::Long => z.as_long().map(Number::Long),
@@ -176,7 +174,6 @@ fn number(z: Zval) -> Option<Number> {
 /// The number a value is as it stands, nothing converted and a
 /// reference not followed.
 #[inline(always)] // as `number`
-#[allow(clippy::inline_always)]
 fn value_number(v: &Value) -> Option<Number> {
     v.as_int()
         .map(Number::Long)
@@ -197,7 +194,6 @@ fn value_number(v: &Value) -> Option<Number> {
 /// float(1.5)
 /// ```
 #[inline(always)] // as `number`
-#[allow(clippy::inline_always)]
 pub(crate) fn number_value(n: Number) -> Value {
     match n {
         Number::Long(n) => Value::int(n),
@@ -244,7 +240,6 @@ fn overflowed(op: Arith, x: i64, y: i64) -> Number {
 /// where the long overflowed, two doubles as they are, and a mixed pair
 /// with its long converted.
 #[inline(always)] // the arithmetic of an inline path
-#[allow(clippy::inline_always)]
 fn computed(op: Arith, a: Number, b: Number) -> Number {
     if let (Number::Long(x), Number::Long(y)) = (a, b) {
         return match op.longs(x, y) {
@@ -286,7 +281,6 @@ fn computed(op: Arith, a: Number, b: Number) -> Number {
 /// int(-9223372036854775808)
 /// ```
 #[inline(always)] // the arithmetic of an inline path
-#[allow(clippy::inline_always)]
 pub(crate) fn quotient(a: Number, b: Number) -> Option<Number> {
     match (a, b) {
         (Number::Long(_), Number::Long(0)) | (Number::Long(i64::MIN), Number::Long(-1)) => None,
@@ -321,7 +315,6 @@ pub(crate) fn quotient(a: Number, b: Number) -> Option<Number> {
 /// int(1)
 /// ```
 #[inline(always)] // the arithmetic of an inline path
-#[allow(clippy::inline_always)]
 pub(crate) fn remainder(a: i64, b: i64) -> Option<i64> {
     match b {
         0 => None,
@@ -353,7 +346,6 @@ pub(crate) fn remainder(a: i64, b: i64) -> Option<i64> {
 /// Bit shift by negative number
 /// ```
 #[inline(always)] // the arithmetic of an inline path
-#[allow(clippy::inline_always)]
 pub(crate) fn shifted(op: Shift, a: i64, b: i64) -> Option<i64> {
     let by = u64::try_from(b).ok().filter(|by| *by < 64)?;
     Some(match op {
@@ -380,7 +372,6 @@ impl Bitwise {
     /// 7 5 2
     /// ```
     #[inline(always)] // the arithmetic of an inline path
-    #[allow(clippy::inline_always)]
     pub(crate) const fn long(self, left: i64, right: i64) -> i64 {
         match self {
             Bitwise::Or => left | right,
@@ -393,7 +384,6 @@ impl Bitwise {
 /// What `op` comes to over two numbers, by its rule, or None where the
 /// rule leaves the pair to the kernel.
 #[inline(always)] // the arithmetic of an inline path
-#[allow(clippy::inline_always)]
 fn binary_numbers(op: Binary, a: Number, b: Number) -> Option<Number> {
     // The type pair first, then the operator, as php's handlers test.
     if let (Number::Long(x), Number::Long(y)) = (a, b) {
@@ -432,7 +422,6 @@ fn binary_numbers(op: Binary, a: Number, b: Number) -> Option<Number> {
 /// int(0)
 /// ```
 #[inline(always)] // as `computed`
-#[allow(clippy::inline_always)]
 pub(crate) fn binary(op: Binary, a: Zval, b: Zval) -> Option<Zval> {
     binary_numbers(op, number(a)?, number(b)?).map(number_zval)
 }
@@ -471,7 +460,6 @@ pub(crate) fn binary(op: Binary, a: Zval, b: Zval) -> Option<Zval> {
 /// float(9.223372036854776E+18)
 /// ```
 #[inline(always)] // as `computed`
-#[allow(clippy::inline_always)]
 pub(crate) fn arith(op: Arith, a: Zval, b: Zval) -> Option<Zval> {
     numbers(
         a,
@@ -494,7 +482,6 @@ pub(crate) fn arith(op: Arith, a: Zval, b: Zval) -> Option<Zval> {
 /// pair; None where either is no number.
 #[cfg_attr(not(debug_assertions), inline(always))] // the type tests of an inline path
 #[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
-#[allow(clippy::inline_always)]
 #[allow(clippy::needless_bitwise_bool)] // the two compares meet in one branch, measured (#3273)
 fn numbers<R>(
     a: Zval,
@@ -530,7 +517,6 @@ fn numbers<R>(
 /// float(1.5)
 /// ```
 #[inline(always)] // as `computed`
-#[allow(clippy::inline_always)]
 pub(crate) fn step(op: Arith, z: Zval) -> Option<Zval> {
     if let Some(n) = z.as_long() {
         return Some(number_zval(computed(op, Number::Long(n), Number::Long(1))));
@@ -542,7 +528,6 @@ pub(crate) fn step(op: Arith, z: Zval) -> Option<Zval> {
 
 /// The zval a number is, which an inline path writes.
 #[inline(always)] // as `number`
-#[allow(clippy::inline_always)]
 fn number_zval(n: Number) -> Zval {
     match n {
         Number::Long(n) => Zval::long(n),
@@ -562,7 +547,6 @@ pub(crate) trait Operator: Copy {
 
 impl Operator for Arith {
     #[inline(always)] // as `computed`
-    #[allow(clippy::inline_always)]
     fn apply(self, a: Zval, b: Zval) -> Option<Zval> {
         arith(self, a, b)
     }
@@ -570,7 +554,6 @@ impl Operator for Arith {
 
 impl Operator for Binary {
     #[inline(always)] // as `computed`
-    #[allow(clippy::inline_always)]
     fn apply(self, a: Zval, b: Zval) -> Option<Zval> {
         binary(self, a, b)
     }
@@ -604,7 +587,6 @@ impl Operator for Binary {
 /// int(0)
 /// ```
 #[inline(always)] // the kernel's first test
-#[allow(clippy::inline_always)]
 pub(crate) fn binary_values(op: Binary, a: &Value, b: &Value) -> Option<Value> {
     binary_numbers(op, value_number(a)?, value_number(b)?).map(number_value)
 }
@@ -646,7 +628,6 @@ pub(crate) fn arith_numbers(op: Arith, a: Number, b: Number) -> Value {
 /// bool(false)
 /// ```
 #[inline(always)] // a shift and a test, on an inline path
-#[allow(clippy::inline_always)]
 pub(crate) fn has_type(mask: u32, kind: ZvalType) -> bool {
     (mask >> (kind as u32)) & 1 != 0
 }
@@ -686,7 +667,6 @@ pub(crate) fn has_type(mask: u32, kind: ZvalType) -> bool {
 /// bool(false)
 /// ```
 #[inline(always)] // as `has_type`
-#[allow(clippy::inline_always)]
 pub(crate) fn type_check(z: Zval, mask: u32) -> Option<bool> {
     match z.kind() {
         ZvalType::Null
@@ -723,7 +703,6 @@ pub(crate) fn type_check(z: Zval, mask: u32) -> Option<bool> {
 /// int(0)
 /// ```
 #[inline(always)] // a test of the type byte, on an inline path
-#[allow(clippy::inline_always)]
 pub(crate) fn string_length(z: Zval) -> Option<i64> {
     z.as_str()
         .map(|s| i64::try_from(s.len()).unwrap_or(i64::MAX))
@@ -755,7 +734,6 @@ pub(crate) fn string_length(z: Zval) -> Option<i64> {
 /// 012
 /// ```
 #[inline(always)] // as `computed`
-#[allow(clippy::inline_always)]
 pub(crate) fn order(a: Zval, b: Zval, holds: impl Fn(Ordering) -> bool + Copy) -> Option<bool> {
     numbers(
         a,
@@ -781,7 +759,6 @@ pub(crate) fn order(a: Zval, b: Zval, holds: impl Fn(Ordering) -> bool + Copy) -
 /// nan
 /// ```
 #[inline(always)] // as `number`
-#[allow(clippy::inline_always)]
 pub(crate) fn truth(z: Zval) -> Option<bool> {
     match z.kind() {
         ZvalType::Null | ZvalType::False => Some(false),
@@ -817,7 +794,6 @@ pub(crate) fn truth(z: Zval) -> Option<bool> {
 /// int(4)
 /// ```
 #[inline(always)] // a test of the type byte, on an inline path
-#[allow(clippy::inline_always)]
 pub(crate) fn dim_key(dim: Zval, constant: bool) -> Option<Key> {
     match dim.kind() {
         ZvalType::Long => dim.as_long().map(Key::Long),
@@ -885,7 +861,6 @@ pub(crate) fn dim_key(dim: Zval, constant: bool) -> Option<Key> {
 /// Warning: Undefined array key 9 in %s on line 5
 /// ```
 #[inline(always)] // as `dim_key`
-#[allow(clippy::inline_always)]
 pub(crate) fn element(array: Arr, key: Key) -> Option<Zval> {
     let found = array.value_ref(key)?.read();
     match found.kind() {
@@ -920,7 +895,6 @@ pub(crate) fn element(array: Arr, key: Key) -> Option<Zval> {
 /// bool(true)
 /// ```
 #[inline(always)] // as `number`
-#[allow(clippy::inline_always)]
 pub(crate) fn identical(a: Zval, b: Zval) -> Option<bool> {
     let scalar = |z: Zval| match z.kind() {
         ZvalType::Null => Some(php_heap::Scalar::Null),

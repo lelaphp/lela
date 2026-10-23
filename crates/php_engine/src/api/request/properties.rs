@@ -484,7 +484,6 @@ impl Request {
     /// has no hooks, with what a write from the scope is held to
     /// ([`Request::write_type`]). None for every other name.
     #[inline(always)] // its callers' fast arm: out of line it cost 37 instructions on a computed read
-    #[allow(clippy::inline_always)]
     fn offset_of(
         &self,
         class: ClassId,
