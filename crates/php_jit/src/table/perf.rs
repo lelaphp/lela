@@ -25,7 +25,7 @@ use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use super::{TraceId, TraceName, code};
 use crate::policy::JitDebug;
@@ -56,6 +56,39 @@ const ELF_MACHINE: u32 = if cfg!(target_arch = "aarch64") {
 pub(crate) struct Perf {
     map: Option<Box<dyn Write + Send>>,
     dump: Option<Dump>,
+    used: Arc<Used>,
+}
+
+/// What the traces published under one engine's [`Outputs`] take, counted
+/// as each is published (#2961): the bytes of their code in the arena,
+/// the oplines they compiled, one [`crate::lower::Mark`] each, and how
+/// many traces there are. php's `JIT memory usage` line counts its own
+/// buffer, its stubs and alignment with them; this counts the traces'
+/// bytes alone.
+#[derive(Debug, Default)]
+pub(crate) struct Used {
+    bytes: AtomicUsize,
+    oplines: AtomicUsize,
+    traces: AtomicU32,
+}
+
+/// [`Used`] as it stood when read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Usage {
+    pub(crate) bytes: usize,
+    pub(crate) oplines: usize,
+    pub(crate) traces: u32,
+}
+
+impl Used {
+    /// The counts as they stand.
+    pub(crate) fn now(&self) -> Usage {
+        Usage {
+            bytes: self.bytes.load(Ordering::Relaxed),
+            oplines: self.oplines.load(Ordering::Relaxed),
+            traces: self.traces.load(Ordering::Relaxed),
+        }
+    }
 }
 
 /// The jitdump the records go to, and the engine's next `code_id`.
@@ -69,6 +102,7 @@ impl std::fmt::Debug for Perf {
         f.debug_struct("Perf")
             .field("map", &self.map.is_some())
             .field("dump", &self.dump.is_some())
+            .field("used", &self.used)
             .finish()
     }
 }
@@ -97,6 +131,10 @@ pub(crate) struct Outputs {
     map: bool,
     dump: bool,
     code_id: Arc<AtomicU64>,
+    /// Whether the engine's end writes php's `JIT memory usage` line,
+    /// `ZEND_JIT_DEBUG_SIZE`.
+    size: bool,
+    used: Arc<Used>,
 }
 
 impl Outputs {
@@ -106,6 +144,8 @@ impl Outputs {
             map: false,
             dump: false,
             code_id: Arc::new(AtomicU64::new(1)),
+            size: false,
+            used: Arc::default(),
         }
     }
 
@@ -129,12 +169,21 @@ impl Outputs {
             map,
             dump,
             code_id: Arc::new(AtomicU64::new(1)),
+            size: debug.any(JitDebug::SIZE),
+            used: Arc::default(),
         }
     }
 }
 
 impl Drop for Outputs {
+    /// The engine's end, php's `zend_jit_shutdown`: the jitdump's close
+    /// record, and, under `ZEND_JIT_DEBUG_SIZE`, php's line of what the
+    /// traces took (`Z/ext/opcache/jit/zend_jit.c:3866-3868`), the bytes
+    /// [`Used`] counted.
     fn drop(&mut self) {
+        if self.size {
+            eprint!("\nJIT memory usage: {}\n", self.used.now().bytes);
+        }
         if self.dump
             && let Ok(mut file) = OpenOptions::new().append(true).open(dump_path())
         {
@@ -145,12 +194,26 @@ impl Drop for Outputs {
 }
 
 impl Perf {
+    /// What the traces published through this `Perf` take.
+    pub(crate) fn usage(&self) -> Usage {
+        self.used.now()
+    }
+
+    /// One trace published, `bytes` of code compiled from `oplines`
+    /// oplines, counted in [`Used`] once nothing of its publish can fail.
+    pub(crate) fn counted(&self, bytes: usize, oplines: usize) {
+        self.used.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.used.oplines.fetch_add(oplines, Ordering::Relaxed);
+        self.used.traces.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Nowhere: no line and no record.
     #[cfg(test)]
     pub(crate) fn none() -> Perf {
         Perf {
             map: None,
             dump: None,
+            used: Arc::default(),
         }
     }
 
@@ -171,6 +234,7 @@ impl Perf {
                 to,
                 code_id: Arc::clone(&outputs.code_id),
             }),
+            used: Arc::clone(&outputs.used),
         }
     }
 
@@ -187,6 +251,7 @@ impl Perf {
                 to,
                 code_id: Arc::new(AtomicU64::new(1)),
             }),
+            used: Arc::default(),
         }
     }
 

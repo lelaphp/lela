@@ -46,6 +46,7 @@ mod lower;
 mod observed;
 mod policy;
 mod record;
+mod stepping;
 mod table;
 #[cfg(test)]
 mod testing;
@@ -68,7 +69,15 @@ pub struct Jit;
 impl Tier for Jit {
     type State = JitRequest;
 
+    /// The site visited ([`dispatch::safepoint`]); in the bench's build of
+    /// the stepping arm alone, `cfg(php_jit_stepping)`, which only `xtask
+    /// bench` sets, the serving stepped to its end instead ([`stepping`],
+    /// #2946). Every other build's `cfg!` is `false` and the branch folds
+    /// away.
     fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
+        if cfg!(php_jit_stepping) {
+            return stepping::driven(req, frame);
+        }
         dispatch::safepoint(req, frame, site, held)
     }
 
@@ -92,14 +101,17 @@ impl Tier for Jit {
     /// [`JitEngine`], built last at engine start, after the opcache
     /// extension registered php's `opcache.jit*`; its request's,
     /// [`JitRequest`], is the tier's own ([`Jit::lay`]).
+    /// Under `cfg(php_jit_usage)`, which only `xtask bench` sets, a
+    /// request's end also writes what its epoch's traces took
+    /// ([`JitEngine::request_ended`], #2961).
     fn extension() -> Option<Extension> {
-        Some(
-            ExtensionBuilder::default()
-                .ini(policy::ini())
-                .engine_state(JitEngine::new)
-                .rinit(JitEngine::request_started)
-                .build("jit"),
-        )
+        let tier = ExtensionBuilder::default()
+            .ini(policy::ini())
+            .engine_state(JitEngine::new)
+            .rinit(JitEngine::request_started);
+        #[cfg(php_jit_usage)]
+        let tier = tier.rshutdown(JitEngine::request_ended);
+        Some(tier.build("jit"))
     }
 }
 
@@ -249,6 +261,24 @@ impl JitEngine {
             compiler: compiler::Compiler::new(&shared),
             shared,
         }
+    }
+
+    /// The G4 bar's line (#2961), at a request's end in the bench's
+    /// build alone: the bytes the engine's traces take, the oplines they
+    /// compiled and how many there are, as its tables counted them
+    /// ([`table::TraceTable::usage`]); php's count of compiled oplines is
+    /// its `TRACE_BYTECODE` listing, which this tier does not write.
+    #[cfg(php_jit_usage)]
+    fn request_ended(req: &mut Request) {
+        let epoch = tier::epoch(req);
+        let Some(used) = table::of_epoch(&epoch).map(table::TraceTable::usage) else {
+            return;
+        };
+        let line = format!(
+            "JIT usage: {} bytes, {} oplines, {} traces\n",
+            used.bytes, used.oplines, used.traces
+        );
+        req.response_mut().write_stderr(line.as_bytes());
     }
 
     /// The first request's start raises the warning of a refused tier,

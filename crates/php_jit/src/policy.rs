@@ -112,6 +112,8 @@ impl JitDebug {
     pub(crate) const PERF: u32 = 1 << 4;
     /// A jitdump record per trace, where php writes one.
     pub(crate) const PERF_DUMP: u32 = 1 << 5;
+    /// The engine's end writes how many bytes its traces took.
+    pub(crate) const SIZE: u32 = 1 << 9;
     pub(crate) const TRACE_START: u32 = 1 << 12;
     pub(crate) const TRACE_STOP: u32 = 1 << 13;
     pub(crate) const TRACE_COMPILED: u32 = 1 << 14;

@@ -161,6 +161,10 @@ struct Arm {
     env: Environment,
     #[serde(skip)]
     reads: Vec<PathBuf>,
+    /// Whether a run states what its process retired over its life
+    /// ([`Spent::run`]), read before it is reaped.
+    #[serde(skip)]
+    retired: bool,
 }
 
 /// One bar: what is measured, and the two arms a rep times against each
@@ -324,16 +328,20 @@ pub(crate) struct Sample {
     pub(crate) value: f64,
     pub(crate) wrote: Vec<u8>,
     pub(crate) spent: Spent,
+    /// A process arm's peak physical footprint in bytes, where it asked
+    /// for what its process retired and the platform states it (#2961).
+    pub(crate) peak: Option<u64>,
 }
 
 impl Sample {
     /// A run that states its value and what it wrote, and nothing it spent.
     pub(crate) fn of(value: f64, wrote: Vec<u8>) -> Sample {
-        let spent = Spent::Unasked;
+        let (spent, peak) = (Spent::Unasked, None);
         Sample {
             value,
             wrote,
             spent,
+            peak,
         }
     }
 }
@@ -349,6 +357,9 @@ pub(crate) enum Unit {
     Ms,
     Ns,
     Rps,
+    /// Bytes, a cost: a process's peak footprint, or its traces' code per
+    /// opline compiled (G4, #2961).
+    Bytes,
 }
 
 impl Unit {
@@ -358,6 +369,7 @@ impl Unit {
             Unit::Ms => "ms",
             Unit::Ns => "ns",
             Unit::Rps => "rps",
+            Unit::Bytes => "bytes",
         }
     }
 
@@ -371,7 +383,7 @@ impl Unit {
     /// a time, and less of a rate.
     pub(crate) fn worse(self) -> f64 {
         match self {
-            Unit::Ms | Unit::Ns => 1.0,
+            Unit::Ms | Unit::Ns | Unit::Bytes => 1.0,
             Unit::Rps => -1.0,
         }
     }
@@ -380,7 +392,7 @@ impl Unit {
     /// suffix a figure is kept under, milliseconds where none is another's.
     pub(crate) fn of(reading: &Reading) -> Unit {
         let kept = |unit: Unit| (reading.numbers.keys()).any(|k| k.ends_with(&unit.key("")));
-        [Unit::Rps, Unit::Ns]
+        [Unit::Rps, Unit::Ns, Unit::Bytes]
             .into_iter()
             .find(|unit| kept(*unit))
             .unwrap_or(Unit::Ms)
@@ -509,6 +521,13 @@ impl From<Arm> for Spawned {
 pub(crate) struct Environment {
     clear: bool,
     set: BTreeMap<String, String>,
+}
+
+impl Spawned {
+    /// One run of the arm, and what it wrote on its second stream.
+    fn ran(&self) -> Result<(Sample, Vec<u8>)> {
+        ran(&self.arm, &self.program)
+    }
 }
 
 impl Side for Spawned {
@@ -673,6 +692,11 @@ fn load_average() -> Option<[f64; 3]> {
 /// spawn, the stdin it reads and the wait. A nonzero exit refuses the run,
 /// naming the arm, since an arm that failed timed nothing.
 fn once(arm: &Arm, program: &Path) -> Result<Sample> {
+    ran(arm, program).map(|(sample, _)| sample)
+}
+
+/// [`once`], and what the run wrote on its second stream.
+fn ran(arm: &Arm, program: &Path) -> Result<(Sample, Vec<u8>)> {
     let mut command = Command::new(program);
     if arm.env.clear {
         command.env_clear();
@@ -694,10 +718,30 @@ fn once(arm: &Arm, program: &Path) -> Result<Sample> {
         pipe.write_all(arm.stdin.as_bytes())
             .with_context(|| format!("feeding the arm {}", arm.name))?;
     }
-    let done = child
-        .wait_with_output()
-        .with_context(|| format!("waiting for the arm {}", arm.name))?;
-    let value = start.elapsed().as_secs_f64() * 1000.0;
+    let (done, value, (spent, peak)) = if arm.retired {
+        let (stdout, stderr) = (drained(child.stdout.take()), drained(child.stderr.take()));
+        let (retired, peak) = spent::Retired::exited(child.id()).unzip();
+        let value = start.elapsed().as_secs_f64() * 1000.0;
+        let status = child.wait();
+        let status = status.with_context(|| format!("waiting for the arm {}", arm.name))?;
+        let read = |read: std::thread::JoinHandle<Vec<u8>>| read.join().ok();
+        let streams = read(stdout).zip(read(stderr));
+        let (stdout, stderr) = streams.context("a thread reading the arm's streams panicked")?;
+        let done = std::process::Output {
+            status,
+            stdout,
+            stderr,
+        };
+        (done, value, (Spent::run(retired), peak))
+    } else {
+        let done = child.wait_with_output();
+        let done = done.with_context(|| format!("waiting for the arm {}", arm.name))?;
+        (
+            done,
+            start.elapsed().as_secs_f64() * 1000.0,
+            (Spent::Unasked, None),
+        )
+    };
     if !done.status.success() {
         bail!(
             "the arm {} exited {}: {}",
@@ -706,7 +750,24 @@ fn once(arm: &Arm, program: &Path) -> Result<Sample> {
             String::from_utf8_lossy(&done.stderr).trim()
         );
     }
-    Ok(Sample::of(value, done.stdout))
+    let sample = Sample {
+        spent,
+        peak,
+        ..Sample::of(value, done.stdout)
+    };
+    Ok((sample, done.stderr))
+}
+
+/// What a child's stream writes, read to its end on a thread of its own,
+/// so a child that fills one pipe while the other is read never stalls.
+fn drained(pipe: Option<impl std::io::Read + Send + 'static>) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut read = Vec::new();
+        if let Some(mut pipe) = pipe {
+            pipe.read_to_end(&mut read).ok();
+        }
+        read
+    })
 }
 
 /// One bar measured: `reps` paired reps after [`WARMUP`] discarded ones,
@@ -855,6 +916,8 @@ fn declared(root: &Path) -> Result<Vec<Declared>> {
     bars.extend(kernels::oracle(root));
     bars.extend(kernels::compiled(root));
     bars.extend(kernels::door(root));
+    bars.extend(kernels::stepping(root));
+    bars.extend(kernels::g4(root));
     bars.extend(
         [
             ("jit-wrapper", [WRAPPER, DIRECT], Held::Series),
@@ -889,7 +952,7 @@ fn wrapper(root: &Path, id: &str, [a, b]: [&'static str; 2], held: Held) -> Decl
                 &root,
                 ("php_jit", "php_jit_bench"),
                 Some("bench"),
-                None,
+                (None, None),
             )?;
             let arm = |name: String, way: &str| -> Box<dyn Side> {
                 let args = vec![way.to_owned(), CALLS.to_string()];
@@ -900,7 +963,8 @@ fn wrapper(root: &Path, id: &str, [a, b]: [&'static str; 2], held: Held) -> Decl
                     ..Arm::default()
                 };
                 let side = Spawned::from(arm);
-                Box::new(PerCall { side, calls: CALLS })
+                let count = f64::from(CALLS);
+                Box::new(Counted { side, count })
             };
             Ok(Ok(Arms::Pair([arm(a.to_owned(), a), arm(second(a, b), b)])))
         }),
@@ -913,14 +977,16 @@ pub(crate) fn second(a: &str, b: &str) -> String {
     format!("{b}{}", if a == b { "-b" } else { "" })
 }
 
-/// A process arm that makes a known count of calls, each run, which
-/// [`Spawned`] reads in milliseconds, read in nanoseconds per call.
-struct PerCall {
+/// A process arm that makes a known count of calls or executes a known
+/// count of oplines, each run, which [`Spawned`] reads in milliseconds,
+/// read in nanoseconds per call (#2879) or per opline, and what its process
+/// retired, where it asks, per opline (#2946).
+struct Counted {
     side: Spawned,
-    calls: u32,
+    count: f64,
 }
 
-impl Side for PerCall {
+impl Side for Counted {
     fn name(&self) -> &str {
         self.side.name()
     }
@@ -929,10 +995,19 @@ impl Side for PerCall {
         self.side.program()
     }
 
+    fn reads(&self) -> &[PathBuf] {
+        self.side.reads()
+    }
+
     fn once(&mut self) -> Result<Sample> {
         let ran = self.side.once()?;
-        let value = ran.value * 1e6 / f64::from(self.calls);
-        Ok(Sample { value, ..ran })
+        let value = ran.value * 1e6 / self.count;
+        let spent = ran.spent.per_opline(self.count);
+        Ok(Sample {
+            value,
+            spent,
+            ..ran
+        })
     }
 
     fn unit(&self) -> Unit {
@@ -1125,7 +1200,7 @@ fn rendered(
     let rows: Vec<String> = (took.rows.iter()).map(|(program, row)| {
         let unit = row.unit.suffix();
         let stat = |name: &str, s: &Stats, spent: &Spent| {
-            let spent = (spent.text()).map_or_else(String::new, |t| format!("; per request: {t}"));
+            let spent = (spent.text()).map_or_else(String::new, |t| format!("; {t}"));
             format!(
                 "  {name}: median {:.3} {unit}, IQR {:.3} (q1 {:.3}, q3 {:.3}, min {:.3}, max {:.3}, n {}){spent}\n",
                 s.median, s.iqr, s.q1, s.q3, s.min, s.max, s.n
@@ -1250,7 +1325,11 @@ fn row_numbers(program: Option<&str>, row: &Measured) -> Vec<(String, f64)> {
     ];
     let numbers = (numbers.into_iter()).map(|(key, value)| (row.unit.key(key), value));
     let [a, b] = row.spent;
-    let spent = (a.numbers("a").into_iter()).chain(b.numbers("b"));
+    let delta = a.instructions().zip(b.instructions());
+    let delta = delta.map(|(a, b)| ("delta_instructions".to_owned(), a - b));
+    let spent = (a.numbers("a").into_iter())
+        .chain(b.numbers("b"))
+        .chain(delta);
     let ratio = program.map(|_| ("ratio".to_owned(), row.ratio()));
     (numbers.chain(spent))
         .chain([("paired_pct".to_owned(), row.paired_pct)])
@@ -1323,9 +1402,7 @@ fn recorded(
     let measured = match took.rows.as_slice() {
         [(None, row)] => {
             let spent: String = (bar.names.iter().zip(row.spent))
-                .filter_map(|(name, spent)| {
-                    Some(format!("; {name} per request: {}", spent.text()?))
-                })
+                .filter_map(|(name, spent)| Some(format!("; {name} {}", spent.text()?)))
                 .collect();
             format!(
                 "{reps} reps, {}; {}{spent}",

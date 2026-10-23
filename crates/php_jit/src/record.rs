@@ -1546,7 +1546,7 @@ impl<'p> Recorder<'p> {
 /// `op2` where they name a slot and the opcode reads a value there, and
 /// the `OP_DATA`'s `op1` after an assignment, whose class php does not
 /// record.
-fn sampled(
+pub(crate) fn sampled(
     req: &Request,
     frame: FrameRef,
     op: &Opline,
@@ -1635,7 +1635,7 @@ fn ended(at: FrameRef, stepped: bool) -> Ended {
 }
 
 /// The opline `frame` stands at.
-fn position(req: &Request, frame: FrameRef) -> OplineIdx {
+pub(crate) fn position(req: &Request, frame: FrameRef) -> OplineIdx {
     tier::frame(req, frame).map_or(OplineIdx(0), |view| view.opline())
 }
 
