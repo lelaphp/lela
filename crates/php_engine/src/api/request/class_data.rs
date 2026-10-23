@@ -496,6 +496,9 @@ impl Request {
                         })
                         .collect()
                 });
+        if !updated_as_declared {
+            self.init_statics(class)?;
+        }
         for info in statics {
             self.lay_down_static(info)?;
         }
@@ -855,6 +858,9 @@ impl Request {
                 None => Some(Value::null()),
             };
             self.class_data.rows.row(class).defaults.push(value);
+            if info.declaring == class {
+                self.default_evaluated(info);
+            }
         }
         Ok(())
     }
