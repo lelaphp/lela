@@ -2375,6 +2375,16 @@ pub(crate) fn send_val_ex<T: Tier, A: Operand + Default>(
         return edge;
     }
     req.vm_mut().stand(frame, at);
+    sent_declared(req, frame, code, op)
+}
+
+/// `SEND_VAL_EX` past its inline path: the slot [`reserve_arg`] gives
+/// the argument, by number or by name, the `Error` for a parameter that
+/// takes its argument by reference, and the operand placed
+/// ([`send`]). A call of its own, as [`sent`] is for `SEND_VAL`, so the
+/// loop holds one copy of it for both operand kinds.
+#[inline(never)]
+fn sent_declared(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
