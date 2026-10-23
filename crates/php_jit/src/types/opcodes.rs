@@ -248,7 +248,35 @@ pub(super) fn out_types(op: &Opline, t1: Types, t2: Types, td: Types, code: &OpA
         Opcode::InitArray | Opcode::AddArrayElement => Types::of_tag(ZvalType::Array),
         Opcode::VerifyReturnType => returned(code, t1),
         Opcode::Cast => cast(op.extended_value),
+        Opcode::FeFetchR | Opcode::FeFetchRw => fetched_key(t1),
         _ => Types::UNKNOWN.without(Types::UNDEF),
+    }
+}
+
+/// What a `FE_FETCH_R` or `FE_FETCH_RW` writes as its key, over an
+/// iterated `t`, as php's `zend_update_type_info` types it: a long from a
+/// packed array, whose keys are its positions, a long or a string from a
+/// hash, and anything from an object (`Z/Zend/Optimizer/zend_inference.c:3536-3548`).
+/// So a key read from a packed array holds no guard, as php's holds none.
+fn fetched_key(t: Types) -> Types {
+    let mut key = Types::NONE;
+    if t.meets(Types::OBJECT) {
+        key = key.or(Types::ANY);
+    }
+    if t.meets(Types::ARRAY) {
+        let packed = t.meets(Types::PACKED) || !t.meets(Types::HASH);
+        let hash = t.meets(Types::HASH) || !t.meets(Types::PACKED);
+        if packed {
+            key = key.or(Types::LONG);
+        }
+        if hash {
+            key = key.or(Types::LONG).or(Types::STRING);
+        }
+    }
+    if key == Types::NONE {
+        Types::UNKNOWN.without(Types::UNDEF)
+    } else {
+        key
     }
 }
 
@@ -369,7 +397,7 @@ pub(super) fn params(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<Para
 /// a class name, `object`, `static`, `self`, `parent` and an intersection
 /// an object, `iterable` an array or an object, `callable` a string, an
 /// array or an object; a variadic parameter is an array of them.
-fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
+pub(super) fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
     if variadic {
         return Types::of_tag(ZvalType::Array);
     }
@@ -524,6 +552,24 @@ pub(super) fn may_exit(op: &Opline, after: Option<&Opline>) -> bool {
         }
         _ => false,
     }
+}
+
+/// php's unconditional branch (`Z/ext/opcache/jit/zend_jit_trace.c:5655-5691`):
+/// a `JMPZ`, `JMPNZ`, `JMPZ_EX` or `JMPNZ_EX` whose condition, once its
+/// guards held, is one kind no greater than `true` (`has_concrete_type`,
+/// `concrete_type(op1_info) <= IS_TRUE`) goes the way the record went
+/// and takes no exit for the way it did not. php's test ignores
+/// `MAY_BE_REF`; a condition that may be a reference has no one tag here,
+/// so it keeps its exit, one more than php's at worst and never the other
+/// way taken.
+pub(super) fn goes_one_way(opcode: Opcode, held: Types) -> bool {
+    matches!(
+        opcode,
+        Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx
+    ) && matches!(
+        held.tag(),
+        Some(ZvalType::Undef | ZvalType::Null | ZvalType::False | ZvalType::True)
+    )
 }
 
 /// The oplines whose handler leaves a temporary it reads alive: a

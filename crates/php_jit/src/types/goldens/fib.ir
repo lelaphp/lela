@@ -4,40 +4,39 @@ frame f1 e1 callee of f0, 1 cvs 6 temps
 frame f2 e1 callee of f1, 1 cvs 6 temps
 entry
   #0 f0.CV0 [long]
-loop at 0, recursive call, interrupt exit 10
+loop at 0, recursive call, interrupt exit 7
   #1 f0.CV0 [long] = phi(#0, #5)
 0001 f0 IS_SMALLER #1, int(2) fused inline
   checks direction taken -> exit 0
+  guard room 192 -> exit 2
 0005 f0 INIT_FCALL_BY_NAME const#1 inline map 0 leaves -> exit 1
      f0 init e1
 0006 f0 SUB #1, int(1) inline
   -> #2 f0.T1 [long] reg
-  checks #2 long -> exit 2
-0007 f0 SEND_VAL_EX #2 inline leaves -> exit 3
-0008 f0 DO_FCALL_BY_NAME inline leaves -> exit 4
+  checks #2 long -> exit 3
+0007 f0 SEND_VAL_EX #2 inline leaves -> exit 4
+0008 f0 DO_FCALL_BY_NAME inline leaves -> exit 5
      f1 enter e1
   -> #3 f1.CV0 [long]
 0001 f1 IS_SMALLER #3, int(2) fused inline
-  checks direction taken -> exit 5
-0005 f1 INIT_FCALL_BY_NAME const#1 inline map 0 leaves -> exit 6
+  checks direction taken -> exit 0
+  guard room 192 -> exit 2
+0005 f1 INIT_FCALL_BY_NAME const#1 inline map 0 leaves -> exit 1
      f1 init e1
 0006 f1 SUB #3, int(1) inline
   -> #4 f1.T1 [long] reg
-  checks #4 long -> exit 7
-0007 f1 SEND_VAL_EX #4 inline leaves -> exit 8
-0008 f1 DO_FCALL_BY_NAME inline leaves -> exit 9
+  checks #4 long -> exit 3
+0007 f1 SEND_VAL_EX #4 inline leaves -> exit 6
+0008 f1 DO_FCALL_BY_NAME inline leaves -> exit 5
      f2 enter e1
   -> #5 f2.CV0 [long]
 end: back to 0
 exit 0: f0 0003 plain f0.CV0:long
 exit 1: f0 0005 plain f0.CV0:long
-exit 2: f0 0006 restore call f0.CV0:long
-exit 3: f0 0007 restore call f0.T1=#2 f0.CV0:long f0.T1:long
-exit 4: f0 0008 restore call f0.CV0:long
-exit 5: f1 0003 plain f1.CV0:long
-exit 6: f1 0005 plain f1.CV0:long
-exit 7: f1 0006 restore call f1.CV0:long
-exit 8: f1 0007 restore call f1.T1=#4 f1.CV0:long f1.T1:long
-exit 9: f1 0008 restore call f1.CV0:long
-exit 10: f0 0001 plain f0.CV0:long to vm
+exit 2: f0 0005 plain f0.CV0:long to vm
+exit 3: f0 0006 restore call f0.CV0:long
+exit 4: f0 0007 restore call f0.T1=#2 f0.CV0:long f0.T1:long
+exit 5: f0 0008 restore call f0.CV0:long
+exit 6: f1 0007 restore call f1.T1=#4 f1.CV0:long f1.T1:long
+exit 7: f0 0001 plain f0.CV0:long to vm
 map 0: offset 1 slot 0

@@ -93,18 +93,18 @@ loop at 0, loop, interrupt exit 31
   -> #48 f0.T24 [double] reg
 0035 f0 ASSIGN #17, #48 inline unwinds -> unwind 5
   -> #49 f0.CV15 [double] reg
-0036 f0 FETCH_DIM_R #50, #7 inline leaves -> exit 20
+0036 f0 FETCH_DIM_R #50, #7 inline leaves -> exit 18
   -> #51 f0.T26 [double] reg
-  checks #51 double -> exit 18
-  checks #51 ref to double -> exit 19
+  checks #51 double -> exit 19
+  checks #51 ref to double -> exit 20
 0037 f0 MUL #49, #51 inline
   -> #52 f0.T27 [double] reg
 0038 f0 ASSIGN #19, #52 inline unwinds -> unwind 6
   -> #53 f0.CV16 [double] reg
-0039 f0 FETCH_DIM_R #50, #24 inline leaves -> exit 23
+0039 f0 FETCH_DIM_R #50, #24 inline leaves -> exit 21
   -> #54 f0.T29 [double] reg
-  checks #54 double -> exit 21
-  checks #54 ref to double -> exit 22
+  checks #54 double -> exit 22
+  checks #54 ref to double -> exit 23
 0040 f0 MUL #49, #54 inline
   -> #55 f0.T30 [double] reg
 0041 f0 ASSIGN #21, #55 inline unwinds -> unwind 7
@@ -143,7 +143,7 @@ loop at 0, loop, interrupt exit 31
   -> #69 f0.CV10 [long] reg
   checks #69 long -> exit 30
 end: back to 0
-exit 0: f0 0061 plain
+exit 0: f0 0061 plain packed guard
 exit 1: f0 0061 plain f0.CV6:array
 exit 2: f0 0061 plain f0.CV6:array f0.CV8:long
 exit 3: f0 0061 plain f0.CV6:array f0.CV8:long f0.CV9:long
@@ -161,12 +161,12 @@ exit 14: f0 0023 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV6:array f0.CV8:lo
 exit 15: f0 0024 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double
 exit 16: f0 0024 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.T13:double
 exit 17: f0 0034 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.T23=#46 f0.CV6:array f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.T23:double
-exit 18: f0 0037 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.T26=copied #51 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double
-exit 19: f0 0037 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.T26=copied #51 through a reference f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double
-exit 20: f0 0036 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double to vm
-exit 21: f0 0040 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV16=#53 f0.T29=copied #54 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double f0.CV16:double
-exit 22: f0 0040 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV16=#53 f0.T29=copied #54 through a reference f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double f0.CV16:double
-exit 23: f0 0039 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV16=#53 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double f0.CV16:double to vm
+exit 18: f0 0036 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double to vm
+exit 19: f0 0037 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.T26=copied #51 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double
+exit 20: f0 0037 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.T26=copied #51 through a reference f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double
+exit 21: f0 0039 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV16=#53 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double f0.CV16:double to vm
+exit 22: f0 0040 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV16=#53 f0.T29=copied #54 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double f0.CV16:double
+exit 23: f0 0040 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV16=#53 f0.T29=copied #54 through a reference f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double f0.CV16:double
 exit 24: f0 0043 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV16=#53 f0.CV17=#56 f0.T33=#57 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double f0.CV16:double f0.CV17:double f0.T33:double
 exit 25: f0 0046 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV16=#53 f0.CV17=#56 f0.T35=#59 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double f0.CV16:double f0.CV17:double f0.T35:double
 exit 26: f0 0049 plain f0.CV10=#7 f0.CV11=#28 f0.CV12=#33 f0.CV13=#38 f0.CV14=#44 f0.CV15=#49 f0.CV16=#53 f0.CV17=#56 f0.T37=#61 f0.CV6:array f0.CV7:double f0.CV8:long f0.CV9:long f0.CV10:long f0.CV11:double f0.CV12:double f0.CV13:double f0.CV14:double f0.CV15:double f0.CV16:double f0.CV17:double f0.T37:double
