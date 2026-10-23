@@ -458,7 +458,7 @@ pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
         std::fs::copy(workspace.join(&file), &target)
             .with_context(|| format!("copying {file} into {}", to.display()))?;
     }
-    git(to, &["init", "-q", "-b", "main"], None)?;
+    git(to, &["init", "-q", "-b", "main"])?;
     if let Some(common) = crate::git::common_dir(workspace) {
         let alternates = to.join(".git/objects/info/alternates");
         crate::write(
@@ -466,12 +466,11 @@ pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
             format!("{}\n", common.join("objects").display()),
         )?;
     }
-    git(to, &["config", "core.hooksPath", "scripts/hooks"], None)?;
-    git(to, &["add", "-A"], None)?;
+    git(to, &["config", "core.hooksPath", "scripts/hooks"])?;
+    git(to, &["add", "-A"])?;
     git(
         to,
         &[&UNHOOKED[..], &["commit", "-q", "-m", "scratch"]].concat(),
-        None,
     )?;
     Ok(())
 }
@@ -494,7 +493,7 @@ pub const UNHOOKED: [&str; 8] = [
 /// `git` in `dir` under [`UNHOOKED`], a failure the test's.
 #[cfg(test)]
 pub(crate) fn committing(dir: &Path, args: &[&str]) {
-    if let Err(err) = git(dir, &[&UNHOOKED[..], args].concat(), None) {
+    if let Err(err) = git(dir, &[&UNHOOKED[..], args].concat()) {
         panic!("git {args:?} in {}: {err:#}", dir.display());
     }
 }

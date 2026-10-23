@@ -188,7 +188,6 @@ pub fn add(root: &Path, branch: &str, ticket: Option<Ticket>) -> Result<PathBuf>
             &dir.to_string_lossy(),
             &track.base,
         ],
-        None,
     )
     .context("git worktree add refused; nothing was laid down")?;
     say(
@@ -252,7 +251,7 @@ pub fn retire(root: &Path, branch: &str) -> Result<()> {
     }
     let appended = append_log(&dir, store)?;
     carry_runs(&dir, RETIRE)?;
-    git(store, &["worktree", "remove", &dir.to_string_lossy()], None).with_context(|| {
+    git(store, &["worktree", "remove", &dir.to_string_lossy()]).with_context(|| {
         if appended {
             "git worktree remove refused; the readings are appended already, so commit or discard what is uncommitted and call again"
         } else {
@@ -536,7 +535,7 @@ fn trust(dir: &Path, homes: &Path) {
 
 /// What the clone already has, said rather than set again.
 fn carried_over(dir: &Path) {
-    match git(dir, &["config", "core.hooksPath"], None) {
+    match git(dir, &["config", "core.hooksPath"]) {
         Ok(hooks) if !hooks.trim().is_empty() => say(
             ADD,
             &format!(

@@ -1172,7 +1172,7 @@ impl Chain {
         if !root.join(".git").exists() {
             return Ok(Chain::default());
         }
-        let ids = crate::git::git(root, &["rev-list", "--first-parent", "HEAD"], None)?;
+        let ids = crate::git::git(root, &["rev-list", "--first-parent", "HEAD"])?;
         let distance = ids.lines().enumerate().map(|(n, id)| (id.to_owned(), n));
         Ok(Chain {
             distance: distance.collect(),

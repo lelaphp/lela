@@ -1311,8 +1311,8 @@ const STATUS_LINES: usize = 20;
 /// with the number left out named. The JSON's `status` is cut the same
 /// way, the number beside it as `status_omitted`.
 fn git_section(root: &Path, format: Table) -> Result<String> {
-    let log = git(root, &["log", "--oneline", "-10"], None)?;
-    let status = git(root, &["status", "--short", "--branch"], None)?;
+    let log = git(root, &["log", "--oneline", "-10"])?;
+    let status = git(root, &["status", "--short", "--branch"])?;
     let mut lines: Vec<&str> = status.lines().collect();
     let omitted = lines.len().saturating_sub(STATUS_LINES + 1);
     lines.truncate(STATUS_LINES + 1);

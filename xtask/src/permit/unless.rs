@@ -153,11 +153,7 @@ fn carried(
         return false;
     };
     let count = COMMITS.to_string();
-    let Ok(log) = git::git(
-        root,
-        &["log", "--format=%H", "-n", &count, "--", file],
-        None,
-    ) else {
+    let Ok(log) = git::git(root, &["log", "--format=%H", "-n", &count, "--", file]) else {
         return false;
     };
     let mut commits = Vec::new();

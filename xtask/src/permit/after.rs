@@ -862,10 +862,10 @@ fn prune(dir: &Path) {
 fn hash_objects(checkout: &Path, paths: &[&str]) -> Result<Vec<String>> {
     let mut stdin = paths.join("\n");
     stdin.push('\n');
-    let ids = git::git(
+    let ids = git::fed(
         checkout,
         &["hash-object", "-w", "--no-filters", "--stdin-paths"],
-        Some(&stdin),
+        &stdin,
     )?;
     Ok(ids.lines().map(str::to_owned).collect())
 }
@@ -904,12 +904,11 @@ mod tests {
         for file in ["oracle.toml", "notes.toml"] {
             fs::write(root.join(file), was).unwrap();
         }
-        git::git(&root, &["init", "-q"], None).unwrap();
-        git::git(&root, &["add", "."], None).unwrap();
+        git::git(&root, &["init", "-q"]).unwrap();
+        git::git(&root, &["add", "."]).unwrap();
         git::git(
             &root,
             &[&crate::scratch::UNHOOKED[..], &["commit", "-qm", "x"]].concat(),
-            None,
         )
         .unwrap();
         let steered_over = |file: &str| {

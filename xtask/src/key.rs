@@ -568,7 +568,7 @@ mod tests {
         let tree = super::fixture("snapshot");
         let root: &Path = &tree;
         let write = |path: &str, text: &str| fs::write(root.join(path), text).unwrap();
-        git::git(root, &["config", "core.autocrlf", "input"], None).unwrap();
+        git::git(root, &["config", "core.autocrlf", "input"]).unwrap();
         write("ext/ctype/crlf.txt", "one\r\ntwo\r\n");
         write("crates/php_ext/gone.txt", "deleted after its commit\n");
         committing(
@@ -576,7 +576,7 @@ mod tests {
             &["add", "--", "ext/ctype/crlf.txt", "crates/php_ext/gone.txt"],
         );
         committing(root, &["commit", "-q", "-m", "crlf"]);
-        let eol = git::git(root, &["ls-files", "--eol", "ext/ctype/crlf.txt"], None).unwrap();
+        let eol = git::git(root, &["ls-files", "--eol", "ext/ctype/crlf.txt"]).unwrap();
         assert!(eol.contains("i/lf") && eol.contains("w/crlf"), "{eol}");
         write("ext/reflection/src/untracked.rs", "fn untracked() {}\n");
         write("crates/php_engine/src/lib.rs", "// modified\n");
@@ -584,7 +584,7 @@ mod tests {
         write("ext/reflection/src/lib.rs", "// staged\n");
         committing(root, &["add", "--", "ext/reflection/src/lib.rs"]);
         write("ext/reflection/src/lib.rs", "// staged, then modified\n");
-        let head = git::git(root, &["rev-parse", "HEAD"], None).unwrap();
+        let head = git::git(root, &["rev-parse", "HEAD"]).unwrap();
         let head = head.trim();
         let now = Snapshot::disk(root).unwrap();
         let then = Snapshot::commit(root, head).unwrap();

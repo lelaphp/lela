@@ -222,7 +222,7 @@ fn ready_name(ticket: Ticket) -> String {
 /// it records none: what `track work` reads a session's end by (#2311).
 pub fn ready_of(root: &Path, branch: &str, ticket: Ticket) -> Result<Option<Successors>> {
     let key = ready_key(branch, ticket);
-    let Ok(text) = crate::git::git(root, &["config", "--get", &key], None) else {
+    let Ok(text) = crate::git::git(root, &["config", "--get", &key]) else {
         return Ok(None);
     };
     Successors::of_record(&text).map(Some)
@@ -235,7 +235,7 @@ pub fn ready_of(root: &Path, branch: &str, ticket: Ticket) -> Result<Option<Succ
 /// readied on a branch that records only the first of them (#2358).
 fn record_of(root: &Path, ticket: Ticket) -> Result<Option<Successors>> {
     let pattern = format!(r"^branch\..*\.{}$", ready_name(ticket));
-    let Ok(found) = crate::git::git(root, &["config", "--get-regexp", &pattern], None) else {
+    let Ok(found) = crate::git::git(root, &["config", "--get-regexp", &pattern]) else {
         return Ok(None);
     };
     found
@@ -1724,7 +1724,7 @@ const PARTIAL: &str = "partial";
 /// merged there names the pull request, never a ticket: its ticket is the
 /// branch's, `t<n>` as `worktree add` names it (#3243).
 fn named_by_merges(root: &Path, range: &str) -> Result<Vec<Ticket>> {
-    let subjects = crate::git::git(root, &["log", "--merges", "--format=%s", range], None)?;
+    let subjects = crate::git::git(root, &["log", "--merges", "--format=%s", range])?;
     let mut named: Vec<Ticket> = Vec::new();
     let mut name = |number: u64| {
         let ticket = Ticket::new(number);
@@ -1819,7 +1819,7 @@ fn ready(
     let branch = crate::track::head_branch(root)
         .ok_or("HEAD is detached, and a ready record is a branch's; not ready, nothing recorded")?;
     let key = ready_key(&branch, Ticket::new(issue.number));
-    crate::git::git(root, &["config", &key, &successors.record()], None)
+    crate::git::git(root, &["config", &key, &successors.record()])
         .map_err(|err| format!("{key} could not be written: {err:#}; not ready"))?;
     Ok(format!(
         "{opened}; ready to merge at {}, recorded as {key}; the merge into main closes it",

@@ -564,7 +564,7 @@ pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
 pub(super) fn staged(checkout: &Path, path: &str) -> Option<Operation> {
     let operation = Operation::in_progress(&git::git_dir(checkout)?)?;
     let args = ["diff", "--cached", "--quiet", "--diff-filter=u", "--", path];
-    let differs = git::git(checkout, &args, None).is_err();
+    let differs = git::git(checkout, &args).is_err();
     differs.then_some(operation)
 }
 
