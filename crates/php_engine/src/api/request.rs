@@ -162,7 +162,6 @@ mod traces;
 mod unit_cache;
 mod unit_strings;
 pub(crate) use unit_cache::HandlePath;
-pub(crate) use unit_strings::holds_counted_array;
 mod variables;
 pub use variables::Variables;
 mod zone;

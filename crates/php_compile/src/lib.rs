@@ -21,6 +21,7 @@
     clippy::unimplemented
 )]
 
+pub mod arrays;
 mod emit;
 mod live;
 pub mod multibyte;

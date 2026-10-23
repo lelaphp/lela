@@ -1790,7 +1790,7 @@ impl Shared {
             },
         );
         debug_assert!(
-            !(unit.as_ref().ok()).is_some_and(crate::api::request::holds_counted_array),
+            !(unit.as_ref().ok()).is_some_and(php_compile::arrays::holds_counted_array),
             "a unit for every request holds a counted array"
         );
         let answers = home.settle(strings_kept(&unit));
