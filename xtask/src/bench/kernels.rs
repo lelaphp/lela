@@ -113,13 +113,13 @@ pub(crate) fn bar(
     (id, programs): (&str, &'static [&'static str]),
     about: String,
     held: Held,
-    arms: impl FnOnce(&Pin) -> Result<Result<[Php; 2], String>> + 'static,
+    arms: impl FnOnce(&Path, &Pin) -> Result<Result<[Php; 2], String>> + 'static,
 ) -> Declared {
     let root = root.to_path_buf();
     let start = move || -> Result<Sides> {
         let manifest = Manifest::load(&root)?;
         let pin = manifest.pin()?;
-        let arms = match arms(pin)? {
+        let arms = match arms(&root, pin)? {
             Ok(arms) => arms,
             Err(why) => return Ok(Err(why)),
         };
@@ -162,19 +162,16 @@ fn tracing(root: &Path, (id, whose): (&str, &str), binary: Binary) -> [Declared;
         let about = format!(
             "{whose} under [regime.{a}] against [regime.{b}] over the seven kernels and Zend/bench.php"
         );
-        let at = root.to_path_buf();
-        bar(root, (&format!("{id}{aa}"), PROGRAMS), about, held, move |pin| {
-            let binary = match binary(&at, pin)? {
-                Ok(binary) => binary,
-                Err(why) => return Ok(Err(why)),
-            };
-            let arm = |name: String, regime| Php {
-                name,
-                binary: binary.clone(),
-                regimes: vec![regime],
-                ini: Vec::new(),
-            };
-            Ok(Ok([arm(a.to_owned(), a), arm(second(a, b), b)]))
+        bar(root, (&format!("{id}{aa}"), PROGRAMS), about, held, move |root, pin| {
+            Ok(binary(root, pin)?.map(|binary| {
+                let arm = |name: String, regime| Php {
+                    name,
+                    binary: binary.clone(),
+                    regimes: vec![regime],
+                    ini: Vec::new(),
+                };
+                [arm(a.to_owned(), a), arm(second(a, b), b)]
+            }))
         })
     })
 }
@@ -251,12 +248,11 @@ pub(crate) fn door(root: &Path) -> [Declared; 2] {
         let about = format!(
             "the engine built as {a} with opcache.jit_buffer_size=0 against {b} over the seven kernels"
         );
-        let at = root.to_path_buf();
-        bar(root, (id, KERNELS), about, held, move |_| {
+        bar(root, (id, KERNELS), about, held, move |root, _| {
             let arm = |name: String, build: Build| -> Result<Php> {
                 Ok(Php {
                     name,
-                    binary: build.built(&at)?,
+                    binary: build.built(root)?,
                     regimes: vec!["jit-tracing"],
                     ini: vec!["opcache.jit_buffer_size=0".to_owned()],
                 })

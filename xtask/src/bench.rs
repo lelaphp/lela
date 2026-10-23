@@ -133,14 +133,9 @@ pub enum Label {
 }
 
 impl Label {
-    /// The label as the reading spells it.
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Label::Unlabelled => "UNLABELLED",
-            Label::Smoke => "SMOKE",
-            Label::Provisional => "PROVISIONAL",
-            Label::BaselineOfRecord => "BASELINE-OF-RECORD",
-        }
+    /// The label as the reading spells it: its flag's value in capitals.
+    pub(crate) fn spelled(self) -> String {
+        (self.to_possible_value()).map_or_else(String::new, |v| v.get_name().to_uppercase())
     }
 
     /// Whether the label owes a note (§8).
@@ -194,24 +189,16 @@ impl Bar {
     /// The bar as the run measures it, two processes, an A/A control
     /// unless the file says it is a series.
     fn declared(self) -> Declared {
-        let Bar {
-            id,
-            about,
-            a,
-            b,
-            series,
-        } = self;
+        let (a, b, series) = (self.a, self.b, self.series);
+        let spawned = |arm: Arm| -> Result<Box<dyn Side>> {
+            let program = resolve(&arm.program)?;
+            Ok(Box::new(Spawned { arm, program }))
+        };
         Declared {
-            id,
-            about,
+            id: self.id,
+            about: self.about,
             held: if series { Held::Series } else { Held::Control },
-            start: Box::new(move || {
-                let spawned = |arm: Arm| -> Result<Box<dyn Side>> {
-                    let program = resolve(&arm.program)?;
-                    Ok(Box::new(Spawned { arm, program }))
-                };
-                Ok(Ok(Arms::Pair([spawned(a)?, spawned(b)?])))
-            }),
+            start: Box::new(move || Ok(Ok(Arms::Pair([spawned(a)?, spawned(b)?])))),
         }
     }
 }
@@ -277,12 +264,10 @@ pub(crate) enum Sign {
     Faster,
     Slower,
     /// A set whose rows all resolved, some each way: published unsigned
-    /// with the count each way, since a geomean near 1.00 over +20% and
-    /// −17% would claim no change while hiding a regression (#3127).
-    Mixed {
-        faster: usize,
-        slower: usize,
-    },
+    /// with the count each way ([`Took::each_way`]), since a geomean near
+    /// 1.00 over +20% and −17% would claim no change while hiding a
+    /// regression (#3127).
+    Mixed,
 }
 
 impl Sign {
@@ -291,7 +276,7 @@ impl Sign {
         match self {
             Sign::Swamped => "NOISE-SWAMPED",
             Sign::Faster | Sign::Slower => "resolved",
-            Sign::Mixed { .. } => "mixed",
+            Sign::Mixed => "mixed",
         }
     }
 }
@@ -480,11 +465,11 @@ impl Held {
     fn status(self, took: &Took, bound: Option<f64>) -> Status {
         let (value, sign) = (took.ratio(), took.sign());
         let above = |at_most| {
-            let mixed = matches!(sign, Sign::Mixed { .. });
-            value.is_nan() || mixed || (sign == Sign::Slower && value > at_most)
+            value.is_nan() || sign == Sign::Mixed || (sign == Sign::Slower && value > at_most)
         };
+        let resolved: usize = took.each_way().iter().sum();
         match self {
-            Held::Control if took.pattern().is_some_and(|k| took.resolved() >= k) => Status::Fail,
+            Held::Control if took.pattern().is_some_and(|k| resolved >= k) => Status::Fail,
             Held::Bound if bound.is_some_and(above) => Status::Fail,
             Held::Control | Held::Series | Held::Bound => Status::Pass,
         }
@@ -557,17 +542,8 @@ impl Took {
 
     /// How many rows resolved faster, and how many slower.
     fn each_way(&self) -> [usize; 2] {
-        let way = |sign| {
-            (self.rows.iter())
-                .filter(|(_, row)| row.sign() == sign)
-                .count()
-        };
-        [way(Sign::Faster), way(Sign::Slower)]
-    }
-
-    /// How many rows' paired deltas have their sign established.
-    fn resolved(&self) -> usize {
-        self.each_way().iter().sum()
+        let signs: Vec<Sign> = self.rows.iter().map(|(_, row)| row.sign()).collect();
+        [Sign::Faster, Sign::Slower].map(|way| signs.iter().filter(|s| **s == way).count())
     }
 
     /// How many resolved rows fail an A/A control over them: a pair's one,
@@ -595,12 +571,10 @@ impl Took {
     /// (#3127).
     fn sign(&self) -> Sign {
         match self.each_way() {
-            [faster, slower] if self.rows.is_empty() || faster + slower < self.rows.len() => {
-                Sign::Swamped
-            }
+            [faster, slower] if faster + slower < self.rows.len().max(1) => Sign::Swamped,
             [_, 0] => Sign::Faster,
             [0, _] => Sign::Slower,
-            [faster, slower] => Sign::Mixed { faster, slower },
+            _ => Sign::Mixed,
         }
     }
 }
@@ -751,9 +725,7 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
         .iter()
         .map(|path| Pin::take(path))
         .collect::<Result<Vec<_>>>()?;
-    let (mut a_values, mut b_values, mut delta) = (Vec::new(), Vec::new(), Vec::new());
-    let mut spent = [Vec::new(), Vec::new()];
-    let mut vacuous = false;
+    let (mut kept, mut vacuous) = (Vec::new(), false);
     for r in 1..=(WARMUP + reps) {
         let (sa, sb) = if r % 2 == 0 {
             let sa = a.once()?;
@@ -770,16 +742,16 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
         }
         vacuous |= sa.wrote.is_empty();
         if r > WARMUP {
-            delta.push(sa.value - sb.value);
-            a_values.push(sa.value);
-            b_values.push(sb.value);
-            spent[0].push(sa.spent);
-            spent[1].push(sb.spent);
+            kept.push([sa, sb]);
         }
     }
     holds(&programs, &before)?;
-    let (stream, unit) = (a.stream(), a.unit());
-    let (a, b, delta) = (stats(&a_values), stats(&b_values), stats(&delta));
+    let (unit, stream) = (a.unit(), a.stream());
+    let of = |value: fn(&[Sample; 2]) -> f64| stats(&kept.iter().map(value).collect::<Vec<_>>());
+    let (a, b) = (of(|[a, _]| a.value), of(|[_, b]| b.value));
+    let delta = of(|[a, b]| a.value - b.value);
+    let spent =
+        |arm: usize| Spent::median(&kept.iter().map(|rep| rep[arm].spent).collect::<Vec<_>>());
     Ok(Measured {
         unit,
         a,
@@ -795,7 +767,7 @@ fn measure(id: &str, [a, b]: &mut [Box<dyn Side>; 2], reps: usize) -> Result<Mea
         } else {
             Correctness::Bytes(stream)
         },
-        spent: spent.map(|reps| Spent::median(&reps)),
+        spent: [spent(0), spent(1)],
     })
 }
 
@@ -1011,7 +983,7 @@ pub fn run(
     if label.needs_note() && note.trim().is_empty() {
         bail!(
             "--label {} owes a written reservation; a standing with none is a word and not a label ({PROTOCOL} §8)",
-            label.as_str().to_lowercase()
+            label.spelled().to_lowercase()
         );
     }
     if reps == 0 {
@@ -1040,13 +1012,8 @@ pub fn run(
     let failed = store.root().join(FAILED);
     std::fs::remove_dir_all(&failed).ok();
     let (mut readings, mut refused) = (Vec::new(), Vec::new());
-    for Declared {
-        id,
-        about,
-        held,
-        start,
-    } in bars
-    {
+    for declared in bars {
+        let (id, held, start) = (declared.id, declared.held, declared.start);
         // A bar whose arms this machine cannot run is a skip, and one whose
         // run refused (§1) is a failing reading that names why; either way
         // the next bar runs, and a refusal is the command's error once all
@@ -1071,7 +1038,7 @@ pub fn run(
         let row = tolerances.iter().find(|t| t.bar == id);
         let bar = Shown {
             id: &id,
-            about: &about,
+            about: &declared.about,
             held,
             names: [&names[0], &names[1]],
             row,
@@ -1164,27 +1131,28 @@ fn rendered(
             )
         };
         let program = (program.as_ref()).map_or_else(String::new, |p| format!("  {p}: ratio {:.4}\n", row.ratio()));
-        format!(
-            "{program}{}{}  paired delta: median {:.3} {unit} ({:+.2}%), IQR {:.3} (q1 {:.3}, q3 {:.3}); {}; correctness {}\n",
-            stat(bar.names[0], &row.a, &row.spent[0]),
-            stat(bar.names[1], &row.b, &row.spent[1]),
-            row.delta.median,
-            row.paired_pct,
-            row.delta.iqr,
-            row.delta.q1,
-            row.delta.q3,
-            row.sign().as_str(),
-            row.correctness.as_str(),
-        )
+        let [a, b] = [(0, &row.a), (1, &row.b)].map(|(i, s)| stat(bar.names[i], s, &row.spent[i]));
+        format!("{program}{a}{b}  {}\n", delta_text(row))
     }).collect();
     format!(
         "bench {}: {}; {reps} reps (+{WARMUP} warm-up) per arm, order alternated; load {}\n{}  {}{}\n",
         bar.id,
-        label.as_str(),
+        label.spelled(),
         load_text(load),
         rows.concat(),
         geomean(took),
         held_by(bar, took),
+    )
+}
+
+/// A row's paired delta, its verdict and how its bytes compared, as the
+/// rendering and the reading say them.
+fn delta_text(row: &Measured) -> String {
+    let (d, unit) = (&row.delta, row.unit.suffix());
+    let (verdict, correctness) = (row.sign().as_str(), row.correctness.as_str());
+    format!(
+        "paired delta: median {:.3} {unit} ({:+.2}%), IQR {:.3} (q1 {:.3}, q3 {:.3}); {verdict}; correctness {correctness}",
+        d.median, row.paired_pct, d.iqr, d.q1, d.q3
     )
 }
 
@@ -1205,19 +1173,12 @@ fn geomean(took: &Took) -> String {
         took.rows.len(),
         each.join(", "),
         took.sign().as_str(),
-        took.resolved(),
+        faster + slower,
     )
 }
 
 /// What the bar is held to, as its rendering and its reading say it.
 fn held_by(bar: &Shown<'_>, took: &Took) -> String {
-    let series = "a series, held to its tolerance where `[[bench]]` gives one (#2659)";
-    let to_go = match to_go(took) {
-        Some(to_go) => format!("{} is {to_go:.2}% to go to {}", bar.names[0], bar.names[1]),
-        None => {
-            format!("the sign is not established, so no distance to go is stated ({PROTOCOL} §1.2)")
-        }
-    };
     match bar.held {
         Held::Control if !took.set() => format!("the bar is the A/A control of {PROTOCOL} §2"),
         Held::Control => {
@@ -1230,7 +1191,13 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
                 "the bar is the A/A control of {PROTOCOL} §2 over {rows} rows, failing {fails} at 1 row in {rate:.0} is at most {chance}% (#3127)"
             )
         }
-        Held::Series => format!("{series}; {to_go}"),
+        Held::Series => format!(
+            "a series, held to its tolerance where `[[bench]]` gives one (#2659); {}",
+            to_go(took).map_or_else(
+                || format!("the sign is not established, so no distance to go is stated ({PROTOCOL} §1.2)"),
+                |to_go| format!("{} is {to_go:.2}% to go to {}", bar.names[0], bar.names[1]),
+            )
+        ),
         Held::Bound => bar.bound().map_or_else(
             || format!("a bound with no `[[bench]]` row, so a series held to none ({PROTOCOL} §12.3)"),
             |at_most| format!("a bound, its ratio held to at most {at_most:.4}, one plus its `[[bench]]` tolerance ({PROTOCOL} §12.3)"),
@@ -1360,13 +1327,9 @@ fn recorded(
                 })
                 .collect();
             format!(
-                "paired delta {:.3} {} ({:+.2}%) over {reps} reps, {}; correctness {}; {}{spent}",
-                row.delta.median,
-                row.unit.suffix(),
-                row.paired_pct,
-                row.sign().as_str(),
-                row.correctness.as_str(),
-                held_by(bar, took),
+                "{reps} reps, {}; {}{spent}",
+                delta_text(row),
+                held_by(bar, took)
             )
         }
         _ => format!(
@@ -1378,7 +1341,7 @@ fn recorded(
     reading.message = format!(
         "{}: {measured}; {}{reservation}; load {} ({PROTOCOL} §4.3, §7)",
         bar.about,
-        label.as_str(),
+        label.spelled(),
         load_text(load),
     );
     Ok(reading)
@@ -1497,11 +1460,7 @@ mod tests {
     fn a_set_is_held_by_its_geomean() {
         let set = took(vec![row(Ms, &AHEAD, -50.0), row(Ms, &BEHIND, 100.0)], true);
         assert!(close(set.ratio(), 1.0), "{}", set.ratio());
-        let mixed = Sign::Mixed {
-            faster: 1,
-            slower: 1,
-        };
-        assert_eq!((set.sign(), set.resolved()), (mixed, 2));
+        assert_eq!((set.sign(), set.each_way()), (Sign::Mixed, [1, 1]));
         assert_eq!(to_go(&set), None, "a mixed geomean has no sign");
         assert_eq!(
             Held::Bound.status(&set, Some(1.02)),
@@ -1513,7 +1472,10 @@ mod tests {
             true,
         );
         assert!(close(swamped.ratio(), 1.1));
-        assert_eq!((swamped.sign(), swamped.resolved()), (Sign::Swamped, 1));
+        assert_eq!(
+            (swamped.sign(), swamped.each_way()),
+            (Sign::Swamped, [0, 1])
+        );
         assert_eq!(
             to_go(&swamped),
             None,
@@ -1669,6 +1631,17 @@ mod tests {
         let shown = super::rendered(&bar, &took, 12, super::Label::Smoke, None);
         let said = format!("n 12); per request: absent: {}", super::spent::ABSENT);
         assert!(shown.contains(&said), "{shown}");
+    }
+
+    /// A label is spelled as its flag's value in capitals (§8).
+    #[test]
+    fn a_label_is_spelled_in_capitals() {
+        use super::Label::{BaselineOfRecord, Provisional, Smoke, Unlabelled};
+        let spelled = [Unlabelled, Smoke, Provisional, BaselineOfRecord].map(super::Label::spelled);
+        assert_eq!(
+            spelled,
+            ["UNLABELLED", "SMOKE", "PROVISIONAL", "BASELINE-OF-RECORD"]
+        );
     }
 
     /// A GitHub-hosted runner is refused, and a machine of ours or one
