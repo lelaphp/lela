@@ -276,6 +276,51 @@ enum Owner {
 /// constants, its variables' names and what a fold made on the way,
 /// which php's compile frees as it goes. A constant is told by its
 /// allocation, not its bytes, since two written alike are two strings.
+///
+/// An array a declaration keeps inside a tree that did not fold whole is
+/// held where the tree is: the op array's constant expression for a
+/// parameter's default, a promoted one's and an abstract method's among
+/// them (`OpArray::const_exprs`), and the declaration for a class
+/// constant, a default, a static, an attribute's argument and a `const`
+/// ([`declared_arrays`]). Each outlives the `eval` that declared it, read
+/// after the heap is churned:
+///
+/// ```php
+/// eval('#[Attribute(Attribute::TARGET_ALL)] class At { function __construct(public $v) {} } class Foo { function __construct(public $a) {} }');
+/// eval('function f1($p = [[1, 2], Z]) { return $p; }');
+/// eval('function f2($p = new Foo([3, 4])) { return $p->a; }');
+/// eval('$GLOBALS["c1"] = function ($p = [[5], Z]) { return $p; };');
+/// eval('class M { function m($p = [[6], Z]) { return $p; } static function s($p = new Foo([7])) { return $p->a; } function __construct(public $q = [[8], Z]) {} }');
+/// eval('abstract class AB { abstract function a($p = [[9], Z]); } interface IF1 { const IC = [[10], Z]; function i($p = [[11], Z]); }');
+/// eval('class D { const C = [[12], Z]; public $p = [[13], Z]; public static $s = [[14], Z]; }');
+/// eval('trait T { public $tp = [[15], Z]; public static $ts = [[16], Z]; } class UT { use T; }');
+/// eval('function f3() { static $s = [[17], Z]; return $s; }');
+/// eval('#[At([[18], Z])] class AC { #[At([[19], Z])] const K = 1; #[At([[20], Z])] public $p; #[At([[21], Z])] function m(#[At([[22], Z])] $a) {} public $h { #[At([[23], Z])] get => 1; } }');
+/// eval('enum EN { #[At([[24], Z])] case A; const L = [[25], Z]; }');
+/// eval('#[At([[26], Z])] function f4() {}');
+/// eval('$GLOBALS["c2"] = #[At([[27], Z])] fn () => 1;');
+/// eval('define("Z3", 3); #[At([[28], Z])] const Y1 = [[29], Z3];');
+/// eval('define("Z4", 4); const Y2 = [[30], Z4];');
+/// define('Z', 'z');
+/// $junk = array_fill(0, 2000, str_repeat("x", 100));
+/// $o = [];
+/// $o[] = f1(); $o[] = f2(); $o[] = $c1(); $o[] = (new M)->m(); $o[] = M::s(); $o[] = (new M)->q;
+/// $o[] = (new ReflectionMethod('AB', 'a'))->getParameters()[0]->getDefaultValue();
+/// $o[] = IF1::IC; $o[] = (new ReflectionMethod('IF1', 'i'))->getParameters()[0]->getDefaultValue();
+/// $o[] = D::C; $o[] = (new D)->p; $o[] = D::$s;
+/// $o[] = (new UT)->tp; $o[] = UT::$ts; $o[] = f3();
+/// $at = fn ($r) => $r->getAttributes()[0]->newInstance()->v;
+/// $o[] = $at(new ReflectionClass('AC')); $o[] = $at(new ReflectionClassConstant('AC', 'K')); $o[] = $at(new ReflectionProperty('AC', 'p'));
+/// $o[] = $at(new ReflectionMethod('AC', 'm')); $o[] = $at((new ReflectionMethod('AC', 'm'))->getParameters()[0]);
+/// $o[] = $at((new ReflectionProperty('AC', 'h'))->getHook(PropertyHookType::Get));
+/// $o[] = $at(new ReflectionEnumUnitCase('EN', 'A')); $o[] = EN::L;
+/// $o[] = $at(new ReflectionFunction('f4')); $o[] = $at(new ReflectionFunction($c2));
+/// $o[] = $at(new ReflectionConstant('Y1')); $o[] = Y1; $o[] = Y2;
+/// echo json_encode($o), "\n";
+/// ```
+/// ```expect regime=jit-off
+/// [[[1,2],"z"],[3,4],[[5],"z"],[[6],"z"],[7],[[8],"z"],[[9],"z"],[[10],"z"],[[11],"z"],[[12],"z"],[[13],"z"],[[14],"z"],[[15],"z"],[[16],"z"],[[17],"z"],[[18],"z"],[[19],"z"],[[20],"z"],[[21],"z"],[[22],"z"],[[23],"z"],[[24],"z"],[[25],"z"],[[26],"z"],[[27],"z"],[[28],"z"],[[29],3],[[30],4]]
+/// ```
 fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
     let owner_of = |at: usize| function_owner(unit, at);
     let bodies = || {
@@ -297,10 +342,18 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
         .filter_map(|(owner, z)| Some((z.as_str()?, owner)))
         .collect();
     held.sort_unstable_by(|a, b| a.0.bytes().cmp(b.0.bytes()));
-    let arrays: Vec<(Zval, Owner)> = constants()
+    let mut arrays: Vec<(Zval, Owner)> = constants()
         .filter(|(_, z)| z.as_arr().is_some())
         .map(|(owner, z)| (z, owner))
         .collect();
+    // And an array a constant expression the op array keeps whole holds
+    // inside its tree (`IS_CONSTANT_AST`), a parameter's default that did
+    // not fold among them, whose `RECV_INIT` holds the tree.
+    for (owner, body) in bodies() {
+        for expr in &body.const_exprs {
+            unit_arrays(expr, &mut |z| arrays.push((z, owner)));
+        }
+    }
     let mut declared = declared_arrays(unit);
     let names = declared_names(unit);
     let mut values = class_constant_values(unit);
@@ -338,7 +391,7 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
                     })
                 }
                 // A declaration's, one owner for each slot that holds
-                // it, ahead of a literal's.
+                // it, ahead of an op array's constant's.
                 None => match (declared.iter()).position(|(held, _)| held.is_same_value(z)) {
                     Some(at) => declared.swap_remove(at).1,
                     None => (arrays.iter())
@@ -475,17 +528,30 @@ pub(super) fn attribute_arrays(attributes: &[Attribute], found: &mut dyn FnMut(Z
     }
 }
 
-/// Whether every array `unit`'s declarations hold is immutable, as a
-/// unit the cache keeps holds no counted value (design §3.4).
-pub(crate) fn declares_no_counted_array(unit: &Unit) -> bool {
+/// Whether `unit` holds a counted array anywhere: among an op array's
+/// constants, inside a constant expression one keeps, or in a
+/// declaration ([`declared_arrays`]). A unit the cache keeps holds none
+/// (design §3.4).
+pub(crate) fn holds_counted_array(unit: &Unit) -> bool {
     let mut counted = false;
-    for constant in &unit.constants {
-        attribute_arrays(&constant.attributes, &mut |z| counted |= z.is_refcounted());
-    }
-    !counted
-        && declared_arrays(unit)
+    let mut note = |z: Zval| counted |= z.as_arr().is_some() && z.is_refcounted();
+    let bodies = (unit.functions.iter().chain(&unit.dynamic))
+        .map(|(_, body)| body)
+        .chain(unit.methods.iter().map(|method| &method.body))
+        .chain(unit.hooks.iter().map(|hook| &hook.body));
+    for body in std::iter::once(&unit.main).chain(bodies) {
+        body.literals.iter().for_each(|z| note(*z));
+        body.const_exprs
             .iter()
-            .all(|(z, _)| !z.is_refcounted())
+            .for_each(|expr| unit_arrays(expr, &mut note));
+    }
+    for constant in &unit.constants {
+        attribute_arrays(&constant.attributes, &mut note);
+    }
+    for (z, _) in declared_arrays(unit) {
+        note(z);
+    }
+    counted
 }
 
 /// The names `unit`'s declarations are read by
