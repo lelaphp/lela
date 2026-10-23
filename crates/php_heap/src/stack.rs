@@ -1916,13 +1916,14 @@ mod tests {
         drop(stack.close(&mut heap));
     }
 
-    /// The word at `at` bytes into `base`, read as compiled code reads it.
+    /// The word at `at` bytes into `base`, read as compiled code reads it:
+    /// as a pointer, keeping what the word points into.
     #[allow(
         clippy::cast_ptr_alignment,
         reason = "the layout's word offsets are word-aligned"
     )]
-    fn word_at(base: *const u8, at: usize) -> usize {
-        let word = base.wrapping_add(at).cast::<usize>();
+    fn word_at(base: *const u8, at: usize) -> *mut u8 {
+        let word = base.wrapping_add(at).cast::<*mut u8>();
         // SAFETY: every caller names a word of a live stack or of a record
         // or room it names, at an offset its layout gives.
         unsafe { word.read() }
@@ -1933,10 +1934,20 @@ mod tests {
         clippy::cast_ptr_alignment,
         reason = "the layout's word offsets are word-aligned"
     )]
-    fn put_word(base: *mut u8, at: usize, value: usize) {
-        let word = base.wrapping_add(at).cast::<usize>();
+    fn put_word(base: *mut u8, at: usize, value: *mut u8) {
+        let word = base.wrapping_add(at).cast::<*mut u8>();
         // SAFETY: as `word_at`, and the caller holds the stack mutably.
         unsafe { word.write(value) };
+    }
+
+    /// A count the layout names at `at` bytes into `base`.
+    fn count_at(base: *const u8, at: usize) -> usize {
+        word_at(base, at).addr()
+    }
+
+    /// `value` written as the count at `at` bytes into `base`.
+    fn put_count(base: *mut u8, at: usize, value: usize) {
+        put_word(base, at, std::ptr::without_provenance_mut(value));
     }
 
     /// A frame of `slots` slots pushed with nothing but the words
@@ -1952,19 +1963,18 @@ mod tests {
     fn pushed_in_place(stack: &mut VmStack<Head>, slots: usize, header: Head) -> Option<()> {
         let layout = VmStack::<Head>::LAYOUT;
         let base = std::ptr::from_mut(stack).cast::<u8>();
-        let (top, end) = (word_at(base, layout.top), word_at(base, layout.end));
+        let (room, end) = (word_at(base, layout.top), word_at(base, layout.end));
         let used = (FRAME_HEADER_SLOTS + slots) * SLOT;
         let table = base.wrapping_add(layout.frames);
         let (at, len, cap) = (
             word_at(table, layout.table.at),
-            word_at(table, layout.table.len),
-            word_at(table, layout.table.cap),
+            count_at(table, layout.table.len),
+            count_at(table, layout.table.cap),
         );
-        if end - top < used || len == cap {
+        if end.addr() - room.addr() < used || len == cap {
             return None;
         }
-        let room = std::ptr::with_exposed_provenance_mut::<u8>(top);
-        put_word(room, 0, word_at(base, layout.innermost));
+        put_count(room, 0, count_at(base, layout.innermost));
         let head = room.wrapping_add(HEADER_AT).cast::<Head>();
         // SAFETY: the header's place is past the room's link, inside the
         // room the check found free.
@@ -1974,16 +1984,20 @@ mod tests {
             // SAFETY: the slot is inside the room the check found free.
             unsafe { cell.write(Zval::UNDEF) };
         }
-        put_word(base, layout.innermost, top);
-        let record = std::ptr::with_exposed_provenance_mut::<u8>(at + len * layout.table.record);
-        put_word(record, layout.table.record_at, top + ROOM_BYTES);
-        put_word(record, layout.table.record_len, slots);
+        put_count(base, layout.innermost, room.expose_provenance());
+        let record = at.wrapping_add(len * layout.table.record);
+        put_word(
+            record,
+            layout.table.record_at,
+            room.wrapping_add(ROOM_BYTES),
+        );
+        put_count(record, layout.table.record_len, slots);
         let tag = record.wrapping_add(layout.table.record_placed);
         // SAFETY: the tag is the placement's first byte, inside the record
         // the capacity check found free.
         unsafe { tag.write(layout.table.on_page) };
-        put_word(table, layout.table.len, len + 1);
-        put_word(base, layout.top, top + used);
+        put_count(table, layout.table.len, len + 1);
+        put_word(base, layout.top, room.wrapping_add(used));
         Some(())
     }
 
@@ -1997,20 +2011,19 @@ mod tests {
         let table = base.wrapping_add(layout.frames);
         let (at, len) = (
             word_at(table, layout.table.at),
-            word_at(table, layout.table.len),
+            count_at(table, layout.table.len),
         );
         let last = len.checked_sub(1)?;
-        let record = std::ptr::with_exposed_provenance::<u8>(at + last * layout.table.record);
+        let record = at.wrapping_add(last * layout.table.record);
         let tag = record.wrapping_add(layout.table.record_placed);
         // SAFETY: the tag is the live last record's placement's first byte.
         let tag = unsafe { tag.read() };
         if tag != layout.table.on_page {
             return None;
         }
-        let room = word_at(record, layout.table.record_at) - ROOM_BYTES;
-        put_word(table, layout.table.len, last);
-        let below = word_at(std::ptr::with_exposed_provenance::<u8>(room), 0);
-        put_word(base, layout.innermost, below);
+        let room = word_at(record, layout.table.record_at).wrapping_sub(ROOM_BYTES);
+        put_count(table, layout.table.len, last);
+        put_count(base, layout.innermost, count_at(room, 0));
         put_word(base, layout.top, room);
         Some(())
     }
