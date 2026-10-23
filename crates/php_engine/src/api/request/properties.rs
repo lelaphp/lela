@@ -2952,21 +2952,14 @@ impl Request {
         })
     }
 
-    /// [`Request::declared_typed_property`] for a `static` property: the
-    /// `zend_property_info` `zend_fetch_static_property_address` hands on,
-    /// its type and the class that declared it, where the property is
-    /// typed.
-    pub(crate) fn declared_typed_static(
-        &self,
-        class: ClassId,
-        name: &[u8],
-    ) -> Option<TypedProperty> {
-        let (declaring, p) = self.property_info_of(class, name)?;
-        if p.is_instance {
-            return None;
-        }
+    /// [`Request::declared_typed_property`] for the `static` property
+    /// `info` names: the `zend_property_info`
+    /// `zend_fetch_static_property_address` hands on, its type and the
+    /// class that declared it, where the property is typed.
+    pub(crate) fn typed_static(&self, info: PropertyInfo) -> Option<TypedProperty> {
+        let p = self.property_decl(info)?;
         p.ty.clone().map(|ty| TypedProperty {
-            declaring,
+            declaring: info.declaring,
             ty,
             readonly: p.is_readonly,
         })

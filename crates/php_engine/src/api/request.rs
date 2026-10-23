@@ -57,7 +57,7 @@ pub(crate) use objects::placed_of;
 mod calls;
 pub use calls::Supplier;
 mod class_constants;
-pub(crate) use class_constants::{ByValue, ConstantFetch};
+pub(crate) use class_constants::{ByValue, ConstantFetch, ConstantRead};
 mod class_data;
 pub(crate) use class_data::PropertyNames;
 mod classes;
