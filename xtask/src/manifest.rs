@@ -196,6 +196,31 @@ pub(crate) fn overlaps(a: &Path, b: &Path) -> bool {
     a.starts_with(b) || b.starts_with(a)
 }
 
+/// Hold each row's `needed_in` (#3309): an extension's alone, and only
+/// beyond the directories its subset holds whole, so no test is listed
+/// twice.
+fn needed_in(crates: &[Crate]) -> Result<()> {
+    for krate in crates.iter().filter(|k| !k.needed_in.is_empty()) {
+        if krate.extension().is_none() {
+            bail!(
+                "[[crate]] {} has `needed_in`, the places of tests that name an extension in `--EXTENSIONS--`; the row is no extension's, so no test names it",
+                krate.name
+            );
+        }
+        let own = krate.subsets();
+        if let Some(place) = (krate.needed_in.iter().map(Path::new))
+            .find(|place| own.iter().any(|dir| overlaps(place, dir)))
+        {
+            bail!(
+                "[[crate]] {} has `needed_in` {}, inside or around a directory its subset holds whole; a test is its subset's once",
+                krate.name,
+                place.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// `[oracle]`: the only place the manifest says where the pin is.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1108,14 +1133,7 @@ impl Manifest {
                 );
             }
         }
-        if let Some(krate) = (manifest.crates.iter())
-            .find(|krate| !krate.needed_in.is_empty() && krate.extension().is_none())
-        {
-            bail!(
-                "[[crate]] {} has `needed_in`, the places of tests that name an extension in `--EXTENSIONS--`; the row is no extension's, so no test names it",
-                krate.name
-            );
-        }
+        needed_in(&manifest.crates)?;
         manifest.parity.hold(&manifest.crates)?;
         owed::hold(&manifest.owed, &manifest.crates)?;
         Ok(manifest)

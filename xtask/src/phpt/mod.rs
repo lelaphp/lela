@@ -277,18 +277,14 @@ impl Dir {
     }
 
     /// Whether the test at `path` is the subset's: every one, or one whose
-    /// `--EXTENSIONS--` names the extension, as a binary that loads it is
-    /// the one that runs it (run-tests.php:2029-2031); a file that does
-    /// not parse names none.
+    /// `--EXTENSIONS--` names the extension as run-tests.php reads it
+    /// ([`Phpt::extensions`]), so only a binary that loads it runs it; a
+    /// file that does not parse names none.
     fn admits(&self, path: &Path) -> bool {
         let Some(needs) = &self.needs else {
             return true;
         };
-        Phpt::load(path).is_ok_and(|phpt| {
-            (phpt.text("EXTENSIONS").unwrap_or_default())
-                .split_whitespace()
-                .any(|named| named.eq_ignore_ascii_case(needs))
-        })
+        Phpt::load(path).is_ok_and(|phpt| phpt.extensions().contains(needs))
     }
 
     /// Where the test stands inside this directory.
@@ -486,17 +482,19 @@ impl Subset {
     /// a reading that says so, since dropping it quietly would leave
     /// `done` asking a crate for a phpt reading nothing could write, which
     /// is the hole #18 closed.
+    ///
     /// Beside them, the tests of each directory its row's `needed_in`
     /// names that name the extension (#3309).
     pub(crate) fn of(source: &Path, krate: &Crate) -> Option<Subset> {
         let unders = krate.subsets();
         let mut subset = (!unders.is_empty())
             .then(|| Subset::over(krate.name.clone(), source, unders, Holds::Every))?;
-        let needing = krate.extension().map(str::to_owned);
-        subset.dirs.extend(krate.needed_in.iter().map(|under| Dir {
-            needs: needing.clone(),
-            ..Dir::at(source, PathBuf::from(under))
-        }));
+        if let Some(extension) = krate.extension() {
+            subset.dirs.extend(krate.needed_in.iter().map(|under| Dir {
+                needs: Some(extension.to_owned()),
+                ..Dir::at(source, PathBuf::from(under))
+            }));
+        }
         Some(subset)
     }
 

@@ -254,12 +254,7 @@ impl Redirect {
         let mut named = dir.clone().into_os_string();
         named.push("/");
         env.push(("REDIR_TEST_DIR".to_owned(), named));
-        let extensions = phpt
-            .text("EXTENSIONS")
-            .unwrap_or_default()
-            .split_whitespace()
-            .map(str::to_owned)
-            .collect();
+        let extensions = phpt.extensions();
         let listed = set_files(&dir)?;
         let redirect = Redirect {
             by: by.to_path_buf(),

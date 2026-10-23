@@ -1033,10 +1033,11 @@ fn a_crate_resolves_to_every_subset_its_row_names() {
 }
 
 /// A row's `needed_in` holds, beside the extension's own tests, each test
-/// of the directory it names whose `--EXTENSIONS--` names the extension,
-/// in any case and among others, and no other, so they run under the
-/// row's oracle where the main one skips them; a copy of the tree keeps
-/// the filter (#3309).
+/// of the directory it names whose `--EXTENSIONS--` names the extension on
+/// a line of its own, among others, and no other: not one that spells it
+/// otherwise, which run-tests.php finds missing whatever loads it. So they
+/// run under the row's oracle where the main one skips them; a copy of
+/// the tree keeps the filter (#3309).
 #[test]
 fn a_row_holds_the_tests_elsewhere_that_need_its_extension() {
     let tree = fixture_tree();
@@ -1049,9 +1050,10 @@ fn a_row_holds_the_tests_elsewhere_that_need_its_extension() {
     write("Zend/tests/needs.phpt", "--EXTENSIONS--\nzend_test\n");
     write(
         "Zend/tests/among.phpt",
-        "--EXTENSIONS--\nstandard\nZEND_TEST\n",
+        "--EXTENSIONS--\nstandard\nzend_test\n",
     );
     write("Zend/tests/other.phpt", "--EXTENSIONS--\nzend_testing\n");
+    write("Zend/tests/cased.phpt", "--EXTENSIONS--\nZEND_TEST\n");
     let mut row = Crate::named("ext/zend_test");
     row.needed_in = vec!["Zend/tests".to_owned()];
     let subset = resolve(&manifest_of([row], &tree), "zend_test").unwrap();
