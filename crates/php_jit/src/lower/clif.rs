@@ -468,15 +468,11 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.switch_to_block(head);
                 self.b.set_srcloc(located(header.at.index()));
-                // The interrupt test, one load and one branch (§4.3); the
-                // bench's untested build alone leaves it out, to measure
-                // what it costs (#2960, §10).
-                if cfg!(not(php_jit_untested_loops)) {
-                    self.interrupt_test(match header.interrupt {
-                        Interrupt::Exit(exit) => Raised::Exit(exit),
-                        Interrupt::Stub(_) => Raised::Stub,
-                    })?;
-                }
+                // The interrupt test, one load and one branch (§4.3).
+                self.interrupt_test(match header.interrupt {
+                    Interrupt::Exit(exit) => Raised::Exit(exit),
+                    Interrupt::Stub(_) => Raised::Stub,
+                })?;
                 self.ops(split..self.ir.ops.len(), body)?;
                 let brought = phis
                     .iter()
@@ -1029,8 +1025,13 @@ impl<'a> Emit<'a> {
     /// `Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`). The byte the
     /// `ExitCtx`'s pointer names is loaded, and where it is not zero, or
     /// under exit-fuzz on the test's first pass, the code goes where
-    /// `raised` says.
+    /// `raised` says. The bench's untested build alone emits no test,
+    /// the header's nor the link's, to measure what it costs (#2960,
+    /// §10).
     fn interrupt_test(&mut self, raised: Raised) -> Result<(), Abort> {
+        if cfg!(php_jit_untested_loops) {
+            return Ok(());
+        }
         let pointer = if let Some(pointer) = self.interrupt {
             pointer
         } else {
