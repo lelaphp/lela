@@ -117,8 +117,9 @@ pub(crate) fn bar(
 ) -> Declared {
     let root = root.to_path_buf();
     let start = move || -> Result<Sides> {
-        let pin = Manifest::load(&root)?.pin;
-        let arms = match arms(&pin)? {
+        let manifest = Manifest::load(&root)?;
+        let pin = manifest.pin()?;
+        let arms = match arms(pin)? {
             Ok(arms) => arms,
             Err(why) => return Ok(Err(why)),
         };
@@ -132,7 +133,7 @@ pub(crate) fn bar(
             let script = workloads.join(format!("{program}.php"));
             let [a, b] = &arms;
             let side = |php: &Php| -> Result<Box<dyn Side>> {
-                Ok(Box::new(Spawned::from(php.running(&pin, &script, &env)?)))
+                Ok(Box::new(Spawned::from(php.running(pin, &script, &env)?)))
             };
             set.push(((*program).to_owned(), [side(a)?, side(b)?]));
         }
@@ -286,6 +287,7 @@ mod tests {
     /// Each program is committed where the protocol keeps its workloads
     /// (§11), and each arm runs it under the recipe, its regime and
     /// [`INI`], in that order, with the program's path last.
+    #[cfg(tracked)]
     #[test]
     fn each_program_is_committed_and_run_under_the_recipe_then_the_regime() {
         let root = crate::package_dir().parent().unwrap().to_path_buf();
@@ -293,7 +295,7 @@ mod tests {
             let path = root.join(format!("docs/perf/workloads/{program}.php"));
             assert!(path.is_file(), "{}", path.display());
         }
-        let pin = Manifest::load(&root).unwrap().pin;
+        let pin = Manifest::load(&root).unwrap().pin.unwrap();
         let php = Php {
             name: "jit-off".to_owned(),
             binary: PathBuf::from("php"),

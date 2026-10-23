@@ -7,6 +7,7 @@
 //! reading a run over it alone gives: a crate's lint is its own and blocks
 //! none above it, and a crate that does not compile stops only the crates
 //! built on it.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 

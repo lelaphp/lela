@@ -209,7 +209,7 @@ pub fn run(
     store: &Store,
     ask: &Ask,
 ) -> Result<Vec<Reading>> {
-    let pin = &manifest.pin;
+    let pin = manifest.pin()?;
     let snapshot = Snapshot::disk(root)?;
     let ini = ini(pin.regime(REGIME)?)?;
     let oracle = pin.oracle();

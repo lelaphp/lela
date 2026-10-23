@@ -112,7 +112,7 @@ pub(crate) fn run(
     let snapshot = Snapshot::disk(root)?;
     let krate = (manifest.crate_named(SCOPE)).ok_or_else(|| anyhow!("no [[crate]] {SCOPE}"))?;
     let mut reading = Reading::for_crate(INSTRUMENT, krate, &snapshot)?;
-    let Some(tree) = Promise::Tree.or_skip(manifest.pin.source.tree())? else {
+    let Some(tree) = Promise::Tree.or_skip(manifest.pin()?.source.tree())? else {
         reading.message =
             format!("{INSTRUMENT}: this machine has no pinned php-src, so nothing was sent");
         return Ok(reading);
@@ -126,7 +126,7 @@ pub(crate) fn run(
     let mut entries: Vec<Entry> = subset.into_iter().filter(|e| e.ini.is_empty()).collect();
     entries.extend(super::workloads(root)?);
     let host = super::makala(root)?;
-    let recipe = &manifest.pin.recipe;
+    let recipe = &manifest.pin()?.recipe;
     let own = Tree::new("soak")?;
     let names: Vec<String> = (0..entries.len()).map(|n| format!("{n}.php")).collect();
     for (entry, name) in entries.iter().zip(&names) {

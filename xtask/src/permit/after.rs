@@ -583,7 +583,7 @@ fn steered(checkout: &Path, path: &str, was: Option<&str>, since: i64) -> bool {
     let Some(was) = was else {
         return false;
     };
-    if !steer::STEERABLE.contains(&path) {
+    if !steer::binding(checkout).is_ok_and(|manifest| steer::steerable(&manifest, path)) {
         return false;
     }
     let Ok(Some(reading)) = Store::of_workspace(checkout).read(steer::INSTRUMENT, path) else {
@@ -882,7 +882,54 @@ fn cat_blob(checkout: &Path, id: &str) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{runs_steer, settled};
+    use std::fs;
+    use std::path::Path;
+
+    use super::{runs_steer, settled, steered};
+    use crate::key::Snapshot;
+    use crate::reading::{Reading, Status, Store};
+    use crate::{git, steer};
+
+    /// #3183: `steered` stands on a passing steer reading over the write
+    /// only for a file `harness.self` names, the list steer reads; a
+    /// reading over the same addition to a file the rule does not name,
+    /// one left behind or written under another manifest, lets nothing
+    /// through.
+    #[test]
+    fn a_steer_reading_over_a_file_harness_self_does_not_name_is_no_steer_write() {
+        let root = crate::scratch::Tree::new("after-steered").unwrap();
+        let manifest = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [\"seams.toml\", \"oracle.toml\"]\ndeny = true\ntext = \"harness.self\"\n";
+        let was = "[a]\nb = 1\n";
+        fs::write(root.join("seams.toml"), manifest).unwrap();
+        for file in ["oracle.toml", "notes.toml"] {
+            fs::write(root.join(file), was).unwrap();
+        }
+        git::git(&root, &["init", "-q"], None).unwrap();
+        git::git(&root, &["add", "."], None).unwrap();
+        git::git(
+            &root,
+            &[&crate::scratch::UNHOOKED[..], &["commit", "-qm", "x"]].concat(),
+            None,
+        )
+        .unwrap();
+        let steered_over = |file: &str| {
+            fs::write(root.join(file), "[a]\nb = 1\nc = 2\n").unwrap();
+            let over = Path::new(file);
+            let snapshot = Snapshot::disk_over(&root, over).unwrap();
+            let mut reading =
+                Reading::stamped_over(steer::INSTRUMENT, file, &snapshot, over).unwrap();
+            reading.status = Status::Pass;
+            reading.count("added", 1).unwrap();
+            reading.message = format!("{file}: 1 added: a.c");
+            Store::of_workspace(&root).record(&[reading]).unwrap();
+            steered(&root, file, Some(&git::blob_id(was.as_bytes())), 0)
+        };
+        assert!(
+            steered_over("oracle.toml"),
+            "the control: a named file's steer write stands"
+        );
+        assert!(!steered_over("notes.toml"));
+    }
 
     /// #3220: a merge lands between the first read of `HEAD` and the
     /// file's, so the file is read again under the `HEAD` it stands at;

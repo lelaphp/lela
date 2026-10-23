@@ -89,10 +89,10 @@ enum Came {
 /// `only` names by their paths, compared; one reading, a skip where this
 /// machine has neither the tree nor the pinned php-fpm.
 pub(crate) fn run(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Reading> {
+    let pin = manifest.pin()?;
     let snapshot = Snapshot::disk(root)?;
     let krate = (manifest.crate_named(SCOPE)).ok_or_else(|| anyhow!("no [[crate]] {SCOPE}"))?;
-    let mut reading = Reading::for_crate(INSTRUMENT, krate, &snapshot)?.under(&manifest.pin);
-    let pin = &manifest.pin;
+    let mut reading = Reading::for_crate(INSTRUMENT, krate, &snapshot)?.under(pin);
     let oracle = pin.oracle();
     let fpm = Promise::Oracle.or_skip(oracle.asserted().and_then(|()| {
         (pin.sapi.fpm.as_ref().map(|fpm| fpm.path.clone()))

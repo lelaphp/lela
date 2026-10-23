@@ -537,7 +537,7 @@ pub fn judge(
             ),
             Condition::TicketBoxes => {
                 if let Some(ticket) = ticket {
-                    boxes(snapshot, store, manifest.pin.digest(), ticket, &mut unmet)?;
+                    boxes(snapshot, store, manifest.pin_digest(), ticket, &mut unmet)?;
                 }
             }
             Condition::Stranded => unmet.extend(ticket::stranded(root, store, &base.commit)?),
@@ -723,7 +723,7 @@ fn slack_porting_notes(
             }
             key = snapshot.key(&krate.path())?;
         }
-        if let Some(why) = slack_porting(krate, &columns, &key, manifest.pin.digest()) {
+        if let Some(why) = slack_porting(krate, &columns, &key, manifest.pin_digest()) {
             slack.entry(why).or_default().push(&krate.name);
         }
     }
@@ -760,6 +760,15 @@ fn miri_unsupported(instrument: &str, reading: &Reading) -> bool {
     failed.is_some_and(|n| n > 0) && failed == count("unsupported") && count("undefined") == Some(0)
 }
 
+/// Whether `reading` is a skip naming a rule the manifest does not carry:
+/// the rule absent, which a crate owes nothing under, and not a condition
+/// unmet (#3182). With the rule written, the same skip is unmet.
+fn rule_absent(manifest: &Manifest, reading: &Reading) -> bool {
+    reading.status == Status::Skip
+        && !reading.rule.is_empty()
+        && manifest.rule(&reading.rule).is_none()
+}
+
 /// Condition 1's rungs for a reading that is not a pass: the causes a
 /// person excused, and no other.
 fn met_without_passing(krate: &Crate, instrument: &str, reading: &Reading) -> bool {
@@ -793,7 +802,7 @@ fn no_regression(
     not_judged: &mut Vec<String>,
     unmet: &mut Vec<String>,
 ) -> Result<()> {
-    let (scope, pin) = (&krate.name, &asking.manifest.pin);
+    let (scope, pin) = (&krate.name, asking.manifest.pin()?);
     let pin = match krate.oracle.as_deref().map(|v| pin.variant(v)) {
         Some(Err(err)) => {
             unmet.push(format!("phpt: {scope}: {err:#}"));
@@ -809,7 +818,7 @@ fn no_regression(
         Against::Unrun(_) if phpt::testless(asking.manifest, scope) => {}
         Against::Unrun(why) => {
             let sought = [("phpt".to_owned(), scope.clone(), key.to_owned())];
-            let digest = asking.manifest.pin.digest();
+            let digest = asking.manifest.pin_digest();
             let read = asking.store.latest_over_each(&sought, digest)?;
             let excused = read.values().any(no_binary_yet);
             if asking.not_run.iter().any(|n| n == "phpt") {
@@ -868,7 +877,7 @@ fn fresh_readings(
     notes: &mut Vec<String>,
 ) -> Result<()> {
     let (root, store, not_run) = (asking.snapshot.root(), asking.store, asking.not_run);
-    let pin = asking.manifest.pin.digest();
+    let pin = asking.manifest.pin_digest();
     let key = &now.key;
     let name = &krate.name;
     // The scope's file holds the last reading written, which a refused
@@ -920,7 +929,10 @@ fn fresh_readings(
             ));
             continue;
         }
-        if reading.status != Status::Pass && !met_without_passing(krate, instrument, &reading) {
+        if reading.status != Status::Pass
+            && !met_without_passing(krate, instrument, &reading)
+            && !rule_absent(asking.manifest, &reading)
+        {
             unmet.push(format!(
                 "{instrument}: {scope} {}: {}",
                 reading.status.as_str(),
@@ -1012,7 +1024,7 @@ fn locks(
             continue;
         };
         let tree = snapshot.key(&dir)?;
-        let fresh = reading.fresh_for(&tree, manifest.pin.digest());
+        let fresh = reading.fresh_for(&tree, manifest.pin_digest());
         match reading.status {
             Status::Fail if fresh => unmet.push(format!(
                 "{shown}: {}{}",
@@ -1233,10 +1245,10 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 mod tests {
     use super::{
         FRESH, Slack, instruments_of, met_without_passing, miri_unsupported, no_binary_yet,
-        porting_meter, slack_porting,
+        porting_meter, rule_absent, slack_porting,
     };
     use crate::carried::Carried;
-    use crate::manifest::Crate;
+    use crate::manifest::{Crate, Manifest, Rule};
     use crate::reading::{Reading, Status};
 
     /// The crate `api.lock` lives with in the shipped manifest, which is
@@ -1391,6 +1403,7 @@ mod tests {
     /// whose row names an oracle variant beside its feature, which the
     /// lane runs on the engine built with it (#2029): `ext/zend_test` in
     /// the shipped manifest, `phpt` and not `crosscheck`.
+    #[cfg(tracked)]
     #[test]
     fn an_optional_crate_is_not_asked_for_a_phpt_reading_the_lane_never_writes() {
         let varied = Crate::named("ext/mbstring")
@@ -1556,5 +1569,20 @@ mod tests {
         ] {
             assert_eq!(said(&porting("ext/zip"), &columns, ""), None, "{columns:?}");
         }
+    }
+
+    /// #3182: a skip naming a rule the manifest does not carry is the rule
+    /// absent, owed by nobody; with the rule written it is unmet.
+    #[test]
+    fn a_skip_naming_an_absent_rule_is_the_rule_absent_and_not_unmet() {
+        let mut reading = Reading::new("unsafe-audit", "php_heap");
+        reading.rule = "unsafe.homes".to_owned();
+        let without = Manifest::named("php_heap");
+        assert!(rule_absent(&without, &reading));
+        let mut with = without.clone();
+        with.rules.push(Rule::named("unsafe.homes", "**"));
+        assert!(!rule_absent(&with, &reading));
+        reading.status = Status::Fail;
+        assert!(!rule_absent(&without, &reading), "a fail is held");
     }
 }

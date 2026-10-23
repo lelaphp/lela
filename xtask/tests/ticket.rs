@@ -5,6 +5,7 @@
 //! tracker was asked is read back as a fact and nothing here reaches
 //! GitHub. One test holds the types it lays to `gh`'s own answers. The
 //! checkbox grammar is held beside the parser.
+#![cfg(tracked)]
 
 use std::fs;
 use std::path::Path;

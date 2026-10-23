@@ -16,7 +16,8 @@
 //! ([`Pinned`]). Where it is at neither place [`Source::tree`] tries, the
 //! markers are not held and the reading says so, unless the machine
 //! promised the tree, when that fails it; a tree standing there and
-//! refused, at another commit, fails it always.
+//! refused, at another commit, fails it always, as does a manifest that
+//! names no pin.
 //!
 //! The header is read with its comments taken out, a line at a time, and
 //! not compiled or preprocessed, so a declaration under `#if 0` counts. A
@@ -104,10 +105,18 @@ impl Tree {
 }
 
 impl Pinned {
-    pub(super) fn new(source: &Source) -> Pinned {
-        Pinned {
-            source: source.clone(),
-            tree: OnceCell::new(),
+    /// The pin's php-src, or why the manifest has no pin, which holds
+    /// every marker against nothing.
+    pub(super) fn new(source: Result<&Source>) -> Pinned {
+        match source {
+            Ok(source) => Pinned {
+                source: source.clone(),
+                tree: OnceCell::new(),
+            },
+            Err(why) => Pinned {
+                source: Source::default(),
+                tree: OnceCell::from(Tree::Refused(format!("{why:#}"))),
+            },
         }
     }
 
@@ -479,6 +488,7 @@ php_on_the_next_line(void);
 
     /// A tree at neither place is absent, and one at a place that refuses
     /// it, here a `.git` git cannot read, is refused, never absent.
+    #[cfg(tracked)]
     #[test]
     fn a_tree_standing_where_the_pin_looks_and_refused_is_not_absent() {
         use super::Tree;

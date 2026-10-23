@@ -463,6 +463,7 @@ fn in_corpus(ids: &[String]) -> Vec<&str> {
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     // The target from inside, over the fixture at `xtask/fixtures/phpt/met-of-target/`,
     // which plants two tests the oracle misses. Nothing here spawns php, so

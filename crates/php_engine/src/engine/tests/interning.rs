@@ -170,7 +170,7 @@ fn what_memory_get_usage_reads_starts_where_it_started_for_every_request() {
         let mut req = Request::new(Arc::clone(&engine.shared), description(""));
         started_at.push(req.memory().usage(false));
         let before = req.memory().usage(false);
-        let compiled = req.compiling(|strings, _, _, _| {
+        let compiled = req.compiling(|strings, _, _, _, _| {
             compile(
                 source,
                 Origin {

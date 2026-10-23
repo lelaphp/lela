@@ -1,5 +1,6 @@
 //! `xtask budget` over the tracked workspace and the generated
 //! `ext/clippy.toml` (harness-design.md §4.1, §6).
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

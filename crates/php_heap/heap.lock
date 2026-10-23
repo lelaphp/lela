@@ -241,6 +241,8 @@ Host::suspensions
 Intern
 Intern::constant_array
 Intern::give_back
+Intern::hold
+Intern::hold_made
 Intern::intern
 Intern::intern_made
 Intern::intern_marked

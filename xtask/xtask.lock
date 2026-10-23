@@ -105,6 +105,8 @@ manifest::Manifest::lock_line_rule
 manifest::Manifest::named
 manifest::Manifest::of
 manifest::Manifest::parse
+manifest::Manifest::pin
+manifest::Manifest::pin_file
 manifest::Manifest::rule
 manifest::Manifest::rule_checked_by
 manifest::Manifest::scope_path
@@ -310,7 +312,6 @@ scratch::xtask
 status::Against
 status::render
 status::session
-steer::STEERABLE
 steer::Verdict
 steer::Verdict::additions
 steer::judge

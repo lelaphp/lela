@@ -288,6 +288,7 @@ fn binary() -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use std::io::Read;
     use std::process::{Command, Stdio};

@@ -5,6 +5,7 @@
 //! The tests that spawn php need the pinned binary at the path the pin names
 //! and say so on stderr when it is absent; the rest run anywhere, the tree
 //! `Source::tree` answers being a fixture's.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

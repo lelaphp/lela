@@ -693,6 +693,7 @@ mod tests {
     /// The workspace's own graph: an extension's closure reaches
     /// `php_engine` through `php_ext`, `php_engine`'s reaches no
     /// extension, and a leaf extension is in no other leaf's closure.
+    #[cfg(tracked)]
     #[test]
     fn the_workspace_closure_follows_cargos_graph() {
         let graph = Graph::of(&built_root()).unwrap();

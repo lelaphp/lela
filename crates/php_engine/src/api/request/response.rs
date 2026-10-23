@@ -555,7 +555,7 @@ impl<'r> Response<&'r Request> {
     /// Where the first byte reached the host, `php_output_get_start_filename`
     /// and `_lineno`, once one has.
     #[must_use]
-    pub fn started_at(self) -> Option<(Vec<u8>, u32)> {
+    pub fn started_at(self) -> Option<(&'r [u8], u32)> {
         self.0.response.output.started_at()
     }
 
@@ -629,7 +629,7 @@ impl<'r> Response<&'r Request> {
     /// `headers_sent()`: `SG(headers_sent)`, and where the body started
     /// when it was a body byte that sent them.
     #[must_use]
-    pub fn headers_sent(self) -> Option<(Vec<u8>, u32)> {
+    pub fn headers_sent(self) -> Option<(&'r [u8], u32)> {
         if self.0.response.output.headers_sent() {
             Some(self.0.response.output.started_at().unwrap_or_default())
         } else {

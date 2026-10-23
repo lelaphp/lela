@@ -4,6 +4,7 @@
 //! fails; it is run through the instrument's library entry, through the
 //! binary, and then through `done` over a scratch repository, which is
 //! the reading the ticket is for: a crate with a failing test is not done.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 
@@ -234,7 +235,7 @@ fn fresh_but_test(root: &Path, manifest: &Manifest, store: &Store) {
         let mut reading =
             Reading::for_scope(instrument, "php_heap", manifest, &snapshot).expect("a reading");
         if xtask::reading::UNDER_RECIPE.contains(&instrument) {
-            reading = reading.under(&manifest.pin);
+            reading = reading.under(manifest.pin().unwrap());
         }
         reading.status = Status::Pass;
         reading.message = String::from("php_heap: measured");

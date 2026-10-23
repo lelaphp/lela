@@ -174,6 +174,16 @@ pub(super) struct ClassDataTables {
     beside: super::WordMap<u32, Vec<php_heap::Block>>,
 }
 
+impl ClassDataTables {
+    /// The value the request evaluated the constant `name` of `declaring`
+    /// to and keeps in its row, a view; none where it evaluated none.
+    pub(super) fn evaluated_constant(&self, declaring: ClassId, name: &[u8]) -> Option<Value> {
+        let data = self.rows.get(declaring)?;
+        let (_, value) = data.constants.iter().find(|(held, _)| **held == *name)?;
+        Some(*value)
+    }
+}
+
 impl Request {
     /// Each class's mutable data given up, a debug build's teardown, as
     /// `zend_cleanup_mutable_class_data` and the walk of
@@ -532,13 +542,7 @@ impl Request {
         declaring: ClassId,
         name: &[u8],
     ) -> Result<Value, Thrown> {
-        if let Some((_, value)) = self
-            .class_data
-            .rows
-            .get(declaring)
-            .and_then(|data| data.constants.iter().find(|(held, _)| **held == *name))
-        {
-            let value = *value;
+        if let Some(value) = self.class_data.evaluated_constant(declaring, name) {
             self.addref(&value);
             return Ok(value);
         }

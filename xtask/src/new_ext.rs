@@ -199,7 +199,7 @@ pub fn run(root: &Path, manifest: &Manifest, name: &str) -> Result<Laid> {
     laid.notes.push(if owned.is_empty() {
         format!(
             "phpt subset: {subset} is not in the pinned php-src tree ({}); `xtask phpt --subset` has nothing to run",
-            manifest.pin.source.tag
+            manifest.pin()?.source.tag
         )
     } else {
         format!("phpt subset: {subset} at the pinned tag")

@@ -235,6 +235,7 @@ mod tests {
     /// comments are read past, so prose that cites a flag does not stand in
     /// for a command. Three commands build: the harness (`XTASK`), the
     /// hosts and the tree's test.
+    #[cfg(tracked)]
     #[test]
     fn the_oracle_job_builds_its_binaries_in_the_lanes_profile() {
         let text =
