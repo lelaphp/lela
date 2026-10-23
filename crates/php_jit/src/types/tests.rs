@@ -1644,3 +1644,54 @@ fn an_entered_trace_numbers_phps_recv_exits_ahead_of_its_own() -> Result<(), Str
     }
     Ok(())
 }
+
+/// `binary_trees`' `make_tree`, entered, leaves its second inlined level
+/// through the first level's exits where the levels leave alike: the
+/// caller's `$d`, held in a register, is stored to its slot as the call
+/// enters (`Op::Enter`), so an exit from the callee stores none of it, as
+/// php's stack map, relative to the frame an exit lands in, holds none of
+/// a caller's slots. So the trace takes the pinned php's five exits,
+/// `TRACE 1 exit info` under the trace-dump regime: the `RECV`'s
+/// `exit_0`, the direction's `exit_1` for both levels, the subtraction's
+/// overflow, and a stack check per level, `exit_3` and `exit_4`, which
+/// each store their own level's `$d` (#3203, #3290).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_callees_exit_stores_none_of_its_callers_registers() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "make_tree"), ("record.start", "enter")],
+        "function make_tree(int $depth)
+        {
+            if ($depth === 0) {
+                return [null, null];
+            }
+            $d = $depth - 1;
+            return [make_tree($d), make_tree($d)];
+        }
+        $t = make_tree(8); echo \"ok\", \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let directions: Vec<(Frame, ExitId)> = (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Direction { .. }))
+        .filter_map(|guard| match guard.at {
+            GuardAt::Within(at) => match ir.ops.get(at.index()) {
+                Some(Op::Line(line)) => Some((line.frame, guard.exit)),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        (ir.exits.len(), directions.as_slice()),
+        (5, [(Frame(0), ExitId(1)), (Frame(1), ExitId(1))].as_slice()),
+        "{rendered}"
+    );
+    assert!(
+        (ir.exits.iter()).all(|exit| exit
+            .stores
+            .iter()
+            .all(|store| store.slot.frame == exit.frame)),
+        "{rendered}"
+    );
+    Ok(())
+}

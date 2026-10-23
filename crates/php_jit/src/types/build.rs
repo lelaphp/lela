@@ -2924,6 +2924,25 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// The register values the calls into the trace's frames before
+    /// `point` stored to their slots as they entered (`Op::Enter`).
+    fn spilled_before(&self, point: Point) -> HashSet<ValueId> {
+        let ops = match point {
+            Point::Start => 0,
+            Point::Before(at) => at.index(),
+            Point::After(at) => at.index() + 1,
+            Point::End => self.ops.len(),
+        };
+        (self.ops.iter().take(ops))
+            .filter_map(|op| match op {
+                Op::Enter { stores, .. } => Some(stores),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect()
+    }
+
     /// One exit's spec from its draft and the state it leaves, the values
     /// in `known` held by a guard before it.
     fn spec(&self, draft: &Draft, known: &HashMap<ValueId, ZvalType>) -> ExitSpec {
@@ -2957,10 +2976,17 @@ impl<'a> Builder<'a> {
                 }
             }
         };
+        // A caller's register value is in its slot from the call into the
+        // frame above it on, which stored it there (`Op::Enter`'s
+        // `stores`), so an exit from a frame above stores none of it, as
+        // php's stack map, relative to the frame an exit lands in, holds
+        // none of a caller's slots.
+        let spilled = self.spilled_before(draft.point);
         let mut stores: Vec<Store> = snapshot
             .values
             .iter()
             .filter(|(_, value)| self.val(*value).home == Home::Register)
+            .filter(|(slot, value)| slot.frame == draft.frame || !spilled.contains(value))
             .map(|(slot, value)| Store {
                 slot: *slot,
                 from: Stored::Value(*value),
