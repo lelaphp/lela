@@ -24242,8 +24242,8 @@ fn inline_arith(
 
 /// The inline path of the comparisons that branch (`ZEND_IS_SMALLER`,
 /// `ZEND_IS_SMALLER_OR_EQUAL`, `ZEND_IS_EQUAL`, `ZEND_IS_NOT_EQUAL`):
-/// two numbers as they stand ordered by [`inline::order`], and the
-/// answer `holds` reads off the order branched on where a `JMPZ` or a
+/// two numbers as they stand ordered by [`inline::order`], which reads
+/// the answer `holds` off the order, branched on where a `JMPZ` or a
 /// `JMPNZ` is fused to the comparison ([`branch::Branch`]), or written into
 /// the temporary as a bool where none is. `None`, with nothing touched,
 /// where the operands are not two numbers, or the temporary holds an
@@ -24256,14 +24256,15 @@ fn inline_compare<T: Tier, S: Branch>(
     code: &OpArray,
     op: &Opline,
     at: u32,
-    holds: impl FnOnce(Ordering) -> bool,
+    holds: impl Fn(Ordering) -> bool + Copy,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
     let slots = req.slots_mut(frame);
-    let answer = holds(inline::order(
+    let answer = inline::order(
         a.read(slots, code, op.op1),
         b.read(slots, code, op.op2),
-    )?);
+        holds,
+    )?;
     if let Some(jump) = S::fused(code, op, at) {
         return Some(branch_fused::<T>(
             req,
