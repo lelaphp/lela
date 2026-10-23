@@ -1419,3 +1419,36 @@ fn a_loop_keeps_the_initial_pointer_where_its_first_opline_may_call_the_runtime(
     }
     Ok(())
 }
+
+/// A `DO_*CALL` the trace follows into a callee its `INIT_*` pushed
+/// through the `push_call` kernel takes no exit, as php's code takes none
+/// for the call (#3203's measurement): what the call's kernel throws
+/// unwinds. A loop calling `g`, declared after it, by name takes the
+/// pinned php's first six exits (`TRACE 1 exit info` under
+/// `opcache.optimization_level=0`): the stack check, three guards at
+/// entry, the direction at `0011`, and the find-function guard of the
+/// `INIT_FCALL_BY_NAME` at `0004`; the call at `0006` none.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_call_the_trace_follows_takes_no_exit() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += g($i); } return $s; }
+        function g($a) { return $a + 1; }
+        echo f(50), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let oplines: Vec<Option<u32>> = (ir.exits.iter().take(6))
+        .map(|exit| exit.opline.map(|at| at.0))
+        .collect();
+    assert_eq!(oplines, [9, 9, 9, 9, 11, 4].map(Some), "{rendered}");
+    let call = ir.ops.iter().find_map(|op| match op {
+        Op::Line(line) if line.opcode == Opcode::DoFcallByName => Some(line),
+        _ => None,
+    });
+    assert!(
+        call.is_some_and(|line| line.exit.is_none() && line.unwind.is_some()),
+        "{rendered}"
+    );
+    Ok(())
+}

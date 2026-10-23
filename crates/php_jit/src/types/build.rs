@@ -947,7 +947,10 @@ impl<'a> Builder<'a> {
                 (op.opcode == Opcode::Assign && !old.within(UNCOUNTED))
                     || (op.opcode == Opcode::FetchDimR && self.is_temp(op1))
                     || op.opcode == Opcode::AssignDim
-                    || matches!(in_place, Some(Served::Make))
+                    || matches!(
+                        op.opcode,
+                        Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
+                    )
                     // The leave kernel a variable that owns something
                     // leaves through frees it, and a destructor may throw.
                     || (matches!(in_place, Some(Served::Leave)) && !self.uncounted(frame))

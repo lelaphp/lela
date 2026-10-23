@@ -641,7 +641,9 @@ pub(super) fn is_call(opcode: Opcode) -> bool {
 /// rules it out as php's code generator rules it out
 /// ([`cannot_raise`](super::cannot_raise)), an element past a packed array is a hole, a
 /// call's frame may not fit, a value sent where the callee takes a
-/// reference is refused, a parameter's check may fail.
+/// reference is refused. A `DO_*CALL` the trace follows is not among
+/// them: php's code takes no exit there, and what the call's kernel
+/// throws, a parameter's check among it, unwinds (#3203's measurement).
 pub(super) fn inline_may_leave(line: &Line) -> bool {
     let arithmetic = match (line.opcode, line.imm) {
         (Opcode::AssignOp, Imm::Binary(binary)) => Some(binary),
@@ -659,9 +661,6 @@ pub(super) fn inline_may_leave(line: &Line) -> bool {
             | Opcode::InitFcallByName
             | Opcode::InitNsFcallByName
             | Opcode::SendValEx
-            | Opcode::DoUcall
-            | Opcode::DoFcall
-            | Opcode::DoFcallByName
     )
 }
 
