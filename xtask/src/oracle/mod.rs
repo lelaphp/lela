@@ -116,23 +116,19 @@ pub enum Promise {
 }
 
 impl Promise {
-    const ALL: [Promise; 5] = [
-        Promise::Tree,
-        Promise::Oracle,
-        Promise::Mysql,
-        Promise::Locale,
-        Promise::MainStack,
+    /// Every fact, with the word [`PROMISE_VARIABLE`] lists for it.
+    const WORDS: [(Promise, &'static str); 5] = [
+        (Promise::Tree, "tree"),
+        (Promise::Oracle, "oracle"),
+        (Promise::Mysql, "mysql"),
+        (Promise::Locale, "locale"),
+        (Promise::MainStack, "main-stack"),
     ];
 
     /// The word [`PROMISE_VARIABLE`] lists for this fact.
     pub fn word(self) -> &'static str {
-        match self {
-            Promise::Tree => "tree",
-            Promise::Oracle => "oracle",
-            Promise::Mysql => "mysql",
-            Promise::Locale => "locale",
-            Promise::MainStack => "main-stack",
-        }
+        let named = Promise::WORDS.iter().find(|(p, _)| *p == self);
+        named.map_or("", |(_, word)| word)
     }
 
     /// What every guarded test asks (#38): `found` when it is, and
@@ -193,10 +189,10 @@ impl Promised {
     pub fn parse(value: &str) -> Result<Promised> {
         let mut promised = Vec::new();
         for word in value.split_whitespace() {
-            let Some(promise) = Promise::ALL.into_iter().find(|p| p.word() == word) else {
+            let Some((promise, _)) = Promise::WORDS.into_iter().find(|(_, w)| *w == word) else {
                 bail!(
                     "{PROMISE_VARIABLE} lists {word:?}, which promises nothing; the words it takes are {}",
-                    Promise::ALL.map(Promise::word).join(", ")
+                    Promise::WORDS.map(|(_, w)| w).join(", ")
                 );
             };
             if !promised.contains(&promise) {

@@ -31,19 +31,19 @@ pub enum Platform {
 }
 
 impl Platform {
-    const ALL: [Platform; 3] = [
-        Platform::DarwinArm64,
-        Platform::LinuxX86_64,
-        Platform::LinuxAarch64,
+    /// Every platform: the key of its table under `[variant.<name>]`, and
+    /// Rust's names for its operating system and architecture
+    /// (`std::env::consts`).
+    const ALL: [(Platform, &'static str, &'static str, &'static str); 3] = [
+        (Platform::DarwinArm64, "darwin-arm64", "macos", "aarch64"),
+        (Platform::LinuxX86_64, "linux-x86_64", "linux", "x86_64"),
+        (Platform::LinuxAarch64, "linux-aarch64", "linux", "aarch64"),
     ];
 
     /// The key of the platform's table under `[variant.<name>]`.
     pub fn key(self) -> &'static str {
-        match self {
-            Platform::DarwinArm64 => "darwin-arm64",
-            Platform::LinuxX86_64 => "linux-x86_64",
-            Platform::LinuxAarch64 => "linux-aarch64",
-        }
+        let named = Platform::ALL.iter().find(|(p, ..)| *p == self);
+        named.map_or("", |(_, key, ..)| key)
     }
 
     /// The platform this harness was built for, none where it is no
@@ -55,12 +55,10 @@ impl Platform {
     /// The platform of Rust's names for an operating system and an
     /// architecture (`std::env::consts`).
     fn of(os: &str, arch: &str) -> Option<Platform> {
-        match (os, arch) {
-            ("macos", "aarch64") => Some(Platform::DarwinArm64),
-            ("linux", "x86_64") => Some(Platform::LinuxX86_64),
-            ("linux", "aarch64") => Some(Platform::LinuxAarch64),
-            _ => None,
-        }
+        let found = Platform::ALL
+            .into_iter()
+            .find(|(_, _, o, a)| (*o, *a) == (os, arch));
+        found.map(|(platform, ..)| platform)
     }
 
     /// Whether a build for the platform is made in a container whose image
@@ -106,7 +104,7 @@ impl Variant {
     /// refuses the build it left behind until a person re-pins it. `name`
     /// is the variant's, for the refusal.
     pub(super) fn held(&self, name: &str, closure: Option<&ClosureDigest>) -> Result<()> {
-        for platform in Platform::ALL {
+        for (platform, ..) in Platform::ALL {
             let Some(build) = self.build(platform) else {
                 continue;
             };
@@ -253,7 +251,7 @@ mod tests {
         );
         assert_eq!(Platform::of("macos", "x86_64"), None);
         assert_eq!(Platform::of("windows", "x86_64"), None);
-        let keys: Vec<&str> = Platform::ALL.map(Platform::key).to_vec();
+        let keys: Vec<&str> = Platform::ALL.map(|(p, ..)| p.key()).to_vec();
         assert_eq!(keys, ["darwin-arm64", "linux-x86_64", "linux-aarch64"]);
     }
 
