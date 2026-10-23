@@ -70,7 +70,8 @@ pub struct Manifest {
     /// to; `None` where the file has no table, which `status` says.
     pub divergence: Option<DivergenceTable>,
     /// `[[bench]]`: each perf bar's tolerance and the nights it was
-    /// derived over (#2659); a bar without a row is a series held to none.
+    /// derived over (#2659), the one place a bar's bound is written
+    /// (#3130); a bar without a row is a series held to none.
     #[serde(rename = "bench", default)]
     pub(crate) tolerances: Vec<Tolerance>,
     /// The pin the `[oracle]` row names, loaded from that file by the
@@ -106,18 +107,22 @@ pub struct DivergenceTable {
     pub target: u64,
 }
 
-/// One `[[bench]]` row (#2659): a bar's tolerance, the 75th percentile of
-/// its A/A control's nightly |paired delta| over `from` to `to`, floored at
-/// 2%, in percentage points of the second arm; the first baseline is the
-/// median of the bar's own nights over the same dates.
+/// One `[[bench]]` row (#2659): a bar's tolerance, in percentage points
+/// of the second arm, the 75th percentile of its A/A control's nightly
+/// |paired delta| over `nights`, floored at 2%, or the floor alone while
+/// the control has no two weeks of nights (#3130). A series is held to it
+/// beside its baseline, the first the median of its own nights over the
+/// same dates; a bar held to a bound is held to one plus it (protocol
+/// §12.3).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Tolerance {
     pub bar: String,
     #[serde(rename = "tolerance_pct")]
     pub pct: f64,
-    pub from: toml::value::Datetime,
-    pub to: toml::value::Datetime,
+    /// The first and the last night it was derived over; none while it is
+    /// the floor.
+    pub nights: Option<[toml::value::Datetime; 2]>,
 }
 
 /// `[parity]`: the suites php builds that parity does not count (design

@@ -12,8 +12,8 @@
 //! the same pair and control on the engine built with the tier's feature,
 //! what the engine's tier buys. G1 (#2947, [`door`]): the engine built
 //! with the tier's feature against the engine built without it over the
-//! seven kernels alone, [`KERNELS`], held to a geomean of at most
-//! [`DOOR`].
+//! seven kernels alone, [`KERNELS`], its geomean held to a bound, one
+//! plus the tolerance of its `[[bench]]` row in `seams.toml` (#3130).
 //!
 //! **What every arm runs under.** The recipe, as the oracle's every run
 //! is, then the regimes, then [`INI`]: php.ini-production's values for the
@@ -202,10 +202,6 @@ pub(crate) fn compiled(root: &Path) -> [Declared; 2] {
     tracing(root, bar, |root, _| Build::Jit.built(root).map(Ok))
 }
 
-/// G1's bound (design §9.2): the tier's door may cost the build without
-/// the feature 2% and no more, above which `jit-design.md` §3 is revisited.
-const DOOR: f64 = 1.02;
-
 /// A build of the engine's `php` an arm runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Build {
@@ -238,14 +234,16 @@ impl Build {
 /// G1, the door cost, and its control (#2947): the engine built with the
 /// tier's feature, `php_jit::Jit` bound and `opcache.jit_buffer_size=0`,
 /// against the engine built without the feature, over the seven kernels
-/// and held to [`DOOR`]; and the build without the feature against
+/// and held to a bound, its `[[bench]]` row's: within the A/A drift,
+/// floored at 2%, above which `jit-design.md` §3 is revisited (design
+/// §9.2, protocol §12.3, #3130); and the build without the feature against
 /// itself, its A/A control. Both arms of each run one command line,
 /// `[regime.jit-tracing]` and the zero buffer, so the binary is the one
 /// difference: the featured engine's `Policy` asks for tracing and runs
 /// `Mode::Off` (`jit-design.md` §4.7), and the other has no tier to ask.
 pub(crate) fn door(root: &Path) -> [Declared; 2] {
     [
-        ("g1", Build::Jit, Held::Bound(DOOR)),
+        ("g1", Build::Jit, Held::Bound),
         ("g1-aa", Build::Plain, Held::Control),
     ]
     .map(|(id, first, held)| {
@@ -280,7 +278,7 @@ mod tests {
         let bars = [oracle(root), compiled(root), door(root)].map(|b| b.map(|b| (b.id, b.held)));
         let pair = |id: &str, held| [(id.to_owned(), held), (format!("{id}-aa"), Held::Control)];
         let series = |id| pair(id, Held::Series);
-        let door = pair("g1", Held::Bound(DOOR));
+        let door = pair("g1", Held::Bound);
         assert_eq!(bars, [series("oracle-jit"), series("engine-jit"), door]);
     }
 

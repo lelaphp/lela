@@ -283,7 +283,12 @@ A night is one reading of the bar: its paired delta's median, Q1 and Q3
    (`third-engine-design.md` §9.2's revisit line for G1). The derived
    number and the dates it came from land in `seams.toml` as one
    `[[bench]]` row per bar, through `xtask steer`. A bar without a row is a
-   series and fails nothing.
+   series and fails nothing. Until the bar's A/A control has its two
+   weeks of nights, the row carries the 2% floor alone and names no
+   nights, as Mitchell ruled for G1 on #3130. A bar held to a bound and
+   not a baseline, G1, whose door should cost nothing, is held to one
+   plus its row's tolerance: its ratio, a set's geomean, at most
+   1.02 at the floor. The row is the one place that bound is written.
 4. **The baseline ratchets, and is a reading.** The baseline is a reading
    of the store, `<bar>/baseline`, never a manifest value. The first is the
    median of the bar's nights over the tolerance's dates. It moves only

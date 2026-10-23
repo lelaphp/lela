@@ -64,6 +64,7 @@ use serde::Deserialize;
 
 use crate::inputs;
 use crate::key::Snapshot;
+use crate::manifest::Tolerance;
 use crate::reading::{Reading, Status, Store};
 use spent::Spent;
 
@@ -452,7 +453,7 @@ pub(crate) enum Arms {
 pub(crate) type Sides = Result<Arms, String>;
 
 /// How a bar's reading is held.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Held {
     /// An A/A control: a pair passes while its paired delta has its sign
     /// swamped (§2, §4.3), and a set until its rows resolve in the count
@@ -462,19 +463,21 @@ pub(crate) enum Held {
     /// and the distance to go to the second arm, and held by [`series`]'s
     /// rule where the manifest gives it a tolerance (#1902, #2336, #2659).
     Series,
-    /// A series held to a bound: a fail where the bar's ratio, a set's
-    /// geomean, is established above this, G1's 1.02 (design §9.2, #2947),
-    /// or is `mixed`, whose value a bound is not read from (§10, #3127);
-    /// and a pass where it is at most this or swamped, as a swamped night
-    /// is never a regression (protocol §1.2, §12).
-    Bound(f64),
+    /// A series held to a bound, one plus its `[[bench]]` row's tolerance
+    /// ([`Shown::bound`]), G1's (design §9.2, #2947, #3130): a fail where
+    /// the bar's ratio, a set's geomean, is established above it, or is
+    /// `mixed`, whose value a bound is not read from (§10, #3127); and a
+    /// pass where it is at most it or swamped, as a swamped night is never
+    /// a regression (protocol §1.2, §12), or where the bar has no row.
+    Bound,
 }
 
 impl Held {
     /// The reading's status for what a bar `took`: a control fails at
-    /// [`Took::pattern`] resolved rows, a bound where the ratio is established above
-    /// it, is mixed or is no number, and a series is held to no bound.
-    fn status(self, took: &Took) -> Status {
+    /// [`Took::pattern`] resolved rows, a bound where the ratio is
+    /// established above `bound`, is mixed or is no number, and a series is
+    /// held to no bound.
+    fn status(self, took: &Took, bound: Option<f64>) -> Status {
         let (value, sign) = (took.ratio(), took.sign());
         let above = |at_most| {
             let mixed = matches!(sign, Sign::Mixed { .. });
@@ -482,8 +485,8 @@ impl Held {
         };
         match self {
             Held::Control if took.pattern().is_some_and(|k| took.resolved() >= k) => Status::Fail,
-            Held::Bound(at_most) if above(at_most) => Status::Fail,
-            Held::Control | Held::Series | Held::Bound(_) => Status::Pass,
+            Held::Bound if bound.is_some_and(above) => Status::Fail,
+            Held::Control | Held::Series | Held::Bound => Status::Pass,
         }
     }
 }
@@ -1065,15 +1068,17 @@ pub fn run(
                 continue;
             }
         };
+        let row = tolerances.iter().find(|t| t.bar == id);
         let bar = Shown {
             id: &id,
             about: &about,
             held,
             names: [&names[0], &names[1]],
+            row,
         };
         print!("{}", rendered(&bar, &measured, reps, label, load));
         let mut reading = recorded(&bar, &measured, (reps, label, note), load, &snapshot)?;
-        let held = (tolerances.iter().find(|t| t.bar == id))
+        let held = (row.filter(|_| held == Held::Series))
             .map(|tolerance| series::hold(tolerance, &log, &mut reading));
         readings.push(reading);
         if let Some((baseline, regressed)) = held {
@@ -1110,12 +1115,24 @@ fn ticket_of(bar: &str, regressed: &str) -> String {
     )
 }
 
-/// A measured bar as its rendering and its reading name it.
+/// A measured bar as its rendering and its reading name it, with its
+/// `[[bench]]` row where the manifest carries one.
 struct Shown<'a> {
     id: &'a str,
     about: &'a str,
     held: Held,
     names: [&'a str; 2],
+    row: Option<&'a Tolerance>,
+}
+
+impl Shown<'_> {
+    /// The ratio a bound bar is held to, one plus its row's tolerance, the
+    /// one place it is written (protocol §12.3, #3130); none for another
+    /// bar, and for a bound without a row, a series held to none.
+    fn bound(&self) -> Option<f64> {
+        let row = self.row.filter(|_| self.held == Held::Bound)?;
+        Some(1.0 + row.pct / 100.0)
+    }
 }
 
 /// The reading of a bar that was not measured, with why, printed too.
@@ -1214,7 +1231,10 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
             )
         }
         Held::Series => format!("{series}; {to_go}"),
-        Held::Bound(at_most) => format!("a bound, its ratio held to at most {at_most:.4}"),
+        Held::Bound => bar.bound().map_or_else(
+            || format!("a bound with no `[[bench]]` row, so a series held to none ({PROTOCOL} §12.3)"),
+            |at_most| format!("a bound, its ratio held to at most {at_most:.4}, one plus its `[[bench]]` tolerance ({PROTOCOL} §12.3)"),
+        ),
     }
 }
 
@@ -1286,8 +1306,8 @@ fn recorded(
     snapshot: &Snapshot,
 ) -> Result<Reading> {
     let mut reading = Reading::stamped_over(INSTRUMENT, bar.id, snapshot, Path::new("."))?;
-    reading.status = bar.held.status(took);
-    if let Held::Bound(at_most) = bar.held {
+    reading.status = bar.held.status(took, bar.bound());
+    if let Some(at_most) = bar.bound() {
         reading
             .numbers
             .insert("bound_ratio".to_owned(), at_most.into());
@@ -1444,12 +1464,18 @@ mod tests {
     #[test]
     fn a_control_fails_on_a_resolved_sign_and_a_series_states_the_distance_to_go() {
         let one = |unit, deltas: &[f64], pct| took(vec![row(unit, deltas, pct)], false);
-        assert_eq!(Held::Control.status(&one(Ms, &BEHIND, 1.0)), Status::Fail);
         assert_eq!(
-            Held::Control.status(&one(Ms, &STRADDLES, 1.0)),
+            Held::Control.status(&one(Ms, &BEHIND, 1.0), None),
+            Status::Fail
+        );
+        assert_eq!(
+            Held::Control.status(&one(Ms, &STRADDLES, 1.0), None),
             Status::Pass
         );
-        assert_eq!(Held::Series.status(&one(Ms, &BEHIND, 1.0)), Status::Pass);
+        assert_eq!(
+            Held::Series.status(&one(Ms, &BEHIND, 1.0), None),
+            Status::Pass
+        );
         assert!(close(to_go(&one(Ms, &BEHIND, 250.0)).unwrap(), 250.0));
         assert!(close(to_go(&one(Ms, &AHEAD, -12.5)).unwrap(), 0.0));
         assert_eq!(to_go(&one(Ms, &STRADDLES, 3.0)), None, "swamped");
@@ -1478,7 +1504,7 @@ mod tests {
         assert_eq!((set.sign(), set.resolved()), (mixed, 2));
         assert_eq!(to_go(&set), None, "a mixed geomean has no sign");
         assert_eq!(
-            Held::Bound(1.02).status(&set),
+            Held::Bound.status(&set, Some(1.02)),
             Status::Fail,
             "a bound is not read from a mixed geomean, near 1.00 as it is"
         );
@@ -1493,16 +1519,20 @@ mod tests {
             None,
             "one swamped row leaves the geomean unsigned"
         );
-        assert_eq!(Held::Control.status(&swamped), Status::Pass, "1 of 2");
-        assert_eq!(Held::Bound(1.02).status(&swamped), Status::Pass);
+        assert_eq!(Held::Control.status(&swamped, None), Status::Pass, "1 of 2");
+        assert_eq!(Held::Bound.status(&swamped, Some(1.02)), Status::Pass);
         let at = took(vec![row(Ms, &BEHIND, 0.0), row(Ms, &BEHIND, 0.0)], true);
         assert_eq!(at.sign(), Sign::Slower);
-        assert_eq!(Held::Bound(1.0).status(&at), Status::Pass, "at the bound");
+        assert_eq!(
+            Held::Bound.status(&at, Some(1.0)),
+            Status::Pass,
+            "at the bound"
+        );
         let behind = took(vec![row(Ms, &BEHIND, 10.0), row(Ms, &BEHIND, 10.0)], true);
-        assert_eq!(Held::Bound(1.02).status(&behind), Status::Fail);
+        assert_eq!(Held::Bound.status(&behind, Some(1.02)), Status::Fail);
         let ahead = took(vec![row(Ms, &AHEAD, -10.0), row(Ms, &AHEAD, -10.0)], true);
         assert_eq!(ahead.sign(), Sign::Faster);
-        assert_eq!(Held::Bound(1.02).status(&ahead), Status::Pass);
+        assert_eq!(Held::Bound.status(&ahead, Some(1.02)), Status::Pass);
         let shown = super::geomean(&set);
         assert!(
             shown.contains(
@@ -1531,19 +1561,56 @@ mod tests {
             let deltas = |i| if i < resolved { &BEHIND } else { &STRADDLES };
             took((0..n).map(|i| row(Ms, deltas(i), 1.0)).collect(), true)
         };
-        assert_eq!(Held::Control.status(&set(2, 8)), Status::Pass);
-        assert_eq!(Held::Control.status(&set(3, 8)), Status::Fail);
-        assert_eq!(Held::Control.status(&set(1, 1)), Status::Pass);
+        assert_eq!(Held::Control.status(&set(2, 8), None), Status::Pass);
+        assert_eq!(Held::Control.status(&set(3, 8), None), Status::Fail);
+        assert_eq!(Held::Control.status(&set(1, 1), None), Status::Pass);
         let shown = super::held_by(
             &super::Shown {
                 id: "aa",
                 about: "",
                 held: Held::Control,
                 names: ["a", "b"],
+                row: None,
             },
             &set(3, 8),
         );
         assert!(shown.contains("over 8 rows, failing where 3 of them resolve, the fewest whose chance at 1 row in 17 is at most 1%"), "{shown}");
+    }
+
+    /// G1's bound is its `[[bench]]` row's (#3130): a manifest carrying
+    /// `g1` at the 2% floor and no nights holds a bound bar to 1.02, a
+    /// series and a control to none of it, and a bound with no row to none.
+    #[test]
+    fn a_bound_bar_is_held_to_one_plus_its_row_s_tolerance() {
+        let text = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\n\n[[bench]]\nbar = \"g1\"\ntolerance_pct = 2.0\n";
+        let manifest = crate::manifest::Manifest::parse(text).unwrap();
+        let [g1] = manifest.tolerances.as_slice() else {
+            panic!("{:?}", manifest.tolerances)
+        };
+        assert_eq!((g1.bar.as_str(), g1.nights), ("g1", None));
+        let bar = |held, row| super::Shown {
+            id: "g1",
+            about: "",
+            held,
+            names: ["a", "b"],
+            row,
+        };
+        assert!(close(bar(Held::Bound, Some(g1)).bound().unwrap(), 1.02));
+        assert_eq!(bar(Held::Series, Some(g1)).bound(), None);
+        assert_eq!(bar(Held::Bound, None).bound(), None);
+        let set = |pct| took(vec![row(Ms, &BEHIND, pct), row(Ms, &BEHIND, pct)], true);
+        let held = |pct| Held::Bound.status(&set(pct), bar(Held::Bound, Some(g1)).bound());
+        assert_eq!((held(1.0), held(3.0)), (Status::Pass, Status::Fail));
+        let shown = super::held_by(&bar(Held::Bound, Some(g1)), &set(3.0));
+        assert!(
+            shown.contains("at most 1.0200, one plus its `[[bench]]` tolerance"),
+            "{shown}"
+        );
+        let missing = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\n\n[[bench]]\nbar = \"g1\"\n";
+        assert!(
+            crate::manifest::Manifest::parse(missing).is_err(),
+            "a row names its tolerance"
+        );
     }
 
     /// A rate arm's reps are paired as a time's are, the delta in requests
@@ -1597,6 +1664,7 @@ mod tests {
             about: "a rate",
             held: Held::Series,
             names: ["a", "b"],
+            row: None,
         };
         let shown = super::rendered(&bar, &took, 12, super::Label::Smoke, None);
         let said = format!("n 12); per request: absent: {}", super::spent::ABSENT);

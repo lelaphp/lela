@@ -131,10 +131,10 @@ pub(crate) fn hold(
         .collect();
     let kept = baseline_scope(bar);
     let mut first = None;
-    let (from, to) = (day(&tolerance.from), day(&tolerance.to));
+    let dates = (tolerance.nights.as_ref()).map(|[from, to]| (day(from), day(to)));
     let baseline = if let Some(kept) = log.iter().rev().find(|r| r.scope == kept) {
         kept.numbers.get("baseline_pct").map(|n| n.as_f64())
-    } else {
+    } else if let Some((from, to)) = &dates {
         let window: Vec<f64> = (nights.iter())
             .filter(|(r, _)| (from.as_str()..=to.as_str()).contains(&day(&r.at).as_str()))
             .map(|(_, night)| night.median)
@@ -144,11 +144,17 @@ pub(crate) fn hold(
             window.len()
         ));
         (!window.is_empty()).then(|| stats(&window).median)
+    } else {
+        None
     };
     let Some(baseline) = baseline else {
+        let waits = dates.map_or_else(
+            || "its row names no nights, the floor alone (#3130)".to_owned(),
+            |(from, to)| format!("no night of the bar stands from {from} to {to}"),
+        );
         write!(
             tonight.message,
-            "; its tolerance of {pct}% waits on a baseline: no night of the bar stands from {from} to {to}"
+            "; its tolerance of {pct}% waits on a baseline: {waits}"
         )
         .ok();
         return (None, None);
@@ -313,8 +319,7 @@ mod tests {
         let tolerance = Tolerance {
             bar: "b".to_owned(),
             pct: 2.0,
-            from: "1970-01-01".parse().unwrap(),
-            to: "2999-01-01".parse().unwrap(),
+            nights: Some(["1970-01-01", "2999-01-01"].map(|day| day.parse().unwrap())),
         };
         let log = [
             reading("b", 10.0, "c1"),
