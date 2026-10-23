@@ -329,8 +329,8 @@ fn dimensions(op: &Op) -> Result<(Vec<Dimension>, bool), String> {
     }
     if op.says("SMART_BRANCH") {
         dimensions.push((
-            "Fused::of(op, next)",
-            ["No", "Jmpz", "Jmpnz"]
+            "Fused::of(op, next, at)",
+            ["No", "Jmpz", "Jmpnz", "JmpzBack", "JmpnzBack"]
                 .iter()
                 .map(|way| {
                     let name = if *way == "No" { "" } else { way };
@@ -352,9 +352,10 @@ type Dimension = (&'static str, Vec<(String, String)>);
 /// `op1`'s then `op2`'s, and one for the kinds it does not list, as
 /// `zend_vm_gen.php` emits a handler per `SPEC` pair and
 /// `ZEND_NULL_HANDLER` for the rest; for an opcode whose handler line
-/// says `SMART_BRANCH`, each of those three times over, unfused and fused
+/// says `SMART_BRANCH`, each of those five times over, unfused and fused
 /// to the `JMPZ` or the `JMPNZ` after it, as php's `_JMPZ` and `_JMPNZ`
-/// handlers are; for one whose line says `RETVAL`, each kind's twice
+/// handlers are, the jump forward or back, which php tests where it
+/// takes the jump and this resolves with it; for one whose line says `RETVAL`, each kind's twice
 /// over, its `out` unread and read, as php's `_RETVAL_UNUSED` and
 /// `_RETVAL_USED` handlers are. `Unresolved`, the default, is what an opline holds
 /// until its unit is published, and what no opline of a
@@ -441,12 +442,12 @@ fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {
         "}}\n\
          \n\
          impl Handler {{\n\
-         \x20   /// The handler `op` is served by.\n\
+         \x20   /// The handler `op`, the opline at `at`, is served by.\n\
          \x20   // One arm per opcode: the length is the number of opcodes, and a\n\
          \x20   // `_` is the kinds the row does not list, however few are left.\n\
          \x20   #[allow(clippy::too_many_lines, clippy::match_wildcard_for_single_variants)]\n\
          \x20   #[must_use]\n\
-         \x20   pub(crate) fn of(op: &Opline, next: Option<&Opline>) -> Handler {{\n\
+         \x20   pub(crate) fn of(op: &Opline, next: Option<&Opline>, at: usize) -> Handler {{\n\
          \x20       match op.opcode {{\n\
          {arms}\
          \x20       }}\n\

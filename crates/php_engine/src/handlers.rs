@@ -21542,7 +21542,8 @@ fn rope_piece(
 /// into the temporary the opline's `result` field names. php's handler
 /// takes the long pair and the double pairs before it calls
 /// `zend_compare`, and those are the kernel's first arms.
-#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `pre_inc`
+#[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
 #[allow(clippy::inline_always)]
 pub(crate) fn is_smaller<T: Tier, A: Operand + Default, B: Operand + Default, S: Branch>(
     req: &mut Request,
@@ -21592,7 +21593,8 @@ pub(crate) fn is_smaller_or_equal<T: Tier, S: Branch>(
 /// `ZEND_IS_EQUAL`: [`crate::ops::is_equal`], the same way. Each
 /// comparison branches over a `JMPZ` or a `JMPNZ` after it
 /// ([`smart_branch`]).
-#[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
+#[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `pre_inc`
+#[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
 #[allow(clippy::inline_always)]
 pub(crate) fn is_equal<T: Tier, A: Operand + Default, B: Operand + Default, S: Branch>(
     req: &mut Request,
@@ -23143,15 +23145,17 @@ pub(crate) fn jmp<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, code, (at, at), op.op1, op.out)
+    jumped::<T>(req, frame, code, at, (op.op1, op.op1 <= at), op.out)
 }
 
-/// `ZEND_VM_JMP` from the jump at `at` to `target`, the frame left at
-/// the target, answered as the distance from `served`, the opline the
-/// loop dispatched, which is `at` or the comparison a fused jump
-/// follows; a target at or before `at` is the back-edge, where the
-/// interrupt is tested and then the loop safepoint raised with
-/// `number`, the one the compiler wrote into the jump's `result`.
+/// `ZEND_VM_JMP` to `target`, the frame left at the target, answered as
+/// the distance from `served`, the opline the loop dispatched, the jump
+/// or the comparison a fused jump follows; `back` says the target is at
+/// or before the jump's own place, the back-edge, where the interrupt
+/// is tested and then the loop safepoint raised with `number`, the one
+/// the compiler wrote into the jump's `result`. A fused jump's direction
+/// was resolved with its handler where the unit was published; every
+/// other jump's is the compare its caller makes.
 ///
 /// Under `Nop` the frame is stood at the target only where the
 /// interrupt is raised: every line read after a back-edge is the line
@@ -23209,11 +23213,11 @@ fn jumped<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
-    (served, at): (u32, u32),
-    target: u32,
+    served: u32,
+    (target, back): (u32, bool),
     number: u32,
 ) -> Edge {
-    if target <= at {
+    if back {
         // The frame stands at the target where something reads it: the
         // interrupt, whose timeout names the target's line and whose
         // handlers' backtrace starts there, and a tier the engine asks
@@ -23406,7 +23410,7 @@ fn branched<T: Tier, const ON: bool, const EX: bool>(
         return jump_to(op.op2);
     }
     let at = req.vm().opline(frame);
-    jumped::<T>(req, frame, code, (at, at), op.op2, op.out)
+    jumped::<T>(req, frame, code, at, (op.op2, op.op2 <= at), op.out)
 }
 
 /// `ZEND_JMP_SET`: the left operand of `a ?: c`
@@ -24161,12 +24165,14 @@ pub(crate) mod branch {
 
     use crate::exec;
 
-    /// The jump a comparison is fused to, and the truth that takes it:
-    /// `false` for a `JMPZ`, `true` for a `JMPNZ`.
+    /// The jump a comparison is fused to, the truth that takes it,
+    /// `false` for a `JMPZ`, `true` for a `JMPNZ`, and whether it goes
+    /// back, a loop's back-edge.
     #[derive(Clone, Copy)]
     pub(crate) struct Fused<'c> {
         pub(crate) jump: &'c Opline,
         pub(crate) on: bool,
+        pub(crate) back: bool,
     }
 
     /// Which of a comparison's handlers serves it.
@@ -24177,10 +24183,17 @@ pub(crate) mod branch {
 
     /// The handler with no jump fused: the answer is written.
     pub(crate) struct Unfused;
-    /// The handler fused to the `JMPZ` after it, php's `_JMPZ`.
+    /// The handler fused to the `JMPZ` after it, php's `_JMPZ`, which
+    /// jumps forward.
     pub(crate) struct OnJmpz;
-    /// The handler fused to the `JMPNZ` after it, php's `_JMPNZ`.
+    /// The handler fused to the `JMPNZ` after it, php's `_JMPNZ`, which
+    /// jumps forward.
     pub(crate) struct OnJmpnz;
+    /// [`OnJmpz`] with the jump back, a loop's back-edge.
+    pub(crate) struct OnJmpzBack;
+    /// [`OnJmpnz`] with the jump back, the `JMPNZ` a `for`, a `while`
+    /// and a `do` end in.
+    pub(crate) struct OnJmpnzBack;
     /// A comparison whose handler line says no `SMART_BRANCH`, which
     /// tests the opline after it on every execution
     /// ([`Opline::fuses`]).
@@ -24198,7 +24211,11 @@ pub(crate) mod branch {
         #[inline(always)] // the jump's one read, in the loop
         #[allow(clippy::inline_always)]
         fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
-            exec::opline_at(code, exec::after(at)).map(|jump| Fused { jump, on: false })
+            exec::opline_at(code, exec::after(at)).map(|jump| Fused {
+                jump,
+                on: false,
+                back: false,
+            })
         }
     }
 
@@ -24206,7 +24223,35 @@ pub(crate) mod branch {
         #[inline(always)] // the jump's one read, in the loop
         #[allow(clippy::inline_always)]
         fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
-            exec::opline_at(code, exec::after(at)).map(|jump| Fused { jump, on: true })
+            exec::opline_at(code, exec::after(at)).map(|jump| Fused {
+                jump,
+                on: true,
+                back: false,
+            })
+        }
+    }
+
+    impl Branch for OnJmpzBack {
+        #[inline(always)] // the jump's one read, in the loop
+        #[allow(clippy::inline_always)]
+        fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
+            exec::opline_at(code, exec::after(at)).map(|jump| Fused {
+                jump,
+                on: false,
+                back: true,
+            })
+        }
+    }
+
+    impl Branch for OnJmpnzBack {
+        #[inline(always)] // the jump's one read, in the loop
+        #[allow(clippy::inline_always)]
+        fn fused<'c>(code: &'c OpArray, _: &Opline, at: u32) -> Option<Fused<'c>> {
+            exec::opline_at(code, exec::after(at)).map(|jump| Fused {
+                jump,
+                on: true,
+                back: true,
+            })
         }
     }
 
@@ -24219,6 +24264,7 @@ pub(crate) mod branch {
                 .map(|jump| Fused {
                     jump,
                     on: jump.opcode == Opcode::Jmpnz,
+                    back: jump.op2 <= exec::after(at),
                 })
         }
     }
@@ -24243,8 +24289,8 @@ fn branch_fused<T: Tier>(
         // `ZEND_VM_SET_NEXT_OPCODE(opline + 2)`.
         return Ok(Next::by(2));
     }
-    let jump = exec::after(at);
-    jumped::<T>(req, frame, code, (at, jump), fused.jump.op2, fused.jump.out)
+    let target = (fused.jump.op2, fused.back);
+    jumped::<T>(req, frame, code, at, target, fused.jump.out)
 }
 
 /// The inline path of the binary operators (design §5.8,
@@ -24337,7 +24383,14 @@ fn inline_branch<T: Tier, const ON: bool, const EX: bool>(
     if EX {
         return Some(jump_to(op.op2));
     }
-    Some(jumped::<T>(req, frame, code, (at, at), op.op2, op.out))
+    Some(jumped::<T>(
+        req,
+        frame,
+        code,
+        at,
+        (op.op2, op.op2 <= at),
+        op.out,
+    ))
 }
 
 /// The inline path of `ZEND_BOOL` (`NOT` false) and `ZEND_BOOL_NOT`

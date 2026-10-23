@@ -407,7 +407,13 @@ const RETVALS: [(&str, &str); 2] = [
 /// The branches of a `SMART_BRANCH` comparison, each the part of the
 /// variant's name `php_unit` gives it and the type the handler is served
 /// at.
-const BRANCHES: [(&str, &str); 3] = [("", "Unfused"), ("Jmpz", "OnJmpz"), ("Jmpnz", "OnJmpnz")];
+const BRANCHES: [(&str, &str); 5] = [
+    ("", "Unfused"),
+    ("Jmpz", "OnJmpz"),
+    ("Jmpnz", "OnJmpnz"),
+    ("JmpzBack", "OnJmpzBack"),
+    ("JmpnzBack", "OnJmpnzBack"),
+];
 
 /// Every `php_unit::Handler` of one opcode, as `php_unit`'s `build.rs`
 /// names them from the same row, each with the kinds of `op1` and `op2`
