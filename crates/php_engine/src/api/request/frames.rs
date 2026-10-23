@@ -1619,7 +1619,6 @@ impl Request {
         (caller, at): (FrameRef, u32),
         flagged: bool,
     ) -> Option<FrameRef> {
-        let call = self.vm.stack.current();
         // The callee on top and the caller below it lent together, one
         // look at the frame table for both, and the function's row read
         // off the tables beside the stack.
@@ -1648,6 +1647,10 @@ impl Request {
             return None;
         }
         entered_words((top, from), (caller, at), returns_to, shape, cache);
+        // The callee's place, the top's, which the lend found standing
+        // above its caller.
+        #[allow(clippy::cast_possible_truncation)] // a frame's place is `FrameRef`'s `u32`
+        let call = FrameRef(self.vm.stack.len().wrapping_sub(1) as u32);
         crate::observer::call(self, call);
         Some(call)
     }
