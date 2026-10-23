@@ -555,6 +555,7 @@ impl Request {
             now,
             levels,
             optimizer: shared.optimizer(),
+            counts: crate::tier::counts(&shared, Some(&*self)),
         };
         let arena = Arc::clone(&self.arena);
         // What a compile that ran read and made, none for a hit.

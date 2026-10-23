@@ -1993,6 +1993,7 @@ impl Shared {
             now: crate::unit_cache::now(),
             levels: crate::unit_cache::Levels::Memory,
             optimizer: self.optimizer(),
+            counts: crate::tier::counts(self, None),
         };
         let arena = self.arena.current();
         let (compiled, _, _) = self.units.file(

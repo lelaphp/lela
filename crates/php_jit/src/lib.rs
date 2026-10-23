@@ -82,10 +82,11 @@ impl Tier for Jit {
         dispatch::safepoint(req, frame, site, held)
     }
 
-    /// The engine binds `Jit`'s loop only where the tier runs
-    /// ([`policy::Bound`]); under `Off` it binds `Nop`'s, so the loop
-    /// pays nothing at a safepoint, as php's VM keeps its own handlers
-    /// where its compiled tier does not start.
+    /// The engine binds `Jit`'s loop only where the tier may compile a trace
+    /// ([`policy::Bound`]), from the start or once a request turns
+    /// `opcache.jit` on; where it never can, it binds `Nop`'s, so the
+    /// loop pays nothing at a safepoint, as php's VM keeps its own
+    /// handlers where its compiled tier does not start.
     fn asked(started: &Started<'_>) -> bool {
         started
             .engine::<JitEngine>()
@@ -99,16 +100,32 @@ impl Tier for Jit {
     }
 
     /// php's `zend_jit_status` ([`policy::Policy::status`]): `JIT_G` as
-    /// the directives set it at engine start, and the buffer less what
-    /// the traces of `req`'s epoch take ([`table::TraceTable::usage`]),
-    /// none where no request of the epoch made its table.
+    /// the directives set it at engine start and `req`'s `opcache.jit`
+    /// rewrites it, and the buffer less what the traces of `req`'s epoch
+    /// take ([`table::TraceTable::usage`]), none where no request of the
+    /// epoch made its table.
     fn status(req: &Request) -> TierStatus {
         let Some(engine) = req.engine::<JitEngine>() else {
             return TierStatus::default();
         };
         let epoch = tier::epoch(req);
         let used = table::of_epoch(&epoch).map_or(0, |table| table.usage().bytes);
-        engine.shared.policy.status(used)
+        engine.shared.policy.status(used, setting(req))
+    }
+
+    /// Whether a unit published now counts ([`policy::Policy::counts`]):
+    /// as `req`'s `opcache.jit` says, the startup's where the engine
+    /// publishes it for no request; none where the engine built no
+    /// [`JitEngine`].
+    fn counts(started: &Started<'_>, req: Option<&Request>) -> bool {
+        let Some(engine) = started.engine::<JitEngine>() else {
+            return false;
+        };
+        let policy = &engine.shared.policy;
+        req.map_or_else(
+            || policy.counts_at_start(),
+            |req| policy.counts(setting(req)),
+        )
     }
 
     /// The tier's state (`jit-design.md` §4): its two directives and
@@ -127,6 +144,13 @@ impl Tier for Jit {
         let tier = tier.rshutdown(JitEngine::request_ended);
         Some(tier.build("jit"))
     }
+}
+
+/// `opcache.jit` as `req` has it now, php's `JIT_G` as `zend_jit_config`
+/// left it after the request's last `ini_set`; none where no extension
+/// declares the directive.
+fn setting(req: &Request) -> Option<&[u8]> {
+    req.ini().get(b"opcache.jit")
 }
 
 impl JitRequest {
@@ -353,8 +377,10 @@ mod tests {
     }
 
     /// The engine start decides once how the engine binds the tier
-    /// (#3133): `Nop`'s loop wherever php's tier never starts or is set
-    /// up and not on, `Jit`'s only where it runs.
+    /// (#3133): `Nop`'s loop wherever php's tier never starts, so under
+    /// `opcache.jit=disable` no request can switch it on, and `Jit`'s
+    /// where it runs from the start or is set up and off, which a request
+    /// may turn on (#3139).
     #[test]
     fn the_engine_start_binds_jits_loop_only_where_the_tier_runs() {
         use crate::policy::Bound;
@@ -385,7 +411,7 @@ mod tests {
             (&[("jit.mode", "force")][..], "", Bound::On),
         ] {
             assert_eq!(bound(asked, host), expected, "{asked:?} on {host:?}");
-            assert_eq!(expected.asked(), expected == Bound::On);
+            assert_eq!(expected.asked(), expected != Bound::Never);
         }
         let refused = JitEngine::over(&ini(&[tracing]), "", |_| true, crate::lower::Backend::new);
         assert_eq!(refused.shared.bound, Bound::Never, "a refused tier");
@@ -466,7 +492,8 @@ mod tests {
 
     /// With its compiled tier disabled php writes no `opcache.jit_debug` line
     /// whatever the bits ask (`gh13232.phpt`), and neither does a tier
-    /// that runs `Off` for any reason.
+    /// that runs `Off` for any reason, nor one set up and off, whose
+    /// program was published while it was off and so is never traced.
     #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
     #[test]
     fn a_tier_that_runs_off_writes_no_line_whatever_jit_debug_asks() {

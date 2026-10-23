@@ -474,6 +474,10 @@ pub(crate) struct Asked<'a> {
     pub(crate) now: i64,
     pub(crate) levels: Levels<'a>,
     pub(crate) optimizer: Optimizer,
+    /// Whether the safepoint words of a unit held for this question count
+    /// (`tier::Tier::counts`), as the tier answered for the request
+    /// asking.
+    pub(crate) counts: bool,
 }
 
 /// What opcache's optimizer makes of a unit it persists that a request
@@ -974,6 +978,7 @@ impl UnitCache {
             now,
             levels,
             optimizer,
+            counts,
         } = asked;
         let (memory, disk) = match levels {
             Levels::Memory => (true, None),
@@ -1017,7 +1022,7 @@ impl UnitCache {
                 size: kept.size,
                 observed,
             };
-            let held = self.hold(files, path, validation, now, read);
+            let held = self.hold(files, (path, counts), validation, now, read);
             files.hit(&held, validation, now);
             return (
                 Some(held.unit.clone().map(Compiled::Published)),
@@ -1062,7 +1067,7 @@ impl UnitCache {
             size,
             observed,
         };
-        let held = self.hold(files, path, validation, now, read);
+        let held = self.hold(files, (path, counts), validation, now, read);
         if let Some(written) = written {
             self.add_key(files, written, &held);
         }
@@ -1117,11 +1122,12 @@ impl UnitCache {
     /// under its full path, in place of a discarded copy under every name
     /// that copy was filed under, as `cache_script_in_shared_memory`
     /// updates the bucket every key of it points to; what another request
-    /// held for it meanwhile where it did.
+    /// held for it meanwhile where it did; its op arrays' words
+    /// `counts` or sealed as the tier answered (`tier::Tier::counts`).
     fn hold(
         &self,
         files: &Files,
-        path: &[u8],
+        (path, counts): (&[u8], bool),
         validation: Validation,
         now: i64,
         read: Read,
@@ -1160,7 +1166,7 @@ impl UnitCache {
         if held.order == order {
             files.used.fetch_add(size, Ordering::Relaxed);
             if let Ok(unit) = &held.unit {
-                files.funcs.publish(unit);
+                files.funcs.publish(unit, counts);
                 self.persist_names(path, unit);
             }
         }

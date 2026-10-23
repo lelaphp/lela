@@ -129,14 +129,15 @@ pub(crate) fn stdout(served: &Served) -> String {
 }
 
 /// System ini entries a test tier declares, each unset by default, so a
-/// value the engine's builder sets reaches its engine start.
+/// value the engine's builder sets reaches its engine start; `opcache.jit`
+/// and `opcache.jit_debug` a request may set too, as php's `PHP_INI_ALL`.
 pub(crate) fn declared(names: &[&str]) -> Vec<IniDecl> {
     names
         .iter()
         .map(|name| IniDecl {
             name: Name::from(*name),
             default: None,
-            user: false,
+            user: matches!(*name, "opcache.jit" | "opcache.jit_debug"),
             per_dir: false,
             system: true,
         })
@@ -188,6 +189,10 @@ impl Tier for Lane {
 
     fn asked(started: &Started<'_>) -> bool {
         <crate::Jit as Tier>::asked(started)
+    }
+
+    fn counts(started: &Started<'_>, req: Option<&Request>) -> bool {
+        <crate::Jit as Tier>::counts(started, req)
     }
 
     fn extension() -> Option<Extension> {

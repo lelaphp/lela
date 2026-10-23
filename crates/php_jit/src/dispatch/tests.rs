@@ -552,6 +552,10 @@ impl Tier for Counted {
         <crate::Jit as Tier>::asked(started)
     }
 
+    fn counts(started: &tier::Started<'_>, req: Option<&Request>) -> bool {
+        <crate::Jit as Tier>::counts(started, req)
+    }
+
     fn extension() -> Option<Extension> {
         let mut ini = crate::policy::ini();
         ini.extend(testing::declared(&testing::OPCACHE));
@@ -568,7 +572,7 @@ impl Tier for Counted {
 /// A tier that is `Off` is never asked (#3133): the engine binds `Nop`'s
 /// loop, so no loop's back edge reads its word or bumps its heat, and
 /// no call or return asks either, under a zero buffer, G1's setting, as
-/// under `opcache.jit=disable` and `off` and on the command line without
+/// under `opcache.jit=disable` and on the command line without
 /// `opcache.enable_cli`. Under tracing the same program asks at every
 /// back edge and bumps the header's heat.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -582,7 +586,6 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
             &[("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")][..],
         ),
         ("", &[("opcache.jit", "disable")]),
-        ("", &[("opcache.jit", "off")]),
         ("cli", &[("opcache.jit", "tracing")]),
     ] {
         let engine = testing::engine_on::<Counted>(host, off);
@@ -603,6 +606,44 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
     // `$main`'s, five, each bumping its header's heat.
     assert_eq!((asked.loops, asked.loops_written), (15, 15), "{asked:?}");
     assert!(asked.entries >= 6 && asked.returns >= 5, "{asked:?}");
+}
+
+/// php gives an op array its counters as it persists it while its tier
+/// is on (#3139): set up and off, the engine binds `Jit`'s loop, and a
+/// unit published while the request's `opcache.jit` is off has its words
+/// sealed, asked at every back edge and never bumped, claimed nor
+/// recorded, while one a request publishes after turning it on counts;
+/// on from the start, a unit published after a request turns it off is
+/// sealed in turn.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_unit_counts_as_its_request_had_the_tier_when_it_was_published() {
+    let looped = "function g() { $s = 0; for ($i = 0; $i < 4; $i++) { $s += $i; } return $s; }";
+    let program = |setting: Option<&str>| {
+        let switch = setting.map_or(String::new(), |s| format!("ini_set('opcache.jit', '{s}');"));
+        format!("{switch}\necho include __DIR__ . '/loop.php';")
+    };
+    let hot = ("opcache.jit_hot_loop", "255");
+    for (start, switch, written) in [
+        ("off", None, false),
+        ("off", Some("tracing"), true),
+        ("tracing", None, true),
+        ("tracing", Some("off"), false),
+    ] {
+        let engine = testing::engine::<Counted>(&[("opcache.jit", start), hot]);
+        let scratch = testing::Scratch::new();
+        let loop_file = format!("<?php {looped} return g();");
+        std::fs::write(scratch.0.join("loop.php"), loop_file).unwrap_or_default();
+        let (served, asked) = scratch.serve_kept::<Asked>(&engine, &program(switch));
+        assert_eq!(testing::stdout(&served), "6", "{start} then {switch:?}");
+        let asked = asked.unwrap_or_default();
+        assert_eq!(asked.loops, 4, "{start} then {switch:?}: {asked:?}");
+        let counted = if written { 4 } else { 0 };
+        assert_eq!(
+            asked.loops_written, counted,
+            "{start} then {switch:?}: {asked:?}"
+        );
+    }
 }
 
 /// A loop in `$main` that no call activates is a root of its own: the

@@ -61,7 +61,7 @@ pub(crate) enum Mode {
 /// Whether the engine's loop asks the tier at all, decided once at
 /// engine start from the [`Policy`] and the host's `Backend`, which is
 /// the one bit `Jit::asked` answers the engine with: the loop bound to
-/// `Nop` where the tier can never compile a trace, `Jit`'s where it does.
+/// `Nop` where the tier can never compile a trace, `Jit`'s where it may.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Bound {
     /// The tier never runs in this process: opcache does not start for
@@ -69,15 +69,15 @@ pub(crate) enum Bound {
     /// no bytes ([`SetUp`]), a refusal of `zend_jit_check_support`, or a
     /// host with no `Backend`. php's VM keeps its own handlers.
     Never,
-    /// Set up and not on, `opcache.jit=off` with a buffer, which php may
-    /// turn on from a request with `ini_set('opcache.jit', 'tracing')`
+    /// Set up and not on, `opcache.jit=off` with a buffer, which php
+    /// turns on from a request with `ini_set('opcache.jit', 'tracing')`
     /// (`zend_jit_config`, `Z/ext/opcache/jit/zend_jit.c:3646-3700`). It
-    /// binds `Nop`'s loop as `Never` does because this tier reads the
-    /// startup ini alone (`jit-design.md` §4.7), so it runs no trace
-    /// whatever a request sets, which #3139 is to change (#3140's
-    /// ruling).
+    /// binds `Jit`'s loop, and no word counts until a request turns the
+    /// setting on and publishes a unit while it is ([`Policy::counts`]),
+    /// as php gives an op array its counters only as it persists it while
+    /// `JIT_G(on)` (#3139).
     Runtime,
-    /// The tier runs: tracing, or a lane `jit.mode` names.
+    /// The tier runs from the start: tracing, or a lane `jit.mode` names.
     On,
 }
 
@@ -85,8 +85,8 @@ impl Bound {
     /// Whether the engine binds `Jit`'s loop.
     pub(crate) fn asked(self) -> bool {
         match self {
-            Bound::Never | Bound::Runtime => false,
-            Bound::On => true,
+            Bound::Never => false,
+            Bound::Runtime | Bound::On => true,
         }
     }
 }
@@ -405,6 +405,9 @@ pub(crate) struct Policy {
     /// host, which is where `zend_jit_check_support` runs and so where its
     /// refusal warns ([`Policy::check_support`]).
     set_up: SetUp,
+    /// Whether `jit.mode` names a lane, so every unit counts whatever
+    /// `opcache.jit` says ([`Policy::counts`]).
+    lane: bool,
     /// What php's `zend_jit_status` reports once its start is over, no
     /// code in the buffer ([`Policy::status`]).
     started: TierStatus,
@@ -557,15 +560,19 @@ impl Policy {
         // below's. `off` is not one: php may turn it on from a request.
         let disabled = value(ini, "opcache.jit").is_some()
             && matches!(setting, Setting::Disable | Setting::Invalid { .. });
+        // Set up and off, the tier traces what a request publishes after
+        // it turns the setting on ([`Policy::counts`]).
+        let lane = lane.filter(|_| !disabled);
         let asked = match (lane, setting, set_up) {
-            (Some(mode), ..) if !disabled => mode,
+            (Some(mode), ..) => mode,
             (None, Setting::On { crto }, SetUp::Yes) => {
                 if (crto / 10) % 10 != HOT_TRACE {
                     notes.push(Note::AsTracing { crto });
                 }
                 Mode::Tracing
             }
-            (Some(_) | None, ..) => Mode::Off,
+            (None, Setting::Off, SetUp::Yes) => Mode::Tracing,
+            (None, ..) => Mode::Off,
         };
         let mode = if buffer_size > 0 { asked } else { Mode::Off };
         if matches!(mode, Mode::Force | Mode::ExitFuzz) {
@@ -618,6 +625,7 @@ impl Policy {
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
             debug,
             set_up,
+            lane: lane.is_some(),
             started: started(setting, set_up, buffer_size),
         };
         if mode == Mode::Off {
@@ -676,28 +684,108 @@ impl Policy {
     }
 
     /// `zend_jit_status` (`Z/ext/opcache/jit/zend_jit.c:825-842`): `JIT_G`
-    /// as php's start left it, and the buffer, of which the code of
-    /// `used` bytes is taken. php's stubs take some of it before any
-    /// trace; this tier has none, so a buffer no trace was published
-    /// into is free whole. `JIT_G` is the start's: php's
-    /// `ini_set('opcache.jit', ...)` from a request rewrites `on` and the digits, which
-    /// this tier does not read yet (#3139).
-    pub(crate) fn status(&self, used: usize) -> TierStatus {
+    /// and the buffer, of which the code of `used` bytes is taken. php's
+    /// stubs take some of it before any trace; this tier has none, so a
+    /// buffer no trace was published into is free whole. `JIT_G` is the
+    /// start's, rewritten where php set its tier up by `setting`, the
+    /// request's `opcache.jit`, as `zend_jit_config` rewrites it from
+    /// `ini_set`: on, and its digits, under a setting that turns it on;
+    /// `on` dropped under `off`, and `enabled` too under `disable`, each
+    /// keeping the digits the start wrote.
+    ///
+    /// Under `opcache.jit=off` with a buffer, `ini_set('opcache.jit',
+    /// 'function')` turns the tier on with php's digits for it:
+    ///
+    /// ```php
+    /// $code = '$s = fn () => array_slice(opcache_get_status(false)["jit"], 0, 5); echo json_encode($s()), "\n"; ini_set("opcache.jit", "function"); echo json_encode($s()), "\n";';
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-r', $code], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]);
+    /// proc_close($p);
+    /// ```
+    /// ```expect process
+    /// {"enabled":true,"on":false,"kind":0,"opt_level":0,"opt_flags":0}
+    /// {"enabled":true,"on":true,"kind":0,"opt_level":5,"opt_flags":6}
+    /// ```
+    pub(crate) fn status(&self, used: usize, setting: Option<&[u8]>) -> TierStatus {
         let used = u64::try_from(used).unwrap_or(u64::MAX);
+        let started = self.started;
+        let jit_g = match (self.set_up, setting.map(Setting::of)) {
+            (SetUp::Yes, Some(on @ Setting::On { .. })) => TierStatus {
+                buffer_size: started.buffer_size,
+                buffer_free: started.buffer_free,
+                ..on.status()
+            },
+            (SetUp::Yes, Some(Setting::Off)) => TierStatus {
+                on: false,
+                ..started
+            },
+            (SetUp::Yes, Some(Setting::Disable)) => TierStatus {
+                enabled: false,
+                on: false,
+                ..started
+            },
+            _ => started,
+        };
         TierStatus {
-            buffer_free: self.started.buffer_free.saturating_sub(used),
-            ..self.started
+            buffer_free: started.buffer_free.saturating_sub(used),
+            ..jit_g
         }
+    }
+
+    /// Whether the safepoint words of a unit published now count, php's
+    /// `zend_persist` giving an op array its counters only while
+    /// `JIT_G(on)` (`Z/ext/opcache/zend_persist.c:721-726`, `:1471-1473`),
+    /// which none of its handlers reads again: where the tier is set up, `setting`, the
+    /// `opcache.jit` in force where the unit is published, turns it on,
+    /// or a lane counts every unit. A unit whose words do not count is
+    /// never traced, whatever a later request sets, as php's op array
+    /// keeps the handlers it was persisted with.
+    ///
+    /// Under `opcache.jit=off` with a buffer, a program cached before its
+    /// `ini_set('opcache.jit', 'tracing')` writes no `TRACE` line from its
+    /// loop, and a file it includes after the switch writes php's, its
+    /// entry's and its loop's:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/jit-switch-' . getmypid(); mkdir($dir);
+    /// $loop = 'function %s() { $s = 0; for ($i = 0; $i < 4; $i++) { $s += $i; } return $s; }';
+    /// file_put_contents("$dir/main.php", '<?php ' . sprintf($loop, 'before') . ' var_dump(opcache_is_script_cached(__FILE__)); ini_set("opcache.jit", "tracing"); echo include __DIR__ . "/after.php", " ", before(), "\n";');
+    /// file_put_contents("$dir/after.php", '<?php ' . sprintf($loop, 'after') . ' return after();');
+    /// touch("$dir/main.php", time() - 60); touch("$dir/after.php", time() - 60);
+    /// $cmd = [PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_debug=12288', '-d', 'opcache.jit_hot_loop=1', '-d', 'opcache.jit_hot_func=1', "$dir/main.php"];
+    /// $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]), str_replace($dir, 'DIR', stream_get_contents($pipes[2]));
+    /// proc_close($p); unlink("$dir/main.php"); unlink("$dir/after.php"); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// bool(true)
+    /// 6 6
+    /// ---- TRACE 1 start (enter) $main() DIR/after.php:1
+    /// ---- TRACE 1 start (loop) after() DIR/after.php:1
+    /// ---- TRACE 1 stop (loop)
+    /// ```
+    pub(crate) fn counts(&self, setting: Option<&[u8]>) -> bool {
+        match self.mode {
+            Mode::Off => false,
+            _ if self.lane => true,
+            _ => setting.is_some_and(|setting| matches!(Setting::of(setting), Setting::On { .. })),
+        }
+    }
+
+    /// Whether a unit published with no request counts: as the startup's
+    /// `opcache.jit` says.
+    pub(crate) fn counts_at_start(&self) -> bool {
+        self.mode != Mode::Off && (self.lane || self.started.on)
     }
 
     /// How the engine binds the tier, for a host whose `Backend` was
     /// `backed`, made, where the directives asked for one ([`Bound`]).
     pub(crate) fn bound(&self, backed: bool) -> Bound {
-        match (self.mode, self.set_up) {
-            (Mode::Off, SetUp::Yes) => Bound::Runtime,
-            (Mode::Off, _) => Bound::Never,
+        match self.mode {
+            Mode::Off => Bound::Never,
             _ if !backed => Bound::Never,
-            _ => Bound::On,
+            _ if self.counts_at_start() => Bound::On,
+            _ => Bound::Runtime,
         }
     }
 

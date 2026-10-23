@@ -116,10 +116,12 @@ pub(crate) fn visit(
 
 /// `Jit::safepoint`, the site's word visited and what came of it,
 /// outlined, so the loop's site is one call. An engine whose tier runs
-/// `Off` binds `Nop`'s loop and never asks (`Jit::asked`); asked under
-/// `Off` all the same, it answers `Continue` before any word is read.
-/// Here, and only here, `Continue` means nothing happened. The engine
-/// state is looked up once, and its `Arc` is shared on only past a visit
+/// `Off` binds `Nop`'s loop and never asks (`Jit::asked`). The site's
+/// word is read first, and a word no visit acts on, sealed or
+/// recording, answers `Continue` before the request's state is looked
+/// up; asked under `Off` all the same, it answers `Continue` before a
+/// word is visited. Here, and only here, `Continue` means nothing
+/// happened. The engine state is looked up once, and its `Arc` is shared on only past a visit
 /// that entered or claimed, so the visit that bumps and goes on writes
 /// no count of the `Arc` the engine's threads share. A return's word is
 /// its caller's landing ([`Site`]'s third arm visits no word of the
@@ -163,14 +165,6 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
     };
     let (decided, shared) = {
         let req: &Request = req;
-        let Some(state) = tier::state::<JitRequest>(req) else {
-            return Flow::Continue;
-        };
-        let shared = &state.shared;
-        if shared.policy.mode() == Mode::Off {
-            return Flow::Continue;
-        }
-        let claims = !quieted(state, Some(site));
         let rooted = match site {
             Site::Loop(at) => Rooted::Safepoint(at),
             Site::Entry => Rooted::Safepoint(SafepointIdx::ENTRY),
@@ -179,6 +173,26 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
                 None => return Flow::Continue,
             },
         };
+        let word = match rooted {
+            Rooted::Safepoint(at) => held.word(req, at),
+            Rooted::Landing(caller, at) => tier::landing(req, caller, at),
+        };
+        // A word no visit acts on answers before the request's state is
+        // looked up: a unit published while `opcache.jit` was off has its
+        // words sealed (`Policy::counts`), and a landing reads sealed
+        // until a trace armed it, so an engine set up and off pays a call
+        // and a word read at a safepoint and nothing more.
+        if matches!(policy::read(word), State::Blacklisted | State::Recording) {
+            return Flow::Continue;
+        }
+        let Some(state) = tier::state::<JitRequest>(req) else {
+            return Flow::Continue;
+        };
+        let shared = &state.shared;
+        if shared.policy.mode() == Mode::Off {
+            return Flow::Continue;
+        }
+        let claims = !quieted(state, Some(site));
         // A table a hot root found full stopped its counters, as php's
         // `zend_jit_stop_counter_handlers` does: no word is claimed more.
         let holder = || {
@@ -199,10 +213,6 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
                     at,
                 },
             })
-        };
-        let word = match rooted {
-            Rooted::Safepoint(at) => held.word(req, at),
-            Rooted::Landing(caller, at) => tier::landing(req, caller, at),
         };
         match visit(word, &shared.policy, start, claims, holder) {
             Visited::Continue => return Flow::Continue,

@@ -200,6 +200,20 @@ pub trait Tier: 'static {
         let _ = req;
         TierStatus::default()
     }
+
+    /// Whether the safepoint words of a unit the engine `started`
+    /// publishes now count, asked once per unit as the cache holds it,
+    /// with `req`, the request it is published for, none where the engine
+    /// publishes it for no request: php's `zend_persist` gives an op array
+    /// its counters only while its compiled tier is on, and none of its
+    /// handlers reads that again (`jit-design.md` §4.7). A unit whose words do not
+    /// count has them sealed, so no visit acts on them. Every unit
+    /// counts by default.
+    #[must_use]
+    fn counts(started: &Started<'_>, req: Option<&Request>) -> bool {
+        let _ = (started, req);
+        true
+    }
 }
 
 /// The started engine as its tier reads it at [`Tier::asked`]: the
@@ -259,6 +273,12 @@ impl TierState {
     fn of<T: Tier>(started: Started<'_>) -> TierState {
         TierState(T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>))
     }
+}
+
+/// Whether the words of a unit the engine `shared` holds now, for `req`
+/// or for no request, count ([`Tier::counts`]).
+pub(crate) fn counts(shared: &crate::engine::Shared, req: Option<&Request>) -> bool {
+    (shared.loops.counts)(&Started { shared }, req)
 }
 
 /// The tier's state the request was laid with, where it is an `S`
@@ -597,6 +617,9 @@ pub(crate) struct Loops {
     /// The engine's tier's [`Tier::status`], its own whichever loop is
     /// bound; read by `UnitCache::status` alone.
     pub(crate) status: fn(&Request) -> TierStatus,
+    /// The engine's tier's [`Tier::counts`], its own whichever loop is
+    /// bound; read by the unit cache as it holds a unit.
+    pub(crate) counts: fn(&Started<'_>, Option<&Request>) -> bool,
 }
 
 impl Loops {
@@ -610,6 +633,7 @@ impl Loops {
         } else {
             Loops {
                 status: T::status,
+                counts: T::counts,
                 ..Loops::told::<Nop>(&shared.opcodes)
             }
         }
@@ -639,6 +663,7 @@ impl Loops {
             resume: resume::<T, D>,
             lay: TierState::of::<T>,
             status: T::status,
+            counts: T::counts,
         }
     }
 }
