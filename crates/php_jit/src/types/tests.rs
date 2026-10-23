@@ -23,9 +23,10 @@ use super::{
     Slot, TraceIr, Types, ValueId, build,
 };
 use crate::lower::dump;
-use crate::record::{Landed, Stop};
+use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
-    self, FIB, Fixture, MANDELBROT, NBODY, SPECTRALNORM, held, traced as built,
+    self, ARRAY_WRITE, FANNKUCH, FIB, Fixture, MANDELBROT, NBODY, SIEVE, SPECTRALNORM, held,
+    traced as built,
 };
 use crate::testing::records::recording;
 
@@ -137,7 +138,10 @@ fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
 /// its own loop or recursive call (`Z/ext/opcache/jit/zend_jit_trace.c:4237-4272`),
 /// and a side's guard at the read (#3203): the array's layout among
 /// them, held where the array is read by a long key, as php's side holds
-/// `MAY_BE_PACKED_GUARD` there.
+/// `MAY_BE_PACKED_GUARD` there; and `$n`, read once. `$i`, which php's
+/// allocator loads into a register as the trace enters, read by the
+/// comparison, the fetch and the increment, is held at entry, as php's
+/// code holds a `ZREG_LOAD` value there (`:4283-4310`, #3270).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), String> {
@@ -151,7 +155,15 @@ fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), Strin
     assert!(at_entry(&looping) > 0, "{}", dump::render(&looping));
     recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
     let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
-    assert_eq!(at_entry(&linked), 0, "{}", dump::render(&linked));
+    let entered: Vec<u32> = (linked.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Entry)
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => Some(linked.values[value.0 as usize].slot.var),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(entered, [3], "{}", dump::render(&linked));
+    assert_eq!(at_entry(&linked), 1, "{}", dump::render(&linked));
     let layout = (linked.guards.iter())
         .find(|guard| matches!(guard.check, Check::Layout { .. }))
         .map(|guard| guard.at);
@@ -160,6 +172,78 @@ fn a_trace_that_does_not_loop_holds_its_guards_at_the_read() -> Result<(), Strin
         "{layout:?}: {}",
         dump::render(&linked)
     );
+    Ok(())
+}
+
+/// fannkuch's side trace at `0049` (`TRACE 10`, side trace 9/2 under the
+/// pinned php at `opcache.optimization_level=0`, whose op arrays are this
+/// engine's) does not loop, and php's allocator loads `$maxFlips` at its
+/// entry, read by `0054`'s `IS_SMALLER` and written by `0056`'s `ASSIGN`
+/// (its `TRACE 10 Live Ranges` list `#5.CV5($maxFlips) load`), so php
+/// holds its type there: `exit_0` and `exit_1` land at `0049`, the guard
+/// on `$maxFlips` and then the one on `$flips`, which `PRE_INC` reads
+/// once (#3270). The record is the engine's own for that trace.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_value_phps_allocator_loads_is_held_at_entry() -> Result<(), String> {
+    let recorded = goldens::recorded(FANNKUCH)?;
+    let root = crate::record::func_name(recorded.record.root);
+    let text = "start side 9/3\nroot {root}\nentered 1:array 11:long 12:long
+op {root} 49 long - - -\nop {root} 50 array.packed - - -\nop {root} 51 long long - -
+op {root} 52 long - - fell\nop {root} 54 long long - fell\nop {root} 56 long long - -
+op {root} 57 long - - -\nop {root} 58 long - - taken\nop {root} 62 long - - -
+op {root} 63 long - - -\nop {root} 64 long long - -\nop {root} 65 - - - -
+op {root} 93 - - - taken\nop {root} 66 long long - taken\nop {root} 72 array.packed - - -
+op {root} 73 long long - -\nop {root} 74 long - - -\nop {root} 75 - - - -
+link-at {root} 82\nstop link 6\n"
+        .replace("{root}", &root);
+    let record = TraceRecord::parse(&text).map_err(|e| format!("{e:?}"))?;
+    let ir = build(&record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let first: Vec<Option<(u32, Option<u32>, bool)>> = (ir.guards.iter().take(2))
+        .map(|guard| match guard.check {
+            Check::Type { value, .. } => {
+                let var = ir.values[value.0 as usize].slot.var;
+                let lands = ir.exits[usize::from(guard.exit.0)].opline.map(|at| at.0);
+                Some((var, lands, guard.at == GuardAt::Entry))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        first,
+        [Some((5, Some(49), true)), Some((9, Some(49), false))],
+        "{}",
+        dump::render(&ir)
+    );
+    let exits: Vec<u16> = ir.guards.iter().take(2).map(|guard| guard.exit.0).collect();
+    assert_eq!(exits, [0, 1], "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// An element write and its `OP_DATA` are two ops of php's trace SSA, so
+/// `$a[$k] = $k` reads `$k` twice, as the key and as the value the
+/// `OP_DATA` takes an owner of, and php's allocator loads it at the entry
+/// of a trace that does not loop where nothing else reads it
+/// (`zend_jit_trace_allocate_registers`, `Z/ext/opcache/jit/zend_jit_trace.c:3290-3300`;
+/// #3270).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_key_written_as_its_own_value_is_read_twice() -> Result<(), String> {
+    let (mut recorded, _) = recording(
+        &IN_F,
+        "function f($a, $k, $n) { for ($i = 0; $i < $n; $i++) { $a[$k] = $k; } return $a; }
+        echo f([1, 2, 3], 1, 3)[1], \"\\n\";",
+    )?;
+    recorded.record.stop = Stop::Link(crate::table::TraceId::new(1).ok_or("no trace 1")?);
+    let linked = build(&recorded.record, &recorded.view).map_err(|abort| format!("{abort:?}"))?;
+    let entered: Vec<u32> = (linked.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Entry)
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => Some(linked.values[value.0 as usize].slot.var),
+            _ => None,
+        })
+        .collect();
+    assert!(entered.contains(&1), "{}", dump::render(&linked));
     Ok(())
 }
 
@@ -214,6 +298,47 @@ fn mandelbrot_loops_in_file_scope() -> Result<(), String> {
 fn nbody_advances_in_a_loop() -> Result<(), String> {
     let ir = golden(NBODY)?;
     assert_eq!(ir.entry.stop, Stop::Loop);
+    Ok(())
+}
+
+/// The element writes of `array_write` and `sieve`, a scalar by a long
+/// key to a packed array recorded packed, are inline, as php's
+/// `zend_jit_assign_dim` compiles them, with no layout guard, which php
+/// adds only to an array recorded hash
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`): the array is of
+/// either layout, which the write tests. They take no exit, since php's
+/// code calls its helpers where it cannot write in place, and the handler
+/// serves it here; the handler may throw, so they unwind (#3228).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_element_write_is_inline_and_takes_no_exit() -> Result<(), String> {
+    for fixture in [ARRAY_WRITE, SIEVE] {
+        let ir = golden(fixture)?;
+        assert_eq!(ir.entry.stop, Stop::Loop);
+        let writes: Vec<_> = (ir.ops.iter())
+            .filter_map(|op| match op {
+                Op::Line(line) if line.opcode == Opcode::AssignDim => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(writes.len(), 1, "{}", dump::render(&ir));
+        for line in writes {
+            assert_eq!(line.form, Form::Inline, "{}", dump::render(&ir));
+            assert!(line.exit.is_none() && line.unwind.is_some());
+            let Operand::Value(array) = line.op1 else {
+                return Err(format!("{}: a write to no array", fixture.name));
+            };
+            let types = ir.values[array.0 as usize].types;
+            assert!(types.meets(Types::PACKED) && types.meets(Types::HASH));
+        }
+        assert!(
+            !ir.guards
+                .iter()
+                .any(|guard| matches!(guard.check, Check::Layout { .. })),
+            "{}",
+            dump::render(&ir)
+        );
+    }
     Ok(())
 }
 
@@ -998,10 +1123,10 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
 /// (`0007`, `0008`, `0010`, `0011`, `0013`, `0014`), the increment's at
 /// `0016`, with no exit for a `JMPZ`'s direction
 /// (`Z/ext/opcache/jit/zend_jit_trace.c:5687-5691`, #3203). php's tenth,
-/// its interrupt test's at `0017`, is there because its register
-/// allocator holds the `BOOL_NOT`s' temporaries in registers, which an
-/// exit must store (`:7214-7230`); here the loop takes the interrupt stub
-/// (#3270).
+/// its interrupt test's at `0017`, is there because its code no longer
+/// uses the instruction pointer it entered with, its register allocator
+/// holding nothing (`:7214-7230`); here the loop takes the interrupt stub
+/// (#3277).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_jump_its_guard_holds_one_way_takes_phps_exits() -> Result<(), String> {

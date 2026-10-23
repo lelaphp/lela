@@ -27,6 +27,7 @@ use super::{
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 
+mod loads;
 mod stack;
 
 /// php's `ZEND_JIT_TRACE_MAX_EXITS`: the most exits one trace has.
@@ -218,6 +219,12 @@ struct Builder<'a> {
     /// An inlined callee's untyped parameter, by the value it entered
     /// with, and the caller's register value it was sent from ([`Call::regs`]).
     held: HashMap<ValueId, ValueId>,
+    /// In a trace that does not loop, the guards held at the first read
+    /// of what the root frame entered with, which php's allocator may
+    /// load at entry ([`Builder::load_at_entry`]).
+    entry_reads: Vec<usize>,
+    /// Per line, the operands' types its recording saw.
+    sampled: HashMap<OpId, [Option<Sample>; 3]>,
 }
 
 impl<'a> Builder<'a> {
@@ -251,6 +258,8 @@ impl<'a> Builder<'a> {
                 _ => None,
             },
             held: HashMap::new(),
+            entry_reads: Vec::new(),
+            sampled: HashMap::new(),
         };
         let root = builder.frame(rec.root, Place::Root, None)?;
         builder.stack.push(root);
@@ -481,6 +490,7 @@ impl<'a> Builder<'a> {
             samples,
         );
         let form = self.form(frame, &op, seen, next);
+        self.sampled.insert(idx, samples);
         let map_ptr = self.map_ptr(func, &op, form);
         self.record_send(frame, &op, op1);
         if !keeps_temporaries(op.opcode) {
@@ -760,8 +770,9 @@ impl<'a> Builder<'a> {
     /// one cannot finish, before it does anything, which the interpreter
     /// runs again; through an unwind where a kernel it calls throws, a
     /// stepped one that may, an inline assignment over a counted value,
-    /// whose destructor may, and an inline fetch from a temporary array,
-    /// which frees it once its element is read.
+    /// whose destructor may, an inline fetch from a temporary array,
+    /// which frees it once its element is read, and an inline element
+    /// write, which its handler serves where it cannot write in place.
     fn own_exit(&mut self, idx: OpId, frame: Frame, op: &Opline, form: Form, old: Types) {
         let Some(Op::Line(line)) = self.ops.get(idx.index()) else {
             return;
@@ -790,6 +801,7 @@ impl<'a> Builder<'a> {
             Form::Inline => {
                 (op.opcode == Opcode::Assign && !old.within(UNCOUNTED))
                     || (op.opcode == Opcode::FetchDimR && self.is_temp(op1))
+                    || op.opcode == Opcode::AssignDim
             }
             Form::Step => op.opcode.effects().contains(Effects::THROW),
         };
@@ -1333,8 +1345,11 @@ impl<'a> Builder<'a> {
     /// holds a loop-invariant type there only for those stops
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:4237-4272`), and before the op
     /// that reads it first in any other trace, a side's among them, as
-    /// php's holds `MAY_BE_GUARD` and `MAY_BE_PACKED_GUARD` at the read; a
-    /// recursive return's loop holds only what the call wrote there, its
+    /// php's holds `MAY_BE_GUARD` and `MAY_BE_PACKED_GUARD` at the read,
+    /// but at entry again in a trace that does not loop where php's
+    /// register allocator loads the value as the trace enters
+    /// ([`Builder::load_at_entry`], `:4283-4310`), decided once the walk
+    /// has seen every read; a recursive return's loop holds only what the call wrote there, its
     /// phi ([`Builder::close_phis`]); by the inline op that
     /// computed it for an arithmetic's overflow and a fetched element's
     /// type, as php's code generator holds a guarded value it writes, an
@@ -1394,10 +1409,16 @@ impl<'a> Builder<'a> {
                 }
                 (GuardAt::Within(def), draft(Point::Before(def), frame, to))
             }
-            _ => (
-                GuardAt::Before(idx),
-                draft(Point::Before(idx), held.slot.frame, At::Opline(here)),
-            ),
+            _ => {
+                if held.def == Def::Entry && held.slot.frame == Frame::ROOT && self.repeat.is_none()
+                {
+                    self.entry_reads.push(self.guards.len());
+                }
+                (
+                    GuardAt::Before(idx),
+                    draft(Point::Before(idx), held.slot.frame, At::Opline(here)),
+                )
+            }
         };
         self.guards.push(Placed { at, check, exit });
         self.guards.extend(then);
@@ -1504,7 +1525,16 @@ impl<'a> Builder<'a> {
                 cv1 && number(t1)
             }
             Opcode::FetchDimR => op.op1_type != OperandKind::Const && t1 == packed && long(t2),
-            Opcode::AssignDim => cv1 && t1 == packed && long(t2) && scalar(td),
+            // php compiles the write inline over an array that may be
+            // packed, testing its layout where it may be either, and adds
+            // no layout guard where the array was recorded packed
+            // (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`).
+            Opcode::AssignDim => {
+                cv1 && t1.tag() == Some(ZvalType::Array)
+                    && t1.meets(Types::PACKED)
+                    && long(t2)
+                    && scalar(td)
+            }
             Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx => {
                 op.op2_type == OperandKind::Unused && scalar(t1)
             }
@@ -1637,6 +1667,7 @@ impl<'a> Builder<'a> {
                     .flatten(),
             },
         };
+        self.load_at_entry();
         let numbered = self.number(closes)?;
         let end = numbered
             .end
