@@ -685,11 +685,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
                 req.addref(&object.as_value());
                 Ok((Funcs::Class, object, Some(class_iter)))
             }
-            None => Err(throw_error(
-                req,
-                "Error",
-                "An iterator cannot be used with foreach by reference",
-            )),
+            None => Err(no_foreach_by_ref(req)),
         };
     }
     if req
@@ -706,11 +702,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         let funcs = match by_ref_places(req, object) {
             Some(place) => Funcs::Places(place),
             None if by_ref => {
-                return Err(throw_error(
-                    req,
-                    "Error",
-                    "An iterator cannot be used with foreach by reference",
-                ));
+                return Err(no_foreach_by_ref(req));
             }
             None => Funcs::User,
         };
@@ -738,11 +730,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         Some(inner) if native && internal_walked(req, inner) == Some(object) => {
             answered.give_up(req);
             if by_ref {
-                return Err(throw_error(
-                    req,
-                    "Error",
-                    "An iterator cannot be used with foreach by reference",
-                ));
+                return Err(no_foreach_by_ref(req));
             }
             req.addref(&object.as_value());
             Ok((Funcs::Element, object, None))
@@ -1214,4 +1202,13 @@ fn internal_element(req: &mut Request, this: PhpObject) -> Result<Option<Iterato
     let (object, index) = (*object, *index as usize);
     let table = req.object_handlers(object.heap());
     table.iterator_element(req, object, index)
+}
+
+/// php's `Error` for a `foreach` by reference over an iterator.
+fn no_foreach_by_ref(req: &mut Request) -> Thrown {
+    throw_error(
+        req,
+        "Error",
+        "An iterator cannot be used with foreach by reference",
+    )
 }

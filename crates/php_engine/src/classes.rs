@@ -894,12 +894,7 @@ impl Closure {
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
     ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
-        adopted_some(do_closure_bind(
-            req,
-            closure.object(),
-            newThis,
-            NewScope::of(newScope),
-        ))
+        adopted_some(do_closure_bind(req, closure.object(), newThis, newScope))
     }
 
     /// `Closure::bindTo(?object $newThis, object|string|null $newScope = "static"): ?Closure`,
@@ -969,12 +964,7 @@ impl Closure {
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
     ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
-        adopted_some(do_closure_bind(
-            req,
-            this.object(),
-            newThis,
-            NewScope::of(newScope),
-        ))
+        adopted_some(do_closure_bind(req, this.object(), newThis, newScope))
     }
 
     /// `Closure::call(object $newThis, mixed ...$args): mixed`,
@@ -2229,24 +2219,6 @@ fn throwable_property<T: FromArgument>(
     Raw::from_value(req, value)
 }
 
-/// The `object|string|null $newScope` of `bind` and `bindTo`,
-/// `Z_PARAM_OBJ_OR_STR_OR_NULL` with php's default `"static"`.
-enum NewScope {
-    Object(PhpObject),
-    Named(Vec<u8>),
-    Null,
-}
-
-impl NewScope {
-    fn of(scope: Option<Union<PhpObject, PhpString>>) -> NewScope {
-        match scope {
-            Some(Union::A(object)) => NewScope::Object(object),
-            Some(Union::B(name)) => NewScope::Named(name.as_bytes().to_vec()),
-            None => NewScope::Null,
-        }
-    }
-}
-
 /// `do_closure_bind` (`Z/Zend/zend_closures.c:323`): the scope the
 /// arguments name, an object's class, `"static"` the closure's own and
 /// any other string the class of that name, php's warning and `null`
@@ -2302,26 +2274,24 @@ fn do_closure_bind(
     req: &mut Request,
     closure: PhpObject,
     this: Option<PhpObject>,
-    scope: NewScope,
+    scope: Option<Union<PhpObject, PhpString>>,
 ) -> Result<Option<Instance<Closure>>, Thrown> {
     let Some(ClosureObject { info, cache: from }) = closure.native::<ClosureObject>(req).cloned()
     else {
         return Ok(None);
     };
     let scope = match scope {
-        NewScope::Object(object) => Some(object.class()),
-        NewScope::Named(name) if name == b"static" => info.scope,
-        NewScope::Named(name) => {
-            let Some(class) = req.class_named(Bare::of(&name)) else {
-                warning(
-                    req,
-                    &format!("Class \"{}\" not found", String::from_utf8_lossy(&name)),
-                );
+        Some(Union::A(object)) => Some(object.class()),
+        Some(Union::B(name)) if name.as_bytes() == b"static" => info.scope,
+        Some(Union::B(name)) => {
+            let Some(class) = req.class_named(Bare::of(name.as_bytes())) else {
+                let shown = String::from_utf8_lossy(name.as_bytes());
+                warning(req, &format!("Class \"{shown}\" not found"));
                 return Ok(None);
             };
             Some(class)
         }
-        NewScope::Null => None,
+        None => None,
     };
     if !valid_closure_binding(req, &info, this, scope) {
         return Ok(None);
