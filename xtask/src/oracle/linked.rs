@@ -69,7 +69,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -172,7 +172,7 @@ fn ask(dir: &Path, server: Option<&Path>, recipe: &Recipe) -> Result<()> {
     };
     let environ = Environ::of(recipe);
     let idle = {
-        let mut idle = IDLE.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut idle = crate::locked(&IDLE);
         let at = idle
             .iter()
             .position(|server| server.binary == binary && server.environ == environ);
@@ -183,9 +183,7 @@ fn ask(dir: &Path, server: Option<&Path>, recipe: &Recipe) -> Result<()> {
         None => Server::start(binary, recipe, environ)?,
     };
     server.ask(dir)?;
-    IDLE.lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(server);
+    crate::locked(&IDLE).push(server);
     Ok(())
 }
 

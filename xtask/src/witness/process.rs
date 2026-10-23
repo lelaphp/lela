@@ -42,7 +42,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
@@ -112,7 +112,7 @@ impl Binary {
     #[cfg(test)]
     #[cfg(tracked)]
     fn stand(&self, host: EngineHost, features: &[&str], path: PathBuf) {
-        let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut built = crate::locked(&self.built);
         let key = (host.krate, owned(features));
         built.insert(key, Arc::new(OnceLock::from(Ok(path))));
     }
@@ -136,7 +136,7 @@ impl Binary {
         // The map's lock is held to find the build's slot alone, so one
         // host's build never waits on another's.
         let slot = {
-            let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut built = crate::locked(&self.built);
             let key = (host.krate, owned(features));
             Arc::clone(built.entry(key).or_default())
         };

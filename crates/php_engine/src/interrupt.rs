@@ -38,10 +38,18 @@ use crate::api::request::{Interrupt, Request};
 /// leaves `EG(exception)` for the opline it re-enters.
 #[inline]
 pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
-    if req.limits().interrupt().raised().load(Ordering::Relaxed) {
+    if raised(req) {
         return interrupted(req);
     }
     Ok(false)
+}
+
+/// The check's one load: whether the interrupt is raised, for a site
+/// that does something of its own before [`interrupted`] where it is,
+/// as the loop's back-edge stands the frame at its target.
+#[inline]
+pub(crate) fn raised(req: &Request) -> bool {
+    req.limits().interrupt().raised().load(Ordering::Relaxed)
 }
 
 /// What a check that found the interrupt raised does

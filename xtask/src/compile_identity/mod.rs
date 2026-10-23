@@ -400,7 +400,7 @@ pub fn run(
     // The engine's binary, built from the tree the reading is stamped
     // with; one the tree has moved past, or none, dumps nothing, and the
     // lane says why (#475, #2166).
-    let runner = Runner::resolve(root, pin, ask.engine.as_deref())?;
+    let runner = Runner::resolve(root, &manifest.layout(), pin, ask.engine.as_deref())?;
     if let Runner::Absent(why) | Runner::Stale(why) = &runner {
         println!("{INSTRUMENT}: {why}");
     }

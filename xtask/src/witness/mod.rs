@@ -138,7 +138,7 @@ mod watch;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -461,12 +461,6 @@ fn tail(tally: &Tally) -> String {
     said.collect::<Vec<_>>().concat()
 }
 
-/// The value under `lock`, a poisoned one included: a fence whose run
-/// panicked leaves what it gathered as it was.
-fn held<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
-    lock.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// `krate`'s reading over `snapshot`, under the coverage rule where the
 /// manifest has one: the rule's id and its ADR, on every reading the
 /// instrument writes.
@@ -731,7 +725,7 @@ fn find<'a>(
         }
         // The harness measures the engine and carries no witness of its
         // own; `done` asks it for none either (§4.5).
-        let unrun = if krate.name == crate::done::HARNESS {
+        let unrun = if krate.name == crate::layout::HARNESS {
             Some("the harness carries no witness")
         } else {
             (!sources::exists(root, krate)).then_some(sources::NOT_YET_CREATED)
@@ -1108,8 +1102,8 @@ fn serve(
     }
     let mut kept = judge::Kept::default();
     let judged = judge::one(oracle, registry, ask, witness, regime, binary, &mut kept)?;
-    held(&gathered.captured).extend(kept.captured);
-    held(&gathered.entered).insert(witness.id(), kept.entered);
+    crate::locked(&gathered.captured).extend(kept.captured);
+    crate::locked(&gathered.entered).insert(witness.id(), kept.entered);
     if let Some(watch) = watch {
         watch.served(witness)?;
     }
@@ -1140,7 +1134,7 @@ fn serve_absent(
                 Record::Unserved
             }
         };
-        held(&gathered.entered).insert(witness.id(), record);
+        crate::locked(&gathered.entered).insert(witness.id(), record);
     }
     unserved
 }

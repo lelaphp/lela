@@ -30,7 +30,12 @@ fn locks_and_budget_render_the_readings_the_instruments_wrote() {
         "# a header\nvalues::Zval\nvalues::Array\n\n__private::Entry\nrequest::Request\n",
     )
     .unwrap();
-    let ceiling = Manifest::load(&root).unwrap().budget.api_items.to_string();
+    let ceiling = Manifest::load(&root)
+        .unwrap()
+        .budget
+        .api_items
+        .unwrap()
+        .to_string();
     let md = status(&root, &["--section", "locks"]).ok();
     assert!(
         md.contains(&format!("| api | api.lock | 3 | {ceiling} | pass |")),

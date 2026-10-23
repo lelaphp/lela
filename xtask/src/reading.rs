@@ -1172,7 +1172,7 @@ impl Chain {
         if !root.join(".git").exists() {
             return Ok(Chain::default());
         }
-        let ids = crate::git::git(root, &["rev-list", "--first-parent", "HEAD"], None)?;
+        let ids = crate::git::git(root, &["rev-list", "--first-parent", "HEAD"])?;
         let distance = ids.lines().enumerate().map(|(n, id)| (id.to_owned(), n));
         Ok(Chain {
             distance: distance.collect(),
@@ -1346,6 +1346,21 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = yoe + era * 400 + i64::from(m <= 2);
     (y, m, d)
+}
+
+/// Each of `items` as it displays, `separator` between.
+pub(crate) fn joined<T: std::fmt::Display>(
+    items: impl IntoIterator<Item = T>,
+    separator: &str,
+) -> String {
+    let mut out = String::new();
+    for (i, item) in items.into_iter().enumerate() {
+        if i > 0 {
+            out.push_str(separator);
+        }
+        out.push_str(&item.to_string());
+    }
+    out
 }
 
 /// At most five names, and how many more there are: how a reading's

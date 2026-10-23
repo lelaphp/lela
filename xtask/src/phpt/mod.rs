@@ -430,11 +430,25 @@ impl Subset {
     /// Every `.phpt` of the directory `under` of the pinned tree at
     /// `source`, a subset of its own named by its place in the tree.
     fn whole(source: &Path, under: PathBuf) -> Subset {
+        let scope = under.to_string_lossy().into_owned();
+        Subset::over(scope, source, [under], Holds::Every)
+    }
+
+    /// The subset named `scope` of the directories `unders` of the tree
+    /// at `root`, run from there.
+    fn over(
+        scope: String,
+        root: &Path,
+        unders: impl IntoIterator<Item = PathBuf>,
+        holds: Holds,
+    ) -> Subset {
+        let dirs = unders.into_iter().map(|under| Dir::at(root, under));
+        let root = root.to_path_buf();
         Subset {
-            scope: under.to_string_lossy().into_owned(),
-            dirs: vec![Dir::at(source, under)],
-            root: source.to_path_buf(),
-            holds: Holds::Every,
+            scope,
+            dirs: dirs.collect(),
+            root,
+            holds,
         }
     }
 
@@ -445,33 +459,16 @@ impl Subset {
     /// `done` asking a crate for a phpt reading nothing could write, which
     /// is the hole #18 closed.
     pub(crate) fn of(source: &Path, krate: &Crate) -> Option<Subset> {
-        let dirs: Vec<Dir> = krate
-            .subsets()
-            .into_iter()
-            .map(|under| Dir::at(source, under))
-            .collect();
-        (!dirs.is_empty()).then(|| Subset {
-            scope: krate.name.clone(),
-            dirs,
-            root: source.to_path_buf(),
-            holds: Holds::Every,
-        })
+        let unders = krate.subsets();
+        (!unders.is_empty()).then(|| Subset::over(krate.name.clone(), source, unders, Holds::Every))
     }
 
     /// The same subset standing in the tree at `root`, a copy of the one
     /// it was resolved in: its directories at their places there, and its
     /// programs run from there.
     pub(crate) fn rooted(&self, root: &Path) -> Subset {
-        Subset {
-            scope: self.scope.clone(),
-            dirs: self
-                .dirs
-                .iter()
-                .map(|place| Dir::at(root, place.under.clone()))
-                .collect(),
-            root: root.to_path_buf(),
-            holds: self.holds,
-        }
+        let unders = self.dirs.iter().map(|place| place.under.clone());
+        Subset::over(self.scope.clone(), root, unders, self.holds)
     }
 
     /// Whether the subset's tests make System V objects naming no process,
@@ -656,6 +653,26 @@ impl Judgement {
         Judgement::Unsent,
     ];
 
+    /// The verdict's three spellings, the one place each is named.
+    fn spelled(self) -> Spelled {
+        let spelled = |kept, key, upstream| Spelled {
+            kept,
+            key,
+            upstream,
+        };
+        match self {
+            Judgement::Pass => spelled("pass", "passed", Some("PASS")),
+            Judgement::Fail => spelled("fail", "failed", Some("FAIL")),
+            Judgement::Skip => spelled("skip", "skipped", Some("SKIP")),
+            Judgement::Bork => spelled("bork", "borked", Some("BORK")),
+            Judgement::XFail => spelled("xfail", "xfailed", Some("XFAIL")),
+            Judgement::Warn => spelled("warn", "warned", Some("WARN")),
+            Judgement::Diverged => spelled("diverged", "diverged", Some("FAIL")),
+            Judgement::Unread => spelled("unread", "unread", None),
+            Judgement::Unsent => spelled("unsent", "unsent", None),
+        }
+    }
+
     /// Whether the test met its expectation with no registry row: a pass,
     /// or one its `--XFAIL--` warns of, which differ by the test's section
     /// and not by what ran.
@@ -673,18 +690,26 @@ impl Judgement {
     /// place it is named, for the run that writes the count and the
     /// rendering that reads it back (#1745).
     pub(crate) fn key(self) -> &'static str {
-        match self {
-            Judgement::Pass => "passed",
-            Judgement::Diverged => "diverged",
-            Judgement::Fail => "failed",
-            Judgement::Skip => "skipped",
-            Judgement::Bork => "borked",
-            Judgement::XFail => "xfailed",
-            Judgement::Warn => "warned",
-            Judgement::Unread => "unread",
-            Judgement::Unsent => "unsent",
-        }
+        self.spelled().key
     }
+
+    /// What `run-tests.php` calls the verdict: a difference a registry
+    /// row accepts is still its `FAIL`, and a test the compiler did not
+    /// read has none, since only the engine's compiler refuses one, nor
+    /// one the served lane left out, since only that lane sends HTTP.
+    pub(super) fn word(self) -> Option<&'static str> {
+        self.spelled().upstream
+    }
+}
+
+/// A verdict's spellings ([`Judgement::spelled`]).
+struct Spelled {
+    /// As a kept run spells it, [`tally::Judgement::as_str`].
+    kept: &'static str,
+    /// The key of a reading's `numbers` that counts it.
+    key: &'static str,
+    /// What `run-tests.php` calls it, where it calls it anything.
+    upstream: Option<&'static str>,
 }
 
 impl tally::Judgement for Judgement {
@@ -694,17 +719,7 @@ impl tally::Judgement for Judgement {
     const PASS: Judgement = Judgement::Pass;
 
     fn as_str(self) -> &'static str {
-        match self {
-            Judgement::Pass => "pass",
-            Judgement::Diverged => "diverged",
-            Judgement::Fail => "fail",
-            Judgement::Skip => "skip",
-            Judgement::Bork => "bork",
-            Judgement::XFail => "xfail",
-            Judgement::Warn => "warn",
-            Judgement::Unread => "unread",
-            Judgement::Unsent => "unsent",
-        }
+        self.spelled().kept
     }
 
     /// Whether the subset's reading fails on it.
@@ -1409,11 +1424,12 @@ impl<'v> Runners<'v> {
             .map_err(|why| anyhow::anyhow!("{why}"))?;
         // The control is each oracle's own php, standing for the engine
         // under its own pin (#1970).
+        let layout = manifest.layout();
         let resolve = |pin: &Pin| match &ask.engine {
             Engine::Built => tiered
                 .clone()
-                .map_or_else(|| Runner::resolve(root, pin, None), Ok),
-            Engine::Named(path) => Runner::resolve(root, pin, Some(path)),
+                .map_or_else(|| Runner::resolve(root, &layout, pin, None), Ok),
+            Engine::Named(path) => Runner::resolve(root, &layout, pin, Some(path)),
             Engine::Control => Ok(Runner::Control(pin.oracle.path.clone())),
         };
         let mut resolved = BTreeMap::new();
@@ -1921,10 +1937,7 @@ fn run_tests(
     let waited = Mutex::new(across::Waited::default());
     let tally = Tally::judge_apart(&held, jobs, batch, &apart, |(item, keys)| {
         let (_held, wait) = across::hold(locks, keys)?;
-        waited
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .add(wait);
+        crate::locked(&waited).add(wait);
         adapter.judge(subset, item)
     })?;
     let waited = waited.into_inner().unwrap_or_else(PoisonError::into_inner);

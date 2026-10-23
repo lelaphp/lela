@@ -19,7 +19,7 @@ use crate::sources::{self, Standing};
 pub(crate) const RULE: &str = "unsafe.homes";
 
 /// The instrument's name, the reading's `instrument` field.
-const INSTRUMENT: &str = "unsafe-audit";
+pub(crate) const INSTRUMENT: &str = "unsafe-audit";
 
 /// Audit every created crate; one reading each.
 pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {

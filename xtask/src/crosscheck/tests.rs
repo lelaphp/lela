@@ -456,7 +456,7 @@ fn staging(tree: &std::path::Path, path: &str, text: &str) {
     let at = tree.join(path);
     fs::create_dir_all(at.parent().unwrap()).unwrap();
     fs::write(&at, text).unwrap();
-    crate::git::git(tree, &["add", "--", path], None).unwrap();
+    crate::git::git(tree, &["add", "--", path]).unwrap();
 }
 
 /// `crosscheck --staged` over the closure fixture of #1318, both

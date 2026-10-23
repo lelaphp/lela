@@ -46,7 +46,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock, PoisonError};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -54,6 +54,8 @@ use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::divergence::{Divergence, Registry};
+use crate::layout::Layout;
+use crate::reading::joined;
 use crate::scratch::{self, Tree};
 
 /// The environment variable that names the pinned php-src tree on this
@@ -638,7 +640,7 @@ static RUN_DIR: Mutex<Option<Tree>> = Mutex::new(None);
 /// Where the run's own directory stands, made now if no program has
 /// named it yet.
 pub(crate) fn run_dir() -> Result<PathBuf> {
-    let mut held = RUN_DIR.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut held = crate::locked(&RUN_DIR);
     if let Some(tree) = &*held {
         return Ok(tree.path().to_path_buf());
     }
@@ -650,10 +652,7 @@ pub(crate) fn run_dir() -> Result<PathBuf> {
 
 /// The run's own directory removed, as the run ends.
 pub(crate) fn run_ended() {
-    RUN_DIR
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .take();
+    crate::locked(&RUN_DIR).take();
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -836,11 +835,7 @@ impl Pin {
         self.regime.get(name).with_context(|| {
             format!(
                 "no regime {name:?} in the pin; the regimes are {}",
-                self.regime
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                joined(self.regime.keys(), ", ")
             )
         })
     }
@@ -1517,7 +1512,7 @@ impl Spawned {
     /// One program spawned as `pid` at `from`; the number
     /// [`Spawned::ended`] closes its run by.
     fn add(&self, pid: u32, from: SystemTime) -> u64 {
-        let mut programs = self.programs.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut programs = crate::locked(&self.programs);
         let number = programs.next;
         programs.next += 1;
         programs.pids.insert(pid);
@@ -1534,7 +1529,7 @@ impl Spawned {
     /// fails leaves the window its last write bounds, which the lane's
     /// own sweep settles whole when the run is not cut off.
     fn journal(&self, line: fmt::Arguments<'_>) {
-        let journal = self.journal.lock().unwrap_or_else(PoisonError::into_inner);
+        let journal = crate::locked(&self.journal);
         if let Some(mut file) = journal.as_ref() {
             writeln!(file, "{line}").ok();
         }
@@ -1544,7 +1539,7 @@ impl Spawned {
     /// forgotten since is not looked for.
     fn ended(&self, number: u64) {
         let now = SystemTime::now();
-        let mut programs = self.programs.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut programs = crate::locked(&self.programs);
         if let Some(ran) = programs.runs.iter_mut().rev().find(|r| r.number == number) {
             ran.to = Some(now);
         }
@@ -1555,7 +1550,7 @@ impl Spawned {
     /// The programs spawned since the last take, and none kept after but
     /// the count, so a number is never given twice.
     fn take(&self) -> Programs {
-        let mut programs = self.programs.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut programs = crate::locked(&self.programs);
         let next = programs.next;
         std::mem::replace(
             &mut *programs,
@@ -1615,11 +1610,7 @@ impl<'a> Oracle<'a> {
     /// Each program's start and end written to `journal` from now, a
     /// System V claim's file, or to none (#2448).
     pub(crate) fn journal(&self, journal: Option<File>) {
-        *self
-            .spawned
-            .journal
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = journal;
+        *crate::locked(&self.spawned.journal) = journal;
     }
 
     /// Run `program` under the pinned binary and the recipe, with
@@ -1894,7 +1885,8 @@ pub enum Runner {
 impl Runner {
     /// The binary to run: the one named, or the engine's where cargo puts
     /// it. A binary whose digest is the pin's is the lane's control, and
-    /// the engine's own is held to the tree by [`against_the_tree`].
+    /// the engine's own is held to the tree by [`against_the_tree`], over
+    /// the crate directories of `layout`.
     ///
     /// The profiles are tried in [`profile::PREFERRED`]'s order, the
     /// lanes' own first (revision 82). A binary the tree has moved past is
@@ -1904,7 +1896,12 @@ impl Runner {
     /// every run after, however far the tree moved, and a debug build could
     /// not displace it (#475). Where every binary found is behind the tree,
     /// the first is the one the skip names.
-    pub fn resolve(root: &Path, pin: &Pin, named: Option<&Path>) -> Result<Runner> {
+    pub fn resolve(
+        root: &Path,
+        layout: &Layout,
+        pin: &Pin,
+        named: Option<&Path>,
+    ) -> Result<Runner> {
         if let Some(path) = named {
             let path = named_binary(path)?;
             let digest = md5_of(&path, "")?;
@@ -1914,7 +1911,7 @@ impl Runner {
                 // about it; the pin holds it by its digest instead.
                 Runner::Control(path)
             } else {
-                against_the_tree(root, path)
+                against_the_tree(root, layout, path)
             });
         }
         let mut behind = None;
@@ -1924,7 +1921,7 @@ impl Runner {
             if !built.is_file() {
                 continue;
             }
-            match against_the_tree(root, built) {
+            match against_the_tree(root, layout, built) {
                 Runner::Stale(why) => {
                     behind.get_or_insert(Runner::Stale(why));
                 }
@@ -2019,7 +2016,7 @@ fn named_binary(path: &Path) -> Result<PathBuf> {
 /// held to the tree with the engine's, and the lot is behind the tree when
 /// any is. Each is held to its own dep-info, so writing `sapi/fpm` moves
 /// no `php`, as cargo relinks none.
-fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
+fn against_the_tree(root: &Path, layout: &Layout, path: PathBuf) -> Runner {
     let behind = hosts::HOSTS.iter().find_map(|host| {
         // The binary under test is `path`, whatever its name; the other
         // hosts stand beside it by theirs.
@@ -2029,7 +2026,8 @@ fn against_the_tree(root: &Path, path: PathBuf) -> Runner {
             path.with_file_name(host.binary)
         };
         let built = binary.metadata().and_then(|at| at.modified()).ok()?;
-        let (source, written) = BuiltFrom::of(&binary).newest(root, Path::new(host.krate))?;
+        let host_dir = Path::new(host.krate);
+        let (source, written) = BuiltFrom::of(&binary).newest(root, layout, host_dir)?;
         (written > built).then_some((binary, source))
     });
     let Some((path, source)) = behind else {

@@ -15,7 +15,8 @@
 //! A binary with no dep-info of its own, none beside it or one naming
 //! another binary (a target directory copied from another checkout), is
 //! keyed over every crate directory, as every binary was before #3109,
-//! and held to every file under them.
+//! and held to every file under them. The crate directories are the
+//! manifest's ([`Layout`], #3207).
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -23,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use super::hosts::{HOSTS, MAKALA};
-use crate::layout::{CRATE_DIRS, normalize};
+use crate::layout::{Layout, normalize};
 
 /// The workspace's own files every build of a package reads.
 const WORKSPACE: [&str; 4] = [
@@ -70,14 +71,14 @@ impl BuiltFrom {
     /// under: each package of the workspace the dep-info names a path in,
     /// whole, each host's, each other file of the workspace it names (a
     /// file a `build.rs` reads, `ops.toml`), and [`WORKSPACE`]. Where it
-    /// names no package under `root`, every crate directory, as
-    /// [`BuiltFrom::Unlisted`] is.
-    pub(crate) fn keyed(&self, root: &Path) -> Vec<PathBuf> {
-        let (packages, hosts) = (self.packages(root), HOSTS.map(|h| h.krate));
+    /// names no package under `root`, every crate directory of `layout`,
+    /// as [`BuiltFrom::Unlisted`] is.
+    pub(crate) fn keyed(&self, root: &Path, layout: &Layout) -> Vec<PathBuf> {
+        let (packages, hosts) = (self.packages(root, layout), HOSTS.map(|h| h.krate));
         // The served subset's host serves it beside them (`phpt::http`).
         let hosts = hosts.into_iter().chain([MAKALA.krate]).collect::<Vec<_>>();
-        let every = UNLISTED.iter().chain(CRATE_DIRS.iter().map(|d| &d.dir));
         if packages.is_empty() {
+            let every = UNLISTED.into_iter().chain(layout.dirs());
             return every.map(PathBuf::from).collect();
         }
         let workspace = WORKSPACE.iter().chain(&hosts).map(PathBuf::from);
@@ -88,7 +89,7 @@ impl BuiltFrom {
     /// Each path under `root` the dep-info names as its package's
     /// directory, or as itself outside one; none under `target`, which
     /// holds what a `build.rs` generated from the others.
-    fn packages(&self, root: &Path) -> BTreeSet<PathBuf> {
+    fn packages(&self, root: &Path, layout: &Layout) -> BTreeSet<PathBuf> {
         let BuiltFrom::Listed(paths) = self else {
             return BTreeSet::new();
         };
@@ -100,7 +101,7 @@ impl BuiltFrom {
             Some(normalize(path.ok()?))
         };
         let package = |path: PathBuf| match path.components().next() {
-            Some(first) if is_package(first.as_ref()) => {
+            Some(first) if is_package(first.as_ref(), layout) => {
                 Some(Path::new(&first).join(path.components().nth(1)?))
             }
             _ => Some(path),
@@ -108,7 +109,7 @@ impl BuiltFrom {
         let named = paths.iter().filter_map(|path| within(path));
         let named = named.filter(|path| !path.starts_with("target"));
         let found: BTreeSet<PathBuf> = named.filter_map(package).collect();
-        let linked = found.iter().any(|path| is_package(path));
+        let linked = found.iter().any(|path| is_package(path, layout));
         if linked { found } else { BTreeSet::new() }
     }
 
@@ -121,10 +122,15 @@ impl BuiltFrom {
     /// is no test, bench, example or fixture, and no `clippy.toml`, but
     /// another host's, since writing `sapi/fpm` relinks no `php`. `None`
     /// where none is there, and then the binary is behind nothing.
-    pub(crate) fn newest(&self, root: &Path, host: &Path) -> Option<(PathBuf, SystemTime)> {
+    pub(crate) fn newest(
+        &self,
+        root: &Path,
+        layout: &Layout,
+        host: &Path,
+    ) -> Option<(PathBuf, SystemTime)> {
         let listed = match self {
             BuiltFrom::Listed(paths) => paths.clone(),
-            BuiltFrom::Unlisted => CRATE_DIRS.iter().map(|d| root.join(d.dir)).collect(),
+            BuiltFrom::Unlisted => layout.dirs().map(|dir| root.join(dir)).collect(),
         };
         let mut found = Vec::new();
         for path in listed {
@@ -134,7 +140,8 @@ impl BuiltFrom {
                 found.push(path);
             }
         }
-        let packages = self.packages(root).into_iter().filter(|p| is_package(p));
+        let packages = self.packages(root, layout).into_iter();
+        let packages = packages.filter(|p| is_package(p, layout));
         found.extend(packages.map(|package| root.join(package).join("Cargo.toml")));
         found.push(root.join("rust-toolchain.toml"));
         if *self == BuiltFrom::Unlisted {
@@ -162,10 +169,10 @@ fn is_engine_source(relative: &Path) -> bool {
         && !(relative.components()).any(|part| skipped.iter().any(|s| part.as_os_str() == *s))
 }
 
-/// Whether `path`, relative to the root, is under a crate directory: a
-/// package's directory or a path in one.
-fn is_package(path: &Path) -> bool {
-    CRATE_DIRS.iter().any(|d| path.starts_with(d.dir))
+/// Whether `path`, relative to the root, is under a crate directory of
+/// `layout`: a package's directory or a path in one.
+fn is_package(path: &Path, layout: &Layout) -> bool {
+    layout.dirs().any(|dir| path.starts_with(dir))
 }
 
 /// The words of a dep-info line, each path with its `\ ` read as a space.

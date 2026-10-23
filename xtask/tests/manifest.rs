@@ -436,6 +436,56 @@ fn generated_decodes_as_a_list_of_files_and_any_other_shape_is_refused() {
     }
 }
 
+/// `[[owed]]` rows are refused by name (#3206): the fixtures name an
+/// instrument that writes no reading of a crate (`status`), a predicate
+/// the harness does not derive, and a crate no row of the manifest is,
+/// a misspelling that would drop the obligation unseen; a second row of
+/// one instrument and an `exempt` naming no crate are refused as well.
+/// The rows the grammar reads load.
+#[test]
+fn an_owed_row_naming_an_unknown_instrument_predicate_or_crate_is_refused_by_name() {
+    const CRATES: &str =
+        "[[crate]]\nname = \"php_heap\"\nbudget = 1\n[[crate]]\nname = \"ext/pcre\"\nbudget = 1\n";
+    let parsed = |rows: &str| Manifest::parse(&format!("{MINIMAL}{CRATES}{rows}"));
+    let refused = |rows: &str| format!("{:#}", parsed(rows).unwrap_err());
+    let fixture = |name: &str| {
+        let path = xtask::package_dir().join("fixtures/done").join(name);
+        refused(&std::fs::read_to_string(path).unwrap())
+    };
+    let err = fixture("owed-unknown-instrument.toml");
+    assert!(
+        err.contains(
+            "[[owed]] names the instrument \"status\", which writes no reading of a crate"
+        ) && err.contains("one of clippy, test, witness"),
+        "{err}"
+    );
+    let err = fixture("owed-unknown-when.toml");
+    assert!(
+        err.contains("unknown variant `phpt-lane`") && err.contains("`phpt-subset`"),
+        "{err}"
+    );
+    let err = fixture("owed-unmatched-crate.toml");
+    assert!(
+        err.contains("an [[owed]] row for miri names \"php_hep\", which matches no crate"),
+        "{err}"
+    );
+    let row =
+        |instrument: &str| format!("[[owed]]\ninstrument = \"{instrument}\"\ncrates = \"*\"\n");
+    let err = refused(&format!("{}{}", row("test"), row("test")));
+    assert!(err.contains("[[owed]] names \"test\" twice"), "{err}");
+    let err = refused(&format!("{}exempt = [\"xtsak\"]\n", row("witness")));
+    assert!(
+        err.contains("row for witness names \"xtsak\", which matches no crate"),
+        "{err}"
+    );
+    let held = "[[owed]]\ninstrument = \"miri\"\ncrates = [\"php_*\"]\nexempt = [\"ext/*\"]\nwhen = \"lock-home\"\n";
+    let manifest = parsed(&format!("{}{held}", row("test"))).unwrap();
+    assert_eq!(manifest.owed.len(), 2);
+    assert!(manifest.owing("test").unwrap().covers("ext/pcre"));
+    assert!(manifest.owing("miri").unwrap().covers("php_heap"));
+    assert!(!manifest.owing("miri").unwrap().covers("ext/pcre"));
+}
+
 /// `allow_in_tests` lists lints its rule denies that clippy exempts tests
 /// from by a key (#3078). The fixture lists `clippy::todo`, which has no
 /// such key, and is refused naming the lint; so is a lint the rule does

@@ -872,7 +872,7 @@ fn the_sparse_patterns_check_out_every_subset_the_manifest_and_the_corpus_hold()
     ];
 
     let origin = Tree::new("phpt-sparse-origin").unwrap();
-    git(&origin, &["init", "-q", "-b", "main"], None).unwrap();
+    git(&origin, &["init", "-q", "-b", "main"]).unwrap();
     for under in &held {
         fs::create_dir_all(origin.join(under)).unwrap();
         fs::write(origin.join(under).join("held.phpt"), "").unwrap();
@@ -882,7 +882,7 @@ fn the_sparse_patterns_check_out_every_subset_the_manifest_and_the_corpus_hold()
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         fs::write(file, "").unwrap();
     }
-    git(&origin, &["add", "-A"], None).unwrap();
+    git(&origin, &["add", "-A"]).unwrap();
     git(
         &origin,
         &[
@@ -895,27 +895,21 @@ fn the_sparse_patterns_check_out_every_subset_the_manifest_and_the_corpus_hold()
             "-m",
             "corpus",
         ],
-        None,
     )
     .unwrap();
 
     let clone = Tree::new("phpt-sparse-clone").unwrap();
     let from = origin.path().to_string_lossy().into_owned();
-    git(
-        &clone,
-        &["clone", "-q", "--no-checkout", &from, "php-src"],
-        None,
-    )
-    .unwrap();
+    git(&clone, &["clone", "-q", "--no-checkout", &from, "php-src"]).unwrap();
     let checkout = clone.join("php-src");
     let stdin = patterns.join("\n") + "\n";
-    git(
+    crate::git::fed(
         &checkout,
         &["sparse-checkout", "set", "--no-cone", "--stdin"],
-        Some(&stdin),
+        &stdin,
     )
     .unwrap();
-    git(&checkout, &["checkout", "-q"], None).unwrap();
+    git(&checkout, &["checkout", "-q"]).unwrap();
 
     for under in &held {
         assert!(

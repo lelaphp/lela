@@ -40,7 +40,7 @@ use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{self, Ended, Invocation, Observation, Oracle, Program, Regime, Verdict};
 use crate::phpt::{Build, Lane};
-use crate::reading::{Reading, Status, Store};
+use crate::reading::{Reading, Status, Store, joined};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "trace-dump";
@@ -301,10 +301,7 @@ impl Sides<'_> {
         let under = format!("under [regime.{REGIME}] and {}", self.ini.join(" "));
         let said = format!("{}: {under}: {verdict}", traced.scope);
         reading.status = status;
-        reading.message = std::iter::once(said)
-            .chain(notes)
-            .collect::<Vec<_>>()
-            .join("; ");
+        reading.message = joined(std::iter::once(said).chain(notes), "; ");
         Ok(())
     }
 }

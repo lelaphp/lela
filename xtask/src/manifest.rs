@@ -22,6 +22,11 @@ use crate::oracle::Pin;
 use crate::phpt::Scope;
 use crate::track::Ticket;
 
+pub use crate::layout::Layout;
+pub use owed::{Instrument, Owed, When};
+
+mod owed;
+
 /// The file name of the manifest at the workspace root.
 pub const FILE: &str = "seams.toml";
 
@@ -47,6 +52,10 @@ pub struct Manifest {
     pub edges: Vec<Edge>,
     #[serde(rename = "rule", default)]
     pub rules: Vec<Rule>,
+    /// `[[owed]]`: the instruments a crate owes a fresh reading of before
+    /// `done`, one row per instrument ([`Owed`], #3206).
+    #[serde(default)]
+    pub owed: Vec<Owed>,
     /// `[lock_home]`: the crate a lock's file lives with, for a lock no
     /// `[[crate]]` row names. A seam whose producer is a file and not a
     /// crate (`ops`, generated from `ops.toml`) has no row to carry it,
@@ -61,7 +70,8 @@ pub struct Manifest {
     /// to; `None` where the file has no table, which `status` says.
     pub divergence: Option<DivergenceTable>,
     /// `[[bench]]`: each perf bar's tolerance and the nights it was
-    /// derived over (#2659); a bar without a row is a series held to none.
+    /// derived over (#2659), the one place a bar's bound is written
+    /// (#3130); a bar without a row is a series held to none.
     #[serde(rename = "bench", default)]
     pub(crate) tolerances: Vec<Tolerance>,
     /// The pin the `[oracle]` row names, loaded from that file by the
@@ -97,18 +107,22 @@ pub struct DivergenceTable {
     pub target: u64,
 }
 
-/// One `[[bench]]` row (#2659): a bar's tolerance, the 75th percentile of
-/// its A/A control's nightly |paired delta| over `from` to `to`, floored at
-/// 2%, in percentage points of the second arm; the first baseline is the
-/// median of the bar's own nights over the same dates.
+/// One `[[bench]]` row (#2659): a bar's tolerance, in percentage points
+/// of the second arm, the 75th percentile of its A/A control's nightly
+/// |paired delta| over `nights`, floored at 2%, or the floor alone while
+/// the control has no two weeks of nights (#3130). A series is held to it
+/// beside its baseline, the first the median of its own nights over the
+/// same dates; a bar held to a bound is held to one plus it (protocol
+/// §12.3).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Tolerance {
     pub bar: String,
     #[serde(rename = "tolerance_pct")]
     pub pct: f64,
-    pub from: toml::value::Datetime,
-    pub to: toml::value::Datetime,
+    /// The first and the last night it was derived over; none while it is
+    /// the floor.
+    pub nights: Option<[toml::value::Datetime; 2]>,
 }
 
 /// `[parity]`: the suites php builds that parity does not count (design
@@ -190,7 +204,10 @@ pub struct PinRow {
     pub pin: String,
 }
 
-/// `[budget]`: the workspace-wide ceilings (design §4.1, §10).
+/// `[budget]`: the workspace-wide ceilings (design §4.1, §10). The php
+/// measures, `clean_build_release_s`, `api_items` and `bindings`, are
+/// optional: a manifest that omits one states no budget for it, and
+/// nothing is held to it (#3187's ruling, #3207).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
@@ -200,14 +217,14 @@ pub struct Budget {
     pub docs: u64,
     pub harness: u64,
     pub lock_packages: u64,
-    pub clean_build_release_s: u64,
-    pub api_items: u64,
+    pub clean_build_release_s: Option<u64>,
+    pub api_items: Option<u64>,
     /// `api.lock`'s `__private` lines, the helpers only a macro expansion
     /// names, held apart from `api_items` (design §4.4, revision 34);
     /// absent while a person has not written the row, and the whole lock
     /// is then held to `api_items`.
     pub api_private_items: Option<u64>,
-    pub bindings: u64,
+    pub bindings: Option<u64>,
     /// `scripts/**` against its ceiling, with what under it is a generator
     /// and not counted; absent while a person has not written the row,
     /// and `budget` then counts the tree and holds it to nothing.
@@ -225,10 +242,10 @@ impl Budget {
             docs: n,
             harness: n,
             lock_packages: n,
-            clean_build_release_s: n,
-            api_items: n,
+            clean_build_release_s: Some(n),
+            api_items: Some(n),
             api_private_items: None,
-            bindings: n,
+            bindings: Some(n),
             scripts: None,
         }
     }
@@ -708,46 +725,37 @@ pub(crate) fn in_tests_key(lint: &str) -> Option<&'static str> {
         .map(|(_, key)| *key)
 }
 
+/// Whether a rule's predicates carry the one a row of
+/// [`Predicates::TABLE`] names.
+type Carries = fn(&Predicates) -> bool;
+
 impl Predicates {
-    /// The predicate names, in the design's order, `require_argv` after
-    /// the `deny_argv` it stands beside.
-    pub const NAMES: [&'static str; 12] = [
-        "deny_types",
-        "deny_methods",
-        "allow",
-        "deny_pattern",
-        "deny_argv",
-        "require_argv",
-        "on",
-        "deny",
-        "deny_lints",
-        "check",
-        "avoid_from",
-        "generated",
+    /// Each predicate: its name, in the design's order, `require_argv`
+    /// after the `deny_argv` it stands beside; whether a rule carries it;
+    /// and whether it describes one write or one command, so `permit` can
+    /// judge it before the call runs (the other five read the tree after
+    /// the write, harness-design.md §4.4).
+    const TABLE: [(&'static str, Carries, bool); 12] = [
+        ("deny_types", |p| p.deny_types.is_some(), true),
+        ("deny_methods", |p| p.deny_methods.is_some(), false),
+        ("allow", |p| p.allow.is_some(), true),
+        ("deny_pattern", |p| p.deny_pattern.is_some(), true),
+        ("deny_argv", |p| p.deny_argv.is_some(), true),
+        ("require_argv", |p| p.require_argv.is_some(), true),
+        ("on", |p| p.on.is_some(), true),
+        ("deny", |p| p.deny.is_some(), true),
+        ("deny_lints", |p| p.deny_lints.is_some(), false),
+        ("check", |p| p.check.is_some(), false),
+        ("avoid_from", |p| p.avoid_from.is_some(), false),
+        ("generated", |p| p.generated.is_some(), false),
     ];
 
     /// The names of the predicates this rule carries.
     pub fn named(&self) -> Vec<&'static str> {
-        let set = [
-            self.deny_types.is_some(),
-            self.deny_methods.is_some(),
-            self.allow.is_some(),
-            self.deny_pattern.is_some(),
-            self.deny_argv.is_some(),
-            self.require_argv.is_some(),
-            self.on.is_some(),
-            self.deny.is_some(),
-            self.deny_lints.is_some(),
-            self.check.is_some(),
-            self.avoid_from.is_some(),
-            self.generated.is_some(),
-        ];
-        Self::NAMES
-            .iter()
-            .zip(set)
-            .filter(|(_, on)| *on)
-            .map(|(name, _)| *name)
-            .collect()
+        let carried = Self::TABLE
+            .into_iter()
+            .filter(|(_, carries, _)| carries(self));
+        carried.map(|(name, ..)| name).collect()
     }
 
     /// Whether the predicate describes one write or one command, so `permit`
@@ -755,13 +763,9 @@ impl Predicates {
     /// `deny_pattern`, `deny_types`, `allow`, `on`. The other five read the
     /// tree after the write (harness-design.md §4.4).
     pub fn describes_a_call(&self) -> bool {
-        self.deny.is_some()
-            || self.deny_argv.is_some()
-            || self.require_argv.is_some()
-            || self.deny_pattern.is_some()
-            || self.deny_types.is_some()
-            || self.allow.is_some()
-            || self.on.is_some()
+        Self::TABLE
+            .iter()
+            .any(|(_, carries, call)| *call && carries(self))
     }
 
     /// A qualifier that has no predicate to qualify: `unless` without
@@ -1017,7 +1021,7 @@ impl Manifest {
                     rule.id,
                     named.len(),
                     named.join(", "),
-                    Predicates::NAMES.join(", ")
+                    crate::reading::joined(Predicates::TABLE.map(|(name, ..)| name), ", ")
                 );
             }
             if rule.predicate.with.iter().any(|w| w.trim().is_empty()) {
@@ -1095,6 +1099,7 @@ impl Manifest {
             }
         }
         manifest.parity.hold(&manifest.crates)?;
+        owed::hold(&manifest.owed, &manifest.crates)?;
         Ok(manifest)
     }
 
@@ -1112,11 +1117,12 @@ impl Manifest {
     }
 
     /// The ceilings on a seam's lock width: `[budget] api_items` and
-    /// `api_private_items` for the api seam (design §4.4, §4.5); no other
-    /// lock has one.
+    /// `api_private_items` for the api seam (design §4.4, §4.5), where the
+    /// manifest states `api_items`; no other lock has one.
     pub fn lock_ceiling(&self, seam: &Seam) -> Option<LockCeiling> {
-        (seam.name == "api").then_some(LockCeiling {
-            items: self.budget.api_items,
+        let items = self.budget.api_items.filter(|_| seam.name == "api")?;
+        Some(LockCeiling {
+            items,
             private: self.budget.api_private_items,
         })
     }
@@ -1137,8 +1143,21 @@ impl Manifest {
             .map(|t| t.trim().to_owned())
     }
 
+    /// The directories its crates are laid down in, derived from its
+    /// `[[crate]]` rows ([`Layout`], #3207).
+    pub fn layout(&self) -> Layout {
+        Layout::of(&self.crates)
+    }
+
     pub fn crate_named(&self, name: &str) -> Option<&Crate> {
         self.crates.iter().find(|c| c.name == name)
+    }
+
+    /// The `[[owed]]` row of `instrument`, where the manifest has one.
+    pub fn owing(&self, instrument: &str) -> Option<&Owed> {
+        self.owed
+            .iter()
+            .find(|row| row.instrument.name() == instrument)
     }
 
     /// The rows `only` names, in the manifest's order, or every row where

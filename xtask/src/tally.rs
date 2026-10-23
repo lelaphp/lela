@@ -406,7 +406,7 @@ pub(crate) fn pool<I: Sync, R: Send>(
         for _ in 0..threads.get().min(items.len()) {
             let (sent, queue, freed, each) = (sent.clone(), &queue, &freed, &each);
             scope.spawn(move || {
-                let lock = || queue.lock().unwrap_or_else(PoisonError::into_inner);
+                let lock = || crate::locked(queue);
                 loop {
                     let mut waiting = lock();
                     let at = loop {

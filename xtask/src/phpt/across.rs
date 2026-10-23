@@ -113,13 +113,8 @@ enum Mode {
 /// `mode` says, waiting where another holder stands in the way; how long
 /// the wait was.
 fn take(path: &Path, mode: Mode) -> Result<(File, Duration)> {
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .with_context(|| format!("opening the lock {}", path.display()))?;
+    let file =
+        crate::lock_file(path).with_context(|| format!("opening the lock {}", path.display()))?;
     let free = match mode {
         Mode::Shared => file.try_lock_shared().is_ok(),
         Mode::Exclusive => file.try_lock().is_ok(),

@@ -36,7 +36,7 @@ use regex_lite::Regex;
 
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
-use crate::reading::{Reading, Status, Store, epoch_seconds};
+use crate::reading::{Reading, Status, Store, epoch_seconds, joined};
 use crate::ticket;
 use crate::track::Ticket;
 
@@ -53,23 +53,14 @@ pub(crate) struct Unfiled {
 impl Unfiled {
     /// The tickets closed, as they are cited: `#28, #29`.
     fn closed_cited(&self) -> String {
-        self.closed
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", ")
+        joined(&self.closed, ", ")
     }
 
     /// The block's reason: the rule's text, what this session closed, the
     /// sentences that read as work left unfiled, and what to do.
     pub(crate) fn render(&self) -> String {
         let closed = self.closed_cited();
-        let sentences = self
-            .sentences
-            .iter()
-            .map(|s| format!("- {s:?}"))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let sentences = joined(self.sentences.iter().map(|s| format!("- {s:?}")), "\n");
         format!(
             "{} ({})\nThis session closed {closed}; its last reply reads as work left unfiled, in these sentences:\n{sentences}\nFile each as a ticket, `ready-for-agent` or `for-a-person`, and name its number in the reply, or say which ticket, divergence row or proposed rule already holds it; then stop again. A heuristic: the second Stop passes.\n",
             self.text, self.rule

@@ -558,7 +558,7 @@ ext = "OP"
 effects = ["throw", "alloc"]
 throw_cond = "if (opline->extended_value == ZEND_ADD) { if ((t1 & MAY_BE_ANY) == MAY_BE_ARRAY && (t2 & MAY_BE_ANY) == MAY_BE_ARRAY) { return 0; } return (t1 & (MAY_BE_STRING|MAY_BE_ARRAY|MAY_BE_OBJECT|MAY_BE_RESOURCE)) || (t2 & (MAY_BE_STRING|MAY_BE_ARRA ...; op1 CV undefined -> warning; op1 TMP/VAR destructor; op2 CV undefined -> warning; op2 TMP/VAR destructor"
 spec = ""
-specialise = false
+specialise = true
 doc = "assign with operator"
 
 [[op]]

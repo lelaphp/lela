@@ -102,9 +102,6 @@ pub(crate) enum Binary {
 #[inline]
 pub(crate) fn compound(extended_value: u32) -> Option<Binary> {
     // php's numbers for the opcodes, matched as the field holds them.
-    const ADD: u32 = Opcode::Add as u32;
-    const SUB: u32 = Opcode::Sub as u32;
-    const MUL: u32 = Opcode::Mul as u32;
     const DIV: u32 = Opcode::Div as u32;
     const MOD: u32 = Opcode::Mod as u32;
     const SL: u32 = Opcode::Sl as u32;
@@ -125,6 +122,44 @@ pub(crate) fn compound(extended_value: u32) -> Option<Binary> {
         BW_AND => Binary::Bitwise(Bitwise::And),
         _ => return None,
     })
+}
+
+/// `ZEND_ADD`'s, `ZEND_SUB`'s and `ZEND_MUL`'s numbers, as a compound
+/// assignment's `extended_value` holds them.
+const ADD: u32 = Opcode::Add as u32;
+const SUB: u32 = Opcode::Sub as u32;
+const MUL: u32 = Opcode::Mul as u32;
+
+/// [`binary`] under the operator of a compound assignment as its
+/// `extended_value` holds it: [`Arith`]'s three matched on the field
+/// itself, the operator then known where [`binary`] branches on it, and
+/// every other operator through [`compound`], so `$s += $i` makes one
+/// compare of the field where [`compound`] builds a [`Binary`] the pair
+/// then branches on again. [`binary`] and not [`arith`], whose tests
+/// put two longs and two doubles first: an accumulation is the mixed
+/// pair, a double and a long, which [`binary`] reaches in fewer (#3273).
+/// None where [`compound`] names no operator or the rule leaves the
+/// pair to the kernel.
+///
+/// ```php
+/// function c($a, $b) { $x = $a; $x += $b; $y = $a; $y -= $b; $z = $a; $z *= $b; $w = $a; $w /= $b; $t = $a; $t .= $b; echo implode(" ", [$x, $y, $z, $w, $t]), "\n"; }
+/// c(7, 2); c(1.5, 2); c(PHP_INT_MAX, 1); c(-3, 0.5);
+/// ```
+/// ```expect
+/// 9 5 14 3.5 72
+/// 3.5 -0.5 3 0.75 1.52
+/// 9.2233720368548E+18 9223372036854775806 9223372036854775807 9223372036854775807 92233720368547758071
+/// -2.5 -3.5 -1.5 -6 -30.5
+/// ```
+#[inline(always)] // as `computed`
+#[allow(clippy::inline_always)]
+pub(crate) fn compounded(extended_value: u32, a: Zval, b: Zval) -> Option<Zval> {
+    match extended_value {
+        ADD => binary(Binary::Arith(Arith::Add), a, b),
+        SUB => binary(Binary::Arith(Arith::Sub), a, b),
+        MUL => binary(Binary::Arith(Arith::Mul), a, b),
+        other => binary(compound(other)?, a, b),
+    }
 }
 
 /// A zval that is a number as it stands, nothing converted.
@@ -438,7 +473,43 @@ pub(crate) fn binary(op: Binary, a: Zval, b: Zval) -> Option<Zval> {
 #[inline(always)] // as `computed`
 #[allow(clippy::inline_always)]
 pub(crate) fn arith(op: Arith, a: Zval, b: Zval) -> Option<Zval> {
-    Some(number_zval(computed(op, number(a)?, number(b)?)))
+    numbers(
+        a,
+        b,
+        |x, y| match op.longs(x, y) {
+            Some(n) => Zval::long(n),
+            None => number_zval(overflowed(op, x, y)),
+        },
+        |x, y| Zval::double(op.doubles(x, y)),
+    )
+}
+
+/// Two zvals that are numbers as they stand, each pair served where its
+/// test lands, as php's handlers test them: two longs first, as
+/// `ZEND_ADD`'s `EXPECTED` pair is, then two doubles, then a mixed pair
+/// with its long converted as [`Number::double`] converts it. Each pair
+/// is one test of both type bytes (`&`, not `&&`, so the two compares
+/// meet in one branch), and no [`Number`] is built for a pair to be
+/// matched on again. `longs` serves two longs and `doubles` every other
+/// pair; None where either is no number.
+#[cfg_attr(not(debug_assertions), inline(always))] // the type tests of an inline path
+#[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
+#[allow(clippy::inline_always)]
+#[allow(clippy::needless_bitwise_bool)] // the two compares meet in one branch, measured (#3273)
+fn numbers<R>(
+    a: Zval,
+    b: Zval,
+    longs: impl FnOnce(i64, i64) -> R,
+    doubles: impl FnOnce(f64, f64) -> R,
+) -> Option<R> {
+    let (ka, kb) = (a.kind(), b.kind());
+    if (ka == ZvalType::Long) & (kb == ZvalType::Long) {
+        return Some(longs(a.as_long()?, b.as_long()?));
+    }
+    if (ka == ZvalType::Double) & (kb == ZvalType::Double) {
+        return Some(doubles(a.as_double()?, b.as_double()?));
+    }
+    Some(doubles(number(a)?.double(), number(b)?.double()))
 }
 
 /// The step of `ZEND_PRE_INC`, `ZEND_PRE_DEC` and their `POST_` pair over
@@ -659,8 +730,10 @@ pub(crate) fn string_length(z: Zval) -> Option<i64> {
 }
 
 /// `ZEND_IS_SMALLER`'s, `ZEND_IS_SMALLER_OR_EQUAL`'s and `ZEND_IS_EQUAL`'s
-/// inline pairs, [`Number::compare`]'s order over two zvals that are
-/// numbers as they stand: a NAN is greater whichever side it is on, so
+/// inline pairs: what `holds` reads off [`Number::compare`]'s order over
+/// two zvals that are numbers as they stand, read in the pair's own
+/// branch so no order is built for the answer to be read off again. A
+/// NAN is greater whichever side it is on, so
 /// it is smaller than nothing, equal to nothing and nothing is smaller
 /// than it.
 ///
@@ -683,8 +756,13 @@ pub(crate) fn string_length(z: Zval) -> Option<i64> {
 /// ```
 #[inline(always)] // as `computed`
 #[allow(clippy::inline_always)]
-pub(crate) fn order(a: Zval, b: Zval) -> Option<Ordering> {
-    Some(number(a)?.compare(number(b)?))
+pub(crate) fn order(a: Zval, b: Zval, holds: impl Fn(Ordering) -> bool + Copy) -> Option<bool> {
+    numbers(
+        a,
+        b,
+        |x, y| holds(x.cmp(&y)),
+        |x, y| holds(Number::Double(x).compare(Number::Double(y))),
+    )
 }
 
 /// `ZEND_JMPZ`'s and `ZEND_JMPNZ`'s inline test

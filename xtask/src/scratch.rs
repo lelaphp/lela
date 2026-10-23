@@ -43,13 +43,13 @@
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, PoisonError};
 
 use anyhow::{Context, Result};
 
 use crate::git::git;
-use crate::reading::{Reading, Status};
+use crate::reading::{Reading, Status, joined};
 
 /// Set to anything non-empty and a scratch tree is made, named on stderr
 /// and left standing: what a session debugging a failure sets, so the tree
@@ -135,7 +135,7 @@ impl Tree {
         // Before this process's first tree under `base`, and so before
         // there is one of ours there to mistake for a dead run's.
         {
-            let mut swept = SWEPT.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut swept = crate::locked(&SWEPT);
             if !swept.iter().any(|done| done == base) {
                 reap(base);
                 swept.push(base.to_path_buf());
@@ -288,11 +288,7 @@ fn volume(path: &Path) -> PathBuf {
         .and_then(|out| {
             let text = String::from_utf8_lossy(&out.stdout).into_owned();
             let line = text.lines().last()?.to_owned();
-            let mounted = line
-                .split_whitespace()
-                .skip(5)
-                .collect::<Vec<_>>()
-                .join(" ");
+            let mounted = joined(line.split_whitespace().skip(5), " ");
             (!mounted.is_empty()).then(|| PathBuf::from(mounted))
         })
         .unwrap_or_else(|| standing.to_path_buf())
@@ -458,7 +454,7 @@ pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
         std::fs::copy(workspace.join(&file), &target)
             .with_context(|| format!("copying {file} into {}", to.display()))?;
     }
-    git(to, &["init", "-q", "-b", "main"], None)?;
+    git(to, &["init", "-q", "-b", "main"])?;
     if let Some(common) = crate::git::common_dir(workspace) {
         let alternates = to.join(".git/objects/info/alternates");
         crate::write(
@@ -466,12 +462,11 @@ pub fn repository(workspace: &Path, to: &Path, scopes: &[&str]) -> Result<()> {
             format!("{}\n", common.join("objects").display()),
         )?;
     }
-    git(to, &["config", "core.hooksPath", "scripts/hooks"], None)?;
-    git(to, &["add", "-A"], None)?;
+    git(to, &["config", "core.hooksPath", "scripts/hooks"])?;
+    git(to, &["add", "-A"])?;
     git(
         to,
         &[&UNHOOKED[..], &["commit", "-q", "-m", "scratch"]].concat(),
-        None,
     )?;
     Ok(())
 }
@@ -494,7 +489,7 @@ pub const UNHOOKED: [&str; 8] = [
 /// `git` in `dir` under [`UNHOOKED`], a failure the test's.
 #[cfg(test)]
 pub(crate) fn committing(dir: &Path, args: &[&str]) {
-    if let Err(err) = git(dir, &[&UNHOOKED[..], args].concat(), None) {
+    if let Err(err) = git(dir, &[&UNHOOKED[..], args].concat()) {
         panic!("git {args:?} in {}: {err:#}", dir.display());
     }
 }
@@ -515,13 +510,8 @@ pub(crate) fn committing(dir: &Path, args: &[&str]) {
 /// work around, because the alternative is two runs in one directory.
 fn hold(tree: &Path) -> Result<(PathBuf, File)> {
     let (taking, lock) = (beside(tree, TAKING), beside(tree, LOCK));
-    let file = File::options()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(&taking)
-        .map_err(|err| made(err, &taking, "opening the scratch lock"))?;
+    let file =
+        crate::lock_file(&taking).map_err(|err| made(err, &taking, "opening the scratch lock"))?;
     if file.try_lock().is_err() {
         anyhow::bail!(
             "the scratch lock {} is held: another run is working there",
@@ -1164,9 +1154,7 @@ mod tests {
     /// a child, for its length: one's first tree sweeps another's.
     fn alone() -> std::sync::MutexGuard<'static, ()> {
         static STRAYS: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        STRAYS
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        crate::locked(&STRAYS)
     }
 
     /// The same under a subreaper (#2761): a test process run under a perl

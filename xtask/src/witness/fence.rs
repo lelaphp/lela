@@ -703,7 +703,8 @@ fn item_of(line: &str) -> Option<Item> {
             _ => return None,
         }
     }
-    let name = identifier(&words.collect::<Vec<_>>().join(" ")).unwrap_or_default();
+    let words = words.collect::<Vec<_>>().join(" ");
+    let name = identifier(&words).unwrap_or_default().to_owned();
     let function = keyword? == "fn";
     let head = if function {
         format!("{}fn {name}", if visible { "pub " } else { "" })
@@ -720,13 +721,13 @@ fn item_of(line: &str) -> Option<Item> {
 /// The identifier at the start of `text`, if there is one; a raw one,
 /// `r#mod`, as it is written, since php's name for the kernel is a
 /// keyword here.
-fn identifier(text: &str) -> Option<String> {
+pub(super) fn identifier(text: &str) -> Option<&str> {
     let text = text.trim_start();
     let raw = text.strip_prefix("r#").map_or(0, |_| 2);
     let end = text[raw..]
         .find(|c: char| !(c.is_alphanumeric() || c == '_'))
         .map_or(text.len(), |at| raw + at);
-    (end > raw).then(|| text[..end].to_owned())
+    (end > raw).then(|| &text[..end])
 }
 
 /// The `expect` fence line with `status` pinned on it: the one thing
