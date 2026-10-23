@@ -936,7 +936,7 @@ impl UnitCache {
     /// weight counted as wasted once however many requests discard it,
     /// and where the memory is exhausted a restart scheduled if enough is
     /// now wasted.
-    fn discard_held(&self, files: &Files, held: &Held) {
+    pub(crate) fn discard_held(&self, files: &Files, held: &Held) {
         if held.discarded.swap(true, Ordering::Relaxed) {
             return;
         }
