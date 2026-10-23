@@ -58,7 +58,7 @@ mod perf;
 mod tests;
 
 use code::{Arena, Code, Pages};
-pub(crate) use perf::{Outputs, Perf};
+pub(crate) use perf::{Outputs, Perf, Usage};
 
 /// The `Pages` adapter a trace's code is mapped through on this target
 /// (`jit-design.md` §4.4): `MAP_JIT` on macOS aarch64; under Miri the
@@ -547,6 +547,19 @@ impl<P: Pages> TraceTable<P> {
         }
     }
 
+    /// What the traces published so far take (#2961), read
+    /// under the compile mutex, so no publish is half counted.
+    #[cfg_attr(
+        not(any(test, php_jit_usage)),
+        expect(
+            dead_code,
+            reason = "the bench's build alone reads it, at a request's end"
+        )
+    )]
+    pub(crate) fn usage(&self) -> Usage {
+        self.writer().perf.usage()
+    }
+
     /// The trace `id` names: two acquire loads, nothing taken. None for
     /// an id no publish wrote, which is "not compiled" to every reader,
     /// the window `jit-design.md` §3.2 names included.
@@ -671,9 +684,8 @@ impl<P: Pages> TraceTable<P> {
         if !self.vacant(id) {
             return Err(Unpublished::Malformed("a slot written twice"));
         }
-        writer
-            .perf
-            .published(id, &compiled.name, entry, &compiled.bytes);
+        let (bytes, oplines) = (&compiled.bytes, compiled.marks.len());
+        (writer.perf).published((id, &compiled.name), entry, bytes, oplines);
         let trace = Box::new(Trace {
             code,
             entry_offset: compiled.entry_offset,

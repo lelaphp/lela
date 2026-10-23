@@ -125,6 +125,43 @@ fn a_published_trace_is_got_by_its_id_with_its_exits() -> Result<(), String> {
     Ok(())
 }
 
+/// What the traces published take is counted as each is published
+/// (#2961), the one count the G4 bar's line and php's `JIT memory usage`
+/// line read: their code's bytes, one opline a mark, and how many there
+/// are; a trace refused counts nothing.
+#[test]
+fn what_the_published_traces_take_is_counted_as_each_is_published() {
+    let table = table(&[]);
+    assert_eq!(table.usage(), super::Usage::default());
+    let func = php_engine::tier::FuncRef::at(php_unit::MapPtrOffset::Request(0));
+    let marks = |n: u32| -> Box<[crate::lower::Mark]> {
+        (0..n)
+            .map(|i| crate::lower::Mark {
+                func,
+                opline: OplineIdx(i),
+                offset: i * 4,
+            })
+            .collect()
+    };
+    let first = Compiled {
+        marks: marks(3),
+        ..compiled(&[1, 2, 3, 4], vec![exit(None)])
+    };
+    assert_eq!(table.publish(first, Start::Loop), Ok(trace(1)));
+    let second = Compiled {
+        marks: marks(2),
+        ..compiled(&[5, 6, 7, 8, 9, 10, 11, 12], vec![exit(None)])
+    };
+    assert_eq!(table.publish(second, Start::Loop), Ok(trace(2)));
+    let refused = Compiled {
+        entry_offset: 9,
+        ..compiled(&[1, 2, 3, 4], vec![exit(None)])
+    };
+    assert!(table.publish(refused, Start::Loop).is_err());
+    let used = table.usage();
+    assert_eq!((used.bytes, used.oplines, used.traces), (12, 5, 2));
+}
+
 /// Ids go on across the first segment into the second, each read back
 /// from its own.
 #[test]
