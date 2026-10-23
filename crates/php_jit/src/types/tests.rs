@@ -65,7 +65,9 @@ fn fib_enters_and_recurses() -> Result<(), String> {
 /// `SEND_VAR`, which moves the element into the call, as php's code
 /// generator compiles them (`Z/ext/opcache/jit/zend_jit_trace.c:5324-5390`,
 /// `:5822-5829`); nothing writes `$node`, so the callee's parameter is
-/// the array the send moved.
+/// the array the send moved. The `=== null` over the element read is a
+/// `TYPE_CHECK`, inline, as php's `zend_jit_type_check` compiles it
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:5536-5563`).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn binary_trees_sends_its_nodes_elements_by_value() -> Result<(), String> {
@@ -80,6 +82,7 @@ fn binary_trees_sends_its_nodes_elements_by_value() -> Result<(), String> {
         Opcode::CheckFuncArg,
         Opcode::FetchDimFuncArg,
         Opcode::SendFuncArg,
+        Opcode::TypeCheck,
     ] {
         assert!(
             !opcodes.contains(&(opcode, Form::Step)),

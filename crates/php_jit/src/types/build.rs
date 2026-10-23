@@ -946,6 +946,11 @@ impl<'a> Builder<'a> {
             Form::Inline => {
                 (op.opcode == Opcode::Assign && !old.within(UNCOUNTED))
                     || (op.opcode == Opcode::FetchDimR && self.is_temp(op1))
+                    // The temporary it reads is given up, and a destructor
+                    // may throw.
+                    || (op.opcode == Opcode::TypeCheck
+                        && self.is_temp(op1)
+                        && !old.within(UNCOUNTED))
                     || op.opcode == Opcode::AssignDim
                     || matches!(
                         op.opcode,
@@ -1806,6 +1811,25 @@ impl<'a> Builder<'a> {
             }
             Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx => {
                 op.op2_type == OperandKind::Unused && scalar(t1)
+            }
+            // php's `zend_jit_type_check` (`Z/ext/opcache/jit/zend_jit_ir.c:8162-8330`)
+            // over a value the trace reads as it stands: a temporary, which
+            // is never a reference, or a variable that is neither a
+            // reference nor unset, which would warn; `is_resource()`, which
+            // asks whether the resource is closed, is the handler's, as
+            // php's code generator leaves it to it
+            // (`Z/ext/opcache/jit/zend_jit_trace.c:5536-5540`).
+            Opcode::TypeCheck => {
+                op.extended_value & MAY_BE_RESOURCE == 0
+                    && match op.op1_type {
+                        OperandKind::Tmp => true,
+                        OperandKind::Cv | OperandKind::Var => {
+                            !seen.referenced[0]
+                                && t1.kinds() != Types::NONE
+                                && !t1.meets(Types::REF.or(Types::UNDEF))
+                        }
+                        OperandKind::Const | OperandKind::Unused => false,
+                    }
             }
             // A check of an argument the trace knows the callee takes by
             // value, php's `zend_jit_check_func_arg` (`:9925-9960`).
@@ -2789,6 +2813,7 @@ fn imm(op: &Opline) -> Imm {
     match op.opcode {
         Opcode::SendVal | Opcode::SendVar if op.op2_type == OperandKind::Unused => Imm::Arg(op.op2),
         Opcode::AssignOp => lattice::binary_of(op.extended_value).map_or(Imm::None, Imm::Binary),
+        Opcode::TypeCheck => Imm::Mask(op.extended_value),
         _ => Imm::None,
     }
 }

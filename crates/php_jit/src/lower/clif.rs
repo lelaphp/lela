@@ -1490,6 +1490,7 @@ impl<'a> Emit<'a> {
             Opcode::AssignDim => self.assign_dim(at, line),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
             Opcode::CheckFuncArg => self.check_func_arg(),
+            Opcode::TypeCheck => self.type_check(at, line),
             // A send to a callee that takes the argument by value.
             Opcode::SendValEx if matches!(line.imm, Imm::Arg(_)) => self.send(at, line),
             Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => match line.imm {
@@ -2047,6 +2048,101 @@ impl<'a> Emit<'a> {
         let call = self.call_room()?;
         self.write(call, arg, held);
         Ok(())
+    }
+
+    /// A `TYPE_CHECK`, php's `zend_jit_type_check`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8162-8330`): whether the value's
+    /// type is one the mask names, `mask >> type & 1`, from the type the
+    /// trace knows where it knows one and the slot's type byte otherwise;
+    /// branched on where a jump is fused to it, written where not. A
+    /// temporary it reads is given up after, `FREE_OP1`, through the
+    /// release kernel where it is counted, as php's code calls
+    /// `zval_ptr_dtor` there; its slot is left `UNDEF`, as the
+    /// handler takes the operand. A node's element held to `null` and
+    /// the elements of a list held to their types:
+    ///
+    /// ```php
+    /// function leaves($node) {
+    ///     if ($node[0] === null) { return 1; }
+    ///     return leaves($node[0]) + leaves($node[1]);
+    /// }
+    /// function kinds($a) {
+    ///     $s = "";
+    ///     foreach ($a as $v) {
+    ///         $s .= is_int($v) ? "i" : (is_string($v) ? "s" : (is_array($v) ? "a" : (is_null($v) ? "n" : (is_bool($v) ? "b" : "?"))));
+    ///     }
+    ///     return $s;
+    /// }
+    /// $t = [[[null, null], [null, null]], [null, null]];
+    /// echo leaves($t), " ", kinds([1, "x", [2], null, true, 1.5, false, "y" . 3]), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 3 isanb?bs
+    /// ```
+    fn type_check(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let Imm::Mask(mask) = line.imm else {
+            return Err(mismatch("a type check with no mask"));
+        };
+        let Operand::Value(value) = line.op1 else {
+            return Err(mismatch("a type check of no value"));
+        };
+        let asked = |tag: ZvalType| (mask >> u32::from(tag as u8)) & 1;
+        let answer = if Kind::of(self.value(value)?.types).is_some() {
+            if let Scalar::Bool(truth) = self.scalar(at, line.op1)? {
+                let (yes, no) = (asked(ZvalType::True), asked(ZvalType::False));
+                let truth = self.b.ins().icmp_imm_s(IntCC::NotEqual, truth, 0);
+                let yes = self.b.ins().iconst(I8, i64::from(yes));
+                let no = self.b.ins().iconst(I8, i64::from(no));
+                self.b.ins().select(truth, yes, no)
+            } else {
+                let tag = self
+                    .value(value)?
+                    .types
+                    .tag()
+                    .ok_or_else(|| mismatch("a scalar of no one type"))?;
+                self.b.ins().iconst(I8, i64::from(asked(tag)))
+            }
+        } else {
+            let (room, slot_at) = self.place(self.value(value)?.slot)?;
+            let byte = self.b.ins().load(I8, trusted(), room, slot_at + TYPE_AT);
+            let byte = self.b.ins().uextend(I32, byte);
+            let mask = self.b.ins().iconst(I32, i64::from(mask));
+            let shifted = self.b.ins().ushr(mask, byte);
+            let bit = self.b.ins().band_imm_u(shifted, 1);
+            self.b.ins().ireduce(I8, bit)
+        };
+        let slot = self.value(value)?.slot;
+        if slot.var >= self.frame_cvs(slot.frame)? && Kind::of(self.value(value)?.types).is_none() {
+            // `FREE_OP1`: the temporary out of its slot, then its owner
+            // given up.
+            let (room, slot_at) = self.place(slot)?;
+            let word = self.b.ins().load(I64, trusted(), room, slot_at);
+            let info = self.b.ins().load(I32, trusted(), room, slot_at + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b
+                .ins()
+                .store(trusted(), undef, room, slot_at + TYPE_AT);
+            let counted = self.b.ins().band_imm_u(info, COUNTED);
+            let [room_arg, opline] = self.served(line)?;
+            self.when(counted, |emit| {
+                emit.call(
+                    Kernel::Release,
+                    &[room_arg, opline, word, info],
+                    line.unwind.map(Leave::Unwind),
+                )
+            })?;
+        }
+        let jumps = match line.fused {
+            Some(Fused::Jmpz) => self.b.ins().icmp_imm_s(IntCC::Equal, answer, 0),
+            Some(Fused::Jmpnz) => self.b.ins().icmp_imm_s(IntCC::NotEqual, answer, 0),
+            None => {
+                if let Some(out) = line.out {
+                    self.define(out, Scalar::Bool(answer))?;
+                }
+                answer
+            }
+        };
+        self.direction(at, jumps)
     }
 
     /// The room of the call under way, php's `EX(call)`: in a register

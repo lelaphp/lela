@@ -348,6 +348,9 @@ pub(crate) enum Imm {
     Leave {
         owners: bool,
     },
+    /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
+    /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.
+    Mask(u32),
 }
 
 /// An operand as the op reads it.
