@@ -546,7 +546,8 @@ impl Request {
             return Ok(Opened::Already);
         }
         let path = match resolved {
-            Ok(path) if !is_wrapper_url(&path) => path,
+            // A stream the cache holds is served as a file it holds is.
+            Ok(path) if held.is_some() || !is_wrapper_url(&path) => path,
             // php's `resolved_path = zend_string_copy(inc_filename)` for a
             // path it could not resolve, which a stream wrapper opens.
             Ok(path) => return self.include_stream(kind, written, &path),
@@ -720,8 +721,9 @@ impl Request {
     /// `php_stream_open_for_zend_ex` under `USE_PATH | REPORT_ERRORS |
     /// STREAM_OPEN_FOR_INCLUDE`: the stream opened as its wrapper opens it,
     /// the warnings raised under it naming the construct, read whole, and
-    /// compiled as a file under the path, a unit of the request's own
-    /// that nothing publishes, since opcache keeps plain files alone. The
+    /// compiled as a file under the path, held by the unit cache where
+    /// opcache's predicate admits the path, a `phar://` one
+    /// ([`FileArgs::cached`]), and the request's own otherwise. The
     /// path goes in the included-files table as the construct puts a
     /// file's there, before the compile for the once forms and after it
     /// for the others.

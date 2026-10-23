@@ -14,7 +14,7 @@ use std::sync::Arc;
 use php_compile::SourceKind;
 
 use super::Code;
-use super::{AccelServed, Request, Unresolved};
+use super::{AccelServed, Request, Unresolved, is_cacheable_stream_path, is_wrapper_url};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
@@ -23,7 +23,8 @@ use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
 use crate::supplied::tell;
 use crate::unit_cache::{
-    Asked, Cached, CompileRefused, Disk, Filed, Fresh, Held, Levels, UnitKey, full_path,
+    Asked, Cached, CompileRefused, Disk, Filed, Fresh, Held, Levels, Observe, Stamp, UnitKey,
+    full_path,
 };
 
 /// What the `zend_file_handle` a file is compiled through holds when
@@ -50,9 +51,10 @@ pub(crate) enum HandlePath {
     /// made is held open until then ([`Request::require_kept`]).
     Kept,
     /// A stream a wrapper opened, `php_stream_open_for_zend_ex` over a
-    /// URL ([`Request::include_stream`]): its bytes compiled as the
-    /// request's own, which no cache holds, since opcache keeps plain
-    /// files alone, whatever path the stream names as opened.
+    /// URL ([`Request::include_stream`]): its bytes compiled under the
+    /// path the stream names as opened, held by the cache where opcache's
+    /// predicate keeps that path ([`FileArgs::cached`]) and as the
+    /// request's own otherwise.
     Stream,
 }
 
@@ -235,11 +237,11 @@ impl Request {
     /// relative path's key asks for the working directory, which lays
     /// `ZCG(cwd)` down the first time ([`Request::accel_cwd`]).
     fn written_key(&mut self, written: &[u8]) -> Option<UnitKey> {
+        if written.starts_with(b"/") || is_cacheable_stream_path(written) {
+            return Some(UnitKey::full(written));
+        }
         if written.is_empty() || super::paths::scheme_length(written).is_some() {
             return None;
-        }
-        if written.starts_with(b"/") {
-            return Some(UnitKey::full(written));
         }
         // The memory limit's fatal is recorded and ends the request.
         self.accel_cwd().ok();
@@ -272,8 +274,9 @@ impl Request {
     /// the file held under `written`'s name and the validation the answer
     /// for it gives, a hit [`Request::held_answer`] serves without the
     /// path resolved or the file stat'ed, where the answer looks by the
-    /// path as written and nothing is due; none where a hit would need
-    /// either, which the lookup by the full path gives. Nothing is counted
+    /// path as written and nothing is due, or a stream's path, which
+    /// resolves to none, stat'ed as written; none where a hit would need
+    /// more, which the lookup by the full path gives. Nothing is counted
     /// until it is served, so an `include_once` of a file already
     /// included is no hit, as `persistent_zend_resolve_path` counts none:
     ///
@@ -320,7 +323,9 @@ impl Request {
             return None;
         };
         let now = self.environment().request_time();
-        held.trusted(validation, now).then_some((held, validation))
+        (held.trusted(validation, now)
+            || is_wrapper_url(written) && held.validated(validation, now, self))
+        .then_some((held, validation))
     }
 
     /// What `held`, found under `validation`, answers this request as a
@@ -516,7 +521,7 @@ impl Request {
         }
         let shared = Arc::clone(&self.shared);
         let full = full_path(path, &self.cwd);
-        if handle == HandlePath::Stream {
+        if !args.cached() {
             return self.compiled_alone(args, &full);
         }
         let (validation, lookup, protection, file_cache, memory) = match self.admission(&full) {
@@ -763,7 +768,8 @@ impl Request {
     /// A file no cache holds compiled as this request's own, from the
     /// `source` handed down or the file's bytes, which are opened as a
     /// stream where php opens them ([`FileArgs::opens_stream`]): one the
-    /// answer keeps out, and a wrapper's stream ([`HandlePath::Stream`]).
+    /// answer keeps out, and a wrapper's stream opcache does not cache
+    /// ([`FileArgs::cached`]).
     fn compiled_alone(&mut self, args: FileArgs<'_>, full: &[u8]) -> Cached {
         let source = crate::unit_cache::source_or_read(args.source, args.path)?;
         if args.opens_stream() {
@@ -842,12 +848,10 @@ impl Request {
         };
         let stamp = match validation {
             Validation::Never => None,
-            Validation::Window { .. } | Validation::EveryHit => {
-                let Some(stamp) = crate::unit_cache::stamp_seconds(&full) else {
-                    return Ok(false);
-                };
-                Some(stamp)
-            }
+            Validation::Window { .. } | Validation::EveryHit => match self.stamp(&full) {
+                Some(stamp) => Some(stamp.seconds()),
+                None => return Ok(false),
+            },
         };
         Ok(disk(file_cache, &self.shared.units.build).holds(&full, stamp))
     }
@@ -891,6 +895,20 @@ impl Request {
     /// path, in bundle order ([`crate::api::abi::ExtensionBuilder::cached`]).
     pub(crate) fn tell_cached(&mut self, full: &[u8]) {
         tell!(self, cached, |req, hook| hook(req, full));
+    }
+}
+
+impl Observe for Request {
+    /// `zend_get_file_handle_timestamp`: a plain file's `stat(2)`, and a
+    /// stream wrapper's path's `zend_get_stream_timestamp`, its wrapper's
+    /// `url_stat` asked quietly through the stream layer
+    /// ([`crate::layer::StreamHooks::timestamp`]).
+    fn stamp(&mut self, path: &[u8]) -> Option<Stamp> {
+        if !is_wrapper_url(path) {
+            return Stamp::of(path);
+        }
+        let hooks = self.stream_hooks()?;
+        (hooks.timestamp)(self, path).map(Stamp::stat)
     }
 }
 
@@ -947,7 +965,7 @@ impl UnitCache<'_> {
             Ok(_) | Err(Unresolved::Missing(_)) => {}
             Err(Unresolved::Threw(thrown)) => return Err(thrown),
         }
-        Ok(held.validated(validation, now))
+        Ok(held.validated(validation, now, req))
     }
 
     /// `zend_accel_invalidate`: the copies `how` names of the file
@@ -999,9 +1017,9 @@ impl UnitCache<'_> {
         if let Some(file_cache) = self.req.file_cache_of(&path) {
             disk(&file_cache, &self.req.shared.units.build).invalidate(&path);
         }
-        let req = &self.req;
+        let (shared, arena) = (Arc::clone(&self.req.shared), Arc::clone(&self.req.arena));
         let forced = how == Invalidation::Forced;
-        let held = (req.shared.units).discard(&req.arena.files, &UnitKey::full(&path), forced);
+        let held = (shared.units).discard(&arena.files, &UnitKey::full(&path), forced, self.req);
         Ok(on_disk || held)
     }
 

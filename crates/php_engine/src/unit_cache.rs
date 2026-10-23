@@ -126,11 +126,19 @@ pub(crate) fn full_path(path: &[u8], cwd: &Path) -> Vec<u8> {
     )
 }
 
-/// The `mtime` of the file at `path` in whole seconds, php's
-/// `zend_get_file_handle_timestamp`; none where nothing is there.
-pub(crate) fn stamp_seconds(path: &[u8]) -> Option<i64> {
-    Stamp::of(path).map(Stamp::seconds)
+/// Who stats a file the cache holds, `zend_get_file_handle_timestamp`'s
+/// caller: a request, which reaches a stream wrapper's `url_stat`
+/// (`crate::api::request::Request`'s), or no request, which stats a
+/// plain file alone.
+pub(crate) trait Observe {
+    /// The file at the full path `path` as it stands now; none where
+    /// nothing is there or nothing keeps a time for it.
+    fn stamp(&mut self, path: &[u8]) -> Option<Stamp> {
+        Stamp::of(path)
+    }
 }
+
+impl Observe for () {}
 
 /// What the system reported of a file as it was compiled, the
 /// `zend_stat_t` php's `validate_timestamps` reads: when it was last
@@ -142,7 +150,7 @@ pub(crate) struct Stamp {
 }
 
 impl Stamp {
-    /// The file at `path` as the system reports it now; none where
+    /// The plain file at `path` as the system reports it now; none where
     /// nothing is there or the system keeps no time for it.
     pub(crate) fn of(path: &[u8]) -> Option<Stamp> {
         let described = std::fs::metadata(String::from_utf8_lossy(path).as_ref()).ok()?;
@@ -153,8 +161,18 @@ impl Stamp {
         })
     }
 
+    /// What a wrapper's `url_stat` reported, laid out as `php_fstat`
+    /// lays a `zend_stat_t` out: its `st_mtime` in whole seconds and its
+    /// `st_size`.
+    pub(crate) fn stat(sb: [i64; 13]) -> Stamp {
+        Stamp {
+            modified: Duration::from_secs(u64::try_from(sb[9]).unwrap_or(0)),
+            size: u64::try_from(sb[7]).unwrap_or(0),
+        }
+    }
+
     /// `st_mtime`, the whole seconds php compares and never the size.
-    fn seconds(self) -> i64 {
+    pub(crate) fn seconds(self) -> i64 {
         i64::try_from(self.modified.as_secs()).unwrap_or(i64::MAX)
     }
 }
@@ -265,17 +283,17 @@ impl Held {
     /// at `now` is served, the file as it stands stat'ed only where a
     /// hit is due, and the next revalidation time recorded where a
     /// window's stat finds the file unchanged.
-    pub(crate) fn validated(&self, validation: Validation, now: i64) -> bool {
+    pub(crate) fn validated(&self, validation: Validation, now: i64, by: &mut dyn Observe) -> bool {
         match self.due(validation, now) {
             Due::Nothing => true,
             Due::Seconds { was, next } => {
-                let fresh = Stamp::of(&self.path).is_some_and(|stamp| stamp.seconds() == was);
+                let fresh = by.stamp(&self.path).map(Stamp::seconds) == Some(was);
                 if fresh {
                     self.revalidate.store(next, Ordering::Relaxed);
                 }
                 fresh
             }
-            Due::Exact(held) => held.is_some() && Stamp::of(&self.path) == held,
+            Due::Exact(held) => held.is_some() && by.stamp(&self.path) == held,
         }
     }
 }
@@ -690,6 +708,13 @@ pub(crate) fn hit_keys(validation: Validation, unit: &Unit) -> u32 {
     }
 }
 
+/// The unit `held` holds, answered as `filed` with its early-bound
+/// classes.
+fn answered_by(held: &Held, filed: Filed) -> Answered {
+    let unit = held.unit.clone().map(Compiled::Published);
+    (Some(unit), filed, Some(Arc::clone(&held.early)))
+}
+
 /// A unit held nowhere, answered as `filed`.
 fn alone(unit: Result<Unit, CompileError>, filed: Filed) -> Answered {
     (
@@ -955,7 +980,7 @@ impl UnitCache {
     /// `compile` and `publish` are handed `caller`, the request the file
     /// is compiled and its classes published for, or nothing.
     #[allow(clippy::too_many_arguments)] // the table, the question, the caller and the four steps, each one fact
-    pub(crate) fn file<A>(
+    pub(crate) fn file<A: Observe>(
         &self,
         caller: &mut A,
         files: &Files,
@@ -980,16 +1005,14 @@ impl UnitCache {
             Levels::Both(disk) => (true, Some(disk)),
             Levels::Disk(disk) => (false, Some(disk)),
         };
-        if memory && let Some(hit) = self.held_hit(files, path, written.as_ref(), validation, now) {
-            return (
-                Some(hit.unit.clone().map(Compiled::Published)),
-                Filed::Hit,
-                Some(Arc::clone(&hit.early)),
-            );
+        if memory
+            && let Some(hit) = self.held_hit(caller, files, path, written.as_ref(), validation, now)
+        {
+            return answered_by(&hit, Filed::Hit);
         }
         let validated = validation != Validation::Never;
         let stamped = validated || protection > 0;
-        let observed = if stamped { Stamp::of(path) } else { None };
+        let observed = if stamped { caller.stamp(path) } else { None };
         // The second level, `zend_file_cache_script_load`: read back
         // where it keeps the file at the `mtime` it has now, where
         // timestamps are validated.
@@ -1019,11 +1042,7 @@ impl UnitCache {
             };
             let held = self.hold(files, path, validation, now, read);
             files.hit(&held, validation, now);
-            return (
-                Some(held.unit.clone().map(Compiled::Published)),
-                Filed::Hit,
-                Some(Arc::clone(&held.early)),
-            );
+            return answered_by(&held, Filed::Hit);
         }
         if memory && validation != Validation::EveryHit {
             files.misses.fetch_add(1, Ordering::Relaxed);
@@ -1063,14 +1082,12 @@ impl UnitCache {
             observed,
         };
         let held = self.hold(files, path, validation, now, read);
-        if let Some(written) = written {
+        // Not a `phar://` name, which may hold an alias the archive
+        // keeps for the request alone (`ZendAccelerator.c:1669-1672`).
+        if let Some(written) = written.filter(|key| !key.0.starts_with(b"phar://")) {
             self.add_key(files, written, &held);
         }
-        (
-            Some(held.unit.clone().map(Compiled::Published)),
-            Filed::Held,
-            Some(Arc::clone(&held.early)),
-        )
+        answered_by(&held, Filed::Held)
     }
 
     /// The first level's hit on `path`: a file the preload saved,
@@ -1080,6 +1097,7 @@ impl UnitCache {
     /// is discarded, and a discarded one is a miss.
     fn held_hit(
         &self,
+        by: &mut dyn Observe,
         files: &Files,
         path: &[u8],
         written: Option<&UnitKey>,
@@ -1102,7 +1120,7 @@ impl UnitCache {
             .held
             .get(&UnitKey::full(path))
             .filter(|held| !held.discarded())?;
-        if stale.validated(validation, now) {
+        if stale.validated(validation, now, by) {
             files.hit(&stale, validation, now);
             if let Some(written) = written {
                 self.add_key(files, written.clone(), &stale);
@@ -1173,7 +1191,13 @@ impl UnitCache {
     /// held with no stamp, or written at another second. Whether a unit
     /// was held under the name at all; a refusal is none, as php
     /// persists none, and so is a copy discarded already.
-    pub(crate) fn discard(&self, files: &Files, key: &UnitKey, force: bool) -> bool {
+    pub(crate) fn discard(
+        &self,
+        files: &Files,
+        key: &UnitKey,
+        force: bool,
+        by: &mut dyn Observe,
+    ) -> bool {
         let Some(held) = files.held.get(key).filter(|held| !held.discarded()) else {
             return false;
         };
@@ -1182,9 +1206,9 @@ impl UnitCache {
         }
         let changed = force
             || key.0 != held.path
-            || held.stamp.is_none_or(|was| {
-                Stamp::of(&held.path).is_none_or(|stamp| stamp.seconds() != was.seconds())
-            });
+            || held
+                .stamp
+                .is_none_or(|was| by.stamp(&held.path).map(Stamp::seconds) != Some(was.seconds()));
         if changed {
             self.discard_held(files, &held);
         }

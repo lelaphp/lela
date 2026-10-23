@@ -21,7 +21,7 @@ use crate::api::abi::{
 };
 use crate::api::raising::{Level, Thrown};
 use crate::api::request::ExtensionId;
-use crate::api::request::{HandlePath, Request, Unresolved};
+use crate::api::request::{HandlePath, Request, Unresolved, is_cacheable_stream_path};
 use crate::api::values::{PhpObject, PhpString};
 use crate::observer::Opcodes;
 
@@ -217,6 +217,57 @@ impl<'a> FileArgs<'a> {
     pub(crate) fn opens_stream(&self) -> bool {
         self.source.is_none() && !matches!(self.handle, HandlePath::Host | HandlePath::Stream)
     }
+
+    /// Whether `persistent_compile_file` caches the file
+    /// (`ZendAccelerator.c:2051`): every file but a wrapper's stream whose
+    /// path [`is_cacheable_stream_path`] does not admit, so a file read
+    /// through `phar://` is held and its arrays and strings are the
+    /// cache's, as a plain file's are:
+    ///
+    /// ```php
+    /// function member($name, $data) {
+    ///     $h = pack('a100a8a8a8a12a12a8a1a100a6a2a247', $name, '0000644', '', '', sprintf('%011o', strlen($data)), sprintf('%011o', time() - 60), '        ', '0', '', 'ustar', '00', '');
+    ///     $h = substr_replace($h, sprintf('%06o', array_sum(array_map('ord', str_split($h)))) . "\0 ", 148, 8);
+    ///     return $h . str_pad($data, (strlen($data) + 511) & ~511, "\0");
+    /// }
+    /// $t = __DIR__ . '/lib.phar.tar';
+    /// $tar = member('.phar/stub.php', '<?php __HALT_COMPILER();');
+    /// $tar .= member('def.php', "<?php\nfunction g(\$s = ['abcdefgh' => [1, 2]]) { return \$s; }\n");
+    /// $tar .= member('r.php', '<?php return 1;');
+    /// $tar .= member('.phar/signature.bin', pack('VV', 2, 20) . sha1($tar, true)) . str_repeat("\0", 1024);
+    /// file_put_contents($t, $tar);
+    /// $s = fn () => opcache_get_status(true);
+    /// $before = $s()['opcache_statistics'];
+    /// require "phar://$t/def.php";
+    /// debug_zval_dump(g());
+    /// ini_set('opcache.revalidate_freq', 0);
+    /// include "phar://$t/r.php"; include "phar://$t/r.php";
+    /// $after = $s();
+    /// $held = $after['scripts']["phar://$t/def.php"] ?? [];
+    /// $after = $after['opcache_statistics'];
+    /// var_dump($after['num_cached_scripts'] - $before['num_cached_scripts'], $after['hits'] - $before['hits'], $after['num_cached_keys'] - $before['num_cached_keys']);
+    /// var_dump(($held['timestamp'] ?? 0) === filemtime("phar://$t/def.php"), opcache_is_script_cached("phar://$t/r.php"));
+    /// unlink($t);
+    /// ```
+    /// ```expect regime=jit-off
+    /// array(1) interned {
+    ///   ["abcdefgh"]=>
+    ///   array(2) packed interned {
+    ///     [0]=>
+    ///     int(1)
+    ///     [1]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// int(2)
+    /// int(1)
+    /// int(2)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    pub(crate) fn cached(&self) -> bool {
+        self.handle != HandlePath::Stream || is_cacheable_stream_path(self.path)
+    }
 }
 
 impl ChainKind for CompileFile {
@@ -240,8 +291,8 @@ impl sealed::Kind for CompileFile {
             req.hold_opened(opened, args.handle);
         }
         // `persistent_compile_file` takes opcache's hold for every file
-        // but a stream no cache keeps (`ZendAccelerator.c:2051`, `:2106`).
-        if args.handle != crate::api::request::HandlePath::Stream {
+        // it caches (`ZendAccelerator.c:2051`, `:2106`).
+        if args.cached() {
             req.take_shared_hold();
         }
         Ok(req.cached_source(args).map(Compiled))
