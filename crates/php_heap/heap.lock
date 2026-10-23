@@ -251,6 +251,7 @@ Intern::hold_made
 Intern::intern
 Intern::intern_made
 Intern::intern_marked
+Intern::intern_name
 Key
 Laziness
 Made

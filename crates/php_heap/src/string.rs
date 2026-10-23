@@ -737,6 +737,18 @@ pub trait Intern {
         self.intern_marked(bytes, valid_utf8).map(Made)
     }
 
+    /// [`Intern::intern_made`] of a declaration's own name or lowered
+    /// key, where php's compile copies the string the declaration holds
+    /// (`zend_string_copy`) rather than make one: `__CLASS__`,
+    /// `__FUNCTION__` and `self::class`, and a runtime declaration's
+    /// lowered name, the key `do_bind_function` and `do_bind_class` bind
+    /// it under. A home that makes a string each time it is asked keeps
+    /// this one as the declaration's, so the declaration costs no string
+    /// more for it.
+    fn intern_name(&mut self, bytes: &[u8]) -> Result<Made, Fatal> {
+        self.intern_made(bytes, false)
+    }
+
     /// `made` read for the last time: the string this home made for the
     /// claim gone, where the home made one for the asker alone, and
     /// nothing where the string is the table's, as an interned string is

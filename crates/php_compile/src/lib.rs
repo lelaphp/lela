@@ -967,7 +967,7 @@ impl<'u> Parts<'u> {
     pub(crate) fn intern(self, kind: SourceKind, strings: &mut dyn Intern) -> Result<(), Fatal> {
         if kind == SourceKind::File {
             for name in self.names() {
-                strings.intern(name)?;
+                strings.intern_name(name)?;
             }
         }
         self.intern_declared(strings)
