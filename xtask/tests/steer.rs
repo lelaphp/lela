@@ -9,6 +9,7 @@
 
 use std::fs;
 
+use xtask::manifest::Manifest;
 use xtask::reading::Status;
 use xtask::scratch::Tree;
 use xtask::steer;
@@ -35,6 +36,25 @@ fn scratch_at(name: &str, file: &str, body: &str) -> Tree {
     dir
 }
 
+/// A manifest whose `harness.self` names `files` as the harness's own,
+/// with the pin row naming `oracle.toml`: what steer reads its files from.
+fn naming(files: &[&str]) -> Manifest {
+    let scope = files
+        .iter()
+        .map(|f| format!("{f:?}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Manifest::parse(&format!(
+        "[oracle]\npin = \"oracle.toml\"\n[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\nclean_build_release_s = 1\napi_items = 1\nbindings = 1\n[[rule]]\nid = \"harness.self\"\ntool = [\"Edit\", \"Write\"]\nscope = [{scope}]\ndeny = true\ntext = \"harness.self\"\n"
+    ))
+    .expect("the manifest")
+}
+
+/// The manifest as dax-php's `harness.self` names its three TOML files.
+fn harness() -> Manifest {
+    naming(&["seams.toml", "oracle.toml", xtask::divergence::FILE])
+}
+
 const PIN: &str =
     "[oracle]\nversion = \"8.5.9\"\n\n[regime.jit-off]\nini = [\"opcache.enable=0\"]\n";
 
@@ -45,7 +65,8 @@ fn a_proposal_that_only_adds_is_written() {
     let added = format!("{PIN}\n[regime.dump]\nini = [\"opcache.opt_debug_level=0x10000\"]\n");
     fs::write(&proposal, &added).expect("the proposal");
 
-    let reading = steer::run(&root, "oracle.toml", &proposal, false).expect("the instrument runs");
+    let reading = steer::run(&root, &harness(), "oracle.toml", &proposal, false)
+        .expect("the instrument runs");
     assert_eq!(reading.status, Status::Pass);
     assert_eq!(reading.instrument, "steer");
     assert_eq!(reading.scope, "oracle.toml");
@@ -76,7 +97,8 @@ fn a_dry_run_judges_and_writes_nothing() {
     let proposal = root.join("proposed.toml");
     fs::write(&proposal, format!("{PIN}\n[regime.dump]\nini = []\n")).expect("the proposal");
 
-    let reading = steer::run(&root, "oracle.toml", &proposal, true).expect("the instrument runs");
+    let reading =
+        steer::run(&root, &harness(), "oracle.toml", &proposal, true).expect("the instrument runs");
     assert_eq!(reading.status, Status::Pass);
     assert_eq!(
         fs::read_to_string(root.join("oracle.toml")).expect("the pin"),
@@ -92,7 +114,8 @@ fn a_changed_recipe_is_refused_and_the_file_stands() {
     let moved = PIN.replace("opcache.enable=0", "opcache.enable=1");
     fs::write(&proposal, &moved).expect("the proposal");
 
-    let reading = steer::run(&root, "oracle.toml", &proposal, false).expect("the instrument runs");
+    let reading = steer::run(&root, &harness(), "oracle.toml", &proposal, false)
+        .expect("the instrument runs");
     assert_eq!(reading.status, Status::Fail);
     assert!(
         reading.message.contains("regime.jit-off.ini"),
@@ -113,7 +136,7 @@ fn a_file_that_is_not_the_harnesss_own_is_refused() {
     fs::write(&proposal, PIN).expect("the proposal");
     fs::write(root.join("Cargo.toml"), "[package]\nname = \"x\"\n").expect("a crate manifest");
 
-    let refused = steer::run(&root, "Cargo.toml", &proposal, false);
+    let refused = steer::run(&root, &harness(), "Cargo.toml", &proposal, false);
     let message = refused
         .expect_err("steer writes the harness's own files alone")
         .to_string();
@@ -123,15 +146,30 @@ fn a_file_that_is_not_the_harnesss_own_is_refused() {
     );
 }
 
+/// The files steer writes are the ones the manifest's `harness.self`
+/// names (#3183): a manifest naming another file has steer write that one
+/// and refuse `oracle.toml`, which it no longer names.
 #[test]
-fn every_steerable_file_is_one_permit_denies() {
-    // The list this instrument may write is the scope of `harness.self`,
-    // less `.claude/**`, which is no TOML and carries nothing to judge.
-    for file in steer::STEERABLE {
-        let extension = std::path::Path::new(file).extension();
+fn steer_writes_the_files_the_manifests_harness_self_names_and_no_other() {
+    let root = scratch_at("named", "harness.toml", "[a]\nb = 1\n");
+    let manifest = naming(&["harness.toml", ".claude/**"]);
+    let proposal = root.join("proposed.toml");
+    fs::write(&proposal, "[a]\nb = 1\nc = 2\n").expect("the proposal");
+    let reading = steer::run(&root, &manifest, "harness.toml", &proposal, false)
+        .expect("the instrument runs");
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert_eq!(
+        fs::read_to_string(root.join("harness.toml")).expect("the file"),
+        "[a]\nb = 1\nc = 2\n"
+    );
+    fs::write(root.join("oracle.toml"), PIN).expect("a pin");
+    for file in ["oracle.toml", ".claude/settings.toml"] {
+        let refused = steer::run(&root, &manifest, file, &proposal, false)
+            .expect_err("a file the scope does not name is refused")
+            .to_string();
         assert!(
-            extension.is_some_and(|ext| ext.eq_ignore_ascii_case("toml")),
-            "{file} is judged as TOML, so it must be TOML"
+            refused.contains(file) && refused.contains("harness.self"),
+            "{refused}"
         );
     }
 }
@@ -154,7 +192,8 @@ fn a_key_added_to_a_rule_row_the_file_carries_is_written_and_named() {
     let added = fixture("added-key.toml");
     fs::write(&proposal, &added).expect("the proposal");
 
-    let reading = steer::run(&root, "seams.toml", &proposal, false).expect("the instrument runs");
+    let reading =
+        steer::run(&root, &harness(), "seams.toml", &proposal, false).expect("the instrument runs");
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
     assert!(
         reading
@@ -187,8 +226,8 @@ fn every_negative_control_is_refused_at_the_path_it_moved_and_writes_nothing() {
         let proposal = root.join("proposed.toml");
         fs::write(&proposal, fixture(name)).expect("the proposal");
 
-        let reading =
-            steer::run(&root, "seams.toml", &proposal, false).expect("the instrument runs");
+        let reading = steer::run(&root, &harness(), "seams.toml", &proposal, false)
+            .expect("the instrument runs");
         assert_eq!(reading.status, Status::Fail, "{name}: {}", reading.message);
         assert!(
             reading.message.contains(path),
@@ -224,8 +263,8 @@ fn a_new_row_with_covers_is_one_addition_to_the_registry() {
     let proposal = root.join("proposed.toml");
     fs::write(&proposal, format!("{tracked}{COVERING}")).expect("the proposal");
 
-    let reading =
-        steer::run(&root, xtask::divergence::FILE, &proposal, true).expect("the instrument runs");
+    let reading = steer::run(&root, &harness(), xtask::divergence::FILE, &proposal, true)
+        .expect("the instrument runs");
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
     assert_eq!(reading.numbers["added"], 1.into(), "{}", reading.message);
     assert!(
@@ -260,7 +299,7 @@ fn a_new_row_with_covers_is_one_addition_to_the_registry() {
         (doubled.as_str(), "two rows"),
     ] {
         fs::write(&proposal, format!("{tracked}{row}")).expect("the proposal");
-        let reading = steer::run(&root, xtask::divergence::FILE, &proposal, false)
+        let reading = steer::run(&root, &harness(), xtask::divergence::FILE, &proposal, false)
             .expect("the instrument runs");
         assert_eq!(reading.status, Status::Fail, "{}", reading.message);
         assert!(
@@ -298,7 +337,8 @@ fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written(
         format!("{pin}\n[hosts_nobody_reads]\ncgi = \"x\"\n"),
     )
     .expect("the proposal");
-    let refused = steer::run(&root, "oracle.toml", &proposal, false).expect("the instrument runs");
+    let refused = steer::run(&root, &harness(), "oracle.toml", &proposal, false)
+        .expect("the instrument runs");
     assert_eq!(refused.status, Status::Fail, "{}", refused.message);
     assert!(
         refused.message.contains("would not load"),
@@ -312,7 +352,8 @@ fn a_table_the_pins_reader_does_not_know_is_refused_and_one_it_knows_is_written(
 
     let sapi = "\n[sapi]\ncgi = { path = \"/bin/php-cgi\", md5 = \"00\" }\n";
     fs::write(&proposal, format!("{pin}{sapi}")).expect("the proposal");
-    let written = steer::run(&root, "oracle.toml", &proposal, false).expect("the instrument runs");
+    let written = steer::run(&root, &harness(), "oracle.toml", &proposal, false)
+        .expect("the instrument runs");
     assert_eq!(written.status, Status::Pass, "{}", written.message);
     assert!(
         fs::read_to_string(root.join("oracle.toml"))
@@ -361,7 +402,8 @@ fn steered_as_the_union(root: &Tree, union: &str) {
     let file = xtask::divergence::FILE;
     let proposal = root.join("proposed.toml");
     fs::write(&proposal, union).expect("the proposal");
-    let reading = steer::run(root, file, &proposal, false).expect("the instrument runs");
+    let reading =
+        steer::run(root, &harness(), file, &proposal, false).expect("the instrument runs");
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
     assert_eq!(reading.numbers["added"], 1.into(), "{}", reading.message);
     for named in [
@@ -438,7 +480,7 @@ fn a_conflicted_merge_refuses_a_reworded_reason_and_a_row_neither_side_carries()
         let at = root.join("proposed.toml");
         fs::write(&at, fixture(proposal)).expect("the proposal");
 
-        let reading = steer::run(&root, file, &at, false).expect("the instrument runs");
+        let reading = steer::run(&root, &harness(), file, &at, false).expect("the instrument runs");
         assert_eq!(reading.status, Status::Fail, "{name}: {}", reading.message);
         assert!(
             reading.message.contains(path) && reading.message.contains("Nothing was written"),
