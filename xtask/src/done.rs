@@ -760,6 +760,15 @@ fn miri_unsupported(instrument: &str, reading: &Reading) -> bool {
     failed.is_some_and(|n| n > 0) && failed == count("unsupported") && count("undefined") == Some(0)
 }
 
+/// Whether `reading` is a skip naming a rule the manifest does not carry:
+/// the rule absent, which a crate owes nothing under, and not a condition
+/// unmet (#3182). With the rule written, the same skip is unmet.
+fn rule_absent(manifest: &Manifest, reading: &Reading) -> bool {
+    reading.status == Status::Skip
+        && !reading.rule.is_empty()
+        && manifest.rule(&reading.rule).is_none()
+}
+
 /// Condition 1's rungs for a reading that is not a pass: the causes a
 /// person excused, and no other.
 fn met_without_passing(krate: &Crate, instrument: &str, reading: &Reading) -> bool {
@@ -920,7 +929,10 @@ fn fresh_readings(
             ));
             continue;
         }
-        if reading.status != Status::Pass && !met_without_passing(krate, instrument, &reading) {
+        if reading.status != Status::Pass
+            && !met_without_passing(krate, instrument, &reading)
+            && !rule_absent(asking.manifest, &reading)
+        {
             unmet.push(format!(
                 "{instrument}: {scope} {}: {}",
                 reading.status.as_str(),
@@ -1233,10 +1245,10 @@ pub fn run_hook(root: &Path, manifest: &Manifest, registry: &Registry, store: &S
 mod tests {
     use super::{
         FRESH, Slack, instruments_of, met_without_passing, miri_unsupported, no_binary_yet,
-        porting_meter, slack_porting,
+        porting_meter, rule_absent, slack_porting,
     };
     use crate::carried::Carried;
-    use crate::manifest::Crate;
+    use crate::manifest::{Crate, Manifest, Rule};
     use crate::reading::{Reading, Status};
 
     /// The crate `api.lock` lives with in the shipped manifest, which is
@@ -1556,5 +1568,20 @@ mod tests {
         ] {
             assert_eq!(said(&porting("ext/zip"), &columns, ""), None, "{columns:?}");
         }
+    }
+
+    /// #3182: a skip naming a rule the manifest does not carry is the rule
+    /// absent, owed by nobody; with the rule written it is unmet.
+    #[test]
+    fn a_skip_naming_an_absent_rule_is_the_rule_absent_and_not_unmet() {
+        let mut reading = Reading::new("unsafe-audit", "php_heap");
+        reading.rule = "unsafe.homes".to_owned();
+        let without = Manifest::named("php_heap");
+        assert!(rule_absent(&without, &reading));
+        let mut with = without.clone();
+        with.rules.push(Rule::named("unsafe.homes", "**"));
+        assert!(!rule_absent(&with, &reading));
+        reading.status = Status::Fail;
+        assert!(!rule_absent(&without, &reading), "a fail is held");
     }
 }

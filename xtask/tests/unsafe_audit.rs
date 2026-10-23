@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use xtask::manifest::Manifest;
-use xtask::reading::Status;
+use xtask::reading::{Outcome, Status};
 use xtask::unsafe_audit;
 
 mod common {
@@ -109,4 +109,35 @@ mod tracked {
             phpdbg.message
         );
     }
+}
+
+/// A manifest without `unsafe.homes` names no home, so nothing is
+/// audited: a skip per crate naming the rule, which the run meets (#3182).
+/// The crate's `unsafe` outside any home would fail it under the rule.
+#[test]
+fn a_manifest_without_the_rule_is_a_skip_per_crate_naming_it() {
+    let tree = xtask::scratch::Tree::new("unsafe-audit-no-rule").unwrap();
+    let repo = Repo::init(&tree);
+    repo.write(
+        "crates/php_heap/Cargo.toml",
+        "[package]\nname = \"php_heap\"\n",
+    );
+    repo.write(
+        "crates/php_heap/src/lib.rs",
+        "pub fn f() -> i32 {\n    unsafe { 0 }\n}\n",
+    );
+    repo.commit("a crate");
+    let manifest = Manifest::of([xtask::manifest::Crate::named("php_heap")]);
+    let readings = unsafe_audit::run(&tree, &manifest).unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert_eq!(reading.rule, "unsafe.homes");
+    assert!(
+        reading.message.contains("no rule unsafe.homes"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(Outcome::of(&readings), Outcome::Met);
 }

@@ -2,7 +2,8 @@
 //! is permitted in the homes the manifest's `unsafe.homes` rule lists and
 //! nowhere else. Every other crate is `#![forbid(unsafe_code)]` at its
 //! root; a crate whose home is one module is `#![deny(unsafe_code)]` with
-//! the allowance on that module alone. One reading per crate.
+//! the allowance on that module alone. One reading per crate; a skip
+//! naming the rule for each where the manifest has none (#3182).
 
 use std::path::Path;
 
@@ -17,6 +18,9 @@ use crate::sources::{self, Standing};
 /// The rule the audit reads.
 pub(crate) const RULE: &str = "unsafe.homes";
 
+/// The instrument's name, the reading's `instrument` field.
+const INSTRUMENT: &str = "unsafe-audit";
+
 /// Audit every created crate; one reading each.
 pub fn run(root: &Path, manifest: &Manifest) -> Result<Vec<Reading>> {
     over(root, manifest, &Standing::default())
@@ -30,20 +34,15 @@ pub(crate) fn measure(
     store: &Store,
     staged: bool,
 ) -> Result<Vec<Reading>> {
-    let standing = Standing::of_every_crate(staged, root, manifest, store, "unsafe-audit")?;
+    let standing = Standing::of_every_crate(staged, root, manifest, store, INSTRUMENT)?;
     over(root, manifest, &standing)
 }
 
 /// Every reading, less a crate whose reading stands for the commit.
 fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Reading>> {
-    let rule = manifest
-        .rule(RULE)
-        .with_context(|| format!("the manifest has no rule {RULE}"))?;
-    let homes: Vec<Home> = rule
-        .predicate
-        .allow
-        .iter()
-        .flatten()
+    let rule = manifest.rule(RULE);
+    let homes: Vec<Home> = (rule.iter())
+        .flat_map(|rule| rule.predicate.allow.iter().flatten())
         .map(|h| Home::parse(h))
         .collect::<Result<_>>()?;
     let snapshot = Snapshot::disk(root)?;
@@ -53,8 +52,16 @@ fn over(root: &Path, manifest: &Manifest, standing: &Standing) -> Result<Vec<Rea
             continue;
         }
         let created = sources::exists(root, krate);
-        let mut reading = Reading::for_crate("unsafe-audit", krate, &snapshot)?;
+        let mut reading = Reading::for_crate(INSTRUMENT, krate, &snapshot)?;
         RULE.clone_into(&mut reading.rule);
+        let Some(rule) = rule else {
+            reading.message = format!(
+                "{}: the manifest has no rule {RULE}, so no home of `unsafe` is named and nothing is audited",
+                krate.name
+            );
+            readings.push(reading);
+            continue;
+        };
         reading.adr = rule.adr.adr_field();
         if created {
             let audit = audit(root, krate, &homes)?;
