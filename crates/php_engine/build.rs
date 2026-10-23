@@ -392,7 +392,17 @@ struct Variant {
     name: String,
     kinds: Option<Vec<String>>,
     branch: Option<&'static str>,
+    /// Whether the `out` operand is read, the type in `crate::operand` the
+    /// handler is served at, where the row says `RETVAL`.
+    retval: Option<&'static str>,
 }
+
+/// The two ways of a `RETVAL` opcode's `out`, each the part of the
+/// variant's name `php_unit` gives it and the type in `crate::operand`.
+const RETVALS: [(&str, &str); 2] = [
+    ("RetvalUnused", "RetvalUnused"),
+    ("RetvalUsed", "RetvalUsed"),
+];
 
 /// The branches of a `SMART_BRANCH` comparison, each the part of the
 /// variant's name `php_unit` gives it and the type the handler is served
@@ -412,11 +422,12 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         _ => None,
     };
     let ways: &[(&str, &str)] = if spec.smart { &BRANCHES } else { &[("", "")] };
-    let branched = |name: String, kinds: Option<Vec<String>>| {
+    let branched = |name: String, kinds: Option<Vec<String>>, retval: Option<&'static str>| {
         ways.iter().map(move |(part, ty)| Variant {
             name: format!("{name}{part}"),
             kinds: kinds.clone(),
             branch: (!ty.is_empty()).then_some(*ty),
+            retval,
         })
     };
     let [spec1, spec2] = spec.zval_shaped.map(|bit| spec.specialise && bit);
@@ -424,7 +435,7 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         let kinds = lone(&spec.op1)
             .zip(lone(&spec.op2))
             .map(|(a, b)| vec![a, b]);
-        return Ok(branched(spec.variant.clone(), kinds).collect());
+        return Ok(branched(spec.variant.clone(), kinds, None).collect());
     }
     let side = |listed: bool, kinds: &[String]| -> Result<Vec<(String, String)>, String> {
         if listed {
@@ -450,13 +461,23 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
             .collect(),
         None => vec![(String::new(), None)],
     };
+    // `SPEC(RETVAL)`: each kind's variant twice, its result unused and
+    // used, after the kinds' parts of the name, as `php_unit` names them.
+    let retvals: &[(&str, &str)] = if spec.retval { &RETVALS } else { &[("", "")] };
     let mut out = Vec::new();
     for (a, ka) in side(spec1, &spec.op1)? {
         for (b, kb) in side(spec2, &spec.op2)? {
             for (d, kd) in &data {
-                let mut kinds = vec![ka.clone(), kb.clone()];
-                kinds.extend(kd.clone());
-                out.extend(branched(format!("{}{a}{b}{d}", spec.variant), Some(kinds)));
+                for (r, ty) in retvals {
+                    let mut kinds = vec![ka.clone(), kb.clone()];
+                    kinds.extend(kd.clone());
+                    let retval = (!ty.is_empty()).then_some(*ty);
+                    out.extend(branched(
+                        format!("{}{a}{b}{d}{r}", spec.variant),
+                        Some(kinds),
+                        retval,
+                    ));
+                }
             }
         }
     }
@@ -464,6 +485,7 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         name: format!("{}Unlisted", spec.variant),
         kinds: None,
         branch: None,
+        retval: None,
     });
     Ok(out)
 }
@@ -549,6 +571,18 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
             write!(params, ", crate::operand::{ty}").ok();
         }
         params.push_str(&branch(&variant)?);
+        match (handler.retval, variant.retval) {
+            (false, _) => {}
+            (true, Some(ty)) => {
+                write!(params, ", crate::operand::{ty}").ok();
+            }
+            (true, None) => {
+                return Err(format!(
+                    "`fn {}` is generic over whether its `out` is read and ops.toml does not say `RETVAL` for the opcode",
+                    handler.ident
+                ));
+            }
+        }
         out.push((
             variant.name,
             format!(
@@ -625,6 +659,10 @@ struct Spec {
     /// The kinds of `SPEC(OP_DATA=...)` on an opcode the hot list
     /// specialises, which `php_unit` resolves the handler over too.
     op_data: Option<Vec<String>>,
+    /// `RETVAL` in the handler line's `SPEC(...)` on an opcode the hot
+    /// list specialises by kind, over which `php_unit` resolves each
+    /// kind's handler twice.
+    retval: bool,
 }
 
 /// php's opcode names against what the dispatch reads of their rows.
@@ -688,6 +726,9 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
                     .find_map(|word| word.strip_prefix("OP_DATA="))
                     .filter(|_| specialise)
                     .map(|kinds| kinds.split('|').map(str::to_owned).collect()),
+                retval: specialise
+                    && words.contains(&"RETVAL")
+                    && (specialised("op1_raw") || specialised("op2_raw")),
             },
         );
     }
@@ -705,6 +746,9 @@ struct Handler {
     /// Whether the handler is generic over its comparison's branch, the
     /// `S: Branch` after its kinds (`crate::handlers::branch`).
     branched: bool,
+    /// Whether the handler is generic over whether its `out` is read,
+    /// the `R: Retval` after its kinds (`crate::operand::Retval`).
+    retval: bool,
     /// Whether the handler takes the place of its opline, `at: u32`, and
     /// stands the frame there itself where something outside the loop
     /// reads it; a handler generic over operand kinds always takes it.
@@ -753,6 +797,7 @@ fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
             ident: ident.to_owned(),
             operands: generics.matches(": Operand").count(),
             branched: generics.contains(": Branch"),
+            retval: generics.contains(": Retval"),
         });
     }
     Ok(out)

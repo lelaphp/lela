@@ -808,4 +808,36 @@ mod tests {
             "an assignment with no OP_DATA after it is no unit the compiler writes"
         );
     }
+
+    /// An opcode whose line says `SPEC(RETVAL)` is resolved over whether
+    /// its `out` is read, as php's `_RETVAL_UNUSED` and `_RETVAL_USED`
+    /// handlers are, and the kinds a row does not list keep their one
+    /// variant whatever its `out` is.
+    #[test]
+    fn publication_resolves_a_retval_opcode_over_whether_its_result_is_read() {
+        let (cv, tmp, unused) = (OperandKind::Cv, OperandKind::Tmp, OperandKind::Unused);
+        let unread = |opcode, op1_type, op2_type| Opline {
+            out_type: unused,
+            out: 0,
+            ..over(opcode, op1_type, op2_type)
+        };
+        assert_eq!(
+            resolved(vec![
+                unread(Opcode::PreInc, cv, unused),
+                over(Opcode::PreInc, cv, unused),
+                unread(Opcode::PreDec, OperandKind::Var, unused),
+                unread(Opcode::Assign, cv, tmp),
+                over(Opcode::Assign, cv, tmp),
+                unread(Opcode::Assign, tmp, tmp),
+            ]),
+            [
+                Handler::PreIncCvRetvalUnused,
+                Handler::PreIncCvRetvalUsed,
+                Handler::PreDecVarRetvalUnused,
+                Handler::AssignCvTmpRetvalUnused,
+                Handler::AssignCvTmpRetvalUsed,
+                Handler::AssignUnlisted,
+            ]
+        );
+    }
 }

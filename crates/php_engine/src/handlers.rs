@@ -77,7 +77,7 @@ use crate::exec::{
     cleanup_unfinished_calls, free_carried_value, has_only_fatal_errors, restore_silenced,
 };
 use crate::observer::OnThrow;
-use crate::operand::{ByKind, Operand, Var};
+use crate::operand::{ByKind, Operand, Retval, RetvalByte, Var};
 use crate::ops::inline::{self, Arith, Binary, Bitwise, Shift};
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
 use crate::tier::{Flow, Next, SafepointIdx, Site, Stepped, Tier};
@@ -13059,14 +13059,14 @@ fn frameless_call<const N: usize>(
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn assign<T: Tier, A: Operand + Default, B: Operand + Default>(
+pub(crate) fn assign<T: Tier, A: Operand + Default, B: Operand + Default, R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_assign(req, frame, code, op, (A::default(), B::default())) {
+    if let Some(edge) = inline_assign::<R>(req, frame, code, op, (A::default(), B::default())) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -14057,7 +14057,7 @@ fn data_value(
     container: Held,
 ) -> Option<Zval> {
     let field = exec::opline_at(code, at.saturating_add(1))?.op1;
-    let taking = taking(slots, code, op, data, field)?;
+    let taking = taking::<RetvalByte>(slots, code, op, data, field)?;
     if !ty.admits(taking.z) {
         return None;
     }
@@ -14080,7 +14080,7 @@ struct Taking {
 /// The [`Taking`] of the value `field` names, by [`taken_value`]'s rule.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
-fn taking(
+fn taking<R: Retval>(
     slots: &[Zval],
     code: &OpArray,
     op: &Opline,
@@ -14093,14 +14093,14 @@ fn taking(
     {
         return None;
     }
-    let out = if op.out_type == OperandKind::Unused {
-        None
-    } else {
+    let out = if R::used(op) {
         let out = op.out as usize;
         if slots.get(out)?.is_refcounted() {
             return None;
         }
         Some(out)
+    } else {
+        None
     };
     let moved = match value.kind() {
         OperandKind::Tmp | OperandKind::Var => Some(value.slot(field)?),
@@ -14151,14 +14151,14 @@ impl Taking {
 /// ```
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
-fn taken_value(
+fn taken_value<R: Retval>(
     slots: &mut [Zval],
     code: &OpArray,
     op: &Opline,
     value: impl Operand,
     field: u32,
 ) -> Option<Zval> {
-    taking(slots, code, op, value, field)?.take(slots)
+    taking::<R>(slots, code, op, value, field)?.take(slots)
 }
 
 /// `ASSIGN_OBJ` over a `VAR` container, its inline path and then its
@@ -15816,7 +15816,7 @@ fn inline_assign_dim(
     (a, b, data): (impl Operand, impl Operand, impl Operand),
 ) -> Option<Edge> {
     let field = exec::opline_at(code, at.saturating_add(1))?.op1;
-    let taking = taking(req.slots_mut(frame), code, op, data, field)?;
+    let taking = taking::<RetvalByte>(req.slots_mut(frame), code, op, data, field)?;
     let placed = match owned_entry(req, frame, (code, op, at), DimRead::Silent, (a, b))? {
         Ok(placed) => placed,
         Err(edge) => return Some(edge),
@@ -21804,14 +21804,14 @@ pub(crate) fn spaceship<T: Tier>(
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
 #[allow(clippy::inline_always)]
-pub(crate) fn pre_inc<T: Tier, A: Operand + Default>(
+pub(crate) fn pre_inc<T: Tier, A: Operand + Default, R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_incdec(req, frame, op, (Arith::Add, false), A::default()) {
+    if let Some(edge) = inline_incdec::<R>(req, frame, op, (Arith::Add, false), A::default()) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -21827,7 +21827,7 @@ pub(crate) fn post_inc<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let step = (Arith::Add, true);
-    if let Some(edge) = inline_incdec(req, frame, op, step, ByKind(op.op1_type)) {
+    if let Some(edge) = inline_incdec::<RetvalByte>(req, frame, op, step, ByKind(op.op1_type)) {
         return edge;
     }
     incdec(req, frame, code, op, true, crate::ops::increment)
@@ -21861,14 +21861,14 @@ pub(crate) fn post_inc<T: Tier>(
 #[cfg_attr(not(debug_assertions), inline(always))] // design §5.8, as `pre_inc`
 #[cfg_attr(debug_assertions, inline(never))] // a debug `serve_frame` holds every inlined arm's locals
 #[allow(clippy::inline_always)]
-pub(crate) fn pre_dec<T: Tier, A: Operand + Default>(
+pub(crate) fn pre_dec<T: Tier, A: Operand + Default, R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_incdec(req, frame, op, (Arith::Sub, false), A::default()) {
+    if let Some(edge) = inline_incdec::<R>(req, frame, op, (Arith::Sub, false), A::default()) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
@@ -21908,7 +21908,7 @@ pub(crate) fn post_dec<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let step = (Arith::Sub, true);
-    if let Some(edge) = inline_incdec(req, frame, op, step, ByKind(op.op1_type)) {
+    if let Some(edge) = inline_incdec::<RetvalByte>(req, frame, op, step, ByKind(op.op1_type)) {
         return edge;
     }
     incdec(req, frame, code, op, true, crate::ops::decrement)
@@ -24424,7 +24424,7 @@ fn inline_truth<const NOT: bool>(
 /// ```
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
-fn inline_incdec(
+fn inline_incdec<R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     op: &Opline,
@@ -24437,7 +24437,7 @@ fn inline_incdec(
         OperandKind::Cv => {
             let held = *slots.get(at)?;
             let stepped = inline::step(arith, held)?;
-            if op.out_type != OperandKind::Unused {
+            if R::used(op) {
                 write_owning_nothing(slots, op, if post { held } else { stepped })?;
             }
             *slots.get_mut(at)? = stepped;
@@ -24446,7 +24446,7 @@ fn inline_incdec(
             let entry = slots.get(at)?.as_indirect()?;
             let held = entry.read();
             let stepped = inline::step(arith, held)?;
-            if op.out_type != OperandKind::Unused {
+            if R::used(op) {
                 write_owning_nothing(slots, op, if post { held } else { stepped })?;
             }
             entry.write(stepped);
@@ -24478,7 +24478,7 @@ fn inline_incdec(
 /// ```
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
-fn inline_assign(
+fn inline_assign<R: Retval>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
@@ -24495,7 +24495,7 @@ fn inline_assign(
     if held.is_refcounted() && garbage.is_none() {
         return None;
     }
-    let value = taken_value(slots, code, op, b, op.op2)?;
+    let value = taken_value::<R>(slots, code, op, b, op.op2)?;
     *slots.get_mut(at)? = value;
     if let Some(garbage) = garbage {
         req.heap_mut().release_string(garbage);

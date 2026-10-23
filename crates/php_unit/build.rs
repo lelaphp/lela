@@ -314,6 +314,19 @@ fn dimensions(op: &Op) -> Result<(Vec<Dimension>, bool), String> {
         dimensions.push(("data_kind(next)", values));
     }
     let listed = !dimensions.is_empty();
+    // `SPEC(RETVAL)` on an opcode the hot list specialises by kind:
+    // whether the opline's result is read, `RETURN_VALUE_USED`, as php's
+    // `_RETVAL_UNUSED` and `_RETVAL_USED` handlers are. Read by the
+    // kinds' own `match`, so it adds no `Unlisted` of its own.
+    if listed && op.says("RETVAL") {
+        dimensions.push((
+            "op.out_type == OperandKind::Unused",
+            vec![
+                ("true".to_owned(), "RetvalUnused".to_owned()),
+                ("false".to_owned(), "RetvalUsed".to_owned()),
+            ],
+        ));
+    }
     if op.says("SMART_BRANCH") {
         dimensions.push((
             "Fused::of(op, next)",
@@ -341,7 +354,9 @@ type Dimension = (&'static str, Vec<(String, String)>);
 /// `ZEND_NULL_HANDLER` for the rest; for an opcode whose handler line
 /// says `SMART_BRANCH`, each of those three times over, unfused and fused
 /// to the `JMPZ` or the `JMPNZ` after it, as php's `_JMPZ` and `_JMPNZ`
-/// handlers are. `Unresolved`, the default, is what an opline holds
+/// handlers are; for one whose line says `RETVAL`, each kind's twice
+/// over, its `out` unread and read, as php's `_RETVAL_UNUSED` and
+/// `_RETVAL_USED` handlers are. `Unresolved`, the default, is what an opline holds
 /// until its unit is published, and what no opline of a
 /// `PublishedUnit` holds.
 fn handlers(ops: &[Op], out: &mut String) -> Result<(), String> {
