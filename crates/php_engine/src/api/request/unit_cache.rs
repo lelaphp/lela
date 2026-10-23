@@ -393,6 +393,32 @@ impl Request {
     /// bool(false)
     /// int(0)
     /// ```
+    ///
+    /// A key whose path now resolves to another held file is a miss, the
+    /// file compiled and the other's copy served, no hit counted on it,
+    /// and the key stays filed beside the discarded copy, so the next
+    /// include by it is a miss again ([`Filed::Existing`]):
+    ///
+    /// ```php
+    /// $d = realpath(__DIR__) . '/to' . getmypid(); @mkdir("$d/x", 0777, true); @mkdir("$d/y");
+    /// foreach (['x', 'y'] as $t) { file_put_contents("$d/$t/a.inc", "<?php return '$t';"); touch("$d/$t/a.inc", time() - 60); }
+    /// symlink("$d/x", "$d/to");
+    /// $s = fn () => array_values(array_intersect_key(opcache_get_status()['opcache_statistics'], ['hits' => 0, 'misses' => 0]));
+    /// echo include "$d/to/a.inc", include "$d/y/a.inc", include "$d/y/a.inc", "\n";
+    /// [$h, $m] = $s();
+    /// unlink("$d/to"); symlink("$d/y", "$d/to");
+    /// var_dump(include "$d/to/a.inc", include_once "$d/to/a.inc", include "$d/to/a.inc");
+    /// [$h2, $m2] = $s();
+    /// echo $h2 - $h, ' ', $m2 - $m, ' ', opcache_get_status()['scripts']["$d/y/a.inc"]['hits'], "\n";
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off
+    /// xyy
+    /// string(1) "y"
+    /// bool(true)
+    /// string(1) "y"
+    /// 0 2 1
+    /// ```
     pub(crate) fn held_answer(
         &mut self,
         held: &Held,
@@ -414,11 +440,13 @@ impl Request {
 
     /// `persistent_zend_resolve_path` under `include_once` and
     /// `require_once`, the lookup by the key `written` makes having
-    /// missed: the key filed beside the full path `path` where the cache
-    /// holds that, as `zend_accel_add_key` files it, whether or not the
-    /// file was included already, so the include that follows is a hit
-    /// by the key and opens no stream. A relative include whose key is
-    /// not filed yet while its full path is held opens the file:
+    /// missed: the file held under the full path `path`, which the once
+    /// form serves as one the key found, `ZCG(cache_persistent_script)`,
+    /// and validates where it is served ([`Request::held_answer`]), with
+    /// the key filed beside it as `zend_accel_add_key` files it, whether
+    /// or not the file was included already, so the include that follows
+    /// is a hit by the key and opens no stream. A relative include whose
+    /// key is not filed yet while its full path is held opens the file:
     ///
     /// ```php
     /// function r() { return get_resource_id(fopen('php://memory', 'r')); }
@@ -450,22 +478,56 @@ impl Request {
     /// string(1) "c"
     /// int(21)
     /// ```
-    pub(crate) fn file_once_key(&mut self, written: &[u8], path: &[u8]) {
+    ///
+    /// So a once form whose key names a discarded copy while the path
+    /// it resolves to is held elsewhere is a hit on that file, where an
+    /// include by the same key is a miss:
+    ///
+    /// ```php
+    /// $d = realpath(__DIR__) . '/to' . getmypid(); @mkdir("$d/x", 0777, true); @mkdir("$d/y");
+    /// foreach (['x', 'y'] as $t) { file_put_contents("$d/$t/a.inc", "<?php return '$t';"); touch("$d/$t/a.inc", time() - 60); }
+    /// symlink("$d/x", "$d/to");
+    /// $s = fn () => array_values(array_intersect_key(opcache_get_status()['opcache_statistics'], ['hits' => 0, 'misses' => 0]));
+    /// var_dump(include "$d/to/a.inc", opcache_compile_file("$d/y/a.inc"));
+    /// unlink("$d/to"); symlink("$d/y", "$d/to");
+    /// var_dump(opcache_invalidate("$d/x/a.inc", true));
+    /// [$h, $m] = $s();
+    /// var_dump(include_once "$d/to/a.inc");
+    /// [$h2, $m2] = $s();
+    /// var_dump(include "$d/to/a.inc");
+    /// [$h3, $m3] = $s();
+    /// echo $h2 - $h, ' ', $m2 - $m, ' ', $h3 - $h2, ' ', $m3 - $m2, ' ', opcache_get_status()['scripts']["$d/y/a.inc"]['hits'], "\n";
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off
+    /// string(1) "x"
+    /// bool(true)
+    /// bool(true)
+    /// string(1) "y"
+    /// string(1) "y"
+    /// 1 0 0 1 1
+    /// ```
+    pub(crate) fn file_once_key(
+        &mut self,
+        written: &[u8],
+        path: &[u8],
+    ) -> Option<(Arc<Held>, Validation)> {
         let full = full_path(path, &self.cwd);
-        let as_written = matches!(
-            self.admission(&full),
-            Admission::Held {
-                lookup: Lookup::AsWritten,
-                ..
-            }
-        );
+        let Admission::Held {
+            validation,
+            lookup: Lookup::AsWritten,
+            ..
+        } = self.admission(&full)
+        else {
+            return None;
+        };
         let shared = Arc::clone(&self.shared);
-        if as_written
-            && let Some(key) = self.written_key(written)
-            && let Some(held) = shared.units.find(&self.arena.files, &UnitKey::full(&full))
-        {
-            shared.units.add_key(&self.arena.files, key, &held);
-        }
+        let key = self.written_key(written)?;
+        let held = shared
+            .units
+            .find(&self.arena.files, &UnitKey::full(&full))?;
+        shared.units.add_key(&self.arena.files, key, &held);
+        (validation != Validation::EveryHit).then_some((held, validation))
     }
 
     /// The unit for the file at `path`, resolved already, as
@@ -813,7 +875,9 @@ impl Request {
             .and_then(Result::ok)
             .zip(early)
             .filter(|(_, early)| early.iter().any(Option::is_some));
-        if let (Some(Ok(unit)), Filed::Hit | Filed::Held, Some(_)) = (cached, filed, served) {
+        if let (Some(Ok(unit)), Filed::Hit | Filed::Held | Filed::Existing, Some(_)) =
+            (cached, filed, served)
+        {
             self.note_held(unit);
         }
     }
@@ -934,7 +998,9 @@ impl Request {
     /// accelerator admitted, held as php without opcache compiles it,
     /// which optimizes nothing.
     fn tell_compiled(&mut self, full: &[u8], validation: Validation, filed: Filed) {
-        if validation != Validation::EveryHit && matches!(filed, Filed::Held | Filed::Kept) {
+        if validation != Validation::EveryHit
+            && matches!(filed, Filed::Held | Filed::Existing | Filed::Kept)
+        {
             self.run_optimizer_passes(full);
         }
         if filed == Filed::Held {
@@ -1259,7 +1325,7 @@ impl AccelServed {
         match filed {
             _ if validation == Validation::EveryHit => None,
             Filed::Compiled => None,
-            Filed::Held => Some(AccelServed::Compiled),
+            Filed::Held | Filed::Existing => Some(AccelServed::Compiled),
             Filed::Hit | Filed::Unheld | Filed::Kept => Some(AccelServed::Hit),
         }
     }

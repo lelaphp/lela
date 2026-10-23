@@ -748,6 +748,11 @@ pub(crate) enum Filed {
     Hit,
     /// Compiled and held, `cache_script_in_shared_memory`.
     Held,
+    /// Compiled, and answered by the copy held under its full path
+    /// already, which `cache_script_in_shared_memory` prefers to what it
+    /// compiled (`Z/ext/opcache/ZendAccelerator.c:1588-1610`): neither a
+    /// hit nor held anew.
+    Existing,
     /// Held nowhere: read back from the file cache, or not read.
     Unheld,
     /// Compiled and kept in the file cache alone: under
@@ -849,17 +854,21 @@ impl UnitCache {
     }
 
     /// `zend_accel_add_key`: `key` filed beside the names `held` is held
-    /// under in `files`.
+    /// under in `files`, where it names nothing yet, a discarded copy
+    /// being something.
     pub(crate) fn add_key(&self, files: &Files, key: UnitKey, held: &Arc<Held>) {
-        if files
-            .held
-            .get(&key)
-            .is_some_and(|found| Arc::ptr_eq(&found, held))
-        {
-            return;
+        if files.held.get(&key).is_none() {
+            self.update_key(files, key, held);
         }
-        if self.hash_full(files) {
-            return;
+    }
+
+    /// `zend_accel_hash_update` of `key` to `held`'s entry: in place of
+    /// what it names, or filed anew where the names are not full.
+    fn update_key(&self, files: &Files, key: UnitKey, held: &Arc<Held>) {
+        match files.held.get(&key) {
+            Some(found) if Arc::ptr_eq(&found, held) => return,
+            None if self.hash_full(files) => return,
+            _ => {}
         }
         // `accel_new_interned_key`: the name as written is one of the
         // buffer's strings from here.
@@ -1040,7 +1049,7 @@ impl UnitCache {
                 size: kept.size,
                 observed,
             };
-            let held = self.hold(files, path, validation, now, read);
+            let (held, _) = self.hold(files, path, validation, now, read);
             files.hit(&held, validation, now);
             return answered_by(&held, Filed::Hit);
         }
@@ -1082,20 +1091,31 @@ impl UnitCache {
             size,
             observed,
         };
-        let held = self.hold(files, path, validation, now, read);
+        let (held, answered) = self.hold(files, path, validation, now, read);
         // Not a `phar://` name, which may hold an alias the archive
         // keeps for the request alone (`ZendAccelerator.c:1669-1672`).
+        // The copy held already takes the key only at the stamp compiled.
         if let Some(written) = written.filter(|key| !key.0.starts_with(b"phar://")) {
-            self.add_key(files, written, &held);
+            match answered {
+                Filed::Held => self.update_key(files, written, &held),
+                _ if validation == Validation::Never
+                    || held.stamp.map(Stamp::seconds) == observed.map(Stamp::seconds) =>
+                {
+                    self.add_key(files, written, &held);
+                }
+                _ => {}
+            }
         }
-        answered_by(&held, Filed::Held)
+        answered_by(&held, answered)
     }
 
     /// The first level's hit on `path`: a file the preload saved,
     /// whose timestamp php keeps at zero, served as held without the
     /// file looked at, whatever the window, and a held file `validation`
     /// finds fresh at `now`; each filed under `written` too. A stale copy
-    /// is discarded, and a discarded one is a miss.
+    /// is discarded, and a discarded one is a miss, as is any file where
+    /// `written` names a discarded copy, which `persistent_compile_file`
+    /// takes for a miss without looking up the full path.
     fn held_hit(
         &self,
         stat: &mut dyn Stat,
@@ -1105,6 +1125,9 @@ impl UnitCache {
         validation: Validation,
         now: i64,
     ) -> Option<Arc<Held>> {
+        if written.is_some_and(|key| files.held.get(key).is_some_and(|held| held.discarded())) {
+            return None;
+        }
         // The cache bypassed, `EveryHit`, compiles afresh.
         if validation != Validation::EveryHit
             && let Some(held) = self
@@ -1135,8 +1158,9 @@ impl UnitCache {
     /// What `read` compiled from the file at `path`, held in `files`
     /// under its full path, in place of a discarded copy under every name
     /// that copy was filed under, as `cache_script_in_shared_memory`
-    /// updates the bucket every key of it points to; what another request
-    /// held for it meanwhile where it did.
+    /// updates the bucket every key of it points to, [`Filed::Held`]; the
+    /// copy held for the path already where there is one, served at
+    /// `now`, [`Filed::Existing`].
     fn hold(
         &self,
         files: &Files,
@@ -1144,7 +1168,7 @@ impl UnitCache {
         validation: Validation,
         now: i64,
         read: Read,
-    ) -> Arc<Held> {
+    ) -> (Arc<Held>, Filed) {
         let Read {
             unit,
             early,
@@ -1180,12 +1204,14 @@ impl UnitCache {
                     discarded: AtomicBool::new(false),
                 }
             });
-        if built {
-            files.used.fetch_add(size, Ordering::Relaxed);
-            files.funcs.publish(&held.unit);
-            self.persist_names(path, &held.unit);
+        if !built {
+            held.last_used.store(now, Ordering::Relaxed);
+            return (held, Filed::Existing);
         }
-        held
+        files.used.fetch_add(size, Ordering::Relaxed);
+        files.funcs.publish(&held.unit);
+        self.persist_names(path, &held.unit);
+        (held, Filed::Held)
     }
 
     /// `zend_accel_invalidate`'s discard of the file held under `key`:
