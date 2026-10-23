@@ -66,6 +66,7 @@ tier::FrameLayout::header_bytes
 tier::FrameLayout::info
 tier::FrameLayout::innermost
 tier::FrameLayout::leaves_by_kernel
+tier::FrameLayout::link
 tier::FrameLayout::num_args
 tier::FrameLayout::numbered_from
 tier::FrameLayout::on_page
@@ -76,6 +77,7 @@ tier::FrameLayout::record_len
 tier::FrameLayout::record_placed
 tier::FrameLayout::returns_to
 tier::FrameLayout::room
+tier::FrameLayout::slot
 tier::FrameLayout::this
 tier::FrameLayout::top
 tier::FrameRef

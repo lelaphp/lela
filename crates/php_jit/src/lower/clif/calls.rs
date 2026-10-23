@@ -38,9 +38,9 @@ const fn at(word: u32) -> i32 {
     imm(word as usize)
 }
 
-/// A slot, `sizeof(zval)`.
-const SLOT: u32 = 16;
-const _: () = assert!(L.room().is_multiple_of(SLOT) && L.header_bytes().is_multiple_of(8));
+/// A slot, `sizeof(zval)`, the layout's.
+const SLOT: u32 = L.slot();
+const _: () = assert!(L.header_bytes().is_multiple_of(8));
 
 /// Where the stack keeps its words.
 const TOP: i32 = at(L.top());
@@ -101,7 +101,8 @@ impl Emit<'_> {
         let at = (self.held.iter())
             .position(|held| held == plain)
             .ok_or_else(|| mismatch("a call in place the trace does not hold"))?;
-        i32::try_from(at * 8).map_err(|_| mismatch("too many calls in place"))
+        // One address a call, `IMAGES_AT`'s table.
+        i32::try_from(at * size_of::<usize>()).map_err(|_| mismatch("too many calls in place"))
     }
 
     /// Whether the request is not ready for the trace's calls in place,
@@ -143,7 +144,7 @@ impl Emit<'_> {
         self.divert_if(refused, slow);
         // The link, the room linked before this one, and the header.
         let below = self.b.ins().load(I64, trusted(), stack, INNERMOST);
-        self.b.ins().store(trusted(), below, top, 0);
+        self.b.ins().store(trusted(), below, top, at(L.link()));
         let cx = self.cx.ok_or_else(|| mismatch("a push before the entry"))?;
         let images = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
         let header = self.b.ins().load(I64, trusted(), images, header);
@@ -417,7 +418,7 @@ impl Emit<'_> {
         })?;
         // The record off the table, the word and the top back.
         self.b.ins().store(trusted(), last, stack, FRAMES_LEN);
-        let below = self.b.ins().load(I64, trusted(), room, 0);
+        let below = self.b.ins().load(I64, trusted(), room, at(L.link()));
         self.b.ins().store(trusted(), below, stack, INNERMOST);
         self.b.ins().store(trusted(), room, stack, TOP);
         // The caller on past its call, `LOAD_NEXT_OPLINE()`.

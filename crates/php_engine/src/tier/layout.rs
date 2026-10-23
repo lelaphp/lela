@@ -16,7 +16,7 @@
 //! moved offset is not; no offset is written in `php_jit` or in a seam's
 //! file.
 
-use php_heap::{FrameRef, HEADER_AT, HeaderImage, ROOM_BYTES, StackLayout, VmStack};
+use php_heap::{FrameRef, HEADER_AT, HeaderImage, ROOM_BYTES, StackLayout, VmStack, Zval};
 use php_unit::MapPtrOffset;
 use php_unit::decl::Bare;
 
@@ -42,7 +42,9 @@ const STACK: StackLayout = VmStack::<Header>::LAYOUT;
 /// [`FRAME`]; read at compile time, every accessor is a `const fn`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameLayout {
+    slot: u32,
     room: u32,
+    link: u32,
     header: u32,
     header_bytes: u32,
     opline: u32,
@@ -72,7 +74,9 @@ pub struct FrameLayout {
 
 /// The engine's frame layout.
 pub const FRAME: FrameLayout = FrameLayout {
+    slot: word(size_of::<Zval>()),
     room: word(ROOM_BYTES),
+    link: 0,
     header: word(HEADER_AT),
     header_bytes: word(size_of::<Header>()),
     opline: word(HEADER_AT + Header::OPLINE_AT),
@@ -106,6 +110,9 @@ pub const FRAME: FrameLayout = FrameLayout {
 const _: () = {
     assert!(FRAME.header_bytes.is_multiple_of(8) && FRAME.header.is_multiple_of(8));
     assert!(FRAME.header + FRAME.header_bytes == FRAME.room);
+    // The link is the room's first word, the header the words after it.
+    assert!(FRAME.link == 0 && FRAME.header as usize == size_of::<usize>());
+    assert!(FRAME.room.is_multiple_of(FRAME.slot));
     assert!(
         FRAME.opline.is_multiple_of(4)
             && FRAME.info.is_multiple_of(4)
@@ -117,6 +124,20 @@ const _: () = {
 };
 
 impl FrameLayout {
+    /// A slot's bytes, `sizeof(zval)`, the stride of a frame's slots and
+    /// of a room's.
+    #[must_use]
+    pub const fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    /// Where a room keeps its link to the room linked before it, php's
+    /// `prev_execute_data`, a word.
+    #[must_use]
+    pub const fn link(&self) -> u32 {
+        self.link
+    }
+
     /// The bytes of a room before its first slot, `ZEND_CALL_FRAME_SLOT`
     /// zvals: a frame's slot `n` is at `room() + 16 * n`. Its first word
     /// is the link to the room linked before it, php's
