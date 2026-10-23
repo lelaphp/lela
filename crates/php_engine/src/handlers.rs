@@ -14088,7 +14088,13 @@ fn taking<R: Retval>(
     field: u32,
 ) -> Option<Taking> {
     let z = value.read(slots, code, field);
-    if !crate::operand::movable(z)
+    // A `TMP` holds a value a variable may hold, never a reference, an
+    // `IS_INDIRECT` or nothing, so it is taken untested, as php's
+    // `ZEND_ASSIGN_SPEC_CV_TMP` takes it (`zend_copy_to_variable`). A
+    // debug build keeps the test, and `ASSIGN`'s inline path senses a
+    // `TMP` that breaks it ([`Request::sense_unmovable_temporary`]).
+    let untested = value.kind() == OperandKind::Tmp && !cfg!(debug_assertions);
+    if !(untested || crate::operand::movable(z))
         || (value.kind() == OperandKind::Const && !crate::operand::owns_nothing(z))
     {
         return None;
@@ -24487,6 +24493,14 @@ fn inline_assign<R: Retval>(
 ) -> Option<Edge> {
     if a.kind() != OperandKind::Cv {
         return None;
+    }
+    #[cfg(debug_assertions)]
+    if b.kind() == OperandKind::Tmp {
+        let z = b.read(req.slots_mut(frame), code, op.op2);
+        if !crate::operand::movable(z) {
+            req.sense_unmovable_temporary(op, op.op2, z.kind());
+            return None;
+        }
     }
     let at = a.slot(op.op1)?;
     let slots = req.slots_mut(frame);
