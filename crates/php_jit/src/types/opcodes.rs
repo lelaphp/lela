@@ -927,14 +927,42 @@ pub(super) fn check_sites(op: &Opline, samples: [Option<Sample>; 3]) -> Vec<Site
     }
 }
 
+/// Whether an `ASSIGN_DIM_OP` is compiled inline, as php compiles a
+/// compound write to an element over a variable's array, through the
+/// reference it may be (`t1` what it sees of it), by a long key and with
+/// a number, calling its helpers where the array is shared, a hash or
+/// short of the key, or the element is no number (`zend_jit_assign_dim_op`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:13528-13750`): its `out` slot unused and
+/// its operator one `zend_jit_math_helper` serves over two numbers.
+pub(super) fn compound_in_place(op: &Opline, t1: Types, t2: Types, td: Types) -> bool {
+    op.op1_type == OperandKind::Cv
+        && op.out_type == OperandKind::Unused
+        && t1.tag() == Some(ZvalType::Array)
+        && t2 == Types::LONG
+        && (td == Types::LONG || td == Types::DOUBLE)
+        && lattice::binary_of(op.extended_value)
+            .is_some_and(|binary| matches!(binary, Opcode::Add | Opcode::Sub | Opcode::Mul))
+}
+
 /// php's packed guard over an array `op1` read or written by a long key
-/// (`MAY_BE_PACKED_GUARD`): the layout it holds, where php adds one.
+/// (`MAY_BE_PACKED_GUARD`): the layout it holds, where php adds one. An
+/// array recorded through a reference is held to its layout only where it
+/// is read, as php's code generator adds the guard to what
+/// `zend_jit_fetch_reference` left of it for a read alone, its trace SSA
+/// knowing no type of a reference (`Z/ext/opcache/jit/zend_jit_trace.c:5830-5880`).
 pub(super) fn packed_guard(
     op: &Opline,
     samples: [Option<Sample>; 3],
     code: &OpArray,
 ) -> Option<Layout> {
-    let first = samples[0].filter(|s| !s.reference && !s.indirect && s.kind == ZvalType::Array)?;
+    let first = samples[0].filter(|s| !s.indirect && s.kind == ZvalType::Array)?;
+    let reads = matches!(
+        op.opcode,
+        Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::FetchListR
+    );
+    if first.reference && !reads {
+        return None;
+    }
     let recorded = if first.packed {
         Layout::Packed
     } else {

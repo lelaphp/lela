@@ -327,7 +327,7 @@ pub(crate) enum Imm {
     /// takes it by value, which php decides as it compiles
     /// (`zend_jit_send_val`, `Z/ext/opcache/jit/zend_jit_ir.c:9466-9506`).
     Arg(u32),
-    /// The binary operator of an `ASSIGN_OP`.
+    /// The binary operator of an `ASSIGN_OP` or an `ASSIGN_DIM_OP`.
     Binary(Opcode),
     /// A `DO_*CALL` that makes a call compiled code pushed in place, and
     /// makes it the callee's frame in place where nothing refuses it
@@ -428,8 +428,13 @@ pub(crate) enum Check {
     Type { value: ValueId, tag: ZvalType },
     /// The slot holds a reference, and what it refers to is of this type.
     Deref { value: ValueId, tag: ZvalType },
-    /// The array is laid out so: php's packed guard.
-    Layout { value: ValueId, layout: Layout },
+    /// The array is laid out so, held in the slot or through the
+    /// reference the slot holds: php's packed guard.
+    Layout {
+        value: ValueId,
+        layout: Layout,
+        read: Read,
+    },
     /// The jump goes the way it went.
     Direction { taken: bool },
     /// The interpreter stands at this opline of this op array once the op
@@ -557,8 +562,8 @@ pub(crate) enum Stored {
     Copied { value: ValueId, read: Read },
 }
 
-/// How a fetched element is read: in place, or through the reference the
-/// element is.
+/// How a zval is read: in place, or through the reference it is: a
+/// fetched element, and the array a layout guard holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Read {
     InPlace,

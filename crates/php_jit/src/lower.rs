@@ -571,9 +571,14 @@ fn in_place(ir: &TraceIr) -> (Box<[PlainCall]>, Box<[FuncRef]>) {
         if !calls.contains(plain) {
             calls.push(plain.clone());
         }
+        // A user function's cache the call enters, laid down; a native's
+        // call enters none.
+        let Some(callee) = plain.callee() else {
+            continue;
+        };
         let own = ir.frames.get(usize::from(frame.0)).map(|info| info.func);
-        if own != Some(plain.callee()) && !caches.contains(&plain.callee()) {
-            caches.push(plain.callee());
+        if own != Some(callee) && !caches.contains(&callee) {
+            caches.push(callee);
         }
     }
     (calls.into_boxed_slice(), caches.into_boxed_slice())

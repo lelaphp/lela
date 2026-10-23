@@ -285,7 +285,7 @@ fn frames(f: FuncRef, g: FuncRef) -> Vec<FrameInfo> {
 fn push_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
     let plain = req.state::<Parity>().plain.clone()?;
     let (init, _) = named(req, f, Opcode::InitFcall)?;
-    let (callee, me) = (plain.callee(), func(req, f)?);
+    let (callee, me) = (plain.callee()?, func(req, f)?);
     let ops = vec![
         Op::Line(line(
             Frame::ROOT,
@@ -314,7 +314,7 @@ fn make_in_place(req: &mut Request, f: FrameRef) -> Option<Read> {
     let entry = plain.activation()?.opline();
     let (init, _) = named(req, f, Opcode::InitFcall)?;
     let (call, returns) = named(req, f, Opcode::DoUcall)?;
-    let (callee, me) = (plain.callee(), func(req, f)?);
+    let (callee, me) = (plain.callee()?, func(req, f)?);
     let send = |at: u32, n: u32| {
         Op::Line(line(
             Frame::ROOT,
