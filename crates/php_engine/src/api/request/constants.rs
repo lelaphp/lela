@@ -160,6 +160,34 @@ impl Constants {
         Some((at, self.rows.get(usize::try_from(at).ok()?)?))
     }
 
+    /// The constant the request holds under `name`, its value and whether
+    /// `CONST_DEPRECATED` marks it: a row it added, or `PHP_SAPI`, which
+    /// php registers at startup (`CONST_PERSISTENT|CONST_NO_FILE_CACHE`)
+    /// and the engine holds per request, since the host names it. The
+    /// engine's declared constants are not among them.
+    fn request(&self, name: &[u8]) -> Option<(Value, bool)> {
+        if name == b"PHP_SAPI" {
+            return Some((self.sapi_constant, false));
+        }
+        let (_, row) = self.find(name)?;
+        Some((row.value, row.deprecated))
+    }
+
+    /// The constant the request holds under `name` as a compile of its
+    /// own reads `EG(zend_constants)` past the persistent table
+    /// ([`php_compile::RequestConstants`]). `PHP_SAPI` is among them, so
+    /// an `eval` substitutes it as php does; a file compiled for the
+    /// cache is handed none, where php's persistent arm substitutes
+    /// `PHP_SAPI` there too, since the engine's cache keeps no unit of
+    /// one host's.
+    pub(super) fn defined(&self, name: &[u8]) -> Option<php_compile::Defined> {
+        let (value, deprecated) = self.request(name)?;
+        Some(php_compile::Defined {
+            value: value.to_zval(),
+            deprecated,
+        })
+    }
+
     /// The row under `name` taken out, those after it moved down and the
     /// index laid again, a new generation of positions.
     fn remove(&mut self, name: &[u8]) -> Option<ConstantRow> {
@@ -498,12 +526,7 @@ impl Request {
     }
 
     pub(crate) fn constant_named(&self, name: &[u8]) -> Option<Value> {
-        if name == b"PHP_SAPI" {
-            return Some(self.constants.sapi_constant);
-        }
-        self.constants
-            .find(name)
-            .map(|(_, row)| row.value)
+        (self.constants.request(name).map(|(value, _)| value))
             .or_else(|| self.shared.constant(name))
     }
 

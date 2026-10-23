@@ -746,6 +746,30 @@ pub trait Intern {
         let _ = made;
     }
 
+    /// One more owner of `value`, a value another place owns that a
+    /// compile hands on where the program wrote something else, kept for
+    /// the unit as what this home made is kept: whether this home holds
+    /// it. php's compile takes that owner wherever it copies a counted
+    /// value it did not make into what it compiles (`ZVAL_COPY_OR_DUP`,
+    /// `ZVAL_COPY`): a constant the request defined that
+    /// `zend_try_ct_eval_const` substitutes for its name, and an element
+    /// a fold reads out of an array the request owns. A value nothing
+    /// counts owners of, an interned string or an immutable array, is
+    /// held by any home and takes nothing; a counted one only by a home of
+    /// the request's whose values it is, and where the home cannot the
+    /// asker leaves what was written standing, the fetch or the node.
+    fn hold(&mut self, value: Zval) -> bool {
+        !value.is_refcounted()
+    }
+
+    /// [`Intern::hold`] of a string as a claim the asker holds alone and
+    /// gives back once it has read it ([`Intern::give_back`]), as a fold
+    /// over the substituted constant destroys its copy; none where this
+    /// home cannot hold it.
+    fn hold_made(&mut self, s: Str) -> Option<Made> {
+        self.hold(Zval::string(s)).then_some(Made(s))
+    }
+
     /// A constant array of a unit in this home (design §5.3): the
     /// entries in this order, the keys strings this home made or
     /// integers. An engine's is php's `IS_ARRAY_IMMUTABLE`, no owner

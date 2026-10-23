@@ -197,10 +197,7 @@ impl Request {
     /// The linked record of a class: a native class's as startup linked
     /// it, a declared class's as it bound ([`Request::bind_members`]).
     pub(crate) fn linked_class(&self, class: ClassId) -> Option<&LinkedClass<ClassId>> {
-        match self.native_class_at(class) {
-            Some(native) => self.shared.records.get(native),
-            None => self.declared_row(class)?.bound.record.as_ref(),
-        }
+        self.class_lookup().linked_class(class)
     }
 
     /// The function the method at `at` among `class`'s own declarations

@@ -670,8 +670,12 @@ impl Request {
         let bound = crate::multibyte::bound(self, shared.compile_multibyte());
         let keys_before = self.keys_made();
         self.compiling_for_cache(|heap, classes, cwd| {
+            // opcache compiles the file under
+            // `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`, so it substitutes
+            // none of the request's constants.
             let request = ForRequest {
                 classes,
+                constants: None,
                 multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
                 keys_before,
             };

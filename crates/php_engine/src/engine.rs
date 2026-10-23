@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use php_compile::multibyte::Multibyte;
-use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
+use php_compile::{CompileError, RequestClasses, RequestConstants, SourceKind, StackLimit};
 use php_heap::{Intern, Strings, Zval};
 use php_link::{Exact, Folded, Indexed, LinkedClass, NameMap, Names};
 use php_unit::decl::{
@@ -1542,7 +1542,10 @@ struct Origin<'a> {
 }
 
 /// What the request a source compiles for brings to its compile: the
-/// classes it has declared ([`php_compile::RequestClasses`]), where
+/// classes it has declared ([`php_compile::RequestClasses`]), the
+/// constants it has defined where the compile is one php runs without
+/// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`
+/// ([`php_compile::RequestConstants`]), where
 /// `zend.multibyte` is on the encoding functions bound for it and what
 /// the scanner reads beside them ([`crate::multibyte::Bound`]), and
 /// `CG(rtd_key_counter)` as it stands
@@ -1550,6 +1553,7 @@ struct Origin<'a> {
 #[derive(Clone, Copy)]
 pub(crate) struct ForRequest<'a> {
     pub(crate) classes: RequestClasses<'a>,
+    pub(crate) constants: Option<RequestConstants<'a>>,
     pub(crate) multibyte: Option<Multibyte<'a>>,
     pub(crate) keys_before: u32,
 }
@@ -1560,6 +1564,7 @@ impl<'a> ForRequest<'a> {
     pub(crate) fn none(multibyte: Option<Multibyte<'a>>) -> ForRequest<'a> {
         ForRequest {
             classes: RequestClasses::default(),
+            constants: None,
             multibyte,
             keys_before: 0,
         }
@@ -1898,13 +1903,14 @@ impl Shared {
             ..self.declared()
         };
         let room = req.compile_room();
-        req.compiling(|heap, request_classes, arena, cwd| {
+        req.compiling(|heap, request_classes, request_constants, arena, cwd| {
             let origin = Origin {
                 filename,
                 cwd,
                 kind,
                 request: ForRequest {
                     classes: request_classes,
+                    constants: Some(request_constants),
                     multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
                     keys_before,
                 },
@@ -6081,6 +6087,7 @@ fn compile(
         frameless: declared.frameless,
         classes: declared.classes,
         request_classes: origin.request.classes,
+        request_constants: origin.request.constants,
         stack,
         keys_before: origin.request.keys_before,
         multibyte: origin.request.multibyte,

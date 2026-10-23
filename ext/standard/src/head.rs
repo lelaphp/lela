@@ -145,7 +145,7 @@ fn http_response_code(
             let message = match req.response().started_at() {
                 Some((file, line)) => format!(
                     "Cannot set response code - headers already sent (output started at {}:{line})",
-                    String::from_utf8_lossy(&file)
+                    String::from_utf8_lossy(file)
                 ),
                 None => String::from("Cannot set response code - headers already sent"),
             };
@@ -222,14 +222,20 @@ fn headers_sent(
     #[php(default = null)] filename: Ref<Untyped<Value>>,
     #[php(default = null)] line: Ref<Untyped<Value>>,
 ) -> Result<bool, Thrown> {
-    let sent = req.response().headers_sent();
-    let (file, at) = sent.clone().unwrap_or_default();
+    // `ZEND_TRY_ASSIGN_REF_STRING`: a string of its own, so the name is
+    // read out before the request is written.
+    let sent = req
+        .response()
+        .headers_sent()
+        .map(|(file, at)| (file.to_vec(), at));
+    let headers_sent = sent.is_some();
+    let (file, at) = sent.unwrap_or_default();
     line.set(req, Untyped(Value::int(i64::from(at))))?;
     if filename.is_given() {
         let file = PhpString::new(req, &file)?;
         filename.set(req, Untyped(file.into_value()))?;
     }
-    Ok(sent.is_some())
+    Ok(headers_sent)
 }
 
 /// `headers_list(): array` (`Z/ext/standard/head.c:360`): the list, one

@@ -74,6 +74,59 @@ pub(crate) struct UnitStrings {
     compiling: Compiling,
 }
 
+/// What the request-only units the request holds hold, read apart from
+/// the compile under way: which units they are, and the strings a copy
+/// of a name finds ([`UnitStrings::find`]).
+#[derive(Clone, Copy)]
+pub(super) struct UnitsHeld<'a> {
+    units: &'a [Held],
+    by_bytes: &'a HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
+    kept: &'a HashMap<Box<[u8]>, PhpString, NameHasher>,
+    files: usize,
+}
+
+impl<'a> UnitsHeld<'a> {
+    /// The view over the fields of [`UnitStrings`] it reads.
+    fn of(
+        units: &'a [Held],
+        by_bytes: &'a HashMap<Box<[u8]>, Option<PhpString>, NameHasher>,
+        kept: &'a HashMap<Box<[u8]>, PhpString, NameHasher>,
+        files: usize,
+    ) -> UnitsHeld<'a> {
+        UnitsHeld {
+            units,
+            by_bytes,
+            kept,
+            files,
+        }
+    }
+
+    /// The string a request-only unit that lives holds for the name
+    /// `bytes`, else the one the request keeps for it to its end; a
+    /// view, no owner taken.
+    pub(super) fn find(self, bytes: &[u8]) -> Option<PhpString> {
+        (self.by_bytes.get(bytes).copied().flatten())
+            .or_else(|| self.kept.get(bytes).copied())
+            .or_else(|| {
+                (self.files > 0)
+                    .then(|| {
+                        (self.units.iter().rev())
+                            .find_map(|held| held.file.filter(|file| file.as_bytes() == bytes))
+                    })
+                    .flatten()
+            })
+    }
+
+    /// Whether `unit` is one the request compiled for itself and holds,
+    /// no cache keeping it: php's class of such a unit is mutable, its
+    /// constants updated in place as they are evaluated.
+    pub(super) fn holds(self, unit: *const Unit) -> bool {
+        self.units
+            .iter()
+            .any(|held| std::ptr::eq(held.unit.as_ptr(), unit))
+    }
+}
+
 /// The vectors one unit's strings and arrays stood in, emptied, kept
 /// together for the next unit's: an `eval` in a loop takes them back
 /// with one pop.
@@ -249,6 +302,7 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
         .map(|(owner, z)| (z, owner))
         .collect();
     let names = declared_names(unit);
+    let mut values = class_constant_values(unit);
     // Each dynamic definition's variables, one string each it takes, the
     // last definition's first, to be taken from the end.
     let mut vars: HashMap<&[u8], Vec<usize>, NameHasher> = HashMap::with_hasher(NameHasher);
@@ -272,7 +326,13 @@ fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
                         match var {
                             Some(at) => Owner::Definition(at),
                             None if names.contains(bytes) => Owner::Tables,
-                            None => Owner::Main,
+                            None => match values.get_mut(bytes) {
+                                Some(left) if *left > 0 => {
+                                    *left -= 1;
+                                    Owner::Tables
+                                }
+                                _ => Owner::Main,
+                            },
                         }
                     })
                 }
@@ -292,6 +352,55 @@ fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
     php_compile::declared_names(unit)
         .map(Cow::into_owned)
         .collect()
+}
+
+/// The string values `unit`'s classes declare their constants with, each
+/// beside how many constants hold it: the string the compile made for
+/// one, written or folded, is the class's from its declaration, as
+/// php's `constants_table` holds the zval `zend_compile_class_const_decl`
+/// put there, and its first read finds it ([`Request::declared_string`])
+/// rather than make one. A value is told by its bytes, so the compile's
+/// strings of those bytes are taken for it in the order made, as many as
+/// constants hold it. An enum case's is not among them, its value
+/// standing in the case's copied expression ([`declared_bytes::AstCopy`]).
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3263-class-values.inc';
+/// file_put_contents($f, <<<'PHP'
+/// <?php
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// m('class W {}');
+/// foreach ([
+///     'class S1 { const K = "abcdefghij5"; }',
+///     '$GLOBALS["a"] = S1::K;',
+///     'class S2 { const K = "abcdefghij" . 5; }',
+///     '$GLOBALS["a"] = S2::K;',
+///     'interface S3 { const K = "abcdefghij" . "5"; }',
+///     '$GLOBALS["a"] = S3::K;',
+/// ] as $c) echo m($c), "  ", $c, "\n";
+/// PHP);
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// 536  class S1 { const K = "abcdefghij5"; }
+/// 888  $GLOBALS["a"] = S1::K;
+/// 536  class S2 { const K = "abcdefghij" . 5; }
+/// 0  $GLOBALS["a"] = S2::K;
+/// 536  interface S3 { const K = "abcdefghij" . "5"; }
+/// 0  $GLOBALS["a"] = S3::K;
+/// ```
+fn class_constant_values(unit: &Unit) -> HashMap<&[u8], usize, NameHasher> {
+    let mut values = HashMap::with_hasher(NameHasher);
+    let constants = (unit.classes.iter())
+        .flat_map(|class| &class.constants)
+        .filter(|constant| !constant.is_case);
+    for constant in constants {
+        if let php_unit::decl::ConstExpr::Str(value) = &constant.value {
+            *values.entry(&**value).or_insert(0) += 1;
+        }
+    }
+    values
 }
 
 /// `by_bytes`'s entry for `bytes` pointed at `s`.
@@ -343,28 +452,28 @@ impl UnitStrings {
     /// `bytes`, else the one the request keeps for it to its end
     /// ([`Request::kept_string`]); a view, no owner taken.
     pub(super) fn find(&self, bytes: &[u8]) -> Option<PhpString> {
-        (self.by_bytes.get(bytes).copied().flatten())
-            .or_else(|| self.kept.get(bytes).copied())
-            .or_else(|| {
-                (self.files > 0)
-                    .then(|| {
-                        (self.units.iter().rev())
-                            .find_map(|held| held.file.filter(|file| file.as_bytes() == bytes))
-                    })
-                    .flatten()
-            })
+        self.units_held().find(bytes)
+    }
+
+    /// What the request's units hold, read apart from the compile under
+    /// way ([`UnitsHeld`]).
+    fn units_held(&self) -> UnitsHeld<'_> {
+        UnitsHeld::of(&self.units, &self.by_bytes, &self.kept, self.files)
+    }
+
+    /// The compile under way, which the home its constants are made in
+    /// keeps them in, beside what the request's units hold, borrowed apart
+    /// so a compile can read a class's constant strings while it makes
+    /// its own ([`super::Request::compiling`]).
+    pub(super) fn compiling_beside(&mut self) -> (&mut Compiling, UnitsHeld<'_>) {
+        let held = UnitsHeld::of(&self.units, &self.by_bytes, &self.kept, self.files);
+        (&mut self.compiling, held)
     }
 
     /// `s`, a string of the request's with one owner, the kept string
     /// for `bytes` to the request's end ([`Request::kept_string`]).
     pub(super) fn keep(&mut self, bytes: &[u8], s: PhpString) {
         self.kept.insert(bytes.into(), s);
-    }
-
-    /// The compile under way, which the home its constants are made in
-    /// keeps them in ([`super::memory::RequestStrings`]).
-    pub(super) fn compiling_mut(&mut self) -> &mut Compiling {
-        &mut self.compiling
     }
 
     /// The strings that are over taken out: those of each unit nothing
@@ -523,10 +632,7 @@ impl Request {
     /// declared, an `eval`'s or an uncached include's, whose constant
     /// strings are its own rather than the engine's.
     pub(crate) fn declared_for_the_request(&self, class: crate::api::values::ClassId) -> bool {
-        self.declared_row(class).is_some_and(|row| {
-            let unit = PublishedUnit::as_ptr(&row.unit);
-            (self.unit_strings.units.iter()).any(|held| std::ptr::eq(held.unit.as_ptr(), unit))
-        })
+        (self.class_lookup()).declared_for_the_request(self.unit_strings.units_held(), class)
     }
 
     /// The constant strings the compile just made, given to `unit`, the
@@ -592,11 +698,15 @@ impl Request {
         } else {
             made.drain(..).map(|z| (Owner::Main, z)).collect()
         };
-        let names = if owned.iter().any(|(owner, _)| *owner != Owner::Main) {
-            declared_names(unit)
+        let (names, values) = if owned.iter().any(|(owner, _)| *owner != Owner::Main) {
+            (declared_names(unit), class_constant_values(unit))
         } else {
-            HashSet::default()
+            (HashSet::default(), HashMap::default())
         };
+        // What a declaration finds by its bytes: a name it is read by, or
+        // a class constant's value.
+        let found =
+            |s: &PhpString| names.contains(s.as_bytes()) || values.contains_key(s.as_bytes());
         for (owner, z) in owned {
             let name = z.as_str().map(PhpString::of);
             match owner {
@@ -609,7 +719,7 @@ impl Request {
                 }
                 Owner::Tables => {
                     held.constants.push(z);
-                    if let Some(s) = name.filter(|s| names.contains(s.as_bytes())) {
+                    if let Some(s) = name.filter(found) {
                         held.found.push(s);
                         point(&mut strings.by_bytes, s);
                     }
