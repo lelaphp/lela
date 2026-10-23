@@ -412,10 +412,11 @@ impl Emit<'_> {
             .b
             .ins()
             .iadd_imm_s(caller, -i64::from(L.numbered_from()));
+        let callers = self.record_word(frames, place, L.record_at());
         let named = self.b.ins().load(I32, trusted(), room, at(L.returns_to()));
         let returns = self.b.ins().uextend(I64, named);
+        let target = self.taken_at(callers, returns);
         let reads = self.b.ins().icmp_imm_s(IntCC::NotEqual, returns, 0);
-        let (callers, target) = self.taken_at(frames, place, returns);
         let kind = self.b.ins().load(I32, trusted(), target, super::TYPE_AT);
         let counted = self.b.ins().band_imm_u(kind, COUNTED);
         let counted = self.b.ins().icmp_imm_s(IntCC::NotEqual, counted, 0);
@@ -437,7 +438,8 @@ impl Emit<'_> {
             Owners::Each(vars) => {
                 let threw = self.free_cvs(room, line, vars)?;
                 let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
-                let (callers, target) = self.taken_at(frames, place, returns);
+                let callers = self.record_word(frames, place, L.record_at());
+                let target = self.taken_at(callers, returns);
                 (Some(threw), frames, callers, target)
             }
             Owners::Uncounted | Owners::Kernel => (None, frames, callers, target),
@@ -493,17 +495,16 @@ impl Emit<'_> {
         self.left_or_not(id, line, (slow, join))
     }
 
-    /// The caller's slots, by its record in the frame table at `frames`,
-    /// and the slot of them a call that returns into `returns`, numbered
-    /// past [`FrameLayout::numbered_from`], takes the value in.
-    fn taken_at(&mut self, frames: Value, place: Value, returns: Value) -> (Value, Value) {
-        let callers = self.record_word(frames, place, L.record_at());
+    /// The slot of the caller's slots at `callers` that a call returning
+    /// into `returns`, numbered past [`FrameLayout::numbered_from`], takes
+    /// the value in.
+    fn taken_at(&mut self, callers: Value, returns: Value) -> Value {
         let taken = self
             .b
             .ins()
             .iadd_imm_s(returns, -i64::from(L.numbered_from()));
         let offset = self.b.ins().imul_imm_s(taken, i64::from(SLOT));
-        (callers, self.b.ins().iadd(callers, offset))
+        self.b.ins().iadd(callers, offset)
     }
 
     /// php's `zend_jit_free_cv` over each of `vars`, the variables of the
