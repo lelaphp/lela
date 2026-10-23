@@ -2167,29 +2167,42 @@ impl<'a> Builder<'a> {
     }
 
     /// php's `zend_jit_trace_uses_initial_ip` over the trace's ops as
-    /// php's code generator walks them (`Z/ext/opcache/jit/zend_jit_ir.c:991-1098`):
+    /// php's code generator walks them (`Z/ext/opcache/jit/zend_jit_ir.c:991-1109`):
     /// the code enters holding the trace's first opline in its
-    /// instruction pointer and tracks it, a call it begins starts reusing
+    /// instruction pointer and tracks it; a call it begins starts reusing
     /// the pointer for the call (`zend_jit_start_reuse_ip`) and stops
-    /// tracking, and an opline served through its handler
+    /// tracking; an opline served through its handler
     /// ([`Builder::by_handler`]) sets the pointer (`zend_jit_set_ip`),
-    /// using the one it tracks where it tracks one, and tracks its own
-    /// from then on.
+    /// using the one it tracks where it tracks one, and tracks the opline
+    /// after it from then on; and an opline compiled inline at the opline
+    /// tracked uses the pointer where its code may call into php's runtime,
+    /// standing the frame there first (`jit_SET_EX_OPLINE`, `:1100-1109`): php's
+    /// `BOOL_NOT` of a variable recorded through a reference calls
+    /// `zend_is_true` (`:7790-7792`), so a loop whose first opline it is
+    /// takes php's interrupt stub.
     fn uses_initial_ip(&self) -> bool {
-        let mut tracking = true;
+        let first = self.ops.iter().find_map(|op| match op {
+            Op::Line(line) => Some(self.place_of(line)),
+            _ => None,
+        });
+        let mut tracked = first;
         for (at, op) in self.ops.iter().enumerate() {
             match op {
                 Op::Line(line) if self.by_handler(at, line) => {
-                    if tracking {
+                    if tracked.is_some() {
                         return true;
                     }
-                    tracking = true;
+                    tracked = Some(self.after_handler(line));
+                }
+                Op::Line(line) => {
+                    if tracked == Some(self.place_of(line)) && self.calls_runtime(at, line) {
+                        return true;
+                    }
                 }
                 Op::InitCall {
                     began: Began::Here, ..
-                } => tracking = false,
-                Op::Line(_)
-                | Op::InitCall {
+                } => tracked = None,
+                Op::InitCall {
                     began: Began::Before,
                     ..
                 }
@@ -2198,6 +2211,45 @@ impl<'a> Builder<'a> {
             }
         }
         false
+    }
+
+    /// The opline `line` is, as php's pointer names it: by its op array,
+    /// whatever frame of the trace serves it.
+    fn place_of(&self, line: &Line) -> (FuncRef, OplineIdx) {
+        (self.frames[usize::from(line.frame.0)].func, line.opline)
+    }
+
+    /// The opline php's handler leaves the pointer at after `line`: the
+    /// next, past an `OP_DATA` that goes with it (`zend_jit_handler`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:4139-4153`).
+    fn after_handler(&self, line: &Line) -> (FuncRef, OplineIdx) {
+        let (func, at) = self.place_of(line);
+        let code = self.meta(line.frame).code;
+        let data = code
+            .oplines
+            .get(at.0 as usize + 1)
+            .is_some_and(|after| after.opcode == Opcode::OpData);
+        (func, OplineIdx(at.0 + if data { 2 } else { 1 }))
+    }
+
+    /// Whether php's inline code for `line`, the op at `at`, may call into
+    /// php's runtime, standing the frame at it first: where an operand was recorded
+    /// through a reference, or may be anything but a scalar once php's
+    /// `CHECK_OP_TRACE_TYPE` narrowed it to what was recorded.
+    fn calls_runtime(&self, at: usize, line: &Line) -> bool {
+        let samples = OpId(u32::try_from(at).unwrap_or(u32::MAX));
+        let samples = self.sampled.get(&samples).copied().unwrap_or([None; 3]);
+        [line.op1, line.op2]
+            .into_iter()
+            .zip(samples)
+            .any(|(operand, sample)| match (operand, sample) {
+                (Operand::Value(_), Some(sample)) if sample.reference => true,
+                (Operand::Value(_), Some(sample)) if !sample.indirect => {
+                    !Types::of_tag(sample.kind).scalar()
+                }
+                (Operand::Value(value), _) => !self.val(value).types.scalar(),
+                (Operand::Unused | Operand::Constant(_), _) => false,
+            })
     }
 
     /// Whether php's code generator serves `line`, the op at `at`, through

@@ -19,8 +19,8 @@ use php_heap::ZvalType;
 use php_unit::{Opcode, OplineIdx};
 
 use super::{
-    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Landing, Op, OpId, Operand, Repeat,
-    Slot, TraceIr, Types, ValueId, build,
+    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Interrupt, Landing, Op, OpId,
+    Operand, Repeat, Slot, TraceIr, Types, ValueId, build,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
@@ -1373,5 +1373,49 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
         Some(last.opline),
         "{rendered}"
     );
+    Ok(())
+}
+
+/// A loop whose first opline php compiles inline but whose code may call
+/// into php's runtime keeps php's initial instruction pointer, the code
+/// standing the frame at that opline first (`jit_SET_EX_OPLINE`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:1100-1109`): `!$done` over a variable
+/// recorded through a reference calls `zend_is_true` (`:7790-7792`), so
+/// the pinned php's `TRACE 1 exit info` lists five exits and no `/VM` one,
+/// its interrupt test taking the stub; with no reference, seven, the last
+/// the interrupt test's `0006/VM` (under `opcache.optimization_level=0`,
+/// #3277).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_keeps_the_initial_pointer_where_its_first_opline_may_call_the_runtime()
+-> Result<(), String> {
+    for (program, php, stub) in [
+        (
+            "$done = false; $r = &$done; $n = 0;
+            while (!$done) { $n++; $done = $n > 50; } echo $n, \"\\n\";",
+            5,
+            true,
+        ),
+        (
+            "$done = false; $n = 0;
+            while (!$done) { $n++; $done = $n > 50; } echo $n, \"\\n\";",
+            7,
+            false,
+        ),
+    ] {
+        let ir = built(&IN_MAIN, program)?;
+        let End::Loop(header) = ir.end else {
+            return Err(format!("no loop: {}", dump::render(&ir)));
+        };
+        assert_eq!(
+            (
+                ir.exits.len(),
+                matches!(header.interrupt, Interrupt::Stub(_))
+            ),
+            (php, stub),
+            "{program}\n{}",
+            dump::render(&ir)
+        );
+    }
     Ok(())
 }
