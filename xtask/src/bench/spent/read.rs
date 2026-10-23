@@ -28,23 +28,59 @@ pub(super) fn totals(pid: u32) -> Option<[u64; 4]> {
     // with at most that many bytes of pids.
     let listed = unsafe { libc::proc_listchildpids(pid, children.as_mut_ptr().cast(), size) };
     let listed = usize::try_from(listed).ok()?.min(CHILDREN);
-    let (numer, denom) = timebase()?;
-    let ns = |ticks: u64| ticks.saturating_mul(u64::from(numer)) / u64::from(denom);
+    let base = timebase()?;
     let mut sum = [0_u64; 4];
     let read = children[..listed].iter().filter_map(|&child| usage(child));
     for info in std::iter::once(usage(pid)?).chain(read) {
-        let cpu = info.ri_user_time.saturating_add(info.ri_system_time);
-        let figures = [
-            info.ri_instructions,
-            info.ri_cycles,
-            ns(cpu),
-            ns(info.ri_runnable_time),
-        ];
-        for (total, figure) in sum.iter_mut().zip(figures) {
+        for (total, figure) in sum.iter_mut().zip(figures(&info, base)) {
             *total = total.saturating_add(figure);
         }
     }
     Some(sum)
+}
+
+/// What the child `pid` retired over its life, read once it has exited and
+/// before it is reaped: `waitid` with `WNOWAIT` waits for the exit and
+/// leaves the child for the caller's own wait, and `proc_pid_rusage` reads
+/// the zombie's totals, as `time -l` reads them. None where either call
+/// fails; a wait a signal cut short is waited again.
+pub(super) fn exited(pid: u32) -> Option<[u64; 4]> {
+    let id = libc::id_t::from(pid);
+    loop {
+        // SAFETY: `siginfo_t` is integers and pointers, for which every bit
+        // pattern, zero among them, is a value.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        // SAFETY: `info` is the `siginfo_t` the call writes, and outlives it.
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                id,
+                &raw mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if waited == 0 {
+            break;
+        }
+        if std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return None;
+        }
+    }
+    let info = usage(libc::pid_t::try_from(pid).ok()?)?;
+    Some(figures(&info, timebase()?))
+}
+
+/// One process's instructions, cycles, CPU (user and system) and runnable
+/// nanoseconds, its ticks taken to nanoseconds through the timebase `base`.
+fn figures(info: &libc::rusage_info_v4, (numer, denom): (u32, u32)) -> [u64; 4] {
+    let ns = |ticks: u64| ticks.saturating_mul(u64::from(numer)) / u64::from(denom);
+    let cpu = info.ri_user_time.saturating_add(info.ri_system_time);
+    [
+        info.ri_instructions,
+        info.ri_cycles,
+        ns(cpu),
+        ns(info.ri_runnable_time),
+    ]
 }
 
 /// The process `pid`'s `rusage_info_v4`, or none where it cannot be read.

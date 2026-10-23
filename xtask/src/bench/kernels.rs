@@ -28,7 +28,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
-use super::{Arm, Arms, Declared, Environment, Held, PRODUCTION, Side, Sides, Spawned, second};
+use anyhow::{Context, bail};
+
+use super::{
+    Arm, Arms, Counted, Declared, Environment, Held, PRODUCTION, Side, Sides, Spawned, ran, second,
+};
 use crate::carried::BUNDLE;
 use crate::manifest::Manifest;
 use crate::oracle::{Pin, hosts::CLI, profile};
@@ -66,6 +70,7 @@ pub(crate) const MEMORY: &str = "memory_limit=512M";
 /// One arm of a bar over [`PROGRAMS`]: its name, the php binary, the
 /// pin's regimes it runs each program under in order, and ini after
 /// theirs, G1's `opcache.jit_buffer_size=0` on its jit arm.
+#[derive(Clone)]
 pub(crate) struct Php {
     pub(crate) name: String,
     pub(crate) binary: PathBuf,
@@ -110,7 +115,7 @@ impl Php {
 /// which is its skip.
 pub(crate) fn bar(
     root: &Path,
-    (id, programs): (&str, &'static [&'static str]),
+    (id, programs, per_opline): (&str, &'static [&'static str], bool),
     about: String,
     held: Held,
     arms: impl FnOnce(&Path, &Pin) -> Result<Result<[Php; 2], String>> + 'static,
@@ -132,8 +137,23 @@ pub(crate) fn bar(
         for program in programs {
             let script = workloads.join(format!("{program}.php"));
             let [a, b] = &arms;
+            let probe = |regime| {
+                let php = Php {
+                    regimes: vec![regime],
+                    ..a.clone()
+                };
+                php.running(pin, &script, &env)
+            };
+            let probes = || counted(program, ["jit-tracing", "jit-off"].map(probe));
+            let oplines = per_opline.then(probes).transpose()?;
             let side = |php: &Php| -> Result<Box<dyn Side>> {
-                Ok(Box::new(Spawned::from(php.running(pin, &script, &env)?)))
+                let mut arm = php.running(pin, &script, &env)?;
+                let Some(count) = oplines else {
+                    return Ok(Box::new(Spawned::from(arm)));
+                };
+                arm.retired = true;
+                let side = Spawned::from(arm);
+                Ok(Box::new(Counted { side, count }))
             };
             set.push(((*program).to_owned(), [side(a)?, side(b)?]));
         }
@@ -151,28 +171,44 @@ pub(crate) fn bar(
 type Binary = fn(&Path, &Pin) -> Result<Result<PathBuf, String>>;
 
 /// `whose` tier, `binary`, under `jit-tracing` against `jit-off` over
-/// every program, the bar `id`, a series; and `jit-off` against itself,
-/// `<id>-aa`, its A/A control.
-fn tracing(root: &Path, (id, whose): (&str, &str), binary: Binary) -> [Declared; 2] {
+/// `programs`, the bar `id`, a series; and `jit-off` against itself,
+/// `<id>-aa`, its A/A control; each run read per opline where `per_opline`
+/// says, over the oplines [`counted`] counts of each program.
+fn tracing(
+    root: &Path,
+    (id, whose): (&str, &str),
+    (programs, per_opline): (&'static [&'static str], bool),
+    binary: Binary,
+) -> [Declared; 2] {
     [
         ("", ["jit-tracing", "jit-off"], Held::Series),
         ("-aa", ["jit-off", "jit-off"], Held::Control),
     ]
     .map(|(aa, [a, b], held)| {
-        let about = format!(
-            "{whose} under [regime.{a}] against [regime.{b}] over the seven kernels and Zend/bench.php"
-        );
-        bar(root, (&format!("{id}{aa}"), PROGRAMS), about, held, move |root, pin| {
-            Ok(binary(root, pin)?.map(|binary| {
-                let arm = |name: String, regime| Php {
-                    name,
-                    binary: binary.clone(),
-                    regimes: vec![regime],
-                    ini: Vec::new(),
-                };
-                [arm(a.to_owned(), a), arm(second(a, b), b)]
-            }))
-        })
+        let over = if per_opline {
+            "per opline over the seven kernels"
+        } else {
+            "over the seven kernels and Zend/bench.php"
+        };
+        let about = format!("{whose} under [regime.{a}] against [regime.{b}] {over}");
+        let id = format!("{id}{aa}");
+        bar(
+            root,
+            (&id, programs, per_opline),
+            about,
+            held,
+            move |root, pin| {
+                Ok(binary(root, pin)?.map(|binary| {
+                    let arm = |name: String, regime| Php {
+                        name,
+                        binary: binary.clone(),
+                        regimes: vec![regime],
+                        ini: Vec::new(),
+                    };
+                    [arm(a.to_owned(), a), arm(second(a, b), b)]
+                }))
+            },
+        )
     })
 }
 
@@ -180,7 +216,8 @@ fn tracing(root: &Path, (id, whose): (&str, &str), binary: Binary) -> [Declared;
 /// machine without the pinned php measures neither, each a skip that says
 /// so.
 pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
-    tracing(root, ("oracle-jit", "the pinned php"), |_, pin| {
+    let bar = ("oracle-jit", "the pinned php");
+    tracing(root, bar, (PROGRAMS, false), |_, pin| {
         if let Some(why) = pin.oracle.absent() {
             return Ok(Err(why));
         }
@@ -196,7 +233,9 @@ pub(crate) fn oracle(root: &Path) -> [Declared; 2] {
 /// `jit.compile` asks by default.
 pub(crate) fn compiled(root: &Path) -> [Declared; 2] {
     let bar = ("engine-jit", "the engine built as jit-feature");
-    tracing(root, bar, |root, _| Build::Jit.built(root).map(Ok))
+    tracing(root, bar, (PROGRAMS, false), |root, _| {
+        Build::Jit.built(root).map(Ok)
+    })
 }
 
 /// A build of the engine's `php` an arm runs.
@@ -206,6 +245,10 @@ enum Build {
     Jit,
     /// The default build, without it.
     Plain,
+    /// [`Build::Jit`] with `cfg(php_jit_stepping)` set, whose tier steps
+    /// a serving to its end at the first safepoint it is asked at
+    /// (`php_jit`'s `stepping`, #2946).
+    Stepping,
 }
 
 impl Build {
@@ -214,17 +257,24 @@ impl Build {
         match self {
             Build::Jit => "jit-feature",
             Build::Plain => "no-jit-feature",
+            Build::Stepping => "stepping",
         }
     }
 
     /// The build in the bench lane's profile, [`Build::Jit`] into the
     /// directory the lanes build it in ([`profile::featured`]).
     fn built(self, root: &Path) -> Result<PathBuf> {
-        let jit = self == Build::Jit;
+        let jit = self != Build::Plain;
         let on = jit.then(|| format!("{BUNDLE}/{}", Lane::FEATURE));
-        let into = jit.then(|| profile::featured(root, Lane::FEATURE));
+        let into = match self {
+            Build::Jit => Some(profile::featured(root, Lane::FEATURE)),
+            Build::Stepping => Some(profile::featured(root, self.name())),
+            Build::Plain => None,
+        };
+        let cfg = (self == Build::Stepping).then_some("php_jit_stepping");
         let (package, binary) = (CLI.package(), CLI.binary);
-        profile::released(root, (&package, binary), on.as_deref(), into.as_deref())
+        let into = (into.as_deref(), cfg);
+        profile::released(root, (&package, binary), on.as_deref(), into)
     }
 }
 
@@ -248,7 +298,7 @@ pub(crate) fn door(root: &Path) -> [Declared; 2] {
         let about = format!(
             "the engine built as {a} with opcache.jit_buffer_size=0 against {b} over the seven kernels"
         );
-        bar(root, (id, KERNELS), about, held, move |root, _| {
+        bar(root, (id, KERNELS, false), about, held, move |root, _| {
             let arm = |name: String, build: Build| -> Result<Php> {
                 Ok(Php {
                     name,
@@ -262,20 +312,67 @@ pub(crate) fn door(root: &Path) -> [Declared; 2] {
     })
 }
 
+/// What `step` costs per opline under recording (#2946, `jit-design.md`
+/// §4.1, §10), and its control: [`Build::Stepping`]'s tier, which steps
+/// each kernel to its end at the first safepoint it is asked at and
+/// samples each opline's operands as the recorder does, under
+/// `jit-tracing` against the same build under `jit-off`, whose engine
+/// binds `execute::<Nop>`, per opline of what the stepping run counted.
+pub(crate) fn stepping(root: &Path) -> [Declared; 2] {
+    let bar = ("step", "the stepping build");
+    tracing(root, bar, (KERNELS, true), |root, _| {
+        Build::Stepping.built(root).map(Ok)
+    })
+}
+
+/// How many oplines the stepping arm executes of `program`, the sum of
+/// the `stepped <n> oplines` lines its tier writes on the second stream,
+/// once its first stream is held equal to `execute::<Nop>`'s run of the
+/// same program: the assertion #2946 asks of the bar before it measures.
+fn counted(program: &str, [stepping, nop]: [Result<Arm>; 2]) -> Result<f64> {
+    let (stepping, nop) = (Spawned::from(stepping?), Spawned::from(nop?));
+    let (stepped, said) = ran(&stepping.arm, &stepping.program)?;
+    let (ran_nop, _) = ran(&nop.arm, &nop.program)?;
+    if stepped.wrote != ran_nop.wrote {
+        bail!(
+            "{program}: the stepping driver wrote other bytes than execute::<Nop>; nothing is measured"
+        );
+    }
+    let said = String::from_utf8_lossy(&said);
+    let counts = said
+        .lines()
+        .filter_map(|line| line.strip_prefix("stepped ")?.strip_suffix(" oplines"));
+    let oplines = counts.map(str::parse::<u64>).sum::<Result<u64, _>>();
+    let oplines = oplines.with_context(|| format!("{program}: the stepping driver's count"))?;
+    if oplines == 0 {
+        bail!("{program}: the stepping build stepped no opline; its tier was never asked");
+    }
+    #[allow(clippy::cast_precision_loss)]
+    Ok(oplines as f64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     /// The engine's tier and php's are each a series beside its A/A
-    /// control, named for whose tier it is, and G1 is held to its bound.
+    /// control, named for whose tier it is, G1 is held to its bound, and
+    /// the stepping driver is a series beside its control (#2946).
     #[test]
-    fn each_tier_is_a_series_beside_its_control_and_the_door_a_bound() {
+    fn each_tier_and_the_stepping_driver_is_a_series_beside_its_control_and_the_door_a_bound() {
         let root = Path::new(".");
-        let bars = [oracle(root), compiled(root), door(root)].map(|b| b.map(|b| (b.id, b.held)));
+        let bars = [oracle(root), compiled(root), door(root), stepping(root)];
+        let bars = bars.map(|b| b.map(|b| (b.id, b.held)));
         let pair = |id: &str, held| [(id.to_owned(), held), (format!("{id}-aa"), Held::Control)];
         let series = |id| pair(id, Held::Series);
         let door = pair("g1", Held::Bound);
-        assert_eq!(bars, [series("oracle-jit"), series("engine-jit"), door]);
+        let tiers = [
+            series("oracle-jit"),
+            series("engine-jit"),
+            door,
+            series("step"),
+        ];
+        assert_eq!(bars, tiers);
     }
 
     /// Each program is committed where the protocol keeps its workloads

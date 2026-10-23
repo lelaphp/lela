@@ -79,18 +79,20 @@ pub(crate) fn build(
     features: Option<&str>,
     into: Option<&Path>,
 ) -> Result<PathBuf> {
-    built(root, LANE, (package, binary), features, into)
+    built(root, LANE, (package, binary), features, (into, None))
 }
 
 /// The same in `release`, the bench lane's profile: what a bar's arm of
 /// the engine's own runs, never a correctness lane's build (#2351); under
 /// `into` as [`build`]'s, the engine with the tier's feature beside the
-/// lanes' build of it ([`featured`]).
+/// lanes' build of it ([`featured`]); and with `cfg` set where one is
+/// named, a cfg only a bench build sets, through `RUSTFLAGS`, which is why
+/// such a build goes into a directory of its own (#2946).
 pub(crate) fn released(
     root: &Path,
     (package, binary): (&str, &str),
     features: Option<&str>,
-    into: Option<&Path>,
+    into: (Option<&Path>, Option<&str>),
 ) -> Result<PathBuf> {
     built(root, Profile::Release, (package, binary), features, into)
 }
@@ -102,9 +104,13 @@ fn built(
     profile: Profile,
     (package, binary): (&str, &str),
     features: Option<&str>,
-    into: Option<&Path>,
+    (into, cfg): (Option<&Path>, Option<&str>),
 ) -> Result<PathBuf> {
-    let status = Command::new(cargo())
+    let mut cargo = Command::new(cargo());
+    if let Some(cfg) = cfg {
+        cargo.env("RUSTFLAGS", format!("--cfg {cfg}"));
+    }
+    let status = cargo
         .args([
             "build",
             "--quiet",
