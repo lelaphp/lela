@@ -35,7 +35,9 @@
 //! function table once a `DECLARE_FUNCTION` bound it.
 
 use php_link::Row;
-use php_unit::decl::{ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation};
+use php_unit::decl::{
+    ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation, Visibility,
+};
 use php_unit::{OpArray, Unit};
 
 use super::Request;
@@ -310,6 +312,7 @@ impl ClassBlocks {
         if let Some(parent) = &linking.parent {
             self.defaults.inherit(req, parent.slots.instance)?;
             self.statics.inherit(req, parent.slots.statics)?;
+            self.defaults.grow(req, linking.hooked_slots)?;
             // As `zend_do_inheritance_ex` walks them, each only where the
             // parent's table has rows.
             for table in [Table::Properties, Table::Constants, Table::Methods] {
@@ -442,6 +445,10 @@ pub(super) struct Linking {
     /// The slots the traits' properties take.
     trait_slots: SlotCounts,
     parent: Option<Inherited>,
+    /// The slots `do_inherit_property` adds, one `perealloc` each, for a
+    /// virtual property with hooks the class declares over a parent's
+    /// backed one with none (`use_child_prop`).
+    hooked_slots: usize,
     /// Rows after the parent's: the traits' abstract methods and the
     /// interfaces' members.
     last: Members,
@@ -903,7 +910,7 @@ impl AstCopy {
             | ConstExpr::Bool(_)
             | ConstExpr::Long { .. }
             | ConstExpr::Double(_)
-            | ConstExpr::UnitArray(_) => self.tree += AST_ZVAL,
+            | ConstExpr::UnitValue(_) => self.tree += AST_ZVAL,
             ConstExpr::Str(bytes) => self.string(bytes),
             ConstExpr::Constant { name, .. } => self.string(&name.resolved().0),
             ConstExpr::ClassConstant { class, name, .. } => {
@@ -1526,10 +1533,24 @@ impl Request {
                 .saturating_sub(decl.properties.len() + taken.properties),
         };
         let interfaces = self.interface_sizes(decl, written);
+        let above = (decl.parent.as_ref()).and_then(|name| self.class_named(name.into()));
+        let backed_above = |name: &[u8]| {
+            let above = above.map_or(&[][..], |above| self.placed_properties(above));
+            (above.iter().filter_map(|info| self.property_decl(*info))).any(|property| {
+                *property.name.0 == *name
+                    && property.visibility != Visibility::Private
+                    && property.hooks.is_none()
+            })
+        };
+        let hooked_slots = (written.properties.iter())
+            .filter(|property| property.is_instance && property.is_virtual)
+            .filter(|property| property.hooks.is_some() && backed_above(&property.name.0))
+            .count();
         Some(Linking {
             first,
             trait_slots,
             parent,
+            hooked_slots,
             last,
             interfaces,
         })

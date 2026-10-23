@@ -936,12 +936,23 @@ pub(crate) struct Placed {
     /// `zend_property_info` its one find answers. Empty for a class with
     /// no record.
     rows: Box<[RowPlace]>,
+    /// The slots `do_inherit_property` leaves `IS_UNDEF` in
+    /// `default_properties_table` over the lineage, one for each property
+    /// a class redeclares over its parent's: php's object keeps them
+    /// though no property names one, and this engine places the property
+    /// in one slot alone ([`objects::placed_of`]).
+    holes: u32,
 }
 
 impl Placed {
     /// The declared instance properties in slot order.
     pub(crate) fn slots(&self) -> &[PropertyInfo] {
         &self.slots
+    }
+
+    /// [`Placed::holes`].
+    pub(crate) fn holes(&self) -> u32 {
+        self.holes
     }
 }
 
