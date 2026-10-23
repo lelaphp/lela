@@ -25,7 +25,7 @@ use php_heap::{Made, Zval, ZvalType};
 use php_syntax::tree::{self, NodeId};
 use php_unit::Level;
 
-use super::{Emit, Fold, truth};
+use super::{Emit, Fold, Operated, truth};
 use crate::{CompileError, Raise};
 
 /// What a fold of a node answers where it has no value for it: the node
@@ -122,8 +122,11 @@ impl Rewrites {
 /// operator over it has folded, which gives it back as php's
 /// `zend_eval_const_expr` destroys the operand zvals once the value
 /// stands, or keeps it by dropping the claim. A claim is resolved by the
-/// operator that reads it ([`Emit::binary_constant`]), so the
-/// claims above a mark are only those of the operands being read.
+/// operator that reads it ([`Emit::fold_over`]), so the claims above a
+/// mark are only those of the operands being read. A compile's fold,
+/// which takes no mark, reads its operands' claims off the top
+/// ([`Emit::operands_folded`]), and a claim no fold reads is kept where it
+/// stands, its string the unit's.
 #[derive(Default)]
 pub(super) struct Claims(Vec<(tree::Expr, Made)>);
 
@@ -140,6 +143,16 @@ impl Claims {
     /// `made`, held by `node` alone.
     pub(super) fn hold(&mut self, node: tree::Expr, made: Made) {
         self.0.push((node, made));
+    }
+
+    /// The newest claim, taken out where `node` holds it: the operand
+    /// of a compile's fold whose compile made it last
+    /// ([`Emit::operands_folded`]).
+    pub(super) fn take_top(&mut self, node: tree::Expr) -> Option<Made> {
+        if self.0.last().is_some_and(|(held, _)| *held == node) {
+            return self.0.pop().map(|(_, made)| made);
+        }
+        None
     }
 
     /// The claims made since `mark`, taken out.
@@ -161,7 +174,11 @@ impl Emit<'_> {
     /// a conditional holds among them. An operator that did not fold calls
     /// none of this and keeps them all, since the compile reads its
     /// operands again.
-    pub(super) fn consume(&mut self, claims: Vec<(tree::Expr, Made)>, operands: [tree::Expr; 2]) {
+    pub(super) fn consume<const N: usize>(
+        &mut self,
+        claims: Vec<(tree::Expr, Made)>,
+        operands: [tree::Expr; N],
+    ) {
         let peeled = operands.map(|operand| self.peel(operand));
         for (node, made) in claims {
             let Some(at) = peeled.iter().position(|operand| *operand == node) else {
@@ -183,6 +200,63 @@ impl Emit<'_> {
             }
             self.strings.give_back(made);
         }
+    }
+
+    /// `fold` over a node whose children are `operands`, and the claims
+    /// made while they were read given back once the node stands
+    /// ([`Self::consume`]), as `zend_ast_destroy` frees a node's children
+    /// once `zend_eval_const_expr` has replaced it by its value: the value
+    /// the node's own claim where the fold made its string
+    /// ([`Self::claimed`]). A value that is the string of one of those
+    /// claims, a cast of a string to a string, is the operand's own
+    /// handed on with one more owner (`ZVAL_COPY`) before the operand is
+    /// destroyed, so that claim becomes the node's and the others are
+    /// kept. A fold that does not stand gives nothing back, since the
+    /// compile reads its children again.
+    ///
+    /// ```php
+    /// $n = fn () => opcache_get_status()['interned_strings_usage']['number_of_strings'];
+    /// foreach (['-"78"', '~~"st" . "u"', '"vw" && "yz"', '"ab" ? 1 : 2', '(int)"12"', '(string)"cd"', '((string)"ef") . "g"', '"hij"[1]', '["k" => "lm"]["k"]'] as $i => $e) {
+    ///     $f = sys_get_temp_dir() . "/fold-$i-" . getmypid() . '.php';
+    ///     file_put_contents($f, "<?php class F$i { const A = $e; }");
+    ///     $a = $n();
+    ///     include $f;
+    ///     echo $e, ': ', $n() - $a, ' ', var_export(constant("F$i::A"), true), "\n";
+    ///     unlink($f);
+    /// }
+    /// ```
+    /// ```expect regime=jit-off exit=0
+    /// -"78": 3 -78
+    /// ~~"st" . "u": 4 'stu'
+    /// "vw" && "yz": 3 true
+    /// "ab" ? 1 : 2: 3 1
+    /// (int)"12": 3 12
+    /// (string)"cd": 4 'cd'
+    /// ((string)"ef") . "g": 4 'efg'
+    /// "hij"[1]: 3 'i'
+    /// ["k" => "lm"]["k"]: 4 'lm'
+    /// ```
+    pub(super) fn fold_over<const N: usize>(
+        &mut self,
+        node: tree::Expr,
+        operands: [tree::Expr; N],
+        fold: impl FnOnce(&mut Self) -> Result<Operated, Unfolded>,
+    ) -> Result<Zval, Unfolded> {
+        let mark = self.claims.mark();
+        let folded = fold(self);
+        let mut claims = self.claims.since(mark);
+        let folded = folded?;
+        let value = folded.value();
+        let handed_on = value
+            .as_str()
+            .and_then(|s| claims.iter().position(|(_, made)| made.str().is_same(s)));
+        if let Some(at) = handed_on {
+            let (_, made) = claims.swap_remove(at);
+            self.claims.hold(node, made);
+            return Ok(value);
+        }
+        self.consume(claims, operands);
+        Ok(self.claimed(node, folded))
     }
 
     /// [`Self::constant_expr`] where a compile needs the value: a node
@@ -373,7 +447,10 @@ impl Emit<'_> {
         let node = &self.parsed.tree[id];
         let (cond, then, otherwise) = (node.cond, node.then, node.else_branch);
         let otherwise = self.required(otherwise, "a conditional")?;
-        let value = match self.child(cond)? {
+        let mark = self.claims.mark();
+        let condition = self.child(cond);
+        let claims = self.claims.since(mark);
+        let value = match condition? {
             Child::Folded(value) => value,
             Child::Unfolded(unfolded) => {
                 if let Some(then) = then {
@@ -386,11 +463,16 @@ impl Emit<'_> {
         if value.as_double().is_some_and(f64::is_nan) {
             self.raise(Level::Warning, "unexpected NAN value was coerced to bool");
         }
-        match (truth(value), then) {
-            (true, None) => Ok(value),
-            (true, Some(then)) => self.replaced_by(tree::Expr::TernaryExpr(id), then),
-            (false, _) => self.replaced_by(tree::Expr::TernaryExpr(id), otherwise),
-        }
+        // The condition is destroyed once a side replaces the node, its
+        // claims given back ([`Self::consume`]); `?:` over a true one is
+        // the condition's own value, which keeps them.
+        let side = match (truth(value), then) {
+            (true, None) => return Ok(value),
+            (true, Some(then)) => then,
+            (false, _) => otherwise,
+        };
+        self.consume(claims, [cond]);
+        self.replaced_by(tree::Expr::TernaryExpr(id), side)
     }
 
     /// A node php replaces with one of its children, `*ast_ptr =
@@ -418,26 +500,45 @@ impl Emit<'_> {
     /// it.
     pub(super) fn short_circuit_fold(
         &mut self,
+        id: NodeId<tree::BinaryExpr>,
         or: bool,
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Zval, Unfolded> {
         if self.fold == Fold::EvalConstExpr {
-            let left = self.child(left)?;
-            let right = self.child(right)?;
-            return match (left, right) {
-                (Child::Folded(held), _) if truth(held) == or => Ok(Zval::bool(truth(held))),
-                (Child::Folded(_), Child::Folded(right)) => Ok(Zval::bool(truth(right))),
-                (Child::Unfolded(unfolded), _) | (Child::Folded(_), Child::Unfolded(unfolded)) => {
-                    Err(unfolded.of_node("a short circuit over a side that does not fold"))
-                }
-            };
+            let node = tree::Expr::BinaryExpr(id);
+            return self.fold_over(node, [left, right], |emit| {
+                emit.short_circuit_children(or, left, right)
+                    .map(Operated::Kept)
+            });
         }
         let held = truth(self.constant_expr(left)?);
         if held == or {
             return Ok(Zval::bool(held));
         }
         Ok(Zval::bool(truth(self.constant_expr(right)?)))
+    }
+
+    /// [`Self::short_circuit_fold`]'s two children under
+    /// `zend_eval_const_expr`, each evaluated, and the bool they fold to;
+    /// the strings a folded side was written as are given back once it
+    /// stands ([`Self::consume`]), as `zend_ast_destroy` frees both
+    /// children.
+    fn short_circuit_children(
+        &mut self,
+        or: bool,
+        left: tree::Expr,
+        right: tree::Expr,
+    ) -> Result<Zval, Unfolded> {
+        let left = self.child(left)?;
+        let right = self.child(right)?;
+        match (left, right) {
+            (Child::Folded(held), _) if truth(held) == or => Ok(Zval::bool(truth(held))),
+            (Child::Folded(_), Child::Folded(right)) => Ok(Zval::bool(truth(right))),
+            (Child::Unfolded(unfolded), _) | (Child::Folded(_), Child::Unfolded(unfolded)) => {
+                Err(unfolded.of_node("a short circuit over a side that does not fold"))
+            }
+        }
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_NEW` arm and its

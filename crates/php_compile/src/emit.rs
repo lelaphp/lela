@@ -11740,7 +11740,8 @@ impl<'a> Emit<'a> {
         line: u32,
     ) -> Result<Where, CompileError> {
         let parts = self.list(self.parsed.tree[id].parts);
-        self.encaps(parts, Holder::DoubleQuoted(&self.parsed.tree[id]), line)
+        let holder = Holder::DoubleQuoted(&self.parsed.tree[id]);
+        self.encaps(tree::Expr::InterpolatedStringExpr(id), parts, holder, line)
     }
 
     /// `ZEND_AST_ENCAPS_LIST` written as a heredoc.
@@ -11750,7 +11751,8 @@ impl<'a> Emit<'a> {
         line: u32,
     ) -> Result<Where, CompileError> {
         let parts = self.list(self.parsed.tree[id].parts);
-        self.encaps(parts, Holder::Heredoc(&self.parsed.tree[id]), line)
+        let holder = Holder::Heredoc(&self.parsed.tree[id]);
+        self.encaps(tree::Expr::HeredocExpr(id), parts, holder, line)
     }
 
     /// `zend_compile_simple_var` through `zend_try_compile_cv`: the
@@ -11790,7 +11792,7 @@ impl<'a> Emit<'a> {
             Some(SyntaxKind::MINUS) => self.unary(true, operand),
             Some(SyntaxKind::PLUS) => self.unary(false, operand),
             Some(SyntaxKind::BANG) => self.bool_not(operand),
-            Some(SyntaxKind::TILDE) => self.bw_not(operand),
+            Some(SyntaxKind::TILDE) => self.bw_not(id, operand),
             _ => Err(self.unread("a unary operator")),
         }
     }
@@ -11869,7 +11871,7 @@ impl<'a> Emit<'a> {
             Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce(left, right),
             Some(SyntaxKind::PIPE_GT) => self.pipe(left, right),
             Some(kind) => match binary_op(kind) {
-                Some(op) => self.binary(op, left, right),
+                Some(op) => self.binary(id, op, left, right),
                 None => Err(self.unread("a binary operator")),
             },
             None => Err(self.unread("a binary operator")),
@@ -12735,6 +12737,12 @@ impl<'a> Emit<'a> {
     /// does not, the right side alone is the answer, as the constant it
     /// folds to or as one `BOOL` over it.
     ///
+    /// Each constant side is destroyed once the operator stands
+    /// (`zval_ptr_dtor` of its `u.constant`), so the string it was
+    /// written as is given back ([`Self::side_folded`]): the left one's
+    /// claim is taken where its compile left it on top, before the right
+    /// side compiles, and given back last, as php frees it.
+    ///
     /// A call of its own, so what it takes is off the stack of a
     /// left-nested chain of the other operators (#3159).
     #[inline(never)]
@@ -12744,8 +12752,23 @@ impl<'a> Emit<'a> {
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Where, CompileError> {
-        let left = self.expr(left)?;
-        self.short_circuit_from(or, left, |emit| emit.expr(right))
+        let side = left;
+        let left = self.expr(side)?;
+        let held = match left {
+            Where::Constant(_) => self.claims.take_top(self.peel(side)),
+            _ => None,
+        };
+        let answer = self.short_circuit_from(or, left, |emit| emit.expr(right));
+        // A constant answer over a right side that compiled is the
+        // right side's fold; one the left side settled compiled none,
+        // so no claim of the right side's stands to give back.
+        if let Ok(Where::Constant(_)) = answer {
+            self.side_folded(right);
+        }
+        if let Some(made) = held {
+            self.strings.give_back(made);
+        }
+        answer
     }
 
     /// [`Self::short_circuiting`] once its left side stands compiled,
@@ -14586,42 +14609,47 @@ impl<'a> Emit<'a> {
     #[inline(always)]
     fn binary(
         &mut self,
+        id: NodeId<tree::BinaryExpr>,
         op: BinaryOp,
         left: tree::Expr,
         right: tree::Expr,
     ) -> Result<Where, CompileError> {
         let left = self.expr(left)?;
         let right = self.expr(right)?;
-        self.binary_operands(op, left, right)
+        self.binary_operands(id, op, left, right)
     }
 
     /// The rest of `zend_compile_binary_op` over its two compiled sides:
-    /// the `ZEND_CONCAT`, comparison and bitwise arms each to its own,
-    /// the value where `zend_try_ct_eval_binary_op` folds the arithmetic
-    /// over two constants, and the opcode into a temporary where it
-    /// does not (`zend_emit_op_tmp`). A call of its own, so what an arm
-    /// takes is off the stack of a left-nested chain, which stands in
-    /// [`Self::binary`] once per operator (#3159).
+    /// the value where `zend_try_ct_eval_binary_op` folds two constants,
+    /// the one fold [`Self::constant_operands`] makes for
+    /// `zend_eval_const_expr` too ([`Self::operands_folded`]), and
+    /// otherwise the `ZEND_CONCAT`, comparison and bitwise arms each to
+    /// its own and the opcode into a temporary (`zend_emit_op_tmp`). A
+    /// call of its own, so what an arm takes is off the stack of a
+    /// left-nested chain, which stands in [`Self::binary`] once per
+    /// operator (#3159).
     #[inline(never)]
     fn binary_operands(
         &mut self,
+        id: NodeId<tree::BinaryExpr>,
         op: BinaryOp,
         left: Where,
         right: Where,
     ) -> Result<Where, CompileError> {
+        if let (Where::Constant(a), Where::Constant(b)) = (left, right) {
+            match self.constant_operands(op, a, b) {
+                Ok(folded) => return Ok(Where::Constant(self.operands_folded(id, folded))),
+                Err(Unfolded::NoConstant(_)) => {}
+                Err(Unfolded::Unread(refused) | Unfolded::Refused(refused)) => {
+                    return Err(refused);
+                }
+            }
+        }
         if op == BinaryOp::Concat {
             return self.concat(left, right);
         }
         if compares(op) {
             return Ok(self.comparison(op, left, right));
-        }
-        if bitwise(op) {
-            return self.bitwise(op, left, right);
-        }
-        if let (Where::Constant(a), Where::Constant(b)) = (left, right)
-            && let Some(folded) = self.arithmetic_fold(op, a, b)?
-        {
-            return Ok(Where::Constant(folded));
         }
         Ok(self.emit_binary(Self::opcode_of(op), left, right, 0))
     }
@@ -14690,35 +14718,100 @@ impl<'a> Emit<'a> {
         self.lay_array(&entries)
     }
 
-    /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm over the two
-    /// compiled sides: the fold over two constants, and otherwise each
-    /// constant side converted to a string where it stands and `CONCAT`
-    /// into a temporary. php converts before it emits, so what the
-    /// opline reads is the string and never the number it was written
-    /// as.
-    fn concat(&mut self, left: Where, right: Where) -> Result<Where, CompileError> {
-        if let (Where::Constant(a), Where::Constant(b)) = (left, right)
-            && let Some(folded) = self.concat_fold(a, b)?
-        {
-            return Ok(Where::Constant(folded));
+    /// `zend_compile_binary_op` once `zend_try_ct_eval_binary_op` has
+    /// folded its two constant sides: each side's constant destroyed
+    /// (`zval_ptr_dtor` of `left_node.u.constant` and
+    /// `right_node.u.constant`), so a string the scanner or a fold below
+    /// made for the side alone is given back where its claim stands on
+    /// top of [`eval::Claims`], the right side's above the left side's;
+    /// and the value the node's own claim ([`Self::claimed`]), which the
+    /// operator over it gives back in turn, or keeps where an opline
+    /// reads the value as its `CONST` operand. The claim is taken off the
+    /// top and no mark is held, so the frame of [`Self::binary`], which a
+    /// left-nested chain stands in once per operator, holds only the
+    /// node's id for it.
+    fn operands_folded(&mut self, id: NodeId<tree::BinaryExpr>, folded: Operated) -> Zval {
+        let node = &self.parsed.tree[id];
+        let sides = [node.rhs, Some(node.lhs)];
+        for side in sides.into_iter().flatten() {
+            self.side_folded(side);
         }
+        self.claimed(tree::Expr::BinaryExpr(id), folded)
+    }
+
+    /// One side of a compile's fold destroyed once the fold stands
+    /// (`zval_ptr_dtor` of the side's `u.constant`): its own claim given
+    /// back where its compile left it on top of [`eval::Claims`], and
+    /// nothing where the side's constant is kept elsewhere. A unary
+    /// operator's fold and a short circuit over a constant left side
+    /// give theirs back as a binary operator's does, so only the string
+    /// a fold leaves standing joins opcache's buffer:
+    ///
+    /// ```php
+    /// $n = fn () => opcache_get_status()['interned_strings_usage']['number_of_strings'];
+    /// foreach (['-"78"', '!"ab"', '~"st"', '~"cd" . "e"', '"vw" && "yz"', '"ij" || "kl"', '"" || "mn"', '"op" && $q'] as $i => $e) {
+    ///     $f = sys_get_temp_dir() . "/side-$i-" . getmypid() . '.php';
+    ///     file_put_contents($f, "<?php \$z$i = @($e);");
+    ///     $a = $n();
+    ///     include $f;
+    ///     echo $e, ': ', $n() - $a, "\n";
+    ///     unlink($f);
+    /// }
+    /// ```
+    /// ```expect regime=jit-off exit=0
+    /// -"78": 2
+    /// !"ab": 2
+    /// ~"st": 3
+    /// ~"cd" . "e": 3
+    /// "vw" && "yz": 2
+    /// "ij" || "kl": 2
+    /// "" || "mn": 2
+    /// "op" && $q: 2
+    /// ```
+    fn side_folded(&mut self, side: tree::Expr) {
+        let side = self.peel(side);
+        if let Some(made) = self.claims.take_top(side) {
+            self.strings.give_back(made);
+        }
+    }
+
+    /// `zend_compile_binary_op`'s `ZEND_CONCAT` arm over two compiled
+    /// sides it did not fold: each constant side converted to a string
+    /// where it stands and `CONCAT` into a temporary. php converts
+    /// before it emits, so what the opline reads is the string and
+    /// never the number it was written as.
+    ///
+    /// Where both sides are constants the fold stands in its place
+    /// ([`Self::operands_folded`]), and the strings the two sides were
+    /// written as are freed with the fold, as `zend_compile_binary_op`
+    /// destroys each side's zval, so neither joins opcache's buffer with
+    /// the unit; a fold of a fold gives back the inner one's string too,
+    /// and a comparison or an arithmetic fold its two strings:
+    ///
+    /// ```php
+    /// $n = fn () => opcache_get_status()['interned_strings_usage']['number_of_strings'];
+    /// foreach (['"ab" . "cd"', '"ef" | "gh"', '12 . "x"', '"ij" . "kl" . "mn"', '"op" == "qr"', '"34" * "56"', '"AB" . $u'] as $i => $e) {
+    ///     $f = sys_get_temp_dir() . "/concat-$i-" . getmypid() . '.php';
+    ///     file_put_contents($f, "<?php \$z$i = @($e);");
+    ///     $a = $n();
+    ///     include $f;
+    ///     echo $e, ': ', $n() - $a, "\n";
+    ///     unlink($f);
+    /// }
+    /// ```
+    /// ```expect regime=jit-off exit=0
+    /// "ab" . "cd": 3
+    /// "ef" | "gh": 3
+    /// 12 . "x": 3
+    /// "ij" . "kl" . "mn": 3
+    /// "op" == "qr": 2
+    /// "34" * "56": 2
+    /// "AB" . $u: 3
+    /// ```
+    fn concat(&mut self, left: Where, right: Where) -> Result<Where, CompileError> {
         let left = self.string_operand(left)?;
         let right = self.string_operand(right)?;
         Ok(self.emit_binary(Opcode::Concat, left, right, 0))
-    }
-
-    /// `zend_compile_binary_op`'s `ZEND_BW_OR`, `ZEND_BW_XOR` and
-    /// `ZEND_BW_AND` arms over the two compiled sides: folded where
-    /// [`Self::bitwise_fold`] folds them, and otherwise the opcode into
-    /// a temporary. The three are `SPEC(COMMUTATIVE)`, so `pass_two`
-    /// may put the constant second ([`swap_commutative`]).
-    fn bitwise(&mut self, op: BinaryOp, left: Where, right: Where) -> Result<Where, CompileError> {
-        if let (Where::Constant(a), Where::Constant(b)) = (left, right)
-            && let Some(folded) = self.bitwise_fold(op, a, b)?
-        {
-            return Ok(Where::Constant(folded));
-        }
-        Ok(self.emit_binary(Self::opcode_of(op), left, right, 0))
     }
 
     /// `zend_try_ct_eval_binary_op` over `bitwise_or_function`,
@@ -14729,9 +14822,12 @@ impl<'a> Emit<'a> {
     /// string that is no number refuses, and an operand the long
     /// conversion would not be exact over refuses too, since php will
     /// not write the deprecation's answer into a constant. The string two
-    /// strings fold to and the text a number is joined as are given back
-    /// once read ([`Self::bitwise_made`], [`Self::stringified_made`]), so
-    /// neither joins opcache's buffer with the unit that folded them:
+    /// strings fold to is the reader's alone ([`Operated::Made`]), which
+    /// the node over it gives back once it stands, as
+    /// `zend_eval_const_expr` destroys an operand's zval, and a long is
+    /// kept; that string and the text a number is joined as
+    /// ([`Self::stringified_made`]) are given back once read, so neither
+    /// joins opcache's buffer with the unit that folded them:
     ///
     /// ```php
     /// $f = sys_get_temp_dir() . '/bitwise-' . getmypid() . '.php';
@@ -14745,19 +14841,6 @@ impl<'a> Emit<'a> {
     /// ```expect regime=jit-off
     /// 4 cf! 12x 1.5y
     /// ```
-    fn bitwise_fold(
-        &mut self,
-        op: BinaryOp,
-        left: Zval,
-        right: Zval,
-    ) -> Result<Option<Zval>, CompileError> {
-        Ok(self.bitwise_made(op, left, right)?.map(Operated::kept))
-    }
-
-    /// [`Self::bitwise_fold`] as its reader holds it: the string two
-    /// strings fold to is the reader's alone ([`Operated::Made`]), which
-    /// the node over it gives back once it stands, as
-    /// `zend_eval_const_expr` destroys an operand's zval; a long is kept.
     fn bitwise_made(
         &mut self,
         op: BinaryOp,
@@ -14781,17 +14864,14 @@ impl<'a> Emit<'a> {
     }
 
     /// `zend_compile_binary_op`'s comparison arms and `zend_compile_greater`
-    /// over the two compiled sides: the fold over two constants, which
-    /// `zend_binary_op_produces_error` never refuses for a comparison; a
-    /// `===` or `!==` against a constant null, false or true as the
+    /// over two compiled sides it did not fold (two constants
+    /// [`Self::compare_fold`] folds, which `zend_binary_op_produces_error`
+    /// never refuses for a comparison): a `===` or `!==` against a constant null, false or true as the
     /// `TYPE_CHECK` php emits in its place, `$a === null` being
     /// `is_null($a)`; and otherwise the opcode into a temporary, `>` and
     /// `>=` as `IS_SMALLER` and `IS_SMALLER_OR_EQUAL` with the operands
     /// swapped, which is the one shape php has for them.
     fn comparison(&mut self, op: BinaryOp, left: Where, right: Where) -> Where {
-        if let (Where::Constant(a), Where::Constant(b)) = (left, right) {
-            return Where::Constant(self.compare_fold(op, a, b));
-        }
         if let Some((operand, mask)) = type_check(op, left, right) {
             return self.emit_unary(Opcode::TypeCheck, operand, mask);
         }
@@ -15070,12 +15150,13 @@ impl<'a> Emit<'a> {
     /// `zend_compile_unary_pm`: php folds unary `-` and `+` as the
     /// multiplication by -1 and by 1 it would otherwise emit, and emits
     /// that multiplication where the operand is not a constant.
-    fn unary(&mut self, minus: bool, operand: tree::Expr) -> Result<Where, CompileError> {
+    fn unary(&mut self, minus: bool, side: tree::Expr) -> Result<Where, CompileError> {
         let sign = Zval::long(if minus { -1 } else { 1 });
-        let operand = self.expr(operand)?;
+        let operand = self.expr(side)?;
         if let Where::Constant(value) = operand
             && let Some(folded) = fold(BinaryOp::Mul, value, sign)
         {
+            self.side_folded(side);
             return Ok(Where::Constant(folded));
         }
         Ok(self.emit_binary(Opcode::Mul, operand, Where::Constant(sign), 0))
@@ -15090,11 +15171,12 @@ impl<'a> Emit<'a> {
     /// `zend_unary_op_produces_error`'s one arm for this opcode, so
     /// `!1` and `!""` are bools in the op array and `!1.5` is the
     /// opline over `float(1.5)`, as the oracle's dump has it.
-    fn bool_not(&mut self, operand: tree::Expr) -> Result<Where, CompileError> {
-        let operand = self.expr(operand)?;
+    fn bool_not(&mut self, side: tree::Expr) -> Result<Where, CompileError> {
+        let operand = self.expr(side)?;
         if let Where::Constant(value) = operand
             && value.as_double().is_none()
         {
+            self.side_folded(side);
             return Ok(Where::Constant(Zval::bool(!truth(value))));
         }
         Ok(self.emit_unary(Opcode::BoolNot, operand, 0))
@@ -15128,30 +15210,41 @@ impl<'a> Emit<'a> {
     /// int(-2)
     /// bool(true)
     /// ```
-    fn bw_not(&mut self, operand: tree::Expr) -> Result<Where, CompileError> {
-        let operand = self.expr(operand)?;
+    fn bw_not(
+        &mut self,
+        id: NodeId<tree::UnaryExpr>,
+        side: tree::Expr,
+    ) -> Result<Where, CompileError> {
+        let operand = self.expr(side)?;
         if let Where::Constant(value) = operand
-            && let Some(folded) = self.bw_not_fold(value)?
+            && let Some(folded) = self.bw_not_made(value)?
         {
-            return Ok(Where::Constant(folded));
+            self.side_folded(side);
+            return Ok(Where::Constant(
+                self.claimed(tree::Expr::UnaryExpr(id), folded),
+            ));
         }
         Ok(self.emit_unary(Opcode::BwNot, operand, 0))
     }
 
     /// `bitwise_not_function` over a constant php's
     /// `zend_unary_op_produces_error` lets through: a long negated, a
-    /// string negated byte by byte, and a double through the long it is
-    /// exactly worth. Nothing for a constant the guard refuses.
-    fn bw_not_fold(&mut self, value: Zval) -> Result<Option<Zval>, CompileError> {
+    /// string negated byte by byte, the reader's alone
+    /// ([`Operated::Made`]), and a double through the long it is exactly
+    /// worth. Nothing for a constant the guard refuses.
+    fn bw_not_made(&mut self, value: Zval) -> Result<Option<Operated>, CompileError> {
         if let Some(s) = value.as_str() {
             let negated: Vec<u8> = s.bytes().iter().map(|b| !b).collect();
-            return self.string(&negated).map(Some);
+            return self
+                .string_made(&negated, false)
+                .map(|made| Some(Operated::Made(made)));
         }
         if let Some(n) = value.as_long() {
-            return Ok(Some(Zval::long(!n)));
+            return Ok(Some(Operated::Kept(Zval::long(!n))));
         }
         if let Some(d) = value.as_double() {
-            return Ok(long_compatible(Number::Double(d)).map(|l| Zval::long(!l)));
+            let long = long_compatible(Number::Double(d));
+            return Ok(long.map(|l| Operated::Kept(Zval::long(!l))));
         }
         Ok(None)
     }
@@ -15604,8 +15697,10 @@ impl<'a> Emit<'a> {
     /// in `extended_value` and the rope's temporary unassigned until
     /// [`Self::rope_finalize`]. `${a}` is `ZEND_ENCAPS_VAR_DOLLAR_CURLY`,
     /// deprecated before its piece compiles. A list with no variable
-    /// piece is the joined constant, which the reader never hands here
-    /// since such a string is [`Expr::Str`].
+    /// piece is the one string php's parser made of it, a `ZEND_AST_ZVAL`
+    /// and no list: the node's own claim ([`Self::claimed`]), which a
+    /// fold over it gives back ([`Self::operands_folded`]) and every
+    /// other reader keeps.
     ///
     /// A dimension piece is `zend_compile_dim` under `BP_VAR_R` and a
     /// property piece `zend_compile_prop`, each piece's oplines before
@@ -15635,11 +15730,24 @@ impl<'a> Emit<'a> {
     /// ```
     fn encaps(
         &mut self,
+        node: tree::Expr,
         parts: &[tree::StringPart],
         holder: Holder<'_>,
         line: u32,
     ) -> Result<Where, CompileError> {
         let pieces = self.pieces(parts, holder, line)?;
+        if let [
+            Piece {
+                fetch: Fetched::Text(bytes),
+                line: text_line,
+                written: Written::Plain,
+            },
+        ] = pieces
+        {
+            self.line = *text_line;
+            let made = self.string_made(bytes, false)?;
+            return Ok(Where::Constant(self.claimed(node, Operated::Made(made))));
+        }
         let mut last_const: Option<Zval> = None;
         let mut reserved: Option<usize> = None;
         let mut init_at: Option<usize> = None;
@@ -16188,33 +16296,35 @@ impl<'a> Emit<'a> {
     fn unary_constant(&mut self, id: NodeId<tree::UnaryExpr>) -> Result<Zval, Unfolded> {
         let node = &self.parsed.tree[id];
         let operand = self.required(node.operand, "a unary operator")?;
-        match node.op.map(|op| self.kind(op)) {
-            Some(kind @ (SyntaxKind::MINUS | SyntaxKind::PLUS)) => {
-                let value = self.constant_expr(operand)?;
-                fold(
-                    BinaryOp::Mul,
-                    value,
-                    Zval::long(if kind == SyntaxKind::MINUS { -1 } else { 1 }),
-                )
-                .ok_or(Unfolded::NoConstant(
-                    "arithmetic this compiler cannot fold yet",
-                ))
+        let Some(kind) = node.op.map(|op| self.kind(op)) else {
+            return Err(self.unread("a unary operator").into());
+        };
+        self.fold_over(tree::Expr::UnaryExpr(id), [operand], |emit| {
+            let value = emit.constant_expr(operand)?;
+            emit.unary_operand(kind, value)
+        })
+    }
+
+    /// The fold of [`Self::unary_constant`] over its folded operand:
+    /// the string `~` makes of a string is the node's claim
+    /// ([`Operated::Made`]), and every other value is kept.
+    fn unary_operand(&mut self, kind: SyntaxKind, value: Zval) -> Result<Operated, Unfolded> {
+        match kind {
+            SyntaxKind::MINUS | SyntaxKind::PLUS => {
+                let sign = Zval::long(if kind == SyntaxKind::MINUS { -1 } else { 1 });
+                fold(BinaryOp::Mul, value, sign)
+                    .map(Operated::Kept)
+                    .ok_or(Unfolded::NoConstant(
+                        "arithmetic this compiler cannot fold yet",
+                    ))
             }
-            Some(SyntaxKind::BANG) => {
-                let value = self.constant_expr(operand)?;
-                if value.as_double().is_some() {
-                    return Err(Unfolded::NoConstant(
-                        "a `!` over a float is left to its opcode",
-                    ));
-                }
-                Ok(Zval::bool(!truth(value)))
-            }
-            Some(SyntaxKind::TILDE) => {
-                let value = self.constant_expr(operand)?;
-                self.bw_not_fold(value)?.ok_or(Unfolded::NoConstant(
-                    "a `~` over this constant is left to its opcode",
-                ))
-            }
+            SyntaxKind::BANG if value.as_double().is_some() => Err(Unfolded::NoConstant(
+                "a `!` over a float is left to its opcode",
+            )),
+            SyntaxKind::BANG => Ok(Operated::Kept(Zval::bool(!truth(value)))),
+            SyntaxKind::TILDE => self.bw_not_made(value)?.ok_or(Unfolded::NoConstant(
+                "a `~` over this constant is left to its opcode",
+            )),
             _ => Err(self.unread("a unary operator").into()),
         }
     }
@@ -16226,9 +16336,12 @@ impl<'a> Emit<'a> {
         let node = &self.parsed.tree[id];
         let to = self.cast_to(node.op, line)?;
         let operand = self.required(node.operand, "a cast")?;
-        let value = self.constant_expr(operand)?;
-        self.cast_fold(to, value)?
-            .ok_or(Unfolded::NoConstant("a cast this compiler cannot fold"))
+        self.fold_over(tree::Expr::CastExpr(id), [operand], |emit| {
+            let value = emit.constant_expr(operand)?;
+            emit.cast_fold(to, value)?
+                .map(Operated::Kept)
+                .ok_or(Unfolded::NoConstant("a cast this compiler cannot fold"))
+        })
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_AND`, `ZEND_AST_OR`,
@@ -16240,10 +16353,10 @@ impl<'a> Emit<'a> {
         match node.op.map(|op| self.kind(op)) {
             // `Z/Zend/zend_compile.c:12116`.
             Some(SyntaxKind::AMP_AMP | SyntaxKind::AND_KW) => {
-                self.short_circuit_fold(false, left, right)
+                self.short_circuit_fold(id, false, left, right)
             }
             Some(SyntaxKind::PIPE_PIPE | SyntaxKind::OR_KW) => {
-                self.short_circuit_fold(true, left, right)
+                self.short_circuit_fold(id, true, left, right)
             }
             Some(SyntaxKind::QUESTION_QUESTION) => self.coalesce_constant(id, left, right),
             Some(kind) => match binary_op(kind) {
@@ -16294,7 +16407,12 @@ impl<'a> Emit<'a> {
     fn subscript_constant(&mut self, id: NodeId<tree::SubscriptExpr>) -> Result<Zval, Unfolded> {
         let node = &self.parsed.tree[id];
         let (base, index) = (node.base, node.index);
-        self.dimension_fold(base, index)
+        let Some(index) = index else {
+            return Err(self.compile_error("Cannot use [] for reading").into());
+        };
+        self.fold_over(tree::Expr::SubscriptExpr(id), [base, index], |emit| {
+            emit.dimension_fold(base, index).map(Operated::Kept)
+        })
     }
 
     /// `zend_try_ct_eval_class_const` folds nothing under
@@ -16339,7 +16457,10 @@ impl<'a> Emit<'a> {
     /// `bitwise_or_function` and its kin, over `zend_compare` and
     /// `zend_is_identical`, and over the arithmetic; each of the four
     /// refuses where php's opcode would throw or warn, which is the
-    /// value left to the request.
+    /// value left to the request. The steps are [`Self::fold_over`]'s
+    /// spelled out: a closure here stands in the frame a left-nested
+    /// chain repeats, 171 links under a 512K stack in a debug build where
+    /// this reaches 206 (measured on #3240).
     fn binary_constant(
         &mut self,
         id: NodeId<tree::BinaryExpr>,
@@ -16369,7 +16490,9 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// The fold of [`Self::binary_constant`] over its two folded sides,
+    /// `zend_try_ct_eval_binary_op` over two folded sides, the one fold
+    /// `zend_eval_const_expr` ([`Self::binary_constant`]) and
+    /// `zend_compile_binary_op` ([`Self::binary_operands`]) both make,
     /// out of the frame a left-nested chain stands in once per
     /// operator: the string a concatenation or a bitwise operator over
     /// two strings makes is the node's claim ([`Operated::Made`]), and
@@ -16404,8 +16527,9 @@ impl<'a> Emit<'a> {
     }
 
     /// `zend_eval_const_expr`'s `ZEND_AST_DIM` arm
-    /// (`Z/Zend/zend_compile.c:12225`): `[]` with nothing in it is php's
-    /// compile error; the container and the dimension folded, then an
+    /// (`Z/Zend/zend_compile.c:12225`), past the `[]` with nothing in it
+    /// that [`Self::subscript_constant`] refuses as php's compile error:
+    /// the container and the dimension folded, then an
     /// array's entry at an integer or a string key (`zend_symtable_find`,
     /// a decimal string read as the integer) and a string's byte at an
     /// integer offset inside it, as a one-byte string (`ZVAL_CHAR`). A key
@@ -16427,14 +16551,7 @@ impl<'a> Emit<'a> {
     ///   string(1) "y"
     /// }
     /// ```
-    fn dimension_fold(
-        &mut self,
-        base: tree::Expr,
-        index: Option<tree::Expr>,
-    ) -> Result<Zval, Unfolded> {
-        let Some(index) = index else {
-            return Err(self.compile_error("Cannot use [] for reading").into());
-        };
+    fn dimension_fold(&mut self, base: tree::Expr, index: tree::Expr) -> Result<Zval, Unfolded> {
         let (container, dim) = self.constant_pair(base, index)?;
         let refused = || Unfolded::NoConstant("a dimension this compiler leaves to the request");
         if let Some(array) = container.as_arr() {
@@ -16994,7 +17111,8 @@ impl<'a> Emit<'a> {
             });
         }
         let parts = self.list(self.parsed.tree[id].parts);
-        let command = self.encaps(parts, Holder::ShellExec(&self.parsed.tree[id]), line)?;
+        let holder = Holder::ShellExec(&self.parsed.tree[id]);
+        let command = self.encaps(tree::Expr::ShellExecExpr(id), parts, holder, line)?;
         let (op1_type, op1) = self.operand(command);
         self.push(Opline {
             opcode: if known {

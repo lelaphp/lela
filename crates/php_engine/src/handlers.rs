@@ -12949,10 +12949,19 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
             .map_or_else(Value::null, |place| Value::of_slot(place.read()))
     };
     let computed = if grows_in_place(req, op.extended_value, &held) {
-        crate::ops::concat_assign(req, &held, &value, |req| {
-            let at = write_place(req, frame, op.op1_type, op.op1);
-            vacate(req, at);
-        })
+        crate::ops::concat_assign(
+            req,
+            &held,
+            &value,
+            |req| {
+                let at = write_place(req, frame, op.op1_type, op.op1);
+                vacate(req, at);
+            },
+            |req, left| {
+                let at = write_place(req, frame, op.op1_type, op.op1);
+                reinstate(req, at, left);
+            },
+        )
     } else {
         kernel(req, &held, &value)
     };
@@ -14389,6 +14398,24 @@ fn vacate(req: &mut Request, at: Option<php_heap::ZvalRef>) {
     req.release(held);
 }
 
+/// What [`vacate`] gave up put back where it stood, the place read again
+/// and a reference there followed to its cell: the left string of a `.=`
+/// whose append the limit refused, which php's `zend_string_extend`
+/// leaves in the place. `left` is one owner, the place's from here; with
+/// no place it is given up.
+fn reinstate(req: &mut Request, at: Option<php_heap::ZvalRef>, left: Value) {
+    let Some(mut at) = at else {
+        req.release(left);
+        return;
+    };
+    if let Some(cell) = Value::of_slot(at.read()).as_php_ref() {
+        at = cell.heap().val_ref();
+    }
+    let held = Value::of_slot(at.read());
+    at.write(left.to_zval());
+    req.release(held);
+}
+
 /// `ZEND_ASSIGN_STATIC_PROP_OP` (`Z/Zend/zend_vm_def.h:2714`),
 /// `C::$p op= v`, two oplines: this one names the property in `op1`,
 /// the class's constant pair in `op2` and the operator in
@@ -14536,14 +14563,26 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
                     .static_slot_cell(info)
                     .is_none_or(|cell| req.ref_type_sources(cell.heap()).is_empty()));
     let computed = if in_place {
-        crate::ops::concat_assign(req, &held, &value, |req| {
-            req.release(held);
-            req.store_static_property(info, Value::null());
-        })
+        crate::ops::concat_assign(
+            req,
+            &held,
+            &value,
+            |req| {
+                req.release(held);
+                req.store_static_property(info, Value::null());
+            },
+            // The read's owner `vacate` gave up taken again, for the
+            // release below.
+            |req, left| {
+                req.addref(&left);
+                req.store_static_property(info, left);
+            },
+        )
     } else {
         kernel(req, &held, &value)
     };
-    // An `Err` never vacated, so the read's owner is still ours then.
+    // An `Err` leaves the place as it stood, so the read's owner is
+    // still ours then.
     if !in_place || computed.is_err() {
         req.release(held);
     }
@@ -16200,7 +16239,13 @@ fn stepped_entry(
     let raw = Value::of_slot(entry.read());
     let held = raw.deref();
     let computed = if grows_in_place(req, op.extended_value, &raw) {
-        crate::ops::concat_assign(req, &held, &value, |req| vacate(req, Some(entry)))
+        crate::ops::concat_assign(
+            req,
+            &held,
+            &value,
+            |req| vacate(req, Some(entry)),
+            |req, left| reinstate(req, Some(entry), left),
+        )
     } else {
         kernel(req, &held, &value)
     };
@@ -17123,10 +17168,16 @@ fn slot_step(
     if grows_in_place(req, step.op.extended_value, &raw)
         && (!typed || held.as_php_string().is_some())
     {
-        return crate::ops::concat_assign(req, &held, value, |req| {
-            let at = object.heap().slot_ref(slot);
-            vacate(req, at);
-        });
+        return crate::ops::concat_assign(
+            req,
+            &held,
+            value,
+            |req| {
+                let at = object.heap().slot_ref(slot);
+                vacate(req, at);
+            },
+            |req, left| reinstate(req, object.heap().slot_ref(slot), left),
+        );
     }
     (step.kernel)(req, &held, value)
 }
