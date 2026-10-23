@@ -554,6 +554,21 @@ pub(super) fn may_exit(op: &Opline, after: Option<&Opline>) -> bool {
     }
 }
 
+/// php's unconditional branch (`Z/ext/opcache/jit/zend_jit_trace.c:5655-5691`):
+/// a `JMPZ`, `JMPNZ`, `JMPZ_EX` or `JMPNZ_EX` whose condition, once its
+/// guards held, is one kind no greater than `true` (`has_concrete_type`,
+/// `concrete_type(op1_info) <= IS_TRUE`) goes the way the record went
+/// and takes no exit for the way it did not.
+pub(super) fn goes_one_way(opcode: Opcode, held: Types) -> bool {
+    matches!(
+        opcode,
+        Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx
+    ) && matches!(
+        held.tag(),
+        Some(ZvalType::Undef | ZvalType::Null | ZvalType::False | ZvalType::True)
+    )
+}
+
 /// The oplines whose handler leaves a temporary it reads alive: a
 /// `switch`'s or a `match`'s subject, a `foreach`'s iterator, a `list()`'s
 /// array, a copied temporary, a coalescing jump's value.

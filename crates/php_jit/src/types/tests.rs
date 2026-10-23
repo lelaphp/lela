@@ -951,7 +951,12 @@ fn repeated(statement: &str, n: usize) -> String {
 /// generator holds its recorded type at, a cast to string of an int and
 /// a rope part or an element of an array written out take none of their own, a
 /// throw none at all, and an exit at an opline is new where the types the
-/// trace knows of the frame's slots differ from an earlier one's.
+/// trace knows of the frame's slots differ from an earlier one's. A
+/// jump on a condition its guard holds as `true` or `false` goes one way
+/// and takes no exit of its own, php's unconditional branch: `if (!$b)`
+/// takes its `BOOL_NOT`'s guard on `$b` and its `JMPZ`'s on what the `BOOL_NOT` wrote
+/// alone, the pinned php's two under `opcache.optimization_level=0`, so
+/// that its op arrays are this engine's (#3203).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
@@ -967,6 +972,7 @@ fn each_statement_takes_the_exits_php_takes() -> Result<(), String> {
         ("$x = 5;", 1),
         ("$s += $i * 5;", 2),
         ("$x = $b && $i;", 4),
+        ("if (!$b) { $x = 1; }", 2),
         ("$x = $y;", 1),
     ] {
         let two = built(&IN_MAIN, &repeated(statement, 2))?;

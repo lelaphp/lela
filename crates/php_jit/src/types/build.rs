@@ -13,10 +13,10 @@ use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineI
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Declared, Within, arith, assigned, check_sites, constant, constant_types, guard_sites,
-    inline_may_leave, is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard,
-    param_types, params, reads, reads_by_name, referenced, slot_of, within, writes, written,
-    written_after_entry,
+    Declared, Within, arith, assigned, check_sites, constant, constant_types, goes_one_way,
+    guard_sites, inline_may_leave, is_call, keeps_temporaries, may_exit, op1_types, out_types,
+    packed_guard, param_types, params, reads, reads_by_name, referenced, slot_of, within, writes,
+    written, written_after_entry,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
@@ -533,7 +533,9 @@ impl<'a> Builder<'a> {
         self.successor = went(at, &op, target, len, branch);
         self.own_exit(idx, frame, &op, form, t1);
         self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
-        if let Some(taken) = branch {
+        if let Some(taken) = branch
+            && !goes_one_way(op.opcode, t1)
+        {
             let to = Branched {
                 taken,
                 fused,
