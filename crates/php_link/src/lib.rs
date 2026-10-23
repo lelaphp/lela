@@ -1354,7 +1354,7 @@ fn default_text(default: &ConstExpr) -> String {
         // An array the compiler folded is a value, `[]` or `[...]`; one
         // still to evaluate is the `<expression>` below, as php prints
         // a `ZEND_AST_ARRAY`, and a native's empty one is its stub's `[]`.
-        ConstExpr::UnitValue(array) if array.is_empty() => String::from("[]"),
+        ConstExpr::UnitValue(held) if held.is_empty() => String::from("[]"),
         ConstExpr::UnitValue(_) => String::from("[...]"),
         ConstExpr::Array { elements, .. } if elements.is_empty() => String::from("[]"),
         ConstExpr::Constant { name, .. } => text(&name.resolved().0),

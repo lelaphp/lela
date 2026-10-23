@@ -2582,7 +2582,7 @@ fn defined_class_constant(
         (None, ConstExpr::Str(bytes)) => {
             php_heap::Zval::string(tables.shared.existing_interned(bytes)?)
         }
-        (None, ConstExpr::UnitValue(array)) => array.value(),
+        (None, ConstExpr::UnitValue(held)) => held.value(),
         (None, _) => return None,
     };
     Some(php_compile::DefinedClassConstant {

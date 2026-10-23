@@ -427,13 +427,13 @@ impl ByIdentity {
     }
 
     /// Where `z` stands among the strings or among the arrays.
-    fn place(&self, z: Zval) -> Option<Result<usize, usize>> {
+    fn place(&self, z: Zval) -> Option<Place> {
         let Some(s) = z.as_str() else {
             return (self
                 .arrays
                 .iter()
                 .position(|(held, _)| held.is_same_value(z)))
-            .map(Err);
+            .map(Place::Array);
         };
         let from = self
             .strings
@@ -441,14 +441,14 @@ impl ByIdentity {
         (self.strings.get(from..).unwrap_or_default().iter())
             .take_while(|(held, _)| held.bytes() == s.bytes())
             .position(|(held, _)| held.is_same(s))
-            .map(|at| Ok(from + at))
+            .map(|at| Place::String(from + at))
     }
 
     /// What holds `z`, where something does.
     fn find(&self, z: Zval) -> Option<Owner> {
         match self.place(z)? {
-            Ok(at) => self.strings.get(at).map(|(_, owner)| *owner),
-            Err(at) => self.arrays.get(at).map(|(_, owner)| *owner),
+            Place::String(at) => self.strings.get(at).map(|(_, owner)| *owner),
+            Place::Array(at) => self.arrays.get(at).map(|(_, owner)| *owner),
         }
     }
 
@@ -456,10 +456,18 @@ impl ByIdentity {
     /// holder.
     fn take(&mut self, z: Zval) -> Option<Owner> {
         match self.place(z)? {
-            Ok(at) => Some(self.strings.remove(at).1),
-            Err(at) => Some(self.arrays.swap_remove(at).1),
+            Place::String(at) => Some(self.strings.remove(at).1),
+            Place::Array(at) => Some(self.arrays.swap_remove(at).1),
         }
     }
+}
+
+/// Where a value stands in a [`ByIdentity`]: its place among the strings
+/// or among the arrays.
+#[derive(Clone, Copy)]
+enum Place {
+    String(usize),
+    Array(usize),
 }
 
 /// `by_bytes`'s entry for `bytes` pointed at `s`.

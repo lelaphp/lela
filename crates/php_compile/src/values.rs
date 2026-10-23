@@ -104,7 +104,7 @@ fn function_decls(unit: &Unit) -> impl Iterator<Item = (Holder, &FunctionDecl)> 
 pub fn unit_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
     let mut each = |expr: &ConstExpr| unit_values(expr, found);
     match expr {
-        ConstExpr::UnitValue(array) => found(array.value()),
+        ConstExpr::UnitValue(held) => found(held.value()),
         ConstExpr::Unary { operand, .. }
         | ConstExpr::Unpack(operand)
         | ConstExpr::Cast { operand, .. }

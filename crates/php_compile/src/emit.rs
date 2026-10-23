@@ -102,7 +102,7 @@ use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Arena, ArenaVec, Holder, Parsed, SyntaxKind, TokenValue};
 
 use php_heap::{
-    Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Zval, ZvalType, double_to_string,
+    Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Str, Zval, ZvalType, double_to_string,
     numeric_prefix,
 };
 use php_link::Indexed;
@@ -1300,9 +1300,12 @@ impl Operated {
 enum Folded {
     Line(i64),
     Text(Vec<u8>),
-    /// The name of the class or the function the constant stands in,
-    /// whose own string php copies (`ZVAL_STR_COPY`).
+    /// The name of the function the constant stands in, whose own
+    /// string php copies (`ZVAL_STR_COPY`).
     Name(Vec<u8>),
+    /// The name of the class the constant stands in, `ce->name`
+    /// ([`Emit::class_name_made`]).
+    ClassName,
     /// `__CLASS__` in a trait, the one magic constant
     /// `zend_try_ct_eval_magic_const` leaves to the program: the class
     /// that uses the trait, fetched as `FETCH_CLASS_NAME` of `self`.
@@ -1324,7 +1327,7 @@ struct ActiveClass {
     anonymous: bool,
     /// `ce->name` once the body begins, the string the class's name is,
     /// which `self::class` and `__CLASS__` copy (`zend_string_copy`).
-    own: Option<Zval>,
+    own: Option<Str>,
     /// The method whose body is compiling, which `zend_begin_method_decl`
     /// put into the class's `function_table` before the body: none
     /// between methods.
@@ -1343,7 +1346,7 @@ impl ActiveClass {
         kind: ClassKind,
         at: usize,
         anonymous: bool,
-        own: Option<Zval>,
+        own: Option<Str>,
     ) -> ActiveClass {
         ActiveClass {
             name: name.to_vec(),
@@ -1365,7 +1368,7 @@ struct Entered {
     parent: Option<Vec<u8>>,
     hooked_variance_checks: u32,
     /// The string the class's name is ([`ActiveClass::own`]).
-    own: Option<Zval>,
+    own: Option<Str>,
 }
 
 /// The method `zend_begin_method_decl` has put into
@@ -2167,7 +2170,10 @@ impl<'a> Emit<'a> {
     /// [`Self::string`] of a declaration's own name or lowered key, which
     /// php copies where this compile asks for it ([`Intern::intern_name`]).
     fn own_string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
-        self.own_made(bytes).map(|made| made.value())
+        match self.strings.intern_name(bytes) {
+            Ok(made) => Ok(made.value()),
+            Err(fatal) => Err(self.fatal_of(fatal)),
+        }
     }
 
     /// `zend_string_tolower(ce->name)`, the key `DECLARE_CLASS` and
@@ -2175,10 +2181,10 @@ impl<'a> Emit<'a> {
     /// (`own`, [`ActiveClass::own`]) held once more where lowering
     /// changes nothing, as `zend_string_tolower` hands back the string it
     /// was given, else a key of its own.
-    fn class_key(&mut self, own: Option<Zval>, name: &[u8]) -> Result<Zval, CompileError> {
+    fn class_key(&mut self, own: Option<Str>, name: &[u8]) -> Result<Zval, CompileError> {
         let lowered = self.arena.lowercase(name);
         if lowered == name
-            && let Some(own) = own
+            && let Some(own) = own.map(Zval::string)
             && self.strings.hold(own)
         {
             return Ok(own);
@@ -2186,19 +2192,45 @@ impl<'a> Emit<'a> {
         self.own_string(lowered)
     }
 
-    /// [`Self::own_string`] as the claim of the one who asked: the active
-    /// class's name one more owner of the string its body began with
-    /// ([`ActiveClass::own`]), so every `self::class` and `__CLASS__` of
-    /// the class is that one string, and any other made as asked.
-    fn own_made(&mut self, bytes: &[u8]) -> Result<Made, CompileError> {
-        let own = (self.active_class.as_ref().and_then(|class| class.own))
-            .and_then(Zval::as_str)
-            .filter(|own| own.bytes() == bytes);
+    /// `CG(active_class_entry)->name` as the claim of the one who asked:
+    /// one more owner of the string the class's body began with
+    /// ([`ActiveClass::own`]), so every `self::class`, `__CLASS__` and
+    /// `__TRAIT__` of the class is that one string (`zend_string_copy`);
+    /// the name made as asked before the body, in an attribute of the
+    /// class, and the empty string outside any class. A function or a
+    /// method of the class's name is a string of its own, as php's is
+    /// (the file under the recipe's `TMPDIR`):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3281-own-name.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('class foo { function foo2() {} static function g() { return [__CLASS__, self::class]; } } function foo() { return __FUNCTION__; }'), "\n";
+    /// echo m('class fx { function fx() { return __FUNCTION__ . __CLASS__; } }'), "\n";
+    /// echo m('trait Tq { function t() { return __TRAIT__; } }'), "\n";
+    /// echo json_encode([foo::g(), foo(), (new fx)->fx()]), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1000
+    /// 608
+    /// 608
+    /// [["foo","foo"],"foo","fxfx"]
+    /// ```
+    fn class_name_made(&mut self) -> Result<Made, CompileError> {
+        let (own, name) = match &self.active_class {
+            Some(class) => (class.own, class.name.clone()),
+            None => (None, Vec::new()),
+        };
         if let Some(made) = own.and_then(|own| self.strings.hold_made(Zval::string(own))) {
             return Ok(made);
         }
         self.strings
-            .intern_name(bytes)
+            .intern_name(&name)
             .map_err(|fatal| self.fatal_of(fatal))
     }
 
@@ -5275,8 +5307,8 @@ impl<'a> Emit<'a> {
         parameter: &walk::Parameter,
         folded: Zval,
     ) -> Result<Option<ConstExpr>, CompileError> {
-        if let Some(array) = UnitValue::new(folded) {
-            return Ok(Some(ConstExpr::UnitValue(array)));
+        if let Some(held) = UnitValue::new(folded) {
+            return Ok(Some(ConstExpr::UnitValue(held)));
         }
         let written = self.without_persistent_substitution(|this| {
             parameter
@@ -5857,7 +5889,7 @@ impl<'a> Emit<'a> {
             return Ok(());
         }
         let delayed = toplevel && unlinked_free;
-        self.declare_class(at, (&name, own), parent.as_deref(), line, delayed)
+        self.declare_class(at, &name, own, parent.as_deref(), line, delayed)
     }
 
     /// `zend_compile_class_decl` from its `ce` to its body, which a
@@ -5987,7 +6019,7 @@ impl<'a> Emit<'a> {
             object_beside: Box::default(),
             attribute_validator: None,
         };
-        let own = Some(self.own_string(&name)?);
+        let own = self.own_string(&name)?.as_str();
         self.active_class = Some(ActiveClass::entered(&name, class.kind, at, anonymous, own));
         self.active_parent.clone_from(&parent);
         // The class takes its place `at` in the unit before its body, so
@@ -7982,7 +8014,8 @@ impl<'a> Emit<'a> {
     fn declare_class(
         &mut self,
         at: usize,
-        (name, own): (&[u8], Option<Zval>),
+        name: &[u8],
+        own: Option<Str>,
         parent: Option<&[u8]>,
         line: u32,
         delayed: bool,
@@ -8639,7 +8672,7 @@ impl<'a> Emit<'a> {
             ConstExpr::Long { value, .. } => Operated::Kept(Zval::long(*value)),
             ConstExpr::Double(d) => Operated::Kept(Zval::double(*d)),
             ConstExpr::Str(bytes) => Operated::Made(self.string_made(bytes, false)?),
-            ConstExpr::UnitValue(array) => Operated::Kept(array.value()),
+            ConstExpr::UnitValue(held) => Operated::Kept(held.value()),
             _ => return Ok(None),
         }))
     }
@@ -12271,6 +12304,7 @@ impl<'a> Emit<'a> {
             Folded::Line(n) => Ok(Zval::long(n)),
             Folded::Text(text) => self.string(&text),
             Folded::Name(name) => self.own_string(&name),
+            Folded::ClassName => self.class_name_made().map(|made| made.value()),
             Folded::UsingClass => {
                 Err(self.unread("a `__CLASS__` in a trait's constant expression"))
             }
@@ -18159,7 +18193,7 @@ impl<'a> Emit<'a> {
             _ => return Ok(None),
         };
         Ok(Some(if fetch == FETCH_CLASS_SELF {
-            Operated::Made(self.own_made(&name)?)
+            Operated::Made(self.class_name_made()?)
         } else {
             Operated::Kept(self.string(&name)?)
         }))
@@ -19284,7 +19318,7 @@ impl<'a> Emit<'a> {
             }
             Magic::Namespace => self.namespace.clone().unwrap_or_default(),
             Magic::Class if self.in_trait() => return Folded::UsingClass,
-            Magic::Class => return Folded::Name(self.active_name().unwrap_or_default()),
+            Magic::Class => return Folded::ClassName,
             Magic::Property => self.active_property.clone().unwrap_or_default(),
             // `zend_compile_func_decl` names the op array; the main one
             // has no `function_name`, and a member's constant expression
@@ -19309,9 +19343,7 @@ impl<'a> Emit<'a> {
                 (_, None) => Vec::new(),
             },
             // The trait's own name inside one, and none elsewhere.
-            Magic::Trait if self.in_trait() => {
-                return Folded::Name(self.active_name().unwrap_or_default());
-            }
+            Magic::Trait if self.in_trait() => return Folded::ClassName,
             Magic::Trait => Vec::new(),
         };
         Folded::Text(text)

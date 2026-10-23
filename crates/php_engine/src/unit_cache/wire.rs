@@ -695,8 +695,8 @@ impl Wire for ConstExpr {
             } => (21u8, (class, (method, line))).put(out),
             ConstExpr::ScopeClass => 22u8.put(out),
             // A request's counted array is in no unit the cache keeps.
-            ConstExpr::UnitValue(array) if array.value().is_refcounted() => None,
-            ConstExpr::UnitValue(array) => (23u8, array.value()).put(out),
+            ConstExpr::UnitValue(held) if held.value().is_refcounted() => None,
+            ConstExpr::UnitValue(held) => (23u8, held.value()).put(out),
         }
     }
     fn take(r: &mut Reader<'_>) -> Option<Self> {
