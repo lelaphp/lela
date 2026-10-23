@@ -774,12 +774,13 @@ pub trait Intern {
         !value.is_refcounted()
     }
 
-    /// [`Intern::hold`] of a string as a claim the asker holds alone and
-    /// gives back once it has read it ([`Intern::give_back`]), as a fold
-    /// over the substituted constant destroys its copy; none where this
-    /// home cannot hold it.
-    fn hold_made(&mut self, s: Str) -> Option<Made> {
-        self.hold(Zval::string(s)).then_some(Made(Zval::string(s)))
+    /// [`Intern::hold`] of a string or an array as a claim the asker
+    /// holds alone and gives back once it has read it
+    /// ([`Intern::give_back`]), as a fold over the substituted constant,
+    /// or over an element it read out of an array, destroys its copy;
+    /// none where this home cannot hold it.
+    fn hold_made(&mut self, value: Zval) -> Option<Made> {
+        self.hold(value).then_some(Made(value))
     }
 
     /// A constant array of a unit in this home (design §5.3): the

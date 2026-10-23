@@ -2194,7 +2194,7 @@ impl<'a> Emit<'a> {
         let own = (self.active_class.as_ref().and_then(|class| class.own))
             .and_then(Zval::as_str)
             .filter(|own| own.bytes() == bytes);
-        if let Some(made) = own.and_then(|own| self.strings.hold_made(own)) {
+        if let Some(made) = own.and_then(|own| self.strings.hold_made(Zval::string(own))) {
             return Ok(made);
         }
         self.strings
@@ -14956,10 +14956,12 @@ impl<'a> Emit<'a> {
         op: BinaryOp,
         left: Zval,
         right: Zval,
-    ) -> Result<Option<Zval>, CompileError> {
+    ) -> Result<Option<Operated>, CompileError> {
         match (op, left.as_arr(), right.as_arr()) {
-            (BinaryOp::Add, Some(left), Some(right)) => self.array_union(left, right).map(Some),
-            (_, None, None) => Ok(fold(op, left, right)),
+            (BinaryOp::Add, Some(left), Some(right)) => self
+                .array_union(left, right)
+                .map(|made| Some(Operated::Made(made))),
+            (_, None, None) => Ok(fold(op, left, right).map(Operated::Kept)),
             _ => Ok(None),
         }
     }
@@ -15003,11 +15005,10 @@ impl<'a> Emit<'a> {
     ///   string(1) "n"
     /// }
     /// ```
-    fn array_union(&mut self, left: Arr, right: Arr) -> Result<Zval, CompileError> {
+    fn array_union(&mut self, left: Arr, right: Arr) -> Result<Made, CompileError> {
         let mut entries: Vec<(Key, Zval)> = left.iter().collect();
         entries.extend(right.iter().filter(|(key, _)| left.get(*key).is_none()));
         self.lay_array(&entries, Vec::new())
-            .map(|made| made.value())
     }
 
     /// `zend_compile_binary_op` once `zend_try_ct_eval_binary_op` has
@@ -16815,7 +16816,6 @@ impl<'a> Emit<'a> {
             return Ok(Operated::Kept(self.compare_fold(op, left, right)));
         }
         self.arithmetic_fold(op, left, right)?
-            .map(Operated::Kept)
             .ok_or(Unfolded::NoConstant(
                 "arithmetic this compiler cannot fold yet",
             ))
@@ -16884,20 +16884,15 @@ impl<'a> Emit<'a> {
                 (None, None) => return Err(refused()),
             };
             // `ZVAL_COPY_OR_DUP`: one more owner of the element, the
-            // node's claim where it is a string; else the fetch.
+            // node's claim where it is a string or an array; else the
+            // fetch.
             let element = array.get(key).ok_or_else(refused)?;
-            if let Some(s) = element.as_str() {
-                return self
-                    .strings
-                    .hold_made(s)
+            if element.as_str().is_some() || element.as_arr().is_some() {
+                return (self.strings.hold_made(element))
                     .map(Operated::Made)
                     .ok_or_else(refused);
             }
-            return if self.strings.hold(element) {
-                Ok(Operated::Kept(element))
-            } else {
-                Err(refused())
-            };
+            return Ok(Operated::Kept(element));
         }
         if let Some(text) = container.as_str() {
             let offset = match (dim.as_long(), dim.as_str()) {
@@ -17113,7 +17108,7 @@ impl<'a> Emit<'a> {
     ///
     /// ```php
     /// $n = fn () => opcache_get_status()['interned_strings_usage']['number_of_strings'];
-    /// foreach (['$z = ["a#"] == "a#";', '$z = ["a#"] + ["c#"];', 'class X { const A = ["a#"] == "a#"; }', '$z = [["a#"]] == 1;', '$z = [...["a#"]] == 1;', 'class D { const A = ["k#" => "l#"]["k#"]; }', '$z = [["a#"]][0];', '$z = ["a#"] ?? 2;'] as $i => $c) {
+    /// foreach (['$z = ["a#"] == "a#";', '$z = ["a#"] + ["c#"];', 'class X { const A = ["a#"] == "a#"; }', '$z = [["a#"]] == 1;', '$z = [...["a#"]] == 1;', 'class D { const A = ["k#" => "l#"]["k#"]; }', '$z = [["a#"]][0];', '$z = ["a#"] ?? 2;', 'class U { const A = (["a#"] + ["c#", "e#"]) == 1; }', 'class V { const A = [[["a#"]][0]] == 1; }'] as $i => $c) {
     ///     $c = str_replace('#', "q$i", $c);
     ///     $f = sys_get_temp_dir() . "/w3258-lay-$i.php";
     ///     file_put_contents("$f.tmp", "<?php $c");
@@ -17124,7 +17119,7 @@ impl<'a> Emit<'a> {
     ///     echo $n() - $a, '  ', $c, "\n";
     ///     unlink($f);
     /// }
-    /// echo json_encode([X::A, D::A, $z]), "\n";
+    /// echo json_encode([X::A, D::A, $z, U::A, V::A]), "\n";
     /// ```
     /// ```expect regime=jit-off
     /// 1  $z = ["aq0"] == "aq0";
@@ -17135,7 +17130,9 @@ impl<'a> Emit<'a> {
     /// 2  class D { const A = ["kq5" => "lq5"]["kq5"]; }
     /// 2  $z = [["aq6"]][0];
     /// 2  $z = ["aq7"] ?? 2;
-    /// [false,"lq5",["aq7"]]
+    /// 1  class U { const A = (["aq8"] + ["cq8", "eq8"]) == 1; }
+    /// 1  class V { const A = [[["aq9"]][0]] == 1; }
+    /// [false,"lq5",["aq7"],false,false]
     /// ```
     pub(crate) fn lay_array(
         &mut self,
@@ -20828,7 +20825,7 @@ impl<'a> Emit<'a> {
     /// ```
     fn request_constant(&mut self, value: Zval) -> Option<Operated> {
         match value.as_str() {
-            Some(s) => self.strings.hold_made(s).map(Operated::Made),
+            Some(_) => self.strings.hold_made(value).map(Operated::Made),
             None => self.strings.hold(value).then_some(Operated::Kept(value)),
         }
     }
