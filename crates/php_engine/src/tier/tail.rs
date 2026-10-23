@@ -95,7 +95,7 @@ pub(crate) fn onward<'a, D: Telling>(
         crate::exec::after(at)
     } else {
         match next.way() {
-            Way::On(places) | Way::Stretch(places) => at.wrapping_add(places),
+            Way::On(places) => at.wrapping_add(places),
             Way::Jump(to) => to,
             Way::Left(_) => return Ok(ControlFlow::Break(next)),
         }

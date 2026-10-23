@@ -80,7 +80,7 @@ use crate::observer::OnThrow;
 use crate::operand::{ByKind, Operand, Retval, RetvalByte, Var};
 use crate::ops::inline::{self, Arith, Binary, Bitwise, Shift};
 use crate::ops::{DimRead, Offset, Switched, array_entry, string_dim_offset, string_offset};
-use crate::tier::{Flow, Inline, Next, SafepointIdx, Site, Stepped, Tier};
+use crate::tier::{Flow, Next, SafepointIdx, Site, Stepped, Tier};
 use branch::Branch;
 use php_unit::Opcode;
 
@@ -10072,29 +10072,8 @@ fn inline_fetch_dim_r(
     op: &Opline,
     (a, b): (impl Operand, impl Operand),
 ) -> Option<Edge> {
-    if inline_fetch_dim_r_in(req.slots_mut(frame), code, op, (a, b), true)? {
-        exec::free_operand(req, frame, op.op2_type, op.op2);
-    }
-    Some(Ok(advanced()))
-}
-
-/// [`inline_fetch_dim_r`] over the frame's slots: the element into the
-/// temporary and whether the dimension is a temporary's to free, which
-/// is refused, with nothing touched, unless `free` says the caller frees
-/// it.
-#[inline(always)] // as `inline_arith`
-#[allow(clippy::inline_always)]
-fn inline_fetch_dim_r_in(
-    slots: &mut [Zval],
-    code: &OpArray,
-    op: &Opline,
-    (a, b): (impl Operand, impl Operand),
-    free: bool,
-) -> Option<bool> {
+    let slots = req.slots_mut(frame);
     let (array, (key, free_dim)) = inline_dim(slots, code, op, a, b)?;
-    if free_dim && !free {
-        return None;
-    }
     let z = inline::element(array, key)?;
     let out = op.out as usize;
     if slots.get(out)?.is_refcounted() {
@@ -10102,7 +10081,10 @@ fn inline_fetch_dim_r_in(
     }
     *slots.get_mut(out)? = z;
     z.addref();
-    Some(free_dim)
+    if free_dim {
+        exec::free_operand(req, frame, op.op2_type, op.op2);
+    }
+    Some(Ok(advanced()))
 }
 
 /// The array and the key a dimension read's inline path works on: the
@@ -13200,8 +13182,8 @@ pub(crate) fn assign_op<T: Tier, A: Operand + Default, B: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::assign_op::<A, B>(req.slots_mut(frame), code, op, at) {
-        return inlined_on(went);
+    if let Some(edge) = inline_assign_op(req, frame, code, op, (A::default(), B::default())) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     assigned_op(req, frame, code, op)
@@ -13222,17 +13204,19 @@ pub(crate) fn assign_op<T: Tier, A: Operand + Default, B: Operand + Default>(
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
 fn inline_assign_op(
-    slots: &mut [Zval],
+    req: &mut Request,
+    frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     (a, b): (impl Operand, impl Operand),
-) -> Option<Inline> {
+) -> Option<Edge> {
     // The kind is the arm's, so a `VAR` arm has no inline path at all.
     if a.kind() != OperandKind::Cv {
         return None;
     }
     // The value first: one that is no number, a numeric string among
     // them, is the refusal met most, and it reads nothing else.
+    let slots = req.slots_mut(frame);
     let value = b.read(slots, code, op.op2);
     if !matches!(value.kind(), ZvalType::Long | ZvalType::Double) {
         return None;
@@ -13244,7 +13228,7 @@ fn inline_assign_op(
         write_owning_nothing(slots, op, z)?;
     }
     *slots.get_mut(at)? = z;
-    Some(Inline::ADVANCE)
+    Some(Ok(advanced()))
 }
 
 /// `ASSIGN_OP` past its inline path: both operands read as values, the
@@ -14063,7 +14047,7 @@ fn inline_assign_obj(
 }
 
 /// The `OP_DATA` value the inline path of `ASSIGN_OBJ` takes into a
-/// slot that holds `ty`, by [`taking`]'s rule, its `container` given
+/// slot that holds `ty`, by [`taken_value`]'s rule, its `container` given
 /// up after the last test and before the take ([`Held::give_up`]): the
 /// `OP_DATA` opline after `at`, whose `op1` is of the kind `data` is, as
 /// the assignment's handler was resolved over it where its unit was
@@ -14091,7 +14075,7 @@ fn data_value(
     taking.take(slots)
 }
 
-/// What [`taking`] takes, found with nothing touched: the zval,
+/// What [`taken_value`] takes, found with nothing touched: the zval,
 /// the temporary it is moved out of, and the temporary that takes it
 /// too under `RETURN_VALUE_USED`. Asking first is what an inline path
 /// that lays an element down does before it lays it, so an element it
@@ -14103,28 +14087,7 @@ struct Taking {
     out: Option<usize>,
 }
 
-/// The value an assignment's inline path takes, found as a [`Taking`]
-/// with nothing touched, one rule for `ASSIGN`'s `op2` and the `OP_DATA`
-/// of `ASSIGN_OBJ` and `ASSIGN_DIM`, as `zend_assign_to_variable` takes
-/// it: a constant that counts no owner
-/// copied, a temporary moved out of its slot and a CV copied with one
-/// more owner, and, under `RETURN_VALUE_USED`, one more owner for the
-/// temporary, which takes it too. None, with nothing touched, for a
-/// value nothing wrote, whose warning is the kernel's, a reference,
-/// whose value is what is assigned, a refcounted constant, and a
-/// temporary holding an owner.
-///
-/// ```php
-/// $a = str_repeat('a', 3); $o = new stdClass; $d = [];
-/// $x = $a; $o->p = $a; $d[0] = $a; $y = $a . 'b'; $o->q = $a . 'c'; $d[1] = $a . 'd';
-/// debug_zval_dump($a, $y, $o->q, $d[1]);
-/// ```
-/// ```expect
-/// string(3) "aaa" refcount(5)
-/// string(4) "aaab" refcount(2)
-/// string(4) "aaac" refcount(2)
-/// string(4) "aaad" refcount(2)
-/// ```
+/// The [`Taking`] of the value `field` names, by [`taken_value`]'s rule.
 #[inline(always)] // as `inline_fetch_dim_r`
 #[allow(clippy::inline_always)]
 fn taking<R: Retval>(
@@ -14204,6 +14167,39 @@ fn sensed_unmovable(
     }
     req.sense_unmovable_temporary(op, field, z.kind());
     true
+}
+
+/// The value an assignment's inline path takes, one rule for `ASSIGN`'s
+/// `op2` and the `OP_DATA` of `ASSIGN_OBJ` and `ASSIGN_DIM`, as
+/// `zend_assign_to_variable` takes it: a constant that counts no owner
+/// copied, a temporary moved out of its slot and a CV copied with one
+/// more owner, and, under `RETURN_VALUE_USED`, one more owner for the
+/// temporary, which takes it too. None, with nothing touched, for a
+/// value nothing wrote, whose warning is the kernel's, a reference,
+/// whose value is what is assigned, a refcounted constant, and a
+/// temporary holding an owner.
+///
+/// ```php
+/// $a = str_repeat('a', 3); $o = new stdClass; $d = [];
+/// $x = $a; $o->p = $a; $d[0] = $a; $y = $a . 'b'; $o->q = $a . 'c'; $d[1] = $a . 'd';
+/// debug_zval_dump($a, $y, $o->q, $d[1]);
+/// ```
+/// ```expect
+/// string(3) "aaa" refcount(5)
+/// string(4) "aaab" refcount(2)
+/// string(4) "aaac" refcount(2)
+/// string(4) "aaad" refcount(2)
+/// ```
+#[inline(always)] // as `inline_fetch_dim_r`
+#[allow(clippy::inline_always)]
+fn taken_value<R: Retval>(
+    slots: &mut [Zval],
+    code: &OpArray,
+    op: &Opline,
+    value: impl Operand,
+    field: u32,
+) -> Option<Zval> {
+    taking::<R>(slots, code, op, value, field)?.take(slots)
 }
 
 /// `ASSIGN_OBJ` over a `VAR` container, its inline path and then its
@@ -15709,70 +15705,25 @@ pub(crate) fn assign_dim<
     op: &Opline,
     at: u32,
 ) -> Edge {
-    let operands = (A::default(), B::default(), D::default());
-    if let Some((went, garbage)) =
-        inline_assign_dim_in(req.slots_mut(frame), code, op, at, operands, true)
-    {
-        if let GivenUp::Left(garbage) = garbage {
-            req.heap_mut().release_string(garbage);
-        }
-        return inlined_on(went);
-    }
-    if let Some(edge) = inline_assign_dim(req, frame, code, op, at, operands) {
+    if let Some(edge) = inline_assign_dim(
+        req,
+        frame,
+        code,
+        op,
+        at,
+        (A::default(), B::default(), D::default()),
+    ) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
     assigned_dim(req, frame, code, op)
 }
 
-/// [`inline_assign_dim`] over an element the array holds already and
-/// owns nothing that counts owners or is a string another owner holds
-/// too ([`kept_string`]), a dimension with nothing to free:
-/// the frame's slots alone, `None` with nothing touched for the rest.
-#[inline(always)] // as `inline_arith`
-#[allow(clippy::inline_always)]
-fn inline_assign_dim_in(
-    slots: &mut [Zval],
-    code: &OpArray,
-    op: &Opline,
-    at: u32,
-    (a, b, data): (impl Operand, impl Operand, impl Operand),
-    release: bool,
-) -> Option<(Inline, GivenUp)> {
-    let field = exec::opline_at(code, exec::after(at))?.op1;
-    let taking = taking::<RetvalByte>(slots, code, op, data, field)?;
-    let array = owned_array(slots, code, op, a)?;
-    if b.kind() == OperandKind::Unused {
-        return None;
-    }
-    let (key, free_dim) = inline_key(slots, code, op, b)?;
-    let entry = array.value_ref(key)?;
-    let garbage = entry.read();
-    if free_dim
-        || matches!(
-            garbage.kind(),
-            php_heap::ZvalType::Undef
-                | php_heap::ZvalType::Reference
-                | php_heap::ZvalType::Indirect
-        )
-    {
-        return None;
-    }
-    let garbage = given_up(garbage, release)?;
-    let z = taking.take(slots)?;
-    entry.write(z);
-    if a.kind() == OperandKind::Var {
-        *slots.get_mut(a.slot(op.op1)?)? = Zval::UNDEF;
-    }
-    // Past the `OP_DATA`, as the kernel goes on.
-    Some((Inline::On(2), garbage))
-}
-
 /// The inline path of `ZEND_ASSIGN_DIM` over a CV
 /// (`ZEND_ASSIGN_DIM_SPEC_CV_*`, `Z/Zend/zend_vm_def.h:2621-2660`): an
 /// array the CV alone owns, or the one a reference it holds names
 /// ([`owned_array`]), whose element at the key holds a value and no
-/// reference, takes the `OP_DATA` value ([`taking`]), as
+/// reference, takes the `OP_DATA` value ([`taken_value`]), as
 /// `zend_assign_to_variable` writes it, and the temporary takes it
 /// under `RETURN_VALUE_USED`. What the element held is given up after
 /// both, `GC_DTOR_NO_REF(garbage)`: a string serves no destructor and is
@@ -15781,7 +15732,7 @@ fn inline_assign_dim_in(
 /// where a destructor it serves runs and a throw it leaves is the edge's.
 /// `None`, with nothing touched, as [`inline_fetch_dim_w`]'s, for an
 /// element that is a reference, and a value or a temporary
-/// [`taking`] refuses, which is asked before an element is laid
+/// [`taken_value`] refuses, which is asked before an element is laid
 /// down, so the kernel never lays down a second one for a key the
 /// table did not have or for an append.
 ///
@@ -20215,12 +20166,8 @@ pub(crate) fn fe_fetch_r<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(fetched) = inline_fe_fetch_r(req.slots_mut(frame), op, at, A::default(), true) {
-        // What the CV held, a string at most, which serves no code as it goes.
-        if let Some(old) = fetched.1 {
-            req.release_nogc(Value::of_slot(old));
-        }
-        return inlined_on(fetched.0);
+    if let Some(edge) = inline_fe_fetch_r(req, frame, op, A::default()) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     fetched_element(req, frame, op)
@@ -20251,38 +20198,30 @@ pub(crate) fn fe_fetch_r<T: Tier, A: Operand + Default>(
 #[inline(always)] // the handler's fast half, as php's is in the handler
 #[allow(clippy::inline_always)]
 fn inline_fe_fetch_r(
-    slots: &mut [Zval],
+    req: &mut Request,
+    frame: FrameRef,
     op: &Opline,
-    at: u32,
     a: impl Operand,
-    release: bool,
-) -> Option<(Inline, Option<Zval>)> {
+) -> Option<Edge> {
     if op.op2_type != OperandKind::Cv {
         return None;
     }
     let var = a.slot(op.op1)?;
     let target = op.op2 as usize;
     let out = op.out as usize;
-    // What the CV holds, read first: a string no other owner holds is
-    // the refusal met most where the request is not in hand.
-    let old = *slots.get(target)?;
-    if old.is_refcounted()
-        && (old.kind() != php_heap::ZvalType::String
-            || (!release && old.as_str().is_none_or(|text| text.refcount() < 2)))
-    {
-        return None;
-    }
+    let slots = req.slots_mut(frame);
     let held = *slots.get(var)?;
     let array = held.as_arr()?;
     let Some((found, key, value)) = array.live_from(held.fe_pos()) else {
-        return Some((Inline::On(op.extended_value.wrapping_sub(at)), None));
+        return Some(jump_to(op.extended_value));
     };
     let value = crate::operand::deref(value);
     let keyed = op.out_type != OperandKind::Unused;
+    let old = *slots.get(target)?;
     if value.is_undef()
         || value.kind() == php_heap::ZvalType::Indirect
+        || (old.is_refcounted() && old.kind() != php_heap::ZvalType::String)
         || (keyed && slots.get(out)?.is_refcounted())
-        || (old.is_refcounted() && !release && !kept_string(old))
     {
         return None;
     }
@@ -20299,10 +20238,11 @@ fn inline_fe_fetch_r(
         key.addref();
     }
     value.addref();
-    Some((
-        Inline::ADVANCE,
-        (old.is_refcounted() && release).then_some(old),
-    ))
+    // What the CV held, a string at most, which serves no code as it goes.
+    if old.is_refcounted() {
+        req.release_nogc(Value::of_slot(old));
+    }
+    Some(Ok(advanced()))
 }
 
 /// `FE_FETCH_R` past its inline path: the next element of an array, an
@@ -21054,8 +20994,15 @@ pub(crate) fn add<T: Tier, A: Operand + Default, B: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::add::<A, B>(req.slots_mut(frame), code, op, at) {
-        return inlined_on(went);
+    if let Some(edge) = inline_arith(
+        req,
+        frame,
+        code,
+        op,
+        Arith::Add,
+        (A::default(), B::default()),
+    ) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     binary(req, frame, code, op, crate::ops::add)
@@ -21071,8 +21018,15 @@ pub(crate) fn sub<T: Tier, A: Operand + Default, B: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::sub::<A, B>(req.slots_mut(frame), code, op, at) {
-        return inlined_on(went);
+    if let Some(edge) = inline_arith(
+        req,
+        frame,
+        code,
+        op,
+        Arith::Sub,
+        (A::default(), B::default()),
+    ) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     binary(req, frame, code, op, crate::ops::sub)
@@ -21088,8 +21042,15 @@ pub(crate) fn mul<T: Tier, A: Operand + Default, B: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::mul::<A, B>(req.slots_mut(frame), code, op, at) {
-        return inlined_on(went);
+    if let Some(edge) = inline_arith(
+        req,
+        frame,
+        code,
+        op,
+        Arith::Mul,
+        (A::default(), B::default()),
+    ) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     binary(req, frame, code, op, crate::ops::mul)
@@ -21631,8 +21592,16 @@ pub(crate) fn is_smaller<T: Tier, A: Operand + Default, B: Operand + Default, S:
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::is_smaller::<A, B, S>(req.slots_mut(frame), code, op, at) {
-        return inlined::<T>(req, frame, code, at, went);
+    if let Some(edge) = inline_compare::<T, S>(
+        req,
+        frame,
+        code,
+        op,
+        at,
+        Ordering::is_lt,
+        (A::default(), B::default()),
+    ) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     compared_branch::<T, S>(req, frame, code, op, crate::ops::is_smaller)
@@ -21646,9 +21615,17 @@ pub(crate) fn is_smaller_or_equal<T: Tier, S: Branch>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    if let Some(went) = inline_path::is_smaller_or_equal::<S>(req.slots_mut(frame), code, op, at) {
-        return inlined::<T>(req, frame, code, at, went);
+    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_compare::<T, S>(
+        req,
+        frame,
+        code,
+        op,
+        req.vm().opline(frame),
+        Ordering::is_le,
+        kinds,
+    ) {
+        return edge;
     }
     compared_branch::<T, S>(req, frame, code, op, crate::ops::is_smaller_or_equal)
 }
@@ -21666,8 +21643,16 @@ pub(crate) fn is_equal<T: Tier, A: Operand + Default, B: Operand + Default, S: B
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::is_equal::<A, B, S>(req.slots_mut(frame), code, op, at) {
-        return inlined::<T>(req, frame, code, at, went);
+    if let Some(edge) = inline_compare::<T, S>(
+        req,
+        frame,
+        code,
+        op,
+        at,
+        Ordering::is_eq,
+        (A::default(), B::default()),
+    ) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     compared_branch::<T, S>(req, frame, code, op, crate::ops::is_equal)
@@ -21680,9 +21665,17 @@ pub(crate) fn is_not_equal<T: Tier, S: Branch>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    if let Some(went) = inline_path::is_not_equal::<S>(req.slots_mut(frame), code, op, at) {
-        return inlined::<T>(req, frame, code, at, went);
+    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_compare::<T, S>(
+        req,
+        frame,
+        code,
+        op,
+        req.vm().opline(frame),
+        Ordering::is_ne,
+        kinds,
+    ) {
+        return edge;
     }
     compared_branch::<T, S>(req, frame, code, op, crate::ops::is_not_equal)
 }
@@ -21699,8 +21692,10 @@ pub(crate) fn is_identical<T: Tier, A: Operand + Default, B: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::is_identical::<A, B>(req.slots_mut(frame), code, op, at) {
-        return inlined::<T>(req, frame, code, at, went);
+    if let Some(edge) =
+        inline_identical::<T, false>(req, frame, code, op, at, (A::default(), B::default()))
+    {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     compared_branch::<T, branch::Peeked>(req, frame, code, op, crate::ops::is_identical)
@@ -21737,13 +21732,15 @@ pub(crate) fn is_identical<T: Tier, A: Operand + Default, B: Operand + Default>(
 /// ```
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
-fn inline_identical<const NOT: bool>(
-    slots: &mut [Zval],
+fn inline_identical<T: Tier, const NOT: bool>(
+    req: &mut Request,
+    frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
     (a, b): (impl Operand, impl Operand),
-) -> Option<Inline> {
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
     let side = |kind: OperandKind, z: Zval| {
         if z.is_refcounted() && matches!(kind, OperandKind::Tmp | OperandKind::Var) {
             return None;
@@ -21754,10 +21751,10 @@ fn inline_identical<const NOT: bool>(
     let y = side(b.kind(), b.read(slots, code, op.op2))?;
     let answer = inline::identical(x, y)? != NOT;
     if let Some(jump) = branch::Peeked::fused(code, op, at) {
-        return Some(fused_inline(at, jump, answer));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
     write_owning_nothing(slots, op, Zval::bool(answer))?;
-    Some(Inline::ADVANCE)
+    Some(Ok(advanced()))
 }
 
 /// `ZEND_IS_NOT_IDENTICAL`: [`crate::ops::is_not_identical`], the same
@@ -21795,8 +21792,9 @@ pub(crate) fn is_not_identical<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let at = req.vm().opline(frame);
-    if let Some(went) = inline_path::is_not_identical(req.slots_mut(frame), code, op, at) {
-        return inlined::<T>(req, frame, code, at, went);
+    let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
+    if let Some(edge) = inline_identical::<T, true>(req, frame, code, op, at, kinds) {
+        return edge;
     }
     compared_branch::<T, branch::Peeked>(req, frame, code, op, crate::ops::is_not_identical)
 }
@@ -21854,8 +21852,8 @@ pub(crate) fn pre_inc<T: Tier, A: Operand + Default, R: Retval>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::pre_inc::<A, R>(req.slots_mut(frame), code, op, at) {
-        return inlined_on(went);
+    if let Some(edge) = inline_incdec::<R>(req, frame, op, (Arith::Add, false), A::default()) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     incdec(req, frame, code, op, false, crate::ops::increment)
@@ -21870,10 +21868,8 @@ pub(crate) fn post_inc<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let step = (Arith::Add, true);
-    if let Some(went) =
-        inline_incdec::<RetvalByte>(req.slots_mut(frame), op, step, ByKind(op.op1_type))
-    {
-        return inlined_on(went);
+    if let Some(edge) = inline_incdec::<RetvalByte>(req, frame, op, step, ByKind(op.op1_type)) {
+        return edge;
     }
     incdec(req, frame, code, op, true, crate::ops::increment)
 }
@@ -21913,8 +21909,8 @@ pub(crate) fn pre_dec<T: Tier, A: Operand + Default, R: Retval>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::pre_dec::<A, R>(req.slots_mut(frame), code, op, at) {
-        return inlined_on(went);
+    if let Some(edge) = inline_incdec::<R>(req, frame, op, (Arith::Sub, false), A::default()) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     incdec(req, frame, code, op, false, crate::ops::decrement)
@@ -21953,10 +21949,8 @@ pub(crate) fn post_dec<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let step = (Arith::Sub, true);
-    if let Some(went) =
-        inline_incdec::<RetvalByte>(req.slots_mut(frame), op, step, ByKind(op.op1_type))
-    {
-        return inlined_on(went);
+    if let Some(edge) = inline_incdec::<RetvalByte>(req, frame, op, step, ByKind(op.op1_type)) {
+        return edge;
     }
     incdec(req, frame, code, op, true, crate::ops::decrement)
 }
@@ -23193,7 +23187,7 @@ pub(crate) fn jmp<T: Tier>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    inlined::<T>(req, frame, code, at, jumped_inline(op, at))
+    jumped::<T>(req, frame, code, at, (op.op1, op.op1 <= at), op.out)
 }
 
 /// `ZEND_VM_JMP` to `target`, the frame left at the target, answered as
@@ -23288,11 +23282,6 @@ fn jumped<T: Tier>(
             flow => return crate::tier::resumed(req, flow, frame),
         }
     }
-    if back && crate::tier::interpreted::<T>() {
-        // The back-edge the interpreter's loop took: the oplines past it
-        // that inline paths serve are served over the frame's slots.
-        return Ok(Next::stretch(target.wrapping_sub(served)));
-    }
     jump_from(served, target)
 }
 
@@ -23312,8 +23301,8 @@ pub(crate) fn jmpnz<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::jmpnz::<A>(req.slots_mut(frame), code, op, at) {
-        return inlined::<T>(req, frame, code, at, went);
+    if let Some(edge) = inline_branch::<T, true, false>(req, frame, code, op, at, A::default()) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     branched::<T, true, false>(req, frame, code, op)
@@ -23341,8 +23330,8 @@ pub(crate) fn jmpz<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(went) = inline_path::jmpz::<A>(req.slots_mut(frame), code, op, at) {
-        return inlined::<T>(req, frame, code, at, went);
+    if let Some(edge) = inline_branch::<T, false, false>(req, frame, code, op, at, A::default()) {
+        return edge;
     }
     req.vm_mut().stand(frame, at);
     branched::<T, false, false>(req, frame, code, op)
@@ -23380,9 +23369,15 @@ pub(crate) fn jmpz_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    if let Some(went) = inline_path::jmpz_ex(req.slots_mut(frame), code, op, at) {
-        return inlined_on(went);
+    if let Some(edge) = inline_branch::<T, false, true>(
+        req,
+        frame,
+        code,
+        op,
+        req.vm().opline(frame),
+        ByKind(op.op1_type),
+    ) {
+        return edge;
     }
     branched::<T, false, true>(req, frame, code, op)
 }
@@ -23408,9 +23403,15 @@ pub(crate) fn jmpnz_ex<T: Tier>(
     code: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let at = req.vm().opline(frame);
-    if let Some(went) = inline_path::jmpnz_ex(req.slots_mut(frame), code, op, at) {
-        return inlined_on(went);
+    if let Some(edge) = inline_branch::<T, true, true>(
+        req,
+        frame,
+        code,
+        op,
+        req.vm().opline(frame),
+        ByKind(op.op1_type),
+    ) {
+        return edge;
     }
     branched::<T, true, true>(req, frame, code, op)
 }
@@ -23784,9 +23785,10 @@ pub(crate) fn qm_assign<T: Tier>(
     // temporary that owns nothing either (`ZVAL_COPY_VALUE`), which is
     // what php's `QM_ASSIGN_LONG` and `QM_ASSIGN_DOUBLE` do for the pairs
     // its optimizer proved, tested here where the opline runs.
-    let at = req.vm().opline(frame);
-    if let Some(went) = inline_path::qm_assign(req.slots_mut(frame), code, op, at) {
-        return inlined_on(went);
+    let slots = req.slots_mut(frame);
+    let z = ByKind(op.op1_type).read(slots, code, op.op1);
+    if crate::operand::owns_nothing(z) && write_owning_nothing(slots, op, z).is_some() {
+        return Ok(advanced());
     }
     qm_assigned(req, frame, code, op)
 }
@@ -24088,8 +24090,8 @@ fn binary_by_kind(
     (rule, kernel): (Binary, BinaryKernel),
 ) -> Edge {
     let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-    if let Some(went) = inline_arith(req.slots_mut(frame), code, op, rule, kinds) {
-        return inlined_on(went);
+    if let Some(edge) = inline_arith(req, frame, code, op, rule, kinds) {
+        return edge;
     }
     binary(req, frame, code, op, kernel)
 }
@@ -24284,64 +24286,13 @@ fn branch_fused<T: Tier>(
     fused: branch::Fused<'_>,
     answer: bool,
 ) -> Edge {
-    inlined::<T>(req, frame, code, at, fused_inline(at, fused, answer))
-}
-
-/// [`branch_fused`]'s way, as an inline path answers it: on past the
-/// comparison and its jump where the jump is not taken,
-/// `ZEND_VM_SMART_BRANCH`'s `ZEND_VM_SET_NEXT_OPCODE(opline + 2)`, and
-/// to the jump's target where it is, over the back-edge with the jump's
-/// number where it goes back.
-#[inline(always)] // as `branch::Branch::fused`
-#[allow(clippy::inline_always)]
-fn fused_inline(at: u32, fused: branch::Fused<'_>, answer: bool) -> Inline {
     if answer != fused.on {
-        return Inline::On(2);
+        // Past the comparison and its jump, `ZEND_VM_SMART_BRANCH`'s
+        // `ZEND_VM_SET_NEXT_OPCODE(opline + 2)`.
+        return Ok(Next::by(2));
     }
-    Inline::to(at, fused.jump.op2, fused.back, fused.jump.out)
-}
-
-/// What an inline path answered as the handler's edge: on in the
-/// frame, or the back-edge taken as [`jumped`] takes it, the interrupt
-/// tested and the loop safepoint raised with the jump's number.
-#[inline(always)] // in every handler with an inline path
-#[allow(clippy::inline_always)]
-fn inlined<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-    at: u32,
-    went: Inline,
-) -> Edge {
-    match went {
-        Inline::On(places) => Ok(Next::by(places)),
-        Inline::Back(places, number) => jumped::<T>(
-            req,
-            frame,
-            code,
-            at,
-            (at.wrapping_add(places), true),
-            number,
-        ),
-    }
-}
-
-/// `ZEND_JMP`'s way, to the opline in `op1`, over the back-edge with the
-/// number in `result` where it is at the jump or before it.
-#[inline(always)] // in the loop and in the handler
-#[allow(clippy::inline_always)]
-fn jumped_inline(op: &Opline, at: u32) -> Inline {
-    Inline::to(at, op.op1, op.op1 <= at, op.out)
-}
-
-/// What an inline path that never goes back answered, as the edge: the
-/// handlers' whose inline paths answer [`Inline::On`] alone.
-#[inline(always)] // as `inlined`
-#[allow(clippy::inline_always)]
-fn inlined_on(went: Inline) -> Edge {
-    match went {
-        Inline::On(places) | Inline::Back(places, _) => Ok(Next::by(places)),
-    }
+    let target = (fused.jump.op2, fused.back);
+    jumped::<T>(req, frame, code, at, target, fused.jump.out)
 }
 
 /// The inline path of the binary operators (design §5.8,
@@ -24358,15 +24309,17 @@ fn inlined_on(went: Inline) -> Edge {
 #[inline(always)] // the handler's fast half, as php's is in the handler
 #[allow(clippy::inline_always)]
 fn inline_arith(
-    slots: &mut [Zval],
+    req: &mut Request,
+    frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     rule: impl inline::Operator,
     (a, b): (impl Operand, impl Operand),
-) -> Option<Inline> {
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
     let computed = rule.apply(a.read(slots, code, op.op1), b.read(slots, code, op.op2))?;
     write_owning_nothing(slots, op, computed)?;
-    Some(Inline::ADVANCE)
+    Some(Ok(advanced()))
 }
 
 /// The inline path of the comparisons that branch (`ZEND_IS_SMALLER`,
@@ -24379,24 +24332,26 @@ fn inline_arith(
 /// owner.
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
-fn inline_compare<S: Branch>(
-    slots: &mut [Zval],
+fn inline_compare<T: Tier, S: Branch>(
+    req: &mut Request,
+    frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
     holds: impl Fn(Ordering) -> bool + Copy,
     (a, b): (impl Operand, impl Operand),
-) -> Option<Inline> {
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
     let answer = inline::order(
         a.read(slots, code, op.op1),
         b.read(slots, code, op.op2),
         holds,
     )?;
     if let Some(jump) = S::fused(code, op, at) {
-        return Some(fused_inline(at, jump, answer));
+        return Some(branch_fused::<T>(req, frame, code, at, jump, answer));
     }
-    write_owning_nothing(slots, op, Zval::bool(answer))?;
-    Some(Inline::ADVANCE)
+    write_owning_nothing(req.slots_mut(frame), op, Zval::bool(answer))?;
+    Some(Ok(advanced()))
 }
 
 /// The inline path of the four conditional jumps
@@ -24411,25 +24366,33 @@ fn inline_compare<S: Branch>(
 /// an `_EX`'s temporary holds an owner.
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
-fn inline_branch<const ON: bool, const EX: bool>(
-    slots: &mut [Zval],
+fn inline_branch<T: Tier, const ON: bool, const EX: bool>(
+    req: &mut Request,
+    frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
     a: impl Operand,
-) -> Option<Inline> {
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
     let truth = inline::truth(a.read(slots, code, op.op1))?;
     if EX {
         write_owning_nothing(slots, op, Zval::bool(truth))?;
     }
     if truth != ON {
-        return Some(Inline::ADVANCE);
+        return Some(Ok(advanced()));
     }
     if EX {
-        // An `_EX`'s jump goes forward always and is no site.
-        return Some(Inline::On(op.op2.wrapping_sub(at)));
+        return Some(jump_to(op.op2));
     }
-    Some(Inline::to(at, op.op2, op.op2 <= at, op.out))
+    Some(jumped::<T>(
+        req,
+        frame,
+        code,
+        at,
+        (op.op2, op.op2 <= at),
+        op.out,
+    ))
 }
 
 /// The inline path of `ZEND_BOOL` (`NOT` false) and `ZEND_BOOL_NOT`
@@ -24493,12 +24456,14 @@ fn inline_truth<const NOT: bool>(
 #[inline(always)] // as `inline_arith`
 #[allow(clippy::inline_always)]
 fn inline_incdec<R: Retval>(
-    slots: &mut [Zval],
+    req: &mut Request,
+    frame: FrameRef,
     op: &Opline,
     (arith, post): (Arith, bool),
     a: impl Operand,
-) -> Option<Inline> {
+) -> Option<Edge> {
     let at = a.slot(op.op1)?;
+    let slots = req.slots_mut(frame);
     match a.kind() {
         OperandKind::Cv => {
             let held = *slots.get(at)?;
@@ -24520,11 +24485,11 @@ fn inline_incdec<R: Retval>(
         }
         OperandKind::Tmp | OperandKind::Const | OperandKind::Unused => return None,
     }
-    Some(Inline::ADVANCE)
+    Some(Ok(advanced()))
 }
 
 /// The inline path of `ZEND_ASSIGN` to a CV (`ZEND_ASSIGN_SPEC_CV_*`,
-/// `zend_assign_to_variable`): the value taken by [`taking`]'s rule
+/// `zend_assign_to_variable`): the value taken by [`taken_value`]'s rule
 /// and written over a variable that holds nothing that counts owners or
 /// a string, which is given up after the write, as
 /// `zend_assign_to_variable`'s `GC_DELREF` of the garbage gives it up; a
@@ -24558,66 +24523,19 @@ fn inline_assign<R: Retval>(
     if sensed_unmovable(req, frame, code, op, (b, op.op2)) {
         return None;
     }
-    let (went, garbage) = inline_assign_in::<R>(req.slots_mut(frame), code, op, (a, b), true)?;
-    if let GivenUp::Left(garbage) = garbage {
-        req.heap_mut().release_string(garbage);
-    }
-    Some(inlined_on(went))
-}
-
-/// [`inline_assign`] over a variable that holds nothing that counts
-/// owners, or a string another owner holds too, which the write gives up
-/// as `GC_DELREF` gives it up ([`kept_string`]): the frame's slots alone.
-/// A debug build leaves a temporary holding what no temporary should
-/// to the handler, whose sensor names it ([`taking`],
-/// [`sensed_unmovable`]).
-#[inline(always)] // as `inline_arith`
-#[allow(clippy::inline_always)]
-fn inline_assign_in<R: Retval>(
-    slots: &mut [Zval],
-    code: &OpArray,
-    op: &Opline,
-    (a, b): (impl Operand, impl Operand),
-    release: bool,
-) -> Option<(Inline, GivenUp)> {
-    if a.kind() != OperandKind::Cv {
+    let at = a.slot(op.op1)?;
+    let slots = req.slots_mut(frame);
+    let held = *slots.get(at)?;
+    let garbage = held.is_refcounted().then(|| held.as_str()).flatten();
+    if held.is_refcounted() && garbage.is_none() {
         return None;
     }
-    let at = a.slot(op.op1)?;
-    let held = *slots.get(at)?;
-    let taking = taking::<R>(slots, code, op, b, op.op2)?;
-    let garbage = given_up(held, release)?;
-    let value = taking.take(slots)?;
+    let value = taken_value::<R>(slots, code, op, b, op.op2)?;
     *slots.get_mut(at)? = value;
-    Some((Inline::ADVANCE, garbage))
-}
-
-/// What an inline path writing over a zval does with it ([`given_up`]).
-enum GivenUp {
-    /// Nothing is left of it: it counted no owners, or another owner
-    /// holds it too and one owner was given up.
-    Done,
-    /// A string whose last owner it was, for the caller, which holds the
-    /// request, to give up ([`php_heap::Heap::release_string`]).
-    Left(php_heap::Str),
-}
-
-/// What an inline path writing over `held` does with it: nothing where
-/// it counts no owners, a string left for the caller where `release`
-/// says the caller holds the request, and a string given up here where
-/// another owner holds it too ([`kept_string`]); `None`, untouched, for
-/// every other, which is the kernel's.
-#[inline(always)] // as `inline_arith`
-#[allow(clippy::inline_always)]
-fn given_up(held: Zval, release: bool) -> Option<GivenUp> {
-    if !held.is_refcounted() {
-        return Some(GivenUp::Done);
+    if let Some(garbage) = garbage {
+        req.heap_mut().release_string(garbage);
     }
-    match held.as_str() {
-        Some(text) if release => Some(GivenUp::Left(text)),
-        _ if kept_string(held) => Some(GivenUp::Done),
-        _ => None,
-    }
+    Some(Ok(advanced()))
 }
 
 /// `ZVAL_COPY_VALUE(EX_VAR(opline->result.var), z)` for a zval that owns
@@ -24634,19 +24552,6 @@ fn write_owning_nothing(slots: &mut [Zval], op: &Opline, z: Zval) -> Option<()> 
     }
     *out = z;
     Some(())
-}
-
-/// One owner of `z` given up where `z` is a string another owner holds
-/// too, `GC_DELREF` and nothing after it, as an inline path over the
-/// frame's slots gives up what it writes over; whether it was. A string
-/// serves no destructor and is offered to no collector, and freeing the
-/// last owner's is the request's, so that one is refused untouched
-/// ([`php_heap::Heap::release_nogc_kept`]). Made last, after every
-/// refusal, since it cannot be taken back.
-#[inline(always)] // as `inline_arith`
-#[allow(clippy::inline_always)]
-fn kept_string(z: Zval) -> bool {
-    z.kind() == ZvalType::String && php_heap::Heap::release_nogc_kept(z)
 }
 
 /// `ZEND_VM_NEXT_OPCODE` after an inline path, which serves no user
@@ -25981,329 +25886,3 @@ pub(crate) fn make_ref<T: Tier>(
 
 #[cfg(test)]
 mod tests;
-
-/// The inline paths the loop serves over the frame's slots (design
-/// §5.8), one per handler that has one and named as it is, generic over
-/// what the handler is generic over but its tier: what each reads and
-/// writes is the frame's slots and the op array and nothing else, so the
-/// loop holds the slots across the oplines whose inline paths serve
-/// them, and the handler, which `step`, an arm out of the loop and the
-/// loop where the inline path stands aside call, serves the same path
-/// first. `None`, with nothing touched, where the handler's kernel
-/// serves the opline.
-pub(crate) mod inline_path {
-    use std::cmp::Ordering;
-
-    use php_heap::Zval;
-    use php_unit::{OpArray, Opline};
-
-    use super::branch::Branch;
-    use super::{
-        inline_arith, inline_assign_dim_in, inline_assign_in, inline_assign_op, inline_branch,
-        inline_compare, inline_fe_fetch_r, inline_fetch_dim_r_in, inline_identical, inline_incdec,
-        write_owning_nothing,
-    };
-    use crate::operand::{ByKind, Operand, Retval};
-    use crate::ops::inline::{Arith, Binary};
-    use crate::tier::Inline;
-
-    /// `ZEND_ADD` over two numbers.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn add<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_arith(slots, code, op, Arith::Add, (A::default(), B::default()))
-    }
-
-    /// `ZEND_SUB` over two numbers.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn sub<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_arith(slots, code, op, Arith::Sub, (A::default(), B::default()))
-    }
-
-    /// `ZEND_MUL` over two numbers.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn mul<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_arith(slots, code, op, Arith::Mul, (A::default(), B::default()))
-    }
-
-    /// `ZEND_DIV` over the kinds its opline names.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn div(slots: &mut [Zval], code: &OpArray, op: &Opline, _: u32) -> Option<Inline> {
-        let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-        inline_arith(slots, code, op, Binary::Div, kinds)
-    }
-
-    /// `ZEND_IS_SMALLER`, and the jump fused to it.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn is_smaller<A: Operand + Default, B: Operand + Default, S: Branch>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_compare::<S>(
-            slots,
-            code,
-            op,
-            at,
-            Ordering::is_lt,
-            (A::default(), B::default()),
-        )
-    }
-
-    /// `ZEND_IS_EQUAL`, and the jump fused to it.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn is_equal<A: Operand + Default, B: Operand + Default, S: Branch>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_compare::<S>(
-            slots,
-            code,
-            op,
-            at,
-            Ordering::is_eq,
-            (A::default(), B::default()),
-        )
-    }
-
-    /// `ZEND_IS_SMALLER_OR_EQUAL` over the kinds its opline names.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn is_smaller_or_equal<S: Branch>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-        inline_compare::<S>(slots, code, op, at, Ordering::is_le, kinds)
-    }
-
-    /// `ZEND_IS_NOT_EQUAL` over the kinds its opline names.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn is_not_equal<S: Branch>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-        inline_compare::<S>(slots, code, op, at, Ordering::is_ne, kinds)
-    }
-
-    /// `ZEND_IS_IDENTICAL`.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn is_identical<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_identical::<false>(slots, code, op, at, (A::default(), B::default()))
-    }
-
-    /// `ZEND_IS_NOT_IDENTICAL` over the kinds its opline names.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn is_not_identical(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        let kinds = (ByKind(op.op1_type), ByKind(op.op2_type));
-        inline_identical::<true>(slots, code, op, at, kinds)
-    }
-
-    /// `ZEND_PRE_INC` over a variable holding a number.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn pre_inc<A: Operand + Default, R: Retval>(
-        slots: &mut [Zval],
-        _: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_incdec::<R>(slots, op, (Arith::Add, false), A::default())
-    }
-
-    /// `ZEND_PRE_DEC` over a variable holding a number.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn pre_dec<A: Operand + Default, R: Retval>(
-        slots: &mut [Zval],
-        _: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_incdec::<R>(slots, op, (Arith::Sub, false), A::default())
-    }
-
-    /// `ZEND_ASSIGN` to a CV holding nothing that counts owners.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn assign<A: Operand + Default, B: Operand + Default, R: Retval>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_assign_in::<R>(slots, code, op, (A::default(), B::default()), false)
-            .map(|(went, _)| went)
-    }
-
-    /// `ZEND_ASSIGN_OP` over a CV.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn assign_op<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_assign_op(slots, code, op, (A::default(), B::default()))
-    }
-
-    /// `ZEND_QM_ASSIGN` of a value that owns nothing, copied into a
-    /// temporary that owns nothing either (`ZVAL_COPY_VALUE`), which is
-    /// what php's `QM_ASSIGN_LONG` and `QM_ASSIGN_DOUBLE` do for the pairs
-    /// its optimizer proved, tested here where the opline runs.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn qm_assign(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        let z = ByKind(op.op1_type).read(slots, code, op.op1);
-        if !crate::operand::owns_nothing(z) {
-            return None;
-        }
-        write_owning_nothing(slots, op, z)?;
-        Some(Inline::ADVANCE)
-    }
-
-    /// `ZEND_JMP` to the opline in `op1`, a back-edge where it is at the
-    /// jump or before it.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn jmp(_: &mut [Zval], _: &OpArray, op: &Opline, at: u32) -> Option<Inline> {
-        Some(super::jumped_inline(op, at))
-    }
-
-    /// `ZEND_JMPZ` over a truth the operand holds as it stands.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn jmpz<A: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_branch::<false, false>(slots, code, op, at, A::default())
-    }
-
-    /// `ZEND_JMPNZ` over a truth the operand holds as it stands.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn jmpnz<A: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_branch::<true, false>(slots, code, op, at, A::default())
-    }
-
-    /// `ZEND_JMPZ_EX` over the kind its opline names.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn jmpz_ex(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_branch::<false, true>(slots, code, op, at, ByKind(op.op1_type))
-    }
-
-    /// `ZEND_JMPNZ_EX` over the kind its opline names.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn jmpnz_ex(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        inline_branch::<true, true>(slots, code, op, at, ByKind(op.op1_type))
-    }
-
-    /// `ZEND_FETCH_DIM_R` of an element an array holds, with no
-    /// dimension to free.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn fetch_dim_r<A: Operand + Default, B: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        _: u32,
-    ) -> Option<Inline> {
-        inline_fetch_dim_r_in(slots, code, op, (A::default(), B::default()), false)?;
-        Some(Inline::ADVANCE)
-    }
-
-    /// `ZEND_ASSIGN_DIM` over an element an array holds already.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn assign_dim<A: Operand + Default, B: Operand + Default, D: Operand + Default>(
-        slots: &mut [Zval],
-        code: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        let operands = (A::default(), B::default(), D::default());
-        inline_assign_dim_in(slots, code, op, at, operands, false).map(|(went, _)| went)
-    }
-
-    /// `ZEND_FE_FETCH_R` of an array's next element into a CV that held
-    /// nothing that counts owners.
-    #[inline(always)] // in the loop and in the handler
-    #[allow(clippy::inline_always)]
-    pub(crate) fn fe_fetch_r<A: Operand + Default>(
-        slots: &mut [Zval],
-        _: &OpArray,
-        op: &Opline,
-        at: u32,
-    ) -> Option<Inline> {
-        // A CV holding a string another owner holds too gives it up
-        // here ([`kept_string`]); the last owner's is the request's.
-        inline_fe_fetch_r(slots, op, at, A::default(), false).map(|(went, _)| went)
-    }
-}
