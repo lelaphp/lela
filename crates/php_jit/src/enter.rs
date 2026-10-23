@@ -773,16 +773,19 @@ pub(crate) fn enter(
     // trace's code reads as the last kernel's: its IP guard, and the call
     // its frame began before it.
     let stood = if trace.entry_stood {
-        Some(where_stood(req, frame, None, Some(&Holding::of(epoch)))?)
+        // A frame whose cache is the own cache of the op array the trace
+        // opens in runs that op array, named with no row of the epoch read.
+        let own = (trace.opens)
+            .and_then(|(func, _)| engine_offset(func))
+            .filter(|func| tier::frame_cache(req, frame).and_then(engine_offset) == Some(*func));
+        Some(where_stood(req, frame, own, None)?)
     } else {
         None
     };
     // The stack the trace's calls in place are made on, their headers in
     // this request, and whether they are made in place.
     let stack = tier::stack(req).as_ptr();
-    let images = Images::of(req, trace);
-    let laid = trace.laid.iter().all(|callee| tier::laid(req, *callee));
-    let ready = images.ready() && laid;
+    let (images, ready) = Images::of(req, trace);
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
     let mut cx = ExitCtx::new(&mut *req);
@@ -861,30 +864,31 @@ enum Images {
 }
 
 impl Images {
-    /// The headers of `trace`'s calls in place as `req` lays them out.
-    fn of(req: &Request, trace: &Trace) -> Images {
-        if trace.calls.is_empty() {
-            return Images::None;
+    /// The headers of `trace`'s calls in place as `req` lays them out, and
+    /// whether its code makes them in place in `req`: every header laid
+    /// out and the cache of every callee it enters laid down
+    /// ([`Trace::laid`]).
+    fn of(req: &Request, trace: &Trace) -> (Images, bool) {
+        if trace.calls.is_empty() && trace.laid.is_empty() {
+            return (Images::None, true);
         }
         if let Some(state) = tier::state::<crate::JitRequest>(req) {
-            return state
-                .headers
-                .addresses(req, trace)
-                .map_or(Images::Unready, Images::Kept);
+            return match state.headers.entered(req, trace) {
+                Some((at, ready)) => (Images::Kept(at), ready),
+                None => (Images::Unready, false),
+            };
+        }
+        if trace.calls.is_empty() {
+            return (Images::None, callees_laid(req, trace));
         }
         let Some(images) = (trace.calls.iter())
             .map(|call| tier::call_image(req, call))
             .collect::<Option<Box<[HeaderImage]>>>()
         else {
-            return Images::Unready;
+            return (Images::Unready, false);
         };
         let addresses = images.iter().map(HeaderImage::address).collect();
-        Images::Own(images, addresses)
-    }
-
-    /// Whether every call's header is laid out.
-    fn ready(&self) -> bool {
-        !matches!(self, Images::Unready)
+        (Images::Own(images, addresses), callees_laid(req, trace))
     }
 
     /// Where compiled code reads the addresses, null where it reads none.
@@ -897,28 +901,49 @@ impl Images {
     }
 }
 
+/// Whether the cache of every op array `trace`'s calls in place enter is
+/// laid down in `req` ([`Trace::laid`]).
+fn callees_laid(req: &Request, trace: &Trace) -> bool {
+    trace.laid.iter().all(|callee| tier::laid(req, *callee))
+}
+
 /// What a request keeps of the headers its traces push calls in place
 /// with ([`Images`]): each call's header, by its callee and argument
-/// count, and each trace's addresses of them, by its number. A header's
-/// bytes and an address list stand where they were laid out for as long
-/// as the request runs, which is as long as the code that reads them can.
+/// count, laid out once, and per trace it entered, by the trace's number,
+/// the addresses of its calls' headers and whether the caches of the
+/// callees it enters were found laid down, which once laid stay laid for
+/// the request. A header's bytes and an address list stand where they
+/// were laid out for as long as the request runs, which is as long as the
+/// code that reads them can. An entry reads its trace's row by its
+/// number, with no hash taken.
 #[derive(Debug, Default)]
 pub(crate) struct Headers(std::cell::RefCell<HeadersKept>);
 
 #[derive(Debug, Default)]
 struct HeadersKept {
     calls: std::collections::HashMap<(FuncRef, u32), HeaderImage>,
-    traces: std::collections::HashMap<crate::table::TraceId, Box<[usize]>>,
+    traces: Vec<Option<Entered>>,
+}
+
+/// What a request keeps of one trace it entered ([`Headers`]).
+#[derive(Debug)]
+struct Entered {
+    addresses: Box<[usize]>,
+    laid: bool,
 }
 
 impl Headers {
     /// The addresses of `trace`'s headers in `req`, laid out the first time
-    /// the request enters it; none while a call's function is not the
-    /// request's.
-    fn addresses(&self, req: &Request, trace: &Trace) -> Option<*const usize> {
+    /// the request enters it, and whether its calls are made in place:
+    /// none while a call's function is not the request's.
+    fn entered(&self, req: &Request, trace: &Trace) -> Option<(*const usize, bool)> {
         let mut kept = self.0.borrow_mut();
-        if let Some(addresses) = kept.traces.get(&trace.id) {
-            return Some(addresses.as_ptr());
+        let row = usize::try_from(trace.id.get()).ok()?;
+        if let Some(Some(entered)) = kept.traces.get_mut(row) {
+            if !entered.laid {
+                entered.laid = callees_laid(req, trace);
+            }
+            return Some((entered.addresses.as_ptr(), entered.laid));
         }
         let mut addresses = Vec::with_capacity(trace.calls.len());
         for call in &trace.calls {
@@ -933,10 +958,16 @@ impl Headers {
             };
             addresses.push(address);
         }
-        let addresses = addresses.into_boxed_slice();
-        let at = addresses.as_ptr();
-        kept.traces.insert(trace.id, addresses);
-        Some(at)
+        let entered = Entered {
+            addresses: addresses.into_boxed_slice(),
+            laid: callees_laid(req, trace),
+        };
+        let found = (entered.addresses.as_ptr(), entered.laid);
+        if kept.traces.len() <= row {
+            kept.traces.resize_with(row + 1, || None);
+        }
+        kept.traces[row] = Some(entered);
+        Some(found)
     }
 }
 
