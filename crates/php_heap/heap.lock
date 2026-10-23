@@ -87,6 +87,7 @@ Frame::slots
 Frame::slots_mut
 FrameRef
 FramesAside
+FramesLayout
 FreshStr
 FreshStr::bytes
 FreshStr::bytes_mut
@@ -334,6 +335,7 @@ Scalar
 Scalar::is_true
 Slot
 SortEntry
+StackLayout
 StackRefused
 StandaloneHeap
 StandaloneHeap::gc
@@ -365,6 +367,7 @@ Suspensions
 Switched
 TableRow
 VmStack
+VmStack::LAYOUT
 VmStack::close
 VmStack::current
 VmStack::entry
