@@ -523,6 +523,13 @@ pub(crate) struct Environment {
     set: BTreeMap<String, String>,
 }
 
+impl Spawned {
+    /// One run of the arm, and what it wrote on its second stream.
+    fn ran(&self) -> Result<(Sample, Vec<u8>)> {
+        ran(&self.arm, &self.program)
+    }
+}
+
 impl Side for Spawned {
     fn name(&self) -> &str {
         &self.arm.name
@@ -717,7 +724,9 @@ fn ran(arm: &Arm, program: &Path) -> Result<(Sample, Vec<u8>)> {
         let value = start.elapsed().as_secs_f64() * 1000.0;
         let status = child.wait();
         let status = status.with_context(|| format!("waiting for the arm {}", arm.name))?;
-        let [stdout, stderr] = [stdout, stderr].map(|read| read.join().unwrap_or_default());
+        let read = |read: std::thread::JoinHandle<Vec<u8>>| read.join().ok();
+        let streams = read(stdout).zip(read(stderr));
+        let (stdout, stderr) = streams.context("a thread reading the arm's streams panicked")?;
         let done = std::process::Output {
             status,
             stdout,

@@ -42,6 +42,11 @@ const FIGURES: [(&str, f64); 4] = [
 pub(super) const ABSENT: &str = "proc_pid_rusage could not read the server's process";
 #[cfg(not(target_os = "macos"))]
 pub(super) const ABSENT: &str = "this platform has no proc_pid_rusage";
+/// [`ABSENT`] for a process arm.
+#[cfg(target_os = "macos")]
+const ABSENT_RUN: &str = "proc_pid_rusage could not read the arm's process";
+#[cfg(not(target_os = "macos"))]
+const ABSENT_RUN: &str = ABSENT;
 
 /// What a server's processes had retired when read, summed over them:
 /// instructions, cycles, CPU and runnable nanoseconds, in [`FIGURES`]'
@@ -85,7 +90,7 @@ impl Retired {
         let mut per = [0.0; 4];
         for (i, (_, scale)) in FIGURES.iter().enumerate() {
             let Some(spent) = after.0[i].checked_sub(self.0[i]) else {
-                return Spent::Absent("a process of the server ended during the rep");
+                return Spent::Absent(each, "a process of the server ended during the rep");
             };
             per[i] = spent as f64 / scale / n.max(1.0);
         }
@@ -102,13 +107,25 @@ pub(crate) enum Each {
     Opline,
 }
 
+impl Each {
+    /// What a figure is stated per, as the text names it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Each::Request => "request",
+            Each::Run => "run",
+            Each::Opline => "opline",
+        }
+    }
+}
+
 /// What an arm states of what its rep cost beside its time or rate.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) enum Spent {
     /// An arm that states its time and nothing beside it.
     Unasked,
-    /// An arm whose figures this build or this rep does not have, and why.
-    Absent(&'static str),
+    /// An arm whose figures, per what, this build or this rep does not
+    /// have, and why.
+    Absent(Each, &'static str),
     /// An arm's figures per request, run or opline, in [`FIGURES`]' order.
     Per(Each, [f64; 4]),
 }
@@ -119,14 +136,14 @@ impl Spent {
     pub(crate) fn over(before: Option<Retired>, after: Option<Retired>, answered: u32) -> Spent {
         match before.zip(after) {
             Some((before, after)) => before.per(after, f64::from(answered), Each::Request),
-            None => Spent::Absent(ABSENT),
+            None => Spent::Absent(Each::Request, ABSENT),
         }
     }
 
     /// What a process arm's whole run retired, as [`Retired::exited`] read
     /// it.
     pub(crate) fn run(retired: Option<Retired>) -> Spent {
-        retired.map_or(Spent::Absent(ABSENT), |r| {
+        retired.map_or(Spent::Absent(Each::Run, ABSENT_RUN), |r| {
             Retired([0; 4]).per(r, 1.0, Each::Run)
         })
     }
@@ -135,6 +152,7 @@ impl Spent {
     pub(crate) fn per_opline(self, n: f64) -> Spent {
         match self {
             Spent::Per(Each::Run, figures) => Spent::Per(Each::Opline, figures.map(|f| f / n)),
+            Spent::Absent(Each::Run, why) => Spent::Absent(Each::Opline, why),
             other => other,
         }
     }
@@ -163,21 +181,27 @@ impl Spent {
     /// What an arm's line and its reading's message say it spent, after
     /// what it is stated per; none for an arm that states nothing.
     pub(crate) fn text(self) -> Option<String> {
-        match self {
-            Spent::Unasked => None,
-            Spent::Absent(why) => Some(format!("per request: absent: {why}")),
-            Spent::Per(Each::Opline, [instructions, cycles, cpu, runnable]) => Some(format!(
-                "per opline: {instructions:.1} instructions, {cycles:.1} cycles, {:.2} CPU ns, {:.2} runnable ns",
-                cpu * 1e6,
-                runnable * 1e6
-            )),
-            Spent::Per(each, [instructions, cycles, cpu, runnable]) => Some(format!(
-                "per {}: {:.1}M instructions, {:.1}M cycles, {cpu:.2} CPU ms, {runnable:.2} runnable ms",
-                if each == Each::Run { "run" } else { "request" },
-                instructions / 1e6,
-                cycles / 1e6
-            )),
-        }
+        let (each, said) = match self {
+            Spent::Unasked => return None,
+            Spent::Absent(each, why) => (each, format!("absent: {why}")),
+            Spent::Per(Each::Opline, [instructions, cycles, cpu, runnable]) => (
+                Each::Opline,
+                format!(
+                    "{instructions:.1} instructions, {cycles:.1} cycles, {:.2} CPU ns, {:.2} runnable ns",
+                    cpu * 1e6,
+                    runnable * 1e6
+                ),
+            ),
+            Spent::Per(each, [instructions, cycles, cpu, runnable]) => (
+                each,
+                format!(
+                    "{:.1}M instructions, {:.1}M cycles, {cpu:.2} CPU ms, {runnable:.2} runnable ms",
+                    instructions / 1e6,
+                    cycles / 1e6
+                ),
+            ),
+        };
+        Some(format!("per {}: {said}", each.as_str()))
     }
 
     /// The figures as a reading keeps them under the arm's `prefix`.
@@ -221,8 +245,11 @@ mod tests {
         );
         assert_eq!(spent.numbers("a")[2], ("a_cpu_ms".to_owned(), 60.0));
         let ended = Spent::over(Some(after), Some(before), 4);
-        assert!(matches!(ended, Spent::Absent(why) if why.contains("ended")));
-        assert_eq!(Spent::over(None, Some(after), 4), Spent::Absent(ABSENT));
+        assert!(matches!(ended, Spent::Absent(_, why) if why.contains("ended")));
+        assert_eq!(
+            Spent::over(None, Some(after), 4),
+            Spent::Absent(Each::Request, ABSENT)
+        );
     }
 
     /// An arm's figure is each one's median over its reps; one rep without
@@ -235,9 +262,9 @@ mod tests {
             Spent::median(&reps),
             Spent::Per(Each::Request, [2.0, 20.0, 2.0, 2.0])
         );
-        let absent = [reps[0], Spent::Absent(ABSENT), reps[1]];
+        let absent = [reps[0], Spent::Absent(Each::Request, ABSENT), reps[1]];
         let arm = Spent::median(&absent);
-        assert_eq!(arm, Spent::Absent(ABSENT));
+        assert_eq!(arm, Spent::Absent(Each::Request, ABSENT));
         let text = arm.text().unwrap();
         assert_eq!(text, format!("per request: absent: {ABSENT}"));
         assert!(arm.numbers("b").is_empty());
@@ -261,6 +288,9 @@ mod tests {
             "per opline: 5.0 instructions, 10.0 cycles, 2000.00 CPU ns, 3000.00 runnable ns"
         );
         assert_eq!(opline.instructions(), Some(5.0));
-        assert_eq!(Spent::run(None).per_opline(400.0), Spent::Absent(ABSENT));
+        assert_eq!(
+            Spent::run(None).per_opline(400.0),
+            Spent::Absent(Each::Opline, ABSENT_RUN)
+        );
     }
 }

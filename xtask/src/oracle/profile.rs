@@ -108,7 +108,8 @@ fn built(
 ) -> Result<PathBuf> {
     let mut cargo = Command::new(cargo());
     if let Some(cfg) = cfg {
-        cargo.env("RUSTFLAGS", format!("--cfg {cfg}"));
+        let inherited = std::env::var("RUSTFLAGS").unwrap_or_default();
+        cargo.env("RUSTFLAGS", format!("{inherited} --cfg {cfg}").trim_start());
     }
     let status = cargo
         .args([

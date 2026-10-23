@@ -151,18 +151,18 @@ pub(crate) fn bar(
         for program in programs {
             let script = workloads.join(format!("{program}.php"));
             let [a, b] = &arms;
-            let probe = |regime| {
+            let under = |regime| {
                 let php = Php {
                     regimes: vec![regime],
                     ..a.clone()
                 };
                 php.running(pin, &script, &env)
             };
-            let probes = || counted(program, ["jit-tracing", "jit-off"].map(probe));
-            let oplines = (read == Read::PerOpline).then(probes).transpose()?;
+            let count = || counted(program, ["jit-tracing", "jit-off"].map(under));
+            let oplines = (read == Read::PerOpline).then(count).transpose()?;
             let side = |php: &Php| -> Result<Box<dyn Side>> {
                 let mut arm = php.running(pin, &script, &env)?;
-                arm.retired = read != Read::Time;
+                arm.retired = matches!(read, Read::PerOpline | Read::Peak);
                 let side = Spawned::from(arm);
                 Ok(match (read, oplines) {
                     (Read::PerOpline, Some(count)) => Box::new(Counted { side, count }),
@@ -204,9 +204,10 @@ fn tracing(
     ]
     .map(|(aa, [a, b], held)| {
         let over = match read {
-            Read::Time | Read::Code => "over the seven kernels and Zend/bench.php",
+            Read::Time => "over the seven kernels and Zend/bench.php",
             Read::PerOpline => "per opline over the seven kernels",
             Read::Peak => "by peak footprint over the seven kernels",
+            Read::Code => "by code per opline compiled over the seven kernels",
         };
         let about = format!("{whose} under [regime.{a}] against [regime.{b}] {over}");
         let id = format!("{id}{aa}");
@@ -274,31 +275,31 @@ enum Build {
 }
 
 impl Build {
-    /// The arm's name.
-    fn name(self) -> &'static str {
+    /// The arm's name, the directory under `target/featured/` the build
+    /// goes into where it is not the default build's, and the cfg the
+    /// bench alone sets on it.
+    fn spec(self) -> (&'static str, Option<&'static str>, Option<&'static str>) {
         match self {
-            Build::Jit => "jit-feature",
-            Build::Plain => "no-jit-feature",
-            Build::Stepping => "stepping",
-            Build::Usage => "usage",
+            Build::Jit => ("jit-feature", Some(Lane::FEATURE), None),
+            Build::Plain => ("no-jit-feature", None, None),
+            Build::Stepping => ("stepping", Some("stepping"), Some("php_jit_stepping")),
+            Build::Usage => ("usage", Some("usage"), Some("php_jit_usage")),
         }
     }
 
-    /// The build in the bench lane's profile, [`Build::Jit`] into the
-    /// directory the lanes build it in ([`profile::featured`]).
+    /// The arm's name.
+    fn name(self) -> &'static str {
+        self.spec().0
+    }
+
+    /// The build in the bench lane's profile: every build but
+    /// [`Build::Plain`] with the tier's feature, into the directory the
+    /// lanes build [`Build::Jit`] in ([`profile::featured`]) or one of its
+    /// own, a cfg set where the build names one.
     fn built(self, root: &Path) -> Result<PathBuf> {
-        let jit = self != Build::Plain;
-        let on = jit.then(|| format!("{BUNDLE}/{}", Lane::FEATURE));
-        let into = match self {
-            Build::Jit => Some(profile::featured(root, Lane::FEATURE)),
-            Build::Stepping | Build::Usage => Some(profile::featured(root, self.name())),
-            Build::Plain => None,
-        };
-        let cfg = match self {
-            Build::Stepping => Some("php_jit_stepping"),
-            Build::Usage => Some("php_jit_usage"),
-            Build::Jit | Build::Plain => None,
-        };
+        let (_, dir, cfg) = self.spec();
+        let on = dir.map(|_| format!("{BUNDLE}/{}", Lane::FEATURE));
+        let into = dir.map(|dir| profile::featured(root, dir));
         let (package, binary) = (CLI.package(), CLI.binary);
         let into = (into.as_deref(), cfg);
         profile::released(root, (&package, binary), on.as_deref(), into)
@@ -383,7 +384,10 @@ pub(crate) fn g4(root: &Path) -> [Declared; 3] {
                 regimes: vec!["jit-tracing"],
                 ini: vec![format!("opcache.jit_debug={debug}")],
             };
-            let engine = php("engine", Build::Usage.built(root)?, SIZE);
+            let mut engine = php("engine", Build::Usage.built(root)?, SIZE);
+            // Compiled where it is recorded, as php compiles, so the end's
+            // count and the request's name the same traces.
+            engine.ini.push("jit.compile=inline".to_owned());
             Ok(Ok([
                 engine,
                 php("php", pin.oracle.path.clone(), SIZE | LISTED),
@@ -424,7 +428,7 @@ impl Side for Parsed {
     }
 
     fn once(&mut self) -> Result<Sample> {
-        let (ran, said) = ran(&self.side.arm, &self.side.program)?;
+        let (ran, said) = self.side.ran()?;
         let value = (self.value)(&ran, &said)?;
         Ok(Sample { value, ..ran })
     }
@@ -443,24 +447,19 @@ fn peak(ran: &Sample, _: &[u8]) -> Result<f64> {
     Ok(peak as f64)
 }
 
-/// The bytes a run's traces took per opline they compiled: the engine's
-/// `JIT usage` line, or php's `JIT memory usage` line over the oplines its
+/// The bytes a run's traces took per opline they compiled: its `JIT
+/// memory usage` line, php's `ZEND_JIT_DEBUG_SIZE` on either side, over
+/// the oplines the engine's `JIT usage` line names or php's
 /// `TRACE_BYTECODE` listing names of each trace it compiled.
 #[allow(clippy::cast_precision_loss)]
 fn code_per_opline(_: &Sample, said: &[u8]) -> Result<f64> {
     let said = String::from_utf8_lossy(said);
-    let number = |text: Option<&str>| text.and_then(|n| n.trim().parse::<u64>().ok());
-    let engine = said
-        .lines()
-        .find_map(|line| line.strip_prefix("JIT usage: "));
-    let (bytes, oplines) = if let Some(usage) = engine {
-        let mut words = usage.split(' ');
-        (number(words.next()), number(words.nth(1)))
-    } else {
-        let php = said
-            .lines()
-            .find_map(|line| line.strip_prefix("JIT memory usage: "));
-        (number(php), Some(compiled_oplines(&said)))
+    let line = |prefix: &str| said.lines().find_map(|line| line.strip_prefix(prefix));
+    let bytes = line("JIT memory usage: ").and_then(|n| n.trim().parse::<u64>().ok());
+    let engine = line("JIT usage: ").map(|usage| usage.split(' ').nth(2));
+    let oplines = match engine {
+        Some(oplines) => oplines.and_then(|n| n.parse::<u64>().ok()),
+        None => Some(compiled_oplines(&said)),
     };
     match (bytes, oplines) {
         (Some(bytes), Some(oplines)) if oplines > 0 => Ok(bytes as f64 / oplines as f64),
@@ -540,9 +539,9 @@ mod tests {
         assert_eq!(compiled_oplines(php), 2);
         let near = |got: f64, want: f64| (got - want).abs() < 1e-9;
         assert!(near(code_per_opline(&ran, php.as_bytes()).unwrap(), 300.0));
-        let engine = b"JIT usage: 1200 bytes, 40 oplines, 3 traces\n";
+        let engine = b"JIT usage: 1100 bytes, 40 oplines, 3 traces\n\nJIT memory usage: 1200\n";
         assert!(near(code_per_opline(&ran, engine).unwrap(), 30.0));
-        let nothing = b"JIT usage: 0 bytes, 0 oplines, 0 traces\n";
+        let nothing = b"JIT usage: 0 bytes, 0 oplines, 0 traces\n\nJIT memory usage: 0\n";
         assert!(code_per_opline(&ran, nothing).is_err());
     }
 
