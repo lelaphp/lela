@@ -1013,7 +1013,7 @@ fn a_cast_inside_an_array_expression_folds_and_one_outside_it_does_not() {
         b"<?php\nclass C { const B = (bool)\"a\"; const I = (int)\"12abc\"; const F = (float)\"1e3\"; const S = (string)true; const A = (array)1; }\n",
     );
     let array = strings
-        .constant_array(&[(php_heap::Key::Long(0), php_heap::Zval::long(1))])
+        .constant_array(&[(php_heap::Key::Long(0), php_heap::Zval::long(1))], 1)
         .map(php_heap::Zval::array)
         .ok()
         .and_then(php_unit::decl::UnitValue::new)

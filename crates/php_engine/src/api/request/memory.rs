@@ -253,13 +253,12 @@ impl Intern for RequestStrings<'_> {
     ///   string(12) "uuuuuuuuuuuu" refcount(1)
     /// }
     /// ```
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+    fn constant_array(&mut self, entries: &[(Key, Zval)], size: usize) -> Result<Arr, Fatal> {
         if entries.is_empty() {
             return Ok(Arr::empty());
         }
-        let a = self
-            .heap
-            .array_sized(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
+        let size = size.max(entries.len());
+        let a = (self.heap).array_sized(u32::try_from(size).unwrap_or(u32::MAX))?;
         self.made.add(Zval::array(a));
         for &(key, z) in entries {
             let moved = self.made.take(z);

@@ -300,7 +300,7 @@ impl Wire for Zval {
                     };
                     entries.push((key, Zval::take(r)?));
                 }
-                Zval::array(r.strings.constant_array(&entries).ok()?)
+                Zval::array(r.strings.constant_array(&entries, entries.len()).ok()?)
             }
             k if k == ZvalType::ConstExpr as u8 => Zval::const_expr(u32::take(r)?),
             k if k == ZvalType::Ptr as u8 => Zval::ptr(u32::take(r)?),

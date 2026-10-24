@@ -4173,6 +4173,7 @@ impl Intern for PermanentStrings<'_> {
     fn constant_array(
         &mut self,
         entries: &[(php_heap::Key, php_heap::Zval)],
+        _: usize,
     ) -> Result<php_heap::Arr, php_heap::Fatal> {
         self.made.constant_array(entries)
     }

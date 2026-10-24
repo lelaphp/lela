@@ -902,11 +902,30 @@ struct Label {
 
 /// The jump table of one `SWITCH_LONG`, `SWITCH_STRING` or `MATCH`
 /// while its targets are being learnt: the opline, the constant slot
-/// reserved for the array, and the entries so far.
+/// reserved for the array, the entries so far, and the size
+/// `zend_hash_init` gives it, a `switch`'s cases or a `match`'s
+/// conditions as written.
 struct Table {
     at: u32,
     slot: u32,
     entries: Vec<(Key, Zval)>,
+    size: usize,
+}
+
+/// What a jump table's key is taken from, the zval of the case as php's
+/// tree holds it (`zend_hash_add(jumptable, Z_STR_P(cond_zv))`): the
+/// scanner's string where nothing interned it, which the comparison's
+/// constant is too where the request's home made it. A string the
+/// engine's table holds is the comparison's alone, and the key a string
+/// of its own, not interned ([`php_heap::Intern::interning`]).
+#[derive(Clone, Copy)]
+enum CaseValue {
+    /// A `switch` case's constant, which its comparison keeps: the table
+    /// takes one more owner of it.
+    Compared(Zval),
+    /// A `match` condition folded for the table alone, whose one owner
+    /// the table takes.
+    Folded(Zval),
 }
 
 /// `ZEND_FREE_ON_RETURN`, the bit `zend_compile.h` sets on the `FREE` a
@@ -8877,7 +8896,7 @@ impl<'a> Emit<'a> {
         let Some(entries) = self.keyed_entries(folded)? else {
             return Ok(None);
         };
-        let array = self.lay_array(&entries, claims)?;
+        let array = self.lay_array(&entries, claims, items.len())?;
         Ok(UnitValue::new(array.value()))
     }
 
@@ -11136,6 +11155,7 @@ impl<'a> Emit<'a> {
                     Opcode::SwitchString
                 },
                 subject,
+                cases.len(),
             )),
             _ => None,
         };
@@ -11147,13 +11167,11 @@ impl<'a> Emit<'a> {
         let mut has_default = false;
         for (case, jump) in cases.iter().zip(jumps) {
             let case = &self.parsed.tree[*case];
-            if let (Some(cond), Some(jump)) = (case.value, jump) {
+            if let (Some(_), Some((jump, cond))) = (case.value, jump) {
                 self.update_jump_target_to_next(jump);
-                let value = match table {
-                    Some(_) => self.constant_of(cond)?,
-                    None => None,
-                };
-                self.table_add(&mut table, value);
+                if let Where::Constant(value) = cond {
+                    self.table_add(&mut table, CaseValue::Compared(value))?;
+                }
             } else {
                 has_default = true;
                 self.update_jump_target_to_next(default_jump);
@@ -11237,7 +11255,7 @@ impl<'a> Emit<'a> {
         subject: Where,
         case_node: u32,
         cases: &[NodeId<tree::SwitchArm>],
-    ) -> Result<Vec<Option<u32>>, CompileError> {
+    ) -> Result<Vec<Option<(u32, Where)>>, CompileError> {
         let mut jumps = Vec::with_capacity(cases.len());
         let mut has_default = false;
         for case in cases {
@@ -11286,7 +11304,7 @@ impl<'a> Emit<'a> {
                     self.cond_jump_forward(Opcode::Jmpnz, Where::Temporary(case_node))
                 }
             };
-            jumps.push(Some(jump));
+            jumps.push(Some((jump, cond)));
         }
         Ok(jumps)
     }
@@ -11383,7 +11401,7 @@ impl<'a> Emit<'a> {
     /// int(2)
     /// NULL
     /// ```
-    fn emit_table(&mut self, opcode: Opcode, subject: Where) -> Table {
+    fn emit_table(&mut self, opcode: Opcode, subject: Where, size: usize) -> Table {
         let (op1_type, op1) = self.operand(subject);
         let slot = self.literal(Zval::null());
         let at = self.push(Opline {
@@ -11398,22 +11416,81 @@ impl<'a> Emit<'a> {
             at,
             slot,
             entries: Vec::new(),
+            size,
         }
     }
 
     /// `zend_hash_index_add` or `zend_hash_add` of the opline about to be
     /// emitted under the condition's value: the first case of a value
-    /// keeps its target. Nothing where no table is being built.
-    fn table_add(&mut self, table: &mut Option<Table>, value: Option<Zval>) {
+    /// keeps its target, under the key [`CaseValue`] says. Nothing where
+    /// no table is being built.
+    ///
+    /// So a `switch` costs one string a case, which its comparison and
+    /// the table share, and a `match` one a condition, the table's alone,
+    /// whether or not opcache holds the bytes, as the program below does;
+    /// and a table is laid at the cases or conditions written, a default
+    /// and a repeated condition among them, an uncached include's and an
+    /// `eval`'s alike (the program under the recipe's `TMPDIR`, the
+    /// includes written during the request):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3323-tables.inc', <<<'PHP'
+    /// <?php
+    /// ini_set('opcache.file_update_protection', '2');
+    /// function inc($name, $src) { $f = sys_get_temp_dir() . "/w3323-$name.inc"; file_put_contents($f, $src); $m = memory_get_usage(); include $f; $d = memory_get_usage() - $m; unlink($f); return $d; }
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// inc('w0', '<?php class W {} $q0 = 1;'); m('$q1 = 1;'); m('function w1() {}');
+    /// echo inc('match', '<?php function mz1($x) { return match($x) { "aa" => 1, "bb" => 2, default => 3 }; }'), " ";
+    /// echo m('function me1($x) { return match($x) { "aa" => 1, "bb" => 2, default => 3 }; }'), "\n";
+    /// echo inc('switch', '<?php function sz1($x) { switch ($x) { case "aa": return 1; case "bb": return 2; case "cc": return 4; } return 3; }'), " ";
+    /// echo m('function se1($x) { switch ($x) { case "aa": return 1; case "bb": return 2; case "cc": return 4; } return 3; }'), "\n";
+    /// echo inc('long', '<?php function mz2($x) { return match($x) { 1 => 1, 2 => 2, default => 3 }; }'), "\n";
+    /// echo m('function s8($x) { switch ($x) { case "a1": case "a2": case "a3": case "a4": case "a5": case "a6": case "a7": case "a8": return 1; default: return 3; } }'), " ";
+    /// echo m('function m8($x) { return match($x) { "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c1" => 1, default => 2 }; }'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo mz1("aa"), me1("bb"), sz1("cc"), se1("bb"), mz2(2), s8("a8"), m8("c1"), m8("zz"), "\n";
+    /// PHP);
+    /// include $f;
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1096 1112
+    /// 1304 1320
+    /// 872
+    /// 2056 1496
+    /// 12422112
+    /// ```
+    fn table_add(
+        &mut self,
+        table: &mut Option<Table>,
+        case: CaseValue,
+    ) -> Result<(), CompileError> {
         let Some(table) = table else {
-            return;
+            return Ok(());
         };
         let target = self.next();
-        if let Some(key) = value.and_then(jump_key)
-            && !table.entries.iter().any(|(held, _)| *held == key)
-        {
-            table.entries.push((key, Zval::long(i64::from(target))));
+        let (CaseValue::Compared(value) | CaseValue::Folded(value)) = case;
+        let Some(key) = jump_key(value) else {
+            return Ok(());
+        };
+        if table.entries.iter().any(|(held, _)| *held == key) {
+            return Ok(());
         }
+        let key = match (key, case) {
+            (Key::Str(s), _) if !value.is_refcounted() => {
+                match self.uninterned(|this| this.strings.intern(s.bytes())) {
+                    Ok(own) => Key::Str(own),
+                    Err(fatal) => return Err(self.fatal_of(fatal)),
+                }
+            }
+            (key, CaseValue::Compared(_)) => {
+                self.strings.hold(value);
+                key
+            }
+            (key, CaseValue::Folded(_)) => key,
+        };
+        table.entries.push((key, Zval::long(i64::from(target))));
+        Ok(())
     }
 
     /// The table opline's `extended_value` aimed at the opline about to
@@ -11434,7 +11511,7 @@ impl<'a> Emit<'a> {
         let Some(table) = table else {
             return Ok(());
         };
-        let array = match self.strings.constant_array(&table.entries) {
+        let array = match self.strings.constant_array(&table.entries, table.size) {
             Ok(array) => array,
             Err(fatal) => return Err(self.fatal_of(fatal)),
         };
@@ -11499,7 +11576,8 @@ impl<'a> Emit<'a> {
         // `can_match_use_jumptable` folded is created at.
         let subject_line = self.line;
         if self.match_uses_jumptable(arms)? {
-            table = Some(self.emit_table(Opcode::Match, subject));
+            let conds = self.match_conds(arms).len();
+            table = Some(self.emit_table(Opcode::Match, subject, conds));
         } else {
             jumps = self.match_chain(subject, case_node, arms, subject_line)?;
             default_jump = Some(self.push(Opline {
@@ -11673,11 +11751,11 @@ impl<'a> Emit<'a> {
                     if let Some(jump) = jumps.next() {
                         self.update_jump_target_to_next(jump);
                     }
-                    let value = match table {
-                        Some(_) => self.constant_of(*cond)?,
-                        None => None,
-                    };
-                    self.table_add(table, value);
+                    if table.is_some()
+                        && let Some(value) = self.uninterned(|this| this.constant_of(*cond))?
+                    {
+                        self.table_add(table, CaseValue::Folded(value))?;
+                    }
                 }
             } else {
                 if let Some(jump) = default_jump {
@@ -15290,7 +15368,7 @@ impl<'a> Emit<'a> {
     fn array_union(&mut self, left: Arr, right: Arr) -> Result<Made, CompileError> {
         let mut entries: Vec<(Key, Zval)> = left.iter().collect();
         entries.extend(right.iter().filter(|(key, _)| left.get(*key).is_none()));
-        self.lay_array(&entries, Vec::new())
+        self.lay_array(&entries, Vec::new(), entries.len())
     }
 
     /// `zend_compile_binary_op` once `zend_try_ct_eval_binary_op` has
@@ -15718,7 +15796,7 @@ impl<'a> Emit<'a> {
             ZvalType::Null => &[],
             _ => &[(Key::Long(0), value)],
         };
-        self.lay_array(entries, Vec::new())
+        self.lay_array(entries, Vec::new(), entries.len())
             .map(|made| Some(Operated::Made(made)))
     }
 
@@ -17212,6 +17290,25 @@ impl<'a> Emit<'a> {
     /// here too; an array or an object as a key is php's `Illegal
     /// offset type`, raised only once every element is known constant,
     /// as php raises it in its second pass.
+    ///
+    /// The array is laid at the elements written, a repeated key among
+    /// them, as `in_array`'s table is at the haystack's elements
+    /// (`zend_new_array(zend_hash_num_elements(src))`):
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('$q1 = 1;'); m('function w1() {}');
+    /// echo m('$GLOBALS["a"] = ["e1" => 1, "e2" => 2, "e3" => 3, "e4" => 4, "e5" => 5, "e6" => 6, "e7" => 7, "e8" => 8, "e1" => 9];'), " ";
+    /// echo m('$GLOBALS["b"] = ["f1" => 1, "f2" => 2, "f3" => 3, "f4" => 4, "f5" => 5, "f6" => 6, "f7" => 7, "f8" => 8];'), "\n";
+    /// echo m('function i9($x) { return in_array($x, ["g1", "g2", "g3", "g4", "g5", "g6", "g7", "g8", "g1"], true); }'), " ";
+    /// echo m('function i8($x) { return in_array($x, ["h1", "h2", "h3", "h4", "h5", "h6", "h7", "h8"], true); }'), "\n";
+    /// echo count($a), count($b), i9("g1") && i8("h8"), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1464 632
+    /// 1304 984
+    /// 881
+    /// ```
     fn constant_array(
         &mut self,
         elements: &[NodeId<tree::ArrayElement>],
@@ -17221,7 +17318,7 @@ impl<'a> Emit<'a> {
             return Ok(None);
         };
         let claims = (self.claims.since(mark).into_iter()).map(|(_, made)| made);
-        self.lay_array(&entries, claims.collect()).map(Some)
+        (self.lay_array(&entries, claims.collect(), elements.len())).map(Some)
     }
 
     /// `zend_try_ct_eval_array` over an argument php's tree holds as
@@ -17378,9 +17475,10 @@ impl<'a> Emit<'a> {
     }
 
     /// One constant array laid down in the home the unit's strings are
-    /// in, as the claim of the one who asked ([`Intern::constant_array_made`]),
-    /// and the fatal php's allocator raises where there is no memory for
-    /// it. The array takes one owner of each key and value over, as
+    /// in, at the `size` php inits it with, the elements written
+    /// (`array_init_size(result, list->children)`), as the claim of the
+    /// one who asked ([`Intern::constant_array_made`]), and the fatal
+    /// php's allocator raises where there is no memory for it. The array takes one owner of each key and value over, as
     /// `zend_try_ct_eval_array` moves each element's zval in: the claim
     /// among `claims` an entry was made with, else one more owner of it
     /// ([`Intern::hold`]); a claim no entry holds, a numeric key's string
@@ -17420,6 +17518,7 @@ impl<'a> Emit<'a> {
         &mut self,
         entries: &[(Key, Zval)],
         mut claims: Vec<Made>,
+        size: usize,
     ) -> Result<Made, CompileError> {
         let values = entries.iter().flat_map(|(key, value)| {
             let key = match key {
@@ -17440,7 +17539,7 @@ impl<'a> Emit<'a> {
         for made in claims {
             self.strings.give_back(made);
         }
-        (self.strings.constant_array_made(entries)).map_err(|fatal| self.fatal_of(fatal))
+        (self.strings.constant_array_made(entries, size)).map_err(|fatal| self.fatal_of(fatal))
     }
 
     /// `zend_compile_array` (`Z/Zend/zend_compile.c:10935`): the constant

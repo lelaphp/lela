@@ -797,17 +797,20 @@ pub trait Intern {
     /// entries in this order, the keys strings this home made or
     /// integers. An engine's is php's `IS_ARRAY_IMMUTABLE`, no owner
     /// counted and living as long as the home does; a request's compile
-    /// makes one its unit owns. What a `switch` or a `match` jump table
-    /// is (`zend_compile_switch`, `zend_compile_match`).
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal>;
+    /// makes one its unit owns, laid at the `size` php's compile inits it
+    /// with (`array_init_size`, `zend_hash_init`), which counts what was
+    /// written and not what stands, and which a home that persists the
+    /// array has no use for. What a `switch` or a `match` jump table is
+    /// (`zend_compile_switch`, `zend_compile_match`).
+    fn constant_array(&mut self, entries: &[(Key, Zval)], size: usize) -> Result<Arr, Fatal>;
 
     /// [`Intern::constant_array`] of an array the asker alone holds and
     /// gives back once it has read it ([`Intern::give_back`]), each entry
     /// one owner the array took over: the array `zend_try_ct_eval_array`
     /// made for a node, which `zend_eval_const_expr` destroys with its
     /// strings once a fold over it stands (`zval_ptr_dtor`).
-    fn constant_array_made(&mut self, entries: &[(Key, Zval)]) -> Result<Made, Fatal> {
-        (self.constant_array(entries)).map(|a| Made(Zval::array(a)))
+    fn constant_array_made(&mut self, entries: &[(Key, Zval)], size: usize) -> Result<Made, Fatal> {
+        (self.constant_array(entries, size)).map(|a| Made(Zval::array(a)))
     }
 
     /// Whether what this home lays from here on is interned, php's
@@ -970,7 +973,7 @@ impl Intern for Strings {
     /// `zend_persist_zval` over a constant array under opcache: one
     /// array on the system allocator, immutable, shared by every request
     /// that serves the unit, freed with the engine.
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+    fn constant_array(&mut self, entries: &[(Key, Zval)], _: usize) -> Result<Arr, Fatal> {
         let a = persistent_array(entries)?;
         self.arrays.push(a);
         Ok(a)
