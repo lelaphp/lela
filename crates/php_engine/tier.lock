@@ -178,5 +178,6 @@ tier::under_way
 tier::unwind
 [kernels]
 tier::call_held
+tier::free_cv
 tier::release
 tier::step_held

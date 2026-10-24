@@ -362,6 +362,18 @@ impl Zval {
     /// The bits of that word that are the count, beneath the pin a walk
     /// sets; an owner added past them saturates, as the heap's own adds do.
     pub const COUNT_BITS: u32 = crate::gc::COUNT;
+    /// Where that block keeps its type, flags and collector bits, php's
+    /// `GC_TYPE_INFO`, a 32-bit word past the count: what the compiled
+    /// tier tests [`Zval::LEAK_BITS`] in.
+    pub const GC_INFO_AT: usize = crate::gc::TYPE_INFO_AT;
+    /// The bits of that word of which a value the collector may take as
+    /// a possible root has none, php's `GC_MAY_LEAK`: in the root buffer
+    /// already, coloured, or not collectable, which a string, a
+    /// reference and a resource are. What the compiled tier tests
+    /// inline after an owner given up leaves owners, as php's
+    /// `jit_if_GC_MAY_NOT_LEAK` does, calling the collector only where
+    /// none is set.
+    pub const LEAK_BITS: u32 = crate::gc::LEAK_BITS;
 
     /// The all-zero zval, `IS_UNDEF`.
     pub const UNDEF: Zval = Zval {

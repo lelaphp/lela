@@ -28,7 +28,7 @@ use php_heap::ZvalType;
 use crate::record::func_name as func;
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
-    Landing, Layout, Op, OpId, Operand, Place, Read, Repeat, Returned, Slot, Store, Stored,
+    Landing, Layout, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store, Stored,
     TraceIr, Types, Unwind, ValueId,
 };
 
@@ -175,28 +175,7 @@ impl<'a> Dump<'a> {
                     Form::Step => "step",
                 };
                 write!(text, " {form}")?;
-                // What compiled code makes or leaves in place, and what a
-                // leave hands its caller where it is no scalar.
-                match line.imm {
-                    Imm::Make { .. }
-                    | Imm::Leave {
-                        value: Returned::Scalar,
-                        ..
-                    } => {
-                        write!(text, " in-place")?;
-                    }
-                    Imm::Leave {
-                        value: Returned::Constant(_),
-                        ..
-                    } => {
-                        write!(text, " in-place constant")?;
-                    }
-                    Imm::Leave {
-                        value: Returned::Moved,
-                        ..
-                    } => write!(text, " in-place moved")?,
-                    _ => {}
-                }
+                in_place(text, line.imm)?;
                 if let Some(map) = line.map_ptr {
                     write!(text, " map {map}")?;
                 }
@@ -387,5 +366,30 @@ fn check(check: Check) -> String {
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
         Check::Arm { opline } => format!("arm {:04}", opline.0),
         Check::Room { bytes } => format!("room {bytes}"),
+    }
+}
+
+/// What compiled code makes or leaves in place at a line whose immediate
+/// is `imm`: a call made, and a leave's value, where it is no scalar, and
+/// the variables it frees.
+fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
+    let (value, owners) = match imm {
+        Imm::Make { .. } => return write!(text, " in-place"),
+        Imm::Leave { value, owners } => (value, owners),
+        _ => return Ok(()),
+    };
+    match value {
+        Returned::Scalar => write!(text, " in-place")?,
+        Returned::Constant(_) => write!(text, " in-place constant")?,
+        Returned::Moved => write!(text, " in-place moved")?,
+    }
+    // The variables a leave frees, `zend_jit_free_cv`'s.
+    match owners {
+        Owners::Each(vars) => {
+            let vars: Vec<String> = vars.iter().map(|var| format!("CV{var}")).collect();
+            write!(text, " frees {}", vars.join(","))
+        }
+        Owners::Kernel => write!(text, " frees by kernel"),
+        Owners::Uncounted => Ok(()),
     }
 }

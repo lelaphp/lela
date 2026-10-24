@@ -26,7 +26,7 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, SIEVE, SPECTRALNORM, held, traced as built,
+    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -171,10 +171,12 @@ fn fib_leaves_both_levels_through_one_exit_per_place() -> Result<(), String> {
 /// check before the second call, the comparison's direction in the
 /// callee and the addition's overflow, each an opline later here, past
 /// the `VERIFY_RETURN_TYPE` php's optimiser drops from `return $n`. The
-/// trace takes those three and #3176's three, which php's function-level
+/// trace takes those three and #3176's two, which php's function-level
 /// inference proves need no guard: the entry's guard on what the call
-/// before returned, exit 0, and the guard on `$n` and the subtraction's
-/// overflow before the second call, exits 2 and 3.
+/// before returned, exit 0, and the subtraction's overflow before the
+/// second call, exit 2. `$n` is held long by its declaration, as php's
+/// inference holds it, `return $n;`'s `VERIFY_RETURN_TYPE` keeping it as
+/// it is (`types::opcodes::written_after_entry`), so no guard reads it.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
@@ -198,7 +200,7 @@ fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
         (Repeat::Return, Interrupt::None),
         "{rendered}"
     );
-    let inferred = [0, 2, 3];
+    let inferred = [0, 2];
     let phps: Vec<(Frame, Option<u32>, Grows)> = (ir.exits.iter().enumerate())
         .filter(|(at, _)| !inferred.contains(at))
         .map(|(_, exit)| (exit.frame, exit.opline.map(|at| at.0), exit.grows))
@@ -447,6 +449,30 @@ fn a_natives_call_is_pushed_in_place() -> Result<(), String> {
         _ => None,
     });
     assert_eq!(init, Some(Form::Inline), "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// A callee's `RETURN` over variables that own something, an array its
+/// caller keeps too and a string it built, is left in place and names
+/// both to be freed, as php's trace frees each before
+/// `zend_jit_leave_func` (#3313).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_leave_over_owning_variables_is_made_in_place() -> Result<(), String> {
+    let ir = golden(OWNING_LEAVE)?;
+    let rendered = dump::render(&ir);
+    let leave = (ir.ops.iter()).find_map(|op| match op {
+        Op::Line(line) if line.opcode == Opcode::Return => Some(line),
+        _ => None,
+    });
+    let leave = leave.ok_or_else(|| format!("no RETURN in\n{rendered}"))?;
+    // `$a` is CV0, `$i` CV1 and `$s` CV2.
+    let owners = (super::Vars::default().with(0)).and_then(|vars| vars.with(2));
+    assert_eq!(leave.form, Form::Inline, "{rendered}");
+    assert!(
+        matches!(leave.imm, super::Imm::Leave { owners: super::Owners::Each(vars), .. } if Some(vars) == owners),
+        "{rendered}"
+    );
     Ok(())
 }
 
@@ -897,6 +923,86 @@ fn ticks_reload_what_a_reference_holds() -> Result<(), String> {
         $x = [1]; echo f($x, 3), \"\\n\";",
     )?;
     clobbers(&ir, Opcode::Ticks, &[0], &[1, 2, 3])
+}
+
+/// The leave of an inlined callee whose variables own something, a
+/// `RETURN` left in place that frees them and may serve a destructor, has
+/// no `call` effect: the caller's variables, a reference among them, are
+/// read again after it by nothing, as php's code keeps every type and
+/// register across `zend_jit_free_cv` (`Builder::clobber`'s witnesses
+/// hold a destructor there that writes them).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_leave_that_frees_its_variables_reloads_nothing() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "class D {}
+        function h($i) { $d = new D; return $i; }
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += $a[0]; $s += h($i); $s += $a[0]; }
+            return $s;
+        }
+        $x = [1]; echo f($x, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let (at, leave) = ir
+        .ops
+        .iter()
+        .enumerate()
+        .find_map(|(at, op)| match op {
+            Op::Line(line) if line.opcode == Opcode::Return => Some((at, line)),
+            _ => None,
+        })
+        .ok_or_else(|| format!("no RETURN in\n{rendered}"))?;
+    // `$d` is the callee's CV1.
+    let d = super::Vars::default().with(1).ok_or("a set of one")?;
+    assert_eq!(leave.form, Form::Inline, "{rendered}");
+    assert!(
+        matches!(leave.imm, super::Imm::Leave { owners: super::Owners::Each(vars), .. } if vars == d),
+        "{rendered}"
+    );
+    assert!(leave.unwind.is_some(), "a destructor may throw: {rendered}");
+    let at = OpId(u32::try_from(at).map_err(|_| "a long trace")?);
+    assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
+    assert!(rendered.contains("frees CV1"), "{rendered}");
+    Ok(())
+}
+
+/// A return trace that lands past a recursive call and never reads the
+/// typed parameter knows it holds what its declaration says all the same:
+/// the `VERIFY_RETURN_TYPE` of `return $n;` under an `int` return leaves
+/// an `int` as it is, so it is no write of another type, as php's
+/// inference types it, and the `RETURN` left in place frees nothing.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_typed_parameter_its_return_type_keeps_is_no_owner_at_the_leave() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", "f"), ("record.start", "return")],
+        "function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
+        echo f(20), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let leaves: Vec<_> = (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::Return => Some(line.imm),
+            _ => None,
+        })
+        .collect();
+    assert!(!leaves.is_empty(), "{rendered}");
+    for imm in leaves {
+        assert!(
+            matches!(
+                imm,
+                super::Imm::Leave {
+                    owners: super::Owners::Uncounted,
+                    ..
+                }
+            ),
+            "{rendered}"
+        );
+    }
+    Ok(())
 }
 
 /// A kernel that may throw and calls nothing, a cast to string, reads
@@ -1401,6 +1507,36 @@ fn a_loops_trace_keeps_a_way_in_at_the_body_its_back_edge_lands_on() -> Result<(
     Ok(())
 }
 
+/// A `while (true)`'s trace is rooted at its body, where its back edge
+/// lands, as php's CFG heads the loop once its optimizer folds the
+/// constant condition into a `JMP` (`record::loop_root`, #3317): it keeps
+/// no second way in, its back edge landing on its root, and the `JMPNZ`
+/// on `true` that ends its body goes one way and takes no exit, as php's
+/// `JMP` takes none (#3203): no exit goes on past it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_on_a_constant_condition_keeps_no_way_in_at_its_body() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; while (true) { $s += $n; if ($s > 20) { break; } } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    assert_eq!(ir.body, None, "{}", dump::render(&ir));
+    let jump = (ir.ops.iter())
+        .find_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::Jmpnz => Some(line.opline),
+            _ => None,
+        })
+        .ok_or_else(|| format!("no JMPNZ in\n{}", dump::render(&ir)))?;
+    let past = OplineIdx(jump.0 + 1);
+    assert!(
+        (ir.exits.iter()).all(|exit| exit.opline != Some(past)),
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
 /// A loop's interrupt test takes php's exit point only where php's code
 /// does not keep the trace's initial instruction pointer or keeps values
 /// in registers at the loop's end, and php's interrupt stub otherwise,
@@ -1495,8 +1631,8 @@ fn a_side_of_an_exit_that_names_no_opline_holds_where_the_frame_stands() -> Resu
 /// `RETURN` left in place, its end the exit the interpreter serves the
 /// `RETURN` through where the leave cannot be made in place
 /// ([`End::Return`]). A variable the trace does not hold uncounted, here
-/// a string, is tested as the frame leaves, as php's `zend_jit_free_cv`
-/// tests it, where the leave had been refused whole.
+/// a string, is named to be freed as the frame leaves, as php's
+/// `zend_jit_free_cv` frees it, and no other.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), String> {
@@ -1514,10 +1650,12 @@ fn a_trace_that_stops_at_a_return_leaves_the_frame_in_place() -> Result<(), Stri
         return Err(format!("no last line: {rendered}"));
     };
     assert_eq!(last.opcode, Opcode::Return, "{rendered}");
+    // `$d`, the second variable, may own a string; `$i` owns nothing.
+    let d = super::Vars::default().with(1).ok_or("a set of one")?;
     assert_eq!(
         last.imm,
         super::Imm::Leave {
-            owners: true,
+            owners: super::Owners::Each(d),
             value: super::Returned::Scalar,
         },
         "{rendered}"

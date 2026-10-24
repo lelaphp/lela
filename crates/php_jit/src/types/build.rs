@@ -22,8 +22,8 @@ use super::opcodes::{
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
     Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
-    LoopHeader, Op, OpId, Operand, Place, Read, Repeat, Returned, Slot, Store, Stored, TraceIr,
-    Unwind, UnwindId, Value, ValueId,
+    LoopHeader, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store, Stored,
+    TraceIr, Unwind, UnwindId, Value, ValueId, Vars,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -675,7 +675,7 @@ impl<'a> Builder<'a> {
             imm: match in_place {
                 Some(InPlace::Send) => Imm::Arg(op.op2),
                 Some(InPlace::Leave) => Imm::Leave {
-                    owners: !self.uncounted(frame),
+                    owners: self.owners(frame),
                     value: returned(&op, code, t1),
                 },
                 Some(InPlace::Make) => Imm::Make {
@@ -1446,6 +1446,50 @@ impl<'a> Builder<'a> {
     /// ```expect regime=jit-exit-fuzz process
     /// float(186)
     /// ```
+    ///
+    /// The leave of a frame whose variables own something, compiled in
+    /// place, frees them inline and calls the `free_cv` kernel for a
+    /// destructor, with no `call` effect, so the caller keeps every fact
+    /// across it as php's code keeps them across `zend_jit_free_cv`. A
+    /// destructor served at the leave of an inlined callee that writes the
+    /// reference the caller holds and a global array, the caller's own
+    /// array kept as it was:
+    ///
+    /// ```php
+    /// class D { function __destruct() { global $g; static $c = 0; if (++$c % 7 == 0) { $g = $c + 0.5; $GLOBALS['l'][1] = $c + 0.5; } } }
+    /// function h($i) { $d = new D; return $i; }
+    /// function f(&$r, $n) {
+    ///     global $l; $t = 0; $v = [1, 2, 3]; $v[] = 4;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $r = $i; $l = [1, 2, 3]; $t = $t + h($i) + $r + $l[1] + $v[1];
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0; $l = [];
+    /// echo f($g, 30), " ", $g, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 1060 29
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D { function __destruct() { global $g; static $c = 0; if (++$c % 7 == 0) { $g = $c + 0.5; $GLOBALS['l'][1] = $c + 0.5; } } }
+    /// function h($i) { $d = new D; return $i; }
+    /// function f(&$r, $n) {
+    ///     global $l; $t = 0; $v = [1, 2, 3]; $v[] = 4;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $r = $i; $l = [1, 2, 3]; $t = $t + h($i) + $r + $l[1] + $v[1];
+    ///     }
+    ///     return $t;
+    /// }
+    /// $g = 0; $l = [];
+    /// echo f($g, 30), " ", $g, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 1060 29
+    /// ```
     fn clobber(&mut self, idx: OpId) {
         let live: Vec<Frame> = self.stack.clone();
         for frame in live {
@@ -1605,10 +1649,8 @@ impl<'a> Builder<'a> {
             Place::Root if self.rec.start == Start::Enter => {
                 param.map_or(Types::UNDEF, |p| param_types(p.declared, None))
             }
-            _ => match param {
-                Some(p) if !written_after_entry(meta.code, slot.var) => {
-                    param_types(p.declared, None)
-                }
+            _ => match param.map(|p| param_types(p.declared, None)) {
+                Some(holds) if !written_after_entry(meta.code, slot.var, holds) => holds,
                 _ => unknown,
             },
         }
@@ -2124,15 +2166,35 @@ impl<'a> Builder<'a> {
     /// Whether every variable of `frame` holds what no reference counts,
     /// so a return frees nothing that runs a destructor.
     fn uncounted(&self, frame: Frame) -> bool {
+        self.owners(frame) == Owners::Uncounted
+    }
+
+    /// The variables of `frame` a return gives up ([`Owners`]): each the
+    /// trace does not hold uncounted where it reaches it, as php's trace
+    /// frees each whose `STACK_TYPE` and inference may be counted
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:5600-5631`).
+    fn owners(&self, frame: Frame) -> Owners {
         let cvs = self.meta(frame).code.num_cvs;
-        (0..cvs).all(|var| {
+        let mut owners = Vars::default();
+        for var in 0..cvs {
             let slot = Slot { frame, var };
             let types = match self.slots[usize::from(frame.0)].get(var as usize) {
                 Some(Some(value)) => self.val(*value).types,
                 _ => self.entry_types(slot),
             };
-            types.within(UNCOUNTED)
-        })
+            if types.within(UNCOUNTED) {
+                continue;
+            }
+            match owners.with(var) {
+                Some(with) => owners = with,
+                None => return Owners::Kernel,
+            }
+        }
+        if owners.is_empty() {
+            Owners::Uncounted
+        } else {
+            Owners::Each(owners)
+        }
     }
 
     /// The runtime cache slot an inline call's `INIT_*` reads its callee

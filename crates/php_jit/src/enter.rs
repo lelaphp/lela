@@ -13,16 +13,16 @@
 //! is answered as one. Wrappers are `extern "C"` and not `"C-unwind"`: no
 //! panic reaches compiled code (`research/llvm-research.r1.md` B.4).
 //!
-//! **The engine's kernels** are `lower::Kernel`'s four (§5.2): `step`,
-//! the opline served whole through `tier::step`; `push_call`, an inline
-//! `INIT_*` served the same way where the callee its cache slot holds is
-//! the one recorded, and refused before anything is pushed where it is
-//! not; `release`, php's `zval_ptr_dtor`; and `copy`, php's
-//! `ZVAL_COPY_DEREF`. Each that reads its frame stands it at the opline
-//! it serves first, php's `SAVE_OPLINE()`, so what it raises is reported
-//! there. Each line of the list names the engine item it serves through,
-//! which `api-check` writes into `tier.lock`'s kernels section where the
-//! face does not list it already (§5.3).
+//! **The engine's kernels** are `lower::Kernel`'s (§5.2), among them
+//! `step`, the opline served whole through `tier::step`; `push_call`, an
+//! inline `INIT_*` served the same way where the callee its cache slot
+//! holds is the one recorded, and refused before anything is pushed
+//! where it is not; `release`, php's `zval_ptr_dtor`; and `free_cv`,
+//! php's `zend_jit_free_cv` at a leave. Each that reads its frame stands
+//! it at the opline it serves first, php's `SAVE_OPLINE()`, so what it
+//! raises is reported there. Each line of the list names the engine item
+//! it serves through, which `api-check` writes into `tier.lock`'s kernels
+//! section where the face does not list it already (§5.3).
 //!
 //! **What `enter` does not do yet.** It touches no map pointer on a
 //! request's first entry: `lower` lowers no read of a runtime-cache slot
@@ -222,6 +222,9 @@ pub(crate) enum Status {
     Bailout = 2,
     Panic = 3,
 }
+
+// Compiled code reads a throw's status by `lower`'s number for it.
+const _: () = assert!(Status::Exception as u32 == lower::THREW);
 
 /// What a kernel answers through its wrapper's out pointer, written as
 /// compiled code reads it.
@@ -482,6 +485,7 @@ kernels! {
         PushCall => push_call(func: u32, callee: u32) -> Stood = tier::step_held;
         Call => call(func: u32, callee: u32) -> Stood = tier::call_held;
         Release => release(word: u64, type_info: u32) = tier::release;
+        FreeCv => free_cv(word: u64, type_info: u32) = tier::free_cv;
     }
 }
 
@@ -567,6 +571,15 @@ fn held<'a>(on: On<'_, 'a>, func: u32) -> Result<(Held<'a>, &'a Epoch), Fatal> {
 fn release(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<(), Fatal> {
     standing(req, on.room, on.at)?;
     tier::release(req, zval(word, type_info));
+    Ok(())
+}
+
+/// The `free_cv` kernel: php's `zend_jit_free_cv` of a variable of the
+/// frame a `RETURN` leaves in place, that frame off the chain first
+/// ([`tier::free_cv`]), a destructor's throw left pending.
+fn free_cv(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<(), Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    tier::free_cv(req, frame, zval(word, type_info));
     Ok(())
 }
 

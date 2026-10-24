@@ -1693,6 +1693,54 @@ mod tests {
         assert_eq!(r.heap.objects(), 0);
     }
 
+    /// The `GC_TYPE_INFO` word compiled code reads at [`Zval::GC_INFO_AT`]
+    /// past a block's start, held to [`Zval::LEAK_BITS`], says what
+    /// `possible_root` says: a fresh array and a fresh object may leak, a
+    /// string and a reference are not collectable, and an array once in
+    /// the root buffer is in it already.
+    #[test]
+    fn the_leak_bits_compiled_code_reads_say_what_the_collector_says() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        r.heap.gc.enable(true);
+        let read = |z: Zval| {
+            let block = z.counted().expect("a counted value").block().as_ptr();
+            let at = block.wrapping_add(Zval::GC_INFO_AT).cast::<[u8; 4]>();
+            // SAFETY: the block stands for the read, and its header's
+            // `GC_TYPE_INFO` is the four bytes `GC_INFO_AT` bytes in.
+            let word = u32::from_ne_bytes(unsafe { at.read() });
+            word & Zval::LEAK_BITS == 0
+        };
+        let a = r.heap.array().expect("an array");
+        let o = r.heap.object(1, 1, 0).expect("an object");
+        let s = r.heap.string(b"held").expect("a string");
+        let cell = r.heap.reference(Zval::long(1)).expect("a reference");
+        for z in [
+            Zval::array(a),
+            Zval::object(o),
+            Zval::string(s),
+            Zval::reference(cell),
+        ] {
+            let collectable = matches!(z.kind(), ZvalType::Array | ZvalType::Object);
+            assert_eq!(read(z), collectable, "{:?}", z.kind());
+            if collectable {
+                assert!(possible_root(z).is_some(), "{:?}", z.kind());
+            }
+        }
+        a.addref();
+        Heap::release(&mut r, Zval::array(a));
+        assert_eq!(r.heap.gc_status().roots, 1);
+        assert!(!read(Zval::array(a)) && possible_root(Zval::array(a)).is_none());
+        for z in [
+            Zval::array(a),
+            Zval::object(o),
+            Zval::string(s),
+            Zval::reference(cell),
+        ] {
+            Heap::release(&mut r, z);
+        }
+    }
+
     /// `$a = []; $a[] =& $a; unset($a);`: one root, the table, and one
     /// value freed, the reference the walk passes through not counted.
     #[test]

@@ -736,6 +736,9 @@ impl Request {
             |unit| shared.publish_compiled(unit),
             |req, unit| req.publish_unit(unit),
         );
+        if filed == Filed::Own {
+            return self.compiled_alone(args, &full);
+        }
         let scanned = scanned.get();
         self.note_pushed(scanned.map_or_else(super::Pushed::default, |scanned| scanned.pushed));
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
@@ -921,10 +924,55 @@ impl Request {
     /// stream where php opens them ([`FileArgs::opens_stream`]): one the
     /// answer keeps out, and a wrapper's stream opcache does not cache
     /// ([`FileArgs::cached`]).
+    ///
+    /// And one the cache leaves to it ([`crate::unit_cache::Filed::Own`]):
+    /// written within `opcache.file_update_protection` seconds, which
+    /// opcache compiles through `accelerator_orig_compile_file` before it
+    /// would persist anything, so the include costs what php's compile
+    /// lays on the request, its names made as an `eval`'s are
+    /// ([`Request::hold_unit_names`]) and its file's name the string
+    /// `EG(included_files)` keeps, a once form's put there before the
+    /// compile ([`Request::opened_once`]) (the program under the recipe's
+    /// `TMPDIR`, read after the heap is churned):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3316-fresh-include.php', <<<'PHP'
+    /// <?php
+    /// ini_set('opcache.file_update_protection', '2');
+    /// function inc($name, $src, $once = false) { $f = sys_get_temp_dir() . "/w3316-$name.inc"; file_put_contents($f, $src); $m = memory_get_usage(); $once ? include_once $f : include $f; $d = memory_get_usage() - $m; unlink($f); return $d; }
+    /// inc('w0', '<?php class W {} $q0 = 1;');
+    /// echo inc('a', '<?php function abcdefgz() { return 2; } $GLOBALS["d"] = function () { $abcdefgz = "w"; return $abcdefgz; };'), "\n";
+    /// echo inc('b', '<?php class Abcdefgy { public $abcdefgy = 1; protected $Abcdefgy = 2; function Abcdefgy2() { return __FUNCTION__ . __METHOD__ . __CLASS__; } }'), "\n";
+    /// echo inc('c', '<?php $GLOBALS["e"] = function () { return __FUNCTION__ . __FUNCTION__; }; $GLOBALS["g"] = fn() => __FUNCTION__ . __FUNCTION__;'), "\n";
+    /// echo inc('d', '<?php if (1) { function Qwertyz() { $qwertyz = 1; return [$qwertyz, __FUNCTION__]; } }'), "\n";
+    /// echo inc('e', '<?php function Fqwerty1() { return 1; }', true), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode([abcdefgz(), $d(), (array) new Abcdefgy, (new Abcdefgy)->Abcdefgy2(), $e() === $g(), Qwertyz(), Fqwerty1()]), "\n";
+    /// $m = memory_get_usage(); unset($d, $e, $g); echo memory_get_usage() - $m, "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1384
+    /// 1008
+    /// 1584
+    /// 384
+    /// 272
+    /// [2,"w",{"abcdefgy":1,"\u0000*\u0000Abcdefgy":2},"Abcdefgy2Abcdefgy::Abcdefgy2Abcdefgy",true,[1,"Qwertyz"],1]
+    /// -2144
+    /// ```
     fn compiled_alone(&mut self, args: FileArgs<'_>, full: &[u8]) -> Cached {
         let source = crate::unit_cache::source_or_read(args.source, args.path)?;
         if args.opens_stream() {
             self.open_include_stream(full, args.handle);
+        }
+        if args.handle == HandlePath::Host {
+            self.fill_primary_handle(source.len()).ok();
+        }
+        if let Some(opened) = self.opened_once(full) {
+            self.compile_opened(opened);
         }
         let shared = Arc::clone(&self.shared);
         Some(shared.compile_for(self, &source, args.path, SourceKind::File))
@@ -1351,7 +1399,7 @@ impl AccelServed {
     fn of(validation: Validation, filed: Filed) -> Option<AccelServed> {
         match filed {
             _ if validation == Validation::EveryHit => None,
-            Filed::Compiled => None,
+            Filed::Compiled | Filed::Own => None,
             Filed::Held | Filed::Existing => Some(AccelServed::Compiled),
             Filed::Hit | Filed::Unheld | Filed::Kept => Some(AccelServed::Hit),
         }
