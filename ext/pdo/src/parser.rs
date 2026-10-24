@@ -14,7 +14,7 @@
 use php_ext::coerce::{to_long, truthy, with_string};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{FreshString, Owner, PhpObject, PhpString, Value, ValueRef};
 
 use crate::bound::{Bound, BoundKey, BoundTable};
 use crate::connector::{
@@ -201,41 +201,64 @@ pub(super) fn parse_params(
 
 /// The `rewrite:` arm: `newbuffer_len`, then the query built into
 /// `zend_string_alloc`'s string of that length, each placeholder's text
-/// kept or, where values are `quoted`, its quoted value in its place.
+/// kept or, where values are `quoted`, its quoted value in its place, and
+/// `ZSTR_LEN` set to what was written. Query generation counts the query
+/// whole and adds each quoted value without taking the placeholder's own
+/// text off (`ext/pdo/pdo_sql_parser.re:210`, `:325`), so the string
+/// keeps the bytes of every placeholder past its end: `DO ?` with a
+/// 4-digit integer is a 7-byte query in the 40-byte bin, which 7 bytes
+/// alone would not reach, and the emulated statement holds it while it
+/// stands:
+///
+/// ```php
+/// $q = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+/// foreach ([3, 4, 5, 12] as $n) {
+///     $s = $q->prepare('DO ?');
+///     $s->bindValue(1, (int) str_repeat('1', $n), PDO::PARAM_INT);
+///     $m = memory_get_usage(); $s->execute(); $d = memory_get_usage() - $m;
+///     echo $n, ' ', $d, "\n";
+///     unset($s);
+/// }
+/// ```
+/// ```expect mysql regime=jit-off
+/// 3 48
+/// 4 56
+/// 5 56
+/// 12 64
+/// ```
 fn build(
     req: &mut Request,
     sql: &[u8],
     placeholders: &[Placeholder],
     quoted: bool,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let text = |placeholder: &Placeholder| -> usize {
-        if quoted {
-            placeholder.quoted.len()
-        } else {
-            placeholder.len
-        }
+    let newbuffer_len = if quoted {
+        placeholders
+            .iter()
+            .fold(sql.len(), |len, p| len + p.quoted.len())
+    } else {
+        sql.len()
     };
-    let len = placeholders
-        .iter()
-        .fold(sql.len(), |len, p| len - p.len + text(p));
-    PhpString::filled(req, len, |to| {
-        let mut put = 0;
-        let mut copy = |bytes: &[u8]| {
-            to[put..put + bytes.len()].copy_from_slice(bytes);
-            put += bytes.len();
-        };
-        let mut from = 0;
-        for placeholder in placeholders {
-            copy(&sql[from..placeholder.at]);
-            if quoted {
-                copy(&placeholder.quoted);
-            } else {
-                copy(&sql[placeholder.at..placeholder.at + placeholder.len]);
-            }
-            from = placeholder.at + placeholder.len;
+    let mut out = FreshString::new(req, newbuffer_len)?;
+    let to = out.bytes_mut();
+    let mut put = 0;
+    let mut copy = |bytes: &[u8]| {
+        to[put..put + bytes.len()].copy_from_slice(bytes);
+        put += bytes.len();
+    };
+    let mut from = 0;
+    for placeholder in placeholders {
+        copy(&sql[from..placeholder.at]);
+        if quoted {
+            copy(&placeholder.quoted);
+        } else {
+            copy(&sql[placeholder.at..placeholder.at + placeholder.len]);
         }
-        copy(&sql[from..]);
-    })
+        from = placeholder.at + placeholder.len;
+    }
+    copy(&sql[from..]);
+    out.set_len(put);
+    Ok(out.finish())
 }
 
 /// The entry held under `key`.
