@@ -3088,6 +3088,13 @@ impl Value {
         self.zval
     }
 
+    /// The zval this value is, borrowed: what a reader whose answer
+    /// borrows the zval's string reads ([`php_heap::Scalar::of`]).
+    #[inline]
+    pub(crate) const fn as_zval(&self) -> &Zval {
+        &self.zval
+    }
+
     /// The zval this value is inside an array's bucket or a property
     /// slot, where `UNDEF` is a tombstone and never an element: a value
     /// nothing wrote is `null` there, as php reads one.

@@ -151,6 +151,60 @@ fn visit_as_a_table_over_state_and_start() {
     assert_eq!(policy::read(&sealed), State::Blacklisted);
 }
 
+/// A loop root's word, visited where a return or an exit goes on at the
+/// root, is entered where compiled and otherwise neither bumped nor
+/// claimed, however hot: the loop's back edge counts its heat once a
+/// turn, as php's header counts each arrival once, so a body that ends in
+/// a call is not counted twice a turn (#3318).
+#[test]
+fn a_loop_roots_word_is_entered_from_a_landing_and_never_counted_there() {
+    let tracing = testing::policy(&[("opcache.jit", "tracing"), ("opcache.jit_hot_loop", "2")]);
+    let (epoch, func) = fixture();
+    let word = epoch.word(func, SafepointIdx(1));
+    for _ in 0..300 {
+        let visited = super::Goes::Header.visit(word, &tracing, true, || root(&epoch, func, 1));
+        assert_eq!(decided(visited), "continue");
+    }
+    assert_eq!((policy::read(word), heat(word)), (State::Cold, 0));
+    if let Some(claim) = root(&epoch, func, 1).and_then(|h| policy::claim(h, &tracing, Start::Loop))
+    {
+        policy::settle(claim, &Outcome::Published(trace(3)));
+    }
+    let visited = super::Goes::Header.visit(word, &tracing, true, || root(&epoch, func, 1));
+    assert_eq!(decided(visited), "enter 3");
+}
+
+/// A loop whose body ends in a call counts its heat once a turn, as one
+/// whose body does not: under `opcache.jit_hot_loop=8` neither roots in
+/// seven turns and each roots in eight, where a return landing on the
+/// condition that counted too rooted the first in four (#3318's review).
+/// php counts the `JMP` into the loop as an arrival as well and roots both
+/// in seven, which this engine, with no site at the condition (revision
+/// 70), does not see.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_whose_body_ends_in_a_call_counts_once_a_turn() {
+    let ini = [
+        ("opcache.jit", "tracing"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+        ("opcache.jit_hot_loop", "8"),
+        ("opcache.jit_hot_func", "255"),
+    ];
+    let scratch = testing::Scratch::new();
+    let rooted = |body: &str, turns: u32| {
+        let engine = testing::engine::<Lane>(&ini);
+        let program = format!("function g() {{}} $i = 0; while ($i < {turns}) {{ {body} }}");
+        let served = scratch.serve(&engine, &program);
+        (lines(&served).iter())
+            .filter(|line| line.contains("start (loop)"))
+            .count()
+    };
+    for body in ["$i++; g();", "g(); $i++;"] {
+        assert_eq!((rooted(body, 7), rooted(body, 8)), (0, 1), "{body}");
+    }
+}
+
 /// With the request recording, a visit that crosses the
 /// threshold answers `Continue` and leaves the word bumped and cold, as
 /// php's `zend_jit_loop_trace_counter_handler` bumps and returns while

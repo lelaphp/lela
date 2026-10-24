@@ -340,6 +340,7 @@ Res::resource_type
 ResourceType
 Scalar
 Scalar::is_true
+Scalar::of
 Slot
 SortEntry
 StackLayout
@@ -460,6 +461,7 @@ call_stack_default_size
 canonical_int
 compare
 compare_constants
+constant_truth
 double_to_string
 ecalloc
 efree
