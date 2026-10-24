@@ -509,13 +509,23 @@ impl Request {
     /// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 6
     /// after
     /// ```
+    #[inline(always)] // one load and a branch on every callback's return
     fn checked_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
+        if !self.limits().interrupt().raised().load(Ordering::Relaxed) {
+            return served;
+        }
+        self.interrupted_after_call(served)
+    }
+
+    /// [`Request::checked_after_call`] past its load, where the interrupt
+    /// is raised: what the callee served handed on as it stands where it
+    /// threw, and otherwise the check's answer over it.
+    #[cold]
+    #[inline(never)]
+    fn interrupted_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
         let Ok(value) = served else {
             return served;
         };
-        if !self.limits().interrupt().raised().load(Ordering::Relaxed) {
-            return Ok(value);
-        }
         match crate::interrupt::interrupted(self) {
             Ok(false) => Ok(value),
             Ok(true) => {
