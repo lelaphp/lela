@@ -2805,6 +2805,11 @@ fn read_csv(
     let filled = match fields {
         None => parsed.append(req, Owner::null()),
         Some(fields) => fields.iter().try_for_each(|field| {
+            // php 8.5.12's `php_fgetcsv` takes no field once the memory
+            // limit was met (`ZEND_HAS_OOM()`).
+            if req.memory().has_oom() {
+                return Ok(());
+            }
             let value = crate::string_value(req, field)?;
             parsed.append(req, value)
         }),
