@@ -810,7 +810,7 @@ impl<'a> Builder<'a> {
             .flatten();
         let out = match slot {
             Some(slot) if !pushes && !fused => {
-                let types = out_types(op, t1, t2, td, code);
+                let types = out_types(op, [t1, t2, td], seen.read[0], code);
                 let types = returns.map_or(types, |returns| types.and(returns));
                 Some(self.define(slot, types, idx, form))
             }
@@ -982,7 +982,8 @@ impl<'a> Builder<'a> {
     /// runs again; through an unwind where a kernel it calls throws, a
     /// stepped one that may, an inline assignment over a counted value,
     /// whose destructor may, an inline fetch or test of an element of a
-    /// temporary array, which frees it once its element is read, and an inline element
+    /// temporary array, which frees it once its element is read, and an
+    /// inline element
     /// write, which its handler serves where it cannot write in place.
     fn own_exit(
         &mut self,
@@ -1943,16 +1944,18 @@ impl<'a> Builder<'a> {
             exit: draft(Point::Before(idx), slot.frame, At::Opline(here)),
         };
         let temporary = slot.var >= self.meta(slot.frame).code.num_cvs;
-        if sample.indirect || sample.reference {
-            // An indirect `VAR` is followed to what it points at, as
-            // php's `zend_jit_fetch_indirect_var` follows it; one that
-            // points at a reference, and a temporary that is one, are the
-            // handler's.
-            let (check, read) = match (sample.indirect, sample.reference, temporary) {
-                (true, false, true) => (Check::Indirect { value, tag }, Read::Indirect),
-                (false, true, false) => (Check::Deref { value, tag }, Read::Through),
-                _ => return None,
-            };
+        // An indirect `VAR` is followed to what it points at, as php's
+        // `zend_jit_fetch_indirect_var` follows it, and a variable's
+        // reference to what it refers to; one that points at a reference,
+        // and a temporary that is one, are the handler's.
+        let read = Read::sampled(sample)?;
+        let check = match (read, temporary) {
+            (Read::InPlace, _) => None,
+            (Read::Indirect, true) => Some(Check::Indirect { value, tag }),
+            (Read::Through, false) => Some(Check::Deref { value, tag }),
+            (Read::Indirect | Read::Through, _) => return None,
+        };
+        if let Some(check) = check {
             self.guards.push(Placed { check, ..before });
             return Some((Types::of_tag(tag), read));
         }
@@ -2203,9 +2206,7 @@ impl<'a> Builder<'a> {
             | Opcode::AssignDimOp
             | Opcode::FetchDimW
             | Opcode::FetchDimRw => dim_inline((op, data), seen.types, seen.read[0], code),
-            Opcode::FeResetR | Opcode::FeFetchR => {
-                iterated(op, t1, seen.read[0] != Read::InPlace, branch)
-            }
+            Opcode::FeResetR | Opcode::FeFetchR => iterated(op, t1, seen.read[0], branch),
             // php's `zend_jit_send_val` and `zend_jit_send_var`, a value
             // no scalar moved into the call's slot from a temporary, copied
             // with an owner more from a variable, or as it is from a
@@ -2214,7 +2215,7 @@ impl<'a> Builder<'a> {
                 op.op2_type == OperandKind::Unused
                     && (scalar(t1) || copied(op.op1_type, op.op1, t1))
             }
-            Opcode::TypeCheck => type_checked(op, t1, seen.read[0] != Read::InPlace),
+            Opcode::TypeCheck => type_checked(op, t1, seen.read[0]),
             // A check of an argument the trace knows the callee takes by
             // value, php's `zend_jit_check_func_arg` (`:9925-9960`).
             Opcode::CheckFuncArg => {
@@ -3422,16 +3423,18 @@ fn sent_by_value(params: &[Parameter], n: u32) -> bool {
 /// Whether a `TYPE_CHECK` is compiled inline, php's `zend_jit_type_check`
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:8162-8330`), over a value the trace
 /// reads as it stands: a temporary, which is never a reference, or a
-/// variable that is neither a reference, `referenced` or of a type that
+/// variable that is neither a reference, read in place by `read1`, nor of a type that
 /// may be one, nor unset, which would warn. `is_resource()`, which asks
 /// whether the resource is closed, is the handler's, as php's code
 /// generator leaves it to it (`Z/ext/opcache/jit/zend_jit_trace.c:5536-5540`).
-fn type_checked(op: &Opline, t1: Types, referenced: bool) -> bool {
+fn type_checked(op: &Opline, t1: Types, read1: Read) -> bool {
     op.extended_value & MAY_BE_RESOURCE == 0
         && match op.op1_type {
             OperandKind::Tmp => true,
             OperandKind::Cv | OperandKind::Var => {
-                !referenced && t1.kinds() != Types::NONE && !t1.meets(Types::REF.or(Types::UNDEF))
+                read1 == Read::InPlace
+                    && t1.kinds() != Types::NONE
+                    && !t1.meets(Types::REF.or(Types::UNDEF))
             }
             OperandKind::Const | OperandKind::Unused => false,
         }
@@ -3528,7 +3531,7 @@ fn copied_whole(kind: OperandKind, field: u32, t: Types, code: &OpArray) -> bool
 }
 
 /// Whether a `foreach`'s reset or fetch is compiled inline over `t1`,
-/// what it sees of its array, `referenced` where it sees it through a
+/// what it sees of its array, read in place by `read1` or through a
 /// reference, the record having gone `branch`: php's `zend_jit_fe_reset`
 /// over an array no constant holds, which goes on whether the array holds
 /// anything or not, as the handler does
@@ -3537,10 +3540,12 @@ fn copied_whole(kind: OperandKind, field: u32, t: Types, code: &OpArray) -> bool
 /// variable, where the loop goes on, the end its exit (`:13800-14120`).
 /// Where the record ended the loop, php serves the fetch as it is, and so
 /// does the step.
-fn iterated(op: &Opline, t1: Types, referenced: bool, branch: Option<bool>) -> bool {
+fn iterated(op: &Opline, t1: Types, read1: Read, branch: Option<bool>) -> bool {
     match op.opcode {
         Opcode::FeResetR => {
-            op.op1_type != OperandKind::Const && t1.tag() == Some(ZvalType::Array) && !referenced
+            op.op1_type != OperandKind::Const
+                && t1.tag() == Some(ZvalType::Array)
+                && read1 == Read::InPlace
         }
         Opcode::FeFetchR => {
             op.op1_type == OperandKind::Var

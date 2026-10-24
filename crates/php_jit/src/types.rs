@@ -497,9 +497,12 @@ pub(crate) enum Check {
     Deref { value: ValueId, tag: ZvalType },
     /// The `VAR` holds the address of a zval, `IS_INDIRECT`, as a fetch
     /// for writing leaves it, and that zval is of this type, php's
-    /// `zend_jit_fetch_indirect_var`: the `VAR`'s own type is tested where
-    /// its value may be other than [`Types::INDIRECT`], php's
-    /// `add_indirect_guard`, and the exit goes back to the opline.
+    /// `zend_jit_fetch_indirect_var` (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`):
+    /// the `VAR`'s own type is tested where its value may be other than
+    /// [`Types::INDIRECT`], where php's `add_indirect_guard` is set, the
+    /// `indirect_reference` mark past an inline fetch for writing clear
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:5951`), a type here; the exit
+    /// goes back to the opline.
     Indirect { value: ValueId, tag: ZvalType },
     /// The array is laid out so, held in the slot or through the
     /// reference the slot holds: php's packed guard.
@@ -651,6 +654,20 @@ pub(crate) enum Read {
     InPlace,
     Through,
     Indirect,
+}
+
+impl Read {
+    /// How the recorder reached the zval it sampled: through an
+    /// `IS_INDIRECT`, through an `IS_REFERENCE`, or in place; none for
+    /// both, a slot that points at a reference.
+    pub(crate) fn sampled(sample: php_engine::tier::Sample) -> Option<Read> {
+        match (sample.indirect, sample.reference) {
+            (false, false) => Some(Read::InPlace),
+            (false, true) => Some(Read::Through),
+            (true, false) => Some(Read::Indirect),
+            (true, true) => None,
+        }
+    }
 }
 
 /// What the trampoline does at an exit before the interpreter goes on

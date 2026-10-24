@@ -615,6 +615,15 @@ impl Onward {
     }
 }
 
+/// How a value given up is given up: as php's `zval_ptr_dtor`, which
+/// buffers a possible root where other owners stand, or as
+/// `zval_ptr_dtor_nogc`, a temporary's `FREE_OP`, which never does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dtor {
+    Gc,
+    Nogc,
+}
+
 /// One trace's function as it is built.
 struct Emit<'a> {
     ir: &'a TraceIr,
@@ -2207,7 +2216,7 @@ impl<'a> Emit<'a> {
             self.copy_operand(line.frame, line.op2, into)?;
         }
         if let Some((word, info)) = old {
-            self.release(line, word, info)?;
+            self.release(line, word, info, Dtor::Gc)?;
         }
         Ok(())
     }
@@ -2422,7 +2431,7 @@ impl<'a> Emit<'a> {
         self.divert_if(reference, handled);
         let word = self.b.ins().load(I64, trusted(), zval, 0);
         self.written(line, zval, value)?;
-        self.release(line, word, old)?;
+        self.release(line, word, old, Dtor::Gc)?;
         self.b.ins().jump(done, &[]);
         Ok(())
     }
@@ -2539,12 +2548,20 @@ impl<'a> Emit<'a> {
     /// 187 [7,8,100]
     /// ```
     fn array_of(&mut self, slot: Slot, read: Read) -> Result<Value, Abort> {
+        let (base, at) = self.zval_of(slot, read)?;
+        Ok(self.b.ins().load(I64, trusted(), base, at))
+    }
+
+    /// Where the zval `slot` holds, read so, is: the slot itself, the
+    /// value of the reference it holds, or the zval its indirect `VAR`
+    /// points at.
+    pub(super) fn zval_of(&mut self, slot: Slot, read: Read) -> Result<(Value, i32), Abort> {
         let (room, at) = self.place(slot)?;
-        let held = self.b.ins().load(I64, trusted(), room, at);
+        let mut to = || self.b.ins().load(I64, trusted(), room, at);
         Ok(match read {
-            Read::InPlace => held,
-            Read::Through => self.b.ins().load(I64, trusted(), held, imm(Ref::VALUE_AT)),
-            Read::Indirect => self.b.ins().load(I64, trusted(), held, 0),
+            Read::InPlace => (room, at),
+            Read::Through => (to(), imm(Ref::VALUE_AT)),
+            Read::Indirect => (to(), 0),
         })
     }
 
@@ -2795,7 +2812,7 @@ impl<'a> Emit<'a> {
         let element = self.deref(element);
         let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
         self.copy(element, info, target)?;
-        self.release(line, old_word, old_info)?;
+        self.release(line, old_word, old_info, Dtor::Gc)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(handled);
         self.b.seal_block(handled);
@@ -2830,7 +2847,9 @@ impl<'a> Emit<'a> {
 
     /// `FREE_OP` of `operand` where it is a temporary, as the handler
     /// takes it: what it holds out of its slot, which is left `UNDEF`,
-    /// then its owner given up as [`Emit::release`] gives it up, what a
+    /// then its owner given up as [`Emit::release`] gives it up under
+    /// [`Dtor::Nogc`], as the handler's `FREE_OP` and php's `jit_FREE_OP`
+    /// give it up (`Z/ext/opcache/jit/zend_jit_ir.c:1905-1915`), what a
     /// destructor throws leaving through the opline's unwind. A
     /// `foreach`'s array freed at its loop's end is this, php's
     /// `zend_jit_free` of `FE_FREE` over an array, which holds no iterator
@@ -2854,7 +2873,7 @@ impl<'a> Emit<'a> {
         let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
         self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
         let word = self.b.ins().load(I64, trusted(), room, at);
-        self.release(line, word, info)
+        self.release(line, word, info, Dtor::Nogc)
     }
 
     /// What a slot held, `word` and its type word `info`, given up after
@@ -2865,7 +2884,9 @@ impl<'a> Emit<'a> {
     /// it (`GC_MAY_LEAK`'s bits, [`Zval::LEAK_BITS`]), as a string's;
     /// the last owner, a value the collector may take and a reference,
     /// whose value it looks through to, through the release kernel, a
-    /// destructor's throw leaving through the opline's unwind. A string
+    /// destructor's throw leaving through the opline's unwind; under
+    /// [`Dtor::Nogc`] the last owner alone, as `zval_ptr_dtor_nogc` buffers
+    /// no possible root. A string
     /// two variables hold, one of them written over, and an object whose
     /// last owner an assignment gives up, its destructor called there:
     ///
@@ -2888,13 +2909,13 @@ impl<'a> Emit<'a> {
     /// ```expect regime=jit-exit-fuzz process
     /// 012345abab
     /// ```
-    fn release(&mut self, line: &Line, word: Value, info: Value) -> Result<(), Abort> {
+    fn release(&mut self, line: &Line, word: Value, info: Value, dtor: Dtor) -> Result<(), Abort> {
         let counted = self.b.ins().band_imm_u(info, COUNTED);
         let [room, opline] = self.served(line)?;
         self.when(counted, |emit| {
             let count_at = imm(Zval::COUNT_AT);
             let count = emit.b.ins().load(I32, trusted(), word, count_at);
-            let called = emit.kernel_releases(word, info, count);
+            let called = emit.kernel_releases(word, info, count, dtor);
             let (kernel, inline, done) = (
                 emit.b.create_block(),
                 emit.b.create_block(),
@@ -2929,12 +2950,15 @@ impl<'a> Emit<'a> {
     /// and a value the collector may take as a possible root, whose
     /// `GC_TYPE_INFO` holds no bit of php's `GC_MAY_LEAK` mask
     /// ([`Zval::LEAK_BITS`]). Otherwise a `GC_DELREF` inline gives it up.
-    fn kernel_releases(&mut self, word: Value, info: Value, count: Value) -> Value {
+    fn kernel_releases(&mut self, word: Value, info: Value, count: Value, dtor: Dtor) -> Value {
         let owners = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
         let last = self
             .b
             .ins()
             .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, owners, 1);
+        if dtor == Dtor::Nogc {
+            return last;
+        }
         let kind = self.b.ins().band_imm_u(info, KIND);
         let reference = self
             .b

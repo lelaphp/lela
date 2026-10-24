@@ -9,7 +9,7 @@ use php_unit::decl::{Parameter, Type};
 use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
-use super::{Constant, Frame, Imm, Layout, Line, Slot};
+use super::{Constant, Frame, Imm, Layout, Line, Read, Slot};
 
 /// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
 pub(super) const MAX_ARG_FLAG_NUM: u32 = 12;
@@ -198,7 +198,12 @@ pub(super) fn assigned(t: Types) -> Types {
 
 /// What an opline writes to its `out` slot, php's `zend_update_type_info`
 /// for the scalar core and anything past it.
-pub(super) fn out_types(op: &Opline, t1: Types, t2: Types, td: Types, code: &OpArray) -> Types {
+pub(super) fn out_types(
+    op: &Opline,
+    [t1, t2, td]: [Types; 3],
+    read1: Read,
+    code: &OpArray,
+) -> Types {
     match op.opcode {
         Opcode::Add
         | Opcode::Sub
@@ -250,10 +255,19 @@ pub(super) fn out_types(op: &Opline, t1: Types, t2: Types, td: Types, code: &OpA
         Opcode::Cast => cast(op.extended_value),
         Opcode::FeFetchR | Opcode::FeFetchRw => fetched_key(t1),
         // The element's address, which the handler lays down for any key
-        // the lookups take, warning of none: php's `MAY_BE_INDIRECT`. A
-        // `FETCH_DIM_RW`'s warning may reach an error handler that frees
-        // the array, and the `VAR` is then an error.
-        Opcode::FetchDimW if t1.tag() == Some(ZvalType::Array) && keyed(op, t2) => Types::INDIRECT,
+        // the lookups take, warning of none, in a variable's array or the
+        // one an indirect `VAR` points at: php's `MAY_BE_INDIRECT`, its
+        // `indirect_reference`. A `VAR` that holds an array of its own
+        // takes a copy of the element, and a `FETCH_DIM_RW`'s warning may
+        // reach an error handler that frees the array, the `VAR` then an
+        // error.
+        Opcode::FetchDimW
+            if t1.tag() == Some(ZvalType::Array)
+                && keyed(op, t2)
+                && (op.op1_type == OperandKind::Cv || read1 == Read::Indirect) =>
+        {
+            Types::INDIRECT
+        }
         _ => Types::UNKNOWN.without(Types::UNDEF),
     }
 }

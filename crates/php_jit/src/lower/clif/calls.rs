@@ -26,8 +26,8 @@ use php_engine::tier::{FRAME, FrameLayout, PlainCall};
 use php_heap::{Zval, ZvalType};
 
 use super::{
-    COUNTED, Emit, Kernel, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM, Scalar,
-    imm, leave_of, mismatch, trusted,
+    COUNTED, Dtor, Emit, Kernel, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
+    Scalar, imm, leave_of, mismatch, trusted,
 };
 use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, THREW};
 use crate::types::{Abort, End, ExitId, Frame, Imm, Line, OpId, Operand, Owners, Returned, Vars};
@@ -712,7 +712,7 @@ impl Emit<'_> {
                 .store(trusted(), undef, room, slot + super::TYPE_AT);
             let word = self.b.ins().load(I64, trusted(), room, slot);
             let count = self.b.ins().load(I32, trusted(), word, COUNT_AT);
-            let called = self.kernel_releases(word, info, count);
+            let called = self.kernel_releases(word, info, count, Dtor::Gc);
             let inline = self.b.create_block();
             self.b.ins().brif(called, kernel, &[], inline, &[]);
             self.b.switch_to_block(inline);

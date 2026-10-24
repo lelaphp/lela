@@ -11,7 +11,7 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{Block, BlockArg, InstBuilder, StackSlot, Value};
-use php_heap::{Arr, Ref, ZvalType};
+use php_heap::{Arr, ZvalType};
 use php_unit::Opcode;
 
 use super::{COUNTED, Emit, KIND, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
@@ -72,7 +72,8 @@ impl Emit<'_> {
     /// place, any other element through [`Kernel::Find`], the element set
     /// where it is found and, a reference followed, more than `null`
     /// (`Z_TYPE_P(value) > IS_NULL`); a temporary freed, as php's
-    /// `jit_FREE_OP` frees it before the jump; the answer written, or the
+    /// `jit_FREE_OP` frees it before the jump (`:13294`, `:13326`); the
+    /// answer written, or the
     /// jump fused to it held. It leaves for nothing but the way its jump
     /// goes. [`Emit::fetch_is`]'s witnesses test an element of a
     /// temporary. A packed and a hashed array, read by longs and
@@ -121,6 +122,50 @@ impl Emit<'_> {
     /// ```
     /// ```expect regime=jit-exit-fuzz process
     /// [7,77,"[false,false,true,false,false,false,false,true,false,false,false,false]"]
+    /// ```
+    ///
+    /// The temporary a magic `__get` made freed before the jump, its last
+    /// owner, whose element's destructor writes the variable a reference
+    /// reaches and a global array, which the trace reads again where it
+    /// reads them next, under force and where every guard fails once
+    /// (`jit-design.md` §4.2, revision 83):
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { global $g; $g = $this->n; $GLOBALS['l'][0] = $this->n; } }
+    /// class M { function __isset($p) { return true; } function __get($p) { static $c = 0; return ['k' => new D(++$c)]; } }
+    /// function f(&$r, $o, $n) {
+    ///     global $l; $s = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $r = 0; $l = [1];
+    ///         if (isset($o->a['k'])) { $s += 100; }
+    ///         $s += $r + $l[0];
+    ///     }
+    ///     return $s;
+    /// }
+    /// $g = 0; $l = [];
+    /// echo f($g, new M, 30), " ", $g, "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 3930 30
+    /// ```
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { global $g; $g = $this->n; $GLOBALS['l'][0] = $this->n; } }
+    /// class M { function __isset($p) { return true; } function __get($p) { static $c = 0; return ['k' => new D(++$c)]; } }
+    /// function f(&$r, $o, $n) {
+    ///     global $l; $s = 0;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $r = 0; $l = [1];
+    ///         if (isset($o->a['k'])) { $s += 100; }
+    ///         $s += $r + $l[0];
+    ///     }
+    ///     return $s;
+    /// }
+    /// $g = 0; $l = [];
+    /// echo f($g, new M, 30), " ", $g, "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 3930 30
     /// ```
     pub(super) fn isset_dim(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let answered = self.b.create_block();
@@ -446,14 +491,13 @@ impl Emit<'_> {
     /// from a constant ([`Emit::copy_operand`]), and what the element held
     /// given up after ([`Emit::release`]), a destructor's throw leaving
     /// through the opline's unwind; through the handler otherwise, where
-    /// php's code copies the array or looks a packed array's hole up, so
-    /// the write takes no exit.
+    /// php's code copies the array, so the write takes no exit.
     ///
-    /// An immutable array, one shared, a key past `nNumUsed`, a hole, an
-    /// element that is a reference and an array turned hash are each served
-    /// by the handler, in place of the write, and a counted element given
-    /// up in place, its destructor called there, and the loop goes on in
-    /// the trace:
+    /// An immutable array, one shared and an element that is a reference
+    /// are each served by the handler, in place of the write, a key past
+    /// `nNumUsed`, a hole and an array turned hash by [`Kernel::Lookup`],
+    /// and a counted element given up in place, its destructor called
+    /// there, and the loop goes on in the trace:
     ///
     /// ```php
     /// class D { function __destruct() { echo "freed\n"; } }
@@ -640,10 +684,11 @@ impl Emit<'_> {
     /// (`zend_jit_fetch_dimension_address_inner`'s `BP_VAR_W` and
     /// `BP_VAR_RW` paths, `Z/ext/opcache/jit/zend_jit_ir.c:11953-12276`),
     /// each layout's path to a write of its own where the array may be
-    /// either, as php's code merges none before it writes; to `handled`
-    /// otherwise, where php's code calls the array's copy, a packed
-    /// array's lookup or the warning of a key a compound write does not
-    /// find.
+    /// either, as php's code merges none before it writes, a packed
+    /// array's slot a write has not got through [`Kernel::Lookup`] too, as
+    /// php's code calls `zend_hash_index_lookup` for it; to `handled`
+    /// otherwise, where php's code calls the array's copy or the warning
+    /// of a key a compound write does not find.
     ///
     /// A compound write to a key the array has not got is its handler's,
     /// whose warning reaches an error handler that frees the array the reference
@@ -755,44 +800,54 @@ impl Emit<'_> {
             .load(I32, trusted(), arr, imm(Arr::REFCOUNT_AT));
         let shared = self.b.ins().icmp_imm_s(IntCC::NotEqual, count, 1);
         self.divert_if(shared, handled);
-        match reach {
-            Reach::Slot => {
-                let (element, old) = self.slot_written(arr, long(key)?, handled);
-                then(self, element, old)
-            }
-            Reach::Table => {
-                let (element, old) = self.table_written(line, (arr, kernel), key, handled)?;
-                then(self, element, old)
-            }
-            Reach::Either => {
-                // The packed slot first, as php's code lays it, and the
-                // table's arm cold, as it calls a kernel: the slot's path
-                // falls through, the branch's other way laid out next.
-                let index = long(key)?;
-                let (slot, table) = (self.b.create_block(), self.b.create_block());
-                self.b.set_cold_block(table);
-                let flags = self.b.ins().load(I32, trusted(), arr, imm(Arr::FLAGS_AT));
-                let packed = self.b.ins().band_imm_u(flags, i64::from(Arr::PACKED));
-                let hashed = self.b.ins().icmp_imm_s(IntCC::Equal, packed, 0);
-                self.b.ins().brif(hashed, table, &[], slot, &[]);
-                self.b.switch_to_block(slot);
-                self.b.seal_block(slot);
-                let (element, old) = self.slot_written(arr, index, handled);
-                then(self, element, old)?;
-                self.b.switch_to_block(table);
-                self.b.seal_block(table);
-                let (element, old) = self.table_written(line, (arr, kernel), key, handled)?;
-                then(self, element, old)
-            }
+        if reach == Reach::Table {
+            let (element, old) = self.table_written(line, (arr, kernel), key, handled)?;
+            return then(self, element, old);
         }
+        // The packed slot first, as php's code lays it, and the table's
+        // arm cold, as it calls a kernel: the slot's path falls through.
+        // The table's arm serves a hash where the array may be either, and
+        // a write's slot the packed array has not got, past `nNumUsed` or a
+        // hole, which php's code looks up with `zend_hash_index_lookup`
+        // (`Z/ext/opcache/jit/zend_jit_ir.c:12261-12285`); a compound
+        // write's is the handler's, which warns.
+        let index = long(key)?;
+        let table = (reach == Reach::Either || kernel == Kernel::Lookup).then(|| {
+            let table = self.b.create_block();
+            self.b.set_cold_block(table);
+            table
+        });
+        if reach == Reach::Either {
+            let (slot, table) = (self.b.create_block(), table.unwrap_or(handled));
+            let flags = self.b.ins().load(I32, trusted(), arr, imm(Arr::FLAGS_AT));
+            let packed = self.b.ins().band_imm_u(flags, i64::from(Arr::PACKED));
+            let hashed = self.b.ins().icmp_imm_s(IntCC::Equal, packed, 0);
+            self.b.ins().brif(hashed, table, &[], slot, &[]);
+            self.b.switch_to_block(slot);
+            self.b.seal_block(slot);
+        }
+        let missed = if kernel == Kernel::Lookup {
+            table.unwrap_or(handled)
+        } else {
+            handled
+        };
+        let (element, old) = self.slot_written(arr, index, missed);
+        then(self, element, old)?;
+        let Some(table) = table else {
+            return Ok(());
+        };
+        self.b.switch_to_block(table);
+        self.b.seal_block(table);
+        let (element, old) = self.table_written(line, (arr, kernel), key, handled)?;
+        then(self, element, old)
     }
 
     /// The slot of the packed array `arr` that the long `key` names, and
     /// its type word, where it is below `nNumUsed` and holds a value; to
-    /// `handled` otherwise.
-    fn slot_written(&mut self, arr: Value, key: Value, handled: Block) -> (Value, Value) {
+    /// `missed` otherwise.
+    fn slot_written(&mut self, arr: Value, key: Value, missed: Block) -> (Value, Value) {
         let past = self.past_used(arr, key);
-        self.divert_if(past, handled);
+        self.divert_if(past, missed);
         let element = self.slot_at(arr, key);
         let old = self.b.ins().load(I32, trusted(), element, TYPE_AT);
         let kind = self.b.ins().band_imm_u(old, KIND);
@@ -800,7 +855,7 @@ impl Emit<'_> {
             .b
             .ins()
             .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
-        self.divert_if(hole, handled);
+        self.divert_if(hole, missed);
         (element, old)
     }
 
@@ -975,9 +1030,11 @@ impl Emit<'_> {
     /// the array, for a write to its element at the op at `at`: the
     /// variable's own, of the layout its guard held, the one the
     /// reference it holds refers to, as php's
-    /// `zend_jit_prepare_array_update` follows it, or the one the
+    /// `zend_jit_prepare_array_update` follows it
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:5084-5096`), or the one the
     /// indirect `VAR` points at, as php's `zend_jit_fetch_indirect_var`
-    /// follows it, each of either layout.
+    /// follows it (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`), each of
+    /// either layout.
     ///
     /// Elements written, compounded and fetched for writing through the
     /// `VAR` a fetch for writing left indirect: an inner array copied
@@ -1023,32 +1080,29 @@ impl Emit<'_> {
     /// ```
     fn written_array(&mut self, at: OpId, array: ValueId) -> Result<((Value, i32), Types), Abort> {
         let held = self.value(array)?;
-        let (room, array_at) = self.place(held.slot)?;
         let read = self.read_of(at, array);
-        if read == Read::InPlace {
-            return Ok(((room, array_at), held.types));
-        }
-        let to = self.b.ins().load(I64, trusted(), room, array_at);
-        let zval_at = if read == Read::Through {
-            imm(Ref::VALUE_AT)
-        } else {
-            0
+        let zval = self.zval_of(held.slot, read)?;
+        let types = match read {
+            Read::InPlace => held.types,
+            Read::Through | Read::Indirect => Types::of_tag(ZvalType::Array),
         };
-        Ok(((to, zval_at), Types::of_tag(ZvalType::Array)))
+        Ok((zval, types))
     }
 
     /// A fetch of an array's element for writing, `FETCH_DIM_W` and
     /// `FETCH_DIM_RW`, as php's `zend_jit_fetch_dim` compiles it over an
-    /// array a variable holds, or the reference it holds refers to, by a
-    /// key the lookups take (`Z/ext/opcache/jit/zend_jit_ir.c:12982-13155`):
-    /// the element's place, `IS_INDIRECT`, written to the fetch's `VAR`,
+    /// array a variable holds, the reference it holds refers to or the
+    /// indirect `VAR` a fetch before it left points at, by a key the
+    /// lookups take (`Z/ext/opcache/jit/zend_jit_ir.c:12982-13155`): the
+    /// element's place, `IS_INDIRECT`, written to the fetch's `VAR`,
     /// where the write reaches it in place ([`Emit::written_in_place`]),
     /// [`Kernel::Lookup`] laying a `null` down for `_W` where the key is
     /// not there; the handler's otherwise, the array's copy, a packed
-    /// array's hole and the warning `_RW` raises over a key the array has
-    /// not got. What reads the `VAR` after is its handler's, as php's
-    /// code calls the handler of an opline over a `VAR` its fetch left
-    /// indirect.
+    /// array's hole `_RW` reads and the warning it raises over a key the
+    /// array has not got. A write, a compound write and a fetch for
+    /// writing over the `VAR` follow it ([`Emit::written_array`]); an
+    /// increment over it is its handler's, as php's code calls the handler
+    /// of an increment over a `VAR` its fetch left indirect.
     ///
     /// Elements of a hash and of a packed array written through a fetch,
     /// a nested array laid down, an element incremented, a key the array
