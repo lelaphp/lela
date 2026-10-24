@@ -673,12 +673,16 @@ fn concat(
     b_info: u32,
     kinds: u32,
 ) -> Result<Zval, Fatal> {
-    let kind = |byte: u32| match byte & 0xff {
-        1 => Ok(OperandKind::Const),
-        2 => Ok(OperandKind::Tmp),
-        4 => Ok(OperandKind::Var),
-        8 => Ok(OperandKind::Cv),
-        _ => Err(internal("a side of a concatenation of no operand kind")),
+    let kind = |byte: u32| {
+        [
+            OperandKind::Const,
+            OperandKind::Tmp,
+            OperandKind::Var,
+            OperandKind::Cv,
+        ]
+        .into_iter()
+        .find(|kind| u32::from(*kind as u8) == byte & 0xff)
+        .ok_or_else(|| internal("a side of a concatenation of no operand kind"))
     };
     let left = (zval(a, a_info), kind(kinds)?);
     let right = (zval(b, b_info), kind(kinds >> 8)?);

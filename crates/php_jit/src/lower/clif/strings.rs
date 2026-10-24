@@ -1,11 +1,14 @@
 //! The string oplines compiled inline, as php's code generator compiles
 //! them: a strict comparison where a string is one side
 //! (`zend_jit_identical`, `Z/ext/opcache/jit/zend_jit_ir.c:7292-7532`), a
-//! string's length (`zend_jit_strlen`, `:11623-11660`), a boolean cast
-//! (`zend_jit_bool_jmpznz`, `:7533-7800`) and the free of a `foreach`'s
-//! array (`zend_jit_free`, `:11543-11580`). A string is read through
+//! string's length (`zend_jit_strlen`, `:11623-11660`), a concatenation of
+//! two strings (`zend_jit_concat`, `:6016-6118`), a rope's string pieces
+//! (`zend_jit_rope`, `:11753-11799`) and `.=` of two strings
+//! (`zend_jit_assign_op`, `:6120-6290`). A string is read through
 //! [`Str::LEN_AT`] alone; its bytes are compared by
-//! [`Kernel::Identical`], where php calls `zend_is_identical`.
+//! [`Kernel::Identical`], where php calls `zend_is_identical`, and joined
+//! by the kernels over the engine's own rules, where php calls its helpers
+//! (`Kernel::Concat`, `RopeInit`, `RopeAdd`, `RopeEnd`, `AssignConcat`).
 
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
@@ -14,9 +17,9 @@ use php_engine::tier::FRAME;
 use php_heap::{Str, ZvalType};
 use php_unit::{Opcode, OperandKind};
 
-use super::{Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, slot_offset, tag, trusted};
+use super::{Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::types::{
-    Abort, Check, Constant, Frame, Fused, GuardAt, Home, Leave, Line, OpId, Operand, Slot,
+    Abort, Check, Constant, Frame, Fused, GuardAt, Home, Leave, Line, OpId, Operand,
 };
 
 /// Where a string's length is, `ZSTR_LEN`.
@@ -44,27 +47,6 @@ impl Emit<'_> {
                 .or_else(|| self.value(value).ok().and_then(|held| held.types.tag())),
         };
         tag == Some(ZvalType::String)
-    }
-
-    /// The pointer word of the string `operand` names, of `frame`: its
-    /// slot's word, or the word of its zval among the op array's
-    /// constants.
-    fn string_word(&mut self, frame: Frame, operand: Operand) -> Result<Value, Abort> {
-        match operand {
-            Operand::Value(value) => {
-                let held = self.value(value)?;
-                if held.home == Home::Register {
-                    return Err(mismatch("a string held in a register"));
-                }
-                let (room, at) = self.place(held.slot)?;
-                Ok(self.b.ins().load(I64, trusted(), room, at))
-            }
-            Operand::Constant(Constant::Other(idx)) => {
-                let zval = self.constant_zval(frame, idx)?;
-                Ok(self.b.ins().load(I64, trusted(), zval, 0))
-            }
-            _ => Err(mismatch("a string read from a scalar")),
-        }
     }
 
     /// A strict comparison where one side is a string, as php's
@@ -128,7 +110,7 @@ impl Emit<'_> {
             self.free_temp(line, operand)?;
         }
         Ok(match line.opcode {
-            php_unit::Opcode::IsNotIdentical => self.b.ins().icmp_imm_s(IntCC::Equal, same, 0),
+            Opcode::IsNotIdentical => self.b.ins().icmp_imm_s(IntCC::Equal, same, 0),
             _ => same,
         })
     }
@@ -223,76 +205,51 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// A cast of a scalar to a boolean, its truth, or its negation for
-    /// `!`, as php's `zend_jit_bool_jmpznz` writes it.
-    pub(super) fn bool(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let held = self.scalar(at, line.op1)?;
-        let truth = self.truth(held);
-        let truth = match line.opcode {
-            php_unit::Opcode::BoolNot => self.b.ins().icmp_imm_s(IntCC::Equal, truth, 0),
-            _ => truth,
-        };
-        if let Some(out) = line.out {
-            self.define(out, Scalar::Bool(truth))?;
-        }
-        Ok(())
-    }
-
-    /// `FREE_OP` of `operand` where it is a temporary, as the handler
-    /// takes it: what it holds out of its slot, which is left `UNDEF`,
-    /// then its owner given up as [`Emit::release`] gives it up, what a
-    /// destructor throws leaving through the opline's unwind. A `foreach`'s array freed at its loop's end is this,
-    /// php's `zend_jit_free` of `FE_FREE` over an array, which holds no
-    /// iterator to delete.
-    pub(super) fn free_temp(&mut self, line: &Line, operand: Operand) -> Result<(), Abort> {
-        let Operand::Value(value) = operand else {
-            return Ok(());
-        };
-        let held = self.value(value)?;
-        if held.home == Home::Register || held.slot.var < self.frame_cvs(held.slot.frame)? {
-            return Ok(());
-        }
-        self.free_slot(line, held.slot)
-    }
-
-    /// The temporary `slot` freed as [`Emit::free_temp`] frees it.
-    pub(super) fn free_slot(&mut self, line: &Line, slot: Slot) -> Result<(), Abort> {
-        let room = self.room(slot.frame)?;
-        let at = slot_offset(slot.var)?;
-        let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
-        let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
-        self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
-        let word = self.b.ins().load(I64, trusted(), room, at);
-        self.release(line, word, info)
-    }
-
     /// The string `operand` of `frame` names, its two words, with an owner
     /// to hand on, as the handler's string arm of a rope takes a piece: a
     /// temporary's moved, its slot left `UNDEF`; a variable's or a
     /// constant's with one owner more, `zend_string_copy`.
     fn owned_string(&mut self, frame: Frame, operand: Operand) -> Result<(Value, Value), Abort> {
-        let (base, at, temporary) = match operand {
-            Operand::Value(value) => {
-                let held = self.value(value)?;
-                if held.home == Home::Register {
-                    return Err(mismatch("a string held in a register"));
-                }
-                let (room, at) = self.place(held.slot)?;
-                let temporary = held.slot.var >= self.frame_cvs(held.slot.frame)?;
-                (room, at, temporary)
-            }
-            Operand::Constant(Constant::Other(idx)) => (self.constant_zval(frame, idx)?, 0, false),
-            _ => return Err(mismatch("a string read from a scalar")),
-        };
+        let (base, at) = self.zval_place(frame, operand)?;
         let word = self.b.ins().load(I64, trusted(), base, at);
         let info = self.b.ins().load(I32, trusted(), base, at + TYPE_AT);
-        if temporary {
+        if self.kind_of(operand)? == OperandKind::Tmp {
             let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
             self.b.ins().store(trusted(), undef, base, at + TYPE_AT);
         } else {
             self.addref(word, info)?;
         }
         Ok((word, info))
+    }
+
+    /// Where the zval `operand` of `frame` names is: its slot, or its
+    /// constant among the op array's.
+    fn zval_place(&mut self, frame: Frame, operand: Operand) -> Result<(Value, i32), Abort> {
+        match operand {
+            Operand::Value(value) => {
+                let held = self.value(value)?;
+                if held.home == Home::Register {
+                    return Err(mismatch("a string held in a register"));
+                }
+                self.place(held.slot)
+            }
+            Operand::Constant(Constant::Other(idx)) => Ok((self.constant_zval(frame, idx)?, 0)),
+            _ => Err(mismatch("a string read from a scalar")),
+        }
+    }
+
+    /// The two words of the zval `operand` of `frame` names, as it stands.
+    fn zval_words(&mut self, frame: Frame, operand: Operand) -> Result<(Value, Value), Abort> {
+        let (base, at) = self.zval_place(frame, operand)?;
+        let word = self.b.ins().load(I64, trusted(), base, at);
+        let info = self.b.ins().load(I32, trusted(), base, at + TYPE_AT);
+        Ok((word, info))
+    }
+
+    /// The pointer word of the string `operand` of `frame` names.
+    fn string_word(&mut self, frame: Frame, operand: Operand) -> Result<Value, Abort> {
+        let (base, at) = self.zval_place(frame, operand)?;
+        Ok(self.b.ins().load(I64, trusted(), base, at))
     }
 
     /// `EX(opline) = opline`, php's `SAVE_OPLINE()`, written in place
@@ -465,22 +422,7 @@ impl Emit<'_> {
             return Err(mismatch("a .= onto no variable"));
         };
         let var = self.value(target)?.slot.var;
-        let (word, info) = match line.op2 {
-            Operand::Value(value) => {
-                let held = self.value(value)?;
-                let (room, at) = self.place(held.slot)?;
-                let word = self.b.ins().load(I64, trusted(), room, at);
-                let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
-                (word, info)
-            }
-            Operand::Constant(Constant::Other(idx)) => {
-                let zval = self.constant_zval(line.frame, idx)?;
-                let word = self.b.ins().load(I64, trusted(), zval, 0);
-                let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
-                (word, info)
-            }
-            _ => return Err(mismatch("a .= of a scalar")),
-        };
+        let (word, info) = self.zval_words(line.frame, line.op2)?;
         let [room, opline] = self.served(line)?;
         let var = self.b.ins().iconst(I32, i64::from(var));
         self.call_freeing(Kernel::AssignConcat, &[room, opline, var, word, info], line)
@@ -495,31 +437,7 @@ impl Emit<'_> {
     fn call_freeing(&mut self, kernel: Kernel, args: &[Value], line: &Line) -> Result<(), Abort> {
         let status = self.call_status(kernel, args)?;
         self.free_temp(line, line.op2)?;
-        let to = self.left_by(line.unwind.map(Leave::Unwind))?;
-        let on = self.b.create_block();
-        self.b.ins().brif(status, to, &[], on, &[]);
-        self.b.switch_to_block(on);
-        self.b.seal_block(on);
-        Ok(())
-    }
-
-    /// The two words of the zval `operand` of `frame` names, as it stands:
-    /// its slot's, or its constant's.
-    fn zval_words(&mut self, frame: Frame, operand: Operand) -> Result<(Value, Value), Abort> {
-        let (base, at) = match operand {
-            Operand::Value(value) => {
-                let held = self.value(value)?;
-                if held.home == Home::Register {
-                    return Err(mismatch("a string held in a register"));
-                }
-                self.place(held.slot)?
-            }
-            Operand::Constant(Constant::Other(idx)) => (self.constant_zval(frame, idx)?, 0),
-            _ => return Err(mismatch("a string read from a scalar")),
-        };
-        let word = self.b.ins().load(I64, trusted(), base, at);
-        let info = self.b.ins().load(I32, trusted(), base, at + TYPE_AT);
-        Ok((word, info))
+        self.left_unless(status, line.unwind.map(Leave::Unwind))
     }
 
     /// The `IS_*` of the slot or constant `operand` names, as the handler
@@ -527,11 +445,10 @@ impl Emit<'_> {
     fn kind_of(&self, operand: Operand) -> Result<OperandKind, Abort> {
         Ok(match operand {
             Operand::Value(value) => {
-                let slot = self.value(value)?.slot;
-                if slot.var < self.frame_cvs(slot.frame)? {
-                    OperandKind::Cv
-                } else {
+                if self.is_temporary(self.value(value)?.slot)? {
                     OperandKind::Tmp
+                } else {
+                    OperandKind::Cv
                 }
             }
             Operand::Constant(_) => OperandKind::Const,

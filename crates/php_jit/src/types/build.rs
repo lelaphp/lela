@@ -2081,8 +2081,8 @@ impl<'a> Builder<'a> {
         let packed = Types::ARRAY.laid_out(Layout::Packed);
         let code = self.meta(frame).code;
         let copied = |kind, field, t| copied_whole(kind, field, t, code);
-        if let Some(inline) = strung(op, seen) {
-            return if inline { Form::Inline } else { Form::Step };
+        if let Some(form) = strung(op, seen) {
+            return form;
         }
         let inline = match op.opcode {
             Opcode::Jmp => true,
@@ -3177,25 +3177,26 @@ struct Branched {
     held: Types,
 }
 
-/// Whether a strict comparison, a string's length, a boolean cast or a
-/// `foreach`'s free is compiled inline over what its operands are seen
-/// as, none for any other opline: two scalars, or a string beside a string or a scalar, as php's
+/// How a strict comparison, a string's length, a boolean cast, a
+/// `foreach`'s free, a concatenation, a rope's piece or `.=` is compiled
+/// over what its operands are seen as, none for any other opline. Inline:
+/// two scalars compared, or a string beside a string or a scalar, as php's
 /// `zend_jit_identical` compares them inline or calls `zend_is_identical`
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:7292-7532`); a string's length read
 /// in place, php's `zend_jit_strlen` (`:11623-11660`); a scalar's truth,
 /// php's `zend_jit_bool_jmpznz`, a double's the handler's as a jump's is;
-/// and an array, which holds no iterator to delete, given up as php's
+/// an array, which holds no iterator to delete, given up as php's
 /// `zend_jit_free` gives it up (`:11543-11580`); a rope's piece that is a
 /// string, which php's `zend_jit_rope` stores inline and joins through
 /// `zend_jit_rope_end` (`:11753-11799`); a concatenation of two strings,
 /// through php's `zend_jit_fast_concat_helper` (`zend_jit_concat`,
-/// `:6016-6118`); and `.=` of a string onto a
-/// variable's string, through php's `zend_jit_fast_assign_concat_helper`
-/// (`zend_jit_assign_op`, `:6120-6290`).
-fn strung(op: &Opline, seen: Seen) -> Option<bool> {
+/// `:6016-6118`); and `.=` of a string onto a variable's string, through
+/// php's `zend_jit_fast_assign_concat_helper` (`zend_jit_assign_op`,
+/// `:6120-6290`). Stepped otherwise.
+fn strung(op: &Opline, seen: Seen) -> Option<Form> {
     let [t1, t2, _] = seen.types;
     let string = |t: Types, at: usize| t == Types::STRING && !seen.referenced[at];
-    Some(match op.opcode {
+    let inline = match op.opcode {
         Opcode::IsIdentical | Opcode::IsNotIdentical => {
             (t1.scalar() && t2.scalar())
                 || (string(t1, 0) && (string(t2, 1) || t2.scalar()))
@@ -3213,7 +3214,8 @@ fn strung(op: &Opline, seen: Seen) -> Option<bool> {
                 && string(t2, 1)
         }
         _ => return None,
-    })
+    };
+    Some(if inline { Form::Inline } else { Form::Step })
 }
 
 /// The jump after `op` it is fused to, where it is a comparison whose

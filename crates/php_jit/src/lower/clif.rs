@@ -396,6 +396,31 @@ impl Onward {
     /// ```expect regime=jit-exit-fuzz process
     /// 135
     /// ```
+    ///
+    /// A handled concatenation whose `__toString` writes a variable through
+    /// the reference an object holds to it, which the loop reads after:
+    /// the handler serves user code with no `call` effect, and the trace
+    /// keeps no fact that code can change, as revision 83's analysis has
+    /// it (`jit-design.md` §4.2), a reference's inner type held at every
+    /// read:
+    ///
+    /// ```php
+    /// class S { public $r; function __toString(): string { $this->r = $this->r + 1; return "s"; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $c = "a" . $o; $t += $x; } return [$t, $x, $c]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [55,10,"as"]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $r; function __toString(): string { $this->r = $this->r + 1; return "s"; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $c = "a" . $o; $t += $x; } return [$t, $x, $c]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [55,10,"as"]
+    /// ```
     fn of(opcode: Opcode) -> Option<Onward> {
         match opcode {
             Opcode::InitArray
@@ -1309,6 +1334,12 @@ impl<'a> Emit<'a> {
     /// answering [`ABANDONED`] where the opline names no way to leave.
     fn call(&mut self, kernel: Kernel, args: &[Value], leave: Option<Leave>) -> Result<(), Abort> {
         let status = self.call_status(kernel, args)?;
+        self.left_unless(status, leave)
+    }
+
+    /// A kernel's `status` tested: on where it is `Continue`, leaving as
+    /// `leave` says otherwise ([`Emit::left_by`]).
+    fn left_unless(&mut self, status: Value, leave: Option<Leave>) -> Result<(), Abort> {
         let to = self.left_by(leave)?;
         let on = self.b.create_block();
         self.b.ins().brif(status, to, &[], on, &[]);
@@ -1400,7 +1431,7 @@ impl<'a> Emit<'a> {
         *self.answer.get_or_insert_with(|| {
             self.b.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                u32::try_from(size_of::<Zval>()).unwrap_or(u32::MAX),
+                u32::try_from(SLOT).unwrap_or(u32::MAX),
                 3,
             ))
         })
@@ -2000,7 +2031,7 @@ impl<'a> Emit<'a> {
                 let from = self.value(value)?.slot;
                 let (room, from_at) = self.place(from)?;
                 let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
-                if from.var >= self.frame_cvs(from.frame)? {
+                if self.is_temporary(from)? {
                     let word = self.b.ins().load(I64, trusted(), room, from_at);
                     self.b.ins().store(trusted(), word, base, at);
                     self.b.ins().store(trusted(), info, base, at + TYPE_AT);
@@ -2036,7 +2067,7 @@ impl<'a> Emit<'a> {
             .ok_or_else(|| mismatch("a constant of a frame the trace does not have"))?
             .literals;
         let address = (idx.0 as usize)
-            .checked_mul(16)
+            .checked_mul(size_of::<Zval>())
             .and_then(|offset| literals.checked_add(offset))
             .and_then(|address| i64::try_from(address).ok())
             .ok_or_else(|| mismatch("a constant past the host's addresses"))?;
@@ -2756,7 +2787,7 @@ impl<'a> Emit<'a> {
         let (room, at) = self.place(from)?;
         let zval = self.b.ins().iadd_imm_s(room, i64::from(at));
         let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
-        if from.var >= self.frame_cvs(from.frame)? {
+        if self.is_temporary(from)? {
             let word = self.b.ins().load(I64, trusted(), room, at);
             let (dest, dest_at) = self.place(to)?;
             self.b.ins().store(trusted(), word, dest, dest_at);
@@ -2890,6 +2921,51 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
+    /// A cast of a scalar to a boolean, its truth, or its negation for
+    /// `!`, as php's `zend_jit_bool_jmpznz` writes it
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:7533-7800`).
+    fn bool(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let held = self.scalar(at, line.op1)?;
+        let truth = self.truth(held);
+        let truth = match line.opcode {
+            Opcode::BoolNot => self.b.ins().icmp_imm_s(IntCC::Equal, truth, 0),
+            _ => truth,
+        };
+        if let Some(out) = line.out {
+            self.define(out, Scalar::Bool(truth))?;
+        }
+        Ok(())
+    }
+
+    /// `FREE_OP` of `operand` where it is a temporary, as the handler
+    /// takes it: what it holds out of its slot, which is left `UNDEF`,
+    /// then its owner given up as [`Emit::release`] gives it up, what a
+    /// destructor throws leaving through the opline's unwind. A
+    /// `foreach`'s array freed at its loop's end is this, php's
+    /// `zend_jit_free` of `FE_FREE` over an array, which holds no iterator
+    /// to delete (`Z/ext/opcache/jit/zend_jit_ir.c:11543-11580`).
+    fn free_temp(&mut self, line: &Line, operand: Operand) -> Result<(), Abort> {
+        let Operand::Value(value) = operand else {
+            return Ok(());
+        };
+        let held = self.value(value)?;
+        if held.home == Home::Register || !self.is_temporary(held.slot)? {
+            return Ok(());
+        }
+        self.free_slot(line, held.slot)
+    }
+
+    /// The temporary `slot` freed as [`Emit::free_temp`] frees it.
+    fn free_slot(&mut self, line: &Line, slot: Slot) -> Result<(), Abort> {
+        let room = self.room(slot.frame)?;
+        let at = slot_offset(slot.var)?;
+        let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
+        let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+        self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
+        let word = self.b.ins().load(I64, trusted(), room, at);
+        self.release(line, word, info)
+    }
+
     /// What a slot held, `word` and its type word `info`, given up after
     /// an inline write over it or as a temporary is freed, as php's
     /// `jit_ZVAL_PTR_DTOR` gives it up (`Z/ext/opcache/jit/zend_jit_ir.c:1819-1903`):
@@ -2927,24 +3003,7 @@ impl<'a> Emit<'a> {
         self.when(counted, |emit| {
             let count_at = imm(Zval::COUNT_AT);
             let count = emit.b.ins().load(I32, trusted(), word, count_at);
-            let owners = emit.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
-            let last = emit
-                .b
-                .ins()
-                .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, owners, 1);
-            let kind = emit.b.ins().band_imm_u(info, KIND);
-            let reference = emit
-                .b
-                .ins()
-                .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
-            let gc = emit
-                .b
-                .ins()
-                .load(I32, trusted(), word, imm(Zval::GC_INFO_AT));
-            let held = emit.b.ins().band_imm_u(gc, i64::from(Zval::LEAK_BITS));
-            let leaks = emit.b.ins().icmp_imm_u(IntCC::Equal, held, 0);
-            let called = emit.b.ins().bor(last, reference);
-            let called = emit.b.ins().bor(called, leaks);
+            let called = emit.kernel_releases(word, info, count);
             let (kernel, inline, done) = (
                 emit.b.create_block(),
                 emit.b.create_block(),
@@ -2969,6 +3028,35 @@ impl<'a> Emit<'a> {
             emit.b.seal_block(done);
             Ok(())
         })
+    }
+
+    /// Whether giving up one owner of the counted value at `word`, of type
+    /// word `info` and count word `count`, is the release kernel's, as
+    /// php's `jit_ZVAL_PTR_DTOR` calls out (`Z/ext/opcache/jit/zend_jit_ir.c:1819-1903`):
+    /// the last owner, or none, which the heap's own release reads with
+    /// its pin; a reference, whose value the collector looks through to;
+    /// and a value the collector may take as a possible root, whose
+    /// `GC_TYPE_INFO` holds no bit of php's `GC_MAY_LEAK` mask
+    /// ([`Zval::LEAK_BITS`]). Otherwise a `GC_DELREF` inline gives it up.
+    fn kernel_releases(&mut self, word: Value, info: Value, count: Value) -> Value {
+        let owners = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+        let last = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, owners, 1);
+        let kind = self.b.ins().band_imm_u(info, KIND);
+        let reference = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        let gc = self
+            .b
+            .ins()
+            .load(I32, trusted(), word, imm(Zval::GC_INFO_AT));
+        let held = self.b.ins().band_imm_u(gc, i64::from(Zval::LEAK_BITS));
+        let leaks = self.b.ins().icmp_imm_u(IntCC::Equal, held, 0);
+        let called = self.b.ins().bor(last, reference);
+        self.b.ins().bor(called, leaks)
     }
 
     /// A send, php's `zend_jit_send_val` and `zend_jit_send_var`
@@ -3057,7 +3145,7 @@ impl<'a> Emit<'a> {
             self.b.ins().ireduce(I8, bit)
         };
         let slot = self.value(value)?.slot;
-        if slot.var >= self.frame_cvs(slot.frame)? && Kind::of(self.value(value)?.types).is_none() {
+        if self.is_temporary(slot)? && Kind::of(self.value(value)?.types).is_none() {
             // `FREE_OP1`: the temporary out of its slot, then its owner
             // given up.
             let (room, slot_at) = self.place(slot)?;
@@ -3385,6 +3473,11 @@ impl<'a> Emit<'a> {
             .get(usize::from(frame.0))
             .map(|info| info.cvs)
             .ok_or_else(|| mismatch("a frame past the trace's"))
+    }
+
+    /// Whether `slot` is a temporary, numbered past its frame's variables.
+    fn is_temporary(&self, slot: Slot) -> Result<bool, Abort> {
+        Ok(slot.var >= self.frame_cvs(slot.frame)?)
     }
 
     /// The variable of `frame`'s room.
