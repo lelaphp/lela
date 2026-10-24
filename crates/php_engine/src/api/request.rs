@@ -172,7 +172,7 @@ pub use variables::{BodyLimits, Input};
 pub use zone::Zone;
 
 pub(crate) use hooks::parent_hook_trampolines;
-pub(crate) use lazy::Strategy;
+pub(crate) use lazy::{RawWrite, Strategy};
 pub(crate) use preload::{Keyed, Named, Preloaded, Preloading};
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.

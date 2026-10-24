@@ -1012,9 +1012,10 @@ impl ReflectionProperty {
     }
 
     /// `ReflectionProperty::setRawValueWithoutLazyInitialization(object $object, mixed $value): void`:
-    /// the value written into the property past `__set` and hooks, on the
-    /// object the initialised proxies lead to, and the property no longer
-    /// waiting; the object is no longer lazy once none waits.
+    /// the value written into the property as `setRawValue` writes it, a
+    /// `set` hook's trampoline or `write_property` with no `__set`, on the
+    /// object the initialised proxies lead to, while the property does not
+    /// wait; the object is no longer lazy once none waits.
     ///
     /// ```php
     /// class C { public $a = 1; public int $b = 2; public static $s; public function __set($n, $v) { echo "set $n\n"; } }
@@ -1044,6 +1045,28 @@ impl ReflectionProperty {
     /// Can not use setRawValueWithoutLazyInitialization on static property C::$s
     /// Can not use setRawValueWithoutLazyInitialization on dynamic property stdClass::$dyn
     /// ```
+    ///
+    /// Over a property with a `set` hook the hook's trampoline is called,
+    /// so a throw has its row and the value it hands back is given up as a
+    /// possible root:
+    ///
+    /// ```php
+    /// class B {}
+    /// class C { public int $n { set { $this->n = $value; } } public B $b { set { $this->b = $value; } } }
+    /// $r = new ReflectionClass(C::class);
+    /// $g = $r->newLazyGhost(function () { echo "init\n"; });
+    /// try { $r->getProperty('n')->setRawValueWithoutLazyInitialization($g, 'x'); } catch (TypeError $e) { echo $e->getTraceAsString(), "\n"; }
+    /// var_dump($r->getProperty('n')->isLazy($g));
+    /// function t($r) { $g = $r->newLazyGhost(function () {}); $v = new B; gc_collect_cycles(); $r->getProperty('b')->setRawValueWithoutLazyInitialization($g, $v); echo gc_status()['roots'], "\n"; }
+    /// t($r);
+    /// ```
+    /// ```expect
+    /// #0 [internal function]: C->$n::set('x')
+    /// #1 %s(6): ReflectionProperty->setRawValueWithoutLazyInitialization(Object(C), 'x')
+    /// #2 {main}
+    /// bool(true)
+    /// 2
+    /// ```
     fn setRawValueWithoutLazyInitialization(
         req: &mut Request,
         this: This<Self>,
@@ -1061,9 +1084,12 @@ impl ReflectionProperty {
         if !object.is_lazy() {
             return set_raw_value(req, asked, prop.as_ref(), object, &name, value);
         }
-        let value = Owner::take(req, value);
-        skip_lazy_initialization(req, &object, &name, Some(value))?;
-        Ok(())
+        // `IS_PROP_LAZY` cleared around `reflection_property_set_raw_value`,
+        // the write `setRawValue` makes.
+        let mut write = |req: &mut Request, object: PhpObject| {
+            set_raw_value(req, asked, prop.as_ref(), object, &name, value)
+        };
+        skip_lazy_initialization(req, &object, &name, Some(&mut write))
     }
 
     /// `ReflectionProperty::skipLazyInitialization(object $object): void`:

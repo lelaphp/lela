@@ -3614,15 +3614,15 @@ pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<Ph
 /// `ReflectionProperty::setRawValueWithoutLazyInitialization` under
 /// `Some`: the declared property `name`, on the object the initialised
 /// proxies lead to, stops waiting for the initializer, holding its
-/// default or `value` written past `__set` and hooks; the object stops
-/// being lazy once no property waits. `value` is a sink's, the object's
-/// from here. The checks on the property php makes first are the
-/// caller's.
+/// default, or with its `IS_PROP_LAZY` cleared while `write`, the
+/// caller's `reflection_property_set_raw_value`, writes it on that object;
+/// the object stops being lazy once no property waits. The checks on the
+/// property php makes first are the caller's.
 pub fn skip_lazy_initialization(
     req: &mut Request,
     object: &PhpObject,
     name: &[u8],
-    value: Option<Owner<Value>>,
+    write: Option<crate::api::request::RawWrite<'_>>,
 ) -> Result<(), Thrown> {
-    req.lazy_skip(*object, name, value)
+    req.lazy_skip(*object, name, write)
 }
