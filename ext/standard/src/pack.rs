@@ -482,6 +482,19 @@ fn overflow(req: &mut Request, code: char) -> Thrown {
 /// Invalid format type y
 /// unpack(): Argument #3 ($offset) must be contained in argument #2 ($data)
 /// ```
+///
+/// Since 8.5.12 a repetition is unpacked only while the memory limit has
+/// not been met: past it the call returns and the limit's fatal is
+/// raised.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(unpack('C*', str_repeat('a', 1 << 20))), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[allow(clippy::too_many_lines)]
 #[php_function]
 fn unpack(
@@ -577,6 +590,12 @@ fn unpack(
         };
         let mut i: i64 = 0;
         while i != repetitions {
+            // "Each repetition costs a name and a value, so stop once over
+            // the limit" (8.5.12): `RETURN_OOM()`, the array as far as it
+            // was filled.
+            if req.memory().has_oom() {
+                return Ok(OrFalse::Value(array));
+            }
             if size != 0 && size != -1 && INT_MAX - size + 1 < inputpos {
                 docref(req, Level::Warning, &format!("Type {ch}: integer overflow"));
                 array.give_up(req);

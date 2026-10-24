@@ -14,7 +14,7 @@ use php_ext::abi::Passed;
 use php_ext::attr::{php_const, php_function};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Charset, Owner, PhpArray, PhpString};
+use php_ext::values::{Charset, FreshString, Owner, PhpArray, PhpString};
 
 use tables::Row;
 
@@ -633,6 +633,19 @@ fn entities(
         hint.as_ref().map(PhpString::as_bytes),
         double_encode,
     );
+    // php 8.5.12 asks for its first estimate fallibly,
+    // `zend_string_falloc(maxlen)`, 128 bytes or twice the input, and
+    // answers the empty string where the memory limit refused it, the
+    // limit's fatal raised as the call returns.
+    let len = string.len();
+    let maxlen = if len < 64 { 128 } else { len.saturating_mul(2) };
+    let Some(estimate) = req
+        .memory_mut()
+        .fallible(|req| FreshString::new(req, maxlen))?
+    else {
+        return PhpString::new(req, b"");
+    };
+    estimate.free(req);
     PhpString::new(req, &out)
 }
 
@@ -714,6 +727,19 @@ fn entities(
 ///   }
 ///   - Return [ array ]
 /// }
+/// ```
+///
+/// php 8.5.12 asks for its first estimate of the escaped string, twice
+/// the input, fallibly: past the memory limit it is refused and the call
+/// answers the empty string, the limit's fatal raised as it returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(htmlspecialchars(str_repeat('a', 3 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 6307840 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn htmlspecialchars(
