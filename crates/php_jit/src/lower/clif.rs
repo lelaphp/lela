@@ -2212,10 +2212,11 @@ impl<'a> Emit<'a> {
     /// php's code calls its helpers, the array's copy and the hash's
     /// lookup or insert, so the write takes no exit.
     ///
-    /// An immutable array, one shared, a key past `nNumUsed`, a hole and an
-    /// array turned hash are each served by the handler, in place of the
-    /// write, and a counted element given up in place, its destructor called
-    /// there, and the loop goes on in the trace:
+    /// An immutable array, one shared, a key past `nNumUsed`, a hole, an
+    /// element that is a reference and an array turned hash are each served
+    /// by the handler, in place of the write, and a counted element given
+    /// up in place, its destructor called there, and the loop goes on in
+    /// the trace:
     ///
     /// ```php
     /// class D { function __destruct() { echo "freed\n"; } }
@@ -2280,6 +2281,28 @@ impl<'a> Emit<'a> {
     /// 170
     /// ```
     ///
+    /// An element bound by reference to a variable is written through
+    /// the reference, which the variable reads, its string and a long
+    /// alike, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// function f($n) { $a = [1, 2, 3]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 3] = $i; $t += $r; } return [$a, $r, $t]; }
+    /// function g($n) { $a = ["x", "y"]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 2] = str_repeat("s", $i % 5); $t += strlen($r); } return [$a, $r, $t]; }
+    /// echo json_encode(f(3000)), json_encode(g(3000)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [[2997,2998,2999],2998,4495504][["sss","ssss"],"ssss",5997]
+    /// ```
+    ///
+    /// ```php
+    /// function f($n) { $a = [1, 2, 3]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 3] = $i; $t += $r; } return [$a, $r, $t]; }
+    /// function g($n) { $a = ["x", "y"]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 2] = str_repeat("s", $i % 5); $t += strlen($r); } return [$a, $r, $t]; }
+    /// echo json_encode(f(3000)), json_encode(g(3000)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [[2997,2998,2999],2998,4495504][["sss","ssss"],"ssss",5997]
+    /// ```
+    ///
     /// Fields of a line split, each trimmed back into its place, one
     /// uppercased and one a constant, the strings they held given up, under
     /// force and where every guard fails once:
@@ -2316,6 +2339,15 @@ impl<'a> Emit<'a> {
         let (room, array_at) = self.place(held.slot)?;
         let hash = held.types.meets(Types::HASH);
         let (element, old) = self.written_in_place((room, array_at), key, hash, handled);
+        // An element that is a reference is written through, which
+        // `zend_jit_assign_to_variable` does past its `ZVAL_DEREF` and the
+        // handler does here.
+        let kind = self.b.ins().band_imm_u(old, KIND);
+        let reference = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        self.divert_if(reference, handled);
         // Where every guard fails once, the handler serves the write.
         let never = self.b.ins().iconst(I8, 0);
         let fuzzed = self.fuzzed(never)?;
