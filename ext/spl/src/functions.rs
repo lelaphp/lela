@@ -370,6 +370,27 @@ fn spl_autoload_functions(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
 /// Notice: spl_autoload_register(): Argument #2 ($do_throw) has been ignored, spl_autoload_register() will always throw in %s on line 9
 /// ```
 ///
+/// The stack keeps what the callable resolved to and an owner of its
+/// receiver, never the array it was registered as
+/// (`autoload_func_info_from_fci`), so the program's `unset` frees the
+/// array, which gives the receiver up and offers it to the collector,
+/// and the receiver's own `unset` adds no root of its own:
+///
+/// ```php
+/// class L { public function load($c) { } }
+/// $l = new L;
+/// $cb = [$l, 'load'];
+/// spl_autoload_register($cb);
+/// unset($cb);
+/// echo gc_status()['roots'], "\n";
+/// unset($l);
+/// echo gc_status()['roots'], "\n";
+/// ```
+/// ```expect
+/// 1
+/// 1
+/// ```
+///
 /// The declaration is php's, its defaults shown:
 ///
 /// ```php
@@ -409,7 +430,7 @@ fn spl_autoload_register(
         ));
     }
     if let Some(loader) = loader {
-        req.symbols_mut().autoload_register(loader, prepend)?;
+        req.symbols_mut().autoload_register(&loader, prepend)?;
         return Ok(true);
     }
     // The name is lent to the callable, which the stack takes its own of.
@@ -418,7 +439,7 @@ fn spl_autoload_register(
         name.give_up(req);
         return Ok(false);
     };
-    let registered = req.symbols_mut().autoload_register(loader, prepend);
+    let registered = req.symbols_mut().autoload_register(&loader, prepend);
     name.give_up(req);
     registered?;
     Ok(true)
