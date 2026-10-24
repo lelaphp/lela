@@ -322,12 +322,79 @@ impl Onward {
     /// holds as php's own functions over two strings hold them, an
     /// assignment, a write to an element and a compound one, a send, a
     /// frameless call to a native, a string's length, a cast to a
-    /// boolean and the free of a `foreach`'s array. None for every other
+    /// boolean, the free of a `foreach`'s array, and a property's fetch,
+    /// write, compound write, increment and decrement, whose `__get` and
+    /// `__set` the handler serves through an `execute` of their own, as
+    /// php's helpers do, and whose typed property it coerces or refuses.
+    /// None for every other
     /// opline: a jump and a comparison, whose handler may take the jump
     /// fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
     /// a return, an include or an `eval`, a generator's opcodes, a
-    /// `finally`'s `FAST_CALL` and `FAST_RET`, and the two silence
-    /// opcodes, whose observers a step tells.
+    /// `finally`'s `FAST_CALL` and `FAST_RET`, the two silence opcodes,
+    /// whose observers a step tells, and a property's `isset()` and
+    /// `empty()`, whose handler may take the jump after it.
+    ///
+    /// A `__get` the handler serves writes a variable through the
+    /// reference an object holds to it, which the loop reads after; a
+    /// `__set` writes one, and the object's declared property; a typed
+    /// property's coercion throws, caught in the loop: none of the three
+    /// oplines has the `call` effect, and the trace keeps no fact the user
+    /// code can change, a reference's inner type held at every read, as
+    /// revision 83's analysis has it (`jit-design.md` §4.2):
+    ///
+    /// ```php
+    /// class G { public $r; private $v = 3; function __get($n) { $this->r = $this->r + 0.5; return $this->v; } }
+    /// function f($n) { $x = 0; $o = new G; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->missing; $t += $x; $o->r = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [241,19]
+    /// ```
+    ///
+    /// ```php
+    /// class G { public $r; private $v = 3; function __get($n) { $this->r = $this->r + 0.5; return $this->v; } }
+    /// function f($n) { $x = 0; $o = new G; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->missing; $t += $x; $o->r = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [241,19]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $p = 0; public $r; function __set($n, $v) { $this->r = $v * 2.5; $this->p = $this->p + 1; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $o->missing = $i; $t += $x + $o->p; } return [$t, $x, $o->p]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [685,47.5,20]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $p = 0; public $r; function __set($n, $v) { $this->r = $v * 2.5; $this->p = $this->p + 1; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $o->missing = $i; $t += $x + $o->p; } return [$t, $x, $o->p]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [685,47.5,20]
+    /// ```
+    ///
+    /// ```php
+    /// class T { public int $n = 0; public float $f = 0.0; }
+    /// function f($n) { $o = new T; $c = 0; for ($i = 0; $i < $n; $i++) { try { $o->n = $i == 7 ? "x" : $i; $o->f = $i; $c += $o->n + $o->f; } catch (TypeError $e) { $c += 100; } } return [$c, $o->n, $o->f]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [466,19,19]
+    /// ```
+    ///
+    /// ```php
+    /// class T { public int $n = 0; public float $f = 0.0; }
+    /// function f($n) { $o = new T; $c = 0; for ($i = 0; $i < $n; $i++) { try { $o->n = $i == 7 ? "x" : $i; $o->f = $i; $c += $o->n + $o->f; } catch (TypeError $e) { $c += 100; } } return [$c, $o->n, $o->f]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [466,19,19]
+    /// ```
     ///
     /// An array built per turn, and a key the build throws at, caught in
     /// the frame:
@@ -440,8 +507,20 @@ impl Onward {
             | Opcode::FramelessIcall2
             | Opcode::Strlen
             | Opcode::Bool
-            | Opcode::FeFree => Some(Onward(1)),
-            Opcode::AssignDim | Opcode::AssignDimOp | Opcode::FramelessIcall3 => Some(Onward(2)),
+            | Opcode::FeFree
+            | Opcode::FetchObjR
+            | Opcode::FetchObjIs
+            | Opcode::FetchObjW
+            | Opcode::FetchObjRw
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj => Some(Onward(1)),
+            Opcode::AssignDim
+            | Opcode::AssignDimOp
+            | Opcode::AssignObj
+            | Opcode::AssignObjOp
+            | Opcode::FramelessIcall3 => Some(Onward(2)),
             _ => None,
         }
     }
