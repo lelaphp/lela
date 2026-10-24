@@ -322,6 +322,20 @@ pub fn callable_name(req: &mut Request, value: &Value) -> Result<Owner<PhpString
 /// Deprecated: ini_set(): assert.callback INI setting is deprecated in %s on line 2
 /// AssertionError: assert(false) / Invalid callback nope, function "nope" not found or invalid function name
 /// ```
+///
+/// Where the check failed with a throwable pending, an autoloader's
+/// thrown while the class half was looked up, that throwable is handed on
+/// alone, the resolver's sentence freed and no refusal thrown over it, as
+/// php 8.5.12's `zend_call_function` returns (`Z/Zend/zend_execute_API.c:859-865`).
+///
+/// ```php
+/// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
+/// @ini_set("assert.callback", "Foo::bar");
+/// try { assert(false); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// AssertionError: assert(false) / boom
+/// ```
 pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown> {
     match req.callable_checked(value) {
         Ok(_) if req.is_pending() => Err(Thrown::of(req.take_pending_view())),
@@ -330,6 +344,9 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
         // sentence, made for an array or an object and the string's own
         // for a string.
         Err(refusal) => Err(refusal.across(req, |req| {
+            if req.is_pending() {
+                return Thrown::of(req.take_pending_view());
+            }
             let name = req.callable_name(value);
             let message = format!("Invalid callback {name}, {refusal}");
             let made = match value.deref().as_ref() {
@@ -341,7 +358,7 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
                 }
                 _ => None,
             };
-            let thrown = crate::api::raising::throw_over_pending(req, "Error", &message);
+            let thrown = crate::api::raising::throw_error(req, "Error", &message);
             if let Some(made) = made {
                 made.give_up(req);
             }

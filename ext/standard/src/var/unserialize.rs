@@ -12,7 +12,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::Passed;
 use php_ext::attr::php_function;
 use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, new_object};
-use php_ext::coerce::{callable_checked, value_name};
+use php_ext::coerce::{to_callable, value_name};
 use php_ext::raising::{
     Level, Thrown, call_stack_end, deprecated, docref, throw, throw_error, warning,
 };
@@ -2153,18 +2153,9 @@ impl State<'_> {
         };
         let shown = String::from_utf8_lossy(&function).into_owned();
         let callee = PhpString::new(req, &function)?;
-        let checked = callable_checked(req, &Value::string(*callee));
+        let checked = to_callable(req, &Value::string(*callee));
         callee.give_up(req);
-        let callable = match checked {
-            Ok(callable) => callable,
-            Err(error) => {
-                return Err(throw_error(
-                    req,
-                    "Error",
-                    &format!("Invalid callback {shown}, {error}"),
-                ));
-            }
-        };
+        let callable = checked?;
         let argument = PhpString::new(req, name)?;
         let answer = call(req, &callable, &[Value::string(*argument)]);
         argument.give_up(req);
