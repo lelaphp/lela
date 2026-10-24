@@ -3506,13 +3506,13 @@ fn identical_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Resul
     if left.heap().is_same(right.heap()) {
         return Ok(true);
     }
+    compare_stack(req)?;
     if left.is_recursive() {
         return Err(nesting_too_deep(req));
     }
     if left.len() != right.len() {
         return Ok(false);
     }
-    crate::api::raising::call_stack_end(req)?;
     left.protect();
     let walked = identical_entries(req, left, right);
     left.unprotect();
@@ -3632,20 +3632,25 @@ fn silent_number(value: ValueRef) -> Scalar<'static> {
 /// reached from it, and protecting both would call a shared table a
 /// cycle.
 ///
-/// php asks no stack limit here, so two arrays nested deeper than
-/// `zend.max_allowed_stack_size` allows are compared whole, as long as
-/// the thread holds them; the walk is held to the thread's floor
-/// ([`crate::api::raising::call_stack_end`]), which the small-stack
-/// regime's 256K does not move, and [`identical_arrays`] with it.
+/// Each level asks the stack limit first, after the one-table test and
+/// before the recursion guard, as php-8.5.12's `zend_hash_compare`
+/// does (`Z/Zend/zend_hash.c:3432-3437`): two arrays nested deeper than
+/// `zend.max_allowed_stack_size` allows are php's `Error`, "Maximum
+/// call stack size reached during comparison", for `==`, `===` and
+/// `<=>` alike ([`compare_stack`]), while a walk that stops before the
+/// depth is answered whole. How deep a level reaches the limit is each
+/// engine's frame size, so the nest is deep enough for any build:
 ///
 /// ```php
 /// $a = $b = [];
-/// for ($i = 0; $i < 1000; $i++) { $a = [$a]; $b = [$b]; }
-/// var_dump($a == $b, $a === $b, $a <=> [[1]]);
+/// for ($i = 0; $i < 20000; $i++) { $a = [$a]; $b = [$b]; }
+/// foreach ([fn() => $a == $b, fn() => $a === $b, fn() => $a <=> [[1]]] as $f) {
+///     try { var_dump($f()); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
 /// ```
 /// ```expect regime=small-stack
-/// bool(true)
-/// bool(true)
+/// Maximum call stack size reached during comparison
+/// Maximum call stack size reached during comparison
 /// int(1)
 /// ```
 ///
@@ -3732,14 +3737,30 @@ impl HeldTables {
 /// walk under its protection.
 #[inline(always)] // the body of `compare_arrays`, apart for its hold
 fn compare_held(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Ordering, Thrown> {
+    compare_stack(req)?;
     if left.is_recursive() {
         return Err(nesting_too_deep(req));
     }
-    crate::api::raising::call_stack_end(req)?;
     left.protect();
     let ordering = compare_entries(req, left, right);
     left.unprotect();
     ordering
+}
+
+/// `zend_hash_compare`'s stack check, `zend_call_stack_overflowed`
+/// against `EG(stack_limit)` (`Z/Zend/zend_hash.c:3432-3437`), for
+/// [`compare_arrays`] and [`identical_arrays`]; then the thread's floor
+/// ([`crate::api::raising::call_stack_end`]), which a limit the ini
+/// turned off (`zend.max_allowed_stack_size=-1`) leaves as the one
+/// guard, where php's walk would exhaust the thread.
+fn compare_stack(req: &mut Request) -> Result<(), Thrown> {
+    if req.limits().stack_overflowed() {
+        return Err(crate::api::raising::error(
+            req,
+            "Maximum call stack size reached during comparison",
+        ));
+    }
+    crate::api::raising::call_stack_end(req)
 }
 
 /// php's `Error` for a table a comparison's walk is already inside,
@@ -5875,11 +5896,9 @@ mod tests {
     use crate::test::Capture;
 
     /// `==` and `===` over two arrays nested deeper than the thread
-    /// holds are refused at its floor, whatever
-    /// `zend.max_allowed_stack_size` says: the
-    /// test harness's thread is 2 MiB and the nesting two hundred
-    /// thousand, and the refusal is the `Error` a program can catch,
-    /// after which the request goes on and frees both.
+    /// holds are refused, at `zend.max_allowed_stack_size` where a
+    /// limit stands and at the thread's floor where the ini turns the
+    /// limit off (`-1`); the refusal is an `Error` a program can catch.
     #[test]
     fn a_nesting_deeper_than_the_thread_is_refused_at_its_floor() {
         let source = "<?php\n$a = $b = [];\nfor ($i = 0; $i < 200000; $i++) { $a = [$a]; $b = [$b]; }\ntry { $a == $b; } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\ntry { $a === $b; } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\necho 'done';";
@@ -5896,11 +5915,13 @@ mod tests {
                 "under zend.max_allowed_stack_size={limit}: {stdout}"
             );
             for refused in &lines[..2] {
-                assert!(
+                let held = if limit == "-1" {
                     refused.starts_with("Maximum call stack size of ")
-                        && refused.ends_with(" bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"),
-                    "under zend.max_allowed_stack_size={limit}: {refused}"
-                );
+                        && refused.ends_with(" bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?")
+                } else {
+                    *refused == "Maximum call stack size reached during comparison"
+                };
+                assert!(held, "under zend.max_allowed_stack_size={limit}: {refused}");
             }
             assert_eq!(lines[2], "done");
         }
