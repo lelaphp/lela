@@ -167,22 +167,25 @@ pub(crate) fn state(req: &mut Request, object: PhpObject) -> Option<&mut DbhStat
     }
 }
 
+/// The object's own `pdo_dbh_t` taken off its payload, which shares
+/// nothing until [`share`] points it at the persistent one.
+fn detach(req: &mut Request, object: PhpObject) -> Option<Dbh> {
+    object.native_mut::<Dbh>(req).map(std::mem::take)
+}
+
 /// An object's payload switched over to the persistent `pdo_dbh_t` the
-/// request holds at `at`, `pdo_obj->inner = pdbh`: what it held before
-/// handed back.
-/// The persistent one counts the object among its holders,
-/// `pdbh->refcount++`.
-fn share(req: &mut Request, object: PhpObject, at: usize) -> Option<Dbh> {
-    let payload = object.native_mut::<Dbh>(req)?;
-    let shared = DbhState {
-        shares: Some(at),
-        ..DbhState::default()
-    };
-    let own = std::mem::replace(payload, Box::new(shared));
+/// request holds at `at`, `pdo_obj->inner = pdbh`, which counts the
+/// object among its holders, `pdbh->refcount++`.
+fn share(req: &mut Request, object: PhpObject, at: usize) {
+    if let Some(payload) = object.native_mut::<Dbh>(req) {
+        **payload = DbhState {
+            shares: Some(at),
+            ..DbhState::default()
+        };
+    }
     if let Some(held) = req.state::<Persistent>().lent.get_mut(at) {
         held.holders += 1;
     }
-    Some(own)
 }
 
 /// `EG(persistent_list)` as far as PDO reaches it (design §4.10): the
@@ -348,6 +351,11 @@ impl ObjectHandlers for Handlers {
                 if rolled.unwrap_or(false) {
                     d.in_txn = false;
                 }
+                // php leaves the objects sharing a dead connection on it
+                // and counts a new one from the factory's object alone; the
+                // engine replaces the dead one in place (`hold`), so those
+                // objects share the new one uncounted, and what their frees
+                // take off the count stops at zero.
                 d.holders = d.holders.saturating_sub(1);
                 d.query_stmt.take()
             });
@@ -844,14 +852,12 @@ fn alive(req: &mut Request, conn: Conn) -> (bool, Conn) {
 /// opened for `object` held by the request under `key`, in place of the
 /// dead one at `dead`, and the object switched over to it.
 fn hold(req: &mut Request, object: PhpObject, key: Vec<u8>, dead: Option<usize>) {
-    let Some(mut dbh) = share(req, object, usize::MAX) else {
+    let Some(dbh) = detach(req, object) else {
         return;
     };
     let lent = &mut req.state::<Persistent>().lent;
     let at = match dead.and_then(|at| lent.get_mut(at).map(|held| (at, held))) {
         Some((at, held)) => {
-            // The objects sharing the dead one share this one now.
-            dbh.holders = held.holders;
             let mut old = std::mem::replace(held, dbh);
             persistent_shutdown(req, &mut old);
             // `zend_list_close` of the dead one: its destructor closes
