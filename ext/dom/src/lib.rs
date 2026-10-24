@@ -1801,6 +1801,21 @@ fn validate_and_extract(
 /// where the legacy ones hand it to `xmlDOMWrapAdoptNode`. The `Err` is
 /// the memory limit, met where the mapper makes a
 /// declaration, after the subtree is the document's.
+///
+/// ```php
+/// foreach ([fn() => new DOMDocument, fn() => Dom\XMLDocument::createEmpty()] as $make) {
+///     $s = $make(); $e = $s->appendChild($s->createElement('e'));
+///     $e->setAttribute('a', 'victim');
+///     $v = $e->getAttributeNode('a')->firstChild;
+///     $t = $make(); $t->appendChild($t->adoptNode($e));
+///     unset($t, $s, $e);
+///     echo $v->data, ' ', get_class($v->ownerDocument), "\n";
+/// }
+/// ```
+/// ```expect
+/// victim DOMDocument
+/// victim Dom\XMLDocument
+/// ```
 fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> Result<bool, Thrown> {
     node.invalidate_document_lists();
     let old = node.doc();
@@ -1828,6 +1843,13 @@ fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> Result
                     let mut attr = n.properties();
                     while let Some(a) = attr {
                         a.transfer_document(req, shared);
+                        // An attribute's value nodes a wrapper names go
+                        // with it (php 8.5.12, GH-23352).
+                        let mut child = a.children();
+                        while let Some(c) = child {
+                            c.transfer_document(req, shared);
+                            child = c.next();
+                        }
                         attr = a.next();
                     }
                 }
