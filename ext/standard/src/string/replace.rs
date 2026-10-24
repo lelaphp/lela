@@ -727,6 +727,19 @@ impl Pen<'_> {
 /// string(3) "abC"
 /// string(3) "abc"
 /// ```
+///
+/// One pair of a longer replacement asks for the string fallibly since
+/// 8.5.12: past the memory limit it is refused and the limit's fatal is
+/// raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(strtr(str_repeat('a', 1 << 20), ['a' => str_repeat('b', 16)]), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 3
+/// ```
 #[php_function(arity = manual, frameless(2, 3))]
 pub(super) fn strtr(
     req: &mut Request,

@@ -1809,6 +1809,20 @@ fn explode(
 /// string(2) "xy"
 /// join(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given
 /// ```
+///
+/// The joined string is asked for fallibly since 8.5.12, as the glue is
+/// repeated once per element and the string can dwarf the input: past
+/// the memory limit it is refused and the limit's fatal is raised as the
+/// call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// echo strlen(implode(str_repeat('-', 1 << 20), array_fill(0, 32, 'x'))), "unreached\n";
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 32522240 bytes) in %s on line 3
+/// ```
 #[php_function(frameless(1, 2), aliases(join))]
 fn implode(
     req: &mut Request,
