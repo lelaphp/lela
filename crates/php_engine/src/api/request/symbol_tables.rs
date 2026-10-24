@@ -117,7 +117,7 @@ impl Request {
                 // The string the unit's compile made of the name
                 // ([`Request::frame_var_names`]), the table's owner of it
                 // taken; a refusal has ended the request.
-                let Ok(name) = self.declared_string(&name.0) else {
+                let Ok(name) = self.var_name(&unit, body, at, &name.0) else {
                     return;
                 };
                 self.table_add(table, *name, Zval::indirect(cv));
@@ -453,10 +453,29 @@ impl Request {
         let Some(code) = exec::body_of(&unit, body) else {
             return Ok(Vec::new());
         };
-        code.vars
-            .iter()
-            .map(|name| self.declared_string(&name.0))
+        (code.vars.iter().enumerate())
+            .map(|(at, name)| self.var_name(&unit, body, at, &name.0))
             .collect()
+    }
+
+    /// The name of the CV `cv`, named `bytes`, of the op array `body` of
+    /// `unit`, one owner the caller's: the string a request-only unit's
+    /// main op array names it by where it holds one of its own, as a
+    /// `static` first met at its binding is the scanner's string
+    /// (`lookup_cv`), else [`Request::declared_string`]'s.
+    fn var_name(
+        &mut self,
+        unit: &php_unit::PublishedUnit,
+        body: exec::Body,
+        cv: usize,
+        bytes: &[u8],
+    ) -> Result<Owner<PhpString>, Thrown> {
+        let main = (body == exec::Body::Main)
+            .then(|| (self.unit_strings).main_var(php_unit::PublishedUnit::as_ptr(unit), cv));
+        match main.flatten() {
+            Some(own) => Ok(Owner::take(self, own)),
+            None => self.declared_string(bytes),
+        }
     }
 
     /// The number of the CV named `name` in the op array `frame` serves,
