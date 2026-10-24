@@ -414,9 +414,8 @@ impl Buffer {
     /// `multipart_buffer_read_body` at 8.5.12: what `read` hands out, to
     /// the end of the part, in a buffer on the request's heap grown by
     /// each read, fallibly (`safe_ferealloc`); a growth the memory limit
-    /// refuses ends the read, the delayed OOM recorded. php keeps what
-    /// was read then; here its bytes are the request's end's, and the
-    /// caller stops at the limit either way.
+    /// refuses ends the read, the delayed OOM recorded, and what was
+    /// read is kept.
     fn read_body(&mut self, req: &mut Request) -> Result<Option<Text>, Thrown> {
         let mut out: Option<Emalloc> = None;
         let mut total = 0;
@@ -427,10 +426,7 @@ impl Buffer {
                 break;
             }
             let size = total + chunk.len() + 1;
-            let grown = req.memory_mut().fallible(|req| match out.take() {
-                Some(held) => held.resize(req, size),
-                None => Emalloc::new(req, size),
-            })?;
+            let grown = grow(req, &mut out, size)?;
             let Some(mut grown) = grown else {
                 break;
             };
@@ -599,9 +595,7 @@ impl Translation {
         };
         let (made, room) = converted_string(req, text.len, converted.len())?;
         let copy = Text::dup(req, &converted[..converted.len().min(room)]);
-        if let Some(made) = made {
-            made.free(req);
-        }
+        made.free(req);
         let copy = copy?;
         text.free(req);
         Ok(copy)
@@ -614,30 +608,51 @@ impl Translation {
 /// grown by half again whenever the converted text fills it, fallibly
 /// (`mb_convert_buf_ensure`, `Z/ext/mbstring/libmbfl/mbfl/mbfl_encoding.h:164`).
 /// With it the room it reached, short of `converted` where the memory limit
-/// refused a growth and the conversion stopped there; the string is then
-/// the request's end's.
+/// refused a growth and the conversion stopped there.
 fn converted_string(
     req: &mut Request,
     input: usize,
     converted: usize,
-) -> Result<(Option<Emalloc>, usize), Thrown> {
+) -> Result<(Emalloc, usize), Thrown> {
     // `_ZSTR_STRUCT_SIZE(len)`: the string's 24-byte header, its bytes
     // and the terminator.
     let size = |room: usize| room + 25;
     let mut room = input;
-    let mut made = Emalloc::new(req, size(room))?;
+    let mut made = Some(Emalloc::new(req, size(room))?);
     while room < converted {
         let grown_room = room + (room >> 1).max(1);
-        let grown = req
-            .memory_mut()
-            .fallible(|req| made.resize(req, size(grown_room)))?;
-        let Some(grown) = grown else {
-            return Ok((None, room));
+        let Some(grown) = grow(req, &mut made, size(grown_room))? else {
+            break;
         };
-        made = grown;
+        made = Some(grown);
         room = grown_room;
     }
-    Ok((Some(made), room))
+    match made {
+        Some(made) => Ok((made, room)),
+        None => Ok((Emalloc::new(req, size(room))?, room)),
+    }
+}
+
+/// `held` grown to `len` bytes fallibly, `safe_ferealloc(held, ...,
+/// true)`, or laid down where nothing is held: `None` where the memory
+/// limit refused it, the delayed OOM recorded and `held` left as it
+/// stood, as php keeps a block whose growth was refused.
+fn grow(
+    req: &mut Request,
+    held: &mut Option<Emalloc>,
+    len: usize,
+) -> Result<Option<Emalloc>, Thrown> {
+    let taken = held.take();
+    let mut kept = None;
+    let grown = req.memory_mut().fallible(|req| match taken {
+        Some(block) => block.try_resize(req, len).map_err(|(block, thrown)| {
+            kept = Some(block);
+            thrown
+        }),
+        None => Emalloc::new(req, len),
+    });
+    *held = kept;
+    grown
 }
 
 /// `normalize_protected_variable`: the name less its leading spaces, a
@@ -759,12 +774,12 @@ impl Handler {
             return Ok(true);
         }
         let size = param.len() + INDEX_ROOM;
-        let held = self.lbuf.take().map(|(block, _)| block);
-        let grown = req.memory_mut().fallible(|req| match held {
-            Some(block) => block.resize(req, size),
-            None => Emalloc::new(req, size),
-        })?;
-        let Some(grown) = grown else {
+        let (mut held, llen) = match self.lbuf.take() {
+            Some((block, llen)) => (Some(block), llen),
+            None => (None, 0),
+        };
+        let Some(grown) = grow(req, &mut held, size)? else {
+            self.lbuf = held.map(|block| (block, llen));
             return Ok(false);
         };
         self.lbuf = Some((grown, size));
