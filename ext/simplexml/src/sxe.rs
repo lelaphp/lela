@@ -959,6 +959,18 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Th
     Ok(PhpString::new(req, bytes)?.into_value())
 }
 
+/// `sxe_xmlNodeListGetString`'s string of a node list's text
+/// (`Z/ext/simplexml/simplexml.c:910`): `zend_string_finit` of what
+/// libxml gave back, whatever its length, and the empty string where it
+/// gave back nothing.
+fn list_value(req: &mut Request, text: Option<Vec<u8>>) -> Result<Owner<Value>, Thrown> {
+    Ok(match text {
+        Some(text) => PhpString::finit(req, &text)?,
+        None => PhpString::new(req, b"")?,
+    }
+    .into_value())
+}
+
 /// `get_base_node_value`: a node's text where its first child is text that
 /// is not blank, an object standing for it otherwise.
 fn base_value(
@@ -971,7 +983,7 @@ fn base_value(
         && c.kind() == Kind::Text
         && !c.is_blank()
     {
-        return string(req, &node.list_string().unwrap_or_default());
+        return list_value(req, node.list_string());
     }
     Ok(wrap(req, of, node, Walk::Node, ns.cloned())?.into_value())
 }
@@ -999,14 +1011,14 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
                     }
                 };
                 if named && view.matches_ns(a) {
-                    attrs.push((a.name(), a.list_string().unwrap_or_default()));
+                    attrs.push((a.name(), a.list_string()));
                 }
                 at = a.next();
             }
             if !attrs.is_empty() {
                 let mut list = PhpArray::new(req)?;
                 for (name, value) in attrs {
-                    let value = string(req, &value)?;
+                    let value = list_value(req, value)?;
                     list.set_str(req, &name, value)?;
                 }
                 add_row(&mut rows, b"@attributes", list.into_value());
@@ -1020,8 +1032,7 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
         return Ok(rows);
     }
     if node.kind() == Kind::Attribute {
-        let text = node.list_string().unwrap_or_default();
-        rows.push(Row::Next(string(req, &text)?));
+        rows.push(Row::Next(list_value(req, node.list_string())?));
         return Ok(rows);
     }
     let mut use_iter = false;
@@ -1046,8 +1057,7 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
                 n.kind() != Kind::Text
             } else if n.kind() == Kind::Text {
                 if n.content().is_some_and(|c| !c.is_empty()) {
-                    let text = n.content().unwrap_or_default();
-                    rows.push(Row::Next(string(req, &text)?));
+                    rows.push(Row::Next(list_value(req, n.content())?));
                 }
                 false
             } else {

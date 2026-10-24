@@ -21,7 +21,9 @@ use crate::natives::{Unmangled, unmangle_property_name};
 /// `zend_lookup_class_ex`: one leading `\` dropped, the table under
 /// the name whatever its case, and the autoloaders where the table has
 /// none and `autoload` asks for them, each handed the name past that
-/// one `\`, which a second `\` stays in:
+/// one `\`, which a second `\` stays in. A lone `\` names no class and
+/// asks no loader (`Z/Zend/zend_execute_API.c:1225-1228`, new at
+/// php-8.5.12), and neither does the empty name:
 ///
 /// ```php
 /// spl_autoload_register(function ($c) { echo "load [$c]\n"; });
@@ -35,7 +37,6 @@ use crate::natives::{Unmangled, unmangle_property_name};
 /// bool(true)
 /// bool(false)
 /// load [\Countable]
-/// load []
 /// bool(false)
 /// bool(false)
 /// bool(false)

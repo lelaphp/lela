@@ -3891,7 +3891,7 @@ impl Request {
     }
 
     /// `ZEND_FE_RESET_R`'s separation of a shared property table
-    /// (`Z/Zend/zend_vm_def.h:6903`): the loop walks the object's own
+    /// (`Z/Zend/zend_vm_def.h:6908`): the loop walks the object's own
     /// table, so one a cast shares is duplicated first and the object
     /// takes the copy, php's `zend_array_dup` under
     /// `GC_REFCOUNT(zobj->properties) > 1`. An object that has no table
@@ -3907,7 +3907,7 @@ impl Request {
 
     /// The start of a `foreach` over an object whose class has no
     /// `get_iterator`, the object arm `FE_RESET_R` and `FE_RESET_RW`
-    /// share (`Z/Zend/zend_vm_def.h:6903-6934`): the property table the
+    /// share (`Z/Zend/zend_vm_def.h:6908-6939`): the property table the
     /// walk goes over made the object's own, separated where a cast
     /// shares it and laid down where the object has none, which is php's
     /// `get_properties` materialising it; then, where the object has a
@@ -3952,7 +3952,7 @@ impl Request {
         Ok(Some(at))
     }
 
-    /// `zend_fe_fetch_object_helper` (`Z/Zend/zend_vm_def.h:7058`) over
+    /// `zend_fe_fetch_object_helper` (`Z/Zend/zend_vm_def.h:7063`) over
     /// an object whose class has no `get_iterator`, and the object arm
     /// of `FE_FETCH_RW`: the next property the executing scope may see
     /// from where iterator `idx` stands, with its key and where it sits,
@@ -4300,7 +4300,7 @@ impl Request {
     }
 
     /// `FE_FETCH_RW`'s bind over an object's property
-    /// (`Z/Zend/zend_vm_def.h:7331-7357`, `:7434-7439`): the cell the
+    /// (`Z/Zend/zend_vm_def.h:7336-7362`, `:7439-7444`): the cell the
     /// place holds, or one made there over the value it held
     /// (`ZVAL_NEW_EMPTY_REF`), the place keeping the owner it had. A
     /// declared `readonly` slot is php's `Error` and no cell; a typed

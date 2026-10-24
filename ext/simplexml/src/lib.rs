@@ -945,7 +945,8 @@ impl SimpleXMLElement {
         let view = View::of(req, this.object());
         let base = view.node(req)?;
         let name = view.first(base).map(Node::name).unwrap_or_default();
-        PhpString::new(req, &name)
+        // `zend_string_finit_fast` (`Z/ext/simplexml/simplexml.c:1677`).
+        PhpString::fast(req, &name)
     }
 
     /// `__toString(): string`: the text of the walk's first node.

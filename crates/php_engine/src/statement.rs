@@ -3,7 +3,7 @@
 //! with extended info leaves before a statement (`-e`, #1780, #1822),
 //! as `ZEND_EXT_STMT` applies `zend_extension_statement_handler` to
 //! every loaded Zend extension in the order they were loaded
-//! (`Z/Zend/zend_vm_def.h:7923-7933`, `Z/Zend/zend_execute.c:2457-2462`).
+//! (`Z/Zend/zend_vm_def.h:7928-7938`, `Z/Zend/zend_execute.c:2457-2462`).
 //! It is what a debugger's line breakpoints and stepping stand on, as
 //! xdebug's `xdebug_statement_call` does.
 //!
@@ -93,7 +93,7 @@ impl Statement<'_> {
     }
 }
 
-/// `ZEND_EXT_STMT`'s walk (`Z/Zend/zend_vm_def.h:7927-7930`): unless
+/// `ZEND_EXT_STMT`'s walk (`Z/Zend/zend_vm_def.h:7932-7935`): unless
 /// `EG(no_extensions)` is set ([`Request::serve_host_string`]), each
 /// Zend extension's handler told of the statement `frame` stands at, in
 /// the order the extensions start, and what was thrown raised after the

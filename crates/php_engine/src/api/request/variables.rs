@@ -593,7 +593,8 @@ impl Request {
                 continue;
             }
             let name = self.registered_key(&name)?;
-            let value = match PhpString::new(self, &value) {
+            // `ZVAL_STRINGL_FAST` (`Z/main/php_variables.c:647`).
+            let value = match PhpString::fast(self, &value) {
                 Ok(value) => value,
                 Err(thrown) => {
                     name.give_up(self);
@@ -1000,7 +1001,9 @@ impl Request {
         let shared = std::sync::Arc::clone(&self.shared);
         match shared.supplied.input_filter.entry() {
             Some((by, hook)) => self.serve_for(by, |req| hook(req, input, name, value)),
-            None => Ok(Some(PhpString::new(self, value)?.into_value())),
+            // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`
+            // (`Z/main/php_variables.c:47`).
+            None => Ok(Some(PhpString::fast(self, value)?.into_value())),
         }
     }
 

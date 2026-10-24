@@ -337,10 +337,10 @@ fn zend_multibyte_support_is_disabled_without_a_provider() {
     );
 }
 
-/// #1556: argument #6's bound is the integer `ZEND_ULONG_FMT` names,
-/// `PHP_TIMEOUT_ULL_MAX / 1000000`; the pinned php prints what a register
-/// held there, so the witness beside `fsockopen` holds the digits
-/// and this holds the number (`trace:fsockopen-timeout-bound`).
+/// #1556: argument #5's bound is the integer php-8.5.12 prints,
+/// `PHP_TIMEOUT_ULL_MAX / 1000000` (`Z/ext/standard/fsock.c:110`), on
+/// every platform, as the witness beside `fsockopen` holds it at the
+/// oracle's.
 #[test]
 fn fsockopen_s_timeout_bound_is_the_integer_php_s_format_names() {
     let (stdout, fatal) = served(
@@ -349,7 +349,7 @@ fn fsockopen_s_timeout_bound_is_the_integer_php_s_format_names() {
     assert_eq!(fatal, None);
     assert_eq!(
         stdout,
-        "fsockopen(): Argument #6 must be -1 or between 0 and 18446744073709\npfsockopen(): Argument #6 must be -1 or between 0 and 18446744073709"
+        "fsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709\npfsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709"
     );
 }
 

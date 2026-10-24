@@ -856,7 +856,8 @@ pub fn fgets(
         None => None,
     };
     Ok(match stream.get_line(req, maxlen)? {
-        Some(line) => OrFalse::Value(PhpString::new(req, &line)?),
+        // `zend_string_finit` of the line (`Z/ext/standard/file.c:891`).
+        Some(line) => OrFalse::Value(PhpString::finit(req, &line)?),
         None => OrFalse::False,
     })
 }

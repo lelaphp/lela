@@ -366,7 +366,7 @@ impl Emit<'_> {
         (out_type, out)
     }
 
-    /// `FETCH_GLOBALS` (`Z/Zend/zend_vm_def.h:9229`), `$GLOBALS` itself
+    /// `FETCH_GLOBALS` (`Z/Zend/zend_vm_def.h:9236`), `$GLOBALS` itself
     /// (`zend_compile_simple_var`'s `is_globals_fetch` arm): a copy of
     /// `EG(symbol_table)` into a temporary under a read and into a `VAR`
     /// under a write, which `isset` and `empty` never reach, since php

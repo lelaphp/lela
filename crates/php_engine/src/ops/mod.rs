@@ -170,7 +170,7 @@ pub(crate) enum Switched {
     Chain,
 }
 
-/// `ZEND_SWITCH_LONG` (`Z/Zend/zend_vm_def.h:9295`): a `long` subject,
+/// `ZEND_SWITCH_LONG` (`Z/Zend/zend_vm_def.h:9302`): a `long` subject,
 /// a reference to one followed, looked up in the table by
 /// `zend_hash_index_find`, the default where it is not there; any other
 /// subject, an undefined variable among them, is left to the chain,
@@ -210,7 +210,7 @@ pub(crate) fn switch_long(subject: &Value, table: PhpArray) -> Switched {
     }
 }
 
-/// `ZEND_SWITCH_STRING` (`Z/Zend/zend_vm_def.h:9323`): a string
+/// `ZEND_SWITCH_STRING` (`Z/Zend/zend_vm_def.h:9330`): a string
 /// subject, a reference to one followed, looked up in the table by
 /// `zend_hash_find`, its bytes and nothing else, since the compiler
 /// keeps a numeric string out of the table; the default where it is not
@@ -238,7 +238,7 @@ pub(crate) fn switch_string(subject: &Value, table: PhpArray) -> Switched {
     }
 }
 
-/// `ZEND_MATCH` (`Z/Zend/zend_vm_def.h:9356`): a `long` subject looked
+/// `ZEND_MATCH` (`Z/Zend/zend_vm_def.h:9363`): a `long` subject looked
 /// up by `zend_hash_index_find` and a string one by `zend_hash_find`,
 /// each its own kind and nothing else, which is `===`; a reference
 /// followed; every other subject the default, an undefined variable
@@ -272,7 +272,7 @@ pub(crate) fn match_target(subject: &Value, table: PhpArray) -> Switched {
     }
 }
 
-/// `ZEND_IN_ARRAY` (`Z/Zend/zend_vm_def.h:9408`): whether the needle is
+/// `ZEND_IN_ARRAY` (`Z/Zend/zend_vm_def.h:9415`): whether the needle is
 /// in the table `zend_compile_func_in_array` built, a reference followed.
 /// A string is looked up by `zend_hash_find`, its bytes and nothing
 /// else; under `$strict` a long by `zend_hash_index_find` and
@@ -639,7 +639,7 @@ fn object_converted(
     }
 }
 
-/// `ZEND_ISSET_ISEMPTY_CV`'s `isset` arm (`Z/Zend/zend_vm_def.h:7465`):
+/// `ZEND_ISSET_ISEMPTY_CV`'s `isset` arm (`Z/Zend/zend_vm_def.h:7470`):
 /// whether the slot holds more than `null`, which a slot nothing wrote
 /// does not (`Z_TYPE_P(value) > IS_NULL`), with a reference followed one
 /// step, so a name bound to a `null` is as unset as the `null` itself
@@ -671,7 +671,7 @@ pub(crate) fn is_set(value: &Value) -> bool {
 }
 
 /// What `ZEND_CAST` converts to, the five arms of its handler
-/// (`Z/Zend/zend_vm_def.h:6495`), named by the type constant the
+/// (`Z/Zend/zend_vm_def.h:6496`), named by the type constant the
 /// opline's `extended_value` carries. `(bool)` is `ZEND_BOOL` and never
 /// reaches here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -703,7 +703,7 @@ impl CastTo {
     }
 }
 
-/// `ZEND_CAST` (`Z/Zend/zend_vm_def.h:6495`): a value as `(int)`,
+/// `ZEND_CAST` (`Z/Zend/zend_vm_def.h:6496`): a value as `(int)`,
 /// `(float)` or `(string)` read it, which is `zval_get_long` with
 /// `is_strict` off, `zval_get_double` and [`to_string`]. The cast is the
 /// silent reading: a string is the number it opens with or zero with no
@@ -810,7 +810,7 @@ pub(crate) fn cast(req: &mut Request, value: &Value, to: CastTo) -> Result<Value
 /// ```
 /// ```expect
 /// 376
-/// 816
+/// 832
 /// ```
 pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thrown> {
     let value = value.deref();
@@ -2883,34 +2883,34 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// ```expect capture
 /// appended, moved
 /// 2 32
-/// 8 40
-/// 16 48
-/// 24 56
-/// 32 64
-/// 40 80
-/// 56 96
-/// 72 112
-/// 88 128
-/// 104 160
-/// 136 192
-/// 168 224
-/// 200 256
-/// 232 320
-/// 296 384
-/// 360 448
-/// 424 512
-/// 488 640
-/// 616 768
-/// 744 896
-/// 872 1024
-/// 1000 1280
-/// 1256 1536
-/// 1512 1792
-/// 1768 2048
-/// 2024 2560
-/// 2536 3072
-/// 3048 4096
-/// 4072 8192
+/// 3 40
+/// 9 48
+/// 17 56
+/// 25 64
+/// 33 80
+/// 49 96
+/// 65 112
+/// 81 128
+/// 97 160
+/// 129 192
+/// 161 224
+/// 193 256
+/// 225 320
+/// 289 384
+/// 353 448
+/// 417 512
+/// 481 640
+/// 609 768
+/// 737 896
+/// 865 1024
+/// 993 1280
+/// 1249 1536
+/// 1505 1792
+/// 1761 2048
+/// 2017 2560
+/// 2529 3072
+/// 3041 4096
+/// 4065 8192
 /// shared 8192
 /// ```
 ///
@@ -3506,13 +3506,13 @@ fn identical_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Resul
     if left.heap().is_same(right.heap()) {
         return Ok(true);
     }
+    compare_stack(req)?;
     if left.is_recursive() {
         return Err(nesting_too_deep(req));
     }
     if left.len() != right.len() {
         return Ok(false);
     }
-    crate::api::raising::call_stack_end(req)?;
     left.protect();
     let walked = identical_entries(req, left, right);
     left.unprotect();
@@ -3632,20 +3632,25 @@ fn silent_number(value: ValueRef) -> Scalar<'static> {
 /// reached from it, and protecting both would call a shared table a
 /// cycle.
 ///
-/// php asks no stack limit here, so two arrays nested deeper than
-/// `zend.max_allowed_stack_size` allows are compared whole, as long as
-/// the thread holds them; the walk is held to the thread's floor
-/// ([`crate::api::raising::call_stack_end`]), which the small-stack
-/// regime's 256K does not move, and [`identical_arrays`] with it.
+/// Each level asks the stack limit first, after the one-table test and
+/// before the recursion guard, as php-8.5.12's `zend_hash_compare`
+/// does (`Z/Zend/zend_hash.c:3432-3437`): two arrays nested deeper than
+/// `zend.max_allowed_stack_size` allows are php's `Error`, "Maximum
+/// call stack size reached during comparison", for `==`, `===` and
+/// `<=>` alike ([`compare_stack`]), while a walk that stops before the
+/// depth is answered whole. How deep a level reaches the limit is each
+/// engine's frame size, so the nest is deep enough for any build:
 ///
 /// ```php
 /// $a = $b = [];
-/// for ($i = 0; $i < 1000; $i++) { $a = [$a]; $b = [$b]; }
-/// var_dump($a == $b, $a === $b, $a <=> [[1]]);
+/// for ($i = 0; $i < 20000; $i++) { $a = [$a]; $b = [$b]; }
+/// foreach ([fn() => $a == $b, fn() => $a === $b, fn() => $a <=> [[1]]] as $f) {
+///     try { var_dump($f()); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
 /// ```
 /// ```expect regime=small-stack
-/// bool(true)
-/// bool(true)
+/// Maximum call stack size reached during comparison
+/// Maximum call stack size reached during comparison
 /// int(1)
 /// ```
 ///
@@ -3732,14 +3737,30 @@ impl HeldTables {
 /// walk under its protection.
 #[inline(always)] // the body of `compare_arrays`, apart for its hold
 fn compare_held(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Ordering, Thrown> {
+    compare_stack(req)?;
     if left.is_recursive() {
         return Err(nesting_too_deep(req));
     }
-    crate::api::raising::call_stack_end(req)?;
     left.protect();
     let ordering = compare_entries(req, left, right);
     left.unprotect();
     ordering
+}
+
+/// `zend_hash_compare`'s stack check, `zend_call_stack_overflowed`
+/// against `EG(stack_limit)` (`Z/Zend/zend_hash.c:3432-3437`), for
+/// [`compare_arrays`] and [`identical_arrays`]; then the thread's floor
+/// ([`crate::api::raising::call_stack_end`]), which a limit the ini
+/// turned off (`zend.max_allowed_stack_size=-1`) leaves as the one
+/// guard, where php's walk would exhaust the thread.
+fn compare_stack(req: &mut Request) -> Result<(), Thrown> {
+    if req.limits().stack_overflowed() {
+        return Err(crate::api::raising::error(
+            req,
+            "Maximum call stack size reached during comparison",
+        ));
+    }
+    crate::api::raising::call_stack_end(req)
 }
 
 /// php's `Error` for a table a comparison's walk is already inside,
@@ -4126,7 +4147,7 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
     req.string(&out)
 }
 
-/// `ZEND_STRLEN`'s handler (`Z/Zend/zend_vm_def.h:8759`), the length of
+/// `ZEND_STRLEN`'s handler (`Z/Zend/zend_vm_def.h:8766`), the length of
 /// the string an operand is, which is what php's compiler emits for
 /// `strlen($a)` in place of the call (`zend_compile_func_strlen`),
 /// so the native of the same name serves `strlen` only where the
@@ -4213,7 +4234,7 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
     ))
 }
 
-/// `ZEND_TYPE_CHECK`'s handler (`Z/Zend/zend_vm_def.h:8821`): whether
+/// `ZEND_TYPE_CHECK`'s handler (`Z/Zend/zend_vm_def.h:8828`): whether
 /// the value's type is one of the `MAY_BE_*` bits in `mask`, which is
 /// `1 << Z_TYPE` for one type and the bits of a bool, a long, a double
 /// and a string for `is_scalar` (`zend_compile_func_typecheck`,
@@ -4259,7 +4280,7 @@ pub(crate) fn type_check(value: &Value, mask: u32) -> bool {
     }
 }
 
-/// `ZEND_DEFINED`'s handler (`Z/Zend/zend_vm_def.h:8857`) and
+/// `ZEND_DEFINED`'s handler (`Z/Zend/zend_vm_def.h:8864`) and
 /// `zend_quick_check_constant` under it: whether a constant of exactly
 /// this name exists as the request serves, which is what php's compiler
 /// emits for `defined('NAME')` over a name it could not substitute
@@ -4303,7 +4324,7 @@ pub(crate) fn defined(req: &Request, name: &[u8]) -> bool {
     )
 }
 
-/// `ZEND_COUNT`'s handler (`Z/Zend/zend_vm_def.h:9480`), which is what
+/// `ZEND_COUNT`'s handler (`Z/Zend/zend_vm_def.h:9487`), which is what
 /// php's compiler emits for `count($a)` and `sizeof($a)` in place of the
 /// call (`zend_compile_func_count`), and the one arm the native of the
 /// same name shares with it: an array is its element count; an object
@@ -4426,7 +4447,7 @@ pub(crate) enum Offset {
 }
 
 /// `ZEND_ADD_ARRAY_ELEMENT`'s body past its operand addressing
-/// (`Z/Zend/zend_vm_def.h:6224`), the one kernel `INIT_ARRAY` dispatches
+/// (`Z/Zend/zend_vm_def.h:6225`), the one kernel `INIT_ARRAY` dispatches
 /// into for its first element and `ADD_ARRAY_ELEMENT` for the rest:
 /// `value`, the kernel's to give up from here, written into `array`,
 /// which has one owner, at the key `offset` makes. No offset is
@@ -4965,7 +4986,7 @@ pub(crate) fn legacy_type(value: &Value) -> &'static [u8] {
     }
 }
 
-/// `ZEND_ISSET_ISEMPTY_DIM_OBJ`'s array arm (`Z/Zend/zend_vm_def.h:7546`,
+/// `ZEND_ISSET_ISEMPTY_DIM_OBJ`'s array arm (`Z/Zend/zend_vm_def.h:7551`,
 /// the `isset_dim_obj_array` label): the entry at the key the offset
 /// makes, asked for rather than fetched, so no `Undefined array key`
 /// warning is raised on any path. Under `isset` the answer is that the
@@ -5066,7 +5087,7 @@ pub(crate) fn isset_offset(
     }
 }
 
-/// `ZEND_UNSET_DIM`'s body over an array (`Z/Zend/zend_vm_def.h:6735`,
+/// `ZEND_UNSET_DIM`'s body over an array (`Z/Zend/zend_vm_def.h:6740`,
 /// the `unset_dim_array` label): `zend_hash_del` or
 /// `zend_hash_index_del` at the key the offset makes, over the array the
 /// container holds, which the handler separated first
@@ -5875,11 +5896,9 @@ mod tests {
     use crate::test::Capture;
 
     /// `==` and `===` over two arrays nested deeper than the thread
-    /// holds are refused at its floor, whatever
-    /// `zend.max_allowed_stack_size` says: the
-    /// test harness's thread is 2 MiB and the nesting two hundred
-    /// thousand, and the refusal is the `Error` a program can catch,
-    /// after which the request goes on and frees both.
+    /// holds are refused, at `zend.max_allowed_stack_size` where a
+    /// limit stands and at the thread's floor where the ini turns the
+    /// limit off (`-1`); the refusal is an `Error` a program can catch.
     #[test]
     fn a_nesting_deeper_than_the_thread_is_refused_at_its_floor() {
         let source = "<?php\n$a = $b = [];\nfor ($i = 0; $i < 200000; $i++) { $a = [$a]; $b = [$b]; }\ntry { $a == $b; } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\ntry { $a === $b; } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\necho 'done';";
@@ -5896,11 +5915,13 @@ mod tests {
                 "under zend.max_allowed_stack_size={limit}: {stdout}"
             );
             for refused in &lines[..2] {
-                assert!(
+                let held = if limit == "-1" {
                     refused.starts_with("Maximum call stack size of ")
-                        && refused.ends_with(" bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"),
-                    "under zend.max_allowed_stack_size={limit}: {refused}"
-                );
+                        && refused.ends_with(" bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?")
+                } else {
+                    *refused == "Maximum call stack size reached during comparison"
+                };
+                assert!(held, "under zend.max_allowed_stack_size={limit}: {refused}");
             }
             assert_eq!(lines[2], "done");
         }
