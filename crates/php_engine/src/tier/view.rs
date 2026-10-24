@@ -183,8 +183,10 @@ impl<'a> Held<'a> {
         Held(code)
     }
 
-    /// The op array itself, for the engine's own loop.
-    pub(crate) fn code(self) -> &'a OpArray {
+    /// The op array itself: what the engine's own loop runs, and what a
+    /// tier reads of the code of a frame it goes on in ([`served`]).
+    #[must_use]
+    pub fn code(self) -> &'a OpArray {
         self.0
     }
 
@@ -322,6 +324,16 @@ pub fn jump_targets(code: &OpArray, at: OplineIdx) -> impl Iterator<Item = Oplin
         })
     });
     cases.chain(op.and_then(Opline::jump_target))
+}
+
+/// The op array `frame` serves, as the epoch `req` started in holds it,
+/// for as long as the request: what a tier reads where the interpreter
+/// goes on in a frame whose op array the loop does not hand it, a
+/// return's caller (`jit-design.md` §4.9). None for a request's op array
+/// and a frame that serves none.
+#[must_use]
+pub fn served(req: &Request, frame: FrameRef) -> Option<Held<'_>> {
+    held(req, frame)?.op_array().map(Held)
 }
 
 /// The landing word of opline `at` of the op array `frame` serves, what

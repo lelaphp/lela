@@ -1643,11 +1643,18 @@ pub(crate) fn position(req: &Request, frame: FrameRef) -> OplineIdx {
     tier::frame(req, frame).map_or(OplineIdx(0), |view| view.opline())
 }
 
-/// The loop header standing at `at`, as php's trace roots it: the
-/// safepoint past the entry, and no return's own number, whose loop
-/// [`loop_root`] finds at `at`, where php's CFG finds a header at all
-/// ([`reached`]).
+/// The loop header standing at `at`, as php's trace roots it, where
+/// php's CFG finds a header at all ([`reached`]): [`loop_at`]'s.
 pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
+    loop_at(code, at).filter(|_| reached(code, at))
+}
+
+/// The loop whose root stands at `at`, counted or not: the safepoint
+/// past the entry, and no return's own number, whose loop [`loop_root`]
+/// finds at `at`. Its word says whether php counts it, which a claim
+/// asks ([`counts`]), so a return that lands here reads it with no walk
+/// of the op array (`dispatch::goes_on`).
+pub(crate) fn loop_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
     code.safepoints
         .iter()
         .enumerate()
@@ -1656,7 +1663,6 @@ pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
         .find(|(_, site)| {
             (**site == at || before_body(code, **site) == Some(at)) && rooted(code, **site) == at
         })
-        .filter(|_| reached(code, at))
         .and_then(|(number, _)| u32::try_from(number).ok())
         .map(SafepointIdx)
 }

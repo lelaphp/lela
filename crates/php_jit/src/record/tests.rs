@@ -439,6 +439,54 @@ fn a_loop_reached_through_a_catch_alone_is_not_counted() -> Result<(), String> {
     Ok(())
 }
 
+/// A loop's root php counts is never a landing a trace arms, so a return
+/// that lands there reads the loop's word and no landing's
+/// (`dispatch::goes_on`, #3318), as php's `zend_jit_trace_setup_ret_counter`
+/// leaves an opline whose `trace_flags` are set
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`): a trace that hands
+/// on to the interpreter at a call whose landing is a `while`'s condition
+/// arms nothing, where it arms the landing past a call no loop is rooted
+/// at.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_counted_loops_root_is_never_an_armed_landing() -> Result<(), String> {
+    let (recorded, _) = testing::records::recording(
+        &at("a", "enter"),
+        "function g() { return 1; }
+        function a($n) { while ($n-- > 0) { g(); } g(); return $n; }
+        echo a(2), \"\\n\";",
+    )?;
+    let record = &recorded.record;
+    let code = recorded
+        .view
+        .op_array(record.root)
+        .ok_or("the view holds a()")?;
+    let calls: Vec<OplineIdx> = (code.oplines.iter().enumerate())
+        .filter(|(_, op)| op.opcode == Opcode::DoUcall)
+        .filter_map(|(at, _)| u32::try_from(at).ok().map(OplineIdx))
+        .collect();
+    let [inside, past] = calls[..] else {
+        return Err(format!("a() makes two calls: {calls:?}"));
+    };
+    let template = (record.events.iter())
+        .find(|event| matches!(event, Event::Op { .. }))
+        .ok_or("the record has an op")?;
+    let armed = |call: OplineIdx| {
+        let mut handed = record.clone();
+        let mut op = template.clone();
+        if let Event::Op { opline, .. } = &mut op {
+            *opline = call;
+        }
+        (handed.events, handed.stop) = (vec![op], Stop::Interpreter);
+        super::landings(&handed, &recorded.view)
+    };
+    let condition = OplineIdx(inside.0 + 1);
+    assert!(super::header_at(code, condition).is_some());
+    assert_eq!(armed(inside), []);
+    assert_eq!(armed(past), [(record.root, OplineIdx(past.0 + 1))]);
+    Ok(())
+}
+
 /// A fused compare-and-branch is one `Op` with its direction on it: the
 /// `for` condition jumping back to the header, and an `if` falling
 /// through and jumping over.

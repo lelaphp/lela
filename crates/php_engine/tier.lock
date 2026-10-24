@@ -164,6 +164,7 @@ tier::room
 tier::running_func
 tier::sample
 tier::serve_kept
+tier::served
 tier::set_argv
 tier::set_aside
 tier::set_stdin
