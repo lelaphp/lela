@@ -1219,6 +1219,67 @@ fn bind(
 
 // ---- executing
 
+/// `closeCursor()`'s emulation for a connector with no `cursor_closer`:
+/// every row fetched and discarded.
+fn drain(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
+    while with_driver(req, stmt, |req, driver| {
+        driver.fetch(req, crate::connector::Orientation::Forward, 0)
+    })?
+    .unwrap_or(false)
+    {}
+    Ok(())
+}
+
+/// `pdo_stmt_invalidate_result`, php 8.5.12's: the rows of the start
+/// before closed, by the connector or by [`drain`], and the statement no
+/// longer executed, so a start that fails leaves no row of the one
+/// before to fetch. php ignores the closer's answer, its error cleared
+/// by the start's `PDO_STMT_CLEAR_ERR` next; a throwable a callback raised
+/// while it closed is handed on.
+///
+/// ```php
+/// $db = PDO::connect('sqlite::memory:');
+/// $s = $db->prepare('SELECT ? UNION ALL SELECT 2');
+/// $s->execute(['a']); var_dump($s->fetchColumn());
+/// try { $s->execute([new stdClass]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($s->fetchColumn());
+/// $db->createFunction('f', function ($t) { if ($t) throw new Exception('thrown'); return 'b'; });
+/// $s = $db->prepare('SELECT f(?) UNION ALL SELECT 2');
+/// $s->execute([0]); var_dump($s->fetchColumn());
+/// try { $s->execute([1]); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($s->fetchColumn());
+/// $s->execute([0]); var_dump($s->fetchAll(PDO::FETCH_COLUMN));
+/// ```
+/// ```expect
+/// string(1) "a"
+/// Object of class stdClass could not be converted to string
+/// bool(false)
+/// string(1) "b"
+/// thrown
+/// bool(false)
+/// array(2) {
+///   [0]=>
+///   string(1) "b"
+///   [1]=>
+///   int(2)
+/// }
+/// ```
+fn invalidate_result(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
+    match with_driver(req, stmt, |req, driver| driver.close_cursor(req))? {
+        Err(Failure {
+            cause: Cause::Unsupported,
+            thrown: None,
+        }) => drain(req, stmt)?,
+        Err(Failure {
+            thrown: Some(thrown),
+            ..
+        }) => return Err(thrown),
+        Ok(()) | Err(Failure { thrown: None, .. }) => {}
+    }
+    write(req, stmt, |s| s.executed = false);
+    Ok(())
+}
+
 // ---- attributes, metadata and cursors
 
 /// `pdo_raise_impl_error(stmt->dbh, stmt, "IM001", supp)` and `false`.
@@ -1441,13 +1502,7 @@ impl PDOStatement {
         match on_driver(req, stmt, |req, driver| driver.close_cursor(req))? {
             Ok(Some(())) => {}
             Ok(None) => return Ok(false),
-            Err(()) => {
-                while with_driver(req, stmt, |req, driver| {
-                    driver.fetch(req, crate::connector::Orientation::Forward, 0)
-                })?
-                .unwrap_or(false)
-                {}
-            }
+            Err(()) => drain(req, stmt)?,
         }
         write(req, stmt, |s| s.executed = false);
         Ok(true)
@@ -1625,6 +1680,9 @@ impl PDOStatement {
         let input = params;
         let (stmt, dbh) = this_stmt(req, this.object())?;
         refuse_in_param_event(req, stmt)?;
+        if read(req, stmt, |s| s.executed).unwrap_or(false) {
+            invalidate_result(req, stmt)?;
+        }
         clear_error(req, stmt);
         if let Some(input) = input {
             if let Some(old) = write(req, stmt, |s| s.params.take()).flatten() {
