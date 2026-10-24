@@ -126,6 +126,11 @@ pub(crate) struct DbhState {
     /// every `PDO` asking its key shares in place of its own, as
     /// `pdo_obj->inner = pdbh` shares it.
     shares: Option<usize>,
+    /// Of a persistent `pdo_dbh_t` the request holds, the `PDO` objects
+    /// sharing it: php's `refcount` less the one `EG(persistent_list)`
+    /// keeps, which `pdo_dbh_free_storage` reads to roll back only as the
+    /// last of them goes (GH-23962).
+    holders: usize,
     /// `dbh->query_stmt`: the statement a failed `query()` left, whose
     /// error state `errorCode()` and `errorInfo()` read.
     query_stmt: Option<Owner<PhpObject>>,
@@ -162,16 +167,25 @@ pub(crate) fn state(req: &mut Request, object: PhpObject) -> Option<&mut DbhStat
     }
 }
 
+/// The object's own `pdo_dbh_t` taken off its payload, which shares
+/// nothing until [`share`] points it at the persistent one.
+fn detach(req: &mut Request, object: PhpObject) -> Option<Dbh> {
+    object.native_mut::<Dbh>(req).map(std::mem::take)
+}
+
 /// An object's payload switched over to the persistent `pdo_dbh_t` the
-/// request holds at `at`, `pdo_obj->inner = pdbh`: what it held before
-/// handed back.
-fn share(req: &mut Request, object: PhpObject, at: usize) -> Option<Dbh> {
-    let payload = object.native_mut::<Dbh>(req)?;
-    let shared = DbhState {
-        shares: Some(at),
-        ..DbhState::default()
-    };
-    Some(std::mem::replace(payload, Box::new(shared)))
+/// request holds at `at`, `pdo_obj->inner = pdbh`, which counts the
+/// object among its holders, `pdbh->refcount++`.
+fn share(req: &mut Request, object: PhpObject, at: usize) {
+    if let Some(payload) = object.native_mut::<Dbh>(req) {
+        **payload = DbhState {
+            shares: Some(at),
+            ..DbhState::default()
+        };
+    }
+    if let Some(held) = req.state::<Persistent>().lent.get_mut(at) {
+        held.holders += 1;
+    }
 }
 
 /// `EG(persistent_list)` as far as PDO reaches it (design §4.10): the
@@ -294,20 +308,42 @@ impl ObjectHandlers for Handlers {
     /// `pdo_dbh_free_storage`: a transaction still open rolled back,
     /// `zend_object_std_dtor`, and then `dbh_free`: the failed statement
     /// given up, the connection closed and the constructor arguments
-    /// released.
+    /// released. Over a persistent connection the rollback waits for the
+    /// last object sharing it (GH-23962):
+    ///
+    /// ```php
+    /// $a = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// $b = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// $b->beginTransaction();
+    /// unset($a);
+    /// var_dump($b->inTransaction(), $b->commit());
+    /// $b->beginTransaction();
+    /// $b->exec('CREATE TABLE t (a)');
+    /// unset($b);
+    /// $c = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// var_dump($c->inTransaction(), $c->query("SELECT count(*) FROM sqlite_master WHERE name = 't'")->fetchColumn());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// int(0)
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         if object
             .native::<Dbh>(req)
             .is_some_and(|d| d.shares.is_some())
         {
-            // Over a persistent `pdo_dbh_t`: the transaction rolled back,
-            // `persistent_shutdown`, and `dbh_free`'s `--dbh->refcount`,
-            // which leaves the connection held.
-            let Some(tracked) = dbh_ref(req, object, |d| d.in_txn) else {
+            // Over a persistent `pdo_dbh_t`: the transaction rolled back
+            // where no other object shares the connection (php 8.5.12's
+            // `refcount <= 2`, GH-23962), `persistent_shutdown`, and
+            // `dbh_free`'s `--dbh->refcount`, which leaves the connection
+            // held.
+            let Some((tracked, last)) = dbh_ref(req, object, |d| (d.in_txn, d.holders <= 1)) else {
                 return;
             };
             let rolled = with_connection(req, object, |req, conn| {
-                let rolled = roll_back_open(req, conn, tracked);
+                let rolled = last && roll_back_open(req, conn, tracked);
                 conn.persistent_shutdown(req);
                 Ok(rolled)
             });
@@ -315,6 +351,12 @@ impl ObjectHandlers for Handlers {
                 if rolled.unwrap_or(false) {
                     d.in_txn = false;
                 }
+                // php leaves the objects sharing a dead connection on it
+                // and counts a new one from the factory's object alone; the
+                // engine replaces the dead one in place (`hold`), so those
+                // objects share the new one uncounted, and what their frees
+                // take off the count stops at zero.
+                d.holders = d.holders.saturating_sub(1);
                 d.query_stmt.take()
             });
             Std.free_obj(req, object);
@@ -810,7 +852,7 @@ fn alive(req: &mut Request, conn: Conn) -> (bool, Conn) {
 /// opened for `object` held by the request under `key`, in place of the
 /// dead one at `dead`, and the object switched over to it.
 fn hold(req: &mut Request, object: PhpObject, key: Vec<u8>, dead: Option<usize>) {
-    let Some(dbh) = share(req, object, usize::MAX) else {
+    let Some(dbh) = detach(req, object) else {
         return;
     };
     let lent = &mut req.state::<Persistent>().lent;
@@ -1118,6 +1160,24 @@ fn set_statement_class(
 /// load Lazy
 /// Lazy
 /// ```
+///
+/// Constructor arguments that are not an array are named by their own
+/// type, and a refused value leaves the class set before it:
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// try { $db->setAttribute(PDO::ATTR_STATEMENT_CLASS, ['PDOStatement', 'x']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $db->prepare('SELECT 1', [PDO::ATTR_STATEMENT_CLASS => ['PDOStatement', 1]]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($db->getAttribute(PDO::ATTR_STATEMENT_CLASS));
+/// ```
+/// ```expect
+/// PDO::setAttribute(): Argument #2 ($value) PDO::ATTR_STATEMENT_CLASS constructor_args must be of type ?array, string given
+/// PDO::ATTR_STATEMENT_CLASS constructor_args must be of type ?array, int given
+/// array(1) {
+///   [0]=>
+///   string(12) "PDOStatement"
+/// }
+/// ```
 pub(super) fn statement_class(
     req: &mut Request,
     value: &Value,
@@ -1168,7 +1228,8 @@ pub(super) fn statement_class(
             if let Some(args) = args.deref().as_array() {
                 Some(args)
             } else {
-                let given = value_name(req, value);
+                // php 8.5.12 names the element, where 8.5.9 named the pair.
+                let given = value_name(req, &args.deref());
                 return Err(type_error(
                     req,
                     &format!(

@@ -16,9 +16,10 @@ use cranelift_codegen::isa;
 use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD,
-    STRING_MATCH, held,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
+    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
+    HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
+    SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -977,4 +978,43 @@ fn a_class_the_next_request_declares_fails_the_class_guard() {
     assert_eq!(testing::stdout(&second), "104 64\n");
     let lines = String::from_utf8_lossy(&second.stderr);
     assert!(lines.contains("TRACE 1 exit"), "{lines}");
+}
+
+/// The hash slice's dimension oplines lowered, each element reached
+/// through the kernel php's code calls the table's lookup through: the
+/// `find` kernel for a read, a test and a compound write, the `lookup`
+/// kernel for a write and a fetch for writing, and `.=` onto the element
+/// through `assign_concat` (#3339).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), String> {
+    let kernels: [(Fixture, &[(Kernel, usize)]); 13] = [
+        (HASH_READ, &[(Kernel::Find, 3)]),
+        (HASH_IS, &[(Kernel::Find, 3)]),
+        (HASH_ISSET, &[(Kernel::Find, 3)]),
+        (HASH_WRITE, &[(Kernel::Lookup, 3)]),
+        (HASH_FETCH_W, &[(Kernel::Lookup, 1), (Kernel::Find, 1)]),
+        (DIM_DIV, &[(Kernel::Find, 1)]),
+        (DIM_MOD, &[(Kernel::Find, 2)]),
+        (DIM_SL, &[(Kernel::Find, 2)]),
+        (DIM_SR, &[(Kernel::Find, 2)]),
+        (DIM_AND, &[(Kernel::Find, 1)]),
+        (DIM_OR, &[(Kernel::Find, 1)]),
+        (DIM_XOR, &[(Kernel::Find, 1)]),
+        (DIM_CONCAT, &[(Kernel::Find, 1), (Kernel::AssignConcat, 1)]),
+    ];
+    for (fixture, calls) in kernels {
+        lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        for (kernel, n) in calls {
+            assert_eq!(
+                calls_of(&clif, *kernel).len(),
+                *n,
+                "{}: {kernel:?}\n{clif}",
+                fixture.name
+            );
+        }
+    }
+    Ok(())
 }

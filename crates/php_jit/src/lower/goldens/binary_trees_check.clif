@@ -38,7 +38,7 @@ function u0:0(i64, i64) -> i32 tail {
                                     v54 -> v22
                                     v65 -> v22
                                     v86 -> v22
-                                    v155 -> v22
+                                    v154 -> v22
                                     v189 -> v22
                                     v202 -> v22
                                     v87 -> v30
@@ -61,17 +61,17 @@ function u0:0(i64, i64) -> i32 tail {
 @0000                               brif v28, block6(v29, v22, v30), block7  ; v29 = 0
 
                                 block7:
-@0000                               v34 = iconst.i64 0
-@0000                               v35 = load.i64 notrap aligned v22+80
-@0000                               v36 = load.i32 notrap aligned v35+24
+@0000                               v34 = load.i64 notrap aligned v22+80
+@0000                               v35 = iconst.i64 0
+@0000                               v36 = load.i32 notrap aligned v34+24
 @0000                               v37 = uextend.i64 v36
-@0000                               v38 = icmp uge v34, v37  ; v34 = 0
+@0000                               v38 = icmp uge v35, v37  ; v35 = 0
 @0000                               brif v38, block8, block9
 
                                 block9:
-@0000                               v39 = load.i64 notrap aligned v35+16
+@0000                               v39 = load.i64 notrap aligned v34+16
 @0000                               v40 = iconst.i64 16
-@0000                               v41 = imul.i64 v34, v40  ; v34 = 0, v40 = 16
+@0000                               v41 = imul.i64 v35, v40  ; v35 = 0, v40 = 16
 @0000                               v42 = iadd v39, v41
 @0000                               v43 = load.i8 notrap aligned v42+8
 @0000                               v44 = iconst.i8 0
@@ -262,17 +262,17 @@ function u0:0(i64, i64) -> i32 tail {
 @0004                               v152 = iconst.i32 -129
 @0004                               v153 = band v151, v152  ; v152 = -129
 @0004                               store notrap aligned v153, v150+44
-@0005                               v154 = iconst.i64 0
-@0005                               v156 = load.i64 notrap aligned v22+80
-@0005                               v157 = load.i32 notrap aligned v156+24
+@0005                               v155 = load.i64 notrap aligned v22+80
+@0005                               v156 = iconst.i64 0
+@0005                               v157 = load.i32 notrap aligned v155+24
 @0005                               v158 = uextend.i64 v157
-@0005                               v159 = icmp uge v154, v158  ; v154 = 0
+@0005                               v159 = icmp uge v156, v158  ; v156 = 0
 @0005                               brif v159, block28, block29
 
                                 block29:
-@0005                               v160 = load.i64 notrap aligned v156+16
+@0005                               v160 = load.i64 notrap aligned v155+16
 @0005                               v161 = iconst.i64 16
-@0005                               v162 = imul.i64 v154, v161  ; v154 = 0, v161 = 16
+@0005                               v162 = imul.i64 v156, v161  ; v156 = 0, v161 = 16
 @0005                               v163 = iadd v160, v162
 @0005                               v164 = load.i8 notrap aligned v163+8
 @0005                               v165 = iconst.i8 0
@@ -294,7 +294,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0005                               brif v175, block34, block35
 
                                 block34 cold:
-@0005                               jump block36(v150, v155, v30)
+@0005                               jump block36(v150, v154, v30)
 
                                 block35:
 @0005                               jump block33(v163)
@@ -311,7 +311,7 @@ function u0:0(i64, i64) -> i32 tail {
 @0005                               brif v187, block37, block38
 
                                 block37 cold:
-@0005                               jump block36(v150, v155, v176)
+@0005                               jump block36(v150, v154, v176)
 
                                 block38:
 @0005                               jump block33(v182)
@@ -408,7 +408,7 @@ function u0:0(i64, i64) -> i32 tail {
                                     v277 -> v246
                                     v288 -> v246
                                     v309 -> v246
-                                    v375 -> v246
+                                    v374 -> v246
                                     v406 -> v246
                                     v419 -> v246
 @0008                               v247 = load.i64 notrap aligned v3+72
@@ -430,17 +430,17 @@ function u0:0(i64, i64) -> i32 tail {
 @0009                               brif v255, block6(v256, v246, v249), block45  ; v256 = 0
 
                                 block45:
-@0009                               v257 = iconst.i64 0
-@0009                               v258 = load.i64 notrap aligned v246+80
-@0009                               v259 = load.i32 notrap aligned v258+24
+@0009                               v257 = load.i64 notrap aligned v246+80
+@0009                               v258 = iconst.i64 0
+@0009                               v259 = load.i32 notrap aligned v257+24
 @0009                               v260 = uextend.i64 v259
-@0009                               v261 = icmp uge v257, v260  ; v257 = 0
+@0009                               v261 = icmp uge v258, v260  ; v258 = 0
 @0009                               brif v261, block8, block46
 
                                 block46:
-@0009                               v262 = load.i64 notrap aligned v258+16
+@0009                               v262 = load.i64 notrap aligned v257+16
 @0009                               v263 = iconst.i64 16
-@0009                               v264 = imul.i64 v257, v263  ; v257 = 0, v263 = 16
+@0009                               v264 = imul.i64 v258, v263  ; v258 = 0, v263 = 16
 @0009                               v265 = iadd v262, v264
 @0009                               v266 = load.i8 notrap aligned v265+8
 @0009                               v267 = iconst.i8 0
@@ -631,17 +631,17 @@ function u0:0(i64, i64) -> i32 tail {
 @000d                               v372 = iconst.i32 -129
 @000d                               v373 = band v371, v372  ; v372 = -129
 @000d                               store notrap aligned v373, v370+44
-@000e                               v374 = iconst.i64 0
-@000e                               v376 = load.i64 notrap aligned v246+80
-@000e                               v377 = load.i32 notrap aligned v376+24
+@000e                               v375 = load.i64 notrap aligned v246+80
+@000e                               v376 = iconst.i64 0
+@000e                               v377 = load.i32 notrap aligned v375+24
 @000e                               v378 = uextend.i64 v377
-@000e                               v379 = icmp uge v374, v378  ; v374 = 0
+@000e                               v379 = icmp uge v376, v378  ; v376 = 0
 @000e                               brif v379, block28, block61
 
                                 block61:
-@000e                               v380 = load.i64 notrap aligned v376+16
+@000e                               v380 = load.i64 notrap aligned v375+16
 @000e                               v381 = iconst.i64 16
-@000e                               v382 = imul.i64 v374, v381  ; v374 = 0, v381 = 16
+@000e                               v382 = imul.i64 v376, v381  ; v376 = 0, v381 = 16
 @000e                               v383 = iadd v380, v382
 @000e                               v384 = load.i8 notrap aligned v383+8
 @000e                               v385 = iconst.i8 0
@@ -663,7 +663,7 @@ function u0:0(i64, i64) -> i32 tail {
 @000e                               brif v395, block66, block67
 
                                 block66 cold:
-@000e                               jump block36(v370, v375, v249)
+@000e                               jump block36(v370, v374, v249)
 
                                 block67:
 @000e                               jump block65(v383)
@@ -680,7 +680,7 @@ function u0:0(i64, i64) -> i32 tail {
 @000e                               brif v404, block68, block69
 
                                 block68 cold:
-@000e                               jump block36(v370, v375, v396)
+@000e                               jump block36(v370, v374, v396)
 
                                 block69:
 @000e                               jump block65(v399)
