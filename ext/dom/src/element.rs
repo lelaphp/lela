@@ -15,7 +15,7 @@ use crate::node::DOMNode;
 use crate::object::{Code, Extra};
 use crate::private::{HTML_NS, html_in_html_document};
 use crate::{
-    check_qname, dom, dom_error, dom_mut, dom_throw, empty_string, fetch, get_ns, intern,
+    carried, check_qname, dom, dom_error, dom_mut, dom_throw, empty_string, fetch, get_ns, intern,
     invalidate, mark_ids_modified, node_list_unlink, nullable_object, object_for,
     resolve_prefix_conflict, returned, set_attribute_id, strict, string, validate_and_extract,
 };
@@ -32,12 +32,11 @@ enum Found {
 }
 
 impl Found {
-    /// What `xmlHasNsProp` answered, told apart by its kind.
+    /// What `xmlHasNsProp` answered, told apart by its kind ([`carried`]).
     fn prop(node: Node) -> Found {
-        if node.kind() == Kind::AttributeDecl {
-            Found::Default(node)
-        } else {
-            Found::Attr(node)
+        match carried(Some(node)) {
+            Some(attr) => Found::Attr(attr),
+            None => Found::Default(node),
         }
     }
 }
@@ -122,7 +121,7 @@ fn namespace_node(
 ) -> Result<Owner<Value>, Thrown> {
     let Some(fake) = Node::fake_namespace_decl(
         Some(elem),
-        None,
+        elem.doc(),
         ns.href().as_deref(),
         ns.prefix().as_deref(),
     ) else {
@@ -331,10 +330,7 @@ fn set_attribute_ns_legacy(
             mark_ids_modified(req, this);
             match uri.filter(|u| !u.is_empty()) {
                 Some(uri) => {
-                    if let Some(existing) = elem
-                        .has_ns_prop(&local, Some(uri))
-                        .filter(|a| a.kind() != Kind::AttributeDecl)
-                    {
+                    if let Some(existing) = carried(elem.has_ns_prop(&local, Some(uri))) {
                         node_list_unlink(existing.children());
                     }
                     let is_xmlns = (prefix.as_deref() == Some(b"xmlns")
@@ -386,10 +382,7 @@ fn set_attribute_ns_legacy(
                 }
                 None => {
                     if Name::valid(&local) {
-                        if let Some(existing) = elem
-                            .has_prop(&local)
-                            .filter(|a| a.kind() != Kind::AttributeDecl)
-                        {
+                        if let Some(existing) = carried(elem.has_prop(&local)) {
                             node_list_unlink(existing.children());
                         }
                         elem.set_prop(&local, value);
@@ -445,10 +438,7 @@ fn set_attribute_ns_modern(
     let ns = mapped_ns(req, this, elem.doc(), prefix.as_deref(), namespace)?;
     // The attribute replaced keeps the children a wrapper names, detached,
     // where `xmlSetNsProp` would free them (php 8.5.12).
-    if let Some(existing) = elem
-        .has_ns_prop(&local, ns.and_then(Ns::href).as_deref())
-        .filter(|a| a.kind() != Kind::AttributeDecl)
-    {
+    if let Some(existing) = carried(elem.has_ns_prop(&local, ns.and_then(Ns::href).as_deref())) {
         node_list_unlink(existing.children());
     }
     match elem.set_ns_prop(ns, &local, value) {
@@ -727,12 +717,11 @@ fn set_attribute_node(
     }
     // An attribute in no namespace replaces one in none, never one of the
     // name in a namespace (php 8.5.12, GH-22447).
-    let existing = match (attr.ns().and_then(Ns::href), use_ns) {
+    let existing = carried(match (attr.ns().and_then(Ns::href), use_ns) {
         (Some(href), true) => elem.has_ns_prop(&attr.name(), Some(&href)),
         (None, _) => elem.has_ns_prop(&attr.name(), None),
         (Some(_), false) => elem.has_prop(&attr.name()),
-    }
-    .filter(|a| a.kind() != Kind::AttributeDecl);
+    });
     if let Some(old) = existing {
         if old == attr {
             return Ok(Owner::null());
@@ -767,10 +756,7 @@ fn set_id_attribute_ns(
     is_id: bool,
 ) -> Result<(), Thrown> {
     let elem = fetch(req, this)?;
-    if let Some(a) = elem
-        .has_ns_prop(name, Some(uri))
-        .filter(|a| a.kind() != Kind::AttributeDecl)
-    {
+    if let Some(a) = carried(elem.has_ns_prop(name, Some(uri))) {
         set_attribute_id(req, this, a, is_id);
     } else {
         let strict = strict(req, this);
@@ -1363,7 +1349,7 @@ impl DOMElement {
                 return Ok(());
             }
         }
-        if let Some(a) = attr.filter(|a| a.kind() != Kind::AttributeDecl) {
+        if let Some(a) = carried(attr) {
             remove_found(elem, Found::Attr(a));
         }
         Ok(())
@@ -1565,10 +1551,7 @@ impl DOMElement {
     ) -> Result<(), Thrown> {
         let this = this.object();
         let elem = fetch(req, this)?;
-        if let Some(a) = elem
-            .has_ns_prop(qualifiedName.as_bytes(), None)
-            .filter(|a| a.kind() != Kind::AttributeDecl)
-        {
+        if let Some(a) = carried(elem.has_ns_prop(qualifiedName.as_bytes(), None)) {
             set_attribute_id(req, this, a, isId);
         } else {
             let strict = strict(req, this);

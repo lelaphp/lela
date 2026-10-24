@@ -22,9 +22,9 @@ use crate::object::{Code, Dom};
 use crate::parent::replace_validity;
 use crate::private::{Mapper, Private};
 use crate::{
-    Deep, children_valid, class_name, clone_node, copy_document_ref, dom_error, dom_error_message,
-    fetch, has_feature, hierarchy_ok, instance_of, invalidate, is_equal_attr, is_equal_node,
-    is_read_only, normalize, normalize_refused, nullable_object, object_for,
+    StackGuard, StackRefusal, children_valid, class_name, clone_node, copy_document_ref, dom_error,
+    dom_error_message, fetch, has_feature, hierarchy_ok, instance_of, invalidate, is_equal_attr,
+    is_equal_node, is_read_only, normalize, nullable_object, object_for,
     reconcile_attribute_namespace, reconcile_ns, reconcile_ns_list, returned,
     set_document_ref_pointers, shared_doc, strict,
 };
@@ -104,11 +104,10 @@ fn check_legacy_insertion(
 /// and `insertBefore` replace: in no namespace for one in none (php
 /// 8.5.12), never one of the name in a namespace.
 fn existing_attr(parent: Node, child: Node) -> Option<Node> {
-    match child.ns().and_then(Ns::href) {
+    crate::carried(match child.ns().and_then(Ns::href) {
         None => parent.has_ns_prop(&child.name(), None),
         Some(href) => parent.has_ns_prop(&child.name(), Some(&href)),
-    }
-    .filter(|a| a.kind() != Kind::AttributeDecl)
+    })
 }
 
 /// `dom_node_replace_child`: the standard's checks where `modern`, the
@@ -420,8 +419,8 @@ fn cloned_object(
 
 /// `php_dom_normalize_modern`: every descendant text node that is empty
 /// removed, and the text nodes that follow one merged into it.
-fn normalize_modern(deep: &mut Deep<'_>, this: Node) {
-    if deep.overflowed() {
+fn normalize_modern(guard: &mut StackGuard<'_>, this: Node) {
+    if guard.overflowed() {
         return;
     }
     let mut at = this.children();
@@ -450,7 +449,7 @@ fn normalize_modern(deep: &mut Deep<'_>, this: Node) {
                     next = after;
                 }
             }
-            Kind::Element => normalize_modern(deep, node),
+            Kind::Element => normalize_modern(guard, node),
             _ => {}
         }
         at = node.next();
@@ -473,15 +472,10 @@ pub(crate) fn is_equal_node_of(
     if node == other {
         return Ok(true);
     }
-    let mut deep = Deep::new(req);
-    let equal = is_equal_node(&mut deep, node, other, modern);
-    if deep.reached() {
-        return Err(throw_error(
-            req,
-            "Error",
-            "Maximum call stack size reached.",
-        ));
-    }
+    let mut guard = StackGuard::new(req);
+    let equal = is_equal_node(&mut guard, node, other, modern);
+    let reached = guard.reached();
+    StackRefusal::Compare.raise_if(req, reached)?;
     Ok(equal)
 }
 
@@ -1479,9 +1473,9 @@ impl DOMNode {
     fn cloneNode(
         req: &mut Request,
         this: This<Self>,
-        #[php(default = false)] deep: bool,
+        #[php(default = false)] guard: bool,
     ) -> Result<Untyped<Owner<Value>>, Thrown> {
-        clone_node_of(req, this.object(), deep).map(Untyped)
+        clone_node_of(req, this.object(), guard).map(Untyped)
     }
 
     /// `DOMNode::getLineNo(): int`.
@@ -1842,14 +1836,14 @@ impl DOMNode {
         let this = this.object();
         let node = fetch(req, this)?;
         let modern = follows_spec(req, this);
-        let mut deep = Deep::new(req);
+        let mut guard = StackGuard::new(req);
         if modern {
-            normalize_modern(&mut deep, node);
+            normalize_modern(&mut guard, node);
         } else {
-            normalize(&mut deep, node);
+            normalize(&mut guard, node);
         }
-        let reached = deep.reached();
-        normalize_refused(req, reached)
+        let reached = guard.reached();
+        StackRefusal::Normalize.raise_if(req, reached)
     }
 
     /// `DOMNode::removeChild(DOMNode $child): DOMNode|false`.

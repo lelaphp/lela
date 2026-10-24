@@ -358,9 +358,7 @@ fn named(
     let ns = ns.filter(|uri| !(uri.is_empty() && modern));
     let found = match kind {
         Walk::Attributes => match ns {
-            Some(uri) => node
-                .has_ns_prop(name, Some(uri))
-                .filter(|a| a.kind() != Kind::AttributeDecl),
+            Some(uri) => crate::carried(node.has_ns_prop(name, Some(uri))),
             None if modern => attribute_node(node, name),
             None => node.has_prop(name),
         },

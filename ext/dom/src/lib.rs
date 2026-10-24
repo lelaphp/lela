@@ -1482,7 +1482,7 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
         let parent = parent_obj.and_then(|p| node_of(req, p));
         if let Some(cloned) = Node::fake_namespace_decl(
             parent,
-            n.doc(),
+            parent.map_or(n.doc(), Node::doc),
             ns.and_then(Ns::href).as_deref(),
             ns.and_then(Ns::prefix).as_deref(),
         ) {
@@ -1565,25 +1565,33 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
     Ok(clone)
 }
 
+/// What `xmlHasProp` or `xmlHasNsProp` answered, where it is an attribute
+/// the element carries: never the declaration (`XML_ATTRIBUTE_DECL`) of
+/// the default a DTD gives an element that does not carry it, which both
+/// answer too.
+pub(crate) fn carried(found: Option<Node>) -> Option<Node> {
+    found.filter(|a| a.kind() != Kind::AttributeDecl)
+}
+
 /// A walk php makes by recursing over the tree, asking at each level
 /// whether the stack has come down to its limit
 /// (`zend_call_stack_overflowed(EG(stack_limit))`): a level that finds it
 /// has does nothing more, the levels above go on, and the native raises
 /// the refusal once at the end, as php throws only the first.
-pub(crate) struct Deep<'r> {
+pub(crate) struct StackGuard<'r> {
     req: &'r Request,
     reached: bool,
 }
 
-impl<'r> Deep<'r> {
-    pub(crate) fn new(req: &'r Request) -> Deep<'r> {
-        Deep {
+impl<'r> StackGuard<'r> {
+    pub(crate) fn new(req: &'r Request) -> StackGuard<'r> {
+        StackGuard {
             req,
             reached: false,
         }
     }
 
-    /// Whether this level is past the limit, kept for [`Deep::reached`].
+    /// Whether this level is past the limit, kept for [`StackGuard::reached`].
     pub(crate) fn overflowed(&mut self) -> bool {
         let over = self.req.limits().stack_overflowed();
         self.reached |= over;
@@ -1596,22 +1604,35 @@ impl<'r> Deep<'r> {
     }
 }
 
-/// `dom_normalize_check_stack_limit`'s refusal, raised by the native a
-/// normalisation that reached the limit ends in.
-pub(crate) fn normalize_refused(req: &mut Request, deep: bool) -> Result<(), Thrown> {
-    if deep {
-        return Err(throw_error(
-            req,
-            "Error",
-            "Maximum call stack size reached. Infinite recursion?",
-        ));
+/// What a walk over the tree refuses where it reached the stack's limit:
+/// php's sentence for that walk, which normalisation and comparison word
+/// apart.
+#[derive(Clone, Copy)]
+pub(crate) enum StackRefusal {
+    /// `dom_normalize_check_stack_limit`.
+    Normalize,
+    /// `php_dom_node_is_equal_node`.
+    Compare,
+}
+
+impl StackRefusal {
+    /// The walk's end: the refusal raised where a level reached the limit
+    /// (`StackGuard::reached`), once, as php throws only the first.
+    pub(crate) fn raise_if(self, req: &mut Request, reached: bool) -> Result<(), Thrown> {
+        if !reached {
+            return Ok(());
+        }
+        let message = match self {
+            StackRefusal::Normalize => "Maximum call stack size reached. Infinite recursion?",
+            StackRefusal::Compare => "Maximum call stack size reached.",
+        };
+        Err(throw_error(req, "Error", message))
     }
-    Ok(())
 }
 
 /// `php_dom_normalize_legacy`.
-fn normalize(deep: &mut Deep<'_>, node: Node) {
-    if deep.overflowed() {
+fn normalize(guard: &mut StackGuard<'_>, node: Node) {
+    if guard.overflowed() {
         return;
     }
     let mut child = node.children();
@@ -1644,10 +1665,10 @@ fn normalize(deep: &mut Deep<'_>, node: Node) {
                 }
             }
             Kind::Element => {
-                normalize(deep, c);
+                normalize(guard, c);
                 let mut attr = c.properties();
                 while let Some(a) = attr {
-                    normalize(deep, a);
+                    normalize(guard, a);
                     attr = a.next();
                 }
             }
@@ -1674,8 +1695,8 @@ fn is_equal_attr(a: Node, b: Node) -> bool {
 /// (`spec_compliant`) keeps none to compare.
 /// A level past the stack's limit answers unequal, its refusal raised by
 /// the native once the walk ends.
-fn is_equal_node(deep: &mut Deep<'_>, a: Node, b: Node, spec_compliant: bool) -> bool {
-    if deep.overflowed() {
+fn is_equal_node(guard: &mut StackGuard<'_>, a: Node, b: Node, spec_compliant: bool) -> bool {
+    if guard.overflowed() {
         return false;
     }
     if a.kind() != b.kind() {
@@ -1686,9 +1707,9 @@ fn is_equal_node(deep: &mut Deep<'_>, a: Node, b: Node, spec_compliant: bool) ->
             a.name() == b.name()
                 && ns_prefix_equal(a, b)
                 && ns_uri_equal(a, b)
-                && unordered_equal(deep, a.properties(), b.properties(), spec_compliant)
+                && unordered_equal(guard, a.properties(), b.properties(), spec_compliant)
                 && (spec_compliant || unordered_ns_equal(a.ns_def(), b.ns_def()))
-                && ordered_equal(deep, a.children(), b.children(), spec_compliant)
+                && ordered_equal(guard, a.children(), b.children(), spec_compliant)
         }
         Kind::Dtd => {
             a.name() == b.name()
@@ -1711,7 +1732,7 @@ fn is_equal_node(deep: &mut Deep<'_>, a: Node, b: Node, spec_compliant: bool) ->
                 && a.ns().and_then(Ns::href) == b.ns().and_then(Ns::href)
         }
         Kind::Fragment | Kind::HtmlDocument | Kind::Document => {
-            ordered_equal(deep, a.children(), b.children(), spec_compliant)
+            ordered_equal(guard, a.children(), b.children(), spec_compliant)
         }
         _ => false,
     }
@@ -2050,7 +2071,7 @@ fn ns_uri_equal(a: Node, b: Node) -> bool {
 }
 
 fn ordered_equal(
-    deep: &mut Deep<'_>,
+    guard: &mut StackGuard<'_>,
     a: Option<Node>,
     b: Option<Node>,
     spec_compliant: bool,
@@ -2059,11 +2080,11 @@ fn ordered_equal(
     a.len() == b.len()
         && a.iter()
             .zip(b.iter())
-            .all(|(x, y)| is_equal_node(deep, *x, *y, spec_compliant))
+            .all(|(x, y)| is_equal_node(guard, *x, *y, spec_compliant))
 }
 
 fn unordered_equal(
-    deep: &mut Deep<'_>,
+    guard: &mut StackGuard<'_>,
     a: Option<Node>,
     b: Option<Node>,
     spec_compliant: bool,
@@ -2072,7 +2093,7 @@ fn unordered_equal(
     a.len() == b.len()
         && a.iter().all(|x| {
             b.iter()
-                .any(|y| is_equal_node(deep, *x, *y, spec_compliant))
+                .any(|y| is_equal_node(guard, *x, *y, spec_compliant))
         })
 }
 

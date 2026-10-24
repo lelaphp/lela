@@ -34,7 +34,7 @@ enum Mode {
     /// dispatch refuses it as it refuses a namespace with no table
     /// (GH-23897).
     #[default]
-    None,
+    Refused,
     /// A call is served from the table, by name.
     Set,
     /// `registerPhpFunctions()` with no argument: any function by name,
@@ -457,9 +457,12 @@ fn item_object(
                 }
             };
             let parent_obj = *parent_value;
-            let Some(fake) =
-                Node::fake_namespace_decl(Some(parent), None, href.as_deref(), prefix.as_deref())
-            else {
+            let Some(fake) = Node::fake_namespace_decl(
+                Some(parent),
+                parent.doc(),
+                href.as_deref(),
+                prefix.as_deref(),
+            ) else {
                 parent_value.give_up(req);
                 return Err(crate::dom_throw(req, Code::InvalidState));
             };
@@ -567,7 +570,8 @@ impl Lookup {
         match namespace {
             None
             | Some(Namespace {
-                mode: Mode::None, ..
+                mode: Mode::Refused,
+                ..
             }) => Lookup::NoTable,
             Some(Namespace {
                 mode: Mode::All, ..

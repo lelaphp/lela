@@ -1006,7 +1006,7 @@ fn import_node(
     req: &mut Request,
     this: PhpObject,
     node_obj: PhpObject,
-    deep: bool,
+    guard: bool,
 ) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let node = fetch(req, node_obj)?;
@@ -1021,7 +1021,7 @@ fn import_node(
     if node.doc() == Some(doc) {
         return object_for(req, node, Some(this));
     }
-    let Some(copy) = crate::clone_node(node, Some(doc), deep) else {
+    let Some(copy) = crate::clone_node(node, Some(doc), guard) else {
         return Ok(Owner::bool(false));
     };
     if copy.kind() == Kind::Attribute
@@ -1058,7 +1058,7 @@ fn modern_import(
     req: &mut Request,
     this: PhpObject,
     node_obj: Option<PhpObject>,
-    deep: bool,
+    guard: bool,
 ) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let Some(node_obj) = node_obj else {
@@ -1073,7 +1073,7 @@ fn modern_import(
         return object_for(req, node, Some(this));
     }
     let copy = crate::private::with_mapper(req, this, |mapper, req| {
-        crate::node::clone_node_modern(req, mapper, node, Some(doc), deep)
+        crate::node::clone_node_modern(req, mapper, node, Some(doc), guard)
     })?
     .flatten();
     let Some(copy) = copy else {
@@ -1614,9 +1614,9 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         node: Instance<DOMNode>,
-        #[php(default = false)] deep: bool,
+        #[php(default = false)] guard: bool,
     ) -> Result<Untyped<Owner<Value>>, Thrown> {
-        import_node(req, this.object(), node.object(), deep).map(Untyped)
+        import_node(req, this.object(), node.object(), guard).map(Untyped)
     }
 
     /// `DOMDocument::load(string $filename, int $options = 0): bool`.
@@ -1697,10 +1697,10 @@ impl DOMDocument {
     #[php(tentative)]
     fn normalizeDocument(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let node = fetch(req, this.object())?;
-        let mut deep = crate::Deep::new(req);
-        crate::normalize(&mut deep, node);
-        let reached = deep.reached();
-        crate::normalize_refused(req, reached)
+        let mut guard = crate::StackGuard::new(req);
+        crate::normalize(&mut guard, node);
+        let reached = guard.reached();
+        crate::StackRefusal::Normalize.raise_if(req, reached)
     }
 
     /// `DOMDocument::registerNodeClass(string $baseClass, ?string $extendedClass): true`.
@@ -2307,9 +2307,9 @@ impl Document {
         req: &mut Request,
         this: This<Self>,
         node: Option<Instance<crate::modern::Node>>,
-        #[php(default = false)] deep: bool,
+        #[php(default = false)] guard: bool,
     ) -> Result<Owner<Raw<Instance<crate::modern::Node>>>, Thrown> {
-        let imported = modern_import(req, this.object(), node.map(|n| n.object()), deep)?;
+        let imported = modern_import(req, this.object(), node.map(|n| n.object()), guard)?;
         returned(imported)
     }
 
@@ -2443,9 +2443,9 @@ impl Document {
         req: &mut Request,
         this: This<Self>,
         node: Instance<DOMNode>,
-        #[php(default = false)] deep: bool,
+        #[php(default = false)] guard: bool,
     ) -> Result<Owner<Raw<Instance<crate::modern::Node>>>, Thrown> {
-        let imported = modern_import(req, this.object(), Some(node.object()), deep)?;
+        let imported = modern_import(req, this.object(), Some(node.object()), guard)?;
         returned(imported)
     }
 
