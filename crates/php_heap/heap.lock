@@ -290,6 +290,7 @@ Obj::set_class
 Obj::set_destructor_called
 Obj::set_laziness
 Obj::set_slot_bit
+Obj::set_uncollectable
 Obj::set_weakly_referenced
 Obj::slot
 Obj::slot_bit

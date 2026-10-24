@@ -1301,7 +1301,6 @@ values::Owner::set
 values::Owner::set_next_free
 values::Owner::set_str
 values::Owner::set_symtable_str
-values::Owner::sort_by
 values::Owner::take
 values::Owner::try_append
 values::Owner::unset
@@ -1461,6 +1460,7 @@ values::SmartStr::finish
 values::SmartStr::free
 values::SmartStr::remove
 values::SmartStr::reserve
+values::SortAlgorithm
 values::TypeTag
 values::Value
 values::Value::array

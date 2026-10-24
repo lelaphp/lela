@@ -1297,7 +1297,25 @@ pub(crate) enum CallFrame {
 /// other callee is `zend_create_fake_closure` over it, its scope the
 /// class that declares it, bound to the frame's receiver, and its
 /// called scope the receiver's class where it has one and the frame's
-/// called scope where it has none.
+/// called scope where it has none. One bound to no receiver is marked
+/// uncollectable, as `zend_create_fake_closure` marks it, so it is never
+/// a possible root; one bound to a receiver is:
+///
+/// ```php
+/// class X { public $f; }
+/// class M { function m() {} static function s() {} }
+/// $x = new X; $x->f = strlen(...); $c = $x->f; unset($c);
+/// $s = M::s(...); $s2 = $s; unset($s2);
+/// $w = Closure::fromCallable('strlen'); $v = $w; unset($v);
+/// var_dump(gc_status()['roots']);
+/// $m = new M; $b = $m->m(...); $b2 = $b; unset($b2);
+/// var_dump(gc_status()['roots'], ($x->f)("abc"));
+/// ```
+/// ```expect
+/// int(0)
+/// int(2)
+/// int(3)
+/// ```
 pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<PhpObject, Thrown> {
     let (function, this, called_scope) = match frame {
         CallFrame::Closure(closure) => {
@@ -1331,13 +1349,20 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
         bound: None,
         fake: true,
     };
-    create_closure(
+    let made = create_closure(
         req,
         (&fake, ClosureCache::Function),
         scope,
         called_scope,
         this,
-    )
+    )?;
+    // `zend_create_fake_closure`'s `GC_ADD_FLAGS(&closure->std,
+    // GC_NOT_COLLECTABLE)` where no receiver is bound: such a closure is
+    // part of no cycle, so no release offers it to the collector.
+    if this.is_none() {
+        made.heap().set_uncollectable();
+    }
+    Ok(made)
 }
 
 /// `zend_ast_evaluate`'s `ZEND_AST_OP_ARRAY` arm: a closure of a
