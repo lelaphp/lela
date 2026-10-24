@@ -43,6 +43,7 @@ pub(crate) mod dateformat;
 pub(crate) mod enumeration;
 pub(crate) mod formatter;
 pub(crate) mod grapheme;
+pub(crate) mod heap;
 pub(crate) mod idn;
 pub(crate) mod listformatter;
 pub(crate) mod locale;
@@ -262,6 +263,60 @@ pub(crate) fn to_utf16(text: &[u8]) -> Result<Vec<u16>, Code> {
         written
     });
     status.check().map(|_| out)
+}
+
+/// `intl_convert_utf8_to_utf16` as php makes it, into a block of the
+/// request's heap: the length preflighted, then `eumalloc` of it and its
+/// terminator, an ask the memory limit serves past the soft limit and
+/// records, then the conversion. The block and the length of its text,
+/// or the code a failure left, where nothing is held; the `Err` is the
+/// hard limit.
+pub(crate) fn to_utf16_block(
+    req: &mut php_ext::request::Request,
+    text: &[u8],
+) -> Result<Result<(heap::Block<u16>, usize), Code>, php_ext::raising::Thrown> {
+    let Ok(len) = length(text.len()) else {
+        return Ok(Err(Code::BUFFER_OVERFLOW));
+    };
+    let (mut needed, mut status) = (0, Code::ZERO);
+    // SAFETY: the preflight writes nothing, reading `len` bytes of a live
+    // slice.
+    unsafe {
+        sys::u_strFromUTF8(
+            std::ptr::null_mut(),
+            0,
+            &raw mut needed,
+            text.as_ptr().cast(),
+            len,
+            &mut status,
+        )
+    };
+    if status != Code::BUFFER_OVERFLOW && status != Code::STRING_NOT_TERMINATED {
+        return Ok(Err(status));
+    }
+    let units = usize::try_from(needed).unwrap_or(0);
+    let Some(mut block) = heap::Block::<u16>::ask(req, units + 1, false)? else {
+        return Ok(Err(Code::MEMORY_ALLOCATION));
+    };
+    status = Code::ZERO;
+    let room = block.as_mut_slice();
+    // SAFETY: the block holds `needed + 1` units, the capacity handed, and
+    // the source is `len` bytes of a live slice.
+    unsafe {
+        sys::u_strFromUTF8(
+            room.as_mut_ptr(),
+            needed + 1,
+            std::ptr::null_mut(),
+            text.as_ptr().cast(),
+            len,
+            &mut status,
+        )
+    };
+    if status.is_failure() {
+        block.give_back(req);
+        return Ok(Err(status));
+    }
+    Ok(Ok((block, units)))
 }
 
 /// `intl_convert_utf16_to_utf8`: `u_strToUTF8`, which refuses an
