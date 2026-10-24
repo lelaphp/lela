@@ -535,7 +535,7 @@ pub(crate) fn is_true(req: &mut Request, value: &Value) -> Result<bool, Thrown> 
             }
             f != 0.0
         }
-        ValueRef::Str(s) => !(s.is_empty() || s.as_bytes() == b"0"),
+        ValueRef::Str(s) => Scalar::Str(s.as_bytes()).is_true(),
         ValueRef::Array(a) => !a.is_empty(),
         ValueRef::Resource(r) => r.id() != 0,
         // `deref` followed the reference already.
@@ -3517,23 +3517,18 @@ pub(crate) fn is_not_identical(
     Ok(Value::bool(!identical(req, left, right)?))
 }
 
-/// The scalar a value is, for [`php_heap::compare`]; nothing for an
-/// array, an object, a resource or a reference not yet followed.
+/// The scalar a value is, for [`php_heap::compare`], as
+/// [`Scalar::of`] reads its zval; nothing for an array, an object, a
+/// resource or a reference not yet followed. No value is a constant
+/// expression, an `IS_INDIRECT` or an `IS_PTR`, which its reader made
+/// `null` ([`Value::of_slot`]).
 fn scalar(value: &Value) -> Option<Scalar<'_>> {
-    Some(match value.as_ref() {
-        // php's `IS_NULL` arm; an uninitialised zval reads as null here.
-        ValueRef::Undef | ValueRef::Null => Scalar::Null,
-        ValueRef::Bool(b) => Scalar::Bool(b),
-        ValueRef::Int(n) => Scalar::Long(n),
-        ValueRef::Float(f) => Scalar::Double(f),
-        ValueRef::Str(_) => Scalar::Str(value.as_str_bytes()?),
-        ValueRef::Array(_)
-        | ValueRef::Object(_)
-        | ValueRef::Resource(_)
-        | ValueRef::Reference(_) => {
-            return None;
-        }
-    })
+    let zval = value.as_zval();
+    // php's `IS_NULL` arm; an uninitialised zval reads as null here.
+    if zval.is_undef() {
+        return Some(Scalar::Null);
+    }
+    Scalar::of(zval)
 }
 
 /// `_zendi_convert_scalar_to_number_silent` over what [`compare`]'s

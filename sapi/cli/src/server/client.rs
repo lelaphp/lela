@@ -655,6 +655,42 @@ impl OutputSink for WireSink {
     fn write_stderr(&mut self, bytes: &[u8]) {
         std::io::stderr().lock().write_all(bytes).ok();
     }
+
+    /// `php://stdout` is the server's own fd 1, never the client's
+    /// socket: `php_stream_url_wrap_php` opens it as `dup(STDOUT_FILENO)`
+    /// under any SAPI not named `cli`, and the built-in server's is
+    /// `cli-server` (`Z/ext/standard/php_fopen_wrapper.c:260-272`), so
+    /// what a router logs there, as Laravel's `artisan serve` router logs
+    /// each request, reaches the terminal the server was started from.
+    ///
+    /// ```php
+    /// $dir = sys_get_temp_dir() . '/srv' . bin2hex(random_bytes(8));
+    /// mkdir($dir);
+    /// file_put_contents("$dir/index.php", '<?php file_put_contents("php://stdout", "to stdout\n"); echo "body\n";');
+    /// $p = proc_open([PHP_BINARY, '-n', '-S', '127.0.0.1:0', '-t', $dir], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// $ready = [$pipes[2]]; $none = null;
+    /// $line = stream_select($ready, $none, $none, 30) ? fgets($pipes[2]) : '';
+    /// $port = preg_match('/:(\d+)\) started$/', rtrim($line), $m) ? $m[1] : 0;
+    /// $c = stream_socket_client("tcp://127.0.0.1:$port");
+    /// fwrite($c, "GET / HTTP/1.0\r\nHost: x\r\n\r\n");
+    /// $response = stream_get_contents($c);
+    /// fclose($c);
+    /// echo strtok($response, "\r\n"), "\n", substr($response, strpos($response, "\r\n\r\n") + 4);
+    /// $ready = [$pipes[1]];
+    /// echo stream_select($ready, $none, $none, 30) ? fgets($pipes[1]) : "nothing on the server's stdout\n";
+    /// proc_terminate($p); proc_close($p);
+    /// unlink("$dir/index.php"); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// HTTP/1.0 200 OK
+    /// body
+    /// to stdout
+    /// ```
+    fn write_stdout(&mut self, bytes: &[u8]) -> bool {
+        std::io::stdout().lock().flush().ok();
+        crate::ffi::write_stdout(bytes).ok();
+        true
+    }
 }
 
 /// `append_http_status_line`: `HTTP/<major>.<minor> <code> <reason>`,
