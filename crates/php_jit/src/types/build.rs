@@ -1000,7 +1000,10 @@ impl<'a> Builder<'a> {
             // An element a fetch does not find is the interpreter's to
             // warn of, through php's `ZEND_JIT_EXIT_TO_VM`
             // (`zend_jit_fetch_dimension_address_inner`).
-            let grows = if matches!(op.opcode, Opcode::FetchDimR | Opcode::FetchObjR) {
+            let grows = if matches!(
+                op.opcode,
+                Opcode::FetchDimR | Opcode::FetchObjR | Opcode::FetchObjW
+            ) {
                 Grows::Never
             } else {
                 Grows::Side
@@ -1043,7 +1046,8 @@ impl<'a> Builder<'a> {
                     // What a property held is given up, or its handler
                     // serves what the inline form does not, and either
                     // may throw.
-                    || (places(op.opcode) && op.opcode != Opcode::FetchObjR)
+                    || (places(op.opcode)
+                        && !matches!(op.opcode, Opcode::FetchObjR | Opcode::FetchObjW))
                     // What the variable held is given up, and a destructor
                     // may throw.
                     || op.opcode == Opcode::FeFetchR
@@ -2279,6 +2283,9 @@ impl<'a> Builder<'a> {
         let unused = op.out_type == OperandKind::Unused;
         let served = match op.opcode {
             Opcode::FetchObjR => op.out_type == OperandKind::Tmp,
+            // The place itself, `IS_INDIRECT`, as `zend_jit_fetch_obj`
+            // writes it for a `_W` fetch of a property with no type.
+            Opcode::FetchObjW => op.out_type == OperandKind::Var,
             // A typed slot takes a scalar its type holds as it stands, as
             // the handler's inline path writes one (`data_value`).
             Opcode::AssignObj if slot.typed() => {

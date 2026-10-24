@@ -1975,8 +1975,9 @@ fn class_guards(ir: &TraceIr) -> usize {
 
 /// A loop over `$this` and a loop over an object a function holds: each
 /// property opline of a published class's declared slot with no type is
-/// compiled in place, a read, a write, a compound write and an increment
-/// or a decrement, under one class guard per object before the first,
+/// compiled in place, a read, a write, a compound write, an increment or
+/// a decrement and a fetch for writing, under one class guard per object
+/// before the first,
 /// as php's code generator compiles one whose `prop_info` it knows on an
 /// immutable class (`zend_jit_class_guard`, `TRACE_FRAME_SET_THIS_CLASS_CHECKED`);
 /// a typed property's write of a long its type holds is in place, as the
@@ -1993,6 +1994,7 @@ fn properties_of_a_published_class_are_inline_under_one_class_guard() -> Result<
             (Opcode::AssignObj, Form::Inline),
             (Opcode::AssignObjOp, Form::Inline),
             (Opcode::PreIncObj, Form::Inline),
+            (Opcode::FetchObjW, Form::Inline),
         ],
         "{}",
         dump::render(&this)

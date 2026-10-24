@@ -856,6 +856,7 @@ pub(crate) fn places(opcode: Opcode) -> bool {
     matches!(
         opcode,
         Opcode::FetchObjR
+            | Opcode::FetchObjW
             | Opcode::AssignObj
             | Opcode::AssignObjOp
             | Opcode::PreIncObj

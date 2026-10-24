@@ -761,6 +761,7 @@ pub(super) fn inline_may_leave(line: &Line) -> bool {
         Opcode::AssignOp
             | Opcode::FetchDimR
             | Opcode::FetchObjR
+            | Opcode::FetchObjW
             | Opcode::InitFcall
             | Opcode::InitFcallByName
             | Opcode::InitNsFcallByName

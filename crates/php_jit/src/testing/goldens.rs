@@ -142,7 +142,7 @@ pub(crate) const STRING_BUILD: Fixture = Fixture {
 
 /// A method's loop over `$this`, as `Zend/micro_bench.php`'s are: each
 /// property opline on a published class's declared slot in place, under
-/// one class guard (#3337).
+/// one class guard, and an `isset()` through the `handle` kernel (#3337).
 pub(crate) const OBJECT_THIS: Fixture = Fixture {
     name: "object_this",
     program: "object_this",

@@ -148,6 +148,58 @@ impl Emit<'_> {
         }
     }
 
+    /// `FETCH_OBJ_W` of a declared slot with no type: the slot itself,
+    /// `IS_INDIRECT`, written to the `VAR` the write after it reads, as
+    /// `zend_jit_fetch_obj` writes it; a slot nothing holds leaves for the
+    /// interpreter, `__get`'s, a lazy object's or the warning's.
+    ///
+    /// An array appended to through the fetch, a nested element
+    /// compound-written, a typed array's append the handler serves, an
+    /// object's property written through it, a reference taken of it, and
+    /// a slot unset, which the handler lays down:
+    ///
+    /// ```php
+    /// class L { public $a = []; public $m = [[0]]; public ?array $t = []; public $o; }
+    /// function f($l, $n) { for ($i = 0; $i < $n; $i++) { $l->a[] = $i; $l->m[0][0] += $i; $l->t[] = $i; $l->o->x = $i; $r = &$l->a; $r[] = -1; unset($r); } return $l; }
+    /// $l = new L; $l->o = new stdClass; echo json_encode(f($l, 4)), "\n";
+    /// $u = new L; unset($u->a); $u->o = new stdClass; echo json_encode(f($u, 2)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// {"a":[0,-1,1,-1,2,-1,3,-1],"m":[[6]],"t":[0,1,2,3],"o":{"x":3}}
+    /// {"a":[0,-1,1,-1],"m":[[1]],"t":[0,1],"o":{"x":1}}
+    /// ```
+    ///
+    /// ```php
+    /// class L { public $a = []; public $m = [[0]]; public ?array $t = []; public $o; }
+    /// function f($l, $n) { for ($i = 0; $i < $n; $i++) { $l->a[] = $i; $l->m[0][0] += $i; $l->t[] = $i; $l->o->x = $i; $r = &$l->a; $r[] = -1; unset($r); } return $l; }
+    /// $l = new L; $l->o = new stdClass; echo json_encode(f($l, 4)), "\n";
+    /// $u = new L; unset($u->a); $u->o = new stdClass; echo json_encode(f($u, 2)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// {"a":[0,-1,1,-1,2,-1,3,-1],"m":[[6]],"t":[0,1,2,3],"o":{"x":3}}
+    /// {"a":[0,-1,1,-1],"m":[[1]],"t":[0,1],"o":{"x":1}}
+    /// ```
+    pub(super) fn fetch_obj_w(&mut self, line: &Line) -> Result<(), Abort> {
+        let exit = line
+            .exit
+            .ok_or_else(|| mismatch("a property fetch that cannot leave"))?;
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a property fetch that writes nothing"))?;
+        let zval = self.property(line)?;
+        let byte = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
+        let undef = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Undef));
+        self.leave_if(undef, exit)?;
+        let (room, at) = self.place(self.value(out)?.slot)?;
+        let indirect = self.b.ins().iconst(I32, tag(ZvalType::Indirect));
+        self.b.ins().store(trusted(), zval, room, at);
+        self.b.ins().store(trusted(), indirect, room, at + TYPE_AT);
+        Ok(())
+    }
+
     /// `ASSIGN_OBJ` to a declared slot with no type, as
     /// `zend_jit_assign_obj` writes it through `zend_jit_assign_to_variable`:
     /// what the slot held written over where it counts nothing, given up

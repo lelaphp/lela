@@ -331,9 +331,51 @@ impl Onward {
     /// opline: a jump and a comparison, whose handler may take the jump
     /// fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
     /// a return, an include or an `eval`, a generator's opcodes, a
-    /// `finally`'s `FAST_CALL` and `FAST_RET`, the two silence opcodes,
-    /// whose observers a step tells, and a property's `isset()` and
-    /// `empty()`, whose handler may take the jump after it.
+    /// `finally`'s `FAST_CALL` and `FAST_RET`, and the two silence
+    /// opcodes, whose observers a step tells. A property's `isset()` and
+    /// `empty()` is among them, as php's code calls its handler; fused to
+    /// the jump after it, its handler takes that jump, and its direction
+    /// guard has it stepped, as every opline that holds a guard within it
+    /// is ([`Emit::step_kernel`]).
+    ///
+    /// A property hook writes a variable through the reference the object
+    /// holds to it as the handler serves its `get` and `set`, which the
+    /// loop reads after; and `isset()` and `empty()` of a property served by
+    /// their handler, written to a variable and fused to a jump each way:
+    ///
+    /// ```php
+    /// class H { public $r; public int $v = 0 { get { $this->r = $this->r + 0.5; return $this->v; } set { $this->v = $value * 2; } } }
+    /// function f($n) { $x = 0; $h = new H; $h->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $h->v = $i; $t += $h->v; $t += $x; } return [$t, $x]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [117.5,5]
+    /// ```
+    ///
+    /// ```php
+    /// class H { public $r; public int $v = 0 { get { $this->r = $this->r + 0.5; return $this->v; } set { $this->v = $value * 2; } } }
+    /// function f($n) { $x = 0; $h = new H; $h->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $h->v = $i; $t += $h->v; $t += $x; } return [$t, $x]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [117.5,5]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $b = 0; public $n = null; public $z = "0"; function run($k) { $c = 0; for ($i = 0; $i < $k; $i++) { $x = isset($this->b); $y = empty($this->z); if (isset($this->n)) { $c += 100; } if (!empty($this->b)) { $c += 10; } $c += $x + $y; $this->b = $i % 2; $this->n = $i == 3 ? 1 : null; } return $c; } }
+    /// echo (new S)->run(8), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 146
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $b = 0; public $n = null; public $z = "0"; function run($k) { $c = 0; for ($i = 0; $i < $k; $i++) { $x = isset($this->b); $y = empty($this->z); if (isset($this->n)) { $c += 100; } if (!empty($this->b)) { $c += 10; } $c += $x + $y; $this->b = $i % 2; $this->n = $i == 3 ? 1 : null; } return $c; } }
+    /// echo (new S)->run(8), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 146
+    /// ```
     ///
     /// A `__get` the handler serves writes a variable through the
     /// reference an object holds to it, which the loop reads after; a
@@ -516,7 +558,8 @@ impl Onward {
             | Opcode::PreIncObj
             | Opcode::PreDecObj
             | Opcode::PostIncObj
-            | Opcode::PostDecObj => Some(Onward(1)),
+            | Opcode::PostDecObj
+            | Opcode::IssetIsemptyPropObj => Some(Onward(1)),
             Opcode::AssignDim
             | Opcode::AssignDimOp
             | Opcode::AssignObj
@@ -1861,6 +1904,7 @@ impl<'a> Emit<'a> {
             }
             Opcode::FetchDimR => self.fetch(at, line),
             Opcode::FetchObjR => self.fetch_obj(at, line),
+            Opcode::FetchObjW => self.fetch_obj_w(line),
             Opcode::AssignObj => self.assign_obj(at, line),
             Opcode::AssignObjOp
             | Opcode::PreIncObj
