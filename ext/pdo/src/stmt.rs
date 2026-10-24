@@ -84,7 +84,7 @@ impl DbLink {
 /// string(10) "SELECT 111" refcount(5)
 /// SQL: [10] SELECT 111
 /// Params:  0
-/// 64
+/// 80
 /// SQL: [13] SELECT 111, ?
 /// Sent SQL: [19] SELECT 111, '12346'
 /// Params:  1

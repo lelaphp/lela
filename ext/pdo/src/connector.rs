@@ -735,7 +735,10 @@ pub struct Rewritten {
 /// until `php_pdo_free_statement` destroys it. A parameter bound by
 /// position over the rewritten query takes one more owner of its name
 /// (`rewrite_name_to_position`'s `zend_string_copy`), so its name costs
-/// nothing of its own:
+/// nothing of its own. The last statement's column is named `12345`,
+/// which mysqlnd interns at request time, so the fence is pinned under
+/// opcache, the model the engine's interning copies
+/// (`trace:immutable-literal-arrays`):
 ///
 /// ```php
 /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_EMULATE_PREPARES => false]);
@@ -758,12 +761,12 @@ pub struct Rewritten {
 /// $s->execute([12345]);
 /// echo memory_get_usage() - $m, "\n";
 /// ```
-/// ```expect mysql
+/// ```expect mysql regime=immutable-literals
 /// 21760
 /// 22200
 /// 776
 /// 0
-/// 16984
+/// 16992
 /// ```
 pub struct ParameterMap {
     table: Owner<PhpArray>,
