@@ -349,7 +349,9 @@ impl Handle {
     /// []
     /// ```
     pub(crate) fn release(self, req: &mut Request) {
-        let taken = match slot_of(req.state::<State>(), self) {
+        let state = req.state::<State>();
+        let enabled = state.collect_statistics;
+        let taken = match slot_of(state, self) {
             Some(slot) => {
                 slot.refs -= 1;
                 if slot.refs == 0 {
@@ -363,7 +365,7 @@ impl Handle {
         if let Some(mut conn) = taken {
             // The close counts under the entry as it stands now, as a
             // lend's call does, not as the last lend left it.
-            conn.stats.enabled = ini_bool(req, b"mysqlnd.collect_statistics");
+            conn.stats.enabled = enabled;
             conn.send_close(req).ok();
             flush(req.state::<State>(), &mut conn);
             conn.dtor(req);
@@ -460,7 +462,7 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 /// var_dump(ini_set('mysqlnd.collect_statistics', '0')); $fetch(); echo $rows(), "\n";
 /// ini_restore('mysqlnd.collect_statistics'); var_dump(ini_get('mysqlnd.collect_statistics')); $fetch(); echo $rows(), "\n";
 /// ```
-/// ```expect
+/// ```expect mysql
 /// 1
 /// string(1) "1"
 /// 1
