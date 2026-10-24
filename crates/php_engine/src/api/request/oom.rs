@@ -19,9 +19,13 @@ impl Request {
     /// records one, `zend_get_executed_filename_ex()` and
     /// `zend_get_executed_lineno()`, `Unknown` on line zero with nothing
     /// executing. The heap cannot read a frame, so the engine names it
-    /// before the frame it was recorded under moves on: at the interrupt
-    /// check, before a back-edge stands its frame at the target; as a
-    /// frame leaves; and after a compile.
+    /// where it next stands on a path already cold: at the safepoint that
+    /// raises it, before a back-edge's interrupt check stands its frame at
+    /// the target, as the serving's entry frame leaves, and after a
+    /// compile. No return to a caller pays for it, so where php's
+    /// `SAVE_OPLINE` and the engine's stands differ, or a callee returned
+    /// between the allocation and the safepoint, the line can be another
+    /// than php's: the caller's.
     #[cold]
     pub(crate) fn locate_oom(&mut self) {
         if self.oom_unlocated() {

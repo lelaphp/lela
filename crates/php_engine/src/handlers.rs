@@ -24277,10 +24277,13 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
         if let Some(edge) = inline_return(req, frame, code, op, A::default()) {
             return edge;
         }
-    }
-    // A delayed OOM is named where the frame stood before the return
-    // moves it, the site php recorded.
-    if req.oom_unlocated() {
+    } else if req.oom_unlocated() {
+        // The serving's entry frame leaves with nothing executing above
+        // it, where `zend_execute_scripts` raises what no safepoint did:
+        // a delayed OOM is named where the frame stood before the return
+        // moves it. A frame returning to a caller leaves it to the
+        // caller's next safepoint, which names the caller's site.
+        std::hint::cold_path();
         req.locate_oom();
     }
     req.vm_mut().stand(frame, at);
