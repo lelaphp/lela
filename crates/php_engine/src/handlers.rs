@@ -5941,13 +5941,11 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     // `ZEND_CALL_RELEASE_THIS`.
     let this = req.vm().this(frame);
     let receiver = this.map(exec::Receiver::lent);
-    // The trampoline's name, `$name::get`, which php makes with the
-    // trampoline (`zend_get_property_hook_trampoline`); a hook of its
-    // own needs none.
-    let written = if trampoline {
-        let written = format!("${shown}::{}", kind.name());
-        match req.string(written.as_bytes()) {
-            Ok(written) => Some(written),
+    // The trampoline's record, which php makes with the trampoline
+    // (`zend_get_property_hook_trampoline`); a hook of its own needs none.
+    let built = if trampoline {
+        match req.hook_trampoline(&name, kind) {
+            Ok(built) => Some(built),
             Err(thrown) => return threw(req, frame, &thrown),
         }
     } else {
@@ -5960,14 +5958,8 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
         _ => declaring,
     }));
     let call = req.push_call(header)?;
-    // The trampoline reads the property off the name it was built
-    // under, php's `internal_function.reserved[0]`; a hook's own body
-    // has no use for it.
-    if let Some(written) = written {
-        match req.annex_mut(call) {
-            Some(annex) => annex.name = Some(written),
-            None => req.release(Value::string(written)),
-        }
+    if let Some(built) = built {
+        req.carry_trampoline(call, built);
     }
     Ok(advance(req, frame))
 }

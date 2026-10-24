@@ -129,9 +129,10 @@ fn relifetimed<'b>(spare: Vec<Link<'_>>) -> Vec<Link<'b>> {
 /// `include_filename` is the file of the link the walk passed last, and
 /// none where the frame is the innermost link.
 pub(super) enum Traced {
-    /// A function, and the name a hook trampoline's call was built
-    /// under, `$name::set`, which php's row copies as the trampoline's
-    /// `function_name`, in the class of the property, its scope:
+    Function(Function),
+    /// A hook trampoline's call, named as php's row copies the
+    /// trampoline's `function_name`, `$name::set`, in the class of the
+    /// property, its scope:
     ///
     /// ```php
     /// class P { public int $a; }
@@ -144,7 +145,10 @@ pub(super) enum Traced {
     /// #1 %s(5): C->$a::set('x')
     /// #2 {main}
     /// ```
-    Function(Function, Option<PhpString>),
+    HookTrampoline {
+        function: Function,
+        name: PhpString,
+    },
     /// A frameless call's native (`ZEND_FRAMELESS_ICALL_*`), whose row
     /// php lays down off the user frame at the call's opline before that
     /// frame's own (`Z/Zend/zend_builtin_functions.c:2003`): `function`
@@ -485,15 +489,17 @@ impl Request {
                 continue;
             }
             self.set_site(&mut row, site)?;
+            // A hook trampoline's row is a function's under the name its
+            // call was built under.
+            let (traced, built) = match traced {
+                Traced::HookTrampoline { function, name } => {
+                    (Traced::Function(function), Some(name))
+                }
+                traced => (traced, None),
+            };
             match traced {
-                Traced::Function(function, built) => {
-                    let name = match built {
-                        Some(built) => {
-                            self.addref(&Value::string(built));
-                            Value::string(built)
-                        }
-                        None => Value::string(self.function_name_string(function)?),
-                    };
+                Traced::Function(function) => {
+                    let name = self.row_function_name(function, built)?;
                     self.set_string_key(&mut row, Known::Function, Owner::adopt(name))?;
                     // `ce->name` whole: an anonymous class's with its NUL
                     // and site; a receiver's class name for a function of
@@ -557,12 +563,50 @@ impl Request {
                     self.release(Value::array(row));
                     continue;
                 }
-                Traced::Frameless(_) => {}
+                Traced::Frameless(_) | Traced::HookTrampoline { .. } => {}
             }
             trace.append(self, Owner::adopt(Value::array(row)))?;
         }
         rows.files = files;
         Ok(trace)
+    }
+
+    /// What a call's row names, and the class it is in: a hook
+    /// trampoline's in the class of the property, the trampoline's scope,
+    /// its call's; any other call's in its closure's scope, if any.
+    fn call_traced(&self, call: &crate::exec::FrameAt<'_>) -> (Traced, Option<ClassId>) {
+        let function = call.callee();
+        match call.annex().and_then(|annex| annex.trampoline.as_ref()) {
+            Some(trampoline) => {
+                let name = trampoline.name;
+                (
+                    Traced::HookTrampoline { function, name },
+                    call.called_scope(),
+                )
+            }
+            None if call.info().frameless() => (
+                Traced::Frameless(function),
+                self.closure_scope(call.closure()),
+            ),
+            None => (
+                Traced::Function(function),
+                self.closure_scope(call.closure()),
+            ),
+        }
+    }
+
+    /// A framed row's `function`: the name a hook trampoline's call was
+    /// built under, one more owner of it, or the function's own.
+    fn row_function_name(
+        &mut self,
+        function: Function,
+        built: Option<PhpString>,
+    ) -> Result<Value, Thrown> {
+        let Some(built) = built else {
+            return Ok(Value::string(self.function_name_string(function)?));
+        };
+        self.addref(&Value::string(built));
+        Ok(Value::string(built))
     }
 
     /// `func->common.function_name` as a row copies it: the engine's
@@ -980,7 +1024,7 @@ impl Request {
                     };
                     let arguments = self.traced_arguments(*state, function);
                     rows.laid.push((
-                        Traced::Function(function, None),
+                        Traced::Function(function),
                         state.this(),
                         self.closure_scope(state.closure()),
                         arguments,
@@ -1017,18 +1061,7 @@ impl Request {
                 // rows after it.
                 Link::Site(_) | Link::Fake(_) => {}
                 Link::Call(call) => {
-                    // A hook trampoline's row is in the class of the
-                    // property, the trampoline's scope, its call's.
-                    let built = call.annex().and_then(|annex| annex.name);
-                    let traced = if call.info().frameless() {
-                        Traced::Frameless(call.callee())
-                    } else {
-                        Traced::Function(call.callee(), built)
-                    };
-                    let scope = match built {
-                        Some(_) => call.called_scope(),
-                        None => self.closure_scope(call.closure()),
-                    };
+                    let (traced, scope) = self.call_traced(call);
                     rows.laid.push((
                         traced,
                         call.this(),

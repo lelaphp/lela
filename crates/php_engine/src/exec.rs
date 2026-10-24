@@ -1062,10 +1062,8 @@ pub(crate) struct Annex {
     /// The op array's bytes an `INCLUDE_OR_EVAL` frame holds on the
     /// request's heap ([`HeapOpArray`]); none for every other frame.
     pub(crate) op_array: Option<HeapOpArray>,
-    /// The name a parent hook's trampoline call was built under,
-    /// `$name::get`, which php keeps in the trampoline's
-    /// `internal_function.reserved[0]`; one owner the call holds.
-    pub(crate) name: Option<PhpString>,
+    /// What a hook trampoline's call serves, none for every other call.
+    pub(crate) trampoline: Option<HookTrampoline>,
     /// php's `str_tmp`: what a coercion made for a frameless call, freed
     /// with the call as `Z_FLF_PARAM_FREE_STR` frees it at the body's end.
     pub(crate) coerced: Vec<Value>,
@@ -1077,6 +1075,17 @@ pub(crate) struct Annex {
     /// Where a file's frame finds its main op array's `static` table;
     /// none for a function's frame.
     pub(crate) statics: Option<FileStatics>,
+}
+
+/// What `zend_get_property_hook_trampoline` builds a trampoline with:
+/// the property it reads or writes, php's `internal_function.reserved[0]`,
+/// and the name it is called by, `$name::get` or `$name::set`, its
+/// `function_name`, which a trace row copies; one owner of the name the
+/// call holds, given up with it.
+#[derive(Debug)]
+pub(crate) struct HookTrampoline {
+    pub(crate) property: Box<[u8]>,
+    pub(crate) name: PhpString,
 }
 
 /// php's `ZEND_MAP_PTR(static_variables_ptr)` of the main op array a

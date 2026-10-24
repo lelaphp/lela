@@ -52,6 +52,17 @@ pub(super) struct Calls {
     trace: Option<Vec<crate::trace::Entered>>,
 }
 
+/// What a call carries beyond its function and arguments, never two of
+/// them at once: the closure it serves (`ZEND_CALL_CLOSURE`), or the
+/// property a hook trampoline reads or writes, of the hook of `kind`
+/// (`zend_get_property_hook_trampoline`'s `reserved[0]`).
+#[derive(Clone, Copy)]
+enum Carried<'a> {
+    Nothing,
+    Closure(PhpObject),
+    HookTrampoline(&'a [u8], HookKind),
+}
+
 impl Request {
     /// `zend_call_function` over a native method: the call frame pushed
     /// as `INIT_METHOD_CALL` and the `SEND_*` oplines would push it, the
@@ -85,7 +96,7 @@ impl Request {
             function,
             this,
             Some(called_scope),
-            None,
+            Carried::Nothing,
             arguments,
             extra_named,
         )
@@ -108,11 +119,17 @@ impl Request {
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
         let function = self.parent_hook_trampoline(kind);
-        let written = [b"$", name, b"::", kind.name().as_bytes()].concat();
-        self.in_fake_scope(None, |req| {
-            let (this, scope) = (Some(object), Some(scope));
-            req.serve_call_body(function, this, scope, None, arguments, &[], Some(&written))
-        })
+        let carried = Carried::HookTrampoline(name, kind);
+        self.serve_call(function, Some(object), Some(scope), carried, arguments, &[])
+    }
+
+    /// The trampoline's record on `call`, given up where the call has no
+    /// annex to hold it.
+    pub(crate) fn carry_trampoline(&mut self, call: FrameRef, built: exec::HookTrampoline) {
+        match self.annex_mut(call) {
+            Some(annex) => annex.trampoline = Some(built),
+            None => self.release(Value::string(built.name)),
+        }
     }
 
     /// `zend_call_known_fcc` over a `Closure`, which is what
@@ -156,7 +173,7 @@ impl Request {
             closure.function,
             closure.this,
             closure.called_scope,
-            Some(object),
+            Carried::Closure(object),
             arguments,
             extra_named,
         )
@@ -209,7 +226,7 @@ impl Request {
             closure.function,
             Some(this),
             Some(scope),
-            Some(object),
+            Carried::Closure(object),
             arguments,
             extra_named,
         );
@@ -305,7 +322,14 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
-        self.serve_call(function, None, None, None, arguments, extra_named)
+        self.serve_call(
+            function,
+            None,
+            None,
+            Carried::Nothing,
+            arguments,
+            extra_named,
+        )
     }
 
     /// `zend_call_function` (`Z/Zend/zend_execute_API.c:806`), which every
@@ -328,7 +352,7 @@ impl Request {
         function: Function,
         this: Option<PhpObject>,
         called_scope: Option<ClassId>,
-        closure: Option<PhpObject>,
+        carried: Carried<'_>,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
@@ -340,27 +364,27 @@ impl Request {
                 function,
                 this,
                 called_scope,
-                closure,
+                carried,
                 arguments,
                 extra_named,
-                None,
             )
         })
     }
 
-    /// [`Request::serve_call`] with no scope a write named standing, and
-    /// the name a hook trampoline is built under where `function` is one.
-    #[allow(clippy::too_many_arguments)]
+    /// [`Request::serve_call`] with no scope a write named standing.
     fn serve_call_body(
         &mut self,
         function: Function,
         this: Option<PhpObject>,
         called_scope: Option<ClassId>,
-        closure: Option<PhpObject>,
+        carried: Carried<'_>,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
-        trampoline: Option<&[u8]>,
     ) -> Result<Value, Thrown> {
+        let closure = match carried {
+            Carried::Closure(closure) => Some(closure),
+            Carried::Nothing | Carried::HookTrampoline(..) => None,
+        };
         // `if (EG(exception)) return SUCCESS;`: no call while one is pending.
         if self.pending().is_some() {
             return Ok(Value::null());
@@ -411,8 +435,9 @@ impl Request {
             .any(|argument| matches!(argument.as_ref(), ValueRef::Undef));
         // `zend_call_function` names the callee by
         // `func->common.function_name`, which the function carries; no
-        // constant spelled it, so the call carries no name of its own
-        // and interns none into the request's memory.
+        // constant spelled it, so the call interns no name into the
+        // request's memory. A hook trampoline's name is the one php builds
+        // with the trampoline, laid below once the call stands.
         let extra_named = exec::ExtraNamed::laid(self, extra_named.to_vec())?;
         // `GC_ADDREF(ZEND_CLOSURE_OBJECT(func))` with `ZEND_CALL_CLOSURE`,
         // once the arguments are placed: the call's own owner of the
@@ -455,20 +480,15 @@ impl Request {
         {
             annex.extra_named = extra_named;
         }
-        // The trampoline reads its property off the name it was built
-        // under, php's `internal_function.reserved[0]`, one owner the
-        // call holds.
-        if let Some(name) = trampoline {
-            let written = match self.string(name) {
-                Ok(written) => written,
+        // The trampoline's record, made once its call stands, as php makes
+        // it before the call (`zend_get_property_hook_trampoline`).
+        if let Carried::HookTrampoline(property, kind) = carried {
+            match self.hook_trampoline(property, kind) {
+                Ok(built) => self.carry_trampoline(call, built),
                 Err(thrown) => {
                     self.pop_call();
                     return Err(thrown);
                 }
-            };
-            match self.annex_mut(call) {
-                Some(annex) => annex.name = Some(written),
-                None => self.release(Value::string(written)),
             }
         }
         if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self, call) {
