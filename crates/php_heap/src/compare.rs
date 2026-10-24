@@ -466,8 +466,9 @@ mod tests {
     use super::*;
 
     /// A NAN is true, an array is true where it has an element, and the
-    /// string `"0"` is false, as `zend_is_true` reads each; an object or
-    /// a slot nothing wrote has no truth a constant gives.
+    /// string `"0"` is false where `"0.0"` is true, as `zend_is_true`
+    /// reads each; an object, an `IS_PTR` or a slot nothing wrote has no
+    /// truth a constant gives.
     #[test]
     fn a_constant_is_true_as_zend_is_true_reads_it() {
         let _alone = crate::serial::alone();
@@ -480,6 +481,8 @@ mod tests {
         };
         let (zero, double_zero, one, empty) =
             (string(b"0"), string(b"00"), string(b"1"), string(b""));
+        let zero_point_zero = string(b"0.0");
+        let object = heap.object(1, 0, 0).expect("an object");
         let full = heap.array().expect("an array");
         assert!(matches!(heap.array_append(full, Zval::long(0)), Ok(true)));
         for (value, truth) in [
@@ -492,10 +495,13 @@ mod tests {
             (double_zero, Some(true)),
             (one, Some(true)),
             (empty, Some(false)),
+            (zero_point_zero, Some(true)),
             (Zval::null(), Some(false)),
             (Zval::bool(true), Some(true)),
             (Zval::long(0), Some(false)),
             (Zval::long(-1), Some(true)),
+            (Zval::object(object), None),
+            (Zval::ptr(0), None),
             (Zval::UNDEF, None),
         ] {
             assert_eq!(constant_truth(value), truth, "{:?}", value.kind());
