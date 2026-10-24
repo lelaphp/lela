@@ -1228,16 +1228,40 @@ fn content_value(
 }
 
 /// `node_list_unlink`: every node of the list some object names unlinked,
-/// the rest walked into.
+/// the rest walked into, an entity reference passed over.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<!DOCTYPE r [<!ENTITY e "X">]><r a="a&e;b"/>');
+/// $at = $d->documentElement->getAttributeNode('a');
+/// [$first, $ref, $last] = [$at->firstChild, $at->childNodes[1], $at->lastChild];
+/// unset($at);
+/// $d->documentElement->setAttribute('a', 'new');
+/// var_dump($first->data, $ref->nodeName, $ref->parentNode, $last->data, $last->parentNode);
+/// $d->loadXML('<!DOCTYPE r [<!ENTITY e "X">]><r a="a&e;b"/>');
+/// $last = $d->documentElement->getAttributeNode('a')->lastChild;
+/// $d->documentElement->removeAttribute('a');
+/// var_dump($last->data, $last->parentNode);
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "e"
+/// NULL
+/// string(1) "b"
+/// NULL
+/// string(1) "b"
+/// NULL
+/// ```
 fn node_list_unlink(first: Option<Node>) {
     let mut at = first;
     while let Some(node) = at {
+        // Read before the unlink clears it, so the walk goes on past a
+        // node with a wrapper; an entity reference is passed over, not
+        // the end of the list (php 8.5.12, GH-23331).
+        let next = node.next();
         if node.object().is_some() {
             node.unlink();
-        } else {
-            if node.kind() == Kind::EntityRef {
-                break;
-            }
+        } else if node.kind() != Kind::EntityRef {
             node_list_unlink(node.children());
             match node.kind() {
                 Kind::AttributeDecl
@@ -1249,7 +1273,7 @@ fn node_list_unlink(first: Option<Node>) {
                 _ => node_list_unlink(node.properties()),
             }
         }
-        at = node.next();
+        at = next;
     }
 }
 
