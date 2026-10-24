@@ -2034,11 +2034,10 @@ impl PDOStatement {
             }
         };
         let info = read(req, stmt, |s| {
-            let c = s
-                .columns
-                .as_ref()?
-                .get(at)
-                .filter(|_| at < s.column_count)?;
+            if at >= s.column_count {
+                return None;
+            }
+            let c = s.columns.as_ref()?.get(at)?;
             Some((*c.name, c.max_len, c.precision))
         })
         .flatten();
