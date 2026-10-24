@@ -95,8 +95,26 @@ pub struct Lent {
 ///
 /// The limit's fatal, for the caller to end the request in.
 pub fn lent<R>(req: &mut Request, call: impl FnOnce(&Lent) -> R) -> Result<R, Thrown> {
-    req.memory_mut()
-        .lend_heap(|| call(&Lent { _made_by_lent: () }))
+    // php 8.5.12 points lexbor's allocator at `femalloc`, `safe_ferealloc`
+    // and `fecalloc` (`Z/ext/lexbor/php_lexbor.c:33-46`): every ask lexbor
+    // makes is fallible, refused past the soft limit as the NULL lexbor
+    // answers with its own error, the delayed OOM left for the next
+    // safepoint, and never held to the hard limit. The scope covers the
+    // lend alone, and `call` reaches nothing but lexbor.
+    let mut answered = None;
+    req.memory_mut().fallible(|req| {
+        answered = Some(
+            req.memory_mut()
+                .lend_heap(|| call(&Lent { _made_by_lent: () })),
+        );
+        Ok(())
+    })?;
+    answered.unwrap_or_else(|| {
+        Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a lend to lexbor answered nothing",
+        ))
+    })
 }
 
 /// A value that holds lexbor's memory past the call that made it, with no

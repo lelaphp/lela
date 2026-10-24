@@ -1225,7 +1225,12 @@ impl Memory<&mut Request> {
         let refused = self.0.heap.take_refused();
         match answered {
             Ok(value) => Ok(Some(value)),
-            Err(_) if refused => Ok(None),
+            // The refusal carried out as an `Err` with nothing thrown and
+            // the request not ending; a throwable or a fatal met after a
+            // refusal is `ask`'s to answer.
+            Err(thrown) if refused && thrown.exception().is_none() && self.0.ending().is_none() => {
+                Ok(None)
+            }
             Err(thrown) => Err(thrown),
         }
     }

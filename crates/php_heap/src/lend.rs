@@ -28,7 +28,12 @@
 //! leaves it, by a jump over its frames: the allocation the heap refuses is served
 //! by the system allocator, so the library runs to its return, and the
 //! refusal is what [`Heap::lend`] answers, for the caller to end the
-//! request in.
+//! request in. Under a fallible scope (`Heap::set_fallible`, the engine's
+//! `Memory::fallible` around the lend) an ask past the soft limit is
+//! refused as php 8.5.12's `femalloc` and `ferealloc` refuse it: the
+//! entry answers null, a block it was asked to resize stands as it was,
+//! the delayed OOM is recorded, and nothing is kept for the lend to
+//! answer, so the library answers the null as it answers any.
 //!
 //! A library whose allocator callbacks take an argument of their own
 //! (zlib's `zalloc`, uriparser's memory manager, libtidy's allocator) is
@@ -171,6 +176,12 @@ impl Lending {
         // SAFETY: a live block of this heap holding `copy` bytes.
         let fatal = match unsafe { self.mm().realloc(block, copy, size) } {
             Ok(moved) => return moved.as_ptr().cast(),
+            // A fallible scope's refusal (`Memory::fallible` around the
+            // call): php 8.5.12's `ferealloc`'s NULL, the block standing as
+            // it was and the delayed OOM recorded.
+            Err(fatal) if *fatal.reason() == crate::FatalReason::Refused => {
+                return std::ptr::null_mut();
+            }
             Err(fatal) => fatal,
         };
         self.refuse(fatal);
@@ -199,6 +210,10 @@ impl Lending {
     fn alloc(&mut self, size: usize) -> *mut c_void {
         match self.mm().alloc(size) {
             Ok(at) => at.as_ptr().cast(),
+            // A fallible scope's refusal: php 8.5.12's `femalloc`'s NULL,
+            // with the delayed OOM recorded, for C to answer as it answers
+            // any NULL.
+            Err(fatal) if *fatal.reason() == crate::FatalReason::Refused => std::ptr::null_mut(),
             Err(fatal) => {
                 self.refuse(fatal);
                 system_alloc(size)
