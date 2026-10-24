@@ -832,7 +832,7 @@ pub struct AttributeArgument {
 /// `ZEND_ATTRIBUTE_STRICT_TYPES`, whether the file it was written in
 /// declares `strict_types`: the site and the regime
 /// `zend_get_attribute_object` makes its object under; and `own_name`,
-/// whether the string `attr->name` is is one no holder the compile
+/// whether the string `attr->name` is one no holder the compile
 /// filled before it holds: one `zend_resolve_class_name` made, or the
 /// first copy of the scanner's or a `use`'s, which a later holder copies
 /// again, a promoted parameter's property the parameter's and another
