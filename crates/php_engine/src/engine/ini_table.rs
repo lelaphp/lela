@@ -52,32 +52,30 @@ impl IniTable {
         core: impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
         extensions: &[ExtensionEntry],
     ) -> IniTable {
-        let mut rows: Vec<Directive> = core
-            .map(|(name, value)| Directive {
+        let numbered = || (1..).map(ExtensionId::at).zip(extensions);
+        let declared = numbered().flat_map(|(extension, entry)| {
+            (entry.ini.iter().enumerate()).map(move |(at, decl)| {
+                let value = decl.default.as_deref().map(<[u8]>::to_vec);
+                (decl.name.0.to_vec(), value, Some((extension, at)))
+            })
+        });
+        let rows: Vec<Directive> = (core.map(|(name, value)| (name, value, None)))
+            .chain(declared)
+            .map(|(name, value, declared)| Directive {
                 name,
                 value,
-                declared: None,
+                declared,
                 on_modify: None,
             })
             .collect();
-        for (extension, entry) in (1..).map(ExtensionId::at).zip(extensions) {
-            rows.extend(entry.ini.iter().enumerate().map(|(at, decl)| Directive {
-                name: decl.name.0.to_vec(),
-                value: decl.default.as_deref().map(<[u8]>::to_vec),
-                declared: Some((extension, at)),
-                on_modify: None,
-            }));
-        }
         let mut table = IniTable {
             names: Names::over(&rows),
             rows,
         };
-        for (extension, entry) in (1..).map(ExtensionId::at).zip(extensions) {
+        for (extension, entry) in numbered() {
             for (name, handler) in &entry.on_modify {
-                if let Some(row) = table.find_mut(name)
-                    && row.on_modify.is_none()
-                {
-                    row.on_modify = Some((extension, *handler));
+                if let Some(row) = table.find_mut(name) {
+                    row.on_modify.get_or_insert((extension, *handler));
                 }
             }
         }
@@ -106,8 +104,7 @@ impl IniTable {
     }
 
     fn find_mut(&mut self, name: &[u8]) -> Option<&mut Directive> {
-        let at = self.names.find(&self.rows, name)?;
-        self.rows.get_mut(at)
+        (self.names.find(&self.rows, name)).and_then(|at| self.rows.get_mut(at))
     }
 
     /// The master value of `name` as `zend_ini_get_value` reads it, the

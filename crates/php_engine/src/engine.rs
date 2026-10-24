@@ -1603,9 +1603,8 @@ impl Shared {
     /// registered; none for an entry of the core table or none at all.
     pub(crate) fn extension_ini(&self, name: &[u8]) -> Option<&IniDecl> {
         let (extension, at) = self.ini.find(name)?.declared?;
-        (self.extensions.get(usize::try_from(extension.0).ok()?))?
-            .ini
-            .get(at)
+        let declaring = self.extensions.get(usize::try_from(extension.0).ok()?)?;
+        declaring.ini.get(at)
     }
 
     /// `zend_flf_functions` by name, in the frameless table's order
@@ -1711,7 +1710,8 @@ impl Shared {
     pub(crate) fn optimizer(&self) -> crate::unit_cache::Optimizer {
         use crate::unit_cache::Optimizer;
         let level = self
-            .ini_default(b"opcache.optimization_level")
+            .ini
+            .master(b"opcache.optimization_level")
             // The one reading of a whole-number entry, without the
             // sentence `Request::ini_quantity_warn` raises.
             .map_or(0, |value| crate::ini_quantity::parse(value).0);
@@ -1923,7 +1923,8 @@ impl Shared {
     /// to on the thread that asked for it.
     pub(crate) fn stack_limit(&self) -> StackLimit {
         let bytes = |name: &[u8]| {
-            self.ini_default(name)
+            self.ini
+                .master(name)
                 .map_or(0, crate::api::request::Ini::parse_bytes)
         };
         StackLimit::init(
@@ -2094,13 +2095,6 @@ impl Shared {
     /// `interned_strings_usage.number_of_strings`.
     pub(crate) fn interned_strings(&self) -> usize {
         self.interned.strings().count()
-    }
-
-    /// The value the entry `name` starts every request with as
-    /// `zend_ini_get_value` reads it, the empty string where it has none
-    /// (php's `NULL`); `None` where php has no such entry.
-    pub(crate) fn ini_default(&self, name: &[u8]) -> Option<&[u8]> {
-        self.ini.master(name)
     }
 
     /// `zend_disable_functions` over a started engine's table, as
@@ -4689,7 +4683,7 @@ impl Engine {
         for (name, value) in taken {
             shared.set_ini_default(&name, value);
         }
-        (shared.realpath_cache).engine_startup(shared.ini_default(b"open_basedir"));
+        (shared.realpath_cache).engine_startup(shared.ini.master(b"open_basedir"));
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
@@ -4926,7 +4920,7 @@ impl Engine {
     /// with, `None` for an entry php does not know.
     #[must_use]
     pub fn ini_get(&self, name: &[u8]) -> Option<Vec<u8>> {
-        self.shared.ini_default(name).map(<[u8]>::to_vec)
+        self.shared.ini.master(name).map(<[u8]>::to_vec)
     }
 
     /// `tsrm_realpath(path, NULL)` outside any request
@@ -5077,7 +5071,7 @@ impl Engine {
     #[must_use]
     pub fn dump_before_optimizer(&self, description: &RequestDescription) -> Option<Vec<u8>> {
         let level =
-            crate::ini_quantity::parse(self.shared.ini_default(b"opcache.opt_debug_level")?).0;
+            crate::ini_quantity::parse(self.shared.ini.master(b"opcache.opt_debug_level")?).0;
         if level & BEFORE_OPTIMIZER == 0 {
             return None;
         }

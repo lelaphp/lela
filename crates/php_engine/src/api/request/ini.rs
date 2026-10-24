@@ -628,22 +628,16 @@ impl Request {
         let shared = Arc::clone(&self.shared);
         let changed: Vec<DirectiveAt> = self.ini.changed.iter().map(|(at, ..)| *at).collect();
         for at in changed {
-            let Some(Directive {
-                name,
-                value,
-                on_modify,
-                ..
-            }) = shared.ini.row(at)
-            else {
+            let Some(row) = shared.ini.row(at) else {
                 continue;
             };
-            let original = value.as_deref();
+            let (name, original) = (row.name.as_slice(), row.value.as_deref());
             // A core handler that reads a quantity reads its startup
             // value again, and warns again where the rule interprets it.
             if let Some(reading) = CoreQuantity::of(name) {
                 self.core_quantity_warn(name, reading, original.unwrap_or_default());
             }
-            if let Some((_, handler)) = *on_modify {
+            if let Some((_, handler)) = row.on_modify {
                 // Each rule under its own `zend_try`: what it bails out
                 // with leaves it, and the next entry is restored.
                 handler.serve(self, name, original).ok();
@@ -1004,56 +998,46 @@ impl Request {
         self.ini_hold(name, Some(value));
     }
 
-    /// An extension's entries in the order it declared them.
+    /// An extension's entries in the order it declared them, `Core`'s
+    /// the engine's own table: the rows of the engine's table it
+    /// registered.
     fn registered_ini(&self, extension: ExtensionId) -> Vec<IniEntry> {
-        if extension == ExtensionId::CORE {
-            return self.core_ini();
-        }
-        let Some(module) = self.extension_of(extension) else {
-            return Vec::new();
-        };
-        module
-            .ini
-            .iter()
-            .map(|decl| self.ini_entry(decl.clone(), extension))
-            .collect()
-    }
-
-    /// `Core`'s entries, `main.c`'s and `zend.c`'s table: every entry of
-    /// the engine's no extension declared.
-    fn core_ini(&self) -> Vec<IniEntry> {
+        let core = extension == ExtensionId::CORE;
         (self.shared.ini.rows().iter())
-            .filter(|row| row.declared.is_none())
-            .map(|Directive { name, value, .. }| {
-                let (user, per_dir, system) = Request::ini_modifiable(name);
-                let decl = IniDecl {
-                    name: Name(name.as_slice().into()),
-                    default: value.as_deref().map(Into::into),
-                    user,
-                    per_dir,
-                    system,
-                };
-                self.ini_entry(decl, ExtensionId::CORE)
-            })
+            .filter(|row| row.declared.map(|(of, _)| of) == (!core).then_some(extension))
+            .map(|row| self.ini_entry(row))
             .collect()
     }
 
-    /// One entry as the request sees it: the value in force, the
-    /// request's `ini_set` over the engine's startup value, the startup
-    /// value, and whether the request changed it.
-    fn ini_entry(&self, decl: IniDecl, extension: ExtensionId) -> IniEntry {
-        let name = decl.name.0.as_ref();
-        let master = (self.shared.ini.find(name)).map_or_else(
-            || decl.default.clone(),
-            |row| row.value.as_deref().map(Into::into),
-        );
-        let changed = self.ini_changed(name);
+    /// One entry as the request sees it: its declaration, a core entry's
+    /// with the core table's `modifiable` bits ([`Request::ini_modifiable`]),
+    /// the value in force, the request's `ini_set` over the engine's
+    /// startup value, the startup value, and whether the request changed
+    /// it.
+    fn ini_entry(&self, row: &Directive) -> IniEntry {
+        let declared = row
+            .declared
+            .and_then(|(of, at)| self.extension_of(of)?.ini.get(at));
+        let decl = declared.cloned().unwrap_or_else(|| {
+            let (user, per_dir, system) = Request::ini_modifiable(&row.name);
+            let default = row.value.as_deref().map(Into::into);
+            let name = Name(row.name.as_slice().into());
+            IniDecl {
+                name,
+                default,
+                user,
+                per_dir,
+                system,
+            }
+        });
+        let master: Option<Box<[u8]>> = row.value.as_deref().map(Into::into);
+        let changed = self.ini_changed(&row.name);
         IniEntry {
             value: changed.map_or_else(|| master.clone(), |(_, v, _)| v.as_deref().map(Into::into)),
             master,
             modified: changed.is_some(),
             decl,
-            extension,
+            extension: row.declared.map_or(ExtensionId::CORE, |(of, _)| of),
         }
     }
 
@@ -1381,10 +1365,8 @@ impl<'r> Ini<&'r Request> {
     /// ```
     #[must_use]
     pub fn entries(self) -> Vec<IniEntry> {
-        let entries = (0..self.0.shared.extensions.len())
-            .filter_map(|at| u32::try_from(at).ok())
-            .flat_map(|at| self.0.registered_ini(ExtensionId(at)))
-            .collect();
+        let rows = self.0.shared.ini.rows().iter();
+        let entries = rows.map(|row| self.0.ini_entry(row)).collect();
         self.0.in_table_order(entries)
     }
 
@@ -1806,7 +1788,7 @@ impl Ini<&mut Request> {
                 [
                     String::from_utf8_lossy(name).into_owned(),
                     shown(self.0.ini().get(name)),
-                    shown(self.0.shared.ini_default(name)),
+                    shown(self.0.shared.ini.master(name)),
                 ]
             })
             .collect();
@@ -2050,16 +2032,12 @@ impl Ini<&mut Request> {
     /// ```
     pub fn core_ini_info(self) {
         let shared = Arc::clone(&self.0.shared);
-        let names: Vec<&[u8]> = (shared.ini.rows().iter())
+        let rows: Vec<(String, IniCell, IniCell)> = (shared.ini.rows().iter())
             .filter(|row| row.declared.is_none())
-            .map(|row| row.name.as_slice())
-            .collect();
-        let rows: Vec<(String, IniCell, IniCell)> = names
-            .iter()
-            .map(|name| {
+            .map(|Directive { name, value, .. }| {
                 let displayer = IniDisplayer::of(name);
                 let local = self.0.ini().get(name).unwrap_or_default();
-                let master = shared.ini_default(name).unwrap_or_default();
+                let master = value.as_deref().unwrap_or_default();
                 (
                     String::from_utf8_lossy(name).into_owned(),
                     self.0.ini_display(displayer, local),
