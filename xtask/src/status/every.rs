@@ -179,7 +179,7 @@ fn lines<R: PerReading>(log: &Log) -> Result<String> {
     for reading in log
         .readings
         .iter()
-        .filter(|r| r.instrument == R::INSTRUMENT)
+        .filter(|r| r.instrument == R::INSTRUMENT && !crate::witness::is_accepted(r))
     {
         out.push_str(&serde_json::to_string(&R::of(reading)).context("rendering a row")?);
         out.push('\n');

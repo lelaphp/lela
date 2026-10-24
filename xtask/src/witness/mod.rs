@@ -889,6 +889,12 @@ fn finished_reading(
     if ask.accept != Accept::Nothing && !tally.captured.is_empty() {
         capture(root, &tally.captured)?;
         *snapshot = Snapshot::disk(root)?;
+        let wrote: Vec<(&Path, usize)> = tally
+            .captured
+            .iter()
+            .map(|one| (one.file.as_path(), one.line))
+            .collect();
+        record_accepted(root, &krate.name, &wrote)?;
     }
     // The diff is the review, fence by fence, as a person reads it before
     // the commit (#801).
@@ -1259,6 +1265,51 @@ pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
         crate::write(&file, out)?;
     }
     Ok(())
+}
+
+/// What a crate's record of the verdicts `--accept` wrote is scoped to: the
+/// crate's name and [`ACCEPTED`], a scope beside the crate's own, so the
+/// record never stands in for the crate's reading ([`record_accepted`]).
+pub(crate) fn accepted_scope(krate: &str) -> String {
+    format!("{krate}{ACCEPTED}")
+}
+
+/// The mark a scope of the record of accepted verdicts carries after its
+/// crate's name.
+const ACCEPTED: &str = "@accepted";
+
+/// Whether `reading` is a record of a verdict `--accept` wrote and not a
+/// reading of what a crate's fences pin: the renderings of the crate's
+/// readings leave it out.
+pub(crate) fn is_accepted(reading: &Reading) -> bool {
+    reading.instrument == INSTRUMENT && reading.scope.ends_with(ACCEPTED)
+}
+
+/// The record of the verdicts `--accept` wrote in `krate`, each at its
+/// file and 1-based line as the file now stands: one reading of the
+/// crate's accepted scope ([`accepted_scope`]) per verdict, keyed by its
+/// block ([`fence::verdict`]), written whether the run was the crate's or
+/// narrowed to a file or an item. It is what `permit`'s `unless` sensor
+/// reads a captured `exit=` or `capture` fence by, so a verdict taken with
+/// `--item` stands as one taken over the crate, and an edit around it or a
+/// merge that moves the crate on leaves it standing; a verdict typed by
+/// hand is a block no record names. A line no rustdoc block holds, a host's
+/// `tests/lines.toml`, leaves none.
+pub fn record_accepted(root: &Path, krate: &str, wrote: &[(&Path, usize)]) -> Result<()> {
+    let scope = accepted_scope(krate);
+    let mut records = Vec::new();
+    for (file, line) in wrote {
+        let text = crate::read(&root.join(file))?;
+        let Some(verdict) = line.checked_sub(1).and_then(|at| fence::verdict(&text, at)) else {
+            continue;
+        };
+        let mut record = Reading::keyed(INSTRUMENT, &scope, verdict)?;
+        record.status = Status::Pass;
+        record.message = format!("{}:{line}: written by --accept", file.display());
+        records.push(record);
+    }
+    // Every record passes, so the outcome owes no exit.
+    Store::of_workspace(root).record(&records).map(|_| ())
 }
 
 /// Every crate that exists less those whose `witness` reading passes and

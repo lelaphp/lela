@@ -114,9 +114,11 @@ fn an_unsafe_attribute_is_a_site_outside_a_home_and_not_a_finding_inside_one() {
 }
 
 /// End to end (#105): `xtask witness --accept` captures the oracle's
-/// status onto the fence line and writes its reading, and `xtask permit
-/// --diff` over that tree permits the line it wrote. Take the reading away
-/// and the same tree is denied with the rule id.
+/// status onto the fence line and writes its reading and its record of
+/// the verdict, and `xtask permit --diff` over that tree permits the line
+/// it wrote. Take the reading away and the record still says the line is
+/// the instrument's; take the record away too and the same tree is denied
+/// with the rule id.
 #[test]
 fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
     if !oracle_is_here() {
@@ -146,7 +148,15 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
     let out = xtask(&root, &["permit", "--diff"]).ok();
     assert!(!out.contains("deny "), "{out}");
 
-    std::fs::remove_file(Store::of_workspace(&root).path("witness", CRATE).unwrap()).unwrap();
+    let store = Store::of_workspace(&root);
+    std::fs::remove_file(store.path("witness", CRATE).unwrap()).unwrap();
+    let out = xtask(&root, &["permit", "--diff"]).ok();
+    assert!(!out.contains("deny "), "the record stands: {out}");
+
+    let record = store.path("witness", &format!("{CRATE}@accepted")).unwrap();
+    std::fs::remove_file(&record).unwrap();
+    std::fs::remove_dir_all(record.with_extension("")).unwrap();
+    std::fs::remove_file(store.root().join("log/witness.jsonl")).unwrap();
     let ran = xtask(&root, &["permit", "--diff"]);
     assert_eq!(ran.code(), 1, "{ran}");
     let out = ran.stdout;
