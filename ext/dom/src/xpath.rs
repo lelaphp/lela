@@ -703,7 +703,25 @@ fn dispatch(
 }
 
 /// `php_xpath_eval`: `query` forces a node set, `evaluate` answers what
-/// the expression does.
+/// the expression does. An evaluation a function makes on the same
+/// object leaves the outer one the node it evaluates at and its
+/// declarations.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r xmlns:p="urn:p"><a><x/><p:y/></a><a><x/></a><b><x/><x/></b></r>');
+/// $x = new DOMXPath($d);
+/// $x->registerNamespace('php', 'http://php.net/xpath');
+/// $x->registerPhpFunctions();
+/// $b = $d->documentElement->lastElementChild;
+/// function inner() { global $x, $b; $x->query('x[2]', $b); return true; }
+/// var_dump($x->evaluate('count(a[php:function("inner") and x])', $d->documentElement));
+/// var_dump($x->query('a[php:function("inner") and p:y]', $d->documentElement)->length);
+/// ```
+/// ```expect
+/// float(2)
+/// int(1)
+/// ```
 fn eval(
     req: &mut Request,
     this: PhpObject,
