@@ -2556,7 +2556,8 @@ impl PhpRef {
             return Ok(());
         }
         let strict = req.strict_types();
-        req.assign_to_reference(self.0, value, strict)
+        // `zend_try_assign_typed_ref`: the value moves in, from no operand.
+        req.assign_to_reference(self.0, value, strict, php_unit::OperandKind::Unused)
     }
 
     /// The value held replaced by what php's `convert_to_*` makes of it
