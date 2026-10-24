@@ -1,0 +1,6 @@
+start loop
+root e13
+op e13 8 long long - taken
+op e13 5 array - string -
+op e13 7 long - - -
+stop loop

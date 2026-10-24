@@ -14,7 +14,7 @@
 //! None runs user code; a rope's reads no frame, and compiled code stood
 //! the frame at the opline first where what it serves may raise.
 
-use php_heap::{Fatal, FrameRef, Zval};
+use php_heap::{Fatal, Zval, ZvalRef};
 use php_unit::OperandKind;
 
 use crate::api::request::Request;
@@ -86,37 +86,24 @@ pub fn rope_end(req: &mut Request, rope: i64, piece: Zval) -> Result<Option<Zval
     })
 }
 
-/// `ASSIGN_OP` with `.` over variable `var` of `frame`, which holds a
+/// `.=` over `place`, a variable or an array's element that holds a
 /// string and no reference, and `right`, a string compiled code hands
 /// with no owner and gives up after, as the handler's `.=` serves it
-/// ([`crate::ops::concat_assign`]): the variable's string grown in place
-/// where the variable is its one owner, as `zend_string_extend` grows it,
-/// and a new string otherwise; what the join refuses, the memory limit or
-/// php's `String size overflow`, left pending with the variable's string
-/// put back where it stood.
-///
-/// # Errors
-///
-/// A variable the frame does not have, which no compiled code hands.
-pub fn assign_concat(
-    req: &mut Request,
-    frame: FrameRef,
-    var: u32,
-    right: Zval,
-) -> Result<(), Fatal> {
-    let unplaced = || {
-        Fatal::error("InternalError: compiled code's .= over a variable the frame does not have")
-    };
-    let left = Value::of_slot(req.slot_ptr(frame, var).ok_or_else(unplaced)?.read());
+/// ([`crate::ops::concat_assign`]): the string grown in place where
+/// `place` is its one owner, as `zend_string_extend` grows it, and a new
+/// string otherwise; what the join refuses, the memory limit or php's
+/// `String size overflow`, left pending with the string put back where it
+/// stood. Nothing but the join runs between the writes to `place`, so the
+/// table an element stands in is not written under it.
+pub fn assign_concat(req: &mut Request, place: ZvalRef, right: Zval) {
+    let left = Value::of_slot(place.read());
     let right = Value::of_slot(right);
     // `i_zval_ptr_dtor(result); ZVAL_NULL(result)` and its undoing, over
-    // a variable that holds no reference.
+    // a place that holds no reference.
     let put = |req: &mut Request, value: Value| {
-        if let Some(at) = req.slot_ptr(frame, var) {
-            let held = Value::of_slot(at.read());
-            at.write(value.to_zval());
-            req.release(held);
-        }
+        let held = Value::of_slot(place.read());
+        place.write(value.to_zval());
+        req.release(held);
     };
     let computed = crate::ops::concat_assign(
         req,
@@ -129,7 +116,6 @@ pub fn assign_concat(
         Ok(joined) => put(req, joined),
         Err(thrown) => req.leave_pending(&thrown),
     }
-    Ok(())
 }
 
 /// `CONCAT` or `FAST_CONCAT` of two strings, `left` of `left_kind`, with
