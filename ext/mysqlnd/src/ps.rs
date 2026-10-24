@@ -563,7 +563,7 @@ impl Stmt {
     pub fn more_rowsets(&self, req: &mut Request) -> bool {
         self.conn
             .handle()
-            .with(req, |_, conn| conn.more_rowsets())
+            .peek(req, ConnData::more_rowsets)
             .unwrap_or(false)
     }
 
@@ -666,7 +666,7 @@ impl Stmt {
         let conn = self.conn;
         let affected = conn
             .handle()
-            .with(req, |_, c| c.upsert.affected_rows)
+            .peek(req, |c| c.upsert.affected_rows)
             .unwrap_or(u64::MAX);
         let held = conn.acquire(req);
         let closed = self.close(req, false);

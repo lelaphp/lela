@@ -292,6 +292,31 @@ impl Handle {
         Some(answered)
     }
 
+    /// The connection read where it stands, for what reads and counts
+    /// nothing: no lend, so no statistic is switched on or flushed and
+    /// `mysqlnd.collect_statistics` is not read; `None` where the number
+    /// names no connection or the connection is lent already, as for
+    /// [`Handle::with`]. The accessors read through it, so reading the
+    /// connection's facts counts nothing:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// mysqli_query($l, 'SELEC 1');
+    /// $before = mysqli_get_connection_stats($l);
+    /// $facts = [mysqli_errno($l), mysqli_sqlstate($l), mysqli_affected_rows($l), mysqli_warning_count($l), mysqli_real_escape_string($l, "a'b"), mysqli_more_results($l), count(mysqli_error_list($l))];
+    /// echo json_encode($facts), "\n";
+    /// var_dump(array_diff_assoc(mysqli_get_connection_stats($l), $before));
+    /// ```
+    /// ```expect mysql
+    /// [1064,"42000",-1,0,"a\\'b",false,1]
+    /// array(0) {
+    /// }
+    /// ```
+    pub(crate) fn peek<R>(self, req: &mut Request, f: impl FnOnce(&ConnData) -> R) -> Option<R> {
+        slot_of(req.state::<State>(), self)?.conn.as_deref().map(f)
+    }
+
     /// `get_reference`: one more owner of the connection.
     pub(crate) fn acquire(self, req: &mut Request) {
         if let Some(slot) = slot_of(req.state::<State>(), self) {

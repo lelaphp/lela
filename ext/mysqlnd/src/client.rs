@@ -268,7 +268,7 @@ impl Mysqlnd {
     /// The facts the accessors read.
     pub fn status(self, req: &mut Request) -> Status {
         self.0
-            .with(req, |_, conn| Status {
+            .peek(req, |conn| Status {
                 errno: conn.error.errno,
                 sqlstate: conn.sqlstate(),
                 error: conn.error.error.clone(),
@@ -355,7 +355,7 @@ impl Mysqlnd {
     /// `mysqlnd_real_escape_string`: the escaped bytes, without quotes.
     pub fn escape(self, req: &mut Request, from: &[u8]) -> Vec<u8> {
         self.0
-            .with(req, |_, conn| conn.escape_string(from))
+            .peek(req, |conn| conn.escape_string(from))
             .unwrap_or_default()
     }
 
@@ -401,7 +401,7 @@ impl Mysqlnd {
     /// `mysqlnd_get_connection_stats`: each statistic's name and value.
     pub fn stats(self, req: &mut Request) -> Vec<(&'static str, u64)> {
         self.0
-            .with(req, |_, conn| named(&conn.stats.values[..]))
+            .peek(req, |conn| named(&conn.stats.values[..]))
             .unwrap_or_default()
     }
 
@@ -413,7 +413,7 @@ impl Mysqlnd {
     /// `conn->options->local_infile_directory`.
     pub fn local_infile_directory(self, req: &mut Request) -> Option<Vec<u8>> {
         self.0
-            .with(req, |_, conn| {
+            .peek(req, |conn| {
                 let dir = conn.options.local_infile_directory.as_ref();
                 dir.map(|d| d.bytes().to_vec())
             })
@@ -477,10 +477,7 @@ impl Mysqlnd {
         let mut dont_poll = Vec::new();
         if let Some(read) = read.as_deref_mut() {
             read.retain(|conn| {
-                let state = conn
-                    .0
-                    .with(req, |_, c| c.state)
-                    .unwrap_or(ConnState::Alloced);
+                let state = conn.0.peek(req, |c| c.state).unwrap_or(ConnState::Alloced);
                 let idle = state <= ConnState::Ready || state == ConnState::QuitSent;
                 if idle {
                     dont_poll.push(*conn);
@@ -556,7 +553,7 @@ impl Mysqlnd {
 
     /// The connection's stream, for what selects on it.
     pub fn stream(self, req: &mut Request) -> Option<php_ext::request::Stream> {
-        self.0.with(req, |_, conn| conn.net.stream()).flatten()
+        self.0.peek(req, |conn| conn.net.stream()).flatten()
     }
 }
 
