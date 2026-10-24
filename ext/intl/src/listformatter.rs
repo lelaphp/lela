@@ -206,6 +206,26 @@ impl IntlListFormatter {
     const WIDTH_SHORT: i64 = 1;
     const WIDTH_NARROW: i64 = 2;
 
+    /// `__construct(string $locale, int $type = IntlListFormatter::TYPE_AND,
+    /// int $width = IntlListFormatter::WIDTH_WIDE)`: the object's error and
+    /// the request's reset before the arguments are read (php 8.5.12), so
+    /// a stale failure is gone even where they are refused.
+    ///
+    /// ```php
+    /// $f = new IntlListFormatter('en_US');
+    /// $f->format(["\x80"]);
+    /// new IntlListFormatter('en_US');
+    /// var_dump(intl_get_error_code(), $f->getErrorCode());
+    /// try { $f->__construct(); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump($f->getErrorCode());
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// int(10)
+    /// IntlListFormatter::__construct() expects at least 1 argument, 0 given
+    /// int(0)
+    /// ```
+    #[php(before_args = error::errors_reset_this::<ListFormatterObject>)]
     fn __construct(
         req: &mut Request,
         this: This<Self>,
