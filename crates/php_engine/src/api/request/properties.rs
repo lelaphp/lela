@@ -1743,11 +1743,44 @@ impl Request {
     /// `zend_assign_to_variable` does where `ZEND_REF_HAS_TYPE_SOURCES`
     /// reads false. The value is given up with the `TypeError` and what
     /// the cell held stands, as php gives up its copy.
+    ///
+    /// `handed` is the operand kind `zend_assign_to_typed_ref_ex` is told
+    /// the value came as: it copies the value in and, for a `Tmp` or a
+    /// `Var`, gives the operand's own owner up after with
+    /// `i_zval_ptr_dtor_noref`, which leaves what landed a possible root
+    /// of the cycle collector. A `Cv` and a `Const` keep their own owner,
+    /// and a native's value, which has no operand (`Unused`), moves in as
+    /// `zend_try_assign_typed_ref` moves it; neither is offered.
+    /// `zend_assign_to_typed_prop` and `zend_std_write_property` hand
+    /// their copy on as `IS_TMP_VAR` whatever the operand was:
+    ///
+    /// ```php
+    /// class P { public array $path = []; public $plain = []; }
+    /// function t() {
+    ///     $p = new P; $id = 'x'; $v = [$id];
+    ///     $r = &$p->path; $s = &$p->path; unset($s);
+    ///     gc_collect_cycles();
+    ///     $p->path = [$id]; $a = gc_status()['roots'];
+    ///     gc_collect_cycles();
+    ///     $r = $v; $b = gc_status()['roots'];
+    ///     $q = new P; $w = &$q->plain; gc_collect_cycles();
+    ///     $q->plain = [$id]; $c = gc_status()['roots'];
+    ///     var_dump($a, $b, $c, $p->path === $v);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(0)
+    /// int(0)
+    /// bool(true)
+    /// ```
     pub(crate) fn assign_to_reference(
         &mut self,
         cell: Ref,
         value: Value,
         strict: bool,
+        handed: php_unit::OperandKind,
     ) -> Result<(), Thrown> {
         if cell.sources() == 0 {
             self.reference_set(cell, value);
@@ -1755,6 +1788,12 @@ impl Request {
         }
         let verdict = crate::ops::verify_ref_assignable(self, cell, &value, strict);
         let value = crate::ops::landed(self, value, verdict)?;
+        if matches!(
+            handed,
+            php_unit::OperandKind::Tmp | php_unit::OperandKind::Var
+        ) {
+            self.memory_mut().gc_possible_root(&value);
+        }
         self.reference_set(cell, value);
         Ok(())
     }
@@ -3091,13 +3130,13 @@ impl Request {
         o: Obj,
         i: u32,
         value: Value,
-        strict: bool,
+        (strict, handed): (bool, php_unit::OperandKind),
     ) -> Result<(Value, Value), Thrown> {
         if let Some(r) = o.slot(i).as_reference() {
             let cell = PhpRef::of(r);
             let garbage = cell.get();
             self.addref(&garbage);
-            if let Err(thrown) = self.assign_to_reference(r, value, strict) {
+            if let Err(thrown) = self.assign_to_reference(r, value, strict, handed) {
                 self.release(garbage);
                 return Err(thrown);
             }
@@ -3433,7 +3472,10 @@ impl Request {
             } else {
                 value.hand_on()
             };
-            match self.assign_declared_slot(o, placed.slot, value, self.property_strict_types()) {
+            // `zend_std_write_property`'s `zend_assign_to_variable_ex(...,
+            // IS_TMP_VAR, ...)` over the owner it took of the value.
+            let regime = (self.property_strict_types(), php_unit::OperandKind::Tmp);
+            match self.assign_declared_slot(o, placed.slot, value, regime) {
                 Ok((_, garbage)) => self.release(garbage),
                 Err(thrown) => {
                     name.give_up(self);
@@ -3541,7 +3583,12 @@ impl Request {
         let held = Value::of_slot(place.read());
         if let Some(cell) = held.as_php_ref() {
             let strict = self.property_strict_types();
-            return self.assign_to_reference(cell.heap(), value.hand_on().undef_as_null(), strict);
+            return self.assign_to_reference(
+                cell.heap(),
+                value.hand_on().undef_as_null(),
+                strict,
+                php_unit::OperandKind::Tmp,
+            );
         }
         place.write(value.hand_on().into_zval());
         self.release(held);

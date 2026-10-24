@@ -17,12 +17,15 @@
 //! extension's optimizer passes where the unit cache runs them (#2386),
 //! the running execution's trace number across a fiber switch and a
 //! generator's resume (#2738), and the request's storage as a native
-//! holds it, an `Emalloc` and a `FreshString` (design §5.13).
+//! holds it, an `Emalloc` and a `FreshString` (design §5.13), and a
+//! call's closure taken for the closure `CALLABLE_CONVERT` writes
+//! (#3335).
 
 use crate::api;
 
 mod allocations;
 mod body;
+mod call_closure;
 mod dropped_frames;
 mod frame_writes;
 mod frames;
