@@ -87,13 +87,21 @@ struct State {
 /// The two pairs `add_offset_pair` hands every group that did not take
 /// part under `PREG_OFFSET_CAPTURE`, one owner each, `["", -1]` and,
 /// under `PREG_UNMATCHED_AS_NULL`, `[null, -1]`: made on first use and
-/// given up in `RSHUTDOWN`, after which a pair is made fresh each time,
-/// as php makes one under `EG_FLAGS_IN_SHUTDOWN`.
+/// given up in `RSHUTDOWN`. Once the program has ended, a pair not
+/// cached yet is made fresh each time, as php makes one under
+/// `EG_FLAGS_IN_SHUTDOWN`, which `php_request_shutdown` sets before the
+/// shutdown functions are called.
 #[derive(Default)]
 struct Unmatched {
     empty: Option<Owner<PhpArray>>,
     null: Option<Owner<PhpArray>>,
     ended: bool,
+}
+
+/// The program has ended (`EG(flags) |= EG_FLAGS_IN_SHUTDOWN`): the
+/// cached pairs stand until `RSHUTDOWN`, and no other is cached.
+fn program_ended(req: &mut Request) {
+    req.state::<State>().unmatched.ended = true;
 }
 
 /// `sizeof(pcre2_general_context)`: the allocator's two callbacks and
@@ -205,14 +213,10 @@ fn rshutdown(req: &mut Request) {
         general.free(req);
     }
     // `zval_ptr_dtor(&PCRE_G(unmatched_null_pair))` and its twin.
-    let unmatched = std::mem::replace(
-        &mut req.state::<State>().unmatched,
-        Unmatched {
-            ended: true,
-            ..Unmatched::default()
-        },
-    );
-    for pair in [unmatched.empty, unmatched.null].into_iter().flatten() {
+    let unmatched = &mut req.state::<State>().unmatched;
+    unmatched.ended = true;
+    let pairs = [unmatched.empty.take(), unmatched.null.take()];
+    for pair in pairs.into_iter().flatten() {
         pair.give_up(req);
     }
 }
@@ -326,6 +330,7 @@ pub fn extension() -> Extension {
         .request_state::<State>()
         .rinit(rinit)
         .rshutdown(rshutdown)
+        .program_ended(program_ended)
         .engine_state(|start| Ok(pattern::engine_state(start)))
         .info(pcre_info)
         .build("pcre")

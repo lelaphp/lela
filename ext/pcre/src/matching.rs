@@ -187,46 +187,36 @@ pub(super) fn offset_pair(
 /// (`init_unmatched_empty_pair`, `init_unmatched_null_pair`), so every
 /// group that did not take part shares it and a `$matches` destroyed
 /// with it gives up an array another owner holds, a possible root.
-/// Once `RSHUTDOWN` gave the pairs up, each is made fresh.
+/// Once the program has ended, in a shutdown function or a destructor
+/// the request's end serves, a pair not cached yet is made fresh and
+/// cached no more, as under `EG_FLAGS_IN_SHUTDOWN`; one cached before
+/// is still handed out.
 ///
 /// ```php
 /// function d($p) {
 ///     preg_match_all('#\{(!)?(\w+)\}#', $p, $m, PREG_OFFSET_CAPTURE | PREG_SET_ORDER);
-///     gc_collect_cycles(); unset($m); $one = gc_status()['roots'];
-///     preg_match('/(a)?(b)?c/', 'c', $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
-///     gc_collect_cycles(); unset($n); $two = gc_status()['roots'];
-///     var_dump($one, $two);
+///     gc_collect_cycles(); unset($m); var_dump(gc_status()['roots']);
 /// }
 /// d('/h/{name}');
 /// preg_match('/(x)?(y)/', 'y', $o, PREG_OFFSET_CAPTURE);
-/// var_dump($o);
+/// var_dump($o[1]);
+/// register_shutdown_function(function () {
+///     preg_match('/(a)?(b)?c/', 'c', $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+///     gc_collect_cycles(); unset($n); $fresh = gc_status()['roots'];
+///     preg_match('/(x)?(y)/', 'y', $m, PREG_OFFSET_CAPTURE);
+///     gc_collect_cycles(); unset($m); var_dump($fresh, gc_status()['roots']);
+/// });
 /// ```
 /// ```expect
 /// int(1)
-/// int(1)
-/// array(3) {
+/// array(2) {
 ///   [0]=>
-///   array(2) {
-///     [0]=>
-///     string(1) "y"
-///     [1]=>
-///     int(0)
-///   }
+///   string(0) ""
 ///   [1]=>
-///   array(2) {
-///     [0]=>
-///     string(0) ""
-///     [1]=>
-///     int(-1)
-///   }
-///   [2]=>
-///   array(2) {
-///     [0]=>
-///     string(1) "y"
-///     [1]=>
-///     int(0)
-///   }
+///   int(-1)
 /// }
+/// int(0)
+/// int(1)
 /// ```
 pub(super) fn unmatched_pair(
     req: &mut Request,
@@ -239,11 +229,11 @@ pub(super) fn unmatched_pair(
         } else {
             &unmatched.empty
         };
-        (!unmatched.ended).then(|| slot.as_ref().map(|pair| **pair))
+        (slot.as_ref().map(|pair| **pair), unmatched.ended)
     };
     let pair = match cached {
-        Some(Some(pair)) => pair,
-        held => {
+        (Some(pair), _) => pair,
+        (None, ended) => {
             let mut pair = PhpArray::new(req)?;
             let text = if unmatched_as_null {
                 Owner::null()
@@ -252,8 +242,9 @@ pub(super) fn unmatched_pair(
             };
             pair.append(req, text)?;
             pair.append(req, Owner::int(-1))?;
-            // `EG_FLAGS_IN_SHUTDOWN`'s arm: a pair of its own.
-            if held.is_none() {
+            // `EG_FLAGS_IN_SHUTDOWN`'s arm: a pair none was cached for
+            // yet is the group's own.
+            if ended {
                 return Ok(pair.into_value());
             }
             let view = *pair;
