@@ -399,6 +399,16 @@ impl Obj {
         }
     }
 
+    /// `GC_ADD_FLAGS(object, GC_NOT_COLLECTABLE)`: the object can be part
+    /// of no cycle, so a release that leaves it owners never offers it to
+    /// the collector (`GC_MAY_LEAK`). php marks an enum case
+    /// (`zend_enum_new`, `Z/Zend/zend_enum.c:42`) and a fake closure with
+    /// no receiver (`zend_create_fake_closure`,
+    /// `Z/Zend/zend_closures.c:870`), and nothing else of an object.
+    pub fn set_uncollectable(&self) {
+        self.add_flag(gc::NOT_COLLECTABLE);
+    }
+
     /// `Z_PROTECT_RECURSION_P`: the walk is inside.
     pub fn protect(&self) {
         self.add_flag(gc::PROTECTED);

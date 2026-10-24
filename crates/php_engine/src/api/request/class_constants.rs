@@ -618,7 +618,27 @@ impl Request {
     /// `zend_enum_new`: the instance standing for the case `name`, its
     /// `name` the constant's interned name and its `value`, for a backed
     /// enum, `value`, whose owner it takes; kept in the request's slot,
-    /// with one more owner for the caller.
+    /// with one more owner for the caller. It is marked uncollectable, as
+    /// `zend_enum_new` marks it, so a case is never a possible root, a
+    /// case of an enum a cached file declares as well:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3335-enum-' . getmypid() . '.inc';
+    /// file_put_contents("$f.tmp", '<?php enum Suit: string { case H = "h"; case S = "s"; }');
+    /// touch("$f.tmp", time() - 10); rename("$f.tmp", $f);
+    /// include $f;
+    /// enum Local { case A; }
+    /// class Box { public $v; }
+    /// $b = new Box; $b->v = Suit::H; $c = $b->v; unset($c);
+    /// $l = new Box; $l->v = Local::A; $d = $l->v; unset($d);
+    /// $s = Suit::from('s'); $e = $s; unset($e);
+    /// var_dump(gc_status()['roots'], $s === Suit::S);
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// bool(true)
+    /// ```
     fn made_case(
         &mut self,
         class: ClassId,
@@ -632,6 +652,9 @@ impl Request {
                 return Err(thrown);
             }
         };
+        // `GC_ADD_FLAGS(zobj, GC_NOT_COLLECTABLE)`: a case is part of no
+        // cycle, so no release offers it to the collector.
+        case.heap().set_uncollectable();
         // The case's name is the constant's, as `zend_enum_new` copies
         // `case_name` into `OBJ_PROP_NUM(zobj, 0)` and the value into
         // the slot after it, no property looked up by name.
