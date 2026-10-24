@@ -11,7 +11,7 @@ use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_type_error, argument_error, arity, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value};
 
 use super::{KeyBytes, long, lower, memnstr};
 use crate::ffi::memchr;
@@ -100,6 +100,24 @@ use crate::ffi::memchr;
 /// string(3) "222"
 /// str_replace(): Argument #2 ($replace) must be of type string when argument #1 ($search) is a string
 /// ```
+///
+/// Where the replacement is longer than what it replaces, the replaced
+/// string is asked for fallibly since 8.5.12 ("the replacement is
+/// repeated once per match"): past the memory limit it is refused, the
+/// subject becomes the empty string, and the limit's fatal is raised as
+/// the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(str_replace(['a', 'b'], ['bb', 'c'], 'ab', $n), $n);
+/// var_dump(str_replace('a', str_repeat('b', 16), str_repeat('a', 1 << 20), $n), "unreached");
+/// ```
+/// ```expect exit=255
+/// string(3) "ccc"
+/// int(4)
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 4
+/// ```
 #[php_function(frameless(3))]
 pub(super) fn str_replace(
     req: &mut Request,
@@ -141,6 +159,18 @@ pub(super) fn str_replace(
 /// int(1003552)
 /// int(0)
 /// bool(true)
+/// ```
+///
+/// The replaced string is asked for fallibly since 8.5.12 where it grows,
+/// as `str_replace`'s is.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(str_ireplace('A', str_repeat('b', 16), str_repeat('a', 1 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 3
 /// ```
 #[php_function]
 pub(super) fn str_ireplace(
@@ -247,11 +277,19 @@ fn in_subject(
             };
             let searched = subject.search(req, *needle, with, case_sensitive, &mut count);
             let value = subject.into_current(req);
-            if let Err(thrown) = searched {
-                value.give_up(req);
-                return Err(thrown);
+            match searched {
+                Err(thrown) => {
+                    value.give_up(req);
+                    return Err(thrown);
+                }
+                // `ZVAL_EMPTY_STRING(result)` where the replaced string
+                // was refused, the limit's fatal raised after the call.
+                Ok(None) => {
+                    value.give_up(req);
+                    return Ok((PhpString::new(req, b"")?, count));
+                }
+                Ok(Some(_)) => return Ok((value, count)),
             }
-            return Ok((value, count));
         }
     };
     let mut replace_at = 0;
@@ -289,11 +327,12 @@ fn in_subject(
         if let Some(with) = with {
             with.give_up(req);
         }
-        // A search that left nothing ends the walk.
-        Ok(if replaced? && subject.now().is_empty() {
-            ControlFlow::Break(())
-        } else {
-            ControlFlow::Continue(())
+        // A search that left nothing ends the walk, and so does one whose
+        // string the memory limit refused, the subject then `""`.
+        Ok(match replaced? {
+            None => ControlFlow::Break(()),
+            Some(true) if subject.now().is_empty() => ControlFlow::Break(()),
+            Some(_) => ControlFlow::Continue(()),
         })
     });
     let value = subject.into_current(req);
@@ -332,7 +371,9 @@ impl Subject {
     /// skipped, a one-byte search is `php_char_to_str_ex`, a longer one
     /// `php_str_to_str_ex`, or `php_str_to_str_i_ex` over the folded
     /// subject and the needle folded for the search, both on the
-    /// request's heap as `zend_string_tolower` makes them.
+    /// request's heap as `zend_string_tolower` makes them. `None` where
+    /// the memory limit refused the replaced string, as php 8.5.12's
+    /// `NULL`.
     fn search(
         &mut self,
         req: &mut Request,
@@ -340,10 +381,10 @@ impl Subject {
         with: &[u8],
         case_sensitive: bool,
         count: &mut i64,
-    ) -> Result<bool, Thrown> {
+    ) -> Result<Option<bool>, Thrown> {
         let now = self.now();
         let step = match needle.as_bytes() {
-            [] => None,
+            [] => Replaced::Kept,
             &[byte] => char_to_str(req, now.as_bytes(), (byte, with), case_sensitive, count)?,
             bytes if case_sensitive => {
                 str_to_str(req, (now.as_bytes(), now.as_bytes()), (bytes, with), count)?
@@ -360,7 +401,7 @@ impl Subject {
                 // `php_str_to_str_i_ex` folds the needle only where it
                 // can match.
                 if bytes.len() > now.len() {
-                    None
+                    Replaced::Kept
                 } else {
                     let needle = lowered(req, needle)?;
                     let step = str_to_str(
@@ -374,8 +415,10 @@ impl Subject {
                 }
             }
         };
-        let Some(replaced) = step else {
-            return Ok(false);
+        let replaced = match step {
+            Replaced::Kept => return Ok(Some(false)),
+            Replaced::Refused => return Ok(None),
+            Replaced::Made(replaced) => replaced,
         };
         if let Some(folded) = self.folded.take() {
             folded.give_up(req);
@@ -383,7 +426,7 @@ impl Subject {
         if let Some(old) = self.current.replace(replaced) {
             old.give_up(req);
         }
-        Ok(true)
+        Ok(Some(true))
     }
 
     /// The subject as it stands, one owner of it, its folded copy given
@@ -420,6 +463,23 @@ fn lowered(req: &mut Request, s: PhpString) -> Result<Owner<PhpString>, Thrown> 
 /// a subject without one is `None` and allocates nothing, and the new string
 /// is allocated once at its length, `zend_string_safe_alloc` where it
 /// grows.
+/// What one replacing pass made of a string: nothing to replace, the
+/// string it made, or the string php 8.5.12 asks for fallibly
+/// (`zend_string_safe_falloc`, where the replacement is longer than
+/// what it replaces) refused by the memory limit, php's `NULL`.
+enum Replaced {
+    Kept,
+    Made(Owner<PhpString>),
+    Refused,
+}
+
+impl Replaced {
+    /// A fallible ask's answer.
+    fn of(asked: Option<Owner<PhpString>>) -> Replaced {
+        asked.map_or(Replaced::Refused, Replaced::Made)
+    }
+}
+
 #[allow(clippy::naive_bytecount)] // `count_chars` is one loop, not a crate
 fn char_to_str(
     req: &mut Request,
@@ -427,7 +487,7 @@ fn char_to_str(
     (from, to): (u8, &[u8]),
     case_sensitive: bool,
     count: &mut i64,
-) -> Result<Option<Owner<PhpString>>, Thrown> {
+) -> Result<Replaced, Thrown> {
     let folded = lower(from);
     let n = if case_sensitive {
         // `count_chars`' SSE2 count, which the compiler vectorises as it is.
@@ -436,7 +496,7 @@ fn char_to_str(
         subject.iter().filter(|&&c| lower(c) == folded).count()
     };
     if n == 0 {
-        return Ok(None);
+        return Ok(Replaced::Kept);
     }
     *count += long(n);
     let fill = |out: &mut [u8]| {
@@ -459,11 +519,15 @@ fn char_to_str(
             }
         }
     };
-    let replaced = match to.len().checked_sub(1) {
-        Some(grows) => PhpString::product(req, n, grows, subject.len(), fill)?,
-        None => PhpString::filled(req, subject.len() - n, fill)?,
-    };
-    Ok(Some(replaced))
+    // "The replacement is repeated once per match, so the result can
+    // dwarf the input": fallible since 8.5.12.
+    Ok(match to.len().checked_sub(1) {
+        Some(grows) => Replaced::of(
+            req.memory_mut()
+                .fallible(|req| PhpString::product(req, n, grows, subject.len(), fill))?,
+        ),
+        None => Replaced::Made(PhpString::filled(req, subject.len() - n, fill)?),
+    })
 }
 
 /// `php_str_to_str_ex` (`Z/ext/standard/string.c:3169`) where `searched`
@@ -481,19 +545,19 @@ fn str_to_str(
     (subject, searched): (&[u8], &[u8]),
     (needle, with): (&[u8], &[u8]),
     count: &mut i64,
-) -> Result<Option<Owner<PhpString>>, Thrown> {
+) -> Result<Replaced, Thrown> {
     let len = subject.len();
     if needle.len() >= len {
         if searched != needle {
-            return Ok(None);
+            return Ok(Replaced::Kept);
         }
         *count += 1;
         // `zend_string_init_fast`.
-        return PhpString::new(req, with).map(Some);
+        return PhpString::new(req, with).map(Replaced::Made);
     }
     if needle.len() == with.len() {
         let Some(first) = memnstr(searched, needle, 0) else {
-            return Ok(None);
+            return Ok(Replaced::Kept);
         };
         let mut n = 0;
         let replaced = PhpString::filled(req, len, |out| {
@@ -506,10 +570,10 @@ fn str_to_str(
             }
         })?;
         *count += n;
-        return Ok(Some(replaced));
+        return Ok(Replaced::Made(replaced));
     }
     let Some(first) = memnstr(searched, needle, 0) else {
-        return Ok(None);
+        return Ok(Replaced::Kept);
     };
     let n = found(searched, needle, first).count();
     *count += long(n);
@@ -523,12 +587,20 @@ fn str_to_str(
         }
         pen.put(&subject[copied..]);
     };
-    let replaced = if with.len() > needle.len() {
-        PhpString::product(req, n, with.len() - needle.len(), len, fill)?
+    // Fallible since 8.5.12 where the string grows.
+    Ok(if with.len() > needle.len() {
+        let grows = with.len() - needle.len();
+        Replaced::of(
+            req.memory_mut()
+                .fallible(|req| PhpString::product(req, n, grows, len, fill))?,
+        )
     } else {
-        PhpString::filled(req, len - n * (needle.len() - with.len()), fill)?
-    };
-    Ok(Some(replaced))
+        Replaced::Made(PhpString::filled(
+            req,
+            len - n * (needle.len() - with.len()),
+            fill,
+        )?)
+    })
 }
 
 /// Each offset of a non-empty `needle` in `haystack` from the match at
@@ -729,15 +801,17 @@ fn strtr_array(
     let replaced = match k {
         [] => {
             docref(req, Level::Warning, "Ignoring replacement of empty string");
-            Ok(None)
+            Ok(Replaced::Kept)
         }
         &[byte] => char_to_str(req, s, (byte, with.as_bytes()), true, &mut ignored),
         _ => str_to_str(req, (s, s), (k, with.as_bytes()), &mut ignored),
     };
     with.give_up(req);
     match replaced? {
-        Some(replaced) => Ok(replaced),
-        None => Ok(Owner::take(req, string)),
+        Replaced::Made(replaced) => Ok(replaced),
+        Replaced::Kept => Ok(Owner::take(req, string)),
+        // RETURN_OOM()
+        Replaced::Refused => PhpString::new(req, b""),
     }
 }
 
@@ -783,9 +857,19 @@ fn strtr_pairs(
     if minlen > maxlen {
         return Ok(Owner::take(req, string));
     }
-    let mut out: Option<Vec<u8>> = None;
+    // php's `smart_str result`, on the request's heap.
+    let mut out: Option<SmartStr> = None;
     let (mut pos, mut old_pos) = (0usize, 0usize);
     while pos + minlen <= s.len() {
+        // "One replacement is appended per match, so stop once over the
+        // limit" (8.5.12).
+        if req.memory().has_oom() {
+            if let Some(mut buffer) = out {
+                buffer.free(req);
+            }
+            // RETURN_OOM()
+            return PhpString::new(req, b"");
+        }
         if firsts.contains(usize::from(s[pos])) {
             let mut len = maxlen.min(s.len() - pos);
             while len >= minlen {
@@ -797,9 +881,14 @@ fn strtr_pairs(
                         from.find(key)
                     };
                     if let Some(value) = found {
-                        let buffer = out.get_or_insert_with(|| Vec::with_capacity(s.len()));
-                        buffer.extend_from_slice(&s[old_pos..pos]);
-                        with_string(req, &value, |with| buffer.extend_from_slice(with))?;
+                        // `zval_get_tmp_string`, then the two appends.
+                        let with = to_string(req, &value)?;
+                        let buffer = out.get_or_insert_with(SmartStr::default);
+                        let appended = buffer
+                            .append(req, &s[old_pos..pos])
+                            .and_then(|()| buffer.append(req, with.as_bytes()));
+                        with.give_up(req);
+                        appended?;
                         old_pos = pos + len;
                         pos = old_pos - 1;
                         break;
@@ -812,8 +901,8 @@ fn strtr_pairs(
     }
     match out {
         Some(mut buffer) => {
-            buffer.extend_from_slice(&s[old_pos..]);
-            PhpString::new(req, &buffer)
+            buffer.append(req, &s[old_pos..])?;
+            buffer.extract(req)
         }
         None => Ok(Owner::take(req, string)),
     }
@@ -899,6 +988,19 @@ impl Bits {
 /// }
 /// substr_replace(): Argument #3 ($offset) cannot be an array when working on a single string
 /// substr_replace(): Argument #4 ($length) cannot be an array when working on a single string
+/// ```
+///
+/// Since 8.5.12 an array of strings is replaced only while the memory
+/// limit has not been met ("the replacement is repeated once per
+/// element"): past it the call returns and the limit's fatal is raised.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(substr_replace(array_fill(0, 16, 'x'), str_repeat('y', 2 << 20), 0, 1)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2113536 bytes) in %s on line 3
 /// ```
 #[allow(clippy::too_many_lines)]
 #[php_function]
@@ -989,7 +1091,14 @@ pub(super) fn substr_replace(
             // tmp_str)` (`Z/ext/standard/string.c:2443`), no owner of the
             // strings taken: the argument holds them while `__toString`
             // runs.
+            let mut refused = false;
             walk::foreach(req, strings, Hold::None, |req, row| -> walk::Step {
+                // "The replacement is repeated once per element, so stop
+                // once over the limit" (8.5.12).
+                if req.memory().has_oom() {
+                    refused = true;
+                    return Ok(ControlFlow::Break(()));
+                }
                 let s = with_string(req, row.value(), <[u8]>::to_vec)?;
                 let slen = long(s.len());
                 let clamp_from = |f: i64| {
@@ -1043,6 +1152,11 @@ pub(super) fn substr_replace(
                 out.set(req, key, value)?;
                 Ok(ControlFlow::Continue(()))
             })?;
+            if refused {
+                out.give_up(req);
+                // RETURN_OOM()
+                return PhpString::new(req, b"").map(Union::B);
+            }
             Ok(Union::A(out))
         }
     }

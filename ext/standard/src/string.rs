@@ -30,7 +30,7 @@ use php_ext::coerce::coerce_param;
 use php_ext::decl::Type;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Charset, Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Charset, Key, Layout, Owner, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
 
 use crate::ffi::locale::{self as c, Class};
@@ -587,6 +587,21 @@ fn strtolower(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, 
 /// #1 {main}
 ///   thrown in %s on line 2
 /// ```
+///
+/// The padded string is asked for fallibly since 8.5.12: past the memory
+/// limit it is refused, and the limit's fatal is raised as the call
+/// returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(str_pad("ab", 5, "xy", STR_PAD_BOTH));
+/// echo str_pad("x", 16 << 20), "unreached\n";
+/// ```
+/// ```expect exit=255
+/// string(5) "xabxy"
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 4
+/// ```
 #[php_function]
 fn str_pad(
     req: &mut Request,
@@ -618,20 +633,22 @@ fn str_pad(
             ));
         }
     };
-    // `zend_string_safe_alloc(1, ZSTR_LEN(input), num_pad_chars, 0)`,
-    // then the three fills in place.
-    PhpString::product(req, 1, bytes.len(), num_pad_chars, |result| {
-        let mut at = 0;
-        for i in 0..left_pad {
-            result[at] = pad[i % pad.len()];
-            at += 1;
-        }
-        result[at..at + bytes.len()].copy_from_slice(bytes);
-        at += bytes.len();
-        for i in 0..right_pad {
-            result[at] = pad[i % pad.len()];
-            at += 1;
-        }
+    // `zend_string_safe_falloc(1, ZSTR_LEN(input), num_pad_chars, 0,
+    // fallible: true)` since 8.5.12, then the three fills in place.
+    fallibly(req, |req| {
+        PhpString::product(req, 1, bytes.len(), num_pad_chars, |result| {
+            let mut at = 0;
+            for i in 0..left_pad {
+                result[at] = pad[i % pad.len()];
+                at += 1;
+            }
+            result[at..at + bytes.len()].copy_from_slice(bytes);
+            at += bytes.len();
+            for i in 0..right_pad {
+                result[at] = pad[i % pad.len()];
+                at += 1;
+            }
+        })
     })
 }
 
@@ -1663,6 +1680,20 @@ fn fallibly(
 /// }
 /// explode(): Argument #1 ($separator) must not be empty
 /// ```
+///
+/// Since 8.5.12 each piece is added only while the memory limit has not
+/// been met ("each piece costs a zval plus a `zend_string`"): past it the
+/// array is returned as far as it was filled and the limit's fatal is
+/// raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(explode(',', str_repeat('a,', 512 * 1024))), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn explode(
     req: &mut Request,
@@ -1717,6 +1748,13 @@ fn explode(
         return Ok(array);
     }
     for i in 0..take {
+        // "Each piece costs a zval plus a zend_string, so stop once over
+        // the limit" (8.5.12), before each piece, the array as far as it
+        // was filled returned and the limit's fatal raised after the
+        // call.
+        if req.memory().has_oom() {
+            return Ok(array);
+        }
         let value = PhpString::new(req, piece(i))?.into_value();
         array.append(req, value)?;
     }
@@ -1895,7 +1933,13 @@ fn implode_array(
             made.give_up(req);
         }
     }
-    let joined = PhpString::new(req, &out)?;
+    // "The glue is repeated once per element, so the result can dwarf
+    // the input": `zend_string_safe_falloc(numelems - 1, ZSTR_LEN(glue),
+    // len, 0, fallible: true)` since 8.5.12, `RETURN_OOM()` where the
+    // memory limit refused it.
+    let Some(joined) = req.memory_mut().fallible(|req| PhpString::new(req, &out))? else {
+        return PhpString::new(req, b"");
+    };
     if utf8 {
         joined.mark_valid_utf8();
     }
@@ -2113,6 +2157,22 @@ fn alphanumeric_argument(req: &mut Request, string: PhpString) -> Result<Vec<u8>
 /// string(2) "ab"
 /// chunk_split(): Argument #2 ($length) must be greater than 0
 /// ```
+///
+/// Since 8.5.12 the string is asked for fallibly at the length it ends
+/// with: past the memory limit it is refused, and the limit's fatal is
+/// raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(chunk_split("abcd", 3, "|"), chunk_split("ab", 3, "|"));
+/// echo chunk_split(str_repeat('a', 1 << 20), 1, str_repeat('-', 8)), "unreached\n";
+/// ```
+/// ```expect exit=255
+/// string(6) "abc|d|"
+/// string(3) "ab|"
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 9453568 bytes) in %s on line 4
+/// ```
 #[php_function]
 fn chunk_split(
     req: &mut Request,
@@ -2127,10 +2187,13 @@ fn chunk_split(
     }
     let bytes = string.as_bytes();
     let chunk = usize::try_from(chunklen).unwrap_or(usize::MAX);
+    // Both strings are asked for fallibly since 8.5.12,
+    // `zend_string_safe_falloc`, each the length it ends with, and
+    // `RETURN_OOM()` where the memory limit refused one.
     if chunk > bytes.len() {
         let mut out = bytes.to_vec();
         out.extend_from_slice(sep);
-        return PhpString::new(req, &out);
+        return fallibly(req, |req| PhpString::new(req, &out));
     }
     if bytes.is_empty() {
         return PhpString::new(req, b"");
@@ -2140,7 +2203,7 @@ fn chunk_split(
         out.extend_from_slice(piece);
         out.extend_from_slice(sep);
     }
-    PhpString::new(req, &out)
+    fallibly(req, |req| PhpString::new(req, &out))
 }
 
 /// `quotemeta(string $string): string`: a backslash before each of
@@ -2529,6 +2592,23 @@ fn hebrev_bytes(s: &[u8], max_chars: i64) -> Vec<u8> {
 /// string(4) "none"
 /// string(28) "3c6272202f3e0a3c6272202f3e0a"
 /// ```
+///
+/// The string is asked for fallibly since 8.5.12, each newline grown by
+/// its tag: past the memory limit it is refused, and the limit's fatal is
+/// raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(nl2br("a\r\nb\nc", false));
+/// var_dump(nl2br(str_repeat("\n", 2 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+/// string(14) "a<br>
+/// b<br>
+/// c"
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 14696448 bytes) in %s on line 4
+/// ```
 #[php_function]
 fn nl2br(
     req: &mut Request,
@@ -2556,7 +2636,10 @@ fn nl2br(
         out.push(s[i]);
         i += 1;
     }
-    PhpString::new(req, &out)
+    // `zend_string_safe_falloc(repl_cnt, repl_len, ZSTR_LEN(str), 0,
+    // fallible: true)` since 8.5.12, the length it ends with, and
+    // `RETURN_OOM()` where the memory limit refused it.
+    fallibly(req, |req| PhpString::new(req, &out))
 }
 
 /// `count_chars(string $string, int $mode = 0): array|string`: the
@@ -2792,6 +2875,20 @@ fn str_shuffle(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>,
 /// }
 /// str_word_count(): Argument #2 ($format) must be a valid format value
 /// ```
+///
+/// Since 8.5.12 a word is added only while the memory limit has not been
+/// met; the count alone allocates nothing and runs to the end.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(str_word_count(str_repeat('ab ', 350 * 1024)));
+/// var_dump(str_word_count(str_repeat('ab ', 350 * 1024), 2));
+/// ```
+/// ```expect exit=255
+/// int(358400)
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2621440 bytes) in %s on line 4
+/// ```
 #[php_function]
 fn str_word_count(
     req: &mut Request,
@@ -2828,6 +2925,12 @@ fn str_word_count(
     }
     let mut count = 0usize;
     while p < e {
+        // "Each word costs a zval plus a zend_string, so stop once over
+        // the limit" (8.5.12), where words are kept.
+        if format != 0 && req.memory().has_oom() {
+            // RETURN_OOM(): the array as far as it was filled.
+            break;
+        }
         let start = p;
         while p < e && (s[p].is_ascii_alphabetic() || extra(s[p]) || s[p] == b'\'' || s[p] == b'-')
         {
@@ -2879,6 +2982,32 @@ fn str_word_count(
 /// }
 /// str_split(): Argument #2 ($length) must be greater than 0
 /// ```
+///
+/// Since 8.5.12 the table for every piece is asked for fallibly, and a
+/// piece is added only while the memory limit has not been met: past it
+/// the call returns and the limit's fatal is raised.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(str_split("abcde", 2), str_split("ab", 5));
+/// var_dump(count(str_split(str_repeat('a', 1 << 20))), "unreached");
+/// ```
+/// ```expect exit=255
+/// array(3) {
+///   [0]=>
+///   string(2) "ab"
+///   [1]=>
+///   string(2) "cd"
+///   [2]=>
+///   string(1) "e"
+/// }
+/// array(1) {
+///   [0]=>
+///   string(2) "ab"
+/// }
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 4
+/// ```
 #[php_function]
 fn str_split(
     req: &mut Request,
@@ -2891,10 +3020,38 @@ fn str_split(
     if string.is_empty() {
         return Ok(Owner::take(req, PhpArray::empty()));
     }
-    let mut array = PhpArray::new(req)?;
+    let bytes = string.as_bytes();
     let chunk = usize::try_from(length).unwrap_or(usize::MAX);
-    for piece in string.as_bytes().chunks(chunk) {
+    if chunk >= bytes.len() {
+        let mut array = PhpArray::init_size(req, 1)?;
+        let value = PhpString::new(req, bytes)?.into_value();
+        array.append(req, value)?;
+        return Ok(array);
+    }
+    // `array_finit_size_packed` since 8.5.12: the table for every piece
+    // asked for fallibly, `RETURN_OOM()` where the memory limit refused
+    // it.
+    let pieces = u32::try_from((bytes.len() - 1) / chunk + 1).unwrap_or(u32::MAX);
+    let Some(mut array) = req
+        .memory_mut()
+        .fallible(|req| PhpArray::sized(req, pieces, Layout::Packed))?
+    else {
+        return Ok(Owner::take(req, PhpArray::empty()));
+    };
+    let mut regular = bytes.chunks_exact(chunk);
+    for piece in &mut regular {
+        // "Each segment costs a zval plus a zend_string, so stop once
+        // over the limit."
+        if req.memory().has_oom() {
+            // RETURN_OOM()
+            return Ok(array);
+        }
         let value = PhpString::new(req, piece)?.into_value();
+        array.append(req, value)?;
+    }
+    let rest = regular.remainder();
+    if !rest.is_empty() {
+        let value = PhpString::new(req, rest)?.into_value();
         array.append(req, value)?;
     }
     Ok(array)
