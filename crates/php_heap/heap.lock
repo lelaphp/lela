@@ -251,6 +251,7 @@ Intern::hand_name
 Intern::hold
 Intern::hold_made
 Intern::intern
+Intern::intern_in
 Intern::intern_made
 Intern::intern_marked
 Key

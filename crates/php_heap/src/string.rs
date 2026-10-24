@@ -727,6 +727,17 @@ pub trait Intern {
     /// `zend_interned_string_ht_lookup` finds it.
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal>;
 
+    /// [`Intern::intern`] of a string laid as a string of `room` bytes and
+    /// cut to `bytes` where it stands (`ZSTR_LEN(s) = len`), which keeps
+    /// the block's bin: `__DIR__`, which `zend_try_ct_eval_magic_const`
+    /// lays at the length of the whole file name before `zend_dirname`
+    /// shortens it. A home that lays nothing on a request's heap interns
+    /// the bytes as any other.
+    fn intern_in(&mut self, bytes: &[u8], room: usize) -> Result<Str, Fatal> {
+        let _ = room;
+        self.intern_marked(bytes, false)
+    }
+
     /// [`Intern::intern_marked`] of a string the asker alone will hold
     /// and gives back once it has read it ([`Intern::give_back`]): a
     /// string a fold makes that the fold above it consumes, as

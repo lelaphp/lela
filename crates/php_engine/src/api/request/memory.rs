@@ -141,6 +141,23 @@ impl Intern for RequestStrings<'_> {
         Ok(s)
     }
 
+    /// `zend_string_init` of `room` bytes cut to `bytes`, and
+    /// `zval_make_interned_string` over it, which finds the engine's string
+    /// where the request has taken its [`SharedHold`].
+    fn intern_in(&mut self, bytes: &[u8], room: usize) -> Result<Str, Fatal> {
+        if self.hold == SharedHold::Taken
+            && let Some(held) = self.shared.existing_interned(bytes)
+        {
+            return Ok(held);
+        }
+        let mut laid = self.heap.string_fresh(room.max(bytes.len()))?;
+        laid.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        laid.set_len(bytes.len());
+        let s = laid.finish();
+        self.made.add(Zval::string(s));
+        Ok(s)
+    }
+
     /// A declaration's own string, kept as what its place in the
     /// compile's walk names when the unit is taken
     /// ([`Request::hold_compiled`]).

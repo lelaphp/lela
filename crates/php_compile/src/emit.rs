@@ -119,7 +119,7 @@ use php_unit::{
 
 use php_syntax::magic_const_name;
 
-use crate::{CompileError, Options, Refused, SourceKind, StackLimit};
+use crate::{CompileError, MAXPATHLEN, Options, Refused, SourceKind, StackLimit};
 use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
 use by_name::Symbols;
@@ -1307,6 +1307,11 @@ impl Operated {
 enum Folded {
     Line(i64),
     Text(Vec<u8>),
+    /// `__DIR__`, laid as a string of the second's length and cut to the
+    /// first: the file name's, or `MAXPATHLEN` where the directory is
+    /// the working one, which `zend_string_extend` grows it to before
+    /// `VCWD_GETCWD` writes it ([`php_heap::Intern::intern_in`]).
+    Dir(Vec<u8>, usize),
     /// The name of the function the constant stands in, whose own
     /// string php copies (`ZVAL_STR_COPY`, [`Emit::function_name_made`]).
     FunctionName,
@@ -12496,6 +12501,9 @@ impl<'a> Emit<'a> {
         match self.magic_const(which, line) {
             Folded::Line(n) => Ok(Zval::long(n)),
             Folded::Text(text) => self.string(&text),
+            Folded::Dir(dir, room) => (self.strings.intern_in(&dir, room))
+                .map(Zval::string)
+                .map_err(|fatal| self.fatal_of(fatal)),
             Folded::FunctionName => self.function_name_made().map(|made| made.value()),
             Folded::FileName => self.file_name_made().map(|made| made.value()),
             Folded::ClassName => self.class_name_made().map(|made| made.value()),
@@ -19498,17 +19506,54 @@ impl<'a> Emit<'a> {
     /// ```expect
     /// p pp
     /// ```
+    ///
+    /// `__DIR__` is laid at the length of the whole file name and cut
+    /// where it stands ([`Folded::Dir`]), and a unit compiled for the
+    /// request alone takes the engine's string where opcache holds the
+    /// bytes, as it holds the working directory once a relative path is
+    /// keyed, `witness.php`'s: so an `eval` that program runs costs no
+    /// string, where one a program in a directory under the recipe's
+    /// `TMPDIR` runs, and an include written there during the request,
+    /// costs a string of the file name's length, which is longer by a bin:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// $fc = $fd = $fe = null; m('$GLOBALS["fz"] = 1;');
+    /// echo m('$GLOBALS["fc"] = __DIR__;'), "\n";
+    /// $d = sys_get_temp_dir() . '/w3324'; @mkdir($d);
+    /// $put = function ($name, $src) use ($d) { $f = "$d/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('dir.inc', <<<'PHP'
+    /// <?php
+    /// ini_set('opcache.file_update_protection', '2');
+    /// function inc($name, $src) { $f = dirname(__FILE__) . '/' . str_pad($name, 40, '-') . '.inc'; file_put_contents($f, $src); $m = memory_get_usage(); include $f; $d = memory_get_usage() - $m; unlink($f); return $d; }
+    /// function here($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// inc('w0', '<?php class W {} $q0 = 1;');
+    /// echo inc('main', '<?php $GLOBALS["fd"] = __DIR__;'), "\n";
+    /// echo inc('fn', '<?php function fa3() { return __DIR__; }'), "\n";
+    /// echo here('$GLOBALS["fe"] = __DIR__;'), "\n";
+    /// PHP);
+    /// include $f;
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo $fc === __DIR__, $fd === $d, fa3() === $d, $fe === $d, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0
+    /// 256
+    /// 400
+    /// 112
+    /// 1111
+    /// ```
     fn magic_const(&self, which: Magic, line: u32) -> Folded {
         let text = match which {
             Magic::Line => return Folded::Line(i64::from(line)),
             Magic::File => return Folded::FileName,
             Magic::Dir => {
                 let dirname = dirname(self.filename);
-                if dirname == b"." {
-                    self.cwd.to_vec()
+                return if dirname == b"." {
+                    Folded::Dir(self.cwd.to_vec(), MAXPATHLEN)
                 } else {
-                    dirname
-                }
+                    Folded::Dir(dirname, self.filename.len())
+                };
             }
             Magic::Namespace => self.namespace.clone().unwrap_or_default(),
             Magic::Class if self.in_trait() => return Folded::UsingClass,

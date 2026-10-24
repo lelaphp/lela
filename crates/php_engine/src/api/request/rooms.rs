@@ -115,12 +115,15 @@ impl Request {
     }
 
     /// `accel_getcwd` as `accel_make_persistent_key` asks it for a
-    /// relative path: `ZCG(cwd)` laid down once, the first time. The
-    /// `Err` is the memory limit's fatal.
+    /// relative path: `ZCG(cwd)` laid down once, the first time, and
+    /// put in the engine's table then (`ZCG(cwd_check)`,
+    /// [`crate::engine::Shared::intern_cwd`]). The `Err` is the memory
+    /// limit's fatal.
     pub(crate) fn accel_cwd(&mut self) -> Result<(), Thrown> {
         if self.rooms.accel_cwd.is_none() {
             let cwd = self.cwd.as_os_str().as_encoded_bytes().to_vec();
             self.rooms.accel_cwd = Some(self.string_init(&cwd)?);
+            self.shared.intern_cwd(&cwd);
         }
         Ok(())
     }

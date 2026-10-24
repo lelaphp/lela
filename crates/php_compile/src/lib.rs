@@ -36,6 +36,17 @@ pub mod values;
 pub use emit::is_reserved_class_name;
 pub use stack::{Reentered, StackLimit};
 
+/// `MAXPATHLEN` (`Z/Zend/zend_virtual_cwd.h:39`), the host's
+/// `PATH_MAX`: 4096 on Linux, 1024 on macOS and the BSDs. The room
+/// `__DIR__` takes where the directory is the working one, and the one
+/// value the engine's path checks, `open_basedir`, `include` and `dl()`
+/// read and `PHP_MAXPATHLEN` says.
+pub const MAXPATHLEN: usize = if cfg!(target_os = "linux") {
+    4096
+} else {
+    1024
+};
+
 /// The token stream and the tree (design §4.9), handed up for
 /// `php_engine::api::syntax` and nothing of the compiler's own: the
 /// lexer, its stream and php's names for its kinds, which
