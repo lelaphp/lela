@@ -5,7 +5,7 @@
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpString, Value};
+use php_ext::values::{Owner, PhpString, SmartStr, Value};
 
 use crate::consts::{FieldType, column};
 use crate::result::{Field, Row};
@@ -13,10 +13,27 @@ use crate::stats::{Stat, Stats};
 use crate::wire::Body;
 
 /// What `ps_fetch_from_1_to_8_bytes` makes: an integer, or the text php
-/// writes where it would not fit or is zero-filled.
+/// writes where it is zero-filled or would not fit.
 pub(crate) enum Bits {
     Long(i64),
-    Text(String),
+    /// `zend_strpprintf(0, "%0*" PRIu64, ...)`, a zero-filled column's.
+    ZeroFilled(String),
+    /// `zend_u64_to_str`, an unsigned value past `zend_long`.
+    Unsigned(u64),
+}
+
+impl Bits {
+    /// The value php makes of it, one owner: the integer, the
+    /// zero-filled text as `zend_strpprintf` makes it ([`printed`]), or
+    /// the unsigned value's digits as `zend_u64_to_str`'s
+    /// `zend_string_init` makes them.
+    pub(crate) fn into_value(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
+        match self {
+            Bits::Long(n) => Ok(Owner::int(n)),
+            Bits::ZeroFilled(digits) => printed(req, &digits),
+            Bits::Unsigned(n) => text(req, n.to_string().as_bytes()),
+        }
+    }
 }
 
 /// `ps_fetch_from_1_to_8_bytes` over `bytes`, `byte_count` of them: a
@@ -37,11 +54,11 @@ fn from_1_to_8_bytes(field: &Field, bytes: &[u8]) -> Bits {
         };
         if field.flags & column::ZEROFILL != 0 {
             let width = usize::try_from(field.length).unwrap_or(0);
-            return Bits::Text(format!("{uval:0width$}"));
+            return Bits::ZeroFilled(format!("{uval:0width$}"));
         }
         return match i64::try_from(uval) {
             Ok(n) => Bits::Long(n),
-            Err(_) => Bits::Text(uval.to_string()),
+            Err(_) => Bits::Unsigned(uval),
         };
     }
     let at = |i: usize| bytes.get(i).copied().unwrap_or(0);
@@ -180,6 +197,43 @@ fn text(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
     Ok(PhpString::new(req, bytes)?.into_value())
 }
 
+/// A column's text as `zend_strpprintf` makes it, which is how
+/// `ps_fetch_time`, `ps_fetch_date`, `ps_fetch_datetime` and a
+/// zero-filled integer write theirs (`Z/ext/mysqlnd/mysqlnd_ps_codec.c:126`,
+/// `:309-409`): `zend_vstrpprintf`'s `smart_str`, laid down at its start
+/// and handed out by `smart_str_extract`, whose trim php-8.5.12 asks at
+/// `zend_string_finit`'s size, so a `DATE`'s ten bytes hold the 48-byte
+/// bin where `zend_string_init` would hold the 40-byte one. One owner.
+///
+/// ```php
+/// $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_EMULATE_PREPARES => false]);
+/// $db->exec('CREATE TEMPORARY TABLE tz (d DATE, t TIME, t3 TIME(6), dt DATETIME, dt6 DATETIME(6), z INT(9) UNSIGNED ZEROFILL, zb BIGINT(30) UNSIGNED ZEROFILL)');
+/// $db->exec("INSERT INTO tz VALUES ('2026-10-24', '-838:59:59', '12:34:56.123456', '2026-10-24 12:34:56', '2026-10-24 12:34:56.654321', 42, 7)");
+/// foreach (['d', 't', 't3', 'dt', 'dt6', 'z', 'zb'] as $c) {
+///     $st = $db->prepare("SELECT $c FROM tz");
+///     $st->execute();
+///     $st->bindColumn(1, $v);
+///     $m = memory_get_usage(); memory_reset_peak_usage();
+///     $st->fetch(PDO::FETCH_BOUND);
+///     echo $c, ' ', var_export($v, true), ' ', memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n";
+///     unset($st, $v);
+/// }
+/// ```
+/// ```expect mysql
+/// d '2026-10-24' 80 424
+/// t '-838:59:59' 48 392
+/// t3 '12:34:56.123456' 48 392
+/// dt '2026-10-24 12:34:56' 56 416
+/// dt6 '2026-10-24 12:34:56.654321' 64 440
+/// z '000000042' 48 392
+/// zb '000000000000000000000000000007' 64 440
+/// ```
+fn printed(req: &mut Request, text: &str) -> Result<Owner<Value>, Thrown> {
+    let mut buf = SmartStr::default();
+    buf.append(req, text.as_bytes())?;
+    Ok(buf.extract(req)?.into_value())
+}
+
 /// `ps_fetch_over_read_error`.
 fn over_read(req: &mut Request) {
     docref(
@@ -266,12 +320,7 @@ fn fetch<'a>(
         let b = variable(req, p)?;
         (b.is_empty() || b.len() >= min || too_short(req)).then_some(b)
     };
-    let long = |bits: Bits, req: &mut Request| -> Result<Owner<Value>, Thrown> {
-        match bits {
-            Bits::Long(n) => Ok(Owner::int(n)),
-            Bits::Text(s) => text(req, s.as_bytes()),
-        }
-    };
+    let long = |bits: Bits, req: &mut Request| bits.into_value(req);
     let ty = field.field_type();
     Ok(Some(match ty {
         FieldType::Null => Owner::null(),
@@ -311,15 +360,15 @@ fn fetch<'a>(
             None => return Ok(None),
         },
         FieldType::Time => match temporal(req, p, 8) {
-            Some(b) => text(req, time(field, b).as_bytes())?,
+            Some(b) => printed(req, &time(field, b))?,
             None => return Ok(None),
         },
         FieldType::Date => match temporal(req, p, 4) {
-            Some(b) => text(req, date(b).as_bytes())?,
+            Some(b) => printed(req, &date(b))?,
             None => return Ok(None),
         },
         FieldType::DateTime | FieldType::Timestamp => match temporal(req, p, 4) {
-            Some(b) => text(req, datetime(field, b).as_bytes())?,
+            Some(b) => printed(req, &datetime(field, b))?,
             None => return Ok(None),
         },
         // `ps_fetch_bit`: an over-read is warned once, by `variable`.
