@@ -882,6 +882,7 @@ fn sid_attributes() -> Vec<Attribute> {
         ],
         line: 0,
         strict: false,
+        own_name: true,
     }]
 }
 

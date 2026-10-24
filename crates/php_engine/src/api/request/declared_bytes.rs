@@ -738,6 +738,7 @@ fn op_array(
             req,
             &mut blocks.emalloced,
             decl.attributes.iter().chain(parameters),
+            false,
         )?;
     }
     // `get_next_op` grows the oplines fourfold from
@@ -819,14 +820,16 @@ pub(super) fn arg_infos(decl: &FunctionDecl, method: bool) -> usize {
 /// constant it declares (`zend_constant_add_attributes`). That is the
 /// `attributes` table, `zend_hash_init(…, 8, …)` and packed as each is
 /// appended, and per attribute its `zend_attribute`, its name as
-/// resolved, which is the scanner's string where nothing prefixed it,
+/// resolved where it is a string of its own ([`Attribute::own_name`]),
 /// its lowered name where lowering changes it (`zend_string_tolower_ex`),
 /// each argument's name, and the tree `zend_const_expr_to_zval` copies
 /// for an argument that folds to no value ([`AstCopy`]); a value that
 /// folds is the unit's, a string the scanner's. A string of one byte is
-/// the scanner's `ZSTR_CHAR`. An uncached include's and an `eval`'s
-/// alike (the program under the recipe's `TMPDIR`, written into the past,
-/// the includes written during the request):
+/// the scanner's `ZSTR_CHAR`. A promoted parameter's property holds its
+/// list `again`, the arguments' names the parameter's strings. An
+/// uncached include's and an `eval`'s alike (the program under the
+/// recipe's `TMPDIR`, written into the past, the includes written during
+/// the request):
 ///
 /// ```php
 /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
@@ -863,6 +866,7 @@ pub(super) fn attributes<'a>(
     req: &mut Request,
     emalloced: &mut Vec<Emalloc>,
     attributes: impl Iterator<Item = &'a Attribute>,
+    again: bool,
 ) -> Result<(), Thrown> {
     let string = |bytes: &[u8]| (bytes.len() > 1).then_some(STRING_HEADER + bytes.len() + 1);
     let mut count = 0;
@@ -870,10 +874,11 @@ pub(super) fn attributes<'a>(
         let name = &attribute.name.0;
         let lowered = name.iter().any(u8::is_ascii_uppercase);
         let mut lens = vec![ATTRIBUTE + attribute.arguments.len() * ATTRIBUTE_ARG];
-        lens.extend(string(name));
+        lens.extend(string(name).filter(|_| attribute.own_name));
         lens.extend(lowered.then_some(STRING_HEADER + name.len() + 1));
         for argument in &attribute.arguments {
-            lens.extend(argument.name.as_ref().and_then(|name| string(&name.0)));
+            let named = argument.name.as_ref().filter(|_| !again);
+            lens.extend(named.and_then(|name| string(&name.0)));
             if !super::linking::is_literal(&argument.value) {
                 lens.extend(AstCopy::of(&argument.value).blocks());
             }
@@ -1206,11 +1211,14 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
         add_rows(req, blocks.table(table), written.of(table))?;
     }
     // `ce->attributes`, and each property's and constant's own.
-    attributes(req, &mut blocks.emalloced, class.attributes.iter())?;
-    let members = (class.properties.iter().map(|p| &p.attributes))
-        .chain(class.constants.iter().map(|c| &c.attributes));
-    for held in members {
-        attributes(req, &mut blocks.emalloced, held.iter())?;
+    attributes(req, &mut blocks.emalloced, class.attributes.iter(), false)?;
+    let properties = class
+        .properties
+        .iter()
+        .map(|p| (&p.attributes, p.is_promoted));
+    let constants = class.constants.iter().map(|c| (&c.attributes, false));
+    for (held, again) in properties.chain(constants) {
+        attributes(req, &mut blocks.emalloced, held.iter(), again)?;
     }
     // The default values, reallocated one at a time
     // (`zend_declare_typed_property`), which leaves the bin of the last.

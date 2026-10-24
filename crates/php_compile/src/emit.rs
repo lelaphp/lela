@@ -4594,6 +4594,7 @@ impl<'a> Emit<'a> {
         parameter: &walk::Parameter,
         promoted: walk::Promoted,
         ty: Option<&Type>,
+        earlier: &[Attribute],
     ) -> Result<(), CompileError> {
         let class_name = self.active_name().unwrap_or_default();
         let member = format!(
@@ -4668,6 +4669,7 @@ impl<'a> Emit<'a> {
             attributes::TARGET_PROPERTY,
             attributes::TARGET_PARAMETER,
             parameter.line,
+            earlier,
         )?;
         let declared = PropertyDecl {
             name: Name(parameter.name.clone().into_boxed_slice()),
@@ -5104,7 +5106,7 @@ impl<'a> Emit<'a> {
         } else {
             attributes::TARGET_FUNCTION
         };
-        let attributes = self.member_attributes(&function.attributes, target, 0, line)?;
+        let attributes = self.member_attributes(&function.attributes, target, 0, line, &[])?;
         // `zend_compile_params`' `fallback_return_type`: a method named
         // `__toString` with no return type written returns `string` all
         // the same, which is what `Stringable::__toString` holds it to.
@@ -5335,6 +5337,7 @@ impl<'a> Emit<'a> {
                 attributes::TARGET_PARAMETER,
                 promoted_target,
                 parameter.line,
+                &[],
             )?;
             let (ty, implicitly_nullable) = self.parameter_type(parameter, &mut folded, shown)?;
             // `zend_compile_params` makes every optional parameter before
@@ -5386,7 +5389,7 @@ impl<'a> Emit<'a> {
                 None
             };
             if let Some(promoted) = parameter.promote {
-                self.promoted_property(parameter, promoted, ty.as_ref())?;
+                self.promoted_property(parameter, promoted, ty.as_ref(), &attrs)?;
             }
             parameters.push(Parameter {
                 name: Name(parameter.name.clone().into_boxed_slice()),
@@ -7088,7 +7091,7 @@ impl<'a> Emit<'a> {
         self.line = declared_at;
         for attribute in &class.attributes {
             let name = self.class_name(&attribute.name).to_vec();
-            out.push(self.attribute(attribute, name, declared_at)?);
+            out.push(self.attribute(attribute, name, declared_at, None)?);
         }
         self.line = declared_at;
         let delayed = attributes::delays_validation(&out);
@@ -7121,7 +7124,12 @@ impl<'a> Emit<'a> {
 
     /// One attribute as the declaration keeps it: the name resolved,
     /// each argument the constant expression `zend_const_expr_to_zval`
-    /// leaves.
+    /// leaves, and whether its name is a string of its own
+    /// ([`Self::own_name`]). `again` is what a promoted parameter's
+    /// compile made of the same tree, which php compiles once more for
+    /// the property over the tree the first compile evaluated in place:
+    /// each argument a copy of the first's value, one more owner of it
+    /// (`ZVAL_COPY`), and its names the same strings.
     ///
     /// Its list is held to `zend_compile_attributes`' rules at the line
     /// of the declaration it stands on: no unpacking, a name once, and
@@ -7180,7 +7188,20 @@ impl<'a> Emit<'a> {
         attribute: &walk::Attr,
         name: Vec<u8>,
         declared_at: u32,
+        again: Option<&Attribute>,
     ) -> Result<Attribute, CompileError> {
+        let own_name = self.own_name(&attribute.name, again.is_some());
+        if let Some(earlier) = again {
+            for argument in &earlier.arguments {
+                crate::values::unit_values(&argument.value, &mut |z| {
+                    self.strings.hold(z);
+                });
+            }
+            return Ok(Attribute {
+                own_name,
+                ..earlier.clone()
+            });
+        }
         if attribute
             .arguments
             .contains(&walk::AttrArgument::CallableConvert)
@@ -7237,6 +7258,7 @@ impl<'a> Emit<'a> {
             arguments,
             line: attribute.line,
             strict: self.typing == Typing::Strict,
+            own_name,
         })
     }
 
@@ -7266,6 +7288,7 @@ impl<'a> Emit<'a> {
             attributes::TARGET_CLASS_CONST,
             0,
             constant.line,
+            &[],
         )
     }
 
@@ -7276,7 +7299,10 @@ impl<'a> Emit<'a> {
     /// property's list, then php's second loop at the declaration's
     /// line, `declared_at`: an internal attribute on a target it does
     /// not allow and one written twice are php's `E_ERROR`, unless
-    /// `#[\DelayedTargetValidation]` defers the target.
+    /// `#[\DelayedTargetValidation]` defers the target. A promoted
+    /// parameter's property compiles the list again (`earlier`, what the
+    /// parameter's compile made of it), each attribute there one more
+    /// copy of the parameter's ([`Self::attribute`]).
     ///
     /// ```php
     /// class A {
@@ -7354,18 +7380,24 @@ impl<'a> Emit<'a> {
         target: u32,
         promoted: u32,
         declared_at: u32,
+        earlier: &[Attribute],
     ) -> Result<Vec<Attribute>, CompileError> {
         let mut out = Vec::with_capacity(written.len());
+        let mut earlier = earlier.iter();
         self.line = declared_at;
         for attribute in written {
             let name = self.class_name(&attribute.name).to_vec();
-            if let Some(config) = self.attribute_config(&name) {
-                let targets = config.targets();
-                if targets & target == 0 && targets & promoted != 0 {
-                    continue;
-                }
+            let targets = self
+                .attribute_config(&name)
+                .map(attributes::Config::targets);
+            let left = |on: u32, to: u32| targets.is_some_and(|t| t & on == 0 && t & to != 0);
+            // What the parameter's compile took of the list, which left
+            // to the property what targets the property alone.
+            let again = (!left(promoted, target)).then(|| earlier.next()).flatten();
+            if left(target, promoted) {
+                continue;
             }
-            out.push(self.attribute(attribute, name, declared_at)?);
+            out.push(self.attribute(attribute, name, declared_at, again)?);
         }
         self.line = declared_at;
         let delayed = attributes::delays_validation(&out);
@@ -7579,6 +7611,7 @@ impl<'a> Emit<'a> {
             attributes::TARGET_PROPERTY,
             0,
             property.line,
+            &[],
         );
         self.active_property = None;
         let attributes = attributes?;
@@ -9587,7 +9620,8 @@ impl<'a> Emit<'a> {
             return Err(self.compile_error("Cannot apply attributes to multiple constants at once"));
         }
         let written = self.walk_attributes(self.list(node.attrs))?;
-        let attributes = self.member_attributes(&written, attributes::TARGET_CONST, 0, first)?;
+        let attributes =
+            self.member_attributes(&written, attributes::TARGET_CONST, 0, first, &[])?;
         // The value `ZEND_DECLARE_ATTRIBUTED_CONST` evaluates, which a
         // value the compiler could not fold is the tree of.
         let Some(value) = unevaluated.or_else(|| folded_const_expr(value)) else {

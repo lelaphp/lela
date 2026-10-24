@@ -414,7 +414,7 @@ impl Request {
         php_compile::values::attribute_values(&attributes, &mut |z| self.heap.addref(z));
         let mut room = Vec::from_iter(self.constant_room());
         // The memory limit's fatal is recorded and ends the request.
-        super::declared_bytes::attributes(self, &mut room, attributes.iter()).ok();
+        super::declared_bytes::attributes(self, &mut room, attributes.iter(), false).ok();
         let named = self.declared_string(given).ok();
         let keyed = (given.contains(&b'\\'))
             .then(|| self.interned(name).ok())
