@@ -12986,6 +12986,30 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// int(32)
 /// after
 /// ```
+///
+/// The call ends in the interrupt check php's four handlers make once
+/// the operands are freed, `ZEND_VM_FCALL_INTERRUPT_CHECK(execute_data)`
+/// (`Z/Zend/zend_vm_def.h:9790`, `:9817`, `:9852`, `:9893`, new at
+/// php-8.5.12), the one [`crate::interrupt::check`] `DO_ICALL` makes,
+/// so an interrupt raised while the native ran is taken before the next
+/// opline and not at whichever site comes next. Here pcntl's dispatch
+/// of `SIGUSR1` inside `__toString` blocks signals while its handler
+/// runs, so the `SIGUSR2` that handler sends lands as the dispatch ends,
+/// after every check inside the native has been made:
+///
+/// ```php
+/// pcntl_async_signals(true);
+/// pcntl_signal(SIGUSR1, function () { echo "usr1\n"; posix_kill(posix_getpid(), SIGUSR2); });
+/// pcntl_signal(SIGUSR2, function () { echo "usr2\n"; });
+/// class S { function __toString(): string { posix_kill(posix_getpid(), SIGUSR1); return "s"; } }
+/// $s = implode(",", [new S]);
+/// echo "after $s\n";
+/// ```
+/// ```expect
+/// usr1
+/// usr2
+/// after s
+/// ```
 #[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
@@ -13036,6 +13060,9 @@ fn frameless_call<const N: usize>(
     match served {
         Ok(value) => {
             set_out(req, frame, op, value);
+            if crate::interrupt::check(req)? {
+                return Ok(Stepped::Threw(frame).into());
+            }
             jump_to(at.saturating_add(width))
         }
         Err(thrown) => threw(req, frame, &thrown),
