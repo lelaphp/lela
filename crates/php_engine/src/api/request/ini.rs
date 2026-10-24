@@ -525,6 +525,32 @@ impl Request {
         self.ini.changed(self.shared.ini.at(name)?)
     }
 
+    /// `ZVAL_SET_INI_STR` over the value in force of the entry `name`,
+    /// as `ini_get()` hands it back: the string the entry holds, one more
+    /// owner of the request's string a changed entry took, the engine's
+    /// for a value its startup interned, which costs the request nothing,
+    /// and a string of the request's only for bytes neither holds; `None`
+    /// where php has no such entry. The `Err` is the memory limit.
+    pub(crate) fn ini_string(&mut self, name: &[u8]) -> Result<Option<Owner<PhpString>>, Thrown> {
+        let Some(at) = self.shared.ini.at(name) else {
+            return Ok(None);
+        };
+        let (held, bytes) = match self.ini.changed(at) {
+            Some((_, value, string)) => (*string, value.as_deref()),
+            None => (
+                None,
+                self.shared.ini.row(at).and_then(|row| row.value.as_deref()),
+            ),
+        };
+        let bytes = bytes.unwrap_or_default();
+        if let Some(held) = held.or_else(|| self.held_name(bytes)) {
+            return Ok(Some(Owner::take(self, held)));
+        }
+        // Copied first: the bytes stand in the request the string is made in.
+        let bytes = bytes.to_vec();
+        PhpString::new(self, &bytes).map(Some)
+    }
+
     /// [`Request::ini_hold`] with the entry the owner `string` hands it,
     /// a request string or none where the value is no request's, and the
     /// string it held before released, as `zend_alter_ini_entry_ex`
