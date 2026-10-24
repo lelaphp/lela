@@ -341,6 +341,30 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// [500,464975510,"ttt"]
     /// ```
+    ///
+    /// A piece that is a string on one turn and an object with a
+    /// `__toString` on the next is held to its type before the rope takes
+    /// it, so the object's turn is the handler's, its `__toString` served
+    /// there, under force and where every guard fails once; so is a `.=`
+    /// of it:
+    ///
+    /// ```php
+    /// class S { function __toString(): string { return "s"; } }
+    /// function f($n) { $o = new S; $t = ""; for ($i = 0; $i < $n; $i++) { $p = $i % 3 ? "p" : $o; $t .= "<$p|$i>"; $t .= $p; } return $t; }
+    /// echo f(7), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// <s|0>s<p|1>p<p|2>p<s|3>s<p|4>p<p|5>p<s|6>s
+    /// ```
+    ///
+    /// ```php
+    /// class S { function __toString(): string { return "s"; } }
+    /// function f($n) { $o = new S; $t = ""; for ($i = 0; $i < $n; $i++) { $p = $i % 3 ? "p" : $o; $t .= "<$p|$i>"; $t .= $p; } return $t; }
+    /// echo f(7), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// <s|0>s<p|1>p<p|2>p<s|3>s<p|4>p<p|5>p<s|6>s
+    /// ```
     pub(super) fn rope(&mut self, line: &Line) -> Result<(), Abort> {
         let (word, info) = self.owned_string(line.frame, line.op2)?;
         let [room, opline] = self.served(line)?;

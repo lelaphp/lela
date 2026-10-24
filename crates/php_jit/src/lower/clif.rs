@@ -2238,6 +2238,30 @@ impl<'a> Emit<'a> {
     /// 0=96 1=97 3=99 4=94 5=95 2=98 1000=-1 6
     /// ```
     ///
+    /// The same where every guard fails once, the destructor of the
+    /// element written over served where the write gives it up:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "freed\n"; } }
+    /// function w($n) {
+    ///     $a = [0, 0, 0, 0]; $b = null;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if ($i == 50) { $b = $a; }
+    ///         if ($i == 60) { $a[1] = new D; }
+    ///         if ($i == 70) { unset($a[2]); }
+    ///         if ($i == 80) { $a[1000] = -1; }
+    ///         $a[$i % 6] = $i;
+    ///     }
+    ///     foreach ($a as $k => $v) { echo "$k=$v "; }
+    ///     echo count($b), "\n";
+    /// }
+    /// w(100);
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// freed
+    /// 0=96 1=97 3=99 4=94 5=95 2=98 1000=-1 6
+    /// ```
+    ///
     /// Under exit-fuzz the handler serves the write once in each trace, in
     /// place of an exit:
     ///
