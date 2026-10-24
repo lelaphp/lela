@@ -1235,7 +1235,8 @@ fn drain(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
 /// longer executed, so a start that fails leaves no row of the one
 /// before to fetch. php ignores the closer's answer, its error cleared
 /// by the start's `PDO_STMT_CLEAR_ERR` next; a throwable a callback raised
-/// while it closed is handed on.
+/// while it closed is handed on once the statement is no longer executed,
+/// where php goes on with the start, the throwable pending.
 ///
 /// ```php
 /// $db = PDO::connect('sqlite::memory:');
@@ -1273,7 +1274,10 @@ fn invalidate_result(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
         Err(Failure {
             thrown: Some(thrown),
             ..
-        }) => return Err(thrown),
+        }) => {
+            write(req, stmt, |s| s.executed = false);
+            return Err(thrown);
+        }
         Ok(()) | Err(Failure { thrown: None, .. }) => {}
     }
     write(req, stmt, |s| s.executed = false);
