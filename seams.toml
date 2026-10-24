@@ -790,7 +790,7 @@ crates = "*"
 [[owed]]
 instrument = "witness"
 crates = "*"
-exempt = ["xtask"]                         # the harness has no kernel and no native
+when = "engine"                           # every crate but the harness (layout::HARNESS)
 
 [[owed]]
 instrument = "api-check"
