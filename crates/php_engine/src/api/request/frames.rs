@@ -928,7 +928,7 @@ impl Request {
             None => {}
         }
         let header = into.header_mut();
-        header.opline = header.opline.saturating_add(1);
+        header.opline = header.opline.wrapping_add(1);
         self.vm.stack.pop_frame(&mut self.heap);
         Some(Stepped::Popped(caller))
     }
@@ -1666,13 +1666,15 @@ impl Request {
                 ),
                 "a call whose INIT laid its entry no longer holds what the activation would write"
             );
-            from.header_mut().opline = at;
             let laid = top.header_mut();
             laid.info.set_serving();
             laid.info.set_return_used(returns_to.is_some());
             laid.activate_laid();
             laid.set_returns_to(returns_to);
             laid.set_caller(exec::Caller::Opline(caller));
+            // The caller's opline last, so the callee's words are written
+            // through the one load of its room.
+            from.header_mut().opline = at;
             return Some(self.entered_top());
         }
         if !header.info.building() {

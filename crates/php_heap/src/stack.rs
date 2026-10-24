@@ -1020,7 +1020,11 @@ impl<H> VmStack<H> {
     #[allow(clippy::type_complexity)] // three borrows of one look, named where they are taken
     pub fn top_over_mut(&mut self) -> Option<(FrameRef, &mut Frame<H>, &mut [Frame<H>])> {
         let (top, below) = self.frames.split_last_mut()?;
-        Some((FrameRef(u32::try_from(below.len()).ok()?), top, below))
+        // A place past `u32::MAX` would be 2^32 frames of at least eighty
+        // bytes each, which no request's memory holds.
+        #[allow(clippy::cast_possible_truncation)]
+        let at = FrameRef(below.len() as u32);
+        Some((at, top, below))
     }
 
     /// The frame on top of the stack, mutably, and its position.
