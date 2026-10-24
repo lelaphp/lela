@@ -7225,9 +7225,11 @@ impl<'a> Emit<'a> {
                     (None, *expr)
                 }
             };
+            self.folded_string = None;
+            let value = self.uninterned(|this| this.dynamic_const_expr(expr))?;
             arguments.push(AttributeArgument {
                 name: named,
-                value: self.dynamic_const_expr(expr)?,
+                value: self.held_value(value),
             });
         }
         Ok(Attribute {

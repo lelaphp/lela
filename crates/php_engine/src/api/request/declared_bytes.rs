@@ -36,7 +36,7 @@
 
 use php_link::Row;
 use php_unit::decl::{
-    ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation, Visibility,
+    Attribute, ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation, Visibility,
 };
 use php_unit::{OpArray, Unit};
 
@@ -90,6 +90,17 @@ const CLASS_NAME: usize = 16;
 const PRECEDENCE: usize = 32;
 /// `sizeof(zend_trait_alias)`.
 const ALIAS: usize = 32;
+/// `sizeof(HashTable)`, a holder's `attributes`.
+const HASH_TABLE: usize = 56;
+/// `ZEND_ATTRIBUTE_SIZE(0)`, a `zend_attribute` with no argument.
+const ATTRIBUTE: usize = 40;
+/// `sizeof(zend_attribute_arg)`, what each argument adds to it.
+const ATTRIBUTE_ARG: usize = 24;
+/// `HT_HASH_SIZE(HT_MIN_MASK)`, the two hash slots a packed table keeps
+/// before its elements.
+const PACKED_HASH: usize = 8;
+/// The size `zend_add_attribute` inits a holder's `attributes` with.
+const ATTRIBUTES: usize = 8;
 
 /// php's blocks for what one request-only unit declares.
 #[derive(Default)]
@@ -719,6 +730,16 @@ fn op_array(
 ) -> Result<(), Thrown> {
     let args = declared.map_or(0, |(decl, method)| arg_infos(decl, method));
     blocks.emalloced.push(Emalloc::new(req, REFCOUNT)?);
+    // `op_array->attributes`, the function's and its parameters' in one
+    // table (`zend_compile_params`' offset).
+    if let Some((decl, _)) = declared {
+        let parameters = decl.parameters.iter().flat_map(|p| &p.attributes);
+        attributes(
+            req,
+            &mut blocks.emalloced,
+            decl.attributes.iter().chain(parameters),
+        )?;
+    }
     // `get_next_op` grows the oplines fourfold from
     // `INITIAL_OP_ARRAY_SIZE`, and `pass_two` reallocates them to the
     // oplines with the constants after them, aligned to 16
@@ -789,6 +810,87 @@ pub(super) fn arg_infos(decl: &FunctionDecl, method: bool) -> usize {
     let returns =
         decl.return_type.is_some() || (method && decl.name.0.eq_ignore_ascii_case(b"__tostring"));
     decl.parameters.len() + usize::from(returns)
+}
+
+/// What `zend_compile_attributes` lays on the request's heap for the
+/// attributes of one holder (`zend_add_attribute`): a function's with
+/// its parameters', a class's, a property's, a class constant's, or a
+/// `const` statement's, which `DECLARE_ATTRIBUTED_CONST` hands the
+/// constant it declares (`zend_constant_add_attributes`). That is the
+/// `attributes` table, `zend_hash_init(…, 8, …)` and packed as each is
+/// appended, and per attribute its `zend_attribute`, its name as
+/// resolved, which is the scanner's string where nothing prefixed it,
+/// its lowered name where lowering changes it (`zend_string_tolower_ex`),
+/// each argument's name, and the tree `zend_const_expr_to_zval` copies
+/// for an argument that folds to no value ([`AstCopy`]); a value that
+/// folds is the unit's, a string the scanner's. A string of one byte is
+/// the scanner's `ZSTR_CHAR`. An uncached include's and an `eval`'s
+/// alike (the program under the recipe's `TMPDIR`, written into the past,
+/// the includes written during the request):
+///
+/// ```php
+/// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+/// $f = $put('w3322-attributes.inc', <<<'PHP'
+/// <?php
+/// ini_set('opcache.file_update_protection', '2');
+/// function inc($name, $src) { $f = sys_get_temp_dir() . "/w3322-$name.inc"; file_put_contents($f, $src); $m = memory_get_usage(); include $f; $d = memory_get_usage() - $m; unlink($f); return $d; }
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// inc('w0', '<?php class W {} $q0 = 1;'); m('$q1 = 1;'); m('function w1() {}');
+/// echo inc('class', '<?php #[Attribute] class Az1 { }'), " ", m('#[Attribute] class Ez1 { }'), "\n";
+/// echo inc('fn', '<?php #[Az1] function az1() {}'), " ", m('#[Az1] function ez1() {}'), "\n";
+/// echo inc('arg', '<?php #[Az1("y")] function az2() {}'), "\n";
+/// echo inc('prop', '<?php class Az3 { #[Az1] public $p; }'), "\n";
+/// echo inc('param', '<?php function az4(#[SensitiveParameter] $p) {}'), " ", m('function ez4(#[SensitiveParameter] $p) {}'), "\n";
+/// echo m('#[Az1(name: "abcdefgh", v: [1, 2], w: X1 . "y")] #[az1, A] function ez5(#[Az1] $a, #[Az1] $b) {}'), "\n";
+/// echo m('class Ez6 { #[Az1] const C = 1; #[Az1] function m(#[Az1] $p) {} }'), "\n";
+/// $junk = array_fill(0, 1000, str_repeat("x", 100));
+/// echo count((new ReflectionFunction('ez5'))->getAttributes()), count((new ReflectionClass('Ez6'))->getMethod('m')->getAttributes()), "\n";
+/// PHP);
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// 496 512
+/// 496 528
+/// 520
+/// 816
+/// 624 640
+/// 1496
+/// 1672
+/// 31
+/// ```
+pub(super) fn attributes<'a>(
+    req: &mut Request,
+    emalloced: &mut Vec<Emalloc>,
+    attributes: impl Iterator<Item = &'a Attribute>,
+) -> Result<(), Thrown> {
+    let string = |bytes: &[u8]| (bytes.len() > 1).then_some(STRING_HEADER + bytes.len() + 1);
+    let mut count = 0;
+    for attribute in attributes {
+        let name = &attribute.name.0;
+        let lowered = name.iter().any(u8::is_ascii_uppercase);
+        let mut lens = vec![ATTRIBUTE + attribute.arguments.len() * ATTRIBUTE_ARG];
+        lens.extend(string(name));
+        lens.extend(lowered.then_some(STRING_HEADER + name.len() + 1));
+        for argument in &attribute.arguments {
+            lens.extend(argument.name.as_ref().and_then(|name| string(&name.0)));
+            if !super::linking::is_literal(&argument.value) {
+                lens.extend(AstCopy::of(&argument.value).blocks());
+            }
+        }
+        for len in lens {
+            emalloced.push(Emalloc::new(req, len)?);
+        }
+        count += 1;
+    }
+    if count > 0 {
+        // `HT_PACKED_SIZE_EX(nTableSize, HT_MIN_MASK)`, doubled from 8 as
+        // `zend_hash_packed_grow` doubles it.
+        let slots = count.max(ATTRIBUTES).next_power_of_two();
+        emalloced.push(Emalloc::new(req, HASH_TABLE)?);
+        emalloced.push(Emalloc::new(req, slots * ZVAL + PACKED_HASH)?);
+    }
+    Ok(())
 }
 
 /// What `zend_ast_copy` lays for one constant expression, as php's
@@ -1102,6 +1204,13 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
     };
     for table in Table::ALL {
         add_rows(req, blocks.table(table), written.of(table))?;
+    }
+    // `ce->attributes`, and each property's and constant's own.
+    attributes(req, &mut blocks.emalloced, class.attributes.iter())?;
+    let members = (class.properties.iter().map(|p| &p.attributes))
+        .chain(class.constants.iter().map(|c| &c.attributes));
+    for held in members {
+        attributes(req, &mut blocks.emalloced, held.iter())?;
     }
     // The default values, reallocated one at a time
     // (`zend_declare_typed_property`), which leaves the bin of the last.
