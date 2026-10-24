@@ -1269,9 +1269,11 @@ impl Memory<&mut Request> {
         let refused = self.0.heap.take_refused();
         match answered {
             Ok(value) => Ok(Some(value)),
-            // The refusal carried out as an `Err` with nothing thrown and
-            // the request not ending; a throwable or a fatal met after a
-            // refusal is `ask`'s to answer.
+            // The heap's latch says a refusal was met in the scope; it
+            // cannot say the `Err` in hand is that refusal, since a
+            // throwable or a fatal can follow one in the same scope (a
+            // lend's system refusal after lexbor's), so the `Err` is the
+            // refusal only where it carries nothing else.
             Err(thrown) if refused && thrown.exception().is_none() && self.0.ending().is_none() => {
                 Ok(None)
             }

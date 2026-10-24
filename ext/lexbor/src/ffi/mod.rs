@@ -91,6 +91,24 @@ pub struct Lent {
 /// string(20) "https://münchen.de/"
 /// ```
 ///
+/// Every ask lexbor makes under the lend is fallible, as php 8.5.12's
+/// lexbor allocator is: a parse that meets the memory limit is refused
+/// there, the native throws as lexbor's error leaves it, and the limit's
+/// fatal is raised in that throwable's place as the call returns, no
+/// `catch` and no `finally` served:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// try {
+///     Dom\HTMLDocument::createFromString(str_repeat('<div class=a><p>hello <b>world</b></p></div>', 20000), LIBXML_NOERROR);
+///     echo "parsed\n";
+/// } catch (Throwable $e) { echo get_class($e), "\n"; } finally { echo "finally\n"; }
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
+/// ```
+///
 /// # Errors
 ///
 /// The limit's fatal, for the caller to end the request in.

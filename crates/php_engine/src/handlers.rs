@@ -12573,9 +12573,19 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
     // a signal the native delivered to its own process is dispatched
     // under `pcntl_async_signals(true)`. A native that threw leaves the
     // interrupt raised for the next site, since php calls no PHP handler
-    // while `EG(exception)` stands.
+    // while `EG(exception)` stands, but for the memory limit: php checks
+    // before it reads `EG(exception)`, and `zend_handle_delayed_oom`
+    // gives up what the native threw for the unwind exit, so no `catch`
+    // takes it (a DOM parse lexbor stopped at the limit throws its
+    // `DOMException` and the limit's fatal is raised in its place).
     let interrupted = match &served {
         Ok(_) => crate::interrupt::check(req),
+        Err(thrown) if req.has_oom() && crate::interrupt::raised(req) => {
+            req.leave_pending(thrown);
+            let interrupted = crate::interrupt::interrupted(req);
+            req.pop_call();
+            return interrupted.map(|_| Stepped::Threw(frame).into());
+        }
         Err(_) => Ok(false),
     };
     req.pop_call();
