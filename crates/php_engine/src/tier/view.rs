@@ -508,10 +508,10 @@ impl UnitView {
         };
         // `CACHE_ADDR(opline->extended_value & ~ZEND_FETCH_OBJ_FLAGS)`, an
         // `ASSIGN_OBJ_OP`'s its `OP_DATA`'s: a `_W` fetch carries php's two
-        // fetch flags, `ZEND_FETCH_REF` and `ZEND_FETCH_DIM_WRITE`, beside
-        // the slot (`Z/Zend/zend_compile.h`), and the rest none.
+        // fetch flags beside the slot, and the rest none.
+        let flags = crate::handlers::FETCH_REF | crate::handlers::FETCH_DIM_WRITE;
         let slot = match op.opcode {
-            Opcode::FetchObjW => CacheSlot(op.extended_value & !0b11),
+            Opcode::FetchObjW => CacheSlot(op.extended_value & !flags),
             Opcode::FetchObjR
             | Opcode::AssignObj
             | Opcode::PreIncObj

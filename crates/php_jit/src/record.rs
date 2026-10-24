@@ -1624,7 +1624,7 @@ fn placed(
 ) {
     if next == frame
         && let Some(class) = op1.and_then(|sample| sample.class)
-        && types::places(op.opcode)
+        && types::on_declared_slot(op.opcode)
     {
         view.hold_place(req, frame, at, class);
     }
@@ -1636,7 +1636,7 @@ fn placed(
 /// the frame it compiles for.
 fn on_this(op: &Opline) -> bool {
     op.op1_type == OperandKind::Unused
-        && (types::places(op.opcode)
+        && (types::on_declared_slot(op.opcode)
             || matches!(
                 op.opcode,
                 Opcode::InitMethodCall | Opcode::IssetIsemptyPropObj

@@ -17,18 +17,15 @@ use php_engine::tier::{self, ClassId, FRAME};
 use php_heap::{Obj, ZvalType};
 use php_unit::Opcode;
 
-use super::{COUNTED, Emit, KIND, Kind, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
+use super::{Emit, KIND, SLOT, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::types::{Abort, ExitId, Imm, Line, Object, OpId, Operand};
-
-/// `sizeof(zval)`, the stride of an object's slots.
-const SLOT: i64 = 16;
 
 impl Emit<'_> {
     /// The object `object` names, a `zend_object *`: `$this` of its frame,
     /// or what the value's slot holds, an object as its guard held it.
     fn object(&mut self, object: Object) -> Result<Value, Abort> {
         let (base, at) = match object {
-            Object::This(frame) => (self.room(frame)?, i32::try_from(FRAME.this()).unwrap_or(0)),
+            Object::This(frame) => (self.room(frame)?, imm(FRAME.this() as usize)),
             Object::Value(value) => self.place(self.value(value)?.slot)?,
         };
         Ok(self.b.ins().load(I64, trusted(), base, at))
@@ -37,6 +34,33 @@ impl Emit<'_> {
     /// php's class guard: leave through `exit` unless `object` is of
     /// `class`, a published class whose id is the same in every request of
     /// the trace's epoch.
+    ///
+    /// A variable written over between two reads holds an object the
+    /// guard has not held, whatever the recording saw it of, so the second
+    /// read holds its class again; an object of another class whose slot
+    /// stands elsewhere leaves there:
+    ///
+    /// ```php
+    /// class A { public $x = 1; }
+    /// class B { public $q = 0; public $x = 2; }
+    /// function f($os, $n) { $t = 0; $o = $os[0]; for ($i = 0; $i < $n; $i++) { $t += $o->x; $o = $os[$i]; $t += $o->x * 10; } return $t; }
+    /// $a = new A; $os = []; for ($j = 0; $j < 30; $j++) { $os[] = $a; } $os[20] = new B;
+    /// echo f($os, 30), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 341
+    /// ```
+    ///
+    /// ```php
+    /// class A { public $x = 1; }
+    /// class B { public $q = 0; public $x = 2; }
+    /// function f($os, $n) { $t = 0; $o = $os[0]; for ($i = 0; $i < $n; $i++) { $t += $o->x; $o = $os[$i]; $t += $o->x * 10; } return $t; }
+    /// $a = new A; $os = []; for ($j = 0; $j < 30; $j++) { $os[] = $a; } $os[20] = new B;
+    /// echo f($os, 30), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 341
+    /// ```
     pub(super) fn class_guard(
         &mut self,
         object: Object,
@@ -62,7 +86,7 @@ impl Emit<'_> {
             Operand::Constant(_) => return Err(mismatch("a property of a constant")),
         };
         let obj = self.object(object)?;
-        let at = i64::try_from(Obj::SLOTS_AT).unwrap_or(0) + SLOT * i64::from(slot);
+        let at = i64::from(imm(Obj::SLOTS_AT)) + SLOT * i64::from(slot);
         Ok(self.b.ins().iadd_imm_s(obj, at))
     }
 
@@ -273,25 +297,8 @@ impl Emit<'_> {
         let never = self.b.ins().iconst(I8, 0);
         let fuzzed = self.fuzzed(never)?;
         self.divert_if(fuzzed, handled);
-        let (plain, owning) = (self.b.create_block(), self.b.create_block());
-        let counted = self.b.ins().band_imm_u(old, COUNTED);
-        self.b.ins().brif(counted, owning, &[], plain, &[]);
-        self.b.switch_to_block(plain);
-        self.b.seal_block(plain);
-        self.written(line, zval, value)?;
-        self.b.ins().jump(done, &[]);
-        self.b.switch_to_block(owning);
-        self.b.seal_block(owning);
-        let reference = self
-            .b
-            .ins()
-            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
-        self.divert_if(reference, handled);
-        let word = self.b.ins().load(I64, trusted(), zval, 0);
-        self.written(line, zval, value)?;
-        self.release(line, word, old)?;
-        self.b.ins().jump(done, &[]);
-        self.handled_then(at, line, handled, done)?;
+        self.written_over(line, (zval, old), value, (handled, done))?;
+        self.handled_then(at, line, (handled, done))?;
         match (line.out, value) {
             (Some(out), Some(value)) => self.define(out, value),
             (Some(_), None) => Err(mismatch(
@@ -373,47 +380,7 @@ impl Emit<'_> {
         let handled = self.b.create_block();
         let done = self.b.create_block();
         let kind = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
-        let is_long = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Long));
-        let is_double = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Double));
-        let long = self.b.create_block();
-        let not_long = self.b.create_block();
-        self.b.ins().brif(is_long, long, &[], not_long, &[]);
-        self.b.switch_to_block(not_long);
-        self.b.seal_block(not_long);
-        let double = self.b.create_block();
-        self.b.ins().brif(is_double, double, &[], handled, &[]);
-        for (block, kind) in [(long, Kind::Long), (double, Kind::Double)] {
-            self.b.switch_to_block(block);
-            self.b.seal_block(block);
-            let x = self.read(zval, 0, kind);
-            let num = self.binary(binary, x, by, None)?;
-            self.write_num(zval, 0, num);
-            self.b.ins().jump(done, &[]);
-        }
-        self.handled_then(at, line, handled, done)
-    }
-
-    /// The `handled` block, `line` served by its handler, then on at
-    /// `done`, where the inline form and the handler meet.
-    fn handled_then(
-        &mut self,
-        at: OpId,
-        line: &Line,
-        handled: cranelift_codegen::ir::Block,
-        done: cranelift_codegen::ir::Block,
-    ) -> Result<(), Abort> {
-        self.b.switch_to_block(handled);
-        self.b.seal_block(handled);
-        self.stepped(at, line)?;
-        self.b.ins().jump(done, &[]);
-        self.b.switch_to_block(done);
-        self.b.seal_block(done);
-        Ok(())
+        self.compound_at((zval, kind), (binary, by), (handled, done))?;
+        self.handled_then(at, line, (handled, done))
     }
 }

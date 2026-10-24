@@ -848,11 +848,10 @@ pub(crate) fn declared(ty: &php_unit::decl::Type) -> Types {
     opcodes::of_type(Some(ty), false)
 }
 
-/// The trace `rec` builds, read through `view`, or why it builds none.
 /// The property oplines compiled code serves in place on a declared slot
 /// ([`Imm::Property`]), whose place the recorder takes from the engine's
 /// cache once the handler has primed it (`UnitView::hold_place`).
-pub(crate) fn places(opcode: Opcode) -> bool {
+pub(crate) fn on_declared_slot(opcode: Opcode) -> bool {
     matches!(
         opcode,
         Opcode::FetchObjR
@@ -866,6 +865,7 @@ pub(crate) fn places(opcode: Opcode) -> bool {
     )
 }
 
+/// The trace `rec` builds, read through `view`, or why it builds none.
 pub(crate) fn build(rec: &TraceRecord, view: &UnitView) -> Result<TraceIr, Abort> {
     build::build(rec, view)
 }

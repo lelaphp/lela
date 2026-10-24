@@ -2514,12 +2514,35 @@ impl<'a> Emit<'a> {
         // is given up after, but a reference is written through, which
         // `zend_jit_assign_to_variable` does past its `ZVAL_DEREF` and the
         // handler does here.
+        self.written_over(line, (element, old), value, (handled, done))?;
+        self.handled_then(at, line, (handled, done))?;
+        match (line.out, value) {
+            (Some(out), Some(value)) => self.define(out, value),
+            (Some(_), None) => Err(mismatch(
+                "an element write of a value no scalar, its result used",
+            )),
+            (None, _) => Ok(()),
+        }
+    }
+
+    /// The zval at `zval`, of type word `old`, written with `line`'s
+    /// value as `zend_jit_assign_to_variable` writes it, then on at
+    /// `done`: written over where it counts nothing, given up after where
+    /// it counts, through the release kernel where it is the last owner;
+    /// a reference to `handled`, whose handler writes through it.
+    fn written_over(
+        &mut self,
+        line: &Line,
+        (zval, old): (Value, Value),
+        value: Option<Scalar>,
+        (handled, done): (Block, Block),
+    ) -> Result<(), Abort> {
         let (plain, owning) = (self.b.create_block(), self.b.create_block());
         let counted = self.b.ins().band_imm_u(old, COUNTED);
         self.b.ins().brif(counted, owning, &[], plain, &[]);
         self.b.switch_to_block(plain);
         self.b.seal_block(plain);
-        self.written(line, element, value)?;
+        self.written(line, zval, value)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(owning);
         self.b.seal_block(owning);
@@ -2529,23 +2552,65 @@ impl<'a> Emit<'a> {
             .ins()
             .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
         self.divert_if(reference, handled);
-        let word = self.b.ins().load(I64, trusted(), element, 0);
-        self.written(line, element, value)?;
+        let word = self.b.ins().load(I64, trusted(), zval, 0);
+        self.written(line, zval, value)?;
         self.release(line, word, old)?;
         self.b.ins().jump(done, &[]);
+        Ok(())
+    }
+
+    /// The `handled` block, `line` served by its handler, then on at
+    /// `done`, where an inline write and its handler meet.
+    fn handled_then(
+        &mut self,
+        at: OpId,
+        line: &Line,
+        (handled, done): (Block, Block),
+    ) -> Result<(), Abort> {
         self.b.switch_to_block(handled);
         self.b.seal_block(handled);
         self.stepped(at, line)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(done);
         self.b.seal_block(done);
-        match (line.out, value) {
-            (Some(out), Some(value)) => self.define(out, value),
-            (Some(_), None) => Err(mismatch(
-                "an element write of a value no scalar, its result used",
-            )),
-            (None, _) => Ok(()),
+        Ok(())
+    }
+
+    /// The number at `zval`, of type byte `kind`, written over with `op`
+    /// of it and `by` in place where it is a long or a double, which php's
+    /// `zend_jit_math_helper` serves inline, a long overflowing to a
+    /// double as php's does, then on at `done`; to `handled` where it is
+    /// anything else.
+    fn compound_at(
+        &mut self,
+        (zval, kind): (Value, Value),
+        (op, by): (Opcode, Scalar),
+        (handled, done): (Block, Block),
+    ) -> Result<(), Abort> {
+        let is_long = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Long));
+        let is_double = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Double));
+        let long = self.b.create_block();
+        let not_long = self.b.create_block();
+        self.b.ins().brif(is_long, long, &[], not_long, &[]);
+        self.b.switch_to_block(not_long);
+        self.b.seal_block(not_long);
+        let double = self.b.create_block();
+        self.b.ins().brif(is_double, double, &[], handled, &[]);
+        for (block, kind) in [(long, Kind::Long), (double, Kind::Double)] {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let x = self.read(zval, 0, kind);
+            let num = self.binary(op, x, by, None)?;
+            self.write_num(zval, 0, num);
+            self.b.ins().jump(done, &[]);
         }
+        Ok(())
     }
 
     /// The element at `element` written with `line`'s value: the scalar
@@ -2731,36 +2796,8 @@ impl<'a> Emit<'a> {
         };
         let (element, old) = self.written_in_place(zval, key, hash, handled);
         let kind = self.b.ins().band_imm_u(old, KIND);
-        let is_long = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Long));
-        let is_double = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Double));
-        let long = self.b.create_block();
-        let not_long = self.b.create_block();
-        self.b.ins().brif(is_long, long, &[], not_long, &[]);
-        self.b.switch_to_block(not_long);
-        self.b.seal_block(not_long);
-        let double = self.b.create_block();
-        self.b.ins().brif(is_double, double, &[], handled, &[]);
-        for (block, kind) in [(long, Kind::Long), (double, Kind::Double)] {
-            self.b.switch_to_block(block);
-            self.b.seal_block(block);
-            let x = self.read(element, 0, kind);
-            let num = self.binary(binary, x, value, None)?;
-            self.write_num(element, 0, num);
-            self.b.ins().jump(done, &[]);
-        }
-        self.b.switch_to_block(handled);
-        self.b.seal_block(handled);
-        self.stepped(at, line)?;
-        self.b.ins().jump(done, &[]);
-        self.b.switch_to_block(done);
-        self.b.seal_block(done);
-        Ok(())
+        self.compound_at((element, kind), (binary, value), (handled, done))?;
+        self.handled_then(at, line, (handled, done))
     }
 
     /// Go to `to` where `cond` is not zero, a block whose branches the

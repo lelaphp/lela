@@ -1960,7 +1960,9 @@ fn a_callees_exit_stores_none_of_its_callers_registers() -> Result<(), String> {
 fn property_forms(ir: &TraceIr) -> Vec<(Opcode, Form)> {
     (ir.ops.iter())
         .filter_map(|op| match op {
-            Op::Line(line) if crate::types::places(line.opcode) => Some((line.opcode, line.form)),
+            Op::Line(line) if crate::types::on_declared_slot(line.opcode) => {
+                Some((line.opcode, line.form))
+            }
             _ => None,
         })
         .collect()
@@ -2010,6 +2012,7 @@ fn properties_of_a_published_class_are_inline_under_one_class_guard() -> Result<
             (Opcode::PreDecObj, Form::Inline),
             (Opcode::AssignObj, Form::Inline),
             (Opcode::AssignObj, Form::Step),
+            (Opcode::PostDecObj, Form::Step),
         ],
         "{}",
         dump::render(&value)
@@ -2047,5 +2050,29 @@ fn a_request_scoped_copy_of_a_class_is_guarded_by_no_class_id() -> Result<(), St
         dump::render(&ir)
     );
     assert_eq!(class_guards(&ir), 0, "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// A variable written over between two property reads holds an object
+/// no guard has held, whatever class the recording saw it of: the class a
+/// guard held is carried only across a property opline that writes
+/// through the object, as php's `COPY_SSA_OBJ_TYPE` carries it, so the
+/// second read holds its class again (#3337).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_object_written_over_is_guarded_again() -> Result<(), String> {
+    let ir = built(
+        &[
+            ("record.function", "f"),
+            ("record.start", "loop"),
+            ("record.headers", "0"),
+        ],
+        "class A { public $x = 1; }
+        class B { public $q = 0; public $x = 2; }
+        function f($os, $n) { $t = 0; $o = $os[0]; for ($i = 0; $i < $n; $i++) { $t += $o->x; $o = $os[$i]; $t += $o->x * 10; } return $t; }
+        $a = new A; $os = []; for ($j = 0; $j < 30; $j++) { $os[] = $a; } $os[20] = new B;
+        echo f($os, 30), \"\\n\";",
+    )?;
+    assert_eq!(class_guards(&ir), 2, "{}", dump::render(&ir));
     Ok(())
 }

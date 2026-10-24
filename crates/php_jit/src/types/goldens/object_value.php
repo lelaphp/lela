@@ -3,7 +3,8 @@
 // read, a write of a string, a compound write and a decrement, each on a
 // published class's declared slot, under one class guard; a typed
 // property's write of a long in place, and of a string its type
-// coerces the handler's, Core alone.
+// coerces the handler's; a decrement whose result is read the handler's,
+// Core alone.
 class Point {
     public $x = 0;
     public $y = 0;
@@ -19,6 +20,7 @@ function k($p, $m) {
         $p->x--;
         $p->n = $i;
         $p->n = "7";
+        $t += $p->y--;
     }
     return $t + $p->n;
 }

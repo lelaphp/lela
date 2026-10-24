@@ -23,7 +23,7 @@ use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
     Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
     LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store,
-    Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, places,
+    Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -655,8 +655,8 @@ impl<'a> Builder<'a> {
         );
         let form = self.form(frame, (&op, data_line.as_ref()), seen, (next, branch));
         let form = match (op.opcode, property) {
-            (opcode, Some(_)) if places(opcode) => Form::Inline,
-            (opcode, None) if places(opcode) => Form::Step,
+            (opcode, Some(_)) if on_declared_slot(opcode) => Form::Inline,
+            (opcode, None) if on_declared_slot(opcode) => Form::Step,
             _ => form,
         };
         if let (Form::Inline, Some(property)) = (form, property) {
@@ -688,7 +688,8 @@ impl<'a> Builder<'a> {
         );
         // The object a property opline writes through is the one it read,
         // of the class a guard held it of (`COPY_SSA_OBJ_TYPE`).
-        if let (Operand::Value(read), Some(def)) = (op1, written.op1)
+        if on_declared_slot(op.opcode)
+            && let (Operand::Value(read), Some(def)) = (op1, written.op1)
             && let Some(class) = self.classed.get(&Object::Value(read)).copied()
             && !self.aliased(self.val(read).slot)
         {
@@ -1046,7 +1047,7 @@ impl<'a> Builder<'a> {
                     // What a property held is given up, or its handler
                     // serves what the inline form does not, and either
                     // may throw.
-                    || (places(op.opcode)
+                    || (on_declared_slot(op.opcode)
                         && !matches!(op.opcode, Opcode::FetchObjR | Opcode::FetchObjW))
                     // What the variable held is given up, and a destructor
                     // may throw.
@@ -2265,7 +2266,7 @@ impl<'a> Builder<'a> {
         seen: Seen,
     ) -> Option<PropertyAt> {
         let code = self.meta(frame).code;
-        if !places(op.opcode) || op.op2_type != OperandKind::Const {
+        if !on_declared_slot(op.opcode) || op.op2_type != OperandKind::Const {
             return None;
         }
         let class = sample1?.class?;
