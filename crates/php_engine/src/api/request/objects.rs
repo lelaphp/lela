@@ -1582,15 +1582,16 @@ impl Request {
             return Ok(std::cmp::Ordering::Equal);
         }
         let held = crate::ops::HeldTables::hold(self, table, right.table());
-        let order = crate::ops::hash_compare_guard(self, table).and_then(|()| {
-            if left.len() != right.len() {
-                return Ok(left.len().cmp(&right.len()));
-            }
+        let order = if left.len() != right.len() {
+            Ok(left.len().cmp(&right.len()))
+        } else if table.is_recursive() {
+            Err(crate::ops::nesting_too_deep(self))
+        } else {
             table.protect();
             let order = self.compare_rows(left, right, ClassId(x.class()));
             table.unprotect();
             order
-        });
+        };
         held.give_up(self);
         order
     }

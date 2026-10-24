@@ -3506,10 +3506,13 @@ fn identical_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Resul
     if left.heap().is_same(right.heap()) {
         return Ok(true);
     }
-    hash_compare_guard(req, left.heap())?;
+    if left.is_recursive() {
+        return Err(nesting_too_deep(req));
+    }
     if left.len() != right.len() {
         return Ok(false);
     }
+    crate::api::raising::call_stack_end(req)?;
     left.protect();
     let walked = identical_entries(req, left, right);
     left.unprotect();
@@ -3629,13 +3632,15 @@ fn silent_number(value: ValueRef) -> Scalar<'static> {
 /// reached from it, and protecting both would call a shared table a
 /// cycle.
 ///
-/// Each level asks the stack limit first ([`hash_compare_guard`]), so
-/// two arrays nested no deeper than `zend.max_allowed_stack_size` holds
-/// are compared whole, and [`identical_arrays`] with them:
+/// php asks no stack limit here, so two arrays nested deeper than
+/// `zend.max_allowed_stack_size` allows are compared whole, as long as
+/// the thread holds them; the walk is held to the thread's floor
+/// ([`crate::api::raising::call_stack_end`]), which the small-stack
+/// regime's 256K does not move, and [`identical_arrays`] with it.
 ///
 /// ```php
 /// $a = $b = [];
-/// for ($i = 0; $i < 200; $i++) { $a = [$a]; $b = [$b]; }
+/// for ($i = 0; $i < 1000; $i++) { $a = [$a]; $b = [$b]; }
 /// var_dump($a == $b, $a === $b, $a <=> [[1]]);
 /// ```
 /// ```expect regime=small-stack
@@ -3727,53 +3732,14 @@ impl HeldTables {
 /// walk under its protection.
 #[inline(always)] // the body of `compare_arrays`, apart for its hold
 fn compare_held(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Ordering, Thrown> {
-    hash_compare_guard(req, left.heap())?;
+    if left.is_recursive() {
+        return Err(nesting_too_deep(req));
+    }
+    crate::api::raising::call_stack_end(req)?;
     left.protect();
     let ordering = compare_entries(req, left, right);
     left.unprotect();
     ordering
-}
-
-/// `zend_hash_compare`'s guard over two tables that are not one, before
-/// either is walked or counted, for [`compare_arrays`], [`identical`]
-/// and two objects' property tables
-/// ([`Request::compare_tables`](crate::api::request::Request)):
-/// php's `Error` where the thread has come down to
-/// `zend.max_allowed_stack_size` (`zend_call_stack_overflowed`, since
-/// 8.5.12, GH-23088), then the one for a left table the walk is
-/// already inside. Two nests too deep for the stack are refused, as a
-/// chain of objects is ([`Request::compare_objects`]). Under
-/// `zend.max_allowed_stack_size=-1`, where php checks nothing,
-/// the walk is refused at the
-/// thread's floor instead ([`crate::api::raising::call_stack_end`]):
-///
-/// ```php
-/// $a = $b = [];
-/// for ($i = 0; $i < 20000; $i++) { $a = [$a]; $b = [$b]; }
-/// foreach ([fn () => $a == $b, fn () => $a === $b, fn () => $a <=> $b] as $f) {
-///     try { var_dump($f()); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-/// }
-/// ```
-/// ```expect regime=small-stack
-/// Maximum call stack size reached during comparison
-/// Maximum call stack size reached during comparison
-/// Maximum call stack size reached during comparison
-/// ```
-///
-/// [`Request::compare_objects`]: crate::api::request::Request
-#[inline]
-pub(crate) fn hash_compare_guard(req: &mut Request, left: php_heap::Arr) -> Result<(), Thrown> {
-    if req.limits().stack_overflowed() {
-        return Err(crate::api::raising::error(
-            req,
-            "Maximum call stack size reached during comparison",
-        ));
-    }
-    crate::api::raising::call_stack_end(req)?;
-    if left.is_recursive() {
-        return Err(nesting_too_deep(req));
-    }
-    Ok(())
 }
 
 /// php's `Error` for a table a comparison's walk is already inside,
@@ -5909,13 +5875,13 @@ mod tests {
     use crate::test::Capture;
 
     /// `==` and `===` over two arrays nested deeper than the thread
-    /// holds are refused at `zend.max_allowed_stack_size` with php's
-    /// `Error`, and under `-1` at the thread's
-    /// floor: the test harness's thread is 2 MiB and the nesting two
-    /// hundred thousand, and either refusal is an `Error` a program can
-    /// catch, after which the request goes on and frees both.
+    /// holds are refused at its floor, whatever
+    /// `zend.max_allowed_stack_size` says: the
+    /// test harness's thread is 2 MiB and the nesting two hundred
+    /// thousand, and the refusal is the `Error` a program can catch,
+    /// after which the request goes on and frees both.
     #[test]
-    fn a_nesting_deeper_than_the_thread_is_refused() {
+    fn a_nesting_deeper_than_the_thread_is_refused_at_its_floor() {
         let source = "<?php\n$a = $b = [];\nfor ($i = 0; $i < 200000; $i++) { $a = [$a]; $b = [$b]; }\ntry { $a == $b; } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\ntry { $a === $b; } catch (Error $e) { echo $e->getMessage(), \"\\n\"; }\necho 'done';";
         for limit in ["0", "-1", "256K"] {
             let served = Engine::cli_builder()
@@ -5930,11 +5896,9 @@ mod tests {
                 "under zend.max_allowed_stack_size={limit}: {stdout}"
             );
             for refused in &lines[..2] {
-                let floor = refused.starts_with("Maximum call stack size of ")
-                    && refused.ends_with(" bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?");
-                let limit_met = *refused == "Maximum call stack size reached during comparison";
                 assert!(
-                    if limit == "-1" { floor } else { limit_met },
+                    refused.starts_with("Maximum call stack size of ")
+                        && refused.ends_with(" bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?"),
                     "under zend.max_allowed_stack_size={limit}: {refused}"
                 );
             }
