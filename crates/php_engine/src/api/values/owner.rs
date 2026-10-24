@@ -1,8 +1,6 @@
 //! One owner of a value as a type (design §5.1, #1980): [`Owner`]
 //! beside the views it owns.
 
-use std::cmp::Ordering;
-
 use php_unit::decl::Type;
 
 use crate::api::abi::{Callable, Class, FromArgument, Instance, IntoReturn, Raw, Static};
@@ -725,16 +723,6 @@ impl Owner<PhpArray> {
     /// [`PhpArray::separate`].
     pub fn separate(&mut self, req: &mut Request) -> Result<(), Thrown> {
         self.written(|view| view.separate(req))
-    }
-
-    /// [`PhpArray::sort_by`].
-    pub fn sort_by(
-        &mut self,
-        req: &mut Request,
-        renumber: bool,
-        compare: impl FnMut(&mut Request, (&Key, &Value), (&Key, &Value)) -> Result<Ordering, Thrown>,
-    ) -> Result<(), Thrown> {
-        self.written(|view| view.sort_by(req, renumber, compare))
     }
 
     /// [`PhpArray::cursor_next`].

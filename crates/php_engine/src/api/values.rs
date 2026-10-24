@@ -461,6 +461,32 @@ impl Key {
 #[derive(Clone, Copy)]
 pub struct PhpArray(Arr);
 
+/// Which of php's two sorts of a table [`PhpArray::sort_by`] is, as each
+/// native calls one: `zend_hash_sort`, which sorts the table as it
+/// stands (`ksort()`, `krsort()`, intl's `Collator::sort()`), or
+/// `zend_array_sort` (`Z/Zend/zend_hash.c:3083`), which holds the table
+/// one owner more while it sorts and gives that owner up after with
+/// `gc_check_possible_root`, so the sorted table is offered to the
+/// collector (`sort()`, `usort()`, `asort()` and the rest of
+/// `Z/ext/standard/array.c`'s sorts).
+///
+/// ```php
+/// function keys() { $k = []; $k['b'] = 1; $k['a'] = 2; ksort($k); krsort($k); return gc_status()['roots']; }
+/// function values() { $v = []; $v['b'] = 2; $v['a'] = 1; asort($v); return gc_status()['roots']; }
+/// var_dump(keys(), values());
+/// ```
+/// ```expect
+/// int(0)
+/// int(1)
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortAlgorithm {
+    /// `zend_hash_sort`: no hold, no possible root.
+    Hash,
+    /// `zend_array_sort`: a hold, then a release that may offer a root.
+    Array,
+}
+
 /// How a table [`PhpArray::sized`] lays down is laid out: php's packed
 /// array, a list of values indexed from zero, or its hash, the buckets
 /// and their hash slots, `zend_hash_real_init_packed` and
@@ -990,11 +1016,13 @@ impl PhpArray {
     /// positions alone and the array is left as php leaves it before what
     /// was thrown is raised from here.
     ///
-    /// The table is held one owner more while it is sorted,
-    /// `zend_array_sort_ex`'s `GC_ADDREF(ht)`, so a comparison whose code
-    /// writes the array separates it: the variable takes the copy with the
-    /// write, and the table sorted is given up after, destroyed where
-    /// nothing else holds it.
+    /// Under [`SortAlgorithm::Array`] the table is held one owner more
+    /// while it is sorted, `zend_array_sort_ex`'s `GC_ADDREF(ht)`, so a
+    /// comparison whose code writes the array separates it: the variable
+    /// takes the copy with the write, and the table sorted is given up
+    /// after, destroyed where nothing else holds it and otherwise offered
+    /// to the collector. Under [`SortAlgorithm::Hash`] it is sorted as it
+    /// stands, held by nothing and offered to no collector.
     ///
     /// ```php
     /// function resize_arr() { global $arr; for ($i = 0; $i < 4; $i++) { $arr[$i] = $i; } }
@@ -1020,6 +1048,7 @@ impl PhpArray {
     pub fn sort_by(
         &mut self,
         req: &mut Request,
+        algorithm: SortAlgorithm,
         renumber: bool,
         mut compare: impl FnMut(
             &mut Request,
@@ -1028,7 +1057,7 @@ impl PhpArray {
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
-        let held = Owner::take(req, self.to_value());
+        let held = (algorithm == SortAlgorithm::Array).then(|| Owner::take(req, self.to_value()));
         let mut pending: Option<Thrown> = None;
         let sorted = req.array_sort(self.0, renumber, &mut |req, x, y| {
             let ordering = if pending.is_some() {
@@ -1046,7 +1075,9 @@ impl PhpArray {
             };
             ordering.then(x.position.cmp(&y.position))
         });
-        held.give_up(req);
+        if let Some(held) = held {
+            held.give_up(req);
+        }
         sorted?;
         pending.map_or(Ok(()), Err)
     }

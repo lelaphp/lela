@@ -133,7 +133,7 @@ third-engine-design.md
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 427 |  |
 
-<!-- /computed in=36d490ba42ba8f0e278a7359b27bc1c386cfa60ec1e604864cbb3e77cd169635 out=01866b04bcc7f1d8296a2ed7c8a2191c130eb6761e891957f7c2bc5926e89e0f -->
+<!-- /computed in=e0238f5b8a0d9510f6806ba1e3ecf5a8589b3320ddca7b946e9227b7e284a428 out=01866b04bcc7f1d8296a2ed7c8a2191c130eb6761e891957f7c2bc5926e89e0f -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine
