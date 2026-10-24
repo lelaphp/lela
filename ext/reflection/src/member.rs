@@ -1067,6 +1067,31 @@ impl ReflectionProperty {
     /// bool(true)
     /// 2
     /// ```
+    ///
+    /// The slot is the effective property's, `OBJ_PROP(object, prop->offset)`:
+    /// a parent's private property reflected through the parent is that
+    /// slot and not the child's of the same name, which still waits, as
+    /// it does under `skipLazyInitialization`:
+    ///
+    /// ```php
+    /// class P { private $p = 'P'; public $q = 1; }
+    /// class Q extends P { private $p = 'Q'; }
+    /// $r = new ReflectionClass(Q::class); $pp = new ReflectionProperty(P::class, 'p'); $qp = new ReflectionProperty(Q::class, 'p');
+    /// $g = $r->newLazyGhost(function () { echo "init\n"; });
+    /// $pp->setRawValueWithoutLazyInitialization($g, 'X');
+    /// var_dump($pp->isLazy($g), $qp->isLazy($g), $r->isUninitializedLazyObject($g));
+    /// $h = $r->newLazyGhost(function () { echo "init\n"; });
+    /// $pp->skipLazyInitialization($h);
+    /// var_dump($pp->isLazy($h), $qp->isLazy($h), $r->isUninitializedLazyObject($h));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// ```
     fn setRawValueWithoutLazyInitialization(
         req: &mut Request,
         this: This<Self>,
@@ -1086,10 +1111,11 @@ impl ReflectionProperty {
         }
         // `IS_PROP_LAZY` cleared around `reflection_property_set_raw_value`,
         // the write `setRawValue` makes.
+        let declaring = prop.as_ref().map_or(class, |(at, _)| *at);
         let mut write = |req: &mut Request, object: PhpObject| {
             set_raw_value(req, asked, prop.as_ref(), object, &name, value)
         };
-        skip_lazy_initialization(req, &object, &name, Some(&mut write))
+        skip_lazy_initialization(req, &object, declaring, &name, Some(&mut write))
     }
 
     /// `ReflectionProperty::skipLazyInitialization(object $object): void`:
@@ -1124,10 +1150,13 @@ impl ReflectionProperty {
         let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         let object = object_of(req, object, asked, 1)?;
+        let object = object.lazy_real(req).unwrap_or(object);
         let reflected = declared.map(|decl| (class, decl));
+        let prop = effective_prop(req, asked, object, reflected, &name);
         let method = "skipLazyInitialization";
-        lazy_compatible(req, asked, reflected.as_ref(), &name, object, method)?;
-        skip_lazy_initialization(req, &object, &name, None)?;
+        lazy_compatible(req, asked, prop.as_ref(), &name, object, method)?;
+        let declaring = prop.as_ref().map_or(class, |(at, _)| *at);
+        skip_lazy_initialization(req, &object, declaring, &name, None)?;
         Ok(())
     }
 
@@ -1156,10 +1185,17 @@ impl ReflectionProperty {
         let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         let object = object_of(req, object, asked, 1)?;
-        if !declared.is_some_and(|decl| decl.is_instance) {
+        let object = object.lazy_real(req).unwrap_or(object);
+        let reflected = declared.map(|decl| (class, decl));
+        // `reflection_property_get_effective_prop`, then `false` for a
+        // static or a virtual property, which has no slot.
+        let Some((declaring, decl)) = effective_prop(req, asked, object, reflected, &name) else {
+            return Ok(false);
+        };
+        if !decl.is_instance || php_ext::call::property_is_virtual(req, declaring, &name) {
             return Ok(false);
         }
-        Ok(object.is_lazy_prop(req, &name))
+        Ok(object.is_lazy_prop(req, declaring, &name))
     }
 
     /// `ReflectionProperty::isInitialized(?object $object = null)`: for a

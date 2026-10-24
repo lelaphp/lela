@@ -883,12 +883,16 @@ impl Request {
     pub(crate) fn lazy_skip(
         &mut self,
         object: PhpObject,
+        declaring: ClassId,
         name: &[u8],
         write: Option<RawWrite<'_>>,
     ) -> Result<(), Thrown> {
         let object = self.lazy_reader(object);
         let o = object.heap();
-        let Some(slot) = self.prop_slot(object.class(), name) else {
+        // `OBJ_PROP(object, prop->offset)`: the slot of the property
+        // `declaring` declares, a parent's private one apart from the
+        // child's of the same name.
+        let Some(slot) = self.prop_slot(declaring, name) else {
             return Ok(());
         };
         let was_lazy = self.lazy_slot(o, slot);
@@ -949,11 +953,12 @@ impl Request {
         }
     }
 
-    /// `ReflectionProperty::isLazy`: whether the declared property
-    /// `name` of the object the initialised proxies lead to waits.
-    pub(crate) fn lazy_property(&self, object: PhpObject, name: &[u8]) -> bool {
+    /// `ReflectionProperty::isLazy`: whether the property `name` that
+    /// `declaring` declares, in the object the initialised proxies lead
+    /// to, waits (`OBJ_PROP(object, prop->offset)`).
+    pub(crate) fn lazy_property(&self, object: PhpObject, declaring: ClassId, name: &[u8]) -> bool {
         let object = self.lazy_reader(object);
-        self.prop_slot(object.class(), name)
+        self.prop_slot(declaring, name)
             .is_some_and(|slot| self.lazy_slot(object.heap(), slot))
     }
 

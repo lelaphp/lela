@@ -3614,7 +3614,8 @@ pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<Ph
 
 /// `ReflectionProperty::skipLazyInitialization` under `None` and
 /// `ReflectionProperty::setRawValueWithoutLazyInitialization` under
-/// `Some`: the declared property `name`, on the object the initialised
+/// `Some`: the property `name` that `declaring` declares, the effective
+/// property's slot (`prop->offset`), on the object the initialised
 /// proxies lead to, stops waiting for the initializer, holding its
 /// default, or with its `IS_PROP_LAZY` cleared while `write`, the
 /// caller's `reflection_property_set_raw_value`, writes it on that object;
@@ -3623,8 +3624,9 @@ pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<Ph
 pub fn skip_lazy_initialization(
     req: &mut Request,
     object: &PhpObject,
+    declaring: ClassId,
     name: &[u8],
     write: Option<crate::api::request::RawWrite<'_>>,
 ) -> Result<(), Thrown> {
-    req.lazy_skip(*object, name, write)
+    req.lazy_skip(*object, declaring, name, write)
 }
