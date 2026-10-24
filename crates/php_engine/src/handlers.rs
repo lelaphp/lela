@@ -1771,18 +1771,16 @@ pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
 /// first pass primed it, and take it too.
 #[inline(always)] // as `inline_send`
 fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -> Option<Edge> {
-    let call = match req.cached(frame, CacheSlot(op.out)) {
+    let mut call = match req.cached(frame, CacheSlot(op.out)) {
         Cached::Call(call) => call,
         Cached::Function(function) => return init_native(req, frame, function, op, at),
         _ => return None,
     };
+    if call.awaits {
+        call = primed_again(req, frame, op, call);
+    }
     let count = op.extended_value;
-    let header = move || {
-        let mut header = exec::Header::call(call.function, count);
-        header.callee = call.callee;
-        header.info.join(call.sent);
-        header
-    };
+    let header = move || exec::Header::primed(call, count);
     Some(match req.push_laid(call.room as usize, header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
@@ -1925,17 +1923,66 @@ fn init_call(
 
 /// What an `INIT_*`'s slot keeps of `function`, called with `count`
 /// arguments: the push a user function's call takes, made off its row
-/// once ([`exec::PrimedCall`]), and any other callee alone.
+/// once ([`exec::PrimedCall`]), and any other callee alone. A call that
+/// enters plainly lays its entry once the callee's cache is laid down,
+/// on each pass from the second; a named argument or an unpack that
+/// moves the count past what the `INIT` said unlays it, and a call past
+/// the parameters never lays it:
+///
+/// ```php
+/// function f($a, $b = 2, ...$c) { return "$a|$b|" . count($c) . "|" . func_num_args(); }
+/// for ($i = 0; $i < 2; $i++) {
+///     echo f(1), " ", f(1, b: 3), " ", f(...[1, 2, 3]), " ", f(1, 2, 3, 4), " ", f(b: 5, a: 4), "\n";
+/// }
+/// ```
+/// ```expect
+/// 1|2|0|1 1|3|0|2 1|2|1|3 1|2|2|4 4|5|0|2
+/// 1|2|0|1 1|3|0|2 1|2|1|3 1|2|2|4 4|5|0|2
+/// ```
 fn primed_call(req: &Request, function: Function, count: u32) -> Cached {
-    req.user_function(function)
-        .map_or(Cached::Function(function), |user| {
-            Cached::Call(exec::PrimedCall {
-                function,
-                room: user.shape.room(count),
-                callee: user.callee_at(),
-                sent: user.shape.sent,
-            })
-        })
+    let Some(user) = req.user_function(function) else {
+        return Cached::Function(function);
+    };
+    let shape = user.shape;
+    let enters = shape.sent.plain_entry() && count <= shape.parameters;
+    let laid = enters && req.cache_laid(shape.cache);
+    // The words an entry not laid leaves as `Header::call` writes them,
+    // so its push lays what a push in place copies.
+    let (cache, opline) = if laid {
+        let skipped = exec::skipped_recv(count, shape.parameters, shape.typed, shape.entry);
+        (shape.cache, skipped.unwrap_or(0))
+    } else {
+        (exec::CacheAt::default(), 0)
+    };
+    Cached::Call(exec::PrimedCall {
+        function,
+        room: shape.room(count),
+        callee: user.callee_at(),
+        sent: shape.sent.with_laid_entry(laid),
+        cache,
+        opline,
+        awaits: enters && !laid,
+    })
+}
+
+/// A slot whose call `awaits` its callee's runtime cache made again, and
+/// what it keeps now: laid, once the callee's first activation laid the
+/// cache down, and awaiting it still before.
+#[cold]
+#[inline(never)]
+fn primed_again(
+    req: &mut Request,
+    frame: FrameRef,
+    op: &Opline,
+    call: exec::PrimedCall,
+) -> exec::PrimedCall {
+    let Cached::Call(again) = primed_call(req, call.function, op.extended_value) else {
+        return call;
+    };
+    if !again.awaits {
+        req.prime(frame, CacheSlot(op.out), Cached::Call(again));
+    }
+    again
 }
 
 /// `zend_vm_stack_push_call_frame` for an `INIT_*`: the call `header`
@@ -3482,6 +3529,7 @@ fn reserve_named(req: &mut Request, name: PhpString) -> Result<Result<Reserved, 
                 }
                 if let Some(header) = req.vm_mut().at_mut(call) {
                     header.num_args = u32::try_from(at + 1).unwrap_or(u32::MAX);
+                    header.info.unlay_entry();
                 }
             }
             crate::api::call::NamedAt::Argument(at)
@@ -3540,6 +3588,7 @@ fn reserve_next(req: &mut Request) -> Result<Reserved, Fatal> {
     }
     if let Some(header) = req.vm_mut().at_mut(call) {
         header.num_args = u32::try_from(at + 1).unwrap_or(u32::MAX);
+        header.info.unlay_entry();
     }
     Ok(Reserved {
         slot: ArgSlot {

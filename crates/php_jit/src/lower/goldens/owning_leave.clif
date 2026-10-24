@@ -250,8 +250,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block25:
 @0005                               v130 = load.i32 notrap aligned v113+44
-@0005                               v131 = iconst.i32 -569
-@0005                               v132 = band v130, v131  ; v131 = -569
+@0005                               v131 = iconst.i32 -33555001
+@0005                               v132 = band v130, v131  ; v131 = -33555001
 @0005                               v133 = iconst.i32 0
 @0005                               v134 = bor v132, v133  ; v133 = 0
 @0005                               store notrap aligned v134, v113+44

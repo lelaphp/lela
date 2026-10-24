@@ -644,8 +644,36 @@ impl Header {
     pub(crate) fn activate(&mut self, run_time_cache: CacheAt, opline: u32, extra_args: bool) {
         self.run_time_cache = run_time_cache;
         self.opline = opline;
-        self.info.set(CallInfo::CALL | CallInfo::BUILDING, false);
+        self.info.set(
+            CallInfo::CALL | CallInfo::BUILDING | CallInfo::LAID_ENTRY,
+            false,
+        );
         self.info.set(CallInfo::EXTRA_ARGS, extra_args);
+    }
+
+    /// The header an `INIT_*` lays for a call to the user function its
+    /// slot keeps, `count` arguments passed: [`Header::call`] with the
+    /// record and the flags the slot made, and, where the flags say the
+    /// entry is laid ([`CallInfo::LAID_ENTRY`]), the runtime cache and
+    /// the opline the activation would write.
+    #[inline]
+    pub(crate) fn primed(call: PrimedCall, count: u32) -> Header {
+        let mut header = Header::call(call.function, count);
+        header.callee = call.callee;
+        header.info.join(call.sent);
+        header.run_time_cache = call.cache;
+        header.opline = call.opline;
+        header
+    }
+
+    /// A call whose `INIT` laid its entry ([`CallInfo::laid_entry`]) made
+    /// the frame it laid: its runtime cache and opline stand as written.
+    #[inline]
+    pub(crate) fn activate_laid(&mut self) {
+        self.info.set(
+            CallInfo::CALL | CallInfo::BUILDING | CallInfo::LAID_ENTRY,
+            false,
+        );
     }
 
     /// `EX(This)` as a receiver, with whether the frame owns it.
@@ -829,6 +857,25 @@ impl CallInfo {
     /// (`ZEND_ACC_HEAP_RT_CACHE`), which its activation reads in place
     /// of its function's: a [`CallInfo::PLAIN_ENTRY`] it overrides.
     const OWN_CACHE: u32 = 1 << 24;
+    /// The `INIT` wrote what the activation would read off the function,
+    /// as php's `i_init_func_execute_data` reads it off the op array it
+    /// holds: the call is a plain entry ([`CallInfo::PLAIN_ENTRY`]) passing
+    /// no more arguments than the function declares, into a room no
+    /// smaller than its frame, whose runtime cache the request has laid
+    /// down, and the header already holds that cache and the opline the
+    /// prologue's skip stands it at ([`PrimedCall`]). Set by
+    /// `INIT_FCALL`'s inline path alone (`handlers::inline_init_fcall`),
+    /// never by compiled code's pushes in place, whose images are made
+    /// without it. Cleared by every site that moves the count or the
+    /// callee of a call being built: a named argument placed past the
+    /// count (`handlers::reserve_named`), the next argument an unpack
+    /// reserves past it (`handlers::reserve_next`), and a call served
+    /// as another function over new arguments
+    /// (`Request::serve_instead`); and by the activation
+    /// ([`Header::activate`], [`Header::activate_laid`]). A build with
+    /// debug assertions holds each laid entry to the function's row as
+    /// `enter_call` takes it.
+    const LAID_ENTRY: u32 = 1 << 25;
 
     /// The flags as another process read them ([`crate::readable`]).
     pub(crate) fn of(bits: u32) -> CallInfo {
@@ -969,6 +1016,15 @@ impl CallInfo {
     }
 
     /// [`CallInfo::sent`] with [`CallInfo::PLAIN_ENTRY`] where `plain`.
+    /// [`CallInfo::sent`] with [`CallInfo::LAID_ENTRY`] where `laid`.
+    pub(crate) fn with_laid_entry(self, laid: bool) -> CallInfo {
+        CallInfo(if laid {
+            self.0 | Self::LAID_ENTRY
+        } else {
+            self.0
+        })
+    }
+
     pub(crate) fn with_plain_entry(self, plain: bool) -> CallInfo {
         CallInfo(if plain {
             self.0 | Self::PLAIN_ENTRY
@@ -983,6 +1039,20 @@ impl CallInfo {
     #[inline]
     pub(crate) fn plain_entry(self) -> bool {
         self.0 & (Self::PLAIN_ENTRY | Self::OWN_CACHE) == Self::PLAIN_ENTRY
+    }
+
+    /// The `INIT` laid the activation's words ([`CallInfo::LAID_ENTRY`])
+    /// of a call still being built and reading its function's own cache.
+    #[inline]
+    pub(crate) fn laid_entry(self) -> bool {
+        self.0 & (Self::LAID_ENTRY | Self::OWN_CACHE | Self::BUILDING)
+            == Self::LAID_ENTRY | Self::BUILDING
+    }
+
+    /// The words [`CallInfo::LAID_ENTRY`] says were laid no longer hold:
+    /// the count or the callee moved.
+    pub(crate) fn unlay_entry(&mut self) {
+        self.set(Self::LAID_ENTRY, false);
     }
 
     pub(crate) fn set_own_cache(&mut self, on: bool) {
@@ -1704,12 +1774,21 @@ pub(crate) enum Cached {
 /// flags are what the push joins into the call's
 /// ([`crate::api::request::FrameShape::sent`]). A function's row never
 /// changes once declared, so the slot answers every pass of the request.
+///
+/// Where the call enters plainly, the flags say its entry is laid
+/// ([`CallInfo::LAID_ENTRY`]) and the slot keeps the runtime cache and
+/// the opline its activation would write, so `DO_UCALL` reads no row; one
+/// whose cache the request has not laid down yet `awaits` it, and the
+/// first pass after its first activation makes the slot again.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PrimedCall {
     pub(crate) function: Function,
     pub(crate) room: u32,
     pub(crate) callee: crate::readable::CalleeAt,
     pub(crate) sent: CallInfo,
+    pub(crate) cache: CacheAt,
+    pub(crate) opline: u32,
+    pub(crate) awaits: bool,
 }
 
 impl Cached {

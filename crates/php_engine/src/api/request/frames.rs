@@ -1652,6 +1652,29 @@ impl Request {
         } = self;
         let (top, from) = vm.stack.top_and_frame_mut(caller)?;
         let header = top.header();
+        if header.info.laid_entry() {
+            // The `INIT` laid the activation's words: the frame is made
+            // with no row read, as php's `DO_UCALL` reads the op array it
+            // holds.
+            #[cfg(debug_assertions)]
+            debug_assert!(
+                laid_entry_holds(
+                    header,
+                    top.len(),
+                    user_in(user_functions, arena, header.function?),
+                    map
+                ),
+                "a call whose INIT laid its entry no longer holds what the activation would write"
+            );
+            from.header_mut().opline = at;
+            let laid = top.header_mut();
+            laid.info.set_serving();
+            laid.info.set_return_used(returns_to.is_some());
+            laid.activate_laid();
+            laid.set_returns_to(returns_to);
+            laid.set_caller(exec::Caller::Opline(caller));
+            return Some(self.entered_top());
+        }
         if !header.info.building() {
             return None;
         }
@@ -1668,14 +1691,20 @@ impl Request {
             return None;
         }
         entered_words((top, from), (caller, at), returns_to, shape, cache);
-        // The callee's place, the top's, which the lend found standing
-        // above its caller, so the length is at least two. A place past
-        // `u32::MAX` would be 2^32 frames of at least eighty bytes each,
-        // which the memory limit refuses long before.
+        Some(self.entered_top())
+    }
+
+    /// The call [`Request::enter_call`] made a frame of, the top, its
+    /// observer begin raised. The lend found it standing above its
+    /// caller, so the length is at least two; a place past `u32::MAX`
+    /// would be 2^32 frames of at least eighty bytes each, which the
+    /// memory limit refuses long before.
+    #[inline(always)] // in `enter_call`'s two arms
+    fn entered_top(&mut self) -> FrameRef {
         #[allow(clippy::cast_possible_truncation)] // 2^32 frames is no stack a request holds
         let call = FrameRef(self.vm.stack.len().wrapping_sub(1) as u32);
         crate::observer::call(self, call);
-        Some(call)
+        call
     }
 
     /// [`Request::enter_call`] over a call whose `INIT` found its entry
@@ -2457,6 +2486,30 @@ pub(crate) enum CodeFrom {
 /// the opline its prologue's skip leaves it, reading `cache`, returning
 /// into `returns_to`.
 #[inline(always)] // part of `enter_call`'s inline path
+/// The sensor of [`exec::CallInfo::LAID_ENTRY`]: what the activation
+/// of the call `header` begins, in a room of `len` slots, would read off
+/// its function's row `user` and the request's caches `map`, held to what
+/// the `INIT` laid. A site that moves a call's count or callee and keeps
+/// the bit is caught here in a build with debug assertions.
+#[cfg(debug_assertions)]
+fn laid_entry_holds(
+    header: &exec::Header,
+    len: usize,
+    user: Option<&crate::api::request::UserFunction>,
+    map: &exec::RuntimeCaches,
+) -> bool {
+    let Some(shape) = user.map(|user| user.shape) else {
+        return false;
+    };
+    let opline = exec::skipped_recv(header.num_args, shape.parameters, shape.typed, shape.entry);
+    shape.sent.plain_entry()
+        && header.num_args <= shape.parameters
+        && len >= shape.slots as usize
+        && map.laid(shape.cache)
+        && header.runtime_cache() == shape.cache
+        && header.opline == opline.unwrap_or(0)
+}
+
 fn entered_words(
     (top, from): (
         &mut php_heap::Frame<exec::Header>,

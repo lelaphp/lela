@@ -174,8 +174,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block15:
 @0004                               v99 = load.i32 notrap aligned v79+44
-@0004                               v100 = iconst.i32 -569
-@0004                               v101 = band v99, v100  ; v100 = -569
+@0004                               v100 = iconst.i32 -33555001
+@0004                               v101 = band v99, v100  ; v100 = -33555001
 @0004                               v102 = iconst.i32 0
 @0004                               v103 = bor v101, v102  ; v102 = 0
 @0004                               store notrap aligned v103, v79+44
@@ -689,8 +689,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block48:
 @0010                               v449 = load.i32 notrap aligned v433+44
-@0010                               v450 = iconst.i32 -569
-@0010                               v451 = band v449, v450  ; v450 = -569
+@0010                               v450 = iconst.i32 -33555001
+@0010                               v451 = band v449, v450  ; v450 = -33555001
 @0010                               v452 = iconst.i32 0
 @0010                               v453 = bor v451, v452  ; v452 = 0
 @0010                               store notrap aligned v453, v433+44
@@ -902,8 +902,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block61:
 @0018                               v570 = load.i32 notrap aligned v559+44
-@0018                               v571 = iconst.i32 -569
-@0018                               v572 = band v570, v571  ; v571 = -569
+@0018                               v571 = iconst.i32 -33555001
+@0018                               v572 = band v570, v571  ; v571 = -33555001
 @0018                               v573 = iconst.i32 0
 @0018                               v574 = bor v572, v573  ; v573 = 0
 @0018                               store notrap aligned v574, v559+44
@@ -1245,8 +1245,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block82:
 @0021                               v796 = load.i32 notrap aligned v782+44
-@0021                               v797 = iconst.i32 -569
-@0021                               v798 = band v796, v797  ; v797 = -569
+@0021                               v797 = iconst.i32 -33555001
+@0021                               v798 = band v796, v797  ; v797 = -33555001
 @0021                               v799 = iconst.i32 0
 @0021                               v800 = bor v798, v799  ; v799 = 0
 @0021                               store notrap aligned v800, v782+44

@@ -355,8 +355,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block43:
 @0007                               v214 = load.i32 notrap aligned v203+44
-@0007                               v215 = iconst.i32 -569
-@0007                               v216 = band v214, v215  ; v215 = -569
+@0007                               v215 = iconst.i32 -33555001
+@0007                               v216 = band v214, v215  ; v215 = -33555001
 @0007                               v217 = iconst.i32 0
 @0007                               v218 = bor v216, v217  ; v217 = 0
 @0007                               store notrap aligned v218, v203+44
@@ -724,8 +724,8 @@ function u0:0(i64, i64) -> i32 tail {
 
                                 block74:
 @0010                               v431 = load.i32 notrap aligned v420+44
-@0010                               v432 = iconst.i32 -569
-@0010                               v433 = band v431, v432  ; v432 = -569
+@0010                               v432 = iconst.i32 -33555001
+@0010                               v433 = band v431, v432  ; v432 = -33555001
 @0010                               v434 = iconst.i32 0
 @0010                               v435 = bor v433, v434  ; v434 = 0
 @0010                               store notrap aligned v435, v420+44

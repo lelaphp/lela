@@ -241,6 +241,7 @@ impl Request {
             frame.header_mut().function = Some(function);
             frame.header_mut().callee = callee;
             frame.header_mut().num_args = u32::try_from(arguments.len()).unwrap_or(u32::MAX);
+            frame.header_mut().info.unlay_entry();
             for (slot, argument) in frame.slots_mut().iter_mut().zip(arguments) {
                 *slot = argument.to_zval();
             }
