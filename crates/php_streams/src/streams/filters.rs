@@ -228,17 +228,46 @@ impl PhpStream {
     }
 
     /// `_php_stream_fill_read_buffer`'s filtered arm
-    /// (`Z/main/streams/streams.c:571`): while the stream is not at eof
-    /// and the buffer holds fewer than `size` bytes, at most a chunk, one
-    /// chunk read from the kind and wound through the chain, the last
-    /// read with `PSFS_FLAG_FLUSH_CLOSE` once the kind is at eof and an
-    /// empty one with `PSFS_FLAG_FLUSH_INC`; what the chain passes on
-    /// goes into the buffer, what a filter keeps waits for the next
-    /// round, and `PSFS_ERR_FATAL` breaks the stream. `false` is a read
-    /// that failed before a byte was had, or the break.
+    /// (`Z/main/streams/streams.c:567`): `chunk_buf` asked for at the
+    /// chunk size first, fallibly as php 8.5.12's `femalloc` asks, so a
+    /// chunk the memory limit has no room for is a fill that failed and
+    /// the limit's fatal is raised after the call; then, while the stream
+    /// is not at eof and the buffer holds fewer than `size` bytes, at most
+    /// a chunk, one chunk read from the kind and wound through the chain,
+    /// the last read with `PSFS_FLAG_FLUSH_CLOSE` once the kind is at eof
+    /// and an empty one with `PSFS_FLAG_FLUSH_INC`; what the chain passes
+    /// on goes into the buffer, what a filter keeps waits for the next
+    /// round, and `PSFS_ERR_FATAL` breaks the stream. `false` is the
+    /// chunk refused, a read that failed before a byte was had, or the
+    /// break.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $fp = fopen(__FILE__, 'rb');
+    /// stream_filter_append($fp, "string.rot13");
+    /// stream_set_chunk_size($fp, 100 * 1024 * 1024);
+    /// var_dump(fread($fp, 1));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 104857600 bytes) in %s on line 6
+    /// ```
     pub(super) fn fill_filtered(&mut self, req: &mut Request, size: usize) -> bool {
+        let Ok(Some(mut chunk)) = req
+            .memory_mut()
+            .fallible(|req| Emalloc::new(req, self.chunk_size()))
+        else {
+            return false;
+        };
+        let filled = self.fill_through_chain(req, size, chunk.bytes_mut());
+        chunk.free(req);
+        filled
+    }
+
+    /// The rounds of [`PhpStream::fill_filtered`], each read of the kind
+    /// into `chunk`, php's `chunk_buf`.
+    fn fill_through_chain(&mut self, req: &mut Request, size: usize, chunk: &mut [u8]) -> bool {
         let to_read_now = size.min(self.chunk_size());
-        let mut chunk = vec![0u8; self.chunk_size()];
         let mut inp = Brigade::new();
         let mut outp = Brigade::new();
         while !self.eof && self.writepos - self.readpos < to_read_now {
@@ -248,7 +277,7 @@ impl PhpStream {
                 has_buffered_data,
                 ..
             } = self;
-            let justread = ops.read_after_buffer(req, &mut chunk, eof, *has_buffered_data);
+            let justread = ops.read_after_buffer(req, chunk, eof, *has_buffered_data);
             self.count_progress(req, justread.unwrap_or(0));
             if justread.is_none() && self.writepos == self.readpos {
                 return false;
@@ -278,7 +307,12 @@ impl PhpStream {
                 FilterStatus::PassOn => {
                     while let Some(bucket) = inp.pop_front() {
                         if !self.buffer_bucket(req, &bucket) {
-                            return false;
+                            // php 8.5.12 drops the buckets left and goes
+                            // on with a buffer that still holds its
+                            // bytes; this one is empty, so the fill ends
+                            // here and no read waits on the kind for
+                            // bytes the limit's fatal discards.
+                            return true;
                         }
                     }
                 }
@@ -297,15 +331,25 @@ impl PhpStream {
     }
 
     /// One bucket appended to the read buffer, the buffer compacted first
-    /// where it has not the room and grown where compacting was not
-    /// enough; `false` is the memory limit's fatal, rendered.
+    /// where it has not the room and grown by the bucket's length where
+    /// compacting was not enough, `fperealloc` asked fallibly as php
+    /// 8.5.12 asks it, since what a filter hands on is unbounded by what
+    /// it was fed; `false` is the growth the memory limit refused.
     fn buffer_bucket(&mut self, req: &mut Request, bucket: &[u8]) -> bool {
         if !self.readbuf.is_empty() && self.readbuf.len() - self.writepos < bucket.len() {
             self.readbuf.copy_within(self.readpos..self.writepos, 0);
             self.writepos -= self.readpos;
             self.readpos = 0;
         }
-        self.append_read(req, bucket)
+        if self.readbuf.len() - self.writepos < bucket.len() {
+            let grown = self.readbuf.len() + bucket.len();
+            if !self.grow_readbuf(req, grown) {
+                return false;
+            }
+        }
+        self.readbuf[self.writepos..self.writepos + bucket.len()].copy_from_slice(bucket);
+        self.writepos += bucket.len();
+        true
     }
 
     /// One bucket written after `writepos`, the buffer grown by the
@@ -315,11 +359,7 @@ impl PhpStream {
     fn append_read(&mut self, req: &mut Request, bucket: &[u8]) -> bool {
         if self.readbuf.len() - self.writepos < bucket.len() {
             let grown = self.readbuf.len() + bucket.len();
-            if self
-                .readbuf
-                .resize(req, grown, self.flags.persistent)
-                .is_err()
-            {
+            if !self.resize_readbuf(req, grown) {
                 return false;
             }
         }
@@ -469,11 +509,7 @@ impl PhpStream {
                 }
                 if flushed > self.readbuf.len() - self.writepos {
                     let grown = self.writepos + flushed + self.chunk_size();
-                    if self
-                        .readbuf
-                        .resize(req, grown, self.flags.persistent)
-                        .is_err()
-                    {
+                    if !self.resize_readbuf(req, grown) {
                         return false;
                     }
                 }

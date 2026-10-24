@@ -612,6 +612,20 @@ impl ReadBuf {
         Ok(())
     }
 
+    /// `fperealloc(stream->readbuf, len, persistent, /* fallible */
+    /// true)`, php 8.5.12's growth of the buffer as a read fills it:
+    /// `false` where the memory limit refused it, the delayed OOM
+    /// recorded for the next safepoint to raise. php keeps the old
+    /// buffer then; here its bytes are the request's end's and the
+    /// buffer is empty.
+    fn grow(&mut self, req: &mut Request, len: usize, persistent: bool) -> bool {
+        matches!(
+            req.memory_mut()
+                .fallible(|req| self.resize(req, len, persistent)),
+            Ok(Some(()))
+        )
+    }
+
     /// `pefree(stream->readbuf)`.
     fn free(&mut self, req: &mut Request) {
         if let ReadBuf::Request(block) = std::mem::take(self) {
@@ -784,7 +798,20 @@ impl PhpStream {
     /// when the buffer already holds `size` bytes; otherwise the buffer
     /// compacted and grown by one chunk where the chunk would not fit,
     /// and one read of the kind into the room after `writepos`. `false`
-    /// is the read that failed.
+    /// is the read that failed, or the growth the memory limit refused,
+    /// php 8.5.12's `fperealloc` asked fallibly, whose fatal is raised
+    /// after the call:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $fp = fopen(__FILE__, 'rb');
+    /// stream_set_chunk_size($fp, 100 * 1024 * 1024);
+    /// var_dump(stream_get_line($fp, 1024, "\n"));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 104857600 bytes) in %s on line 5
+    /// ```
     fn fill_unfiltered(&mut self, req: &mut Request, size: usize) -> bool {
         if self.writepos - self.readpos >= size {
             return true;
@@ -796,11 +823,7 @@ impl PhpStream {
         }
         if self.readbuf.len() - self.writepos < self.chunk_size() {
             let len = self.readbuf.len() + self.chunk_size();
-            if self
-                .readbuf
-                .resize(req, len, self.flags.persistent)
-                .is_err()
-            {
+            if !self.grow_readbuf(req, len) {
                 return false;
             }
         }
@@ -820,6 +843,32 @@ impl PhpStream {
             }
             None => false,
         }
+    }
+
+    /// The read buffer grown to `len` as php 8.5.12's fill grows it,
+    /// `fperealloc` asked fallibly ([`ReadBuf::grow`]); `false` where the
+    /// memory limit refused it, the buffer then empty and both positions
+    /// at its start, so no read reaches past it.
+    fn grow_readbuf(&mut self, req: &mut Request, len: usize) -> bool {
+        if self.readbuf.grow(req, len, self.flags.persistent) {
+            return true;
+        }
+        self.readpos = 0;
+        self.writepos = 0;
+        false
+    }
+
+    /// The read buffer made `len` long, `perealloc` asked as php asks it
+    /// where it is not fallible; `false` is the memory limit's fatal past
+    /// the hard limit, the buffer then empty and both positions at its
+    /// start, as [`PhpStream::grow_readbuf`] leaves them.
+    fn resize_readbuf(&mut self, req: &mut Request, len: usize) -> bool {
+        if self.readbuf.resize(req, len, self.flags.persistent).is_ok() {
+            return true;
+        }
+        self.readpos = 0;
+        self.writepos = 0;
+        false
     }
 
     /// `_php_stream_read` (`Z/main/streams/streams.c:736`): the buffer
@@ -1193,8 +1242,9 @@ impl PhpStream {
     /// from the read buffer and the buffer filled a chunk at a time
     /// while it holds none, for every kind, the unbuffered ones too;
     /// `maxlen` is php's, so at most `maxlen - 1` bytes, and `None` is
-    /// php's `grow_mode`, a line of any length. `None` back is a line of no
-    /// bytes, at eof or after a read that failed.
+    /// php's `grow_mode`, a line of any length, which php 8.5.12 ends
+    /// with what it gathered once the memory limit was met. `None` back
+    /// is a line of no bytes, at eof or after a read that failed.
     ///
     /// A fill a read filter broke (`PSFS_ERR_FATAL`, `fatal_error`) ends
     /// the line with nothing, what was gathered dropped, and so does
@@ -1224,6 +1274,12 @@ impl PhpStream {
             let avail = self.writepos - self.readpos;
             if avail > 0 {
                 let eol = self.locate_eol();
+                // php 8.5.12 stops a line of any length once the memory
+                // limit was met (`ZEND_HAS_OOM()`), before it grows the
+                // line by what is buffered.
+                if maxlen.is_none() && req.memory().has_oom() {
+                    break;
+                }
                 let held = &self.readbuf[self.readpos..self.writepos];
                 let (mut cpysz, mut done) = match eol {
                     Some(eol) => (eol + 1, true),
@@ -1280,9 +1336,13 @@ impl PhpStream {
     /// less than half of it was read; anything else reads into a string
     /// sized from `php_stream_stat`'s size past the position and a chunk
     /// over, extended a chunk at a time while a quarter chunk of room is
-    /// left, until a read gives nothing, and cut to what was read. `None`
-    /// is php's `NULL`, nothing read, which the string is freed for; the
-    /// `Err` is the memory limit's fatal.
+    /// left, until a read gives nothing, and cut to what was read. Each
+    /// string is asked for fallibly, as php 8.5.12's `zend_string_falloc`
+    /// and `zend_string_fextend` ask, so one the memory limit has no room
+    /// for is `None` and the limit's fatal is raised after the call (php
+    /// frees what an extension it refused had read; here that string is
+    /// the request's end's). `None` is php's `NULL`, also nothing read,
+    /// which the string is freed for; the `Err` is a fatal the read met.
     ///
     /// ```php
     /// $p = __DIR__ . '/big.txt'; $w = fopen($p, 'w'); fwrite($w, str_repeat('x', 442 * 1024)); fclose($w);
@@ -1296,6 +1356,19 @@ impl PhpStream {
     /// 10776 2080
     /// 40000
     /// ```
+    ///
+    /// A file larger than the memory limit is refused its string before a
+    /// byte is read:
+    ///
+    /// ```php
+    /// $p = __DIR__ . '/big.txt'; file_put_contents($p, str_repeat('x', 12 * 1024 * 1024));
+    /// ini_set('memory_limit', '4M');
+    /// var_dump(file_get_contents($p));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 12599296 bytes) in %s on line 4
+    /// ```
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn copy_to_mem(
         &mut self,
@@ -1308,7 +1381,12 @@ impl PhpStream {
         if let Some(max) = maxlen
             && max < 4 * CHUNK_SIZE
         {
-            let mut out = FreshString::new(req, max)?;
+            let Some(mut out) = req
+                .memory_mut()
+                .fallible(|req| FreshString::new(req, max))?
+            else {
+                return Ok(None);
+            };
             let mut len = 0;
             while len < max && !self.eof(req) {
                 match self.read(req, &mut out.bytes_mut()[len..]) {
@@ -1336,7 +1414,12 @@ impl PhpStream {
         if let Some(max) = maxlen {
             buflen = buflen.min(max);
         }
-        let mut out = FreshString::new(req, buflen)?;
+        let Some(mut out) = req
+            .memory_mut()
+            .fallible(|req| FreshString::new(req, buflen))?
+        else {
+            return Ok(None);
+        };
         let min_room = CHUNK_SIZE / 4;
         let mut len = 0;
         while let Some(n) = self.read(req, &mut out.bytes_mut()[len..buflen]) {
@@ -1352,7 +1435,10 @@ impl PhpStream {
                     Some(max) if buflen + CHUNK_SIZE > max => max,
                     _ => buflen + CHUNK_SIZE,
                 };
-                out = out.extend(req, buflen)?;
+                let Some(grown) = req.memory_mut().fallible(|req| out.extend(req, buflen))? else {
+                    return Ok(None);
+                };
+                out = grown;
             }
         }
         if len == 0 {
@@ -1777,6 +1863,21 @@ impl MemBytes {
         self.bytes().len()
     }
 
+    /// The bytes made `len` long, the new ones zero: php 8.5.12's
+    /// `zend_string_frealloc` past the length, which allocates where the
+    /// bytes were the empty string, and `zend_string_ftruncate` under it,
+    /// each asked fallibly. `false` is the ask the memory limit refused,
+    /// the delayed OOM recorded for the next safepoint to raise; php
+    /// keeps the old string then, and here the bytes are the request's
+    /// end's and the stream's are empty. The `Err` is a fatal the ask
+    /// met.
+    fn resize_fallibly(&mut self, req: &mut Request, len: usize) -> Result<bool, Thrown> {
+        Ok(req
+            .memory_mut()
+            .fallible(|req| self.resize(req, len))?
+            .is_some())
+    }
+
     /// The bytes made `len` long, the new ones zero:
     /// `zend_string_realloc` past the length, which allocates where the
     /// bytes were the empty string, and `zend_string_truncate` under it.
@@ -1838,8 +1939,22 @@ impl Ops for Memory {
     /// `php_stream_memory_write` (`Z/main/streams/memory.c:44`): `-1` on
     /// a read-only stream; an append stream writes at the end; a write
     /// past the end reallocates the bytes to reach it and zero-fills the
-    /// gap a seek left. A reallocation past the memory limit is the
-    /// heap's fatal, kept for the native.
+    /// gap a seek left. The reallocation is asked fallibly, as php
+    /// 8.5.12's `zend_string_frealloc` asks it, so one the memory limit
+    /// refuses is `-1` and the limit's fatal is raised after the call; a
+    /// fatal the ask met is kept for the native.
+    ///
+    /// ```php
+    /// $m = fopen('php://memory', 'w+'); fwrite($m, 'abc');
+    /// $s = str_repeat('x', 3 << 20);
+    /// ini_set('memory_limit', '6M');
+    /// var_dump(fwrite($m, $s));
+    /// echo "not reached\n";
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 6291456 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 5
+    /// ```
     fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
         if self.mode == TempMode::ReadOnly {
             return None;
@@ -1847,13 +1962,18 @@ impl Ops for Memory {
         if self.mode == TempMode::Append {
             self.fpos = self.data.len();
         }
-        if self.fpos + buf.len() > self.data.len()
-            && let Err(thrown) = self.data.resize(req, self.fpos + buf.len())
-        {
-            if req.diagnostics_mut().stream_thrown().is_none() {
-                *req.diagnostics_mut().stream_thrown() = Some(thrown);
+        if self.fpos + buf.len() > self.data.len() {
+            match self.data.resize_fallibly(req, self.fpos + buf.len()) {
+                Ok(true) => {}
+                // `return (ssize_t) -1`.
+                Ok(false) => return None,
+                Err(thrown) => {
+                    if req.diagnostics_mut().stream_thrown().is_none() {
+                        *req.diagnostics_mut().stream_thrown() = Some(thrown);
+                    }
+                    return None;
+                }
             }
-            return None;
         }
         self.data.bytes_mut()[self.fpos..self.fpos + buf.len()].copy_from_slice(buf);
         self.fpos += buf.len();
@@ -1943,17 +2063,25 @@ impl Ops for Memory {
     /// (`Z/main/streams/memory.c:193`): refused on a read-only stream;
     /// a shorter size cuts the bytes with `zend_string_truncate` and
     /// pulls the position back to it, a longer one
-    /// `zend_string_realloc`s and zero-fills, so a size past the memory
-    /// limit is the heap's fatal for that string, kept for the native.
+    /// `zend_string_realloc`s and zero-fills, each asked fallibly as php
+    /// 8.5.12's `zend_string_ftruncate` and `zend_string_frealloc` ask, so
+    /// a size the memory limit has no room for is
+    /// `PHP_STREAM_OPTION_RETURN_ERR` and the limit's fatal is raised
+    /// after the call; a fatal the ask met is kept for the native.
     fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
         if self.mode == TempMode::ReadOnly {
             return Some(false);
         }
-        if let Err(thrown) = self.data.resize(req, size) {
-            if req.diagnostics_mut().stream_thrown().is_none() {
-                *req.diagnostics_mut().stream_thrown() = Some(thrown);
+        match self.data.resize_fallibly(req, size) {
+            Ok(true) => {}
+            // `return PHP_STREAM_OPTION_RETURN_ERR`.
+            Ok(false) => return Some(false),
+            Err(thrown) => {
+                if req.diagnostics_mut().stream_thrown().is_none() {
+                    *req.diagnostics_mut().stream_thrown() = Some(thrown);
+                }
+                return Some(false);
             }
-            return Some(false);
         }
         self.fpos = self.fpos.min(size);
         Some(true)
@@ -4620,12 +4748,14 @@ impl StreamLayer for Request {
         r.native::<Option<PhpStream>>(self).map(|_| Stream::of(r))
     }
 
-    /// `php_stream_read_to_str` (`Z/main/streams/streams.c:822`): a
-    /// string of `len` asked for first, so a length past the memory
-    /// limit is php's fatal before a byte is read, then one read into
-    /// it, its length set to what was read and the string cut down only
-    /// where that is less than half of `len`; `None` is the read that
-    /// failed, the string freed.
+    /// `php_stream_read_to_str` (`Z/main/streams/streams.c:838`): a
+    /// string of `len` asked for first, fallibly as php 8.5.12's
+    /// `zend_string_falloc` asks, so a length the memory limit has no
+    /// room for is `None` before a byte is read and the limit's fatal is
+    /// raised after the call; then one read into it, its length set to
+    /// what was read and the string cut down only where that is less
+    /// than half of `len`; `None` is also the read that failed, the
+    /// string freed.
     ///
     /// ```php
     /// $p = __DIR__ . '/r.txt'; $w = fopen($p, 'w'); fwrite($w, str_repeat('x', 70000)); fclose($w);
@@ -4644,7 +4774,12 @@ impl StreamLayer for Request {
         stream: Stream,
         len: usize,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        let mut out = FreshString::new(self, len)?;
+        let Some(mut out) = self
+            .memory_mut()
+            .fallible(|req| FreshString::new(req, len))?
+        else {
+            return Ok(None);
+        };
         let Some(Some(read)) = self.stream_op(stream, |req, s| s.read(req, out.bytes_mut())) else {
             out.free(self);
             return Ok(None);
