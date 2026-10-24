@@ -145,11 +145,15 @@ fn class_name(req: &Request, class: ClassId) -> String {
 // ---- the object
 
 /// `xsl_object`: the stylesheet, its parameters by key in insertion
-/// order, the security preferences, dom's table of php functions and
-/// the profile's path.
+/// order, the security preferences, dom's table of php functions, the
+/// profile's path and how many transformations are running on it.
 #[derive(Default)]
 pub(crate) struct Intern {
     sheet: Option<ffi::Sheet>,
+    /// `transform_depth`: the transformations in progress, nested where
+    /// a callback transforms again, during which `importStylesheet` is
+    /// refused (php 8.5.12, GH-23730).
+    transform_depth: u32,
     has_keys: bool,
     params: Vec<(Vec<u8>, Vec<u8>)>,
     security: i64,
@@ -422,6 +426,9 @@ fn apply<R>(
     };
     let profile = profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
     let answer = id.held(req, |req, sheet| {
+        if let Some(i) = intern(req, this) {
+            i.transform_depth += 1;
+        }
         let mut holder = NodeObject::default();
         let doc = if has_keys {
             let copy = doc.copy_doc(true).unwrap_or(doc);
@@ -441,6 +448,9 @@ fn apply<R>(
         let made = transform(req, this, sheet, &state);
         at(this).clean_node_list(req);
         holder.decrement_doc_ref(req);
+        if let Some(i) = intern(req, this) {
+            i.transform_depth -= 1;
+        }
         finish(req, sheet, made?)
     });
     answer.unwrap_or_else(|| {
@@ -630,6 +640,31 @@ impl XSLTProcessor {
     /// bool(false)
     /// XSLTProcessor::importStylesheet(): Argument #1 ($stylesheet) must be a valid XML node
     /// ```
+    ///
+    /// A stylesheet imported while the processor transforms, from a
+    /// callback or from a destructor the transformation's node list runs
+    /// as it is torn down, is refused, as php 8.5.12 refuses it
+    /// (GH-23730); once the transformation ends, an import is taken:
+    ///
+    /// ```php
+    /// class E extends DOMElement { function __destruct() { imp('destructor'); } }
+    /// function imp($from) { try { $GLOBALS['p']->importStylesheet($GLOBALS['o']); echo "$from: imported\n"; } catch (Error $e) { echo "$from: ", $e->getMessage(), "\n"; } }
+    /// function cb($n) { imp('callback'); return $n[0]; }
+    /// $d = new DOMDocument; $d->registerNodeClass('DOMElement', 'E'); $d->loadXML('<r><i>a</i></r>');
+    /// $s = new DOMDocument; $s->loadXML('<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:php="http://php.net/xsl"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="php:function(\'cb\', //i)"/></xsl:template></xsl:stylesheet>');
+    /// $o = new DOMDocument; $o->loadXML('<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/">B</xsl:template></xsl:stylesheet>');
+    /// $p = new XSLTProcessor; $p->registerPHPFunctions(); $p->importStylesheet($s);
+    /// var_dump($p->transformToXml($d));
+    /// imp('after');
+    /// var_dump($p->transformToXml($d));
+    /// ```
+    /// ```expect
+    /// callback: Cannot call XSLTProcessor::importStylesheet() while a transformation is in progress
+    /// destructor: Cannot call XSLTProcessor::importStylesheet() while a transformation is in progress
+    /// string(1) "a"
+    /// after: imported
+    /// string(1) "B"
+    /// ```
     #[php(tentative)]
     fn importStylesheet(
         req: &mut Request,
@@ -637,6 +672,10 @@ impl XSLTProcessor {
         stylesheet: PhpObject,
     ) -> Result<bool, Thrown> {
         let this = this.object();
+        if intern(req, this).is_some_and(|i| i.transform_depth > 0) {
+            let message = "Cannot call XSLTProcessor::importStylesheet() while a transformation is in progress";
+            return Err(throw_error(req, "Error", message));
+        }
         let Some(exported) = import_node(req, stylesheet) else {
             return Err(arg_type_error(req, 1, "be a valid XML node"));
         };
