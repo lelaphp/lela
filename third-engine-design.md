@@ -696,18 +696,18 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 499 |  |
+| heap | heap.lock | 501 |  |
 | process | process.lock | 40 |  |
 | unit | unit.lock | 125 |  |
 | link | link.lock | 62 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1502 | 1525 |
+| api | api.lock | 1504 | 1525 |
 | sapi | sapi.lock | 58 |  |
-| tier | tier.lock | 190 |  |
+| tier | tier.lock | 192 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 427 |  |
 
-<!-- /computed in=418c44120fe415b9ca6644920a9e3c1f9340ed5070a0c118ee48bdc4c5b0a8fe out=b421ea885f344b5236d0005a37daf4e5d95db06648c531aba08e6b2487f7f3fc -->
+<!-- /computed in=747fca692b2807b2bf2a1dfa31cfd935ac34d0b4517a33f61965bdbeb3a9eb3f out=47dc7ffc84666031c6c90876e7a349b933e3a15e80406a010feaa30ec1aac548 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 
@@ -945,7 +945,7 @@ A `loop { match handler }` over the dense `u16` each opline was resolved to at p
 
 `ADD`, `SUB`, `MUL`, `CONCAT`, `IS_IDENTICAL`, `IS_EQUAL`, `IS_SMALLER`, `ASSIGN`, `ASSIGN_DIM`, `ASSIGN_OBJ`, `ASSIGN_OP`, `ASSIGN_DIM_OP`, `PRE_INC`, `PRE_DEC`, `JMPZ`, `JMPNZ`, `FAST_CONCAT`, `ROPE_INIT`, `ROPE_ADD`, `ROPE_END`, `INIT_FCALL`, `RETURN`, `SEND_VAL`, `FE_FETCH_R`, `FETCH_DIM_R`, `FETCH_OBJ_R`, `FETCH_DIM_W`, `FETCH_OBJ_W`, `FETCH_DIM_RW`, `FETCH_DIM_FUNC_ARG`, `ISSET_ISEMPTY_DIM_OBJ`, `SEND_VAL_EX`, `SEND_VAR`, `DO_ICALL`, `DO_UCALL`, `COUNT`
 
-<!-- /computed in=66416c68620d1ae4230d55de449a3dd11db20f220be5221f0bf536e54807624e out=fc76300fe8020b1191135e206dec1b366c2b081b904a762f9a3c30d7e1c35faf -->
+<!-- /computed in=2f54dad053b41a97ca9f3694e32491c24b541b352e979593e9ec21631be3065b out=fc76300fe8020b1191135e206dec1b366c2b081b904a762f9a3c30d7e1c35faf -->
 
 Which opcodes are specialised is `ops.toml`'s `specialise`, and the list above is rendered from it. An opcode php's `zend_vm_gen.php` specialises on its operand kinds joins in the commit that measures, by instructions retired on a kernel under the protocol, its run-time operand decoding spending what php's specialised handler does not; that commit carries the measurement, and no ruling is asked for (#2997).
 

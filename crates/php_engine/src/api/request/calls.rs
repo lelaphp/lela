@@ -20,6 +20,7 @@ use crate::exec;
 use crate::observer::OnThrow;
 use crate::trampoline::CallTrampoline;
 use php_heap::FrameRef;
+use php_unit::decl::HookKind;
 
 use super::Code;
 use super::Symbols;
@@ -49,6 +50,17 @@ pub(super) struct Calls {
     /// `None` records nothing, and is what a request holds unless its
     /// engine or its test asked (#2168).
     trace: Option<Vec<crate::trace::Entered>>,
+}
+
+/// What a call carries beyond its function and arguments, never two of
+/// them at once: the closure it serves (`ZEND_CALL_CLOSURE`), or the
+/// property a hook trampoline reads or writes, of the hook of `kind`
+/// (`zend_get_property_hook_trampoline`'s `reserved[0]`).
+#[derive(Clone, Copy)]
+enum Carried<'a> {
+    Nothing,
+    Closure(PhpObject),
+    HookTrampoline(&'a [u8], HookKind),
 }
 
 impl Request {
@@ -84,10 +96,40 @@ impl Request {
             function,
             this,
             Some(called_scope),
-            None,
+            Carried::Nothing,
             arguments,
             extra_named,
         )
+    }
+
+    /// `zend_call_known_instance_method` over
+    /// `zend_get_property_hook_trampoline(prop_info, kind, name)`, which
+    /// `ReflectionProperty::getRawValue` and `setRawValue` call over a
+    /// property with a hook of `kind`: the trampoline named `$name::get`
+    /// or `$name::set` and scoped to `scope`, `prop_info->ce`, served on
+    /// `object` with no hold of the call's own, so the read or write it
+    /// makes finds it running and reaches the backing store, and what
+    /// it throws has the trampoline's frame on its trace.
+    pub(crate) fn serve_hook_trampoline(
+        &mut self,
+        object: PhpObject,
+        scope: ClassId,
+        name: &[u8],
+        kind: HookKind,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        let function = self.parent_hook_trampoline(kind);
+        let carried = Carried::HookTrampoline(name, kind);
+        self.serve_call(function, Some(object), Some(scope), carried, arguments, &[])
+    }
+
+    /// The trampoline's record on `call`, given up where the call has no
+    /// annex to hold it.
+    pub(crate) fn carry_trampoline(&mut self, call: FrameRef, built: exec::HookTrampoline) {
+        match self.annex_mut(call) {
+            Some(annex) => annex.trampoline = Some(built),
+            None => self.release(Value::string(built.name)),
+        }
     }
 
     /// `zend_call_known_fcc` over a `Closure`, which is what
@@ -131,7 +173,7 @@ impl Request {
             closure.function,
             closure.this,
             closure.called_scope,
-            Some(object),
+            Carried::Closure(object),
             arguments,
             extra_named,
         )
@@ -184,7 +226,7 @@ impl Request {
             closure.function,
             Some(this),
             Some(scope),
-            Some(object),
+            Carried::Closure(object),
             arguments,
             extra_named,
         );
@@ -280,7 +322,14 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
-        self.serve_call(function, None, None, None, arguments, extra_named)
+        self.serve_call(
+            function,
+            None,
+            None,
+            Carried::Nothing,
+            arguments,
+            extra_named,
+        )
     }
 
     /// `zend_call_function` (`Z/Zend/zend_execute_API.c:806`), which every
@@ -303,7 +352,7 @@ impl Request {
         function: Function,
         this: Option<PhpObject>,
         called_scope: Option<ClassId>,
-        closure: Option<PhpObject>,
+        carried: Carried<'_>,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
@@ -315,7 +364,7 @@ impl Request {
                 function,
                 this,
                 called_scope,
-                closure,
+                carried,
                 arguments,
                 extra_named,
             )
@@ -328,10 +377,14 @@ impl Request {
         function: Function,
         this: Option<PhpObject>,
         called_scope: Option<ClassId>,
-        closure: Option<PhpObject>,
+        carried: Carried<'_>,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        let closure = match carried {
+            Carried::Closure(closure) => Some(closure),
+            Carried::Nothing | Carried::HookTrampoline(..) => None,
+        };
         // `if (ZEND_HAS_OOM()) { zend_handle_delayed_oom(); return FAILURE; }`
         // (`Z/Zend/zend_execute_API.c:838` at 8.5.12): no call once the
         // memory limit was met, its fatal raised here if no safepoint has.
@@ -389,8 +442,9 @@ impl Request {
             .any(|argument| matches!(argument.as_ref(), ValueRef::Undef));
         // `zend_call_function` names the callee by
         // `func->common.function_name`, which the function carries; no
-        // constant spelled it, so the call carries no name of its own
-        // and interns none into the request's memory.
+        // constant spelled it, so the call interns no name into the
+        // request's memory. A hook trampoline's name is the one php builds
+        // with the trampoline, laid below once the call stands.
         let extra_named = exec::ExtraNamed::laid(self, extra_named.to_vec())?;
         // `GC_ADDREF(ZEND_CLOSURE_OBJECT(func))` with `ZEND_CALL_CLOSURE`,
         // once the arguments are placed: the call's own owner of the
@@ -410,16 +464,7 @@ impl Request {
         let call = match self.push_call(header) {
             Ok(call) => call,
             Err(fatal) => {
-                for argument in sent {
-                    self.release(argument);
-                }
-                self.release_named(extra_named);
-                if let Some(receiver) = receiver {
-                    self.give_up_receiver(receiver);
-                }
-                if let Some(closure) = closure {
-                    self.release(closure.as_value());
-                }
+                self.give_up_unpushed(sent, extra_named, receiver, closure);
                 return self.fatal_of(Err(fatal));
             }
         };
@@ -433,6 +478,19 @@ impl Request {
         {
             annex.extra_named = extra_named;
         }
+        // The trampoline's record, made once its call stands, where php
+        // makes it before the call (`zend_get_property_hook_trampoline`):
+        // only the memory limit could tell the two orders apart, and its
+        // fatal ends the request either way.
+        if let Carried::HookTrampoline(property, kind) = carried {
+            match self.hook_trampoline(property, kind) {
+                Ok(built) => self.carry_trampoline(call, built),
+                Err(thrown) => {
+                    self.pop_call();
+                    return Err(thrown);
+                }
+            }
+        }
         if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self, call) {
             self.pop_call();
             return Err(thrown);
@@ -445,7 +503,8 @@ impl Request {
             }
         };
         if self.user_function(function).is_some() {
-            return self.serve_user(call, caller);
+            let served = self.serve_user(call, caller);
+            return self.checked_after_call(served);
         }
         // `zend_call_function` ends an observed native with `fci->retval`
         // whether it threw or not (`Z/Zend/zend_execute_API.c:1039`).
@@ -454,11 +513,37 @@ impl Request {
         self.checked_after_call(served)
     }
 
-    /// `zend_call_function`'s check after a native returns
-    /// (`Z/Zend/zend_execute_API.c:1051-1059`): php tests the interrupt
+    /// What [`Request::serve_call_body`] took for a call whose frame
+    /// `zend_vm_stack_push_call_frame` refused, given back: each argument,
+    /// the extra named ones, the receiver and the closure.
+    fn give_up_unpushed(
+        &mut self,
+        sent: Vec<Value>,
+        extra_named: exec::ExtraNamed,
+        receiver: Option<exec::Receiver>,
+        closure: Option<PhpObject>,
+    ) {
+        for argument in sent {
+            self.release(argument);
+        }
+        self.release_named(extra_named);
+        if let Some(receiver) = receiver {
+            self.give_up_receiver(receiver);
+        }
+        if let Some(closure) = closure {
+            self.release(closure.as_value());
+        }
+    }
+
+    /// `zend_call_function`'s check after its callee returns, a native
+    /// or, from php-8.5.12, a user function
+    /// (`Z/Zend/zend_execute_API.c:1081-1091`): php tests the interrupt
     /// while running user code but not inside a native, so a native a
     /// native called (`array_map('time_nanosleep', ..)`) is where an
-    /// interrupt raised during it is taken. The timer's is the fatal;
+    /// interrupt raised during it is taken, and a user callback's
+    /// `return` is no site of its own, so an interrupt raised after the
+    /// callback's last check is taken here, before the native that
+    /// called it goes on. The timer's is the fatal;
     /// otherwise the extensions' hooks, and what they throw is what the
     /// call hands back. A native that threw leaves the interrupt for the
     /// next site, as the loop's own check after a call does.
@@ -489,13 +574,45 @@ impl Request {
     /// ```expect process
     /// thrown by the handler
     /// ```
+    ///
+    /// Here pcntl blocks signals while it serves `SIGUSR1`, so the
+    /// `SIGUSR2` its handler sends lands as that dispatch ends, after the
+    /// callback's last check; the check after the callback returns serves
+    /// it before `usort` raises its deprecation for the `bool` the
+    /// callback gave back:
+    ///
+    /// ```php
+    /// pcntl_async_signals(true);
+    /// pcntl_signal(SIGUSR1, function () { echo "usr1\n"; posix_kill(posix_getpid(), SIGUSR2); });
+    /// pcntl_signal(SIGUSR2, function () { echo "usr2\n"; });
+    /// $a = [2, 1];
+    /// usort($a, function ($x, $y) { posix_kill(posix_getpid(), SIGUSR1); return $x > $y; });
+    /// echo "after\n";
+    /// ```
+    /// ```expect
+    /// usr1
+    /// usr2
+    ///
+    /// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 6
+    /// after
+    /// ```
+    #[inline(always)] // one load and a branch on every callback's return
     fn checked_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
+        if !self.limits().interrupt().raised().load(Ordering::Relaxed) {
+            return served;
+        }
+        self.interrupted_after_call(served)
+    }
+
+    /// [`Request::checked_after_call`] past its load, where the interrupt
+    /// is raised: what the callee served handed on as it stands where it
+    /// threw, and otherwise the check's answer over it.
+    #[cold]
+    #[inline(never)]
+    fn interrupted_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
         let Ok(value) = served else {
             return served;
         };
-        if !self.limits().interrupt().raised().load(Ordering::Relaxed) {
-            return Ok(value);
-        }
         match crate::interrupt::interrupted(self) {
             Ok(false) => Ok(value),
             Ok(true) => {

@@ -26,7 +26,7 @@ use crate::api::values::{Owner, PhpString};
 /// ```
 /// ```expect
 /// int(403968)
-/// int(64)
+/// int(80)
 /// ```
 #[derive(Debug)]
 pub struct FreshString(FreshStr);

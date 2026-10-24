@@ -859,19 +859,19 @@ pub fn fgets(
     };
     Ok(match stream.get_line(req, maxlen)? {
         // php 8.5.12's `zend_string_finit(buf, line_len, false, true)` for
-        // a line of any length: "this copy can double an already large
-        // buffer".
+        // a line of any length (`Z/ext/standard/file.c:891`): "this copy
+        // can double an already large buffer".
         Some(line) if maxlen.is_none() => {
             match req
                 .memory_mut()
-                .fallible(|req| PhpString::new(req, &line))?
+                .fallible(|req| PhpString::finit(req, &line))?
             {
                 Some(line) => OrFalse::Value(line),
                 // RETURN_OOM()
                 None => OrFalse::False,
             }
         }
-        Some(line) => OrFalse::Value(PhpString::new(req, &line)?),
+        Some(line) => OrFalse::Value(PhpString::finit(req, &line)?),
         None => OrFalse::False,
     })
 }

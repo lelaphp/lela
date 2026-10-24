@@ -15,9 +15,9 @@ use super::lattice::{self, Types};
 use super::opcodes::{
     Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, compiled_inline,
     compound_in_place, constant, constant_types, goes_one_way, guard_sites, held_as_is,
-    inline_may_leave, is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard,
-    param_types, params, reads, reads_by_name, recv_exits, referenced, slot_of, within, writes,
-    written, written_after_entry,
+    inline_may_leave, is_call, keeps_temporaries, keyed, may_exit, op1_types, out_types,
+    packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced, slot_of,
+    within, writes, written, written_after_entry,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
@@ -1043,7 +1043,13 @@ impl<'a> Builder<'a> {
                     )
                     || (op.opcode == Opcode::AssignOp
                         && lattice::binary_of(op.extended_value) == Some(Opcode::Concat))
-                    || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
+                    || matches!(
+                        op.opcode,
+                        Opcode::AssignDim
+                            | Opcode::AssignDimOp
+                            | Opcode::FetchDimW
+                            | Opcode::FetchDimRw
+                    )
                     // What a property held is given up, or its handler
                     // serves what the inline form does not, and either
                     // may throw.
@@ -1430,7 +1436,7 @@ impl<'a> Builder<'a> {
     /// A kernel with no `call` effect may call user code too: `INIT_ARRAY`'s
     /// and `ADD_ARRAY_ELEMENT`'s handler raise a null key's deprecation
     /// through the error handler and release a duplicate key's value
-    /// (`Z/Zend/zend_vm_def.h:6278-6291`), and the release kernel compiled
+    /// (`Z/Zend/zend_vm_def.h:6279-6292`), and the release kernel compiled
     /// code calls for a temporary runs a destructor. None clobbers, as
     /// none has to: what that code can write is a variable a symbol table
     /// reaches, whose every write [`Builder::define`] types as anything
@@ -2128,14 +2134,12 @@ impl<'a> Builder<'a> {
         seen: Seen,
         (next, branch): (Option<&Event>, Option<bool>),
     ) -> Form {
-        let [t1, t2, td] = seen.types;
+        let [t1, t2, _] = seen.types;
         // An opline that writes its variable `op1` writes through what it
         // sees through a reference, which only its handler does.
         let cv1 = op.op1_type == OperandKind::Cv && !seen.referenced[0];
         let number = |t: Types| t == Types::LONG || t == Types::DOUBLE;
-        let long = |t: Types| t == Types::LONG;
         let scalar = |t: Types| t.scalar();
-        let packed = Types::ARRAY.laid_out(Layout::Packed);
         let code = self.meta(frame).code;
         let copied = |kind, field, t| copied_whole(kind, field, t, code);
         if let Some(form) = strung(op, seen) {
@@ -2179,9 +2183,13 @@ impl<'a> Builder<'a> {
             Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
                 cv1 && number(t1)
             }
-            Opcode::FetchDimR => op.op1_type != OperandKind::Const && t1 == packed && long(t2),
-            Opcode::AssignDim => cv1 && element_written(op, data, seen.types, code),
-            Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
+            Opcode::FetchDimR
+            | Opcode::FetchDimIs
+            | Opcode::IssetIsemptyDimObj
+            | Opcode::AssignDim
+            | Opcode::AssignDimOp
+            | Opcode::FetchDimW
+            | Opcode::FetchDimRw => dim_inline((op, data), seen.types, cv1, code),
             Opcode::FeResetR | Opcode::FeFetchR => iterated(op, t1, seen.referenced[0], branch),
             // php's `zend_jit_send_val` and `zend_jit_send_var`, a value
             // no scalar moved into the call's slot from a temporary, copied
@@ -3415,8 +3423,8 @@ fn type_checked(op: &Opline, t1: Types, referenced: bool) -> bool {
 
 /// Whether an `ASSIGN_DIM` over a variable's array is compiled inline over
 /// what it sees of the array, the key and the value, `[t1, t2, td]`, its
-/// `OP_DATA` `data`: an array that may be packed, which the write tests,
-/// by a long key, of a scalar, or of a value no scalar moved or copied
+/// `OP_DATA` `data`: an array of either layout, which the write tests
+/// where it may be both, by a key the lookups take ([`keyed`]), of a scalar, or of a value no scalar moved or copied
 /// whole into the element where its `out` slot is unused and the
 /// value is not the array itself, as php's `zend_jit_assign_dim` writes
 /// through `zend_jit_assign_to_variable`
@@ -3435,10 +3443,58 @@ fn element_written(
             && !(data.op1_type == OperandKind::Cv && data.op1 == op.op1)
             && copied_whole(data.op1_type, data.op1, td, code)
     };
-    t1.tag() == Some(ZvalType::Array)
-        && t1.meets(Types::PACKED)
-        && t2 == Types::LONG
-        && (td.scalar() || data.is_some_and(whole))
+    t1.tag() == Some(ZvalType::Array) && keyed(op, t2) && (td.scalar() || data.is_some_and(whole))
+}
+
+/// Whether a dimension opline is compiled inline over what it sees of
+/// the array, the key and the value, `[t1, t2, td]`, `cv1` where its
+/// `op1` is a variable seen as it is: a read ([`fetched_inline`]), a
+/// read under `BP_VAR_IS`, `isset()` alone, as php's `zend_jit_isset_isempty_dim` serves
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:13157-13350`), a write
+/// ([`element_written`]), a compound write ([`compound_in_place`]), and
+/// a fetch for writing of a variable's array, php's `zend_jit_fetch_dim`,
+/// a `VAR`'s being its handler's (`Z/ext/opcache/jit/zend_jit_trace.c:5887`).
+fn dim_inline(
+    (op, data): (&Opline, Option<&Opline>),
+    [t1, t2, td]: [Types; 3],
+    cv1: bool,
+    code: &OpArray,
+) -> bool {
+    let array = t1.tag() == Some(ZvalType::Array);
+    match op.opcode {
+        Opcode::FetchDimR => fetched_inline(op, t1, t2),
+        Opcode::IssetIsemptyDimObj => {
+            op.extended_value & ISEMPTY == 0
+                && op.op1_type == OperandKind::Cv
+                && array
+                && keyed(op, t2)
+        }
+        // php's `zend_jit_fetch_dim_read` under `BP_VAR_IS`, a key it
+        // does not find `null` (`:12101-12200`).
+        Opcode::FetchDimIs => op.op1_type == OperandKind::Cv && array && keyed(op, t2),
+        Opcode::AssignDim => cv1 && element_written(op, data, [t1, t2, td], code),
+        Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
+        Opcode::FetchDimW | Opcode::FetchDimRw => {
+            op.op1_type == OperandKind::Cv
+                && op.out_type == OperandKind::Var
+                && array
+                && keyed(op, t2)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a `FETCH_DIM_R` is compiled inline over what it sees of the
+/// array and the key, `t1` and `t2`, as php's `zend_jit_fetch_dim_read`
+/// compiles a read of an array no constant holds by a long or a string
+/// key (`Z/ext/opcache/jit/zend_jit_ir.c:12513-12700`): a packed array's
+/// slot by a long key in place, and every other element through the
+/// table's lookup, `zend_hash_find_known_hash`, `zend_jit_symtable_find`
+/// or `_zend_hash_index_find` (`:11917-12511`). A key no constant is is
+/// a variable's or a long, which the read gives up nothing of; php's
+/// code frees a temporary string, which this form leaves to the handler.
+fn fetched_inline(op: &Opline, t1: Types, t2: Types) -> bool {
+    op.op1_type != OperandKind::Const && t1.tag() == Some(ZvalType::Array) && keyed(op, t2)
 }
 
 /// Whether an inline form moves or copies an operand of `kind`, at

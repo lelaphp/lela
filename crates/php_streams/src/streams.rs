@@ -1710,13 +1710,14 @@ impl PhpStream {
     /// stream in its free already (php's `in_free` guard) and leaves it;
     /// then the kind closed and the filters taken off. The last owner's
     /// release reaches the free through the destructor instead, the
-    /// resource closed already, as `zend_resource_dtor` closes it first.
+    /// resource closed already, as `zend_resource_dtor` closes it first,
+    /// which a user filter's `$this->stream` reads as `null`.
     ///
     /// ```php
     /// class F extends php_user_filter {
     ///     function filter($in, $out, &$consumed, $closing): int {
     ///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
-    ///         if ($closing) echo get_resource_type($this->stream), "\n";
+    ///         if ($closing) echo $this->stream === null ? "null" : get_resource_type($this->stream), "\n";
     ///         return PSFS_PASS_ON;
     ///     }
     /// }
@@ -1732,7 +1733,7 @@ impl PhpStream {
     /// ```expect
     /// stream
     /// bool(true)
-    /// Unknown
+    /// null
     /// ```
     pub(crate) fn close_open(req: &mut Request, stream: Stream) {
         let res = stream.resource();
@@ -1925,7 +1926,7 @@ impl Ops for Memory {
     /// ```expect
     /// 296
     /// 1608
-    /// 368
+    /// 376
     /// 32
     /// ```
     fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {

@@ -620,7 +620,7 @@ impl Request {
     }
 
     /// `ZEND_BIND_GLOBAL`'s half over `EG(symbol_table)`
-    /// (`Z/Zend/zend_vm_def.h:8679`): the bucket `name` has, laid down
+    /// (`Z/Zend/zend_vm_def.h:8686`): the bucket `name` has, laid down
     /// holding `null` where the table has none (`zend_hash_lookup`), as
     /// [`Request::symbol_place`] finds it for a write, an `IS_INDIRECT`
     /// bucket followed to the CV of the frame attached to it; what stands

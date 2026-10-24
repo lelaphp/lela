@@ -360,6 +360,10 @@ fn evaluate(
     // SAFETY: a context open for the call; the fields php sets for one
     // evaluation.
     let c = unsafe { &mut *ctx };
+    // What an evaluation in progress on the same evaluator set, put back
+    // after, so a function's evaluation leaves the outer one the node it
+    // evaluates at and its declarations (php 8.5.12).
+    let (old_node, old_namespaces, old_ns_nr) = (c.node, c.namespaces, c.nsNr);
     c.node = node.map_or(ptr::null_mut(), Node::raw);
     let list = if let (Scope::InScope, Some(n)) = (&scope, node) {
         let doc = n.doc().map_or(ptr::null_mut(), |d| d.raw().cast());
@@ -400,11 +404,9 @@ fn evaluate(
     // SAFETY: as above, the fields reset.
     let c = unsafe { &mut *ctx };
     c.userData = outer;
-    c.node = ptr::null_mut();
-    if !list.is_null() || !given.is_empty() {
-        c.namespaces = ptr::null_mut();
-        c.nsNr = 0;
-    }
+    c.node = old_node;
+    c.namespaces = old_namespaces;
+    c.nsNr = old_ns_nr;
     if !list.is_null() {
         // SAFETY: the array `xmlGetNsList` allocated, freed once.
         unsafe { Alloc::free(list.cast()) };

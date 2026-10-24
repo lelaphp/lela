@@ -542,7 +542,7 @@ impl Request {
         self.link_declared(unit, at, decl, true).ok()
     }
 
-    /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7968`):
+    /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7973`):
     /// nothing where the unit's load bound the class under the opline's
     /// runtime definition key ([`Request::bind_at_load`]), and
     /// [`Request::bind_class`] where it did not, the key still standing.

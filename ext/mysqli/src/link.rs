@@ -1807,6 +1807,28 @@ impl Props for LinkProps {
         "warning_count",
     ];
 
+    /// `mysqli_link_property_entries`' read functions: a link a failed
+    /// `connect` left made is not fully initialized, where a failed
+    /// `real_connect` keeps its connection unconnected (GH-22854):
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// foreach (['connect', 'real_connect'] as $how) {
+    ///     $m = new mysqli('127.0.0.1', 'root', '', 'test');
+    ///     @$m->$how('127.0.0.1', 'root', '', 'no_such_database');
+    ///     foreach (['host_info', 'errno', 'error'] as $name) {
+    ///         try { var_dump($m->$name); } catch (Error $e) { echo "$name: ", $e->getMessage(), "\n"; }
+    ///     }
+    /// }
+    /// ```
+    /// ```expect mysql
+    /// host_info: Property access is not allowed yet
+    /// errno: mysqli object is not fully initialized
+    /// error: mysqli object is not fully initialized
+    /// host_info: Property access is not allowed yet
+    /// int(1049)
+    /// string(35) "Unknown database 'no_such_database'"
+    /// ```
     fn read(
         req: &mut Request,
         object: PhpObject,
@@ -1848,8 +1870,10 @@ impl Props for LinkProps {
         if !open && !made_enough {
             return props::not_yet(req, quiet);
         }
+        // A link a failed reconnect left made has no `mysql`, php
+        // 8.5.12's `if (!p)` in `MYSQLI_GET_MYSQL`.
         let Some(mysql) = mysql else {
-            return props::gone(req, object, quiet);
+            return props::not_initialized(req, object, quiet);
         };
         let s = mysql.status(req);
         let value = match name {

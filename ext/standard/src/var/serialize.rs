@@ -955,7 +955,22 @@ fn sleep_props(
 /// ```expect
 /// a:4:{i:0;d:3.0E+0;i:1;d:0.2;i:2;d:1.0E+8;i:3;d:0.0E+0;}
 /// ```
+///
+/// A non-finite double under that `0` is nothing at all, since
+/// `zend_gcvt`'s `snprintf(buf, ndigit + 1, ...)` keeps no character of
+/// its word (`Z/Zend/zend_strtod.c:4525`):
+///
+/// ```php
+/// ini_set('serialize_precision', 0);
+/// echo serialize([INF, -INF, NAN, 1.5]), "\n";
+/// ```
+/// ```expect
+/// a:4:{i:0;d:;i:1;d:;i:2;d:;i:3;d:2.0E+0;}
+/// ```
 fn gcvt(value: f64, precision: i32) -> String {
+    if precision == 0 && !value.is_finite() {
+        return String::new();
+    }
     let text = float_format(value, precision, Exponent::Upper);
     let digit = text.strip_prefix('-').unwrap_or(&text);
     if precision == 0 && digit.len() == 1 && digit.bytes().all(|b| b.is_ascii_digit()) {

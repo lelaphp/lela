@@ -416,7 +416,7 @@ impl Request {
                     self.addref(&Value::string(opened_path));
                     Ok(opened_path)
                 }
-                None => self.interned(&script).map(Owner::hand_on),
+                None => self.new_interned(&script).map(Owner::hand_on),
             };
             held.and_then(|held| self.note_included_held(held)).ok();
         } else {

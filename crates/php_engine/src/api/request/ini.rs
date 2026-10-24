@@ -1933,7 +1933,7 @@ impl Ini<&mut Request> {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// PHP Core</h2>
@@ -1994,6 +1994,7 @@ impl Ini<&mut Request> {
     /// <tr><td class="e">max_input_vars</td><td class="v">1000</td><td class="v">1000</td></tr>
     /// <tr><td class="e">max_memory_limit</td><td class="v">-1</td><td class="v">-1</td></tr>
     /// <tr><td class="e">max_multipart_body_parts</td><td class="v">-1</td><td class="v">-1</td></tr>
+    /// <tr><td class="e">memory_hard_limit_percent</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">memory_limit</td><td class="v">128M</td><td class="v">128M</td></tr>
     /// <tr><td class="e">open_basedir</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">output_buffering</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
@@ -2073,7 +2074,7 @@ impl Ini<&mut Request> {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// <h2><a name="module_iconv" href="#module_iconv">iconv</a></h2>

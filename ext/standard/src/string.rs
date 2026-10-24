@@ -949,7 +949,8 @@ fn substr(
     }
     let start = usize::try_from(from).unwrap_or(0);
     let end = start + usize::try_from(taken).unwrap_or(0);
-    PhpString::new(req, &string.as_bytes()[start..end])
+    // `RETURN_STRINGL_FAST` (`Z/ext/standard/string.c:2313`).
+    PhpString::fast(req, &string.as_bytes()[start..end])
 }
 
 /// `zend_tolower_ascii`.
@@ -1555,8 +1556,9 @@ fn wordwrap(
                 laststart = lastspace + 1;
             }
         }
-        // `zend_string_finit(..., fallible: true)`.
-        return fallibly(req, |req| PhpString::new(req, &out));
+        // `zend_string_finit(..., fallible: true)` of the subject
+        // (`Z/ext/standard/string.c:726`).
+        return fallibly(req, |req| PhpString::finit(req, &out));
     }
     // "Multiple character line break or forced cut": php asks for the
     // longest the text can grow to, `zend_string_safe_falloc`, fallibly,
@@ -1747,6 +1749,9 @@ fn explode(
         array.append(req, whole)?;
         return Ok(array);
     }
+    // `php_explode` makes each piece with `zend_string_init_fast`
+    // (`Z/ext/standard/string.c:868`, `:876`), and
+    // `php_explode_negative_limit` with `ZVAL_STRINGL` (`:924`).
     for i in 0..take {
         // "Each piece costs a zval plus a zend_string, so stop once over
         // the limit" (8.5.12), before each piece, the array as far as it
@@ -1755,8 +1760,12 @@ fn explode(
         if req.memory().has_oom() {
             return Ok(array);
         }
-        let value = PhpString::new(req, piece(i))?.into_value();
-        array.append(req, value)?;
+        let value = if limit < 0 {
+            PhpString::new(req, piece(i))?
+        } else {
+            PhpString::fast(req, piece(i))?
+        };
+        array.append(req, value.into_value())?;
     }
     Ok(array)
 }
@@ -2329,10 +2338,30 @@ fn ucwords(
 /// string(0) ""
 /// bool(true)
 /// ```
+///
+/// The string is `zend_string_alloc` of the subject's length
+/// (`Z/ext/standard/string.c:3631`), a string of the request's even for
+/// no byte or one, which another native hands out interned; the first
+/// line counts the program's first measure too:
+///
+/// ```php
+/// $r = null; $m = 0;
+/// foreach (["", "a", "ab", "abcdefgh"] as $t) { $m = memory_get_usage(); $r = strrev($t); echo strlen($t), " ", memory_get_usage() - $m, "\n"; $r = null; }
+/// ```
+/// ```expect
+/// 0 64
+/// 1 32
+/// 2 32
+/// 8 40
+/// ```
 #[php_function]
 fn strrev(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let out: Vec<u8> = string.as_bytes().iter().rev().copied().collect();
-    PhpString::new(req, &out)
+    let bytes = string.as_bytes();
+    PhpString::filled(req, bytes.len(), |to| {
+        for (to, from) in to.iter_mut().zip(bytes.iter().rev()) {
+            *to = *from;
+        }
+    })
 }
 
 /// `similar_text(string $string1, string $string2, &$percent = null):

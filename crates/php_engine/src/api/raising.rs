@@ -288,7 +288,7 @@ pub fn deprecated(req: &mut Request, message: &str) {
 /// $m = memory_get_usage(); $x = @MHASH_MD5; echo memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect
-/// 80
+/// 96
 /// 0
 /// 32
 /// ```
@@ -431,11 +431,11 @@ pub(crate) enum Origin<'a> {
 /// Warning: unserialize(): Error at offset 0 of 1 bytes in %s on line 3
 ///
 /// Warning: unserialize(): Error at offset 0 of 1 bytes in %s on line 3
-/// 13192 0
-/// 13192 0
 /// 13200 0
-/// 13576 0
-/// 960 0
+/// 13200 0
+/// 13200 0
+/// 13584 0
+/// 976 0
 /// ```
 ///
 /// An escaped copy whose text outgrows `php_escape_html_entities_ex`'s
@@ -1114,7 +1114,7 @@ pub fn throw_value(req: &mut Request, throwable: &Value) -> Thrown {
 /// leaves owes its observers is the unwind's and not this home's: php
 /// ends them in `zend_dispatch_try_catch_finally_helper`'s uncaught arm
 /// (`zend_observer_fcall_end(execute_data, NULL)`,
-/// `Z/Zend/zend_vm_def.h:8157-8161`), which is `unwind_from` here, where
+/// `Z/Zend/zend_vm_def.h:8162-8166`), which is `unwind_from` here, where
 /// the observer seam's return home stands ([`crate::observer`]); php
 /// 8.5's observer interface has no notice of a throw. As php's, the hooks
 /// are told nothing where a throwable stands pending already, which
@@ -1325,7 +1325,7 @@ pub(crate) fn under_name(
 /// pk(function () { echo @${str_repeat('u', 300)}; });
 /// ```
 /// ```expect
-/// 304 32
+/// 312 32
 /// 416 0
 /// 4480 0
 /// ```
@@ -1340,11 +1340,14 @@ pub(crate) fn strpprintf(req: &mut Request, text: &[u8]) -> Result<PhpString, Th
     };
     let block = req.heap_mut().block(size);
     let buffer = req.fatal_of(block)?;
+    // The trim is `zend_string_realloc`, which php-8.5.12 asks as the
+    // bytes past the empty string's header (`Z/Zend/zend_string.h:279`),
+    // `zend_string_finit`'s size, a string of its own at any length.
     if paged {
         req.heap_mut().free_block(buffer);
-        return req.string(text);
+        return req.string_finit(text);
     }
-    let string = req.string(text);
+    let string = req.string_finit(text);
     req.heap_mut().free_block(buffer);
     string
 }

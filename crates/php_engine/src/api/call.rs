@@ -1129,32 +1129,86 @@ pub fn property_is_virtual(req: &Request, class: ClassId, name: &[u8]) -> bool {
     req.property_virtual(class, name)
 }
 
-/// A hooked property's backing value, read past its hooks as the
-/// `get` hook itself reads it, which is what
-/// `ReflectionProperty::getRawValue` reaches through
-/// `zend_get_property_hook_trampoline`: a virtual property has none,
-/// php's `Error`; a typed one nothing wrote is the uninitialised-access
-/// `Error`. One more owner of the value, the caller's.
+/// A hooked property's backing value, read past its hooks as
+/// `ReflectionProperty::getRawValue` reads it: the `get` trampoline of
+/// the property `scope` declares, `prop_info->ce`, called on `object`
+/// with `zend_call_known_instance_method_with_0_params`, whose
+/// `read_property` finds it running. A virtual property has none,
+/// php's `Error`, and a typed one nothing wrote is the
+/// uninitialised-access `Error`, each thrown under the trampoline's
+/// frame. One more owner of the value, the caller's.
+///
+/// ```php
+/// class R { public int $a { get => $this->a + 1; } public $v { get => 5; set { } } }
+/// $r = new R;
+/// foreach (['a', 'v'] as $n) {
+///     try { (new ReflectionProperty(R::class, $n))->getRawValue($r); }
+///     catch (Error $e) { echo $e->getMessage(), "\n", $e->getTraceAsString(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Typed property R::$a must not be accessed before initialization
+/// #0 [internal function]: R->$a::get()
+/// #1 %s(5): ReflectionProperty->getRawValue(Object(R))
+/// #2 {main}
+/// Must not read from virtual property R::$v
+/// #0 [internal function]: R->$v::get()
+/// #1 %s(5): ReflectionProperty->getRawValue(Object(R))
+/// #2 {main}
+/// ```
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn read_raw_property(
     req: &mut Request,
     object: &PhpObject,
+    scope: ClassId,
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
-    adopted(req.read_raw(*object, name))
+    adopted(req.serve_hook_trampoline(*object, scope, name, HookKind::Get, &[]))
 }
 
-/// A hooked property's backing value written past its hooks, as the
-/// `set` hook itself writes it, `ReflectionProperty::setRawValue`'s
-/// trampoline: a virtual property has none, php's `Error`. A sink of
-/// both owners, given up whatever arm runs.
+/// A hooked property's backing value written past its hooks as
+/// `ReflectionProperty::setRawValue` writes it,
+/// `zend_call_known_instance_method_with_1_params(func, object, NULL,
+/// value)` over the `set` trampoline of the property `scope` declares:
+/// the call takes an owner of `value` of its own, and the trampoline
+/// returns the value it wrote, which the call gives up with
+/// `zval_ptr_dtor` as `zend_call_known_function` gives up a return
+/// nobody asked for, so a refcounted one is a possible root.
+///
+/// ```php
+/// class B {}
+/// class R { public B $a { set { echo "hook\n"; $this->a = $value; } } public B $plain; public int $n { set { $this->n = $value; } } }
+/// function t() {
+///     $r = new R; $p = new ReflectionProperty(R::class, 'a'); $v = new B; $w = new B;
+///     gc_collect_cycles(); $p->setRawValue($r, $v); echo "hooked uninit ", gc_status()['roots'], "\n";
+///     gc_collect_cycles(); $p->setRawValue($r, $w); echo "hooked over ", gc_status()['roots'], "\n";
+///     $q = new ReflectionProperty(R::class, 'plain'); gc_collect_cycles(); $q->setRawValue($r, $v); echo "plain ", gc_status()['roots'], "\n";
+///     try { (new ReflectionProperty(R::class, 'n'))->setRawValue($r, 'x'); }
+///     catch (TypeError $e) { echo $e->getMessage(), "\n", $e->getTraceAsString(), "\n"; }
+/// }
+/// t();
+/// ```
+/// ```expect
+/// hooked uninit 2
+/// hooked over 3
+/// plain 1
+/// Cannot assign string to property R::$n of type int
+/// #0 [internal function]: R->$n::set('x')
+/// #1 %s(9): ReflectionProperty->setRawValue(Object(R), 'x')
+/// #2 %s(12): t()
+/// #3 {main}
+/// ```
 pub fn write_raw_property(
     req: &mut Request,
     object: &PhpObject,
-    name: Owner<PhpString>,
-    value: Owner<Value>,
+    scope: ClassId,
+    name: &[u8],
+    value: Value,
 ) -> Result<(), Thrown> {
-    req.write_raw(*object, name, value)
+    let arguments = [value];
+    let returned = req.serve_hook_trampoline(*object, scope, name, HookKind::Set, &arguments)?;
+    req.release(returned);
+    Ok(())
 }
 
 /// `new $class(...$arguments)`: [`new_object`] and then the
@@ -1942,7 +1996,9 @@ pub(crate) fn autoload_keyed(req: &mut Request, name: &[u8]) -> Result<Option<Cl
 
 /// [`autoload`], `keyed` where the caller holds the lowered name.
 fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<ClassId>, Thrown> {
-    if name.is_empty() {
+    // The empty name, and a lone namespace separator, which names no
+    // class (`Z/Zend/zend_execute_API.c:1225-1228`), before the table.
+    if name.is_empty() || (!keyed && name == b"\\") {
         return Ok(None);
     }
     let key = Bare::of(name);
@@ -3558,17 +3614,19 @@ pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<Ph
 
 /// `ReflectionProperty::skipLazyInitialization` under `None` and
 /// `ReflectionProperty::setRawValueWithoutLazyInitialization` under
-/// `Some`: the declared property `name`, on the object the initialised
+/// `Some`: the property `name` that `declaring` declares, the effective
+/// property's slot (`prop->offset`), on the object the initialised
 /// proxies lead to, stops waiting for the initializer, holding its
-/// default or `value` written past `__set` and hooks; the object stops
-/// being lazy once no property waits. `value` is a sink's, the object's
-/// from here. The checks on the property php makes first are the
-/// caller's.
+/// default, or with its `IS_PROP_LAZY` cleared while `write`, the
+/// caller's `reflection_property_set_raw_value`, writes it on that object;
+/// the object stops being lazy once no property waits. The checks on the
+/// property php makes first are the caller's.
 pub fn skip_lazy_initialization(
     req: &mut Request,
     object: &PhpObject,
+    declaring: ClassId,
     name: &[u8],
-    value: Option<Owner<Value>>,
+    write: Option<crate::api::request::RawWrite<'_>>,
 ) -> Result<(), Thrown> {
-    req.lazy_skip(*object, name, value)
+    req.lazy_skip(*object, declaring, name, write)
 }

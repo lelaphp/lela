@@ -149,7 +149,7 @@ impl Persistent for Request {
     /// ```
     /// ```expect
     /// 32
-    /// 32 hi
+    /// 40 hi
     /// ```
     fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Owner<Stream>, Thrown> {
         let stream = reopen(self, entry)?;

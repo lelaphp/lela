@@ -1678,11 +1678,29 @@ impl DOMDocument {
         parse_document(req, this.object(), source.as_bytes(), options, false)
     }
 
-    /// `DOMDocument::normalizeDocument(): void`.
+    /// `DOMDocument::normalizeDocument(): void`: `php_dom_normalize_legacy`
+    /// over the document, refused where the stack comes down to its limit
+    /// (GH-23116).
+    ///
+    /// ```php
+    /// $d = new DOMDocument; $n = $d->createElement('a');
+    /// for ($i = 0; $i < 25000; $i++) { $p = $d->createElement('a'); $p->appendChild($n); $n = $p; }
+    /// $d->appendChild($n);
+    /// try { $d->normalizeDocument(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $d = new DOMDocument; $r = $d->appendChild($d->createElement('r')); $r->append('x', 'y');
+    /// $d->normalizeDocument(); var_dump($r->childNodes->length);
+    /// ```
+    /// ```expect regime=small-stack
+    /// Maximum call stack size reached. Infinite recursion?
+    /// int(1)
+    /// ```
     #[php(tentative)]
     fn normalizeDocument(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
-        crate::normalize(fetch(req, this.object())?);
-        Ok(())
+        let node = fetch(req, this.object())?;
+        let mut guard = crate::StackGuard::new(req);
+        crate::normalize(&mut guard, node);
+        let reached = guard.reached();
+        crate::StackRefusal::Normalize.raise_if(req, reached)
     }
 
     /// `DOMDocument::registerNodeClass(string $baseClass, ?string $extendedClass): true`.

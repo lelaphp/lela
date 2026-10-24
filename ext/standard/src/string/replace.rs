@@ -552,8 +552,8 @@ fn str_to_str(
             return Ok(Replaced::Kept);
         }
         *count += 1;
-        // `zend_string_init_fast`.
-        return PhpString::new(req, with).map(Replaced::Made);
+        // `zend_string_init_fast` (`Z/ext/standard/string.c:3307`).
+        return PhpString::fast(req, with).map(Replaced::Made);
     }
     if needle.len() == with.len() {
         let Some(first) = memnstr(searched, needle, 0) else {

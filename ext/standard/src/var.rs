@@ -784,9 +784,30 @@ fn returned_string(
 /// One value as `zend_print_zval_r_to_buf(buf, expr, indent)` renders
 /// it: an array and an object open their name and print their rows as
 /// `print_hash` does ([`Printed`]), each walked with a foreach walk, a
-/// reference is what the cell holds, and everything else is
+/// reference is what the cell holds, a float is
+/// `smart_str_append_double` at `precision`, which raises nothing for a
+/// NAN since 8.5.12 (`Z/Zend/zend.c:600-602`, GH-23662), and everything
+/// else is
 /// `zval_get_string`, which is `1` for `true` and nothing at all for
 /// `false` and `null`.
+///
+/// ```php
+/// print_r(NAN); print_r([NAN, INF, -0.0, 0.1 + 0.2, 1e100]);
+/// ini_set('precision', '0'); print_r(1.5); echo "\n";
+/// ini_set('precision', '-1'); print_r(0.1 + 0.2); echo "\n";
+/// ```
+/// ```expect
+/// NANArray
+/// (
+///     [0] => NAN
+///     [1] => INF
+///     [2] => -0
+///     [3] => 0.3
+///     [4] => 1.0E+100
+/// )
+/// 2
+/// 0.30000000000000004
+/// ```
 ///
 /// The array and the object arms carry php's recursion guard, the mark
 /// set on what the walk is inside and cleared on the way out, and a
@@ -897,6 +918,13 @@ pub(super) fn render(
             (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => Err(thrown),
             (Ok(()), Ok(())) => Ok(()),
         };
+    }
+    // `case IS_DOUBLE`: `smart_str_append_double(buf, d, EG(precision),
+    // false)`, the text `zend_double_to_str` makes without its warning.
+    if let Some(f) = value.as_float() {
+        let text = float_format(f, req.ini().precision(), Exponent::Upper);
+        out.extend_from_slice(text.as_bytes());
+        return Ok(());
     }
     // `zval_get_string_func`, whose string is the caller's to release:
     // the decimal of an int, the bytes of a string, `1` for `true`, the
@@ -1123,13 +1151,13 @@ fn unmangled(out: &mut Vec<u8>, key: &[u8]) {
 /// ob_start(); $s = memory_get_usage(); memory_reset_peak_usage(); var_export(range(1, 40)); $p = memory_get_peak_usage() - $s; ob_end_clean(); echo "print ", $p, "\n";
 /// ```
 /// ```expect
-/// 0 584 272
+/// 0 584 280
 /// 1 4352 728
 /// 2 6528 2008
 /// 3 12544 3288
 /// 4 512 344
-/// 5 288 248
-/// 6 320 248
+/// 5 296 256
+/// 6 328 256
 /// print 5688
 /// ```
 #[php_function]
@@ -1301,7 +1329,7 @@ pub fn export(
 /// $k = new K; $m = memory_get_usage(); $v = var_export($k, true); echo memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect
-/// 440
+/// 456
 /// ```
 fn export_object(
     req: &mut Request,
@@ -1465,13 +1493,15 @@ const fn string_size(len: usize) -> usize {
 }
 
 /// `php_addcslashes(s, "'\\", 2)`'s string: `zend_string_safe_alloc(4,
-/// len, 0, 0)`, cut to what it wrote where that is shorter.
+/// len, 0, 0)`, cut to what it wrote where that is shorter, which
+/// php-8.5.12's `zend_string_truncate` asks as the bytes past the
+/// empty string's header (`Z/Zend/zend_string.h:343`).
 fn addcslashed(req: &mut Request, bytes: &[u8]) -> Result<(Emalloc, usize), Thrown> {
     let len = bytes.len();
     let wrote = len + bytes.iter().filter(|b| matches!(b, b'\'' | b'\\')).count();
     let mut block = Emalloc::new(req, 4 * len + string_size(0))?;
     if wrote < 4 * len {
-        block = block.resize(req, string_size(wrote))?;
+        block = block.resize(req, string_size(0) + wrote)?;
     }
     Ok((block, wrote))
 }
@@ -1493,7 +1523,7 @@ impl Escaped {
             // `zend_string_safe_alloc(count, str_len - needle_len, length)`,
             // then `zend_string_truncate` to what it wrote.
             let made = Emalloc::new(req, nuls * 11 + string_size(len));
-            match made.and_then(|made| made.resize(req, string_size(len + nuls * 11))) {
+            match made.and_then(|made| made.resize(req, string_size(0) + len + nuls * 11)) {
                 Ok(made) => made,
                 Err(thrown) => {
                     slashed.free(req);

@@ -608,7 +608,7 @@ impl Request {
     }
 
     /// The frame for `unit`'s main op array, `zend_vm_stack_push_call_frame`
-    /// and `i_init_code_execute_data` (`Z/Zend/zend_vm_def.h:6590`,
+    /// and `i_init_code_execute_data` (`Z/Zend/zend_vm_def.h:6591`,
     /// `Z/Zend/zend_execute.c:4504`), as `from` serves it
     /// ([`CodeFrom`]): its shape on the VM stack and its engine state,
     /// pushed and popped together and sharing a `FrameRef`, its table
@@ -1132,7 +1132,7 @@ impl Request {
     }
 
     /// `CACHED_PTR(num) == ce ? CACHED_PTR(num + sizeof(void *)) : NULL`
-    /// for a method call's pair (`Z/Zend/zend_vm_def.h:3670`, `:3778`):
+    /// for a method call's pair (`Z/Zend/zend_vm_def.h:3671`, `:3779`):
     /// the callee [`exec::Cached::ClassAndCallee`] at `slot` holds, with
     /// whether it takes `$this`, where it holds `class` and `frame`
     /// reads it back ([`Request::cached_in_scope`]). None otherwise,
@@ -1155,7 +1155,7 @@ impl Request {
         }
     }
 
-    /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3694`,
+    /// `CACHE_POLYMORPHIC_PTR(num, ce, fbc)` (`Z/Zend/zend_vm_def.h:3695`,
     /// `:3818`): `class` and the callee it answered into `slot`, with
     /// whether the callee takes `$this` ([`Request::takes_this`]) and
     /// `frame` as the frame [`Request::cached_callee`] reads it back from.
@@ -2236,8 +2236,8 @@ impl Request {
             self.release_nogc(value);
         }
         self.release_arguments(call);
-        if let Some(name) = annex.as_mut().and_then(|annex| annex.name.take()) {
-            self.release(Value::string(name));
+        if let Some(trampoline) = annex.as_mut().and_then(|annex| annex.trampoline.take()) {
+            self.release(Value::string(trampoline.name));
         }
         if let Some(receiver) = receiver {
             self.give_up_receiver(receiver);

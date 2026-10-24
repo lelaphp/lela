@@ -120,7 +120,7 @@ impl Interrupt {
 
     /// What a check that found it raised reads: it is cleared, and the
     /// seconds come back when the execution timer was what raised it,
-    /// both as php clears them (`Z/Zend/zend_vm_def.h:10526`, `:10537`).
+    /// both as php clears them (`Z/Zend/zend_vm_def.h:10537`, `:10551`).
     /// Clearing it acquires what the setter released, so the seconds the
     /// text names are the ones the timer was armed with; the loop's own
     /// test stays a relaxed load, because this is where the two threads

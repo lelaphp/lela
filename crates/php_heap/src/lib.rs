@@ -211,7 +211,7 @@ impl Heap {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// 2097152 2097152 128M
@@ -1131,37 +1131,40 @@ mod tests {
     }
 
     /// `zend_string_extend` over a string of one owner grows it where it
-    /// stands while the bin holds it, and over a shared one copies it and
-    /// leaves the other holder's bytes as they were.
+    /// stands while the bin holds php-8.5.12's size for it, `len` past
+    /// the empty string's aligned header (`Str::reallocation_size`), and
+    /// over a shared one copies it and leaves the other holder's bytes as
+    /// they were.
     #[test]
     fn an_append_extends_the_one_owner_s_string_and_copies_a_shared_one() {
         let _alone = alone();
         let mut nothing = Recorder { heap: Heap::new() };
-        let s = nothing.heap.string(b"abc").expect("the string \"abc\"");
-        let tail = nothing.heap.string(b"de").expect("the string \"de\"");
+        let s = nothing.heap.string(&[b'a'; 40]).expect("forty bytes");
+        let tail = nothing.heap.string(&[b'b'; 8]).expect("eight bytes");
         let start = nothing.heap.memory_usage(false);
-        // 24 + 3 + 1 and 24 + 5 + 1 both round into the 32-byte bin.
+        // 24 + 40 + 1 rounds into the 80-byte bin, and 32 + 48 fills it.
         let grown = nothing.heap.string_append(s, tail).expect("an append");
         assert!(
             grown.is_same(s),
             "a string with one owner moved within its bin"
         );
-        assert_eq!(grown.bytes(), b"abcde");
+        assert_eq!(grown.bytes().len(), 48);
         assert_eq!(nothing.heap.memory_usage(false), start);
-        // Ten bytes are the 40-byte bin: the slot moves up, once.
+        // 32 + 96 is the 128-byte bin: the slot moves up, once.
         let twice = nothing.heap.string_append(grown, grown).expect("an append");
-        assert_eq!(twice.bytes(), b"abcdeabcde");
-        assert_eq!(nothing.heap.memory_usage(false), start - 32 + 40);
+        assert_eq!(twice.bytes().len(), 96);
+        assert_eq!(nothing.heap.memory_usage(false), start - 80 + 128);
         twice.addref();
         let copy = nothing.heap.string_append(twice, tail).expect("an append");
         assert!(!copy.is_same(twice), "a shared string was written into");
-        assert_eq!(twice.bytes(), b"abcdeabcde");
+        assert_eq!(twice.bytes().len(), 96);
         assert_eq!(twice.refcount(), 1);
-        assert_eq!(copy.bytes(), b"abcdeabcdede");
+        assert_eq!(copy.bytes().len(), 104);
+        assert!(copy.bytes().ends_with(&[b'b'; 8]));
         for z in [twice, copy, tail] {
             Heap::release(&mut nothing, Zval::string(z));
         }
-        assert_eq!(nothing.heap.memory_usage(false), start - 32 - 32);
+        assert_eq!(nothing.heap.memory_usage(false), start - 80 - 40);
     }
 
     /// Strings of `len` bytes made until one meets the limit, that one

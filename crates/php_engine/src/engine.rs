@@ -2996,7 +2996,7 @@ fn core_default(name: &[u8]) -> Option<Vec<u8>> {
 /// $tried = '/^Warning: (.+) \(tried: (\S+) \(.+?\), (\/\S+) \(.+\)\) in Unknown on line 0$/m';
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-v'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
-/// preg_match($tried, $out, $m); echo "$m[1]: $m[2], $m[3]\n", str_contains($out, "\nPHP 8.5.9 (cli)") ? "version\n" : $out;
+/// preg_match($tried, $out, $m); echo "$m[1]: $m[2], $m[3]\n", str_contains($out, "\nPHP 8.5.12 (cli)") ? "version\n" : $out;
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/z/', '-d', 'extension=/a/q.so', '-d', 'zend_extension=y', '-d', 'zend_extension=/a/z.so', '-r', 'echo "ran\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// $out = stream_get_contents($pipes[1]); echo strstr(stream_get_contents($pipes[2]), ':  ', true), "\n", proc_close($p), "\n";
 /// preg_match_all($tried, $out, $m, PREG_SET_ORDER); foreach ($m as $w) { echo "$w[1]: $w[2], $w[3]\n"; } echo substr($out, strrpos(rtrim($out), "\n") + 1);

@@ -115,6 +115,7 @@ ffi::Node::adopt_into
 ffi::Node::alias_content_of
 ffi::Node::as_ptr
 ffi::Node::attr_value
+ffi::Node::attribute_decl_default
 ffi::Node::atype
 ffi::Node::base
 ffi::Node::children

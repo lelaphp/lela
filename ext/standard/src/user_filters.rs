@@ -405,6 +405,31 @@ impl StreamFilter for UserFilter {
     /// Cannot assign resource to property F::$stream of type int
     /// Cannot assign resource to property F::$stream of type int
     /// ```
+    ///
+    /// A stream whose resource is already closed, the flush its last
+    /// owner's release owes, is put there as `null`, not as the closed
+    /// resource (`Z/ext/standard/user_filters.c:159-163`, new at
+    /// php-8.5.12):
+    ///
+    /// ```php
+    /// class F extends php_user_filter {
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+    ///         if ($closing) var_dump($this->stream);
+    ///         return PSFS_PASS_ON;
+    ///     }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $m = fopen('php://memory', 'w');
+    /// stream_filter_append($m, 'f', STREAM_FILTER_WRITE);
+    /// fwrite($m, 'x');
+    /// $m = null;
+    /// echo "end\n";
+    /// ```
+    /// ```expect
+    /// NULL
+    /// end
+    /// ```
     fn filter(
         &mut self,
         req: &mut Request,
@@ -419,7 +444,11 @@ impl StreamFilter for UserFilter {
         };
         let has_stream = object.prop(req, b"stream").is_some();
         if has_stream {
-            let value = Owner::take(req, stream.as_value());
+            let value = if stream.resource().is_closed() {
+                Owner::null()
+            } else {
+                Owner::take(req, stream.as_value())
+            };
             // A property update that threw skips the call: php's warning
             // where input buckets remain, and `PSFS_ERR_FATAL` with the
             // throwable pending (`Z/ext/standard/user_filters.c:161`).

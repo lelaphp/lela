@@ -547,7 +547,7 @@ fn mark_ids_modified(req: &mut Request, object: PhpObject) {
 }
 
 /// `ce->name` of a class.
-fn class_name(req: &Request, class: ClassId) -> String {
+pub(crate) fn class_name(req: &Request, class: ClassId) -> String {
     req.symbols()
         .class_decl(class)
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
@@ -1216,7 +1216,8 @@ fn content_value(
     let content = match node.kind() {
         Kind::Text | Kind::CData | Kind::Pi | Kind::Comment => node.content(),
         Kind::Attribute => {
-            return Ok(PhpString::new(req, &node.attr_value())?.into_value());
+            // `Z/ext/dom/php_dom.c:2368`.
+            return Ok(PhpString::fast(req, &node.attr_value())?.into_value());
         }
         _ => node.get_content(),
     };
@@ -1228,16 +1229,40 @@ fn content_value(
 }
 
 /// `node_list_unlink`: every node of the list some object names unlinked,
-/// the rest walked into.
+/// the rest walked into, an entity reference passed over.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<!DOCTYPE r [<!ENTITY e "X">]><r a="a&e;b"/>');
+/// $at = $d->documentElement->getAttributeNode('a');
+/// [$first, $ref, $last] = [$at->firstChild, $at->childNodes[1], $at->lastChild];
+/// unset($at);
+/// $d->documentElement->setAttribute('a', 'new');
+/// var_dump($first->data, $ref->nodeName, $ref->parentNode, $last->data, $last->parentNode);
+/// $d->loadXML('<!DOCTYPE r [<!ENTITY e "X">]><r a="a&e;b"/>');
+/// $last = $d->documentElement->getAttributeNode('a')->lastChild;
+/// $d->documentElement->removeAttribute('a');
+/// var_dump($last->data, $last->parentNode);
+/// ```
+/// ```expect
+/// string(1) "a"
+/// string(1) "e"
+/// NULL
+/// string(1) "b"
+/// NULL
+/// string(1) "b"
+/// NULL
+/// ```
 fn node_list_unlink(first: Option<Node>) {
     let mut at = first;
     while let Some(node) = at {
+        // Read before the unlink clears it, so the walk goes on past a
+        // node with a wrapper; an entity reference is passed over, not
+        // the end of the list (php 8.5.12, GH-23331).
+        let next = node.next();
         if node.object().is_some() {
             node.unlink();
-        } else {
-            if node.kind() == Kind::EntityRef {
-                break;
-            }
+        } else if node.kind() != Kind::EntityRef {
             node_list_unlink(node.children());
             match node.kind() {
                 Kind::AttributeDecl
@@ -1249,7 +1274,7 @@ fn node_list_unlink(first: Option<Node>) {
                 _ => node_list_unlink(node.properties()),
             }
         }
-        at = node.next();
+        at = next;
     }
 }
 
@@ -1413,7 +1438,29 @@ fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) -> Resul
 /// namespace mapper where the document follows the standard and a copied
 /// document given private data of its own; a namespace node is
 /// `dom_object_namespace_node_clone_obj`'s, a fresh declaration node on
-/// the same element, which the clone keeps alive too.
+/// the same element, which the clone keeps alive too, or on none once
+/// that element's node is gone.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'xi');
+/// file_put_contents($f, '<?xml version="1.0"?><in/>');
+/// $d = new DOMDocument;
+/// $d->loadXML('<r xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file://' . $f . '" xmlns:l="urn:l"/></r>');
+/// $x = new DOMXPath($d);
+/// $x->registerNamespace('xi', 'http://www.w3.org/2001/XInclude');
+/// $ns = $x->query('namespace::l', $x->query('//xi:include')->item(0))->item(0);
+/// echo (clone $ns)->parentNode->nodeName, "\n";
+/// $d->xinclude();
+/// $c = clone $ns;
+/// var_dump($c->nodeName, $c->parentNode, $c->isConnected);
+/// unlink($f);
+/// ```
+/// ```expect
+/// xi:include
+/// string(7) "xmlns:l"
+/// NULL
+/// bool(false)
+/// ```
 fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let node = node_of(req, object);
     let mut payload = crate::object::Dom::default();
@@ -1429,13 +1476,17 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
             payload.extra = Extra::NamespaceParent(Owner::take(req, p));
         }
         let ns = n.ns();
-        if let Some(parent) = n.parent()
-            && let Some(cloned) = Node::fake_namespace_decl(
-                parent,
-                ns.and_then(Ns::href).as_deref(),
-                ns.and_then(Ns::prefix).as_deref(),
-            )
-        {
+        // The element is the one the object's owner names, which is none
+        // once a removal took its node away (`xinclude()` among them),
+        // never the declaration's own parent pointer, which can dangle
+        // then (php 8.5.12).
+        let parent = parent_obj.and_then(|p| node_of(req, p));
+        if let Some(cloned) = Node::fake_namespace_decl(
+            parent,
+            parent.map_or(n.doc(), Node::doc),
+            ns.and_then(Ns::href).as_deref(),
+            ns.and_then(Ns::prefix).as_deref(),
+        ) {
             let shared = shared_doc(req, object);
             payload.obj.attach(req, cloned, shared);
         }
@@ -1515,8 +1566,76 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
     Ok(clone)
 }
 
+/// What `xmlHasProp` or `xmlHasNsProp` answered, where it is an attribute
+/// the element carries: never the declaration (`XML_ATTRIBUTE_DECL`) of
+/// the default a DTD gives an element that does not carry it, which both
+/// answer too.
+pub(crate) fn carried(found: Option<Node>) -> Option<Node> {
+    found.filter(|a| a.kind() != Kind::AttributeDecl)
+}
+
+/// A walk php makes by recursing over the tree, asking at each level
+/// whether the stack has come down to its limit
+/// (`zend_call_stack_overflowed(EG(stack_limit))`): a level that finds it
+/// has does nothing more, the levels above go on, and the native raises
+/// the refusal once at the end, as php throws only the first.
+pub(crate) struct StackGuard<'r> {
+    req: &'r Request,
+    reached: bool,
+}
+
+impl<'r> StackGuard<'r> {
+    pub(crate) fn new(req: &'r Request) -> StackGuard<'r> {
+        StackGuard {
+            req,
+            reached: false,
+        }
+    }
+
+    /// Whether this level is past the limit, kept for [`StackGuard::reached`].
+    pub(crate) fn overflowed(&mut self) -> bool {
+        let over = self.req.limits().stack_overflowed();
+        self.reached |= over;
+        over
+    }
+
+    /// Whether any level was.
+    pub(crate) fn reached(&self) -> bool {
+        self.reached
+    }
+}
+
+/// What a walk over the tree refuses where it reached the stack's limit:
+/// php's sentence for that walk, which normalisation and comparison word
+/// apart.
+#[derive(Clone, Copy)]
+pub(crate) enum StackRefusal {
+    /// `dom_normalize_check_stack_limit`.
+    Normalize,
+    /// `php_dom_node_is_equal_node`.
+    Compare,
+}
+
+impl StackRefusal {
+    /// The walk's end: the refusal raised where a level reached the limit
+    /// (`StackGuard::reached`), once, as php throws only the first.
+    pub(crate) fn raise_if(self, req: &mut Request, reached: bool) -> Result<(), Thrown> {
+        if !reached {
+            return Ok(());
+        }
+        let message = match self {
+            StackRefusal::Normalize => "Maximum call stack size reached. Infinite recursion?",
+            StackRefusal::Compare => "Maximum call stack size reached.",
+        };
+        Err(throw_error(req, "Error", message))
+    }
+}
+
 /// `php_dom_normalize_legacy`.
-fn normalize(node: Node) {
+fn normalize(guard: &mut StackGuard<'_>, node: Node) {
+    if guard.overflowed() {
+        return;
+    }
     let mut child = node.children();
     while let Some(c) = child {
         match c.kind() {
@@ -1547,10 +1666,10 @@ fn normalize(node: Node) {
                 }
             }
             Kind::Element => {
-                normalize(c);
+                normalize(guard, c);
                 let mut attr = c.properties();
                 while let Some(a) = attr {
-                    normalize(a);
+                    normalize(guard, a);
                     attr = a.next();
                 }
             }
@@ -1575,7 +1694,12 @@ fn is_equal_attr(a: Node, b: Node) -> bool {
 /// `php_dom_node_is_equal_node`: the legacy classes compare an element's
 /// namespace declarations too, a document that follows the standard
 /// (`spec_compliant`) keeps none to compare.
-fn is_equal_node(a: Node, b: Node, spec_compliant: bool) -> bool {
+/// A level past the stack's limit answers unequal, its refusal raised by
+/// the native once the walk ends.
+fn is_equal_node(guard: &mut StackGuard<'_>, a: Node, b: Node, spec_compliant: bool) -> bool {
+    if guard.overflowed() {
+        return false;
+    }
     if a.kind() != b.kind() {
         return false;
     }
@@ -1584,9 +1708,9 @@ fn is_equal_node(a: Node, b: Node, spec_compliant: bool) -> bool {
             a.name() == b.name()
                 && ns_prefix_equal(a, b)
                 && ns_uri_equal(a, b)
-                && unordered_equal(a.properties(), b.properties(), spec_compliant)
+                && unordered_equal(guard, a.properties(), b.properties(), spec_compliant)
                 && (spec_compliant || unordered_ns_equal(a.ns_def(), b.ns_def()))
-                && ordered_equal(a.children(), b.children(), spec_compliant)
+                && ordered_equal(guard, a.children(), b.children(), spec_compliant)
         }
         Kind::Dtd => {
             a.name() == b.name()
@@ -1609,7 +1733,7 @@ fn is_equal_node(a: Node, b: Node, spec_compliant: bool) -> bool {
                 && a.ns().and_then(Ns::href) == b.ns().and_then(Ns::href)
         }
         Kind::Fragment | Kind::HtmlDocument | Kind::Document => {
-            ordered_equal(a.children(), b.children(), spec_compliant)
+            ordered_equal(guard, a.children(), b.children(), spec_compliant)
         }
         _ => false,
     }
@@ -1725,6 +1849,21 @@ fn validate_and_extract(
 /// where the legacy ones hand it to `xmlDOMWrapAdoptNode`. The `Err` is
 /// the memory limit, met where the mapper makes a
 /// declaration, after the subtree is the document's.
+///
+/// ```php
+/// foreach ([fn() => new DOMDocument, fn() => Dom\XMLDocument::createEmpty()] as $make) {
+///     $s = $make(); $e = $s->appendChild($s->createElement('e'));
+///     $e->setAttribute('a', 'victim');
+///     $v = $e->getAttributeNode('a')->firstChild;
+///     $t = $make(); $t->appendChild($t->adoptNode($e));
+///     unset($t, $s, $e);
+///     echo $v->data, ' ', get_class($v->ownerDocument), "\n";
+/// }
+/// ```
+/// ```expect
+/// victim DOMDocument
+/// victim Dom\XMLDocument
+/// ```
 fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> Result<bool, Thrown> {
     node.invalidate_document_lists();
     let old = node.doc();
@@ -1752,6 +1891,13 @@ fn adopt(req: &mut Request, doc_obj: PhpObject, node: Node, doc: Node) -> Result
                     let mut attr = n.properties();
                     while let Some(a) = attr {
                         a.transfer_document(req, shared);
+                        // An attribute's value nodes a wrapper names go
+                        // with it (php 8.5.12, GH-23352).
+                        let mut child = a.children();
+                        while let Some(c) = child {
+                            c.transfer_document(req, shared);
+                            child = c.next();
+                        }
                         attr = a.next();
                     }
                 }
@@ -1925,19 +2071,31 @@ fn ns_uri_equal(a: Node, b: Node) -> bool {
     a.ns().and_then(Ns::href) == b.ns().and_then(Ns::href)
 }
 
-fn ordered_equal(a: Option<Node>, b: Option<Node>, spec_compliant: bool) -> bool {
+fn ordered_equal(
+    guard: &mut StackGuard<'_>,
+    a: Option<Node>,
+    b: Option<Node>,
+    spec_compliant: bool,
+) -> bool {
     let (a, b) = (node_list(a), node_list(b));
     a.len() == b.len()
         && a.iter()
             .zip(b.iter())
-            .all(|(x, y)| is_equal_node(*x, *y, spec_compliant))
+            .all(|(x, y)| is_equal_node(guard, *x, *y, spec_compliant))
 }
 
-fn unordered_equal(a: Option<Node>, b: Option<Node>, spec_compliant: bool) -> bool {
+fn unordered_equal(
+    guard: &mut StackGuard<'_>,
+    a: Option<Node>,
+    b: Option<Node>,
+    spec_compliant: bool,
+) -> bool {
     let (a, b) = (node_list(a), node_list(b));
     a.len() == b.len()
-        && a.iter()
-            .all(|x| b.iter().any(|y| is_equal_node(*x, *y, spec_compliant)))
+        && a.iter().all(|x| {
+            b.iter()
+                .any(|y| is_equal_node(guard, *x, *y, spec_compliant))
+        })
 }
 
 fn unordered_ns_equal(a: Option<Ns>, b: Option<Ns>) -> bool {

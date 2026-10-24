@@ -41,7 +41,7 @@ pub(crate) const WSDL_CACHE_DISK: i64 = 0x1;
 /// `WSDL_CACHE_MEMORY`.
 pub(crate) const WSDL_CACHE_MEMORY: i64 = 0x2;
 /// `WSDL_CACHE_VERSION`.
-const WSDL_CACHE_VERSION: u8 = 0x10;
+const WSDL_CACHE_VERSION: u8 = 0x11;
 /// `WSDL_NO_STRING_MARKER`.
 const WSDL_NO_STRING_MARKER: u32 = 0x7fff_ffff;
 
@@ -283,9 +283,38 @@ fn serialize_header(key: &Key, h: &Header, nums: &Nums, out: &mut Out) {
     out.int(nums.ty(h.element));
 }
 
-/// `sdl_serialize_soap_body`. Where a header has header faults, php
-/// writes their count and then the body's headers again in their place,
-/// and so does this.
+/// `sdl_serialize_soap_body`: each header, then its header faults, as
+/// php 8.5.12 writes them; before, php wrote the body's headers again in
+/// their place, and the cache read them back as the faults
+/// (`WSDL_CACHE_VERSION` 0x11 tells the two layouts apart).
+///
+/// ```php
+/// $dir = '/tmp/xtask-witness-soap-headerfault-cache'; @mkdir($dir); chdir($dir);
+/// ini_set('soap.wsdl_cache_dir', $dir);
+/// $h = fn($p, $m) => "<soap:header namespace='urn:h' use='literal' part='$p' message='tns:$p'><soap:headerfault namespace='urn:h' use='literal' part='$m' message='tns:$m'/></soap:header>";
+/// $msg = fn($n) => "<message name='$n'><part name='$n' type='xsd:string'/></message>";
+/// file_put_contents('h.wsdl', "<definitions xmlns='http://schemas.xmlsoap.org/wsdl/' xmlns:soap='http://schemas.xmlsoap.org/wsdl/soap/' xmlns:tns='urn:h' xmlns:xsd='http://www.w3.org/2001/XMLSchema' targetNamespace='urn:h'>"
+///     . $msg('p') . $msg('auth') . $msg('trace') . $msg('authFault') . $msg('traceFault')
+///     . "<portType name='t'><operation name='op'><input message='tns:p'/></operation></portType>"
+///     . "<binding name='b' type='tns:t'><soap:binding style='rpc' transport='http://schemas.xmlsoap.org/soap/http'/><operation name='op'><soap:operation soapAction='op'/>"
+///     . "<input><soap:body namespace='urn:h' use='literal'/>" . $h('auth', 'authFault') . $h('trace', 'traceFault') . "</input></operation></binding>"
+///     . "<service name='s'><port binding='tns:b' name='p'><soap:address location='http://localhost/'/></port></service></definitions>");
+/// new SoapClient('h.wsdl', ['cache_wsdl' => WSDL_CACHE_DISK]);
+/// var_dump((new SoapClient('h.wsdl', ['cache_wsdl' => WSDL_CACHE_DISK]))->__getFunctions());
+/// foreach (glob("$dir/wsdl-*") as $f) {
+///     $b = file_get_contents($f);
+///     echo substr($b, 0, 4), ' ', ord($b[4]), ' ', strlen($b), ' ', md5(substr($b, 9)), "\n";
+///     unlink($f);
+/// }
+/// unlink('h.wsdl'); chdir('/'); rmdir($dir);
+/// ```
+/// ```expect
+/// array(1) {
+///   [0]=>
+///   string(18) "void op(string $p)"
+/// }
+/// wsdl 17 486 2ac69f482dee0c1b72cfe1dabf2c7bcf
+/// ```
 fn serialize_soap_body(body: &Body, nums: &Nums, out: &mut Out) {
     out.one(body.use_ as u8);
     if body.use_ == Use::Encoded {
@@ -298,10 +327,8 @@ fn serialize_soap_body(body: &Body, nums: &Nums, out: &mut Out) {
         serialize_header(key, h, nums, out);
         let j = h.headerfaults.as_ref().map_or(0, Table::len);
         out.len(j);
-        if j > 0 {
-            for (key2, h2) in headers.into_iter().flat_map(Table::iter) {
-                serialize_header(key2, h2, nums, out);
-            }
+        for (key2, h2) in h.headerfaults.iter().flat_map(Table::iter) {
+            serialize_header(key2, h2, nums, out);
         }
     }
 }

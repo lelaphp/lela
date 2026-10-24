@@ -812,6 +812,28 @@ impl SimpleXMLElement {
     /// NULL
     /// SimpleXMLElement::addChild(): Argument #1 ($qualifiedName) must not be empty
     /// ```
+    ///
+    /// The element answered is filtered by the prefix its namespace took,
+    /// so what is added under it lands in that namespace and reads back:
+    ///
+    /// ```php
+    /// $x = new SimpleXMLElement('<r xmlns:a="urn:a"/>');
+    /// $c = $x->addChild('kid', null, 'urn:a');
+    /// $c->addChild('inner', 'v');
+    /// $c->addAttribute('id', '8');
+    /// echo $x->asXML();
+    /// var_dump((string) $c->inner, isset($c['id']));
+    /// $e = (new SimpleXMLElement('<r/>'))->addChild('a:kid');
+    /// $e->addChild('inner', 'z');
+    /// var_dump(isset($e->inner));
+    /// ```
+    /// ```expect
+    /// <?xml version="1.0"?>
+    /// <r xmlns:a="urn:a"><a:kid id="8"><a:inner>v</a:inner></a:kid></r>
+    /// string(1) "v"
+    /// bool(false)
+    /// bool(true)
+    /// ```
     #[php(tentative)]
     fn addChild(
         req: &mut Request,
@@ -844,6 +866,7 @@ impl SimpleXMLElement {
         let Some(made) = node.new_child(None, &local, content) else {
             return Ok(None);
         };
+        let named_ns = prefix.is_some() || namespace.is_some();
         if let Some(uri) = namespace {
             let uri = c_name(uri.as_bytes());
             if uri.is_empty() {
@@ -856,7 +879,15 @@ impl SimpleXMLElement {
                 made.set_ns(ns);
             }
         }
-        let ns = Ns::of(prefix.as_deref(), false);
+        // The element answered filters by the prefix its namespace took,
+        // as a prefix (php 8.5.12), so what is added under it lands in its
+        // namespace and reads back through it.
+        let taken = if named_ns {
+            made.ns().and_then(php_ext_libxml::ffi::Ns::prefix)
+        } else {
+            None
+        };
+        let ns = Ns::of(taken.as_deref(), true);
         wrap(req, this, made, Walk::Node, ns).map(|o| Some(o.into_instance()))
     }
 
@@ -945,7 +976,8 @@ impl SimpleXMLElement {
         let view = View::of(req, this.object());
         let base = view.node(req)?;
         let name = view.first(base).map(Node::name).unwrap_or_default();
-        PhpString::new(req, &name)
+        // `zend_string_finit_fast` (`Z/ext/simplexml/simplexml.c:1677`).
+        PhpString::fast(req, &name)
     }
 
     /// `__toString(): string`: the text of the walk's first node.

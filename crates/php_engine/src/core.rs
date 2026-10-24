@@ -102,7 +102,7 @@ pub(crate) fn extension() -> Extension {
 ///
 /// Core
 ///
-/// PHP Version => 8.5.9
+/// PHP Version => 8.5.12
 ///
 /// Directive => Local Value => Master Value
 /// highlight.comment => <span style="color: #FF8000">#FF8000</span> => <span style="color: #FF8000">#FF8000</span>

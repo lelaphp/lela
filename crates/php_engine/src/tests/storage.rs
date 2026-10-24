@@ -334,12 +334,13 @@ fn a_fresh_string_grows_on_erealloc_s_schedule() {
 }
 
 /// A length set in place keeps the grown allocation; a truncate moves
-/// the string to the bin its length needs.
+/// the string to the bin php-8.5.12's truncate asks for, its length past
+/// the empty string's aligned header.
 #[test]
 fn a_set_length_keeps_its_allocation_and_a_truncate_does_not() {
     assert_eq!(
         clean("<?php echo string_cut(false), \"\\n\", string_cut(true);"),
-        "4096 4096 true 0\n4096 32 true 0"
+        "4096 4096 true 0\n4096 40 true 0"
     );
 }
 

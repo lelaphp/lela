@@ -133,7 +133,18 @@ pub(super) fn unit_length(pattern: &Pattern, subject: &[u8], at: usize) -> usize
 }
 
 /// The bytes of `subject` between two offsets as a new string,
-/// `ZVAL_STRINGL_FAST`.
+/// `populate_match_value_str`'s `ZVAL_STRINGL_FAST`
+/// (`Z/ext/pcre/php_pcre.c:951-954`), sized as php-8.5.12 sizes it
+/// ([`PhpString::fast`]).
+///
+/// ```php
+/// echo "groups\n"; $s = str_repeat('abcdefgh', 4);
+/// $m = memory_get_usage(); preg_match('/(a.{6})(.{7})/', $s, $g); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// groups
+/// 376
+/// ```
 pub(super) fn piece(
     req: &mut Request,
     subject: &[u8],
@@ -141,7 +152,7 @@ pub(super) fn piece(
     end: usize,
 ) -> Result<Owner<Value>, Thrown> {
     let bytes = subject.get(start..end).unwrap_or_default();
-    Ok(PhpString::new(req, bytes)?.into_value())
+    Ok(PhpString::fast(req, bytes)?.into_value())
 }
 
 /// `populate_match_value`: the group's text, or for one that did not

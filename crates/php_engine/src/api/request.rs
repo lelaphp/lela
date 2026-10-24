@@ -173,11 +173,11 @@ pub use variables::{BodyLimits, Input};
 pub use zone::Zone;
 
 pub(crate) use hooks::parent_hook_trampolines;
-pub(crate) use lazy::Strategy;
+pub(crate) use lazy::{RawWrite, Strategy};
 pub(crate) use preload::{Keyed, Named, Preloaded, Preloading};
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
-pub const PHP_VERSION: &str = "8.5.9";
+pub const PHP_VERSION: &str = "8.5.12";
 
 /// A linked extension, by identity: its `module_number`, where its
 /// `zend_module_entry` stands in `module_registry`: `Core` zero, as

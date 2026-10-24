@@ -1615,19 +1615,37 @@ fn nth_key<V>(t: &Table<V>, n: usize) -> Option<Key> {
 /// expanded into `ht`, each attribute of the group fixed up and copied
 /// under its key, each reference in the group expanded in turn and
 /// dropped from the group.
-fn schema_attributegroup_fixup(ctx: &mut Ctx, attr: &Attribute, ht: &mut Table<Attribute>) {
+fn schema_attributegroup_fixup(
+    ctx: &mut Ctx,
+    attr: &Attribute,
+    ht: &mut Table<Attribute>,
+) -> Res<()> {
     let Some(r) = attr.ref_.as_deref() else {
-        return;
+        return Ok(());
     };
     let Some(id) = ctx
         .attribute_groups
         .as_ref()
         .and_then(|g| schema_find_by_ref(g, r).and_then(|k| g.get(&k).copied()))
     else {
-        return;
+        return Ok(());
     };
+    if !ctx.fixup_in_progress.insert(id) {
+        return Err(schema_error(&format!(
+            "recursive attributeGroup 'ref' attribute '{}'",
+            lossy(r)
+        )));
+    }
+    let expanded = expand_attribute_group(ctx, id, ht);
+    ctx.fixup_in_progress.remove(&id);
+    expanded
+}
+
+/// The body of [`schema_attributegroup_fixup`] over the group `id`, while
+/// it is marked in progress.
+fn expand_attribute_group(ctx: &mut Ctx, id: TypeId, ht: &mut Table<Attribute>) -> Res<()> {
     let Some(mut attrs) = ctx.sdl.ty_mut(id).and_then(|t| t.attributes.take()) else {
-        return;
+        return Ok(());
     };
     let mut n = 0;
     while let Some(key) = nth_key(&attrs, n) {
@@ -1640,13 +1658,17 @@ fn schema_attributegroup_fixup(ctx: &mut Ctx, attr: &Attribute, ht: &mut Table<A
             ht.add(key, tmp_attr);
             n += 1;
         } else {
-            schema_attributegroup_fixup(ctx, &tmp_attr, ht);
+            let expanded = schema_attributegroup_fixup(ctx, &tmp_attr, ht);
             attrs.remove(&key);
+            // A refusal ends the whole parse, as php's `E_ERROR` does, so
+            // the attributes taken out are not put back.
+            expanded?;
         }
     }
     if let Some(t) = ctx.sdl.ty_mut(id) {
         t.attributes = Some(attrs);
     }
+    Ok(())
 }
 
 /// `schema_content_model_fixup`: a group reference resolved, and a
@@ -1661,6 +1683,12 @@ fn schema_content_model_fixup(ctx: &mut Ctx, model: &mut ContentModel) -> Res<()
             let found = ctx.sdl.groups.as_ref().and_then(|g| g.get_str(r).copied());
             match found {
                 Some(id) => {
+                    if ctx.fixup_in_progress.contains(&id) {
+                        return Err(schema_error(&format!(
+                            "recursive group 'ref' attribute '{}'",
+                            lossy(r)
+                        )));
+                    }
                     schema_type_fixup(ctx, id)?;
                     model.kind = ContentKind::Group;
                     model.u = Content::Group(id);
@@ -1698,8 +1726,31 @@ fn schema_content_model_fixup(ctx: &mut Ctx, model: &mut ContentModel) -> Res<()
 
 /// `schema_type_fixup`: an element `ref` resolved, then the type's
 /// elements, its model and its attributes, an attribute group reference
-/// expanded in place of itself.
+/// expanded in place of itself; the type marked in progress meanwhile,
+/// so a group or an attribute group that names itself is refused rather
+/// than expanded into itself.
+///
+/// ```php
+/// foreach (['<group name="A"><sequence><element name="a" type="string"/><group ref="tns:A"/></sequence></group><element name="root"><complexType><group ref="tns:A"/></complexType></element>',
+///           '<attributeGroup name="A"><attribute name="a" type="string"/><attributeGroup ref="tns:A"/></attributeGroup><element name="root"><complexType><attributeGroup ref="tns:A"/></complexType></element>'] as $schema) {
+///     $wsdl = '<definitions xmlns="http://schemas.xmlsoap.org/wsdl/" xmlns:tns="urn:test"><types><xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema" targetNamespace="urn:test" xmlns="http://www.w3.org/2001/XMLSchema">' . $schema . '</xsd:schema></types></definitions>';
+///     try { new SoapClient('data://text/plain,' . urlencode($wsdl), ['cache_wsdl' => WSDL_CACHE_NONE]); echo "parsed\n"; }
+///     catch (SoapFault $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// SOAP-ERROR: Parsing Schema: recursive group 'ref' attribute 'urn:test:A'
+/// SOAP-ERROR: Parsing Schema: recursive attributeGroup 'ref' attribute 'urn:test:A'
+/// ```
 fn schema_type_fixup(ctx: &mut Ctx, id: TypeId) -> Res<()> {
+    ctx.fixup_in_progress.insert(id);
+    let fixed = type_fixup(ctx, id);
+    ctx.fixup_in_progress.remove(&id);
+    fixed
+}
+
+/// The body of [`schema_type_fixup`].
+fn type_fixup(ctx: &mut Ctx, id: TypeId) -> Res<()> {
     let Some(r) = ctx.sdl.ty(id).and_then(|t| t.ref_.clone()) else {
         return fixup_parts(ctx, id);
     };
@@ -1775,8 +1826,11 @@ fn fixup_parts(ctx: &mut Ctx, id: TypeId) -> Res<()> {
             attrs.update(key, attr);
             n += 1;
         } else {
-            schema_attributegroup_fixup(ctx, &attr, &mut attrs);
+            let expanded = schema_attributegroup_fixup(ctx, &attr, &mut attrs);
             attrs.remove(&key);
+            // A refusal ends the whole parse, as php's `E_ERROR` does, so
+            // the attributes taken out are not put back.
+            expanded?;
         }
     }
     if let Some(t) = ctx.sdl.ty_mut(id) {
