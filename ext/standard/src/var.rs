@@ -786,7 +786,8 @@ fn returned_string(
 /// `print_hash` does ([`Printed`]), each walked with a foreach walk, a
 /// reference is what the cell holds, a float is
 /// `smart_str_append_double` at `precision`, which raises nothing for a
-/// NAN since 8.5.12 (GH-23662), and everything else is
+/// NAN since 8.5.12 (`Z/Zend/zend.c:600-602`, GH-23662), and everything
+/// else is
 /// `zval_get_string`, which is `1` for `true` and nothing at all for
 /// `false` and `null`.
 ///
