@@ -285,8 +285,9 @@ impl Handle {
         let mut conn = slot_of(req.state::<State>(), self)?.conn.take()?;
         conn.stats.enabled = enabled;
         let answered = f(req, &mut conn);
-        flush(req, &mut conn);
-        if let Some(slot) = slot_of(req.state::<State>(), self) {
+        let state = req.state::<State>();
+        flush(state, &mut conn);
+        if let Some(slot) = slot_of(state, self) {
             slot.conn = Some(conn);
         }
         Some(answered)
@@ -340,7 +341,7 @@ impl Handle {
         };
         if let Some(mut conn) = taken {
             conn.send_close(req).ok();
-            flush(req, &mut conn);
+            flush(req.state::<State>(), &mut conn);
             conn.dtor(req);
         }
     }
@@ -387,8 +388,7 @@ fn slot_of(state: &mut State, handle: Handle) -> Option<&mut Slot> {
 }
 
 /// What a connection counted for the request's statistics added there.
-fn flush(req: &mut Request, conn: &mut ConnData) {
-    let state = req.state::<State>();
+fn flush(state: &mut State, conn: &mut ConnData) {
     state.stats.resize(stats::COUNT, 0);
     conn.stats.flush(&mut state.stats);
 }
