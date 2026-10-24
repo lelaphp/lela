@@ -799,6 +799,12 @@ impl Walk for Parts {
             object.give_up(req);
         }
     }
+
+    /// `ZVAL_UNDEF(&wrapping_obj)` (php 8.5.12): the parts iterator is
+    /// no cycle with itself.
+    fn wraps_object(&self) -> bool {
+        false
+    }
 }
 
 impl Parts {
