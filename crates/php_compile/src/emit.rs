@@ -2246,10 +2246,7 @@ impl<'a> Emit<'a> {
     /// it holds interned, a persistent constant's value and
     /// `CG(compiled_filename)`, which `zend_set_compiled_filename` interns.
     fn interned_string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
-        let outer = self.strings.interning(true);
-        let made = self.string(bytes);
-        self.strings.interning(outer);
-        made
+        self.interning(true, |this| this.string(bytes))
     }
 
     /// [`Self::string`] of a declaration's own name or lowered key, one
@@ -4484,7 +4481,7 @@ impl<'a> Emit<'a> {
             let slot = u32::try_from(self.static_vars.len()).unwrap_or(u32::MAX) << 3;
             let folded = match init {
                 None => Some(Zval::null()),
-                Some(init) => self.uninterned(|this| this.eval_const(init))?,
+                Some(init) => self.interning(false, |this| this.eval_const(init))?,
             };
             self.static_vars.push(BoundVar {
                 name: Name(name.into()),
@@ -5536,13 +5533,14 @@ impl<'a> Emit<'a> {
         })
     }
 
-    /// `f` with what the home lays not interned ([`Intern::interning`]),
-    /// as php's scanner and fold leave a string no interning asks for: a
-    /// constant array's elements and keys, `in_array`'s haystack and a
-    /// `static`'s initial value cost their strings where opcache holds
-    /// the bytes, as the program below does, where a string an opline
-    /// names costs none (the program under the recipe's `TMPDIR`, written into the past
-    /// so opcache keeps it, read after the heap is churned):
+    /// `f` with what the home lays interned or not as `on` says
+    /// ([`Intern::interning`]), off as php's scanner and fold leave a
+    /// string no interning asks for: a constant array's elements and
+    /// keys, `in_array`'s haystack and a `static`'s initial value cost
+    /// their strings where opcache holds the bytes, as the program below
+    /// does, where a string an opline names costs none (the program under
+    /// the recipe's `TMPDIR`, written into the past so opcache keeps it,
+    /// read after the heap is churned):
     ///
     /// ```php
     /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
@@ -5564,8 +5562,8 @@ impl<'a> Emit<'a> {
     /// 712 704 816 0
     /// [{"abcdefghijk1":"abcdefghijk2","7":["abcdefghijk5"]},"abcdefghijk3",true,"abcdefghijk1","abcdefghijk1"]
     /// ```
-    fn uninterned<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
-        let outer = self.strings.interning(false);
+    fn interning<T>(&mut self, on: bool, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.strings.interning(on);
         let done = f(self);
         self.strings.interning(outer);
         done
@@ -7241,7 +7239,7 @@ impl<'a> Emit<'a> {
                 }
             };
             self.folded_string = None;
-            let value = self.uninterned(|this| this.dynamic_const_expr(expr))?;
+            let value = self.interning(false, |this| this.dynamic_const_expr(expr))?;
             arguments.push(AttributeArgument {
                 name: named,
                 value: self.held_value(value),
@@ -8679,7 +8677,7 @@ impl<'a> Emit<'a> {
                         }
                     });
                 }
-                if let Some(array) = self.uninterned(|this| this.folded_array(&items))? {
+                if let Some(array) = self.interning(false, |this| this.folded_array(&items))? {
                     return Ok(ConstExpr::UnitValue(array));
                 }
                 Ok(ConstExpr::Array {
@@ -11508,7 +11506,7 @@ impl<'a> Emit<'a> {
         }
         let key = match (key, case) {
             (Key::Str(s), _) if !value.is_refcounted() => {
-                match self.uninterned(|this| this.strings.intern(s.bytes())) {
+                match self.interning(false, |this| this.strings.intern(s.bytes())) {
                     Ok(own) => Key::Str(own),
                     Err(fatal) => return Err(self.fatal_of(fatal)),
                 }
@@ -11782,7 +11780,8 @@ impl<'a> Emit<'a> {
                         self.update_jump_target_to_next(jump);
                     }
                     if table.is_some()
-                        && let Some(value) = self.uninterned(|this| this.constant_of(*cond))?
+                        && let Some(value) =
+                            self.interning(false, |this| this.constant_of(*cond))?
                     {
                         self.table_add(table, CaseValue::Folded(value))?;
                     }
@@ -17344,7 +17343,7 @@ impl<'a> Emit<'a> {
         elements: &[NodeId<tree::ArrayElement>],
     ) -> Result<Option<Made>, CompileError> {
         let mark = self.claims.mark();
-        let Some(entries) = self.uninterned(|this| this.constant_entries(elements))? else {
+        let Some(entries) = self.interning(false, |this| this.constant_entries(elements))? else {
             return Ok(None);
         };
         let claims = (self.claims.since(mark).into_iter()).map(|(_, made)| made);
@@ -17365,7 +17364,7 @@ impl<'a> Emit<'a> {
             return Ok(None);
         };
         let elements = self.list(self.parsed.tree[id].array_elements);
-        self.uninterned(|this| this.constant_entries(elements))
+        self.interning(false, |this| this.constant_entries(elements))
     }
 
     /// [`Self::constant_array`]'s entries before they are laid down: the
