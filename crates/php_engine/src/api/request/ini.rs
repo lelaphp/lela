@@ -147,7 +147,8 @@ impl IniState {
         self.changed.iter_mut().find(|(held, ..)| *held == at)
     }
 
-    /// The entry at `at` the request changed no longer: what it held.
+    /// The entry at `at` taken out of the entries the request changed:
+    /// what it held.
     fn unchange(&mut self, at: DirectiveAt) -> Option<IniChanged> {
         let found = self.changed.iter().position(|(held, ..)| *held == at)?;
         Some(self.changed.remove(found))
@@ -525,6 +526,20 @@ impl Request {
         self.ini.changed(self.shared.ini.at(name)?)
     }
 
+    /// The value in force of the entry `name`, `None` where it has none
+    /// (php's `NULL`), beside the request string it is where it is one:
+    /// the request's where it changed the entry, else the master value,
+    /// found by one look-up of the engine's table; nothing where php has
+    /// no such entry.
+    fn ini_in_force(&self, name: &[u8]) -> Option<(&Option<Vec<u8>>, Option<PhpString>)> {
+        let table = &self.shared.ini;
+        let at = table.at(name)?;
+        match self.ini.changed(at) {
+            Some((_, value, string)) => Some((value, *string)),
+            None => table.row(at).map(|row| (&row.value, None)),
+        }
+    }
+
     /// `ZVAL_SET_INI_STR` over the value in force of the entry `name`,
     /// as `ini_get()` hands it back: the string the entry holds, one more
     /// owner of the request's string a changed entry took, the engine's
@@ -532,19 +547,12 @@ impl Request {
     /// and a string of the request's only for bytes neither holds; `None`
     /// where php has no such entry. The `Err` is the memory limit.
     pub(crate) fn ini_string(&mut self, name: &[u8]) -> Result<Option<Owner<PhpString>>, Thrown> {
-        let Some(at) = self.shared.ini.at(name) else {
+        let Some((value, string)) = self.ini_in_force(name) else {
             return Ok(None);
         };
-        let (held, bytes) = match self.ini.changed(at) {
-            Some((_, value, string)) => (*string, value.as_deref()),
-            None => (
-                None,
-                self.shared.ini.row(at).and_then(|row| row.value.as_deref()),
-            ),
-        };
-        let bytes = bytes.unwrap_or_default();
-        if let Some(held) = held.or_else(|| self.held_name(bytes)) {
-            return Ok(Some(Owner::take(self, held)));
+        let bytes = value.as_deref().unwrap_or_default();
+        if let Some(string) = string.or_else(|| self.held_name(bytes)) {
+            return Ok(Some(Owner::take(self, string)));
         }
         // Copied first: the bytes stand in the request the string is made in.
         let bytes = bytes.to_vec();
@@ -1310,21 +1318,8 @@ impl<'r> Ini<&'r Request> {
     /// value (php's `NULL`); `None` where php has no such entry.
     #[must_use]
     pub fn get(self, name: &[u8]) -> Option<&'r [u8]> {
-        self.held(name)
-            .map(|value| value.as_deref().unwrap_or_default())
-    }
-
-    /// The value in force of the entry `name` as the request holds it,
-    /// `None` where it has none (php's `NULL`): the request's where it
-    /// changed it, else the master value, found by one look-up of the
-    /// engine's table; no value held where php has no such entry.
-    fn held(self, name: &[u8]) -> Option<&'r Option<Vec<u8>>> {
-        let table = &self.0.shared.ini;
-        let at = table.at(name)?;
-        match self.0.ini.changed(at) {
-            Some((_, value, _)) => Some(value),
-            None => table.row(at).map(|row| &row.value),
-        }
+        let (value, _) = self.0.ini_in_force(name)?;
+        Some(value.as_deref().unwrap_or_default())
     }
 
     /// `INI_STR`, `zend_ini_string_ex`: the entry's value in force as php
@@ -1345,7 +1340,7 @@ impl<'r> Ini<&'r Request> {
     /// ```
     #[must_use]
     pub fn value(self, name: &[u8]) -> Option<&'r [u8]> {
-        self.held(name)?.as_deref()
+        self.0.ini_in_force(name)?.0.as_deref()
     }
 
     /// `EG(ini_directives)`, what `ini_get_all()` walks: the engine's

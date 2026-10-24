@@ -1,8 +1,9 @@
 //! `EG(ini_directives)` as the engine holds it: every entry in
 //! registration order, the engine's own first and then each extension's
 //! in bundle order, filed by name as php's `HashTable` files them, so an
-//! entry is found by one hash and not by a walk of the table. Laid as
-//! the engine is built and altered only while no request can see it
+//! entry is found by one hash and not by a walk of the table. Laid and
+//! filed as the engine is built, its values altered only while no
+//! request can see it
 //! ([`crate::engine::Engine::alter_master_ini`]); immutable and shared
 //! by every request after (design §3.4).
 
@@ -117,19 +118,12 @@ impl IniTable {
             .map(|row| row.value.as_deref().unwrap_or_default())
     }
 
-    /// `zend_hash_update`: the entry `name` takes `value` where it
-    /// stands, or is added last, an entry of the core table.
-    pub(crate) fn set(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
-        if let Some(row) = self.find_mut(&name) {
+    /// The master value of the entry `name` set to `value` where it
+    /// stands; a name the table holds no entry under is none, as
+    /// `zend_alter_ini_entry` finds none, so the names are filed once.
+    pub(crate) fn set(&mut self, name: &[u8], value: Option<Vec<u8>>) {
+        if let Some(row) = self.find_mut(name) {
             row.value = value;
-            return;
         }
-        self.rows.push(Directive {
-            name,
-            value,
-            declared: None,
-            on_modify: None,
-        });
-        self.names = Names::over(&self.rows);
     }
 }

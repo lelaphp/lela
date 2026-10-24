@@ -2133,9 +2133,9 @@ impl Shared {
     /// The master value of the entry `name` set to `value` where it
     /// stands, which keeps the table in registration order, and the
     /// typed entries and the realpath cache's `CWDG` values with it.
-    fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
-        self.typed_ini.update(&name, value.as_deref());
-        self.realpath_cache.update(&name, value.as_deref());
+    fn set_ini_default(&mut self, name: &[u8], value: Option<Vec<u8>>) {
+        self.typed_ini.update(name, value.as_deref());
+        self.realpath_cache.update(name, value.as_deref());
         self.ini.set(name, value);
     }
 
@@ -3617,9 +3617,7 @@ impl EngineBuilder {
             if Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected {
                 continue;
             }
-            if ini.find(&name).is_some() {
-                ini.set(name, Some(value));
-            }
+            ini.set(&name, Some(value));
         }
         let on = |name: &str| {
             (ini.find(name.as_bytes()))
@@ -4652,9 +4650,10 @@ impl Engine {
         // finds the host's value for each: the handlers meet the values
         // in declaration order, whatever order the host set them in.
         let declared_at = |name: &[u8]| {
-            (self.shared.ini.find(name))
+            let declared = (self.shared.ini.find(name))
                 .and_then(|row| row.declared)
-                .map_or((u32::MAX, usize::MAX), |(extension, at)| (extension.0, at))
+                .map(|(extension, at)| (extension.0, at));
+            (declared.is_none(), declared)
         };
         held.sort_by_key(|(name, _)| declared_at(name));
         let sapi_name = self.shared.host;
@@ -4688,7 +4687,7 @@ impl Engine {
         // What the startup stage took is the master value and the startup
         // ini alike.
         for (name, value) in taken {
-            shared.set_ini_default(name, value);
+            shared.set_ini_default(&name, value);
         }
         (shared.realpath_cache).engine_startup(shared.ini_default(b"open_basedir"));
         shared.startup_errors.extend_from_slice(&failed);
@@ -4846,7 +4845,7 @@ impl Engine {
                     if name == b"disable_functions" {
                         shared.disable_functions(&value);
                     }
-                    shared.set_ini_default(name, Some(value));
+                    shared.set_ini_default(&name, Some(value));
                 }
                 shared.locked.extend(locked);
                 Ok(written)
