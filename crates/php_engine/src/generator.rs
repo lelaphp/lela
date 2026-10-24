@@ -1111,25 +1111,48 @@ fn drop_values(req: &mut Request, generator: PhpObject) {
 ///
 /// A delegate that has already yielded is not advanced by the first
 /// resumption of the generator that just delegated to it, whichever
-/// generator of a shared tree that is: the one resumed, or one in the
-/// middle that delegates again (GH-15375, GH-23301):
+/// generator of a shared tree that is: php 8.5.12 keeps that one as the
+/// `delegator` (`:771`), reads and clears its `ZEND_GENERATOR_DO_INIT`
+/// at each turn (`:779-785`), and moves it to the generator that has
+/// just reached a `yield from` (`:893-897`) and back to the one resumed
+/// after a throwable or a delegate's return (`:887`, `:898-902`)
+/// (GH-15375, GH-23301). A middle generator that delegates again yields
+/// its delegate's value once:
 ///
 /// ```php
 /// function inner() { yield "B"; }
 /// function middle() { yield "A"; yield from inner(); yield "C"; yield from ["D"]; }
 /// function delegate($gen) { yield from $gen; }
 /// foreach (delegate(middle()) as $value) { echo $value; }
+/// ```
+/// ```expect
+/// ABCD
+/// ```
+///
+/// A `next()` on the middle of a shared tree advances its delegate once:
+///
+/// ```php
+/// function inner() { yield "B"; }
+/// function delegate($gen) { yield from $gen; }
 /// function tail($inner) { yield from $inner; yield from ["E"]; }
 /// $middle = tail(inner()); $outer = delegate($middle);
-/// echo "\n", $outer->current(); $middle->next(); echo $middle->current(), "\n";
+/// echo $outer->current(); $middle->next(); echo $middle->current(), "\n";
+/// ```
+/// ```expect
+/// BE
+/// ```
+///
+/// A leaf another delegation had primed is not advanced by the read
+/// that primes the chain through it:
+///
+/// ```php
+/// function delegate($gen) { yield from $gen; }
 /// function counter() { yield 1; yield 2; }
 /// $gen1 = counter(); $gen1->valid();
 /// $gen2 = delegate($gen1); $gen3 = delegate($gen2);
 /// var_dump($gen3->current()); $gen2->next(); var_dump($gen2->current()); $gen2->next(); var_dump($gen2->current());
 /// ```
 /// ```expect
-/// ABCD
-/// BE
 /// int(1)
 /// int(2)
 /// NULL
@@ -1156,11 +1179,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
     if !has_frame(req, generator) {
         return Ok(());
     }
-    // The generator whose `yield from` this turn serves, whose first
-    // resumption since it delegated (`ZEND_GENERATOR_DO_INIT`) must not
-    // advance a delegate that has already yielded: the one resumed, or
-    // the one in the middle of the tree that has just delegated again
-    // (php 8.5.12, GH-15375, GH-23301).
+    // php's `delegator`, as the rustdoc above says.
     let mut delegator = orig;
     loop {
         if is_running(req, generator) {
