@@ -226,6 +226,10 @@ pub struct Res {
     binary: bool,
     /// `lengths`, of the last row fetched from text rows.
     lengths: Vec<u64>,
+    /// `row_data`, the values a row is decoded into, its room made once
+    /// for the set's columns and handed back empty by what took the
+    /// values ([`Res::recycle`]), so a fetch allocates no row of its own.
+    row_data: Row,
     /// The statement whose server-side cursor a statement's unbuffered
     /// rows are read from, row by row with `COM_STMT_FETCH`
     /// (`mysqlnd_fetch_stmt_row_cursor` in place of the unbuffered
@@ -258,6 +262,7 @@ impl Res {
             rows: Rows::None,
             binary: false,
             lengths: Vec::new(),
+            row_data: Vec::new(),
             cursor: None,
             cursor_status: (0, 0),
             pool,
@@ -405,7 +410,9 @@ impl Res {
             RowPacket::Row(chunk) => {
                 if decode {
                     let bytes = self.pool.bytes(chunk);
-                    let decoded = decode_row(req, conn, self.binary, &self.fields, bytes, native)?;
+                    let into = std::mem::take(&mut self.row_data);
+                    let decoded =
+                        decode_row(req, conn, self.binary, &self.fields, bytes, native, into)?;
                     match decoded {
                         Ok(values) => row = Some(values),
                         Err(()) => return Ok((None, false, last)),
@@ -774,7 +781,8 @@ impl Res {
             return Ok(Ok(Some(Vec::new())));
         }
         let bytes = at.map_or(&[][..], |chunk| self.pool.bytes(chunk));
-        let decoded = decode_row(req, conn, self.binary, &self.fields, bytes, native)?;
+        let into = std::mem::take(&mut self.row_data);
+        let decoded = decode_row(req, conn, self.binary, &self.fields, bytes, native, into)?;
         self.keep_lengths(&decoded);
         Ok(decoded.map(Some))
     }
@@ -806,7 +814,8 @@ impl Res {
                     return Ok(Ok(Some(Vec::new())));
                 }
                 let bytes = self.pool.bytes(chunk);
-                let decoded = decode_row(req, conn, binary, &self.fields, bytes, native)?;
+                let into = std::mem::take(&mut self.row_data);
+                let decoded = decode_row(req, conn, binary, &self.fields, bytes, native, into)?;
                 self.keep_lengths(&decoded);
                 Ok(decoded.map(Some))
             }
@@ -840,6 +849,39 @@ impl Res {
                 *eof = true;
                 Ok(Err(()))
             }
+        }
+    }
+
+    /// A fetched row whose values were all taken, handed back as the
+    /// room the next row is decoded into; one that still holds values
+    /// is not taken, so none is dropped without being given up. The
+    /// room is reused, never the values: each row fetched is its own,
+    /// buffered, unbuffered or a statement's:
+    ///
+    /// ```php
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $q = "SELECT 1 AS a, 'x' AS b UNION ALL SELECT 2, NULL UNION ALL SELECT 3, 'zz'";
+    /// $r = mysqli_query($l, $q);
+    /// echo json_encode([mysqli_fetch_row($r), mysqli_fetch_assoc($r), $r->fetch_object()]), "\n";
+    /// $u = mysqli_query($l, $q, MYSQLI_USE_RESULT);
+    /// echo json_encode([mysqli_fetch_row($u), mysqli_fetch_row($u), mysqli_fetch_row($u), mysqli_fetch_row($u)]), "\n";
+    /// $s = mysqli_prepare($l, $q);
+    /// $s->execute();
+    /// $s->bind_result($a, $b);
+    /// $seen = [];
+    /// while ($s->fetch()) {
+    ///     $seen[] = [$a, $b];
+    /// }
+    /// echo json_encode($seen), "\n";
+    /// ```
+    /// ```expect mysql
+    /// [["1","x"],{"a":"2","b":null},{"a":"3","b":"zz"}]
+    /// [["1","x"],["2",null],["3","zz"],null]
+    /// [[1,"x"],[2,null],[3,"zz"]]
+    /// ```
+    pub(crate) fn recycle(&mut self, row: Row) {
+        if row.is_empty() {
+            self.row_data = row;
         }
     }
 
@@ -942,7 +984,8 @@ impl Res {
     }
 }
 
-/// The row decoder of the protocol.
+/// The row decoder of the protocol, the values pushed onto `into`, an
+/// empty row whose room is reused.
 fn decode_row(
     req: &mut Request,
     conn: &mut ConnData,
@@ -950,11 +993,14 @@ fn decode_row(
     fields: &[Field],
     bytes: &[u8],
     native: bool,
+    mut into: Row,
 ) -> Result<Result<Row, ()>, Thrown> {
+    into.clear();
+    into.reserve(fields.len());
     if binary {
-        crate::codec::decode_binary(req, &mut conn.stats, bytes, fields)
+        crate::codec::decode_binary(req, &mut conn.stats, bytes, fields, into)
     } else {
-        decode_text(req, &mut conn.stats, bytes, fields, native)
+        decode_text(req, &mut conn.stats, bytes, fields, native, into)
     }
 }
 
@@ -1278,9 +1324,9 @@ fn decode_text(
     bytes: &[u8],
     fields: &[Field],
     native: bool,
+    mut row: Row,
 ) -> Result<Result<Row, ()>, Thrown> {
     let mut p = Body::new(bytes);
-    let mut row = Vec::with_capacity(fields.len());
     for field in fields {
         let len = p.field_length();
         if len == NULL_LENGTH {

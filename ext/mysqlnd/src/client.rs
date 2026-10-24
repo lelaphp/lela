@@ -690,7 +690,7 @@ impl ResultSet {
         // "We clean the error here because in unbuffered mode we could
         // receive a new error and therefore consumers of this method are
         // checking for errors."
-        let row = match self.next_row(req, true)? {
+        let mut row = match self.next_row(req, true)? {
             Fetched::Row(row) => row,
             Fetched::Done => return Ok(Owner::null()),
             Fetched::Failed => return Ok(Owner::bool(false)),
@@ -704,7 +704,7 @@ impl ResultSet {
                 return Err(thrown);
             }
         };
-        let mut values = row.into_iter();
+        let mut values = row.drain(..);
         let mut filled = Ok(());
         for (i, value) in values.by_ref().enumerate() {
             filled = self.fill(req, &mut array, i, flags, value);
@@ -715,6 +715,7 @@ impl ResultSet {
         for value in values {
             value.give_up(req);
         }
+        self.res.recycle(row);
         match filled {
             Ok(()) => Ok(array.into_value()),
             Err(thrown) => {

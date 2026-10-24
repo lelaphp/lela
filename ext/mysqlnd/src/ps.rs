@@ -1257,9 +1257,10 @@ fn fetch(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
         stmt.upsert.server_status = server_status;
     }
     match got {
-        Ok(Some(row)) => {
+        Ok(Some(mut row)) => {
             let binds = stmt.result_bind.as_mut();
-            assign_row(req, binds, row)?;
+            assign_row(req, binds, &mut row)?;
+            result.recycle(row);
             Ok(StmtFetch::Row)
         }
         Ok(None) => Ok(StmtFetch::NoData),
@@ -1277,15 +1278,15 @@ fn fetch(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
 fn assign_row(
     req: &mut Request,
     binds: Option<&mut Binds<ResultBind>>,
-    row: Row,
+    row: &mut Row,
 ) -> Result<(), Thrown> {
     let Some(binds) = binds else {
-        for value in row {
+        for value in row.drain(..) {
             value.give_up(req);
         }
         return Ok(());
     };
-    let mut values = row.into_iter();
+    let mut values = row.drain(..);
     for bind in binds.iter_mut() {
         let Some(value) = values.next() else { break };
         if !bind.bound {

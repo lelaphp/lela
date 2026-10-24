@@ -116,15 +116,12 @@ pub(crate) fn decode_binary(
     stats: &mut Stats,
     bytes: &[u8],
     fields: &[Field],
+    mut row: Row,
 ) -> Result<Result<Row, ()>, Thrown> {
     let count = fields.len();
-    let nulls = bytes
-        .get(1..1 + (count + 9) / 8)
-        .unwrap_or_default()
-        .to_vec();
+    let nulls = bytes.get(1..1 + (count + 9) / 8).unwrap_or_default();
     let mut p = Body::new(bytes);
     p.skip(1 + (count + 9) / 8);
-    let mut row = Vec::with_capacity(count);
     for (i, field) in fields.iter().enumerate() {
         let bit = i + 2;
         let is_null = nulls
