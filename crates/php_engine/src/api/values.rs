@@ -2466,11 +2466,12 @@ impl PhpObject {
     }
 
     /// `Z_PROP_FLAG_P(OBJ_PROP(obj, offset)) & IS_PROP_LAZY` for the
-    /// declared property `name`, on the object the initialised proxies
-    /// lead to: whether it still waits for the initializer.
+    /// property `name` that `declaring` declares, on the object the
+    /// initialised proxies lead to: whether it still waits for the
+    /// initializer.
     #[must_use]
-    pub fn is_lazy_prop(&self, req: &Request, name: &[u8]) -> bool {
-        req.lazy_property(*self, name)
+    pub fn is_lazy_prop(&self, req: &Request, declaring: ClassId, name: &[u8]) -> bool {
+        req.lazy_property(*self, declaring, name)
     }
 
     /// `zend_lazy_object_get_initializer_zv`: the initializer of a lazy
