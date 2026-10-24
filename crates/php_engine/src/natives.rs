@@ -2196,11 +2196,36 @@ fn extension_loaded(req: &mut Request, extension: PhpString) -> bool {
 /// string(2) "10"
 /// bool(false)
 /// ```
+///
+/// The value is handed back as `ZVAL_SET_INI_STR` hands it: the
+/// string the entry holds, the interned master value or the string a
+/// changed entry took, so a read allocates nothing:
+///
+/// ```php
+/// $m = memory_get_usage(); $x = ini_get('memory_limit'); echo memory_get_usage() - $m, "\n";
+/// $tz = 'Europe/' . str_repeat('Amsterdam', mt_rand(1, 1)); ini_set('date.timezone', $tz); unset($tz);
+/// $m = memory_get_usage(); $y = ini_get('date.timezone'); echo memory_get_usage() - $m, " $y\n";
+/// ```
+/// ```expect
+/// 0
+/// 0 Europe/Amsterdam
+/// ```
+///
+/// A value the host set for an entry whose `on_modify` takes it as the
+/// engine starts is interned with the rest, as
+/// `zend_register_ini_entries_ex` interns it:
+///
+/// ```php
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'date.timezone=Europe/Amsterdam', '-r', '$m = memory_get_usage(); $x = ini_get("date.timezone"); echo memory_get_usage() - $m, " $x\n";'], [1 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p);
+/// ```
+/// ```expect process
+/// 0 Europe/Amsterdam
+/// ```
 #[php_function]
 fn ini_get(req: &mut Request, option: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let value = req.ini().get(option.as_bytes()).map(<[u8]>::to_vec);
-    Ok(match value {
-        Some(value) => OrFalse::Value(PhpString::new(req, &value)?),
+    Ok(match req.ini_string(option.as_bytes())? {
+        Some(value) => OrFalse::Value(value),
         None => OrFalse::False,
     })
 }

@@ -26,7 +26,7 @@ docs = 6500                                # design §10; `docs/**` plus the thr
 harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
 lock_packages = 190                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335); 164 is stage 1's TLS as #2333 ruled, 190 adds the compiled tier's Cranelift core set and rustix as #2945 ruled
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
-api_items = 1500                           # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34; #697)
+api_items = 1525                           # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34; #697); 1525 for #3359's frameless entries (#3360, 2026-10-24)
 api_private_items = 16                     # design §4.4 (revision 34, D1 of #947): api::__private, the helpers only a macro expansion names, capped apart from api_items
 bindings = 32000                           # design §4.1: `ext/*/src/ffi/**` pooled across every extension
 # Lines are non-blank, non-comment, tests excluded (`xtask budget`).
@@ -58,7 +58,7 @@ budget = 700                               # fork, the signal pool, LC_CTYPE, th
 lock = "process.lock"
 [[crate]]
 name = "php_unit"
-budget = 2500
+budget = 3000                              # 2.5k raised to 3k for the unit format's parity growth (#3357, 2026-10-24)
 lock = "unit.lock"
 [[crate]]
 name = "php_link"
@@ -69,7 +69,7 @@ name = "php_compile"
 budget = 24000
 [[crate]]
 name = "php_engine"
-budget = 80000
+budget = 84000                             # 80k raised to 84k after #3287's dedupe, for #3343 and the call protocol (#3357, 2026-10-24)
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
@@ -98,7 +98,7 @@ budget = 10000                              # php's main/streams/ and main/netwo
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
-budget = 42000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20)
+budget = 44000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20); 44k after #3279's dedupe found 166 lines (#3357, 2026-10-24)
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
@@ -790,7 +790,7 @@ crates = "*"
 [[owed]]
 instrument = "witness"
 crates = "*"
-exempt = ["xtask"]                         # the harness has no kernel and no native
+when = "engine"                           # every crate but the harness (layout::HARNESS)
 
 [[owed]]
 instrument = "api-check"

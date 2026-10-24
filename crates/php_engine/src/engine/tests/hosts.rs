@@ -116,7 +116,8 @@ fn a_host_s_ini_value_is_read_as_the_scanner_reads_a_bare_word() {
             .build();
         engine
             .shared
-            .ini_default(b"error_append_string")
+            .ini
+            .master(b"error_append_string")
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
     };
     for off in ["Off", "OFF", "oFf", "FALSE", "none", "None", "NULL", "off "] {

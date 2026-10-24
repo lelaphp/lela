@@ -79,6 +79,63 @@ struct State {
     /// creates through `php_pcre_emalloc` and `RSHUTDOWN` frees, which
     /// the engine's match data does not allocate through.
     general: Option<Emalloc>,
+    /// `PCRE_G(unmatched_empty_pair)` and `PCRE_G(unmatched_null_pair)`
+    /// ([`matching::unmatched_pair`]).
+    unmatched: Unmatched,
+}
+
+/// The two pairs `add_offset_pair` hands every group that did not take
+/// part under `PREG_OFFSET_CAPTURE`, one owner each, `["", -1]` and,
+/// under `PREG_UNMATCHED_AS_NULL`, `[null, -1]`: made on first use and
+/// given up in `RSHUTDOWN`. Once the program has ended, a pair not
+/// cached yet is made fresh each time, as php makes one under
+/// `EG_FLAGS_IN_SHUTDOWN`, which `php_request_shutdown` sets before the
+/// shutdown functions are called.
+#[derive(Default)]
+struct Unmatched {
+    empty: Option<Owner<PhpArray>>,
+    null: Option<Owner<PhpArray>>,
+    ended: bool,
+}
+
+impl Unmatched {
+    /// The slot of the pair `PREG_UNMATCHED_AS_NULL` picks.
+    fn slot(&mut self, as_null: bool) -> &mut Option<Owner<PhpArray>> {
+        if as_null {
+            &mut self.null
+        } else {
+            &mut self.empty
+        }
+    }
+
+    /// The cached pair of the kind, a view, where one is cached.
+    fn cached(&mut self, as_null: bool) -> Option<PhpArray> {
+        self.slot(as_null).as_ref().map(|pair| **pair)
+    }
+
+    /// `pair` cached as the kind's, where the program has not ended;
+    /// handed back otherwise, the caller's to hand on.
+    fn cache(&mut self, as_null: bool, pair: Owner<PhpArray>) -> Result<PhpArray, Owner<PhpArray>> {
+        if self.ended || self.slot(as_null).is_some() {
+            return Err(pair);
+        }
+        let view = *pair;
+        *self.slot(as_null) = Some(pair);
+        Ok(view)
+    }
+
+    /// No pair is cached from here, and the two cached are handed back
+    /// to be given up.
+    fn end(&mut self) -> [Option<Owner<PhpArray>>; 2] {
+        self.ended = true;
+        [self.empty.take(), self.null.take()]
+    }
+}
+
+/// The program has ended (`EG(flags) |= EG_FLAGS_IN_SHUTDOWN`): the
+/// cached pairs stand until `RSHUTDOWN`, and no other is cached.
+fn program_ended(req: &mut Request) {
+    req.state::<State>().unmatched.ended = true;
 }
 
 /// `sizeof(pcre2_general_context)`: the allocator's two callbacks and
@@ -188,6 +245,11 @@ fn rinit(req: &mut Request) -> Result<(), Thrown> {
 fn rshutdown(req: &mut Request) {
     if let Some(general) = req.state::<State>().general.take() {
         general.free(req);
+    }
+    // `zval_ptr_dtor(&PCRE_G(unmatched_null_pair))` and its twin.
+    let pairs = req.state::<State>().unmatched.end();
+    for pair in pairs.into_iter().flatten() {
+        pair.give_up(req);
     }
 }
 
@@ -300,6 +362,7 @@ pub fn extension() -> Extension {
         .request_state::<State>()
         .rinit(rinit)
         .rshutdown(rshutdown)
+        .program_ended(program_ended)
         .engine_state(|start| Ok(pattern::engine_state(start)))
         .info(pcre_info)
         .build("pcre")

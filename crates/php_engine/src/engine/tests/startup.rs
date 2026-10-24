@@ -150,7 +150,8 @@ fn the_startup_entries_are_read_as_php_init_config_reads_them() {
         let engine = Engine::cli_builder().ini(name, value).build();
         engine
             .shared
-            .ini_default(probe)
+            .ini
+            .master(probe)
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
     };
     assert_eq!(
