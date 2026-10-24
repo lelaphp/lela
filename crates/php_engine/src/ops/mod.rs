@@ -9,6 +9,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_unit::OperandKind;
 use php_unit::decl::Bare;
 use std::cmp::Ordering;
 use std::ops::ControlFlow;
@@ -2680,6 +2681,62 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
     req.release(Value::string(a));
     req.release(Value::string(b));
     Ok(Value::string(joined?))
+}
+
+/// `ZEND_CONCAT` and `ZEND_FAST_CONCAT` over two strings, the arms of
+/// php's handler before `concat_function` (`Z/Zend/zend_vm_def.h:382-431`,
+/// `:3293-3341`), which its compiled code's `zend_jit_fast_concat_helper`
+/// and `_tmp_helper` serve again (`Z/ext/opcache/jit/zend_jit_helpers.c:1824-1880`):
+/// `a` with its owner where `a_kind` is a temporary the caller took out
+/// of its slot, a view otherwise, and `b` a view, whose temporary the
+/// caller frees after. An empty side that is no `CONST` hands the other
+/// on with an owner more, `ZVAL_STR_COPY`, so `$x . ''` is a new string
+/// and `$x . $e` is `$x`'s; a temporary left side grows where it stands
+/// ([`Request::string_append`]), as `zend_string_extend` grows it when
+/// its owner is the only one and php's alloc arm copies it otherwise; any
+/// other pair is joined into a new string ([`join`]). The joined string
+/// has one owner. What the join refuses, the memory limit or php's
+/// `String size overflow`, is the caller's to raise at its opline.
+///
+/// A variable's empty side hands the other on, so it counts one more
+/// owner; a constant `''` is joined as any string is; a temporary left
+/// side grows into the joined string:
+///
+/// ```php
+/// $a = str_repeat('ab', 2); $e = '';
+/// debug_zval_dump($a . $e, $e . $a, $a . '', str_repeat('x', 3) . 'y');
+/// ```
+/// ```expect
+/// string(4) "abab" refcount(3)
+/// string(4) "abab" refcount(3)
+/// string(4) "abab" refcount(1)
+/// string(4) "xxxy" refcount(1)
+/// ```
+#[inline(always)] // both callers' kinds fold its arms, the handler's at compile time
+pub(crate) fn concat_strings(
+    req: &mut Request,
+    (a, a_kind): (PhpString, OperandKind),
+    (b, b_kind): (PhpString, OperandKind),
+) -> Result<PhpString, Thrown> {
+    let owned = matches!(a_kind, OperandKind::Tmp | OperandKind::Var);
+    if a_kind != OperandKind::Const && a.is_empty() {
+        req.addref(&Value::string(b));
+        if owned {
+            req.release(Value::string(a));
+        }
+        return Ok(b);
+    }
+    if b_kind != OperandKind::Const && b.is_empty() {
+        if !owned {
+            req.addref(&Value::string(a));
+        }
+        return Ok(a);
+    }
+    if owned {
+        req.string_append(a, b)
+    } else {
+        join(req, a, b)
+    }
 }
 
 /// A new string of `a`'s bytes and then `b`'s,

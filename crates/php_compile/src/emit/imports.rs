@@ -99,6 +99,8 @@ struct Tables {
     functions: ByName<Vec<u8>>,
     consts: ByName<Vec<u8>>,
     seen: ByName<u8>,
+    /// The aliases of the class imports an attribute's name copies.
+    attributed: std::collections::HashSet<Vec<u8>, php_link::NameHasher>,
 }
 
 /// One of the file's tables keyed by a name, hashed as every table by
@@ -135,6 +137,14 @@ impl Imports {
             .as_ref()
             .and_then(|tables| tables.seen.get(key))
             .is_some_and(|bits| bits & kind.bit() != 0)
+    }
+
+    /// Whether an attribute's name copies the class `alias` imports for
+    /// the first time: the `use` holds one string, which every
+    /// attribute it resolves copies (`zend_string_copy`) and the first
+    /// keeps once the tables are reset.
+    fn first_attributed(&mut self, alias: &[u8]) -> bool {
+        (self.tables().attributed).insert(alias.to_ascii_lowercase())
     }
 
     /// The class name `alias` imports, whatever its case.
@@ -632,6 +642,52 @@ impl<'a> Emit<'a> {
             return rewritten(self.prefix_with_ns(name));
         }
         (self.arena.copy(name), NameKind::NotFullyQualified)
+    }
+
+    /// Whether the string `zend_resolve_class_name` hands an attribute
+    /// written as `written` is one no holder before it holds
+    /// ([`php_unit::decl::Attribute`]): one it made, the namespace's
+    /// prefix or an import's before the rest, or the first copy of a
+    /// `use`'s; a copy of the scanner's is the attribute's own unless
+    /// php compiled the same tree before (`again`), as a promoted
+    /// parameter's property compiles the parameter's. So a `use`'s
+    /// string is laid once for every attribute it names, a promoted
+    /// parameter's attribute once for the parameter and its property, and
+    /// a namespace's resolution once each (read after the heap is
+    /// churned):
+    ///
+    /// ```php
+    /// #[Attribute(Attribute::TARGET_ALL)] class Az1 { function __construct(public $name = null, public $v = null) {} }
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('$q1 = 1;'); m('function w1() {}'); m('class W {}');
+    /// echo m('use Foo\Barbazqu; #[Barbazqu] function g2() {} #[Barbazqu] function g3() {}'), " ", m('#[Az1] function g4() {} #[Az1] function g5() {}'), "\n";
+    /// echo m('namespace N2; use Foo\Barbazqu; #[Barbazqu] function g6() {}'), " ", m('namespace N3; #[Az1] function g7() {}'), "\n";
+    /// echo m('class Ca1 { function __construct(#[Az1] public $p = 1) {} }'), " ", m('namespace N4; class Ca2 { function __construct(#[Az1] public $p = 1) {} }'), "\n";
+    /// echo m('class Ca3 { function __construct(#[Az1(name: "abcdefgh", v: [1, "zzzzzzzzzzzz"])] #[SensitiveParameter] public $p = 1) {} }'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode((new ReflectionProperty('Ca3', 'p'))->getAttributes()[0]->getArguments()), count((new ReflectionMethod('Ca3', '__construct'))->getParameters()[0]->getAttributes()), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 920 928
+    /// 560 544
+    /// 1720 1752
+    /// 2264
+    /// {"name":"abcdefgh","v":[1,"zzzzzzzzzzzz"]}2
+    /// ```
+    pub(super) fn own_name(&mut self, written: &[u8], again: bool) -> bool {
+        let made = self.namespace.is_some();
+        if super::class_fetch_type(written) != super::FETCH_CLASS_DEFAULT {
+            return !again;
+        }
+        match Written::of(written) {
+            Written::FullyQualified(_) => !again,
+            Written::Relative(_) => made || !again,
+            Written::NotQualified(name) => match name.iter().position(|byte| *byte == b'\\') {
+                Some(slash) => self.imports.class(&name[..slash]).is_some() || made || !again,
+                None if self.imports.class(name).is_some() => self.imports.first_attributed(name),
+                None => made || !again,
+            },
+        }
     }
 
     /// `zend_resolve_non_class_name` over the function imports or the

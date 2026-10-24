@@ -117,6 +117,7 @@ fn alias<E>(
             arguments: Vec::new(),
             line: 0,
             strict: false,
+            own_name: true,
         });
     }
     (decl, entry)

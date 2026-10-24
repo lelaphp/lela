@@ -57,6 +57,7 @@ mod held;
 mod layout;
 pub(crate) mod published;
 mod sampled;
+mod strings;
 #[cfg(dispatch = "tailcall")]
 mod tail;
 mod view;
@@ -73,6 +74,7 @@ pub use sampled::{
     Building, Sample, building, building_call, class_number, native_returns, numbered_class,
     on_heap, sample, under_way,
 };
+pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push};
 pub use view::{
     Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, frame_cache, func, jump_targets,
     landing, running_func, served,
@@ -1280,6 +1282,31 @@ pub fn step_held(
             activated_over(req, callee, code)
         }
         stepped => Ok(stepped),
+    }
+}
+
+/// The handler of the opline `frame` stands at in `held`, one that goes
+/// on at an opline of its own frame or throws there, served as php's
+/// compiled code calls such an opline's handler directly
+/// (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`):
+/// one dispatch, the frame stood where the handler went on, and nothing
+/// [`step_held`] reads past it. No observer is told: a tier runs only
+/// where no opcode but `BEGIN_SILENCE` and `END_SILENCE` is observed
+/// (`jit-design.md` §4.3), and compiled code steps those. A handler that
+/// went anywhere else, a frame it pushed or popped, is an internal error,
+/// which no opline compiled code hands here reaches.
+pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Result<(), Fatal> {
+    let code = held.code();
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+    let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;
+    #[cfg(debug_assertions)]
+    req.sensed_after(code, op)?;
+    match settled(req, frame, at, next) {
+        Stepped::Same(went) | Stepped::Threw(went) if went == frame => Ok(()),
+        _ => Err(Fatal::error(
+            "InternalError: a handler compiled code serves in its frame went on elsewhere",
+        )),
     }
 }
 

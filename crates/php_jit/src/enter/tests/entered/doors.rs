@@ -78,6 +78,7 @@ fn trace(f: FuncRef, start: Start, guards: Vec<Guard>, exits: Vec<ExitSpec>) -> 
             place: Place::Root,
             cvs: 1,
             temps: 0,
+            literals: 0,
         }],
         values: Vec::new(),
         ops: Vec::new(),

@@ -26,7 +26,8 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, held, traced as built,
+    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    traced as built,
 };
 use crate::testing::records::recording;
 
@@ -221,7 +222,8 @@ fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
     Ok(())
 }
 
-/// A `foreach` over a packed array writes its key as a long, as php's
+/// A `foreach` over a packed array is fetched inline, as php's
+/// `zend_jit_fe_fetch` compiles it, and writes its key as a long, as php's
 /// inference types what `FE_FETCH_R` writes from the array's layout, so
 /// no guard holds it; the exit its end takes knows nothing of it, as
 /// php's stack map types what an op writes only once the op's exits are
@@ -236,10 +238,13 @@ fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
         "function f($a) { $s = 0; foreach ($a as $k => $v) { $s += $k; } return $s; }
         echo f([1, 2, 3, 4, 5, 6, 7, 8, 9]), \"\\n\";",
     )?;
-    let at = stepped(&ir, Opcode::FeFetchR)?;
-    let Some(Op::Line(fetch)) = ir.ops.get(at.index()) else {
-        return Err("no FE_FETCH_R".to_owned());
-    };
+    let fetch = (ir.ops.iter())
+        .find_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::FeFetchR => Some(line),
+            _ => None,
+        })
+        .ok_or("no FE_FETCH_R")?;
+    assert_eq!(fetch.form, Form::Inline, "{}", dump::render(&ir));
     let key = fetch.out.ok_or("FE_FETCH_R writes no key")?;
     assert_eq!(ir.values[key.0 as usize].types, Types::LONG);
     let on_key = (ir.guards.iter()).any(|guard| {
@@ -449,6 +454,65 @@ fn a_natives_call_is_pushed_in_place() -> Result<(), String> {
         _ => None,
     });
     assert_eq!(init, Some(Form::Inline), "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// A loop over strings: `$s === ''` fused to its jump, `$s !== "zz"`
+/// written, `strlen($s)` and `(bool) $i` each inline, as php's code
+/// generator compiles them (`zend_jit_identical`, `zend_jit_strlen`,
+/// `zend_jit_bool_jmpznz`), where each was stepped (#3321).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn strings_are_compared_and_measured_inline() -> Result<(), String> {
+    let ir = golden(STRING_MATCH)?;
+    let rendered = dump::render(&ir);
+    for opcode in [
+        Opcode::IsIdentical,
+        Opcode::IsNotIdentical,
+        Opcode::Strlen,
+        Opcode::Bool,
+    ] {
+        let form = (ir.ops.iter()).find_map(|op| match op {
+            Op::Line(line) if line.opcode == opcode => Some(line.form),
+            _ => None,
+        });
+        assert_eq!(form, Some(Form::Inline), "{opcode:?} in\n{rendered}");
+    }
+    Ok(())
+}
+
+/// A blob built in a loop: the path's two concatenations of strings, each
+/// rope piece that is a string, `ROPE_INIT`, `ROPE_ADD` and `ROPE_END`
+/// alike, and `.=` of the line onto the blob, inline, as php's
+/// `zend_jit_concat`, `zend_jit_rope` and `zend_jit_assign_op` compile
+/// them; the piece that is a long is the handler's, as php's is (#3321).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn ropes_and_appends_of_strings_are_inline() -> Result<(), String> {
+    let ir = golden(STRING_BUILD)?;
+    let rendered = dump::render(&ir);
+    let forms: Vec<(Opcode, Form)> = (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) => Some((line.opcode, line.form)),
+            _ => None,
+        })
+        .collect();
+    for opcode in [
+        Opcode::Concat,
+        Opcode::RopeInit,
+        Opcode::RopeEnd,
+        Opcode::AssignOp,
+    ] {
+        assert!(
+            forms.contains(&(opcode, Form::Inline)),
+            "{opcode:?} in\n{rendered}"
+        );
+    }
+    // `$i`, the one long piece.
+    let stepped = (forms.iter())
+        .filter(|(opcode, form)| *opcode == Opcode::RopeAdd && *form == Form::Step)
+        .count();
+    assert_eq!(stepped, 1, "{rendered}");
     Ok(())
 }
 

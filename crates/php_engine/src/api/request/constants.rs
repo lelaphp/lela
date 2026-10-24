@@ -61,9 +61,10 @@ const ZEND_CONSTANT: usize = 40;
 /// registered.
 struct ConstantRow {
     /// php's `zend_constant` on the request's heap, which the row is in
-    /// the engine's own shape; none where the memory limit refused it,
-    /// whose fatal ends the request.
-    room: Option<Emalloc>,
+    /// the engine's own shape, and an attributed one's `attributes` with
+    /// what they hold ([`super::declared_bytes::attributes`]); none where
+    /// the memory limit refused it, whose fatal ends the request.
+    room: Vec<Emalloc>,
     /// `c->name`, released with the row: a host's or an extension's
     /// name through `zend_string_init_interned` ([`Request::interned`]),
     /// and for `define()`'s and `const`'s one more owner of the
@@ -211,7 +212,7 @@ impl Request {
         for z in arrays {
             self.release(Value::of_slot(z));
         }
-        if let Some(room) = row.room {
+        for room in row.room {
             room.free(self);
         }
         let file = match row.owner {
@@ -411,7 +412,9 @@ impl Request {
         // `zend_constant_add_attributes`: an owner of the table, which
         // outlives the op array that declared it.
         php_compile::values::attribute_values(&attributes, &mut |z| self.heap.addref(z));
-        let room = self.constant_room();
+        let mut room = Vec::from_iter(self.constant_room());
+        // The memory limit's fatal is recorded and ends the request.
+        super::declared_bytes::attributes(self, &mut room, attributes.iter(), false).ok();
         let named = self.declared_string(given).ok();
         let keyed = (given.contains(&b'\\'))
             .then(|| self.interned(name).ok())
@@ -468,7 +471,7 @@ impl Request {
     ) {
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         let named = self.constant_name(name);
-        let room = self.constant_room();
+        let room = Vec::from_iter(self.constant_room());
         self.constants.push(ConstantRow {
             room,
             named,

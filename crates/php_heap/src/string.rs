@@ -65,6 +65,11 @@ const _: () = assert!(std::mem::offset_of!(StrHeader, gc) == 0);
 /// The header's size, php's `_ZSTR_HEADER_SIZE`.
 const HEADER: usize = size_of::<StrHeader>();
 
+// php's `zend_string`: the length after the refcounted header and the
+// hash, the bytes after the length, which compiled code reads at
+// `Str::LEN_AT` and `Str::VAL_AT`.
+const _: () = assert!(Str::LEN_AT == 16 && Str::VAL_AT == 24);
+
 /// `IS_STR_INTERNED` (`Z/Zend/zend_types.h:849`): the bit a table's
 /// string carries whichever table it is in, which is what says it is
 /// never refcounted and never freed by a release.
@@ -201,6 +206,14 @@ impl FreshStr {
 pub struct Str(NonNull<StrHeader>);
 
 impl Str {
+    /// Where in `zend_string` its length is, `ZSTR_LEN`: the bytes
+    /// without the NUL, a `size_t`. What the compiled tier reads a
+    /// string's length through (`jit-design.md` §4.3).
+    pub const LEN_AT: usize = std::mem::offset_of!(StrHeader, len);
+    /// Where its bytes begin, `ZSTR_VAL`: past the header,
+    /// `_ZSTR_HEADER_SIZE`.
+    pub const VAL_AT: usize = HEADER;
+
     /// The bytes one allocation of a string of `len` bytes takes:
     /// php's `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))`, which is what
     /// makes `memory_get_usage()` move by what php's moves by.
@@ -727,6 +740,17 @@ pub trait Intern {
     /// `zend_interned_string_ht_lookup` finds it.
     fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal>;
 
+    /// [`Intern::intern`] of a string laid as a string of `room` bytes and
+    /// cut to `bytes` where it stands (`ZSTR_LEN(s) = len`), which keeps
+    /// the block's bin: `__DIR__`, which `zend_try_ct_eval_magic_const`
+    /// lays at the length of the whole file name before `zend_dirname`
+    /// shortens it. A home that lays nothing on a request's heap interns
+    /// the bytes as any other.
+    fn intern_in(&mut self, bytes: &[u8], room: usize) -> Result<Str, Fatal> {
+        let _ = room;
+        self.intern_marked(bytes, false)
+    }
+
     /// [`Intern::intern_marked`] of a string the asker alone will hold
     /// and gives back once it has read it ([`Intern::give_back`]): a
     /// string a fold makes that the fold above it consumes, as
@@ -786,17 +810,33 @@ pub trait Intern {
     /// entries in this order, the keys strings this home made or
     /// integers. An engine's is php's `IS_ARRAY_IMMUTABLE`, no owner
     /// counted and living as long as the home does; a request's compile
-    /// makes one its unit owns. What a `switch` or a `match` jump table
-    /// is (`zend_compile_switch`, `zend_compile_match`).
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal>;
+    /// makes one its unit owns, laid at the `size` php's compile inits it
+    /// with (`array_init_size`, `zend_hash_init`), which counts what was
+    /// written and not what stands, and which a home that persists the
+    /// array has no use for. What a `switch` or a `match` jump table is
+    /// (`zend_compile_switch`, `zend_compile_match`).
+    fn constant_array(&mut self, entries: &[(Key, Zval)], size: usize) -> Result<Arr, Fatal>;
 
     /// [`Intern::constant_array`] of an array the asker alone holds and
     /// gives back once it has read it ([`Intern::give_back`]), each entry
     /// one owner the array took over: the array `zend_try_ct_eval_array`
     /// made for a node, which `zend_eval_const_expr` destroys with its
     /// strings once a fold over it stands (`zval_ptr_dtor`).
-    fn constant_array_made(&mut self, entries: &[(Key, Zval)]) -> Result<Made, Fatal> {
-        (self.constant_array(entries)).map(|a| Made(Zval::array(a)))
+    fn constant_array_made(&mut self, entries: &[(Key, Zval)], size: usize) -> Result<Made, Fatal> {
+        (self.constant_array(entries, size)).map(|a| Made(Zval::array(a)))
+    }
+
+    /// Whether what this home lays from here on is interned, php's
+    /// `zend_new_interned_string` asked of it, and whether it was until
+    /// now: `false` while a compile makes the strings php's scanner and
+    /// `zend_eval_const_expr` lay and nothing interns, an array's
+    /// elements and keys, a `static`'s initial value, an attribute's
+    /// argument and a jump table's key, where a string an opline names,
+    /// a declaration's value and a name are interned. A home that interns
+    /// every string, a cached unit's, keeps on and answers `true`.
+    fn interning(&mut self, on: bool) -> bool {
+        let _ = on;
+        true
     }
 }
 
@@ -946,7 +986,7 @@ impl Intern for Strings {
     /// `zend_persist_zval` over a constant array under opcache: one
     /// array on the system allocator, immutable, shared by every request
     /// that serves the unit, freed with the engine.
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+    fn constant_array(&mut self, entries: &[(Key, Zval)], _: usize) -> Result<Arr, Fatal> {
         let a = persistent_array(entries)?;
         self.arrays.push(a);
         Ok(a)

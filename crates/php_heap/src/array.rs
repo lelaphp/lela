@@ -2950,7 +2950,9 @@ mod tests {
             (Key::Str(s), Zval::long(14)),
             (Key::Long(-3), Zval::long(16)),
         ];
-        let a = strings.constant_array(&entries).expect("a constant array");
+        let a = strings
+            .constant_array(&entries, 3)
+            .expect("a constant array");
         assert!(a.is_immutable());
         assert_eq!(a.refcount(), 1);
         assert!(!Zval::array(a).is_refcounted());
@@ -3014,7 +3016,7 @@ mod tests {
         assert_eq!(e.next_free(), i64::MIN);
         assert!(!Zval::array(e).is_refcounted());
         let mut strings = crate::Strings::new();
-        assert!(strings.constant_array(&[]).is_ok_and(|a| a.is_same(e)));
+        assert!(strings.constant_array(&[], 0).is_ok_and(|a| a.is_same(e)));
         drop(strings);
         let mut nothing = Nothing::new();
         let before = nothing.heap.memory_usage(false);
@@ -3038,7 +3040,7 @@ mod tests {
         let mut nothing = Nothing::new();
         let a = nothing
             .strings
-            .constant_array(&[(Key::Long(0), Zval::long(1))])
+            .constant_array(&[(Key::Long(0), Zval::long(1))], 1)
             .expect("a constant array");
         assert!(a.is_immutable());
         assert!(!Zval::array(a).is_refcounted());

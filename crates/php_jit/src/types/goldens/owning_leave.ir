@@ -19,7 +19,7 @@ loop at 0, loop, interrupt exit 13
   checks direction taken -> exit 5
 0005 f0 INIT_FCALL const#3 inline map 0
      f0 init e1 in-place
-0006 f0 SEND_VAR #5 step unwinds -> unwind 0
+0006 f0 SEND_VAR #5 inline
 0007 f0 SEND_VAR #3 inline
 0008 f0 DO_UCALL inline in-place unwinds -> unwind 0
      f1 enter e1
@@ -27,7 +27,7 @@ loop at 0, loop, interrupt exit 13
   -> #7 f1.CV1 [long]
 0002 f1 CONCAT const#0, #7 step unwinds -> unwind 0
   -> #8 f1.T0 [string]
-0003 f1 ASSIGN #9, #8 step unwinds -> unwind 0
+0003 f1 ASSIGN #9, #8 inline
   -> #10 f1.CV2 [string]
   guard #6 packed -> exit 7
 0004 f1 FETCH_DIM_R #6, int(0) inline leaves -> exit 6

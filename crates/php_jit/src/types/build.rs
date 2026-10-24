@@ -348,6 +348,7 @@ impl<'a> Builder<'a> {
             place,
             cvs: code.num_cvs,
             temps: code.num_tmps,
+            literals: code.literals.as_ptr().addr(),
         });
         self.meta.push(Meta {
             code,
@@ -628,7 +629,7 @@ impl<'a> Builder<'a> {
             [op1, op2, data],
             samples,
         );
-        let form = self.form(frame, &op, seen, next);
+        let form = self.form(frame, (&op, data_line.as_ref()), seen, (next, branch));
         let in_place = (form == Form::Inline)
             .then(|| self.in_place(frame, &op, next))
             .flatten();
@@ -698,7 +699,10 @@ impl<'a> Builder<'a> {
             self.pushing = Some(plain);
         }
         self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
-        if let Some(taken) = branch {
+        // An array's reset goes on whatever it holds, so php's code holds
+        // no direction there.
+        let one_way = op.opcode == Opcode::FeResetR && form == Form::Inline;
+        if let Some(taken) = branch.filter(|_| !one_way) {
             let to = Branched {
                 taken,
                 fused,
@@ -941,7 +945,7 @@ impl<'a> Builder<'a> {
         };
         // What compiled code serves in place takes no exit of its own; a
         // kernel it falls back to that throws unwinds.
-        let (at, op1) = (line.opline, line.op1);
+        let (at, op1, op2) = (line.opline, line.op1, line.op2);
         let may_leave = inline_may_leave(line) && in_place.is_none();
         if form == Form::Inline && may_leave {
             let unfinished = draft(Point::Before(idx), frame, At::Opline(at));
@@ -971,7 +975,26 @@ impl<'a> Builder<'a> {
                     || (op.opcode == Opcode::TypeCheck
                         && self.is_temp(op1)
                         && !old.within(UNCOUNTED))
+                    // A temporary string or array it reads is given up.
+                    || (matches!(
+                        op.opcode,
+                        Opcode::IsIdentical | Opcode::IsNotIdentical | Opcode::Strlen
+                    ) && [op1, op2].into_iter().any(|operand| {
+                        self.is_temp(operand) && !self.types_of(frame, operand).within(UNCOUNTED)
+                    }))
+                    || op.opcode == Opcode::FeFree
+                    // The join may refuse, the memory limit or the string's
+                    // size, and leave it pending.
+                    || matches!(
+                        op.opcode,
+                        Opcode::RopeEnd | Opcode::Concat | Opcode::FastConcat
+                    )
+                    || (op.opcode == Opcode::AssignOp
+                        && lattice::binary_of(op.extended_value) == Some(Opcode::Concat))
                     || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
+                    // What the variable held is given up, and a destructor
+                    // may throw.
+                    || op.opcode == Opcode::FeFetchR
                     || matches!(
                         op.opcode,
                         Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
@@ -2041,7 +2064,13 @@ impl<'a> Builder<'a> {
     /// How an opline is compiled: inline where it is in the scalar core
     /// and its operands' types are the ones the inline code serves,
     /// through `step` otherwise.
-    fn form(&self, frame: Frame, op: &Opline, seen: Seen, next: Option<&Event>) -> Form {
+    fn form(
+        &self,
+        frame: Frame,
+        (op, data): (&Opline, Option<&Opline>),
+        seen: Seen,
+        (next, branch): (Option<&Event>, Option<bool>),
+    ) -> Form {
         let [t1, t2, td] = seen.types;
         // An opline that writes its variable `op1` writes through what it
         // sees through a reference, which only its handler does.
@@ -2050,6 +2079,11 @@ impl<'a> Builder<'a> {
         let long = |t: Types| t == Types::LONG;
         let scalar = |t: Types| t.scalar();
         let packed = Types::ARRAY.laid_out(Layout::Packed);
+        let code = self.meta(frame).code;
+        let copied = |kind, field, t| copied_whole(kind, field, t, code);
+        if let Some(form) = strung(op, seen) {
+            return form;
+        }
         let inline = match op.opcode {
             Opcode::Jmp => true,
             // A double's truth is the handler's, which warns of a NAN as
@@ -2061,7 +2095,6 @@ impl<'a> Builder<'a> {
             Opcode::IsSmaller | Opcode::IsSmallerOrEqual | Opcode::IsEqual | Opcode::IsNotEqual => {
                 number(t1) && number(t2)
             }
-            Opcode::IsIdentical | Opcode::IsNotIdentical => scalar(t1) && scalar(t2),
             Opcode::Add
             | Opcode::Sub
             | Opcode::Mul
@@ -2078,32 +2111,28 @@ impl<'a> Builder<'a> {
                         .and_then(arith)
                         .is_some_and(|served| served.serves(t1, t2))
             }
-            Opcode::Assign => cv1 && scalar(t2) && !t1.meets(Types::REF),
+            // A value no scalar is moved or copied into the variable, as
+            // php's `zend_jit_assign_to_variable` copies it
+            // (`Z/ext/opcache/jit/zend_jit_ir.c:5793-5950`).
+            Opcode::Assign => {
+                cv1 && !t1.meets(Types::REF)
+                    && (scalar(t2)
+                        || (op.out_type == OperandKind::Unused && copied(op.op2_type, op.op2, t2)))
+            }
             Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
                 cv1 && number(t1)
             }
             Opcode::FetchDimR => op.op1_type != OperandKind::Const && t1 == packed && long(t2),
-            // php compiles the write inline over an array that may be
-            // packed, testing its layout where it may be either, and adds
-            // no layout guard where the array was recorded packed
-            // (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`).
-            Opcode::AssignDim => {
-                cv1 && t1.tag() == Some(ZvalType::Array)
-                    && t1.meets(Types::PACKED)
-                    && long(t2)
-                    && scalar(td)
-            }
+            Opcode::AssignDim => cv1 && element_written(op, data, seen.types, code),
             Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
-            // A send that moves what a temporary holds into the call, as
-            // php's `zend_jit_send_var` moves a `TMP` or a `VAR` that is
-            // no reference (`Z/ext/opcache/jit/zend_jit_ir.c:9628-9790`).
-            Opcode::SendVar if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) => {
-                op.op2_type == OperandKind::Unused
-                    && t1.kinds() != Types::NONE
-                    && !t1.meets(Types::REF.or(Types::UNDEF))
-            }
+            Opcode::FeResetR | Opcode::FeFetchR => iterated(op, t1, seen.referenced[0], branch),
+            // php's `zend_jit_send_val` and `zend_jit_send_var`, a value
+            // no scalar moved into the call's slot from a temporary, copied
+            // with an owner more from a variable, or as it is from a
+            // constant no reference counts (`:9466-9790`).
             Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx => {
-                op.op2_type == OperandKind::Unused && scalar(t1)
+                op.op2_type == OperandKind::Unused
+                    && (scalar(t1) || copied(op.op1_type, op.op1, t1))
             }
             Opcode::TypeCheck => type_checked(op, t1, seen.referenced[0]),
             // A check of an argument the trace knows the callee takes by
@@ -3148,6 +3177,47 @@ struct Branched {
     held: Types,
 }
 
+/// How a strict comparison, a string's length, a boolean cast, a
+/// `foreach`'s free, a concatenation, a rope's piece or `.=` is compiled
+/// over what its operands are seen as, none for any other opline. Inline:
+/// two scalars compared, or a string beside a string or a scalar, as php's
+/// `zend_jit_identical` compares them inline or calls `zend_is_identical`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:7292-7532`); a string's length read
+/// in place, php's `zend_jit_strlen` (`:11623-11660`); a scalar's truth,
+/// php's `zend_jit_bool_jmpznz`, a double's the handler's as a jump's is;
+/// an array, which holds no iterator to delete, given up as php's
+/// `zend_jit_free` gives it up (`:11543-11580`); a rope's piece that is a
+/// string, which php's `zend_jit_rope` stores inline and joins through
+/// `zend_jit_rope_end` (`:11753-11799`); a concatenation of two strings,
+/// through php's `zend_jit_fast_concat_helper` (`zend_jit_concat`,
+/// `:6016-6118`); and `.=` of a string onto a variable's string, through
+/// php's `zend_jit_fast_assign_concat_helper` (`zend_jit_assign_op`,
+/// `:6120-6290`). Stepped otherwise.
+fn strung(op: &Opline, seen: Seen) -> Option<Form> {
+    let [t1, t2, _] = seen.types;
+    let string = |t: Types, at: usize| t == Types::STRING && !seen.referenced[at];
+    let inline = match op.opcode {
+        Opcode::IsIdentical | Opcode::IsNotIdentical => {
+            (t1.scalar() && t2.scalar())
+                || (string(t1, 0) && (string(t2, 1) || t2.scalar()))
+                || (t1.scalar() && string(t2, 1))
+        }
+        Opcode::Strlen => string(t1, 0),
+        Opcode::Bool | Opcode::BoolNot => t1.scalar() && t1 != Types::DOUBLE,
+        Opcode::FeFree => t1.tag() == Some(ZvalType::Array),
+        Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => string(t2, 1),
+        Opcode::Concat | Opcode::FastConcat => string(t1, 0) && string(t2, 1),
+        Opcode::AssignOp if lattice::binary_of(op.extended_value) == Some(Opcode::Concat) => {
+            op.op1_type == OperandKind::Cv
+                && op.out_type == OperandKind::Unused
+                && string(t1, 0)
+                && string(t2, 1)
+        }
+        _ => return None,
+    };
+    Some(if inline { Form::Inline } else { Form::Step })
+}
+
 /// The jump after `op` it is fused to, where it is a comparison whose
 /// direction the record keeps.
 fn fused(op: &Opline, after: Option<&Opline>, branch: Option<bool>) -> Option<Fused> {
@@ -3186,6 +3256,76 @@ fn type_checked(op: &Opline, t1: Types, referenced: bool) -> bool {
             }
             OperandKind::Const | OperandKind::Unused => false,
         }
+}
+
+/// Whether an `ASSIGN_DIM` over a variable's array is compiled inline over
+/// what it sees of the array, the key and the value, `[t1, t2, td]`, its
+/// `OP_DATA` `data`: an array that may be packed, which the write tests,
+/// by a long key, of a scalar, or of a value no scalar moved or copied
+/// whole into the element where its `out` slot is unused and the
+/// value is not the array itself, as php's `zend_jit_assign_dim` writes
+/// through `zend_jit_assign_to_variable`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:13352-13527`, `:5793-5950`). php
+/// compiles the write inline over an array that may be packed, testing
+/// its layout where it may be either, and adds no layout guard where the
+/// array was recorded packed (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`).
+fn element_written(
+    op: &Opline,
+    data: Option<&Opline>,
+    [t1, t2, td]: [Types; 3],
+    code: &OpArray,
+) -> bool {
+    let whole = |data: &Opline| {
+        op.out_type == OperandKind::Unused
+            && !(data.op1_type == OperandKind::Cv && data.op1 == op.op1)
+            && copied_whole(data.op1_type, data.op1, td, code)
+    };
+    t1.tag() == Some(ZvalType::Array)
+        && t1.meets(Types::PACKED)
+        && t2 == Types::LONG
+        && (td.scalar() || data.is_some_and(whole))
+}
+
+/// Whether an inline form moves or copies an operand of `kind`, at
+/// `field`, seen as `t`, whole: what a temporary or a variable holds, of a
+/// kind the trace knows, no reference and set, or a constant of `code` no
+/// reference counts, which needs no owner.
+fn copied_whole(kind: OperandKind, field: u32, t: Types, code: &OpArray) -> bool {
+    match kind {
+        OperandKind::Tmp | OperandKind::Var | OperandKind::Cv => {
+            t.kinds() != Types::NONE && !t.meets(Types::REF.or(Types::UNDEF))
+        }
+        OperandKind::Const => code
+            .literals
+            .get(field as usize)
+            .is_some_and(|literal| !literal.is_refcounted()),
+        OperandKind::Unused => false,
+    }
+}
+
+/// Whether a `foreach`'s reset or fetch is compiled inline over `t1`,
+/// what it sees of its array, `referenced` where it sees it through a
+/// reference, the record having gone `branch`: php's `zend_jit_fe_reset`
+/// over an array no constant holds, which goes on whether the array holds
+/// anything or not, as the handler does
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:13756-13775`); php's
+/// `zend_jit_fe_fetch` over a packed array a `VAR` iterator holds into a
+/// variable, where the loop goes on, the end its exit (`:13800-14120`).
+/// Where the record ended the loop, php serves the fetch as it is, and so
+/// does the step.
+fn iterated(op: &Opline, t1: Types, referenced: bool, branch: Option<bool>) -> bool {
+    match op.opcode {
+        Opcode::FeResetR => {
+            op.op1_type != OperandKind::Const && t1.tag() == Some(ZvalType::Array) && !referenced
+        }
+        Opcode::FeFetchR => {
+            op.op1_type == OperandKind::Var
+                && t1 == Types::ARRAY.laid_out(Layout::Packed)
+                && op.op2_type == OperandKind::Cv
+                && branch == Some(false)
+        }
+        _ => false,
+    }
 }
 
 /// What a `RETURN` of `code` hands its caller where it leaves in place:

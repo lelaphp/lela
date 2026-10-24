@@ -300,7 +300,7 @@ impl Wire for Zval {
                     };
                     entries.push((key, Zval::take(r)?));
                 }
-                Zval::array(r.strings.constant_array(&entries).ok()?)
+                Zval::array(r.strings.constant_array(&entries, entries.len()).ok()?)
             }
             k if k == ZvalType::ConstExpr as u8 => Zval::const_expr(u32::take(r)?),
             k if k == ZvalType::Ptr as u8 => Zval::ptr(u32::take(r)?),
@@ -406,7 +406,7 @@ record! {
         dynamic_func_defs, bound_vars, no_receiver, strict_types, return_mask, numeric_dims,
     }
     AttributeArgument { name, value }
-    Attribute { name, arguments, line, strict }
+    Attribute { name, arguments, line, strict, own_name }
     Parameter { name, ty, by_ref, prefer_ref, promoted, variadic, default, attributes }
     FunctionDecl {
         name, parameters, return_type, returns_by_ref, is_generator, attributes, doc_comment,

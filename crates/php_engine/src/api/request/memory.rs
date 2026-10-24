@@ -119,6 +119,17 @@ pub(super) struct RequestStrings<'a> {
     /// The strings and arrays the compile has made, which the unit
     /// takes.
     pub(super) made: &'a mut super::unit_strings::Compiling,
+    /// Whether what it lays is interned ([`Intern::interning`]).
+    pub(super) interning: bool,
+}
+
+impl RequestStrings<'_> {
+    /// Whether a string asked for is looked for in the engine's table
+    /// first: where it is interned and the request holds opcache's
+    /// buffer.
+    fn asks_table(&self) -> bool {
+        self.interning && self.hold == SharedHold::Taken
+    }
 }
 
 impl Intern for RequestStrings<'_> {
@@ -128,7 +139,7 @@ impl Intern for RequestStrings<'_> {
         {
             return Ok(frozen);
         }
-        if self.hold == SharedHold::Taken
+        if self.asks_table()
             && let Some(held) = self.shared.existing_interned(bytes)
         {
             return Ok(held);
@@ -139,6 +150,28 @@ impl Intern for RequestStrings<'_> {
         }
         self.made.add(Zval::string(s));
         Ok(s)
+    }
+
+    /// `zend_string_init` of `room` bytes cut to `bytes`, and
+    /// `zval_make_interned_string` over it where it is interned, which
+    /// finds the engine's string where the request has taken its
+    /// [`SharedHold`].
+    fn intern_in(&mut self, bytes: &[u8], room: usize) -> Result<Str, Fatal> {
+        if self.asks_table()
+            && let Some(held) = self.shared.existing_interned(bytes)
+        {
+            return Ok(held);
+        }
+        let mut laid = self.heap.string_fresh(room.max(bytes.len()))?;
+        laid.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        laid.set_len(bytes.len());
+        let s = laid.finish();
+        self.made.add(Zval::string(s));
+        Ok(s)
+    }
+
+    fn interning(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.interning, on)
     }
 
     /// A declaration's own string, kept as what its place in the
@@ -220,13 +253,12 @@ impl Intern for RequestStrings<'_> {
     ///   string(12) "uuuuuuuuuuuu" refcount(1)
     /// }
     /// ```
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+    fn constant_array(&mut self, entries: &[(Key, Zval)], size: usize) -> Result<Arr, Fatal> {
         if entries.is_empty() {
             return Ok(Arr::empty());
         }
-        let a = self
-            .heap
-            .array_sized(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
+        let size = size.max(entries.len());
+        let a = (self.heap).array_sized(u32::try_from(size).unwrap_or(u32::MAX))?;
         self.made.add(Zval::array(a));
         for &(key, z) in entries {
             let moved = self.made.take(z);

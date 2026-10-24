@@ -49,9 +49,8 @@ const fn at(word: u32) -> i32 {
     imm(word as usize)
 }
 
-/// Where a counted block keeps its count and its `GC_TYPE_INFO`.
+/// Where a counted block keeps its count.
 const COUNT_AT: i32 = imm(Zval::COUNT_AT);
-const GC_INFO_AT: i32 = imm(Zval::GC_INFO_AT);
 
 /// Where variable `var` of a frame stands past its room.
 fn var_at(var: u32) -> Result<i32, Abort> {
@@ -713,23 +712,7 @@ impl Emit<'_> {
                 .store(trusted(), undef, room, slot + super::TYPE_AT);
             let word = self.b.ins().load(I64, trusted(), room, slot);
             let count = self.b.ins().load(I32, trusted(), word, COUNT_AT);
-            let owners = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
-            // The last owner, or none, which the heap's own release reads
-            // with its pin.
-            let last = self
-                .b
-                .ins()
-                .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, owners, 1);
-            let kind = self.b.ins().band_imm_u(info, super::KIND);
-            let reference =
-                self.b
-                    .ins()
-                    .icmp_imm_u(IntCC::Equal, kind, super::tag(ZvalType::Reference));
-            let gc = self.b.ins().load(I32, trusted(), word, GC_INFO_AT);
-            let held = self.b.ins().band_imm_u(gc, i64::from(Zval::LEAK_BITS));
-            let leaks = self.b.ins().icmp_imm_u(IntCC::Equal, held, 0);
-            let called = self.b.ins().bor(last, reference);
-            let called = self.b.ins().bor(called, leaks);
+            let called = self.kernel_releases(word, info, count);
             let inline = self.b.create_block();
             self.b.ins().brif(called, kernel, &[], inline, &[]);
             self.b.switch_to_block(inline);
