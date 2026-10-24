@@ -1080,7 +1080,10 @@ impl XSLTProcessor {
         true
     }
 
-    /// `registerPHPFunctions`: every php function, or the ones named.
+    /// `registerPHPFunctions`: every php function, or the ones named. A
+    /// list naming a function that does not exist is refused whole, and
+    /// the namespace serves no call after, as php 8.5.12 lays a refused
+    /// registration down (GH-23897):
     ///
     /// ```php
     /// $s = new DOMDocument;
@@ -1096,13 +1099,13 @@ impl XSLTProcessor {
     /// $y = new XSLTProcessor;
     /// $y->importStylesheet($s);
     /// try { $y->registerPHPFunctions(['strtoupper', 'no_such_function']); } catch (TypeError $e) { echo get_class($e), "\n"; }
-    /// var_dump($y->transformToXml($d));
+    /// try { var_dump($y->transformToXml($d)); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect
     /// string(1) "T"
     /// XSLTProcessor::registerPHPFunctions(): Argument #1 ($functions) must be a valid callback name
     /// TypeError
-    /// string(1) "T"
+    /// No callbacks were registered
     /// ```
     #[php(tentative)]
     fn registerPHPFunctions(
