@@ -271,6 +271,8 @@ Number
 Number::compare
 Number::double
 Obj
+Obj::CLASS_AT
+Obj::SLOTS_AT
 Obj::addref
 Obj::class
 Obj::declared_rows

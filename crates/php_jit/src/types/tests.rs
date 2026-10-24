@@ -26,8 +26,8 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
-    traced as built,
+    NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD,
+    STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -1953,5 +1953,95 @@ fn a_callees_exit_stores_none_of_its_callers_registers() -> Result<(), String> {
             .all(|store| store.slot.frame == exit.frame)),
         "{rendered}"
     );
+    Ok(())
+}
+
+/// The forms the property oplines of `ir` are compiled in, in order.
+fn property_forms(ir: &TraceIr) -> Vec<(Opcode, Form)> {
+    (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) if crate::types::places(line.opcode) => Some((line.opcode, line.form)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many class guards `ir` holds.
+fn class_guards(ir: &TraceIr) -> usize {
+    (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Class { .. }))
+        .count()
+}
+
+/// A loop over `$this` and a loop over an object a function holds: each
+/// property opline of a published class's declared slot with no type is
+/// compiled in place, a read, a write, a compound write and an increment
+/// or a decrement, under one class guard per object before the first,
+/// as php's code generator compiles one whose `prop_info` it knows on an
+/// immutable class (`zend_jit_class_guard`, `TRACE_FRAME_SET_THIS_CLASS_CHECKED`);
+/// the typed property's write is the handler's, as php's is its
+/// `zend_jit_assign_to_typed_prop`'s (#3337).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn properties_of_a_published_class_are_inline_under_one_class_guard() -> Result<(), String> {
+    let this = golden(OBJECT_THIS)?;
+    assert_eq!(
+        property_forms(&this),
+        [
+            (Opcode::FetchObjR, Form::Inline),
+            (Opcode::AssignObj, Form::Inline),
+            (Opcode::AssignObjOp, Form::Inline),
+            (Opcode::PreIncObj, Form::Inline),
+        ],
+        "{}",
+        dump::render(&this)
+    );
+    assert_eq!(class_guards(&this), 1, "{}", dump::render(&this));
+    let value = golden(OBJECT_VALUE)?;
+    assert_eq!(
+        property_forms(&value),
+        [
+            (Opcode::FetchObjR, Form::Inline),
+            (Opcode::AssignObj, Form::Inline),
+            (Opcode::AssignObjOp, Form::Inline),
+            (Opcode::PreDecObj, Form::Inline),
+            (Opcode::AssignObj, Form::Step),
+        ],
+        "{}",
+        dump::render(&value)
+    );
+    assert_eq!(class_guards(&value), 1, "{}", dump::render(&value));
+    Ok(())
+}
+
+/// A class of the cached file linked over a class the request declared,
+/// `zend_lazy_class_load`'s copy, is the request's own, with an id of
+/// its own (#3322): the recording takes no place on it, so no class
+/// guard assumes it is a published one, and its property oplines are the
+/// handler's.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_request_scoped_copy_of_a_class_is_guarded_by_no_class_id() -> Result<(), String> {
+    let ir = built(
+        &[
+            ("record.function", "k"),
+            ("record.start", "loop"),
+            ("record.headers", "0"),
+        ],
+        "eval('class Base { public $x = 1; }');
+        class Child extends Base { }
+        function k($o, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { $t += $o->x; $o->x = $i; } return $t; }
+        echo k(new Child, 100), \"\\n\";",
+    )?;
+    assert_eq!(
+        property_forms(&ir),
+        [
+            (Opcode::FetchObjR, Form::Step),
+            (Opcode::AssignObj, Form::Step)
+        ],
+        "{}",
+        dump::render(&ir)
+    );
+    assert_eq!(class_guards(&ir), 0, "{}", dump::render(&ir));
     Ok(())
 }

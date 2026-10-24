@@ -326,6 +326,16 @@ pub(super) fn op1_types(
         }
         Opcode::AssignDim | Opcode::AssignDimOp => Types::of_tag(ZvalType::Array),
         Opcode::VerifyReturnType => returned(code, t1),
+        // The object a property opline writes through stays the object
+        // it was, of the class it was (`zend_update_type_info`'s
+        // `ZEND_ASSIGN_OBJ` and `ZEND_PRE_INC_OBJ` cases,
+        // `Z/Zend/Optimizer/zend_inference.c:3028-3083`).
+        Opcode::AssignObj
+        | Opcode::AssignObjOp
+        | Opcode::PreIncObj
+        | Opcode::PreDecObj
+        | Opcode::PostIncObj
+        | Opcode::PostDecObj => t1.and(Types::OBJECT.or(Types::REF)),
         Opcode::UnsetCv => return Types::UNDEF,
         _ => Types::UNKNOWN,
     };
@@ -732,6 +742,7 @@ pub(super) fn is_call(opcode: Opcode) -> bool {
 /// shift by a negative number throws, where no constant divisor or shift
 /// rules it out as php's code generator rules it out
 /// ([`cannot_raise`](super::cannot_raise)), an element past a packed array is a hole, a
+/// property's slot nothing holds is `__get`'s or the warning's, a
 /// call's frame may not fit, a value sent where the callee takes a
 /// reference is refused. A `DO_*CALL` the trace follows is not among
 /// them: php's code takes no exit there, and what the call's kernel
@@ -749,6 +760,7 @@ pub(super) fn inline_may_leave(line: &Line) -> bool {
         line.opcode,
         Opcode::AssignOp
             | Opcode::FetchDimR
+            | Opcode::FetchObjR
             | Opcode::InitFcall
             | Opcode::InitFcallByName
             | Opcode::InitNsFcallByName
@@ -1080,7 +1092,7 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType) -> Option<Within> {
         {
             Some(Within::Rerun)
         }
-        Opcode::FetchDimR => Some(Within::Fetched),
+        Opcode::FetchDimR | Opcode::FetchObjR => Some(Within::Fetched),
         _ => None,
     }
 }

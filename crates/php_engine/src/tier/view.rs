@@ -354,6 +354,36 @@ pub struct MapPtrRaw {
     pub slot: u32,
 }
 
+/// Where a property opline over a constant name finds the property on an
+/// object of one published class, from one op array
+/// ([`UnitView::hold_place`]): the declared slot, `OBJ_PROP_NUM`, and
+/// whether the property carries a type, whose write, compound write and
+/// step php's code generator serves through `zend_jit_assign_to_typed_prop`
+/// and its kin and this tier through the handler, a `readonly` one and one
+/// of a set visibility among them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropertySlot {
+    func: FuncRef,
+    at: OplineIdx,
+    class: ClassId,
+    slot: u32,
+    typed: bool,
+}
+
+impl PropertySlot {
+    /// The declared slot, by its number among the object's slots.
+    #[must_use]
+    pub fn slot(self) -> u32 {
+        self.slot
+    }
+
+    /// Whether the property carries a type.
+    #[must_use]
+    pub fn typed(self) -> bool {
+        self.typed
+    }
+}
+
 /// What a trace may read of the op arrays, literals and published
 /// classes it touched (`jit-design.md` §4.1, §5.3): built by the recorder
 /// from the request, it holds the request's epoch once and the ids it
@@ -368,6 +398,8 @@ pub struct UnitView {
     classes: Vec<ClassId>,
     /// The plain calls the recording took ([`UnitView::hold_call`]).
     calls: Vec<super::PlainCall>,
+    /// The property places the recording took ([`UnitView::hold_place`]).
+    places: Vec<PropertySlot>,
     /// Whether an observer of calls was declared ([`UnitView::observed`]).
     observed: bool,
 }
@@ -391,6 +423,7 @@ impl UnitView {
             funcs: Vec::new(),
             classes: Vec::new(),
             calls: Vec::new(),
+            places: Vec::new(),
             observed: crate::observer::observing(req),
         }
     }
@@ -421,6 +454,94 @@ impl UnitView {
             self.classes.push(c);
         }
         true
+    }
+
+    /// Take the place the property opline at `at` of the op array `frame`
+    /// serves names on an object of `class`, a declared slot, as the
+    /// engine's runtime cache holds it after a pass of the handler
+    /// ([`Request::cached_property`]), so a trace that recorded the opline
+    /// reads and writes the slot in place under a guard on the object's
+    /// class, as php's code generator does for a property its
+    /// `zend_get_known_property_info` finds on an immutable class
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14313-14340`). Taken only where
+    /// the place is the same in every request and every frame that runs
+    /// the op array: `class` is published, so its id names one linked,
+    /// immutable class in every request of the epoch and its slots and
+    /// their types are that record's (a class a request linked over one of
+    /// its own, `zend_lazy_class_load`'s copy, and every enum are the
+    /// request's, with ids of their own); the frame reads its op array's
+    /// own cache, so it is no closure's and no trait method's copy's; and
+    /// the op array runs in one scope ([`super::published::Func::fixes_scope`]),
+    /// which is what the placement asks of the frame. `false`, taking
+    /// nothing, for any other, and where the cache names no declared slot.
+    pub fn hold_place(
+        &mut self,
+        req: &Request,
+        frame: FrameRef,
+        at: OplineIdx,
+        class: ClassId,
+    ) -> bool {
+        let Some(header) = req.vm().at(frame) else {
+            return false;
+        };
+        let Some(func) = own_row(req, header).filter(|func| func.fixes_scope()) else {
+            return false;
+        };
+        let f = FuncRef(header.runtime_cache().offset());
+        let Some(op) = func
+            .op_array()
+            .and_then(|code| code.oplines.get(at.0 as usize))
+        else {
+            return false;
+        };
+        // `CACHE_ADDR(opline->extended_value)`, an `ASSIGN_OBJ_OP`'s its
+        // `OP_DATA`'s: the oplines this takes carry no fetch flags beside
+        // the slot, which only a `_W`, `_RW` and `_FUNC_ARG` fetch does.
+        let slot = match op.opcode {
+            Opcode::FetchObjR
+            | Opcode::AssignObj
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj => CacheSlot(op.extended_value),
+            Opcode::AssignObjOp => match func
+                .op_array()
+                .and_then(|code| code.oplines.get(at.0 as usize + 1))
+            {
+                Some(data) => CacheSlot(data.extended_value),
+                None => return false,
+            },
+            _ => return false,
+        };
+        if op.op2_type != OperandKind::Const || !self.hold(req, f) || !self.hold_class(req, class) {
+            return false;
+        }
+        let Some(crate::exec::PropertyOffset::Declared { slot, ty }) =
+            req.cached_property(frame, slot, class)
+        else {
+            return false;
+        };
+        let place = PropertySlot {
+            func: f,
+            at,
+            class,
+            slot,
+            typed: ty.typed(),
+        };
+        if !self.places.contains(&place) {
+            self.places.push(place);
+        }
+        true
+    }
+
+    /// The declared slot the property opline at `at` of the op array `f`
+    /// names on an object of `class`; none unless
+    /// [`UnitView::hold_place`] took it.
+    #[must_use]
+    pub fn place(&self, f: FuncRef, at: OplineIdx, class: ClassId) -> Option<PropertySlot> {
+        (self.places.iter())
+            .find(|place| place.func == f && place.at == at && place.class == class)
+            .copied()
     }
 
     /// Whether an observer of calls was declared for the engine, which

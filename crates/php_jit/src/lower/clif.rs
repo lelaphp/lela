@@ -51,6 +51,7 @@ use super::{
 
 mod calls;
 mod doors;
+mod objects;
 mod strings;
 use crate::record::{Began, Callee, Stop};
 use crate::types::{
@@ -832,7 +833,10 @@ impl<'a> Emit<'a> {
                     let short = self.short_of(bytes);
                     self.decline_if(short);
                 }
-                Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
+                Check::Direction { .. }
+                | Check::Stands { .. }
+                | Check::Arm { .. }
+                | Check::Class { .. } => {
                     return Err(mismatch("a body entry past a guard it cannot hold"));
                 }
             }
@@ -1109,6 +1113,7 @@ impl<'a> Emit<'a> {
                 let short = self.short_of(bytes);
                 self.leave_if(short, guard.exit)?;
             }
+            Check::Class { object, class } => self.class_guard(object, class, guard.exit)?,
             Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
                 return Err(mismatch("an op's own guard held before it"));
             }
@@ -1686,7 +1691,8 @@ impl<'a> Emit<'a> {
                 Check::Type { .. }
                 | Check::Deref { .. }
                 | Check::Layout { .. }
-                | Check::Room { .. } => {
+                | Check::Room { .. }
+                | Check::Class { .. } => {
                     return Err(mismatch("a stepped opline holds a guard of another kind"));
                 }
             }
@@ -1854,6 +1860,13 @@ impl<'a> Emit<'a> {
                 self.increment(at, line)
             }
             Opcode::FetchDimR => self.fetch(at, line),
+            Opcode::FetchObjR => self.fetch_obj(at, line),
+            Opcode::AssignObj => self.assign_obj(at, line),
+            Opcode::AssignObjOp
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj => self.compound_obj(at, line),
             Opcode::FeResetR => self.fe_reset(line),
             Opcode::FeFetchR => self.fe_fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
