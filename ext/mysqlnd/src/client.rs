@@ -597,11 +597,22 @@ impl ResultSet {
 
     /// `mysqlnd_fetch_row`'s values: the next row.
     pub fn fetch(&mut self, req: &mut Request) -> Result<Fetched, Thrown> {
+        self.next_row(req, false)
+    }
+
+    /// The next row, read in one lend of the connection, its error
+    /// emptied first where `reset` asks.
+    fn next_row(&mut self, req: &mut Request, reset: bool) -> Result<Fetched, Thrown> {
         let res = &mut self.res;
         let got = self
             .conn
             .0
-            .with(req, |req, conn| res.fetch_row(req, conn, true))
+            .with(req, |req, conn| {
+                if reset {
+                    conn.error.reset(req);
+                }
+                res.fetch_row(req, conn, true)
+            })
             .transpose()?;
         Ok(match got {
             Some(Ok(Some(row))) => Fetched::Row(row),
@@ -613,13 +624,37 @@ impl ResultSet {
     /// `mysqlnd_res::fetch_into`: the next row as an array keyed as
     /// `flags` (`MYSQLND_FETCH_ASSOC`, `_NUM` or both) asks, a numeric
     /// column name an integer key; `null` past the last, `false` where
-    /// the fetch failed. The connection's error is emptied first.
+    /// the fetch failed. The connection's error is emptied first, in the
+    /// lend of the connection the row is read in:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $r = mysqli_query($l, "SELECT 'a' UNION ALL SELECT 'b'");
+    /// mysqli_query($l, 'SELEC 1');
+    /// var_dump(mysqli_errno($l), mysqli_fetch_row($r), mysqli_errno($l));
+    /// mysqli_query($l, 'SELEC 1');
+    /// var_dump(mysqli_fetch_assoc($r), mysqli_fetch_row($r), mysqli_errno($l));
+    /// ```
+    /// ```expect mysql
+    /// int(1064)
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "a"
+    /// }
+    /// int(0)
+    /// array(1) {
+    ///   ["a"]=>
+    ///   string(1) "b"
+    /// }
+    /// NULL
+    /// int(0)
+    /// ```
     pub fn fetch_into(&mut self, req: &mut Request, flags: u32) -> Result<Owner<Value>, Thrown> {
         // "We clean the error here because in unbuffered mode we could
         // receive a new error and therefore consumers of this method are
         // checking for errors."
-        let _ = self.conn.0.with(req, |req, conn| conn.error.reset(req));
-        let row = match self.fetch(req)? {
+        let row = match self.next_row(req, true)? {
             Fetched::Row(row) => row,
             Fetched::Done => return Ok(Owner::null()),
             Fetched::Failed => return Ok(Owner::bool(false)),
