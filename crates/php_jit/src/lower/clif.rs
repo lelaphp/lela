@@ -294,12 +294,23 @@ fn leave_of(line: &Line) -> Option<Leave> {
     (line.exit.map(Leave::Exit)).or_else(|| line.unwind.map(Leave::Unwind))
 }
 
-/// Whether `opcode`'s handler goes on at the next opline of its frame,
-/// or throws, and does nothing else to the frame chain but pop a call it
-/// makes: what [`Kernel::Handle`] serves, building an array and adding
-/// to it, whose handlers php's code calls with no inline code of its own,
-/// and a native's call, whose handler php's code calls directly. An array
-/// built per turn, and a key the build throws at, caught in the frame:
+/// How far past its opline `opcode`'s handler goes on in its frame, one
+/// opline or two past an `OP_DATA`, where it goes on there or throws and
+/// does nothing else to the frame chain but pop a call it makes: what
+/// [`Kernel::Handle`] serves, as php's code calls the handler of each
+/// such opline it compiles no inline code for directly
+/// (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`), and
+/// calls one function of its own where it serves two strings:
+/// building an array and adding to it, a native's call, a
+/// concatenation and a rope's pieces, whose string arms the handler
+/// holds as php's functions hold them, an assignment,
+/// a write to an element and a compound one, a send, a frameless call to
+/// a native, a string's length, a cast to a boolean and the free of a
+/// `foreach`'s array. None for every other opline: one that may jump, a
+/// comparison among them, whose handler may take the jump fused to it,
+/// one that calls or returns, and the two silence opcodes, whose
+/// observers a step tells. An array built per turn, and a key the build
+/// throws at, caught in the frame:
 ///
 /// ```php
 /// function pairs($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $p = [$i, $i * 2, "k" => $i]; $s += $p[1] + $p["k"]; } return $s; }
@@ -309,11 +320,66 @@ fn leave_of(line: &Line) -> Option<Leave> {
 /// ```expect regime=jit-force process
 /// 570 114
 /// ```
-fn goes_on(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::InitArray | Opcode::AddArrayElement | Opcode::DoIcall
-    )
+///
+/// A line of fields joined, split and normalised, each piece of it
+/// served by its handler:
+///
+/// ```php
+/// function line($i) { $p = "/r/" . ($i % 7) . "-x"; $s = "  $i , $p ,  ok-$i "; $t = ""; $t .= $s; $t .= "|"; return $t; }
+/// function munge($n) {
+///     $c = 0; $all = "";
+///     for ($i = 0; $i < $n; $i++) {
+///         $f = explode(",", line($i)); $f[1] = trim($f[1]); $f[2] = str_replace("ok", "OK", $f[2]);
+///         $all .= strtoupper($f[1]) . substr($f[2], 0, 4); $c += strlen($f[0]) + (strpos($f[2], "OK") !== false);
+///     }
+///     return [$c, strlen($all), crc32($all)];
+/// }
+/// echo json_encode(munge(40)), "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// [230,400,1340466966]
+/// ```
+///
+/// The same where every guard fails once:
+///
+/// ```php
+/// function line($i) { $p = "/r/" . ($i % 7) . "-x"; $s = "  $i , $p ,  ok-$i "; $t = ""; $t .= $s; $t .= "|"; return $t; }
+/// function munge($n) {
+///     $c = 0; $all = "";
+///     for ($i = 0; $i < $n; $i++) {
+///         $f = explode(",", line($i)); $f[1] = trim($f[1]); $f[2] = str_replace("ok", "OK", $f[2]);
+///         $all .= strtoupper($f[1]) . substr($f[2], 0, 4); $c += strlen($f[0]) + (strpos($f[2], "OK") !== false);
+///     }
+///     return [$c, strlen($all), crc32($all)];
+/// }
+/// echo json_encode(munge(40)), "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// [230,400,1340466966]
+/// ```
+fn goes_on(opcode: Opcode) -> Option<u32> {
+    match opcode {
+        Opcode::InitArray
+        | Opcode::AddArrayElement
+        | Opcode::DoIcall
+        | Opcode::Concat
+        | Opcode::FastConcat
+        | Opcode::RopeInit
+        | Opcode::RopeAdd
+        | Opcode::RopeEnd
+        | Opcode::Assign
+        | Opcode::AssignOp
+        | Opcode::SendVal
+        | Opcode::SendVar
+        | Opcode::FramelessIcall0
+        | Opcode::FramelessIcall1
+        | Opcode::FramelessIcall2
+        | Opcode::Strlen
+        | Opcode::Bool
+        | Opcode::FeFree => Some(1),
+        Opcode::AssignDim | Opcode::AssignDimOp | Opcode::FramelessIcall3 => Some(2),
+        _ => None,
+    }
 }
 
 /// One trace's function as it is built.
@@ -1320,8 +1386,10 @@ impl<'a> Emit<'a> {
                     leave_of(line),
                 )?;
             }
-            None if goes_on(line.opcode) && self.within(at).is_empty() => {
-                self.handled(line, [room, opline, func])?;
+            None if let Some(places) = goes_on(line.opcode)
+                && self.within(at).is_empty() =>
+            {
+                self.handled(line, places, [room, opline, func])?;
             }
             None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
         }
@@ -1385,9 +1453,14 @@ impl<'a> Emit<'a> {
     /// ```expect regime=jit-force process
     /// float(23.5)
     /// ```
-    fn handled(&mut self, line: &Line, [room, opline, func]: [Value; 3]) -> Result<(), Abort> {
+    fn handled(
+        &mut self,
+        line: &Line,
+        places: u32,
+        [room, opline, func]: [Value; 3],
+    ) -> Result<(), Abort> {
         self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
-        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
+        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + places));
         self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
         self.b
             .ins()

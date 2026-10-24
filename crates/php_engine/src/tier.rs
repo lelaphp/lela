@@ -1283,6 +1283,31 @@ pub fn step_held(
     }
 }
 
+/// The handler of the opline `frame` stands at in `held`, one that goes
+/// on at an opline of its own frame or throws there, served as php's
+/// compiled code calls such an opline's handler directly
+/// (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`):
+/// one dispatch, the frame stood where the handler went on, and nothing
+/// [`step_held`] reads past it. No observer is told: a tier runs only
+/// where no opcode but `BEGIN_SILENCE` and `END_SILENCE` is observed
+/// (`jit-design.md` §4.3), and compiled code steps those. A handler that
+/// went anywhere else, a frame it pushed or popped, is an internal error,
+/// which no opline compiled code hands here reaches.
+pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Result<(), Fatal> {
+    let code = held.code();
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+    let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;
+    #[cfg(debug_assertions)]
+    req.sensed_after(code, op)?;
+    match settled(req, frame, at, next) {
+        Stepped::Same(went) | Stepped::Threw(went) if went == frame => Ok(()),
+        _ => Err(Fatal::error(
+            "InternalError: a handler compiled code serves in its frame went on elsewhere",
+        )),
+    }
+}
+
 /// The `DO_UCALL`, `DO_FCALL` or `DO_FCALL_BY_NAME` at `frame`'s opline
 /// of `held`, made as compiled code makes a call to the callee its trace
 /// recorded, `callee`, which the `INIT_*` before it pushed: the handler's
