@@ -24,17 +24,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// `MAXPATHLEN` (`Z/Zend/zend_virtual_cwd.h:39`), the host's
-/// `PATH_MAX`: 4096 on Linux, 1024 on macOS and the BSDs. The one value
-/// the path checks, `open_basedir`, `include` and `dl()` read and
-/// `PHP_MAXPATHLEN` says, and the one an extension reads as
+/// The compile's `MAXPATHLEN`, the one an extension reads as
 /// `request::MAXPATHLEN`, as php's extensions read the one of
 /// `zend_virtual_cwd.h`.
-pub const MAXPATHLEN: usize = if cfg!(target_os = "linux") {
-    4096
-} else {
-    1024
-};
+pub use php_compile::MAXPATHLEN;
 
 /// `LINK_MAX` as `zend_virtual_cwd.c` redefines it: how many links one
 /// resolution follows before it gives up.

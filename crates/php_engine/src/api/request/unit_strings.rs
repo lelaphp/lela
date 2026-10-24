@@ -70,6 +70,10 @@ pub(crate) struct UnitStrings {
     /// The blocks of what units declared that are over, for
     /// [`Request::release_unit_strings`] to give back.
     dead_blocks: Vec<Blocks>,
+    /// `zend_lazy_class_load`'s copies of the classes of files the cache
+    /// keeps that the request linked as its own, with what their links
+    /// laid, held to the request's end.
+    copied: Vec<Blocks>,
     /// What op arrays that are over gave back and [`UnitStrings::take`]
     /// has not yet taken: a dynamic definition's, at its last count.
     gone: Vec<Gone>,
@@ -632,6 +636,17 @@ impl UnitStrings {
     /// Whether the request holds no request-only unit.
     pub(super) fn is_empty(&self) -> bool {
         self.units.is_empty()
+    }
+
+    /// Whether the unit at `unit` is one the request compiled for itself.
+    pub(super) fn holds(&self, unit: *const Unit) -> bool {
+        self.position(unit).is_some()
+    }
+
+    /// The blocks of a class of a file the cache keeps, held to the
+    /// request's end.
+    pub(super) fn keep_copied(&mut self, blocks: Blocks) {
+        self.copied.push(blocks);
     }
 
     /// The blocks of the class at `at` of the unit at `unit`'s classes,
@@ -1524,7 +1539,7 @@ impl Request {
             names.extend(strings.names);
             constants.extend(strings.constants);
         }
-        for blocks in held.dead_blocks {
+        for blocks in held.dead_blocks.into_iter().chain(held.copied) {
             blocks.free(self);
         }
         for held in held.units {

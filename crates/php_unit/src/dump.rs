@@ -1154,11 +1154,12 @@ mod tests {
         use php_heap::{Intern, Key, Strings};
         let mut strings = Strings::new();
         let s = strings.intern(b"s").expect("intern \"s\"");
+        let entries = [
+            (Key::Long(1), Zval::long(12)),
+            (Key::Str(s), Zval::long(14)),
+        ];
         let table = strings
-            .constant_array(&[
-                (Key::Long(1), Zval::long(12)),
-                (Key::Str(s), Zval::long(14)),
-            ])
+            .constant_array(&entries, 2)
             .expect("a constant array");
         let mut body = body(
             vec![Opline {
@@ -1188,7 +1189,7 @@ mod tests {
         let mut strings = Strings::new();
         let key = strings.intern(b"\x80").expect("intern a byte above 0x7f");
         let table = strings
-            .constant_array(&[(Key::Str(key), Zval::long(1))])
+            .constant_array(&[(Key::Str(key), Zval::long(1))], 1)
             .expect("a constant array");
         let decl = FunctionDecl {
             file: Name(b"\xfe.php"[..].into()),
