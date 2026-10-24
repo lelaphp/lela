@@ -15,6 +15,18 @@
 //! `--accept` has written, so the line it captured is inside the tree the
 //! reading is over.
 //!
+//! **The record of what `--accept` took.** Every `--accept`, a run over
+//! the crate or one narrowed to a file or an item, records each verdict it
+//! wrote, and each one the oracle's run reproduced as it stood, under the
+//! crate's accepted scope, keyed by the verdict's block:
+//! the `php` fence through the `expect` fence that pins it, and the
+//! `stderr` fence after it ([`crate::witness::record_accepted`]). A hit
+//! whose block a record names is the instrument's whatever else the file
+//! or the crate became since, so a run narrowed with `--item`, which
+//! writes no reading of the crate, is evidence as a run over it is, and a
+//! prose edit beside the fence or a merge that moves the crate on leaves it
+//! standing. The record lands at `worktree retire` as every reading does.
+//!
 //! **Evidence that travels with the commits.** A tree hash names one
 //! state of the crate, and a merge makes a state no branch measured: a
 //! line a branch's `--accept` captured reached main beside another
@@ -106,6 +118,7 @@ pub(super) fn captured(
         _ => false,
     };
     fresh
+        || accepted(root, instrument, &krate.name, regex, written)
         || carried(
             root,
             instrument,
@@ -115,6 +128,38 @@ pub(super) fn captured(
             written,
             path,
         )
+}
+
+/// Whether every hit in `written` is a verdict `--accept` recorded writing
+/// ([`crate::witness::record_accepted`]), in this workspace's store or the
+/// store of another worktree of the clone, where `worktree retire` lands a
+/// branch's. The record names a verdict by its block, the `php` fence
+/// through the `expect` fence that pins it ([`crate::witness::fence::verdict`]),
+/// so a run narrowed to a file or an item, which writes no reading of the
+/// crate, leaves one as a crate's run does, and prose edited around the
+/// block or a merge that moves the crate on leaves it standing. A verdict
+/// typed by hand is a block no record names.
+fn accepted(root: &Path, instrument: &str, scope: &str, regex: &Regex, written: &str) -> bool {
+    let mut wanted = BTreeSet::new();
+    for hit in regex.find_iter(written) {
+        let line = written[..hit.start()].matches('\n').count();
+        let Some(verdict) = crate::witness::fence::verdict(written, line) else {
+            return false;
+        };
+        wanted.insert(verdict);
+    }
+    if wanted.is_empty() {
+        return false;
+    }
+    let scope = crate::witness::accepted_scope(scope);
+    let mut found = BTreeSet::new();
+    for store in stores(root) {
+        match store.measured_over(instrument, &scope, &wanted) {
+            Ok(those) => found.extend(those),
+            Err(_) => return false,
+        }
+    }
+    found == wanted
 }
 
 /// How many of the commits that last changed a file are looked through for

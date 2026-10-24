@@ -828,12 +828,13 @@ fn count_lines(counts: &Counts) -> Vec<(&'static str, [u64; 3])> {
 }
 
 /// Every reading of one instrument, one row per scope, the numbers as
-/// `key=value` pairs. Sections whose instrument does not exist yet
+/// `key=value` pairs; a `witness` record of the verdicts `--accept` wrote
+/// is no crate's reading and is left out ([`crate::witness::is_accepted`]). Sections whose instrument does not exist yet
 /// (`phpt`, `witness`, `mutants`) render this way from the store alone.
 fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
     let mut scopes: Vec<&str> = readings
         .iter()
-        .filter(|r| r.instrument == name)
+        .filter(|r| r.instrument == name && !crate::witness::is_accepted(r))
         .map(|r| r.scope.as_str())
         .collect();
     scopes.sort_unstable();
