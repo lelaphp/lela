@@ -12,7 +12,7 @@
 
 use std::cmp::Ordering;
 
-use php_heap::{Arr, Key, Number, Zval, ZvalType};
+use php_heap::{Arr, Key, Number, Scalar, Zval, ZvalType};
 use php_unit::Opcode;
 
 use crate::api::values::Value;
@@ -760,12 +760,10 @@ pub(crate) fn order(a: Zval, b: Zval, holds: impl Fn(Ordering) -> bool + Copy) -
 /// ```
 #[inline(always)] // as `number`
 pub(crate) fn truth(z: Zval) -> Option<bool> {
-    match z.kind() {
-        ZvalType::Null | ZvalType::False => Some(false),
-        ZvalType::True => Some(true),
-        ZvalType::Long => z.as_long().map(|n| n != 0),
-        ZvalType::Double => z.as_double().filter(|d| !d.is_nan()).map(|d| d != 0.0),
-        _ => None,
+    match Scalar::of(&z)? {
+        Scalar::Double(d) if d.is_nan() => None,
+        Scalar::Str(_) => None,
+        scalar => Some(scalar.is_true()),
     }
 }
 
@@ -896,14 +894,6 @@ pub(crate) fn element(array: Arr, key: Key) -> Option<Zval> {
 /// ```
 #[inline(always)] // as `number`
 pub(crate) fn identical(a: Zval, b: Zval) -> Option<bool> {
-    let scalar = |z: Zval| match z.kind() {
-        ZvalType::Null => Some(php_heap::Scalar::Null),
-        ZvalType::False => Some(php_heap::Scalar::Bool(false)),
-        ZvalType::True => Some(php_heap::Scalar::Bool(true)),
-        ZvalType::Long => z.as_long().map(php_heap::Scalar::Long),
-        ZvalType::Double => z.as_double().map(php_heap::Scalar::Double),
-        _ => None,
-    };
     if a.is_undef() || b.is_undef() {
         return None;
     }
@@ -911,9 +901,8 @@ pub(crate) fn identical(a: Zval, b: Zval) -> Option<bool> {
         return Some(false);
     }
     match a.kind() {
-        ZvalType::String => Some(a.as_str()?.bytes() == b.as_str()?.bytes()),
         ZvalType::Object => Some(a.as_obj()?.is_same(b.as_obj()?)),
         ZvalType::Array => a.as_arr()?.is_same(b.as_arr()?).then_some(true),
-        _ => Some(php_heap::identical(scalar(a)?, scalar(b)?)),
+        _ => Some(php_heap::identical(Scalar::of(&a)?, Scalar::of(&b)?)),
     }
 }

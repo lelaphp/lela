@@ -30,13 +30,38 @@ pub enum Scalar<'a> {
     Str(&'a [u8]),
 }
 
+impl<'a> Scalar<'a> {
+    /// The scalar a zval is, by one match on its type byte: a null, a
+    /// bool, a long, a double, or a string's bytes, borrowed for as long
+    /// as the zval is ([`Zval::str_bytes`]). `None` for an array, an
+    /// object, a resource, a reference, and a slot nothing wrote, which
+    /// each reader decides for itself: a constant table holds none but
+    /// the array ([`constant_truth`], [`compare_constants`]), and the
+    /// engine's inline tests leave each to the kernel.
+    #[must_use]
+    #[inline(always)] // the engine's inline tests read it, and drop what they leave
+    #[allow(clippy::inline_always)]
+    pub fn of(value: &'a Zval) -> Option<Scalar<'a>> {
+        Some(match value.kind() {
+            ZvalType::Null => Scalar::Null,
+            ZvalType::False => Scalar::Bool(false),
+            ZvalType::True => Scalar::Bool(true),
+            ZvalType::Long => Scalar::Long(value.as_long()?),
+            ZvalType::Double => Scalar::Double(value.as_double()?),
+            ZvalType::String => Scalar::Str(value.str_bytes()?),
+            _ => return None,
+        })
+    }
+}
+
 impl Scalar<'_> {
-    /// `zval_is_true` over a scalar, which the default arm reads a null
-    /// or a bool against and which the compiler's `(bool)` fold reads
-    /// too (`zend_try_ct_eval_cast`'s `_IS_BOOL` arm). No NAN reaches
-    /// it: `zend_compare` orders a NAN against a null or a bool before
-    /// it asks, and `zend_try_ct_eval_cast` folds no cast over one, so
-    /// the warning `zend_is_true` raises for one is never raised here.
+    /// `zend_is_true`'s value over a scalar (`Z/Zend/zend_operators.h:409`):
+    /// a null and a false are false, a long and a double are true where
+    /// they are not zero, a NAN among them, and a string is true unless
+    /// it is empty or `"0"`. The warning 8.5 raises as a NAN is coerced
+    /// is the caller's to raise where php raises it: `zend_compare`'s
+    /// default arm orders a NAN against a null or a bool before it asks,
+    /// and the engine's inline test leaves a NAN to the kernel.
     #[must_use]
     pub fn is_true(self) -> bool {
         match self {
@@ -334,14 +359,7 @@ pub fn compare_constants(left: Zval, right: Zval, precision: i32) -> Ordering {
         (Some(a), Some(b)) => compare_tables(a, b, precision),
         (Some(a), None) => against_array(a, right.kind()).reverse(),
         (None, Some(b)) => against_array(b, left.kind()),
-        (None, None) => {
-            let (a, b) = (left.as_str(), right.as_str());
-            compare(
-                scalar(left, a.as_ref()),
-                scalar(right, b.as_ref()),
-                precision,
-            )
-        }
+        (None, None) => compare(constant_scalar(&left), constant_scalar(&right), precision),
     }
 }
 
@@ -359,10 +377,7 @@ pub fn identical_constants(left: Zval, right: Zval) -> bool {
                         .zip(b.iter())
                         .all(|((k, v), (l, w))| k == l && identical_constants(v, w)))
         }
-        (None, None) => {
-            let (a, b) = (left.as_str(), right.as_str());
-            identical(scalar(left, a.as_ref()), scalar(right, b.as_ref()))
-        }
+        (None, None) => identical(constant_scalar(&left), constant_scalar(&right)),
         _ => false,
     }
 }
@@ -407,27 +422,94 @@ fn against_array(array: Arr, other: ZvalType) -> Ordering {
     }
 }
 
-/// The scalar a constant is, its string's bytes borrowed from `string`.
-fn scalar(value: Zval, string: Option<&crate::string::Str>) -> Scalar<'_> {
-    if let Some(s) = string {
-        return Scalar::Str(s.bytes());
+/// `zend_is_true`'s value over a value of a constant table
+/// (`i_zend_is_true`, `Z/Zend/zend_operators.h:409`): a scalar as
+/// [`Scalar::is_true`] reads it, a NAN true, and an array true where it
+/// has an element. `None` for an object, a resource, a reference or a
+/// slot nothing wrote, none of which a constant table holds and whose
+/// truth needs the request. The compiler's folds over a constant read
+/// it, and so does the compiled tier where it reads pass 1's fold of a
+/// jump on a constant (`Z/Zend/Optimizer/pass1.c:315-333`).
+///
+/// ```php
+/// var_dump(!"0", !"00", ![], ![0], (bool)"0", (bool)[], (bool)[0]);
+/// if (NAN) echo "NAN is true\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(false)
+/// bool(true)
+/// bool(false)
+/// bool(false)
+/// bool(false)
+/// bool(true)
+///
+/// Warning: unexpected NAN value was coerced to bool in %s on line 3
+/// NAN is true
+/// ```
+#[must_use]
+pub fn constant_truth(value: Zval) -> Option<bool> {
+    match value.as_arr() {
+        Some(array) => Some(!array.is_empty()),
+        None => Scalar::of(&value).map(Scalar::is_true),
     }
-    if let Some(n) = value.as_long() {
-        return Scalar::Long(n);
-    }
-    if let Some(d) = value.as_double() {
-        return Scalar::Double(d);
-    }
-    match value.kind() {
-        ZvalType::True => Scalar::Bool(true),
-        ZvalType::False => Scalar::Bool(false),
-        _ => Scalar::Null,
-    }
+}
+
+/// The scalar a constant table's value is, past the arrays its callers
+/// took first; no constant is anything else, and a slot nothing wrote
+/// reads as null.
+fn constant_scalar(value: &Zval) -> Scalar<'_> {
+    Scalar::of(value).unwrap_or(Scalar::Null)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A NAN is true, an array is true where it has an element, and the
+    /// string `"0"` is false where `"0.0"` is true, as `zend_is_true`
+    /// reads each; an object, an `IS_PTR` or a slot nothing wrote has no
+    /// truth a constant gives.
+    #[test]
+    fn a_constant_is_true_as_zend_is_true_reads_it() {
+        let _alone = crate::serial::alone();
+        let mut heap = crate::Heap::new();
+        let mut strings = crate::Strings::new();
+        let mut string = |bytes: &[u8]| {
+            crate::Intern::intern(&mut strings, bytes)
+                .map(Zval::string)
+                .expect("an interned string")
+        };
+        let (zero, double_zero, one, empty) =
+            (string(b"0"), string(b"00"), string(b"1"), string(b""));
+        let zero_point_zero = string(b"0.0");
+        let object = heap.object(1, 0, 0).expect("an object");
+        let full = heap.array().expect("an array");
+        assert!(matches!(heap.array_append(full, Zval::long(0)), Ok(true)));
+        for (value, truth) in [
+            (Zval::double(f64::NAN), Some(true)),
+            (Zval::double(0.0), Some(false)),
+            (Zval::double(-0.0), Some(false)),
+            (Zval::array(Arr::empty()), Some(false)),
+            (Zval::array(full), Some(true)),
+            (zero, Some(false)),
+            (double_zero, Some(true)),
+            (one, Some(true)),
+            (empty, Some(false)),
+            (zero_point_zero, Some(true)),
+            (Zval::null(), Some(false)),
+            (Zval::bool(true), Some(true)),
+            (Zval::long(0), Some(false)),
+            (Zval::long(-1), Some(true)),
+            (Zval::object(object), None),
+            (Zval::ptr(0), None),
+            (Zval::UNDEF, None),
+        ] {
+            assert_eq!(constant_truth(value), truth, "{:?}", value.kind());
+        }
+        assert_eq!(Scalar::of(&zero), Some(Scalar::Str(b"0")));
+        assert_eq!(Scalar::of(&Zval::array(full)), None);
+    }
 
     #[test]
     fn two_scalars_are_identical_by_type_and_then_by_value() {

@@ -35,7 +35,7 @@ use php_engine::tier::{
     self, Building, Epoch, Fatal, FrameRef, FuncRef, Request, SafepointIdx, Sample, Stepped,
     UnitView,
 };
-use php_heap::{Scalar, ZvalType};
+use php_heap::{ZvalType, constant_truth};
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use crate::JitRequest;
@@ -1643,10 +1643,18 @@ pub(crate) fn position(req: &Request, frame: FrameRef) -> OplineIdx {
     tier::frame(req, frame).map_or(OplineIdx(0), |view| view.opline())
 }
 
-/// The loop header standing at `at`, as php's trace roots it: the
-/// safepoint past the entry, and no return's own number, whose loop
-/// [`loop_root`] finds at `at`.
+/// The loop header standing at `at`, as php's trace roots it, where
+/// php's CFG finds a header at all ([`reached`]): [`loop_at`]'s.
 pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
+    loop_at(code, at).filter(|_| reached(code, at))
+}
+
+/// The loop whose root stands at `at`, counted or not: the safepoint
+/// past the entry, and no return's own number, whose loop [`loop_root`]
+/// finds at `at`. Its word says whether php counts it, which a claim
+/// asks ([`counts`]), so a return that lands here reads it with no walk
+/// of the op array (`dispatch::goes_on`).
+pub(crate) fn loop_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
     code.safepoints
         .iter()
         .enumerate()
@@ -1657,6 +1665,91 @@ pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
         })
         .and_then(|(number, _)| u32::try_from(number).ok())
         .map(SafepointIdx)
+}
+
+/// Whether php counts the heat of loop `header`, whose back edge left
+/// `frame` where it lands: `zend_jit_setup_hot_trace_counters` swaps the
+/// handler of the header of each loop php's CFG finds
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:8954-8980`), and finds none where
+/// the header is not [`reached`] from the entry but through a `catch`, so
+/// php never records such a loop, and its word is blacklisted at its
+/// first claim, with no line (`dispatch::hot`). An op array no trace
+/// reads is counted: its word reads sealed already.
+///
+/// The `try` throws in `$main` itself, so the code past its `catch` is
+/// reached through the `catch` alone, and the entry's recording aborts
+/// at the throw and roots nothing more, where a throw in a callee
+/// (`dispatch::safepoint`) leaves the loop a root:
+///
+/// ```php
+/// try { throw new Exception("x"); } catch (Exception $e) {}
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += $i; }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 abort (exception)
+///
+/// ```
+pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bool {
+    tier::served(req, frame).is_none_or(|held| {
+        let code = held.code();
+        loop_root(code, header).is_some_and(|root| reached(code, root))
+    })
+}
+
+/// Whether the opline at `to` is reached from the op array's entry along
+/// the edges php's CFG draws (`zend_build_cfg`,
+/// `Z/Zend/Optimizer/zend_cfg.c:496-587`): each of its
+/// [`tier::jump_targets`], and the opline after each opline that has
+/// one, all
+/// but a return, a throw, a `MATCH_ERROR`, a `VERIFY_NEVER_TYPE`, a
+/// `FAST_RET`, a `JMP` and a `MATCH`. No edge enters a `catch` from the
+/// `try` it guards, so code reached through a `catch` alone has no
+/// immediate dominator (`zend_cfg_compute_dominators_tree`, `:694-724`),
+/// and `zend_cfg_identify_loops` looks for loops among the entry's
+/// dominator tree alone (`:832-844`). A throw inside an expression ends a
+/// block in php only where one starts past it; here it ends one always,
+/// which nothing observes, as the opline past a throw never runs.
+///
+/// `php_ssa`'s CFG and dominator tree replace this walk once ADR-0015's
+/// crate lands, and this tier reads its loop headers from there.
+pub(crate) fn reached(code: &OpArray, to: OplineIdx) -> bool {
+    let mut seen = vec![false; code.oplines.len()];
+    let mut work = vec![OplineIdx(0)];
+    while let Some(at) = work.pop() {
+        if at == to {
+            return true;
+        }
+        let index = at.0 as usize;
+        let (Some(op), Some(seen)) = (code.oplines.get(index), seen.get_mut(index)) else {
+            continue;
+        };
+        if std::mem::replace(seen, true) {
+            continue;
+        }
+        work.extend(tier::jump_targets(code, at));
+        let ends = matches!(
+            op.opcode,
+            Opcode::Return
+                | Opcode::ReturnByRef
+                | Opcode::GeneratorReturn
+                | Opcode::Throw
+                | Opcode::MatchError
+                | Opcode::VerifyNeverType
+                | Opcode::FastRet
+                | Opcode::Jmp
+                | Opcode::Match
+        );
+        if !ends {
+            work.extend(at.0.checked_add(1).map(OplineIdx));
+        }
+    }
+    false
 }
 
 /// The opline php's trace of loop `header` roots at, where the safepoint
@@ -1755,27 +1848,9 @@ fn folds_to_jmp(code: &OpArray, at: OplineIdx, to: OplineIdx) -> bool {
         };
         op.op1_type == OperandKind::Const
             && op.jump_target() == Some(to)
-            && constant_truth(code, op.op1) == Some(jumps_when)
+            && (code.literals.get(op.op1 as usize)).and_then(|value| constant_truth(*value))
+                == Some(jumps_when)
     })
-}
-
-/// `zend_is_true` over the constant operand at `at`: a scalar's truth, and an
-/// array's, which is whether it has an element. None for any other.
-fn constant_truth(code: &OpArray, at: u32) -> Option<bool> {
-    let value = code.literals.get(at as usize)?;
-    let scalar = match value.kind() {
-        ZvalType::Null => Scalar::Null,
-        ZvalType::False => Scalar::Bool(false),
-        ZvalType::True => Scalar::Bool(true),
-        ZvalType::Long => Scalar::Long(value.as_long()?),
-        // A NAN, which `Scalar::is_true` is not asked of, is true, as
-        // pass 1's `zend_is_true` reads it.
-        ZvalType::Double => return value.as_double().map(|d| d != 0.0),
-        ZvalType::String => Scalar::Str(value.str_bytes()?),
-        ZvalType::Array => return value.as_arr().map(|arr| !arr.is_empty()),
-        _ => return None,
-    };
-    Some(scalar.is_true())
 }
 
 /// Where the `JMP` right before `site` goes, where it goes past it: a
