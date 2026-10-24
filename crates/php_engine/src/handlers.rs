@@ -13293,7 +13293,16 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     exec::free_operand(req, frame, op.op2_type, op.op2);
     let stepped = match computed {
         Ok(stepped) => stepped,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            let thrown = match write_place(req, frame, op.op1_type, op.op1) {
+                Some(at) => {
+                    let strict = req.frame_strict_types(frame);
+                    land_failed_step(req, at, (None, strict), thrown)
+                }
+                None => thrown,
+            };
+            return threw(req, frame, &thrown);
+        }
     };
     let Some(at) = write_place(req, frame, op.op1_type, op.op1) else {
         return Err(Fatal::error(
@@ -14779,6 +14788,161 @@ fn release_overwritten(req: &mut Request, old: Value) {
     }
 }
 
+/// What a typed place takes when its compound assignment's operator
+/// threw. php's `zend_binary_op` left the copy it writes `IS_UNDEF`
+/// (`ZVAL_UNDEF(result)` beside `zend_binop_error`,
+/// `Z/Zend/zend_operators.c:1181`), and `zend_binary_assign_op_typed_prop`
+/// and `zend_binary_assign_op_typed_ref` (`Z/Zend/zend_execute.c:1693`)
+/// still hold it to the place's types and write it where they accept it.
+/// With the operator's throwable pending only `zend_parse_arg_long_weak`
+/// and `zend_parse_arg_double_weak` accept it, reading what is undefined
+/// as 0; `zend_parse_arg_str_weak` and `zend_parse_arg_bool_weak` refuse
+/// once `EG(exception)` is set, and so do `strict_types` and every class
+/// type. So a type taking an int lands `0`, one taking a float and no int
+/// `0.0`, a reference's sources each by that rule and all alike, and
+/// anything else keeps what the place held. A declared property's own
+/// type (`own`, where the place holds no reference) refuses with no error
+/// of its own, `zend_verify_property_type_error` raising nothing over a
+/// pending throwable; the sources of the cell a reference names refuse
+/// with `zend_throw_ref_type_error_zval`'s `TypeError` naming the first
+/// that refused, chained over `thrown`, which php raises whatever is
+/// pending. What is pending after is the answer.
+///
+/// ```php
+/// class T { public int $i = 2; public ?float $f = 2.5; public string $s = "s"; public $plain = 6; public static int $si = 7; }
+/// $t = new T;
+/// foreach (['i', 'f', 's', 'plain'] as $p) {
+///     try { $t->$p += "abc"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+///     var_dump($t->$p);
+/// }
+/// try { T::$si -= []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $q = &$t->i; $q = 5;
+/// try { $q %= 0; } catch (DivisionByZeroError $e) { echo $e->getMessage(), "\n"; }
+/// $x = 2; $y = &$x;
+/// try { $x += "abc"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(T::$si, $t->i, $x);
+/// ```
+/// ```expect
+/// Unsupported operand types: int + string
+/// int(0)
+/// Unsupported operand types: float + string
+/// float(0)
+/// Unsupported operand types: string + string
+/// string(1) "s"
+/// Unsupported operand types: int + string
+/// int(6)
+/// Unsupported operand types: int - array
+/// Modulo by zero
+/// Unsupported operand types: int + string
+/// int(0)
+/// int(0)
+/// int(2)
+/// ```
+fn land_failed_step(
+    req: &mut Request,
+    place: php_heap::ZvalRef,
+    (own, strict): (Option<&php_unit::decl::Type>, bool),
+    thrown: Thrown,
+) -> Thrown {
+    let mut at = place;
+    let mut cell = None;
+    let masks: Vec<u32> = match Value::of_slot(place.read()).as_php_ref() {
+        Some(bound) => {
+            at = bound.heap().val_ref();
+            cell = Some(bound.heap());
+            let sources = req.ref_type_sources(bound.heap());
+            sources.iter().map(|source| source.ty.mask()).collect()
+        }
+        None => own.map(php_unit::decl::Type::mask).into_iter().collect(),
+    };
+    if let Some(landed) = undefined_as(&masks, strict) {
+        let held = Value::of_slot(at.read());
+        at.write(landed.to_zval());
+        release_overwritten(req, held);
+        return thrown;
+    }
+    match cell {
+        Some(cell) => refused_by_sources(req, cell, strict, thrown),
+        None => thrown,
+    }
+}
+
+/// [`land_failed_step`] over a `static` property's slot: the slot's own
+/// declared type, or the sources of the cell a reference there names.
+fn land_failed_static(
+    req: &mut Request,
+    frame: FrameRef,
+    info: crate::api::request::PropertyInfo,
+    thrown: Thrown,
+) -> Thrown {
+    let bound = (req.static_slot_cell(info))
+        .map(PhpRef::heap)
+        .filter(|cell| !req.ref_type_sources(*cell).is_empty());
+    let masks: Vec<u32> = match bound {
+        Some(cell) => {
+            let sources = req.ref_type_sources(cell);
+            sources.iter().map(|source| source.ty.mask()).collect()
+        }
+        None => (req.typed_static(info).map(|typed| typed.ty.mask()))
+            .into_iter()
+            .collect(),
+    };
+    let strict = req.frame_strict_types(frame);
+    // What `land_failed_step` makes of a place, over the slot.
+    match (undefined_as(&masks, strict), bound) {
+        (Some(landed), _) => {
+            let previous = req.replace_static_property(info, landed);
+            release_overwritten(req, previous);
+            thrown
+        }
+        (None, Some(cell)) => refused_by_sources(req, cell, strict, thrown),
+        (None, None) => thrown,
+    }
+}
+
+/// [`land_failed_step`]'s refusal by the sources of `cell`: the
+/// `TypeError` naming the first source that takes nothing of the
+/// undefined copy, chained over `thrown`; `thrown` alone where the cell
+/// has no source that refuses.
+fn refused_by_sources(
+    req: &mut Request,
+    cell: php_heap::Ref,
+    strict: bool,
+    thrown: Thrown,
+) -> Thrown {
+    let sources = req.ref_type_sources(cell);
+    let refused = sources
+        .iter()
+        .find(|source| undefined_as(&[source.ty.mask()], strict).is_none())
+        .map(|first| (first.ty.clone(), first.declaring, first.name.clone()));
+    match refused {
+        Some((ty, declaring, name)) => {
+            let later = crate::ops::ref_type_error(req, &Value::undef(), &ty, declaring, &name);
+            thrown.chain(req, later)
+        }
+        None => thrown,
+    }
+}
+
+/// `zend_verify_weak_scalar_type_hint` over an `IS_UNDEF` with a
+/// throwable pending, under each of `masks`: an int where every mask
+/// takes one, a float where every mask takes a float and none an int,
+/// and nothing otherwise ([`land_failed_step`]).
+fn undefined_as(masks: &[u32], strict: bool) -> Option<Value> {
+    const MAY_BE_LONG: u32 = 1 << 4;
+    const MAY_BE_DOUBLE: u32 = 1 << 5;
+    if strict || masks.is_empty() {
+        return None;
+    }
+    if masks.iter().all(|mask| mask & MAY_BE_LONG != 0) {
+        return Some(Value::int(0));
+    }
+    masks
+        .iter()
+        .all(|mask| mask & MAY_BE_LONG == 0 && mask & MAY_BE_DOUBLE != 0)
+        .then(|| Value::float(0.0))
+}
+
 /// Whether `extended_value` names `.`, the operator of `.=`.
 fn is_concat(extended_value: u32) -> bool {
     u8::try_from(extended_value)
@@ -15009,7 +15173,10 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     req.release(value);
     let stepped = match computed {
         Ok(stepped) => stepped,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            let thrown = land_failed_static(req, frame, info, thrown);
+            return threw(req, frame, &thrown);
+        }
     };
     let strict = req.frame_strict_types(frame);
     // `ZEND_REF_HAS_TYPE_SOURCES` ahead of the property's own type:
@@ -16665,7 +16832,13 @@ fn stepped_entry(
         kernel(req, &held, &value)
     };
     exec::free_operand(req, frame, data.op1_type, data.op1);
-    let stepped = computed?;
+    let stepped = match computed {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            let strict = req.frame_strict_types(frame);
+            return Err(land_failed_step(req, entry, (None, strict), thrown));
+        }
+    };
     // `EX_USES_STRICT_TYPES()`: the regime of the frame the opline
     // stands in.
     let (landed, garbage) = assign_to_place(req, frame, entry, stepped)?;
@@ -17540,6 +17713,17 @@ fn step_slot(
     let stepped = match computed {
         Ok(stepped) => stepped,
         Err(thrown) => {
+            let thrown = match object.heap().slot_ref(slot) {
+                Some(place) => {
+                    let own = typed
+                        .then(|| req.typed_property_at(object.class(), slot))
+                        .flatten();
+                    let strict = req.frame_strict_types(frame);
+                    let own = own.as_ref().map(|typed| &typed.ty);
+                    land_failed_step(req, place, (own, strict), thrown)
+                }
+                None => thrown,
+            };
             write_out(req, frame, op, &Value::null());
             return Ok(Err(thrown));
         }
