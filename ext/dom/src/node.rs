@@ -101,10 +101,11 @@ fn check_legacy_insertion(
 }
 
 /// An attribute of the same name `parent` already has, which `appendChild`
-/// and `insertBefore` replace.
+/// and `insertBefore` replace: in no namespace for one in none (php
+/// 8.5.12), never one of the name in a namespace.
 fn existing_attr(parent: Node, child: Node) -> Option<Node> {
     match child.ns().and_then(Ns::href) {
-        None => parent.has_prop(&child.name()),
+        None => parent.has_ns_prop(&child.name(), None),
         Some(href) => parent.has_ns_prop(&child.name(), Some(&href)),
     }
     .filter(|a| a.kind() != Kind::AttributeDecl)
@@ -1024,7 +1025,14 @@ fn insert_before(
                 dom_error(req, Code::NotFound, strict)?;
                 return Ok(Owner::bool(false));
             }
-            Some(refp)
+            // A node inserted before itself goes before what follows it
+            // (php 8.5.12, GH-23365): unlinking it first would leave the
+            // reference out of the list.
+            if refp == child {
+                child.next()
+            } else {
+                Some(refp)
+            }
         }
         None => None,
     };
@@ -1561,6 +1569,28 @@ impl DOMNode {
     /// ```expect
     /// <r><a/><b/><c/></r>
     /// Not Found Error
+    /// ```
+    ///
+    /// A node inserted before itself stays where it is (GH-23365), and an
+    /// attribute in no namespace replaces only the one of its name in none:
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r xmlns:p="urn:p" p:a="0" a="1" b="2">t<c/></r>');
+    /// $r = $d->documentElement;
+    /// [$t, $c, $a] = [$r->firstChild, $r->lastChild, $r->getAttributeNode('a')];
+    /// var_dump($r->insertBefore($t, $t) === $t, $r->insertBefore($c, $c) === $c, $r->insertBefore($a, $a) === $a, $t->nextSibling === $c);
+    /// $n = $d->createAttribute('a');
+    /// $n->value = 'new';
+    /// $r->appendChild($n);
+    /// echo $d->saveXML($r), "\n";
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// <r xmlns:p="urn:p" p:a="0" b="2" a="new">t<c/></r>
     /// ```
     #[allow(clippy::too_many_lines)] // php's function, one step per clause of the specification
     fn insertBefore(
