@@ -59,35 +59,63 @@ pub(crate) fn cleanup_xml_node(node: Node) {
 pub(crate) const SOAP_MAX_XML_DEPTH: u32 = 2048;
 
 /// `is_nesting_too_deep`: whether `node`'s tree nests deeper than
-/// [`SOAP_MAX_XML_DEPTH`], walked without recursing. An entity
-/// reference borrows its declaration as its child list, and that hangs
-/// off the DTD, so neither is descended into. php asks it below libxml2
-/// 2.13, which refuses such a document itself; the library bound here is
-/// 2.9 (`LIBXML_VERSION` 20913).
+/// [`SOAP_MAX_XML_DEPTH`]. php asks it below libxml2 2.13, which refuses
+/// such a document itself; the library bound here is 2.9
+/// (`LIBXML_VERSION` 20913).
 fn is_nesting_too_deep(node: Node) -> bool {
-    let mut trav = node.children();
-    let mut depth = 0u32;
-    while let Some(mut t) = trav {
-        if let Some(first) = t.children()
-            && !matches!(t.kind(), Kind::EntityRef | Kind::Dtd)
-        {
-            depth += 1;
-            if depth > SOAP_MAX_XML_DEPTH {
-                return true;
-            }
-            trav = Some(first);
-            continue;
+    Walk::from(node.children()).any(|(_, depth)| depth > SOAP_MAX_XML_DEPTH)
+}
+
+/// The walk `is_nesting_too_deep` and `get_node_with_attribute_recursive_ex`
+/// make without recursing: from `first`, its siblings and each one's
+/// descendants in tree order, never into an entity reference, whose child
+/// list is its declaration's under the DTD, nor into the DTD; each node
+/// with how many levels below `first` it lies.
+pub(crate) struct Walk {
+    at: Option<Node>,
+    depth: u32,
+}
+
+impl Walk {
+    pub(crate) fn from(first: Option<Node>) -> Walk {
+        Walk {
+            at: first,
+            depth: 0,
         }
-        while t.next().is_none() {
-            match t.parent() {
-                Some(p) if p != node => t = p,
-                _ => return false,
-            }
-            depth = depth.saturating_sub(1);
-        }
-        trav = t.next();
     }
-    false
+}
+
+impl Iterator for Walk {
+    type Item = (Node, u32);
+
+    fn next(&mut self) -> Option<(Node, u32)> {
+        let node = self.at?;
+        let depth = self.depth;
+        if let Some(first) = node.children()
+            && !matches!(node.kind(), Kind::EntityRef | Kind::Dtd)
+        {
+            self.at = Some(first);
+            self.depth += 1;
+            return Some((node, depth));
+        }
+        let mut t = node;
+        self.at = loop {
+            if let Some(next) = t.next() {
+                break Some(next);
+            }
+            if self.depth == 0 {
+                break None;
+            }
+            match t.parent() {
+                Some(p) => {
+                    t = p;
+                    self.depth -= 1;
+                }
+                None => break None,
+            }
+        };
+        Some((node, depth))
+    }
 }
 
 /// `soap_xmlParseFile`: the document at `filename`, opened through the

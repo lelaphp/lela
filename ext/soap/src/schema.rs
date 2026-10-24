@@ -1660,12 +1660,9 @@ fn expand_attribute_group(ctx: &mut Ctx, id: TypeId, ht: &mut Table<Attribute>) 
         } else {
             let expanded = schema_attributegroup_fixup(ctx, &tmp_attr, ht);
             attrs.remove(&key);
-            if expanded.is_err() {
-                if let Some(t) = ctx.sdl.ty_mut(id) {
-                    t.attributes = Some(attrs);
-                }
-                return expanded;
-            }
+            // A refusal ends the whole parse, as php's `E_ERROR` does, so
+            // the attributes taken out are not put back.
+            expanded?;
         }
     }
     if let Some(t) = ctx.sdl.ty_mut(id) {
@@ -1831,12 +1828,9 @@ fn fixup_parts(ctx: &mut Ctx, id: TypeId) -> Res<()> {
         } else {
             let expanded = schema_attributegroup_fixup(ctx, &attr, &mut attrs);
             attrs.remove(&key);
-            if expanded.is_err() {
-                if let Some(t) = ctx.sdl.ty_mut(id) {
-                    t.attributes = Some(attrs);
-                }
-                return expanded;
-            }
+            // A refusal ends the whole parse, as php's `E_ERROR` does, so
+            // the attributes taken out are not put back.
+            expanded?;
         }
     }
     if let Some(t) = ctx.sdl.ty_mut(id) {

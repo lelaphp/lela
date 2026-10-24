@@ -34,7 +34,7 @@ use crate::model::{
 use crate::sdl::{get_encoder, get_encoder_ex, get_encoder_from_prefix};
 use crate::shared::{VAR_ENC_NAME, VAR_ENC_NAMENS, VAR_ENC_NS, VAR_ENC_STYPE, VAR_ENC_TYPE};
 use crate::table::Key as TKey;
-use crate::xml::{attr_content, encode_special_chars, get_attribute, href, parse_namespace};
+use crate::xml::{Walk, attr_content, encode_special_chars, get_attribute, href, parse_namespace};
 use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, soap_error};
 
 /// What one serialisation or deserialisation keeps: `SOAP_GLOBAL(ref_map)`.
@@ -542,34 +542,11 @@ fn soap_add_xml_ref(req: &mut Request, cx: &mut Cx, data: &Value, node: Node) {
 
 /// The first element under `node` and on that carries `attr` (in `ns`)
 /// equal to `value`, by any name: `get_node_with_attribute_recursive_ex`
-/// with no name, walked without recursing as php's is since
-/// GHSA-rgrp-mwpx-f6rm, and never into an entity reference's borrowed
-/// declaration or the DTD.
-fn find_with_id(mut node: Option<Node>, value: &[u8], ns: Option<&[u8]>) -> Option<Node> {
-    let mut depth = 0u32;
-    while let Some(mut n) = node {
-        if let Some(a) = get_attribute(n.properties(), b"id", ns)
-            && attr_content(a) == value
-        {
-            return Some(n);
-        }
-        if let Some(first) = n.children()
-            && !matches!(n.kind(), Kind::EntityRef | Kind::Dtd)
-        {
-            node = Some(first);
-            depth += 1;
-            continue;
-        }
-        while n.next().is_none() {
-            if depth == 0 {
-                return None;
-            }
-            n = n.parent()?;
-            depth -= 1;
-        }
-        node = n.next();
-    }
-    None
+/// with no name, over [`Walk`] as php's walks since GHSA-rgrp-mwpx-f6rm.
+fn find_with_id(node: Option<Node>, value: &[u8], ns: Option<&[u8]>) -> Option<Node> {
+    Walk::from(node).map(|(n, _)| n).find(|n| {
+        get_attribute(n.properties(), b"id", ns).is_some_and(|a| attr_content(a) == value)
+    })
 }
 
 /// `check_and_resolve_href`.
