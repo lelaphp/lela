@@ -1621,6 +1621,22 @@ impl ObjectHandlers for Handlers {
         count(req, object).map(Some)
     }
 
+    /// `sxe_objects_compare`: two elements are equal where they are the
+    /// same node, two documents where they are the same document, and two
+    /// objects nothing initialised never.
+    ///
+    /// ```php
+    /// class S extends SimpleXMLElement { function __construct() {} }
+    /// $a = new S; $b = new S; $x = simplexml_load_string('<r><c/></r>');
+    /// var_dump($a == $a, $a == $b, $a == $x, $x->c == $x->c, $x == $x->c);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// ```
     fn compare(
         &self,
         req: &mut Request,
@@ -1641,7 +1657,11 @@ impl ObjectHandlers for Handlers {
         };
         Ok(match nodes {
             (Some(a), Some(b)) => (a == b).then_some(std::cmp::Ordering::Equal),
-            (None, None) => (docs.0 == docs.1).then_some(std::cmp::Ordering::Equal),
+            // Two objects nothing initialised share no document, so they
+            // are not equal (php 8.5.12).
+            (None, None) => {
+                (docs.0.is_some() && docs.0 == docs.1).then_some(std::cmp::Ordering::Equal)
+            }
             _ => None,
         })
     }
