@@ -866,19 +866,25 @@ impl Request {
         cvs: u32,
         operand: impl FnOnce(&[Zval]) -> Option<(Zval, Option<usize>)>,
     ) -> Option<Stepped> {
-        let (top, laid) = self.vm.stack.top()?;
+        // The frame and its caller below it lent together, one look at
+        // the frame table for both, as php's `zend_leave_helper` reaches
+        // `execute_data` and `EX(prev_execute_data)` off two registers.
+        let (top, laid, below) = self.vm.stack.top_over_mut()?;
         if top != frame {
             return None;
         }
         let header = laid.header();
-        let receiver = header.receiver();
-        let held = receiver.is_some() || header.closure.is_some();
+        // Each test evaluated, none short of the others, so the words are
+        // read side by side and folded, as php's leave tests one word of
+        // `ZEND_CALL_INFO`: a branch apiece measured 26 instructions.
+        let held = header.this().is_some() | header.closure.is_some();
         let plain = header.function.is_some()
-            && header.annex.is_none()
-            && !header.info.call()
-            && !header.info.extra_args()
-            && (!held || held_kept(receiver, header.closure));
-        let caller = header.caller().frame().filter(|_| plain)?;
+            & header.annex.is_none()
+            & (header.info.bits() & exec::CallInfo::LEAVES_BY_KERNEL == 0);
+        if !plain || held && !held_kept(header.receiver(), header.closure) {
+            return None;
+        }
+        let caller = header.caller().frame()?;
         let returns_to = header.returns_to();
         let slots = laid.slots();
         let (returned, moved) = operand(slots)?;
@@ -909,7 +915,7 @@ impl Request {
             };
             return self.leave_owning(leave, returned);
         }
-        let (_, into) = self.vm.stack.top_and_frame_mut(caller)?;
+        let into = below.get_mut(caller.0 as usize)?;
         match returns_to {
             Some(slot) => {
                 let slot = into.slots_mut().get_mut(slot as usize)?;

@@ -1012,6 +1012,18 @@ impl<H> VmStack<H> {
         Some((FrameRef(u32::try_from(at).ok()?), frame))
     }
 
+    /// The frame on top of the stack, its position and every frame below
+    /// it, mutably, from one look at the table: the frame a return leaves
+    /// and the one it returns into, which a plain leave reads and writes
+    /// together, as php's `zend_leave_helper` reaches `execute_data` and
+    /// `EX(prev_execute_data)`.
+    #[inline]
+    #[allow(clippy::type_complexity)] // three borrows of one look, named where they are taken
+    pub fn top_over_mut(&mut self) -> Option<(FrameRef, &mut Frame<H>, &mut [Frame<H>])> {
+        let (top, below) = self.frames.split_last_mut()?;
+        Some((FrameRef(u32::try_from(below.len()).ok()?), top, below))
+    }
+
     /// The frame on top of the stack, mutably, and its position.
     #[inline]
     pub fn top_mut(&mut self) -> Option<(FrameRef, &mut Frame<H>)> {

@@ -889,11 +889,6 @@ impl CallInfo {
         self.set(Self::AT_EXCEPTION_OP, on);
     }
 
-    /// The frame holds arguments past its declared parameters.
-    pub(crate) fn extra_args(self) -> bool {
-        self.has(Self::EXTRA_ARGS)
-    }
-
     /// The record is a call, being built or a native's being served.
     pub(crate) fn call(self) -> bool {
         self.has(Self::CALL)
