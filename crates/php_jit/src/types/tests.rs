@@ -25,9 +25,10 @@ use super::{
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD,
-    STRING_MATCH, held, traced as built,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
+    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_ISSET,
+    HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
+    SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2074,5 +2075,130 @@ fn an_object_written_over_is_guarded_again() -> Result<(), String> {
         echo f($os, 30), \"\\n\";",
     )?;
     assert_eq!(class_guards(&ir), 2, "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// The fixtures of the hash slice and the dimension oplines each holds
+/// inline (#3339).
+const HASH_DIMS: [(Fixture, &[Opcode]); 12] = [
+    (HASH_READ, &[Opcode::FetchDimR]),
+    (HASH_ISSET, &[Opcode::IssetIsemptyDimObj]),
+    (HASH_WRITE, &[Opcode::AssignDim]),
+    (HASH_FETCH_W, &[Opcode::FetchDimW, Opcode::FetchDimRw]),
+    (DIM_DIV, &[Opcode::AssignDimOp]),
+    (DIM_MOD, &[Opcode::AssignDimOp]),
+    (DIM_SL, &[Opcode::AssignDimOp]),
+    (DIM_SR, &[Opcode::AssignDimOp]),
+    (DIM_AND, &[Opcode::AssignDimOp]),
+    (DIM_OR, &[Opcode::AssignDimOp]),
+    (DIM_XOR, &[Opcode::AssignDimOp]),
+    (DIM_CONCAT, &[Opcode::AssignDimOp]),
+];
+
+/// A hash's elements read, tested, written and fetched for writing by a
+/// constant string, a variable's string and a long, and compounded with
+/// `/`, `%`, the shifts, the bitwise operators and `.`, are inline, as
+/// php's code generator compiles each over an array its trace holds a
+/// hash (`zend_jit_fetch_dim_read`, `zend_jit_isset_isempty_dim`,
+/// `zend_jit_assign_dim`, `zend_jit_fetch_dim`, `zend_jit_assign_dim_op`).
+/// A read and a test are held to the layout php's packed guard holds; a
+/// write, which tests the layout, takes no exit, its handler serving
+/// what it does not write in place.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_hashs_dimension_oplines_are_inline() -> Result<(), String> {
+    for (fixture, opcodes) in HASH_DIMS {
+        let ir = golden(fixture)?;
+        let rendered = dump::render(&ir);
+        assert_eq!(ir.entry.stop, Stop::Loop, "{}: {rendered}", fixture.name);
+        for opcode in opcodes {
+            let lines: Vec<&Line> = (ir.ops.iter())
+                .filter_map(|op| match op {
+                    Op::Line(line) if line.opcode == *opcode => Some(line),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                !lines.is_empty(),
+                "{}: no {opcode:?} in {rendered}",
+                fixture.name
+            );
+            for line in lines {
+                assert_eq!(line.form, Form::Inline, "{}: {rendered}", fixture.name);
+                if *opcode != Opcode::FetchDimR {
+                    assert!(line.exit.is_none(), "{}: {rendered}", fixture.name);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The first of `opcode`'s inline lines in `ir`, by its op.
+fn inline_at(ir: &TraceIr, opcode: Opcode) -> Result<OpId, String> {
+    ir.ops
+        .iter()
+        .position(
+            |op| matches!(op, Op::Line(line) if line.opcode == opcode && line.form == Form::Inline),
+        )
+        .and_then(|at| u32::try_from(at).ok())
+        .map(OpId)
+        .ok_or_else(|| format!("no inline {opcode:?} in\n{}", dump::render(ir)))
+}
+
+/// A compound write to a key the array has not got is its handler's,
+/// whose warning reaches an error handler that frees the array, writing
+/// over the variable the reference holds: `ASSIGN_DIM_OP` has no `call`
+/// effect, so the trace reads nothing again after it, and the reference's
+/// inner type is held at its next read, as revision 83's analysis has it
+/// (`jit-design.md` §4.2); `Emit::written_in_place`'s witnesses serve it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_undefined_keys_warning_reloads_nothing() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "set_error_handler(function () { $GLOBALS['x'] = ['k' => 2]; return true; });
+        function f(array &$a, int $n) {
+            $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += $a['k']; $a[$i + 100] += 1; $s += $a['k']; }
+            return $s;
+        }
+        $x = ['k' => 1]; echo f($x, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let at = inline_at(&ir, Opcode::AssignDimOp)?;
+    assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
+    let read = next_read(&ir, at, 0).ok_or("no read of $a after the write")?;
+    assert!(
+        ir.guards.iter().any(|guard| matches!(
+            guard.check,
+            Check::Deref { value, .. } | Check::Layout { value, .. } if value == read
+        )),
+        "the reference's inner value is held again at its read: {rendered}"
+    );
+    Ok(())
+}
+
+/// A write to a shared hash is its handler's, which copies the array,
+/// and one over an object gives the object up, whose destructor writes
+/// the variables a reference reaches: `ASSIGN_DIM` has no `call` effect,
+/// so the trace reads nothing again after it, as revision 83's analysis
+/// has it (`jit-design.md` §4.2); `Emit::written_in_place`'s witnesses serve it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_hashs_separation_and_a_destructor_reload_nothing() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "class D { function __destruct() { $GLOBALS['r'] = [7]; } }
+        function f(array &$t, int $n) {
+            $h = ['a' => new D, 'b' => 0]; $s = 0;
+            for ($i = 0; $i < $n; $i++) { $c = $h; $h['a'] = $i; $s += $t[0] + $c['b'] * 0; $h['b'] = new D; $h['b'] = $i; }
+            return $s;
+        }
+        $r = [1]; echo f($r, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let at = inline_at(&ir, Opcode::AssignDim)?;
+    assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
     Ok(())
 }

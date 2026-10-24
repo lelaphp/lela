@@ -682,10 +682,11 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::rope_end`); a join refused is a throwable
     /// pending, answered as one.
     RopeEnd,
-    /// `assign_concat(cx, frame, opline: u32, var: u32, word: u64,
+    /// `assign_concat(cx, frame, opline: u32, place: u64, word: u64,
     /// type_info: u32)`: `.=` of the string, handed with no owner, onto
-    /// variable `var`, which holds a string, php's
-    /// `zend_jit_fast_assign_concat_helper` (`php_engine::tier::assign_concat`).
+    /// the zval at `place`, a variable or an array's element, which holds
+    /// a string, php's `zend_jit_fast_assign_concat_helper`
+    /// (`php_engine::tier::assign_concat`).
     AssignConcat,
     /// `concat(cx, frame, opline: u32, a: u64, a_info: u32, b: u64,
     /// b_info: u32, kinds: u32, joined: *mut Zval)`: `CONCAT` or
@@ -695,11 +696,25 @@ pub(crate) enum Kernel {
     /// (`php_engine::tier::concat`); a join refused is a throwable
     /// pending, answered as one.
     Concat,
+    /// `find(cx, frame, opline: u32, array: u64, key: u64, key_info: u32,
+    /// constant: u32, place: *mut Zval)`: the element the key names in the
+    /// array, its place an `IS_INDIRECT` or `UNDEF` where it is not
+    /// there, php's `zend_hash_find_known_hash`, `zend_jit_symtable_find`
+    /// and `_zend_hash_index_find`; it stands no frame, runs no user code
+    /// and throws nothing.
+    Find,
+    /// `lookup(cx, frame, opline: u32, array: u64, key: u64, key_info:
+    /// u32, constant: u32, place: *mut Zval)`: the element the key names
+    /// in the array compiled code holds the one owner of, laid down
+    /// holding `null` where it is not there, php's `zend_hash_lookup` and
+    /// `zend_hash_index_lookup` (`php_engine::tier::lookup_element`); it
+    /// runs no user code, and the memory limit is a fatal answered as one.
+    Lookup,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 12] = [
+    pub(crate) const ALL: [Kernel; 14] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -712,6 +727,8 @@ impl Kernel {
         Kernel::RopeEnd,
         Kernel::AssignConcat,
         Kernel::Concat,
+        Kernel::Find,
+        Kernel::Lookup,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

@@ -47,7 +47,7 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 
 use php_engine::tier::{self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Stepped, TraceNum};
-use php_heap::{HeaderImage, Scalar, Zval};
+use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
 use crate::lower::{self, Stood, engine_offset};
@@ -490,8 +490,10 @@ kernels! {
         RopeInit => rope_init(word: u64, type_info: u32) -> u64 = tier::rope_open;
         RopeAdd => rope_add(rope: u64, word: u64, type_info: u32) = tier::rope_push;
         RopeEnd => rope_end(rope: u64, word: u64, type_info: u32) -> Zval = tier::rope_end;
-        AssignConcat => assign_concat(var: u32, word: u64, type_info: u32) = tier::assign_concat;
+        AssignConcat => assign_concat(place: u64, word: u64, type_info: u32) = tier::assign_concat;
         Concat => concat(a: u64, a_info: u32, b: u64, b_info: u32, kinds: u32) -> Zval = tier::concat;
+        Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
+        Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
     }
 }
 
@@ -644,18 +646,23 @@ fn rope_end(
 }
 
 /// The `assign_concat` kernel: `.=` of a string compiled code hands with
-/// no owner onto variable `var` of the frame, which holds a string
-/// ([`tier::assign_concat`]), the frame stood at the opline, php's
-/// `SAVE_OPLINE()`, where the join's refusal is raised.
+/// no owner onto the zval at `place`, a variable of the frame or an
+/// array's element, which holds a string ([`tier::assign_concat`]), the
+/// frame stood at the opline, php's `SAVE_OPLINE()`, where the join's
+/// refusal is raised.
 fn assign_concat(
     req: &mut Request,
     on: On<'_, '_>,
-    var: u32,
+    place: u64,
     word: u64,
     type_info: u32,
 ) -> Result<(), Fatal> {
-    let frame = standing(req, on.room, on.at)?;
-    tier::assign_concat(req, frame, var, zval(word, type_info))
+    standing(req, on.room, on.at)?;
+    let place = zval(place, u32::from(ZvalType::Indirect as u8))
+        .as_indirect()
+        .ok_or_else(|| internal("compiled code's .= onto no place"))?;
+    tier::assign_concat(req, place, zval(word, type_info));
+    Ok(())
 }
 
 /// The `concat` kernel: `CONCAT` or `FAST_CONCAT` of two strings
@@ -687,6 +694,85 @@ fn concat(
     let left = (zval(a, a_info), kind(kinds)?);
     let right = (zval(b, b_info), kind(kinds >> 8)?);
     Ok(tier::concat(req, left, right)?.unwrap_or(Zval::UNDEF))
+}
+
+/// The array at `array` and the key the zval `key`, `key_info` names in
+/// it, as `zend_fetch_dimension_address_inner` reads a dimension it takes
+/// inline: a long as itself, a string as `ZEND_HANDLE_NUMERIC_STR` reads
+/// it, a canonical decimal integer as that integer, but a constant, which
+/// the compiler wrote the integer in place of where it was one.
+fn keyed(array: u64, (key, key_info): (u64, u32), constant: u32) -> Option<(Arr, Key)> {
+    let array = zval(array, u32::from(ZvalType::Array as u8)).as_arr()?;
+    let key = zval(key, key_info);
+    let key = match key.kind() {
+        ZvalType::Long => Key::Long(key.as_long()?),
+        ZvalType::String if constant != 0 => Key::Str(key.as_str()?),
+        ZvalType::String => {
+            let text = key.as_str()?;
+            php_heap::canonical_int(text.bytes()).map_or(Key::Str(text), Key::Long)
+        }
+        _ => return None,
+    };
+    Some((array, key))
+}
+
+/// What a lookup kernel answers for the element at `entry`: its place,
+/// an `IS_INDIRECT`, where it holds a value or a reference; `UNDEF`,
+/// for compiled code to leave the opline to its handler, where it is not
+/// there, is unset or is a symbol table's `IS_INDIRECT`, which the
+/// handler follows.
+fn placed(entry: Option<ZvalRef>) -> Zval {
+    match entry {
+        Some(entry) if !matches!(entry.read().kind(), ZvalType::Undef | ZvalType::Indirect) => {
+            Zval::indirect(entry)
+        }
+        _ => Zval::UNDEF,
+    }
+}
+
+/// The `find` kernel: the element the key names in the array at `array`,
+/// for a read, an `isset()` or a compound write, `zend_hash_find` over a
+/// hash or a packed table, as php's code calls `zend_hash_find_known_hash`,
+/// `zend_jit_symtable_find` and `_zend_hash_index_find`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:11917-12511`); it reads nothing of
+/// the request and stands no frame, as php's call of it saves no opline.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a kernel answers as `kernels!` calls it, and this one never fails"
+)]
+fn find(
+    _: &mut Request,
+    _: On<'_, '_>,
+    array: u64,
+    key: u64,
+    key_info: u32,
+    constant: u32,
+) -> Result<Zval, Fatal> {
+    let found =
+        keyed(array, (key, key_info), constant).and_then(|(array, key)| array.value_ref(key));
+    Ok(placed(found))
+}
+
+/// The `lookup` kernel: the element the key names in the array at
+/// `array`, which compiled code holds the one owner of, found or laid
+/// down holding `null` ([`tier::lookup_element`]), as php's code calls
+/// `zend_hash_lookup` and `zend_hash_index_lookup`; `UNDEF` where nothing
+/// was laid down, and the memory limit's fatal answered as one.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a kernel answers as `kernels!` calls it, and this one never fails"
+)]
+fn lookup(
+    req: &mut Request,
+    _: On<'_, '_>,
+    array: u64,
+    key: u64,
+    key_info: u32,
+    constant: u32,
+) -> Result<Zval, Fatal> {
+    let laid = keyed(array, (key, key_info), constant)
+        .and_then(|(array, key)| tier::lookup_element(req, array, key));
+    Ok(placed(laid))
 }
 
 /// The frame whose room compiled code handed a kernel, stood at the

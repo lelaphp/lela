@@ -62,7 +62,8 @@ mod strings;
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, laid, primed, release, room, stack, stack_room, stand,
+    at_room, current, free_cv, free_operands, laid, lookup_element, primed, release, room, stack,
+    stack_room, stand,
 };
 pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,

@@ -1,0 +1,8 @@
+start loop
+root e9
+op e9 9 long long - taken
+op e9 4 long - - -
+op e9 5 long - - -
+op e9 6 array - long -
+op e9 8 long - - -
+stop loop

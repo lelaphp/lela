@@ -186,6 +186,7 @@ tier::call_held
 tier::concat
 tier::dispatch_held
 tier::free_cv
+tier::lookup_element
 tier::release
 tier::rope_end
 tier::rope_open
