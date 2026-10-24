@@ -277,18 +277,69 @@ impl Exponent {
 /// float(0.30000000000000004441)
 /// [0.10000000000000000555,1.0000000000000000906e+25]|0.10000000000000000555
 /// ```
+///
+/// A non-finite double is its word, `INF`, `-INF` or `NAN`, written by
+/// `snprintf(buf, ndigit + 1, ...)` (`Z/Zend/zend_strtod.c:4525`), so a
+/// precision shorter than the word cuts it; the shortest form's 17 never
+/// does:
+///
+/// ```php
+/// $inf = INF;
+/// foreach ([0, 1, 2, 3, -1] as $p) {
+///     ini_set('precision', $p); ini_set('serialize_precision', $p);
+///     echo $p, ": ", INF, "|", -INF, "|", @strval(NAN), "|", serialize(-INF), "|", var_export(NAN, true), "|", print_r(-INF, true), "|", "IN" == $inf ? "eq" : "ne", "\n";
+/// }
+/// ```
+/// ```expect
+/// 0: I|-|N|d:;|N|-|ne
+/// 1: I|-|N|d:-;|N|-|ne
+/// 2: IN|-I|NA|d:-I;|NA|-I|eq
+/// 3: INF|-IN|NAN|d:-IN;|NAN|-IN|ne
+/// -1: INF|-INF|NAN|d:-INF;|NAN|-INF|ne
+/// ```
+///
+/// The paths that format a non-finite double on their own keep the word
+/// whole at every precision: `var_dump`'s `%.*H`, userland `printf` and
+/// `json_encode`, which refuses one:
+///
+/// ```php
+/// foreach ([0, 1, 2, 3] as $p) {
+///     ini_set('precision', $p); ini_set('serialize_precision', $p);
+///     var_dump(-INF); printf("%.{$p}G|%.{$p}H|%.{$p}e|%.{$p}F\n", INF, -INF, NAN, INF);
+///     echo json_encode([INF], JSON_PARTIAL_OUTPUT_ON_ERROR), "\n";
+/// }
+/// ```
+/// ```expect
+/// float(-INF)
+/// INF|-INF|NaN|INF
+/// [0]
+/// float(-INF)
+/// INF|-INF|NaN|INF
+/// [0]
+/// float(-INF)
+/// INF|-INF|NaN|INF
+/// [0]
+/// float(-INF)
+/// INF|-INF|NaN|INF
+/// [0]
+/// ```
 #[must_use]
 pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> String {
-    if value.is_nan() {
-        return "NAN".to_owned();
-    }
-    if value.is_infinite() {
-        return (if value > 0.0 { "INF" } else { "-INF" }).to_owned();
-    }
     // `zend_gcvt` asks `zend_dtoa` for the shortest digits when `ndigit`
     // is negative, and reads `ndigit` as 17 for the form it then chooses,
     // whatever those digits came to.
     let ndigit = if precision < 0 { 17 } else { precision.max(1) };
+    if !value.is_finite() {
+        let word = if value.is_nan() {
+            "NAN"
+        } else if value > 0.0 {
+            "INF"
+        } else {
+            "-INF"
+        };
+        let kept = usize::try_from(ndigit).unwrap_or(0).min(word.len());
+        return word[..kept].to_owned();
+    }
     let (digits, point) = significant(value.abs(), precision);
     let mut out = String::new();
     if value.is_sign_negative() {
@@ -501,6 +552,25 @@ mod tests {
             );
         }
         assert_eq!(double_to_string(f64::NAN, 14, Exponent::Upper), "NAN");
+        // `snprintf(buf, ndigit + 1, ...)` cuts the word to the precision.
+        for (precision, words) in [
+            (0, ["I", "-", "N"]),
+            (1, ["I", "-", "N"]),
+            (2, ["IN", "-I", "NA"]),
+            (3, ["INF", "-IN", "NAN"]),
+            (-1, ["INF", "-INF", "NAN"]),
+        ] {
+            for (value, word) in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN]
+                .iter()
+                .zip(words)
+            {
+                assert_eq!(
+                    double_to_string(*value, precision, Exponent::Upper),
+                    word,
+                    "{value} at precision {precision}"
+                );
+            }
+        }
 
         // `serialize_precision` at its -1 default, php's mode 0: the
         // shortest text that reads back as the same double.

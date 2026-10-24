@@ -1526,7 +1526,19 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
 
 /// [`dump`] over a value that holds no other, a call of its own, so its
 /// texts are off the stack of a nest of objects or arrays dumped level
-/// by level (#3159).
+/// by level (#3159). A float is `%.*H` at `serialize_precision`, which
+/// writes a non-finite one whole however short the precision:
+///
+/// ```php
+/// ini_set('serialize_precision', 1);
+/// debug_zval_dump(INF, -INF, NAN, 1.5);
+/// ```
+/// ```expect
+/// float(INF)
+/// float(-INF)
+/// float(NAN)
+/// float(2)
+/// ```
 #[inline(never)]
 fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
     let line = if let Some(b) = value.as_bool() {
@@ -1534,8 +1546,13 @@ fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
     } else if let Some(n) = value.as_int() {
         format!("{common}int({n})\n")
     } else if let Some(f) = value.as_float() {
-        // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
-        let precision = req.ini().serialize_precision();
+        // `php_var_dump` prints a float with `%.*H` at `serialize_precision`,
+        // which writes a non-finite one whole, as `zend_gcvt` does at -1.
+        let precision = if f.is_finite() {
+            req.ini().serialize_precision()
+        } else {
+            -1
+        };
         let text = php_heap::double_to_string(f, precision, php_heap::Exponent::Upper);
         format!("{common}float({text})\n")
     } else if let Some(s) = value.as_php_string() {
