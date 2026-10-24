@@ -1430,7 +1430,7 @@ impl<'a> Builder<'a> {
     /// A kernel with no `call` effect may call user code too: `INIT_ARRAY`'s
     /// and `ADD_ARRAY_ELEMENT`'s handler raise a null key's deprecation
     /// through the error handler and release a duplicate key's value
-    /// (`Z/Zend/zend_vm_def.h:6278-6291`), and the release kernel compiled
+    /// (`Z/Zend/zend_vm_def.h:6279-6292`), and the release kernel compiled
     /// code calls for a temporary runs a destructor. None clobbers, as
     /// none has to: what that code can write is a variable a symbol table
     /// reaches, whose every write [`Builder::define`] types as anything

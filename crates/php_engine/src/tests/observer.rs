@@ -568,7 +568,7 @@ fn probe() -> Extension {
 /// Natives are observed as php observes its internal functions: each
 /// asked of on its first call in the request, begun before its entry and
 /// ended after it with what it returned (`ZEND_DO_ICALL`,
-/// `Z/Zend/zend_vm_def.h:4125`, `:4140`); a native method named by its
+/// `Z/Zend/zend_vm_def.h:4126`, `:4141`); a native method named by its
 /// class; and the user function a native calls begun and ended inside
 /// it, here the error handler `trigger_error` calls.
 #[test]
@@ -620,7 +620,7 @@ fn natives_are_begun_before_their_entry_and_ended_after_it() {
 /// A native that throws is ended at once, before the unwind ends the
 /// frames it leaves, and is handed what the path that called it hands:
 /// no value from a call opcode (`EG(exception) ? NULL : ret`,
-/// `Z/Zend/zend_vm_def.h:4140`), also where what threw was the error
+/// `Z/Zend/zend_vm_def.h:4141`), also where what threw was the error
 /// handler the native's notice called, and the `null` its return value
 /// was laid down with from `zend_call_function`
 /// (`Z/Zend/zend_execute_API.c:1039`), here that error handler, a
@@ -848,7 +848,7 @@ fn pending_end(observed: &mut Observed<'_>, returned: Option<&Value>) {
 
 /// The throwable a native left stands pending while its end handlers
 /// are called, as it stands in `EG(exception)` at php's
-/// `ZEND_OBSERVER_FCALL_END` (`Z/Zend/zend_vm_def.h:4140`), and as it
+/// `ZEND_OBSERVER_FCALL_END` (`Z/Zend/zend_vm_def.h:4141`), and as it
 /// stands for the frames the unwind then ends; it is still the caller's
 /// to catch after.
 #[test]

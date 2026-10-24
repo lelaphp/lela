@@ -1565,7 +1565,7 @@ pub(crate) fn lay_own_cache(map: &mut RuntimeCaches, at: CacheAt, cache_size: u3
 }
 
 /// One `FAST_CALL`'s temporary while the `finally` block it entered
-/// runs (`Z/Zend/zend_vm_def.h:8647`): the two fields php keeps in one
+/// runs (`Z/Zend/zend_vm_def.h:8654`): the two fields php keeps in one
 /// zval there, held apart.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FastCall {
@@ -1613,7 +1613,7 @@ pub(crate) enum Cached {
     /// ce, fbc)`: php writes the class into the slot the opline names
     /// and the callee into the one after it, and reads the callee back
     /// only where the class of this pass, the one named or the
-    /// receiver's, is the one written (`Z/Zend/zend_vm_def.h:3670`,
+    /// receiver's, is the one written (`Z/Zend/zend_vm_def.h:3671`,
     /// `:3778`). One variant holds both, so the pair is written and
     /// read as one, and the second slot the compiler reserves stands as
     /// php's dump has it.
@@ -1649,7 +1649,7 @@ pub(crate) enum Cached {
     },
     /// The value a `FETCH_CLASS_CONSTANT` over a constant name read on
     /// its first pass, `CACHE_POLYMORPHIC_PTR(opline->extended_value,
-    /// ce, value)` (`Z/Zend/zend_vm_def.h:6143`): the class it was read
+    /// ce, value)` (`Z/Zend/zend_vm_def.h:6144`): the class it was read
     /// on, which a class resolved on every pass must be again, and the
     /// value, evaluated and held to its type, which the class's row or
     /// the request's case of an enum keeps an owner of to request end,
@@ -2594,7 +2594,7 @@ pub(crate) fn key_value(req: &mut Request, key: php_heap::Key) -> Value {
 
 /// `GET_OP*_ZVAL_PTR_DEREF(BP_VAR_R)` as a frameless call reads its
 /// operand into its record (`ZEND_FRAMELESS_ICALL_*`,
-/// `Z/Zend/zend_vm_def.h:9786`): the zval as it stands, and whether the
+/// `Z/Zend/zend_vm_def.h:9794`): the zval as it stands, and whether the
 /// record owns it. A `TMP` or a `VAR` is moved, its slot left `UNDEF`,
 /// and the record's owner is the one php's `FREE_OP*` gives up after the
 /// call. A `CONST` is borrowed, as php reads its pointer, and so is a

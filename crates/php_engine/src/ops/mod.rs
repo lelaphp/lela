@@ -170,7 +170,7 @@ pub(crate) enum Switched {
     Chain,
 }
 
-/// `ZEND_SWITCH_LONG` (`Z/Zend/zend_vm_def.h:9295`): a `long` subject,
+/// `ZEND_SWITCH_LONG` (`Z/Zend/zend_vm_def.h:9302`): a `long` subject,
 /// a reference to one followed, looked up in the table by
 /// `zend_hash_index_find`, the default where it is not there; any other
 /// subject, an undefined variable among them, is left to the chain,
@@ -210,7 +210,7 @@ pub(crate) fn switch_long(subject: &Value, table: PhpArray) -> Switched {
     }
 }
 
-/// `ZEND_SWITCH_STRING` (`Z/Zend/zend_vm_def.h:9323`): a string
+/// `ZEND_SWITCH_STRING` (`Z/Zend/zend_vm_def.h:9330`): a string
 /// subject, a reference to one followed, looked up in the table by
 /// `zend_hash_find`, its bytes and nothing else, since the compiler
 /// keeps a numeric string out of the table; the default where it is not
@@ -238,7 +238,7 @@ pub(crate) fn switch_string(subject: &Value, table: PhpArray) -> Switched {
     }
 }
 
-/// `ZEND_MATCH` (`Z/Zend/zend_vm_def.h:9356`): a `long` subject looked
+/// `ZEND_MATCH` (`Z/Zend/zend_vm_def.h:9363`): a `long` subject looked
 /// up by `zend_hash_index_find` and a string one by `zend_hash_find`,
 /// each its own kind and nothing else, which is `===`; a reference
 /// followed; every other subject the default, an undefined variable
@@ -272,7 +272,7 @@ pub(crate) fn match_target(subject: &Value, table: PhpArray) -> Switched {
     }
 }
 
-/// `ZEND_IN_ARRAY` (`Z/Zend/zend_vm_def.h:9408`): whether the needle is
+/// `ZEND_IN_ARRAY` (`Z/Zend/zend_vm_def.h:9415`): whether the needle is
 /// in the table `zend_compile_func_in_array` built, a reference followed.
 /// A string is looked up by `zend_hash_find`, its bytes and nothing
 /// else; under `$strict` a long by `zend_hash_index_find` and
@@ -639,7 +639,7 @@ fn object_converted(
     }
 }
 
-/// `ZEND_ISSET_ISEMPTY_CV`'s `isset` arm (`Z/Zend/zend_vm_def.h:7465`):
+/// `ZEND_ISSET_ISEMPTY_CV`'s `isset` arm (`Z/Zend/zend_vm_def.h:7470`):
 /// whether the slot holds more than `null`, which a slot nothing wrote
 /// does not (`Z_TYPE_P(value) > IS_NULL`), with a reference followed one
 /// step, so a name bound to a `null` is as unset as the `null` itself
@@ -671,7 +671,7 @@ pub(crate) fn is_set(value: &Value) -> bool {
 }
 
 /// What `ZEND_CAST` converts to, the five arms of its handler
-/// (`Z/Zend/zend_vm_def.h:6495`), named by the type constant the
+/// (`Z/Zend/zend_vm_def.h:6496`), named by the type constant the
 /// opline's `extended_value` carries. `(bool)` is `ZEND_BOOL` and never
 /// reaches here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -703,7 +703,7 @@ impl CastTo {
     }
 }
 
-/// `ZEND_CAST` (`Z/Zend/zend_vm_def.h:6495`): a value as `(int)`,
+/// `ZEND_CAST` (`Z/Zend/zend_vm_def.h:6496`): a value as `(int)`,
 /// `(float)` or `(string)` read it, which is `zval_get_long` with
 /// `is_strict` off, `zval_get_double` and [`to_string`]. The cast is the
 /// silent reading: a string is the number it opens with or zero with no
@@ -4126,7 +4126,7 @@ fn increment_string(req: &mut Request, bytes: &[u8]) -> Result<PhpString, Thrown
     req.string(&out)
 }
 
-/// `ZEND_STRLEN`'s handler (`Z/Zend/zend_vm_def.h:8759`), the length of
+/// `ZEND_STRLEN`'s handler (`Z/Zend/zend_vm_def.h:8766`), the length of
 /// the string an operand is, which is what php's compiler emits for
 /// `strlen($a)` in place of the call (`zend_compile_func_strlen`),
 /// so the native of the same name serves `strlen` only where the
@@ -4213,7 +4213,7 @@ pub(crate) fn strlen(req: &mut Request, value: &Value) -> Result<Value, Thrown> 
     ))
 }
 
-/// `ZEND_TYPE_CHECK`'s handler (`Z/Zend/zend_vm_def.h:8821`): whether
+/// `ZEND_TYPE_CHECK`'s handler (`Z/Zend/zend_vm_def.h:8828`): whether
 /// the value's type is one of the `MAY_BE_*` bits in `mask`, which is
 /// `1 << Z_TYPE` for one type and the bits of a bool, a long, a double
 /// and a string for `is_scalar` (`zend_compile_func_typecheck`,
@@ -4259,7 +4259,7 @@ pub(crate) fn type_check(value: &Value, mask: u32) -> bool {
     }
 }
 
-/// `ZEND_DEFINED`'s handler (`Z/Zend/zend_vm_def.h:8857`) and
+/// `ZEND_DEFINED`'s handler (`Z/Zend/zend_vm_def.h:8864`) and
 /// `zend_quick_check_constant` under it: whether a constant of exactly
 /// this name exists as the request serves, which is what php's compiler
 /// emits for `defined('NAME')` over a name it could not substitute
@@ -4303,7 +4303,7 @@ pub(crate) fn defined(req: &Request, name: &[u8]) -> bool {
     )
 }
 
-/// `ZEND_COUNT`'s handler (`Z/Zend/zend_vm_def.h:9480`), which is what
+/// `ZEND_COUNT`'s handler (`Z/Zend/zend_vm_def.h:9487`), which is what
 /// php's compiler emits for `count($a)` and `sizeof($a)` in place of the
 /// call (`zend_compile_func_count`), and the one arm the native of the
 /// same name shares with it: an array is its element count; an object
@@ -4426,7 +4426,7 @@ pub(crate) enum Offset {
 }
 
 /// `ZEND_ADD_ARRAY_ELEMENT`'s body past its operand addressing
-/// (`Z/Zend/zend_vm_def.h:6224`), the one kernel `INIT_ARRAY` dispatches
+/// (`Z/Zend/zend_vm_def.h:6225`), the one kernel `INIT_ARRAY` dispatches
 /// into for its first element and `ADD_ARRAY_ELEMENT` for the rest:
 /// `value`, the kernel's to give up from here, written into `array`,
 /// which has one owner, at the key `offset` makes. No offset is
@@ -4965,7 +4965,7 @@ pub(crate) fn legacy_type(value: &Value) -> &'static [u8] {
     }
 }
 
-/// `ZEND_ISSET_ISEMPTY_DIM_OBJ`'s array arm (`Z/Zend/zend_vm_def.h:7546`,
+/// `ZEND_ISSET_ISEMPTY_DIM_OBJ`'s array arm (`Z/Zend/zend_vm_def.h:7551`,
 /// the `isset_dim_obj_array` label): the entry at the key the offset
 /// makes, asked for rather than fetched, so no `Undefined array key`
 /// warning is raised on any path. Under `isset` the answer is that the
@@ -5066,7 +5066,7 @@ pub(crate) fn isset_offset(
     }
 }
 
-/// `ZEND_UNSET_DIM`'s body over an array (`Z/Zend/zend_vm_def.h:6735`,
+/// `ZEND_UNSET_DIM`'s body over an array (`Z/Zend/zend_vm_def.h:6740`,
 /// the `unset_dim_array` label): `zend_hash_del` or
 /// `zend_hash_index_del` at the key the offset makes, over the array the
 /// container holds, which the handler separated first
