@@ -218,6 +218,10 @@ pub(crate) struct StmtState {
     pub(crate) executed: bool,
     /// `stmt->in_fetch`.
     pub(crate) in_fetch: bool,
+    /// `stmt->in_param_event`: the connector's hook running over the
+    /// bound entries ([`dispatch`]), which a start, a bind and a cursor's
+    /// close refuse to change under it ([`refuse_in_param_event`]).
+    in_param_event: bool,
     placeholders: Option<Placeholders>,
     /// `stmt->bound_params`, `None` until the first is registered.
     pub(crate) params: Option<BoundTable>,
@@ -336,8 +340,36 @@ impl ObjectHandlers for Handlers {
         dbh.release(req);
     }
 
-    /// `dbstmt_get_gc`: the connection, and what the default fetch style
-    /// holds.
+    /// `dbstmt_get_gc`: the connection, what the default fetch style
+    /// holds, and, as php 8.5.12 adds, each bound parameter's and then
+    /// each bound column's variable and connector's options, so a cycle
+    /// through a bound variable is collected.
+    ///
+    /// ```php
+    /// class T { static $gone = []; function __construct(public $n, public $s) {} function __destruct() { self::$gone[] = $this->n; } }
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->prepare('SELECT ?, ?');
+    /// $p = new T('param', $s); $s->bindParam(1, $p, PDO::PARAM_INT);
+    /// $q = null; $s->bindParam(2, $q, PDO::PARAM_INT, 0, new T('option', $s));
+    /// $c = $db->query('SELECT 1');
+    /// $v = new T('column', $c); $c->bindColumn(1, $v, PDO::PARAM_INT);
+    /// unset($p, $q, $s, $v, $c);
+    /// var_dump(T::$gone, gc_collect_cycles() > 0);
+    /// $gone = T::$gone; sort($gone); var_dump($gone);
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// bool(true)
+    /// array(3) {
+    ///   [0]=>
+    ///   string(6) "column"
+    ///   [1]=>
+    ///   string(6) "option"
+    ///   [2]=>
+    ///   string(5) "param"
+    /// }
+    /// ```
     fn get_gc(
         &self,
         req: &mut Request,
@@ -349,6 +381,12 @@ impl ObjectHandlers for Handlers {
                 visit(dbh.as_value());
             }
             stmt.target.visit(visit);
+            for table in [&stmt.params, &stmt.columns_bound].into_iter().flatten() {
+                for bound in table.iter() {
+                    visit(*bound.value);
+                    visit(*bound.driver_params);
+                }
+            }
         }
         GcTable::Properties
     }
@@ -772,10 +810,61 @@ pub(super) fn describe_columns(req: &mut Request, object: PhpObject) -> Result<b
     Ok(true)
 }
 
+/// `pdo_stmt_disallow_reentrant_param_event`: php's `Error` where the
+/// connector's hook is running over the bound entries, which PHP code it
+/// runs (a value's `__toString`) would otherwise change under it.
+///
+/// ```php
+/// class Hook { function __construct(public $s, public $f) {} function __toString(): string {
+///     try { ($this->f)($this->s); echo "no error\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+///     return 'v';
+/// } }
+/// $db = new PDO('sqlite::memory:');
+/// foreach ([fn ($s) => $s->bindValue(2, 'x'), fn ($s) => $s->bindParam(2, $x), fn ($s) => $s->execute(), fn ($s) => $s->closeCursor()] as $f) {
+///     $s = $db->prepare('SELECT ?, ?');
+///     $p = 'p'; $q = 'q';
+///     $s->bindParam(1, $p); $s->bindParam(2, $q);
+///     $p = new Hook($s, $f);
+///     var_dump($s->execute(), $s->fetch(PDO::FETCH_NUM)[0]);
+/// }
+/// ```
+/// ```expect
+/// Cannot modify a PDOStatement while parameter hooks are running
+/// bool(true)
+/// string(1) "v"
+/// Cannot modify a PDOStatement while parameter hooks are running
+/// bool(true)
+/// string(1) "v"
+/// Cannot modify a PDOStatement while parameter hooks are running
+/// bool(true)
+/// string(1) "v"
+/// Cannot modify a PDOStatement while parameter hooks are running
+/// bool(true)
+/// string(1) "v"
+/// ```
+pub(super) fn refuse_in_param_event(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    if read(req, object, |s| s.in_param_event).unwrap_or(false) {
+        let text = "Cannot modify a PDOStatement while parameter hooks are running";
+        return Err(throw_error(req, "Error", text));
+    }
+    Ok(())
+}
+
 /// `dispatch_param_event`: the callback served on every bound parameter and
-/// then every bound column; `false` at the first it refused, its error
-/// recorded.
+/// then every bound column, `stmt->in_param_event` standing meanwhile;
+/// `false` at the first it refused, its error recorded.
 pub(super) fn dispatch(
+    req: &mut Request,
+    object: PhpObject,
+    event: BindEvent,
+) -> Result<bool, Thrown> {
+    write(req, object, |s| s.in_param_event = true);
+    let dispatched = dispatch_entries(req, object, event);
+    write(req, object, |s| s.in_param_event = false);
+    dispatched
+}
+
+fn dispatch_entries(
     req: &mut Request,
     object: PhpObject,
     event: BindEvent,
@@ -913,12 +1002,11 @@ pub(super) fn register(
                 "Did not find column name '{}' in the defined columns; it will not be bound",
                 String::from_utf8_lossy(&name)
             );
-            if let Err(thrown) =
-                error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(&supp))
-            {
-                bound.give_up(req);
-                return Err(thrown);
-            }
+            let raised =
+                error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(&supp));
+            // php 8.5.12 refuses the entry here, where 8.5.9 stored it.
+            bound.give_up(req);
+            return raised.map(|()| false);
         }
     }
     if let Err(thrown) = bound.own_name(req) {
@@ -1099,6 +1187,7 @@ fn bind(
     } = asked;
     let ty = BindType::of(ty);
     let (stmt, _) = this_stmt(req, stmt)?;
+    refuse_in_param_event(req, stmt)?;
     let (name, position) = if let Union::A(name) = key {
         if name.is_empty() {
             return Err(argument_error(req, "ValueError", 1, "must not be empty"));
@@ -1129,6 +1218,71 @@ fn bind(
 }
 
 // ---- executing
+
+/// `closeCursor()`'s emulation for a connector with no `cursor_closer`:
+/// every row fetched and discarded.
+fn drain(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
+    while with_driver(req, stmt, |req, driver| {
+        driver.fetch(req, crate::connector::Orientation::Forward, 0)
+    })?
+    .unwrap_or(false)
+    {}
+    Ok(())
+}
+
+/// `pdo_stmt_invalidate_result`, php 8.5.12's: the rows of the start
+/// before closed, by the connector or by [`drain`], and the statement no
+/// longer executed, so a start that fails leaves no row of the one
+/// before to fetch. php ignores the closer's answer, its error cleared
+/// by the start's `PDO_STMT_CLEAR_ERR` next; a throwable a callback raised
+/// while it closed is handed on once the statement is no longer executed,
+/// where php goes on with the start, the throwable pending.
+///
+/// ```php
+/// $db = PDO::connect('sqlite::memory:');
+/// $s = $db->prepare('SELECT ? UNION ALL SELECT 2');
+/// $s->execute(['a']); var_dump($s->fetchColumn());
+/// try { $s->execute([new stdClass]); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($s->fetchColumn());
+/// $db->createFunction('f', function ($t) { if ($t) throw new Exception('thrown'); return 'b'; });
+/// $s = $db->prepare('SELECT f(?) UNION ALL SELECT 2');
+/// $s->execute([0]); var_dump($s->fetchColumn());
+/// try { $s->execute([1]); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($s->fetchColumn());
+/// $s->execute([0]); var_dump($s->fetchAll(PDO::FETCH_COLUMN));
+/// ```
+/// ```expect
+/// string(1) "a"
+/// Object of class stdClass could not be converted to string
+/// bool(false)
+/// string(1) "b"
+/// thrown
+/// bool(false)
+/// array(2) {
+///   [0]=>
+///   string(1) "b"
+///   [1]=>
+///   int(2)
+/// }
+/// ```
+fn invalidate_result(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
+    match with_driver(req, stmt, |req, driver| driver.close_cursor(req))? {
+        Err(Failure {
+            cause: Cause::Unsupported,
+            thrown: None,
+        }) => drain(req, stmt)?,
+        Err(Failure {
+            thrown: Some(thrown),
+            ..
+        }) => {
+            write(req, stmt, |s| s.executed = false);
+            return Err(thrown);
+        }
+        Ok(()) | Err(Failure { thrown: None, .. }) => {}
+    }
+    write(req, stmt, |s| s.executed = false);
+    Ok(())
+}
 
 // ---- attributes, metadata and cursors
 
@@ -1222,7 +1376,26 @@ impl PDOStatement {
     /// string(1) "4"
     ///
     /// Warning: PDOStatement::bindColumn(): SQLSTATE[HY000]: General error: Did not find column name 'nope' in the defined columns; it will not be bound in %s on line 7
-    /// bool(true)
+    /// bool(false)
+    /// ```
+    ///
+    /// The refused column keeps nothing it was handed, the connector's options
+    /// among them:
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+    /// $s = $db->query('SELECT 1 AS a');
+    /// $o = [new stdClass];
+    /// $w = WeakReference::create($o[0]);
+    /// var_dump($s->bindColumn('missing', $v, PDO::PARAM_STR, 0, $o), $s->errorInfo()[0]);
+    /// unset($o);
+    /// var_dump($w->get());
+    /// ```
+    /// ```expect
+    /// Warning: PDOStatement::bindColumn(): SQLSTATE[HY000]: General error: Did not find column name 'missing' in the defined columns; it will not be bound in %s on line 6
+    /// bool(false)
+    /// string(5) "HY000"
+    /// NULL
     /// ```
     #[php(tentative)]
     fn bindColumn(
@@ -1328,17 +1501,12 @@ impl PDOStatement {
     #[php(tentative)]
     fn closeCursor(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (stmt, _) = this_stmt(req, this.object())?;
+        refuse_in_param_event(req, stmt)?;
         clear_error(req, stmt);
         match on_driver(req, stmt, |req, driver| driver.close_cursor(req))? {
             Ok(Some(())) => {}
             Ok(None) => return Ok(false),
-            Err(()) => {
-                while with_driver(req, stmt, |req, driver| {
-                    driver.fetch(req, crate::connector::Orientation::Forward, 0)
-                })?
-                .unwrap_or(false)
-                {}
-            }
+            Err(()) => drain(req, stmt)?,
         }
         write(req, stmt, |s| s.executed = false);
         Ok(true)
@@ -1515,6 +1683,10 @@ impl PDOStatement {
     ) -> Result<bool, Thrown> {
         let input = params;
         let (stmt, dbh) = this_stmt(req, this.object())?;
+        refuse_in_param_event(req, stmt)?;
+        if read(req, stmt, |s| s.executed).unwrap_or(false) {
+            invalidate_result(req, stmt)?;
+        }
         clear_error(req, stmt);
         if let Some(input) = input {
             if let Some(old) = write(req, stmt, |s| s.params.take()).flatten() {
@@ -1862,19 +2034,28 @@ impl PDOStatement {
             }
         };
         let info = read(req, stmt, |s| {
+            if at >= s.column_count {
+                return None;
+            }
             let c = s.columns.as_ref()?.get(at)?;
             Some((*c.name, c.max_len, c.precision))
         })
         .flatten();
-        if let Some((name, max_len, precision)) = info {
-            // `add_assoc_str(..., zend_string_copy(col->name))`.
-            meta.set_str(req, b"name", Owner::take(req, name).into_value())?;
-            // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
-            #[allow(clippy::cast_possible_wrap)]
-            meta.set_str(req, b"len", Owner::int(max_len as i64))?;
-            #[allow(clippy::cast_possible_wrap)]
-            meta.set_str(req, b"precision", Owner::int(precision as i64))?;
-        }
+        // php 8.5.12 refuses a column the statement has not described,
+        // where 8.5.9 answered the connector's half alone.
+        let Some((name, max_len, precision)) = info else {
+            meta.give_up(req);
+            let supp = Some("invalid column index");
+            error::raise_impl(req, dbh, On::Stmt(stmt), SqlState(*b"07009"), supp)?;
+            return Ok(OrFalse::False);
+        };
+        // `add_assoc_str(..., zend_string_copy(col->name))`.
+        meta.set_str(req, b"name", Owner::take(req, name).into_value())?;
+        // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
+        #[allow(clippy::cast_possible_wrap)]
+        meta.set_str(req, b"len", Owner::int(max_len as i64))?;
+        #[allow(clippy::cast_possible_wrap)]
+        meta.set_str(req, b"precision", Owner::int(precision as i64))?;
         Ok(OrFalse::Value(meta))
     }
 

@@ -889,6 +889,9 @@ impl SQLite3 {
     /// var_dump($db->close(), $db->close());
     /// try { $s->execute(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// var_dump($db->lastErrorCode(), $db->lastErrorMsg());
+    /// $u = (new ReflectionClass('SQLite3'))->newInstanceWithoutConstructor();
+    /// var_dump($u->close());
+    /// try { $u->lastErrorCode(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect
     /// bool(true)
@@ -896,30 +899,44 @@ impl SQLite3 {
     /// The SQLite3 object has not been correctly initialised or is already closed
     /// int(0)
     /// string(0) ""
+    /// bool(true)
+    /// The SQLite3 object has not been correctly initialised or is already closed
     /// ```
     ///
-    /// From inside a user function or a collation the call in progress
-    /// holds the connection, so the close is refused as the library
-    /// refuses it for the statement the call runs, and the call runs to
-    /// its end:
+    /// From inside a user function, an aggregate, a collation or the
+    /// authorizer the close throws before it finalizes a statement
+    /// (`in_callback`, php 8.5.12), and the call runs to its end:
     ///
     /// ```php
     /// $db = new SQLite3(':memory:');
-    /// $db->createFunction('f', function ($x) use ($db) { var_dump($db->close()); return $x * 2; });
-    /// $db->createCollation('c', function ($a, $b) use ($db) { var_dump($db->close()); return strcmp($a, $b); });
+    /// $close = function () use ($db) {
+    ///     try { var_dump($db->close()); } catch (Error $e) { echo $e::class, ': ', $e->getMessage(), "\n"; }
+    /// };
+    /// $db->createFunction('f', function ($x) use ($close) { $close(); return $x * 2; });
+    /// $db->createCollation('c', function ($a, $b) use ($close) { $close(); return strcmp($a, $b); });
+    /// $db->createAggregate('g', function ($c, $n, $a) use ($close) { $close(); return $c + $a; }, fn ($c) => $c, 1);
     /// var_dump($db->querySingle('SELECT f(21)'));
     /// var_dump($db->querySingle("SELECT 'b' AS x UNION ALL SELECT 'a' ORDER BY x COLLATE c"));
-    /// var_dump($db->lastErrorMsg(), $db->close());
+    /// var_dump($db->querySingle('SELECT g(x) FROM (SELECT 1 AS x UNION ALL SELECT 2)'));
+    /// $live = $db->prepare('SELECT 7');
+    /// $db->setAuthorizer(function () use ($close) { $close(); return SQLite3::OK; });
+    /// $db->prepare('SELECT 1');
+    /// $db->setAuthorizer(null);
+    /// var_dump($live->execute()->fetchArray(SQLITE3_NUM), $db->close());
     /// ```
     /// ```expect
-    /// Warning: SQLite3::close(): Unable to close database: unable to close due to unfinalized statements or unfinished backups in %s on line 3
-    /// bool(false)
+    /// Error: Cannot close SQLite3 database while inside a callback
     /// int(42)
-    ///
-    /// Warning: SQLite3::close(): Unable to close database: unable to close due to unfinalized statements or unfinished backups in %s on line 4
-    /// bool(false)
+    /// Error: Cannot close SQLite3 database while inside a callback
     /// string(1) "a"
-    /// string(12) "not an error"
+    /// Error: Cannot close SQLite3 database while inside a callback
+    /// Error: Cannot close SQLite3 database while inside a callback
+    /// int(3)
+    /// Error: Cannot close SQLite3 database while inside a callback
+    /// array(1) {
+    ///   [0]=>
+    ///   int(7)
+    /// }
     /// bool(true)
     /// ```
     #[php(tentative)]
@@ -927,11 +944,16 @@ impl SQLite3 {
         let object = this.object();
         let conn = conn(req, object)?;
         let exceptions = conn.exceptions;
+        // `if (db_obj->initialised)`: an object never opened stays so.
+        let Link::Open(open) = &conn.link else {
+            return Ok(true);
+        };
+        if open.db().in_callback(req) {
+            let text = "Cannot close SQLite3 database while inside a callback";
+            return Err(throw_error(req, "Error", text));
+        }
+        let conn = self::conn(req, object)?;
         let Link::Open(open) = std::mem::replace(&mut conn.link, Link::Closed) else {
-            if matches!(conn.link, Link::Closed) {
-                return Ok(true);
-            }
-            conn.link = Link::Unopened;
             return Ok(true);
         };
         let Open { owner, stmts } = *open;
