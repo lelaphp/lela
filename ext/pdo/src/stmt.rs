@@ -336,8 +336,36 @@ impl ObjectHandlers for Handlers {
         dbh.release(req);
     }
 
-    /// `dbstmt_get_gc`: the connection, and what the default fetch style
-    /// holds.
+    /// `dbstmt_get_gc`: the connection, what the default fetch style
+    /// holds, and, as php 8.5.12 adds, each bound parameter's and then
+    /// each bound column's variable and connector's options, so a cycle
+    /// through a bound variable is collected.
+    ///
+    /// ```php
+    /// class T { static $gone = []; function __construct(public $n, public $s) {} function __destruct() { self::$gone[] = $this->n; } }
+    /// $db = new PDO('sqlite::memory:');
+    /// $s = $db->prepare('SELECT ?, ?');
+    /// $p = new T('param', $s); $s->bindParam(1, $p, PDO::PARAM_INT);
+    /// $q = null; $s->bindParam(2, $q, PDO::PARAM_INT, 0, new T('option', $s));
+    /// $c = $db->query('SELECT 1');
+    /// $v = new T('column', $c); $c->bindColumn(1, $v, PDO::PARAM_INT);
+    /// unset($p, $q, $s, $v, $c);
+    /// var_dump(T::$gone, gc_collect_cycles() > 0);
+    /// $gone = T::$gone; sort($gone); var_dump($gone);
+    /// ```
+    /// ```expect
+    /// array(0) {
+    /// }
+    /// bool(true)
+    /// array(3) {
+    ///   [0]=>
+    ///   string(6) "column"
+    ///   [1]=>
+    ///   string(6) "option"
+    ///   [2]=>
+    ///   string(5) "param"
+    /// }
+    /// ```
     fn get_gc(
         &self,
         req: &mut Request,
@@ -349,6 +377,12 @@ impl ObjectHandlers for Handlers {
                 visit(dbh.as_value());
             }
             stmt.target.visit(visit);
+            for table in [&stmt.params, &stmt.columns_bound].into_iter().flatten() {
+                for bound in table.iter() {
+                    visit(*bound.value);
+                    visit(*bound.driver_params);
+                }
+            }
         }
         GcTable::Properties
     }
