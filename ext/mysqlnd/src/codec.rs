@@ -10,7 +10,7 @@ use php_ext::values::{Owner, PhpString, Value};
 use crate::consts::{FieldType, column};
 use crate::result::{Field, Row};
 use crate::stats::{Stat, Stats};
-use crate::wire::{Body, Length};
+use crate::wire::Body;
 
 /// What `ps_fetch_from_1_to_8_bytes` makes: an integer, or the text php
 /// writes where it would not fit or is zero-filled.
@@ -253,19 +253,12 @@ fn fetch<'a>(
     // packet, and for a `NULL` length, a short one or one past the
     // packet's end the over-read warning and no value.
     let variable = |req: &mut Request, p: &mut Body<'a>| -> Option<&'a [u8]> {
-        let before = p.position();
-        let len = match p.field_length() {
-            Length::Of(len) => usize::try_from(len).ok(),
-            Length::Null | Length::Short => None,
-        };
-        let length_len = p.position() - before;
-        match len {
-            Some(len) if len <= left - length_len => Some(p.take(len)),
-            _ => {
-                over_read(req);
-                None
-            }
+        let len = p.field_length();
+        let bytes = p.within(len);
+        if bytes.is_none() {
+            over_read(req);
         }
+        bytes
     };
     // `ps_fetch_is_length_too_short`: a temporal value's bytes cover the
     // fixed offsets its type reads, or are none.
