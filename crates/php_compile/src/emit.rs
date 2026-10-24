@@ -2228,6 +2228,17 @@ impl<'a> Emit<'a> {
         }
     }
 
+    /// [`Self::string`] interned whatever the fold asks
+    /// ([`Intern::interning`]): a string php's compile copies out of one
+    /// it holds interned, a persistent constant's value and
+    /// `CG(compiled_filename)`, which `zend_set_compiled_filename` interns.
+    fn interned_string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
+        let outer = self.strings.interning(true);
+        let made = self.string(bytes);
+        self.strings.interning(outer);
+        made
+    }
+
     /// [`Self::string`] of a declaration's own name or lowered key, one
     /// string this compile makes for it, which php copies where the
     /// compile asks for it again and which the declaration owns once the
@@ -2388,7 +2399,7 @@ impl<'a> Emit<'a> {
             return Ok(made);
         }
         let filename = self.filename;
-        let own = self.string(filename)?;
+        let own = self.interned_string(filename)?;
         let made = self.strings.hold_made(own);
         if let Some(own) = own.as_str() {
             self.file_own = Some(own);
@@ -4460,7 +4471,7 @@ impl<'a> Emit<'a> {
             let slot = u32::try_from(self.static_vars.len()).unwrap_or(u32::MAX) << 3;
             let folded = match init {
                 None => Some(Zval::null()),
-                Some(init) => self.eval_const(init)?,
+                Some(init) => self.uninterned(|this| this.eval_const(init))?,
             };
             self.static_vars.push(BoundVar {
                 name: Name(name.into()),
@@ -5507,6 +5518,41 @@ impl<'a> Emit<'a> {
             }
             (written, _) => written,
         })
+    }
+
+    /// `f` with what the home lays not interned ([`Intern::interning`]),
+    /// as php's scanner and fold leave a string no interning asks for: a
+    /// constant array's elements and keys, `in_array`'s haystack and a
+    /// `static`'s initial value cost their strings where opcache holds
+    /// the bytes, as the program below does, where a string an opline
+    /// names costs none (the program under the recipe's `TMPDIR`, written into the past
+    /// so opcache keeps it, read after the heap is churned):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3323-uninterned.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// $a = $b = $c = null; m('$q1 = 1;'); m('function w1() {}'); m('$GLOBALS["z"] = 1;');
+    /// $held = ["abcdefghijk1", "abcdefghijk2", "abcdefghijk3", "abcdefghijk4", "abcdefghijk5"];
+    /// echo m('$GLOBALS["a"] = ["abcdefghijk1" => "abcdefghijk2", 7 => ["abcdefghijk5"]];'), " ";
+    /// echo m('function sv1() { static $s = "abcdefghijk3"; return $s; }'), " ";
+    /// echo m('function ia1($x) { return in_array($x, ["abcdefghijk4", "zz"], true); }'), " ";
+    /// echo m('$GLOBALS["b"] = "abcdefghijk1"; $GLOBALS["c"] = "abcdefghijk1" . "";'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode([$a, sv1(), ia1("abcdefghijk4"), $b, $c]), "\n";
+    /// PHP);
+    /// include $f;
+    /// ```
+    /// ```expect regime=jit-off
+    /// 712 704 816 0
+    /// [{"abcdefghijk1":"abcdefghijk2","7":["abcdefghijk5"]},"abcdefghijk3",true,"abcdefghijk1","abcdefghijk1"]
+    /// ```
+    fn uninterned<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+        let outer = self.strings.interning(false);
+        let done = f(self);
+        self.strings.interning(outer);
+        done
     }
 
     /// `f` under php's `ZEND_COMPILE_NO_PERSISTENT_CONSTANT_SUBSTITUTION`
@@ -8585,7 +8631,7 @@ impl<'a> Emit<'a> {
                         }
                     });
                 }
-                if let Some(array) = self.folded_array(&items)? {
+                if let Some(array) = self.uninterned(|this| this.folded_array(&items))? {
                     return Ok(ConstExpr::UnitValue(array));
                 }
                 Ok(ConstExpr::Array {
@@ -17171,7 +17217,7 @@ impl<'a> Emit<'a> {
         elements: &[NodeId<tree::ArrayElement>],
     ) -> Result<Option<Made>, CompileError> {
         let mark = self.claims.mark();
-        let Some(entries) = self.constant_entries(elements)? else {
+        let Some(entries) = self.uninterned(|this| this.constant_entries(elements))? else {
             return Ok(None);
         };
         let claims = (self.claims.since(mark).into_iter()).map(|(_, made)| made);
@@ -17192,7 +17238,7 @@ impl<'a> Emit<'a> {
             return Ok(None);
         };
         let elements = self.list(self.parsed.tree[id].array_elements);
-        self.constant_entries(elements)
+        self.uninterned(|this| this.constant_entries(elements))
     }
 
     /// [`Self::constant_array`]'s entries before they are laid down: the
@@ -20796,7 +20842,7 @@ impl<'a> Emit<'a> {
     fn ct_constant(&mut self, name: &[u8]) -> Result<Option<Operated>, CompileError> {
         Ok(match self.ct_found(name) {
             Some(Found::Declared(value)) => Some(Operated::Kept(match value {
-                ConstExpr::Str(bytes) => self.string(bytes)?,
+                ConstExpr::Str(bytes) => self.interned_string(bytes)?,
                 ConstExpr::Bool(b) => Zval::bool(*b),
                 ConstExpr::Long { value: n, .. } => Zval::long(*n),
                 ConstExpr::Double(d) => Zval::double(*d),

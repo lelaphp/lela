@@ -809,6 +809,19 @@ pub trait Intern {
     fn constant_array_made(&mut self, entries: &[(Key, Zval)]) -> Result<Made, Fatal> {
         (self.constant_array(entries)).map(|a| Made(Zval::array(a)))
     }
+
+    /// Whether what this home lays from here on is interned, php's
+    /// `zend_new_interned_string` asked of it, and whether it was until
+    /// now: `false` while a compile makes the strings php's scanner and
+    /// `zend_eval_const_expr` lay and nothing interns, an array's
+    /// elements and keys, a `static`'s initial value, an attribute's
+    /// argument and a jump table's key, where a string an opline names,
+    /// a declaration's value and a name are interned. A home that interns
+    /// every string, a cached unit's, keeps on and answers `true`.
+    fn interning(&mut self, on: bool) -> bool {
+        let _ = on;
+        true
+    }
 }
 
 /// One string or constant array an [`Intern`] home made for an asker
