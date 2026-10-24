@@ -12,6 +12,10 @@
 //! keep: the first `len` records are live, `len <= cap`, and `at` is the
 //! start of an allocation of `cap` records, dangling while `cap` is zero.
 //!
+//! What the table does out of line takes its words by value
+//! ([`Frames::grown`]), never the table's address, so the methods laid in
+//! the dispatch loop reach the words by loads and stores alone.
+//!
 //! [`FrameRef`]: super::FrameRef
 
 use std::alloc::{self, Layout};
@@ -112,7 +116,7 @@ impl<H> Frames<H> {
     /// the process's out of memory, as a `Vec`'s is.
     pub(super) fn push(&mut self, frame: Frame<H>) {
         if self.len == self.cap {
-            self.grow();
+            (self.at, self.cap) = Frames::grown(self.at, self.cap);
         }
         let place = self.at.as_ptr().wrapping_add(self.len);
         // SAFETY: `len < cap` now, so the place past the last live record
@@ -156,32 +160,37 @@ impl<H> Frames<H> {
         std::mem::take(self)
     }
 
-    /// The allocation doubled, the live records moved with it.
+    /// The allocation at `at` of `cap` records doubled, the live records
+    /// moved with it: the new allocation and its capacity. It takes the
+    /// table's words by value and hands them back, never the table's
+    /// address: a push laid in the dispatch loop's body that handed
+    /// `&mut self` to this call made the address a value of its own
+    /// there, which the loop's allocation spilled and reloaded in every
+    /// frame lookup of every handler.
     #[cold]
     #[inline(never)]
-    fn grow(&mut self) {
-        let cap = self.cap.saturating_mul(2).max(4);
-        let Ok(layout) = Layout::array::<Frame<H>>(cap) else {
+    fn grown(at: NonNull<Frame<H>>, cap: usize) -> (NonNull<Frame<H>>, usize) {
+        let new = cap.saturating_mul(2).max(4);
+        let Ok(layout) = Layout::array::<Frame<H>>(new) else {
             alloc::handle_alloc_error(Layout::new::<Frame<H>>());
         };
-        let at = if self.cap == 0 {
+        let moved = if cap == 0 {
             // SAFETY: a record is no zero-sized type (it holds a pointer),
             // so the layout of four or more is not zero-sized.
             unsafe { alloc::alloc(layout) }
         } else {
-            let Ok(old) = Layout::array::<Frame<H>>(self.cap) else {
+            let Ok(old) = Layout::array::<Frame<H>>(cap) else {
                 alloc::handle_alloc_error(layout);
             };
             // SAFETY: `at` came from this allocator with `old`, the layout of
             // `cap` records, and the new size is a valid one for the same
             // alignment, as `layout` is.
-            unsafe { alloc::realloc(self.at.as_ptr().cast(), old, layout.size()) }
+            unsafe { alloc::realloc(at.as_ptr().cast(), old, layout.size()) }
         };
-        let Some(at) = NonNull::new(at).map(NonNull::cast::<Frame<H>>) else {
+        let Some(moved) = NonNull::new(moved).map(NonNull::cast::<Frame<H>>) else {
             alloc::handle_alloc_error(layout);
         };
-        self.at = at;
-        self.cap = cap;
+        (moved, new)
     }
 }
 
