@@ -1154,6 +1154,24 @@ fn set_statement_class(
 /// load Lazy
 /// Lazy
 /// ```
+///
+/// Constructor arguments that are not an array are named by their own
+/// type, and a refused value leaves the class set before it:
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// try { $db->setAttribute(PDO::ATTR_STATEMENT_CLASS, ['PDOStatement', 'x']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $db->prepare('SELECT 1', [PDO::ATTR_STATEMENT_CLASS => ['PDOStatement', 1]]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($db->getAttribute(PDO::ATTR_STATEMENT_CLASS));
+/// ```
+/// ```expect
+/// PDO::setAttribute(): Argument #2 ($value) PDO::ATTR_STATEMENT_CLASS constructor_args must be of type ?array, string given
+/// PDO::ATTR_STATEMENT_CLASS constructor_args must be of type ?array, int given
+/// array(1) {
+///   [0]=>
+///   string(12) "PDOStatement"
+/// }
+/// ```
 pub(super) fn statement_class(
     req: &mut Request,
     value: &Value,
@@ -1204,7 +1222,8 @@ pub(super) fn statement_class(
             if let Some(args) = args.deref().as_array() {
                 Some(args)
             } else {
-                let given = value_name(req, value);
+                // php 8.5.12 names the element, where 8.5.9 named the pair.
+                let given = value_name(req, &args.deref());
                 return Err(type_error(
                     req,
                     &format!(
