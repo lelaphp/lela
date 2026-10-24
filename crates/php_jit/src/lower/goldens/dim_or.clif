@@ -69,29 +69,29 @@ function u0:0(i64, i64) -> i32 tail {
 @0001                               v42 = iconst.i64 255
 @0001                               v43 = band v41, v42  ; v42 = 255
                                     v76 -> v43
-@0002                               v45 = load.i32 notrap aligned v44+104
-@0002                               v46 = iconst.i32 256
-@0002                               v47 = band v45, v46  ; v46 = 256
-@0002                               v48 = iconst.i32 0
-@0002                               v49 = icmp eq v47, v48  ; v48 = 0
-@0002                               brif v49, block15, block17
+@0002                               v45 = iconst.i64 constant#0
+@0002                               v46 = load.i64 notrap aligned v45  ; v45 = constant#0
+@0002                               v47 = load.i32 notrap aligned v45+8  ; v45 = constant#0
+@0002                               v48 = load.i32 notrap aligned v44+104
+@0002                               v49 = iconst.i32 256
+@0002                               v50 = band v48, v49  ; v49 = 256
+@0002                               v51 = iconst.i32 0
+@0002                               v52 = icmp eq v50, v51  ; v51 = 0
+@0002                               brif v52, block15, block17
 
                                 block17:
-@0002                               v50 = load.i64 notrap aligned v44+96
-@0002                               v51 = load.i32 notrap aligned v50
-@0002                               v52 = iconst.i32 1
-@0002                               v53 = icmp ne v51, v52  ; v52 = 1
-@0002                               brif v53, block15, block18
+@0002                               v53 = load.i64 notrap aligned v44+96
+@0002                               v54 = load.i32 notrap aligned v53
+@0002                               v55 = iconst.i32 1
+@0002                               v56 = icmp ne v54, v55  ; v55 = 1
+@0002                               brif v56, block15, block18
 
                                 block18:
-@0002                               v54 = iconst.i64 constant#0
-@0002                               v55 = load.i64 notrap aligned v54  ; v54 = constant#0
-@0002                               v56 = load.i32 notrap aligned v54+8  ; v54 = constant#0
 @0002                               v57 = iconst.i32 1
 @0002                               v58 = iconst.i32 5
 @0002                               v59 = stack_addr.i64 ss1
 @0002                               v60 = iconst.i64 0x7000_0c00
-@0002                               v61 = call_indirect sig0, v60(v0, v44, v58, v50, v55, v56, v57, v59)  ; v60 = 0x7000_0c00, v58 = 5, v57 = 1
+@0002                               v61 = call_indirect sig0, v60(v0, v44, v58, v53, v46, v47, v57, v59)  ; v60 = 0x7000_0c00, v58 = 5, v57 = 1
 @0002                               brif v61, block19, block20
 
                                 block20:
