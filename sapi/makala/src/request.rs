@@ -746,6 +746,34 @@ impl OutputSink for Sink {
         use std::io::Write;
         std::io::stderr().lock().write_all(bytes).ok();
     }
+
+    /// `php://stdout` is makala's own fd 1, never the body, as php-fpm's
+    /// child writes it to its fd 1 (`dup(STDOUT_FILENO)` under a SAPI not
+    /// named `cli`, `Z/ext/standard/php_fopen_wrapper.c:260-272`), the
+    /// pipe its master logs or `/dev/null`.
+    ///
+    /// ```php
+    /// file_put_contents('php://stdout', "to stdout\n");
+    /// echo "body\n";
+    /// ```
+    /// ```request makala
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// 200
+    /// x-powered-by: PHP/8.5.9
+    /// content-type: text/html; charset=UTF-8
+    ///
+    /// body
+    /// ```
+    fn write_stdout(&mut self, bytes: &[u8]) -> bool {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(bytes).ok();
+        stdout.flush().ok();
+        true
+    }
 }
 
 #[cfg(test)]
