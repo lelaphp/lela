@@ -7,7 +7,7 @@ use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString, Value};
 
-use crate::consts::{FieldType, NULL_LENGTH, column};
+use crate::consts::{FieldType, column};
 use crate::result::{Field, Row};
 use crate::stats::{Stat, Stats};
 use crate::wire::Body;
@@ -189,6 +189,16 @@ fn over_read(req: &mut Request) {
     );
 }
 
+/// `ps_fetch_is_length_too_short`'s warning; `false`, the value refused.
+fn too_short(req: &mut Request) -> bool {
+    docref(
+        req,
+        Level::Warning,
+        "Malformed server packet. Field length is too short for the field type",
+    );
+    false
+}
+
 /// `mysqlnd_ps_fetch_functions[type].func` for one column, with `left`
 /// bytes of the packet past its start (php's `pack_len` argument). Each
 /// kind reads its bytes where they stand in the row's packet:
@@ -204,6 +214,28 @@ fn over_read(req: &mut Request) {
 /// ```expect mysql
 /// [[-7,-300,"2026",-70000,"18446744073709551615",2.5,"-30:01:02.500","2026-10-24",2561,"ab\u0000c"],[null,1,null,2,3,null,"00:00:00.000",null,0,""]]
 /// ```
+///
+/// A temporal value's bytes cover the offsets its type reads, a `DATE`
+/// four, a `TIME` eight and a `DATETIME` four, or the row is malformed:
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c6431006d7973716c5f6e61746976655f70617373776f7264,0700000200000002000000';
+/// $prepare = '0c0000010001000000020000000000003200000203646566087068705f74657374046461746104646174610673747276616c0673747276616c0ce000c8000000fd01100000003200000303646566087068705f7465737404646174610464617461';
+/// $columns = ['0664617476616c0664617476616c0c3f000a0000000a811000000005000004fe0000', '0674696d76616c0674696d76616c0c3f000a0000000b811000000005000004fe0000', '0664746976616c0664746976616c0c3f00130000000c811000000005000004fe0000'];
+/// $talks = array_map(fn ($c) => "$greet,$prepare{$c}0200,01000001023200000203646566087068705f74657374046461746104646174610673747276616c0673747276616c0ce000c8000000fd01100000003200000303646566087068705f7465737404646174610464617461{$c}2200090000050000047465737401de05000006fe00002200", $columns);
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); $s = $m->prepare('SELECT strval, datval FROM data'); $s->execute(); $r = $s->get_result(); while ($row = $r->fetch_row()) { var_dump($row); } $s->close(); $m->close(); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli_result::fetch_row(): Malformed server packet. Field length is too short for the field type
+/// mysqli_result::fetch_row(): Malformed server packet. Field length is too short for the field type
+/// mysqli_result::fetch_row(): Malformed server packet. Field length is too short for the field type
+/// ```
 fn fetch<'a>(
     req: &mut Request,
     field: &Field,
@@ -217,16 +249,22 @@ fn fetch<'a>(
         }
         Some(p.take(n))
     };
+    // A value under a length: its bytes where they are all left of the
+    // packet, and for a `NULL` length, a short one or one past the
+    // packet's end the over-read warning and no value.
     let variable = |req: &mut Request, p: &mut Body<'a>| -> Option<&'a [u8]> {
-        let before = p.position();
         let len = p.field_length();
-        let length_len = p.position() - before;
-        let len = usize::try_from(len).unwrap_or(usize::MAX);
-        if len as u64 == NULL_LENGTH || length_len > left || len > left - length_len {
+        let bytes = p.within(len);
+        if bytes.is_none() {
             over_read(req);
-            return None;
         }
-        Some(p.take(len))
+        bytes
+    };
+    // `ps_fetch_is_length_too_short`: a temporal value's bytes cover the
+    // fixed offsets its type reads, or are none.
+    let temporal = |req: &mut Request, p: &mut Body<'a>, min: usize| -> Option<&'a [u8]> {
+        let b = variable(req, p)?;
+        (b.is_empty() || b.len() >= min || too_short(req)).then_some(b)
     };
     let long = |bits: Bits, req: &mut Request| -> Result<Owner<Value>, Thrown> {
         match bits {
@@ -272,15 +310,15 @@ fn fetch<'a>(
             }
             None => return Ok(None),
         },
-        FieldType::Time => match variable(req, p) {
+        FieldType::Time => match temporal(req, p, 8) {
             Some(b) => text(req, time(field, b).as_bytes())?,
             None => return Ok(None),
         },
-        FieldType::Date => match variable(req, p) {
+        FieldType::Date => match temporal(req, p, 4) {
             Some(b) => text(req, date(b).as_bytes())?,
             None => return Ok(None),
         },
-        FieldType::DateTime | FieldType::Timestamp => match variable(req, p) {
+        FieldType::DateTime | FieldType::Timestamp => match temporal(req, p, 4) {
             Some(b) => text(req, datetime(field, b).as_bytes())?,
             None => return Ok(None),
         },
@@ -293,8 +331,9 @@ fn fetch<'a>(
             }
             None => return Ok(None),
         },
+        // `ps_fetch_string`'s `ZVAL_STRINGL_FAST` (`Z/ext/mysqlnd/mysqlnd_ps_codec.c:429`).
         _ => match variable(req, p) {
-            Some(b) => text(req, b)?,
+            Some(b) => PhpString::fast(req, b)?.into_value(),
             None => return Ok(None),
         },
     }))
@@ -330,7 +369,7 @@ fn time(field: &Field, b: &[u8]) -> String {
         (false, 0u32, 0, 0, 0)
     } else {
         let day = u32::from_le_bytes([at(1), at(2), at(3), at(4)]);
-        let part = if b.len() > 8 {
+        let part = if b.len() >= 12 {
             u32::from_le_bytes([at(8), at(9), at(10), at(11)])
         } else {
             0
@@ -364,12 +403,12 @@ fn datetime(field: &Field, b: &[u8]) -> String {
     } else {
         (u16::from_le_bytes([at(0), at(1)]), at(2), at(3))
     };
-    let (hour, minute, second) = if b.len() > 4 {
+    let (hour, minute, second) = if b.len() >= 7 {
         (at(4), at(5), at(6))
     } else {
         (0, 0, 0)
     };
-    let part = if b.len() > 7 {
+    let part = if b.len() >= 11 {
         u32::from_le_bytes([at(7), at(8), at(9), at(10)])
     } else {
         0

@@ -635,7 +635,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// ```php
 /// phpinfo(INFO_LICENSE);
 /// ob_start(); phpinfo(INFO_MODULES | INFO_GENERAL); $m = ob_get_clean();
-/// var_dump(str_contains($m, "<h2><a name=\"module_core\" href=\"#module_core\">Core</a></h2>\n<table>\n<tr><td class=\"e\">PHP Version </td><td class=\"v\">8.5.9 </td></tr>\n</table>\n<table>\n<tr class=\"h\"><th>Directive</th><th>Local Value</th><th>Master Value</th></tr>\n"), str_contains($m, "<h2>Additional Modules</h2>\n<table>\n<tr class=\"h\"><th>Module Name</th></tr>\n</table>\n"), str_ends_with($m, "</div></body></html>"));
+/// var_dump(str_contains($m, "<h2><a name=\"module_core\" href=\"#module_core\">Core</a></h2>\n<table>\n<tr><td class=\"e\">PHP Version </td><td class=\"v\">8.5.12 </td></tr>\n</table>\n<table>\n<tr class=\"h\"><th>Directive</th><th>Local Value</th><th>Master Value</th></tr>\n"), str_contains($m, "<h2>Additional Modules</h2>\n<table>\n<tr class=\"h\"><th>Module Name</th></tr>\n</table>\n"), str_ends_with($m, "</div></body></html>"));
 /// ```
 /// ```request
 /// --GET--

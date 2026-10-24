@@ -15,13 +15,11 @@ use php_ext::values::{Emalloc, Owner, PhpString, Value};
 
 use crate::alloc::PLUGIN_ROOM;
 use crate::conn::ConnData;
-use crate::consts::{
-    ConnState, FieldType, MAX_PACKET_SIZE, NULL_LENGTH, PhpType, ResType, column, cr, status,
-};
+use crate::consts::{ConnState, FieldType, MAX_PACKET_SIZE, PhpType, ResType, column, cr, status};
 use crate::error::{ErrorInfo, OUT_OF_MEMORY, OUT_OF_SYNC};
 use crate::pool::{Chunk, Pool};
 use crate::stats::Stat;
-use crate::wire::{Body, EODATA_MARKER, ERROR_MARKER, PacketError, Prot};
+use crate::wire::{Body, EODATA_MARKER, ERROR_MARKER, Length, Malformed, PacketError, Prot};
 
 /// `sizeof(MYSQLND_RES)`.
 const RES: usize = 272;
@@ -1038,8 +1036,8 @@ enum FieldPacket {
 /// 192
 /// 192
 /// 192
-/// 16656
-/// 608
+/// 16664
+/// 616
 /// 192
 /// ```
 ///
@@ -1068,7 +1066,7 @@ enum FieldPacket {
 /// 16424
 /// 16424
 /// 16424
-/// 16464
+/// 16472
 /// ```
 ///
 /// A name a published unit interned costs nothing, as a string opcache
@@ -1091,12 +1089,51 @@ enum FieldPacket {
 /// ```
 /// ```expect mysql regime=jit-off
 /// 16424
-/// 16464
+/// 16472
+/// ```
+///
+/// A name's length past what is left of the packet is the faulty
+/// server's, and the 12 bytes after the names are there whole:
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c6431006d7973716c5f6e61746976655f70617373776f7264,0700000200000002000000';
+/// $talks = ["$greet,0c00000100010000000100000000000000000002", "$greet,0c00000100010000000100000000000001000002ff", "$greet,0c0000010001000000010000000000003000000203646566087068705f74657374056974656d73056974656d73046974656dfe6974656d0ce000c8000000fd01100000001f000003fe00000200", "$greet,0c0000010001000000010000000000003000000203646566087068705f74657374056974656d73056974656d73046974656d0c6974656d0ce000c8000000fd011000000005000003fe00000200"];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); var_dump($m->prepare('SELECT item FROM items')); $m->close(); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::prepare(): Premature end of data (mysqlnd_wireprotocol.c:1298)
+/// mysqli::prepare(): Result set field packet shorter than expected
+/// bool(false)
+/// mysqli::prepare(): Premature end of data (mysqlnd_wireprotocol.c:1302)
+/// mysqli::prepare(): Result set field packet shorter than expected
+/// bool(false)
+/// mysqli::prepare(): Protocol error. Server sent NULL_LENGTH. The server is faulty
+/// bool(false)
+/// mysqli::prepare(): Protocol error. Server sent false length. Expected 12
+/// mysqli::prepare(): Premature end of data (mysqlnd_wireprotocol.c:1332)
+/// mysqli::prepare(): Result set field packet shorter than expected
+/// bool(false)
 /// ```
 fn read_field(req: &mut Request, body: &[u8]) -> Result<FieldPacket, Thrown> {
     let mut p = Body::new(body);
+    let failed = |req: &mut Request, malformed: Malformed| {
+        malformed.warn(req, Prot::RsetField);
+        FieldPacket::Fail
+    };
+    if let Err(malformed) = p.need(1, 1298) {
+        return Ok(failed(req, malformed));
+    }
     if body.first() == Some(&ERROR_MARKER) {
         p.skip(1);
+        if let Err(malformed) = p.need(1, 1302) {
+            return Ok(failed(req, malformed));
+        }
         return Ok(FieldPacket::Error(PacketError::read_from(p.rest())));
     }
     if body.first() == Some(&EODATA_MARKER) && body.len() < 8 {
@@ -1107,40 +1144,31 @@ fn read_field(req: &mut Request, body: &[u8]) -> Result<FieldPacket, Thrown> {
         );
         return Ok(FieldPacket::Fail);
     }
+    // `READ_RSET_FIELD`: a length past what is left, a `NULL` one among
+    // them, is the faulty server's.
     let mut parts: [Vec<u8>; 6] = Default::default();
     for part in &mut parts {
         let len = p.field_length();
-        if len == NULL_LENGTH {
+        let Some(bytes) = p.within(len) else {
             docref(
                 req,
                 Level::Warning,
                 "Protocol error. Server sent NULL_LENGTH. The server is faulty",
             );
             return Ok(FieldPacket::Fail);
-        }
-        *part = p.take(usize::try_from(len).unwrap_or(usize::MAX)).to_vec();
+        };
+        *part = bytes.to_vec();
     }
     let [catalog, db, table, org_table, name, org_name] = parts;
-    if body.get(p_at(&p)) != Some(&12) {
+    if body.get(p.position()) != Some(&12) {
         docref(
             req,
             Level::Warning,
             "Protocol error. Server sent false length. Expected 12",
         );
     }
-    if p_at(&p) + 12 > body.len() {
-        docref(
-            req,
-            Level::Warning,
-            "Premature end of data (mysqlnd_wireprotocol.c:1270)",
-        );
-        let short = p_at(&p) + 12 - body.len();
-        docref(
-            req,
-            Level::Warning,
-            &format!("Result set field packet {short} bytes shorter than expected"),
-        );
-        return Ok(FieldPacket::Fail);
+    if let Err(malformed) = p.need(12, 1332) {
+        return Ok(failed(req, malformed));
     }
     p.skip(1);
     let charsetnr = u32::from(p.u16());
@@ -1156,16 +1184,15 @@ fn read_field(req: &mut Request, body: &[u8]) -> Result<FieldPacket, Thrown> {
     if num {
         flags |= column::NUM;
     }
-    if p.left() > 0 {
-        let len = p.field_length();
-        if len != 0 && len != NULL_LENGTH {
-            docref(
-                req,
-                Level::Warning,
-                "Protocol error. Server sent default for unsupported field list (mysqlnd_wireprotocol.c:1302)",
-            );
-            return Ok(FieldPacket::Fail);
-        }
+    // `len < MYSQLND_INVALID_NET_FIELD_LENGTH`: any default at all, as
+    // COM_FIELD_LIST is gone.
+    if let Length::Of(_) = p.field_length() {
+        docref(
+            req,
+            Level::Warning,
+            "Protocol error. Server sent default for unsupported field list (mysqlnd_wireprotocol.c:1372)",
+        );
+        return Ok(FieldPacket::Fail);
     }
     let num_key = numeric_key(&name);
     // `meta->sname = zend_string_init_interned(meta->name, ...)`, the
@@ -1190,11 +1217,6 @@ fn read_field(req: &mut Request, body: &[u8]) -> Result<FieldPacket, Thrown> {
         type_byte,
         num_key,
     }))
-}
-
-/// The body cursor's position.
-fn p_at(p: &Body<'_>) -> usize {
-    p.position()
 }
 
 /// `ZEND_HANDLE_NUMERIC_STR`: a name that is a decimal integer in
@@ -1293,7 +1315,9 @@ fn read_row(
         }
         Some(&EODATA_MARKER) if data.len() < 8 => {
             let (mut warning_count, mut server_status) = (0, 0);
-            if data.len() > 1 {
+            // The marker is followed by two bytes of warnings and two of
+            // status, or by neither.
+            if data.len() >= 5 {
                 let mut p = Body::new(&data[1..]);
                 warning_count = u32::from(p.u16());
                 server_status = u32::from(p.u16());
@@ -1328,17 +1352,14 @@ fn decode_text(
     let mut p = Body::new(bytes);
     for field in fields {
         let len = p.field_length();
-        if len == NULL_LENGTH {
+        if len == Length::Null {
             row.push(Owner::null());
             continue;
         }
-        let Ok(len) = usize::try_from(len) else {
+        let Some(text) = p.within(len) else {
             return Ok(malformed(req, row));
         };
-        if p.position() > bytes.len() || len > bytes.len() - p.position() {
-            return Ok(malformed(req, row));
-        }
-        let text = p.take(len);
+        let len = text.len();
         let ty = field.field_type();
         stats.inc(text_stat(ty));
         stats.add(Stat::BytesReceivedPureDataText, len as u64);
@@ -1390,7 +1411,8 @@ fn text_value(
     if native && php_type == PhpType::Double {
         return Ok(Owner::float(strtod(text)));
     }
-    PhpString::new(req, text).map(Owner::into_value)
+    // `ZVAL_STRINGL_FAST` (`Z/ext/mysqlnd/mysqlnd_wireprotocol.c:1774`).
+    PhpString::fast(req, text).map(Owner::into_value)
 }
 
 /// The warning of a field's length past the packet's end, the values

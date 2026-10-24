@@ -53,7 +53,7 @@ pub(crate) fn raised(req: &Request) -> bool {
 }
 
 /// What a check that found the interrupt raised does
-/// (`Z/Zend/zend_vm_def.h:10526`): it clears the interrupt and then
+/// (`Z/Zend/zend_vm_def.h:10537`): it clears the interrupt and then
 /// either raises php's timeout fatal, when the execution timer was what
 /// raised it, or serves each extension's interrupt hook from the top of
 /// php's `zend_interrupt_function` chain, the last `MINIT` to set it
@@ -1646,7 +1646,7 @@ mod tests {
         assert_eq!(interrupt.taken(), Some(1));
     }
 
-    /// The two arms of `Z/Zend/zend_vm_def.h:10526`: the timer's fatal,
+    /// The two arms of `Z/Zend/zend_vm_def.h:10537`: the timer's fatal,
     /// and the interrupt cleared with nothing raised when signal
     /// delivery was what raised it and no PHP handler is installed.
     #[test]

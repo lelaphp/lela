@@ -232,7 +232,7 @@ pub(crate) fn closure_call(req: &Request, function: Function) -> Option<Function
     }
 }
 
-/// `ZEND_CALL_TRAMPOLINE` (`Z/Zend/zend_vm_def.h:8950`) over the call
+/// `ZEND_CALL_TRAMPOLINE` (`Z/Zend/zend_vm_def.h:8957`) over the call
 /// being served, where its callee is a [`Served::Trampoline`]: the
 /// callee made the magic method, and the arguments the two it takes,
 /// the name the call was made by and an array of what was passed, the

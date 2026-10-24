@@ -1216,7 +1216,8 @@ fn content_value(
     let content = match node.kind() {
         Kind::Text | Kind::CData | Kind::Pi | Kind::Comment => node.content(),
         Kind::Attribute => {
-            return Ok(PhpString::new(req, &node.attr_value())?.into_value());
+            // `Z/ext/dom/php_dom.c:2368`.
+            return Ok(PhpString::fast(req, &node.attr_value())?.into_value());
         }
         _ => node.get_content(),
     };

@@ -202,6 +202,19 @@ pub(crate) fn gone(
     Err(crate::closed(req, object))
 }
 
+/// `MYSQLI_GET_MYSQL`'s refusal of a link with no `mysql` where not
+/// quiet.
+pub(crate) fn not_initialized(
+    req: &mut Request,
+    object: PhpObject,
+    quiet: bool,
+) -> Result<Option<Owner<Value>>, Thrown> {
+    if quiet {
+        return Ok(None);
+    }
+    Err(crate::not_initialized(req, object))
+}
+
 /// The `errno`, `sqlstate` and `error` rows of an error list, as
 /// `link_error_list_read` and `mysqli_error_list` build them.
 pub(crate) fn error_list(
