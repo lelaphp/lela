@@ -784,9 +784,29 @@ fn returned_string(
 /// One value as `zend_print_zval_r_to_buf(buf, expr, indent)` renders
 /// it: an array and an object open their name and print their rows as
 /// `print_hash` does ([`Printed`]), each walked with a foreach walk, a
-/// reference is what the cell holds, and everything else is
+/// reference is what the cell holds, a float is
+/// `smart_str_append_double` at `precision`, which raises nothing for a
+/// NAN since 8.5.12 (GH-23662), and everything else is
 /// `zval_get_string`, which is `1` for `true` and nothing at all for
 /// `false` and `null`.
+///
+/// ```php
+/// print_r(NAN); print_r([NAN, INF, -0.0, 0.1 + 0.2, 1e100]);
+/// ini_set('precision', '0'); print_r(1.5); echo "\n";
+/// ini_set('precision', '-1'); print_r(0.1 + 0.2); echo "\n";
+/// ```
+/// ```expect
+/// NANArray
+/// (
+///     [0] => NAN
+///     [1] => INF
+///     [2] => -0
+///     [3] => 0.3
+///     [4] => 1.0E+100
+/// )
+/// 2
+/// 0.30000000000000004
+/// ```
 ///
 /// The array and the object arms carry php's recursion guard, the mark
 /// set on what the walk is inside and cleared on the way out, and a
@@ -897,6 +917,13 @@ pub(super) fn render(
             (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => Err(thrown),
             (Ok(()), Ok(())) => Ok(()),
         };
+    }
+    // `case IS_DOUBLE`: `smart_str_append_double(buf, d, EG(precision),
+    // false)`, the text `zend_double_to_str` makes without its warning.
+    if let Some(f) = value.as_float() {
+        let text = float_format(f, req.ini().precision(), Exponent::Upper);
+        out.extend_from_slice(text.as_bytes());
+        return Ok(());
     }
     // `zval_get_string_func`, whose string is the caller's to release:
     // the decimal of an int, the bytes of a string, `1` for `true`, the
