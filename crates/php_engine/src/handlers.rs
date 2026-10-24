@@ -1758,9 +1758,11 @@ pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
 /// The inline path of `ZEND_INIT_FCALL` (`ZEND_INIT_FCALL_SPEC_CONST`,
 /// `Z/Zend/zend_vm_def.h:4057`): the callee read off the cache slot
 /// `result.num` names, `CACHED_PTR`, and where it is a user function,
-/// the call pushed with the room its frame shape and the arguments past
-/// its parameters take (`_zend_vm_stack_push_call_frame_ex` over the
-/// `used_stack` php's compiler wrote into `op1`). Nothing here raises
+/// the call pushed with what the slot keeps of it, the room its frame
+/// and the arguments past its parameters take, its record and its
+/// sends' flags ([`exec::PrimedCall`]), with no row read
+/// (`_zend_vm_stack_push_call_frame_ex` over the `used_stack` php's
+/// compiler wrote into `op1`). Nothing here raises
 /// but the memory limit on a page the push takes, which is reported at
 /// this opline. A native is pushed by [`init_native`]. `None`, with
 /// nothing touched, for a slot not primed yet and a callee
@@ -1769,21 +1771,19 @@ pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
 /// first pass primed it, and take it too.
 #[inline(always)] // as `inline_send`
 fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -> Option<Edge> {
-    let Cached::Function(function) = req.cached(frame, CacheSlot(op.out)) else {
-        return None;
+    let call = match req.cached(frame, CacheSlot(op.out)) {
+        Cached::Call(call) => call,
+        Cached::Function(function) => return init_native(req, frame, function, op, at),
+        _ => return None,
     };
-    let Some(user) = req.user_function(function) else {
-        return init_native(req, frame, function, op, at);
-    };
-    let room = user.shape.room(op.extended_value);
-    let (callee, sent, count) = (user.callee_at(), user.shape.sent, op.extended_value);
+    let count = op.extended_value;
     let header = move || {
-        let mut header = exec::Header::call(function, count);
-        header.callee = callee;
-        header.info.join(sent);
+        let mut header = exec::Header::call(call.function, count);
+        header.callee = call.callee;
+        header.info.join(call.sent);
         header
     };
-    Some(match req.push_laid(room as usize, header) {
+    Some(match req.push_laid(call.room as usize, header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
             req.vm_mut().stand(frame, at);
@@ -1891,7 +1891,7 @@ fn init_call(
     named: ConstIdx,
 ) -> Edge {
     let slot = CacheSlot(op.out);
-    let function = if let Cached::Function(function) = req.cached(frame, slot) {
+    let function = if let Some(function) = req.cached(frame, slot).function() {
         Some(function)
     } else {
         let named = exec::constant(code, named);
@@ -1904,7 +1904,8 @@ fn init_call(
             exec::find_function(req, Bare::resolved(key))
         });
         if let Some(function) = found {
-            req.prime(frame, slot, Cached::Function(function));
+            let primed = primed_call(req, function, op.extended_value);
+            req.prime(frame, slot, primed);
         }
         found
     };
@@ -1920,6 +1921,21 @@ fn init_call(
         return threw(req, frame, &thrown);
     };
     pushed(req, frame, exec::Header::call(function, op.extended_value))
+}
+
+/// What an `INIT_*`'s slot keeps of `function`, called with `count`
+/// arguments: the push a user function's call takes, made off its row
+/// once ([`exec::PrimedCall`]), and any other callee alone.
+fn primed_call(req: &Request, function: Function, count: u32) -> Cached {
+    req.user_function(function)
+        .map_or(Cached::Function(function), |user| {
+            Cached::Call(exec::PrimedCall {
+                function,
+                room: user.shape.room(count),
+                callee: user.callee_at(),
+                sent: user.shape.sent,
+            })
+        })
 }
 
 /// `zend_vm_stack_push_call_frame` for an `INIT_*`: the call `header`
@@ -12651,6 +12667,7 @@ pub(crate) fn jmp_frameless<T: Tier>(
         Cached::Miss => Cached::Miss,
         Cached::Unprimed
         | Cached::Function(_)
+        | Cached::Call(_)
         | Cached::Class(_)
         | Cached::ClassAndCallee { .. }
         | Cached::Property { .. }

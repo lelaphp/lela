@@ -1599,8 +1599,12 @@ pub(crate) enum Cached {
     /// is not deprecated (`zend_quick_get_constant`'s `CACHE_PTR`).
     Constant(crate::api::request::ConstantAt),
     /// The callee an `INIT_FCALL`, `INIT_FCALL_BY_NAME` or
-    /// `INIT_NS_FCALL_BY_NAME` resolved on its first pass.
+    /// `INIT_NS_FCALL_BY_NAME` resolved on its first pass, where it is
+    /// no user function.
     Function(Function),
+    /// The user function one of the same three resolved on its first
+    /// pass, with what each pass after pushes its call with.
+    Call(PrimedCall),
     /// The class a `CATCH`, `NEW`, `INSTANCEOF` or
     /// `FETCH_CLASS_CONSTANT` resolved off its constant pair on its
     /// first pass, `CACHE_PTR(..., ce)`. A class the linker has placed
@@ -1693,7 +1697,38 @@ pub(crate) enum Cached {
     Hit,
 }
 
+/// A call to a user function as an `INIT_*`'s slot keeps it, read off
+/// the function's row once where the slot is primed: php's `CACHED_PTR`
+/// gives `ZEND_INIT_FCALL` the `zend_function *` and its
+/// `zend_vm_stack_push_call_frame` reads what it pushes off that, where
+/// the engine's row stands behind a table and the room is a sum, so the
+/// slot holds them made. The room is the opline's own, the callee's
+/// frame and the arguments past its parameters the opline passes
+/// ([`crate::api::request::FrameShape::room`]); the record is the one a
+/// frame serving the function names ([`crate::readable::CalleeAt`]); the
+/// flags are what the push joins into the call's
+/// ([`crate::api::request::FrameShape::sent`]). A function's row never
+/// changes once declared, so the slot answers every pass of the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PrimedCall {
+    pub(crate) function: Function,
+    pub(crate) room: u32,
+    pub(crate) callee: crate::readable::CalleeAt,
+    pub(crate) sent: CallInfo,
+}
+
 impl Cached {
+    /// The callee an `INIT_*` primed the slot with, of either kind.
+    #[inline]
+    pub(crate) fn function(self) -> Option<Function> {
+        match self {
+            Cached::Function(function) | Cached::Call(PrimedCall { function, .. }) => {
+                Some(function)
+            }
+            _ => None,
+        }
+    }
+
     /// The frame a slot whose answer the access rule decides was primed
     /// from; none for a slot that answers every scope alike.
     #[inline]
@@ -1705,6 +1740,7 @@ impl Cached {
             Cached::Unprimed
             | Cached::Constant(_)
             | Cached::Function(_)
+            | Cached::Call(_)
             | Cached::Class(_)
             | Cached::Property { .. }
             | Cached::Miss
