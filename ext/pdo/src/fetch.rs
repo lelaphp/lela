@@ -1204,6 +1204,7 @@ pub(super) fn setup_mode(
         .and_then(|dbh| crate::dbh::state(req, dbh).map(|d| i64::from(d.default_fetch)))
         .unwrap_or(4);
     verify(req, dbh_default, mode, mode_arg, false)?;
+    let kind = Kind::of(mode);
     let flags = Flags::of(mode);
     let given = u32::try_from(args.len()).unwrap_or(u32::MAX);
     let total = mode_arg + given;
@@ -1214,7 +1215,7 @@ pub(super) fn setup_mode(
             &format!("{how} {n} arguments for the fetch mode provided, {total} given"),
         )
     };
-    let target = match Kind::of(mode) {
+    let target = match kind {
         Some(
             Kind::Default
             | Kind::Lazy
@@ -1285,7 +1286,7 @@ pub(super) fn setup_mode(
             ));
         }
     };
-    let stored = if Kind::of(mode) == Some(Kind::Default) {
+    let stored = if kind == Some(Kind::Default) {
         dbh_default
     } else {
         mode
