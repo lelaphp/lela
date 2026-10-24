@@ -633,20 +633,22 @@ impl ResultSet {
 
     /// `mysqlnd_fetch_row`'s values: the next row.
     pub fn fetch(&mut self, req: &mut Request) -> Result<Fetched, Thrown> {
-        self.next_row(req, false)
+        self.next_row(req, |_, _| {})
     }
 
-    /// The next row, read in one lend of the connection, its error
-    /// emptied first where `reset` asks.
-    fn next_row(&mut self, req: &mut Request, reset: bool) -> Result<Fetched, Thrown> {
+    /// The next row, read in one lend of the connection, after `first`
+    /// in the same lend.
+    fn next_row(
+        &mut self,
+        req: &mut Request,
+        first: impl FnOnce(&mut Request, &mut ConnData),
+    ) -> Result<Fetched, Thrown> {
         let res = &mut self.res;
         let got = self
             .conn
             .0
             .with(req, |req, conn| {
-                if reset {
-                    conn.error.reset(req);
-                }
+                first(req, conn);
                 res.fetch_row(req, conn, true)
             })
             .transpose()?;
@@ -690,7 +692,7 @@ impl ResultSet {
         // "We clean the error here because in unbuffered mode we could
         // receive a new error and therefore consumers of this method are
         // checking for errors."
-        let mut row = match self.next_row(req, true)? {
+        let mut row = match self.next_row(req, |req, conn| conn.error.reset(req))? {
             Fetched::Row(row) => row,
             Fetched::Done => return Ok(Owner::null()),
             Fetched::Failed => return Ok(Owner::bool(false)),
@@ -715,7 +717,7 @@ impl ResultSet {
         for value in values {
             value.give_up(req);
         }
-        self.res.recycle(row);
+        self.res.recycle(req, row);
         match filled {
             Ok(()) => Ok(array.into_value()),
             Err(thrown) => {

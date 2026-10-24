@@ -852,10 +852,9 @@ impl Res {
         }
     }
 
-    /// A fetched row whose values were all taken, handed back as the
-    /// room the next row is decoded into; one that still holds values
-    /// is not taken, so none is dropped without being given up. The
-    /// room is reused, never the values: each row fetched is its own,
+    /// A fetched row handed back as the room the next row is decoded
+    /// into, any value it still holds given up first, so the room is
+    /// always empty when a decode takes it. The room is reused, never the values: each row fetched is its own,
     /// buffered, unbuffered or a statement's:
     ///
     /// ```php
@@ -879,10 +878,11 @@ impl Res {
     /// [["1","x"],["2",null],["3","zz"],null]
     /// [[1,"x"],[2,null],[3,"zz"]]
     /// ```
-    pub(crate) fn recycle(&mut self, row: Row) {
-        if row.is_empty() {
-            self.row_data = row;
+    pub(crate) fn recycle(&mut self, req: &mut Request, mut row: Row) {
+        for value in row.drain(..) {
+            value.give_up(req);
         }
+        self.row_data = row;
     }
 
     /// The lengths of a text row decoded, kept for `fetch_lengths` in the
@@ -995,7 +995,6 @@ fn decode_row(
     native: bool,
     mut into: Row,
 ) -> Result<Result<Row, ()>, Thrown> {
-    into.clear();
     into.reserve(fields.len());
     if binary {
         crate::codec::decode_binary(req, &mut conn.stats, bytes, fields, into)

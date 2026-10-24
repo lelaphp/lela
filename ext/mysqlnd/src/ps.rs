@@ -1260,7 +1260,7 @@ fn fetch(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
         Ok(Some(mut row)) => {
             let binds = stmt.result_bind.as_mut();
             assign_row(req, binds, &mut row)?;
-            result.recycle(row);
+            result.recycle(req, row);
             Ok(StmtFetch::Row)
         }
         Ok(None) => Ok(StmtFetch::NoData),

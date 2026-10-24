@@ -326,7 +326,23 @@ impl Handle {
     }
 
     /// `free_reference`: one owner fewer, and the last one's close sent and
-    /// the connection dropped.
+    /// the connection dropped, counted as `mysqlnd.collect_statistics`
+    /// stands when it is:
+    ///
+    /// ```php
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $r = mysqli_query($l, "SELECT 1 UNION ALL SELECT 2", MYSQLI_USE_RESULT);
+    /// ini_set('mysqlnd.collect_statistics', '0');
+    /// $before = mysqli_get_client_stats();
+    /// unset($p);
+    /// $l = null;
+    /// $r = null;
+    /// echo json_encode(array_diff_assoc(mysqli_get_client_stats(), $before)), "\n";
+    /// ```
+    /// ```expect mysql
+    /// []
+    /// ```
     pub(crate) fn release(self, req: &mut Request) {
         let taken = match slot_of(req.state::<State>(), self) {
             Some(slot) => {
@@ -340,6 +356,9 @@ impl Handle {
             None => None,
         };
         if let Some(mut conn) = taken {
+            // The close counts under the entry as it stands now, as a
+            // lend's call does, not as the last lend left it.
+            conn.stats.enabled = ini_bool(req, b"mysqlnd.collect_statistics");
             conn.send_close(req).ok();
             flush(req.state::<State>(), &mut conn);
             conn.dtor(req);
