@@ -487,6 +487,10 @@ kernels! {
         Release => release(word: u64, type_info: u32) = tier::release;
         FreeCv => free_cv(word: u64, type_info: u32) = tier::free_cv;
         Identical => identical(a: u64, a_info: u32, b: u64, b_info: u32) -> u64;
+        RopeInit => rope_init(word: u64, type_info: u32) -> u64 = tier::rope_open;
+        RopeAdd => rope_add(rope: u64, word: u64, type_info: u32) = tier::rope_push;
+        RopeEnd => rope_end(rope: u64, word: u64, type_info: u32) -> Zval = tier::rope_end;
+        AssignConcat => assign_concat(var: u32, word: u64, type_info: u32) = tier::assign_concat;
     }
 }
 
@@ -599,6 +603,58 @@ fn identical(
         .zip(Scalar::of(&b))
         .is_some_and(|(a, b)| php_heap::identical(a, b));
     Ok(u64::from(same))
+}
+
+/// The `rope_init` kernel: `ROPE_INIT` of a string compiled code hands
+/// with its owner ([`tier::rope_open`]), the rope's position, which its
+/// temporary holds.
+fn rope_init(req: &mut Request, _: On<'_, '_>, word: u64, type_info: u32) -> Result<u64, Fatal> {
+    let rope = tier::rope_open(req, zval(word, type_info))?;
+    u64::try_from(rope).map_err(|_| internal("a rope at a negative position"))
+}
+
+/// The `rope_add` kernel: `ROPE_ADD` of a string compiled code hands
+/// with its owner onto the rope at `rope` ([`tier::rope_push`]).
+fn rope_add(
+    req: &mut Request,
+    _: On<'_, '_>,
+    rope: u64,
+    word: u64,
+    type_info: u32,
+) -> Result<(), Fatal> {
+    let rope = i64::try_from(rope).map_err(|_| internal("a rope past its positions"))?;
+    tier::rope_push(req, rope, zval(word, type_info))
+}
+
+/// The `rope_end` kernel: `ROPE_END` of a string compiled code hands with
+/// its owner, the rope at `rope` joined ([`tier::rope_end`]), the joined
+/// string's zval, or `UNDEF` where the join refused and left its
+/// throwable pending, which the wrapper answers as one. Compiled code
+/// stood the frame at the opline first, php's `SAVE_OPLINE()`.
+fn rope_end(
+    req: &mut Request,
+    _: On<'_, '_>,
+    rope: u64,
+    word: u64,
+    type_info: u32,
+) -> Result<Zval, Fatal> {
+    let rope = i64::try_from(rope).map_err(|_| internal("a rope past its positions"))?;
+    Ok(tier::rope_end(req, rope, zval(word, type_info))?.unwrap_or(Zval::UNDEF))
+}
+
+/// The `assign_concat` kernel: `.=` of a string compiled code hands with
+/// no owner onto variable `var` of the frame, which holds a string
+/// ([`tier::assign_concat`]), the frame stood at the opline, php's
+/// `SAVE_OPLINE()`, where the join's refusal is raised.
+fn assign_concat(
+    req: &mut Request,
+    on: On<'_, '_>,
+    var: u32,
+    word: u64,
+    type_info: u32,
+) -> Result<(), Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    tier::assign_concat(req, frame, var, zval(word, type_info))
 }
 
 /// The frame whose room compiled code handed a kernel, stood at the

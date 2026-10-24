@@ -17,7 +17,7 @@ use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupp
 use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_MATCH, held,
+    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -311,6 +311,27 @@ fn strings_lower_inline() -> Result<(), String> {
         .count();
     // `$s !== "zz"`'s bytes; `$s === ''` is answered by the lengths.
     assert!(compared >= 1, "{clif}");
+    Ok(())
+}
+
+/// A blob built in a loop: each string piece of the rope through the
+/// rope's kernels, the long one through `handle`, and the line appended
+/// through `assign_concat` (#3321).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn ropes_and_appends_lower_through_their_kernels() -> Result<(), String> {
+    lowered(STRING_BUILD)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("string_build.clif"))
+        .map_err(|e| e.to_string())?;
+    let calls = |kernel: Kernel| {
+        let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+        (clif.lines())
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count()
+    };
+    assert_eq!(calls(Kernel::RopeInit), 1, "{clif}");
+    assert_eq!(calls(Kernel::RopeEnd), 1, "{clif}");
+    assert_eq!(calls(Kernel::AssignConcat), 1, "{clif}");
     Ok(())
 }
 

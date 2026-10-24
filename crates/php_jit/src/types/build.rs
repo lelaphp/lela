@@ -983,6 +983,11 @@ impl<'a> Builder<'a> {
                         self.is_temp(operand) && !self.types_of(frame, operand).within(UNCOUNTED)
                     }))
                     || op.opcode == Opcode::FeFree
+                    // The join may refuse, the memory limit or the string's
+                    // size, and leave it pending.
+                    || op.opcode == Opcode::RopeEnd
+                    || (op.opcode == Opcode::AssignOp
+                        && lattice::binary_of(op.extended_value) == Some(Opcode::Concat))
                     || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
                     // What the variable held is given up, and a destructor
                     // may throw.
@@ -2073,7 +2078,7 @@ impl<'a> Builder<'a> {
         let packed = Types::ARRAY.laid_out(Layout::Packed);
         let code = self.meta(frame).code;
         let copied = |kind, field, t| copied_whole(kind, field, t, code);
-        if let Some(inline) = strung(op.opcode, seen) {
+        if let Some(inline) = strung(op, seen) {
             return if inline { Form::Inline } else { Form::Step };
         }
         let inline = match op.opcode {
@@ -3186,11 +3191,15 @@ struct Branched {
 /// in place, php's `zend_jit_strlen` (`:11623-11660`); a scalar's truth,
 /// php's `zend_jit_bool_jmpznz`, a double's the handler's as a jump's is;
 /// and an array, which holds no iterator to delete, given up as php's
-/// `zend_jit_free` gives it up (`:11543-11580`).
-fn strung(opcode: Opcode, seen: Seen) -> Option<bool> {
+/// `zend_jit_free` gives it up (`:11543-11580`); a rope's piece that is a
+/// string, which php's `zend_jit_rope` stores inline and joins through
+/// `zend_jit_rope_end` (`:11753-11799`); and `.=` of a string onto a
+/// variable's string, through php's `zend_jit_fast_assign_concat_helper`
+/// (`zend_jit_assign_op`, `:6120-6290`).
+fn strung(op: &Opline, seen: Seen) -> Option<bool> {
     let [t1, t2, _] = seen.types;
     let string = |t: Types, at: usize| t == Types::STRING && !seen.referenced[at];
-    Some(match opcode {
+    Some(match op.opcode {
         Opcode::IsIdentical | Opcode::IsNotIdentical => {
             (t1.scalar() && t2.scalar())
                 || (string(t1, 0) && (string(t2, 1) || t2.scalar()))
@@ -3199,6 +3208,13 @@ fn strung(opcode: Opcode, seen: Seen) -> Option<bool> {
         Opcode::Strlen => string(t1, 0),
         Opcode::Bool | Opcode::BoolNot => t1.scalar() && t1 != Types::DOUBLE,
         Opcode::FeFree => t1.tag() == Some(ZvalType::Array),
+        Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => string(t2, 1),
+        Opcode::AssignOp if lattice::binary_of(op.extended_value) == Some(Opcode::Concat) => {
+            op.op1_type == OperandKind::Cv
+                && op.out_type == OperandKind::Unused
+                && string(t1, 0)
+                && string(t2, 1)
+        }
         _ => return None,
     })
 }

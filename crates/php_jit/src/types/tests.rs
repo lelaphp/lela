@@ -26,7 +26,8 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_MATCH, held, traced as built,
+    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    traced as built,
 };
 use crate::testing::records::recording;
 
@@ -477,6 +478,35 @@ fn strings_are_compared_and_measured_inline() -> Result<(), String> {
         });
         assert_eq!(form, Some(Form::Inline), "{opcode:?} in\n{rendered}");
     }
+    Ok(())
+}
+
+/// A blob built in a loop: each rope piece that is a string, `ROPE_INIT`,
+/// `ROPE_ADD` and `ROPE_END` alike, and `.=` of the line onto the blob,
+/// inline, as php's `zend_jit_rope` and `zend_jit_assign_op` compile them;
+/// the piece that is a long is the handler's, as php's is (#3321).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn ropes_and_appends_of_strings_are_inline() -> Result<(), String> {
+    let ir = golden(STRING_BUILD)?;
+    let rendered = dump::render(&ir);
+    let forms: Vec<(Opcode, Form)> = (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) => Some((line.opcode, line.form)),
+            _ => None,
+        })
+        .collect();
+    for opcode in [Opcode::RopeInit, Opcode::RopeEnd, Opcode::AssignOp] {
+        assert!(
+            forms.contains(&(opcode, Form::Inline)),
+            "{opcode:?} in\n{rendered}"
+        );
+    }
+    // `$i`, the one long piece.
+    let stepped = (forms.iter())
+        .filter(|(opcode, form)| *opcode == Opcode::RopeAdd && *form == Form::Step)
+        .count();
+    assert_eq!(stepped, 1, "{rendered}");
     Ok(())
 }
 

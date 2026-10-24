@@ -667,11 +667,31 @@ pub(crate) enum Kernel {
     /// `Z/ext/opcache/jit/zend_jit_ir.c:7292-7532`); it reads nothing of
     /// the request, runs no user code and throws nothing.
     Identical,
+    /// `rope_init(cx, frame, opline: u32, word: u64, type_info: u32, rope:
+    /// *mut u64)`: `ROPE_INIT` of the string the zval names, handed with
+    /// its owner, a rope opened with it, and the rope's position, which
+    /// the rope's temporary holds (`php_engine::tier::rope_open`).
+    RopeInit,
+    /// `rope_add(cx, frame, opline: u32, rope: u64, word: u64, type_info:
+    /// u32)`: `ROPE_ADD` of the string, handed with its owner, onto the
+    /// rope at `rope` (`php_engine::tier::rope_push`).
+    RopeAdd,
+    /// `rope_end(cx, frame, opline: u32, rope: u64, word: u64, type_info:
+    /// u32, joined: *mut Zval)`: `ROPE_END` of the string, handed with its
+    /// owner, and the rope joined, php's `zend_jit_rope_end`
+    /// (`php_engine::tier::rope_end`); a join refused is a throwable
+    /// pending, answered as one.
+    RopeEnd,
+    /// `assign_concat(cx, frame, opline: u32, var: u32, word: u64,
+    /// type_info: u32)`: `.=` of the string, handed with no owner, onto
+    /// variable `var`, which holds a string, php's
+    /// `zend_jit_fast_assign_concat_helper` (`php_engine::tier::assign_concat`).
+    AssignConcat,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 7] = [
+    pub(crate) const ALL: [Kernel; 11] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -679,6 +699,10 @@ impl Kernel {
         Kernel::Handle,
         Kernel::FreeCv,
         Kernel::Identical,
+        Kernel::RopeInit,
+        Kernel::RopeAdd,
+        Kernel::RopeEnd,
+        Kernel::AssignConcat,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

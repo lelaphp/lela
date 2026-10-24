@@ -447,8 +447,8 @@ struct Emit<'a> {
     interrupt: Option<Value>,
     /// Where a kernel writes where the interpreter stands.
     stood: StackSlot,
-    /// Where a kernel that answers a word writes it, made where one is
-    /// first called.
+    /// Where a kernel that answers a word or a zval writes it, made where
+    /// one is first called.
     answer: Option<StackSlot>,
     /// Per frame of the trace, the room it runs in.
     rooms: Vec<Variable>,
@@ -1361,6 +1361,10 @@ impl<'a> Emit<'a> {
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
+            Kernel::RopeInit => &[I64, I64, I32, I64, I32, I64],
+            Kernel::RopeAdd => &[I64, I64, I32, I64, I64, I32],
+            Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
+            Kernel::AssignConcat => &[I64, I64, I32, I32, I64, I32],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -1390,12 +1394,12 @@ impl<'a> Emit<'a> {
         Ok(self.b.ins().iconst(I32, i64::from(engine_offset(func)?)))
     }
 
-    /// Where a kernel that answers a word writes it.
+    /// Where a kernel that answers a word or a zval writes it.
     fn answer(&mut self) -> StackSlot {
         *self.answer.get_or_insert_with(|| {
             self.b.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
-                u32::try_from(size_of::<u64>()).unwrap_or(u32::MAX),
+                u32::try_from(size_of::<Zval>()).unwrap_or(u32::MAX),
                 3,
             ))
         })
@@ -1727,6 +1731,7 @@ impl<'a> Emit<'a> {
             | Opcode::BwAnd
             | Opcode::BwOr
             | Opcode::BwXor => self.arithmetic(at, line, line.opcode),
+            Opcode::AssignOp if line.imm == Imm::Binary(Opcode::Concat) => self.assign_concat(line),
             Opcode::AssignOp => {
                 let Imm::Binary(binary) = line.imm else {
                     return Err(mismatch("an ASSIGN_OP with no operator"));
@@ -1743,6 +1748,7 @@ impl<'a> Emit<'a> {
             Opcode::AssignDim => self.assign_dim(at, line),
             Opcode::AssignDimOp => self.assign_dim_op(at, line),
             Opcode::Strlen => self.strlen(line),
+            Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
             Opcode::Bool | Opcode::BoolNot => self.bool(at, line),
             Opcode::FeFree => self.free_temp(line, line.op1),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
@@ -2611,6 +2617,13 @@ impl<'a> Emit<'a> {
         let word = self.b.ins().load(I64, trusted(), zval, 0);
         self.b.ins().store(trusted(), word, base, at);
         self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+        self.addref(word, info)
+    }
+
+    /// One owner more of the value of type word `info` at `word` where it
+    /// is counted, `Z_TRY_ADDREF`, the count kept below the pin it may
+    /// carry.
+    fn addref(&mut self, word: Value, info: Value) -> Result<(), Abort> {
         let counted = self.b.ins().band_imm_u(info, COUNTED);
         self.when(counted, |emit| {
             let count_at = imm(Zval::COUNT_AT);

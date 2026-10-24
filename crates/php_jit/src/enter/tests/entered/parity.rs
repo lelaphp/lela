@@ -228,6 +228,10 @@ fn compiled(ir: &TraceIr) -> Option<Compiled> {
         Kernel::Release => (super::super::super::wrapped::release as *const ()).addr(),
         Kernel::FreeCv => (super::super::super::wrapped::free_cv as *const ()).addr(),
         Kernel::Identical => (super::super::super::wrapped::identical as *const ()).addr(),
+        Kernel::RopeInit => (super::super::super::wrapped::rope_init as *const ()).addr(),
+        Kernel::RopeAdd => (super::super::super::wrapped::rope_add as *const ()).addr(),
+        Kernel::RopeEnd => (super::super::super::wrapped::rope_end as *const ()).addr(),
+        Kernel::AssignConcat => (super::super::super::wrapped::assign_concat as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend

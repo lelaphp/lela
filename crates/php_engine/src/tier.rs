@@ -57,6 +57,7 @@ mod held;
 mod layout;
 pub(crate) mod published;
 mod sampled;
+mod strings;
 #[cfg(dispatch = "tailcall")]
 mod tail;
 mod view;
@@ -73,6 +74,7 @@ pub use sampled::{
     Building, Sample, building, building_call, class_number, native_returns, numbered_class,
     on_heap, sample, under_way,
 };
+pub use strings::{assign_concat, rope_end, rope_open, rope_push};
 pub use view::{
     Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, frame_cache, func, jump_targets,
     landing, running_func, served,

@@ -10,7 +10,9 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{BlockArg, InstBuilder, Value};
+use php_engine::tier::FRAME;
 use php_heap::{Str, ZvalType};
+use php_unit::Opcode;
 
 use super::{COUNTED, Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, slot_offset, tag, trusted};
 use crate::types::{
@@ -271,5 +273,194 @@ impl Emit<'_> {
                 line.unwind.map(Leave::Unwind),
             )
         })
+    }
+
+    /// The string `operand` of `frame` names, its two words, with an owner
+    /// to hand on, as the handler's string arm of a rope takes a piece: a
+    /// temporary's moved, its slot left `UNDEF`; a variable's or a
+    /// constant's with one owner more, `zend_string_copy`.
+    fn owned_string(&mut self, frame: Frame, operand: Operand) -> Result<(Value, Value), Abort> {
+        let (base, at, temporary) = match operand {
+            Operand::Value(value) => {
+                let held = self.value(value)?;
+                if held.home == Home::Register {
+                    return Err(mismatch("a string held in a register"));
+                }
+                let (room, at) = self.place(held.slot)?;
+                let temporary = held.slot.var >= self.frame_cvs(held.slot.frame)?;
+                (room, at, temporary)
+            }
+            Operand::Constant(Constant::Other(idx)) => (self.constant_zval(frame, idx)?, 0, false),
+            _ => return Err(mismatch("a string read from a scalar")),
+        };
+        let word = self.b.ins().load(I64, trusted(), base, at);
+        let info = self.b.ins().load(I32, trusted(), base, at + TYPE_AT);
+        if temporary {
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b.ins().store(trusted(), undef, base, at + TYPE_AT);
+        } else {
+            self.addref(word, info)?;
+        }
+        Ok((word, info))
+    }
+
+    /// `EX(opline) = opline`, php's `SAVE_OPLINE()`, written in place
+    /// before a kernel that may raise reads where the frame stands.
+    fn save_opline(&mut self, line: &Line) -> Result<(), Abort> {
+        let room = self.room(line.frame)?;
+        let opline = self.b.ins().iconst(I32, i64::from(line.opline.0));
+        let at =
+            i32::try_from(FRAME.opline()).map_err(|_| mismatch("an opline past an immediate"))?;
+        self.b.ins().store(trusted(), opline, room, at);
+        Ok(())
+    }
+
+    /// A rope's piece that is a string, as php's `zend_jit_rope` takes
+    /// one, with its owner, onto the request's rope through
+    /// [`Kernel::RopeInit`], [`Kernel::RopeAdd`] or, joining it,
+    /// [`Kernel::RopeEnd`], php's `zend_jit_rope_end`: the rope's
+    /// position in its temporary as `ROPE_INIT` writes it, and the joined
+    /// string into what `ROPE_END` writes, its rope's temporary left
+    /// `UNDEF` as the handler takes it. A piece of another kind is the
+    /// handler's, as php's is. Lines of variables, a long among them,
+    /// joined and appended:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $all = ""; $t = "t";
+    ///     for ($i = 0; $i < $n; $i++) { $p = "/p/" . ($i % 3); $all .= "<$i $p $t>"; $all .= "{$t}{$p}|"; }
+    ///     return [strlen($all), crc32($all), "$t$t$t"];
+    /// }
+    /// echo json_encode(f(30)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [500,464975510,"ttt"]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $all = ""; $t = "t";
+    ///     for ($i = 0; $i < $n; $i++) { $p = "/p/" . ($i % 3); $all .= "<$i $p $t>"; $all .= "{$t}{$p}|"; }
+    ///     return [strlen($all), crc32($all), "$t$t$t"];
+    /// }
+    /// echo json_encode(f(30)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [500,464975510,"ttt"]
+    /// ```
+    pub(super) fn rope(&mut self, line: &Line) -> Result<(), Abort> {
+        let (word, info) = self.owned_string(line.frame, line.op2)?;
+        let [room, opline] = self.served(line)?;
+        let rope_slot = match line.op1 {
+            Operand::Value(rope) if line.opcode != Opcode::RopeInit => Some(self.value(rope)?.slot),
+            _ => None,
+        };
+        let rope = match rope_slot {
+            Some(slot) => {
+                let (base, at) = self.place(slot)?;
+                Some(self.b.ins().load(I64, trusted(), base, at))
+            }
+            None => None,
+        };
+        let out = line.out.map(|out| self.value(out)).transpose()?;
+        match (line.opcode, rope) {
+            (Opcode::RopeInit, None) => {
+                let slot = self.answer();
+                let answer = self.b.ins().stack_addr(I64, slot, 0);
+                self.call(Kernel::RopeInit, &[room, opline, word, info, answer], None)?;
+                let position = self.b.ins().stack_load(I64, I64, slot, 0);
+                let out = out.ok_or_else(|| mismatch("a ROPE_INIT that writes no rope"))?;
+                let (base, at) = self.place(out.slot)?;
+                self.b.ins().store(trusted(), position, base, at);
+                let long = self.b.ins().iconst(I32, tag(ZvalType::Long));
+                self.b.ins().store(trusted(), long, base, at + TYPE_AT);
+            }
+            (Opcode::RopeAdd, Some(rope)) => {
+                self.call(Kernel::RopeAdd, &[room, opline, rope, word, info], None)?;
+            }
+            (Opcode::RopeEnd, Some(rope)) => {
+                self.save_opline(line)?;
+                let slot = self.answer();
+                let answer = self.b.ins().stack_addr(I64, slot, 0);
+                self.call(
+                    Kernel::RopeEnd,
+                    &[room, opline, rope, word, info, answer],
+                    line.unwind.map(Leave::Unwind),
+                )?;
+                if let Some(rope_slot) = rope_slot {
+                    let (base, at) = self.place(rope_slot)?;
+                    let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+                    self.b.ins().store(trusted(), undef, base, at + TYPE_AT);
+                }
+                let out = out.ok_or_else(|| mismatch("a ROPE_END that writes no string"))?;
+                let (base, at) = self.place(out.slot)?;
+                let joined = self.b.ins().stack_load(I64, I64, slot, 0);
+                let joined_info = self.b.ins().stack_load(I64, I32, slot, TYPE_AT);
+                self.b.ins().store(trusted(), joined, base, at);
+                self.b
+                    .ins()
+                    .store(trusted(), joined_info, base, at + TYPE_AT);
+            }
+            _ => return Err(mismatch("a rope's piece of no rope opline")),
+        }
+        Ok(())
+    }
+
+    /// `.=` of a string onto a variable's string, as php's
+    /// `zend_jit_assign_op` calls `zend_jit_fast_assign_concat_helper`:
+    /// [`Kernel::AssignConcat`], which grows the variable's string in
+    /// place where the variable is its one owner, the frame stood at the
+    /// opline, and the string appended given up after where a temporary
+    /// held it, `FREE_OP2`. A line built by `.=` grows in place, as php's
+    /// `zend_string_extend` grows it, and memory moves as php's:
+    ///
+    /// ```php
+    /// function f($n) { $s = ""; $m = memory_get_usage(); for ($i = 0; $i < $n; $i++) { $s .= str_repeat("x", $i % 5) . "|"; } return [strlen($s), memory_get_usage() - $m]; }
+    /// echo json_encode(f(400)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [1200,1496]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function f($n) { $s = ""; $m = memory_get_usage(); for ($i = 0; $i < $n; $i++) { $s .= str_repeat("x", $i % 5) . "|"; } return [strlen($s), memory_get_usage() - $m]; }
+    /// echo json_encode(f(400)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [1200,1496]
+    /// ```
+    pub(super) fn assign_concat(&mut self, line: &Line) -> Result<(), Abort> {
+        let Operand::Value(target) = line.op1 else {
+            return Err(mismatch("a .= onto no variable"));
+        };
+        let var = self.value(target)?.slot.var;
+        let (word, info) = match line.op2 {
+            Operand::Value(value) => {
+                let held = self.value(value)?;
+                let (room, at) = self.place(held.slot)?;
+                let word = self.b.ins().load(I64, trusted(), room, at);
+                let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
+                (word, info)
+            }
+            Operand::Constant(Constant::Other(idx)) => {
+                let zval = self.constant_zval(line.frame, idx)?;
+                let word = self.b.ins().load(I64, trusted(), zval, 0);
+                let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
+                (word, info)
+            }
+            _ => return Err(mismatch("a .= of a scalar")),
+        };
+        let [room, opline] = self.served(line)?;
+        let var = self.b.ins().iconst(I32, i64::from(var));
+        self.call(
+            Kernel::AssignConcat,
+            &[room, opline, var, word, info],
+            line.unwind.map(Leave::Unwind),
+        )?;
+        self.free_temp(line, line.op2)
     }
 }
