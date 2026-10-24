@@ -58,7 +58,7 @@ budget = 700                               # fork, the signal pool, LC_CTYPE, th
 lock = "process.lock"
 [[crate]]
 name = "php_unit"
-budget = 2500
+budget = 3000                              # 2.5k raised to 3k for the unit format's parity growth (#3357, 2026-10-24)
 lock = "unit.lock"
 [[crate]]
 name = "php_link"
@@ -69,7 +69,7 @@ name = "php_compile"
 budget = 24000
 [[crate]]
 name = "php_engine"
-budget = 80000
+budget = 84000                             # 80k raised to 84k after #3287's dedupe, for #3343 and the call protocol (#3357, 2026-10-24)
 lock = ["api.lock", "sapi.lock", "tier.lock"]
 lock_from = { "api.lock" = "php_ext" }
 [[crate]]
@@ -98,7 +98,7 @@ budget = 10000                              # php's main/streams/ and main/netwo
 phpt = ["ext/standard/tests/streams"]
 [[crate]]
 name = "xtask"
-budget = 42000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20)
+budget = 44000                             # the design carries no number (design ledger 14); 14k was the inherited-pieces estimate, written before the instruments harness §4.2 names landed here; 36k for #1975's host-bytes instrument (#2468, option C); 38k for #2597's permit --after fix and the harness tickets after it (2026-10-10); 40k for the harness tickets this wave's rulings asked for (#2707, 2026-10-12); 42k for the testing tier's harness work (#3082, 2026-10-20); 44k after #3279's dedupe found 166 lines (#3357, 2026-10-24)
 lock = "xtask.lock"                        # harness §4.1, revision 16: the harness holds its own interface
 
 # ---------------------------------------------------------------- ext/
