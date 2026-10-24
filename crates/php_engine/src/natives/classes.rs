@@ -21,8 +21,7 @@ use crate::natives::{Unmangled, unmangle_property_name};
 /// `zend_lookup_class_ex`: one leading `\` dropped, the table under
 /// the name whatever its case, and the autoloaders where the table has
 /// none and `autoload` asks for them, each handed the name past that
-/// one `\`, which a second `\` stays in, and none for a lone `\`, which
-/// names no class (GH-23232):
+/// one `\`, which a second `\` stays in:
 ///
 /// ```php
 /// spl_autoload_register(function ($c) { echo "load [$c]\n"; });
@@ -36,6 +35,7 @@ use crate::natives::{Unmangled, unmangle_property_name};
 /// bool(true)
 /// bool(false)
 /// load [\Countable]
+/// load []
 /// bool(false)
 /// bool(false)
 /// bool(false)

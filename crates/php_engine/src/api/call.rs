@@ -1872,21 +1872,6 @@ pub fn bound_variables(
 ///   thrown in %s on line 12
 /// ```
 ///
-/// A name that is a lone `\` is no class's, and no loader is asked for
-/// the empty name past it (GH-23232):
-///
-/// ```php
-/// spl_autoload_register(function ($c) { echo "load [$c]\n"; });
-/// var_dump(is_callable("\\::a"), is_callable("::a"), is_callable("\\Foo::a"), class_exists("\\"));
-/// ```
-/// ```expect
-/// load [Foo]
-/// bool(false)
-/// bool(false)
-/// bool(false)
-/// bool(false)
-/// ```
-///
 /// The first lookup that may autoload lays `EG(in_autoload)` down, its
 /// header and the data of the lowered name it adds and deletes, and
 /// the table stands until the request ends, so a second costs nothing.
@@ -1957,13 +1942,11 @@ pub(crate) fn autoload_keyed(req: &mut Request, name: &[u8]) -> Result<Option<Cl
 
 /// [`autoload`], `keyed` where the caller holds the lowered name.
 fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<ClassId>, Thrown> {
-    let key = Bare::of(name);
-    let bare = key.bytes();
-    // An empty name, and a lone `\` past which none is left, names no
-    // class, before the table or a loader is asked (GH-23232).
-    if bare.is_empty() {
+    if name.is_empty() {
         return Ok(None);
     }
+    let key = Bare::of(name);
+    let bare = key.bytes();
     // The table first, which holds an anonymous class under its name
     // with the NUL, and `zend_is_valid_class_name` of the name as
     // written only before the autoloaders.
