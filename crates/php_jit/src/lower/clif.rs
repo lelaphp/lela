@@ -2370,24 +2370,31 @@ impl<'a> Emit<'a> {
         let (room, array_at) = self.place(held.slot)?;
         let hash = held.types.meets(Types::HASH);
         let (element, old) = self.written_in_place((room, array_at), key, hash, handled);
-        // An element that is a reference is written through, which
+        // Where every guard fails once, the handler serves the write.
+        let never = self.b.ins().iconst(I8, 0);
+        let fuzzed = self.fuzzed(never)?;
+        self.divert_if(fuzzed, handled);
+        // An element that counts nothing is written over; one that counts
+        // is given up after, but a reference is written through, which
         // `zend_jit_assign_to_variable` does past its `ZVAL_DEREF` and the
         // handler does here.
+        let (plain, owning) = (self.b.create_block(), self.b.create_block());
+        let counted = self.b.ins().band_imm_u(old, COUNTED);
+        self.b.ins().brif(counted, owning, &[], plain, &[]);
+        self.b.switch_to_block(plain);
+        self.b.seal_block(plain);
+        self.written(line, element, value)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(owning);
+        self.b.seal_block(owning);
         let kind = self.b.ins().band_imm_u(old, KIND);
         let reference = self
             .b
             .ins()
             .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
         self.divert_if(reference, handled);
-        // Where every guard fails once, the handler serves the write.
-        let never = self.b.ins().iconst(I8, 0);
-        let fuzzed = self.fuzzed(never)?;
-        self.divert_if(fuzzed, handled);
         let word = self.b.ins().load(I64, trusted(), element, 0);
-        match value {
-            Some(value) => self.write(element, 0, value),
-            None => self.copy_operand(line.frame, line.data, (element, 0))?,
-        }
+        self.written(line, element, value)?;
         self.release(line, word, old)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(handled);
@@ -2402,6 +2409,19 @@ impl<'a> Emit<'a> {
                 "an element write of a value no scalar, its result used",
             )),
             (None, _) => Ok(()),
+        }
+    }
+
+    /// The element at `element` written with `line`'s value: the scalar
+    /// `value`, or the value no scalar its `OP_DATA` names, copied as an
+    /// assignment copies it ([`Emit::copy_operand`]).
+    fn written(&mut self, line: &Line, element: Value, value: Option<Scalar>) -> Result<(), Abort> {
+        match value {
+            Some(value) => {
+                self.write(element, 0, value);
+                Ok(())
+            }
+            None => self.copy_operand(line.frame, line.data, (element, 0)),
         }
     }
 
