@@ -88,18 +88,28 @@ impl ObjectHandlers for Handlers {
 }
 
 /// `IntlDateFormatter_object_clone`: a fresh object's members, the
-/// styles and the calendar type left at their defaults as php leaves
-/// them, and `udat_clone`; php's `Error` once the copy is made.
+/// styles, the calendar type and the requested locale copied, as php
+/// 8.5.12 copies them, and `udat_clone`; php's `Error` once the copy is
+/// made.
 fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let mut status = Code::ZERO;
-    let copy = object
-        .native::<DateFormatObject>(req)
-        .and_then(|o| o.udatf.as_ref())
-        .map(|udatf| udatf.try_clone(&mut status));
+    let (copy, payload) = match object.native::<DateFormatObject>(req) {
+        Some(o) => (
+            o.udatf.as_ref().map(|udatf| udatf.try_clone(&mut status)),
+            DateFormatObject {
+                date_type: o.date_type,
+                time_type: o.time_type,
+                calendar: o.calendar,
+                requested_locale: o.requested_locale.clone(),
+                ..DateFormatObject::default()
+            },
+        ),
+        None => (None, DateFormatObject::default()),
+    };
     let held = copy.is_some();
     let payload = DateFormatObject {
         udatf: copy.flatten(),
-        ..DateFormatObject::default()
+        ..payload
     };
     let new = clone_with(req, &object, payload)?;
     let message = match held {
@@ -1164,7 +1174,7 @@ fn fields(parsed: OrFalse<Parsed>) -> OrFalse<Owner<PhpArray>> {
 }
 
 /// `class IntlDateFormatter`: one `UDateFormat` each, cloned with the
-/// object without the styles php leaves behind; one `new` without a
+/// object and its styles and calendar type; one `new` without a
 /// constructor has none.
 ///
 /// ```php
@@ -1189,8 +1199,8 @@ fn fields(parsed: OrFalse<Parsed>) -> OrFalse<Owner<PhpArray>> {
 /// int(3)
 /// int(1)
 /// string(29) "January 1, 1970 at 12:00 AM"
-/// int(0)
-/// bool(false)
+/// int(1)
+/// int(1)
 /// Cannot clone uninitialized IntlDateFormatter
 /// Found unconstructed IntlDateFormatter
 /// IntlDateFormatter::__construct(): cannot call constructor twice
