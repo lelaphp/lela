@@ -14,8 +14,8 @@ use php_macros::php_function;
 
 use crate::api::abi::{Extension, ExtensionBuilder};
 use crate::api::raising::Thrown;
-use crate::api::request::Request;
-use crate::api::values::{Owner, PhpString};
+use crate::api::request::{BodyLimits, Request};
+use crate::api::values::{Owner, PhpArray, PhpString};
 use crate::engine::{Body, Engine, Method, RequestDescription, WebRequest};
 use crate::test::Capture;
 
@@ -27,9 +27,20 @@ fn body_input(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, &bytes)
 }
 
+/// `parse_body(): array`: `request_parse_body()` with no options, as
+/// ext/standard's native makes its pair, `[$_POST, $_FILES]`.
+#[php_function]
+fn parse_body(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
+    let (post, files) = req.variables_mut().parse_body(&BodyLimits::default())?;
+    let mut pair = PhpArray::new(req)?;
+    pair.append(req, post.into_value())?;
+    pair.append(req, files.into_value())?;
+    Ok(pair)
+}
+
 fn input() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![body_input::declared()])
+        .functions(vec![body_input::declared(), parse_body::declared()])
         .build("body")
 }
 
@@ -75,6 +86,17 @@ fn form() -> Vec<u8> {
 /// before it: what the program wrote, and how many reads the request
 /// made of the body.
 fn posted(engine: &Engine, content_type: &str, body: &[u8], program: &str) -> (String, usize) {
+    sent(engine, Method::Post, content_type, body, program)
+}
+
+/// [`posted`] under `method`.
+fn sent(
+    engine: &Engine,
+    method: Method,
+    content_type: &str,
+    body: &[u8],
+    program: &str,
+) -> (String, usize) {
     let (feed, arriving) = sync_channel(1);
     let reads = Arc::new(AtomicUsize::new(0));
     let description = RequestDescription {
@@ -83,7 +105,7 @@ fn posted(engine: &Engine, content_type: &str, body: &[u8], program: &str) -> (S
         source: Some(program.as_bytes().to_vec()),
         cwd: std::env::current_dir().expect("the working directory"),
         web: Some(WebRequest {
-            method: Some(Method::Post),
+            method: Some(method),
             content_type: Some(content_type.as_bytes().to_vec()),
             content_length: i64::try_from(body.len()).unwrap_or(i64::MAX),
             body: Body::Stream(Box::new(Pieces {
@@ -213,6 +235,40 @@ fn a_form_past_the_memory_limit_ends_the_request_before_the_script() {
         program,
     );
     assert_eq!(stdout, "ran 1 2 3\n");
+}
+
+/// A multipart body `request_parse_body()` refuses part of the way
+/// through gives back every block its parse asked of the heap: the
+/// `RequestParseBodyException` thrown at `max_file_uploads` while a
+/// file part's name and filename are held, and the one thrown at
+/// `max_input_vars` while a field's name and value are held, leave the
+/// heap as the request found it, so a debug engine's leak sensor names
+/// nothing at the request's end. The messages are php-cgi 8.5.12's for
+/// the same two `PUT` bodies under `-d max_file_uploads=1` and `-d
+/// max_input_vars=1` (php-src's `multipart_max_files.phpt` and
+/// `multipart_max_input_vars.phpt`).
+#[test]
+fn a_body_parse_refused_by_a_limit_gives_back_what_its_part_held() {
+    let program = "<?php try { [$_POST, $_FILES] = parse_body(); } catch (RequestParseBodyException $e) { echo $e->getMessage(), \"\\n\"; } echo $_POST === [] && $_FILES === [] ? 'none' : 'some', \"\\n\";";
+    let multipart = "multipart/form-data; boundary=b";
+    let engine = Engine::cli_builder()
+        .ini("max_file_uploads", "1")
+        .extensions(&[input()])
+        .build();
+    let files = b"--b\r\nContent-Disposition: form-data; name=\"file1\"; filename=\"file1.txt\"\r\nContent-Type: text/plain\r\n\r\nfile data\r\n--b\r\nContent-Disposition: form-data; name=\"file2\"; filename=\"file2.txt\"\r\nContent-Type: text/plain\r\n\r\nfile data\r\n--b--\r\n";
+    assert_eq!(
+        sent(&engine, Method::Put, multipart, files, program).0,
+        "Maximum number of allowable file uploads has been exceeded\nnone\n"
+    );
+    let engine = Engine::cli_builder()
+        .ini("max_input_vars", "1")
+        .extensions(&[input()])
+        .build();
+    let fields = b"--b\r\nContent-Disposition: form-data; name=\"field1\"\r\n\r\npost field data\r\n--b\r\nContent-Disposition: form-data; name=\"field2\"\r\n\r\npost field data\r\n--b--\r\n";
+    assert_eq!(
+        sent(&engine, Method::Put, multipart, fields, program).0,
+        "Input variables exceeded 1. To increase the limit change max_input_vars in php.ini.\nnone\n"
+    );
 }
 
 /// `file_uploads` and `enable_post_data_reading` are `OnUpdateBool` in

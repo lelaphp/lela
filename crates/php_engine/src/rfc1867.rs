@@ -1124,24 +1124,35 @@ fn parts(
                     }
                     Err(thrown) => {
                         kept.give_up(req);
+                        value.free(req);
+                        param.free(req);
                         return Err(thrown);
                     }
                 }
             } else {
-                if count == max_input_vars + 1 {
+                let refused = if count == max_input_vars + 1 {
                     upload.refuse(
                         req,
                         &format!(
                             "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
                         ),
-                    )?;
-                }
-                let event = Upload::FormData {
-                    read,
-                    name: &name,
-                    value: value.bytes(),
+                    )
+                } else {
+                    Ok(())
                 };
-                req.upload_event(&event)?;
+                let told = refused.and_then(|()| {
+                    let event = Upload::FormData {
+                        read,
+                        name: &name,
+                        value: value.bytes(),
+                    };
+                    req.upload_event(&event)
+                });
+                if let Err(thrown) = told {
+                    value.free(req);
+                    param.free(req);
+                    return Err(thrown);
+                }
                 !req.has_oom()
             };
             if !registered {
@@ -1164,10 +1175,14 @@ fn parts(
             skip_upload = true;
             if upload_cnt == 0 {
                 upload_cnt -= 1;
-                upload.refuse(
+                let refused = upload.refuse(
                     req,
                     "Maximum number of allowable file uploads has been exceeded",
-                )?;
+                );
+                if let Err(thrown) = refused {
+                    Disposition { param, filename }.free(req);
+                    return Err(thrown);
+                }
             }
         }
         let Some(filename) = filename else {
@@ -1218,7 +1233,13 @@ fn parts(
                 name: &param,
                 filename: &filename,
             };
-            skip_upload = !req.upload_event(&event)?;
+            skip_upload = match req.upload_event(&event) {
+                Ok(told) => !told,
+                Err(thrown) => {
+                    named.free(req);
+                    return Err(thrown);
+                }
+            };
             if !skip_upload && req.has_oom() {
                 named.free(req);
                 break;
@@ -1242,7 +1263,12 @@ fn parts(
             temp = req.open_temporary_fd(dir.as_deref(), b"php", TemporaryGuard::OnFallback);
             upload_cnt -= 1;
             if temp.is_none() {
-                upload.refuse(req, "File upload error - unable to create a temporary file")?;
+                let refused =
+                    upload.refuse(req, "File upload error - unable to create a temporary file");
+                if let Err(thrown) = refused {
+                    named.free(req);
+                    return Err(thrown);
+                }
                 cancel_upload = UPLOAD_ERROR_E;
             }
         }
@@ -1254,7 +1280,17 @@ fn parts(
                 offset,
                 length: size,
             };
-            if !req.upload_event(&event)? || req.has_oom() {
+            let told = match req.upload_event(&event) {
+                Ok(told) => told,
+                Err(thrown) => {
+                    if let Some((_, path)) = &temp {
+                        std::fs::remove_file(path).ok();
+                    }
+                    named.free(req);
+                    return Err(thrown);
+                }
+            };
+            if !told || req.has_oom() {
                 cancel_upload = UPLOAD_ERROR_X;
                 continue;
             }
@@ -1285,7 +1321,17 @@ fn parts(
             temp: shown.as_deref(),
             error: cancel_upload,
         };
-        if !req.upload_event(&event)? || req.has_oom() {
+        let told = match req.upload_event(&event) {
+            Ok(told) => told,
+            Err(thrown) => {
+                if let Some(path) = &temp_path {
+                    std::fs::remove_file(path).ok();
+                }
+                named.free(req);
+                return Err(thrown);
+            }
+        };
+        if !told || req.has_oom() {
             cancel_upload = UPLOAD_ERROR_X;
         }
         let temp_name = if cancel_upload != 0 {
