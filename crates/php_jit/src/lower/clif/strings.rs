@@ -14,7 +14,7 @@ use php_engine::tier::FRAME;
 use php_heap::{Str, ZvalType};
 use php_unit::{Opcode, OperandKind};
 
-use super::{COUNTED, Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, slot_offset, tag, trusted};
+use super::{Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, slot_offset, tag, trusted};
 use crate::types::{
     Abort, Check, Constant, Frame, Fused, GuardAt, Home, Leave, Line, OpId, Operand, Slot,
 };
@@ -240,9 +240,8 @@ impl Emit<'_> {
 
     /// `FREE_OP` of `operand` where it is a temporary, as the handler
     /// takes it: what it holds out of its slot, which is left `UNDEF`,
-    /// then its owner given up through [`Kernel::Release`] where it is
-    /// counted, what a destructor throws leaving through the opline's
-    /// unwind. A `foreach`'s array freed at its loop's end is this,
+    /// then its owner given up as [`Emit::release`] gives it up, what a
+    /// destructor throws leaving through the opline's unwind. A `foreach`'s array freed at its loop's end is this,
     /// php's `zend_jit_free` of `FE_FREE` over an array, which holds no
     /// iterator to delete.
     pub(super) fn free_temp(&mut self, line: &Line, operand: Operand) -> Result<(), Abort> {
@@ -263,16 +262,8 @@ impl Emit<'_> {
         let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
         let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
         self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
-        let counted = self.b.ins().band_imm_u(info, COUNTED);
-        let [room_arg, opline] = self.served(line)?;
-        self.when(counted, |emit| {
-            let word = emit.b.ins().load(I64, trusted(), room, at);
-            emit.call(
-                Kernel::Release,
-                &[room_arg, opline, word, info],
-                line.unwind.map(Leave::Unwind),
-            )
-        })
+        let word = self.b.ins().load(I64, trusted(), room, at);
+        self.release(line, word, info)
     }
 
     /// The string `operand` of `frame` names, its two words, with an owner

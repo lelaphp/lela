@@ -2797,18 +2797,83 @@ impl<'a> Emit<'a> {
     }
 
     /// What a slot held, `word` and its type word `info`, given up after
-    /// an inline write over it, as `zval_ptr_dtor` gives it up: through
-    /// the release kernel where it is counted, a destructor's throw
-    /// leaving through the opline's unwind.
+    /// an inline write over it or as a temporary is freed, as php's
+    /// `jit_ZVAL_PTR_DTOR` gives it up (`Z/ext/opcache/jit/zend_jit_ir.c:1819-1903`):
+    /// where it is counted, a `GC_DELREF` inline where another owner
+    /// stands and the collector holds the value already or never takes
+    /// it (`GC_MAY_LEAK`'s bits, [`Zval::LEAK_BITS`]), as a string's;
+    /// the last owner, a value the collector may take and a reference,
+    /// whose value it looks through to, through the release kernel, a
+    /// destructor's throw leaving through the opline's unwind. A string
+    /// two variables hold, one of them written over, and an object whose
+    /// last owner an assignment gives up, its destructor called there:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n; } }
+    /// function f($n) { $s = str_repeat("ab", 2); for ($i = 0; $i < $n; $i++) { $t = $s; $t = "c"; $o = new D($i); } return $s; }
+    /// echo f(6), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 012345abab
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n; } }
+    /// function f($n) { $s = str_repeat("ab", 2); for ($i = 0; $i < $n; $i++) { $t = $s; $t = "c"; $o = new D($i); } return $s; }
+    /// echo f(6), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 012345abab
+    /// ```
     fn release(&mut self, line: &Line, word: Value, info: Value) -> Result<(), Abort> {
         let counted = self.b.ins().band_imm_u(info, COUNTED);
         let [room, opline] = self.served(line)?;
         self.when(counted, |emit| {
+            let count_at = imm(Zval::COUNT_AT);
+            let count = emit.b.ins().load(I32, trusted(), word, count_at);
+            let owners = emit.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+            let last = emit
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, owners, 1);
+            let kind = emit.b.ins().band_imm_u(info, KIND);
+            let reference = emit
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+            let gc = emit
+                .b
+                .ins()
+                .load(I32, trusted(), word, imm(Zval::GC_INFO_AT));
+            let held = emit.b.ins().band_imm_u(gc, i64::from(Zval::LEAK_BITS));
+            let leaks = emit.b.ins().icmp_imm_u(IntCC::Equal, held, 0);
+            let called = emit.b.ins().bor(last, reference);
+            let called = emit.b.ins().bor(called, leaks);
+            let (kernel, inline, done) = (
+                emit.b.create_block(),
+                emit.b.create_block(),
+                emit.b.create_block(),
+            );
+            emit.b.set_cold_block(kernel);
+            emit.b.ins().brif(called, kernel, &[], inline, &[]);
+            emit.b.switch_to_block(inline);
+            emit.b.seal_block(inline);
+            let fewer = emit.b.ins().iadd_imm_s(count, -1);
+            emit.b.ins().store(trusted(), fewer, word, count_at);
+            emit.b.ins().jump(done, &[]);
+            emit.b.switch_to_block(kernel);
+            emit.b.seal_block(kernel);
             emit.call(
                 Kernel::Release,
                 &[room, opline, word, info],
                 line.unwind.map(Leave::Unwind),
-            )
+            )?;
+            emit.b.ins().jump(done, &[]);
+            emit.b.switch_to_block(done);
+            emit.b.seal_block(done);
+            Ok(())
         })
     }
 
