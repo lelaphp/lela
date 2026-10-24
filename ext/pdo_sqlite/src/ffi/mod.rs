@@ -321,10 +321,6 @@ unsafe extern "C" fn free_lend(lend: *mut c_void) {
     drop(unsafe { Box::from_raw(lend.cast::<Lend>()) });
 }
 
-/// The text `sqlite3_close` sets for a connection a statement, a blob or
-/// a call in progress still holds.
-const BUSY: &[u8] = b"unable to close due to unfinalized statements or unfinished backups";
-
 /// `sqlite3 *`, the one owner of the connection, which the request keeps
 /// for the object that opened it ([`Db::open`], ADR-0013), with what
 /// `pdo_sqlite` records beside it. A statement or a blob opened on it
@@ -487,6 +483,15 @@ impl Db {
         Conn::open(filename, flags, callbacks).map(|conn| req.memory_mut().adopt(conn))
     }
 
+    /// php's `db_obj->in_callback`: whether PHP code one of the
+    /// connection's callbacks runs is in progress, which it is whenever a
+    /// call into the library on the connection is ([`Db::call`]), since
+    /// PHP code runs inside such a call only from a callback.
+    #[must_use]
+    pub fn in_callback(self, req: &mut Request) -> bool {
+        self.conn(req).is_some_and(Conn::serving)
+    }
+
     /// The connection, where its owner keeps it.
     fn conn(self, req: &mut Request) -> Option<&mut Conn> {
         req.memory_mut().foreign(self.0)
@@ -532,29 +537,22 @@ impl Db {
     /// caller to give up when it will, as `SQLite3::close` leaves php's
     /// `funcs` and `collations` on the object. `Err` with the connection
     /// still open, its owner, the code and the library's text, where a
-    /// statement or a blob still holds it, or a call into the library is
-    /// in progress on it, which php's `sqlite3_close` from inside a
-    /// callback answers `SQLITE_BUSY` for the statement the call runs.
+    /// statement or a blob still holds it. A close from inside a callback
+    /// is its caller's to refuse first ([`Db::in_callback`]), as
+    /// `SQLite3::close` throws before it finalizes a statement.
     pub fn close<'r>(
         req: &mut Request,
         owner: Foreign<Conn>,
         registrations: impl IntoIterator<Item = &'r mut Registration>,
     ) -> Result<(), Box<Unclosed>> {
         let db = Db::of(&owner);
-        if db.conn(req).is_some_and(Conn::serving) {
-            return Err(Box::new(Unclosed {
-                owner,
-                code: SQLITE_BUSY,
-                message: BUSY.to_vec(),
-            }));
-        }
         let registrations = registrations
             .into_iter()
             .filter(move |registration| registration.db == db);
         let Some(conn) = req.memory_mut().disown(owner) else {
-            // No call holds it, or `serving` would have answered; were one
-            // to, it closes as the call ends and may call back with what
-            // is registered on it until then, so the data is left to it.
+            // A call holds it: it closes as the call ends and may call
+            // back with what is registered on it until then, so the data
+            // is left to it.
             registrations.for_each(|registration| registration.close(Freed::Never));
             return Ok(());
         };
