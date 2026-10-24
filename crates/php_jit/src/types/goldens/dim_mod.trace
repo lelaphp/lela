@@ -1,7 +1,7 @@
 start loop
-root e6
-op e6 9 long long - taken
-op e6 4 array - - -
-op e6 6 array - long -
-op e6 8 long - - -
+root e7
+op e7 9 long long - taken
+op e7 4 array - - -
+op e7 6 array - long -
+op e7 8 long - - -
 stop loop

@@ -20,6 +20,13 @@ function tested($h, $n) {
     }
     return $s;
 }
+function coalesced($h, $n) {
+    $s = 0; $k = 'b';
+    for ($i = 0; $i < $n; $i++) {
+        $s += ($h['a'] ?? 0) + ($h[$k] ?? 0) + ($h[$i & 15] ?? 0);
+    }
+    return $s;
+}
 function written($n) {
     $h = ['a' => 0, 'b' => 0, 7 => 0]; $k = 'b';
     for ($i = 0; $i < $n; $i++) {
@@ -75,6 +82,6 @@ function joined($n) {
     return strlen($h['x']);
 }
 $h = ['a' => 1, 'b' => 2, 7 => 3, 9 => 4];
-echo read($h, 300), " ", tested($h, 300), " ", written(300), " ", fetched(300), "\n";
+echo read($h, 300), " ", tested($h, 300), " ", coalesced($h, 300), " ", written(300), " ", fetched(300), "\n";
 echo divided(300), " ", modulo(300), " ", shifted_left(300), " ", shifted_right(300), "\n";
 echo anded(300), " ", ored(300), " ", xored(300), " ", joined(300), "\n";

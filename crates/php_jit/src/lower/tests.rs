@@ -17,9 +17,9 @@ use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupp
 use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
-    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_ISSET, HASH_READ,
-    HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, SIEVE,
-    SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
+    HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
+    SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -988,8 +988,9 @@ fn a_class_the_next_request_declares_fails_the_class_guard() {
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), String> {
-    let kernels: [(Fixture, &[(Kernel, usize)]); 12] = [
+    let kernels: [(Fixture, &[(Kernel, usize)]); 13] = [
         (HASH_READ, &[(Kernel::Find, 3)]),
+        (HASH_IS, &[(Kernel::Find, 3)]),
         (HASH_ISSET, &[(Kernel::Find, 3)]),
         (HASH_WRITE, &[(Kernel::Lookup, 3)]),
         (HASH_FETCH_W, &[(Kernel::Lookup, 1), (Kernel::Find, 1)]),

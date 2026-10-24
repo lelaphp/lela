@@ -26,9 +26,9 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
-    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_ISSET,
-    HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
-    SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
+    DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_IS,
+    HASH_ISSET, HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE,
+    OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2080,8 +2080,9 @@ fn an_object_written_over_is_guarded_again() -> Result<(), String> {
 
 /// The fixtures of the hash slice and the dimension oplines each holds
 /// inline (#3339).
-const HASH_DIMS: [(Fixture, &[Opcode]); 12] = [
+const HASH_DIMS: [(Fixture, &[Opcode]); 13] = [
     (HASH_READ, &[Opcode::FetchDimR]),
+    (HASH_IS, &[Opcode::FetchDimIs]),
     (HASH_ISSET, &[Opcode::IssetIsemptyDimObj]),
     (HASH_WRITE, &[Opcode::AssignDim]),
     (HASH_FETCH_W, &[Opcode::FetchDimW, Opcode::FetchDimRw]),

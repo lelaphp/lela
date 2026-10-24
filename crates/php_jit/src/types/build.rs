@@ -2184,6 +2184,7 @@ impl<'a> Builder<'a> {
                 cv1 && number(t1)
             }
             Opcode::FetchDimR
+            | Opcode::FetchDimIs
             | Opcode::IssetIsemptyDimObj
             | Opcode::AssignDim
             | Opcode::AssignDimOp
@@ -3468,6 +3469,9 @@ fn dim_inline(
                 && array
                 && keyed(op, t2)
         }
+        // php's `zend_jit_fetch_dim_read` under `BP_VAR_IS`, a key it
+        // does not find `null` (`:12101-12200`).
+        Opcode::FetchDimIs => op.op1_type == OperandKind::Cv && array && keyed(op, t2),
         Opcode::AssignDim => cv1 && element_written(op, data, [t1, t2, td], code),
         Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
         Opcode::FetchDimW | Opcode::FetchDimRw => {

@@ -1,5 +1,5 @@
-trace loop e12, stop loop
-frame f0 e12 root, 4 cvs 8 temps
+trace loop e13, stop loop
+frame f0 e13 root, 4 cvs 8 temps
 entry
   #0 f0.CV1 [array]
   #2 f0.CV3 [long]

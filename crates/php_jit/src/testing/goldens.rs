@@ -219,6 +219,18 @@ pub(crate) const HASH_ISSET: Fixture = Fixture {
     ],
 };
 
+/// A hash read by `??`, `FETCH_DIM_IS`, a key it has not got `null`
+/// (#3339).
+pub(crate) const HASH_IS: Fixture = Fixture {
+    name: "hash_is",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "coalesced"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// A hash written by a constant string, a variable's string and a long, each through the `lookup` kernel (#3339).
 pub(crate) const HASH_WRITE: Fixture = Fixture {
     name: "hash_write",

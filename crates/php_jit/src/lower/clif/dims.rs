@@ -87,44 +87,10 @@ impl Emit<'_> {
     /// [7,77,"[false,false,true,false,false,false,false,true,false,false,false,false]"]
     /// ```
     pub(super) fn isset_dim(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let Operand::Value(array) = line.op1 else {
-            return Err(mismatch("an isset() of no array's element"));
-        };
-        let (slot, types) = {
-            let held = self.value(array)?;
-            (held.slot, held.types)
-        };
-        let arr = self.array_of(slot, self.read_of(at, array))?;
         let answered = self.b.create_block();
         self.b.append_block_param(answered, I8);
         let unset = self.b.ins().iconst(I8, 0);
-        let element = if self.packed_at(at, array, types) && self.long_at(at, line.op2)? {
-            let Scalar::Long(key) = self.scalar(at, line.op2)? else {
-                return Err(mismatch("an isset() by no long key"));
-            };
-            let past = self.past_used(arr, key);
-            let on = self.b.create_block();
-            self.b
-                .ins()
-                .brif(past, answered, &[BlockArg::Value(unset)], on, &[]);
-            self.b.switch_to_block(on);
-            self.b.seal_block(on);
-            self.slot_at(arr, key)
-        } else {
-            let place = self.looked_up(at, line, Kernel::Find, arr)?;
-            let kind = self.b.ins().stack_load(I64, I8, place, TYPE_AT);
-            let unplaced = self
-                .b
-                .ins()
-                .icmp_imm_s(IntCC::NotEqual, kind, tag(ZvalType::Indirect));
-            let on = self.b.create_block();
-            self.b
-                .ins()
-                .brif(unplaced, answered, &[BlockArg::Value(unset)], on, &[]);
-            self.b.switch_to_block(on);
-            self.b.seal_block(on);
-            self.b.ins().stack_load(I64, I64, place, 0)
-        };
+        let element = self.tested_element(at, line, (answered, &[BlockArg::Value(unset)]))?;
         let element = self.deref(element);
         let kind = self.b.ins().load(I8, trusted(), element, TYPE_AT);
         let set = self
@@ -146,6 +112,123 @@ impl Emit<'_> {
             }
         };
         self.direction(at, jumps)
+    }
+
+    /// The element `line`'s key names in the array its variable holds, for
+    /// a test or a read that finds nothing silently: a packed array's slot
+    /// below `nNumUsed`, as a layout guard held it, or the one
+    /// [`Kernel::Find`] answers; to `missed` with its arguments where
+    /// there is none, a packed array's hole aside, which the caller reads.
+    fn tested_element(
+        &mut self,
+        at: OpId,
+        line: &Line,
+        (missed, args): (Block, &[BlockArg]),
+    ) -> Result<Value, Abort> {
+        let Operand::Value(array) = line.op1 else {
+            return Err(mismatch("an element of no array"));
+        };
+        let (slot, types) = {
+            let held = self.value(array)?;
+            (held.slot, held.types)
+        };
+        let arr = self.array_of(slot, self.read_of(at, array))?;
+        let packed = self.packed_at(at, array, types) && self.long_at(at, line.op2)?;
+        let (absent, reached) = if packed {
+            let Scalar::Long(key) = self.scalar(at, line.op2)? else {
+                return Err(mismatch("an element by no long key"));
+            };
+            (self.past_used(arr, key), Err(key))
+        } else {
+            let place = self.looked_up(at, line, Kernel::Find, arr)?;
+            let kind = self.b.ins().stack_load(I64, I8, place, TYPE_AT);
+            let unplaced = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::NotEqual, kind, tag(ZvalType::Indirect));
+            (unplaced, Ok(place))
+        };
+        let on = self.b.create_block();
+        self.b.ins().brif(absent, missed, args, on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        Ok(match reached {
+            Ok(place) => self.b.ins().stack_load(I64, I64, place, 0),
+            Err(key) => self.slot_at(arr, key),
+        })
+    }
+
+    /// `FETCH_DIM_IS`, the read an `isset()` chain, an `empty()` or a `??`
+    /// makes, as php's `zend_jit_fetch_dim_read` compiles it over an array
+    /// a variable holds under `BP_VAR_IS`: the element copied as
+    /// `ZVAL_COPY_DEREF` copies it, and `null` where the array has not got
+    /// the key, or a packed array holds a hole there, with nothing raised
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:12101-12200`).
+    ///
+    /// A hash and a packed array read by `??` and in `isset()`'s chain, the
+    /// key there and not, an element a reference and one `null`:
+    ///
+    /// ```php
+    /// function f($h, $p, $n) {
+    ///     $s = 0; $k = 'b'; $o = [];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $s += $h['a'] ?? 100; $s += $h[$k] ?? 1000; $s += $p[$i % 4] ?? 7;
+    ///         $o[] = isset($h['n'][0]); $o[] = $h['r'] ?? -1;
+    ///         if ($i == 3) { $k = 'z'; unset($h['a']); }
+    ///     }
+    ///     return [$s, $o];
+    /// }
+    /// $r = 9;
+    /// echo json_encode(f(['a' => 1, 'b' => 2, 'n' => [5], 'r' => &$r], [1, null, 3], 8)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [4448,[true,9,true,9,true,9,true,9,true,9,true,9,true,9,true,9]]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function f($h, $p, $n) {
+    ///     $s = 0; $k = 'b'; $o = [];
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $s += $h['a'] ?? 100; $s += $h[$k] ?? 1000; $s += $p[$i % 4] ?? 7;
+    ///         $o[] = isset($h['n'][0]); $o[] = $h['r'] ?? -1;
+    ///         if ($i == 3) { $k = 'z'; unset($h['a']); }
+    ///     }
+    ///     return [$s, $o];
+    /// }
+    /// $r = 9;
+    /// echo json_encode(f(['a' => 1, 'b' => 2, 'n' => [5], 'r' => &$r], [1, null, 3], 8)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [4448,[true,9,true,9,true,9,true,9,true,9,true,9,true,9,true,9]]
+    /// ```
+    pub(super) fn fetch_is(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
+        let out = self.value(out)?.slot;
+        let (missed, done) = (self.b.create_block(), self.b.create_block());
+        let element = self.tested_element(at, line, (missed, &[]))?;
+        let element = self.deref(element);
+        let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+        let kind = self.b.ins().band_imm_u(info, KIND);
+        let hole = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
+        self.divert_if(hole, missed);
+        self.copy(element, info, out)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(missed);
+        self.b.seal_block(missed);
+        let (room, out_at) = self.place(out)?;
+        let null = self.b.ins().iconst(I32, tag(ZvalType::Null));
+        self.b.ins().store(trusted(), null, room, out_at + TYPE_AT);
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
     }
 
     /// The element `line`'s key names in the array `arr`, through

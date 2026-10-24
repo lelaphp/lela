@@ -1961,6 +1961,7 @@ impl<'a> Emit<'a> {
             }
             Opcode::FetchDimR => self.fetch(at, line),
             Opcode::IssetIsemptyDimObj => self.isset_dim(at, line),
+            Opcode::FetchDimIs => self.fetch_is(at, line),
             Opcode::FetchObjR => self.fetch_obj(at, line),
             Opcode::FetchObjW => self.fetch_obj_w(line),
             Opcode::AssignObj => self.assign_obj(at, line),

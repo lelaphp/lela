@@ -1,10 +1,10 @@
 start loop
-root e4
-op e4 12 long long - taken
-op e4 5 long - - -
-op e4 6 array - - -
-op e4 7 array.indirect long long -
-op e4 9 array string - -
-op e4 10 long.indirect - - -
-op e4 11 long - - -
+root e5
+op e5 12 long long - taken
+op e5 5 long - - -
+op e5 6 array - - -
+op e5 7 array.indirect long long -
+op e5 9 array string - -
+op e5 10 long.indirect - - -
+op e5 11 long - - -
 stop loop
