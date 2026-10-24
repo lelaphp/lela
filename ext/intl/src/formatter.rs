@@ -356,19 +356,11 @@ fn offset(req: &mut Request, given: &Ref<Untyped<Value>>) -> Result<Option<i32>,
 }
 
 /// `intl_convert_utf8_offset_to_utf16` of a given offset, which ICU
-/// reads in code units, refused with "Invalid UTF-8 offset" where it
-/// falls inside a character (GH-23094); the outer `None` is that refusal.
-fn utf16_position(
-    req: &mut Request,
-    object: PhpObject,
-    text: &[u8],
-    position: Option<i32>,
-) -> Answer<Option<i32>> {
-    let Some(p) = position else {
-        return Ok(Some(None));
-    };
-    match ffi::utf8_offset_to_utf16(text, p) {
-        Ok(units) => Ok(Some(Some(units))),
+/// reads in code units, refused with "Invalid UTF-8 offset", and
+/// `false`, where it falls inside a character (GH-23094).
+fn utf16_position(req: &mut Request, object: PhpObject, text: &[u8], position: i32) -> Answer<i32> {
+    match ffi::utf8_offset_to_utf16(text, position) {
+        Ok(units) => Ok(Some(units)),
         Err(code) => check(req, object, code, "Invalid UTF-8 offset").map(|_| None),
     }
 }
@@ -393,8 +385,14 @@ fn parse(
         else {
             return Ok(None);
         };
-        let Some(mut position) = utf16_position(req, object, text.as_bytes(), position)? else {
-            return Ok(None);
+        let mut position = match position {
+            Some(given) => {
+                let Some(units) = utf16_position(req, object, text.as_bytes(), given)? else {
+                    return Ok(None);
+                };
+                Some(units)
+            }
+            None => None,
         };
         let mut status = Code::ZERO;
         let parsed = match kind {
@@ -465,9 +463,14 @@ fn parse_currency(
         else {
             return Ok(None);
         };
-        let position = offset(req, at_offset)?;
-        let Some(mut position) = utf16_position(req, object, text.as_bytes(), position)? else {
-            return Ok(None);
+        let mut position = match offset(req, at_offset)? {
+            Some(given) => {
+                let Some(units) = utf16_position(req, object, text.as_bytes(), given)? else {
+                    return Ok(None);
+                };
+                Some(units)
+            }
+            None => None,
         };
         let mut code = [0u16; 5];
         let mut status = Code::ZERO;

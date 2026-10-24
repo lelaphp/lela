@@ -321,12 +321,11 @@ pub(crate) fn utf16_offset_to_utf8(text: &[u16], position: i32) -> i32 {
     };
     let splits_pair = at > 0
         && at < text.len()
-        && (0xD800..0xDC00).contains(&text[at - 1])
-        && (0xDC00..0xE000).contains(&text[at]);
-    let (at, position) = if splits_pair {
-        (at - 1, position - 1)
-    } else {
-        (at, position)
+        && is_lead_surrogate(text[at - 1])
+        && is_trail_surrogate(text[at]);
+    let at = if splits_pair { at - 1 } else { at };
+    let Ok(position) = i32::try_from(at) else {
+        return position;
     };
     let mut bytes = 0;
     let mut status = Code::ZERO;
@@ -346,6 +345,16 @@ pub(crate) fn utf16_offset_to_utf8(text: &[u16], position: i32) -> i32 {
         return position;
     }
     bytes
+}
+
+/// `U16_IS_LEAD`.
+fn is_lead_surrogate(unit: u16) -> bool {
+    unit & 0xFC00 == 0xD800
+}
+
+/// `U16_IS_TRAIL`.
+fn is_trail_surrogate(unit: u16) -> bool {
+    unit & 0xFC00 == 0xDC00
 }
 
 /// `uloc_getDefault`: ICU's default locale for the process, which php

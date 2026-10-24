@@ -93,23 +93,21 @@ impl ObjectHandlers for Handlers {
 /// made.
 fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let mut status = Code::ZERO;
-    let (copy, payload) = match object.native::<DateFormatObject>(req) {
-        Some(o) => (
-            o.udatf.as_ref().map(|udatf| udatf.try_clone(&mut status)),
+    let mut held = false;
+    let payload = match object.native::<DateFormatObject>(req) {
+        Some(o) => {
+            let copy = o.udatf.as_ref().map(|udatf| udatf.try_clone(&mut status));
+            held = copy.is_some();
             DateFormatObject {
+                error: IntlError::default(),
+                udatf: copy.flatten(),
                 date_type: o.date_type,
                 time_type: o.time_type,
                 calendar: o.calendar,
                 requested_locale: o.requested_locale.clone(),
-                ..DateFormatObject::default()
-            },
-        ),
-        None => (None, DateFormatObject::default()),
-    };
-    let held = copy.is_some();
-    let payload = DateFormatObject {
-        udatf: copy.flatten(),
-        ..payload
+            }
+        }
+        None => DateFormatObject::default(),
     };
     let new = clone_with(req, &object, payload)?;
     let message = match held {
@@ -1072,9 +1070,10 @@ fn parse_text(
         match ffi::utf8_offset_to_utf16(text, *at) {
             Ok(code_units) => *at = code_units,
             Err(code) => {
-                if let Err(stop) = check(req, object, code, "Invalid UTF-8 offset") {
-                    return or_false(Err(stop));
-                }
+                let stop = check(req, object, code, "Invalid UTF-8 offset")
+                    .err()
+                    .flatten();
+                return or_false(Err(stop));
             }
         }
     }
@@ -1793,6 +1792,9 @@ fn datefmt_format_object(
 /// $at = 0;
 /// $f->localtime("2017-10-12\u{1F601}", $at);
 /// var_dump($at);
+/// $at = 0;
+/// $f->parseToCalendar("2017-10-12\u{1F601}", $at);
+/// var_dump($at);
 /// ```
 /// ```expect
 /// string(10) "2017-10-12"
@@ -1800,6 +1802,7 @@ fn datefmt_format_object(
 /// bool(false)
 /// int(1)
 /// string(70) "IntlDateFormatter::parse(): Invalid UTF-8 offset: U_INVALID_CHAR_FOUND"
+/// int(10)
 /// int(10)
 /// ```
 #[php_function(before_args = error::reset)]
