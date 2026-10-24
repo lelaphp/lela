@@ -413,14 +413,9 @@ impl Request {
         php_compile::values::attribute_values(&attributes, &mut |z| self.heap.addref(z));
         let room = self.constant_room();
         let named = self.declared_string(given).ok();
-        let keyed = if given.contains(&b'\\') {
-            match self.shared.existing_interned(name) {
-                Some(interned) => Some(Owner::take(self, PhpString::of(interned))),
-                None => PhpString::new(self, name).ok(),
-            }
-        } else {
-            None
-        };
+        let keyed = (given.contains(&b'\\'))
+            .then(|| self.interned(name).ok())
+            .flatten();
         let file = file.and_then(|file| self.executed_file_string(&file).ok());
         self.constants.push(ConstantRow {
             room,

@@ -1091,11 +1091,11 @@ impl UnitCache {
         let short = accelerated
             && disk.is_none()
             && (files.restart_pending() || files.exhausted.load(Ordering::Relaxed));
-        let unstamped = stamped
+        let unheld = stamped
             && observed.is_none_or(|stamp| {
                 protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
             });
-        if short || unstamped {
+        if short || unheld {
             return (None, Filed::Own, None);
         }
         let Some(source) = source_or_read(handed, path) else {

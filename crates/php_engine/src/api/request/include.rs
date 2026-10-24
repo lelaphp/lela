@@ -1441,7 +1441,8 @@ impl Request {
     /// `zend_hash_add_empty_element(&EG(included_files), opened_path)`,
     /// whose `opened_path` is the string a request-only compile names its
     /// op arrays' `filename` by, so a unit the request compiled for itself
-    /// lends the table its file's name and the path costs no string more.
+    /// lends the table its file's name and the path costs no string more;
+    /// a path is the bytes of no other name a unit holds.
     fn note_compiled_file(&mut self, path: &[u8], unit: &PublishedUnit) -> Result<(), Thrown> {
         let own = (self.unit_strings).file_of(PublishedUnit::as_ptr(unit), path);
         match own.filter(|_| !self.included_files.contains(path)) {

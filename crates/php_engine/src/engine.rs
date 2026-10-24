@@ -1852,11 +1852,11 @@ impl Shared {
                 let refused = CompileRefused::published(error, |unit| {
                     let unit = req.take_unit(unit);
                     req.hold_compiled(&unit);
-                    // An `eval`'s names, made as php's compile made them;
-                    // the memory limit refusing them ends the request.
-                    if matches!(kind, SourceKind::Eval(_)) {
-                        req.hold_unit_names(&unit, kind).ok();
-                    }
+                    // Its names, made as php's compile made them, an
+                    // `eval`'s and a file's alike, as `note_compiled`
+                    // makes a whole unit's; the memory limit refusing them
+                    // ends the request.
+                    req.hold_unit_names(&unit, kind).ok();
                     unit
                 });
                 if refused.declared.is_none() {
