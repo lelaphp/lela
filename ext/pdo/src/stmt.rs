@@ -218,6 +218,10 @@ pub(crate) struct StmtState {
     pub(crate) executed: bool,
     /// `stmt->in_fetch`.
     pub(crate) in_fetch: bool,
+    /// `stmt->in_param_event`: the connector's hook running over the
+    /// bound entries ([`dispatch`]), which a start, a bind and a cursor's
+    /// close refuse to change under it ([`refuse_in_param_event`]).
+    in_param_event: bool,
     placeholders: Option<Placeholders>,
     /// `stmt->bound_params`, `None` until the first is registered.
     pub(crate) params: Option<BoundTable>,
@@ -806,10 +810,61 @@ pub(super) fn describe_columns(req: &mut Request, object: PhpObject) -> Result<b
     Ok(true)
 }
 
+/// `pdo_stmt_disallow_reentrant_param_event`: php's `Error` where the
+/// connector's hook is running over the bound entries, which PHP code it
+/// runs (a value's `__toString`) would otherwise change under it.
+///
+/// ```php
+/// class Hook { function __construct(public $s, public $f) {} function __toString(): string {
+///     try { ($this->f)($this->s); echo "no error\n"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+///     return 'v';
+/// } }
+/// $db = new PDO('sqlite::memory:');
+/// foreach ([fn ($s) => $s->bindValue(2, 'x'), fn ($s) => $s->bindParam(2, $x), fn ($s) => $s->execute(), fn ($s) => $s->closeCursor()] as $f) {
+///     $s = $db->prepare('SELECT ?, ?');
+///     $p = 'p'; $q = 'q';
+///     $s->bindParam(1, $p); $s->bindParam(2, $q);
+///     $p = new Hook($s, $f);
+///     var_dump($s->execute(), $s->fetch(PDO::FETCH_NUM)[0]);
+/// }
+/// ```
+/// ```expect
+/// Cannot modify a PDOStatement while parameter hooks are running
+/// bool(true)
+/// string(1) "v"
+/// Cannot modify a PDOStatement while parameter hooks are running
+/// bool(true)
+/// string(1) "v"
+/// Cannot modify a PDOStatement while parameter hooks are running
+/// bool(true)
+/// string(1) "v"
+/// Cannot modify a PDOStatement while parameter hooks are running
+/// bool(true)
+/// string(1) "v"
+/// ```
+pub(super) fn refuse_in_param_event(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    if read(req, object, |s| s.in_param_event).unwrap_or(false) {
+        let text = "Cannot modify a PDOStatement while parameter hooks are running";
+        return Err(throw_error(req, "Error", text));
+    }
+    Ok(())
+}
+
 /// `dispatch_param_event`: the callback served on every bound parameter and
-/// then every bound column; `false` at the first it refused, its error
-/// recorded.
+/// then every bound column, `stmt->in_param_event` standing meanwhile;
+/// `false` at the first it refused, its error recorded.
 pub(super) fn dispatch(
+    req: &mut Request,
+    object: PhpObject,
+    event: BindEvent,
+) -> Result<bool, Thrown> {
+    write(req, object, |s| s.in_param_event = true);
+    let dispatched = dispatch_entries(req, object, event);
+    write(req, object, |s| s.in_param_event = false);
+    dispatched
+}
+
+fn dispatch_entries(
     req: &mut Request,
     object: PhpObject,
     event: BindEvent,
@@ -1132,6 +1187,7 @@ fn bind(
     } = asked;
     let ty = BindType::of(ty);
     let (stmt, _) = this_stmt(req, stmt)?;
+    refuse_in_param_event(req, stmt)?;
     let (name, position) = if let Union::A(name) = key {
         if name.is_empty() {
             return Err(argument_error(req, "ValueError", 1, "must not be empty"));
@@ -1380,6 +1436,7 @@ impl PDOStatement {
     #[php(tentative)]
     fn closeCursor(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (stmt, _) = this_stmt(req, this.object())?;
+        refuse_in_param_event(req, stmt)?;
         clear_error(req, stmt);
         match on_driver(req, stmt, |req, driver| driver.close_cursor(req))? {
             Ok(Some(())) => {}
@@ -1567,6 +1624,7 @@ impl PDOStatement {
     ) -> Result<bool, Thrown> {
         let input = params;
         let (stmt, dbh) = this_stmt(req, this.object())?;
+        refuse_in_param_event(req, stmt)?;
         clear_error(req, stmt);
         if let Some(input) = input {
             if let Some(old) = write(req, stmt, |s| s.params.take()).flatten() {
