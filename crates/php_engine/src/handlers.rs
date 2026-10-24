@@ -8050,6 +8050,22 @@ pub(crate) fn fetch_static_prop_w<T: Tier>(
 /// }
 /// Typed static property C::$t must not be accessed before initialization
 /// ```
+///
+/// The fetch takes no owner of what the slot holds, so a compound step
+/// over an element offers the static property's array to no collector:
+///
+/// ```php
+/// class C { public static $s = []; }
+/// C::$s['k'] = [];
+/// C::$s['k'] += ['m' => 1];
+/// C::$s['n'] = 1;
+/// C::$s['n'] += 2;
+/// var_dump(gc_status()['roots'], C::$s['n']);
+/// ```
+/// ```expect
+/// int(0)
+/// int(3)
+/// ```
 pub(crate) fn fetch_static_prop_rw<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -8106,9 +8122,11 @@ fn static_prop_place(
         }
         Err(thrown) => return threw(req, frame, &thrown),
     };
+    // The read is the refusal's alone, so the owner it took, which php's
+    // fetch never takes, is given up offering no root.
     if rw {
         match req.static_value(info, PropertyRead::Warning) {
-            Ok(held) => req.release(held),
+            Ok(held) => req.release_nogc(held),
             Err(thrown) => return threw(req, frame, &thrown),
         }
     }
