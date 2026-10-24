@@ -23,13 +23,14 @@
 
 use std::fmt::{self, Write as _};
 
+use php_engine::tier;
 use php_heap::ZvalType;
 
 use crate::record::func_name as func;
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
-    Landing, Layout, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store, Stored,
-    TraceIr, Types, Unwind, ValueId,
+    Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store,
+    Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -366,6 +367,13 @@ fn check(check: Check) -> String {
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
         Check::Arm { opline } => format!("arm {:04}", opline.0),
         Check::Room { bytes } => format!("room {bytes}"),
+        Check::Class { object, class } => {
+            let of = match object {
+                Object::This(frame) => format!("f{}.this", frame.0),
+                Object::Value(value) => format!("#{}", value.0),
+            };
+            format!("{of} class {}", tier::class_number(class))
+        }
     }
 }
 
@@ -375,6 +383,7 @@ fn check(check: Check) -> String {
 fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
     let (value, owners) = match imm {
         Imm::Make { .. } => return write!(text, " in-place"),
+        Imm::Property { slot, .. } => return write!(text, " slot {slot}"),
         Imm::Leave { value, owners } => (value, owners),
         _ => return Ok(()),
     };

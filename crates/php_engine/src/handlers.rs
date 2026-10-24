@@ -9747,8 +9747,8 @@ impl FetchFlag {
 
 /// `ZEND_FETCH_REF` and `ZEND_FETCH_DIM_WRITE`
 /// (`Z/Zend/zend_compile.h:1089-1096`).
-const FETCH_REF: u32 = 1;
-const FETCH_DIM_WRITE: u32 = 2;
+pub(crate) const FETCH_REF: u32 = 1;
+pub(crate) const FETCH_DIM_WRITE: u32 = 2;
 /// `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
 const MAY_BE_ARRAY: u32 = 1 << 7;
 
