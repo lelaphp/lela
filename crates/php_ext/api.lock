@@ -502,6 +502,7 @@ raising::arg_count_error
 raising::arg_null_deprecated
 raising::arg_type_error
 raising::arg_value_error
+raising::argument_count_error
 raising::argument_error
 raising::arity
 raising::call_stack_end
@@ -530,7 +531,9 @@ raising::throw_error
 raising::throw_error_chained
 raising::throw_value
 raising::throwing_warnings
+raising::type_error
 raising::uncaught_at
+raising::value_error
 raising::warning
 raising::while_pending
 request::Allocation

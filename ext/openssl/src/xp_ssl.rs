@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, callable_name, to_long, truthy, with_string};
-use php_ext::raising::{Level, Thrown, docref, leave_pending, raise, throw_error};
+use php_ext::raising::{Level, Thrown, docref, leave_pending, raise, throw_error, value_error};
 use php_ext::request::{
     Crypto, CryptoSocket, Handshake, OwnedStream as _, Readiness, Request, Stream, StreamCtx,
     Streams as _, XportFactory,
@@ -607,7 +607,7 @@ fn url_name(
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
             req.frames().active_function_name()
         );
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     };
     let Some(uri) = parser.parse(req, target)? else {
         return Ok(None);

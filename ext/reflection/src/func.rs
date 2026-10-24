@@ -2084,8 +2084,8 @@ impl ReflectionMethod {
     /// pk(function () { try { ReflectionMethod::createFromMethodName('a'); } catch (ReflectionException $e) {} });
     /// ```
     /// ```expect
-    /// 3120 32
-    /// 3016 0
+    /// 2992 32
+    /// 2888 0
     /// ```
     #[php(arity = manual)]
     fn __construct(

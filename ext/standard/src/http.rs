@@ -43,7 +43,7 @@ use php_ext::abi::{Raw, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Thrown, arg_type_error, throw_error, warning};
+use php_ext::raising::{Thrown, arg_type_error, throw_error, value_error, warning};
 use php_ext::request::{BodyLimits, Ini, Request};
 use php_ext::values::walk;
 use php_ext::values::walk::Hold;
@@ -141,18 +141,13 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
         let value = row.value().deref();
         let key = match key {
             Key::Int(_) => {
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    "Invalid integer key in $options argument",
-                ));
+                return Err(value_error(req, "Invalid integer key in $options argument"));
             }
             Key::Str(key) => key,
         };
         if key.is_empty() {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 "Invalid empty string key in $options argument",
             ));
         }
@@ -161,7 +156,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
                 "Invalid key \"{}\" in $options argument",
                 String::from_utf8_lossy(key.as_bytes())
             );
-            return Err(throw_error(req, "ValueError", &text));
+            return Err(value_error(req, &text));
         };
         let value = value.deref();
         let quantity = match value.as_ref() {
@@ -178,7 +173,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
                     "Invalid {} value in $options argument",
                     value_name(req, &value)
                 );
-                return Err(throw_error(req, "ValueError", &text));
+                return Err(value_error(req, &text));
             }
         };
         limits.push((limit, quantity));
@@ -226,9 +221,8 @@ impl Query<'_> {
                     .class_decl(object.class())
                     .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
                     .unwrap_or_default();
-                return Err(throw_error(
+                return Err(value_error(
                     req,
-                    "ValueError",
                     &format!("Unbacked enum {name} cannot be converted to a string"),
                 ));
             }

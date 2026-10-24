@@ -1920,7 +1920,7 @@ impl DateTime {
     /// $m = memory_get_usage(); $d = DateTime::createFromTimestamp(1); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect
-    /// 3120 32
+    /// 3056 32
     /// 304
     /// ```
     #[php(tentative)]
@@ -2172,7 +2172,7 @@ impl DateTime {
     /// $tz = new DateTimeZone('+01:00'); $m = memory_get_usage(); $d = new DateTime('now', $tz); $e = new DateTime('@1'); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect
-    /// 3328 32
+    /// 3200 32
     /// 624
     /// ```
     fn setMicrosecond(

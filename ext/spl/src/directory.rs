@@ -19,7 +19,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{Function, autoload, call_method, instantiate, lookup_class, new_object};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throw_error};
+use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throw_error, type_error};
 use php_ext::request::{OwnedStream, Request, Stream, Streams as _, Whence};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
@@ -2844,9 +2844,8 @@ fn read_line_ex(req: &mut Request, this: PhpObject, silent: bool) -> Result<bool
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
             let name = php_ext::coerce::value_name(req, &answered);
             answered.give_up(req);
-            return Err(throw_error(
+            return Err(type_error(
                 req,
-                "TypeError",
                 &format!(
                     "{class}::getCurrentLine(): Return value must be of type string, {name} returned"
                 ),

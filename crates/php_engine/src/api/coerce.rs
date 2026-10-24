@@ -341,7 +341,12 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
                 }
                 _ => None,
             };
-            let thrown = crate::api::raising::throw_over_pending(req, "Error", &message);
+            let thrown = crate::api::raising::throw_over_pending(
+                req,
+                crate::api::raising::Printing::Twice,
+                "Error",
+                &message,
+            );
             if let Some(made) = made {
                 made.give_up(req);
             }

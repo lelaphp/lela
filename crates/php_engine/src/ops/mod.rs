@@ -2175,7 +2175,12 @@ pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Va
     let (a, b) = longs(req, "%", left, right)?;
     match inline::remainder(a, b) {
         Some(n) => Ok(Value::int(n)),
-        None => Err(throw(req, "DivisionByZeroError", "Modulo by zero")),
+        // `zend_throw_exception_ex` (`Z/Zend/zend_operators.c:1550`).
+        None => Err(crate::api::raising::throw_formatted(
+            req,
+            "DivisionByZeroError",
+            "Modulo by zero",
+        )),
     }
 }
 

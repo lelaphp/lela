@@ -19,7 +19,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_members, new_object};
 use php_ext::coerce::{compare, identical, truthy, value_name};
-use php_ext::raising::{Thrown, throw, throw_error};
+use php_ext::raising::{Thrown, throw, type_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -1379,9 +1379,8 @@ fn hashed(
     let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
     let name = value_name(req, &answered);
     answered.give_up(req);
-    Err(throw_error(
+    Err(type_error(
         req,
-        "TypeError",
         &format!("{class}::getHash(): Return value must be of type string, {name} returned"),
     ))
 }
@@ -1653,9 +1652,8 @@ impl ObjectHandlers for Handlers {
                     && !crate::is_a(req, target.class(), b"Iterator")
                 {
                     value.give_up(req);
-                    return Err(throw_error(
+                    return Err(type_error(
                         req,
-                        "TypeError",
                         "Can only attach objects that implement the Iterator interface",
                     ));
                 }

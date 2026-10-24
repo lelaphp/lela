@@ -9,7 +9,7 @@ use php_ext::abi::{Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{BinaryOp, binary_op, coerce_param, is_space};
 use php_ext::decl::Type;
-use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
@@ -1081,9 +1081,8 @@ fn value_to_base(req: &mut Request, value: Number, base: u32) -> Result<Vec<u8>,
     if let Union::B(f) = value {
         let mut fvalue = f.floor();
         if fvalue.is_infinite() {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 &format!("An infinite value cannot be converted to base {base}"),
             ));
         }

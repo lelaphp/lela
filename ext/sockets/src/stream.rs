@@ -9,7 +9,7 @@ use std::os::fd::AsRawFd;
 
 use php_ext::abi::{Instance, OrFalse, Untyped};
 use php_ext::attr::php_function;
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, type_error};
 use php_ext::request::{Cast, FdStream, Request, Stream, StreamOption, Streams as _};
 use php_ext::values::{Owner, Resource, Value};
 
@@ -53,9 +53,8 @@ fn socket_import_stream(
     stream: Resource,
 ) -> Result<OrFalse<Owner<Instance<Socket>>>, Thrown> {
     let Some(stream) = Stream::from_value(req, &Value::resource(stream)) else {
-        return Err(throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             "socket_import_stream(): supplied resource is not a valid stream resource",
         ));
     };

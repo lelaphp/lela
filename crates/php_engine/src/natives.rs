@@ -955,7 +955,7 @@ fn strlen(string: PhpString) -> i64 {
 /// pk(function () { try { define('A::B', 1); } catch (ValueError $e) {} });
 /// ```
 /// ```expect
-/// 2920 32
+/// 2792 32
 /// ```
 ///
 /// The constant is listed under its name as given and found whatever

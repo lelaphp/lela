@@ -229,7 +229,7 @@ fn enum_backing(req: &Request, v: &Value) -> Option<EnumBacking> {
 /// `State::pending` for the message's maker to hand on once the message
 /// is made, as php's caller meets `EG(exception)`.
 fn left_pending(req: &mut Request, msg: &str) {
-    let thrown = php_ext::raising::throw_error(req, "ValueError", msg);
+    let thrown = php_ext::raising::value_error(req, msg);
     let earlier = req.state::<crate::State>().pending.take();
     let now = match earlier {
         Some(e) => e.chain(req, thrown),

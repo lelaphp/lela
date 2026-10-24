@@ -11,7 +11,9 @@ use php_ext::abi::{ClassUnserialize, CloneObj, DebugInfo, Instance, ObjectHandle
 use php_ext::attr::php_class;
 use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::coerce::{BinaryOp, numeric_string, to_long, type_name, value_name};
-use php_ext::raising::{Thrown, deprecated, fatal, throw, throw_chained, throw_error};
+use php_ext::raising::{
+    Thrown, deprecated, fatal, throw, throw_chained, throw_error, type_error, value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
@@ -225,7 +227,7 @@ fn operator_operand(req: &mut Request, value: &Value, position: u32) -> Result<M
     }
     let given = value_name(req, &value.deref());
     let text = format!("Number must be of type GMP|string|int, {given} given");
-    Err(throw_error(req, "TypeError", &text))
+    Err(type_error(req, &text))
 }
 
 /// `binop_operator_helper`: both operands, the divisor of a division or
@@ -255,7 +257,7 @@ fn unsupported(req: &mut Request, op: BinaryOp, left: &Value, right: &Value) -> 
     };
     let (l, r) = (type_name(req, left), type_name(req, right));
     let text = format!("Unsupported operand types: {l} {sigil} {r}");
-    throw_error(req, "TypeError", &text)
+    type_error(req, &text)
 }
 
 /// `shift_operator_helper`: `**`, `<<` and `>>`, whose right operand is
@@ -268,11 +270,7 @@ fn shift(req: &mut Request, op: BinaryOp, left: &Value, right: &Value) -> Result
         ValueRef::Str(text) => match numeric_string(text.as_bytes()).and_then(|v| v.as_int()) {
             Some(n) => n,
             None => {
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    "Number is not an integer string",
-                ));
+                return Err(value_error(req, "Number is not an integer string"));
             }
         },
         _ => return Err(unsupported(req, op, left, right)),
@@ -284,7 +282,7 @@ fn shift(req: &mut Request, op: BinaryOp, left: &Value, right: &Value) -> Result
             "Shift"
         };
         let text = format!("{what} must be greater than or equal to 0");
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     };
     let Some(a) = operand(req, left, 1, true)? else {
         return Err(unsupported(req, op, left, right));

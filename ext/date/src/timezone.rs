@@ -176,8 +176,8 @@ fn set_zone(req: &mut Request, object: PhpObject, kind: TzKind) -> Result<(), Th
 /// ```expect
 /// 2360 2392
 /// 104 80
-/// 1624 456
-/// 1248 0
+/// 1656 472
+/// 1280 0
 /// ```
 #[php_function]
 fn timezone_open(

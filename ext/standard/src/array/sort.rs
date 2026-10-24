@@ -867,7 +867,7 @@ fn array_multisort(
     #[php(prefer_ref)] array: Ref<Untyped<Value>>,
     #[php(prefer_ref)] rest: Variadic<Ref<Untyped<Value>>>,
 ) -> Result<True, Thrown> {
-    use php_ext::raising::{arg_type_error, throw_error};
+    use php_ext::raising::{arg_type_error, value_error};
     let given: Vec<Ref<Untyped<Value>>> = std::iter::once(array).chain(rest).collect();
     // Each array with the cell it came in, and the comparison each array
     // is sorted by, `(flags, descending)`.
@@ -933,11 +933,7 @@ fn array_multisort(
     };
     let size = first.len();
     if arrays.iter().any(|(array, _)| array.len() != size) {
-        return Err(throw_error(
-            req,
-            "ValueError",
-            "Array sizes are inconsistent",
-        ));
+        return Err(value_error(req, "Array sizes are inconsistent"));
     }
     if size < 1 {
         return Ok(True);

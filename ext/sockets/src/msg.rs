@@ -3,7 +3,7 @@
 
 use php_ext::abi::{Instance, OrFalse, Ref};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray};
 
@@ -210,7 +210,7 @@ fn socket_cmsg_space(
     }
     let Some(entry) = Ancillary::of(level, ty) else {
         let text = format!("Pair level {level} and/or type {ty} is not supported");
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     };
     let n = usize::try_from(num).unwrap_or(0);
     let size = entry.size() + n * entry.element();

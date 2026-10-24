@@ -55,6 +55,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_string, truthy};
 use php_ext::raising::{
     Level, Thrown, argument_error, deprecated, fatal, new_throwable, throw_error, throw_value,
+    type_error,
 };
 use php_ext::request::{MAXPATHLEN, Request};
 use php_ext::values::walk;
@@ -2061,9 +2062,8 @@ fn coerce_property(
         } else {
             String::from(given)
         };
-        throw_error(
+        type_error(
             req,
-            "TypeError",
             &format!("Cannot assign {given} to property {class}::${prop} of type {shown}"),
         )
     };

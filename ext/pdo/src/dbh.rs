@@ -14,7 +14,8 @@ use php_ext::call::{Function, autoload, known_method, lookup_class, new_object};
 use php_ext::coerce::{c_str, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{
-    Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings,
+    Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings, type_error,
+    value_error,
 };
 use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
@@ -1036,9 +1037,8 @@ fn attribute_set(
                 ValueRef::Int(n) => n != 0,
                 _ => {
                     let given = value_name(req, value);
-                    return Err(throw_error(
+                    return Err(type_error(
                         req,
-                        "TypeError",
                         &format!(
                             "Attribute value must be of type bool for selected attribute, {given} given"
                         ),
@@ -1185,7 +1185,7 @@ pub(super) fn statement_class(
 ) -> Result<(ClassId, Option<PhpArray>), Thrown> {
     let type_error = |req: &mut Request, tail: &str| match arg {
         Some(at) => argument_error(req, "TypeError", at, tail),
-        None => throw_error(req, "TypeError", tail),
+        None => type_error(req, tail),
     };
     let Some(array) = value.as_array() else {
         let given = value_name(req, value);
@@ -1198,7 +1198,7 @@ pub(super) fn statement_class(
         let tail = "PDO::ATTR_STATEMENT_CLASS value must be an array with the format array(classname, constructor_args)";
         return Err(match arg {
             Some(at) => argument_error(req, "ValueError", at, tail),
-            None => throw_error(req, "ValueError", tail),
+            None => value_error(req, tail),
         });
     };
     let class = match first.deref().as_str_bytes().map(<[u8]>::to_vec) {

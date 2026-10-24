@@ -30,6 +30,7 @@ use php_ext::call::{autoload, new_object};
 use php_ext::coerce::{truthy, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, pending, throw_error,
+    value_error,
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -275,7 +276,7 @@ impl ObjectHandlers for Handlers {
             Std.write_property(req, object, again, Owner::int(old))?;
             let class = class_name(req, object.class());
             let message = format!("{class}::${shown} must be greater than or equal to 0");
-            return Err(throw_error(req, "ValueError", &message));
+            return Err(value_error(req, &message));
         }
         again.give_up(req);
         Ok(())

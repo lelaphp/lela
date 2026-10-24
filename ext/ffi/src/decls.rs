@@ -867,7 +867,7 @@ fn made_cdata(req: &mut Request, data: Data) -> Result<Owner<Instance<CData>>, T
 /// unlink($h);
 /// ```
 /// ```expect
-/// 4720
+/// 4560
 /// Failed loading '/tmp/ffi-%d.h' / ')' expected, got ';' at line 1
 /// ```
 fn load(req: &mut Request, filename: &[u8]) -> Result<Owner<Instance<FFI>>, Thrown> {

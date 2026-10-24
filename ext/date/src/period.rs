@@ -5,7 +5,7 @@
 use php_ext::abi::{Instance, IteratorElement, Passed, Raw, Static, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{internal_iterator, new_object};
-use php_ext::raising::{Thrown, deprecated, throw, throw_error};
+use php_ext::raising::{Thrown, deprecated, throw, throw_error, type_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -674,9 +674,8 @@ impl DatePeriod {
                 period.start_ce = Some(class_id(req, "DateTime")?);
                 (options, iso.recurrences)
             } else {
-                return Err(throw_error(
+                return Err(type_error(
                     req,
-                    "TypeError",
                     "DatePeriod::__construct() accepts (DateTimeInterface, DateInterval, int [, int]), or (DateTimeInterface, DateInterval, DateTime [, int]), or (string [, int]) as arguments",
                 ));
             };

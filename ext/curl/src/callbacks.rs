@@ -289,12 +289,12 @@ pub(crate) fn prereq(
             n as c_int
         }
         ValueRef::Int(_) => {
-            let thrown = throw_error(cx.req, "ValueError", text);
+            let thrown = php_ext::raising::value_error(cx.req, text);
             cx.raise(thrown);
             0
         }
         _ => {
-            let thrown = throw_error(cx.req, "TypeError", text);
+            let thrown = php_ext::raising::type_error(cx.req, text);
             cx.raise(thrown);
             0
         }

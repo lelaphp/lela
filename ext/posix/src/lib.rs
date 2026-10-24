@@ -46,7 +46,7 @@ use php_ext::coerce::{coerce_param, to_long, value_name};
 use php_ext::decl::Type;
 use php_ext::process;
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, argument_error, clear, docref, throw_error,
+    Level, Thrown, arg_type_error, arg_value_error, argument_error, clear, docref, type_error,
 };
 use php_ext::request::{Cast, Request, Resolve, Stream};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
@@ -762,9 +762,8 @@ fn fd_of(req: &mut Request, given: &Value, reader: FdReader) -> Result<Option<i3
     let fd = if let ValueRef::Resource(_) = given.as_ref() {
         let Some(stream) = Stream::from_value(req, &given) else {
             let name = req.frames().active_function_name();
-            return Err(throw_error(
+            return Err(type_error(
                 req,
-                "TypeError",
                 &format!("{name}(): supplied resource is not a valid stream resource"),
             ));
         };

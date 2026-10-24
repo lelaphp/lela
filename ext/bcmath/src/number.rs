@@ -498,9 +498,8 @@ impl Number {
             None => expanded(req, base.scale)?,
         };
         let Some(mut root) = num::sqrt(&base.num, scale) else {
-            return Err(throw_error(
+            return Err(php_ext::raising::value_error(
                 req,
-                "ValueError",
                 "Base number must be greater than or equal to 0",
             ));
         };
@@ -969,7 +968,7 @@ fn expanded(req: &mut Request, scale: usize) -> Result<usize, Thrown> {
 
 /// php's `ValueError` for a computed scale wider than `INT_MAX`.
 fn too_large_scale(req: &mut Request) -> Thrown {
-    throw_error(req, "ValueError", "scale of the result is too large")
+    php_ext::raising::value_error(req, "scale of the result is too large")
 }
 
 /// The expanded scale given back down to the digits the quotient, root
@@ -1055,7 +1054,7 @@ fn power(
     site: Site,
 ) -> Result<Decimal, Thrown> {
     let refuse = |req: &mut Request, tail: &str| match site {
-        Site::Operator => throw_error(req, "ValueError", tail),
+        Site::Operator => php_ext::raising::value_error(req, tail),
         Site::Method => value_error(req, 1, tail),
     };
     if exponent.num.scale() != 0 {
@@ -1358,17 +1357,17 @@ impl ObjectHandlers for Handlers {
             (Ok(None), _) | (_, Ok(None)) => return Ok(None),
             (Err(Unreadable), _) => {
                 let text = format!("Left string operand cannot be converted to {CLASS}");
-                return Err(throw_error(req, "ValueError", &text));
+                return Err(php_ext::raising::value_error(req, &text));
             }
             (_, Err(Unreadable)) => {
                 let text = format!("Right string operand cannot be converted to {CLASS}");
-                return Err(throw_error(req, "ValueError", &text));
+                return Err(php_ext::raising::value_error(req, &text));
             }
             (Ok(Some(n1)), Ok(Some(n2))) => (n1, n2),
         };
         if n1.scale > INT_MAX || n2.scale > INT_MAX {
             let text = format!("scale must be between 0 and {INT_MAX}");
-            return Err(throw_error(req, "ValueError", &text));
+            return Err(php_ext::raising::value_error(req, &text));
         }
         let result = calc(req, calc_op, &n1, &n2, ScaleOf::Auto, Site::Operator)?;
         Ok(Some(made(req, result)?.into_value()))
@@ -1405,7 +1404,7 @@ impl ObjectHandlers for Handlers {
         };
         if n1.scale > INT_MAX || n2.scale > INT_MAX {
             let text = format!("scale must be between 0 and {INT_MAX}");
-            return Err(throw_error(req, "ValueError", &text));
+            return Err(php_ext::raising::value_error(req, &text));
         }
         let scale = n1.num.scale().max(n2.num.scale());
         Ok(Some(num::compare(&n1.num, &n2.num, scale)))

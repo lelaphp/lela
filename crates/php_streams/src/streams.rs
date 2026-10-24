@@ -35,7 +35,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use crate::api::values::{Emalloc, Owner, ResourceType};
 
 use crate::api::layer::{Face as _, TemporaryGuard};
-use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
+use crate::api::raising::{Level, Thrown, raise, value_error, warning};
 use crate::api::request::{
     Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Ini, Notification,
     OptionAnswer, OwnedStream, Request, Standard, Stream, StreamCtx, StreamOption, Whence,
@@ -3922,7 +3922,7 @@ impl StreamLayer for Request {
         options: OpenOptions,
     ) -> Result<Option<OpenedNamed>, Thrown> {
         if path.is_empty() {
-            return Err(throw_error(self, "ValueError", "Path must not be empty"));
+            return Err(value_error(self, "Path must not be empty"));
         }
         let mut resolved = None;
         if options.use_path {

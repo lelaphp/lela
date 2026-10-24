@@ -9,7 +9,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{numeric_string, to_long};
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, throw_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{DtdTable, Kind, Node};
@@ -662,11 +662,7 @@ impl ObjectHandlers for MapHandlers {
             Ok(index) if is_list => item(req, object, index),
             Ok(index) => {
                 if !(0..=i64::from(i32::MAX)).contains(&index) {
-                    return Err(throw_error(
-                        req,
-                        "ValueError",
-                        "must be between 0 and 2147483647",
-                    ));
+                    return Err(value_error(req, "must be between 0 and 2147483647"));
                 }
                 item(req, object, index)
             }

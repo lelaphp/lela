@@ -22,7 +22,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use php_ext::call::lookup_class;
-use php_ext::raising::throw_error;
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Owner, PhpObject, PhpRef, PhpString, Value, ValueRef, walk};
 use php_ext_libxml::ffi::{Kind, Library, Node, Ns};
@@ -264,7 +263,7 @@ pub(super) fn class_name(req: &Request, o: PhpObject) -> Vec<u8> {
 
 /// `zend_value_error`.
 pub(super) fn value_error(req: &mut Request, msg: &str) -> Error {
-    Error::Thrown(throw_error(req, "ValueError", msg))
+    Error::Thrown(php_ext::raising::value_error(req, msg))
 }
 
 /// `(int)` of a `zend_long`, as php's `int` locals take one.
