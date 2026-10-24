@@ -339,6 +339,7 @@ impl Heap {
     /// where its fatal stands. Anything but [`DelayedOom::None`] is
     /// `ZEND_HAS_OOM()`.
     #[must_use]
+    #[inline]
     pub fn delayed_oom(&self) -> &DelayedOom {
         self.mm.delayed()
     }
@@ -346,8 +347,9 @@ impl Heap {
     /// `ZEND_HAS_OOM()` (`Z/Zend/zend_alloc.h:63`): the limit was met in
     /// this request and `php_request_shutdown` has not begun.
     #[must_use]
+    #[inline]
     pub fn has_oom(&self) -> bool {
-        *self.mm.delayed() != DelayedOom::None
+        !matches!(self.mm.delayed(), DelayedOom::None)
     }
 
     /// The word the heap raises as it records a delayed OOM, php's

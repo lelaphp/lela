@@ -477,6 +477,7 @@ impl Mm {
     }
 
     /// php's `EG(delayed_oom)`.
+    #[inline]
     pub(crate) fn delayed(&self) -> &DelayedOom {
         &self.delayed
     }

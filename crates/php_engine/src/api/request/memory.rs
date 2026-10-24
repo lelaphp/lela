@@ -1154,6 +1154,19 @@ impl Request {
 }
 
 impl Memory<&Request> {
+    /// `ZEND_HAS_OOM()` (`Z/Zend/zend_alloc.h:63` at 8.5.12): whether the
+    /// memory limit was met in this request, its fatal pending or being
+    /// raised, until `php_request_shutdown` begins. php 8.5.12's natives
+    /// read it to stop a loop whose allocations were served past the
+    /// limit, as `RETURN_OOM` stops a fallible one, and leave the fatal
+    /// to the interrupt check after the call. One load of the heap's
+    /// state.
+    #[must_use]
+    #[inline]
+    pub fn has_oom(self) -> bool {
+        self.0.has_oom()
+    }
+
     /// `memory_get_usage()`.
     #[must_use]
     pub fn usage(self, real: bool) -> usize {

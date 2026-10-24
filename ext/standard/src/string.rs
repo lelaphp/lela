@@ -1477,16 +1477,21 @@ fn ltrim(
 ///
 /// Where the break is longer than a byte or long words are cut, php asks
 /// for the longest the text can grow to before it scans a byte, and the
-/// memory limit is met there, whatever the text turns out to be.
+/// memory limit is met there, whatever the text turns out to be. Since
+/// 8.5.12 the ask is fallible: past the soft limit it is refused, never
+/// held to the hard one, and the limit's fatal is raised as the call
+/// returns, so nothing after it on its line runs. A break that ends the
+/// text is the text's own since 8.5.12, as it is anywhere else.
 ///
 /// ```php
-/// var_dump(wordwrap("ab cd", 1, "--"));
-/// wordwrap(str_repeat("x", 65534), 1, str_repeat("x", 65535));
+/// var_dump(wordwrap("ab cd", 1, "--"), wordwrap("abcdef--", 3, "--", true));
+/// echo wordwrap(str_repeat("x", 65534), 1, str_repeat("x", 65535)), "unreached\n";
 /// ```
 /// ```expect exit=255
 /// string(6) "ab--cd"
+/// string(10) "abc--def--"
 ///
-/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 4294901785 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 4294918144 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn wordwrap(
@@ -1533,23 +1538,32 @@ fn wordwrap(
                 laststart = lastspace + 1;
             }
         }
-        return PhpString::new(req, &out);
+        // `zend_string_finit(..., fallible: true)`.
+        return fallibly(req, |req| PhpString::new(req, &out));
     }
     // "Multiple character line break or forced cut": php asks for the
-    // longest the text can grow to, `zend_string_safe_alloc`, before a
-    // byte is scanned, so that is where the memory limit is met.
+    // longest the text can grow to, `zend_string_safe_falloc`, fallibly,
+    // before a byte is scanned, so that is where the memory limit is met:
+    // past it the ask is refused and `wordwrap` returns (`RETURN_OOM`).
     let (chunks, each, over) = match usize::try_from(linelength) {
         Ok(width) if width > 0 => (text.len() / width + 1, brk.len(), text.len()),
         _ => (text.len(), brk.len() + 1, 0),
     };
-    let charge = PhpString::product(req, chunks, each, over, |_| {})?;
+    let charged = req
+        .memory_mut()
+        .fallible(|req| PhpString::product(req, chunks, each, over, |_| {}))?;
+    let Some(charge) = charged else {
+        return PhpString::new(req, b"");
+    };
     charge.give_up(req);
     let mut out: Vec<u8> = Vec::with_capacity(text.len() + brk.len());
     let (mut laststart, mut lastspace) = (0usize, 0usize);
     let mut current = 0usize;
     while current < text.len() {
         let c = text[current];
-        if c == brk[0] && current + brk.len() < text.len() && text[current..].starts_with(brk) {
+        // `current + breakchar_len <= ZSTR_LEN(text)` at 8.5.12: a break
+        // that ends the text is the text's own.
+        if c == brk[0] && current + brk.len() <= text.len() && text[current..].starts_with(brk) {
             out.extend_from_slice(&text[laststart..current + brk.len()]);
             current += brk.len() - 1;
             laststart = current + 1;
@@ -1577,7 +1591,22 @@ fn wordwrap(
     if laststart != current {
         out.extend_from_slice(&text[laststart.min(current)..current]);
     }
-    PhpString::new(req, &out)
+    // `zend_string_ftruncate(..., fallible: true)`.
+    fallibly(req, |req| PhpString::new(req, &out))
+}
+
+/// A string asked for fallibly, php 8.5.12's `zend_string_finit` and its
+/// kin: the string, or `""` where the memory limit refused it, which the
+/// native returns as `RETURN_OOM` returns, the limit's fatal raised at
+/// the interrupt check after the call.
+fn fallibly(
+    req: &mut Request,
+    ask: impl FnOnce(&mut Request) -> Result<Owner<PhpString>, Thrown>,
+) -> Result<Owner<PhpString>, Thrown> {
+    match req.memory_mut().fallible(ask)? {
+        Some(made) => Ok(made),
+        None => PhpString::new(req, b""),
+    }
 }
 
 /// `explode(string $separator, string $string, int $limit =
