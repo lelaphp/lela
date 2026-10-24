@@ -221,7 +221,8 @@ fn a_loop_by_recursive_return_takes_no_interrupt_test() -> Result<(), String> {
     Ok(())
 }
 
-/// A `foreach` over a packed array writes its key as a long, as php's
+/// A `foreach` over a packed array is fetched inline, as php's
+/// `zend_jit_fe_fetch` compiles it, and writes its key as a long, as php's
 /// inference types what `FE_FETCH_R` writes from the array's layout, so
 /// no guard holds it; the exit its end takes knows nothing of it, as
 /// php's stack map types what an op writes only once the op's exits are
@@ -236,10 +237,13 @@ fn a_packed_arrays_key_is_a_long_no_guard_holds() -> Result<(), String> {
         "function f($a) { $s = 0; foreach ($a as $k => $v) { $s += $k; } return $s; }
         echo f([1, 2, 3, 4, 5, 6, 7, 8, 9]), \"\\n\";",
     )?;
-    let at = stepped(&ir, Opcode::FeFetchR)?;
-    let Some(Op::Line(fetch)) = ir.ops.get(at.index()) else {
-        return Err("no FE_FETCH_R".to_owned());
-    };
+    let fetch = (ir.ops.iter())
+        .find_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::FeFetchR => Some(line),
+            _ => None,
+        })
+        .ok_or("no FE_FETCH_R")?;
+    assert_eq!(fetch.form, Form::Inline, "{}", dump::render(&ir));
     let key = fetch.out.ok_or("FE_FETCH_R writes no key")?;
     assert_eq!(ir.values[key.0 as usize].types, Types::LONG);
     let on_key = (ir.guards.iter()).any(|guard| {

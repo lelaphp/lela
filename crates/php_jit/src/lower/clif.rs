@@ -80,6 +80,8 @@ const KIND: i64 = 0xff;
 const _: () = assert!(Zval::FLAGS_AT == Zval::TYPE_AT + 1);
 /// A slot, `sizeof(zval)`.
 const SLOT: i64 = 16;
+/// A `foreach` iterator's position in its slot, php's `Z_FE_POS`.
+const FE_POS_AT: i32 = imm(Zval::FE_POS_AT);
 const _: () = assert!(size_of::<Zval>() == 16);
 const STOOD_FRAME: i32 = imm(offset_of!(Stood, frame));
 const STOOD_CALL: i32 = imm(offset_of!(Stood, call));
@@ -1719,6 +1721,8 @@ impl<'a> Emit<'a> {
                 self.increment(at, line)
             }
             Opcode::FetchDimR => self.fetch(at, line),
+            Opcode::FeResetR => self.fe_reset(line),
+            Opcode::FeFetchR => self.fe_fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
             Opcode::AssignDimOp => self.assign_dim_op(at, line),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
@@ -2501,6 +2505,176 @@ impl<'a> Emit<'a> {
             let count = emit.b.ins().iadd(count, room);
             emit.b.ins().store(trusted(), count, word, count_at);
             Ok(())
+        })
+    }
+
+    /// A `foreach`'s reset over an array, php's `zend_jit_fe_reset`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:13756-13775`): the array into
+    /// the iterator's slot, with one owner more where a variable holds it,
+    /// moved whole from a temporary, whose slot is left `UNDEF` as the
+    /// handler takes it, and the iterator's position, `Z_FE_POS`, zero,
+    /// the slot's own word and not the array's. An empty array goes on as
+    /// any other, as the handler's does, and the fetch after it finds the
+    /// end.
+    fn fe_reset(&mut self, line: &Line) -> Result<(), Abort> {
+        let Operand::Value(array) = line.op1 else {
+            return Err(mismatch("a reset of no array"));
+        };
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a reset that writes no iterator"))?;
+        let from = self.value(array)?.slot;
+        let to = self.value(out)?.slot;
+        let (room, at) = self.place(from)?;
+        let zval = self.b.ins().iadd_imm_s(room, i64::from(at));
+        let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
+        if from.var >= self.frame_cvs(from.frame)? {
+            let word = self.b.ins().load(I64, trusted(), room, at);
+            let (dest, dest_at) = self.place(to)?;
+            self.b.ins().store(trusted(), word, dest, dest_at);
+            self.b.ins().store(trusted(), info, dest, dest_at + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
+        } else {
+            self.copy(zval, info, to)?;
+        }
+        let (dest, dest_at) = self.place(to)?;
+        let zero = self.b.ins().iconst(I32, 0);
+        self.b
+            .ins()
+            .store(trusted(), zero, dest, dest_at + FE_POS_AT);
+        Ok(())
+    }
+
+    /// A `foreach`'s fetch over a packed array into a variable, where the
+    /// loop goes on, php's `zend_jit_fe_fetch`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:13800-14120`): from the
+    /// iterator's position, the holes passed over, the end of the array
+    /// leaving through the direction's exit for the opline past the loop,
+    /// where the handler would jump; else the position moved past the
+    /// element, its position the key where one is written, and the
+    /// element, through the reference it may be, copied into the variable
+    /// with one owner more, what the variable held given up after, as
+    /// `zend_assign_to_variable` gives it up. A variable that holds a
+    /// reference is written through by the handler, which serves the
+    /// opline whole. Keys and values, a hole, a reference among the
+    /// elements and a variable bound to one:
+    ///
+    /// ```php
+    /// function sum($a) { $s = 0; $t = ""; foreach ($a as $k => $v) { $s += $k; $t .= is_array($v) ? "A" : $v; } return "$s:$t"; }
+    /// $r = "R"; $a = ["a", "b", [1], &$r, str_repeat("c", 2)]; unset($a[1]);
+    /// echo sum($a), " ", sum(["x", "y"]), " ", sum([]), "\n";
+    /// function bound($a) { $v = 0; $w = &$v; foreach ($a as $v) { $w .= "!"; } return $v; }
+    /// echo bound(["p", "q"]), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 9:aARcc 1:xy 0:
+    /// q!
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function sum($a) { $s = 0; $t = ""; foreach ($a as $k => $v) { $s += $k; $t .= is_array($v) ? "A" : $v; } return "$s:$t"; }
+    /// $r = "R"; $a = ["a", "b", [1], &$r, str_repeat("c", 2)]; unset($a[1]);
+    /// echo sum($a), " ", sum(["x", "y"]), " ", sum([]), "\n";
+    /// function bound($a) { $v = 0; $w = &$v; foreach ($a as $v) { $w .= "!"; } return $v; }
+    /// echo bound(["p", "q"]), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 9:aARcc 1:xy 0:
+    /// q!
+    /// ```
+    fn fe_fetch(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let Operand::Value(iterator) = line.op1 else {
+            return Err(mismatch("a fetch from no iterator"));
+        };
+        let Operand::Value(old) = line.op2 else {
+            return Err(mismatch("a fetch into no variable"));
+        };
+        let target = self.value(old)?.slot;
+        let (room, iter_at) = self.place(self.value(iterator)?.slot)?;
+        let (var_room, var_at) = self.place(target)?;
+        let handled = self.b.create_block();
+        let done = self.b.create_block();
+        let old_word = self.b.ins().load(I64, trusted(), var_room, var_at);
+        let old_info = self
+            .b
+            .ins()
+            .load(I32, trusted(), var_room, var_at + TYPE_AT);
+        let kind = self.b.ins().band_imm_u(old_info, KIND);
+        let bound = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        self.divert_if(bound, handled);
+        let arr = self.b.ins().load(I64, trusted(), room, iter_at);
+        let first = self.b.ins().load(I32, trusted(), room, iter_at + FE_POS_AT);
+        let used = self.b.ins().load(I32, trusted(), arr, imm(Arr::USED_AT));
+        let data = self.b.ins().load(I64, trusted(), arr, imm(Arr::DATA_AT));
+        let walk = self.b.create_block();
+        let pos = self.b.append_block_param(walk, I32);
+        let found = self.b.create_block();
+        self.b.ins().jump(walk, &[first.into()]);
+        self.b.switch_to_block(walk);
+        let ended = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, pos, used);
+        self.direction(at, ended)?;
+        let offset = self.b.ins().uextend(I64, pos);
+        let offset = self.b.ins().imul_imm_s(offset, SLOT);
+        let element = self.b.ins().iadd(data, offset);
+        let byte = self.b.ins().load(I8, trusted(), element, TYPE_AT);
+        let hole = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Undef));
+        let past = self.b.ins().iadd_imm_s(pos, 1);
+        self.b.ins().brif(hole, walk, &[past.into()], found, &[]);
+        self.b.seal_block(walk);
+        self.b.switch_to_block(found);
+        self.b.seal_block(found);
+        self.b
+            .ins()
+            .store(trusted(), past, room, iter_at + FE_POS_AT);
+        if let Some(key) = line.out {
+            let key_value = self.b.ins().uextend(I64, pos);
+            self.define(key, Scalar::Long(key_value))?;
+        }
+        let element = self.deref(element);
+        let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+        self.copy(element, info, target)?;
+        self.release(line, old_word, old_info)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(handled);
+        self.b.seal_block(handled);
+        self.stepped(at, line)?;
+        if let Some(key) = line.out
+            && self.value(key)?.home == Home::Register
+        {
+            let held = self.load(self.value(key)?.slot, Kind::Long, false)?;
+            self.define(key, held)?;
+        }
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
+    }
+
+    /// What a slot held, `word` and its type word `info`, given up after
+    /// an inline write over it, as `zval_ptr_dtor` gives it up: through
+    /// the release kernel where it is counted, a destructor's throw
+    /// leaving through the opline's unwind.
+    fn release(&mut self, line: &Line, word: Value, info: Value) -> Result<(), Abort> {
+        let counted = self.b.ins().band_imm_u(info, COUNTED);
+        let [room, opline] = self.served(line)?;
+        self.when(counted, |emit| {
+            emit.call(
+                Kernel::Release,
+                &[room, opline, word, info],
+                line.unwind.map(Leave::Unwind),
+            )
         })
     }
 

@@ -628,7 +628,7 @@ impl<'a> Builder<'a> {
             [op1, op2, data],
             samples,
         );
-        let form = self.form(frame, &op, seen, next);
+        let form = self.form(frame, &op, seen, (next, branch));
         let in_place = (form == Form::Inline)
             .then(|| self.in_place(frame, &op, next))
             .flatten();
@@ -698,7 +698,10 @@ impl<'a> Builder<'a> {
             self.pushing = Some(plain);
         }
         self.stands(idx, (frame, at), &op, after.as_ref(), ahead, t1);
-        if let Some(taken) = branch {
+        // An array's reset goes on whatever it holds, so php's code holds
+        // no direction there.
+        let one_way = op.opcode == Opcode::FeResetR && form == Form::Inline;
+        if let Some(taken) = branch.filter(|_| !one_way) {
             let to = Branched {
                 taken,
                 fused,
@@ -972,6 +975,9 @@ impl<'a> Builder<'a> {
                         && self.is_temp(op1)
                         && !old.within(UNCOUNTED))
                     || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
+                    // What the variable held is given up, and a destructor
+                    // may throw.
+                    || op.opcode == Opcode::FeFetchR
                     || matches!(
                         op.opcode,
                         Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
@@ -2041,7 +2047,13 @@ impl<'a> Builder<'a> {
     /// How an opline is compiled: inline where it is in the scalar core
     /// and its operands' types are the ones the inline code serves,
     /// through `step` otherwise.
-    fn form(&self, frame: Frame, op: &Opline, seen: Seen, next: Option<&Event>) -> Form {
+    fn form(
+        &self,
+        frame: Frame,
+        op: &Opline,
+        seen: Seen,
+        (next, branch): (Option<&Event>, Option<bool>),
+    ) -> Form {
         let [t1, t2, td] = seen.types;
         // An opline that writes its variable `op1` writes through what it
         // sees through a reference, which only its handler does.
@@ -2094,6 +2106,7 @@ impl<'a> Builder<'a> {
                     && scalar(td)
             }
             Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
+            Opcode::FeResetR | Opcode::FeFetchR => iterated(op, t1, seen.referenced[0], branch),
             // A send that moves what a temporary holds into the call, as
             // php's `zend_jit_send_var` moves a `TMP` or a `VAR` that is
             // no reference (`Z/ext/opcache/jit/zend_jit_ir.c:9628-9790`).
@@ -3186,6 +3199,31 @@ fn type_checked(op: &Opline, t1: Types, referenced: bool) -> bool {
             }
             OperandKind::Const | OperandKind::Unused => false,
         }
+}
+
+/// Whether a `foreach`'s reset or fetch is compiled inline over `t1`,
+/// what it sees of its array, `referenced` where it sees it through a
+/// reference, the record having gone `branch`: php's `zend_jit_fe_reset`
+/// over an array no constant holds, which goes on whether the array holds
+/// anything or not, as the handler does
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:13756-13775`); php's
+/// `zend_jit_fe_fetch` over a packed array a `VAR` iterator holds into a
+/// variable, where the loop goes on, the end its exit (`:13800-14120`).
+/// Where the record ended the loop, php serves the fetch as it is, and so
+/// does the step.
+fn iterated(op: &Opline, t1: Types, referenced: bool, branch: Option<bool>) -> bool {
+    match op.opcode {
+        Opcode::FeResetR => {
+            op.op1_type != OperandKind::Const && t1.tag() == Some(ZvalType::Array) && !referenced
+        }
+        Opcode::FeFetchR => {
+            op.op1_type == OperandKind::Var
+                && t1 == Types::ARRAY.laid_out(Layout::Packed)
+                && op.op2_type == OperandKind::Cv
+                && branch == Some(false)
+        }
+        _ => false,
+    }
 }
 
 /// What a `RETURN` of `code` hands its caller where it leaves in place:

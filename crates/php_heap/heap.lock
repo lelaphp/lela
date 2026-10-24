@@ -410,6 +410,7 @@ VmStack::unlink_room
 Zval
 Zval::COUNT_AT
 Zval::COUNT_BITS
+Zval::FE_POS_AT
 Zval::FLAGS_AT
 Zval::GC_INFO_AT
 Zval::LEAK_BITS
