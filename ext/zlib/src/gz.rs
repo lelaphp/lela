@@ -476,6 +476,20 @@ fn gzopen(
 ///   string(6) "at all"
 /// }
 /// ```
+///
+/// Since 8.5.12 a line is added only while the memory limit has not been
+/// met: past it the call returns and the limit's fatal is raised.
+///
+/// ```php
+/// $file = sys_get_temp_dir() . '/gzfile.gz';
+/// file_put_contents($file, gzencode(str_repeat("a\n", 6 << 20), 9));
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(gzfile($file)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 5
+/// ```
 #[php_function]
 fn gzfile(
     req: &mut Request,
@@ -503,6 +517,11 @@ fn read_lines(req: &mut Request, stream: Stream) -> Result<Owner<PhpArray>, Thro
                 return Err(thrown);
             }
         };
+        // php 8.5.12 adds no line once the memory limit was met
+        // (`RETURN_OOM()`), the array as far as it was filled.
+        if req.memory().has_oom() {
+            return Ok(lines);
+        }
         let cut = PhpString::new(req, php_ext::coerce::c_str(&line))?;
         lines.append(req, cut.into_value())?;
     }

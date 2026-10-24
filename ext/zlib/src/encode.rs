@@ -51,8 +51,20 @@ fn encode(
         false,
     )? {
         Ok(mut stream) => {
-            let mut out = match FreshString::new(req, size_guess(input.len())) {
-                Ok(out) => out,
+            // `zend_string_falloc` since 8.5.12: where the memory limit
+            // refuses the guess, the stream is ended and the call answers
+            // false, with no warning, the limit's fatal raised as it
+            // returns.
+            let guess = size_guess(input.len());
+            let asked = req
+                .memory_mut()
+                .fallible(|req| FreshString::new(req, guess));
+            let mut out = match asked {
+                Ok(Some(out)) => out,
+                Ok(None) => {
+                    stream.end(req);
+                    return Ok(OrFalse::False);
+                }
                 Err(thrown) => {
                     stream.end(req);
                     return Err(thrown);
@@ -146,6 +158,19 @@ fn checked(
 /// 1f8b0800000000000213cb48cdc9c9070086a6103605000000
 /// gzcompress(): Argument #2 ($level) must be between -1 and 9
 /// gzcompress(): Argument #3 ($encoding) must be one of ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP, or ZLIB_ENCODING_DEFLATE
+/// ```
+///
+/// The string of the guess is asked for fallibly since 8.5.12: past the
+/// memory limit it is refused, the call answers false with no warning, and
+/// the limit's fatal is raised as it returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(gzcompress(str_repeat('a', 5 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 5324800 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn gzcompress(
@@ -305,9 +330,14 @@ fn inflate_rounds(
         let status = if max != 0 && max <= used {
             Status::MemError
         } else {
-            let grown = match buffer.take() {
-                Some(held) => held.resize(req, size)?,
-                None => Emalloc::new(req, size)?,
+            // `safe_ferealloc` since 8.5.12: a size the memory limit
+            // refuses is `Z_MEM_ERROR`, which ends the rounds.
+            let grown = req.memory_mut().fallible(|req| match buffer.take() {
+                Some(held) => held.resize(req, size),
+                None => Emalloc::new(req, size),
+            })?;
+            let Some(grown) = grown else {
+                break Status::MemError;
             };
             let held = buffer.insert(grown);
             let step = stream.inflate(
@@ -472,6 +502,20 @@ fn gzinflate(
 /// string(11) "hello world"
 /// bool(false)
 /// string(3) "abc"
+/// ```
+///
+/// The rounds' buffer is reallocated fallibly since 8.5.12: a size past
+/// the memory limit is refused and ends the rounds, and the limit's fatal
+/// is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $gz = gzencode(random_bytes(3 << 20), 0);
+/// var_dump(gzdecode($gz), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 3194880 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn gzdecode(

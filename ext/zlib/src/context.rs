@@ -400,6 +400,19 @@ fn deflate_init(
 /// int(69632)
 /// int(69632)
 /// ```
+///
+/// The string of the guess is asked for fallibly since 8.5.12: past the
+/// memory limit it is refused, and the limit's fatal is raised as the call
+/// returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(deflate_add(deflate_init(ZLIB_ENCODING_RAW), str_repeat('a', 5 << 20), ZLIB_FINISH), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 5324800 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn deflate_add(
     req: &mut Request,
@@ -445,7 +458,15 @@ fn deflate_rounds(
     input: &[u8],
     flush: Flush,
 ) -> Result<Result<Owner<PhpString>, Status>, Thrown> {
-    let mut out = FreshString::new(req, size_guess(input.len()).max(64))?;
+    // `zend_string_falloc` since 8.5.12, `RETURN_OOM()` where the memory
+    // limit refused it.
+    let guess = size_guess(input.len()).max(64);
+    let Some(mut out) = req
+        .memory_mut()
+        .fallible(|req| FreshString::new(req, guess))?
+    else {
+        return PhpString::new(req, b"").map(Ok);
+    };
     let (mut read, mut used) = (0, 0);
     let status = loop {
         if used == out.len() {
@@ -691,8 +712,13 @@ fn inflate_rounds(
             Status::Ok | Status::BufError
                 if full && (step.status == Status::Ok || flush == Flush::Finish) =>
             {
+                // `php_zlib_inflate_grow`, `zend_string_fextend` since
+                // 8.5.12: `RETURN_OOM()` where the memory limit refused it.
                 let len = out.len() + CHUNK_SIZE;
-                out = out.extend(req, len)?;
+                let Some(grown) = req.memory_mut().fallible(|req| out.extend(req, len))? else {
+                    return PhpString::new(req, b"").map(Inflated::Out);
+                };
+                out = grown;
                 continue;
             }
             Status::Ok | Status::BufError | Status::StreamEnd => break,
