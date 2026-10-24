@@ -17,7 +17,8 @@ use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupp
 use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD,
+    STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -919,4 +920,61 @@ fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
         "a side's link to its looping root tests the interrupt:\n{tested}"
     );
     Ok(())
+}
+
+/// A loop over `$this` and one over an object a function holds: the class
+/// guard compares the object's class at `Obj::CLASS_AT`, each untyped
+/// slot is read and written at `Obj::SLOTS_AT`, and the typed property's
+/// write and every slot the inline form does not serve go through the
+/// `handle` kernel (#3337).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn properties_lower_in_place_under_their_class_guard() -> Result<(), String> {
+    for fixture in [OBJECT_THIS, OBJECT_VALUE] {
+        lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        let address =
+            format!("{:#x}", symbols().address(Kernel::Handle)).replace("0x7000", "0x7000_");
+        let handled = (clif.lines())
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count();
+        assert!(handled >= 1, "{}: {clif}", fixture.name);
+    }
+    Ok(())
+}
+
+/// A trace compiled over objects of a published class is the engine's,
+/// entered by every request: on the next request an object of a class
+/// that request declared, whose slots stand elsewhere, fails its class
+/// guard and the interpreter serves it, while the published class's
+/// objects go on in place (#3337).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_class_the_next_request_declares_fails_the_class_guard() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ]);
+    let program = "class P { public $x = 1; public $y = 2; }
+        function k($o, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { $t += $o->x; $o->y = $i; $o->x += 1; } return $t + $o->y; }
+        if (defined('SECOND')) {
+            eval('class Q { public $y = 0; public $x = 5; }');
+            echo k(new Q, 10), ' ', k(new P, 10), \"\\n\";
+        } else {
+            echo k(new P, 10), \"\\n\";
+        }";
+    let first = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&first), "64\n");
+    let second = engine.serve_capture_in(
+        &scratch.0,
+        b"main.php",
+        "<?php const SECOND = true; include 'body.php';",
+        php_engine::test::Capture::default(),
+    );
+    assert_eq!(testing::stdout(&second), "104 64\n");
+    let lines = String::from_utf8_lossy(&second.stderr);
+    assert!(lines.contains("TRACE 1 exit"), "{lines}");
 }

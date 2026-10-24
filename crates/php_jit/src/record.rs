@@ -979,8 +979,7 @@ impl<'p> Recorder<'p> {
                 return Ok((Stop::NotSupported, ended(frame, false)));
             }
             let (op1, op2, data) = sampled(req, frame, &op, after.as_ref());
-            let classes = u32::from(op1.is_some_and(|s| s.class.is_some()))
-                + u32::from(op2.is_some_and(|s| s.class.is_some()));
+            let classes = classes(&op, op1, op2);
             self.events.push(Event::Op {
                 func,
                 opline: at,
@@ -1018,6 +1017,7 @@ impl<'p> Recorder<'p> {
             stepped = true;
             let went = match edge {
                 Stepped::Same(next) => {
+                    placed(req, view, (frame, next), (&op, at), op1);
                     frame = next;
                     self.same(req, view, frame, (&op, at, after.as_ref()), call)
                 }
@@ -1086,8 +1086,7 @@ impl<'p> Recorder<'p> {
             .and_then(|code| code.oplines.get(condition.0 as usize).copied())
             .ok_or_else(|| Bailed::Fatal(off_the_end(condition)))?;
         let (op1, op2, _) = sampled(req, frame, &op, None);
-        let classes = u32::from(op1.is_some_and(|s| s.class.is_some()))
-            + u32::from(op2.is_some_and(|s| s.class.is_some()));
+        let classes = classes(&op, op1, op2);
         self.events.push(Event::Op {
             func: root,
             opline: condition,
@@ -1566,7 +1565,8 @@ pub(crate) fn sampled(
     );
     let op1 = op1_read
         .then(|| tier::sample(req, frame, op.op1_type, op.op1))
-        .flatten();
+        .flatten()
+        .or_else(|| on_this(op).then(|| this(req, frame)).flatten());
     let static_prop = matches!(
         op.opcode,
         Opcode::Instanceof
@@ -1610,6 +1610,59 @@ pub(crate) fn sampled(
             ..sample
         });
     (op1, op2, data)
+}
+
+/// The place a property opline at `at`, stepped in `frame` and gone on
+/// in `next`, found on the object of the class its `op1` sample names,
+/// taken where it stays in its frame ([`UnitView::hold_place`]).
+fn placed(
+    req: &Request,
+    view: &mut UnitView,
+    (frame, next): (FrameRef, FrameRef),
+    (op, at): (&Opline, OplineIdx),
+    op1: Option<Sample>,
+) {
+    if next == frame
+        && let Some(class) = op1.and_then(|sample| sample.class)
+        && types::on_declared_slot(op.opcode)
+    {
+        view.hold_place(req, frame, at, class);
+    }
+}
+
+/// Whether `op` reads `$this` as its object, its `op1` unused: a property
+/// opline or a method's call on `$this`, whose class the recorder writes
+/// down as `op1`'s, as php's code generator reads `$this`'s class off
+/// the frame it compiles for.
+fn on_this(op: &Opline) -> bool {
+    op.op1_type == OperandKind::Unused
+        && (types::on_declared_slot(op.opcode)
+            || matches!(
+                op.opcode,
+                Opcode::InitMethodCall | Opcode::IssetIsemptyPropObj
+            ))
+}
+
+/// `$this` of `frame` sampled as an object of its class.
+fn this(req: &Request, frame: FrameRef) -> Option<Sample> {
+    tier::this_class(req, frame).map(|class| Sample {
+        kind: ZvalType::Object,
+        indirect: false,
+        reference: false,
+        packed: false,
+        class: Some(class),
+    })
+}
+
+/// php's `ZEND_JIT_TRACE_OP1_TYPE` and `_OP2_TYPE` records an opline
+/// takes, one per class its slotted operands hold: `$this`'s class, which
+/// this recorder writes down for a property opline and a method's call,
+/// php records only in a closure, so it is counted for no operand php
+/// samples no slot of.
+fn classes(op: &Opline, op1: Option<Sample>, op2: Option<Sample>) -> u32 {
+    let slotted = |kind: OperandKind| !matches!(kind, OperandKind::Unused | OperandKind::Const);
+    u32::from(slotted(op.op1_type) && op1.is_some_and(|s| s.class.is_some()))
+        + u32::from(op2.is_some_and(|s| s.class.is_some()))
 }
 
 /// Whether the frame a root's return landed in serves the same op array

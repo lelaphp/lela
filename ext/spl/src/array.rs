@@ -2452,6 +2452,26 @@ impl ObjectHandlers for Handlers {
         Std.unset_property(req, object, name)
     }
 
+    /// `spl_array_compare_objects`: `zend_compare_symbol_tables` over the
+    /// two tables `spl_array_get_hash_table` answers, then
+    /// `zend_std_compare_objects` where they are equal. Two arrays are
+    /// compared where they stand, which holds both for the walk and gives
+    /// each up after it as a possible root, as php's compare does; a
+    /// table of an object's properties is compared as a copy of its rows.
+    ///
+    /// ```php
+    /// function t() {
+    ///     $x = [1]; $x[] = 2; $y = [1]; $y[] = 2;
+    ///     $a = new ArrayObject($x); $b = new ArrayObject($y); unset($x, $y);
+    ///     $before = gc_status()['roots'];
+    ///     var_dump($a == $b, gc_status()['roots'] - $before);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(2)
+    /// ```
     fn compare(
         &self,
         req: &mut Request,
@@ -2464,11 +2484,25 @@ impl ObjectHandlers for Handlers {
         if l.native::<SplArrayObject>(req).is_none() || r.native::<SplArrayObject>(req).is_none() {
             return Std.compare(req, left, right);
         }
-        let a = table(req, l)?.copy(req)?;
-        let b = table(req, r)?.copy(req)?;
-        let ordering = compare(req, &Value::array(*a), &Value::array(*b));
-        a.give_up(req);
-        b.give_up(req);
+        let ordering = match (table(req, l)?, table(req, r)?) {
+            (Table::Array(_, a), Table::Array(_, b)) => {
+                compare(req, &Value::array(a), &Value::array(b))
+            }
+            (a, b) => {
+                let a = a.copy(req)?;
+                let b = match b.copy(req) {
+                    Ok(b) => b,
+                    Err(thrown) => {
+                        a.give_up(req);
+                        return Err(thrown);
+                    }
+                };
+                let ordering = compare(req, &Value::array(*a), &Value::array(*b));
+                a.give_up(req);
+                b.give_up(req);
+                ordering
+            }
+        };
         match ordering? {
             Ordering::Equal => Std.compare(req, left, right),
             other => Ok(Some(other)),

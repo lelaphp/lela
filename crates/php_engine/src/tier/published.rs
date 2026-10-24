@@ -56,6 +56,25 @@ impl Func {
         matches!(self.body, Body::Main)
     }
 
+    /// Whether every frame that runs the op array runs it in one scope:
+    /// a function's, whose scope is none, and a method's or a property
+    /// hook's of a class that is no trait, whose scope is its class. A
+    /// trait's method runs in each class that uses it, a closure in the
+    /// scope it is bound to and a file's code in its includer's, so none
+    /// of those does.
+    pub(crate) fn fixes_scope(&self) -> bool {
+        let unit = &self.unit;
+        let class = match self.body {
+            Body::Function(_) => return true,
+            Body::Main | Body::Dynamic(_) => return false,
+            Body::Method(at) => unit.methods.get(at as usize).map(|method| method.class),
+            Body::Hook(at) => unit.hooks.get(at as usize).map(|hook| hook.class),
+        };
+        class
+            .and_then(|class| unit.classes.get(class as usize))
+            .is_some_and(|class| class.kind != php_unit::decl::ClassKind::Trait)
+    }
+
     /// The parameters the op array's declaration lists: none for a
     /// file's own code.
     pub(crate) fn parameters(&self) -> Option<&[Parameter]> {

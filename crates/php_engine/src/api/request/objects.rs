@@ -1221,6 +1221,26 @@ impl Request {
     /// (`if (!EG(exception))`): a call refused while a throwable stands,
     /// as a native's conversion past a throw meets it, answers that one,
     /// which ext/intl's `umsg_format_helper` is the witness of.
+    ///
+    /// The object is held for the call, `GC_ADDREF(readobj)`, and given up
+    /// after it with `zend_object_release`, so a cast or an interpolation
+    /// leaves an object another owner holds a possible root:
+    ///
+    /// ```php
+    /// class A { function __toString(): string { return 'a'; } }
+    /// function t() {
+    ///     $o = new A;
+    ///     gc_collect_cycles(); $s = (string) $o; $one = gc_status()['roots'];
+    ///     gc_collect_cycles(); $s = "<$o>"; $two = gc_status()['roots'];
+    ///     var_dump($s, $one, $two);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// string(3) "<a>"
+    /// int(1)
+    /// int(1)
+    /// ```
     pub(crate) fn cast_object(
         &mut self,
         object: PhpObject,
@@ -1235,8 +1255,10 @@ impl Request {
                 {
                     return Ok(None);
                 }
-                let value = crate::api::call::call_method_made(self, &object, b"__toString", &[])?;
-                let value = self.unwrap_reference(value);
+                let held = Owner::take(self, object);
+                let value = crate::api::call::call_method_made(self, &object, b"__toString", &[]);
+                held.give_up(self);
+                let value = self.unwrap_reference(value?);
                 if value.as_php_string().is_some() {
                     return Ok(Some(Owner::adopt(value)));
                 }
@@ -1536,21 +1558,41 @@ impl Request {
     /// int(3)
     /// Nesting level too deep - recursive dependency?
     /// ```
+    ///
+    /// The two tables are held for the walk and given up after it, as
+    /// `zend_compare_symbol_tables` holds them ([`crate::ops::HeldTables`]),
+    /// so each is a possible root after it, beside the two objects:
+    ///
+    /// ```php
+    /// function t() {
+    ///     $a = new stdClass; $a->x = 1; $b = new stdClass; $b->x = 1;
+    ///     gc_collect_cycles();
+    ///     var_dump($a == $b, gc_status()['roots']);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(4)
+    /// ```
     fn compare_tables(&mut self, x: Obj, y: Obj) -> Result<std::cmp::Ordering, Thrown> {
         let (left, right) = self.property_tables(x, y)?;
         let table = left.table();
         if table.is_same(right.table()) {
             return Ok(std::cmp::Ordering::Equal);
         }
-        if left.len() != right.len() {
-            return Ok(left.len().cmp(&right.len()));
-        }
-        if table.is_recursive() {
-            return Err(crate::ops::nesting_too_deep(self));
-        }
-        table.protect();
-        let order = self.compare_rows(left, right, ClassId(x.class()));
-        table.unprotect();
+        let held = crate::ops::HeldTables::hold(self, table, right.table());
+        let order = if left.len() != right.len() {
+            Ok(left.len().cmp(&right.len()))
+        } else if table.is_recursive() {
+            Err(crate::ops::nesting_too_deep(self))
+        } else {
+            table.protect();
+            let order = self.compare_rows(left, right, ClassId(x.class()));
+            table.unprotect();
+            order
+        };
+        held.give_up(self);
         order
     }
 

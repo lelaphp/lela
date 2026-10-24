@@ -808,6 +808,25 @@ pub(crate) fn with_frames<R>(
 /// ```expect
 /// xyz68210xyz
 /// ```
+///
+/// A generator's frame takes an owner of a receiver its call was lent,
+/// save a closure's: the closure the frame holds keeps that one, so a
+/// generator a bound closure made and left unfinished offers its
+/// receiver no root when it is destroyed.
+///
+/// ```php
+/// class A {
+///     function h() { $c = function () { yield 1; }; $gen = $c(); gc_collect_cycles(); unset($gen); return gc_status()['roots']; }
+///     function i() { $gen = $this->j(); gc_collect_cycles(); unset($gen); return gc_status()['roots']; }
+///     function j() { yield 1; }
+/// }
+/// $a = new A;
+/// var_dump($a->h(), $a->i());
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// ```
 pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::Stepped, Fatal> {
     let entry = req.stack_mut().entry() == frame;
     let returns_to = req.vm().returns_to(frame);
@@ -836,10 +855,12 @@ pub(crate) fn create(req: &mut Request, frame: FrameRef) -> Result<crate::tier::
     }
     // `ZEND_CALL_RELEASE_THIS` and `Z_ADDREF` on a receiver the frame
     // was lent: the generator's frame outlives the call that lent it.
+    // A closure's frame is the exception (`ZEND_CALL_CLOSURE`): the
+    // closure it holds keeps the receiver as long as the frame stands.
     let lent = req.vm_mut().at_mut(frame).and_then(|state| {
         state.set_returns_to(None);
         match state.receiver() {
-            Some(crate::exec::Receiver::Lent(this)) => {
+            Some(crate::exec::Receiver::Lent(this)) if state.closure.is_none() => {
                 state.set_receiver(Some(crate::exec::Receiver::Owned(this)));
                 Some(this)
             }
@@ -1516,8 +1537,11 @@ fn release_frame(req: &mut Request, suspended: Suspended, finished: bool) {
         req.release(value);
     }
     req.release_named(extra.extra_named);
-    if let Some(this) = header.receiver().and_then(crate::exec::Receiver::owned) {
-        req.release(this.as_value());
+    // `OBJ_RELEASE(Z_OBJ(execute_data->This))` under
+    // `ZEND_CALL_RELEASE_THIS`; a closure's frame was lent its receiver,
+    // whose pin is let go.
+    if let Some(receiver) = header.receiver() {
+        req.give_up_receiver(receiver);
     }
     // `zend_vm_stack_free_extra_args`: the arguments past the declared
     // ones, past the CVs and the temporaries.

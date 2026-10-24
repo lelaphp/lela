@@ -140,6 +140,32 @@ pub(crate) const STRING_BUILD: Fixture = Fixture {
     ],
 };
 
+/// A method's loop over `$this`, as `Zend/micro_bench.php`'s are: each
+/// property opline on a published class's declared slot in place, under
+/// one class guard, and an `isset()` through the `handle` kernel (#3337).
+pub(crate) const OBJECT_THIS: Fixture = Fixture {
+    name: "object_this",
+    program: "object_this",
+    plan: &[
+        ("record.function", "run"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A function's loop over an object it holds: each property's opline in
+/// place under one class guard on the variable, a typed property's write
+/// of a long in place and of a string it coerces the handler's (#3337).
+pub(crate) const OBJECT_VALUE: Fixture = Fixture {
+    name: "object_value",
+    program: "object_value",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// `fannkuch`'s first loop, recorded for the view it holds of
 /// `fannkuch()`, which a side trace's record written out by hand is built
 /// through (#3270).

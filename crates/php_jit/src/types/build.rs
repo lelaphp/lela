@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall, Sample, UnitView};
+use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample, UnitView};
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
 use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
@@ -22,8 +22,8 @@ use super::opcodes::{
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
     Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
-    LoopHeader, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store, Stored,
-    TraceIr, Unwind, UnwindId, Value, ValueId, Vars,
+    LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store,
+    Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -281,6 +281,22 @@ struct Builder<'a> {
     entry_reads: Vec<usize>,
     /// Per line, the operands' types its recording saw.
     sampled: HashMap<OpId, [Option<Sample>; 3]>,
+    /// The class a guard held each object the trace holds to, `$this` of
+    /// a frame or a value, as php's `TRACE_FRAME_SET_THIS_CLASS_CHECKED`
+    /// and `MAY_BE_CLASS_GUARD` mark a class guarded once
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14317-14335`): an object's class
+    /// never changes, and a value read again is a value of its own.
+    classed: HashMap<Object, ClassId>,
+}
+
+/// Where a property opline is served in place: the object it reads, the
+/// class the recording saw it of, and the slot the engine placed its
+/// name at on that class ([`UnitView::place`]).
+#[derive(Debug, Clone, Copy)]
+struct PropertyAt {
+    object: Object,
+    class: ClassId,
+    slot: PropertySlot,
 }
 
 /// php's `MAY_BE_RESOURCE`, `1 << IS_RESOURCE`, the mask a `TYPE_CHECK`
@@ -323,6 +339,7 @@ impl<'a> Builder<'a> {
             spilled: HashMap::new(),
             entry_reads: Vec::new(),
             sampled: HashMap::new(),
+            classed: HashMap::new(),
         };
         let root = builder.frame(rec.root, Place::Root, None)?;
         builder.stack.push(root);
@@ -629,7 +646,22 @@ impl<'a> Builder<'a> {
             [op1, op2, data],
             samples,
         );
+        let property = self.property_at(
+            frame,
+            (func, at),
+            (&op, data_line.as_ref()),
+            (op1, samples[0]),
+            seen,
+        );
         let form = self.form(frame, (&op, data_line.as_ref()), seen, (next, branch));
+        let form = match (op.opcode, property) {
+            (opcode, Some(_)) if on_declared_slot(opcode) => Form::Inline,
+            (opcode, None) if on_declared_slot(opcode) => Form::Step,
+            _ => form,
+        };
+        if let (Form::Inline, Some(property)) = (form, property) {
+            self.class_guard(idx, frame, at, property);
+        }
         let in_place = (form == Form::Inline)
             .then(|| self.in_place(frame, &op, next))
             .flatten();
@@ -654,6 +686,15 @@ impl<'a> Builder<'a> {
             form,
             fused.is_some(),
         );
+        // The object a property opline writes through is the one it read,
+        // of the class a guard held it of (`COPY_SSA_OBJ_TYPE`).
+        if on_declared_slot(op.opcode)
+            && let (Operand::Value(read), Some(def)) = (op1, written.op1)
+            && let Some(class) = self.classed.get(&Object::Value(read)).copied()
+            && !self.aliased(self.val(read).slot)
+        {
+            self.classed.insert(Object::Value(def), class);
+        }
         if is_call(op.opcode) {
             self.call_at = Some(at);
             if !matches!(next, Some(Event::Enter { .. })) {
@@ -682,6 +723,14 @@ impl<'a> Builder<'a> {
                 Some(InPlace::Make) => Imm::Make {
                     returns: (op.out_type != OperandKind::Unused).then_some(op.out),
                 },
+                _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
+                    Imm::Property {
+                        slot: property.slot.slot(),
+                        binary: (op.opcode == Opcode::AssignObjOp)
+                            .then(|| lattice::binary_of(op.extended_value))
+                            .flatten(),
+                    }
+                }
                 _ => imm(&op),
             },
             form,
@@ -952,7 +1001,10 @@ impl<'a> Builder<'a> {
             // An element a fetch does not find is the interpreter's to
             // warn of, through php's `ZEND_JIT_EXIT_TO_VM`
             // (`zend_jit_fetch_dimension_address_inner`).
-            let grows = if op.opcode == Opcode::FetchDimR {
+            let grows = if matches!(
+                op.opcode,
+                Opcode::FetchDimR | Opcode::FetchObjR | Opcode::FetchObjW
+            ) {
                 Grows::Never
             } else {
                 Grows::Side
@@ -992,6 +1044,11 @@ impl<'a> Builder<'a> {
                     || (op.opcode == Opcode::AssignOp
                         && lattice::binary_of(op.extended_value) == Some(Opcode::Concat))
                     || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
+                    // What a property held is given up, or its handler
+                    // serves what the inline form does not, and either
+                    // may throw.
+                    || (on_declared_slot(op.opcode)
+                        && !matches!(op.opcode, Opcode::FetchObjR | Opcode::FetchObjW))
                     // What the variable held is given up, and a destructor
                     // may throw.
                     || op.opcode == Opcode::FeFetchR
@@ -2184,6 +2241,95 @@ impl<'a> Builder<'a> {
         if inline { Form::Inline } else { Form::Step }
     }
 
+    /// Where a property opline of `frame`, at `at` of `func`, is served in
+    /// place, as php's code generator serves one whose
+    /// `zend_get_known_property_info` finds the property on the immutable
+    /// class the trace recorded (`Z/ext/opcache/jit/zend_jit_ir.c:14313`):
+    /// over a constant name, on `$this` or a variable that holds an object
+    /// as it is, of a class the recording took the name's slot on
+    /// ([`UnitView::place`]). A compound write, an increment and a
+    /// decrement of a property with a type are served by php's
+    /// `zend_jit_assign_to_typed_prop` and its kin, and so by the
+    /// handler here, as is a write of what its type does not hold as it
+    /// stands, a `readonly` one and one of a set visibility among them;
+    /// a write of a scalar its type holds is in place, as the handler's
+    /// own inline path writes it; a write in place writes a scalar, or a value no scalar where
+    /// nothing reads what it writes to its `out` slot, as an assignment
+    /// does; a compound write in place adds, subtracts or multiplies a
+    /// number; an increment and a decrement in place write no `out` slot.
+    fn property_at(
+        &self,
+        frame: Frame,
+        (func, at): (FuncRef, OplineIdx),
+        (op, data): (&Opline, Option<&Opline>),
+        (op1, sample1): (Operand, Option<Sample>),
+        seen: Seen,
+    ) -> Option<PropertyAt> {
+        let code = self.meta(frame).code;
+        if !on_declared_slot(op.opcode) || op.op2_type != OperandKind::Const {
+            return None;
+        }
+        let class = sample1?.class?;
+        let object = match (op.op1_type, op1) {
+            (OperandKind::Unused, _) => Object::This(frame),
+            (OperandKind::Cv, Operand::Value(value))
+                if seen.types[0] == Types::OBJECT && !seen.referenced[0] =>
+            {
+                Object::Value(value)
+            }
+            _ => return None,
+        };
+        let slot = self.view.place(func, at, class)?;
+        let td = seen.types[2];
+        let unused = op.out_type == OperandKind::Unused;
+        let served = match op.opcode {
+            Opcode::FetchObjR => op.out_type == OperandKind::Tmp,
+            // The place itself, `IS_INDIRECT`, as `zend_jit_fetch_obj`
+            // writes it for a `_W` fetch of a property with no type.
+            Opcode::FetchObjW => op.out_type == OperandKind::Var,
+            // A typed slot takes a scalar its type holds as it stands, as
+            // the handler's inline path writes one (`data_value`).
+            Opcode::AssignObj if slot.typed() => {
+                td.scalar() && td.tag().is_some_and(|tag| slot.admits(tag))
+            }
+            Opcode::AssignObj => data.is_some_and(|data| {
+                td.scalar() || (unused && copied_whole(data.op1_type, data.op1, td, code))
+            }),
+            Opcode::AssignObjOp => {
+                unused
+                    && matches!(
+                        lattice::binary_of(op.extended_value),
+                        Some(Opcode::Add | Opcode::Sub | Opcode::Mul)
+                    )
+                    && (td == Types::LONG || td == Types::DOUBLE)
+            }
+            _ => unused,
+        };
+        let typed_served = matches!(op.opcode, Opcode::FetchObjR | Opcode::AssignObj);
+        (served && (typed_served || !slot.typed())).then_some(PropertyAt {
+            object,
+            class,
+            slot,
+        })
+    }
+
+    /// php's `zend_jit_class_guard` on the object a property opline at
+    /// `here` reads, before it, where no guard held its class already.
+    fn class_guard(&mut self, idx: OpId, frame: Frame, here: OplineIdx, property: PropertyAt) {
+        if self.classed.get(&property.object) == Some(&property.class) {
+            return;
+        }
+        self.classed.insert(property.object, property.class);
+        self.guards.push(Placed {
+            at: GuardAt::Before(idx),
+            check: Check::Class {
+                object: property.object,
+                class: property.class,
+            },
+            exit: draft(Point::Before(idx), frame, At::Opline(here)),
+        });
+    }
+
     /// Whether a `RETURN` of `frame` leaves it in place: a function's
     /// frame, with no observer declared, whose variables the leave tests
     /// as it leaves where they may own something ([`Imm::Leave`]).
@@ -2580,7 +2726,8 @@ impl<'a> Builder<'a> {
             let opens = matches!(leaves, Leaves::Unfinished)
                 && matches!(
                     self.ops.get(op.index()),
-                    Some(Op::Line(line)) if line.opcode == Opcode::FetchDimR
+                    Some(Op::Line(line))
+                        if matches!(line.opcode, Opcode::FetchDimR | Opcode::FetchObjR)
                 );
             let stage = if opens { Stage::Opens } else { Stage::Leaves };
             order.push((Order::At(*op, stage), Source::Leave(at)));
@@ -2601,8 +2748,16 @@ impl<'a> Builder<'a> {
         match check {
             Check::Type { value, .. }
             | Check::Deref { value, .. }
-            | Check::Layout { value, .. } => Some(self.val(value).slot),
-            Check::Direction { .. }
+            | Check::Layout { value, .. }
+            | Check::Class {
+                object: Object::Value(value),
+                ..
+            } => Some(self.val(value).slot),
+            Check::Class {
+                object: Object::This(_),
+                ..
+            }
+            | Check::Direction { .. }
             | Check::Stands { .. }
             | Check::Arm { .. }
             | Check::Room { .. } => None,
@@ -3626,6 +3781,7 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
             ..
         }
         | Check::Deref { .. }
+        | Check::Class { .. }
         | Check::Direction { .. }
         | Check::Stands { .. }
         | Check::Arm { .. }

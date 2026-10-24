@@ -26,8 +26,8 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
-    traced as built,
+    NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD,
+    STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -1953,5 +1953,126 @@ fn a_callees_exit_stores_none_of_its_callers_registers() -> Result<(), String> {
             .all(|store| store.slot.frame == exit.frame)),
         "{rendered}"
     );
+    Ok(())
+}
+
+/// The forms the property oplines of `ir` are compiled in, in order.
+fn property_forms(ir: &TraceIr) -> Vec<(Opcode, Form)> {
+    (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) if crate::types::on_declared_slot(line.opcode) => {
+                Some((line.opcode, line.form))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// How many class guards `ir` holds.
+fn class_guards(ir: &TraceIr) -> usize {
+    (ir.guards.iter())
+        .filter(|guard| matches!(guard.check, Check::Class { .. }))
+        .count()
+}
+
+/// A loop over `$this` and a loop over an object a function holds: each
+/// property opline of a published class's declared slot with no type is
+/// compiled in place, a read, a write, a compound write, an increment or
+/// a decrement and a fetch for writing, under one class guard per object
+/// before the first,
+/// as php's code generator compiles one whose `prop_info` it knows on an
+/// immutable class (`zend_jit_class_guard`, `TRACE_FRAME_SET_THIS_CLASS_CHECKED`);
+/// a typed property's write of a long its type holds is in place, as the
+/// handler's own inline path writes it, and its write of a string its
+/// type must coerce is the handler's (#3337).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn properties_of_a_published_class_are_inline_under_one_class_guard() -> Result<(), String> {
+    let this = golden(OBJECT_THIS)?;
+    assert_eq!(
+        property_forms(&this),
+        [
+            (Opcode::FetchObjR, Form::Inline),
+            (Opcode::AssignObj, Form::Inline),
+            (Opcode::AssignObjOp, Form::Inline),
+            (Opcode::PreIncObj, Form::Inline),
+            (Opcode::FetchObjW, Form::Inline),
+        ],
+        "{}",
+        dump::render(&this)
+    );
+    assert_eq!(class_guards(&this), 1, "{}", dump::render(&this));
+    let value = golden(OBJECT_VALUE)?;
+    assert_eq!(
+        property_forms(&value),
+        [
+            (Opcode::FetchObjR, Form::Inline),
+            (Opcode::AssignObj, Form::Inline),
+            (Opcode::AssignObjOp, Form::Inline),
+            (Opcode::PreDecObj, Form::Inline),
+            (Opcode::AssignObj, Form::Inline),
+            (Opcode::AssignObj, Form::Step),
+            (Opcode::PostDecObj, Form::Step),
+        ],
+        "{}",
+        dump::render(&value)
+    );
+    assert_eq!(class_guards(&value), 1, "{}", dump::render(&value));
+    Ok(())
+}
+
+/// A class of the cached file linked over a class the request declared,
+/// `zend_lazy_class_load`'s copy, is the request's own, with an id of
+/// its own (#3322): the recording takes no place on it, so no class
+/// guard assumes it is a published one, and its property oplines are the
+/// handler's.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_request_scoped_copy_of_a_class_is_guarded_by_no_class_id() -> Result<(), String> {
+    let ir = built(
+        &[
+            ("record.function", "k"),
+            ("record.start", "loop"),
+            ("record.headers", "0"),
+        ],
+        "eval('class Base { public $x = 1; }');
+        class Child extends Base { }
+        function k($o, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { $t += $o->x; $o->x = $i; } return $t; }
+        echo k(new Child, 100), \"\\n\";",
+    )?;
+    assert_eq!(
+        property_forms(&ir),
+        [
+            (Opcode::FetchObjR, Form::Step),
+            (Opcode::AssignObj, Form::Step)
+        ],
+        "{}",
+        dump::render(&ir)
+    );
+    assert_eq!(class_guards(&ir), 0, "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// A variable written over between two property reads holds an object
+/// no guard has held, whatever class the recording saw it of: the class a
+/// guard held is carried only across a property opline that writes
+/// through the object, as php's `COPY_SSA_OBJ_TYPE` carries it, so the
+/// second read holds its class again (#3337).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_object_written_over_is_guarded_again() -> Result<(), String> {
+    let ir = built(
+        &[
+            ("record.function", "f"),
+            ("record.start", "loop"),
+            ("record.headers", "0"),
+        ],
+        "class A { public $x = 1; }
+        class B { public $q = 0; public $x = 2; }
+        function f($os, $n) { $t = 0; $o = $os[0]; for ($i = 0; $i < $n; $i++) { $t += $o->x; $o = $os[$i]; $t += $o->x * 10; } return $t; }
+        $a = new A; $os = []; for ($j = 0; $j < 30; $j++) { $os[] = $a; } $os[20] = new B;
+        echo f($os, 30), \"\\n\";",
+    )?;
+    assert_eq!(class_guards(&ir), 2, "{}", dump::render(&ir));
     Ok(())
 }
