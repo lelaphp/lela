@@ -4879,6 +4879,23 @@ pub(crate) fn verify_never_type<T: Tier>(
 /// called scope, a private method reached from its own class, and a
 /// closure called through `$f(...)` or `->__invoke(...)` itself.
 ///
+/// A call made through a closure hands its owner of the closure on to
+/// the operand the opline writes, so letting the call go gives up no owner of it and offers
+/// the cycle collector no root:
+///
+/// ```php
+/// function t() {
+///     $c = static function ($a) {};
+///     $x = $c(...);
+///     var_dump($x === $c, gc_status()['roots']);
+/// }
+/// t();
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// ```
+///
 /// ```php
 /// class P {
 ///     private function hidden($x) { return "hidden$x"; }
@@ -4958,20 +4975,28 @@ pub(crate) fn callable_convert<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(call) = req.building_call().and_then(|call| req.frame_at(call)) else {
+    let Some(at) = req.building_call() else {
         return Err(Fatal::error(
             "InternalError: ZEND_CALLABLE_CONVERT with no call frame under it",
         ));
     };
-    let callee = match call.closure() {
-        Some(closure) => crate::classes::CallFrame::Closure(closure),
-        None => crate::classes::CallFrame::Callee {
+    // `RETURN_OBJ(ZEND_CLOSURE_OBJECT(mptr))`: a call made through a
+    // closure hands its owner of it on to what the opline writes.
+    let made = if let Some(closure) = req.take_call_closure(at) {
+        Ok(closure)
+    } else {
+        let Some(call) = req.frame_at(at) else {
+            return Err(Fatal::error(
+                "InternalError: ZEND_CALLABLE_CONVERT with no call frame under it",
+            ));
+        };
+        let callee = crate::classes::CallFrame::Callee {
             function: call.callee(),
             this: call.this(),
             called_scope: call.called_scope(),
-        },
+        };
+        crate::classes::closure_from_frame(req, callee)
     };
-    let made = crate::classes::closure_from_frame(req, callee);
     // `OBJ_RELEASE(Z_OBJ(call->This))` where `ZEND_CALL_RELEASE_THIS`,
     // and `zend_vm_stack_free_call_frame`.
     req.pop_call();
