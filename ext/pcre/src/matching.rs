@@ -218,47 +218,53 @@ pub(super) fn offset_pair(
 /// int(0)
 /// int(1)
 /// ```
+///
+/// Under `PREG_UNMATCHED_AS_NULL` the program's own null pair is shared
+/// the same way, every unmatched group of a match handed the one array:
+///
+/// ```php
+/// function n() {
+///     preg_match('/(a)?(b)?c/', 'c', $m, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+///     gc_collect_cycles(); unset($m); var_dump(gc_status()['roots']);
+/// }
+/// n();
+/// preg_match('/(a)?(b)?c/', 'c', $o, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+/// var_dump($o[1], $o[1] === $o[2]);
+/// ```
+/// ```expect
+/// int(1)
+/// array(2) {
+///   [0]=>
+///   NULL
+///   [1]=>
+///   int(-1)
+/// }
+/// bool(true)
+/// ```
 pub(super) fn unmatched_pair(
     req: &mut Request,
     unmatched_as_null: bool,
 ) -> Result<Owner<Value>, Thrown> {
-    let cached = {
-        let unmatched = &req.state::<State>().unmatched;
-        let slot = if unmatched_as_null {
-            &unmatched.null
-        } else {
-            &unmatched.empty
-        };
-        (slot.as_ref().map(|pair| **pair), unmatched.ended)
+    if let Some(pair) = req.state::<State>().unmatched.cached(unmatched_as_null) {
+        return Ok(Owner::take(req, pair).into_value());
+    }
+    let mut pair = PhpArray::new(req)?;
+    let text = if unmatched_as_null {
+        Owner::null()
+    } else {
+        PhpString::new(req, b"")?.into_value()
     };
-    let pair = match cached {
-        (Some(pair), _) => pair,
-        (None, ended) => {
-            let mut pair = PhpArray::new(req)?;
-            let text = if unmatched_as_null {
-                Owner::null()
-            } else {
-                PhpString::new(req, b"")?.into_value()
-            };
-            pair.append(req, text)?;
-            pair.append(req, Owner::int(-1))?;
-            // `EG_FLAGS_IN_SHUTDOWN`'s arm: a pair none was cached for
-            // yet is the group's own.
-            if ended {
-                return Ok(pair.into_value());
-            }
-            let view = *pair;
-            let unmatched = &mut req.state::<State>().unmatched;
-            let slot = if unmatched_as_null {
-                &mut unmatched.null
-            } else {
-                &mut unmatched.empty
-            };
-            *slot = Some(pair);
-            view
-        }
-    };
-    Ok(Owner::take(req, pair).into_value())
+    pair.append(req, text)?;
+    pair.append(req, Owner::int(-1))?;
+    match req
+        .state::<State>()
+        .unmatched
+        .cache(unmatched_as_null, pair)
+    {
+        Ok(cached) => Ok(Owner::take(req, cached).into_value()),
+        // `EG_FLAGS_IN_SHUTDOWN`'s arm: the group's own pair.
+        Err(own) => Ok(own.into_value()),
+    }
 }
 
 /// `add_named` and the numbered insert after it: the value under the

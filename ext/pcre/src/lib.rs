@@ -98,6 +98,40 @@ struct Unmatched {
     ended: bool,
 }
 
+impl Unmatched {
+    /// The slot of the pair `PREG_UNMATCHED_AS_NULL` picks.
+    fn slot(&mut self, as_null: bool) -> &mut Option<Owner<PhpArray>> {
+        if as_null {
+            &mut self.null
+        } else {
+            &mut self.empty
+        }
+    }
+
+    /// The cached pair of the kind, a view, where one is cached.
+    fn cached(&mut self, as_null: bool) -> Option<PhpArray> {
+        self.slot(as_null).as_ref().map(|pair| **pair)
+    }
+
+    /// `pair` cached as the kind's, where the program has not ended;
+    /// handed back otherwise, the caller's to hand on.
+    fn cache(&mut self, as_null: bool, pair: Owner<PhpArray>) -> Result<PhpArray, Owner<PhpArray>> {
+        if self.ended || self.slot(as_null).is_some() {
+            return Err(pair);
+        }
+        let view = *pair;
+        *self.slot(as_null) = Some(pair);
+        Ok(view)
+    }
+
+    /// No pair is cached from here, and the two cached are handed back
+    /// to be given up.
+    fn end(&mut self) -> [Option<Owner<PhpArray>>; 2] {
+        self.ended = true;
+        [self.empty.take(), self.null.take()]
+    }
+}
+
 /// The program has ended (`EG(flags) |= EG_FLAGS_IN_SHUTDOWN`): the
 /// cached pairs stand until `RSHUTDOWN`, and no other is cached.
 fn program_ended(req: &mut Request) {
@@ -213,9 +247,7 @@ fn rshutdown(req: &mut Request) {
         general.free(req);
     }
     // `zval_ptr_dtor(&PCRE_G(unmatched_null_pair))` and its twin.
-    let unmatched = &mut req.state::<State>().unmatched;
-    unmatched.ended = true;
-    let pairs = [unmatched.empty.take(), unmatched.null.take()];
+    let pairs = req.state::<State>().unmatched.end();
     for pair in pairs.into_iter().flatten() {
         pair.give_up(req);
     }
