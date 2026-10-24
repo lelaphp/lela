@@ -11,7 +11,7 @@
 
 use std::ptr::NonNull;
 
-use php_heap::{Arr, FrameRef, Key, ROOM_BYTES, Zval, ZvalRef};
+use php_heap::{FrameRef, ROOM_BYTES, Zval};
 use php_unit::{CacheSlot, Opcode, OplineIdx};
 
 use super::{FuncRef, Held};
@@ -107,16 +107,6 @@ pub fn primed(req: &Request, frame: FrameRef, held: Held<'_>, at: OplineIdx) -> 
     let user = req.user_function(function).filter(|_| init)?;
     let body = exec::body_of(&user.unit, user.body)?;
     Some(FuncRef::at(body.runtime_cache))
-}
-
-/// The element `key` names in `array`, which compiled code holds the one
-/// owner of, for a write: found, or laid down holding `null` where the
-/// key is not there, as php's `zend_hash_lookup` and
-/// `zend_hash_index_lookup` lay one down and the handler's inline path
-/// lays one down for `BP_VAR_W`; none where the memory limit refused it,
-/// whose fatal the request ends in.
-pub fn lookup_element(req: &mut Request, array: Arr, key: Key) -> Option<ZvalRef> {
-    (array.value_ref(key)).or_else(|| req.array_lookup(array, key).ok())
 }
 
 /// php's `zval_ptr_dtor` of `zval`, a counted value compiled code gives

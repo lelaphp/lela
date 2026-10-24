@@ -140,6 +140,7 @@ tier::catches
 tier::class_number
 tier::compile
 tier::current
+tier::dim_key
 tier::entry
 tier::epoch
 tier::epoch_state

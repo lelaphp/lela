@@ -708,7 +708,8 @@ pub(crate) enum Kernel {
     /// in the array compiled code holds the one owner of, laid down
     /// holding `null` where it is not there, php's `zend_hash_lookup` and
     /// `zend_hash_index_lookup` (`php_engine::tier::lookup_element`); it
-    /// runs no user code, and the memory limit is a fatal answered as one.
+    /// runs no user code, and the memory limit's fatal, which the request
+    /// ends in, is answered as its unwinding.
     Lookup,
 }
 

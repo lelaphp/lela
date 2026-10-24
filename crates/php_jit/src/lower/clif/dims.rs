@@ -20,9 +20,18 @@ use crate::types::{
     Types, ValueId, cannot_raise,
 };
 
+/// Where a read goes on that finds no element ([`Emit::reached`]): the
+/// opline's exit, for the interpreter to serve it again and warn, or a
+/// block of the caller's with its arguments.
+#[derive(Clone, Copy)]
+enum Missing<'a> {
+    Exit(ExitId),
+    To(Block, &'a [BlockArg]),
+}
+
 /// How a write reaches the element it writes ([`Emit::reach`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Reach {
+enum Reach {
     /// A packed array's slot, by a long key.
     Slot,
     /// The table's lookup.
@@ -90,7 +99,7 @@ impl Emit<'_> {
         let answered = self.b.create_block();
         self.b.append_block_param(answered, I8);
         let unset = self.b.ins().iconst(I8, 0);
-        let element = self.tested_element(at, line, (answered, &[BlockArg::Value(unset)]))?;
+        let element = self.reached(at, line, Missing::To(answered, &[BlockArg::Value(unset)]))?;
         let element = self.deref(element);
         let kind = self.b.ins().load(I8, trusted(), element, TYPE_AT);
         let set = self
@@ -114,48 +123,51 @@ impl Emit<'_> {
         self.direction(at, jumps)
     }
 
-    /// The element `line`'s key names in the array its variable holds, for
-    /// a test or a read that finds nothing silently: a packed array's slot
-    /// below `nNumUsed`, as a layout guard held it, or the one
-    /// [`Kernel::Find`] answers; to `missed` with its arguments where
-    /// there is none, a packed array's hole aside, which the caller reads.
-    fn tested_element(
-        &mut self,
-        at: OpId,
-        line: &Line,
-        (missed, args): (Block, &[BlockArg]),
-    ) -> Result<Value, Abort> {
+    /// The element `line`'s key names in the array its variable holds,
+    /// for a read, a test or a read that finds nothing silently: a packed
+    /// array's slot below `nNumUsed` that holds a value, where a layout
+    /// guard held the array packed and the key is a long, or the place
+    /// [`Kernel::Find`] answers; where there is none, on as `missing` says.
+    fn reached(&mut self, at: OpId, line: &Line, missing: Missing<'_>) -> Result<Value, Abort> {
         let Operand::Value(array) = line.op1 else {
             return Err(mismatch("an element of no array"));
         };
-        let (slot, types) = {
-            let held = self.value(array)?;
-            (held.slot, held.types)
-        };
-        let arr = self.array_of(slot, self.read_of(at, array))?;
-        let packed = self.packed_at(at, array, types) && self.long_at(at, line.op2)?;
-        let (absent, reached) = if packed {
+        let held = self.value(array)?;
+        let arr = self.array_of(held.slot, self.read_of(at, array))?;
+        if self.packed_at(at, array, held.types) && self.long_at(at, line.op2)? {
             let Scalar::Long(key) = self.scalar(at, line.op2)? else {
                 return Err(mismatch("an element by no long key"));
             };
-            (self.past_used(arr, key), Err(key))
-        } else {
-            let place = self.looked_up(at, line, Kernel::Find, arr)?;
-            let kind = self.b.ins().stack_load(I64, I8, place, TYPE_AT);
-            let unplaced = self
+            let past = self.past_used(arr, key);
+            self.missing_if(past, missing)?;
+            let element = self.slot_at(arr, key);
+            let kind = self.b.ins().load(I8, trusted(), element, TYPE_AT);
+            let hole = self
                 .b
                 .ins()
-                .icmp_imm_s(IntCC::NotEqual, kind, tag(ZvalType::Indirect));
-            (unplaced, Ok(place))
-        };
-        let on = self.b.create_block();
-        self.b.ins().brif(absent, missed, args, on, &[]);
-        self.b.switch_to_block(on);
-        self.b.seal_block(on);
-        Ok(match reached {
-            Ok(place) => self.b.ins().stack_load(I64, I64, place, 0),
-            Err(key) => self.slot_at(arr, key),
-        })
+                .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
+            self.missing_if(hole, missing)?;
+            return Ok(element);
+        }
+        let place = self.looked_up(at, line, Kernel::Find, arr)?;
+        let unplaced = self.unplaced(place);
+        self.missing_if(unplaced, missing)?;
+        Ok(self.placed_at(place))
+    }
+
+    /// On as `missing` says where `cond` is not zero, a key the array has
+    /// not got; on in place otherwise.
+    fn missing_if(&mut self, cond: Value, missing: Missing<'_>) -> Result<(), Abort> {
+        match missing {
+            Missing::Exit(exit) => self.leave_if(cond, exit),
+            Missing::To(to, args) => {
+                let on = self.b.create_block();
+                self.b.ins().brif(cond, to, args, on, &[]);
+                self.b.switch_to_block(on);
+                self.b.seal_block(on);
+                Ok(())
+            }
+        }
     }
 
     /// `FETCH_DIM_IS`, the read an `isset()` chain, an `empty()` or a `??`
@@ -209,15 +221,9 @@ impl Emit<'_> {
             .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
         let out = self.value(out)?.slot;
         let (missed, done) = (self.b.create_block(), self.b.create_block());
-        let element = self.tested_element(at, line, (missed, &[]))?;
+        let element = self.reached(at, line, Missing::To(missed, &[]))?;
         let element = self.deref(element);
         let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        let kind = self.b.ins().band_imm_u(info, KIND);
-        let hole = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
-        self.divert_if(hole, missed);
         self.copy(element, info, out)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(missed);
@@ -236,8 +242,9 @@ impl Emit<'_> {
     /// calls the table's lookup (`zend_jit_fetch_dimension_address_inner`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:11917-12511`): the place it
     /// answered, an `IS_INDIRECT` or `UNDEF`, in the kernel's answer slot.
-    /// A throw, the memory limit's fatal past a lookup, unwinds.
-    pub(super) fn looked_up(
+    /// The memory limit's fatal past a lookup, which the request ends in,
+    /// unwinds.
+    fn looked_up(
         &mut self,
         at: OpId,
         line: &Line,
@@ -257,15 +264,16 @@ impl Emit<'_> {
         Ok(slot)
     }
 
-    /// The element's address a lookup answered in `slot`, on at `to`
-    /// where it answered `UNDEF`.
-    pub(super) fn leave_unplaced(&mut self, slot: StackSlot, to: Block) -> Value {
+    /// Whether a lookup answered no place in `slot`, `UNDEF`.
+    fn unplaced(&mut self, slot: StackSlot) -> Value {
         let kind = self.b.ins().stack_load(I64, I8, slot, TYPE_AT);
-        let unplaced = self
-            .b
+        self.b
             .ins()
-            .icmp_imm_s(IntCC::NotEqual, kind, tag(ZvalType::Indirect));
-        self.divert_if(unplaced, to);
+            .icmp_imm_s(IntCC::NotEqual, kind, tag(ZvalType::Indirect))
+    }
+
+    /// The element's address a lookup answered in `slot`.
+    fn placed_at(&mut self, slot: StackSlot) -> Value {
         self.b.ins().stack_load(I64, I64, slot, 0)
     }
 
@@ -295,47 +303,26 @@ impl Emit<'_> {
         Ok((word, info, false))
     }
 
-    /// A read of a packed array's element by a long key: past `nNumUsed`
-    /// or a hole leaves for the interpreter to serve it again; an element
-    /// that is a reference is read through it; one of the type the op's
-    /// guard holds is read, and one of another copied to the slot the
-    /// fetch writes as php's `ZVAL_COPY_DEREF` copies it, for the exit to
-    /// go on past the fetch. A temporary array the fetch read is freed
-    /// after, as its handler frees it, what a destructor throws leaving
-    /// through the exit `types` gives the free.
+    /// A read of an array's element by a long or a string key, php's
+    /// `zend_jit_fetch_dim_read` under `BP_VAR_R` as its tracing tier takes it
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:12513-12700`): a key the array has
+    /// not got, past a packed array's `nNumUsed`, a hole or none the
+    /// table's lookup finds, leaves for the interpreter to serve it again
+    /// and warn ([`Emit::reached`]); an element that is a reference is read
+    /// through it; one of the type the op's guard holds is read, and one
+    /// of another copied to the slot the fetch writes as php's
+    /// `ZVAL_COPY_DEREF` copies it, for the exit to go on past the fetch.
+    /// A temporary array the fetch read is freed after, as its handler
+    /// frees it, what a destructor throws leaving through the exit `types`
+    /// gives the free.
     pub(super) fn fetch(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let exit = line
             .exit
             .ok_or_else(|| mismatch("a fetch that cannot leave"))?;
-        let Operand::Value(array) = line.op1 else {
-            return Err(mismatch("a fetch from no array"));
-        };
-        let (slot, types) = {
-            let held = self.value(array)?;
-            (held.slot, held.types)
-        };
         let out = line
             .out
             .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let arr = self.array_of(slot, self.read_of(at, array))?;
-        let packed = self.packed_at(at, array, types) && self.long_at(at, line.op2)?;
-        let element = if packed {
-            let Scalar::Long(key) = self.scalar(at, line.op2)? else {
-                return Err(mismatch("a fetch by no long key"));
-            };
-            let element = self.element(arr, key, exit)?;
-            let hole = self.b.ins().load(I8, trusted(), element, TYPE_AT);
-            let hole = self
-                .b
-                .ins()
-                .icmp_imm_s(IntCC::Equal, hole, tag(ZvalType::Undef));
-            self.leave_if(hole, exit)?;
-            element
-        } else {
-            let place = self.looked_up(at, line, Kernel::Find, arr)?;
-            let to = self.left_by(Some(Leave::Exit(exit)))?;
-            self.leave_unplaced(place, to)
-        };
+        let element = self.reached(at, line, Missing::Exit(exit))?;
         match self.within(at).as_slice() {
             [] => {
                 let element = self.deref(element);
@@ -354,20 +341,18 @@ impl Emit<'_> {
         self.free_temp(line, line.op1)
     }
 
-    /// A write to an array's element by a long key, php's
+    /// A write to an array's element by a long or a string key, php's
     /// `zend_jit_assign_dim` (`Z/ext/opcache/jit/zend_jit_ir.c:13352-13526`):
-    /// in place where the array is counted and held once, so php's
-    /// `SEPARATE_ARRAY` has nothing to do, packed, and the key below
-    /// `nNumUsed` and the element there
-    /// (`zend_jit_fetch_dimension_address_inner`'s `BP_VAR_W` path,
-    /// `:11953-12276`), as `zend_jit_assign_to_variable` writes it
+    /// in place where [`Emit::written_in_place`] reaches the element, a
+    /// packed slot or the one [`Kernel::Lookup`] finds or lays down, as
+    /// `zend_jit_assign_to_variable` writes it
     /// (`:5793-5950`): a scalar, or a value no scalar moved from a
     /// temporary, copied from a variable with one owner more or copied
     /// from a constant ([`Emit::copy_operand`]), and what the element held
     /// given up after ([`Emit::release`]), a destructor's throw leaving
     /// through the opline's unwind; through the handler otherwise, where
-    /// php's code calls its helpers, the array's copy and the hash's
-    /// lookup or insert, so the write takes no exit.
+    /// php's code copies the array or looks a packed array's hole up, so
+    /// the write takes no exit.
     ///
     /// An immutable array, one shared, a key past `nNumUsed`, a hole, an
     /// element that is a reference and an array turned hash are each served
@@ -479,6 +464,25 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// [12,["e","F","c"]]
     /// ```
+    ///
+    /// A write to the array a reference holds is its handler's, the array
+    /// written over by the loop between:
+    ///
+    /// ```php
+    /// function f(array &$r, $n) { for ($i = 0; $i < $n; $i++) { $r['k'] = $i; $r[$i & 1] = "v$i"; if ($i == 2) { $r = ['z' => 1]; } } }
+    /// $x = ['k' => 0]; $y = &$x; f($x, 6); echo json_encode([$x, $y]), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [{"z":1,"k":5,"1":"v5","0":"v4"},{"z":1,"k":5,"1":"v5","0":"v4"}]
+    /// ```
+    ///
+    /// ```php
+    /// function f(array &$r, $n) { for ($i = 0; $i < $n; $i++) { $r['k'] = $i; $r[$i & 1] = "v$i"; if ($i == 2) { $r = ['z' => 1]; } } }
+    /// $x = ['k' => 0]; $y = &$x; f($x, 6); echo json_encode([$x, $y]), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [{"z":1,"k":5,"1":"v5","0":"v4"},{"z":1,"k":5,"1":"v5","0":"v4"}]
+    /// ```
     pub(super) fn assign_dim(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Operand::Value(array) = line.op1 else {
             return Err(mismatch("an element write to no array"));
@@ -487,10 +491,8 @@ impl Emit<'_> {
             Some(_) => Some(self.scalar(at, line.data)?),
             None => None,
         };
-        let (slot, types) = {
-            let held = self.value(array)?;
-            (held.slot, held.types)
-        };
+        let held = self.value(array)?;
+        let (slot, types) = (held.slot, held.types);
         let handled = self.b.create_block();
         let done = self.b.create_block();
         let zval = self.place(slot)?;
@@ -522,7 +524,7 @@ impl Emit<'_> {
     /// for a hash or a string key, and either by the array's layout where
     /// it may be of both, as php's code tests `HASH_FLAG_PACKED`
     /// (`MAY_BE_ARRAY_PACKED` and `MAY_BE_ARRAY_HASH` both).
-    pub(super) fn reach(&self, at: OpId, types: Types, line: &Line) -> Result<Reach, Abort> {
+    fn reach(&self, at: OpId, types: Types, line: &Line) -> Result<Reach, Abort> {
         let long = self.long_at(at, line.op2)?;
         Ok(
             match (long, types.meets(Types::PACKED), types.meets(Types::HASH)) {
@@ -534,7 +536,7 @@ impl Emit<'_> {
     }
 
     /// The element `line`'s key names of the array the zval at `base +
-    /// at` holds, handed with its type word to `then`, which writes it,
+    /// zval_at` holds, handed with its type word to `then`, which writes it,
     /// where php's code writes it in place: the array counted and held
     /// once, so `SEPARATE_ARRAY` has nothing to do, then, as `reach` says,
     /// a packed array's slot below `nNumUsed` that holds a value, or the
@@ -634,7 +636,7 @@ impl Emit<'_> {
     /// dtor 13
     /// 24 [13]
     /// ```
-    pub(super) fn written_in_place(
+    fn written_in_place(
         &mut self,
         (at, line): (OpId, &Line),
         (base, zval_at): (Value, i32),
@@ -655,35 +657,30 @@ impl Emit<'_> {
             .load(I32, trusted(), arr, imm(Arr::REFCOUNT_AT));
         let shared = self.b.ins().icmp_imm_s(IntCC::NotEqual, count, 1);
         self.divert_if(shared, handled);
-        let (slot, table) = match reach {
-            Reach::Slot => (Some(None), None),
-            Reach::Table => (None, Some(None)),
+        match reach {
+            Reach::Slot => {
+                let (element, old) = self.slot_written(at, line, arr, handled)?;
+                then(self, element, old)
+            }
+            Reach::Table => {
+                let (element, old) = self.table_written(at, line, (arr, kernel), handled)?;
+                then(self, element, old)
+            }
             Reach::Either => {
                 let (slot, table) = (self.b.create_block(), self.b.create_block());
                 let flags = self.b.ins().load(I32, trusted(), arr, imm(Arr::FLAGS_AT));
                 let packed = self.b.ins().band_imm_u(flags, i64::from(Arr::PACKED));
                 self.b.ins().brif(packed, slot, &[], table, &[]);
-                (Some(Some(slot)), Some(Some(table)))
+                self.b.switch_to_block(slot);
+                self.b.seal_block(slot);
+                let (element, old) = self.slot_written(at, line, arr, handled)?;
+                then(self, element, old)?;
+                self.b.switch_to_block(table);
+                self.b.seal_block(table);
+                let (element, old) = self.table_written(at, line, (arr, kernel), handled)?;
+                then(self, element, old)
             }
-        };
-        if let Some(block) = slot {
-            if let Some(block) = block {
-                self.b.switch_to_block(block);
-                self.b.seal_block(block);
-            }
-            let (element, old) = self.slot_written(at, line, arr, handled)?;
-            then(self, element, old)?;
         }
-        if let Some(block) = table {
-            if let Some(block) = block {
-                self.b.switch_to_block(block);
-                self.b.seal_block(block);
-            }
-            let element = self.table_written(at, line, (arr, kernel), handled)?;
-            let old = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-            then(self, element, old)?;
-        }
-        Ok(())
     }
 
     /// The slot of the packed array `arr` that `line`'s long key names,
@@ -712,30 +709,34 @@ impl Emit<'_> {
         Ok((element, old))
     }
 
-    /// The element of `arr` `kernel` answers for `line`'s key; to
-    /// `handled` where it answers none.
+    /// The element of `arr` `kernel` answers for `line`'s key, and its
+    /// type word; to `handled` where it answers none.
     fn table_written(
         &mut self,
         at: OpId,
         line: &Line,
         (arr, kernel): (Value, Kernel),
         handled: Block,
-    ) -> Result<Value, Abort> {
+    ) -> Result<(Value, Value), Abort> {
         let place = self.looked_up(at, line, kernel, arr)?;
-        Ok(self.leave_unplaced(place, handled))
+        let unplaced = self.unplaced(place);
+        self.divert_if(unplaced, handled);
+        let element = self.placed_at(place);
+        let old = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+        Ok((element, old))
     }
 
-    /// A compound write of a number to an array's element by a long key,
+    /// A compound write to an array's element by a long or a string key,
     /// the array a variable's or the one the reference it holds refers
     /// to, php's `zend_jit_assign_dim_op` (`Z/ext/opcache/jit/zend_jit_ir.c:13528-13750`):
-    /// in place where the array can be written in place
-    /// ([`Emit::written_in_place`]) and the element is a long or a
-    /// double, which php's `zend_jit_math_helper` serves inline, a long
-    /// overflowing to a double as php's does; through the handler
-    /// otherwise, where php's code calls its helpers (the array's copy, the
-    /// hash's lookup, `zend_binary_op` over anything else), so the write
-    /// takes no exit, as php's takes none where the record holds no type
-    /// of the element.
+    /// in place where [`Emit::written_in_place`] reaches the element, a
+    /// packed slot or the one [`Kernel::Find`] finds, and the element is
+    /// of a kind the operator serves inline ([`Emit::compound_at`]), or a
+    /// string `.=` writes onto through [`Kernel::AssignConcat`]; through
+    /// the handler otherwise, where php's code copies the array, warns of
+    /// a key the array has not got or calls `zend_binary_op` over anything
+    /// else, so the write takes no exit, as php's takes none where the
+    /// record holds no type of the element.
     ///
     /// By-reference arrays of floats updated in a loop, as nbody updates
     /// them, an element a long that overflows, one a string, a shared
@@ -881,10 +882,8 @@ impl Emit<'_> {
     /// reference it holds refers to, of either layout, as php's
     /// `zend_jit_prepare_array_update` follows it.
     fn written_array(&mut self, at: OpId, array: ValueId) -> Result<((Value, i32), Types), Abort> {
-        let (slot, types) = {
-            let held = self.value(array)?;
-            (held.slot, held.types)
-        };
+        let held = self.value(array)?;
+        let (slot, types) = (held.slot, held.types);
         let (room, array_at) = self.place(slot)?;
         Ok(match self.read_of(at, array) {
             Read::InPlace => ((room, array_at), types),
@@ -981,13 +980,5 @@ impl Emit<'_> {
         };
         self.written_in_place((at, line), zval, (reach, kernel), (handled, placed))?;
         self.handled_then(at, line, (handled, done))
-    }
-
-    /// The address of the slot `key` names in the packed array `arr`,
-    /// leaving through `exit` where the key is past `nNumUsed`.
-    pub(super) fn element(&mut self, arr: Value, key: Value, exit: ExitId) -> Result<Value, Abort> {
-        let past = self.past_used(arr, key);
-        self.leave_if(past, exit)?;
-        Ok(self.slot_at(arr, key))
     }
 }

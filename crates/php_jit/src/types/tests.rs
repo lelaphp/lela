@@ -2203,3 +2203,49 @@ fn a_hashs_separation_and_a_destructor_reload_nothing() -> Result<(), String> {
     assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
     Ok(())
 }
+
+/// What the hash slice leaves to the handler, each stepped as it was
+/// (#3339's successor): `isset()` and `??` over a temporary a fetch made,
+/// a write through the `VAR` a fetch for writing left indirect, and a
+/// write to the array a reference holds. `fetch_dim_w`'s and `fetch_is`'s
+/// witnesses serve the first two, `assign_dim`'s the third.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_is_stepped() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f(array &$r, int $n) {
+            $h = ['n' => [5], 'a' => []]; $s = 0;
+            for ($i = 0; $i < $n; $i++) { $s += isset($h['n'][0]); $h['a'][$i & 3] = $i; $r['k'] = $i; }
+            return $s;
+        }
+        $x = ['k' => 0]; echo f($x, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let forms = |opcode: Opcode, op1: &dyn Fn(&Line) -> bool| -> Vec<Form> {
+        (ir.ops.iter())
+            .filter_map(|op| match op {
+                Op::Line(line) if line.opcode == opcode && op1(line) => Some(line.form),
+                _ => None,
+            })
+            .collect()
+    };
+    // `f` has five variables; a slot past them is a temporary.
+    let temporary = |line: &Line| match line.op1 {
+        Operand::Value(value) => ir.values[value.0 as usize].slot.var >= 5,
+        _ => false,
+    };
+    assert_eq!(
+        forms(Opcode::IssetIsemptyDimObj, &temporary),
+        [Form::Step],
+        "{rendered}"
+    );
+    let writes = forms(Opcode::AssignDim, &|_| true);
+    assert_eq!(writes, [Form::Step, Form::Step], "{rendered}");
+    assert_eq!(
+        forms(Opcode::FetchDimW, &|_| true),
+        [Form::Inline],
+        "{rendered}"
+    );
+    Ok(())
+}

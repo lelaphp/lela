@@ -3448,8 +3448,8 @@ fn element_written(
 
 /// Whether a dimension opline is compiled inline over what it sees of
 /// the array, the key and the value, `[t1, t2, td]`, `cv1` where its
-/// `op1` is a variable seen as it is: a read ([`fetched_inline`]),
-/// `isset()` alone, as php's `zend_jit_isset_isempty_dim` serves
+/// `op1` is a variable seen as it is: a read ([`fetched_inline`]), a
+/// read under `BP_VAR_IS`, `isset()` alone, as php's `zend_jit_isset_isempty_dim` serves
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:13157-13350`), a write
 /// ([`element_written`]), a compound write ([`compound_in_place`]), and
 /// a fetch for writing of a variable's array, php's `zend_jit_fetch_dim`,

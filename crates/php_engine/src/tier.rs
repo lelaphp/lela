@@ -52,6 +52,7 @@ pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 
 mod crossing;
+mod dims;
 mod frames;
 mod held;
 mod layout;
@@ -62,9 +63,9 @@ mod strings;
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, laid, lookup_element, primed, release, room, stack,
-    stack_room, stand,
+    at_room, current, free_cv, free_operands, laid, primed, release, room, stack, stack_room, stand,
 };
+pub use dims::{dim_key, lookup_element};
 pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
