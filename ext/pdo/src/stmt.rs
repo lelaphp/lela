@@ -913,12 +913,11 @@ pub(super) fn register(
                 "Did not find column name '{}' in the defined columns; it will not be bound",
                 String::from_utf8_lossy(&name)
             );
-            if let Err(thrown) =
-                error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(&supp))
-            {
-                bound.give_up(req);
-                return Err(thrown);
-            }
+            let raised =
+                error::raise_impl(req, dbh, On::Stmt(object), SqlState::GENERAL, Some(&supp));
+            // php 8.5.12 refuses the entry here, where 8.5.9 stored it.
+            bound.give_up(req);
+            return raised.map(|()| false);
         }
     }
     if let Err(thrown) = bound.own_name(req) {
@@ -1222,7 +1221,26 @@ impl PDOStatement {
     /// string(1) "4"
     ///
     /// Warning: PDOStatement::bindColumn(): SQLSTATE[HY000]: General error: Did not find column name 'nope' in the defined columns; it will not be bound in %s on line 7
-    /// bool(true)
+    /// bool(false)
+    /// ```
+    ///
+    /// The refused column keeps nothing it was handed, the connector's options
+    /// among them:
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+    /// $s = $db->query('SELECT 1 AS a');
+    /// $o = [new stdClass];
+    /// $w = WeakReference::create($o[0]);
+    /// var_dump($s->bindColumn('missing', $v, PDO::PARAM_STR, 0, $o), $s->errorInfo()[0]);
+    /// unset($o);
+    /// var_dump($w->get());
+    /// ```
+    /// ```expect
+    /// Warning: PDOStatement::bindColumn(): SQLSTATE[HY000]: General error: Did not find column name 'missing' in the defined columns; it will not be bound in %s on line 6
+    /// bool(false)
+    /// string(5) "HY000"
+    /// NULL
     /// ```
     #[php(tentative)]
     fn bindColumn(
