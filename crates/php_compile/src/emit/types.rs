@@ -424,8 +424,9 @@ impl Emit<'_> {
     /// ```
     ///
     /// `static` is among the type names php looks up by name since
-    /// 8.5.12, so a qualified one is refused as the others are, before
-    /// any class scope is asked for:
+    /// 8.5.12 (`builtin_types`, `Z/Zend/zend_compile.c:275`), so a
+    /// qualified one is refused as the others are, before any class
+    /// scope is asked for:
     ///
     /// ```php
     /// function f($i): \static {}
