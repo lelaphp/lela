@@ -2223,10 +2223,30 @@ fn ucwords(
 /// string(0) ""
 /// bool(true)
 /// ```
+///
+/// The string is `zend_string_alloc` of the subject's length
+/// (`Z/ext/standard/string.c:3631`), a string of the request's even for
+/// no byte or one, which another native hands out interned; the first
+/// line counts the program's first measure too:
+///
+/// ```php
+/// $r = null; $m = 0;
+/// foreach (["", "a", "ab", "abcdefgh"] as $t) { $m = memory_get_usage(); $r = strrev($t); echo strlen($t), " ", memory_get_usage() - $m, "\n"; $r = null; }
+/// ```
+/// ```expect
+/// 0 64
+/// 1 32
+/// 2 32
+/// 8 40
+/// ```
 #[php_function]
 fn strrev(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
-    let out: Vec<u8> = string.as_bytes().iter().rev().copied().collect();
-    PhpString::new(req, &out)
+    let bytes = string.as_bytes();
+    PhpString::filled(req, bytes.len(), |to| {
+        for (to, from) in to.iter_mut().zip(bytes.iter().rev()) {
+            *to = *from;
+        }
+    })
 }
 
 /// `similar_text(string $string1, string $string2, &$percent = null):
