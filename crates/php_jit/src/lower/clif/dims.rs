@@ -29,16 +29,29 @@ enum Missing<'a> {
     To(Block, &'a [BlockArg]),
 }
 
-/// An element's key as the lookup kernels take it ([`Emit::key_of`]).
+/// An element's key, read once for the slot and the lookup kernels
+/// ([`Emit::key_of`]).
 #[derive(Debug, Clone, Copy)]
-struct Key {
-    /// The zval's word: the long, or the string's address.
-    word: Value,
-    /// Its type info.
-    info: Value,
-    /// Whether it is the op array's constant, which a string is read as
-    /// it is written.
-    constant: bool,
+enum Key {
+    /// A long, the slot's index and the table's hash; `constant` where
+    /// it is the op array's.
+    Long { word: Value, constant: bool },
+    /// Any other zval, by its word and type info; `constant` where it is
+    /// the op array's, which a string is read as it is written.
+    Zval {
+        word: Value,
+        info: Value,
+        constant: bool,
+    },
+}
+
+/// The long a packed slot is written by: [`Emit::reach`] gives a slot only
+/// where the key is one.
+fn long(key: Key) -> Result<Value, Abort> {
+    match key {
+        Key::Long { word, .. } => Ok(word),
+        Key::Zval { .. } => Err(mismatch("an element write by no long key")),
+    }
 }
 
 /// How a write reaches the element it writes ([`Emit::reach`]).
@@ -162,7 +175,7 @@ impl Emit<'_> {
             return Ok(element);
         }
         let key = self.key_of(at, line)?;
-        let place = self.looked_up(line, (Kernel::Find, arr), key)?;
+        let place = self.looked_up(line, (arr, Kernel::Find), key)?;
         let unplaced = self.unplaced(place);
         self.missing_if(unplaced, missing)?;
         Ok(self.placed_at(place))
@@ -250,8 +263,8 @@ impl Emit<'_> {
         Ok(())
     }
 
-    /// The element `line`'s key names in the array `arr`, through
-    /// `kernel`, [`Kernel::Find`] or [`Kernel::Lookup`], as php's code
+    /// The element `key` names in the array `arr`, through `kernel`,
+    /// [`Kernel::Find`] or [`Kernel::Lookup`], served at `line`, as php's code
     /// calls the table's lookup (`zend_jit_fetch_dimension_address_inner`,
     /// `Z/ext/opcache/jit/zend_jit_ir.c:11917-12511`): the place it
     /// answered, an `IS_INDIRECT` or `UNDEF`, in the kernel's answer slot.
@@ -260,14 +273,21 @@ impl Emit<'_> {
     fn looked_up(
         &mut self,
         line: &Line,
-        (kernel, arr): (Kernel, Value),
-        Key {
-            word: key,
-            info,
-            constant,
-        }: Key,
+        (arr, kernel): (Value, Kernel),
+        key: Key,
     ) -> Result<StackSlot, Abort> {
-        let constant = self.b.ins().iconst(I32, i64::from(constant));
+        let (key, info, of_unit) = match key {
+            Key::Long { word, constant } => {
+                let info = self.b.ins().iconst(I32, tag(ZvalType::Long));
+                (word, info, constant)
+            }
+            Key::Zval {
+                word,
+                info,
+                constant,
+            } => (word, info, constant),
+        };
+        let constant = self.b.ins().iconst(I32, i64::from(of_unit));
         let [room, opline] = self.served(line)?;
         let slot = self.answer();
         let place = self.b.ins().stack_addr(I64, slot, 0);
@@ -300,7 +320,7 @@ impl Emit<'_> {
             let zval = self.constant_zval(line.frame, idx)?;
             let word = self.b.ins().load(I64, trusted(), zval, 0);
             let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
-            return Ok(Key {
+            return Ok(Key::Zval {
                 word,
                 info,
                 constant: true,
@@ -310,10 +330,8 @@ impl Emit<'_> {
             let Scalar::Long(word) = self.scalar(at, line.op2)? else {
                 return Err(mismatch("a long key read as no long"));
             };
-            let info = self.b.ins().iconst(I32, tag(ZvalType::Long));
-            return Ok(Key {
+            return Ok(Key::Long {
                 word,
-                info,
                 constant: matches!(line.op2, Operand::Constant(_)),
             });
         }
@@ -323,7 +341,7 @@ impl Emit<'_> {
         let (room, key_at) = self.place(self.value(value)?.slot)?;
         let word = self.b.ins().load(I64, trusted(), room, key_at);
         let info = self.b.ins().load(I32, trusted(), room, key_at + TYPE_AT);
-        Ok(Key {
+        Ok(Key::Zval {
             word,
             info,
             constant: false,
@@ -674,8 +692,7 @@ impl Emit<'_> {
         ),
     ) -> Result<(), Abort> {
         // The key read once, before the array's tests, for both layouts'
-        // paths: read past the packed test, the packed path reloads the
-        // frame's address for it.
+        // paths, as php's code reads `hval` before it tests the layout.
         let key = self.key_of(at, line)?;
         let info = self.b.ins().load(I32, trusted(), base, zval_at + TYPE_AT);
         let counted = self.b.ins().band_imm_u(info, COUNTED);
@@ -690,7 +707,7 @@ impl Emit<'_> {
         self.divert_if(shared, handled);
         match reach {
             Reach::Slot => {
-                let (element, old) = self.slot_written((arr, key), handled);
+                let (element, old) = self.slot_written(arr, long(key)?, handled);
                 then(self, element, old)
             }
             Reach::Table => {
@@ -698,9 +715,10 @@ impl Emit<'_> {
                 then(self, element, old)
             }
             Reach::Either => {
-                // The table's arm out of line, as it calls a kernel: the
-                // packed path, the one the trace recorded, falls through
-                // to its slot, the branch's other way laid out next.
+                // The packed slot first, as php's code lays it, and the
+                // table's arm cold, as it calls a kernel: the slot's path
+                // falls through, the branch's other way laid out next.
+                let index = long(key)?;
                 let (slot, table) = (self.b.create_block(), self.b.create_block());
                 self.b.set_cold_block(table);
                 let flags = self.b.ins().load(I32, trusted(), arr, imm(Arr::FLAGS_AT));
@@ -709,7 +727,7 @@ impl Emit<'_> {
                 self.b.ins().brif(hashed, table, &[], slot, &[]);
                 self.b.switch_to_block(slot);
                 self.b.seal_block(slot);
-                let (element, old) = self.slot_written((arr, key), handled);
+                let (element, old) = self.slot_written(arr, index, handled);
                 then(self, element, old)?;
                 self.b.switch_to_block(table);
                 self.b.seal_block(table);
@@ -722,8 +740,7 @@ impl Emit<'_> {
     /// The slot of the packed array `arr` that the long `key` names, and
     /// its type word, where it is below `nNumUsed` and holds a value; to
     /// `handled` otherwise.
-    fn slot_written(&mut self, (arr, key): (Value, Key), handled: Block) -> (Value, Value) {
-        let key = key.word;
+    fn slot_written(&mut self, arr: Value, key: Value, handled: Block) -> (Value, Value) {
         let past = self.past_used(arr, key);
         self.divert_if(past, handled);
         let element = self.slot_at(arr, key);
@@ -746,7 +763,7 @@ impl Emit<'_> {
         key: Key,
         handled: Block,
     ) -> Result<(Value, Value), Abort> {
-        let place = self.looked_up(line, (kernel, arr), key)?;
+        let place = self.looked_up(line, (arr, kernel), key)?;
         let unplaced = self.unplaced(place);
         self.divert_if(unplaced, handled);
         let element = self.placed_at(place);

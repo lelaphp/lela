@@ -370,27 +370,27 @@ function u0:0(i64, i64) -> i32 tail {
 @0004                               brif v204, block52(v205, v196, v208), block53  ; v205 = 0
 
                                 block53:
-@0004                               v218 = iconst.i32 4
-@0004                               v219 = load.i32 notrap aligned v196+104
-@0004                               v220 = iconst.i32 256
-@0004                               v221 = band v219, v220  ; v220 = 256
-@0004                               v222 = iconst.i32 0
-@0004                               v223 = icmp eq v221, v222  ; v222 = 0
-@0004                               brif v223, block54, block56
+@0004                               v218 = load.i32 notrap aligned v196+104
+@0004                               v219 = iconst.i32 256
+@0004                               v220 = band v218, v219  ; v219 = 256
+@0004                               v221 = iconst.i32 0
+@0004                               v222 = icmp eq v220, v221  ; v221 = 0
+@0004                               brif v222, block54, block56
 
                                 block56:
-@0004                               v224 = load.i64 notrap aligned v196+96
-@0004                               v225 = load.i32 notrap aligned v224
-@0004                               v226 = iconst.i32 1
-@0004                               v227 = icmp ne v225, v226  ; v226 = 1
-@0004                               brif v227, block54, block57
+@0004                               v223 = load.i64 notrap aligned v196+96
+@0004                               v224 = load.i32 notrap aligned v223
+@0004                               v225 = iconst.i32 1
+@0004                               v226 = icmp ne v224, v225  ; v225 = 1
+@0004                               brif v226, block54, block57
 
                                 block57:
+@0004                               v227 = iconst.i32 4
 @0004                               v228 = iconst.i32 0
 @0004                               v229 = iconst.i32 10
 @0004                               v230 = stack_addr.i64 ss1
 @0004                               v231 = iconst.i64 0x7000_0d00
-@0004                               v232 = call_indirect sig0, v231(v0, v196, v229, v224, v195, v218, v228, v230)  ; v231 = 0x7000_0d00, v229 = 10, v218 = 4, v228 = 0
+@0004                               v232 = call_indirect sig0, v231(v0, v196, v229, v223, v195, v227, v228, v230)  ; v231 = 0x7000_0d00, v229 = 10, v227 = 4, v228 = 0
 @0004                               brif v232, block21, block58
 
                                 block58:
