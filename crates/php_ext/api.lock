@@ -1422,6 +1422,7 @@ values::PhpString
 values::PhpString::as_bytes
 values::PhpString::declared
 values::PhpString::existing_interned
+values::PhpString::fast
 values::PhpString::filled
 values::PhpString::interned
 values::PhpString::is_empty

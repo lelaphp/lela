@@ -357,9 +357,9 @@ impl Request {
     }
 
     /// A string of `bytes` out of this request's heap, what
-    /// [`PhpString::new`] is: php's `ZVAL_STRINGL_FAST`, the process's
-    /// interned string for the empty string and a string of one byte
-    /// (`ZSTR_EMPTY_ALLOC`, `ZSTR_CHAR`), `zend_string_init` otherwise.
+    /// [`PhpString::new`] is: the process's interned string for the
+    /// empty string and a string of one byte (`ZSTR_EMPTY_ALLOC`,
+    /// `ZSTR_CHAR`), `zend_string_init` otherwise.
     /// The memory limit is the fatal that ends the request, recorded
     /// here where `zend_mm` leaves the request, and the `Thrown` that
     /// carries no throwable ends the native.
@@ -370,6 +370,27 @@ impl Request {
             return Ok(PhpString::of(frozen));
         }
         let allocated = self.heap.string(bytes);
+        self.allocated(allocated)
+    }
+
+    /// A string of `bytes` the way php-8.5.12's `zend_string_init_fast`
+    /// makes one, what [`PhpString::fast`] is: the interned string for
+    /// the empty string and one byte, as [`Request::string`] hands out,
+    /// and otherwise `zend_string_finit` ([`Request::string_finit`]).
+    pub(crate) fn string_fast(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        if bytes.len() <= 1
+            && let Some(frozen) = self.shared.permanent(bytes)
+        {
+            return Ok(PhpString::of(frozen));
+        }
+        self.string_finit(bytes)
+    }
+
+    /// A string of `bytes` out of this request's heap whatever their
+    /// length, php-8.5.12's `zend_string_finit`
+    /// ([`php_heap::Heap::string_finit`]).
+    pub(crate) fn string_finit(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string_finit(bytes);
         self.allocated(allocated)
     }
 

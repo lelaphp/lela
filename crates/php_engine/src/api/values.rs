@@ -149,15 +149,42 @@ pub struct PhpString(Str);
 
 impl PhpString {
     /// A string of these bytes out of the request's heap, which is where
-    /// every string a native returns comes from (design §5.13). php's
-    /// `ZVAL_STRINGL_FAST`: the empty string and a string of one byte are
-    /// the process's interned ones and allocate nothing, and anything
-    /// longer is `zend_string_init`, one allocation counted against the
-    /// request. The `Err` is the memory limit, recorded on the request as
-    /// php's fatal and ending the native as `zend_mm` bails out.
+    /// every string a native returns comes from (design §5.13): the
+    /// empty string and a string of one byte are the process's interned
+    /// ones and allocate nothing, and anything longer is
+    /// `zend_string_init`, one allocation counted against the request.
+    /// Where php's native makes its string with `zend_string_init_fast`
+    /// (`ZVAL_STRINGL_FAST`), whose allocation php-8.5.12 sizes apart, it
+    /// is [`PhpString::fast`]. The `Err` is the memory limit, recorded on
+    /// the request as php's fatal and ending the native as `zend_mm`
+    /// bails out.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn new(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
         adopted(req.string(bytes))
+    }
+
+    /// php-8.5.12's `zend_string_init_fast`, `ZVAL_STRINGL_FAST`: the
+    /// interned string for the empty string and one byte, as
+    /// [`PhpString::new`], and otherwise `zend_string_finit`, whose allocation is the bytes past the
+    /// aligned header of the empty string (`Z/Zend/zend_string.h:215-238`),
+    /// so `substr`'s string can take a bin more than `strrev`'s, which is
+    /// `zend_string_alloc`, takes for the same length; the program writes
+    /// its first line before it measures:
+    ///
+    /// ```php
+    /// echo "substr strrev\n"; $big = str_repeat('0123456789', 100);
+    /// foreach ([2, 7, 8, 100] as $l) { $m = memory_get_usage(); $s = substr($big, 1, $l); $a = memory_get_usage() - $m; $t = strrev($s); echo $l, ' ', $a, ' ', memory_get_usage() - $m - $a, "\n"; $s = $t = null; }
+    /// ```
+    /// ```expect
+    /// substr strrev
+    /// 2 40 32
+    /// 7 40 32
+    /// 8 40 40
+    /// 100 160 128
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn fast(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        adopted(req.string_fast(bytes))
     }
 
     /// The string a declaration holds for these bytes, with one owner for

@@ -909,7 +909,8 @@ fn substr(
     }
     let start = usize::try_from(from).unwrap_or(0);
     let end = start + usize::try_from(taken).unwrap_or(0);
-    PhpString::new(req, &string.as_bytes()[start..end])
+    // `RETURN_STRINGL_FAST` (`Z/ext/standard/string.c:2313`).
+    PhpString::fast(req, &string.as_bytes()[start..end])
 }
 
 /// `zend_tolower_ascii`.
@@ -1664,9 +1665,16 @@ fn explode(
         array.append(req, whole)?;
         return Ok(array);
     }
+    // `php_explode` makes each piece with `zend_string_init_fast`
+    // (`Z/ext/standard/string.c:868`, `:876`), and
+    // `php_explode_negative_limit` with `ZVAL_STRINGL` (`:924`).
     for i in 0..take {
-        let value = PhpString::new(req, piece(i))?.into_value();
-        array.append(req, value)?;
+        let value = if limit < 0 {
+            PhpString::new(req, piece(i))?
+        } else {
+            PhpString::fast(req, piece(i))?
+        };
+        array.append(req, value.into_value())?;
     }
     Ok(array)
 }

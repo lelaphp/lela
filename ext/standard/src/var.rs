@@ -1301,7 +1301,7 @@ pub fn export(
 /// $k = new K; $m = memory_get_usage(); $v = var_export($k, true); echo memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect
-/// 440
+/// 456
 /// ```
 fn export_object(
     req: &mut Request,

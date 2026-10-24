@@ -739,7 +739,8 @@ fn unpack(
                 let key = if name.is_empty() {
                     Owner::index(i + 1)
                 } else if repetitions == 1 {
-                    let name = PhpString::new(req, &name)?;
+                    // `zend_string_init_fast` (`Z/ext/standard/pack.c:871`).
+                    let name = PhpString::fast(req, &name)?;
                     Key::from_string(req, name)
                 } else {
                     let mut numbered = name.clone();
