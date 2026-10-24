@@ -629,7 +629,7 @@ impl<'a> Builder<'a> {
             [op1, op2, data],
             samples,
         );
-        let form = self.form(frame, &op, seen, (next, branch));
+        let form = self.form(frame, (&op, data_line.as_ref()), seen, (next, branch));
         let in_place = (form == Form::Inline)
             .then(|| self.in_place(frame, &op, next))
             .flatten();
@@ -2067,7 +2067,7 @@ impl<'a> Builder<'a> {
     fn form(
         &self,
         frame: Frame,
-        op: &Opline,
+        (op, data): (&Opline, Option<&Opline>),
         seen: Seen,
         (next, branch): (Option<&Event>, Option<bool>),
     ) -> Form {
@@ -2123,16 +2123,7 @@ impl<'a> Builder<'a> {
                 cv1 && number(t1)
             }
             Opcode::FetchDimR => op.op1_type != OperandKind::Const && t1 == packed && long(t2),
-            // php compiles the write inline over an array that may be
-            // packed, testing its layout where it may be either, and adds
-            // no layout guard where the array was recorded packed
-            // (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`).
-            Opcode::AssignDim => {
-                cv1 && t1.tag() == Some(ZvalType::Array)
-                    && t1.meets(Types::PACKED)
-                    && long(t2)
-                    && scalar(td)
-            }
+            Opcode::AssignDim => cv1 && element_written(op, data, seen.types, code),
             Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
             Opcode::FeResetR | Opcode::FeFetchR => iterated(op, t1, seen.referenced[0], branch),
             // php's `zend_jit_send_val` and `zend_jit_send_var`, a value
@@ -3263,6 +3254,34 @@ fn type_checked(op: &Opline, t1: Types, referenced: bool) -> bool {
             }
             OperandKind::Const | OperandKind::Unused => false,
         }
+}
+
+/// Whether an `ASSIGN_DIM` over a variable's array is compiled inline over
+/// what it sees of the array, the key and the value, `[t1, t2, td]`, its
+/// `OP_DATA` `data`: an array that may be packed, which the write tests,
+/// by a long key, of a scalar, or of a value no scalar moved or copied
+/// whole into the element where its `out` slot is unused and the
+/// value is not the array itself, as php's `zend_jit_assign_dim` writes
+/// through `zend_jit_assign_to_variable`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:13352-13527`, `:5793-5950`). php
+/// compiles the write inline over an array that may be packed, testing
+/// its layout where it may be either, and adds no layout guard where the
+/// array was recorded packed (`Z/ext/opcache/jit/zend_jit_trace.c:1871-1893`).
+fn element_written(
+    op: &Opline,
+    data: Option<&Opline>,
+    [t1, t2, td]: [Types; 3],
+    code: &OpArray,
+) -> bool {
+    let whole = |data: &Opline| {
+        op.out_type == OperandKind::Unused
+            && !(data.op1_type == OperandKind::Cv && data.op1 == op.op1)
+            && copied_whole(data.op1_type, data.op1, td, code)
+    };
+    t1.tag() == Some(ZvalType::Array)
+        && t1.meets(Types::PACKED)
+        && t2 == Types::LONG
+        && (td.scalar() || data.is_some_and(whole))
 }
 
 /// Whether an inline form moves or copies an operand of `kind`, at

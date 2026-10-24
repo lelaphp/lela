@@ -2197,19 +2197,25 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
-    /// A write of a scalar to an array's element by a long key, php's
+    /// A write to an array's element by a long key, php's
     /// `zend_jit_assign_dim` (`Z/ext/opcache/jit/zend_jit_ir.c:13352-13526`):
     /// in place where the array is counted and held once, so php's
-    /// `SEPARATE_ARRAY` has nothing to do, packed, the key below
-    /// `nNumUsed` and the element there and counting nothing, so nothing
-    /// is freed (`zend_jit_fetch_dimension_address_inner`'s `BP_VAR_W`
-    /// path, `:11953-12276`); through the handler otherwise, where php's
-    /// code calls its helpers, the array's copy, the hash's lookup or
-    /// insert and the old value's release, so the write takes no exit.
+    /// `SEPARATE_ARRAY` has nothing to do, packed, and the key below
+    /// `nNumUsed` and the element there
+    /// (`zend_jit_fetch_dimension_address_inner`'s `BP_VAR_W` path,
+    /// `:11953-12276`), as `zend_jit_assign_to_variable` writes it
+    /// (`:5793-5950`): a scalar, or a value no scalar moved from a
+    /// temporary, copied from a variable with one owner more or copied
+    /// from a constant ([`Emit::copy_operand`]), and what the element held
+    /// given up after ([`Emit::release`]), a destructor's throw leaving
+    /// through the opline's unwind; through the handler otherwise, where
+    /// php's code calls its helpers, the array's copy and the hash's
+    /// lookup or insert, so the write takes no exit.
     ///
-    /// An immutable array, one shared, a key past `nNumUsed`, a counted
-    /// element, a hole and an array turned hash are each served by the
-    /// handler, in place of the write, and the loop goes on in the trace:
+    /// An immutable array, one shared, a key past `nNumUsed`, a hole and an
+    /// array turned hash are each served by the handler, in place of the
+    /// write, and a counted element given up in place, its destructor called
+    /// there, and the loop goes on in the trace:
     ///
     /// ```php
     /// class D { function __destruct() { echo "freed\n"; } }
@@ -2249,6 +2255,26 @@ impl<'a> Emit<'a> {
     /// ```expect regime=jit-exit-fuzz process
     /// 170
     /// ```
+    ///
+    /// Fields of a line split, each trimmed back into its place, one
+    /// uppercased and one a constant, the strings they held given up, under
+    /// force and where every guard fails once:
+    ///
+    /// ```php
+    /// function f($lines) { $t = 0; foreach ($lines as $line) { $f = explode(",", $line); foreach ($f as $k => $v) { $f[$k] = trim($v); } $f[1] = strtoupper($f[1]); $f[2] = "c"; $t += strlen(implode("|", $f)); } return [$t, $f]; }
+    /// echo json_encode(f([" a , b ,x, d ", "e,f,g"])), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [12,["e","F","c"]]
+    /// ```
+    ///
+    /// ```php
+    /// function f($lines) { $t = 0; foreach ($lines as $line) { $f = explode(",", $line); foreach ($f as $k => $v) { $f[$k] = trim($v); } $f[1] = strtoupper($f[1]); $f[2] = "c"; $t += strlen(implode("|", $f)); } return [$t, $f]; }
+    /// echo json_encode(f([" a , b ,x, d ", "e,f,g"])), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [12,["e","F","c"]]
+    /// ```
     fn assign_dim(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Operand::Value(array) = line.op1 else {
             return Err(mismatch("an element write to no array"));
@@ -2256,17 +2282,26 @@ impl<'a> Emit<'a> {
         let Scalar::Long(key) = self.scalar(at, line.op2)? else {
             return Err(mismatch("an element write by no long key"));
         };
-        let value = self.scalar(at, line.data)?;
+        let value = match self.scalar_kind(line.data)? {
+            Some(_) => Some(self.scalar(at, line.data)?),
+            None => None,
+        };
         let held = self.value(array)?;
         let handled = self.b.create_block();
         let done = self.b.create_block();
         let (room, array_at) = self.place(held.slot)?;
         let hash = held.types.meets(Types::HASH);
         let (element, old) = self.written_in_place((room, array_at), key, hash, handled);
-        let counts = self.b.ins().band_imm_u(old, COUNTED);
-        let counts = self.fuzzed(counts)?;
-        self.divert_if(counts, handled);
-        self.write(element, 0, value);
+        // Where every guard fails once, the handler serves the write.
+        let never = self.b.ins().iconst(I8, 0);
+        let fuzzed = self.fuzzed(never)?;
+        self.divert_if(fuzzed, handled);
+        let word = self.b.ins().load(I64, trusted(), element, 0);
+        match value {
+            Some(value) => self.write(element, 0, value),
+            None => self.copy_operand(line.frame, line.data, (element, 0))?,
+        }
+        self.release(line, word, old)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(handled);
         self.b.seal_block(handled);
@@ -2274,10 +2309,13 @@ impl<'a> Emit<'a> {
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(done);
         self.b.seal_block(done);
-        if let Some(out) = line.out {
-            self.define(out, value)?;
+        match (line.out, value) {
+            (Some(out), Some(value)) => self.define(out, value),
+            (Some(_), None) => Err(mismatch(
+                "an element write of a value no scalar, its result used",
+            )),
+            (None, _) => Ok(()),
         }
-        Ok(())
     }
 
     /// The element `key` names of the array the zval at `base + at`
