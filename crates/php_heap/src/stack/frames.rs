@@ -19,7 +19,8 @@ use std::marker::PhantomData;
 use std::mem::offset_of;
 use std::ptr::NonNull;
 
-use super::Frame;
+use super::{Frame, Placed};
+use crate::Zval;
 
 /// The records of a stack's frames. `#[repr(C)]` so that the offsets of
 /// its three words are fixed by its declaration ([`FramesLayout`]).
@@ -128,6 +129,26 @@ impl<H> Frames<H> {
         // taken back by one nothing names it but this read, which moves it
         // out once.
         Some(unsafe { place.read() })
+    }
+
+    /// The last record taken off where it stands on the top page
+    /// ([`Placed::OnPage`]): the room it links and its own room, read in
+    /// place, and the table shortened past it, so the pop of a call in a
+    /// loop copies no record through the loop's stack. Such a record owns
+    /// nothing, its placement no payload and its header nothing a drop
+    /// would give back ([`Frame::FITS`]), so letting it go unread drops
+    /// nothing; any other record, and an empty table, is none here and
+    /// is [`Frames::pop`]'s.
+    #[inline]
+    pub(super) fn pop_on_page(&mut self) -> Option<(usize, NonNull<Zval>)> {
+        let () = Frame::<H>::FITS;
+        let last = self.as_slice().last()?;
+        let Placed::OnPage = last.placed else {
+            return None;
+        };
+        let taken = (last.linked_below(), last.room());
+        self.len -= 1;
+        Some(taken)
     }
 
     /// The whole table taken, an empty one left.

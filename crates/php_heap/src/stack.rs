@@ -979,18 +979,17 @@ impl<H> VmStack<H> {
     #[inline(always)] // once per return, in the loop's RETURN arms
     #[allow(clippy::inline_always)]
     pub fn pop_frame(&mut self, heap: &mut Heap) {
-        let Some(frame) = self.frames.pop() else {
-            return;
-        };
         // `zend_vm_stack_free_call_frame_ex` over a frame on the top page,
         // `EG(vm_stack_top) = call`: every return of a call in a loop, its
         // room linked as every room on a page is.
-        if let Placed::OnPage = frame.placed {
-            self.innermost
-                .store(frame.linked_below(), Ordering::Relaxed);
-            self.top = frame.room();
+        if let Some((below, room)) = self.frames.pop_on_page() {
+            self.innermost.store(below, Ordering::Relaxed);
+            self.top = room;
             return;
         }
+        let Some(frame) = self.frames.pop() else {
+            return;
+        };
         // An unobserved frameless call's room, which links nothing: kept
         // for the next where none is spare, every frameless call's pop.
         if let Placed::Loose(room) = frame.placed {
@@ -1568,6 +1567,56 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(heap.memory_usage(false) - start, 3 * PAGE_SIZE);
+        drop(stack.close(&mut heap));
+        assert_eq!(heap.memory_usage(false), start);
+    }
+
+    /// A pop puts the stack's top and its innermost room back where the
+    /// frame below left them, whichever room the frame stood in: one on
+    /// the top page, read where it stands; one that opened a page, which
+    /// goes back to the heap; and one a generator's move put in an
+    /// allocation of its own and a resumption put back on top, under a
+    /// frame on the page above it.
+    #[test]
+    fn a_pop_puts_the_top_back_from_every_kind_of_room() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let start = heap.memory_usage(false);
+        let mut stack = VmStack::<Head>::new();
+        assert_eq!(stack.open(&mut heap), Ok(()));
+        let (empty_room, empty_link) = (stack.room(), stack.innermost());
+        for _ in 0..1092 {
+            assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
+        }
+        let (full, link) = (stack.room(), stack.innermost());
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
+        assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
+        stack.pop_frame(&mut heap);
+        assert_eq!(heap.memory_usage(false) - start, PAGE_SIZE);
+        assert_eq!((stack.room(), stack.innermost()), (full, link));
+        stack.pop_frame(&mut heap);
+        let (below, below_link) = (stack.room(), stack.innermost());
+        assert!(stack.push_frame(&mut heap, 2, 0, Head::default).is_ok());
+        let moved = stack
+            .move_to_heap(&mut heap)
+            .expect("the move to the heap")
+            .expect("the frame moves to the heap");
+        let resumed = stack.resume_frame(moved);
+        let above = stack
+            .push_frame(&mut heap, 3, 0, Head::default)
+            .expect("a frame above the resumed one");
+        assert_eq!(above.0, resumed.0 + 1);
+        stack.pop_frame(&mut heap);
+        assert_ne!(stack.innermost(), below_link);
+        stack.pop_frame(&mut heap);
+        assert_eq!((stack.room(), stack.innermost()), (below, below_link));
+        for _ in 0..1091 {
+            stack.pop_frame(&mut heap);
+        }
+        assert!(stack.is_empty());
+        assert_eq!((stack.room(), stack.innermost()), (empty_room, empty_link));
+        stack.pop_frame(&mut heap);
+        assert!(stack.is_empty());
         drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
     }
