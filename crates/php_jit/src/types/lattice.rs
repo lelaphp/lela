@@ -49,6 +49,9 @@ impl Types {
     pub(crate) const PACKED: Types = Types(1 << 11);
     /// An array that may be a hash, php's `MAY_BE_ARRAY_HASH`.
     pub(crate) const HASH: Types = Types(1 << 12);
+    /// php's `MAY_BE_INDIRECT`: the slot holds the address of a zval,
+    /// `IS_INDIRECT`, which a fetch for writing leaves in its `VAR`.
+    pub(crate) const INDIRECT: Types = Types(1 << 13);
 
     pub(crate) const BOOL: Types = Types(Types::FALSE.0 | Types::TRUE.0);
     pub(crate) const NUMBER: Types = Types(Types::LONG.0 | Types::DOUBLE.0);
@@ -237,7 +240,7 @@ impl std::fmt::Debug for Types {
     }
 }
 
-/// php's `zend_dump_type_info` words: `undef, ref, null, false, true,
+/// php's `zend_dump_type_info` words: `undef, ind, ref, null, false, true,
 /// long, double, string, array, object, resource`, `bool` for both
 /// booleans, `any` for every kind, and an array's layout before it,
 /// `packed array` or `hash array`, where it is one.
@@ -246,6 +249,9 @@ impl std::fmt::Display for Types {
         let mut words: Vec<&str> = Vec::new();
         if self.meets(Types::UNDEF) {
             words.push("undef");
+        }
+        if self.meets(Types::INDIRECT) {
+            words.push("ind");
         }
         if self.meets(Types::REF) {
             words.push("ref");

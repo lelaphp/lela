@@ -495,6 +495,12 @@ pub(crate) enum Check {
     Type { value: ValueId, tag: ZvalType },
     /// The slot holds a reference, and what it refers to is of this type.
     Deref { value: ValueId, tag: ZvalType },
+    /// The `VAR` holds the address of a zval, `IS_INDIRECT`, as a fetch
+    /// for writing leaves it, and that zval is of this type, php's
+    /// `zend_jit_fetch_indirect_var`: the `VAR`'s own type is tested where
+    /// its value may be other than [`Types::INDIRECT`], php's
+    /// `add_indirect_guard`, and the exit goes back to the opline.
+    Indirect { value: ValueId, tag: ZvalType },
     /// The array is laid out so, held in the slot or through the
     /// reference the slot holds: php's packed guard.
     Layout {
@@ -636,12 +642,15 @@ pub(crate) enum Stored {
     Copied { value: ValueId, read: Read },
 }
 
-/// How a zval is read: in place, or through the reference it is: a
-/// fetched element, and the array a layout guard holds.
+/// How a zval is read: in place, through the reference it is, or
+/// through the address an indirect `VAR` holds ([`Check::Indirect`]): a
+/// fetched element, the array a layout guard holds, and the array an
+/// element write writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Read {
     InPlace,
     Through,
+    Indirect,
 }
 
 /// What the trampoline does at an exit before the interpreter goes on

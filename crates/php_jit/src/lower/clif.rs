@@ -902,9 +902,12 @@ impl<'a> Emit<'a> {
                     self.decline_unless(slot, &[ZvalType::Array], Some(layout))?;
                 }
                 Check::Layout {
-                    read: Read::Through,
+                    read: Read::Through | Read::Indirect,
                     ..
                 } => return Err(mismatch("a reference's layout held as a trace enters")),
+                Check::Indirect { .. } => {
+                    return Err(mismatch("an indirect `VAR` held as a trace enters"));
+                }
                 Check::Deref { value, tag: t } => {
                     let (room, at) = self.place(self.value(value)?.slot)?;
                     let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
@@ -1171,6 +1174,20 @@ impl<'a> Emit<'a> {
                         .ins()
                         .load(I8, trusted(), reference, imm(Ref::VALUE_AT) + TYPE_AT);
                 let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
+                self.leave_if(other, guard.exit)?;
+            }
+            Check::Indirect { value, tag: t } => {
+                let held = self.value(value)?;
+                let (room, at) = self.place(held.slot)?;
+                if held.types != Types::INDIRECT {
+                    let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+                    let indirect = tag(ZvalType::Indirect);
+                    let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, indirect);
+                    self.leave_if(other, guard.exit)?;
+                }
+                let target = self.b.ins().load(I64, trusted(), room, at);
+                let byte = self.b.ins().load(I8, trusted(), target, TYPE_AT);
+                let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, tag(t));
                 self.leave_if(other, guard.exit)?;
             }
             Check::Layout {
@@ -1790,6 +1807,7 @@ impl<'a> Emit<'a> {
                 }
                 Check::Type { .. }
                 | Check::Deref { .. }
+                | Check::Indirect { .. }
                 | Check::Layout { .. }
                 | Check::Room { .. }
                 | Check::Class { .. } => {
@@ -2526,21 +2544,22 @@ impl<'a> Emit<'a> {
         Ok(match read {
             Read::InPlace => held,
             Read::Through => self.b.ins().load(I64, trusted(), held, imm(Ref::VALUE_AT)),
+            Read::Indirect => self.b.ins().load(I64, trusted(), held, 0),
         })
     }
 
     /// How the op at `at` reads `value`: through the reference its slot
-    /// holds where a guard before the op held one, in place otherwise.
+    /// holds, or the address its indirect `VAR` holds, where a guard
+    /// before the op held one, in place otherwise.
     fn read_of(&self, at: OpId, value: ValueId) -> Read {
-        let through = self.ir.guards.iter().any(|g| {
-            g.at == GuardAt::Before(at)
-                && matches!(g.check, Check::Deref { value: v, .. } if v == value)
-        });
-        if through {
-            Read::Through
-        } else {
-            Read::InPlace
-        }
+        (self.ir.guards.iter())
+            .filter(|g| g.at == GuardAt::Before(at))
+            .find_map(|g| match g.check {
+                Check::Deref { value: v, .. } if v == value => Some(Read::Through),
+                Check::Indirect { value: v, .. } if v == value => Some(Read::Indirect),
+                _ => None,
+            })
+            .unwrap_or(Read::InPlace)
     }
 
     /// Whether `key` is past the packed array `arr`'s `nNumUsed`.

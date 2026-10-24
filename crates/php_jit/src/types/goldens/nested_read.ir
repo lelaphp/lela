@@ -1,0 +1,79 @@
+trace loop e1, stop loop
+frame f0 e1 root, 4 cvs 15 temps
+entry
+  #0 f0.CV2 [long]
+  #2 f0.CV3 [long]
+  #4 f0.CV1 [long]
+  #6 f0.CV0 [array]
+  guard #6 array -> exit 0
+  guard #4 long -> exit 1
+  guard #0 long -> exit 2
+  guard #2 long -> exit 3
+loop at 0, loop, interrupt exit 21
+  #1 f0.CV2 [long] reg = phi(#0, #15)
+  #3 f0.CV3 [long] reg = phi(#2, #16)
+0019 f0 IS_SMALLER #3, #4 fused inline
+  checks direction taken -> exit 4
+0005 f0 BW_AND #3, int(1) inline
+  -> #5 f0.T3 [long] reg
+0006 f0 FETCH_DIM_IS #6, const#2 inline
+  -> #7 f0.T2 [packed array]
+  guard #7 array -> exit 5
+  guard #7 packed -> exit 6
+0007 f0 ISSET_ISEMPTY_DIM_OBJ #7, #5 fused inline unwinds -> unwind 0
+  checks direction fell -> exit 7
+0009 f0 PRE_INC #1 inline
+  -> #8 f0.CV2 [long] reg
+  checks #8 long -> exit 8
+0010 f0 FETCH_DIM_IS #6, const#4 inline
+  -> #9 f0.T6 [array]
+  guard #9 array -> exit 9
+0011 f0 FETCH_DIM_IS #9, const#5 inline unwinds -> unwind 1
+  -> #10 f0.T7 [ref, any]
+0012 f0 COALESCE #10 step unwinds -> unwind 1
+  -> #11 f0.T8 [long]
+  checks direction taken -> exit 10
+  guard #11 long -> exit 11
+0014 f0 ASSIGN_OP #8, #11 inline
+  -> #12 f0.CV2 [long] reg
+  checks #12 long -> exit 12
+0015 f0 FETCH_DIM_R #6, const#7 inline leaves -> exit 13
+  -> #13 f0.T10 [array]
+  checks #13 array -> exit 14
+  checks #13 ref to array -> exit 15
+0016 f0 FETCH_DIM_R #13, const#8 inline leaves -> exit 16 unwinds -> unwind 2
+  -> #14 f0.T11 [long] reg
+  checks #14 long -> exit 17
+  checks #14 ref to long -> exit 18
+0017 f0 ASSIGN_OP #12, #14 inline
+  -> #15 f0.CV2 [long] reg
+  checks #15 long -> exit 19
+0018 f0 PRE_INC #3 inline
+  -> #16 f0.CV3 [long] reg
+  checks #16 long -> exit 20
+end: back to 0
+exit 0: f0 0019 plain
+exit 1: f0 0019 plain f0.CV0:array
+exit 2: f0 0019 plain f0.CV0:array f0.CV1:long
+exit 3: f0 0019 plain f0.CV0:array f0.CV1:long f0.CV2:long
+exit 4: f0 0021 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
+exit 5: f0 0007 plain f0.CV2=#1 f0.CV3=#3 f0.T3=#5 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T3:long
+exit 6: f0 0007 plain f0.CV2=#1 f0.CV3=#3 f0.T3=#5 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:array f0.T3:long packed guard
+exit 7: f0 0010 plain f0.CV2=#1 f0.CV3=#3 f0.T3=#5 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:array f0.T3:long
+exit 8: f0 0009 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
+exit 9: f0 0011 plain f0.CV2=#8 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
+exit 10: f0 0013 plain f0.CV2=#8 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
+exit 11: f0 0014 plain f0.CV2=#8 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
+exit 12: f0 0014 plain f0.CV2=#8 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T8:long
+exit 13: f0 0015 plain f0.CV2=#12 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long to vm
+exit 14: f0 0016 plain f0.CV2=#12 f0.CV3=#3 f0.T10=copied #13 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
+exit 15: f0 0016 plain f0.CV2=#12 f0.CV3=#3 f0.T10=copied #13 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
+exit 16: f0 0016 plain f0.CV2=#12 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T10:array to vm
+exit 17: f0 0017 free op1 f0.CV2=#12 f0.CV3=#3 f0.T11=copied #14 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T10:array
+exit 18: f0 0017 free op1 f0.CV2=#12 f0.CV3=#3 f0.T11=copied #14 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T10:array
+exit 19: f0 0017 plain f0.CV2=#12 f0.CV3=#3 f0.T11=#14 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T11:long
+exit 20: f0 0018 plain f0.CV2=#15 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
+exit 21: f0 0019 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long to vm
+unwind 0: f0.CV2=#1 f0.CV3=#3
+unwind 1: f0.CV2=#8 f0.CV3=#3
+unwind 2: f0.CV2=#12 f0.CV3=#3 f0.T11=#14
