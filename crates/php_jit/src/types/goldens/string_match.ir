@@ -1,0 +1,77 @@
+trace loop e1, stop loop
+frame f0 e1 root, 6 cvs 17 temps
+entry
+  #0 f0.CV2 [long]
+  #2 f0.CV3 [long]
+  #4 f0.CV4 [undef, any]
+  #6 f0.CV5 [undef, any]
+  #8 f0.CV1 [long]
+  #10 f0.CV0 [packed array]
+  guard #10 array -> exit 0
+  guard #10 packed -> exit 1
+  guard #8 long -> exit 2
+  guard #0 long -> exit 3
+  guard #2 long -> exit 4
+loop at 0, loop, interrupt exit 15
+  #1 f0.CV2 [long] reg = phi(#0, #21)
+  #3 f0.CV3 [long] reg = phi(#2, #22)
+  #5 f0.CV4 [undef, any] = phi(#4, #12)
+  #7 f0.CV5 [undef, any] = phi(#6, #14)
+0021 f0 IS_SMALLER #3, #8 fused inline
+  checks direction taken -> exit 5
+0005 f0 MOD #3, int(4) inline
+  -> #9 f0.T2 [long] reg
+0006 f0 FETCH_DIM_R #10, #9 inline leaves -> exit 6
+  -> #11 f0.T3 [string]
+  checks #11 string -> exit 7
+  checks #11 ref to string -> exit 8
+0007 f0 ASSIGN #5, #11 inline unwinds -> unwind 0
+  -> #12 f0.CV4 [string]
+0008 f0 IS_IDENTICAL #12, const#3 fused inline
+  checks direction taken -> exit 9
+0011 f0 IS_NOT_IDENTICAL #12, const#4 inline
+  -> #13 f0.T6 [bool] reg
+  guard #13 true -> exit 10
+0012 f0 ASSIGN #7, #13 inline unwinds -> unwind 1
+  -> #14 f0.CV5 [true] reg
+0013 f0 STRLEN #12 inline
+  -> #15 f0.T8 [long] reg
+0014 f0 CAST #14 step unwinds -> unwind 2
+  -> #16 f0.T9 [long]
+0015 f0 ADD #15, #16 inline
+  -> #17 f0.T10 [long] reg
+  checks #17 long -> exit 11
+0016 f0 BOOL #3 inline
+  -> #18 f0.T11 [bool] reg
+0017 f0 CAST #18 step unwinds -> unwind 3
+  -> #19 f0.T12 [long]
+0018 f0 ADD #17, #19 inline
+  -> #20 f0.T13 [long] reg
+  checks #20 long -> exit 12
+0019 f0 ASSIGN_OP #1, #20 inline
+  -> #21 f0.CV2 [long] reg
+  checks #21 long -> exit 13
+0020 f0 PRE_INC #3 inline
+  -> #22 f0.CV3 [long] reg
+  checks #22 long -> exit 14
+end: back to 0
+exit 0: f0 0021 plain
+exit 1: f0 0021 plain f0.CV0:array packed guard
+exit 2: f0 0021 plain f0.CV0:array
+exit 3: f0 0021 plain f0.CV0:array f0.CV1:long
+exit 4: f0 0021 plain f0.CV0:array f0.CV1:long f0.CV2:long
+exit 5: f0 0023 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long
+exit 6: f0 0006 plain f0.CV2=#1 f0.CV3=#3 f0.T2=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:long to vm
+exit 7: f0 0007 free op2 f0.CV2=#1 f0.CV3=#3 f0.T2=#9 f0.T3=copied #11 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:long
+exit 8: f0 0007 free op2 f0.CV2=#1 f0.CV3=#3 f0.T2=#9 f0.T3=copied #11 through a reference f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.T2:long
+exit 9: f0 0010 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string
+exit 10: f0 0012 plain f0.CV2=#1 f0.CV3=#3 f0.T6=#13 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string
+exit 11: f0 0015 plain f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T8=#15 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true f0.T8:long f0.T9:long
+exit 12: f0 0018 plain f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T10=#17 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true f0.T10:long f0.T12:long
+exit 13: f0 0019 plain f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T13=#20 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true f0.T13:long
+exit 14: f0 0020 plain f0.CV2=#21 f0.CV3=#3 f0.CV5=#14 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long f0.CV4:string f0.CV5:true
+exit 15: f0 0021 plain f0.CV2=#1 f0.CV3=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:long to vm
+unwind 0: f0.CV2=#1 f0.CV3=#3
+unwind 1: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14
+unwind 2: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T8=#15
+unwind 3: f0.CV2=#1 f0.CV3=#3 f0.CV5=#14 f0.T10=#17

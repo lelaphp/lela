@@ -17,8 +17,8 @@ loop at 0, loop, interrupt exit 8
   checks direction taken -> exit 5
 0005 f0 INIT_FCALL const#2 inline map 0
      f0 init native in-place
-0006 f0 SEND_VAR #5 step unwinds -> unwind 0
-0007 f0 SEND_VAL const#3 step unwinds -> unwind 0
+0006 f0 SEND_VAR #5 inline
+0007 f0 SEND_VAL const#3 inline
 0008 f0 DO_ICALL step unwinds -> unwind 0
   -> #6 f0.T2 [long]
 0009 f0 ASSIGN_OP #1, #6 inline

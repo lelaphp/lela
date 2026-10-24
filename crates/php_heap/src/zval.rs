@@ -374,6 +374,11 @@ impl Zval {
     /// `jit_if_GC_MAY_NOT_LEAK` does, calling the collector only where
     /// none is set.
     pub const LEAK_BITS: u32 = crate::gc::LEAK_BITS;
+    /// Where php's `Z_FE_POS` is, the `u2` word past the type word that
+    /// a `foreach` over an array keeps its position in ([`Zval::fe_pos`]),
+    /// a 32-bit word: what the compiled tier reads and moves the position
+    /// through, as php's `zend_jit_fe_fetch` does inline.
+    pub const FE_POS_AT: usize = std::mem::offset_of!(Zval, info) + 4;
 
     /// The all-zero zval, `IS_UNDEF`.
     pub const UNDEF: Zval = Zval {
@@ -876,6 +881,23 @@ mod tests {
         );
         assert_eq!(Zval::long(1).as_str(), None);
         assert!(!Zval::null().is_refcounted());
+    }
+
+    #[test]
+    fn the_foreach_position_is_the_word_at_fe_pos_at() {
+        let mut z = Zval::long(7);
+        z.set_fe_pos(0x0102_0304);
+        // SAFETY: `z` is a live sixteen-byte zval, read as bytes.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(std::ptr::from_ref(&z).cast::<u8>(), size_of::<Zval>())
+        };
+        let at = &bytes[Zval::FE_POS_AT..Zval::FE_POS_AT + 4];
+        assert_eq!(
+            u32::from_ne_bytes([at[0], at[1], at[2], at[3]]),
+            0x0102_0304
+        );
+        assert_eq!(z.fe_pos(), 0x0102_0304);
+        assert_eq!(z.as_long(), Some(7), "the position moves no value");
     }
 
     #[test]

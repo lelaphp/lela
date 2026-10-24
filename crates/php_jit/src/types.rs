@@ -162,6 +162,10 @@ pub(crate) struct FrameInfo {
     /// How many of its slots are variables; the temporaries follow.
     pub(crate) cvs: u32,
     pub(crate) temps: u32,
+    /// Where the op array's table of constants begins, the address of its
+    /// first zval, which the trace's epoch holds: where an inline form
+    /// reads a constant no scalar is from, php's `RT_CONSTANT`.
+    pub(crate) literals: usize,
 }
 
 /// How a frame stands to the trace's others.

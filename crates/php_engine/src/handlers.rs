@@ -21477,15 +21477,13 @@ pub(crate) fn concat<T: Tier, A: Operand + Default, B: Operand + Default>(
 
 /// The inline path of `ZEND_CONCAT` and `ZEND_FAST_CONCAT` over two
 /// strings (`Z/Zend/zend_vm_def.h:382-431`, `:3293-3341`), the arm
-/// [`concat_into`] takes for them read off the zvals as they stand: a
-/// left temporary's string grown where it stands
-/// ([`Request::string_append`]), any other left side joined into a new
-/// string ([`crate::ops::join`]), the right side given up where it is a
-/// temporary, and the string into the temporary. `None`, with nothing
-/// touched, for anything but two strings, an empty side that is no
-/// constant, which hands the other on, and a temporary holding an
-/// owner. What the join refuses, the memory limit or php's
-/// `String size overflow`, is raised at this opline, as the kernel's.
+/// [`concat_into`] takes for them read off the zvals as they stand:
+/// [`crate::ops::concat_strings`] over the two, a left temporary's owner
+/// handed to it, the right side given up where it is a temporary, and the
+/// string into the temporary. `None`, with nothing touched, for anything
+/// but two strings and a temporary holding an owner. What the join
+/// refuses, the memory limit or php's `String size overflow`, is raised at
+/// this opline, as the kernel's.
 ///
 /// ```php
 /// $a = "ab"; $b = "cd"; $e = "";
@@ -21508,20 +21506,15 @@ fn inline_concat(
     let (left, right) = (a.read(slots, code, op.op1), b.read(slots, code, op.op2));
     let (x, y) = (left.as_str()?, right.as_str()?);
     let out = op.out as usize;
-    if (a.kind() != OperandKind::Const && x.is_empty())
-        || (b.kind() != OperandKind::Const && y.is_empty())
-        || slots.get(out)?.is_refcounted()
-    {
+    if slots.get(out)?.is_refcounted() {
         return None;
     }
     let (x, y) = (PhpString::of(x), PhpString::of(y));
-    let joined = if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) {
-        // The temporary's owner is the append's now.
+    if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) {
+        // The temporary's owner is the join's now.
         *slots.get_mut(a.slot(op.op1)?)? = Zval::UNDEF;
-        req.string_append(x, y)
-    } else {
-        crate::ops::join(req, x, y)
-    };
+    }
+    let joined = crate::ops::concat_strings(req, (x, a.kind()), (y, b.kind()));
     if matches!(b.kind(), OperandKind::Tmp | OperandKind::Var) {
         exec::free_operand(req, frame, op.op2_type, op.op2);
     }
@@ -21540,16 +21533,13 @@ fn inline_concat(
 }
 
 /// The body `CONCAT` and `FAST_CONCAT` share, php's arms for two
-/// strings (`Z/Zend/zend_vm_def.h:382-431`, `:3293-3341`). An empty side
-/// hands the other on only where it is no `CONST`: the compiler's `''`
-/// is joined as any string is, so `$x . ''` is a new string and not
-/// `$x`'s. A left temporary's owner goes to [`Request::string_append`],
-/// which grows the string where it stands when that owner is its only
-/// one and copies it otherwise, as `zend_string_extend` and php's alloc
-/// arm beside it do; any other left side is joined into a new string
-/// ([`crate::ops::join`]). Every other pair, the empty side's included,
-/// is [`crate::ops::concat`] over the two operands as [`binary`] reads
-/// them, whose empty side hands the other on as php's does.
+/// strings (`Z/Zend/zend_vm_def.h:382-431`, `:3293-3341`),
+/// [`crate::ops::concat_strings`], a left temporary's owner handed to it:
+/// an empty side hands the other on only where it is no `CONST`, so the
+/// compiler's `''` is joined as any string is and `$x . ''` is a new
+/// string and not `$x`'s; a left temporary grows where it stands. Every
+/// other pair is [`crate::ops::concat`] over the two operands as
+/// [`binary`] reads them.
 ///
 /// A string an array holds, joined with a constant `''` on either side,
 /// is a string of its own, and so is a variable's; a variable's `''` is
@@ -21588,27 +21578,17 @@ fn concat_into(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     // it is read.
     let left = exec::operand(req, frame, code, op.op1_type, op.op1);
     let right = exec::operand(req, frame, code, op.op2_type, op.op2);
-    let computed = match (left.as_php_string(), right.as_php_string()) {
-        (Some(a), Some(b))
-            if (op.op1_type == OperandKind::Const || !a.is_empty())
-                && (op.op2_type == OperandKind::Const || !b.is_empty()) =>
-        {
-            if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) {
-                // The temporary's owner is the append's now, and nothing
-                // releases it again.
-                req.take_slot(frame, op.op1);
-                req.string_append(a, b)
-            } else {
-                // A `CV` or a `CONST` is no operand to free.
-                crate::ops::join(req, a, b)
-            }
-            .map(Value::string)
+    let computed = if let (Some(a), Some(b)) = (left.as_php_string(), right.as_php_string()) {
+        if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) {
+            // The temporary's owner is the join's now, and nothing
+            // releases it again.
+            req.take_slot(frame, op.op1);
         }
-        _ => {
-            let computed = crate::ops::concat(req, &left, &right);
-            exec::free_operand(req, frame, op.op1_type, op.op1);
-            computed
-        }
+        crate::ops::concat_strings(req, (a, op.op1_type), (b, op.op2_type)).map(Value::string)
+    } else {
+        let computed = crate::ops::concat(req, &left, &right);
+        exec::free_operand(req, frame, op.op1_type, op.op1);
+        computed
     };
     exec::free_operand(req, frame, op.op2_type, op.op2);
     computed_into(req, frame, op, computed)

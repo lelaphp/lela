@@ -42,7 +42,7 @@ use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use php_engine::tier::{FRAME, FuncRef, PlainCall};
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
-use php_unit::{Opcode, OplineIdx};
+use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
     ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
@@ -51,6 +51,7 @@ use super::{
 
 mod calls;
 mod doors;
+mod strings;
 use crate::record::{Began, Callee, Stop};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
@@ -80,6 +81,8 @@ const KIND: i64 = 0xff;
 const _: () = assert!(Zval::FLAGS_AT == Zval::TYPE_AT + 1);
 /// A slot, `sizeof(zval)`.
 const SLOT: i64 = 16;
+/// A `foreach` iterator's position in its slot, php's `Z_FE_POS`.
+const FE_POS_AT: i32 = imm(Zval::FE_POS_AT);
 const _: () = assert!(size_of::<Zval>() == 16);
 const STOOD_FRAME: i32 = imm(offset_of!(Stood, frame));
 const STOOD_CALL: i32 = imm(offset_of!(Stood, call));
@@ -294,26 +297,154 @@ fn leave_of(line: &Line) -> Option<Leave> {
     (line.exit.map(Leave::Exit)).or_else(|| line.unwind.map(Leave::Unwind))
 }
 
-/// Whether `opcode`'s handler goes on at the next opline of its frame,
-/// or throws, and does nothing else to the frame chain but pop a call it
-/// makes: what [`Kernel::Handle`] serves, building an array and adding
-/// to it, whose handlers php's code calls with no inline code of its own,
-/// and a native's call, whose handler php's code calls directly. An array
-/// built per turn, and a key the build throws at, caught in the frame:
-///
-/// ```php
-/// function pairs($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $p = [$i, $i * 2, "k" => $i]; $s += $p[1] + $p["k"]; } return $s; }
-/// function bad($n) { $c = 0; for ($i = 0; $i < $n; $i++) { try { $a = [$i => 1, ($i == 5 ? [] : $i + 1) => 2]; $c += count($a); } catch (TypeError $e) { $c += 100; } } return $c; }
-/// echo pairs(20), " ", bad(8), "\n";
-/// ```
-/// ```expect regime=jit-force process
-/// 570 114
-/// ```
-fn goes_on(opcode: Opcode) -> bool {
-    matches!(
-        opcode,
-        Opcode::InitArray | Opcode::AddArrayElement | Opcode::DoIcall
-    )
+/// Where an opline's handler goes on: in its own frame, this many
+/// oplines past it, one or two past an `OP_DATA`, having done nothing
+/// else to the frame chain but pop a native's call it made, or thrown
+/// there. What [`Kernel::Handle`] serves, as php's code calls the
+/// handler of each such opline it compiles no inline code for directly
+/// (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`) and
+/// goes on with no IP guard, which `zend_jit_trace_handler` takes only
+/// past an opline `zend_jit_trace_may_exit` names (`:17129-17236`;
+/// `Z/ext/opcache/jit/zend_jit_trace.c:261-330`). The kernel stands the
+/// frame at the opline before the handler runs, php's `SAVE_OPLINE()`,
+/// so what the handler raises, and the unwind of what it throws, see the
+/// frame where php's do, and compiled code writes where it stands past
+/// it, which the handler leaves no `Stood` of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Onward(u32);
+
+impl Onward {
+    /// Where `opcode`'s handler goes on, for the oplines whose handler
+    /// can neither leave its frame, push or replace one, enter the
+    /// loop with the frame unstood nor jump: building an array and
+    /// adding to it, a native's call, made and popped by its handler, a
+    /// concatenation and a rope's pieces, whose string arms the handler
+    /// holds as php's own functions over two strings hold them, an
+    /// assignment, a write to an element and a compound one, a send, a
+    /// frameless call to a native, a string's length, a cast to a
+    /// boolean and the free of a `foreach`'s array. None for every other
+    /// opline: a jump and a comparison, whose handler may take the jump
+    /// fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
+    /// a return, an include or an `eval`, a generator's opcodes, a
+    /// `finally`'s `FAST_CALL` and `FAST_RET`, and the two silence
+    /// opcodes, whose observers a step tells.
+    ///
+    /// An array built per turn, and a key the build throws at, caught in
+    /// the frame:
+    ///
+    /// ```php
+    /// function pairs($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $p = [$i, $i * 2, "k" => $i]; $s += $p[1] + $p["k"]; } return $s; }
+    /// function bad($n) { $c = 0; for ($i = 0; $i < $n; $i++) { try { $a = [$i => 1, ($i == 5 ? [] : $i + 1) => 2]; $c += count($a); } catch (TypeError $e) { $c += 100; } } return $c; }
+    /// echo pairs(20), " ", bad(8), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 570 114
+    /// ```
+    ///
+    /// A line of fields joined, split and normalised, each piece of it
+    /// served by its handler:
+    ///
+    /// ```php
+    /// function line($i) { $p = "/r/" . ($i % 7) . "-x"; $s = "  $i , $p ,  ok-$i "; $t = ""; $t .= $s; $t .= "|"; return $t; }
+    /// function munge($n) {
+    ///     $c = 0; $all = "";
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $f = explode(",", line($i)); $f[1] = trim($f[1]); $f[2] = str_replace("ok", "OK", $f[2]);
+    ///         $all .= strtoupper($f[1]) . substr($f[2], 0, 4); $c += strlen($f[0]) + (strpos($f[2], "OK") !== false);
+    ///     }
+    ///     return [$c, strlen($all), crc32($all)];
+    /// }
+    /// echo json_encode(munge(40)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [230,400,1340466966]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function line($i) { $p = "/r/" . ($i % 7) . "-x"; $s = "  $i , $p ,  ok-$i "; $t = ""; $t .= $s; $t .= "|"; return $t; }
+    /// function munge($n) {
+    ///     $c = 0; $all = "";
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $f = explode(",", line($i)); $f[1] = trim($f[1]); $f[2] = str_replace("ok", "OK", $f[2]);
+    ///         $all .= strtoupper($f[1]) . substr($f[2], 0, 4); $c += strlen($f[0]) + (strpos($f[2], "OK") !== false);
+    ///     }
+    ///     return [$c, strlen($all), crc32($all)];
+    /// }
+    /// echo json_encode(munge(40)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [230,400,1340466966]
+    /// ```
+    ///
+    /// A handled concatenation that throws, an object no string converts,
+    /// caught in the loop, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// function f($n) { $c = 0; $o = new stdClass; for ($i = 0; $i < $n; $i++) { try { $s = "x" . ($i == 3 ? $o : $i); $t = "<$s>"; $t .= $i; $c += strlen($t); } catch (Error $e) { $c += 100; } } return $c; }
+    /// echo f(8), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 135
+    /// ```
+    ///
+    /// ```php
+    /// function f($n) { $c = 0; $o = new stdClass; for ($i = 0; $i < $n; $i++) { try { $s = "x" . ($i == 3 ? $o : $i); $t = "<$s>"; $t .= $i; $c += strlen($t); } catch (Error $e) { $c += 100; } } return $c; }
+    /// echo f(8), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 135
+    /// ```
+    ///
+    /// A handled concatenation whose `__toString` writes a variable through
+    /// the reference an object holds to it, which the loop reads after:
+    /// the handler serves user code with no `call` effect, and the trace
+    /// keeps no fact that code can change, as revision 83's analysis has
+    /// it (`jit-design.md` §4.2), a reference's inner type held at every
+    /// read:
+    ///
+    /// ```php
+    /// class S { public $r; function __toString(): string { $this->r = $this->r + 1; return "s"; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $c = "a" . $o; $t += $x; } return [$t, $x, $c]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [55,10,"as"]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $r; function __toString(): string { $this->r = $this->r + 1; return "s"; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $c = "a" . $o; $t += $x; } return [$t, $x, $c]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [55,10,"as"]
+    /// ```
+    fn of(opcode: Opcode) -> Option<Onward> {
+        match opcode {
+            Opcode::InitArray
+            | Opcode::AddArrayElement
+            | Opcode::DoIcall
+            | Opcode::Concat
+            | Opcode::FastConcat
+            | Opcode::RopeInit
+            | Opcode::RopeAdd
+            | Opcode::RopeEnd
+            | Opcode::Assign
+            | Opcode::AssignOp
+            | Opcode::SendVal
+            | Opcode::SendVar
+            | Opcode::FramelessIcall0
+            | Opcode::FramelessIcall1
+            | Opcode::FramelessIcall2
+            | Opcode::Strlen
+            | Opcode::Bool
+            | Opcode::FeFree => Some(Onward(1)),
+            Opcode::AssignDim | Opcode::AssignDimOp | Opcode::FramelessIcall3 => Some(Onward(2)),
+            _ => None,
+        }
+    }
 }
 
 /// One trace's function as it is built.
@@ -341,6 +472,9 @@ struct Emit<'a> {
     interrupt: Option<Value>,
     /// Where a kernel writes where the interpreter stands.
     stood: StackSlot,
+    /// Where a kernel that answers a word or a zval writes it, made where
+    /// one is first called.
+    answer: Option<StackSlot>,
     /// Per frame of the trace, the room it runs in.
     rooms: Vec<Variable>,
     /// Per value the trace keeps in a register, its variable.
@@ -405,6 +539,7 @@ impl<'a> Emit<'a> {
             cx: None,
             interrupt: None,
             stood,
+            answer: None,
             rooms,
             regs: vec![None; ir.values.len()],
             calls: Vec::new(),
@@ -1199,6 +1334,12 @@ impl<'a> Emit<'a> {
     /// answering [`ABANDONED`] where the opline names no way to leave.
     fn call(&mut self, kernel: Kernel, args: &[Value], leave: Option<Leave>) -> Result<(), Abort> {
         let status = self.call_status(kernel, args)?;
+        self.left_unless(status, leave)
+    }
+
+    /// A kernel's `status` tested: on where it is `Continue`, leaving as
+    /// `leave` says otherwise ([`Emit::left_by`]).
+    fn left_unless(&mut self, status: Value, leave: Option<Leave>) -> Result<(), Abort> {
         let to = self.left_by(leave)?;
         let on = self.b.create_block();
         self.b.ins().brif(status, to, &[], on, &[]);
@@ -1250,6 +1391,12 @@ impl<'a> Emit<'a> {
             Kernel::Handle => &[I64, I64, I32, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
+            Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
+            Kernel::RopeInit => &[I64, I64, I32, I64, I32, I64],
+            Kernel::RopeAdd => &[I64, I64, I32, I64, I64, I32],
+            Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
+            Kernel::AssignConcat => &[I64, I64, I32, I32, I64, I32],
+            Kernel::Concat => &[I64, I64, I32, I64, I32, I64, I32, I32, I64],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -1277,6 +1424,17 @@ impl<'a> Emit<'a> {
             .map(|info| info.func)
             .ok_or_else(|| mismatch("a frame past the trace's"))?;
         Ok(self.b.ins().iconst(I32, i64::from(engine_offset(func)?)))
+    }
+
+    /// Where a kernel that answers a word or a zval writes it.
+    fn answer(&mut self) -> StackSlot {
+        *self.answer.get_or_insert_with(|| {
+            self.b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                u32::try_from(SLOT).unwrap_or(u32::MAX),
+                3,
+            ))
+        })
     }
 
     /// A word of the [`Stood`] the last kernel wrote.
@@ -1320,8 +1478,10 @@ impl<'a> Emit<'a> {
                     leave_of(line),
                 )?;
             }
-            None if goes_on(line.opcode) && self.within(at).is_empty() => {
-                self.handled(line, [room, opline, func])?;
+            None if let Some(onward) = Onward::of(line.opcode)
+                && self.within(at).is_empty() =>
+            {
+                self.handled(line, onward, [room, opline, func])?;
             }
             None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
         }
@@ -1385,9 +1545,14 @@ impl<'a> Emit<'a> {
     /// ```expect regime=jit-force process
     /// float(23.5)
     /// ```
-    fn handled(&mut self, line: &Line, [room, opline, func]: [Value; 3]) -> Result<(), Abort> {
+    fn handled(
+        &mut self,
+        line: &Line,
+        Onward(places): Onward,
+        [room, opline, func]: [Value; 3],
+    ) -> Result<(), Abort> {
         self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
-        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + 1));
+        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + places));
         self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
         self.b
             .ins()
@@ -1598,6 +1763,7 @@ impl<'a> Emit<'a> {
             | Opcode::BwAnd
             | Opcode::BwOr
             | Opcode::BwXor => self.arithmetic(at, line, line.opcode),
+            Opcode::AssignOp if line.imm == Imm::Binary(Opcode::Concat) => self.assign_concat(line),
             Opcode::AssignOp => {
                 let Imm::Binary(binary) = line.imm else {
                     return Err(mismatch("an ASSIGN_OP with no operator"));
@@ -1609,8 +1775,15 @@ impl<'a> Emit<'a> {
                 self.increment(at, line)
             }
             Opcode::FetchDimR => self.fetch(at, line),
+            Opcode::FeResetR => self.fe_reset(line),
+            Opcode::FeFetchR => self.fe_fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
             Opcode::AssignDimOp => self.assign_dim_op(at, line),
+            Opcode::Strlen => self.strlen(line),
+            Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
+            Opcode::Concat | Opcode::FastConcat => self.concat(line),
+            Opcode::Bool | Opcode::BoolNot => self.bool(at, line),
+            Opcode::FeFree => self.free_temp(line, line.op1),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
             Opcode::CheckFuncArg => self.check_func_arg(),
             Opcode::TypeCheck => self.type_check(at, line),
@@ -1654,6 +1827,11 @@ impl<'a> Emit<'a> {
     /// A comparison of two scalars: the boolean it writes, or, fused to
     /// the jump after it, the way that jump goes held.
     fn compare(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        if matches!(line.opcode, Opcode::IsIdentical | Opcode::IsNotIdentical)
+            && (self.is_string(at, line.op1) || self.is_string(at, line.op2))
+        {
+            return self.compare_strings(at, line);
+        }
         let a = self.scalar(at, line.op1)?;
         let b = self.scalar(at, line.op2)?;
         let result = self.comparison(line.opcode, a, b)?;
@@ -1747,14 +1925,46 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
-    /// An assignment of a scalar to a variable: the variable written, and
-    /// where what it held was counted, released after, as
+    /// An assignment to a variable, php's `zend_jit_assign` over
+    /// `zend_jit_assign_to_variable` (`Z/ext/opcache/jit/zend_jit_ir.c:5793-5950`):
+    /// a scalar written, or a value no scalar moved from a temporary,
+    /// copied from a variable with one owner more, or copied as it is from
+    /// a constant no reference counts ([`Emit::copy_operand`]); and where
+    /// what the variable held was counted, released after, as
     /// `zend_assign_to_variable` frees it, what its destructor throws
-    /// leaving through the opline's exit. A register's slot is written
+    /// leaving through the opline's unwind. A register's slot is written
     /// too where the old value was counted, so no slot names a value
-    /// freed.
+    /// freed. Strings, arrays and a constant assigned over strings and
+    /// arrays, an object's destructor among the releases:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// function f($n) {
+    ///     $s = ""; $a = [1]; $k = "k"; $o = new D;
+    ///     for ($i = 0; $i < $n; $i++) { $t = str_repeat("x", $i % 3); $s = $t; $b = $a; $a = [$i]; $k = "k"; if ($i == 1) { $o = $s; } }
+    ///     return [$s, $b, $a, $k, $o];
+    /// }
+    /// echo json_encode(f(5)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// d["x",[3],[4],"k","x"]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// function f($n) {
+    ///     $s = ""; $a = [1]; $k = "k"; $o = new D;
+    ///     for ($i = 0; $i < $n; $i++) { $t = str_repeat("x", $i % 3); $s = $t; $b = $a; $a = [$i]; $k = "k"; if ($i == 1) { $o = $s; } }
+    ///     return [$s, $b, $a, $k, $o];
+    /// }
+    /// echo json_encode(f(5)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// d["x",[3],[4],"k","x"]
+    /// ```
     fn assign(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let held = self.scalar(at, line.op2)?;
         let Operand::Value(target) = line.op1 else {
             return Err(mismatch("an assignment to no variable"));
         };
@@ -1768,27 +1978,100 @@ impl<'a> Emit<'a> {
             }
             None => None,
         };
-        if let Some(def) = line.op1_def {
-            self.define(def, held)?;
-            if old.is_some() && self.value(def)?.home == Home::Register {
-                self.store(slot, held)?;
+        if self.scalar_kind(line.op2)?.is_some() {
+            let held = self.scalar(at, line.op2)?;
+            if let Some(def) = line.op1_def {
+                self.define(def, held)?;
+                if old.is_some() && self.value(def)?.home == Home::Register {
+                    self.store(slot, held)?;
+                }
             }
-        }
-        if let Some(out) = line.out {
-            self.define(out, held)?;
+            if let Some(out) = line.out {
+                self.define(out, held)?;
+            }
+        } else {
+            let into = self.place(slot)?;
+            self.copy_operand(line.frame, line.op2, into)?;
         }
         if let Some((word, info)) = old {
-            let counted = self.b.ins().band_imm_u(info, COUNTED);
-            let [room, opline] = self.served(line)?;
-            self.when(counted, |emit| {
-                emit.call(
-                    Kernel::Release,
-                    &[room, opline, word, info],
-                    line.unwind.map(Leave::Unwind),
-                )
-            })?;
+            self.release(line, word, info)?;
         }
         Ok(())
+    }
+
+    /// Whether `operand` is a scalar compiled code holds as one kind: a
+    /// scalar constant, or a value of one kind of the scalar core; none
+    /// for a constant no scalar is and a value of no one scalar kind.
+    fn scalar_kind(&self, operand: Operand) -> Result<Option<Kind>, Abort> {
+        Ok(match operand {
+            Operand::Constant(Constant::Other(_)) | Operand::Unused => None,
+            Operand::Constant(Constant::Null) => Some(Kind::Null),
+            Operand::Constant(Constant::False) => Some(Kind::False),
+            Operand::Constant(Constant::True) => Some(Kind::True),
+            Operand::Constant(Constant::Long(_)) => Some(Kind::Long),
+            Operand::Constant(Constant::Double(_)) => Some(Kind::Double),
+            Operand::Value(value) => Kind::of(self.value(value)?.types),
+        })
+    }
+
+    /// The value no scalar `operand` names, of `frame`, written whole to
+    /// the zval at `base + at`: what a temporary holds moved with its
+    /// owner, its slot left `UNDEF` as the handler takes the operand,
+    /// php's `ZVAL_COPY_VALUE`; what a variable holds copied with one
+    /// owner more, `ZVAL_COPY`; a constant no reference counts copied as
+    /// it is from the op array's constants, `ZVAL_COPY_CONST`.
+    fn copy_operand(
+        &mut self,
+        frame: Frame,
+        operand: Operand,
+        (base, at): (Value, i32),
+    ) -> Result<(), Abort> {
+        match operand {
+            Operand::Value(value) => {
+                let from = self.value(value)?.slot;
+                let (room, from_at) = self.place(from)?;
+                let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
+                if self.is_temporary(from)? {
+                    let word = self.b.ins().load(I64, trusted(), room, from_at);
+                    self.b.ins().store(trusted(), word, base, at);
+                    self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+                    let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+                    self.b
+                        .ins()
+                        .store(trusted(), undef, room, from_at + TYPE_AT);
+                } else {
+                    let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
+                    self.copy_at(zval, info, (base, at))?;
+                }
+            }
+            Operand::Constant(Constant::Other(idx)) => {
+                let zval = self.constant_zval(frame, idx)?;
+                let word = self.b.ins().load(I64, trusted(), zval, 0);
+                let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
+                self.b.ins().store(trusted(), word, base, at);
+                self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+            }
+            _ => return Err(mismatch("a value copied whole from a scalar")),
+        }
+        Ok(())
+    }
+
+    /// The address of constant `idx` of the op array `frame` serves, its
+    /// zval among the op array's constants, which the trace's epoch
+    /// holds, php's `RT_CONSTANT`.
+    fn constant_zval(&mut self, frame: Frame, idx: ConstIdx) -> Result<Value, Abort> {
+        let literals = self
+            .ir
+            .frames
+            .get(usize::from(frame.0))
+            .ok_or_else(|| mismatch("a constant of a frame the trace does not have"))?
+            .literals;
+        let address = (idx.0 as usize)
+            .checked_mul(size_of::<Zval>())
+            .and_then(|offset| literals.checked_add(offset))
+            .and_then(|address| i64::try_from(address).ok())
+            .ok_or_else(|| mismatch("a constant past the host's addresses"))?;
+        Ok(self.b.ins().iconst(I64, address))
     }
 
     /// A read of a packed array's element by a long key: past `nNumUsed`
@@ -1813,7 +2096,6 @@ impl<'a> Emit<'a> {
         let out = line
             .out
             .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let (room, array_at) = self.place(array_slot)?;
         let arr = self.array_of(array_slot, self.read_of(at, array))?;
         let element = self.element(arr, key, exit)?;
         let hole = self.b.ins().load(I8, trusted(), element, TYPE_AT);
@@ -1836,25 +2118,8 @@ impl<'a> Emit<'a> {
                 ));
             }
         }
-        if array_slot.var >= self.frame_cvs(array_slot.frame)? {
-            let [room_arg, opline] = self.served(line)?;
-            // `FREE_OP1`, as the interpreter takes it: the array out of its
-            // slot, which is left `UNDEF`, then its owner given up.
-            let info = self.b.ins().load(I32, trusted(), room, array_at + TYPE_AT);
-            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
-            self.b
-                .ins()
-                .store(trusted(), undef, room, array_at + TYPE_AT);
-            let counted = self.b.ins().band_imm_u(info, COUNTED);
-            self.when(counted, |emit| {
-                emit.call(
-                    Kernel::Release,
-                    &[room_arg, opline, arr, info],
-                    line.unwind.map(Leave::Unwind),
-                )
-            })?;
-        }
-        Ok(())
+        // `FREE_OP1`, as the interpreter takes it.
+        self.free_temp(line, line.op1)
     }
 
     /// A fetched element at `element` held to its type by its two guards,
@@ -1963,19 +2228,26 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
-    /// A write of a scalar to an array's element by a long key, php's
+    /// A write to an array's element by a long key, php's
     /// `zend_jit_assign_dim` (`Z/ext/opcache/jit/zend_jit_ir.c:13352-13526`):
     /// in place where the array is counted and held once, so php's
-    /// `SEPARATE_ARRAY` has nothing to do, packed, the key below
-    /// `nNumUsed` and the element there and counting nothing, so nothing
-    /// is freed (`zend_jit_fetch_dimension_address_inner`'s `BP_VAR_W`
-    /// path, `:11953-12276`); through the handler otherwise, where php's
-    /// code calls its helpers, the array's copy, the hash's lookup or
-    /// insert and the old value's release, so the write takes no exit.
+    /// `SEPARATE_ARRAY` has nothing to do, packed, and the key below
+    /// `nNumUsed` and the element there
+    /// (`zend_jit_fetch_dimension_address_inner`'s `BP_VAR_W` path,
+    /// `:11953-12276`), as `zend_jit_assign_to_variable` writes it
+    /// (`:5793-5950`): a scalar, or a value no scalar moved from a
+    /// temporary, copied from a variable with one owner more or copied
+    /// from a constant ([`Emit::copy_operand`]), and what the element held
+    /// given up after ([`Emit::release`]), a destructor's throw leaving
+    /// through the opline's unwind; through the handler otherwise, where
+    /// php's code calls its helpers, the array's copy and the hash's
+    /// lookup or insert, so the write takes no exit.
     ///
-    /// An immutable array, one shared, a key past `nNumUsed`, a counted
-    /// element, a hole and an array turned hash are each served by the
-    /// handler, in place of the write, and the loop goes on in the trace:
+    /// An immutable array, one shared, a key past `nNumUsed`, a hole, an
+    /// element that is a reference and an array turned hash are each served
+    /// by the handler, in place of the write, and a counted element given
+    /// up in place, its destructor called there, and the loop goes on in
+    /// the trace:
     ///
     /// ```php
     /// class D { function __destruct() { echo "freed\n"; } }
@@ -1998,6 +2270,30 @@ impl<'a> Emit<'a> {
     /// 0=96 1=97 3=99 4=94 5=95 2=98 1000=-1 6
     /// ```
     ///
+    /// The same where every guard fails once, the destructor of the
+    /// element written over served where the write gives it up:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "freed\n"; } }
+    /// function w($n) {
+    ///     $a = [0, 0, 0, 0]; $b = null;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         if ($i == 50) { $b = $a; }
+    ///         if ($i == 60) { $a[1] = new D; }
+    ///         if ($i == 70) { unset($a[2]); }
+    ///         if ($i == 80) { $a[1000] = -1; }
+    ///         $a[$i % 6] = $i;
+    ///     }
+    ///     foreach ($a as $k => $v) { echo "$k=$v "; }
+    ///     echo count($b), "\n";
+    /// }
+    /// w(100);
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// freed
+    /// 0=96 1=97 3=99 4=94 5=95 2=98 1000=-1 6
+    /// ```
+    ///
     /// Under exit-fuzz the handler serves the write once in each trace, in
     /// place of an exit:
     ///
@@ -2015,6 +2311,48 @@ impl<'a> Emit<'a> {
     /// ```expect regime=jit-exit-fuzz process
     /// 170
     /// ```
+    ///
+    /// An element bound by reference to a variable is written through
+    /// the reference, which the variable reads, its string and a long
+    /// alike, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// function f($n) { $a = [1, 2, 3]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 3] = $i; $t += $r; } return [$a, $r, $t]; }
+    /// function g($n) { $a = ["x", "y"]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 2] = str_repeat("s", $i % 5); $t += strlen($r); } return [$a, $r, $t]; }
+    /// echo json_encode(f(3000)), json_encode(g(3000)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [[2997,2998,2999],2998,4495504][["sss","ssss"],"ssss",5997]
+    /// ```
+    ///
+    /// ```php
+    /// function f($n) { $a = [1, 2, 3]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 3] = $i; $t += $r; } return [$a, $r, $t]; }
+    /// function g($n) { $a = ["x", "y"]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 2] = str_repeat("s", $i % 5); $t += strlen($r); } return [$a, $r, $t]; }
+    /// echo json_encode(f(3000)), json_encode(g(3000)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [[2997,2998,2999],2998,4495504][["sss","ssss"],"ssss",5997]
+    /// ```
+    ///
+    /// Fields of a line split, each trimmed back into its place, one
+    /// uppercased and one a constant, the strings they held given up, under
+    /// force and where every guard fails once:
+    ///
+    /// ```php
+    /// function f($lines) { $t = 0; foreach ($lines as $line) { $f = explode(",", $line); foreach ($f as $k => $v) { $f[$k] = trim($v); } $f[1] = strtoupper($f[1]); $f[2] = "c"; $t += strlen(implode("|", $f)); } return [$t, $f]; }
+    /// echo json_encode(f([" a , b ,x, d ", "e,f,g"])), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [12,["e","F","c"]]
+    /// ```
+    ///
+    /// ```php
+    /// function f($lines) { $t = 0; foreach ($lines as $line) { $f = explode(",", $line); foreach ($f as $k => $v) { $f[$k] = trim($v); } $f[1] = strtoupper($f[1]); $f[2] = "c"; $t += strlen(implode("|", $f)); } return [$t, $f]; }
+    /// echo json_encode(f([" a , b ,x, d ", "e,f,g"])), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [12,["e","F","c"]]
+    /// ```
     fn assign_dim(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Operand::Value(array) = line.op1 else {
             return Err(mismatch("an element write to no array"));
@@ -2022,17 +2360,42 @@ impl<'a> Emit<'a> {
         let Scalar::Long(key) = self.scalar(at, line.op2)? else {
             return Err(mismatch("an element write by no long key"));
         };
-        let value = self.scalar(at, line.data)?;
+        let value = match self.scalar_kind(line.data)? {
+            Some(_) => Some(self.scalar(at, line.data)?),
+            None => None,
+        };
         let held = self.value(array)?;
         let handled = self.b.create_block();
         let done = self.b.create_block();
         let (room, array_at) = self.place(held.slot)?;
         let hash = held.types.meets(Types::HASH);
         let (element, old) = self.written_in_place((room, array_at), key, hash, handled);
-        let counts = self.b.ins().band_imm_u(old, COUNTED);
-        let counts = self.fuzzed(counts)?;
-        self.divert_if(counts, handled);
-        self.write(element, 0, value);
+        // Where every guard fails once, the handler serves the write.
+        let never = self.b.ins().iconst(I8, 0);
+        let fuzzed = self.fuzzed(never)?;
+        self.divert_if(fuzzed, handled);
+        // An element that counts nothing is written over; one that counts
+        // is given up after, but a reference is written through, which
+        // `zend_jit_assign_to_variable` does past its `ZVAL_DEREF` and the
+        // handler does here.
+        let (plain, owning) = (self.b.create_block(), self.b.create_block());
+        let counted = self.b.ins().band_imm_u(old, COUNTED);
+        self.b.ins().brif(counted, owning, &[], plain, &[]);
+        self.b.switch_to_block(plain);
+        self.b.seal_block(plain);
+        self.written(line, element, value)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(owning);
+        self.b.seal_block(owning);
+        let kind = self.b.ins().band_imm_u(old, KIND);
+        let reference = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        self.divert_if(reference, handled);
+        let word = self.b.ins().load(I64, trusted(), element, 0);
+        self.written(line, element, value)?;
+        self.release(line, word, old)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(handled);
         self.b.seal_block(handled);
@@ -2040,10 +2403,26 @@ impl<'a> Emit<'a> {
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(done);
         self.b.seal_block(done);
-        if let Some(out) = line.out {
-            self.define(out, value)?;
+        match (line.out, value) {
+            (Some(out), Some(value)) => self.define(out, value),
+            (Some(_), None) => Err(mismatch(
+                "an element write of a value no scalar, its result used",
+            )),
+            (None, _) => Ok(()),
         }
-        Ok(())
+    }
+
+    /// The element at `element` written with `line`'s value: the scalar
+    /// `value`, or the value no scalar its `OP_DATA` names, copied as an
+    /// assignment copies it ([`Emit::copy_operand`]).
+    fn written(&mut self, line: &Line, element: Value, value: Option<Scalar>) -> Result<(), Abort> {
+        match value {
+            Some(value) => {
+                self.write(element, 0, value);
+                Ok(())
+            }
+            None => self.copy_operand(line.frame, line.data, (element, 0)),
+        }
     }
 
     /// The element `key` names of the array the zval at `base + at`
@@ -2374,10 +2753,24 @@ impl<'a> Emit<'a> {
     /// ["abab",[1,2],[7],"abab",[1,2],[7]] [7,8]
     /// ```
     fn copy(&mut self, zval: Value, info: Value, slot: Slot) -> Result<(), Abort> {
+        let dest = self.place(slot)?;
+        self.copy_at(zval, info, dest)
+    }
+
+    /// The zval at `zval`, no reference, of type word `info`, copied to
+    /// the zval at `base + at` with one owner more where it is counted, as
+    /// [`Emit::copy`] copies it to a slot.
+    fn copy_at(&mut self, zval: Value, info: Value, (base, at): (Value, i32)) -> Result<(), Abort> {
         let word = self.b.ins().load(I64, trusted(), zval, 0);
-        let (room, at) = self.place(slot)?;
-        self.b.ins().store(trusted(), word, room, at);
-        self.b.ins().store(trusted(), info, room, at + TYPE_AT);
+        self.b.ins().store(trusted(), word, base, at);
+        self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+        self.addref(word, info)
+    }
+
+    /// One owner more of the value of type word `info` at `word` where it
+    /// is counted, `Z_TRY_ADDREF`, the count kept below the pin it may
+    /// carry.
+    fn addref(&mut self, word: Value, info: Value) -> Result<(), Abort> {
         let counted = self.b.ins().band_imm_u(info, COUNTED);
         self.when(counted, |emit| {
             let count_at = imm(Zval::COUNT_AT);
@@ -2394,7 +2787,303 @@ impl<'a> Emit<'a> {
         })
     }
 
-    /// A send of a scalar: the call's slot for the argument written.
+    /// A `foreach`'s reset over an array, php's `zend_jit_fe_reset`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:13756-13775`): the array into
+    /// the iterator's slot, with one owner more where a variable holds it,
+    /// moved whole from a temporary, whose slot is left `UNDEF` as the
+    /// handler takes it, and the iterator's position, `Z_FE_POS`, zero,
+    /// the slot's own word and not the array's. An empty array goes on as
+    /// any other, as the handler's does, and the fetch after it finds the
+    /// end.
+    fn fe_reset(&mut self, line: &Line) -> Result<(), Abort> {
+        let Operand::Value(array) = line.op1 else {
+            return Err(mismatch("a reset of no array"));
+        };
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a reset that writes no iterator"))?;
+        let from = self.value(array)?.slot;
+        let to = self.value(out)?.slot;
+        let (room, at) = self.place(from)?;
+        let zval = self.b.ins().iadd_imm_s(room, i64::from(at));
+        let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
+        if self.is_temporary(from)? {
+            let word = self.b.ins().load(I64, trusted(), room, at);
+            let (dest, dest_at) = self.place(to)?;
+            self.b.ins().store(trusted(), word, dest, dest_at);
+            self.b.ins().store(trusted(), info, dest, dest_at + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
+        } else {
+            self.copy(zval, info, to)?;
+        }
+        let (dest, dest_at) = self.place(to)?;
+        let zero = self.b.ins().iconst(I32, 0);
+        self.b
+            .ins()
+            .store(trusted(), zero, dest, dest_at + FE_POS_AT);
+        Ok(())
+    }
+
+    /// A `foreach`'s fetch over a packed array into a variable, where the
+    /// loop goes on, php's `zend_jit_fe_fetch`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:13800-14120`): from the
+    /// iterator's position, the holes passed over, the end of the array
+    /// leaving through the direction's exit for the opline past the loop,
+    /// where the handler would jump; else the position moved past the
+    /// element, its position the key where one is written, and the
+    /// element, through the reference it may be, copied into the variable
+    /// with one owner more, what the variable held given up after, as
+    /// `zend_assign_to_variable` gives it up. A variable that holds a
+    /// reference is written through by the handler, which serves the
+    /// opline whole. Keys and values, a hole, a reference among the
+    /// elements and a variable bound to one:
+    ///
+    /// ```php
+    /// function sum($a) { $s = 0; $t = ""; foreach ($a as $k => $v) { $s += $k; $t .= is_array($v) ? "A" : $v; } return "$s:$t"; }
+    /// $r = "R"; $a = ["a", "b", [1], &$r, str_repeat("c", 2)]; unset($a[1]);
+    /// echo sum($a), " ", sum(["x", "y"]), " ", sum([]), "\n";
+    /// function bound($a) { $v = 0; $w = &$v; foreach ($a as $v) { $w .= "!"; } return $v; }
+    /// echo bound(["p", "q"]), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 9:aARcc 1:xy 0:
+    /// q!
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function sum($a) { $s = 0; $t = ""; foreach ($a as $k => $v) { $s += $k; $t .= is_array($v) ? "A" : $v; } return "$s:$t"; }
+    /// $r = "R"; $a = ["a", "b", [1], &$r, str_repeat("c", 2)]; unset($a[1]);
+    /// echo sum($a), " ", sum(["x", "y"]), " ", sum([]), "\n";
+    /// function bound($a) { $v = 0; $w = &$v; foreach ($a as $v) { $w .= "!"; } return $v; }
+    /// echo bound(["p", "q"]), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 9:aARcc 1:xy 0:
+    /// q!
+    /// ```
+    fn fe_fetch(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let Operand::Value(iterator) = line.op1 else {
+            return Err(mismatch("a fetch from no iterator"));
+        };
+        let Operand::Value(old) = line.op2 else {
+            return Err(mismatch("a fetch into no variable"));
+        };
+        let target = self.value(old)?.slot;
+        let (room, iter_at) = self.place(self.value(iterator)?.slot)?;
+        let (var_room, var_at) = self.place(target)?;
+        let handled = self.b.create_block();
+        let done = self.b.create_block();
+        let old_word = self.b.ins().load(I64, trusted(), var_room, var_at);
+        let old_info = self
+            .b
+            .ins()
+            .load(I32, trusted(), var_room, var_at + TYPE_AT);
+        let kind = self.b.ins().band_imm_u(old_info, KIND);
+        let bound = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        self.divert_if(bound, handled);
+        let arr = self.b.ins().load(I64, trusted(), room, iter_at);
+        let first = self.b.ins().load(I32, trusted(), room, iter_at + FE_POS_AT);
+        let used = self.b.ins().load(I32, trusted(), arr, imm(Arr::USED_AT));
+        let data = self.b.ins().load(I64, trusted(), arr, imm(Arr::DATA_AT));
+        let walk = self.b.create_block();
+        let pos = self.b.append_block_param(walk, I32);
+        let found = self.b.create_block();
+        self.b.ins().jump(walk, &[first.into()]);
+        self.b.switch_to_block(walk);
+        let ended = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, pos, used);
+        self.direction(at, ended)?;
+        let offset = self.b.ins().uextend(I64, pos);
+        let offset = self.b.ins().imul_imm_s(offset, SLOT);
+        let element = self.b.ins().iadd(data, offset);
+        let byte = self.b.ins().load(I8, trusted(), element, TYPE_AT);
+        let hole = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Undef));
+        let past = self.b.ins().iadd_imm_s(pos, 1);
+        self.b.ins().brif(hole, walk, &[past.into()], found, &[]);
+        self.b.seal_block(walk);
+        self.b.switch_to_block(found);
+        self.b.seal_block(found);
+        self.b
+            .ins()
+            .store(trusted(), past, room, iter_at + FE_POS_AT);
+        if let Some(key) = line.out {
+            let key_value = self.b.ins().uextend(I64, pos);
+            self.define(key, Scalar::Long(key_value))?;
+        }
+        let element = self.deref(element);
+        let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+        self.copy(element, info, target)?;
+        self.release(line, old_word, old_info)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(handled);
+        self.b.seal_block(handled);
+        self.stepped(at, line)?;
+        if let Some(key) = line.out
+            && self.value(key)?.home == Home::Register
+        {
+            let held = self.load(self.value(key)?.slot, Kind::Long, false)?;
+            self.define(key, held)?;
+        }
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
+    }
+
+    /// A cast of a scalar to a boolean, its truth, or its negation for
+    /// `!`, as php's `zend_jit_bool_jmpznz` writes it
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:7533-7800`).
+    fn bool(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let held = self.scalar(at, line.op1)?;
+        let truth = self.truth(held);
+        let truth = match line.opcode {
+            Opcode::BoolNot => self.b.ins().icmp_imm_s(IntCC::Equal, truth, 0),
+            _ => truth,
+        };
+        if let Some(out) = line.out {
+            self.define(out, Scalar::Bool(truth))?;
+        }
+        Ok(())
+    }
+
+    /// `FREE_OP` of `operand` where it is a temporary, as the handler
+    /// takes it: what it holds out of its slot, which is left `UNDEF`,
+    /// then its owner given up as [`Emit::release`] gives it up, what a
+    /// destructor throws leaving through the opline's unwind. A
+    /// `foreach`'s array freed at its loop's end is this, php's
+    /// `zend_jit_free` of `FE_FREE` over an array, which holds no iterator
+    /// to delete (`Z/ext/opcache/jit/zend_jit_ir.c:11543-11580`).
+    fn free_temp(&mut self, line: &Line, operand: Operand) -> Result<(), Abort> {
+        let Operand::Value(value) = operand else {
+            return Ok(());
+        };
+        let held = self.value(value)?;
+        if held.home == Home::Register || !self.is_temporary(held.slot)? {
+            return Ok(());
+        }
+        self.free_slot(line, held.slot)
+    }
+
+    /// The temporary `slot` freed as [`Emit::free_temp`] frees it.
+    fn free_slot(&mut self, line: &Line, slot: Slot) -> Result<(), Abort> {
+        let room = self.room(slot.frame)?;
+        let at = slot_offset(slot.var)?;
+        let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
+        let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+        self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
+        let word = self.b.ins().load(I64, trusted(), room, at);
+        self.release(line, word, info)
+    }
+
+    /// What a slot held, `word` and its type word `info`, given up after
+    /// an inline write over it or as a temporary is freed, as php's
+    /// `jit_ZVAL_PTR_DTOR` gives it up (`Z/ext/opcache/jit/zend_jit_ir.c:1819-1903`):
+    /// where it is counted, a `GC_DELREF` inline where another owner
+    /// stands and the collector holds the value already or never takes
+    /// it (`GC_MAY_LEAK`'s bits, [`Zval::LEAK_BITS`]), as a string's;
+    /// the last owner, a value the collector may take and a reference,
+    /// whose value it looks through to, through the release kernel, a
+    /// destructor's throw leaving through the opline's unwind. A string
+    /// two variables hold, one of them written over, and an object whose
+    /// last owner an assignment gives up, its destructor called there:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n; } }
+    /// function f($n) { $s = str_repeat("ab", 2); for ($i = 0; $i < $n; $i++) { $t = $s; $t = "c"; $o = new D($i); } return $s; }
+    /// echo f(6), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 012345abab
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n; } }
+    /// function f($n) { $s = str_repeat("ab", 2); for ($i = 0; $i < $n; $i++) { $t = $s; $t = "c"; $o = new D($i); } return $s; }
+    /// echo f(6), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 012345abab
+    /// ```
+    fn release(&mut self, line: &Line, word: Value, info: Value) -> Result<(), Abort> {
+        let counted = self.b.ins().band_imm_u(info, COUNTED);
+        let [room, opline] = self.served(line)?;
+        self.when(counted, |emit| {
+            let count_at = imm(Zval::COUNT_AT);
+            let count = emit.b.ins().load(I32, trusted(), word, count_at);
+            let called = emit.kernel_releases(word, info, count);
+            let (kernel, inline, done) = (
+                emit.b.create_block(),
+                emit.b.create_block(),
+                emit.b.create_block(),
+            );
+            emit.b.set_cold_block(kernel);
+            emit.b.ins().brif(called, kernel, &[], inline, &[]);
+            emit.b.switch_to_block(inline);
+            emit.b.seal_block(inline);
+            let fewer = emit.b.ins().iadd_imm_s(count, -1);
+            emit.b.ins().store(trusted(), fewer, word, count_at);
+            emit.b.ins().jump(done, &[]);
+            emit.b.switch_to_block(kernel);
+            emit.b.seal_block(kernel);
+            emit.call(
+                Kernel::Release,
+                &[room, opline, word, info],
+                line.unwind.map(Leave::Unwind),
+            )?;
+            emit.b.ins().jump(done, &[]);
+            emit.b.switch_to_block(done);
+            emit.b.seal_block(done);
+            Ok(())
+        })
+    }
+
+    /// Whether giving up one owner of the counted value at `word`, of type
+    /// word `info` and count word `count`, is the release kernel's, as
+    /// php's `jit_ZVAL_PTR_DTOR` calls out (`Z/ext/opcache/jit/zend_jit_ir.c:1819-1903`):
+    /// the last owner, or none, which the heap's own release reads with
+    /// its pin; a reference, whose value the collector looks through to;
+    /// and a value the collector may take as a possible root, whose
+    /// `GC_TYPE_INFO` holds no bit of php's `GC_MAY_LEAK` mask
+    /// ([`Zval::LEAK_BITS`]). Otherwise a `GC_DELREF` inline gives it up.
+    fn kernel_releases(&mut self, word: Value, info: Value, count: Value) -> Value {
+        let owners = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+        let last = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, owners, 1);
+        let kind = self.b.ins().band_imm_u(info, KIND);
+        let reference = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        let gc = self
+            .b
+            .ins()
+            .load(I32, trusted(), word, imm(Zval::GC_INFO_AT));
+        let held = self.b.ins().band_imm_u(gc, i64::from(Zval::LEAK_BITS));
+        let leaks = self.b.ins().icmp_imm_u(IntCC::Equal, held, 0);
+        let called = self.b.ins().bor(last, reference);
+        self.b.ins().bor(called, leaks)
+    }
+
+    /// A send, php's `zend_jit_send_val` and `zend_jit_send_var`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9466-9790`): the call's slot for
+    /// the argument written with a scalar, or with a value no scalar moved
+    /// from a temporary, copied from a variable with one owner more, or
+    /// copied as it is from a constant ([`Emit::copy_operand`]).
     fn send(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Imm::Arg(number) = line.imm else {
             return Err(mismatch("a send with no argument number"));
@@ -2404,22 +3093,9 @@ impl<'a> Emit<'a> {
                 .checked_sub(1)
                 .ok_or_else(|| mismatch("an argument numbered zero"))?,
         )?;
-        if let Operand::Value(value) = line.op1
-            && Kind::of(self.value(value)?.types).is_none()
-            && self.value(value)?.slot.var >= self.frame_cvs(line.frame)?
-        {
-            // What a temporary holds, moved into the call whole, its
-            // owner with it, as `ZVAL_COPY_VALUE` moves it, and the slot
-            // it leaves `UNDEF`, as the handler takes the operand.
-            let (room, from) = self.place(self.value(value)?.slot)?;
-            let word = self.b.ins().load(I64, trusted(), room, from);
-            let info = self.b.ins().load(I32, trusted(), room, from + TYPE_AT);
+        if self.scalar_kind(line.op1)?.is_none() {
             let call = self.call_room()?;
-            self.b.ins().store(trusted(), word, call, arg);
-            self.b.ins().store(trusted(), info, call, arg + TYPE_AT);
-            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
-            self.b.ins().store(trusted(), undef, room, from + TYPE_AT);
-            return Ok(());
+            return self.copy_operand(line.frame, line.op1, (call, arg));
         }
         let held = self.scalar(at, line.op1)?;
         let call = self.call_room()?;
@@ -2489,7 +3165,7 @@ impl<'a> Emit<'a> {
             self.b.ins().ireduce(I8, bit)
         };
         let slot = self.value(value)?.slot;
-        if slot.var >= self.frame_cvs(slot.frame)? && Kind::of(self.value(value)?.types).is_none() {
+        if self.is_temporary(slot)? && Kind::of(self.value(value)?.types).is_none() {
             // `FREE_OP1`: the temporary out of its slot, then its owner
             // given up.
             let (room, slot_at) = self.place(slot)?;
@@ -2817,6 +3493,11 @@ impl<'a> Emit<'a> {
             .get(usize::from(frame.0))
             .map(|info| info.cvs)
             .ok_or_else(|| mismatch("a frame past the trace's"))
+    }
+
+    /// Whether `slot` is a temporary, numbered past its frame's variables.
+    fn is_temporary(&self, slot: Slot) -> Result<bool, Abort> {
+        Ok(slot.var >= self.frame_cvs(slot.frame)?)
     }
 
     /// The variable of `frame`'s room.
