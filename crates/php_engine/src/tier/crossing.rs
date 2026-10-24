@@ -3,10 +3,11 @@
 //! `execute_data`, which compiled code is entered with and reads its
 //! slots past; the frame the loop stands in once a trace has left;
 //! `SAVE_OPLINE`; the callee an `INIT_*`'s cache slot holds; the room
-//! the stack has left for the frames compiled code pushes; and the two
-//! releases, a kernel's `zval_ptr_dtor` and an exit's freeing of the
-//! temporaries an opline read. Compiled code holds a frame by its room
-//! and the engine by its position, and these are the two ways across.
+//! the stack has left for the frames compiled code pushes; and the three
+//! releases, a kernel's `zval_ptr_dtor`, a leave's free of a variable
+//! and an exit's freeing of the temporaries an opline read. Compiled
+//! code holds a frame by its room and the engine by its position, and
+//! these are the two ways across.
 
 use std::ptr::NonNull;
 
@@ -111,6 +112,21 @@ pub fn primed(req: &Request, frame: FrameRef, held: Held<'_>, at: OplineIdx) -> 
 /// php's `zval_ptr_dtor` of `zval`, a counted value compiled code gives
 /// up: a destructor it runs may leave a throwable pending.
 pub fn release(req: &mut Request, zval: Zval) {
+    req.release(Value::of_slot(zval));
+}
+
+/// php's `zend_jit_free_cv` of a variable of `frame`, which a `RETURN`
+/// compiled code leaves the frame by in place gives up where it is the
+/// last owner, or where it leaves owners of a value the collector may
+/// take as a possible root: `frame` off the chain a backtrace reads
+/// first, `EG(current_execute_data) = EX(prev_execute_data)` as
+/// `zend_jit_leave_frame` stores it before the first free, then
+/// `i_zval_ptr_dtor`, whose destructor sees the caller as the frame that
+/// runs and may leave a throwable pending.
+pub fn free_cv(req: &mut Request, frame: FrameRef, zval: Zval) {
+    if let Some(header) = req.vm_mut().at_mut(frame) {
+        header.info.set_leaving(true);
+    }
     req.release(Value::of_slot(zval));
 }
 

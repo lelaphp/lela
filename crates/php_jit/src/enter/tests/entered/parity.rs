@@ -16,6 +16,7 @@ use php_engine::tier::{
     self, Extension, ExtensionBuilder, FRAME, Flow, FrameRef, FuncRef, PlainCall, Request, Site,
     Tier,
 };
+use php_heap::Zval;
 use php_unit::{MapPtrOffset, Opcode, OperandKind, OplineIdx};
 
 use crate::enter::On;
@@ -25,17 +26,19 @@ use crate::table::{self, Outputs, TraceName};
 use crate::testing::{self, Scratch, function_of, stdout};
 use crate::types::{
     Constant, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo, Grows, Imm, Landing, Line, Op,
-    Operand, Place, Returned, TraceIr, Unwind,
+    Operand, Owners, Place, Returned, TraceIr, Unwind, UnwindId, Vars,
 };
 
 /// What a read of the stack holds: the room of the frame read, its link,
-/// header and slots, each slot's value and type word; that frame's
-/// record; the stack's top, end, frame count and innermost room, each as
-/// an offset from the room read where it is an address.
+/// header and slots, each slot's value and type word, and the count of
+/// what each counted slot names; that frame's record; the stack's top,
+/// end, frame count and innermost room, each as an offset from the room
+/// read where it is an address.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Read {
     room: Vec<u8>,
     slots: Vec<[u8; 12]>,
+    counts: Vec<Option<u32>>,
     record: (usize, usize, u8),
     stack: [isize; 4],
 }
@@ -69,17 +72,19 @@ fn read(req: &mut Request, frame: FrameRef) -> Option<Read> {
     let len = word(record, at(FRAME.record_len()));
     let first = word(record, at(FRAME.record_at()));
     let tag = bytes(record.wrapping_add(at(FRAME.record_placed())), 1)[0];
-    let slots = (0..len)
+    let slots: Vec<[u8; 12]> = (0..len)
         .map(|slot| {
             let mut read = [0; 12];
             read.copy_from_slice(&bytes(room.wrapping_add(at(FRAME.room()) + 16 * slot), 12));
             read
         })
         .collect();
+    let counts = slots.iter().map(count_of).collect();
     let from = |address: usize| address.wrapping_sub(room.addr()).cast_signed();
     Some(Read {
         room: bytes(room, at(FRAME.room())),
         slots,
+        counts,
         record: (first.wrapping_sub(room.addr()), len, tag),
         stack: [
             from(word(stack, at(FRAME.top()))),
@@ -88,6 +93,21 @@ fn read(req: &mut Request, frame: FrameRef) -> Option<Read> {
             from(word(stack, at(FRAME.innermost()))),
         ],
     })
+}
+
+/// The count of the block a slot read names where its type word says it
+/// is counted, php's `GC_REFCOUNT`.
+fn count_of(slot: &[u8; 12]) -> Option<u32> {
+    let flags = slot.get(Zval::FLAGS_AT)?;
+    if flags & Zval::TYPE_REFCOUNTED == 0 {
+        return None;
+    }
+    let mut block = [0; size_of::<usize>()];
+    block.copy_from_slice(slot.get(..size_of::<usize>())?);
+    let block = std::ptr::with_exposed_provenance::<u8>(usize::from_ne_bytes(block));
+    let mut count = [0; 4];
+    count.copy_from_slice(&bytes(block.wrapping_add(Zval::COUNT_AT), 4));
+    Some(u32::from_ne_bytes(count))
 }
 
 /// The reads of one way of making the call: after the push, read at the
@@ -206,6 +226,7 @@ fn compiled(ir: &TraceIr) -> Option<Compiled> {
         Kernel::Handle => (super::super::super::wrapped::handle as *const ()).addr(),
         Kernel::PushCall | Kernel::Call => (refusing::refused_call as *const ()).addr(),
         Kernel::Release => (super::super::super::wrapped::release as *const ()).addr(),
+        Kernel::FreeCv => (super::super::super::wrapped::free_cv as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend
@@ -378,25 +399,30 @@ fn returning(req: &Request, g: FrameRef, ret: u32) -> Option<(Operand, Returned)
     })
 }
 
-/// `g`'s return of `7`, or of a constant array, left in place, the trace
-/// leaving in `f` past its call.
+/// `g`'s return of `7`, or of a constant array, left in place, its
+/// variables freed, the trace leaving in `f` past its call.
 fn leave_in_place(req: &mut Request, g: FrameRef) -> Option<(FrameRef, Read)> {
     let (ret, _) = named(req, g, Opcode::Return)?;
     let (returned, value) = returning(req, g, ret)?;
     let f = tier::below(req, g)?;
     let (call, _) = named(req, f, Opcode::DoUcall)?;
     let (me, caller) = (func(req, g)?, func(req, f)?);
+    // Both of `g`'s variables are freed as it leaves, each as it holds
+    // what it holds: nothing counted, or an array.
+    let both = Vars::default().with(0).and_then(|vars| vars.with(1))?;
+    let mut leave = line(
+        Frame::ROOT,
+        ret,
+        Opcode::Return,
+        returned,
+        Imm::Leave {
+            owners: Owners::Each(both),
+            value,
+        },
+    );
+    leave.unwind = Some(UnwindId(0));
     let ops = vec![
-        Op::Line(line(
-            Frame::ROOT,
-            ret,
-            Opcode::Return,
-            returned,
-            Imm::Leave {
-                owners: true,
-                value,
-            },
-        )),
+        Op::Line(leave),
         Op::Back {
             frame: Frame(1),
             out: None,
@@ -529,5 +555,34 @@ fn an_array_returned_in_place_leaves_the_stack_as_the_engines_own() {
     assert_eq!(parity.calls, 5);
     let Reads { left, .. } = parity.by_kernel;
     assert!(left.is_some());
+    assert_eq!(parity.in_place.left, left, "the leave");
+}
+
+/// A leave over variables that own an array another owner of stands, one
+/// given up by the `free_cv` kernel, which offers it to the collector as a
+/// possible root, and the other, which the collector then holds, by a
+/// `GC_DELREF` inline, as php's `zend_jit_free_cv` gives each up, leaves
+/// the caller's slots, the array's count and the stack as
+/// `leave_plainly` leaves them (#2963).
+#[test]
+fn a_leave_that_frees_an_array_leaves_the_stack_as_the_engines_own() {
+    let engine = testing::engine::<Paired>(&[]);
+    let (served, parity) = Scratch::new().serve_kept::<Parity>(
+        &engine,
+        "function g($a, $b) { return 7; }
+        function f($x) { $r = g($x, $x); echo $r, $x[2], \"\\n\"; }
+        $a = [1, 2]; $a[] = 3;
+        f($a); f($a); f($a); f($a);",
+    );
+    assert_eq!(stdout(&served), "73\n73\n73\n73\n", "{:?}", served.fatal);
+    let parity = parity.unwrap_or_default();
+    assert_eq!(parity.calls, 5);
+    let Reads { left, .. } = parity.by_kernel;
+    // `$x`'s array is `$a`'s and `$x`'s again once `g` left.
+    let counts = left.as_ref().map(|left| left.counts.clone());
+    assert_eq!(
+        counts.and_then(|counts| counts.first().copied().flatten()),
+        Some(2)
+    );
     assert_eq!(parity.in_place.left, left, "the leave");
 }

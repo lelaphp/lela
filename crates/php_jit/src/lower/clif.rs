@@ -75,6 +75,8 @@ const TYPE_AT: i32 = imm(Zval::TYPE_AT);
 /// `IS_TYPE_REFCOUNTED` in the type word: the flags byte follows the type
 /// byte, as php's `Z_TYPE_FLAGS_SHIFT` lays it.
 const COUNTED: i64 = (Zval::TYPE_REFCOUNTED as i64) << 8;
+/// The type byte in the type word, php's `Z_TYPE` of `Z_TYPE_INFO`.
+const KIND: i64 = 0xff;
 const _: () = assert!(Zval::FLAGS_AT == Zval::TYPE_AT + 1);
 /// A slot, `sizeof(zval)`.
 const SLOT: i64 = 16;
@@ -1196,6 +1198,18 @@ impl<'a> Emit<'a> {
     /// status word tested, leaving as `leave` says where it is not zero, or
     /// answering [`ABANDONED`] where the opline names no way to leave.
     fn call(&mut self, kernel: Kernel, args: &[Value], leave: Option<Leave>) -> Result<(), Abort> {
+        let status = self.call_status(kernel, args)?;
+        let to = self.left_by(leave)?;
+        let on = self.b.create_block();
+        self.b.ins().brif(status, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        Ok(())
+    }
+
+    /// `kernel`'s wrapper called at its address with the `ExitCtx` and
+    /// `args`, and its status word, an `i32`, for the caller to test.
+    fn call_status(&mut self, kernel: Kernel, args: &[Value]) -> Result<Value, Abort> {
         let sig = self.signature(kernel);
         let address = i64::try_from(self.symbols.address(kernel))
             .map_err(|_| mismatch("a kernel address past the host's"))?;
@@ -1207,22 +1221,21 @@ impl<'a> Emit<'a> {
         all.push(cx);
         all.extend_from_slice(args);
         let inst = self.b.ins().call_indirect(sig, callee, &all);
-        let status = self
-            .b
+        self.b
             .inst_results(inst)
             .first()
             .copied()
-            .ok_or_else(|| mismatch("a kernel that answers nothing"))?;
-        let to = match leave {
+            .ok_or_else(|| mismatch("a kernel that answers nothing"))
+    }
+
+    /// The block a kernel's status other than `Continue` goes to: `leave`'s
+    /// exit or unwind, or [`ABANDONED`] where it names none.
+    fn left_by(&mut self, leave: Option<Leave>) -> Result<Block, Abort> {
+        Ok(match leave {
             Some(Leave::Exit(exit)) => self.exit_block(exit)?,
             Some(Leave::Unwind(unwind)) => self.unwind_block(unwind)?,
             None => self.abandoned(),
-        };
-        let on = self.b.create_block();
-        self.b.ins().brif(status, to, &[], on, &[]);
-        self.b.switch_to_block(on);
-        self.b.seal_block(on);
-        Ok(())
+        })
     }
 
     /// `kernel`'s signature, imported once.
@@ -1236,7 +1249,7 @@ impl<'a> Emit<'a> {
             Kernel::Step => &[I64, I64, I32, I32, I64],
             Kernel::Handle => &[I64, I64, I32, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
-            Kernel::Release => &[I64, I64, I32, I64, I32],
+            Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -1917,7 +1930,7 @@ impl<'a> Emit<'a> {
             return Err(mismatch("a fetch holds a guard of another kind"));
         };
         let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        let kind = self.b.ins().band_imm_u(info, 0xff);
+        let kind = self.b.ins().band_imm_u(info, KIND);
         let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, kind, tag(t));
         let other = self.fuzzed(other)?;
         let goes_on = self
@@ -2068,7 +2081,7 @@ impl<'a> Emit<'a> {
         self.divert_if(past, handled);
         let element = self.slot_at(arr, key);
         let old = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        let kind = self.b.ins().band_imm_u(old, 0xff);
+        let kind = self.b.ins().band_imm_u(old, KIND);
         let hole = self
             .b
             .ins()
@@ -2202,7 +2215,7 @@ impl<'a> Emit<'a> {
             }
         };
         let (element, old) = self.written_in_place(zval, key, hash, handled);
-        let kind = self.b.ins().band_imm_u(old, 0xff);
+        let kind = self.b.ins().band_imm_u(old, KIND);
         let is_long = self
             .b
             .ins()

@@ -17,7 +17,7 @@ use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupp
 use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, SIEVE, SPECTRALNORM, held,
+    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{Check, End, Guard, GuardAt, Imm, Interrupt, Op, Returned, TraceIr};
@@ -270,6 +270,24 @@ fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), Stri
 #[test]
 fn a_natives_call_lowers_in_place() -> Result<(), String> {
     lowered(NATIVE_CALL).map(drop)
+}
+
+/// A leave over owning variables, each freed in place: its type tested,
+/// a `GC_DELREF` inline where another owner stands and the collector holds
+/// or never takes the value, and the `free_cv` kernel otherwise (#3313).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_leave_over_owning_variables_lowers_its_frees() -> Result<(), String> {
+    lowered(OWNING_LEAVE)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("owning_leave.clif"))
+        .map_err(|e| e.to_string())?;
+    let address = format!("{:#x}", symbols().address(Kernel::FreeCv)).replace("0x7000", "0x7000_");
+    let frees = (clif.lines())
+        .filter(|line| line.contains("call_indirect") && line.contains(&address))
+        .count();
+    // One kernel call per variable freed, `$a` and `$s`.
+    assert_eq!(frees, 2, "{clif}");
+    Ok(())
 }
 
 /// A host Cranelift has no ISA for is `Unsupported`, which runs the

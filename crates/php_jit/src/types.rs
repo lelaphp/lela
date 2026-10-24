@@ -342,21 +342,61 @@ pub(crate) enum Imm {
     Make {
         returns: Option<u32>,
     },
-    /// A `RETURN` compiled code leaves its frame by in place where the
-    /// frame holds nothing the leave kernel must give up
+    /// A `RETURN` compiled code leaves its frame by in place
     /// (`zend_jit_leave_func`, `Z/ext/opcache/jit/zend_jit_ir.c:11035-11263`):
-    /// a function's frame and its value a scalar, with no observer
-    /// declared. `owners` where a variable of the frame may own something,
-    /// which the leave then tests as it leaves, leaving through the leave
-    /// kernel where one does, as php's `zend_jit_free_cv` tests each
-    /// variable its inference does not hold uncounted.
+    /// a function's frame, with no observer declared; what it hands its
+    /// caller, and the variables it gives up as it leaves ([`Owners`]).
     Leave {
-        owners: bool,
+        owners: Owners,
         value: Returned,
     },
     /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
     /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.
     Mask(u32),
+}
+
+/// The variables of a frame a `RETURN` left in place gives up, as php's
+/// trace compiles the loop over `op_array->last_var` before
+/// `zend_jit_leave_func` (`Z/ext/opcache/jit/zend_jit_trace.c:5586-5634`):
+/// each that the trace does not hold uncounted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Owners {
+    /// Every variable holds what no reference counts: the leave frees
+    /// nothing.
+    Uncounted,
+    /// The variables that may own something, each freed in place in slot
+    /// order, `zend_jit_free_cv` unrolled.
+    Each(Vars),
+    /// More variables than [`Vars`] holds, their type words tested at
+    /// once and the leave kernel's to free where one owns something, as
+    /// php calls `zend_free_compiled_variables` where it will not unroll
+    /// (`zend_jit_trace.c:5593-5598`).
+    Kernel,
+}
+
+/// A set of a frame's variables, by number, the first [`Vars::MAX`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Vars(u64);
+
+impl Vars {
+    /// How many variables a set can name.
+    pub(crate) const MAX: u32 = u64::BITS;
+
+    /// The set with `var` added; `None` past [`Vars::MAX`].
+    pub(crate) fn with(self, var: u32) -> Option<Vars> {
+        let bit = 1u64.checked_shl(var)?;
+        Some(Vars(self.0 | bit))
+    }
+
+    /// Whether the set names no variable.
+    pub(crate) fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The variables named, in slot order.
+    pub(crate) fn iter(self) -> impl Iterator<Item = u32> {
+        (0..Vars::MAX).filter(move |var| (self.0 >> var) & 1 == 1)
+    }
 }
 
 /// What a `RETURN` left in place hands its caller, as
