@@ -283,6 +283,10 @@ pub(crate) struct Tally {
     pub wall: Duration,
     /// The fence lines `--accept` wrote.
     pub captured: Vec<Captured>,
+    /// The verdicts an `--accept` run found the oracle reproducing as they
+    /// stand, each at its file and the 1-based line of its `expect` fence
+    /// ([`record_accepted`]).
+    pub reproduced: Vec<(PathBuf, usize)>,
     /// Where the pinned php is not, when it is not on this machine: then
     /// no witness ran, each is counted as not run, and a complete tally's
     /// green would be a claim. A binary at the path whose digest is not
@@ -889,12 +893,22 @@ fn finished_reading(
     if ask.accept != Accept::Nothing && !tally.captured.is_empty() {
         capture(root, &tally.captured)?;
         *snapshot = Snapshot::disk(root)?;
-        let wrote: Vec<(&Path, usize)> = tally
+    }
+    if ask.accept != Accept::Nothing {
+        // What `--accept` wrote and what the oracle reproduced as it
+        // stood are both the oracle's verdicts, recorded alike.
+        let taken: Vec<(&Path, usize)> = tally
             .captured
             .iter()
             .map(|one| (one.file.as_path(), one.line))
+            .chain(
+                tally
+                    .reproduced
+                    .iter()
+                    .map(|(file, line)| (file.as_path(), *line)),
+            )
             .collect();
-        record_accepted(root, &krate.name, &wrote)?;
+        record_accepted(root, &krate.name, &taken)?;
     }
     // The diff is the review, fence by fence, as a person reads it before
     // the commit (#801).
@@ -1056,6 +1070,7 @@ pub(crate) struct Prepared<'a> {
 #[derive(Default)]
 pub(crate) struct Gathered {
     captured: Mutex<Vec<Captured>>,
+    reproduced: Mutex<Vec<(PathBuf, usize)>>,
     entered: Mutex<HashMap<String, Record>>,
 }
 
@@ -1109,6 +1124,7 @@ fn serve(
     let mut kept = judge::Kept::default();
     let judged = judge::one(oracle, registry, ask, witness, regime, binary, &mut kept)?;
     crate::locked(&gathered.captured).extend(kept.captured);
+    crate::locked(&gathered.reproduced).extend(kept.reproduced);
     crate::locked(&gathered.entered).insert(witness.id(), kept.entered);
     if let Some(watch) = watch {
         watch.served(witness)?;
@@ -1180,6 +1196,11 @@ fn finish(
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner);
     captured.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+    let mut reproduced = gathered
+        .reproduced
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
+    reproduced.sort();
     Tally {
         witnesses,
         subjects: subjects.len(),
@@ -1191,6 +1212,7 @@ fn finish(
         problems: prepared.problems,
         wall,
         captured,
+        reproduced,
         oracle_absent: prepared.oracle_absent,
         unserved,
     }
@@ -1285,31 +1307,46 @@ pub(crate) fn is_accepted(reading: &Reading) -> bool {
     reading.instrument == INSTRUMENT && reading.scope.ends_with(ACCEPTED)
 }
 
-/// The record of the verdicts `--accept` wrote in `krate`, each at its
-/// file and 1-based line as the file now stands: one reading of the
-/// crate's accepted scope ([`accepted_scope`]) per verdict, keyed by its
-/// block ([`fence::verdict`]), written whether the run was the crate's or
-/// narrowed to a file or an item. It is what `permit`'s `unless` sensor
+/// The record of the verdicts an `--accept` run took in `krate`, each at
+/// its file and 1-based line as the file now stands: those it wrote, and
+/// those it found the oracle reproducing as they stood, since a verdict
+/// the oracle gives again is the oracle's as one written now is. One
+/// reading of the crate's accepted scope ([`accepted_scope`]) per verdict
+/// the store does not record yet, keyed by its block ([`fence::verdict`]),
+/// written whether the run was the crate's or narrowed to a file or an
+/// item. It is what `permit`'s `unless` sensor
 /// reads a captured `exit=` or `capture` fence by, so a verdict taken with
 /// `--item` stands as one taken over the crate, and an edit around it or a
 /// merge that moves the crate on leaves it standing; a verdict typed by
-/// hand is a block no record names. A line no rustdoc block holds, a host's
+/// hand that no `--accept` run has found the oracle giving is a block no
+/// record names. A line no rustdoc block holds, a host's
 /// `tests/lines.toml`, leaves none.
-pub fn record_accepted(root: &Path, krate: &str, wrote: &[(&Path, usize)]) -> Result<()> {
+pub fn record_accepted(root: &Path, krate: &str, taken: &[(&Path, usize)]) -> Result<()> {
     let scope = accepted_scope(krate);
-    let mut records = Vec::new();
-    for (file, line) in wrote {
+    let store = Store::of_workspace(root);
+    let mut verdicts = BTreeMap::new();
+    for (file, line) in taken {
         let text = crate::read(&root.join(file))?;
-        let Some(verdict) = line.checked_sub(1).and_then(|at| fence::verdict(&text, at)) else {
+        if let Some(verdict) = line.checked_sub(1).and_then(|at| fence::verdict(&text, at)) {
+            verdicts.entry(verdict).or_insert((*file, *line));
+        }
+    }
+    // A verdict the store records already is left as it stands, so an
+    // `--accept` over a crate whose verdicts stand writes nothing again.
+    let keys: std::collections::BTreeSet<String> = verdicts.keys().cloned().collect();
+    let recorded = store.measured_over(INSTRUMENT, &scope, &keys)?;
+    let mut records = Vec::new();
+    for (verdict, (file, line)) in verdicts {
+        if recorded.contains(&verdict) {
             continue;
-        };
+        }
         let mut record = Reading::keyed(INSTRUMENT, &scope, verdict)?;
         record.status = Status::Pass;
-        record.message = format!("{}:{line}: written by --accept", file.display());
+        record.message = format!("{}:{line}: taken by --accept", file.display());
         records.push(record);
     }
     // Every record passes, so the outcome owes no exit.
-    Store::of_workspace(root).record(&records).map(|_| ())
+    store.record(&records).map(|_| ())
 }
 
 /// Every crate that exists less those whose `witness` reading passes and

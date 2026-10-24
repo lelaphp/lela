@@ -165,3 +165,60 @@ fn what_accept_wrote_permit_diff_permits_over_the_same_tree() {
         "{out}"
     );
 }
+
+/// A verdict pinned before any record existed is recorded by the next
+/// `--accept` that finds the oracle giving it, though the run writes
+/// nothing (CW): `--accept` takes the oracle's verdicts, and one the
+/// oracle gives again is the oracle's. Before that run the pinned status
+/// stands in the diff with no reading and no record and is denied; after
+/// it `permit --diff` permits it; and the status changed by hand, which
+/// the oracle does not give, is denied again, the next `--accept` leaving
+/// it without a record.
+#[test]
+fn a_verdict_pinned_before_any_record_is_recorded_by_an_accept_that_writes_nothing() {
+    if !oracle_is_here() {
+        return;
+    }
+    let root = scratch("unless-reproduced");
+    let repo = Repo::at(&root);
+    lay_down(&root, &block("exit"));
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the opt-in"]);
+    std::fs::write(root.join(FILE), block("exit=3")).unwrap();
+    repo.git(&["add", "--", CRATE]);
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "pinned before any record: {ran}");
+
+    let accept = || {
+        witness::run(
+            &root,
+            &Manifest::load(&root).unwrap(),
+            &Registry::load(&root).unwrap(),
+            &Ask {
+                crates: vec![CRATE.to_owned()],
+                accept: Accept::Status,
+                scope: witness::Scope::Item("native".to_owned()),
+                ..Ask::default()
+            },
+        )
+        .unwrap()
+    };
+    accept();
+    assert_eq!(
+        std::fs::read_to_string(root.join(FILE)).unwrap(),
+        block("exit=3"),
+        "the run wrote nothing"
+    );
+    let out = xtask(&root, &["permit", "--diff"]).ok();
+    assert!(
+        !out.contains("deny "),
+        "the oracle's verdict, recorded: {out}"
+    );
+
+    std::fs::write(root.join(FILE), block("exit=4")).unwrap();
+    repo.git(&["add", "--", CRATE]);
+    accept();
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(ran.stdout.contains(EXIT_AUTHORED), "{ran}");
+}

@@ -15,9 +15,10 @@
 //! `--accept` has written, so the line it captured is inside the tree the
 //! reading is over.
 //!
-//! **The record of what `--accept` wrote.** Every `--accept`, a run over
+//! **The record of what `--accept` took.** Every `--accept`, a run over
 //! the crate or one narrowed to a file or an item, records each verdict it
-//! wrote under the crate's accepted scope, keyed by the verdict's block:
+//! wrote, and each one the oracle's run reproduced as it stood, under the
+//! crate's accepted scope, keyed by the verdict's block:
 //! the `php` fence through the `expect` fence that pins it, and the
 //! `stderr` fence after it ([`crate::witness::record_accepted`]). A hit
 //! whose block a record names is the instrument's whatever else the file
