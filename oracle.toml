@@ -8,13 +8,13 @@
 # before every run and refuses the whole run on a mismatch.
 
 [oracle]
-version = "8.5.9"
+version = "8.5.12"
 # The keg path, not `/opt/homebrew/bin/php`: the bare name is a symlink the
 # package manager re-points on upgrade (Dax's oracle.toml records it moving
 # 8.5.9 → 8.5.10 mid-run on 2026-09-01). The digest is the identity; the path is
 # where to find it on this machine.
-path = "/opt/homebrew/Cellar/php/8.5.9/bin/php"
-md5 = "315162bd4382e9b7a0aa6668edf4c097"
+path = "/opt/homebrew/Cellar/php/8.5.12/bin/php"
+md5 = "18e167fbb0e7a514e962a4e6b3d85804"
 # opcache is compiled into this build (`php -n -m` lists it; no `zend_extension`
 # line is needed or accepted). The tier regimes below rely on that.
 
@@ -24,7 +24,7 @@ md5 = "315162bd4382e9b7a0aa6668edf4c097"
 # (Mitchell on #2654, 2026-10-11). Every keg `php`, `php-cgi`, `php-fpm` and
 # `phpdbg` load, walked through their load commands, and the receipt's other
 # runtime kegs, `ca-certificates` among them for the trust store curl and
-# OpenSSL read; frozen as the Cellar stood on 2026-10-11, each `brew pin`ned.
+# OpenSSL read; frozen as the Cellar stood on 2026-10-24, each `brew pin`ned.
 # `xtask` refuses a run whose binaries load a keg at another version or one
 # this table does not name (#2657); `scripts/ci/pinned-php.sh` pours and pins
 # each on a runner.
@@ -34,12 +34,12 @@ apr-util = "1.6.5_1"
 argon2 = "20190702_1"
 autoconf = "2.73"
 brotli = "1.2.0"
-ca-certificates = "2026-09-25"
-curl = "8.22.0_1"
+ca-certificates = "2026-10-20"
+curl = "8.23.0"
 dav1d = "1.5.4"
 fontconfig = "2.18.3"
 freetds = "1.5.19_1"
-freetype = "2.14.3"
+freetype = "2.15.0"
 gd = "2.3.3_6"
 gettext = "1.0"
 giflib = "6.1.3"
@@ -59,9 +59,9 @@ libsodium = "1.0.22"
 libssh2 = "1.11.1_7"
 libtiff = "4.7.2"
 libtool = "2.6.2"
-libunistring = "1.4.2"
+libunistring = "1.5"
 libvmaf = "3.2.1"
-libzip = "1.12_1"
+libzip = "1.12.1"
 lz4 = "1.10.0"
 m4 = "1.4.21"
 net-snmp = "5.9.5.2_2"
@@ -71,7 +71,7 @@ openldap = "2.7.1_1"
 "openssl@4" = "4.0.3"
 pcre2 = "10.49"
 readline = "8.3.6"
-sqlite = "3.53.4"
+sqlite = "3.54.1"
 tidy-html5 = "5.8.0"
 unixodbc = "2.3.14"
 webp = "1.6.0"
@@ -82,10 +82,10 @@ zstd = "1.5.7_1"
 # The php-src tree at the same tag: the stubs `xtask crosscheck` reads, the phpt
 # corpus, `Zend/zend_vm_def.h` for `ops.toml`, and every `Z/path:line` citation
 # from this revision on. Design revisions before 8 cite 8.5.7 line numbers.
-tag = "php-8.5.9"
-commit = "dd6e76cc"
-path = "~/Projects/php-src-8.5.9"
-phpt_files = 21655    # `find . -name '*.phpt' | wc -l` at the tag; 8.5.7 had 21548
+tag = "php-8.5.12"
+commit = "136e049a"
+path = "~/Projects/php-src-8.5.12"
+phpt_files = 22280    # `find . -name '*.phpt' | wc -l` at the tag
 
 [recipe]
 # The witness regime (design §8): the snippet runs as `witness.php` with `<?php`
@@ -290,7 +290,7 @@ ini = ["cgi.fix_pathinfo=0"]
 # image's manifest digest the Linux build reproduces from (#1948); closure is the
 # digest of the [closure] the macOS build was made against (#2935)
 flags = ["--enable-zend-test"]
-darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "ba849d79fcf55a9e33cdf4d380dd13fe", closure = "sha256:df85e2cfe3f4a0b78bd4843813f79f2cd996df4a7c8c89e09cadfd98293670ec" }
+darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e2419777e6eac85467d80117397de3c0", closure = "sha256:8163e22bca71ac7aabe9ede650d4b3284aa049c37cfeb7d115a75847b3f2ea1c" }
 linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "a4d2632ad5a39206e905b7df1ba31b1a", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
 linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "36a4972453e44183222752661fad198b", image = "sha256:3ad1c71aa6b7e477f7aa91445a5442fbb163742849393b511661a88081c3d7a2" }
 
