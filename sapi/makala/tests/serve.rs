@@ -40,7 +40,7 @@ fn a_get_is_answered_with_php_s_status_headers_and_body() {
     let mut stream = server.send(&Request::get("/?x=1").host("localhost").close());
     let response = read_response(&mut stream);
     assert_eq!(response.status, "HTTP/1.1 201 Created");
-    assert_eq!(response.header("X-Powered-By"), Some("PHP/8.5.9"));
+    assert_eq!(response.header("X-Powered-By"), Some("PHP/8.5.12"));
     assert_eq!(response.header("X-Test"), Some("yes"));
     assert_eq!(
         response.header("Content-type"),
@@ -464,7 +464,7 @@ fn a_304_carries_no_content_type() {
     assert_eq!(response.status, "HTTP/1.1 304 Not Modified");
     assert_eq!(response.header("content-type"), None, "{response:?}");
     assert_eq!(response.header("location"), Some("/elsewhere"));
-    assert_eq!(response.header("x-powered-by"), Some("PHP/8.5.9"));
+    assert_eq!(response.header("x-powered-by"), Some("PHP/8.5.12"));
 }
 
 /// A response's header names go out lowercase, in the order PHP set them,
@@ -495,7 +495,7 @@ fn a_response_s_header_names_go_out_lowercase_in_php_s_order() {
     assert_eq!(
         php,
         [
-            "x-powered-by: PHP/8.5.9",
+            "x-powered-by: PHP/8.5.12",
             "x-test: yes",
             "content-type: text/html; charset=UTF-8"
         ],

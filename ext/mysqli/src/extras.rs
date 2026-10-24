@@ -34,8 +34,8 @@ use crate::{On, Resource, State, VERSION_ID, string};
 /// var_dump($d);
 /// ```
 /// ```expect
-/// string(13) "mysqlnd 8.5.9"
-/// int(80509)
+/// string(14) "mysqlnd 8.5.12"
+/// int(80512)
 /// int(3)
 ///
 /// Deprecated: The driver_version property is deprecated in %s on line 4
@@ -44,9 +44,9 @@ use crate::{On, Resource, State, VERSION_ID, string};
 /// Cannot write read-only property mysqli_driver::$client_info
 /// object(mysqli_driver)#1 (3) {
 ///   ["client_info"]=>
-///   string(13) "mysqlnd 8.5.9"
+///   string(14) "mysqlnd 8.5.12"
 ///   ["client_version"]=>
-///   int(80509)
+///   int(80512)
 ///   ["report_mode"]=>
 ///   int(0)
 /// }

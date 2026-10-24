@@ -1924,7 +1924,7 @@ impl Ini<&mut Request> {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// PHP Core</h2>
@@ -2064,7 +2064,7 @@ impl Ini<&mut Request> {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// <h2><a name="module_iconv" href="#module_iconv">iconv</a></h2>
