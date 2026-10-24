@@ -503,18 +503,28 @@ impl Request {
     /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
     /// ```
     pub(crate) fn store_static_property(&mut self, info: PropertyInfo, value: Value) {
+        let previous = self.replace_static_property(info, value);
+        self.release(previous);
+    }
+
+    /// [`Request::store_static_property`]'s write without its give-up:
+    /// the value is the slot's from here, written through a reference
+    /// the slot holds, and what the slot or its cell held is handed back
+    /// as the caller's owner to give up, as a compound assignment gives
+    /// up the value it wrote over; `null` where the slot is gone, the
+    /// value given up.
+    pub(crate) fn replace_static_property(&mut self, info: PropertyInfo, value: Value) -> Value {
         let Some(slot) = self.static_props.slots.get_mut(&info) else {
             self.release(value);
-            return;
+            return Value::null();
         };
         if let ValueRef::Reference(cell) = slot.as_ref() {
-            // What the cell held is given up after the write.
-            let cell = cell.heap();
-            self.reference_set(cell, value);
-            return;
+            let at = cell.heap().val_ref();
+            let previous = Value::of_slot(at.read());
+            at.write(value.into_zval());
+            return previous;
         }
-        let previous = std::mem::replace(slot, value);
-        self.release(previous);
+        std::mem::replace(slot, value)
     }
 
     /// `zend_fetch_static_property_address` under `BP_VAR_W`

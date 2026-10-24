@@ -186,7 +186,10 @@ impl Request {
             self.enum_case(class, name).map(|case| case.as_value())
         } else {
             match fetch {
-                ConstantFetch::Opline => self.evaluated_in(holder, class, name),
+                ConstantFetch::Opline => {
+                    let value = self.evaluated_in(holder, class, name);
+                    value.inspect(|value| self.addref(value))
+                }
                 ConstantFetch::Lookup => {
                     let class_name = class_name.map_or_else(
                         || std::borrow::Cow::Owned(self.symbols().class_name(class)),
@@ -385,8 +388,11 @@ impl Request {
                 self.release(value);
                 continue;
             }
+            // The update makes the case in its place and hands nothing
+            // back, as `zend_update_class_constants` does, so the owner
+            // `made_case` hands back is given up offering no root.
             let case = self.made_case(class, &name, Some(value))?;
-            self.release(case.as_value());
+            self.release_nogc(case.as_value());
         }
         // Its other constants with them, in the table's order, each
         // expression's copy given back as it is evaluated.
@@ -396,8 +402,7 @@ impl Request {
             .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
             .collect();
         for (declaring, name) in constants {
-            let value = self.evaluated_in(declaring, declaring, &name)?;
-            self.release(value);
+            self.evaluated_in(declaring, declaring, &name)?;
         }
         let table = self.backed_enum_table(class)?;
         self.class_constants.enums_updated.push((class, table));

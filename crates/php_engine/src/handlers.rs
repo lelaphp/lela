@@ -8050,6 +8050,22 @@ pub(crate) fn fetch_static_prop_w<T: Tier>(
 /// }
 /// Typed static property C::$t must not be accessed before initialization
 /// ```
+///
+/// The fetch takes no owner of what the slot holds, so a compound step
+/// over an element offers the static property's array to no collector:
+///
+/// ```php
+/// class C { public static $s = []; }
+/// C::$s['k'] = [];
+/// C::$s['k'] += ['m' => 1];
+/// C::$s['n'] = 1;
+/// C::$s['n'] += 2;
+/// var_dump(gc_status()['roots'], C::$s['n']);
+/// ```
+/// ```expect
+/// int(0)
+/// int(3)
+/// ```
 pub(crate) fn fetch_static_prop_rw<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -8106,9 +8122,11 @@ fn static_prop_place(
         }
         Err(thrown) => return threw(req, frame, &thrown),
     };
+    // The read is the refusal's alone, so the owner it took, which php's
+    // fetch never takes, is given up offering no root.
     if rw {
         match req.static_value(info, PropertyRead::Warning) {
-            Ok(held) => req.release(held),
+            Ok(held) => req.release_nogc(held),
             Err(thrown) => return threw(req, frame, &thrown),
         }
     }
@@ -13275,7 +13293,16 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     exec::free_operand(req, frame, op.op2_type, op.op2);
     let stepped = match computed {
         Ok(stepped) => stepped,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            let thrown = match write_place(req, frame, op.op1_type, op.op1) {
+                Some(at) => {
+                    let strict = req.frame_strict_types(frame);
+                    land_failed_step(req, at, (None, strict), thrown)
+                }
+                None => thrown,
+            };
+            return threw(req, frame, &thrown);
+        }
     };
     let Some(at) = write_place(req, frame, op.op1_type, op.op1) else {
         return Err(Fatal::error(
@@ -13294,7 +13321,7 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
         Err(thrown) => return threw(req, frame, &thrown),
     };
     write_out(req, frame, op, &landed);
-    req.release(garbage);
+    release_overwritten(req, garbage);
     Ok(advance(req, frame))
 }
 
@@ -14684,7 +14711,7 @@ fn binary_op_of(extended_value: u32) -> Option<BinaryKernel> {
         .ok()
         .and_then(Opcode::from_u8)?;
     Some(match opcode {
-        Opcode::Add => crate::ops::add,
+        Opcode::Add => crate::ops::add_assign,
         Opcode::Sub => crate::ops::sub,
         Opcode::Mul => crate::ops::mul,
         Opcode::Div => crate::ops::div,
@@ -14718,12 +14745,218 @@ fn grows_in_place(req: &Request, extended_value: u32, held: &Value) -> bool {
     }
 }
 
+/// What a compound assignment over a place gives up the value the place
+/// held once what it computed is written there. php's `zend_binary_op(var_ptr,
+/// var_ptr, value)` works over the place itself, and the one collectable
+/// value it writes over is an array under `+`, which
+/// `add_function_array` with `result == op1` separates
+/// (`SEPARATE_ARRAY`, `Z/Zend/zend_operators.c:1138`,
+/// `Z/Zend/zend_types.h:1561`): duplicated where another owner stands and
+/// given up with `GC_TRY_DELREF`, which offers it to no collector, or
+/// merged in place where the place was its one owner. So an array is
+/// given up with no possible root, and anything else as `zval_ptr_dtor`
+/// gives it up. The CV, a dimension, a property's slot or entry and a
+/// static property each give up what they held here, the one rule array
+/// `+=` is held to.
+///
+/// ```php
+/// $m = [str_repeat('x', 2)]; $kept = $m;
+/// $m += [1 => 'y'];
+/// $d = [[str_repeat('x', 2)]]; $keptd = $d[0];
+/// $d[0] += [1 => 'y'];
+/// $o = new stdClass; $o->p = [str_repeat('x', 2)]; $kepto = $o->p;
+/// $o->p += [1 => 'y'];
+/// class K { public $p; public static $s; } $k = new K; $k->p = [str_repeat('x', 2)]; $keptk = $k->p;
+/// $k->p += [1 => 'y'];
+/// K::$s = [str_repeat('x', 2)]; $kepts = K::$s;
+/// K::$s += [1 => 'y'];
+/// var_dump(gc_status()['roots'], count($m), count($d[0]), count($o->p), count($k->p), count(K::$s));
+/// ```
+/// ```expect
+/// int(0)
+/// int(2)
+/// int(2)
+/// int(2)
+/// int(2)
+/// int(2)
+/// ```
+fn release_overwritten(req: &mut Request, old: Value) {
+    if old.as_array().is_some() {
+        req.release_nogc(old);
+    } else {
+        req.release(old);
+    }
+}
+
+/// What a typed place takes when its compound assignment's operator
+/// threw. php's `zend_binary_op` left the copy it writes `IS_UNDEF`
+/// (`ZVAL_UNDEF(result)` beside `zend_binop_error`,
+/// `Z/Zend/zend_operators.c:1181`), and `zend_binary_assign_op_typed_prop`
+/// and `zend_binary_assign_op_typed_ref` (`Z/Zend/zend_execute.c:1693`)
+/// still hold it to the place's types and write it where they accept it.
+/// With the operator's throwable pending only `zend_parse_arg_long_weak`
+/// and `zend_parse_arg_double_weak` accept it, reading what is undefined
+/// as 0; `zend_parse_arg_str_weak` and `zend_parse_arg_bool_weak` refuse
+/// once `EG(exception)` is set, and so do `strict_types` and every class
+/// type. So a type taking an int lands `0`, one taking a float and no int
+/// `0.0`, a reference's sources each by that rule and all alike, and
+/// anything else keeps what the place held. A declared property's own
+/// type (`own`, where the place holds no reference) refuses with no error
+/// of its own, `zend_verify_property_type_error` raising nothing over a
+/// pending throwable; the sources of the cell a reference names refuse
+/// with `zend_throw_ref_type_error_zval`'s `TypeError` naming the first
+/// that refused, chained over `thrown`, which php raises whatever is
+/// pending. What is pending after is the answer.
+///
+/// ```php
+/// class T { public int $i = 2; public ?float $f = 2.5; public string $s = "s"; public $plain = 6; public static int $si = 7; }
+/// $t = new T;
+/// foreach (['i', 'f', 's', 'plain'] as $p) {
+///     try { $t->$p += "abc"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+///     var_dump($t->$p);
+/// }
+/// try { T::$si -= []; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $q = &$t->i; $q = 5;
+/// try { $q %= 0; } catch (DivisionByZeroError $e) { echo $e->getMessage(), "\n"; }
+/// $x = 2; $y = &$x;
+/// try { $x += "abc"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(T::$si, $t->i, $x);
+/// ```
+/// ```expect
+/// Unsupported operand types: int + string
+/// int(0)
+/// Unsupported operand types: float + string
+/// float(0)
+/// Unsupported operand types: string + string
+/// string(1) "s"
+/// Unsupported operand types: int + string
+/// int(6)
+/// Unsupported operand types: int - array
+/// Modulo by zero
+/// Unsupported operand types: int + string
+/// int(0)
+/// int(0)
+/// int(2)
+/// ```
+fn land_failed_step(
+    req: &mut Request,
+    place: php_heap::ZvalRef,
+    (own, strict): (Option<&php_unit::decl::Type>, bool),
+    thrown: Thrown,
+) -> Thrown {
+    let mut at = place;
+    let mut cell = None;
+    let masks: Vec<u32> = match Value::of_slot(place.read()).as_php_ref() {
+        Some(bound) => {
+            at = bound.heap().val_ref();
+            cell = Some(bound.heap());
+            let sources = req.ref_type_sources(bound.heap());
+            sources.iter().map(|source| source.ty.mask()).collect()
+        }
+        None => own.map(php_unit::decl::Type::mask).into_iter().collect(),
+    };
+    if let Some(landed) = undefined_as(&masks, strict) {
+        let held = Value::of_slot(at.read());
+        at.write(landed.to_zval());
+        release_overwritten(req, held);
+        return thrown;
+    }
+    match cell {
+        Some(cell) => refused_by_sources(req, cell, strict, thrown),
+        None => thrown,
+    }
+}
+
+/// [`land_failed_step`] over a `static` property's slot: the slot's own
+/// declared type, or the sources of the cell a reference there names.
+fn land_failed_static(
+    req: &mut Request,
+    frame: FrameRef,
+    info: crate::api::request::PropertyInfo,
+    thrown: Thrown,
+) -> Thrown {
+    let bound = (req.static_slot_cell(info))
+        .map(PhpRef::heap)
+        .filter(|cell| !req.ref_type_sources(*cell).is_empty());
+    let masks: Vec<u32> = match bound {
+        Some(cell) => {
+            let sources = req.ref_type_sources(cell);
+            sources.iter().map(|source| source.ty.mask()).collect()
+        }
+        None => (req.typed_static(info).map(|typed| typed.ty.mask()))
+            .into_iter()
+            .collect(),
+    };
+    let strict = req.frame_strict_types(frame);
+    // What `land_failed_step` makes of a place, over the slot.
+    match (undefined_as(&masks, strict), bound) {
+        (Some(landed), _) => {
+            let previous = req.replace_static_property(info, landed);
+            release_overwritten(req, previous);
+            thrown
+        }
+        (None, Some(cell)) => refused_by_sources(req, cell, strict, thrown),
+        (None, None) => thrown,
+    }
+}
+
+/// [`land_failed_step`]'s refusal by the sources of `cell`: the
+/// `TypeError` naming the first source that takes nothing of the
+/// undefined copy, chained over `thrown`; `thrown` alone where the cell
+/// has no source that refuses.
+fn refused_by_sources(
+    req: &mut Request,
+    cell: php_heap::Ref,
+    strict: bool,
+    thrown: Thrown,
+) -> Thrown {
+    let sources = req.ref_type_sources(cell);
+    let refused = sources
+        .iter()
+        .find(|source| undefined_as(&[source.ty.mask()], strict).is_none())
+        .map(|first| (first.ty.clone(), first.declaring, first.name.clone()));
+    match refused {
+        Some((ty, declaring, name)) => {
+            let later = crate::ops::ref_type_error(req, &Value::undef(), &ty, declaring, &name);
+            thrown.chain(req, later)
+        }
+        None => thrown,
+    }
+}
+
+/// `zend_verify_weak_scalar_type_hint` over an `IS_UNDEF` with a
+/// throwable pending, under each of `masks`: an int where every mask
+/// takes one, a float where every mask takes a float and none an int,
+/// and nothing otherwise ([`land_failed_step`]).
+fn undefined_as(masks: &[u32], strict: bool) -> Option<Value> {
+    const MAY_BE_LONG: u32 = 1 << 4;
+    const MAY_BE_DOUBLE: u32 = 1 << 5;
+    if strict || masks.is_empty() {
+        return None;
+    }
+    if masks.iter().all(|mask| mask & MAY_BE_LONG != 0) {
+        return Some(Value::int(0));
+    }
+    masks
+        .iter()
+        .all(|mask| mask & MAY_BE_LONG == 0 && mask & MAY_BE_DOUBLE != 0)
+        .then(|| Value::float(0.0))
+}
+
 /// Whether `extended_value` names `.`, the operator of `.=`.
 fn is_concat(extended_value: u32) -> bool {
     u8::try_from(extended_value)
         .ok()
         .and_then(Opcode::from_u8)
         .is_some_and(|opcode| opcode == Opcode::Concat)
+}
+
+/// Whether `extended_value` names `+`, the operator of `+=`.
+fn is_add(extended_value: u32) -> bool {
+    u8::try_from(extended_value)
+        .ok()
+        .and_then(Opcode::from_u8)
+        .is_some_and(|opcode| opcode == Opcode::Add)
 }
 
 /// `i_zval_ptr_dtor(result); ZVAL_NULL(result)` of `concat_function`
@@ -14901,6 +15134,17 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
                 && req
                     .static_slot_cell(info)
                     .is_none_or(|cell| req.ref_type_sources(cell.heap()).is_empty()));
+    // An array `+=` is `add_function_array` over the slot itself, which
+    // runs no code of the program, so the read's owner, which php does
+    // not take, is given up first and the union separates the array the
+    // slot holds where it stands ([`crate::ops::add_assign`]).
+    let over_slot = !in_place
+        && is_add(op.extended_value)
+        && held.as_array().is_some()
+        && value.deref().as_array().is_some();
+    if over_slot {
+        req.release_nogc(held);
+    }
     let computed = if in_place {
         crate::ops::concat_assign(
             req,
@@ -14921,14 +15165,18 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
         kernel(req, &held, &value)
     };
     // An `Err` leaves the place as it stood, so the read's owner is
-    // still ours then.
-    if !in_place || computed.is_err() {
-        req.release(held);
+    // still ours then. It is no owner php takes, since php works over
+    // the slot itself, so it is given up offering no root.
+    if !over_slot && (!in_place || computed.is_err()) {
+        req.release_nogc(held);
     }
     req.release(value);
     let stepped = match computed {
         Ok(stepped) => stepped,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            let thrown = land_failed_static(req, frame, info, thrown);
+            return threw(req, frame, &thrown);
+        }
     };
     let strict = req.frame_strict_types(frame);
     // `ZEND_REF_HAS_TYPE_SOURCES` ahead of the property's own type:
@@ -14960,7 +15208,8 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
     // `ZVAL_COPY_VALUE(zptr, &z_copy)` and verifies nothing a second
     // time: a weak conversion raises a deprecation and php raises it
     // once.
-    req.store_static_property(info, stepped);
+    let previous = req.replace_static_property(info, stepped);
+    release_overwritten(req, previous);
     Ok(advance_over_data(req, frame))
 }
 
@@ -16583,12 +16832,18 @@ fn stepped_entry(
         kernel(req, &held, &value)
     };
     exec::free_operand(req, frame, data.op1_type, data.op1);
-    let stepped = computed?;
+    let stepped = match computed {
+        Ok(stepped) => stepped,
+        Err(thrown) => {
+            let strict = req.frame_strict_types(frame);
+            return Err(land_failed_step(req, entry, (None, strict), thrown));
+        }
+    };
     // `EX_USES_STRICT_TYPES()`: the regime of the frame the opline
     // stands in.
     let (landed, garbage) = assign_to_place(req, frame, entry, stepped)?;
     write_out(req, frame, op, &landed);
-    req.release(garbage);
+    release_overwritten(req, garbage);
     Ok(())
 }
 
@@ -17171,6 +17426,9 @@ fn step_property(
                     return Ok(Ok(()));
                 }
             }
+            if let Some(done) = union_over_entry(req, frame, code, step, place) {
+                return Ok(done);
+            }
             Ok(served_property_step(
                 req,
                 frame,
@@ -17218,6 +17476,42 @@ fn step_property(
             step_slot(req, frame, code, step, (object, slot, typed), bytes, None)
         }
     }
+}
+
+/// An array `+=` over a dynamic property's entry: the union runs no code
+/// of the program, so it is `zend_binary_op` over the entry itself, the
+/// union written there ([`crate::ops::add_assign`]) and the array the
+/// entry held given up as [`release_overwritten`] gives it up; `None`,
+/// nothing touched, for every other operator and pair, which the pair of
+/// handlers serves.
+fn union_over_entry(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    step: Compound<'_>,
+    place: php_heap::ZvalRef,
+) -> Option<Result<(), Thrown>> {
+    let Compound { op, data, .. } = step;
+    let held = Value::of_slot(place.read());
+    if !is_add(op.extended_value) || held.as_array().is_none() {
+        return None;
+    }
+    let value = step.value(req, frame, code);
+    value.deref().as_array()?;
+    let computed = crate::ops::add_assign(req, &held, &value);
+    exec::free_operand(req, frame, data.op1_type, data.op1);
+    Some(match computed {
+        Ok(stepped) => {
+            place.write(stepped.to_zval());
+            write_out(req, frame, op, &stepped);
+            release_overwritten(req, held);
+            Ok(())
+        }
+        Err(thrown) => {
+            write_out(req, frame, op, &Value::null());
+            Err(thrown)
+        }
+    })
 }
 
 /// `zend_std_get_property_ptr_ptr`'s valid-offset arm over a slot
@@ -17419,6 +17713,17 @@ fn step_slot(
     let stepped = match computed {
         Ok(stepped) => stepped,
         Err(thrown) => {
+            let thrown = match object.heap().slot_ref(slot) {
+                Some(place) => {
+                    let own = typed
+                        .then(|| req.typed_property_at(object.class(), slot))
+                        .flatten();
+                    let strict = req.frame_strict_types(frame);
+                    let own = own.as_ref().map(|typed| &typed.ty);
+                    land_failed_step(req, place, (own, strict), thrown)
+                }
+                None => thrown,
+            };
             write_out(req, frame, op, &Value::null());
             return Ok(Err(thrown));
         }
@@ -17451,9 +17756,13 @@ fn land_step(
         .is_some_and(|cell| cell.sources() != 0);
     let strict = req.caller_strict_types(frame);
     if !typed || bound {
-        return Ok(req
-            .assign_declared_slot(object.heap(), slot, stepped, strict)
-            .map(|pair| landed_out(req, frame, op, pair)));
+        return Ok(stepped_slot(
+            req,
+            (frame, op),
+            (object, slot),
+            stepped,
+            strict,
+        ));
     }
     let Some(typed) = req.typed_property_at(object.class(), slot) else {
         req.release(stepped);
@@ -17470,9 +17779,13 @@ fn land_step(
             return Ok(Err(thrown));
         }
     };
-    Ok(req
-        .assign_declared_slot(object.heap(), slot, landed, strict)
-        .map(|pair| landed_out(req, frame, op, pair)))
+    Ok(stepped_slot(
+        req,
+        (frame, op),
+        (object, slot),
+        landed,
+        strict,
+    ))
 }
 
 /// What a write answered written into the temporary `out` names, then
@@ -17481,6 +17794,38 @@ fn land_step(
 fn landed_out(req: &mut Request, frame: FrameRef, op: &Opline, (landed, garbage): (Value, Value)) {
     write_out(req, frame, op, &landed);
     req.release(garbage);
+}
+
+/// What a compound step made written into the declared slot it read:
+/// `zend_binary_op` over the slot itself, or over the value of the cell a
+/// reference there names, held first to each type the cell carries
+/// (`zend_binary_assign_op_typed_ref`, under `strict`); what was written
+/// over is given up as a compound assignment gives it up
+/// ([`release_overwritten`]). What landed is what the temporary takes.
+fn stepped_slot(
+    req: &mut Request,
+    (frame, op): (FrameRef, &Opline),
+    (object, slot): (PhpObject, u32),
+    value: Value,
+    strict: bool,
+) -> Result<(), Thrown> {
+    let Some(mut at) = object.heap().slot_ref(slot) else {
+        req.release(value);
+        return Ok(());
+    };
+    let mut value = value;
+    if let Some(cell) = object.heap().slot(slot).as_reference() {
+        if cell.sources() != 0 {
+            let verdict = crate::ops::verify_ref_assignable(req, cell, &value, strict);
+            value = crate::ops::landed(req, value, verdict)?;
+        }
+        at = cell.val_ref();
+    }
+    let held = Value::of_slot(at.read());
+    at.write(value.to_zval());
+    write_out(req, frame, op, &value);
+    release_overwritten(req, held);
+    Ok(())
 }
 
 /// The kernel of a compound assignment over what a declared slot holds
