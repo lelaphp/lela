@@ -571,22 +571,6 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
     Ok(Stepped::Same(at))
 }
 
-/// The activation of a frame serving `code`, its prologue having
-/// raised nothing (design §5.6, §4.3 seam 8): the interrupt check, then
-/// `Site::Entry`, then the frame the loop goes on in.
-#[inline]
-fn activated<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    code: &OpArray,
-) -> Result<Stepped, Fatal> {
-    if interrupt::check(req)? {
-        return Ok(Stepped::Threw(frame));
-    }
-    let flow = T::safepoint(req, frame, Site::Entry, Held::of(code));
-    answered(req, flow, frame)
-}
-
 /// One entry of the loop, as the engine binds it.
 pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 
@@ -988,19 +972,20 @@ fn serve_held<'u, T: Tier, D: Telling>(
                 None => return Err(no_frame(frame)),
             },
         };
-        if pushed {
-            let start = req.vm().opline(frame);
+        let start = req.vm().opline(frame);
+        let mut at = if pushed {
             let entry = exec::entry_of(body);
             match entered::<T, D>(req, frame, body, (start, entry), declared)? {
-                Stepped::Same(at) if at == frame => {}
-                other => {
+                Ok(at) => at,
+                Err(other) => {
                     stepped = other;
                     continue;
                 }
             }
-        }
+        } else {
+            start
+        };
         let mut oplines = &*body.oplines;
-        let mut at = req.vm().opline(frame);
         stepped = loop {
             #[cfg(not(dispatch = "tailcall"))]
             let way = {
@@ -1039,22 +1024,22 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     else {
                         break stepped;
                     };
-                    let Some(callee_body) = kept.called(function) else {
+                    let Some(called) = kept.called(function) else {
                         break stepped;
                     };
-                    kept.keep(callee, callee_body);
-                    let entry = exec::entry_of(callee_body);
-                    match entered::<T, D>(req, callee, callee_body, (start, entry), declared)? {
-                        Stepped::Same(at) if at == callee => {}
-                        other => break other,
+                    kept.keep(callee, called.code);
+                    let entry = (start, called.entry);
+                    if let Err(other) = entered::<T, D>(req, callee, called.code, entry, declared)?
+                    {
+                        break other;
                     }
                     frame = callee;
-                    body = callee_body;
+                    body = called.code;
                     oplines = &*body.oplines;
-                    // Where the callee stands: a prologue served moved it
-                    // on, and so did a tier whose `Site::Entry` answered a
-                    // `Resume` of it, a trace entered there or a recording
-                    // (#3077); the push's `start` is neither's.
+                    // Read off the frame, not taken from `entered`: the
+                    // position in hand from here measured every dispatch
+                    // of the bare loops 4% higher, by two moves the
+                    // allocator added at the loop's head (#3320).
                     at = req.vm().opline(frame);
                 }
                 Way::Left(stepped) => break stepped,
@@ -1174,7 +1159,13 @@ fn serve_scope<T: Tier, D: Telling>(
 /// is left of its `RECV*` prologue served over `code`, the op array the
 /// loop holds for it (design §5.6), up to `entry`, its entry safepoint
 /// ([`exec::entry_of`]), and then its activation, the interrupt check
-/// and `Site::Entry`. `Threw` of the callee where a `RECV` raised.
+/// and `Site::Entry`. The answer is the opline the loop goes on at in
+/// the callee, as php's `ZEND_VM_ENTER` loads `opline` once it has
+/// entered: where the tier answered `Continue`, the one the prologue
+/// left it at, which the loop's first entry of a frame takes as it
+/// stands; read off the frame only where a prologue was served or a
+/// tier resumed the callee itself. Any other edge, `Threw` of the callee
+/// where a `RECV` raised, is the `Err`.
 #[inline(always)] // once per call edge, in the loop
 fn entered<T: Tier, D: Telling>(
     req: &mut Request,
@@ -1182,23 +1173,34 @@ fn entered<T: Tier, D: Telling>(
     code: &OpArray,
     (start, entry): (u32, u32),
     told: D,
-) -> Result<Stepped, Fatal> {
+) -> Result<Result<u32, Stepped>, Fatal> {
+    let mut at = start;
     if start < entry {
         // The parameters php's `RECV` passes on its first test, read off
         // the frame in one run where nothing observes the opcode; the
         // handlers serve the rest from the first that does not pass.
-        let at = if told.tells(php_unit::Opcode::Recv) {
-            start
-        } else {
-            exec::recv_passed(req, callee, code, (start, entry))
-        };
-        if at < entry
-            && let Some(threw) = exec::prologue(req, callee, code, told)?
-        {
-            return Ok(Stepped::Threw(threw));
+        if !told.tells(php_unit::Opcode::Recv) {
+            at = exec::recv_passed(req, callee, code, (start, entry));
+        }
+        if at < entry {
+            if let Some(threw) = exec::prologue(req, callee, code, told)? {
+                return Ok(Err(Stepped::Threw(threw)));
+            }
+            at = req.vm().opline(callee);
         }
     }
-    activated::<T>(req, callee, code)
+    if interrupt::check(req)? {
+        return Ok(Err(Stepped::Threw(callee)));
+    }
+    match T::safepoint(req, callee, Site::Entry, Held::of(code)) {
+        Flow::Continue => Ok(Ok(at)),
+        flow => match answered(req, flow, callee)? {
+            // A tier that resumed the callee itself, at a trace's end or
+            // a recording's start (#3077), stood it where it goes on.
+            Stepped::Same(to) if to == callee => Ok(Ok(req.vm().opline(callee))),
+            other => Ok(Err(other)),
+        },
+    }
 }
 
 /// The internal error for a frame the loop was sent into that serves no
@@ -1346,7 +1348,7 @@ fn activated_over(req: &mut Request, callee: FrameRef, code: &OpArray) -> Result
     let start = req.vm().opline(callee);
     let entry = exec::entry_of(code);
     match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
-        Stepped::Threw(at) => Ok(Stepped::Threw(at)),
+        Err(Stepped::Threw(at)) => Ok(Stepped::Threw(at)),
         _ => Ok(Stepped::Pushed(callee)),
     }
 }
