@@ -517,10 +517,8 @@ fn prop_dim_read(
             if fetch != Fetch::Write {
                 return Ok(Owner::null());
             }
-            if let Member::Index(i) = member
-                && (i < 0 || count < i)
-            {
-                past_the_end(req, mine, i, count);
+            if let Member::Index(i) = member {
+                warn_past_the_end(req, mine, i, count);
             }
             if !appendable || matches!(member, Member::Index(i) if i < 0) {
                 return Ok(Owner::null());
@@ -587,6 +585,14 @@ fn plain_text(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     with_string(req, &value, <[u8]>::to_vec)
 }
 
+/// php's warning for an element written past the `count` there are, or
+/// at a negative offset, which names none.
+fn warn_past_the_end(req: &mut Request, node: Node, index: i64, count: i64) {
+    if index < 0 || count < index {
+        past_the_end(req, node, index, count);
+    }
+}
+
 /// php's warning for an element written past the ones there are.
 fn past_the_end(req: &mut Request, node: Node, index: i64, count: i64) {
     let name = String::from_utf8_lossy(&node.name()).into_owned();
@@ -605,10 +611,16 @@ struct Hits {
     seen: i64,
 }
 
+/// What `sxe_prop_dim_write`'s search answers: what it found, or that the
+/// write is refused, its warning given (`goto out`).
+enum Search {
+    Hits(Hits),
+    Refused,
+}
+
 /// `sxe_prop_dim_write`'s search: the attribute or the element `member`
-/// names under `mine`, `attr` the attributes the walk reads; none where
-/// the write is refused, its warning given: an offset other than 0 of a
-/// node, which is no list.
+/// names under `mine`, `attr` the attributes the walk reads; refused, its
+/// warning given, for an offset other than 0 of a node, which is no list.
 fn hits(
     req: &mut Request,
     view: &View,
@@ -616,7 +628,7 @@ fn hits(
     access: Access,
     mine: Node,
     attr: Option<Node>,
-) -> Result<Option<Hits>, Thrown> {
+) -> Result<Search, Thrown> {
     let mut hits = Hits {
         found: None,
         count: 0,
@@ -644,7 +656,7 @@ fn hits(
                         && *i != 0
                     {
                         past_the_end(req, mine, *i, 0);
-                        return Ok(None);
+                        return Ok(Search::Refused);
                     }
                     Some(mine)
                 }
@@ -665,14 +677,14 @@ fn hits(
                 }
                 at = n.next();
             }
-            return Ok(Some(hits));
+            return Ok(Search::Hits(hits));
         }
     };
     if hit.is_some() {
         hits.found = hit;
         hits.count = 1;
     }
-    Ok(Some(hits))
+    Ok(Search::Hits(hits))
 }
 
 /// The access a write through `member` makes, php's `access_mode` after
@@ -789,8 +801,9 @@ fn prop_dim_write(
         return Ok(None);
     };
     mine.invalidate_document_lists();
-    let Some(hits) = hits(req, &view, member, access, mine, attr)? else {
-        return Ok(None);
+    let hits = match hits(req, &view, member, access, mine, attr)? {
+        Search::Hits(hits) => hits,
+        Search::Refused => return Ok(None),
     };
     if hits.count == 1 {
         if let (Some(n), Some(text)) = (hits.found, &text) {
@@ -813,10 +826,8 @@ fn prop_dim_write(
     Ok(match (access, member) {
         (Access::Elements, Member::Name(name)) => mine.new_text_child(None, name, text),
         (Access::Elements, Member::Append | Member::Index(_)) => {
-            if let Member::Index(i) = member
-                && (*i < 0 || hits.seen < *i)
-            {
-                past_the_end(req, mine, *i, hits.seen);
+            if let Member::Index(i) = member {
+                warn_past_the_end(req, mine, *i, hits.seen);
                 if *i < 0 {
                     return Ok(None);
                 }
