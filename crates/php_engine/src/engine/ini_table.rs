@@ -1,0 +1,133 @@
+//! `EG(ini_directives)` as the engine holds it: every entry in
+//! registration order, the engine's own first and then each extension's
+//! in bundle order, filed by name as php's `HashTable` files them, so an
+//! entry is found by one hash and not by a walk of the table. Laid as
+//! the engine is built and altered only while no request can see it
+//! ([`crate::engine::Engine::alter_master_ini`]); immutable and shared
+//! by every request after (design §3.4).
+
+use php_link::{Exact, Named, Names};
+
+use crate::api::abi::{ExtensionEntry, IniHandler};
+
+/// One entry, php's `zend_ini_entry` as every request starts with it.
+pub(crate) struct Directive {
+    pub(crate) name: Vec<u8>,
+    /// The master value, `None` where it has none (php's `NULL`).
+    pub(crate) value: Option<Vec<u8>>,
+    /// The declaration of an extension's entry, `module_number`: the
+    /// extension's place in the bundle and the entry's among its
+    /// declarations; `None` for an entry of the core table.
+    pub(crate) declared: Option<(usize, usize)>,
+    /// `on_modify`, beside the place in the bundle of the extension
+    /// that gave it.
+    pub(crate) on_modify: Option<(usize, IniHandler)>,
+}
+
+impl Named for Directive {
+    fn name(&self) -> &[u8] {
+        &self.name
+    }
+}
+
+/// The entry's place in the table, which it keeps for the engine's
+/// life: a request names an entry it changed by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DirectiveAt(u32);
+
+/// The table: its rows in registration order and their [`Names`].
+pub(crate) struct IniTable {
+    rows: Vec<Directive>,
+    names: Names<Exact>,
+}
+
+impl IniTable {
+    /// `zend_register_ini_entries` over the core table `core`, each name
+    /// beside its value, then each extension's declarations, each
+    /// entry's `on_modify` the first extension's that gave one.
+    pub(crate) fn register(
+        core: impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
+        extensions: &[ExtensionEntry],
+    ) -> IniTable {
+        let mut rows: Vec<Directive> = core
+            .map(|(name, value)| Directive {
+                name,
+                value,
+                declared: None,
+                on_modify: None,
+            })
+            .collect();
+        for (extension, entry) in extensions.iter().enumerate() {
+            rows.extend(entry.ini.iter().enumerate().map(|(at, decl)| Directive {
+                name: decl.name.0.to_vec(),
+                value: decl.default.as_deref().map(<[u8]>::to_vec),
+                declared: Some((extension, at)),
+                on_modify: None,
+            }));
+        }
+        let mut table = IniTable {
+            names: Names::over(&rows),
+            rows,
+        };
+        for (extension, entry) in extensions.iter().enumerate() {
+            for (name, handler) in &entry.on_modify {
+                if let Some(row) = table.find_mut(name)
+                    && row.on_modify.is_none()
+                {
+                    row.on_modify = Some((extension, *handler));
+                }
+            }
+        }
+        table
+    }
+
+    /// The rows in the table's order.
+    pub(crate) fn rows(&self) -> &[Directive] {
+        &self.rows
+    }
+
+    /// `zend_hash_find(EG(ini_directives), name)`'s place.
+    pub(crate) fn at(&self, name: &[u8]) -> Option<DirectiveAt> {
+        let at = self.names.find(&self.rows, name)?;
+        u32::try_from(at).ok().map(DirectiveAt)
+    }
+
+    /// The entry at `at`.
+    pub(crate) fn row(&self, at: DirectiveAt) -> Option<&Directive> {
+        self.rows.get(usize::try_from(at.0).ok()?)
+    }
+
+    /// The entry `name`.
+    pub(crate) fn find(&self, name: &[u8]) -> Option<&Directive> {
+        self.rows.get(self.names.find(&self.rows, name)?)
+    }
+
+    fn find_mut(&mut self, name: &[u8]) -> Option<&mut Directive> {
+        let at = self.names.find(&self.rows, name)?;
+        self.rows.get_mut(at)
+    }
+
+    /// The master value of `name` as `zend_ini_get_value` reads it, the
+    /// empty string where it has none (php's `NULL`); `None` where php
+    /// has no such entry.
+    pub(crate) fn master(&self, name: &[u8]) -> Option<&[u8]> {
+        self.find(name)
+            .map(|row| row.value.as_deref().unwrap_or_default())
+    }
+
+    /// `zend_hash_update`: the entry `name` takes `value` where it
+    /// stands, or is added last, an entry of the core table.
+    pub(crate) fn set(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
+        if let Some(row) = self.find_mut(&name) {
+            row.value = value;
+            return;
+        }
+        self.rows.push(Directive {
+            name,
+            value,
+            declared: None,
+            on_modify: None,
+        });
+        self.names = Names::over(&self.rows);
+    }
+}
