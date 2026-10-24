@@ -362,7 +362,26 @@ fn set_attribute_ns_legacy(
 }
 
 /// `dom_set_attribute_ns_modern`: the name validated and split, its
-/// namespace the mapper's one declaration.
+/// namespace the mapper's one declaration; the children of the attribute
+/// it replaces that a wrapper names kept, detached.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:x" p:a="old" b="old"/>');
+/// $r = $d->documentElement;
+/// $t = $r->getAttributeNodeNS('urn:x', 'a')->firstChild;
+/// $u = $r->getAttributeNode('b')->firstChild;
+/// $r->setAttributeNS('urn:x', 'p:a', 'new');
+/// $r->setAttributeNS(null, 'b', 'new');
+/// var_dump($t->parentNode, $t->data, $u->parentNode, $u->data, $r->getAttributeNS('urn:x', 'a'), $r->getAttribute('b'));
+/// ```
+/// ```expect
+/// NULL
+/// string(3) "old"
+/// NULL
+/// string(3) "old"
+/// string(3) "new"
+/// string(3) "new"
+/// ```
 fn set_attribute_ns_modern(
     req: &mut Request,
     this: PhpObject,
@@ -377,6 +396,14 @@ fn set_attribute_ns_modern(
         Err(code) => return Err(dom_throw(req, code)),
     };
     let ns = mapped_ns(req, this, elem.doc(), prefix.as_deref(), namespace)?;
+    // The attribute replaced keeps the children a wrapper names, detached,
+    // where `xmlSetNsProp` would free them (php 8.5.12).
+    if let Some(existing) = elem
+        .has_ns_prop(&local, ns.and_then(Ns::href).as_deref())
+        .filter(|a| a.kind() != Kind::AttributeDecl)
+    {
+        node_list_unlink(existing.children());
+    }
     match elem.set_ns_prop(ns, &local, value) {
         Some(attr) => {
             register_attribute_id(req, this, attr);
