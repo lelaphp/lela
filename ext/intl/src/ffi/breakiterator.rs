@@ -110,12 +110,15 @@ impl Breaker {
         Breaker::from_raw(raw).ok_or(Code::MEMORY_ALLOCATION)
     }
 
-    /// `new RuleBasedBreakIterator` over compiled rules, which ICU copies.
+    /// `new RuleBasedBreakIterator` over compiled rules, which ICU does not
+    /// copy: the iterator and every clone of it read `rules` in place, so
+    /// the caller keeps them, unchanged, for as long as any of them lives.
     pub(crate) fn from_binary(rules: &[u8]) -> Result<Breaker, Code> {
         let mut status = Code::ZERO;
         let len = length(rules.len())?;
         let none = std::ptr::null_mut();
-        // SAFETY: the rules are len bytes of a live slice; ICU copies them.
+        // SAFETY: the rules are len bytes of a live slice, which the
+        // caller keeps alive past the iterator and its clones.
         let raw =
             unsafe { sys::php_intl_brk_open_rules(rules.as_ptr().cast(), len, none, &mut status) };
         status.check()?;

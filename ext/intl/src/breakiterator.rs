@@ -27,13 +27,18 @@ use crate::iterator::{self, IntlIterator, Walk};
 const DONE: i32 = -1;
 
 /// `BreakIterator_object`: the error, the iterator and the text it walks,
-/// which ICU reads in place, so the object keeps the string.
+/// which ICU reads in place, so the object keeps the string, and the
+/// compiled rules it was built from, which ICU reads in place too.
 #[derive(Default)]
 pub(crate) struct BreakObject {
     error: IntlError,
     biter: Option<Breaker>,
     /// `text`, an owner of the string `setText()` was handed.
     text: Option<Owner<PhpString>>,
+    /// `compiled_rules`, an owner of the string a compiled-rules
+    /// iterator was built over, which it and every clone of it alias
+    /// (php 8.5.12).
+    compiled_rules: Option<Owner<PhpString>>,
 }
 
 impl Carrier for BreakObject {
@@ -425,6 +430,25 @@ impl IntlBreakIterator {
 
 #[php_class]
 impl IntlRuleBasedBreakIterator {
+    /// `__construct(string $rules, bool $compiled = false)`: compiled
+    /// rules are read by ICU in place, so the object, and each clone of
+    /// it, holds the string it was built over (php 8.5.12's
+    /// `compiled_rules`), whatever becomes of the caller's.
+    ///
+    /// ```php
+    /// $src = new IntlRuleBasedBreakIterator('$S = [,]; !!forward; [^,]+ {1}; $S {42};');
+    /// $it = new IntlRuleBasedBreakIterator($src->getBinaryRules() . '', true);
+    /// $ballast = [];
+    /// for ($i = 0; $i < 16; $i++) $ballast[] = str_repeat("\xCC", strlen($src->getBinaryRules()));
+    /// unset($src);
+    /// $c = clone $it;
+    /// unset($it);
+    /// $c->setText('ab,cd');
+    /// echo implode(' ', iterator_to_array($c->getPartsIterator())), ' ', $c->getRuleStatus(), "\n";
+    /// ```
+    /// ```expect
+    /// ab , cd 1
+    /// ```
     #[php(before_args = error::reset)]
     fn __construct(
         req: &mut Request,
@@ -467,8 +491,17 @@ impl IntlRuleBasedBreakIterator {
         };
         match made {
             Ok(biter) => {
-                if let Some(o) = object.native_mut::<BreakObject>(req) {
-                    o.biter = Some(biter);
+                let held = compiled.then(|| Owner::take(req, rules));
+                match object.native_mut::<BreakObject>(req) {
+                    Some(o) => {
+                        o.biter = Some(biter);
+                        o.compiled_rules = held;
+                    }
+                    None => {
+                        if let Some(held) = held {
+                            held.give_up(req);
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -892,12 +925,14 @@ impl ObjectHandlers for Handlers {
 
     /// `BreakIterator_objects_free`.
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        let text = object.native_mut::<BreakObject>(req).and_then(|o| {
-            o.biter = None;
-            o.text.take()
-        });
-        if let Some(text) = text {
-            text.give_up(req);
+        let (text, rules) = object
+            .native_mut::<BreakObject>(req)
+            .map_or((None, None), |o| {
+                o.biter = None;
+                (o.text.take(), o.compiled_rules.take())
+            });
+        for held in [text, rules].into_iter().flatten() {
+            held.give_up(req);
         }
     }
 
@@ -937,12 +972,17 @@ impl ObjectHandlers for Handlers {
 /// `BreakIterator_clone_obj`: a clone of ICU's iterator over the same
 /// text.
 fn clone_break(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
-    let (copy, text) = match object.native::<BreakObject>(req) {
+    let (copy, text, rules) = match object.native::<BreakObject>(req) {
         Some(BreakObject {
             biter: Some(b),
             text,
+            compiled_rules,
             ..
-        }) => (b.try_clone(), text.as_deref().copied()),
+        }) => (
+            b.try_clone(),
+            text.as_deref().copied(),
+            compiled_rules.as_deref().copied(),
+        ),
         _ => {
             return Err(throw_error(
                 req,
@@ -958,6 +998,7 @@ fn clone_break(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>>
         error: IntlError::default(),
         biter: Some(copy),
         text: text.map(|text| Owner::take(req, text)),
+        compiled_rules: rules.map(|rules| Owner::take(req, rules)),
     };
     clone_with(req, &object, payload)
 }
