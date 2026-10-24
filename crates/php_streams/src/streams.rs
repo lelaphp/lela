@@ -1825,7 +1825,7 @@ impl Ops for Memory {
     /// ```expect
     /// 296
     /// 1608
-    /// 368
+    /// 376
     /// 32
     /// ```
     fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
