@@ -680,6 +680,21 @@ fn write_access(
 /// 3576
 /// It's not possible to assign a complex type to properties, array given / SimpleXMLElement is not properly initialized
 /// ```
+///
+/// An attribute list writes onto the element it is of, which makes an
+/// attribute there where it has none of the name:
+///
+/// ```php
+/// $x = simplexml_load_string('<r/>');
+/// $x->attributes()['a'] = '1';
+/// $x->attributes()->b = '2';
+/// $x->attributes()['a'] = '3';
+/// echo $x->asXML();
+/// ```
+/// ```expect
+/// <?xml version="1.0"?>
+/// <r a="3" b="2"/>
+/// ```
 fn prop_dim_write(
     req: &mut Request,
     object: PhpObject,
@@ -705,10 +720,13 @@ fn prop_dim_write(
     let mut attr = None;
     if let Some((first, first_attr)) = view.attrs(base) {
         attr = first_attr;
-        node = first;
         if matches!(view.walk, Walk::Attributes(_)) {
+            // php 8.5.12 keeps the element an attribute list is of, so a
+            // new attribute is made on it, with or without attributes
+            // there already.
             access = Access::Attributes;
         } else {
+            node = first;
             if matches!(member, Member::Append)
                 && first
                     .and_then(Node::parent)
