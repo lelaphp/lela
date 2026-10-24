@@ -17,7 +17,7 @@ use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupp
 use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, held,
+    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -293,6 +293,25 @@ fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), Stri
 #[test]
 fn a_natives_call_lowers_in_place() -> Result<(), String> {
     lowered(NATIVE_CALL).map(drop)
+}
+
+/// Strings compared, measured and cast inline: the comparison of two
+/// strings by their pointers, then their lengths, then the `identical`
+/// kernel; a length read at `ZSTR_LEN` (#3321).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn strings_lower_inline() -> Result<(), String> {
+    lowered(STRING_MATCH)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("string_match.clif"))
+        .map_err(|e| e.to_string())?;
+    let address =
+        format!("{:#x}", symbols().address(Kernel::Identical)).replace("0x7000", "0x7000_");
+    let compared = (clif.lines())
+        .filter(|line| line.contains("call_indirect") && line.contains(&address))
+        .count();
+    // `$s !== "zz"`'s bytes; `$s === ''` is answered by the lengths.
+    assert!(compared >= 1, "{clif}");
+    Ok(())
 }
 
 /// A leave over owning variables, each freed in place: its type tested,

@@ -945,7 +945,7 @@ impl<'a> Builder<'a> {
         };
         // What compiled code serves in place takes no exit of its own; a
         // kernel it falls back to that throws unwinds.
-        let (at, op1) = (line.opline, line.op1);
+        let (at, op1, op2) = (line.opline, line.op1, line.op2);
         let may_leave = inline_may_leave(line) && in_place.is_none();
         if form == Form::Inline && may_leave {
             let unfinished = draft(Point::Before(idx), frame, At::Opline(at));
@@ -975,6 +975,14 @@ impl<'a> Builder<'a> {
                     || (op.opcode == Opcode::TypeCheck
                         && self.is_temp(op1)
                         && !old.within(UNCOUNTED))
+                    // A temporary string or array it reads is given up.
+                    || (matches!(
+                        op.opcode,
+                        Opcode::IsIdentical | Opcode::IsNotIdentical | Opcode::Strlen
+                    ) && [op1, op2].into_iter().any(|operand| {
+                        self.is_temp(operand) && !self.types_of(frame, operand).within(UNCOUNTED)
+                    }))
+                    || op.opcode == Opcode::FeFree
                     || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
                     // What the variable held is given up, and a destructor
                     // may throw.
@@ -2065,6 +2073,9 @@ impl<'a> Builder<'a> {
         let packed = Types::ARRAY.laid_out(Layout::Packed);
         let code = self.meta(frame).code;
         let copied = |kind, field, t| copied_whole(kind, field, t, code);
+        if let Some(inline) = strung(op.opcode, seen) {
+            return if inline { Form::Inline } else { Form::Step };
+        }
         let inline = match op.opcode {
             Opcode::Jmp => true,
             // A double's truth is the handler's, which warns of a NAN as
@@ -2076,7 +2087,6 @@ impl<'a> Builder<'a> {
             Opcode::IsSmaller | Opcode::IsSmallerOrEqual | Opcode::IsEqual | Opcode::IsNotEqual => {
                 number(t1) && number(t2)
             }
-            Opcode::IsIdentical | Opcode::IsNotIdentical => scalar(t1) && scalar(t2),
             Opcode::Add
             | Opcode::Sub
             | Opcode::Mul
@@ -3166,6 +3176,31 @@ struct Branched {
     target: Option<OplineIdx>,
     opcode: Opcode,
     held: Types,
+}
+
+/// Whether a strict comparison, a string's length, a boolean cast or a
+/// `foreach`'s free is compiled inline over what its operands are seen
+/// as, none for any other opline: two scalars, or a string beside a string or a scalar, as php's
+/// `zend_jit_identical` compares them inline or calls `zend_is_identical`
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:7292-7532`); a string's length read
+/// in place, php's `zend_jit_strlen` (`:11623-11660`); a scalar's truth,
+/// php's `zend_jit_bool_jmpznz`, a double's the handler's as a jump's is;
+/// and an array, which holds no iterator to delete, given up as php's
+/// `zend_jit_free` gives it up (`:11543-11580`).
+fn strung(opcode: Opcode, seen: Seen) -> Option<bool> {
+    let [t1, t2, _] = seen.types;
+    let string = |t: Types, at: usize| t == Types::STRING && !seen.referenced[at];
+    Some(match opcode {
+        Opcode::IsIdentical | Opcode::IsNotIdentical => {
+            (t1.scalar() && t2.scalar())
+                || (string(t1, 0) && (string(t2, 1) || t2.scalar()))
+                || (t1.scalar() && string(t2, 1))
+        }
+        Opcode::Strlen => string(t1, 0),
+        Opcode::Bool | Opcode::BoolNot => t1.scalar() && t1 != Types::DOUBLE,
+        Opcode::FeFree => t1.tag() == Some(ZvalType::Array),
+        _ => return None,
+    })
 }
 
 /// The jump after `op` it is fused to, where it is a comparison whose

@@ -65,6 +65,11 @@ const _: () = assert!(std::mem::offset_of!(StrHeader, gc) == 0);
 /// The header's size, php's `_ZSTR_HEADER_SIZE`.
 const HEADER: usize = size_of::<StrHeader>();
 
+// php's `zend_string`: the length after the refcounted header and the
+// hash, the bytes after the length, which compiled code reads at
+// `Str::LEN_AT` and `Str::VAL_AT`.
+const _: () = assert!(Str::LEN_AT == 16 && Str::VAL_AT == 24);
+
 /// `IS_STR_INTERNED` (`Z/Zend/zend_types.h:849`): the bit a table's
 /// string carries whichever table it is in, which is what says it is
 /// never refcounted and never freed by a release.
@@ -201,6 +206,14 @@ impl FreshStr {
 pub struct Str(NonNull<StrHeader>);
 
 impl Str {
+    /// Where in `zend_string` its length is, `ZSTR_LEN`: the bytes
+    /// without the NUL, a `size_t`. What the compiled tier reads a
+    /// string's length through (`jit-design.md` §4.3).
+    pub const LEN_AT: usize = std::mem::offset_of!(StrHeader, len);
+    /// Where its bytes begin, `ZSTR_VAL`: past the header,
+    /// `_ZSTR_HEADER_SIZE`.
+    pub const VAL_AT: usize = HEADER;
+
     /// The bytes one allocation of a string of `len` bytes takes:
     /// php's `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))`, which is what
     /// makes `memory_get_usage()` move by what php's moves by.

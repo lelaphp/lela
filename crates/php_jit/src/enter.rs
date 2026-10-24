@@ -47,7 +47,7 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 
 use php_engine::tier::{self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Stepped, TraceNum};
-use php_heap::{HeaderImage, Zval};
+use php_heap::{HeaderImage, Scalar, Zval};
 use php_unit::{MapPtrOffset, OplineIdx};
 
 use crate::lower::{self, Stood, engine_offset};
@@ -486,6 +486,7 @@ kernels! {
         Call => call(func: u32, callee: u32) -> Stood = tier::call_held;
         Release => release(word: u64, type_info: u32) = tier::release;
         FreeCv => free_cv(word: u64, type_info: u32) = tier::free_cv;
+        Identical => identical(a: u64, a_info: u32, b: u64, b_info: u32) -> u64;
     }
 }
 
@@ -575,6 +576,29 @@ fn free_cv(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Resu
     let frame = standing(req, on.room, on.at)?;
     tier::free_cv(req, frame, zval(word, type_info));
     Ok(())
+}
+
+/// The `identical` kernel: php's `zend_is_identical` of two zvals of a
+/// scalar kind or a string, one or zero, as compiled code compares two
+/// strings' bytes; it reads nothing of the request and stands no frame,
+/// as php's call of it saves no opline.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "a kernel answers as `kernels!` calls it, and this one never fails"
+)]
+fn identical(
+    _: &mut Request,
+    _: On<'_, '_>,
+    a: u64,
+    a_info: u32,
+    b: u64,
+    b_info: u32,
+) -> Result<u64, Fatal> {
+    let (a, b) = (zval(a, a_info), zval(b, b_info));
+    let same = Scalar::of(&a)
+        .zip(Scalar::of(&b))
+        .is_some_and(|(a, b)| php_heap::identical(a, b));
+    Ok(u64::from(same))
 }
 
 /// The frame whose room compiled code handed a kernel, stood at the

@@ -660,17 +660,25 @@ pub(crate) enum Kernel {
     /// possible root of the collector, the frame taken off the chain a
     /// backtrace reads first, as `zend_jit_leave_frame` takes it.
     FreeCv,
+    /// `identical(cx, frame, opline: u32, a: u64, a_info: u32, b: u64,
+    /// b_info: u32, same: *mut u64)`: php's `zend_is_identical` of the two
+    /// zvals, which a strict comparison of two strings of one length
+    /// calls for their bytes (`zend_jit_identical`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:7292-7532`); it reads nothing of
+    /// the request, runs no user code and throws nothing.
+    Identical,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 6] = [
+    pub(crate) const ALL: [Kernel; 7] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
         Kernel::Release,
         Kernel::Handle,
         Kernel::FreeCv,
+        Kernel::Identical,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

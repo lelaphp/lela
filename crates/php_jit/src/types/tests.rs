@@ -26,7 +26,7 @@ use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FANNKUCH, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, held, traced as built,
+    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -453,6 +453,30 @@ fn a_natives_call_is_pushed_in_place() -> Result<(), String> {
         _ => None,
     });
     assert_eq!(init, Some(Form::Inline), "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// A loop over strings: `$s === ''` fused to its jump, `$s !== "zz"`
+/// written, `strlen($s)` and `(bool) $i` each inline, as php's code
+/// generator compiles them (`zend_jit_identical`, `zend_jit_strlen`,
+/// `zend_jit_bool_jmpznz`), where each was stepped (#3321).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn strings_are_compared_and_measured_inline() -> Result<(), String> {
+    let ir = golden(STRING_MATCH)?;
+    let rendered = dump::render(&ir);
+    for opcode in [
+        Opcode::IsIdentical,
+        Opcode::IsNotIdentical,
+        Opcode::Strlen,
+        Opcode::Bool,
+    ] {
+        let form = (ir.ops.iter()).find_map(|op| match op {
+            Op::Line(line) if line.opcode == opcode => Some(line.form),
+            _ => None,
+        });
+        assert_eq!(form, Some(Form::Inline), "{opcode:?} in\n{rendered}");
+    }
     Ok(())
 }
 

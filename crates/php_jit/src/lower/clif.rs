@@ -42,7 +42,7 @@ use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use php_engine::tier::{FRAME, FuncRef, PlainCall};
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
-use php_unit::{Opcode, OplineIdx};
+use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
     ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
@@ -51,6 +51,7 @@ use super::{
 
 mod calls;
 mod doors;
+mod strings;
 use crate::record::{Began, Callee, Stop};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
@@ -446,6 +447,9 @@ struct Emit<'a> {
     interrupt: Option<Value>,
     /// Where a kernel writes where the interpreter stands.
     stood: StackSlot,
+    /// Where a kernel that answers a word writes it, made where one is
+    /// first called.
+    answer: Option<StackSlot>,
     /// Per frame of the trace, the room it runs in.
     rooms: Vec<Variable>,
     /// Per value the trace keeps in a register, its variable.
@@ -510,6 +514,7 @@ impl<'a> Emit<'a> {
             cx: None,
             interrupt: None,
             stood,
+            answer: None,
             rooms,
             regs: vec![None; ir.values.len()],
             calls: Vec::new(),
@@ -1355,6 +1360,7 @@ impl<'a> Emit<'a> {
             Kernel::Handle => &[I64, I64, I32, I32],
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
+            Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -1382,6 +1388,17 @@ impl<'a> Emit<'a> {
             .map(|info| info.func)
             .ok_or_else(|| mismatch("a frame past the trace's"))?;
         Ok(self.b.ins().iconst(I32, i64::from(engine_offset(func)?)))
+    }
+
+    /// Where a kernel that answers a word writes it.
+    fn answer(&mut self) -> StackSlot {
+        *self.answer.get_or_insert_with(|| {
+            self.b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                u32::try_from(size_of::<u64>()).unwrap_or(u32::MAX),
+                3,
+            ))
+        })
     }
 
     /// A word of the [`Stood`] the last kernel wrote.
@@ -1725,6 +1742,9 @@ impl<'a> Emit<'a> {
             Opcode::FeFetchR => self.fe_fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
             Opcode::AssignDimOp => self.assign_dim_op(at, line),
+            Opcode::Strlen => self.strlen(line),
+            Opcode::Bool | Opcode::BoolNot => self.bool(at, line),
+            Opcode::FeFree => self.free_temp(line, line.op1),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
             Opcode::CheckFuncArg => self.check_func_arg(),
             Opcode::TypeCheck => self.type_check(at, line),
@@ -1768,6 +1788,11 @@ impl<'a> Emit<'a> {
     /// A comparison of two scalars: the boolean it writes, or, fused to
     /// the jump after it, the way that jump goes held.
     fn compare(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        if matches!(line.opcode, Opcode::IsIdentical | Opcode::IsNotIdentical)
+            && (self.is_string(at, line.op1) || self.is_string(at, line.op2))
+        {
+            return self.compare_strings(at, line);
+        }
         let a = self.scalar(at, line.op1)?;
         let b = self.scalar(at, line.op2)?;
         let result = self.comparison(line.opcode, a, b)?;
@@ -1981,18 +2006,7 @@ impl<'a> Emit<'a> {
                 }
             }
             Operand::Constant(Constant::Other(idx)) => {
-                let literals = self
-                    .ir
-                    .frames
-                    .get(usize::from(frame.0))
-                    .ok_or_else(|| mismatch("a constant of a frame the trace does not have"))?
-                    .literals;
-                let address = (idx.0 as usize)
-                    .checked_mul(16)
-                    .and_then(|offset| literals.checked_add(offset))
-                    .and_then(|address| i64::try_from(address).ok())
-                    .ok_or_else(|| mismatch("a constant past the host's addresses"))?;
-                let zval = self.b.ins().iconst(I64, address);
+                let zval = self.constant_zval(frame, idx)?;
                 let word = self.b.ins().load(I64, trusted(), zval, 0);
                 let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
                 self.b.ins().store(trusted(), word, base, at);
@@ -2001,6 +2015,24 @@ impl<'a> Emit<'a> {
             _ => return Err(mismatch("a value copied whole from a scalar")),
         }
         Ok(())
+    }
+
+    /// The address of constant `idx` of the op array `frame` serves, its
+    /// zval among the op array's constants, which the trace's epoch
+    /// holds, php's `RT_CONSTANT`.
+    fn constant_zval(&mut self, frame: Frame, idx: ConstIdx) -> Result<Value, Abort> {
+        let literals = self
+            .ir
+            .frames
+            .get(usize::from(frame.0))
+            .ok_or_else(|| mismatch("a constant of a frame the trace does not have"))?
+            .literals;
+        let address = (idx.0 as usize)
+            .checked_mul(16)
+            .and_then(|offset| literals.checked_add(offset))
+            .and_then(|address| i64::try_from(address).ok())
+            .ok_or_else(|| mismatch("a constant past the host's addresses"))?;
+        Ok(self.b.ins().iconst(I64, address))
     }
 
     /// A read of a packed array's element by a long key: past `nNumUsed`
@@ -2025,7 +2057,6 @@ impl<'a> Emit<'a> {
         let out = line
             .out
             .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let (room, array_at) = self.place(array_slot)?;
         let arr = self.array_of(array_slot, self.read_of(at, array))?;
         let element = self.element(arr, key, exit)?;
         let hole = self.b.ins().load(I8, trusted(), element, TYPE_AT);
@@ -2048,25 +2079,8 @@ impl<'a> Emit<'a> {
                 ));
             }
         }
-        if array_slot.var >= self.frame_cvs(array_slot.frame)? {
-            let [room_arg, opline] = self.served(line)?;
-            // `FREE_OP1`, as the interpreter takes it: the array out of its
-            // slot, which is left `UNDEF`, then its owner given up.
-            let info = self.b.ins().load(I32, trusted(), room, array_at + TYPE_AT);
-            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
-            self.b
-                .ins()
-                .store(trusted(), undef, room, array_at + TYPE_AT);
-            let counted = self.b.ins().band_imm_u(info, COUNTED);
-            self.when(counted, |emit| {
-                emit.call(
-                    Kernel::Release,
-                    &[room_arg, opline, arr, info],
-                    line.unwind.map(Leave::Unwind),
-                )
-            })?;
-        }
-        Ok(())
+        // `FREE_OP1`, as the interpreter takes it.
+        self.free_temp(line, line.op1)
     }
 
     /// A fetched element at `element` held to its type by its two guards,

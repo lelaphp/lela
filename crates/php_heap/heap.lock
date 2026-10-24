@@ -350,6 +350,8 @@ StandaloneHeap::gc
 StandaloneHeap::shutdown
 StandaloneHeap::startup
 Str
+Str::LEN_AT
+Str::VAL_AT
 Str::addref
 Str::bytes
 Str::forget_hash

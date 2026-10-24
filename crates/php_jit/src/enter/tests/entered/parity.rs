@@ -227,6 +227,7 @@ fn compiled(ir: &TraceIr) -> Option<Compiled> {
         Kernel::PushCall | Kernel::Call => (refusing::refused_call as *const ()).addr(),
         Kernel::Release => (super::super::super::wrapped::release as *const ()).addr(),
         Kernel::FreeCv => (super::super::super::wrapped::free_cv as *const ()).addr(),
+        Kernel::Identical => (super::super::super::wrapped::identical as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend
