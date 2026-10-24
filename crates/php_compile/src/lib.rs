@@ -559,6 +559,7 @@ impl Refused {
     pub fn bailed(&self) -> bool {
         match self.raise {
             Raise::Fatal => self.level != Level::Parse,
+            Raise::HardLimit { .. } => true,
             Raise::Thrown | Raise::Unread => false,
         }
     }
@@ -586,6 +587,15 @@ pub enum Raise {
     /// for the compile to read or refuse, as it leaves a node that is no
     /// constant.
     Unread,
+    /// The heap met php 8.5.12's hard limit as the compile asked for
+    /// memory (`zend_mm_hard_limit_error`): the process ends where it
+    /// stands, which no `try` and no shutdown sees.
+    HardLimit {
+        /// `heap->hard_limit`.
+        limit: usize,
+        /// The bytes asked for past what the chunks held.
+        asked: usize,
+    },
 }
 
 /// What php's compile of a source had added to `CG(function_table)` and
@@ -1315,12 +1325,20 @@ fn level_of(level: php_syntax::Level) -> Level {
     }
 }
 
-/// The sentence a compile ends in where the heap refused it a fatal:
-/// the fatal's own message, and php's `Out of memory` for the limit.
-pub(crate) fn fatal_message(fatal: Fatal) -> String {
+/// How a compile the heap refused ends, and its sentence: the fatal's
+/// own message, php's `Out of memory` for the system's refusal, and the
+/// hard limit's end of the process, whose line the request writes.
+pub(crate) fn fatal_refusal(fatal: Fatal) -> (Raise, String) {
     match fatal.into_reason() {
-        FatalReason::Error(message) => message,
-        FatalReason::OutOfMemory(_) => String::from("Out of memory"),
+        FatalReason::Error(message) => (Raise::Fatal, message),
+        FatalReason::OutOfMemory(_) => (Raise::Fatal, String::from("Out of memory")),
+        FatalReason::Refused => (
+            Raise::Fatal,
+            String::from("InternalError: a fallible refusal reached the compiler"),
+        ),
+        FatalReason::HardLimit { limit, asked } => {
+            (Raise::HardLimit { limit, asked }, String::new())
+        }
     }
 }
 

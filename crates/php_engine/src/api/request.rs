@@ -115,6 +115,7 @@ use methods::visibility_string;
 pub use methods::{MethodRow, PropertyInfoRow};
 mod objects;
 mod observing;
+mod oom;
 mod op_arrays;
 pub(crate) use observing::{ObservedChain, OpenCall};
 pub use op_arrays::{ConstIdx, OpArrayView, Opcode, Operand, OplineIdx, OplineView};
@@ -1182,6 +1183,10 @@ impl Request {
             traces: traces::Scratch::default(),
             foreign: foreign::Table::default(),
         });
+        // The word a delayed OOM raises, php's `EG(vm_interrupt)`, which
+        // `zend_mm_delayed_verror` stores (#3260).
+        let word = req.limits().interrupt().word();
+        req.heap.wake_on_oom(word);
         req.activate();
         req
     }

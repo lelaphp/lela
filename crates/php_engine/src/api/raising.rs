@@ -459,6 +459,11 @@ pub(crate) fn verror(
     params: &[u8],
     message: &[u8],
 ) {
+    // Nothing is raised once the memory limit was met
+    // (`Z/main/main.c:1096` at 8.5.12).
+    if req.has_oom() {
+        return;
+    }
     let mut laid = Laid::default();
     let sentence = laid.lay(req, &origin, params, message).and_then(|()| {
         let params = escaped(req, params);

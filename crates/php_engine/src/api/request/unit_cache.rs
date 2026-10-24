@@ -768,11 +768,13 @@ impl Request {
     /// at this request's asking ([`crate::engine::Shared::compile_file`]): under the
     /// request's encoding and with its keys and classes, as opcache's miss
     /// compiles on the request, and charged to the request's heap while
-    /// it runs, so a fold that outgrows `memory_limit` is the request's
-    /// `E_ERROR` at the constant's line, as php's
-    /// `zend_eval_const_expr` raises it with opcache and without it, what
-    /// the file declared before it standing; the request holds nothing of
-    /// the compile once it ends, and a hit compiles nothing:
+    /// it runs. Since php 8.5.12 a fold past `memory_limit` is served, the
+    /// delayed OOM named at the `include` that compiles it, and the compile
+    /// runs on; one that outgrows the hard limit, twice the soft one, ends
+    /// the process there with php's line on its standard error and
+    /// nothing else served, no shutdown function among it, with opcache and
+    /// without it. The request holds nothing of the compile once it
+    /// ends, and a hit compiles nothing:
     ///
     /// ```php
     /// ini_set('display_errors', '0');
@@ -790,10 +792,10 @@ impl Request {
     /// include $file;
     /// echo "included\n";
     /// ```
-    /// ```expect exit=255
-    /// 1 Allowed memory size of 16777216 bytes exhausted on line 5
-    /// bool(true)
-    /// bool(false)
+    /// ```expect process
+    /// ```
+    /// ```stderr
+    /// Hard memory limit of 33554432 bytes exhausted (tried to allocate 15007744 bytes) in %s on line 14
     /// ```
     /// ```php
     /// ini_set('display_errors', '0');
@@ -811,16 +813,20 @@ impl Request {
     /// include $file;
     /// echo "included\n";
     /// ```
-    /// ```expect regime=jit-off exit=255
-    /// 1 Allowed memory size of 16777216 bytes exhausted on line 5
-    /// bool(true)
-    /// bool(false)
+    /// ```expect regime=jit-off process
+    /// ```
+    /// ```stderr
+    /// Hard memory limit of 33554432 bytes exhausted (tried to allocate 16007168 bytes) in %s on line 14
     /// ```
     ///
     /// The limit holds what php's compile holds at once, the string a fold
     /// makes beside the operands it reads, each given back once the node
     /// over it stands (`php_compile`'s fold claims): the file compiles
-    /// under 40M and not under 32M, as php's does in either regime:
+    /// under 40M and not under 32M, as php's does in either regime. Since
+    /// php 8.5.12 the compile runs on past the limit, which it meets as
+    /// the delayed OOM the included file's first safepoint raises at the
+    /// `include`'s line, and under 16M on to the hard limit, where the
+    /// child ends with nothing written:
     ///
     /// ```php
     /// $child = <<<'PHP'

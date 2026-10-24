@@ -617,6 +617,10 @@ impl Request {
         // trace is fetched for the fatal (`Z/Zend/zend.c:1503-1526`). An
         // object in the slot that is no `Throwable`, which no PHP code
         // leaves there, stays where it is.
+        // The unwind exit `zend_handle_delayed_oom` threw stands as php's
+        // `EG(exception)` while the limit's fatal is raised, and is no
+        // throwable to report (`Z/Zend/zend.c:1513` at 8.5.12).
+        let handling = *self.heap.delayed_oom() == php_heap::DelayedOom::Handling;
         if let Some(Raised::Throwable(pending)) = self.raised {
             let throwable = self
                 .class_named(Bare::resolved(b"Throwable"))
@@ -624,7 +628,10 @@ impl Request {
             if throwable && fatal_errors(level) {
                 self.exception_error(Level::Warning).ok();
             }
-        } else if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+        } else if (self.raised.is_none() || handling)
+            && self.fatal_error_backtraces()
+            && fatal_errors(level)
+        {
             self.diagnostics.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         // The string the native raised is its caller's; the one made of

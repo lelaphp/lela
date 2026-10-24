@@ -115,8 +115,8 @@ fn the_entries_keep_their_c_contracts_under_a_lend() {
     assert_eq!(heap.memory_usage(false), start);
 }
 
-/// The limit refused under a lend: the block is the system's, the call
-/// runs to its end, and the lend answers the limit's fatal. The block
+/// The hard limit met under a lend: the block is the system's, the call
+/// runs to its end, and the lend answers the hard limit's fatal. The block
 /// goes back to the system under a later lend.
 #[test]
 fn a_refusal_of_the_limit_is_served_by_the_system_and_answered_after_the_call() {
@@ -130,7 +130,13 @@ fn a_refusal_of_the_limit_is_served_by_the_system_and_answered_after_the_call() 
         !kept.is_null()
     });
     assert!(
-        matches!(lent.as_ref().map_err(Fatal::reason), Err(FatalReason::Error(text)) if text.starts_with("Allowed memory size of 2097152 bytes exhausted")),
+        matches!(
+            lent.as_ref().map_err(Fatal::reason),
+            Err(FatalReason::HardLimit {
+                limit: 4_194_304,
+                ..
+            })
+        ),
         "{lent:?}"
     );
     assert!(!kept.is_null());

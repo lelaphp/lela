@@ -782,6 +782,7 @@ request::MAXPATHLEN
 request::Memory
 request::Memory::adopt
 request::Memory::disown
+request::Memory::fallible
 request::Memory::foreign
 request::Memory::gc_possible_root
 request::Memory::heap_holds

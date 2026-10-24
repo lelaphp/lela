@@ -828,21 +828,23 @@ pub fn fgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<Owner<PhpStrin
 /// ```
 ///
 /// A plain file's line longer than a chunk is read whole, and the
-/// length is asked for as a string before a byte is read, so one the
-/// memory limit cannot hold is php's fatal.
+/// length is asked for as a string before a byte is read, so one past
+/// the hard memory limit, twice the soft one, ends the process there
+/// with php 8.5.12's line on its standard error and nothing after it.
 ///
 /// ```php
 /// $p = __DIR__ . '/fgets.txt'; $w = fopen($p, 'w'); fwrite($w, str_repeat("x", 10000) . "\nend"); fclose($w);
 /// $r = fopen($p, 'r'); var_dump(strlen(fgets($r)), fgets($r), fgets($r), feof($r));
 /// fgets($r, PHP_INT_MAX);
 /// ```
-/// ```expect exit=255
+/// ```expect exit=137
 /// int(10001)
 /// string(3) "end"
 /// bool(false)
 /// bool(true)
-///
-/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate %d bytes) in %s on line 4
+/// ```
+/// ```stderr
+/// Hard memory limit of 268435456 bytes exhausted (tried to allocate %d bytes) in %s on line 4
 /// ```
 #[php_function]
 pub fn fgets(

@@ -376,7 +376,22 @@ fn chr(req: &mut Request, codepoint: i64) -> Result<Owner<PhpString>, Thrown> {
 /// $s = str_repeat("x", 200000000);
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 200000032 bytes) in %s on line 2
+/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 200015872 bytes) in %s on line 2
+/// ```
+///
+/// Since 8.5.12 the string is asked for fallibly,
+/// `zend_string_safe_falloc(..., fallible: true)`: past the memory limit
+/// the ask is refused and `str_repeat` returns nothing (`RETURN_OOM`), so
+/// a string past the hard limit, twice the soft one, is the soft limit's
+/// fatal at the interrupt check after the call and not the end of the
+/// process; the call's own line runs no further:
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// echo str_repeat('x', 8 << 20), "unreached\n";
+/// ```
+/// ```expect exit=255
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 8404992 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn str_repeat(
@@ -395,7 +410,7 @@ fn str_repeat(
     // `zend_string_safe_alloc(ZSTR_LEN(input_str), mult, 0, 0)`, then
     // php's two fills: one byte `memset`, else `memcpy` of the pattern
     // and then of the result onto itself, doubling what is laid down.
-    let repeated = PhpString::product(req, pattern.len(), times, 0, |result| {
+    let fill = |result: &mut [u8]| {
         if pattern.len() == 1 {
             result.fill(pattern[0]);
             return;
@@ -408,7 +423,15 @@ fn str_repeat(
             rest[..step].copy_from_slice(&done[..step]);
             laid += step;
         }
-    })?;
+    };
+    let asked = req
+        .memory_mut()
+        .fallible(|req| PhpString::product(req, pattern.len(), times, 0, fill))?;
+    // `RETURN_OOM()`: nothing written, the limit's fatal raised at the
+    // interrupt check after the call.
+    let Some(repeated) = asked else {
+        return PhpString::new(req, b"");
+    };
     // `ZSTR_COPY_CONCAT_PROPERTIES(result, input_str)`.
     if string.is_valid_utf8() {
         repeated.mark_valid_utf8();

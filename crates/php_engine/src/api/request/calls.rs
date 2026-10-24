@@ -332,6 +332,13 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        // `if (ZEND_HAS_OOM()) { zend_handle_delayed_oom(); return FAILURE; }`
+        // (`Z/Zend/zend_execute_API.c:838` at 8.5.12): no call once the
+        // memory limit was met, its fatal raised here if no safepoint has.
+        if self.has_oom() {
+            self.handle_delayed_oom();
+            return Ok(Value::null());
+        }
         // `if (EG(exception)) return SUCCESS;`: no call while one is pending.
         if self.pending().is_some() {
             return Ok(Value::null());

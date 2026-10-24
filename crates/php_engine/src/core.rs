@@ -111,8 +111,8 @@ pub(crate) fn extension() -> Extension {
 /// highlight.keyword => <span style="color: #007700">#007700</span> => <span style="color: #007700">#007700</span>
 /// highlight.string => <span style="color: #DD0000">#DD0000</span> => <span style="color: #DD0000">#DD0000</span>
 /// display_errors => STDOUT => STDOUT
-/// int(103)
-/// int(103)
+/// int(104)
+/// int(104)
 /// bool(true)
 /// bool(false)
 /// ```

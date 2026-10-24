@@ -866,6 +866,9 @@ impl Request {
         cvs: u32,
         operand: impl FnOnce(&[Zval]) -> Option<(Zval, Option<usize>)>,
     ) -> Option<Stepped> {
+        if self.oom_unlocated() {
+            self.locate_oom();
+        }
         let (top, laid) = self.vm.stack.top()?;
         if top != frame {
             return None;
@@ -1830,6 +1833,11 @@ impl Request {
     /// bool(true)
     /// ```
     pub(crate) fn pop_frame(&mut self) {
+        // A delayed OOM the frame's code recorded is named at its site
+        // before the frame goes (`zend_mm_delayed_verror`).
+        if self.oom_unlocated() {
+            self.locate_oom();
+        }
         let frame = self.vm.stack.current();
         let Some(header) = self.vm.at(frame) else {
             return;

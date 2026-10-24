@@ -167,7 +167,12 @@ impl Request {
     ) -> Result<Option<Result<PublishedUnit, CompileRefused>>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let top = Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), args);
-        Ok(top.serve(self)?.map(|compiled| compiled.0))
+        let compiled = top.serve(self);
+        // A delayed OOM the compile recorded is named at the site that
+        // was executing as it compiled, the `include` php reads, before
+        // the included file's frame stands above it.
+        self.locate_oom();
+        Ok(compiled?.map(|compiled| compiled.0))
     }
 
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
@@ -1050,7 +1055,9 @@ impl Request {
         let args = StringArgs::new(code, name, position);
         let top =
             Beneath::<chain::CompileString>::top(shared.supplied.compile_string.links(), args);
-        Ok(top.serve(self)?.0)
+        let compiled = top.serve(self);
+        self.locate_oom();
+        Ok(compiled?.0)
     }
 
     /// `f` over a string the host evaluates of its own, `-r`'s code, the

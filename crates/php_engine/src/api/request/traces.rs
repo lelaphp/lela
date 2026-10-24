@@ -298,6 +298,11 @@ impl Request {
             chain.clear();
             relifetimed(chain)
         };
+        // `skip_frame: if (ZEND_HAS_OOM()) return;` (8.5.12): once the
+        // memory limit was met the walk stops after its first frame.
+        if self.has_oom() {
+            rows.laid.truncate(1);
+        }
         // `frameno < limit`: the walk stops once `limit` rows are in,
         // before it lays down the next, and a dropped row is no row.
         if let Ok(limit) = usize::try_from(limit)

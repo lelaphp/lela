@@ -587,8 +587,10 @@ impl Request {
             return;
         };
         // `zend_object_is_lazy`: a lazy object's destructor is not
-        // served, nor a forwarding proxy's, whose instance serves its own.
-        if object.heap().laziness() != php_heap::Laziness::Eager {
+        // served, nor a forwarding proxy's, whose instance serves its own;
+        // and none once the memory limit was met (`ZEND_HAS_OOM()`,
+        // `Z/Zend/zend_objects.c:119` at 8.5.12).
+        if object.heap().laziness() != php_heap::Laziness::Eager || self.has_oom() {
             return;
         }
         if !self.destructor_reachable(object, destructor) {

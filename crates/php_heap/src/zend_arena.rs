@@ -129,15 +129,14 @@ mod tests {
         assert_eq!(heap.memory_usage(false), past + FIRST_BLOCK + 4096);
     }
 
-    /// A carve the memory limit refuses is the limit's fatal, and the
-    /// arena carves on from the block it had.
+    /// A carve past the hard limit is its fatal, and the arena carves on
+    /// from the block it had.
     #[test]
     fn a_refused_block_is_the_limit_s_fatal_and_the_arena_keeps_its_block() {
         let _alone = alone();
         let mut heap = Heap::new();
         assert!(heap.set_memory_limit(2 * 1024 * 1024));
         assert!(heap.carve(4 * 1024 * 1024).is_err());
-        heap.overflow_rendered();
         let start = heap.memory_usage(false);
         assert!(heap.carve(8).is_ok());
         assert_eq!(heap.memory_usage(false), start);

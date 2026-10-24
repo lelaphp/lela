@@ -23672,6 +23672,9 @@ fn jumped<T: Tier>(
         // target in its own hand, as every other jump's does.
         if crate::interrupt::raised(req) {
             std::hint::cold_path();
+            // A delayed OOM is named at the site php recorded it at,
+            // before the stand moves the frame on.
+            req.locate_oom();
             req.vm_mut().stand(frame, target);
             if crate::interrupt::interrupted(req)? {
                 return Ok(Stepped::Threw(frame).into());
@@ -24274,6 +24277,11 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
         if let Some(edge) = inline_return(req, frame, code, op, A::default()) {
             return edge;
         }
+    }
+    // A delayed OOM is named where the frame stood before the return
+    // moves it, the site php recorded.
+    if req.oom_unlocated() {
+        req.locate_oom();
     }
     req.vm_mut().stand(frame, at);
     returned(req, frame, code, op)

@@ -82,6 +82,14 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
             if seconds == 1 { "" } else { "s" }
         )));
     }
+    // `else if (ZEND_HAS_OOM()) { zend_handle_delayed_oom(); HANDLE_EXCEPTION(); }`
+    // (`Z/Zend/zend_vm_def.h:10548` at 8.5.12): the heap raised the
+    // interrupt as it recorded the delayed OOM, so the memory limit's
+    // fatal costs the loop no test of its own.
+    if req.has_oom() {
+        req.handle_delayed_oom();
+        return Ok(req.is_pending());
+    }
     req.serve_interrupt_hooks();
     Ok(req.is_pending())
 }

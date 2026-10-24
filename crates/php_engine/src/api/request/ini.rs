@@ -299,7 +299,7 @@ impl CoreQuantity {
     /// order (`Z/main/main.c:807-885`), then `zend.c`'s, which
     /// `zend_register_standard_ini_entries` registers after them
     /// (`Z/Zend/zend.c:262-279`).
-    pub(crate) const ENTRIES: [CoreQuantityEntry; 18] = [
+    pub(crate) const ENTRIES: [CoreQuantityEntry; 19] = [
         (
             b"xmlrpc_error_number",
             CoreQuantity::Signed(LongHandler::Any),
@@ -322,6 +322,10 @@ impl CoreQuantity {
         ),
         (b"max_memory_limit", CoreQuantity::Unsigned),
         (b"memory_limit", CoreQuantity::Unsigned),
+        (
+            b"memory_hard_limit_percent",
+            CoreQuantity::Signed(LongHandler::Any),
+        ),
         (
             b"realpath_cache_size",
             CoreQuantity::Signed(LongHandler::Any),
@@ -477,6 +481,10 @@ impl Request {
         } else {
             value
         };
+        if name == b"memory_hard_limit_percent" && !self.memory_hard_limit_percent_taken(new_value)
+        {
+            return Ok(None);
+        }
         if name == b"report_memleaks" && !Ini::parse_bool(value) {
             let message = "Directive 'report_memleaks' is deprecated";
             crate::api::raising::docref(self, Level::Deprecated, message);
@@ -1868,6 +1876,7 @@ impl Ini<&mut Request> {
     /// max_input_vars => 1000 => 1000
     /// max_memory_limit => -1 => -1
     /// max_multipart_body_parts => -1 => -1
+    /// memory_hard_limit_percent => no value => no value
     /// memory_limit => 128M => 128M
     /// open_basedir => no value => no value
     /// output_buffering => no value => no value

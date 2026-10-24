@@ -1877,12 +1877,13 @@ pub(crate) fn unit(
         &emit.own_names,
         emit.strings,
     ) {
+        let (raise, message) = crate::fatal_refusal(limit);
         return Err(Refused {
             level: Level::Error,
-            message: crate::fatal_message(limit).into(),
+            message: message.into(),
             line: lines.max(1),
             raised: diagnostics,
-            raise: crate::Raise::Fatal,
+            raise,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX),
@@ -2173,8 +2174,10 @@ impl<'a> Emit<'a> {
     /// `try` around an `eval` catches it, and no fold passes over it
     /// ([`Self::constant_of`] holds all three).
     fn fatal_of(&self, fatal: Fatal) -> CompileError {
-        let mut refused = self.fatal(crate::fatal_message(fatal));
+        let (raise, message) = crate::fatal_refusal(fatal);
+        let mut refused = self.fatal(message);
         refused.level = Level::Error;
+        refused.raise = raise;
         refused
     }
 
