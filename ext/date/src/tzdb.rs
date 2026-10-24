@@ -276,7 +276,7 @@ fn timezone_name_from_abbr(
 /// var_dump(timezone_version_get());
 /// ```
 /// ```expect
-/// string(6) "2026.3"
+/// string(6) "2026.5"
 /// ```
 #[php_function]
 fn timezone_version_get(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
