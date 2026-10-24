@@ -65,16 +65,15 @@ impl MyStmt {
     }
 
     /// `mysqli_stmt_close(stmt->stmt, implicit)`, then
-    /// `php_clear_stmt_bind`'s `efree(stmt->query)` and `efree(stmt)`, which
-    /// an implicit close that failed skips as php returns before them.
+    /// `php_clear_stmt_bind`'s `efree(stmt->query)` and `efree(stmt)`,
+    /// whether or not the close was taken (php 8.5.12 no longer returns
+    /// before them).
     fn close(self, req: &mut Request, implicit: bool) -> Result<bool, Thrown> {
         let closed = self.stmt.close(req, implicit);
-        if !implicit || matches!(closed, Ok(true)) {
-            if let Some(query) = self.query {
-                query.free(req);
-            }
-            self.held.free(req);
+        if let Some(query) = self.query {
+            query.free(req);
         }
+        self.held.free(req);
         closed
     }
 }
