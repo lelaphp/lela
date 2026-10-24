@@ -261,6 +261,31 @@ impl Copied {
 }
 
 impl ClassBlocks {
+    /// A class's blocks as `lay` lays them into its three tables, each
+    /// `zend_initialize_class_data`'s, given back where it fails.
+    fn laid(
+        req: &mut Request,
+        lay: impl FnOnce(&mut Request, &mut ClassBlocks) -> Result<(), Thrown>,
+    ) -> Result<ClassBlocks, Thrown> {
+        let mut blocks = ClassBlocks {
+            functions: php_heap::EmbeddedArr::new(CLASS_TABLE),
+            properties: php_heap::EmbeddedArr::new(CLASS_TABLE),
+            constants: php_heap::EmbeddedArr::new(CLASS_TABLE),
+            defaults: Slots::default(),
+            statics: Slots::default(),
+            interfaces: None,
+            emalloced: Vec::new(),
+            copies: Vec::new(),
+        };
+        match lay(req, &mut blocks) {
+            Ok(()) => Ok(blocks),
+            Err(thrown) => {
+                blocks.into_blocks().free(req);
+                Err(thrown)
+            }
+        }
+    }
+
     /// The `HashTable` inside the `zend_class_entry` that is `table`.
     fn table(&self, table: Table) -> php_heap::Arr {
         match table {
@@ -1169,23 +1194,96 @@ impl AstCopy {
 /// 1600
 /// ```
 fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
-    let mut blocks = ClassBlocks {
-        functions: php_heap::EmbeddedArr::new(CLASS_TABLE),
-        properties: php_heap::EmbeddedArr::new(CLASS_TABLE),
-        constants: php_heap::EmbeddedArr::new(CLASS_TABLE),
-        defaults: Slots::default(),
-        statics: Slots::default(),
-        interfaces: None,
-        emalloced: Vec::new(),
-        copies: Vec::new(),
-    };
-    match lay_class(req, &mut blocks, class) {
-        Ok(()) => Ok(blocks),
-        Err(thrown) => {
-            blocks.into_blocks().free(req);
-            Err(thrown)
+    ClassBlocks::laid(req, |req, blocks| lay_class(req, blocks, class))
+}
+
+/// `zend_lazy_class_load`'s copy of a class of a file the cache keeps,
+/// which php links in each request that declares it where the
+/// inheritance cache cannot keep the link (an enum, whose link adds its
+/// `cases`, `from` and `tryFrom`, and a class whose link took a class
+/// the request declared): its default tables at their counts, and each
+/// table its compile filled at the size it was compiled to, the
+/// `zend_class_entry`, its members and their types in the compile's
+/// arena. A cached file's enum costs its copy and its link, and a cached
+/// class over an `eval`'d parent its copy and the parent's rows (the
+/// program under the recipe's `TMPDIR`, written into the past so opcache
+/// keeps it):
+///
+/// ```php
+/// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/w3325-$name.inc"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+/// ini_set('opcache.file_update_protection', '0');
+/// include $put('w0', '<?php class W {} $q0 = 1;');
+/// eval('class EvP { public $a = 1; function f() {} }');
+/// $fs = [
+///     $put('unit', '<?php enum E1 { case A; case B; }'),
+///     $put('string', '<?php enum Ez: string { case A = "a"; }'),
+///     $put('methods', '<?php enum E3: string { case A = "a"; const K = 1; function m() { return 1; } static function s() {} }'),
+///     $put('implements', '<?php interface I4 { function i(); } enum E4: string implements I4 { case A = "a"; function i() {} }'),
+///     $put('trait', '<?php trait T5 { function t() {} } enum E5 { use T5; case A; }'),
+///     $put('nine', '<?php enum E6 { case A; case B; case C; case D; case E; case F; case G; case H; case I; }'),
+///     $put('child', '<?php class M1 extends EvP { public $b = 2; function g() {} const K = 1; }'),
+///     $put('empty', '<?php class M2 extends EvP { }'),
+/// ];
+/// $costs = [];
+/// foreach ($fs as $f) { $m = memory_get_usage(); include $f; $costs[] = memory_get_usage() - $m; }
+/// echo implode(" ", $costs), "\n";
+/// $junk = array_fill(0, 1000, str_repeat("x", 100));
+/// echo Ez::from("a")->name, E3::A->m(), E4::tryFrom("z") === null ? "-" : "+", E5::A->t(), count(E6::cases()), (new M1)->a, (new M2)->f(), "\n";
+/// foreach ($fs as $f) { unlink($f); }
+/// ```
+/// ```expect regime=jit-off
+/// 1088 1112 1112 1120 1088 1408 1408 752
+/// A1-91
+/// ```
+fn lazy_copy(req: &mut Request, compiled: Compiled) -> Result<ClassBlocks, Thrown> {
+    ClassBlocks::laid(req, |req, blocks| lay_tables(req, blocks, compiled))
+}
+
+/// What a class's compile fills its tables with: the rows its
+/// declarations write, an enum's `cases`, `from` and `tryFrom` being its
+/// link's, and the slots of its default tables.
+#[derive(Clone, Copy)]
+struct Compiled {
+    written: Members,
+    slots: SlotCounts,
+}
+
+impl Compiled {
+    /// What `class`'s compile fills.
+    fn of(class: &ClassDecl) -> Compiled {
+        Compiled {
+            written: Members {
+                methods: php_unit::written_methods(class).len(),
+                constants: class.constants.len(),
+                properties: class.properties.len(),
+            },
+            slots: SlotCounts::of(&class.properties),
         }
     }
+}
+
+/// The three tables of a class as its declarations fill them, and its
+/// default values, reallocated one at a time
+/// (`zend_declare_typed_property`), which leaves the bin of the last.
+fn lay_tables(
+    req: &mut Request,
+    blocks: &mut ClassBlocks,
+    compiled: Compiled,
+) -> Result<(), Thrown> {
+    let Compiled { written, slots } = compiled;
+    for table in Table::ALL {
+        add_rows(req, blocks.table(table), written.of(table))?;
+    }
+    for (table, count) in [
+        (&mut blocks.defaults, slots.instance),
+        (&mut blocks.statics, slots.statics),
+    ] {
+        if count > 0 {
+            table.block = Some(Emalloc::new(req, count * ZVAL)?);
+            table.count = count;
+        }
+    }
+    Ok(())
 }
 
 /// [`class`]'s blocks, laid into `blocks`: a class's adaptations of
@@ -1201,15 +1299,7 @@ fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
 /// 936
 /// ```
 fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> Result<(), Thrown> {
-    // An enum's `cases`, `from` and `tryFrom` are its link's.
-    let written = Members {
-        methods: php_unit::written_methods(class).len(),
-        constants: class.constants.len(),
-        properties: class.properties.len(),
-    };
-    for table in Table::ALL {
-        add_rows(req, blocks.table(table), written.of(table))?;
-    }
+    lay_tables(req, blocks, Compiled::of(class))?;
     // `ce->attributes`, and each property's and constant's own.
     attributes(req, &mut blocks.emalloced, class.attributes.iter(), false)?;
     let properties = class
@@ -1219,18 +1309,6 @@ fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> 
     let constants = class.constants.iter().map(|c| (&c.attributes, false));
     for (held, again) in properties.chain(constants) {
         attributes(req, &mut blocks.emalloced, held.iter(), again)?;
-    }
-    // The default values, reallocated one at a time
-    // (`zend_declare_typed_property`), which leaves the bin of the last.
-    let slots = SlotCounts::of(&class.properties);
-    for (table, count) in [
-        (&mut blocks.defaults, slots.instance),
-        (&mut blocks.statics, slots.statics),
-    ] {
-        if count > 0 {
-            table.block = Some(Emalloc::new(req, count * ZVAL)?);
-            table.count = count;
-        }
     }
     // Each constant expression, copied out of the compile's arena as its
     // constant's or its property's value (`zend_const_expr_to_zval`'s
@@ -1425,20 +1503,25 @@ impl Table {
 impl Request {
     /// `zend_do_link_class`'s blocks for `class` as it binds
     /// ([`ClassBlocks::link`]), where a unit the request compiled for
-    /// itself declared it; nothing for any other class. The `Err` is the
-    /// memory limit's fatal.
+    /// itself declared it, and where a file the cache keeps did, over
+    /// `zend_lazy_class_load`'s copy ([`lazy_copy`]), which the request
+    /// holds to its end; the request binds no other class of its own. The
+    /// `Err` is the memory limit's fatal.
     pub(super) fn link_blocks(&mut self, class: ClassId) -> Result<(), Thrown> {
-        if self.unit_strings.is_empty() {
-            return Ok(());
-        }
         let Some((unit, at)) = self
             .declared_row(class)
             .map(|row| (php_unit::PublishedUnit::as_ptr(&row.unit), row.at as usize))
         else {
             return Ok(());
         };
-        let Some(mut blocks) = self.unit_strings.class_blocks(unit, at) else {
-            return Ok(());
+        let cached = !self.unit_strings.holds(unit);
+        let mut blocks = match self.unit_strings.class_blocks(unit, at) {
+            Some(blocks) => blocks,
+            None if cached => match self.symbols().class_decl(class).map(Compiled::of) {
+                Some(compiled) => lazy_copy(self, compiled)?,
+                None => return Ok(()),
+            },
+            None => return Ok(()),
         };
         let linked = match self.linking(class) {
             Some(linking) => blocks.link(self, &linking),
@@ -1446,6 +1529,7 @@ impl Request {
         };
         match self.unit_strings.class_slot(unit, at) {
             Some(slot) => *slot = Some(blocks),
+            None if cached => self.unit_strings.keep_copied(blocks.into_blocks()),
             None => blocks.into_blocks().free(self),
         }
         linked?;

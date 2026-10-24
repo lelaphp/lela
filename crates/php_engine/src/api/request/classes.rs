@@ -1440,7 +1440,9 @@ impl Request {
         if early && !linking.obligations.is_empty() {
             return Ok(false);
         }
-        if let Some(fetched) = fetched
+        // An enum's link adds its own methods, so php never caches it
+        // (`zend_do_link_class`), and each request links it afresh.
+        if let Some(fetched) = fetched.filter(|_| decl.kind != ClassKind::Enum)
             && let Some(entry) = self.publish_link(unit, at, fetched, &linking, &read, early)
         {
             self.declare_cached(unit, at, decl, &entry);
