@@ -2686,6 +2686,21 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
 /// other pair is joined into a new string ([`join`]). The joined string
 /// has one owner. What the join refuses, the memory limit or php's
 /// `String size overflow`, is the caller's to raise at its opline.
+///
+/// A variable's empty side hands the other on, so it counts one more
+/// owner; a constant `''` is joined as any string is; a temporary left
+/// side grows into the joined string:
+///
+/// ```php
+/// $a = str_repeat('ab', 2); $e = '';
+/// debug_zval_dump($a . $e, $e . $a, $a . '', str_repeat('x', 3) . 'y');
+/// ```
+/// ```expect
+/// string(4) "abab" refcount(3)
+/// string(4) "abab" refcount(3)
+/// string(4) "abab" refcount(1)
+/// string(4) "xxxy" refcount(1)
+/// ```
 #[inline(always)] // both callers' kinds fold its arms, the handler's at compile time
 pub(crate) fn concat_strings(
     req: &mut Request,
