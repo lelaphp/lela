@@ -237,6 +237,42 @@ fn a_form_past_the_memory_limit_ends_the_request_before_the_script() {
     assert_eq!(stdout, "ran 1 2 3\n");
 }
 
+/// A multipart body whose read takes the request past `memory_limit`
+/// ends it in the limit's fatal before the program runs, as php 8.5.12's
+/// `rfc1867_post_handler` does: a field's value grown on the heap a read
+/// at a time, fallibly, and a header line's value grown as its
+/// `smart_string` grows, each stopped at the limit. The figures, the
+/// trace and the small body's `ran 1 1` are php-cgi 8.5.12's under `-n -d
+/// memory_limit=4M -d html_errors=0` over the same three bodies on its
+/// standard input; the small body's second `Content-Disposition` and its
+/// `X-1` line are passed over, as 8.5.12 keeps only the first of the two
+/// lines it reads.
+#[test]
+fn a_multipart_body_past_the_memory_limit_ends_the_request_before_the_script() {
+    let engine = Engine::cli_builder()
+        .ini("memory_limit", "4M")
+        .extensions(&[input()])
+        .build();
+    let program =
+        "<?php echo 'ran ', $_POST['a'] ?? '', ' ', isset($_FILES['u']) ? 1 : 0, \"\\n\";";
+    let multipart = "multipart/form-data; boundary=b";
+    let fatal = "\nFatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in Unknown on line 0\nStack trace:\n#0 {main}\n";
+    let mut value = b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n".to_vec();
+    value.resize(value.len() + 5_000_000, b'x');
+    value.extend_from_slice(b"\r\n--b--\r\n");
+    assert_eq!(posted(&engine, multipart, &value, program).0, fatal);
+    let mut header = b"--b\r\nContent-Type: pad\r\n".to_vec();
+    for _ in 0..1500 {
+        header.push(b' ');
+        header.resize(header.len() + 4000, b'a');
+        header.extend_from_slice(b"\r\n");
+    }
+    header.extend_from_slice(b"Content-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n--b--\r\n");
+    assert_eq!(posted(&engine, multipart, &header, program).0, fatal);
+    let small = b"--b\r\nX-1: v\r\nContent-Disposition: form-data; name=\"a\"\r\nContent-Disposition: form-data; name=\"z\"\r\n\r\n1\r\n--b\r\nContent-Disposition: form-data; name=\"u\"; filename=\"f.txt\"\r\nContent-Type: text/plain\r\n\r\nxx\r\n--b--\r\n";
+    assert_eq!(posted(&engine, multipart, small, program).0, "ran 1 1\n");
+}
+
 /// A multipart body `request_parse_body()` refuses part of the way
 /// through gives back every block its parse asked of the heap: the
 /// `RequestParseBodyException` thrown at `max_file_uploads` while a
