@@ -273,6 +273,28 @@ pub(crate) struct xmlEntity {
     pub(crate) checked: c_int,
 }
 
+/// `struct _xmlAttribute`: an attribute's declaration in a DTD, which
+/// `xmlHasProp` answers for a default the element does not carry.
+#[repr(C)]
+pub(crate) struct xmlAttribute {
+    pub(crate) private: *mut c_void,
+    pub(crate) type_: c_int,
+    pub(crate) name: *const xmlChar,
+    pub(crate) children: *mut xmlNode,
+    pub(crate) last: *mut xmlNode,
+    pub(crate) parent: *mut xmlDtd,
+    pub(crate) next: *mut xmlNode,
+    pub(crate) prev: *mut xmlNode,
+    pub(crate) doc: *mut xmlDoc,
+    pub(crate) nexth: *mut xmlAttribute,
+    pub(crate) atype: c_int,
+    pub(crate) def: c_int,
+    pub(crate) defaultValue: *const xmlChar,
+    pub(crate) tree: *mut c_void,
+    pub(crate) prefix: *const xmlChar,
+    pub(crate) elem: *const xmlChar,
+}
+
 /// `struct _xmlError`.
 #[repr(C)]
 pub(crate) struct xmlError {

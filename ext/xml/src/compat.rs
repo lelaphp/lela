@@ -183,6 +183,10 @@ impl Compat {
         name: &[u8],
         attributes: &[(Vec<u8>, &[u8])],
     ) -> Result<(), Thrown> {
+        // `xml_handler_aborted`: nothing is done once a handler threw.
+        if at.pending() {
+            return Ok(());
+        }
         let level = match self.parser(req) {
             Some(p) => {
                 p.level += 1;
@@ -271,6 +275,10 @@ impl Compat {
 
     /// `xml_endElementHandler`.
     fn end(&self, req: &mut Request, at: &At, name: &[u8]) -> Result<(), Thrown> {
+        // `xml_handler_aborted`: the level stays where the throw left it.
+        if at.pending() {
+            return Ok(());
+        }
         let tag = self.decode_tag(req, name);
         let offset = self.offset(req);
         if self
@@ -317,6 +325,10 @@ impl Compat {
 
     /// `xml_characterDataHandler`.
     fn cdata(&self, req: &mut Request, at: &At, text: &[u8]) -> Result<(), Thrown> {
+        // `xml_handler_aborted`.
+        if at.pending() {
+            return Ok(());
+        }
         if self
             .parser(req)
             .is_some_and(|p| p.handlers.get(Hook::CharacterData).is_some())

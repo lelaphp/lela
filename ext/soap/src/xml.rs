@@ -5,7 +5,7 @@
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
 use php_ext_libxml::Errors;
-use php_ext_libxml::ffi::{Kind, Node, Ns, Parser, Source};
+use php_ext_libxml::ffi::{Kind, Node, Ns, Parser, Raised, Source};
 
 /// `is_blank`: only spaces, tabs, newlines and carriage returns.
 fn is_blank(s: &[u8]) -> bool {
@@ -13,39 +13,131 @@ fn is_blank(s: &[u8]) -> bool {
 }
 
 /// `cleanup_xml_node`: blank text, comments and every other node that is
-/// neither an element nor a CDATA section removed, recursively.
+/// neither an element nor a CDATA section removed, through the whole
+/// tree. Iterative, as php's is since GHSA-rgrp-mwpx-f6rm: a recursion
+/// overflows the stack on a deep document.
 pub(crate) fn cleanup_xml_node(node: Node) {
+    let mut parent = node;
     let mut trav = node.children();
-    let mut del: Option<Node> = None;
     while let Some(t) = trav {
-        if let Some(d) = del.take() {
-            d.unlink();
-            d.free();
-        }
+        let mut next = t.next();
         match t.kind() {
             Kind::Text => {
                 if is_blank(&t.content().unwrap_or_default()) {
-                    del = Some(t);
+                    t.unlink();
+                    t.free();
                 }
             }
             Kind::Element | Kind::CData => {
-                if t.children().is_some() {
-                    cleanup_xml_node(t);
+                if let Some(first) = t.children() {
+                    parent = t;
+                    trav = Some(first);
+                    continue;
                 }
             }
-            _ => del = Some(t),
+            _ => {
+                t.unlink();
+                t.free();
+            }
         }
-        trav = t.next();
+        while next.is_none() {
+            if parent == node {
+                return;
+            }
+            next = parent.next();
+            match parent.parent() {
+                Some(p) => parent = p,
+                None => return,
+            }
+        }
+        trav = next;
     }
-    if let Some(d) = del {
-        d.unlink();
-        d.free();
+}
+
+/// `SOAP_MAX_XML_DEPTH`: the deepest element nesting a SOAP message or a
+/// WSDL is taken at.
+pub(crate) const SOAP_MAX_XML_DEPTH: u32 = 2048;
+
+/// `is_nesting_too_deep`: whether `node`'s tree nests deeper than
+/// [`SOAP_MAX_XML_DEPTH`]. php asks it below libxml2 2.13, which refuses
+/// such a document itself; the library bound here is 2.9
+/// (`LIBXML_VERSION` 20913).
+fn is_nesting_too_deep(node: Node) -> bool {
+    Walk::from(node.children()).any(|(_, depth)| depth > SOAP_MAX_XML_DEPTH)
+}
+
+/// The walk `is_nesting_too_deep` and `get_node_with_attribute_recursive_ex`
+/// make without recursing: from `first`, its siblings and each one's
+/// descendants in tree order, never into an entity reference, whose child
+/// list is its declaration's under the DTD, nor into the DTD; each node
+/// with how many levels below `first` it lies.
+pub(crate) struct Walk {
+    at: Option<Node>,
+    depth: u32,
+}
+
+impl Walk {
+    pub(crate) fn from(first: Option<Node>) -> Walk {
+        Walk {
+            at: first,
+            depth: 0,
+        }
+    }
+}
+
+impl Iterator for Walk {
+    type Item = (Node, u32);
+
+    fn next(&mut self) -> Option<(Node, u32)> {
+        let node = self.at?;
+        let depth = self.depth;
+        if let Some(first) = node.children()
+            && !matches!(node.kind(), Kind::EntityRef | Kind::Dtd)
+        {
+            self.at = Some(first);
+            self.depth += 1;
+            return Some((node, depth));
+        }
+        let mut t = node;
+        self.at = loop {
+            if let Some(next) = t.next() {
+                break Some(next);
+            }
+            if self.depth == 0 {
+                break None;
+            }
+            match t.parent() {
+                Some(p) => {
+                    t = p;
+                    self.depth -= 1;
+                }
+                None => break None,
+            }
+        };
+        Some((node, depth))
     }
 }
 
 /// `soap_xmlParseFile`: the document at `filename`, opened through the
-/// request's streams, cleaned of insignificant nodes; none where it was
-/// not well formed. What a program's stream code threw is the `Err`.
+/// request's streams, cleaned of insignificant nodes, the walk made
+/// without recursing; none where it was not well formed or nests deeper
+/// than [`SOAP_MAX_XML_DEPTH`], for which the reason is empty.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'wsdl');
+/// foreach ([2049, 2050] as $depth) {
+///     file_put_contents($f, '<r>' . str_repeat('<a>', $depth - 1) . str_repeat('</a>', $depth - 1) . '</r>');
+///     try { new SoapClient($f, ['cache_wsdl' => WSDL_CACHE_NONE]); }
+///     catch (SoapFault $e) { var_dump(str_replace($f, 'F', $e->getMessage())); }
+/// }
+/// unlink($f);
+/// ```
+/// ```expect
+/// string(60) "SOAP-ERROR: Parsing WSDL: Couldn't find <definitions> in 'F'"
+/// string(48) "SOAP-ERROR: Parsing WSDL: Couldn't load from 'F'"
+/// ```
+///
+/// What a program's stream code threw is the `Err`.
 /// What libxml raised meanwhile reaches php's handler as
 /// `php_libxml_ctx_error` raises it, through soap's, which drops a
 /// throwing client's while it loads its WSDL: the `I/O warning` of a
@@ -76,10 +168,18 @@ pub(crate) fn parse_file(req: &mut Request, filename: &[u8]) -> Result<Option<No
         return Err(t);
     }
     Errors::route(req, raised);
-    if let Some(d) = doc {
-        cleanup_xml_node(d);
+    let Some(d) = doc else {
+        return Ok(None);
+    };
+    if is_nesting_too_deep(d) {
+        // php_sdl.c reports `xmlGetLastError()` as the reason, and libxml
+        // did not fail here, so the error an earlier parse left is dropped.
+        Raised::reset_last();
+        d.free_document();
+        return Ok(None);
     }
-    Ok(doc)
+    cleanup_xml_node(d);
+    Ok(Some(d))
 }
 
 /// [`parse_file`] where the caller's `NULL` is an `E_ERROR`, a WSDL's or
@@ -130,7 +230,26 @@ pub(crate) fn parse_file_before_fatal(
     }
 }
 
-/// `soap_xmlParseMemory`: the document in `buf`, not cleaned.
+/// `soap_xmlParseMemory`: the document in `buf`, not cleaned; none where
+/// it nests deeper than [`SOAP_MAX_XML_DEPTH`], which a server answers
+/// as a request it could not read.
+///
+/// ```php
+/// function test($arg) { return 'ok'; }
+/// $s = new SoapServer(null, ['uri' => 'urn:test']);
+/// $s->addFunction('test');
+/// foreach ([2045, 2046] as $depth) {
+///     $s->handle('<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><test>' . str_repeat('<a>', $depth) . 'leaf' . str_repeat('</a>', $depth) . '</test></s:Body></s:Envelope>');
+///     echo "\n";
+/// }
+/// ```
+/// ```expect
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="urn:test" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:SOAP-ENC="http://schemas.xmlsoap.org/soap/encoding/" SOAP-ENV:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><SOAP-ENV:Body><ns1:testResponse><return xsi:type="xsd:string">ok</return></ns1:testResponse></SOAP-ENV:Body></SOAP-ENV:Envelope>
+///
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Client</faultcode><faultstring>Bad Request</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+/// ```
 pub(crate) fn parse_memory(req: &mut Request, buf: &[u8]) -> Result<Option<Node>, Thrown> {
     let (doc, _raised, thrown) = Parser::soap(req, Source::Memory(buf));
     if let Some(t) = thrown {
@@ -139,7 +258,13 @@ pub(crate) fn parse_memory(req: &mut Request, buf: &[u8]) -> Result<Option<Node>
         }
         return Err(t);
     }
-    Ok(doc)
+    match doc {
+        Some(d) if is_nesting_too_deep(d) => {
+            d.free_document();
+            Ok(None)
+        }
+        doc => Ok(doc),
+    }
 }
 
 /// `node_find_ns`: the node's namespace, or the default one in scope.
