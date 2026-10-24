@@ -20,6 +20,7 @@ use crate::exec;
 use crate::observer::OnThrow;
 use crate::trampoline::CallTrampoline;
 use php_heap::FrameRef;
+use php_unit::decl::HookKind;
 
 use super::Code;
 use super::Symbols;
@@ -88,6 +89,30 @@ impl Request {
             arguments,
             extra_named,
         )
+    }
+
+    /// `zend_call_known_instance_method` over
+    /// `zend_get_property_hook_trampoline(prop_info, kind, name)`, which
+    /// `ReflectionProperty::getRawValue` and `setRawValue` call over a
+    /// property with a hook of `kind`: the trampoline named `$name::get`
+    /// or `$name::set` and scoped to `scope`, `prop_info->ce`, served on
+    /// `object` with no hold of the call's own, so the read or write it
+    /// makes finds it running and reaches the backing store, and what
+    /// it throws has the trampoline's frame on its trace.
+    pub(crate) fn serve_hook_trampoline(
+        &mut self,
+        object: PhpObject,
+        scope: ClassId,
+        name: &[u8],
+        kind: HookKind,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        let function = self.parent_hook_trampoline(kind);
+        let written = [b"$", name, b"::", kind.name().as_bytes()].concat();
+        self.in_fake_scope(None, |req| {
+            let (this, scope) = (Some(object), Some(scope));
+            req.serve_call_body(function, this, scope, None, arguments, &[], Some(&written))
+        })
     }
 
     /// `zend_call_known_fcc` over a `Closure`, which is what
@@ -318,11 +343,14 @@ impl Request {
                 closure,
                 arguments,
                 extra_named,
+                None,
             )
         })
     }
 
-    /// [`Request::serve_call`] with no scope a write named standing.
+    /// [`Request::serve_call`] with no scope a write named standing, and
+    /// the name a hook trampoline is built under where `function` is one.
+    #[allow(clippy::too_many_arguments)]
     fn serve_call_body(
         &mut self,
         function: Function,
@@ -331,6 +359,7 @@ impl Request {
         closure: Option<PhpObject>,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
+        trampoline: Option<&[u8]>,
     ) -> Result<Value, Thrown> {
         // `if (EG(exception)) return SUCCESS;`: no call while one is pending.
         if self.pending().is_some() {
@@ -425,6 +454,22 @@ impl Request {
             && let Some(annex) = self.annex_mut(call)
         {
             annex.extra_named = extra_named;
+        }
+        // The trampoline reads its property off the name it was built
+        // under, php's `internal_function.reserved[0]`, one owner the
+        // call holds.
+        if let Some(name) = trampoline {
+            let written = match self.string(name) {
+                Ok(written) => written,
+                Err(thrown) => {
+                    self.pop_call();
+                    return Err(thrown);
+                }
+            };
+            match self.annex_mut(call) {
+                Some(annex) => annex.name = Some(written),
+                None => self.release(Value::string(written)),
+            }
         }
         if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self, call) {
             self.pop_call();

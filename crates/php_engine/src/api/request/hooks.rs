@@ -1621,37 +1621,4 @@ impl Request {
             HookKind::Set => hooked.set,
         }
     }
-
-    /// [`crate::api::call::read_raw_property`].
-    pub(crate) fn read_raw(&mut self, object: PhpObject, name: &[u8]) -> Result<Value, Thrown> {
-        match self.row_hooked(object.class(), name) {
-            Some(hooked) if hooked.is_virtual => Err(self.hooked_error(object, name, READ_VIRTUAL)),
-            _ => self.read_backing(object, name, PropertyRead::Warning),
-        }
-    }
-
-    /// [`crate::api::call::write_raw_property`].
-    pub(crate) fn write_raw(
-        &mut self,
-        object: PhpObject,
-        name: Owner<PhpString>,
-        value: Owner<Value>,
-    ) -> Result<(), Thrown> {
-        let Some(hooked) = self.row_hooked(object.class(), name.as_bytes()) else {
-            return self.write_property(object, name, value);
-        };
-        if hooked.is_virtual {
-            let bytes = name.as_bytes().to_vec();
-            value.give_up(self);
-            name.give_up(self);
-            return Err(self.hooked_error(object, &bytes, WRITE_VIRTUAL));
-        }
-        if let Some(placed) = self.declared_slot(object.class(), name.as_bytes())
-            && object.heap().slot(placed.slot).is_undef()
-            && self.lazy_slot(object.heap(), placed.slot)
-        {
-            return self.lazy_write(object, name, value, false);
-        }
-        self.write_std_property(object, name, value)
-    }
 }

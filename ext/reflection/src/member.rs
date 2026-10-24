@@ -246,9 +246,11 @@ fn constant_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<
         .map(str::to_owned))
 }
 
-/// `reflection_property_set_raw_value`: `value`, the caller's to give
-/// up, written past the effective property's `set` hook where it has
-/// one, and otherwise through `write_property` under `EG(fake_scope)`,
+/// `reflection_property_set_raw_value`: `value`, a view of the
+/// caller's, written past the effective property's `set` hook where it
+/// has one, by calling the hook's trampoline on the object as php does
+/// ([`php_ext::call::write_raw_property`]), and otherwise through
+/// `write_property` under `EG(fake_scope)`,
 /// the class the reflector was asked about, so a parent's private
 /// property the object's class redeclares is the parent's slot.
 ///
@@ -270,8 +272,14 @@ fn set_raw_value(
     prop: Option<&(ClassId, PropertyDecl)>,
     object: PhpObject,
     name: &[u8],
-    value: Owner<Value>,
+    value: Value,
 ) -> Result<(), Thrown> {
+    if let Some((at, _)) =
+        prop.filter(|(at, _)| property_hook(req, *at, name, HookKind::Set).is_some())
+    {
+        return php_ext::call::write_raw_property(req, &object, *at, name, value);
+    }
+    let value = Owner::take(req, value);
     let key = match PhpString::new(req, name) {
         Ok(key) => key,
         Err(thrown) => {
@@ -279,9 +287,6 @@ fn set_raw_value(
             return Err(thrown);
         }
     };
-    if prop.is_some_and(|(at, _)| property_hook(req, *at, name, HookKind::Set).is_some()) {
-        return php_ext::call::write_raw_property(req, &object, key, value);
-    }
     let handlers = object.handlers(req);
     req.frames_mut().with_fake_scope(asked, |req| {
         handlers.write_property(req, object, key, value)
@@ -952,8 +957,10 @@ impl ReflectionProperty {
                 "May not use getRawValue on static properties",
             ));
         }
-        if prop.is_some_and(|(at, _)| property_hook(req, at, &name, HookKind::Get).is_some()) {
-            return php_ext::call::read_raw_property(req, &object, &name);
+        if let Some((at, _)) =
+            prop.filter(|(at, _)| property_hook(req, *at, &name, HookKind::Get).is_some())
+        {
+            return php_ext::call::read_raw_property(req, &object, at, &name);
         }
         // `read_property` under `EG(fake_scope)`, the class the reflector
         // was asked about.
@@ -1001,7 +1008,6 @@ impl ReflectionProperty {
                 "May not use setRawValue on static properties",
             ));
         }
-        let value = Owner::take(req, value);
         set_raw_value(req, asked, prop.as_ref(), object, &name, value)
     }
 
@@ -1053,7 +1059,6 @@ impl ReflectionProperty {
         let method = "setRawValueWithoutLazyInitialization";
         lazy_compatible(req, asked, prop.as_ref(), &name, object, method)?;
         if !object.is_lazy() {
-            let value = Owner::take(req, value);
             return set_raw_value(req, asked, prop.as_ref(), object, &name, value);
         }
         let value = Owner::take(req, value);
