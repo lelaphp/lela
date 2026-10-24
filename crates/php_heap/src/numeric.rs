@@ -285,16 +285,43 @@ impl Exponent {
 ///
 /// ```php
 /// $inf = INF;
-/// foreach ([1, 2, 3, -1] as $p) {
+/// foreach ([0, 1, 2, 3, -1] as $p) {
 ///     ini_set('precision', $p); ini_set('serialize_precision', $p);
-///     echo $p, ": ", INF, "|", -INF, "|", @strval(NAN), "|", serialize(-INF), "|", var_export(NAN, true), "|", "IN" == $inf ? "eq" : "ne", "\n";
+///     echo $p, ": ", INF, "|", -INF, "|", @strval(NAN), "|", serialize(-INF), "|", var_export(NAN, true), "|", print_r(-INF, true), "|", "IN" == $inf ? "eq" : "ne", "\n";
 /// }
 /// ```
 /// ```expect
-/// 1: I|-|N|d:-;|N|ne
-/// 2: IN|-I|NA|d:-I;|NA|eq
-/// 3: INF|-IN|NAN|d:-IN;|NAN|ne
-/// -1: INF|-INF|NAN|d:-INF;|NAN|ne
+/// 0: I|-|N|d:;|N|-|ne
+/// 1: I|-|N|d:-;|N|-|ne
+/// 2: IN|-I|NA|d:-I;|NA|-I|eq
+/// 3: INF|-IN|NAN|d:-IN;|NAN|-IN|ne
+/// -1: INF|-INF|NAN|d:-INF;|NAN|-INF|ne
+/// ```
+///
+/// The paths that format a non-finite double on their own keep the word
+/// whole at every precision: `var_dump`'s `%.*H`, userland `printf` and
+/// `json_encode`, which refuses one:
+///
+/// ```php
+/// foreach ([0, 1, 2, 3] as $p) {
+///     ini_set('precision', $p); ini_set('serialize_precision', $p);
+///     var_dump(-INF); printf("%.{$p}G|%.{$p}H|%.{$p}e|%.{$p}F\n", INF, -INF, NAN, INF);
+///     echo json_encode([INF], JSON_PARTIAL_OUTPUT_ON_ERROR), "\n";
+/// }
+/// ```
+/// ```expect
+/// float(-INF)
+/// INF|-INF|NaN|INF
+/// [0]
+/// float(-INF)
+/// INF|-INF|NaN|INF
+/// [0]
+/// float(-INF)
+/// INF|-INF|NaN|INF
+/// [0]
+/// float(-INF)
+/// INF|-INF|NaN|INF
+/// [0]
 /// ```
 #[must_use]
 pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> String {
