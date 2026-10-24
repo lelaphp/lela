@@ -682,7 +682,23 @@ fn set_attribute(
 
 /// `dom_element_set_attribute_node_common`: the modern classes refuse an
 /// attribute another element owns and adopt one of another document,
-/// where the legacy ones refuse it.
+/// where the legacy ones refuse it. An attribute in no namespace replaces
+/// the one of its name in none, never one in a namespace.
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createEmpty();
+/// $c = $d->appendChild($d->createElement('c'));
+/// [$a1, $a2, $a4] = [$d->createAttribute('m'), $d->createAttribute('m'), $d->createAttributeNS('urn:a', 'm')];
+/// $c->setAttributeNode($a1);
+/// $c->setAttributeNode($a4);
+/// var_dump($c->setAttributeNode($a2) === $a1, $c->setAttributeNode($a1) === $a2);
+/// echo $d->saveXml($c), "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// <c xmlns="http://www.w3.org/1999/xhtml" xmlns:ns1="urn:a" ns1:m="" m=""></c>
+/// ```
 fn set_attribute_node(
     req: &mut Request,
     this: PhpObject,
@@ -705,9 +721,12 @@ fn set_attribute_node(
         dom_error(req, Code::WrongDocument, strict)?;
         return Ok(Owner::bool(false));
     }
-    let existing = match attr.ns().and_then(Ns::href).filter(|_| use_ns) {
-        Some(href) => elem.has_ns_prop(&attr.name(), Some(&href)),
-        None => elem.has_prop(&attr.name()),
+    // An attribute in no namespace replaces one in none, never one of the
+    // name in a namespace (php 8.5.12, GH-22447).
+    let existing = match (attr.ns().and_then(Ns::href), use_ns) {
+        (Some(href), true) => elem.has_ns_prop(&attr.name(), Some(&href)),
+        (None, _) => elem.has_ns_prop(&attr.name(), None),
+        (Some(_), false) => elem.has_prop(&attr.name()),
     }
     .filter(|a| a.kind() != Kind::AttributeDecl);
     if let Some(old) = existing {
