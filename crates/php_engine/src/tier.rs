@@ -422,11 +422,13 @@ pub(crate) enum Way {
 impl Next {
     /// The high half of each way, written by the constructors below and
     /// read by [`Next::way`] and nowhere else.
+    /// A call and a return, the edges met most after going on, come
+    /// first, so the search of the high half finds each in two compares.
     const ON_WAY: u64 = 0;
-    const JUMP_WAY: u64 = 1;
-    const SAME_WAY: u64 = 2;
-    const PUSHED_WAY: u64 = 3;
-    const POPPED_WAY: u64 = 4;
+    const PUSHED_WAY: u64 = 1;
+    const POPPED_WAY: u64 = 2;
+    const JUMP_WAY: u64 = 3;
+    const SAME_WAY: u64 = 4;
     const MOVED_WAY: u64 = 5;
     const THREW_WAY: u64 = 6;
     const DONE_WAY: u64 = 7;
@@ -461,10 +463,10 @@ impl Next {
             return Way::On(low);
         }
         match self.0 >> 32 {
-            Next::JUMP_WAY => Way::Jump(low),
-            Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
             Next::PUSHED_WAY => Way::Left(Stepped::Pushed(FrameRef(low))),
             Next::POPPED_WAY => Way::Left(Stepped::Popped(FrameRef(low))),
+            Next::JUMP_WAY => Way::Jump(low),
+            Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
             Next::MOVED_WAY => Way::Left(Stepped::Moved(FrameRef(low))),
             Next::THREW_WAY => Way::Left(Stepped::Threw(FrameRef(low))),
             // `DONE_WAY`, the one high half left: the fields are private,
