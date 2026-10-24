@@ -257,15 +257,14 @@ pub(crate) fn find(
         n = search_utf8(needle, enc);
         (&h[..], &n[..])
     };
-    find_utf8(haystack_u8, needle_u8, needle, offset, reverse)
+    find_utf8(haystack_u8, needle_u8, offset, reverse)
 }
 
-/// `mb_find_strpos` over its UTF-8, `needle_raw` the needle as given,
-/// whose length php counts in the backward search.
+/// `mb_find_strpos` over its UTF-8: haystack and needle both as UTF-8,
+/// the needle's codepoints what a backward search steps past.
 fn find_utf8(
     haystack: &[u8],
     needle: &[u8],
-    needle_raw: &[u8],
     offset: isize,
     reverse: bool,
 ) -> Result<usize, Missed> {
@@ -278,7 +277,7 @@ fn find_utf8(
     } else if offset >= 0 {
         find_last(&haystack[start..], needle).map(|at| start + at)
     } else {
-        let needle_len = fast_strlen_utf8(needle_raw);
+        let needle_len = fast_strlen_utf8(needle);
         let end = utf8_position(
             &haystack[start..],
             isize::try_from(needle_len).unwrap_or(isize::MAX),
@@ -309,7 +308,7 @@ pub(crate) fn find_folded(
         )
     };
     let (h, n) = (fold(haystack), fold(needle));
-    find_utf8(&h, &n, &n, offset, reverse)
+    find_utf8(&h, &n, offset, reverse)
 }
 
 /// `handle_strpos_error`, and `false`.
@@ -552,6 +551,20 @@ fn mb_strpos(
 /// int(3)
 /// int(3)
 /// mb_strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
+/// ```
+///
+/// A negative offset steps back past the needle's codepoints as the
+/// search's UTF-8 counts them, not its bytes in the encoding given
+/// (GH-22779), so a one-byte needle in ISO-8859-1 or SJIS's two-byte
+/// `あ` steps one, and UTF-16's two-byte `A` steps one.
+///
+/// ```php
+/// var_dump(mb_strrpos("\xA9\xA9X", "\xA9", -2, 'ISO-8859-1'), mb_strrpos("\x82\xA0\x82\xA0A", "\x82\xA0", -2, 'SJIS'), mb_strrpos("\x00A\x00X\x00A", "\x00A", -2, 'UTF-16BE'));
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// int(0)
 /// ```
 #[php_function]
 fn mb_strrpos(

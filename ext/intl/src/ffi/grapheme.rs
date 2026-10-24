@@ -36,6 +36,7 @@ mod sys {
         fn ubrk_first(bi: *mut UBreakIterator) -> i32;
         fn ubrk_last(bi: *mut UBreakIterator) -> i32;
         fn ubrk_current(bi: *const UBreakIterator) -> i32;
+        fn ubrk_following(bi: *mut UBreakIterator, offset: i32) -> i32;
         fn ubrk_isBoundary(bi: *mut UBreakIterator, offset: i32) -> i8;
         fn utext_openUTF8(ut: *mut UText, s: *const c_char, len: i64, status: &mut Code) -> *mut UText;
         fn utext_close(ut: *mut UText) -> *mut UText;
@@ -133,6 +134,12 @@ impl<'t> Breaks<'t> {
     pub(crate) fn current(&self) -> i32 {
         // SAFETY: as `next`.
         unsafe { sys::ubrk_current(self.bi) }
+    }
+
+    /// `ubrk_following`: the first boundary after `offset`.
+    pub(crate) fn following(&mut self, offset: i32) -> i32 {
+        // SAFETY: as `next`; ICU pins an offset outside the text.
+        unsafe { sys::ubrk_following(self.bi, offset) }
     }
 
     /// `ubrk_isBoundary`.

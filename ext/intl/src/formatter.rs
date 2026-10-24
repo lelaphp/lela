@@ -355,6 +355,16 @@ fn offset(req: &mut Request, given: &Ref<Untyped<Value>>) -> Result<Option<i32>,
     }
 }
 
+/// `intl_convert_utf8_offset_to_utf16` of a given offset, which ICU
+/// reads in code units, refused with "Invalid UTF-8 offset", and
+/// `false`, where it falls inside a character (GH-23094).
+fn utf16_position(req: &mut Request, object: PhpObject, text: &[u8], position: i32) -> Answer<i32> {
+    match ffi::utf8_offset_to_utf16(text, position) {
+        Ok(units) => Ok(Some(units)),
+        Err(code) => check(req, object, code, "Invalid UTF-8 offset").map(|_| None),
+    }
+}
+
 /// `numfmt_parse`.
 fn parse(
     req: &mut Request,
@@ -364,7 +374,7 @@ fn parse(
     at_offset: &Ref<Untyped<Value>>,
     at: u32,
 ) -> Answer<Union<i64, f64>> {
-    let mut position = offset(req, at_offset)?;
+    let position = offset(req, at_offset)?;
     with(req, object, |req, unum| {
         let Some(units) = utf16(
             req,
@@ -374,6 +384,15 @@ fn parse(
         )?
         else {
             return Ok(None);
+        };
+        let mut position = match position {
+            Some(given) => {
+                let Some(units) = utf16_position(req, object, text.as_bytes(), given)? else {
+                    return Ok(None);
+                };
+                Some(units)
+            }
+            None => None,
         };
         let mut status = Code::ZERO;
         let parsed = match kind {
@@ -389,6 +408,7 @@ fn parse(
             }
         };
         if let Some(p) = position {
+            let p = ffi::utf16_offset_to_utf8(&units, p);
             at_offset.set(req, Untyped(Value::int(i64::from(p))))?;
         }
         check(req, object, status, "Number parsing failed")?.map_or(Ok(None), |()| {
@@ -443,11 +463,20 @@ fn parse_currency(
         else {
             return Ok(None);
         };
-        let mut position = offset(req, at_offset)?;
+        let mut position = match offset(req, at_offset)? {
+            Some(given) => {
+                let Some(units) = utf16_position(req, object, text.as_bytes(), given)? else {
+                    return Ok(None);
+                };
+                Some(units)
+            }
+            None => None,
+        };
         let mut code = [0u16; 5];
         let mut status = Code::ZERO;
         let number = unum.parse_currency(&units, position.as_mut(), &mut code, &mut status);
         if let Some(p) = position {
+            let p = ffi::utf16_offset_to_utf8(&units, p);
             at_offset.set(req, Untyped(Value::int(i64::from(p))))?;
         }
         if check(req, object, status, "Number parsing failed")?.is_none() {
@@ -972,6 +1001,31 @@ fn numfmt_format(
 /// int(12)
 /// bool(false)
 /// string(62) "NumberFormatter::parse(): Number parsing failed: U_PARSE_ERROR"
+/// ```
+///
+/// The offset is in bytes of the UTF-8 text, read into ICU's code units
+/// and written back from them; one inside a character is refused and
+/// left as given (GH-23094). `parseCurrency` reads it the same way.
+///
+/// ```php
+/// $f = new NumberFormatter('en_US', NumberFormatter::DECIMAL);
+/// $at = 4;
+/// var_dump($f->parse("😀123", NumberFormatter::TYPE_INT32, $at), $at);
+/// $at = 1;
+/// var_dump($f->parse("é123", NumberFormatter::TYPE_INT32, $at), $at, $f->getErrorMessage());
+/// $f = new NumberFormatter('en_US', NumberFormatter::CURRENCY);
+/// $at = 4;
+/// var_dump($f->parseCurrency("😀$1.5", $currency, $at), $currency, $at);
+/// ```
+/// ```expect
+/// int(123)
+/// int(7)
+/// bool(false)
+/// int(1)
+/// string(68) "NumberFormatter::parse(): Invalid UTF-8 offset: U_INVALID_CHAR_FOUND"
+/// float(1.5)
+/// string(3) "USD"
+/// int(8)
 /// ```
 #[php_function(before_args = error::reset)]
 fn numfmt_parse(
