@@ -178,9 +178,23 @@ struct Find<'a> {
     locale: &'a [u8],
 }
 
-/// `grapheme_strpos_utf16`: the grapheme the match starts at and its
-/// code unit, `None` where there is none or an error was set.
-fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>, Thrown> {
+/// Where `grapheme_strpos_utf16` found the needle: the graphemes before
+/// it, what it answers, and the code points before it, its `puchar_pos`,
+/// which `strstr_common_handler` steps the UTF-8 haystack by (none for
+/// an empty needle, whose `-1` steps nothing).
+#[derive(Clone, Copy)]
+struct Found {
+    graphemes: i64,
+    chars: usize,
+}
+
+/// `grapheme_strpos_utf16`: where the match starts, `None` where there
+/// is none or an error was set. An empty haystack holds no needle that
+/// is not empty, and nothing is converted for it.
+fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<Found>, Thrown> {
+    if find.haystack.is_empty() && !find.needle.is_empty() {
+        return Ok(None);
+    }
     let Some(haystack) = utf16(
         req,
         find.haystack,
@@ -202,12 +216,16 @@ fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>
         if at == -1 {
             return Err(offset_error(req));
         }
-        let at = if find.last && offset >= 0 {
-            ffi::length(haystack.len()).unwrap_or(i32::MAX)
+        let end = if find.last && offset >= 0 {
+            haystack.len()
         } else {
-            at
+            usize::try_from(at).unwrap_or(0)
         };
-        return Ok(Some((i64::from(at), -1)));
+        let graphemes = count_graphemes(haystack.get(..end).unwrap_or(&haystack));
+        return Ok(Some(Found {
+            graphemes,
+            chars: 0,
+        }));
     }
     let locale = ffi::c_string(find.locale);
     let mut search = match Search::open(&needle, &haystack, &locale, breaks) {
@@ -237,7 +255,8 @@ fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>
             .filter(|&p| p >= at)
             .unwrap_or(DONE)
     } else {
-        // php searches forwards, backwards being broken.
+        // php searches forwards, backwards being broken, each search
+        // from the boundary after the last match, so matches overlap.
         let mut previous = DONE;
         loop {
             let p = search.next(&mut status);
@@ -245,6 +264,13 @@ fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>
                 break previous;
             }
             previous = p;
+            let next = search.breaks().following(p);
+            if next == DONE {
+                break previous;
+            }
+            if let Err(code) = search.set_offset(next) {
+                return fail(req, code, "Invalid search offset").map(|()| None);
+            }
         }
     };
     if status.is_failure() {
@@ -256,12 +282,15 @@ fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>
     let prefix = haystack
         .get(..usize::try_from(found).unwrap_or(0))
         .unwrap_or(&[]);
-    Ok(Some((count_graphemes(prefix), found)))
+    Ok(Some(Found {
+        graphemes: count_graphemes(prefix),
+        chars: char::decode_utf16(prefix.iter().copied()).count(),
+    }))
 }
 
 /// A position answered, `false` for none.
-fn position(found: Option<(i64, i32)>) -> OrFalse<i64> {
-    found.map_or(OrFalse::False, |(at, _)| OrFalse::Value(at))
+fn position(found: Option<Found>) -> OrFalse<i64> {
+    found.map_or(OrFalse::False, |found| OrFalse::Value(found.graphemes))
 }
 
 /// `grapheme_strlen(string $string): int|false|null`.
@@ -306,6 +335,23 @@ fn grapheme_strlen(req: &mut Request, string: PhpString) -> Result<Option<OrFals
 /// int(2)
 /// grapheme_strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// ```
+///
+/// An ASCII haystack that misses a needle by bytes is searched again,
+/// canonically, where the needle is not ASCII, so `K` matches the Kelvin
+/// sign; an empty haystack holds no needle, with no error set; and an
+/// empty needle answers the grapheme its offset names, not the code unit
+/// (php 8.5.12).
+///
+/// ```php
+/// var_dump(grapheme_strpos("aKbK", "\u{212A}", 2), grapheme_strpos("abc", "\u{E9}"), grapheme_strpos("", "\u{E9}"), intl_get_error_code(), grapheme_strpos("😀x", "", 1));
+/// ```
+/// ```expect
+/// int(3)
+/// bool(false)
+/// bool(false)
+/// int(0)
+/// int(1)
+/// ```
 #[php_function]
 fn grapheme_strpos(
     req: &mut Request,
@@ -321,9 +367,13 @@ fn grapheme_strpos(
     let offset = i32::try_from(offset).unwrap_or(0);
     if offset >= 0 && ascii(hay, hay.len()) {
         let from = usize::try_from(offset).unwrap_or(0);
-        return Ok(
-            memnstr(hay, nee, from).map_or(OrFalse::False, |at| OrFalse::Value(len_of(&hay[..at])))
-        );
+        if let Some(at) = memnstr(hay, nee, from) {
+            return Ok(OrFalse::Value(len_of(&hay[..at])));
+        }
+        // A needle that is not ASCII can still match canonically.
+        if ascii(nee, nee.len()) {
+            return Ok(OrFalse::False);
+        }
     }
     let find = Find {
         haystack: hay,
@@ -396,6 +446,20 @@ fn grapheme_stripos(
 /// int(3)
 /// int(0)
 /// int(3)
+/// ```
+///
+/// A negative offset searches forwards from each match's next boundary,
+/// so overlapping matches are found; an empty needle answers a count of
+/// graphemes (php 8.5.12).
+///
+/// ```php
+/// var_dump(grapheme_strrpos("\u{E9}\u{E9}\u{E9}", "\u{E9}\u{E9}", -1), grapheme_strripos("\u{C9}\u{E9}\u{C9}", "\u{E9}\u{E9}", -1), grapheme_strrpos("😀x", ""), grapheme_strrpos("😀x", "", -1));
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// int(2)
+/// int(1)
 /// ```
 #[php_function]
 fn grapheme_strrpos(
@@ -600,6 +664,18 @@ fn grapheme_substr(
 /// string(2) "@x"
 /// bool(false)
 /// ```
+///
+/// A haystack and needle both ASCII are searched by bytes; otherwise
+/// the search is canonical, so `e` and a combining acute match `é`, and
+/// the cut steps the UTF-8 haystack by the code points before the match,
+/// a supplementary one counted once (php 8.5.12).
+///
+/// ```php
+/// echo json_encode([grapheme_strstr("pe\u{301}x", "\u{E9}"), grapheme_strstr("pe\u{301}x", "\u{E9}", true), grapheme_strstr("😀abc", "a"), grapheme_stristr("😀e\u{301}abc", "A", true)]), "\n";
+/// ```
+/// ```expect
+/// ["e\u0301x","p","abc","\ud83d\ude00e\u0301"]
+/// ```
 #[php_function]
 #[allow(non_snake_case)]
 fn grapheme_strstr(
@@ -644,13 +720,11 @@ fn strstr(
     locale: Path,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (hay, nee) = (haystack.as_bytes(), needle.as_bytes());
-    if !ignore_case {
+    if !ignore_case && ascii(hay, hay.len()) && ascii(nee, nee.len()) {
         let Some(found) = memnstr(hay, nee, 0) else {
             return Ok(OrFalse::False);
         };
-        if ascii(hay, hay.len()) {
-            return bytes(req, if before { &hay[..found] } else { &hay[found..] });
-        }
+        return bytes(req, if before { &hay[..found] } else { &hay[found..] });
     }
     let find = Find {
         haystack: hay,
@@ -660,12 +734,12 @@ fn strstr(
         last: false,
         locale: locale.0.as_bytes(),
     };
-    let Some((_, unit)) = strpos_utf16(req, &find)? else {
+    let Some(found) = strpos_utf16(req, &find)? else {
         return Ok(OrFalse::False);
     };
-    // php steps one code point per UTF-16 unit the match starts at.
+    // `U8_FWD_N`: one code point at a time, the match's `puchar_pos`.
     let mut at = 0;
-    for _ in 0..unit.max(0) {
+    for _ in 0..found.chars {
         if at >= hay.len() {
             break;
         }
@@ -729,9 +803,9 @@ fn grapheme_str_split(
                 chunks.push(slice(start, pos - current));
                 end = start + pos - current;
                 i = 0;
+                start += pos - current;
+                current = pos;
             }
-            start += pos - current;
-            current = pos;
         } else {
             i += 1;
         }

@@ -174,7 +174,7 @@ impl Heap {
     /// var_dump(memory_get_usage());
     /// ```
     /// ```expect exit=0
-    /// int(464552)
+    /// int(464680)
     /// ```
     ///
     /// A name a class holds costs nothing to read, and no table is laid

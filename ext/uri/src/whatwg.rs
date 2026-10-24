@@ -706,6 +706,51 @@ impl Url {
     /// string(23) "https://example.com/a/c"
     /// ```
     ///
+    /// The parse as php-8.5.12's lexbor makes it (its patches 0014,
+    /// 0015, 0016, 0019 and 0020): an `@` before the last one is the
+    /// userinfo's, percent-encoded in the username as in the password; a
+    /// `..` segment ends at `#` and `?`; an opaque path's trailing space
+    /// before a query or fragment is `%20`; a file URL's replacement
+    /// drive path stays hierarchical, so `withPath()` replaces it; and a
+    /// host whose code points outgrow IDNA's inline buffer keeps those it
+    /// had read.
+    ///
+    /// ```php
+    /// use Uri\WhatWg\Url as W;
+    /// $u = new W("http://user@name:pass@word@localhost/");
+    /// var_dump($u->getUsername(), $u->getPassword(), $u->toAsciiString());
+    /// foreach (["https://example.com/..#frag", "https://example.com/..?q=1", "https://example.com/%?q", "data:x ?q", "foo:a b #c"] as $text) {
+    ///     $u = new W($text);
+    ///     var_dump($u->getPath(), $u->getQuery(), $u->getFragment());
+    /// }
+    /// $u = W::parse("c|/x", new W("file:///d:/a/b"));
+    /// var_dump($u->getPath(), $u->withPath("/zz")->getPath());
+    /// var_dump(strlen(W::parse("https://" . str_repeat("é", 5000) . ".com/")->getAsciiHost()));
+    /// ```
+    /// ```expect
+    /// string(11) "user%40name"
+    /// string(11) "pass%40word"
+    /// string(41) "http://user%40name:pass%40word@localhost/"
+    /// string(1) "/"
+    /// NULL
+    /// string(4) "frag"
+    /// string(1) "/"
+    /// string(3) "q=1"
+    /// NULL
+    /// string(2) "/%"
+    /// string(1) "q"
+    /// NULL
+    /// string(4) "x%20"
+    /// string(1) "q"
+    /// NULL
+    /// string(6) "a b%20"
+    /// NULL
+    /// string(1) "c"
+    /// string(5) "/c:/x"
+    /// string(3) "/zz"
+    /// int(5010)
+    /// ```
+    ///
     /// A host's IDNA processing as pinned lexbor makes it: mapped,
     /// NFC-normalized, `ß` kept rather than mapped to `ss`, a joiner and a
     /// right-to-left letter let through with no error, and a host that is

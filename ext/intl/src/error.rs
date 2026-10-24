@@ -319,6 +319,16 @@ pub(crate) fn errors_reset<P: Carrier>(req: &mut Request, object: PhpObject) {
     reset(req);
 }
 
+/// `intl_errors_reset(obj)` over the method's receiver, for a native that
+/// resets both before its arguments are read (`before_args`), as
+/// `IntlListFormatter::__construct` does.
+pub(crate) fn errors_reset_this<P: Carrier>(req: &mut Request) {
+    match req.frames().this() {
+        Some(object) => errors_reset::<P>(req, object),
+        None => reset(req),
+    }
+}
+
 /// `intl_errors_set_code(obj, code)`: the object's and the request's.
 pub(crate) fn errors_set_code<P: Carrier>(req: &mut Request, object: PhpObject, code: Code) {
     if let Some(error) = carried::<P>(req, object) {
