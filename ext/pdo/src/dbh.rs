@@ -126,6 +126,11 @@ pub(crate) struct DbhState {
     /// every `PDO` asking its key shares in place of its own, as
     /// `pdo_obj->inner = pdbh` shares it.
     shares: Option<usize>,
+    /// Of a persistent `pdo_dbh_t` the request holds, the `PDO` objects
+    /// sharing it: php's `refcount` less the one `EG(persistent_list)`
+    /// keeps, which `pdo_dbh_free_storage` reads to roll back only as the
+    /// last of them goes (GH-23962).
+    holders: usize,
     /// `dbh->query_stmt`: the statement a failed `query()` left, whose
     /// error state `errorCode()` and `errorInfo()` read.
     query_stmt: Option<Owner<PhpObject>>,
@@ -165,13 +170,19 @@ pub(crate) fn state(req: &mut Request, object: PhpObject) -> Option<&mut DbhStat
 /// An object's payload switched over to the persistent `pdo_dbh_t` the
 /// request holds at `at`, `pdo_obj->inner = pdbh`: what it held before
 /// handed back.
+/// The persistent one counts the object among its holders,
+/// `pdbh->refcount++`.
 fn share(req: &mut Request, object: PhpObject, at: usize) -> Option<Dbh> {
     let payload = object.native_mut::<Dbh>(req)?;
     let shared = DbhState {
         shares: Some(at),
         ..DbhState::default()
     };
-    Some(std::mem::replace(payload, Box::new(shared)))
+    let own = std::mem::replace(payload, Box::new(shared));
+    if let Some(held) = req.state::<Persistent>().lent.get_mut(at) {
+        held.holders += 1;
+    }
+    Some(own)
 }
 
 /// `EG(persistent_list)` as far as PDO reaches it (design §4.10): the
@@ -294,20 +305,42 @@ impl ObjectHandlers for Handlers {
     /// `pdo_dbh_free_storage`: a transaction still open rolled back,
     /// `zend_object_std_dtor`, and then `dbh_free`: the failed statement
     /// given up, the connection closed and the constructor arguments
-    /// released.
+    /// released. Over a persistent connection the rollback waits for the
+    /// last object sharing it (GH-23962):
+    ///
+    /// ```php
+    /// $a = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// $b = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// $b->beginTransaction();
+    /// unset($a);
+    /// var_dump($b->inTransaction(), $b->commit());
+    /// $b->beginTransaction();
+    /// $b->exec('CREATE TABLE t (a)');
+    /// unset($b);
+    /// $c = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// var_dump($c->inTransaction(), $c->query("SELECT count(*) FROM sqlite_master WHERE name = 't'")->fetchColumn());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// int(0)
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         if object
             .native::<Dbh>(req)
             .is_some_and(|d| d.shares.is_some())
         {
-            // Over a persistent `pdo_dbh_t`: the transaction rolled back,
-            // `persistent_shutdown`, and `dbh_free`'s `--dbh->refcount`,
-            // which leaves the connection held.
-            let Some(tracked) = dbh_ref(req, object, |d| d.in_txn) else {
+            // Over a persistent `pdo_dbh_t`: the transaction rolled back
+            // where no other object shares the connection (php 8.5.12's
+            // `refcount <= 2`, GH-23962), `persistent_shutdown`, and
+            // `dbh_free`'s `--dbh->refcount`, which leaves the connection
+            // held.
+            let Some((tracked, last)) = dbh_ref(req, object, |d| (d.in_txn, d.holders <= 1)) else {
                 return;
             };
             let rolled = with_connection(req, object, |req, conn| {
-                let rolled = roll_back_open(req, conn, tracked);
+                let rolled = last && roll_back_open(req, conn, tracked);
                 conn.persistent_shutdown(req);
                 Ok(rolled)
             });
@@ -315,6 +348,7 @@ impl ObjectHandlers for Handlers {
                 if rolled.unwrap_or(false) {
                     d.in_txn = false;
                 }
+                d.holders = d.holders.saturating_sub(1);
                 d.query_stmt.take()
             });
             Std.free_obj(req, object);
@@ -810,12 +844,14 @@ fn alive(req: &mut Request, conn: Conn) -> (bool, Conn) {
 /// opened for `object` held by the request under `key`, in place of the
 /// dead one at `dead`, and the object switched over to it.
 fn hold(req: &mut Request, object: PhpObject, key: Vec<u8>, dead: Option<usize>) {
-    let Some(dbh) = share(req, object, usize::MAX) else {
+    let Some(mut dbh) = share(req, object, usize::MAX) else {
         return;
     };
     let lent = &mut req.state::<Persistent>().lent;
     let at = match dead.and_then(|at| lent.get_mut(at).map(|held| (at, held))) {
         Some((at, held)) => {
+            // The objects sharing the dead one share this one now.
+            dbh.holders = held.holders;
             let mut old = std::mem::replace(held, dbh);
             persistent_shutdown(req, &mut old);
             // `zend_list_close` of the dead one: its destructor closes
