@@ -517,6 +517,9 @@ pub(crate) struct Emit<'a> {
     /// as its name or its key, each beside where that stands, handed to
     /// the home once the unit is whole ([`crate::Parts::intern`]).
     own_names: Vec<(crate::Named, Str)>,
+    /// The file's name, `CG(compiled_filename)`, made the first time
+    /// `__FILE__` asked, which the unit owns as `op_array->filename`.
+    file_own: Option<Str>,
     /// `this_guaranteed_exists`: whether the op array being compiled is
     /// an instance method's, whose `$this` is the frame's own and needs
     /// no `FETCH_THIS` as a receiver.
@@ -1307,6 +1310,9 @@ enum Folded {
     /// The name of the function the constant stands in, whose own
     /// string php copies (`ZVAL_STR_COPY`, [`Emit::function_name_made`]).
     FunctionName,
+    /// `CG(compiled_filename)`, whose string php copies
+    /// ([`Emit::file_name_made`]).
+    FileName,
     /// The name of the class the constant stands in, `ce->name`
     /// ([`Emit::class_name_made`]).
     ClassName,
@@ -1617,6 +1623,7 @@ impl<'a> Emit<'a> {
             active_parent: None,
             active_function: None,
             own_names: Vec::new(),
+            file_own: None,
             this_in_scope: false,
             return_type: None,
             returns_by_ref: false,
@@ -2334,6 +2341,55 @@ impl<'a> Emit<'a> {
             function.own = own.as_str();
         }
         made.map_or_else(|| self.string_made(&name, false), Ok)
+    }
+
+    /// `CG(compiled_filename)` as the claim of the one who asked: one
+    /// more owner of the file's name, `zend_set_compiled_filename`'s
+    /// `zend_new_interned_string`, made the first time `__FILE__` asked
+    /// and owned by the unit, so each copy is that one string
+    /// (`ZVAL_STR_COPY`), an `eval`'s and an uncached include's alike (the
+    /// program under the recipe's `TMPDIR`, read after the heap is
+    /// churned):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3316-file-name.inc', <<<'PHP'
+    /// <?php
+    /// ini_set('opcache.file_update_protection', '2');
+    /// function inc($name, $src) { $f = sys_get_temp_dir() . "/w3316-$name.inc"; file_put_contents($f, $src); $m = memory_get_usage(); include $f; $d = memory_get_usage() - $m; unlink($f); return $d; }
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// inc('w0', '<?php class W {} $q0 = 1;'); m('$q1 = 1;');
+    /// echo inc('fn', '<?php function fa2() { return __FILE__; }'), "\n";
+    /// echo inc('main', '<?php $GLOBALS["ff"] = __FILE__;'), "\n";
+    /// echo inc('class', '<?php class Ca5 { const F = __FILE__; function m() { return __FILE__; } }'), "\n";
+    /// echo m('function fa3() { return __FILE__ . __FILE__; }'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo strlen(fa2()), " ", strlen($ff), " ", strlen(Ca5::F), " ", strlen((new Ca5)->m()), " ", strlen(fa3()) > 0 ? "y" : "n", "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 224
+    /// 608
+    /// 848
+    /// 448
+    /// 54 56 57 57 y
+    /// ```
+    fn file_name_made(&mut self) -> Result<Made, CompileError> {
+        if let Some(made) =
+            (self.file_own).and_then(|own| self.strings.hold_made(Zval::string(own)))
+        {
+            return Ok(made);
+        }
+        let filename = self.filename;
+        let own = self.string(filename)?;
+        let made = self.strings.hold_made(own);
+        if let Some(own) = own.as_str() {
+            self.file_own = Some(own);
+            self.own_names.push((crate::Named::File, own));
+        }
+        made.map_or_else(|| self.string_made(filename, false), Ok)
     }
 
     /// [`Self::string`] as a claim the one who asked holds alone
@@ -12441,6 +12497,7 @@ impl<'a> Emit<'a> {
             Folded::Line(n) => Ok(Zval::long(n)),
             Folded::Text(text) => self.string(&text),
             Folded::FunctionName => self.function_name_made().map(|made| made.value()),
+            Folded::FileName => self.file_name_made().map(|made| made.value()),
             Folded::ClassName => self.class_name_made().map(|made| made.value()),
             Folded::UsingClass => {
                 Err(self.unread("a `__CLASS__` in a trait's constant expression"))
@@ -19444,7 +19501,7 @@ impl<'a> Emit<'a> {
     fn magic_const(&self, which: Magic, line: u32) -> Folded {
         let text = match which {
             Magic::Line => return Folded::Line(i64::from(line)),
-            Magic::File => self.filename.to_vec(),
+            Magic::File => return Folded::FileName,
             Magic::Dir => {
                 let dirname = dirname(self.filename);
                 if dirname == b"." {
@@ -21627,6 +21684,7 @@ mod tests {
             active_parent: None,
             active_function: None,
             own_names: Vec::new(),
+            file_own: None,
             this_in_scope: false,
             return_type: None,
             returns_by_ref: false,

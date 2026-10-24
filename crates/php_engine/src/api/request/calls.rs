@@ -861,10 +861,7 @@ impl Request {
     /// numbered past the natives and the native methods (design §5.14).
     #[inline]
     pub(crate) fn user_function(&self, function: Function) -> Option<&UserFunction> {
-        match function.local_at() {
-            Some(at) => self.user_functions.get(at),
-            None => self.arena.function(function),
-        }
+        user_in(&self.user_functions, &self.arena, function)
     }
 
     /// `fbc->common.fn_flags & (ZEND_ACC_DEPRECATED | ZEND_ACC_NODISCARD)`:
@@ -1399,5 +1396,19 @@ impl Supplier {
             #[cfg(debug_assertions)]
             origin: extension.origin(),
         }
+    }
+}
+
+/// [`Request::user_function`] over the two tables it reads, for a caller
+/// that holds the request's other fields at once.
+#[inline]
+pub(super) fn user_in<'a>(
+    rows: &'a super::PinnedRows<UserFunction>,
+    arena: &'a crate::arena::Arena,
+    function: Function,
+) -> Option<&'a UserFunction> {
+    match function.local_at() {
+        Some(at) => rows.get(at),
+        None => arena.function(function),
     }
 }

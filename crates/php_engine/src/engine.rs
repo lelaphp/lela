@@ -1852,11 +1852,11 @@ impl Shared {
                 let refused = CompileRefused::published(error, |unit| {
                     let unit = req.take_unit(unit);
                     req.hold_compiled(&unit);
-                    // An `eval`'s names, made as php's compile made them;
-                    // the memory limit refusing them ends the request.
-                    if matches!(kind, SourceKind::Eval(_)) {
-                        req.hold_unit_names(&unit).ok();
-                    }
+                    // Its names, made as php's compile made them, an
+                    // `eval`'s and a file's alike, as `note_compiled`
+                    // makes a whole unit's; the memory limit refusing them
+                    // ends the request.
+                    req.hold_unit_names(&unit, kind).ok();
                     unit
                 });
                 if refused.declared.is_none() {
@@ -6169,8 +6169,9 @@ struct Laid<'a> {
 /// names it and whether or not the line that names it is reached.
 pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: SourceKind) -> bool {
     // A request-only unit's names, which php's compile made as strings
-    // of the request; the memory limit refusing them ends the request.
-    if matches!(kind, SourceKind::Eval(_)) && req.hold_unit_names(unit).is_err() {
+    // of the request, an `eval`'s and an uncached file's alike; the
+    // memory limit refusing them ends the request.
+    if req.hold_unit_names(unit, kind).is_err() {
         return false;
     }
     // And the op arrays and classes it declares, as php's compile

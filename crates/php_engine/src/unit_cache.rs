@@ -766,6 +766,11 @@ pub(crate) enum Filed {
     /// Compiled and held nowhere, by `accelerator_orig_compile_file` as
     /// php without opcache compiles, whose classes bind early in place.
     Compiled,
+    /// Neither read nor compiled: left to the asker's own compile,
+    /// `accelerator_orig_compile_file`, a unit of its alone, as
+    /// `persistent_compile_file` leaves a file where no room is left and
+    /// `opcache_compile_file` one it does not keep.
+    Own,
 }
 
 /// What [`UnitCache::hold`] did with a compile: held it, or found the
@@ -985,12 +990,14 @@ impl UnitCache {
     /// path meanwhile, filed under
     /// `written` too where given, and kept in the file cache. A file
     /// whose stamp the validation or the `protection` needs and the
-    /// system does not give, and one written within `protection` seconds
-    /// of `now`, is compiled and held and kept nowhere, as php behaves
-    /// without the cache, and so is a unit [`named_by_request`]; any miss
-    /// while a restart is pending is kept in
-    /// the file cache alone. [`Levels::Disk`] asks and keeps in the file
-    /// cache alone and counts nothing. Nothing where the file cannot be
+    /// system does not give, one written within `protection` seconds of
+    /// `now`, and a miss while a restart is pending or the memory is
+    /// exhausted with no file cache, is left to the caller's own compile
+    /// ([`Filed::Own`]), as php compiles it without the cache; a unit
+    /// [`named_by_request`] is held and kept nowhere; any other miss
+    /// while a restart is pending is kept in the file cache alone.
+    /// [`Levels::Disk`] asks and keeps in the file cache alone and counts
+    /// nothing. Nothing where the file cannot be
     /// read. What is `compile`d or `decode`d takes no map-pointer offset
     /// until it is held, `share`d as it is; one held nowhere is answered
     /// [`Compiled::Alone`], its caller's own (GH-8646), and so is one
@@ -1073,19 +1080,30 @@ impl UnitCache {
             files.hit(&held, validation, now);
             return answered_by(&held, Filed::Hit);
         }
-        if memory && validation != Validation::EveryHit {
+        let accelerated = memory && validation != Validation::EveryHit;
+        if accelerated {
             files.misses.fetch_add(1, Ordering::Relaxed);
+        }
+        // `accelerator_orig_compile_file`, the request's own compile, where
+        // there is no room and no file cache to keep it in, and for a file
+        // with no stamp or one written within `protection` seconds of
+        // `now`, which `opcache_compile_file` decides before it compiles.
+        let short = accelerated
+            && disk.is_none()
+            && (files.restart_pending() || files.exhausted.load(Ordering::Relaxed));
+        let unheld = stamped
+            && observed.is_none_or(|stamp| {
+                protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
+            });
+        if short || unheld {
+            return (None, Filed::Own, None);
         }
         let Some(source) = source_or_read(handed, path) else {
             return (None, Filed::Unheld, None);
         };
         let Fresh { unit, answers } = compile(caller, &source);
         let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
-        let unheld = stamped
-            && observed.is_none_or(|stamp| {
-                protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
-            });
-        if unheld || answers == Answers::Asker || named_by_request(validation, &unit) {
+        if answers == Answers::Asker || named_by_request(validation, &unit) {
             return alone(unit, Filed::Compiled);
         }
         // php persists no refusal, so its corrupted copy stays filed.

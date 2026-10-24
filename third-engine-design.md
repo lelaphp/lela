@@ -696,18 +696,18 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 475 |  |
+| heap | heap.lock | 477 |  |
 | process | process.lock | 40 |  |
 | unit | unit.lock | 125 |  |
 | link | link.lock | 62 |  |
 | ops | ops.lock | 209 |  |
 | api | api.lock | 1500 | 1500 |
 | sapi | sapi.lock | 58 |  |
-| tier | tier.lock | 181 |  |
+| tier | tier.lock | 182 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 427 |  |
 
-<!-- /computed in=5f4176b61432a14c4076eb9e9778bc431d3c99bbb0efa7072b95533c35352571 out=44908b07db38423e7218aa9512c2fb191e4dda40960a3a89761e0b87030710ed -->
+<!-- /computed in=2d79d5879837c293ad859645df04718dc327212f98e6440bb4ef21e1e742258b out=ffd16af2e4a88342a5594a306965e699cd79c985b85ebc1565e970bde26aa1e8 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 
@@ -943,9 +943,9 @@ A `loop { match handler }` over the dense `u16` each opline was resolved to at p
 
 <!-- computed exec cmd=scripts/specialised-ops.sh inputs=ops.toml,scripts/specialised-ops.sh name=specialised | do not edit; run computed -->
 
-`ADD`, `SUB`, `MUL`, `CONCAT`, `IS_IDENTICAL`, `IS_EQUAL`, `IS_SMALLER`, `ASSIGN`, `ASSIGN_DIM`, `ASSIGN_OBJ`, `ASSIGN_OP`, `ASSIGN_DIM_OP`, `PRE_INC`, `PRE_DEC`, `JMPZ`, `JMPNZ`, `FAST_CONCAT`, `ROPE_INIT`, `ROPE_ADD`, `ROPE_END`, `INIT_FCALL`, `RETURN`, `SEND_VAL`, `FE_FETCH_R`, `FETCH_DIM_R`, `FETCH_OBJ_R`, `FETCH_DIM_W`, `FETCH_OBJ_W`, `FETCH_DIM_RW`, `FETCH_DIM_FUNC_ARG`, `ISSET_ISEMPTY_DIM_OBJ`, `SEND_VAR`, `DO_ICALL`, `DO_UCALL`, `COUNT`
+`ADD`, `SUB`, `MUL`, `CONCAT`, `IS_IDENTICAL`, `IS_EQUAL`, `IS_SMALLER`, `ASSIGN`, `ASSIGN_DIM`, `ASSIGN_OBJ`, `ASSIGN_OP`, `ASSIGN_DIM_OP`, `PRE_INC`, `PRE_DEC`, `JMPZ`, `JMPNZ`, `FAST_CONCAT`, `ROPE_INIT`, `ROPE_ADD`, `ROPE_END`, `INIT_FCALL`, `RETURN`, `SEND_VAL`, `FE_FETCH_R`, `FETCH_DIM_R`, `FETCH_OBJ_R`, `FETCH_DIM_W`, `FETCH_OBJ_W`, `FETCH_DIM_RW`, `FETCH_DIM_FUNC_ARG`, `ISSET_ISEMPTY_DIM_OBJ`, `SEND_VAL_EX`, `SEND_VAR`, `DO_ICALL`, `DO_UCALL`, `COUNT`
 
-<!-- /computed in=bf0516b8c4a78363e936726b0aa66f3d3968231003d851ada60d8f311d0e5798 out=d90f8536d5d7caa8465435e60c1f734fc31c90f745bd0c0a737d13bf5053745c -->
+<!-- /computed in=66416c68620d1ae4230d55de449a3dd11db20f220be5221f0bf536e54807624e out=fc76300fe8020b1191135e206dec1b366c2b081b904a762f9a3c30d7e1c35faf -->
 
 Which opcodes are specialised is `ops.toml`'s `specialise`, and the list above is rendered from it. An opcode php's `zend_vm_gen.php` specialises on its operand kinds joins in the commit that measures, by instructions retired on a kernel under the protocol, its run-time operand decoding spending what php's specialised handler does not; that commit carries the measurement, and no ruling is asked for (#2997).
 

@@ -1776,10 +1776,14 @@ fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -
         return init_native(req, frame, function, op, at);
     };
     let room = user.shape.room(op.extended_value);
-    let mut header = exec::Header::call(function, op.extended_value);
-    header.callee = user.callee_at();
-    header.info.join(user.shape.sent);
-    Some(match req.push_room(room as usize, header) {
+    let (callee, sent, count) = (user.callee_at(), user.shape.sent, op.extended_value);
+    let header = move || {
+        let mut header = exec::Header::call(function, count);
+        header.callee = callee;
+        header.info.join(sent);
+        header
+    };
+    Some(match req.push_laid(room as usize, header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
             req.vm_mut().stand(frame, at);
@@ -1805,7 +1809,7 @@ fn init_native(
     let mut header = exec::Header::call(function, op.extended_value);
     header.callee = req.shared.native_callee(function)?;
     let room = req.native_room(op.extended_value) as usize;
-    Some(match req.push_native(room, header) {
+    Some(match req.push_laid(room, || header) {
         Ok(_) => Ok(advanced()),
         Err(fatal) => {
             req.vm_mut().stand(frame, at);
@@ -2364,17 +2368,27 @@ fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
 /// C::r(): Argument #1 ($x) could not be passed by reference
 /// ```
 #[inline(always)] // design §5.8: the loop dispatches into its body, as php's hybrid VM does
-pub(crate) fn send_val_ex<T: Tier>(
+pub(crate) fn send_val_ex<T: Tier, A: Operand + Default>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_send(req, frame, code, op, ByKind(op.op1_type), Sending::Declared) {
+    if let Some(edge) = inline_send(req, frame, code, op, A::default(), Sending::Declared) {
         return edge;
     }
     req.vm_mut().stand(frame, at);
+    sent_declared(req, frame, code, op)
+}
+
+/// `SEND_VAL_EX` past its inline path: the slot [`reserve_arg`] gives
+/// the argument, by number or by name, the `Error` for a parameter that
+/// takes its argument by reference, and the operand placed
+/// ([`send`]). A call of its own, as [`sent`] is for `SEND_VAL`, so the
+/// loop holds one copy of it for both operand kinds.
+#[inline(never)]
+fn sent_declared(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let reserved = match reserve_arg(req, frame, code, op) {
         Ok(reserved) => reserved,
         Err(edge) => return edge,
@@ -3575,10 +3589,12 @@ pub(crate) fn do_fcall_by_name<T: Tier>(
     frame: FrameRef,
     _: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_enter(req, frame, op, true) {
+    if let Some(edge) = inline_enter(req, (frame, at), op, true) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     do_call(req, frame, op, "ZEND_DO_FCALL_BY_NAME")
 }
 
@@ -3607,10 +3623,12 @@ pub(crate) fn do_fcall<T: Tier>(
     frame: FrameRef,
     _: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_enter(req, frame, op, true) {
+    if let Some(edge) = inline_enter(req, (frame, at), op, true) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     do_call(req, frame, op, "ZEND_DO_FCALL")
 }
 
@@ -3922,10 +3940,12 @@ pub(crate) fn do_ucall<T: Tier>(
     frame: FrameRef,
     _: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_enter(req, frame, op, false) {
+    if let Some(edge) = inline_enter(req, (frame, at), op, false) {
         return edge;
     }
+    req.vm_mut().stand(frame, at);
     do_call(req, frame, op, "ZEND_DO_UCALL")
 }
 
@@ -3933,12 +3953,19 @@ pub(crate) fn do_ucall<T: Tier>(
 /// `DO_FCALL_BY_NAME` where `flagged`: a call to a user function that
 /// `i_init_func_execute_data` makes a frame of by writing words alone
 /// ([`Request::enter_call`]), entered with no call out of the loop. The
-/// answer is [`Stepped::Pushed`], as [`enter`]'s; `None`, with nothing
-/// touched, for every other call, which [`do_call`] serves.
+/// answer is [`Stepped::Pushed`], the caller stood at `at`
+/// (`SAVE_OPLINE()`) as the callee is entered; `None`, with nothing
+/// touched, for every other call, which [`do_call`] serves once the
+/// handler has stood the caller there.
 #[inline(always)] // as `inline_init_fcall`
-fn inline_enter(req: &mut Request, frame: FrameRef, op: &Opline, flagged: bool) -> Option<Edge> {
+fn inline_enter(
+    req: &mut Request,
+    (frame, at): (FrameRef, u32),
+    op: &Opline,
+    flagged: bool,
+) -> Option<Edge> {
     let returns_to = (op.out_type != OperandKind::Unused).then_some(op.out);
-    let callee = req.enter_call(returns_to, frame, flagged)?;
+    let callee = req.enter_call(returns_to, (frame, at), flagged)?;
     Some(Ok(Stepped::Pushed(callee).into()))
 }
 
@@ -4651,10 +4678,11 @@ pub(crate) fn verify_return_type<T: Tier>(
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
+    at: u32,
 ) -> Edge {
     if op.op1_type != OperandKind::Const {
-        let at = ByKind(op.op1_type).read(req.slots_mut(frame), code, op.op1);
-        let returned = crate::operand::deref(at);
+        let operand = ByKind(op.op1_type).read(req.slots_mut(frame), code, op.op1);
+        let returned = crate::operand::deref(operand);
         // `MAY_BE_ANY` keeps the codes a value can have: an `IS_INDIRECT`
         // would test bit 12, which is `callable`'s.
         let code_bit = 1u32 << (returned.kind() as u32);
@@ -4662,15 +4690,22 @@ pub(crate) fn verify_return_type<T: Tier>(
             return Ok(advanced());
         }
     }
-    return_mask_missed(req, frame, code, op)
+    return_mask_missed(req, (frame, at), code, op)
 }
 
-/// [`verify_return_type`] past its mask: `zend_check_type_slow` over the
-/// declared type, the coercion beside it and the `TypeError`, out of
-/// line so the hit saves no register for it.
+/// [`verify_return_type`] past its mask, the frame stood at `at`
+/// (`SAVE_OPLINE()`): `zend_check_type_slow` over the declared type,
+/// the coercion beside it and the `TypeError`, out of line so the hit
+/// saves no register for it and writes no position.
 #[cold]
 #[inline(never)]
-fn return_mask_missed(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+fn return_mask_missed(
+    req: &mut Request,
+    (frame, at): (FrameRef, u32),
+    code: &OpArray,
+    op: &Opline,
+) -> Edge {
+    req.vm_mut().stand(frame, at);
     let Some((_, by_ref)) = declared_return(req, frame) else {
         return Ok(advance(req, frame));
     };
@@ -23754,8 +23789,8 @@ pub(crate) fn copy_tmp<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_RETURN`: the operand taken as the caller's (`ZVAL_COPY` of a
-/// CV or a constant, a temporary moved), then the return safepoint, then
+/// `ZEND_RETURN`: the return safepoint, then the operand taken as the
+/// caller's (`ZVAL_COPY` of a CV or a constant, a temporary moved), then
 /// the frame popped (design §4.3 seam 8, §5.8), its CVs, temporaries
 /// and receiver given up with it (`zend_leave_helper`), and the value
 /// written into the caller's slot where the call wanted it and given up
@@ -23789,22 +23824,24 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
     op: &Opline,
     at: u32,
 ) -> Edge {
-    if let Some(edge) = inline_return::<T>(req, frame, code, op, A::default()) {
-        return edge;
+    if req.stack_mut().entry() != frame {
+        if let Some(edge) = raise_return::<T>(req, frame, code, op) {
+            return edge;
+        }
+        if let Some(edge) = inline_return(req, frame, code, op, A::default()) {
+            return edge;
+        }
     }
     req.vm_mut().stand(frame, at);
-    returned::<T>(req, frame, code, op)
+    returned(req, frame, code, op)
 }
 
-/// `RETURN` past its inline path: the operand taken as the handler's
-/// own ([`exec::take_operand`]) and the frame left with it
-/// ([`returned_to_caller`]). A call of its own, so that the inline path
-/// before it keeps to the registers it needs.
+/// `RETURN` past its return safepoint and its inline path: the operand
+/// taken as the handler's own ([`exec::take_operand`]) and the frame
+/// left with it ([`returned_to_caller`]). A call of its own, so that the
+/// inline path before it keeps to the registers it needs.
 #[inline(never)]
-fn returned<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
-    if let Some(edge) = return_site::<T>(req, frame, code, op) {
-        return edge;
-    }
+fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     returned_to_caller(req, frame, returned)
 }
@@ -23812,7 +23849,7 @@ fn returned<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Op
 /// The return safepoint of a `RETURN*` (design §5.8, `jit-design.md`
 /// §2.2), raised for every frame but the entry frame of this serving
 /// with the number the compiler wrote in `result`, before the handler
-/// takes its operand: `None` where the tier answered `Continue`, and
+/// reads its operand: `None` where the tier answered `Continue`, and
 /// otherwise the edge it resumed at, since a tier that recorded ran the
 /// return and the caller's landing already and nothing of the return is
 /// left to do here.
@@ -23826,6 +23863,17 @@ fn return_site<T: Tier>(
     if req.stack_mut().entry() == frame {
         return None;
     }
+    raise_return::<T>(req, frame, code, op)
+}
+
+/// [`return_site`] over a frame that is not the serving's entry frame.
+#[inline(always)] // as `return_site`
+fn raise_return<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+) -> Option<Edge> {
     let held = crate::tier::Held::of(code);
     match T::safepoint(req, frame, Site::Return(SafepointIdx(op.out)), held) {
         Flow::Continue => None,
@@ -23835,18 +23883,15 @@ fn return_site<T: Tier>(
 
 /// The inline path of `ZEND_RETURN` (`ZEND_RETURN_SPEC_CONST`, `_TMP`,
 /// `_CV`, `Z/Zend/zend_vm_def.h:4598`, into `zend_leave_helper`'s first
-/// arm): the value copied into the caller's temporary, a temporary's
-/// moved, and a frame whose leave destroys nothing popped, the caller
-/// going on past its call. php's arm frees the CVs, which here gives up
-/// strings at most; so no destructor runs and nothing can be pending
-/// after it. The return safepoint is raised as
-/// [`returned_to_caller`] raises it, once every test has passed, so the
-/// kernel is never asked after it. `None`, with nothing touched, while
-/// an observer is declared, on the serving's entry frame, for a value
-/// that is a reference, or a CV's or a constant's that counts owners,
-/// one nothing reads that would have to be given up, a caller's
-/// temporary that holds an owner, and a frame [`Request::leaves_plainly`]
-/// refuses.
+/// arm), past the return safepoint: the value copied into the caller's
+/// temporary, a temporary's moved, and a frame whose leave destroys
+/// nothing popped, the caller going on past its call
+/// ([`Request::leave_plainly`]). php's arm frees the CVs, which here
+/// gives up strings at most; so no destructor runs and nothing can be
+/// pending after it. `None`, with nothing touched, while an observer is
+/// declared, for a value that is a reference, or a CV's or a constant's
+/// that counts owners, and for a frame [`Request::leave_plainly`]
+/// refuses. Never asked of the serving's entry frame.
 ///
 /// A temporary string is moved into the caller's temporary, a string
 /// parameter and a local are given up with the frame, a string nothing
@@ -23872,48 +23917,30 @@ fn return_site<T: Tier>(
 /// int(32)
 /// ```
 #[inline(always)] // as `inline_send`
-fn inline_return<T: Tier>(
+fn inline_return(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
     op: &Opline,
     a: impl Operand,
 ) -> Option<Edge> {
-    if crate::observer::observing(req) || req.stack_mut().entry() == frame {
+    if crate::observer::observing(req) {
         return None;
     }
-    let z = a.read(req.slots_mut(frame), code, op.op1);
-    let moved = match a.kind() {
-        OperandKind::Tmp | OperandKind::Var if crate::operand::movable(z) => a.slot(op.op1),
-        OperandKind::Const | OperandKind::Cv | OperandKind::Tmp | OperandKind::Var
-            if crate::operand::owns_nothing(z) =>
-        {
-            None
-        }
-        _ => return None,
+    let operand = |slots: &[Zval]| {
+        let z = a.read(slots, code, op.op1);
+        let moved = match a.kind() {
+            OperandKind::Tmp | OperandKind::Var if crate::operand::movable(z) => a.slot(op.op1),
+            OperandKind::Const | OperandKind::Cv | OperandKind::Tmp | OperandKind::Var
+                if crate::operand::owns_nothing(z) =>
+            {
+                None
+            }
+            _ => return None,
+        };
+        Some((z, moved))
     };
-    return_plainly::<T>(req, frame, (code, moved), z, SafepointIdx(op.out))
-}
-
-/// [`inline_return`] once its operand is read: the frame left by
-/// [`Request::leave_plainly`] where [`Request::leaves_plainly`] finds it
-/// can be, after the return safepoint.
-#[inline(always)] // as `inline_return`
-fn return_plainly<T: Tier>(
-    req: &mut Request,
-    frame: FrameRef,
-    (code, moved): (&OpArray, Option<usize>),
-    z: Zval,
-    site: SafepointIdx,
-) -> Option<Edge> {
-    let leave = req.leaves_plainly(frame, code.num_cvs, moved, z)?;
-    match T::safepoint(req, frame, Site::Return(site), crate::tier::Held::of(code)) {
-        Flow::Continue => {}
-        // The tier ran the return and the caller's landing
-        // (`jit-design.md` §2.2); the frame it left is not this one.
-        flow => return Some(crate::tier::resumed(req, flow, frame)),
-    }
-    Some(Ok(req.leave_plainly(leave, z).into()))
+    Some(Ok(req.leave_plainly(frame, code.num_cvs, operand)?.into()))
 }
 
 /// The half of `RETURN` that leaves the frame, which `RETURN_BY_REF`
