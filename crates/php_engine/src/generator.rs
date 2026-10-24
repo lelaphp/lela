@@ -1108,21 +1108,68 @@ fn drop_values(req: &mut Request, generator: PhpObject) {
 /// `EG(jit_trace_num)` up with `EG(current_execute_data)` (`:793-797`,
 /// `:818`, `:865`), so a trace executing on the resumer's execution is
 /// not taken for one executing in the body.
+///
+/// A delegate that has already yielded is not advanced by the first
+/// resumption of the generator that just delegated to it, whichever
+/// generator of a shared tree that is: the one resumed, or one in the
+/// middle that delegates again (GH-15375, GH-23301):
+///
+/// ```php
+/// function inner() { yield "B"; }
+/// function middle() { yield "A"; yield from inner(); yield "C"; yield from ["D"]; }
+/// function delegate($gen) { yield from $gen; }
+/// foreach (delegate(middle()) as $value) { echo $value; }
+/// function tail($inner) { yield from $inner; yield from ["E"]; }
+/// $middle = tail(inner()); $outer = delegate($middle);
+/// echo "\n", $outer->current(); $middle->next(); echo $middle->current(), "\n";
+/// function counter() { yield 1; yield 2; }
+/// $gen1 = counter(); $gen1->valid();
+/// $gen2 = delegate($gen1); $gen3 = delegate($gen2);
+/// var_dump($gen3->current()); $gen2->next(); var_dump($gen2->current()); $gen2->next(); var_dump($gen2->current());
+/// ```
+/// ```expect
+/// ABCD
+/// BE
+/// int(1)
+/// int(2)
+/// NULL
+/// ```
+///
+/// So a `next()` on the middle of three runs the leaf, whose backtrace
+/// shows the middle's frame between it and the call:
+///
+/// ```php
+/// function gen() { yield 1; debug_print_backtrace(); yield 2; }
+/// function from($gen) { yield from $gen; }
+/// $gen1 = gen(); $gen2 = from($gen1); $gen3 = from($gen2);
+/// var_dump($gen3->current()); $gen2->next(); var_dump($gen2->current());
+/// ```
+/// ```expect
+/// int(1)
+/// #0 %s(3): gen()
+/// #1 [internal function]: from(Object(Generator))
+/// #2 %s(5): Generator->next()
+/// int(2)
+/// ```
 pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
     let mut generator = current(req, orig);
     if !has_frame(req, generator) {
         return Ok(());
     }
+    // The generator whose `yield from` this turn serves, whose first
+    // resumption since it delegated (`ZEND_GENERATOR_DO_INIT`) must not
+    // advance a delegate that has already yielded: the one resumed, or
+    // the one in the middle of the tree that has just delegated again
+    // (php 8.5.12, GH-15375, GH-23301).
+    let mut delegator = orig;
     loop {
         if is_running(req, generator) {
             let thrown = error(req, "Cannot resume an already running generator");
             req.leave_pending(&thrown);
             return Ok(());
         }
-        let do_init = read(req, orig, |g| g.do_init).unwrap_or(false);
-        let started = read(req, generator, |g| g.value.tag() != TypeTag::Undef).unwrap_or(false);
-        if do_init && started {
-            with(req, orig, |g| g.do_init = false);
+        let do_init = with(req, delegator, |g| std::mem::take(&mut g.do_init)).unwrap_or(false);
+        if do_init && read(req, generator, |g| g.value.tag() != TypeTag::Undef).unwrap_or(false) {
             return Ok(());
         }
         if let Some(fiber) = req.fibers().active() {
@@ -1153,10 +1200,7 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
         match turned? {
             Turn::NoFrame => return Ok(()),
             Turn::Delegated => {
-                with(req, orig, |g| {
-                    g.do_init = false;
-                    g.in_fiber = None;
-                });
+                with(req, orig, |g| g.in_fiber = None);
                 with(req, generator, |g| g.in_fiber = None);
                 return Ok(());
             }
@@ -1168,20 +1212,23 @@ pub(crate) fn resume(req: &mut Request, orig: PhpObject) -> Result<(), Fatal> {
                 return Ok(());
             }
             generator = current(req, orig);
-            with(req, orig, |g| g.do_init = false);
+            delegator = orig;
             continue;
         }
-        let returned = read(req, generator, |g| g.retval.tag() != TypeTag::Undef).unwrap_or(false);
-        if (!same(generator, orig) && returned)
-            || suspended_op(req, generator).map(|op| op.opcode) == Some(Opcode::YieldFrom)
-        {
+        // `yield from` was used: the generator that ran now delegates,
+        // so its own first resumption is the one asked next.
+        if suspended_op(req, generator).map(|op| op.opcode) == Some(Opcode::YieldFrom) {
+            delegator = generator;
             generator = current(req, orig);
             continue;
         }
-        with(req, orig, |g| {
-            g.do_init = false;
-            g.in_fiber = None;
-        });
+        let returned = read(req, generator, |g| g.retval.tag() != TypeTag::Undef).unwrap_or(false);
+        if !same(generator, orig) && returned {
+            delegator = orig;
+            generator = current(req, orig);
+            continue;
+        }
+        with(req, orig, |g| g.in_fiber = None);
         return Ok(());
     }
 }
