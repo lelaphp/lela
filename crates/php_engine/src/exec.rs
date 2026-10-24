@@ -1015,7 +1015,6 @@ impl CallInfo {
         at < Self::QUICK && self.0 & 1 << (Self::BY_VALUE_AT + at) != 0
     }
 
-    /// [`CallInfo::sent`] with [`CallInfo::PLAIN_ENTRY`] where `plain`.
     /// [`CallInfo::sent`] with [`CallInfo::LAID_ENTRY`] where `laid`.
     pub(crate) fn with_laid_entry(self, laid: bool) -> CallInfo {
         CallInfo(if laid {
@@ -1025,6 +1024,7 @@ impl CallInfo {
         })
     }
 
+    /// [`CallInfo::sent`] with [`CallInfo::PLAIN_ENTRY`] where `plain`.
     pub(crate) fn with_plain_entry(self, plain: bool) -> CallInfo {
         CallInfo(if plain {
             self.0 | Self::PLAIN_ENTRY

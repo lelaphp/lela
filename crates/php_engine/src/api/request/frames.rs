@@ -2482,12 +2482,6 @@ pub(crate) enum CodeFrom {
     Nested(FrameRef, Option<(FrameRef, u32)>),
 }
 
-/// The words `i_init_func_execute_data` writes ([`Request::enter_call`]):
-/// the caller standing at its call opline, `SAVE_OPLINE()`, which the
-/// callee's backtrace reads; and the call made the callee's frame, at
-/// the opline its prologue's skip leaves it, reading `cache`, returning
-/// into `returns_to`.
-#[inline(always)] // part of `enter_call`'s inline path
 /// The sensor of [`exec::CallInfo::LAID_ENTRY`]: what the activation
 /// of the call `header` begins, in a room of `len` slots, would read off
 /// its function's row `user` and the request's caches `map`, held to what
@@ -2512,6 +2506,12 @@ fn laid_entry_holds(
         && header.opline == opline.unwrap_or(0)
 }
 
+/// The words `i_init_func_execute_data` writes ([`Request::enter_call`]):
+/// the caller standing at its call opline, `SAVE_OPLINE()`, which the
+/// callee's backtrace reads; and the call made the callee's frame, at
+/// the opline its prologue's skip leaves it, reading `cache`, returning
+/// into `returns_to`.
+#[inline(always)] // part of `enter_call`'s inline path
 fn entered_words(
     (top, from): (
         &mut php_heap::Frame<exec::Header>,
