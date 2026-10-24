@@ -5239,9 +5239,9 @@ impl Engine {
         self.shutdown(&mut req)
     }
 
-    /// What a started request serves, then each extension's hook for the
-    /// moment after it, which php-fpm's `fastcgi_request_done` stands at
-    /// for a page as for a program.
+    /// What a started request serves, a page or a program, which php-fpm's
+    /// `fastcgi_request_done` stands after alike; the extensions' hook for
+    /// the moment after it opens [`Engine::shutdown_program`].
     pub(crate) fn serve_in(&self, req: &mut Request, source: Option<&[u8]>, serves: HostServes) {
         match serves {
             HostServes::Program => {
@@ -5260,7 +5260,6 @@ impl Engine {
             HostServes::Nothing => {}
         }
         req.free_path_copies();
-        req.program_ended();
     }
 
     /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
@@ -5854,6 +5853,7 @@ impl Engine {
         // them.
         // Each step is its own `zend_try`, so a fatal's bailout leaves
         // the step it was raised in and the next is served.
+        req.program_ended(); // `EG(flags) |= EG_FLAGS_IN_SHUTDOWN`
         req.enter_phase(crate::api::request::Phase::Shutdown);
         req.catch_bailout();
         crate::observer::end_all(req);

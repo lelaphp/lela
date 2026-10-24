@@ -163,28 +163,108 @@ fn match_value(
 }
 
 /// `add_offset_pair`'s pair: `[text, offset]`, or for a group that did
-/// not take part `[null or "", -1]`.
+/// not take part the request's one `[null or "", -1]`
+/// ([`unmatched_pair`]).
 pub(super) fn offset_pair(
     req: &mut Request,
     subject: &[u8],
     (start, end): (usize, usize),
     unmatched_as_null: bool,
 ) -> Result<Owner<Value>, Thrown> {
-    let mut pair = PhpArray::new(req)?;
     if start == ffi::PCRE2_UNSET {
-        let text = if unmatched_as_null {
-            Owner::null()
-        } else {
-            PhpString::new(req, b"")?.into_value()
-        };
-        pair.append(req, text)?;
-        pair.append(req, Owner::int(-1))?;
-    } else {
-        let text = piece(req, subject, start, end)?;
-        pair.append(req, text)?;
-        pair.append(req, Owner::int(i64::try_from(start).unwrap_or(i64::MAX)))?;
+        return unmatched_pair(req, unmatched_as_null);
     }
+    let mut pair = PhpArray::new(req)?;
+    let text = piece(req, subject, start, end)?;
+    pair.append(req, text)?;
+    pair.append(req, Owner::int(i64::try_from(start).unwrap_or(i64::MAX)))?;
     Ok(pair.into_value())
+}
+
+/// `ZVAL_COPY(&match_pair, &PCRE_G(unmatched_empty_pair))`, or of
+/// `unmatched_null_pair` under `PREG_UNMATCHED_AS_NULL`: one more owner
+/// of the request's one pair, made on first use
+/// (`init_unmatched_empty_pair`, `init_unmatched_null_pair`), so every
+/// group that did not take part shares it and a `$matches` destroyed
+/// with it gives up an array another owner holds, a possible root.
+/// Once the program has ended, in a shutdown function or a destructor
+/// the request's end serves, a pair not cached yet is made fresh and
+/// cached no more, as under `EG_FLAGS_IN_SHUTDOWN`; one cached before
+/// is still handed out.
+///
+/// ```php
+/// function d($p) {
+///     preg_match_all('#\{(!)?(\w+)\}#', $p, $m, PREG_OFFSET_CAPTURE | PREG_SET_ORDER);
+///     gc_collect_cycles(); unset($m); var_dump(gc_status()['roots']);
+/// }
+/// d('/h/{name}');
+/// preg_match('/(x)?(y)/', 'y', $o, PREG_OFFSET_CAPTURE);
+/// var_dump($o[1]);
+/// register_shutdown_function(function () {
+///     preg_match('/(a)?(b)?c/', 'c', $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+///     gc_collect_cycles(); unset($n); $fresh = gc_status()['roots'];
+///     preg_match('/(x)?(y)/', 'y', $m, PREG_OFFSET_CAPTURE);
+///     gc_collect_cycles(); unset($m); var_dump($fresh, gc_status()['roots']);
+/// });
+/// ```
+/// ```expect
+/// int(1)
+/// array(2) {
+///   [0]=>
+///   string(0) ""
+///   [1]=>
+///   int(-1)
+/// }
+/// int(0)
+/// int(1)
+/// ```
+///
+/// Under `PREG_UNMATCHED_AS_NULL` the program's own null pair is shared
+/// the same way, every unmatched group of a match handed the one array:
+///
+/// ```php
+/// function n() {
+///     preg_match('/(a)?(b)?c/', 'c', $m, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+///     gc_collect_cycles(); unset($m); var_dump(gc_status()['roots']);
+/// }
+/// n();
+/// preg_match('/(a)?(b)?c/', 'c', $o, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+/// var_dump($o[1], $o[1] === $o[2]);
+/// ```
+/// ```expect
+/// int(1)
+/// array(2) {
+///   [0]=>
+///   NULL
+///   [1]=>
+///   int(-1)
+/// }
+/// bool(true)
+/// ```
+pub(super) fn unmatched_pair(
+    req: &mut Request,
+    unmatched_as_null: bool,
+) -> Result<Owner<Value>, Thrown> {
+    if let Some(pair) = req.state::<State>().unmatched.cached(unmatched_as_null) {
+        return Ok(Owner::take(req, pair).into_value());
+    }
+    let mut pair = PhpArray::new(req)?;
+    let text = if unmatched_as_null {
+        Owner::null()
+    } else {
+        PhpString::new(req, b"")?.into_value()
+    };
+    pair.append(req, text)?;
+    pair.append(req, Owner::int(-1))?;
+    match req
+        .state::<State>()
+        .unmatched
+        .cache(unmatched_as_null, pair)
+    {
+        Ok(cached) => Ok(Owner::take(req, cached).into_value()),
+        // `EG_FLAGS_IN_SHUTDOWN`'s arm: the group's own pair.
+        Err(own) => Ok(own.into_value()),
+    }
 }
 
 /// `add_named` and the numbered insert after it: the value under the

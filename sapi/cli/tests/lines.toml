@@ -633,3 +633,11 @@ args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protectio
 files = { "one.php" = '<?php array_keys($argv); new stdClass; /*                                                                                              */ echo memory_get_usage(), "\n";', "four.php" = '<?php array_keys($argv); array_keys($argv); array_keys($argv); array_keys($argv); new stdClass; new stdClass; new stdClass; new stdClass; echo memory_get_usage(), "\n";' }
 [[line.then]]
 args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "four.php"]
+
+# `php_request_shutdown` sets `EG_FLAGS_IN_SHUTDOWN` before it calls the
+# shutdown functions, under `-r` as for a file, so pcre's `add_offset_pair`
+# makes an unmatched group a pair of its own there where none is cached
+# yet, and hands out the one it cached while the program ran (#3347).
+[[line]]
+name = "a-shutdown-function-under-r-takes-pcre-s-in-shutdown-pair"
+args = ["-n", "-r", '''register_shutdown_function(function () { preg_match("/(a)?(b)?c/", "c", $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL); gc_collect_cycles(); unset($n); $f = gc_status()["roots"]; preg_match("/(x)?(y)/", "y", $m, PREG_OFFSET_CAPTURE); gc_collect_cycles(); unset($m); var_dump($f, gc_status()["roots"]); }); preg_match("/(x)?(y)/", "y", $o, PREG_OFFSET_CAPTURE);''']
