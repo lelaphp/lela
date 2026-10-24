@@ -22,10 +22,11 @@ use crate::object::{Code, Dom};
 use crate::parent::replace_validity;
 use crate::private::{Mapper, Private};
 use crate::{
-    children_valid, class_name, clone_node, copy_document_ref, dom_error, dom_error_message, fetch,
-    has_feature, hierarchy_ok, instance_of, invalidate, is_equal_attr, is_equal_node, is_read_only,
-    normalize, nullable_object, object_for, reconcile_attribute_namespace, reconcile_ns,
-    reconcile_ns_list, returned, set_document_ref_pointers, shared_doc, strict,
+    Deep, children_valid, class_name, clone_node, copy_document_ref, dom_error, dom_error_message,
+    fetch, has_feature, hierarchy_ok, instance_of, invalidate, is_equal_attr, is_equal_node,
+    is_read_only, normalize, normalize_refused, nullable_object, object_for,
+    reconcile_attribute_namespace, reconcile_ns, reconcile_ns_list, returned,
+    set_document_ref_pointers, shared_doc, strict,
 };
 
 /// `dom_insert_fragment`: the fragment's children moved in between
@@ -418,7 +419,10 @@ fn cloned_object(
 
 /// `php_dom_normalize_modern`: every descendant text node that is empty
 /// removed, and the text nodes that follow one merged into it.
-fn normalize_modern(this: Node) {
+fn normalize_modern(deep: &mut Deep<'_>, this: Node) {
+    if deep.overflowed() {
+        return;
+    }
     let mut at = this.children();
     while let Some(node) = at {
         match node.kind() {
@@ -445,7 +449,7 @@ fn normalize_modern(this: Node) {
                     next = after;
                 }
             }
-            Kind::Element => normalize_modern(node),
+            Kind::Element => normalize_modern(deep, node),
             _ => {}
         }
         at = node.next();
@@ -1758,16 +1762,41 @@ impl DOMNode {
     /// int(2)
     /// string(3) "abc"
     /// ```
+    ///
+    /// Both recurse as php's do and are refused where the stack comes down
+    /// to its limit (GH-23116, GH-23117), what the levels above did kept:
+    ///
+    /// ```php
+    /// foreach ([new DOMDocument, Dom\XMLDocument::createEmpty()] as $d) {
+    ///     $n = $d->createElement('a');
+    ///     for ($i = 0; $i < 25000; $i++) { $p = $d->createElement('a'); $p->appendChild($n); $n = $p; }
+    ///     $r = $d->appendChild($d->createElement('r'));
+    ///     $r->append('x', 'y', $n);
+    ///     try { $d->normalize(); } catch (Error $e) { echo $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+    ///     var_dump($r->childNodes->length);
+    /// }
+    /// ```
+    /// ```expect regime=small-stack
+    /// Maximum call stack size reached. Infinite recursion?
+    /// NULL
+    /// int(2)
+    /// Maximum call stack size reached. Infinite recursion?
+    /// NULL
+    /// int(2)
+    /// ```
     #[php(tentative)]
     fn normalize(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let this = this.object();
         let node = fetch(req, this)?;
-        if follows_spec(req, this) {
-            normalize_modern(node);
+        let modern = follows_spec(req, this);
+        let mut deep = Deep::new(req);
+        if modern {
+            normalize_modern(&mut deep, node);
         } else {
-            normalize(node);
+            normalize(&mut deep, node);
         }
-        Ok(())
+        let reached = deep.reached();
+        normalize_refused(req, reached)
     }
 
     /// `DOMNode::removeChild(DOMNode $child): DOMNode|false`.

@@ -1515,8 +1515,55 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
     Ok(clone)
 }
 
+/// A walk php makes by recursing over the tree, asking at each level
+/// whether the stack has come down to its limit
+/// (`zend_call_stack_overflowed(EG(stack_limit))`): a level that finds it
+/// has does nothing more, the levels above go on, and the native raises
+/// the refusal once at the end, as php throws only the first.
+pub(crate) struct Deep<'r> {
+    req: &'r Request,
+    reached: bool,
+}
+
+impl<'r> Deep<'r> {
+    pub(crate) fn new(req: &'r Request) -> Deep<'r> {
+        Deep {
+            req,
+            reached: false,
+        }
+    }
+
+    /// Whether this level is past the limit, kept for [`Deep::reached`].
+    pub(crate) fn overflowed(&mut self) -> bool {
+        let over = self.req.limits().stack_overflowed();
+        self.reached |= over;
+        over
+    }
+
+    /// Whether any level was.
+    pub(crate) fn reached(&self) -> bool {
+        self.reached
+    }
+}
+
+/// `dom_normalize_check_stack_limit`'s refusal, raised by the native a
+/// normalisation that reached the limit ends in.
+pub(crate) fn normalize_refused(req: &mut Request, deep: bool) -> Result<(), Thrown> {
+    if deep {
+        return Err(throw_error(
+            req,
+            "Error",
+            "Maximum call stack size reached. Infinite recursion?",
+        ));
+    }
+    Ok(())
+}
+
 /// `php_dom_normalize_legacy`.
-fn normalize(node: Node) {
+fn normalize(deep: &mut Deep<'_>, node: Node) {
+    if deep.overflowed() {
+        return;
+    }
     let mut child = node.children();
     while let Some(c) = child {
         match c.kind() {
@@ -1547,10 +1594,10 @@ fn normalize(node: Node) {
                 }
             }
             Kind::Element => {
-                normalize(c);
+                normalize(deep, c);
                 let mut attr = c.properties();
                 while let Some(a) = attr {
-                    normalize(a);
+                    normalize(deep, a);
                     attr = a.next();
                 }
             }
