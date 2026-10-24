@@ -184,15 +184,15 @@ impl Request {
     /// after: what a linked class declares, and the chain above it,
     /// never changes.
     pub(crate) fn placed_properties(&self, class: ClassId) -> &[PropertyInfo] {
+        self.placement(class).map_or(&[], Placed::slots)
+    }
+
+    /// Where `class`'s declared properties are on its objects
+    /// ([`Placed`]), as the class's link built it.
+    pub(crate) fn placement(&self, class: ClassId) -> Option<&Placed> {
         match self.native_class_at(class) {
-            Some(native) => self
-                .shared
-                .placed
-                .get(native)
-                .map_or(&[], |placed| &placed.slots),
-            None => self
-                .declared_row(class)
-                .map_or(&[], |row| &row.bound.placed.slots),
+            Some(native) => self.shared.placed.get(native),
+            None => self.declared_row(class).map(|row| &row.bound.placed),
         }
     }
 
@@ -326,9 +326,10 @@ pub(crate) fn placed_of<'d>(
     class: ClassId,
     decl: &ClassDecl,
     record: Option<&LinkedClass<ClassId>>,
-    parent: &[PropertyInfo],
+    above: &Placed,
     decl_of: impl Fn(PropertyInfo) -> Option<&'d PropertyDecl>,
 ) -> Placed {
+    let parent = above.slots();
     let own_name = |row: &Row<ClassId>| match row.holder {
         None => decl
             .properties
@@ -350,15 +351,27 @@ pub(crate) fn placed_of<'d>(
     };
     let mut took = vec![false; decl.properties.len()];
     let mut placed = Vec::with_capacity(parent.len().saturating_add(decl.properties.len()));
+    let mut holes = above.holes;
     for &inherited in parent {
-        let redeclared = decl_of(inherited)
-            .filter(|property| property.visibility != Visibility::Private)
+        let above =
+            decl_of(inherited).filter(|property| property.visibility != Visibility::Private);
+        let redeclared = above
             .and_then(|property| own(&property.name.0))
             .filter(|at| decl.properties.get(*at).is_some_and(|p| p.is_instance));
         match redeclared.and_then(|at| Some((at, took.get_mut(at)?))) {
             Some((at, took)) => {
                 *took = true;
                 placed.push(row(at));
+                // `do_inherit_property` leaves a slot `IS_UNDEF`: the
+                // backed property's own, its default moved to the
+                // parent's, or the parent's, where hooks over a property
+                // with none keep the child's slot (`use_child_prop`).
+                let child = decl.properties.get(at);
+                let hooked_over = above.is_some_and(|above| above.hooks.is_none())
+                    && child.is_some_and(|child| child.hooks.is_some());
+                if child.is_some_and(|child| !child.is_virtual) || hooked_over {
+                    holes += 1;
+                }
             }
             None => placed.push(inherited),
         }
@@ -379,6 +392,7 @@ pub(crate) fn placed_of<'d>(
     Placed {
         slots: placed.into_boxed_slice(),
         rows,
+        holes,
     }
 }
 

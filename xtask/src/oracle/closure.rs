@@ -17,19 +17,20 @@
 //! store `ca-certificates` among them, is read at `<prefix>/opt/<keg>`,
 //! the link Homebrew points at the version it installed.
 //!
-//! **What a build was made against** is the record's [`ClosureDigest`]: a
+//! **What a build was made against** is the record's digest, [`Closure::digest`]: a
 //! variant's macOS build is made against the Homebrew the record names, so
 //! its pin names the digest beside its md5, as a Linux build names its
 //! image (#2935).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{self, Write as _};
 use std::fs::{self, File};
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+
+use crate::sha256::Sha256;
 
 /// The keg names and their versions as `oracle.toml` records them.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq)]
@@ -44,17 +45,12 @@ impl Closure {
 
     /// The record's digest: SHA-256 over each keg's `name=version\n`, in
     /// name order, so one closure always gives one digest (#2935).
-    pub(crate) fn digest(&self) -> ClosureDigest {
-        use sha2::Digest as _;
-        let mut sha = sha2::Sha256::new();
-        for (keg, version) in &self.0 {
-            sha.update(format!("{keg}={version}\n"));
-        }
-        let hex = sha.finalize().iter().fold(String::new(), |mut hex, b| {
-            write!(hex, "{b:02x}").ok();
-            hex
-        });
-        ClosureDigest(format!("sha256:{hex}"))
+    pub(crate) fn digest(&self) -> Sha256 {
+        let lines = self
+            .0
+            .iter()
+            .map(|(keg, version)| format!("{keg}={version}\n"));
+        Sha256::of(lines.collect::<String>().as_bytes())
     }
 
     /// The closure `binaries` load against the record: a keg loaded at a
@@ -89,18 +85,6 @@ impl Closure {
             );
         }
         Ok(())
-    }
-}
-
-/// A [`Closure`]'s digest, `sha256:<hex>`: what a variant's macOS build
-/// names of the record it was made against (#2935).
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
-#[serde(transparent)]
-pub struct ClosureDigest(String);
-
-impl fmt::Display for ClosureDigest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
     }
 }
 

@@ -1,6 +1,7 @@
 //! `lower` at its seam (`jit-design.md` §4.3 *Tested*, §7): the CLIF of
 //! each `types` fixture's trace, held to a golden file, every loop's
-//! carrying the interrupt test; the same function compiled to bytes for
+//! carrying the interrupt test but a recursive return's, which carries
+//! none; the same function compiled to bytes for
 //! the golden's ISA and the host's, a mark per recorded opline; and a
 //! host with no ISA refused as `Unsupported`.
 //!
@@ -15,8 +16,8 @@ use cranelift_codegen::isa;
 use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupported};
 use crate::table::TraceName;
 use crate::testing::goldens::{
-    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT, NBODY,
-    SIEVE, SPECTRALNORM, held,
+    self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT,
+    NATIVE_CALL, NBODY, SIEVE, SPECTRALNORM, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{Check, End, Guard, GuardAt, Imm, Interrupt, Op, Returned, TraceIr};
@@ -95,12 +96,15 @@ fn lowered(fixture: Fixture) -> Result<TraceIr, String> {
         &constants_named(&ir, &clif),
     )?;
     if let End::Loop(header) = ir.end {
-        let answers = match header.interrupt {
-            Interrupt::Exit(exit) => i64::from(exit.0),
+        match header.interrupt {
+            Interrupt::Exit(exit) => interrupt_test(&clif, i64::from(exit.0))?,
             // CLIF writes an `i32` constant signed.
-            Interrupt::Stub(_) => i64::from(i32::from_ne_bytes(INTERRUPTED.to_ne_bytes())),
-        };
-        interrupt_test(&clif, answers)?;
+            Interrupt::Stub(_) => interrupt_test(
+                &clif,
+                i64::from(i32::from_ne_bytes(INTERRUPTED.to_ne_bytes())),
+            )?,
+            Interrupt::None => untested(&clif)?,
+        }
     }
     let host = Backend::new(&policy(&[]), symbols()).map_err(|e| format!("{e:?}"))?;
     for backend in [&backend, &host] {
@@ -155,6 +159,35 @@ fn interrupt_test(clif: &str, exit: i64) -> Result<(), String> {
         Err(format!(
             "the interrupt test's block does not answer exit {exit}:\n{clif}"
         ))
+    }
+}
+
+/// That a loop's CLIF tests no interrupt, a loop by recursive return's
+/// (`types::Interrupt::None`): no byte read through a pointer loaded from
+/// the `ExitCtx`'s interrupt word is branched on, as [`interrupt_test`]
+/// finds the test. A call made in place reads the byte for a check of
+/// its own, which compares it before it branches.
+fn untested(clif: &str) -> Result<(), String> {
+    let lines: Vec<&str> = clif.lines().map(instruction).collect();
+    let loaded = |from: &dyn Fn(&str) -> bool| -> Vec<String> {
+        (lines.iter())
+            .filter_map(|line| {
+                let (value, load) = line.split_once(" = ")?;
+                from(load).then(|| value.to_owned())
+            })
+            .collect()
+    };
+    let pointers = loaded(&|load| load == format!("load.i64 notrap aligned v0+{INTERRUPT_AT}"));
+    let bytes = loaded(&|load| {
+        (pointers.iter()).any(|pointer| load == format!("load.i8 notrap aligned {pointer}"))
+    });
+    match (lines.iter())
+        .find(|line| (bytes.iter()).any(|byte| line.starts_with(&format!("brif {byte}, "))))
+    {
+        Some(branch) => Err(format!(
+            "a loop by recursive return tests the interrupt, `{branch}`:\n{clif}"
+        )),
+        None => Ok(()),
     }
 }
 
@@ -229,6 +262,14 @@ fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), Stri
         lowered(fixture)?;
     }
     Ok(())
+}
+
+/// A native's call pushed in place and its `DO_ICALL` served by the
+/// `handle` kernel, the `Stood` written past it (#2963).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_natives_call_lowers_in_place() -> Result<(), String> {
+    lowered(NATIVE_CALL).map(drop)
 }
 
 /// A host Cranelift has no ISA for is `Unsupported`, which runs the
@@ -372,11 +413,12 @@ fn a_link_answers_its_last_exit() -> Result<(), String> {
     Ok(())
 }
 
-/// A native's call is served whole through [`Kernel::Step`], the operands
-/// it reads stored first.
+/// A native's call is pushed in place, its sends of constants stepped,
+/// the operands they read stored first, and its `DO_ICALL` served by its
+/// handler through [`Kernel::Handle`] (#2963).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_natives_call_is_stepped() -> Result<(), String> {
+fn a_natives_call_is_served_by_its_handler() -> Result<(), String> {
     let (_, clif) = compiled(
         &IN_F,
         "function f(array &$a, int $n) {
@@ -387,6 +429,7 @@ fn a_natives_call_is_stepped() -> Result<(), String> {
         $x = [1]; echo f($x, 3), \"\\n\";",
     )?;
     assert!(!calls_of(&clif, Kernel::Step).is_empty(), "{clif}");
+    assert!(!calls_of(&clif, Kernel::Handle).is_empty(), "{clif}");
     Ok(())
 }
 

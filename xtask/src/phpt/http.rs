@@ -60,7 +60,7 @@ pub(crate) fn subset(source: &Path) -> Subset {
     let mut dirs = Vec::new();
     for corpus in Subset::corpus(source) {
         dirs.extend(
-            (corpus.dirs.into_iter()).filter(|place| tally::any_file_under(&place.dir, is_served)),
+            (corpus.dirs.into_iter()).filter(|place| tally::any_file_under(&place.path, is_served)),
         );
     }
     Subset {

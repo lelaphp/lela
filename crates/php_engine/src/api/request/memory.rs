@@ -141,15 +141,11 @@ impl Intern for RequestStrings<'_> {
         Ok(s)
     }
 
-    /// A declaration's own string, kept as its name or its key when the
-    /// unit is taken ([`Request::hold_compiled`]), where it is one this
-    /// home made.
-    fn intern_name(&mut self, bytes: &[u8]) -> Result<php_heap::Made, Fatal> {
-        let made = self.intern_made(bytes, false)?;
-        if Zval::string(made.str()).is_refcounted() {
-            self.made.name(made.str());
-        }
-        Ok(made)
+    /// A declaration's own string, kept as what its place in the
+    /// compile's walk names when the unit is taken
+    /// ([`Request::hold_compiled`]).
+    fn hand_name(&mut self, name: Option<Str>) {
+        self.made.hand(name);
     }
 
     /// A constant the request defined, substituted where an `eval`
@@ -168,9 +164,13 @@ impl Intern for RequestStrings<'_> {
 
     /// A string the fold that made it has read, given up, as
     /// `zend_eval_const_expr` frees an operand once the value it made stands; one
-    /// the engine's table holds is no string of the compile's.
+    /// the engine's table holds is no string of the compile's. An array
+    /// stays the unit's, with the owners of its entries it took over, and
+    /// goes with its op arrays.
     fn give_back(&mut self, made: php_heap::Made) {
-        let string = made.str();
+        let Some(string) = made.value().as_str() else {
+            return;
+        };
         if self.made.take(Zval::string(string)) {
             self.heap.release_string(string);
         }

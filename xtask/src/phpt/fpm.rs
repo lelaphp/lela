@@ -31,7 +31,7 @@ pub(crate) fn place(subset: &Subset, host: Option<&Path>) -> Result<()> {
         .iter()
         .filter(|place| place.under == Path::new(TESTS))
     {
-        let Some(parent) = place.dir.parent() else {
+        let Some(parent) = place.path.parent() else {
             continue;
         };
         let link = parent.join(FPM.binary);

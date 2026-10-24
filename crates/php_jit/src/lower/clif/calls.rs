@@ -546,6 +546,23 @@ impl Emit<'_> {
         self.b.ins().bor(elsewhere, off_page)
     }
 
+    /// The room of the call under way in `frame` as the frame table has
+    /// it, as the interpreter's `EX(call)` reads after a call it made is
+    /// popped: the record on top where it is not `frame`'s own, null where
+    /// it is.
+    pub(super) fn call_left(&mut self, frame: Frame) -> Result<Value, Abort> {
+        let stack = self.stack()?;
+        let len = self.b.ins().load(I64, trusted(), stack, FRAMES_LEN);
+        let frames = self.b.ins().load(I64, trusted(), stack, FRAMES);
+        let last = self.b.ins().iadd_imm_s(len, -1);
+        let first = self.record_word(frames, last, L.record_at());
+        let top = self.b.ins().iadd_imm_s(first, -i64::from(L.room()));
+        let room = self.room(frame)?;
+        let own = self.b.ins().icmp(IntCC::Equal, top, room);
+        let nothing = self.b.ins().iconst(I64, 0);
+        Ok(self.b.ins().select(own, nothing, top))
+    }
+
     /// The word at `field` of record `place` of the frame table at
     /// `frames`.
     fn record_word(&mut self, frames: Value, place: Value, field: u32) -> Value {

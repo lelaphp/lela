@@ -1,32 +1,36 @@
-//! The values a unit's declarations hold, its arrays
-//! ([`ConstExpr::UnitArray`]) and its strings: the walks over its
+//! The values a unit's declarations hold, its arrays and its strings
+//! ([`ConstExpr::UnitValue`]): the walks over its
 //! declarations and its constant expressions that the engine gives the
-//! compile's owner of each value by, as [`crate::declared_names`] walks
-//! the names a unit's declarations are read by.
+//! compile's owner of each value by, as [`crate::named`] walks the
+//! names a unit's declarations own.
 
 use php_heap::Zval;
 use php_unit::Unit;
 use php_unit::decl::{Attribute, ConstExpr, FunctionDecl};
 
-/// What holds an array of [`declared_arrays`]: the unit, for a function,
-/// a class and its members, or the dynamic definition at its place.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What holds a value of [`declared_values`] or a name of
+/// [`crate::named`]: the unit, for a function, a class and its members,
+/// the dynamic definition at its place, or the main op array, whose
+/// variables' names alone it holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Holder {
+    /// The main op array, held while it runs.
+    Main,
     /// The unit's tables, held while the unit lives.
     Unit,
     /// The dynamic definition at this place of [`Unit::dynamic`].
     Dynamic(usize),
 }
 
-/// The arrays `unit`'s declarations hold as values
-/// ([`ConstExpr::UnitArray`]), each beside what holds it, as php's
+/// The values `unit`'s declarations hold ([`ConstExpr::UnitValue`]), each
+/// beside what holds it, as php's
 /// compile leaves each zval in a table of the declaration's: a class's
 /// constant, default, static default and attribute argument, its
 /// methods' and hooks' among them, the class's; a function's attribute
 /// argument the unit's, and a dynamic definition's its own. A
 /// parameter's default and a `const`'s value and attributes are not
 /// among them: the `RECV_INIT` or `DECLARE_CONST` constant, or the
-/// `DECLARE_ATTRIBUTED_CONST`'s data, holds the array, of which the
+/// `DECLARE_ATTRIBUTED_CONST`'s data, holds the value, of which the
 /// declaration is a view, and the constant takes its own owner as it is
 /// defined (`zend_constant_add_attributes`).
 ///
@@ -55,27 +59,27 @@ pub enum Holder {
 /// [[1,2],[3,4],[5,6],[7,8]]
 /// [[9,10],[11],[12],[13],[14]]
 /// ```
-pub fn declared_arrays(unit: &Unit) -> Vec<(Zval, Holder)> {
+pub fn declared_values(unit: &Unit) -> Vec<(Zval, Holder)> {
     let mut found = Vec::new();
     for (holder, decl) in function_decls(unit) {
         let attributes = (decl.parameters.iter().map(|p| &p.attributes)).chain([&decl.attributes]);
         for list in attributes {
-            attribute_arrays(list, &mut |z| found.push((z, holder)));
+            attribute_values(list, &mut |z| found.push((z, holder)));
         }
     }
     let mut push = |z| found.push((z, Holder::Unit));
     for class in &unit.classes {
-        attribute_arrays(&class.attributes, &mut push);
+        attribute_values(&class.attributes, &mut push);
         for constant in &class.constants {
-            unit_arrays(&constant.value, &mut push);
-            attribute_arrays(&constant.attributes, &mut push);
+            unit_values(&constant.value, &mut push);
+            attribute_values(&constant.attributes, &mut push);
         }
         for property in &class.properties {
             property
                 .default
                 .iter()
-                .for_each(|d| unit_arrays(d, &mut push));
-            attribute_arrays(&property.attributes, &mut push);
+                .for_each(|d| unit_values(d, &mut push));
+            attribute_values(&property.attributes, &mut push);
         }
     }
     found
@@ -99,45 +103,12 @@ fn function_decls(unit: &Unit) -> impl Iterator<Item = (Holder, &FunctionDecl)> 
         .chain(members.map(|decl| (Holder::Unit, decl)))
 }
 
-/// The strings `unit`'s classes declare their constants and properties'
-/// defaults with, one for each declaration that holds one: the string
-/// the compile made for each, written or folded, is the class's from its
-/// declaration, as php's `constants_table`, `default_properties_table`
-/// and `default_static_members_table` hold the zval the compile put
-/// there. An enum case's is not among them, its value standing in the
-/// case's copied expression.
-pub fn declared_strings(unit: &Unit) -> impl Iterator<Item = &[u8]> {
-    unit.classes.iter().flat_map(|class| {
-        let constants = (class.constants.iter())
-            .filter(|constant| !constant.is_case)
-            .map(|constant| &constant.value);
-        let defaults = class.properties.iter().filter_map(|p| p.default.as_ref());
-        constants.chain(defaults).filter_map(string_of)
-    })
-}
-
-/// The strings `unit`'s parameters' defaults are, each held by its
-/// function's `RECV_INIT` constant, which Reflection copies
-/// (`get_parameter_default`).
-pub fn default_strings(unit: &Unit) -> impl Iterator<Item = &[u8]> {
-    function_decls(unit)
-        .flat_map(|(_, decl)| &decl.parameters)
-        .filter_map(|parameter| parameter.default.expr().and_then(string_of))
-}
-
-/// The bytes a constant expression written as a string holds.
-fn string_of(expr: &ConstExpr) -> Option<&[u8]> {
+/// Each value of the unit's `expr` holds ([`ConstExpr::UnitValue`])
+/// anywhere in its tree.
+pub fn unit_values(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
+    let mut each = |expr: &ConstExpr| unit_values(expr, found);
     match expr {
-        ConstExpr::Str(bytes) => Some(bytes),
-        _ => None,
-    }
-}
-
-/// Each array `expr` holds ([`ConstExpr::UnitArray`]) anywhere in its tree.
-pub fn unit_arrays(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
-    let mut each = |expr: &ConstExpr| unit_arrays(expr, found);
-    match expr {
-        ConstExpr::UnitArray(array) => found(array.value()),
+        ConstExpr::UnitValue(held) => found(held.value()),
         ConstExpr::Unary { operand, .. }
         | ConstExpr::Unpack(operand)
         | ConstExpr::Cast { operand, .. }
@@ -171,20 +142,20 @@ pub fn unit_arrays(expr: &ConstExpr, found: &mut dyn FnMut(Zval)) {
     }
 }
 
-/// Each array the arguments of `attributes` hold.
-pub fn attribute_arrays(attributes: &[Attribute], found: &mut dyn FnMut(Zval)) {
+/// Each value of the unit's the arguments of `attributes` hold.
+pub fn attribute_values(attributes: &[Attribute], found: &mut dyn FnMut(Zval)) {
     for argument in attributes.iter().flat_map(|attribute| &attribute.arguments) {
-        unit_arrays(&argument.value, found);
+        unit_values(&argument.value, found);
     }
 }
 
-/// Whether `unit` holds a counted array anywhere: among an op array's
+/// Whether `unit` holds a counted value anywhere: among an op array's
 /// constants, inside a constant expression one keeps, or in a
-/// declaration ([`declared_arrays`]). A unit the cache keeps holds none
+/// declaration ([`declared_values`]). A unit the cache keeps holds none
 /// (design §3.4).
-pub fn holds_counted_array(unit: &Unit) -> bool {
+pub fn holds_counted_value(unit: &Unit) -> bool {
     let mut counted = false;
-    let mut note = |z: Zval| counted |= z.as_arr().is_some() && z.is_refcounted();
+    let mut note = |z: Zval| counted |= z.is_refcounted();
     let bodies = (unit.functions.iter().chain(&unit.dynamic))
         .map(|(_, body)| body)
         .chain(unit.methods.iter().map(|method| &method.body))
@@ -193,12 +164,12 @@ pub fn holds_counted_array(unit: &Unit) -> bool {
         body.literals.iter().for_each(|z| note(*z));
         body.const_exprs
             .iter()
-            .for_each(|expr| unit_arrays(expr, &mut note));
+            .for_each(|expr| unit_values(expr, &mut note));
     }
     for constant in &unit.constants {
-        attribute_arrays(&constant.attributes, &mut note);
+        attribute_values(&constant.attributes, &mut note);
     }
-    for (z, _) in declared_arrays(unit) {
+    for (z, _) in declared_values(unit) {
         note(z);
     }
     counted

@@ -896,7 +896,7 @@ pub(crate) fn to_array(req: &mut Request, value: &Value) -> Result<PhpArray, Thr
 ///
 /// A declared row is keyed by `prop_info->name`, the mangled name the
 /// class's compile interned as it declared the property
-/// ([`php_compile::intern_declared`]), so a cast costs the table it
+/// ([`php_compile::named`]), so a cast costs the table it
 /// lays down and makes no string, the first as every later one; a
 /// subclass's private row of the same name is keyed by its own class:
 ///

@@ -1022,13 +1022,8 @@ fn the_recipe_prints_the_closure_digest_the_tracked_macos_build_names() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     let pin = Pin::parse(&tracked_text()).unwrap();
-    let named = (pin.variant.values()).filter_map(|variant| {
-        variant
-            .build(Platform::DarwinArm64)?
-            .provenance
-            .closure
-            .clone()
-    });
+    let named = (pin.variant.values())
+        .filter_map(|variant| variant.build(Platform::DarwinArm64)?.provenance.closure);
     let named: Vec<String> = named.map(|digest| digest.to_string()).collect();
     assert!(!named.is_empty(), "the tracked pin names a macOS build");
     for digest in named {

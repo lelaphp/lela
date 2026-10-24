@@ -35,7 +35,9 @@
 //! function table once a `DECLARE_FUNCTION` bound it.
 
 use php_link::Row;
-use php_unit::decl::{ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation};
+use php_unit::decl::{
+    ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation, Visibility,
+};
 use php_unit::{OpArray, Unit};
 
 use super::Request;
@@ -310,6 +312,7 @@ impl ClassBlocks {
         if let Some(parent) = &linking.parent {
             self.defaults.inherit(req, parent.slots.instance)?;
             self.statics.inherit(req, parent.slots.statics)?;
+            self.defaults.grow(req, linking.hooked_slots)?;
             // As `zend_do_inheritance_ex` walks them, each only where the
             // parent's table has rows.
             for table in [Table::Properties, Table::Constants, Table::Methods] {
@@ -442,6 +445,10 @@ pub(super) struct Linking {
     /// The slots the traits' properties take.
     trait_slots: SlotCounts,
     parent: Option<Inherited>,
+    /// The slots `do_inherit_property` adds, one `perealloc` each, for a
+    /// virtual property with hooks the class declares over a parent's
+    /// backed one with none (`use_child_prop`).
+    hooked_slots: usize,
     /// Rows after the parent's: the traits' abstract methods and the
     /// interfaces' members.
     last: Members,
@@ -896,14 +903,36 @@ impl AstCopy {
     }
 
     /// `zend_ast_tree_size` over `expr`'s node in php's tree, and the
-    /// strings it holds.
+    /// strings it holds. A trait's `self::class` and `parent::class` stay
+    /// a `ZEND_AST_CLASS_NAME` the using class evaluates, a node with no
+    /// child and no string (the file under the recipe's `TMPDIR`):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3310-trait-class-name.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('trait TT { const K = self::class; public $p = self::class; function g($a = self::class) { return [$a, self::K, $this->p]; } } class UT { use TT; } function ft() { return (new UT)->g(); }'), "\n";
+    /// echo m('trait TP { const K = parent::class; } class BP {} class CP extends BP { use TP; }'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode(eval('return [ft(), CP::K];')), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 3704
+    /// 1048
+    /// [["UT","UT","UT"],"BP"]
+    /// ```
     fn expr(&mut self, expr: &ConstExpr) {
         match expr {
             ConstExpr::Null
             | ConstExpr::Bool(_)
             | ConstExpr::Long { .. }
             | ConstExpr::Double(_)
-            | ConstExpr::UnitArray(_) => self.tree += AST_ZVAL,
+            | ConstExpr::UnitValue(_) => self.tree += AST_ZVAL,
             ConstExpr::Str(bytes) => self.string(bytes),
             ConstExpr::Constant { name, .. } => self.string(&name.resolved().0),
             ConstExpr::ClassConstant { class, name, .. } => {
@@ -917,9 +946,15 @@ impl AstCopy {
                 self.expr(name);
             }
             ConstExpr::EnumCase { .. } => self.enum_init(),
+            // `self::class` and `parent::class` keep the fetch type in
+            // the node's `attr` and no child (`zend_compile_const_expr_class_name`).
             ConstExpr::ClassName { class, .. } => {
                 self.node(1);
-                self.string(&class.0);
+                if !(class.0.eq_ignore_ascii_case(b"self")
+                    || class.0.eq_ignore_ascii_case(b"parent"))
+                {
+                    self.string(&class.0);
+                }
             }
             ConstExpr::Unary { operand, .. }
             | ConstExpr::Unpack(operand)
@@ -1526,10 +1561,24 @@ impl Request {
                 .saturating_sub(decl.properties.len() + taken.properties),
         };
         let interfaces = self.interface_sizes(decl, written);
+        let above = (decl.parent.as_ref()).and_then(|name| self.class_named(name.into()));
+        let backed_above = |name: &[u8]| {
+            let above = above.map_or(&[][..], |above| self.placed_properties(above));
+            (above.iter().filter_map(|info| self.property_decl(*info))).any(|property| {
+                *property.name.0 == *name
+                    && property.visibility != Visibility::Private
+                    && property.hooks.is_none()
+            })
+        };
+        let hooked_slots = (written.properties.iter())
+            .filter(|property| property.is_instance && property.is_virtual)
+            .filter(|property| property.hooks.is_some() && backed_above(&property.name.0))
+            .count();
         Some(Linking {
             first,
             trait_slots,
             parent,
+            hooked_slots,
             last,
             interfaces,
         })

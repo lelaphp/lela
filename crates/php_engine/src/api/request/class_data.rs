@@ -280,6 +280,7 @@ impl Request {
     #[cold]
     fn resolve_made(&mut self, class: ClassId) -> Made {
         const ZEND_OBJECT: usize = 56;
+        const ZVAL: usize = size_of::<php_heap::Zval>();
         let (size, declared_by) = self
             .symbols()
             .lineage(class)
@@ -293,7 +294,7 @@ impl Request {
         let guards = if self.uses_guards(class) { 16 } else { 0 };
         let made = Made {
             slots: self.class_slots(class),
-            custom: size.saturating_sub(ZEND_OBJECT) + guards,
+            custom: size.saturating_sub(ZEND_OBJECT) + guards + ZVAL * self.redeclared_slots(class),
             declared_by,
             create: self.native_new_of(class),
             handlers: self.handlers_of(class),
@@ -308,6 +309,71 @@ impl Request {
         };
         self.class_data.rows.row(class).made = Some(made);
         made
+    }
+
+    /// The slots `do_inherit_property` leaves `IS_UNDEF` in `class`'s
+    /// `default_properties_table` ([`super::Placed::holes`]), one for each
+    /// property a class of its lineage redeclares over its parent's:
+    /// php's object keeps them, so `zend_object_alloc` counts them, where
+    /// this engine places the property in one slot alone. The first `new`
+    /// of a class that redeclares a property costs php's, hooks over a
+    /// backed property among them (the file under the recipe's
+    /// `TMPDIR`):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3286-redeclared.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } }'); m('$q0 = 1;');
+    /// foreach ([
+    ///     'class R { const B = 1; }',
+    ///     'class K1 { public $p = 1; } class K2 extends K1 { public $p = 2; }',
+    ///     '$GLOBALS["k2"] = new K2;',
+    ///     'class K3 extends K2 { public $p = 3; protected $q = 4; }',
+    ///     '$GLOBALS["k3"] = new K3;',
+    ///     'class L1 { public $p = R::B; } class L2 extends L1 { public $q = 2; }',
+    ///     '$GLOBALS["l2"] = new L2;',
+    ///     'class P1 { private $p = 1; } class P2 extends P1 { public $p = 2; }',
+    ///     '$GLOBALS["p2"] = new P2;',
+    ///     'class N1 { public $p = 1; } class N2 extends N1 { public $q = R::B; }',
+    ///     '$GLOBALS["n2"] = new N2;',
+    ///     'class A6 { public $p = 1; } class B6 extends A6 { public $p { get => 5; } }',
+    ///     '$GLOBALS["b6"] = new B6;',
+    ///     'class A8 { public $p = 1; } class B8 extends A8 { public $p = 3 { get => 5; } }',
+    ///     '$GLOBALS["b8"] = new B8;',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// var_dump($k3);
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 432  class R { const B = 1; }
+    /// 928  class K1 { public $p = 1; } class K2 extends K1 { public $p = 2; }
+    /// 624  $GLOBALS["k2"] = new K2;
+    /// 560  class K3 extends K2 { public $p = 3; protected $q = 4; }
+    /// 112  $GLOBALS["k3"] = new K3;
+    /// 928  class L1 { public $p = R::B; } class L2 extends L1 { public $q = 2; }
+    /// 112  $GLOBALS["l2"] = new L2;
+    /// 960  class P1 { private $p = 1; } class P2 extends P1 { public $p = 2; }
+    /// 112  $GLOBALS["p2"] = new P2;
+    /// 928  class N1 { public $p = 1; } class N2 extends N1 { public $q = R::B; }
+    /// 112  $GLOBALS["n2"] = new N2;
+    /// 1072  class A6 { public $p = 1; } class B6 extends A6 { public $p { get => 5; } }
+    /// 112  $GLOBALS["b6"] = new B6;
+    /// 1072  class A8 { public $p = 1; } class B8 extends A8 { public $p = 3 { get => 5; } }
+    /// 112  $GLOBALS["b8"] = new B8;
+    /// object(K3)#2 (2) {
+    ///   ["p"]=>
+    ///   int(3)
+    ///   ["q":protected]=>
+    ///   int(4)
+    /// }
+    /// ```
+    fn redeclared_slots(&self, class: ClassId) -> usize {
+        self.placement(class)
+            .map_or(0, |placed| placed.holes() as usize)
     }
 
     /// The `emalloc`s `create_object` makes beside a new `object`, each
@@ -801,11 +867,11 @@ impl Request {
     /// ```
     ///
     /// An array the declaration wrote, every key and value folded, is
-    /// the unit's array ([`ConstExpr::UnitArray`]), immutable in a unit
+    /// the unit's array ([`ConstExpr::UnitValue`]), immutable in a unit
     /// the cache keeps, so a slot, a `static` and a constant copied from
     /// it take no owner, as opcache leaves php's table of defaults:
     ///
-    /// [`ConstExpr::UnitArray`]: php_unit::decl::ConstExpr::UnitArray
+    /// [`ConstExpr::UnitValue`]: php_unit::decl::ConstExpr::UnitValue
     ///
     /// ```php
     /// class C { public $arr = ['x']; public $n = [[1], 'a']; public $q = [PHP_INT_SIZE]; public static $s = ['y', 'k' => 1]; const K = ['z']; }
