@@ -1101,6 +1101,29 @@ impl Heap {
     /// to the buffer as garbage where it is not in it already; the count
     /// of what was found, references not among it, and `flags` told
     /// when a destructor is still to be served.
+    ///
+    /// The table an object's handler hands back is garbage of its own,
+    /// so an array that table is shared with stays whole when a
+    /// destructor keeps it (GH-24050):
+    ///
+    /// ```php
+    /// class R { public $c; public $self; function __destruct() { $GLOBALS['kept'] = $this->c; } }
+    /// class H { public $o; public $r; public $self; }
+    /// $array = ['victim' => new stdClass, 'key' => 'value'];
+    /// $h = new H; $r = new R;
+    /// $h->o = (object) $array;
+    /// $r->c = function () use ($array) { return $array; };
+    /// $h->r = $r; $h->self = $h; $r->self = $r;
+    /// unset($array); gc_collect_cycles();
+    /// unset($h, $r); var_dump(gc_collect_cycles(), gc_collect_cycles());
+    /// var_dump($kept()['victim']);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(0)
+    /// object(stdClass)#1 (0) {
+    /// }
+    /// ```
     fn gc_collect_white(
         hooks: &mut dyn HeapHooks,
         root: Node,
@@ -1127,6 +1150,17 @@ impl Heap {
                     } else {
                         match children(hooks, node, kids) {
                             (Some(table), split) if table.newly(collect) => {
+                                // The table blackened here is garbage as
+                                // an array reached on its own is, where the
+                                // buffer does not hold it already, so a
+                                // destructor's resurrection takes it out
+                                // of the garbage with what it holds
+                                // (GH-24050, php 8.5.12).
+                                if let Table::Arr(a) = table
+                                    && Node::Arr(a).gc().is_unplaced()
+                                {
+                                    Heap::gc_growing(hooks, |gc| gc.add_garbage(Node::Arr(a)));
+                                }
                                 push_all(&kids[..split], &mut stack, collect);
                                 walk(&kids[split..], &mut stack, collect)
                             }
