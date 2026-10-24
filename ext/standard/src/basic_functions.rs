@@ -163,7 +163,7 @@ fn long2ip(req: &mut Request, ip: i64) -> Result<Owner<PhpString>, Thrown> {
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// string(9) "localhost"
