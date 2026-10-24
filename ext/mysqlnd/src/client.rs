@@ -265,10 +265,46 @@ impl Mysqlnd {
             .unwrap_or(false))
     }
 
+    /// `mysqlnd_errno`: the last error's number, `0` where there is none
+    /// or the number names no connection; what a check that only asks
+    /// whether there is an error reads, [`Mysqlnd::status`] whole
+    /// where there is one. A row's fetch reads it after every row, and a
+    /// row the server failed in reports its error:
+    ///
+    /// ```php
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $q = "SELECT n, IF(n = 3, (SELECT 1 UNION SELECT 2), n) FROM (SELECT 1 AS n UNION ALL SELECT 2 UNION ALL SELECT 3) t";
+    /// $r = mysqli_query($l, $q, MYSQLI_USE_RESULT);
+    /// try {
+    ///     while ($row = mysqli_fetch_row($r)) {
+    ///         echo implode(',', $row), "\n";
+    ///     }
+    /// } catch (mysqli_sql_exception $e) {
+    ///     echo get_class($e), ': ', $e->getCode(), ' ', $e->getMessage(), "\n";
+    /// }
+    /// mysqli_report(MYSQLI_REPORT_ERROR);
+    /// $r = mysqli_query($l, $q, MYSQLI_USE_RESULT);
+    /// var_dump(mysqli_fetch_row($r)[0], mysqli_fetch_row($r)[0], mysqli_fetch_row($r));
+    /// ```
+    /// ```expect mysql
+    /// 1,1
+    /// 2,2
+    /// mysqli_sql_exception: 1242 Subquery returns more than 1 row
+    ///
+    /// Warning: mysqli_fetch_row(): (21000/1242): Subquery returns more than 1 row in %s on line 14
+    /// string(1) "1"
+    /// string(1) "2"
+    /// bool(false)
+    /// ```
+    #[must_use]
+    pub fn errno(self, req: &mut Request) -> u32 {
+        self.0.peek(req, |conn| conn.error.errno).unwrap_or(0)
+    }
+
     /// The facts the accessors read.
     pub fn status(self, req: &mut Request) -> Status {
         self.0
-            .with(req, |_, conn| Status {
+            .peek(req, |conn| Status {
                 errno: conn.error.errno,
                 sqlstate: conn.sqlstate(),
                 error: conn.error.error.clone(),
@@ -355,7 +391,7 @@ impl Mysqlnd {
     /// `mysqlnd_real_escape_string`: the escaped bytes, without quotes.
     pub fn escape(self, req: &mut Request, from: &[u8]) -> Vec<u8> {
         self.0
-            .with(req, |_, conn| conn.escape_string(from))
+            .peek(req, |conn| conn.escape_string(from))
             .unwrap_or_default()
     }
 
@@ -401,7 +437,7 @@ impl Mysqlnd {
     /// `mysqlnd_get_connection_stats`: each statistic's name and value.
     pub fn stats(self, req: &mut Request) -> Vec<(&'static str, u64)> {
         self.0
-            .with(req, |_, conn| named(&conn.stats.values[..]))
+            .peek(req, |conn| named(&conn.stats.values[..]))
             .unwrap_or_default()
     }
 
@@ -413,7 +449,7 @@ impl Mysqlnd {
     /// `conn->options->local_infile_directory`.
     pub fn local_infile_directory(self, req: &mut Request) -> Option<Vec<u8>> {
         self.0
-            .with(req, |_, conn| {
+            .peek(req, |conn| {
                 let dir = conn.options.local_infile_directory.as_ref();
                 dir.map(|d| d.bytes().to_vec())
             })
@@ -477,10 +513,7 @@ impl Mysqlnd {
         let mut dont_poll = Vec::new();
         if let Some(read) = read.as_deref_mut() {
             read.retain(|conn| {
-                let state = conn
-                    .0
-                    .with(req, |_, c| c.state)
-                    .unwrap_or(ConnState::Alloced);
+                let state = conn.0.peek(req, |c| c.state).unwrap_or(ConnState::Alloced);
                 let idle = state <= ConnState::Ready || state == ConnState::QuitSent;
                 if idle {
                     dont_poll.push(*conn);
@@ -556,7 +589,7 @@ impl Mysqlnd {
 
     /// The connection's stream, for what selects on it.
     pub fn stream(self, req: &mut Request) -> Option<php_ext::request::Stream> {
-        self.0.with(req, |_, conn| conn.net.stream()).flatten()
+        self.0.peek(req, |conn| conn.net.stream()).flatten()
     }
 }
 
@@ -600,11 +633,24 @@ impl ResultSet {
 
     /// `mysqlnd_fetch_row`'s values: the next row.
     pub fn fetch(&mut self, req: &mut Request) -> Result<Fetched, Thrown> {
+        self.next_row(req, |_, _| {})
+    }
+
+    /// The next row, read in one lend of the connection, after `first`
+    /// in the same lend.
+    fn next_row(
+        &mut self,
+        req: &mut Request,
+        first: impl FnOnce(&mut Request, &mut ConnData),
+    ) -> Result<Fetched, Thrown> {
         let res = &mut self.res;
         let got = self
             .conn
             .0
-            .with(req, |req, conn| res.fetch_row(req, conn, true))
+            .with(req, |req, conn| {
+                first(req, conn);
+                res.fetch_row(req, conn, true)
+            })
             .transpose()?;
         Ok(match got {
             Some(Ok(Some(row))) => Fetched::Row(row),
@@ -616,13 +662,37 @@ impl ResultSet {
     /// `mysqlnd_res::fetch_into`: the next row as an array keyed as
     /// `flags` (`MYSQLND_FETCH_ASSOC`, `_NUM` or both) asks, a numeric
     /// column name an integer key; `null` past the last, `false` where
-    /// the fetch failed. The connection's error is emptied first.
+    /// the fetch failed. The connection's error is emptied first, in the
+    /// lend of the connection the row is read in:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $r = mysqli_query($l, "SELECT 'a' UNION ALL SELECT 'b'");
+    /// mysqli_query($l, 'SELEC 1');
+    /// var_dump(mysqli_errno($l), mysqli_fetch_row($r), mysqli_errno($l));
+    /// mysqli_query($l, 'SELEC 1');
+    /// var_dump(mysqli_fetch_assoc($r), mysqli_fetch_row($r), mysqli_errno($l));
+    /// ```
+    /// ```expect mysql
+    /// int(1064)
+    /// array(1) {
+    ///   [0]=>
+    ///   string(1) "a"
+    /// }
+    /// int(0)
+    /// array(1) {
+    ///   ["a"]=>
+    ///   string(1) "b"
+    /// }
+    /// NULL
+    /// int(0)
+    /// ```
     pub fn fetch_into(&mut self, req: &mut Request, flags: u32) -> Result<Owner<Value>, Thrown> {
         // "We clean the error here because in unbuffered mode we could
         // receive a new error and therefore consumers of this method are
         // checking for errors."
-        let _ = self.conn.0.with(req, |req, conn| conn.error.reset(req));
-        let row = match self.fetch(req)? {
+        let mut row = match self.next_row(req, |req, conn| conn.error.reset(req))? {
             Fetched::Row(row) => row,
             Fetched::Done => return Ok(Owner::null()),
             Fetched::Failed => return Ok(Owner::bool(false)),
@@ -636,7 +706,7 @@ impl ResultSet {
                 return Err(thrown);
             }
         };
-        let mut values = row.into_iter();
+        let mut values = row.drain(..);
         let mut filled = Ok(());
         for (i, value) in values.by_ref().enumerate() {
             filled = self.fill(req, &mut array, i, flags, value);
@@ -647,6 +717,7 @@ impl ResultSet {
         for value in values {
             value.give_up(req);
         }
+        self.res.recycle(req, row);
         match filled {
             Ok(()) => Ok(array.into_value()),
             Err(thrown) => {

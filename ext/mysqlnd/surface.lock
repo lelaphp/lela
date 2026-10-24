@@ -23,6 +23,7 @@ client::Mysqlnd::close
 client::Mysqlnd::command
 client::Mysqlnd::connect
 client::Mysqlnd::end_psession
+client::Mysqlnd::errno
 client::Mysqlnd::escape
 client::Mysqlnd::give_back
 client::Mysqlnd::init
