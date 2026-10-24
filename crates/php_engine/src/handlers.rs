@@ -1423,13 +1423,16 @@ fn inline_init_closure(
 }
 
 /// What a dynamic call resolved to: the callee, the name the call frame
-/// carries for a method, the receiver it holds one owner of, the called
-/// scope, and the closure the frame holds one owner of, with whether it
-/// reads a runtime cache of its own ([`crate::classes::ClosureCache`]).
+/// carries for a method, the receiver, the called scope, and the closure
+/// the frame holds one owner of, with whether it reads a runtime cache of
+/// its own ([`crate::classes::ClosureCache`]). The receiver is one owner
+/// the call holds (`ZEND_CALL_RELEASE_THIS`), except a closure's bound
+/// one, which the closure the call holds keeps, so the call is lent it
+/// (`ZEND_CALL_CLOSURE | ZEND_CALL_HAS_THIS`).
 struct DynamicTarget {
     function: Function,
     name: Option<PhpString>,
-    this: Option<PhpObject>,
+    receiver: Option<exec::Receiver>,
     called_scope: Option<crate::api::values::ClassId>,
     closure: Option<(PhpObject, bool)>,
 }
@@ -1451,7 +1454,7 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         return Ok(DynamicTarget {
             function: made.function,
             name: None,
-            this: made.this,
+            receiver: made.this.map(exec::Receiver::Owned),
             called_scope: made.called_scope,
             closure: None,
         });
@@ -1474,18 +1477,37 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
     Ok(DynamicTarget {
         function,
         name: Some(name),
-        this,
+        receiver: this.map(exec::Receiver::Owned),
         called_scope: Some(class),
         closure: None,
     })
 }
 
-/// `zend_closure_get_closure` with `GC_ADDREF` of the closure and its
-/// receiver: what a call through `object`, a `Closure`, takes, the
-/// payload read once for the function, the receiver, the called scope
-/// and whether it reads a runtime cache of its own, as php's
-/// `get_closure` hands `fbc` and the object over in one call. None for
-/// an object that is no closure, with nothing touched.
+/// `zend_closure_get_closure` with `GC_ADDREF` of the closure: what a
+/// call through `object`, a `Closure`, takes, the payload read once for
+/// the function, the receiver, the called scope and whether it reads a
+/// runtime cache of its own, as php's `get_closure` hands `fbc` and the
+/// object over in one call. None for an object that is no closure, with
+/// nothing touched. The receiver is lent: the closure the call holds
+/// keeps it, so php sets `ZEND_CALL_HAS_THIS` without
+/// `ZEND_CALL_RELEASE_THIS` and takes no owner of it, and letting the
+/// call go offers it no root. Nor can the closure go while it runs, so a
+/// closure that lets go of its last name inside its own body still reads
+/// its receiver:
+///
+/// ```php
+/// class A {
+///     public $x = 'x';
+///     function m() { $c = function () {}; gc_collect_cycles(); $c(); return gc_status()['roots']; }
+///     function n() { $c = function () use (&$c) { $c = null; return $this->x; }; return $c(); }
+/// }
+/// $a = new A;
+/// var_dump($a->m(), $a->n());
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "x"
+/// ```
 fn closure_target(req: &Request, object: PhpObject) -> Option<DynamicTarget> {
     let closure = object.native::<crate::classes::ClosureObject>(req)?;
     let (function, this, called_scope) = (
@@ -1495,13 +1517,10 @@ fn closure_target(req: &Request, object: PhpObject) -> Option<DynamicTarget> {
     );
     let own_cache = matches!(closure.cache, crate::classes::ClosureCache::Own(_));
     req.addref(&object.as_value());
-    if let Some(this) = this {
-        req.addref(&this.as_value());
-    }
     Some(DynamicTarget {
         function,
         name: None,
-        this,
+        receiver: this.map(exec::Receiver::lent),
         called_scope,
         closure: Some((object, own_cache)),
     })
@@ -1536,7 +1555,7 @@ fn dynamic_call_string(
     Ok(DynamicTarget {
         function,
         name: None,
-        this: None,
+        receiver: None,
         called_scope: None,
         closure: None,
     })
@@ -1643,7 +1662,7 @@ fn dynamic_call_array(
     Ok(DynamicTarget {
         function,
         name: Some(method),
-        this,
+        receiver: this.map(exec::Receiver::Owned),
         called_scope: Some(object.class()),
         closure: None,
     })
@@ -1704,7 +1723,7 @@ fn dynamic_call_static(
     Ok(DynamicTarget {
         function,
         name: Some(method),
-        this: None,
+        receiver: None,
         called_scope: Some(class),
         closure: None,
     })
@@ -2912,7 +2931,7 @@ fn push_dynamic(
 /// scope, and whether the closure reads a cache of its own.
 fn dynamic_header(target: &DynamicTarget, count: u32) -> exec::Header {
     let mut header = exec::Header::call(target.function, count);
-    header.set_receiver(target.this.map(exec::Receiver::Owned));
+    header.set_receiver(target.receiver);
     header.set_called_scope(target.called_scope);
     header.closure = target.closure.map(|(closure, _)| closure);
     header.info.set_dynamic(true);
@@ -2935,7 +2954,7 @@ fn user_call_target(
         crate::api::call::Target::Function(function) => Ok(DynamicTarget {
             function,
             name: None,
-            this: None,
+            receiver: None,
             called_scope: None,
             closure: None,
         }),
@@ -2951,7 +2970,7 @@ fn user_call_target(
             Ok(DynamicTarget {
                 function,
                 name: Some(name),
-                this,
+                receiver: this.map(exec::Receiver::Owned),
                 called_scope: Some(scope),
                 closure: None,
             })
