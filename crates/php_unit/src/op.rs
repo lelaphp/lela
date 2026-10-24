@@ -439,7 +439,7 @@ pub struct OpArray {
     /// folded it to, with the string as written in the slot right after
     /// it. php marks the first of the two `Z_EXTRA = ZEND_EXTRA_VALUE`
     /// and a dimension handler over an object reads the second (`dim++`,
-    /// `Z/Zend/zend_vm_def.h:6822`), so `$o['10']` hands `offsetGet` the
+    /// `Z/Zend/zend_vm_def.h:6827`), so `$o['10']` hands `offsetGet` the
     /// string `"10"` where `$a['10']` is the key `10` (bug #63217). The
     /// slots are ascending, as the compiler lays them down.
     pub numeric_dims: Vec<ConstIdx>,

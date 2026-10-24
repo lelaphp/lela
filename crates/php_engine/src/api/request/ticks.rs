@@ -50,7 +50,7 @@ impl Request {
         }
     }
 
-    /// `ZEND_TICKS`' count (`Z/Zend/zend_vm_def.h:8024`): `EG(ticks_count)`
+    /// `ZEND_TICKS`' count (`Z/Zend/zend_vm_def.h:8029`): `EG(ticks_count)`
     /// stepped, and where it reaches `every` it starts again and the
     /// round is served, `zend_ticks_function` as `php_run_ticks`
     /// runs `PG(tick_functions)`: each extension's hook in bundle order,

@@ -115,6 +115,12 @@ pub(crate) trait UriParser: Sized + Send + 'static {
         Ok(())
     }
 
+    /// The string a username or a password read is: `ZVAL_STRINGL`'s
+    /// ([`PhpString::new`]) by default.
+    fn credential(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        PhpString::new(req, bytes)
+    }
+
     /// `free`: what the parser holds on the request's heap given back,
     /// as `php_uri_object_handler_free` frees it.
     fn free(self, req: &mut Request) {
@@ -528,6 +534,19 @@ fn component_string<P: UriParser>(
     bytes.map(|bytes| PhpString::new(req, &bytes)).transpose()
 }
 
+/// The username or the password read, made as the parser makes it
+/// ([`UriParser::credential`]).
+fn component_credential<P: UriParser>(
+    req: &mut Request,
+    this: PhpObject,
+    name: &str,
+    mode: ReadAs,
+    f: impl FnOnce(&mut Request, &mut P) -> Result<Read<Option<Vec<u8>>>, Thrown>,
+) -> Result<Option<Owner<PhpString>>, Thrown> {
+    let bytes = component::<P, _>(req, this, name, mode, f)?;
+    bytes.map(|bytes| P::credential(req, &bytes)).transpose()
+}
+
 /// `php_uri_property_write_helper`: the receiver cloned through its
 /// handler, `f` applied to the clone's URI, and the clone returned; a refused
 /// write is the throw `f` made, the clone released.
@@ -700,16 +719,20 @@ fn debug_info<P: UriParser>(req: &mut Request, this: PhpObject) -> Result<Owner<
     };
     // A component the parser cannot read is left out, as php's
     // `== SUCCESS` checks leave it.
-    let strings = [
-        (b"scheme".as_slice(), scheme),
-        (b"username", username),
-        (b"password", password),
-        (b"host", host),
-    ];
-    for (name, value) in strings {
+    if let Ok(value) = scheme {
+        put_string(req, &mut out, b"scheme", value)?;
+    }
+    for (name, value) in [(b"username".as_slice(), username), (b"password", password)] {
         if let Ok(value) = value {
-            put_string(req, &mut out, name, value)?;
+            let value = match value {
+                Some(bytes) => P::credential(req, &bytes)?.into_value(),
+                None => Owner::null(),
+            };
+            put(req, &mut out, name, value)?;
         }
+    }
+    if let Ok(value) = host {
+        put_string(req, &mut out, b"host", value)?;
     }
     if let Ok(port) = port {
         put(

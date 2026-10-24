@@ -210,7 +210,9 @@ Heap::set_origin
 Heap::stored
 Heap::string
 Heap::string_append
+Heap::string_erealloc
 Heap::string_extend
+Heap::string_finit
 Heap::string_fresh
 Heap::string_safe_alloc
 Heap::string_truncate

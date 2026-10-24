@@ -1942,7 +1942,9 @@ pub(crate) fn autoload_keyed(req: &mut Request, name: &[u8]) -> Result<Option<Cl
 
 /// [`autoload`], `keyed` where the caller holds the lowered name.
 fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<ClassId>, Thrown> {
-    if name.is_empty() {
+    // The empty name, and a lone namespace separator, which names no
+    // class (`Z/Zend/zend_execute_API.c:1225-1228`), before the table.
+    if name.is_empty() || (!keyed && name == b"\\") {
         return Ok(None);
     }
     let key = Bare::of(name);

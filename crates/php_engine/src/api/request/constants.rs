@@ -417,7 +417,9 @@ impl Request {
         super::declared_bytes::attributes(self, &mut room, attributes.iter(), false).ok();
         let named = self.declared_string(given).ok();
         let keyed = (given.contains(&b'\\'))
-            .then(|| self.interned(name).ok())
+            // `zend_new_interned_string` of the lowered `zend_string_init`
+            // (`Z/Zend/zend_constants.c:524-526`).
+            .then(|| self.new_interned(name).ok())
             .flatten();
         let file = file.and_then(|file| self.executed_file_string(&file).ok());
         self.constants.push(ConstantRow {

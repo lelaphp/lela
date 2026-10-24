@@ -750,7 +750,7 @@ pub(crate) fn with_frames<R>(
     out
 }
 
-/// `GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4652`): the frame that is
+/// `GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4653`): the frame that is
 /// running, `frame`, moved into a new `Generator` and the object handed
 /// to the caller as what the call returned; the caller goes on after its
 /// call opline. A call whose value nothing reads makes no generator at
@@ -963,7 +963,7 @@ pub(crate) enum From {
     Finished(Value),
 }
 
-/// `YIELD_FROM`'s arms over an operand (`Z/Zend/zend_vm_def.h:8518`):
+/// `YIELD_FROM`'s arms over an operand (`Z/Zend/zend_vm_def.h:8525`):
 /// an array or a `Traversable` becomes the generator's delegated values,
 /// a generator becomes the one it delegates to. `value` is one owner the
 /// caller hands over.

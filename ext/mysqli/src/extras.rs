@@ -354,9 +354,9 @@ fn read_warning(req: &mut Request, set: &mut ResultSet) -> Result<Option<Warning
 /// echo memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect mysql
-/// 400
-/// 432
-/// 72
+/// 424
+/// 456
+/// 80
 /// 32
 /// ```
 fn warnings(

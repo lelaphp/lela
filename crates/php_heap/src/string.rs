@@ -150,11 +150,26 @@ impl FreshStr {
     /// written and the hash forgotten. A `len` under the string's is its
     /// own length.
     pub(crate) fn extend(self, mm: &mut Mm, len: usize) -> Result<FreshStr, Fatal> {
+        self.grow(mm, len, Str::reallocation_size)
+    }
+
+    /// The buffer of a `smart_str` grown to hold `len` bytes,
+    /// `smart_str_erealloc`'s `ferealloc2(str->s, len + _ZSTR_HEADER_SIZE + 1, ...)`
+    /// (`Z/Zend/zend_smart_str.c:44`): as [`FreshStr::extend`], but asking
+    /// for the header and `len` with its NUL, not `zend_string_extend`'s
+    /// sum.
+    pub(crate) fn erealloc(self, mm: &mut Mm, len: usize) -> Result<FreshStr, Fatal> {
+        self.grow(mm, len, Str::allocation_size)
+    }
+
+    /// [`FreshStr::extend`] and [`FreshStr::erealloc`], the allocation
+    /// asked for as `size` of the new length says.
+    fn grow(self, mm: &mut Mm, len: usize, size: fn(usize) -> usize) -> Result<FreshStr, Fatal> {
         let old = self.len();
         let len = len.max(old);
         // SAFETY: this is the string's one name and the request's own
         // allocation, its header and first `old` bytes initialised.
-        let at = unsafe { mm.realloc(self.0.address(), HEADER + old, Str::allocation_size(len)) }?;
+        let at = unsafe { mm.realloc(self.0.address(), HEADER + old, size(len)) }?;
         let header = at.cast::<StrHeader>();
         // SAFETY: the header moved with the bytes, and nothing else names
         // the allocation.
@@ -180,7 +195,8 @@ impl FreshStr {
         let len = len.min(self.len());
         // SAFETY: this is the string's one name and the request's own
         // allocation, its header and first `len` bytes initialised.
-        let at = unsafe { mm.realloc(self.0.address(), HEADER + len, Str::allocation_size(len)) }?;
+        let at =
+            unsafe { mm.realloc(self.0.address(), HEADER + len, Str::reallocation_size(len)) }?;
         let header = at.cast::<StrHeader>();
         // SAFETY: the header moved with the bytes, and nothing else names
         // the allocation.
@@ -218,9 +234,10 @@ impl Str {
     /// php's `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))`, which is what
     /// makes `memory_get_usage()` move by what php's moves by.
     ///
-    /// A copy of part of a string is `zend_string_init` of that many
-    /// bytes, so `substr` moves `memory_get_usage()` by this rounded up
-    /// to its bin, a `run` of whole pages past 3072 bytes, and by nothing
+    /// A copy of part of a string is `zend_string_init_fast` of that
+    /// many bytes, which php-8.5.12 sizes as [`Str::reallocation_size`],
+    /// so `substr` moves `memory_get_usage()` by that rounded up to its
+    /// bin, a `run` of whole pages past 3072 bytes, and by nothing
     /// for a span of one byte, the interned character, or one that is the
     /// whole string, which is the argument's own (#2661). A constant
     /// string is interned and its copy one more name for it, so neither
@@ -241,20 +258,33 @@ impl Str {
     /// ```expect capture
     /// copied, moved
     /// 0,1 0
-    /// 0,7 32
-    /// 0,10 40
-    /// 5,100 128
+    /// 0,7 40
+    /// 0,10 48
+    /// 5,100 160
     /// 0,3000 3072
     /// 0,5000 8192
     /// 1,9999 12288
     /// 0,10000 0
-    /// -10,null 40
+    /// -10,null 48
     /// literal 0
     /// strtoupper 40
     /// integer 32
     /// ```
     pub(crate) const fn allocation_size(len: usize) -> usize {
         (HEADER + len + 1).next_multiple_of(8)
+    }
+
+    /// The bytes a string of the request's grown or cut to `len` bytes
+    /// where it stands asks `erealloc` for: php-8.5.12's
+    /// `zend_string_realloc`, `_extend` and `_truncate`, which call
+    /// `safe_fperealloc(s, 1, len, ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(0)))`
+    /// (`Z/Zend/zend_string.h:279`, `:311`, `:343`): `len` past the
+    /// aligned header of the empty string, up to seven bytes more than
+    /// [`Str::allocation_size`] of the same `len`, which the bins then
+    /// round. The same sum is `zend_string_finit`'s,
+    /// `zend_string_safe_falloc(len, 1, 0)`.
+    pub(crate) const fn reallocation_size(len: usize) -> usize {
+        Str::allocation_size(0) + len
     }
 
     /// Lay a string of `bytes` down at `at`, which is an allocation of
@@ -370,7 +400,7 @@ impl Str {
                 // names the allocation but this; its header, bytes and NUL
                 // are initialised.
                 let at = unsafe {
-                    mm.realloc(s.address(), HEADER + old + 1, Str::allocation_size(len))
+                    mm.realloc(s.address(), HEADER + old + 1, Str::reallocation_size(len))
                 }?;
                 Str(at.cast())
             } else {
@@ -692,6 +722,32 @@ unsafe impl Send for Str {}
 
 /// Two strings are the one string when their bytes are, which is php's
 /// `zend_string_equals`; identity is what interning is for.
+impl crate::Heap {
+    /// `smart_str_erealloc` of a buffer ([`FreshStr::erealloc`]): grown to
+    /// `len` bytes as `erealloc2` grows it, the new bytes zero.
+    pub fn string_erealloc(&mut self, s: FreshStr, len: usize) -> Result<FreshStr, Fatal> {
+        s.erealloc(&mut self.mm, len)
+    }
+
+    /// A request-scoped string of `bytes`, php-8.5.12's
+    /// `zend_string_finit(str, len, 0, ...)`, which is
+    /// `zend_string_safe_falloc(len, 1, 0)` and the copy
+    /// (`Z/Zend/zend_string.h:215-225`): one allocation of
+    /// [`Str::reallocation_size`] bytes, `len` past the aligned header of
+    /// the empty string, where [`crate::Heap::string`], php's
+    /// `zend_string_init`, asks for the header and `len` rounded
+    /// together. A string of one byte is allocated here too; the
+    /// interned ones `zend_string_init_fast` hands out for the empty
+    /// string and one byte are the caller's.
+    pub fn string_finit(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
+        let at = self.mm.alloc(Str::reallocation_size(bytes.len()))?;
+        // SAFETY: the allocation holds the header, the bytes and the NUL,
+        // since `reallocation_size` is at least `allocation_size`, and
+        // nothing else holds it.
+        Ok(unsafe { Str::init(at, bytes, 0) })
+    }
+}
+
 impl PartialEq for Str {
     fn eq(&self, other: &Str) -> bool {
         self.0 == other.0 || self.bytes() == other.bytes()
@@ -1432,12 +1488,13 @@ mod tests {
         let mut fresh = heap.string_fresh(2103).expect("a fresh string");
         fresh.bytes_mut()[..5].copy_from_slice(b"hello");
         assert_eq!(heap.memory_usage(false) - base, 2560);
+        // php-8.5.12's truncate asks 32 + 5, the 40-byte bin.
         let cut = heap.string_truncate(fresh, 5).expect("a truncated string");
-        assert_eq!(heap.memory_usage(false) - base, 32);
+        assert_eq!(heap.memory_usage(false) - base, 40);
         let same = heap.string_truncate(cut, 3).expect("a truncated string");
         let s = same.finish();
         assert_eq!(s.bytes(), b"hel");
-        assert_eq!(heap.memory_usage(false) - base, 32);
+        assert_eq!(heap.memory_usage(false) - base, 40);
         heap.release_string(s);
         assert_eq!(heap.memory_usage(false), base);
     }

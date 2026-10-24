@@ -940,7 +940,7 @@ impl<H> VmStack<H> {
     /// before them: in a room off the pages and off `heap` ([`Loose`]), the
     /// one the last such frame gave back where it stands spare. php's
     /// `ZEND_FRAMELESS_ICALL_*` pushes no frame unless an observer
-    /// watches the function (`Z/Zend/zend_vm_def.h:9775`), so this one
+    /// watches the function (`Z/Zend/zend_vm_def.h:9782`), so this one
     /// opens no page where the top page has no room for it, reads in
     /// neither `memory_get_usage()` nor its peak, and leaves the pages
     /// as they stood for what the native pushes while it is served.
@@ -1155,7 +1155,7 @@ impl<H> VmStack<H> {
     /// keeps its own `execute_data`. The first time, the frame, its
     /// header and extra arguments with it, is copied into an allocation
     /// of its own, `emalloc(used_stack)` and the `memcpy` beside it
-    /// (`Z/Zend/zend_vm_def.h:4674-4682`), and its room on the page is
+    /// (`Z/Zend/zend_vm_def.h:4675-4683`), and its room on the page is
     /// given back; after that the slots are one allocation that moves
     /// with the frame and not through it, so a `ZvalRef` into one names
     /// the same zval while the frame is off the stack, and a frame

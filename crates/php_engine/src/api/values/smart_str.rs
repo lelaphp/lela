@@ -81,7 +81,7 @@ impl SmartStr {
         };
         let buf = match self.buf.take() {
             None => req.heap_mut().string_fresh(grown),
-            Some(buf) => req.heap_mut().string_extend(buf, grown),
+            Some(buf) => req.heap_mut().string_erealloc(buf, grown),
         };
         self.buf = Some(req.fatal_of(buf)?);
         Ok(())
@@ -150,8 +150,8 @@ impl SmartStr {
     /// $m = memory_get_usage(); memory_reset_peak_usage(); $s = var_export(range(1, 40), true); echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect
-    /// 56
-    /// 5688 456
+    /// 64
+    /// 5688 448
     /// ```
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn extract(mut self, req: &mut Request) -> Result<Owner<PhpString>, Thrown> {

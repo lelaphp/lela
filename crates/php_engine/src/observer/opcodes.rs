@@ -12,7 +12,7 @@
 //! opcode with a user handler resolves to `ZEND_USER_OPCODE`'s
 //! (`zend_vm_set_opcode_handler`, `Z/Zend/zend_execute.c:5913-5926`),
 //! whose handler calls the user's and then dispatches the opline's own
-//! (`Z/Zend/zend_vm_def.h:8237-8268`). So it is told of every opline the
+//! (`Z/Zend/zend_vm_def.h:8244-8275`). So it is told of every opline the
 //! VM dispatches and of no other: not of an `OP_DATA` its predecessor
 //! reads, not of a `JMPZ` a smart branch steps over, not of the `RECV`
 //! of a passed argument a function with no declared type skips, and not

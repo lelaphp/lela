@@ -799,7 +799,7 @@ fn walked(req: &Request, wrapper: PhpObject) -> Option<(Funcs, PhpObject)> {
 }
 
 /// The iterator arm of `zend_fe_fetch_object_helper`
-/// (`Z/Zend/zend_vm_def.h:7117`) and of `ZEND_FE_FETCH_RW`: past the
+/// (`Z/Zend/zend_vm_def.h:7122`) and of `ZEND_FE_FETCH_RW`: past the
 /// first fetch `funcs->move_forward` and `funcs->valid`; then
 /// `funcs->get_current_data`, by reference under `by_ref`
 /// ([`Funcs::current`]), and `funcs->get_current_key` where the opline

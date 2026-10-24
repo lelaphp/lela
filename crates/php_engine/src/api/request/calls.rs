@@ -438,7 +438,8 @@ impl Request {
             }
         };
         if self.user_function(function).is_some() {
-            return self.serve_user(call, caller);
+            let served = self.serve_user(call, caller);
+            return self.checked_after_call(served);
         }
         // `zend_call_function` ends an observed native with `fci->retval`
         // whether it threw or not (`Z/Zend/zend_execute_API.c:1039`).
@@ -447,11 +448,15 @@ impl Request {
         self.checked_after_call(served)
     }
 
-    /// `zend_call_function`'s check after a native returns
-    /// (`Z/Zend/zend_execute_API.c:1051-1059`): php tests the interrupt
+    /// `zend_call_function`'s check after its callee returns, a native
+    /// or, from php-8.5.12, a user function
+    /// (`Z/Zend/zend_execute_API.c:1081-1091`): php tests the interrupt
     /// while running user code but not inside a native, so a native a
     /// native called (`array_map('time_nanosleep', ..)`) is where an
-    /// interrupt raised during it is taken. The timer's is the fatal;
+    /// interrupt raised during it is taken, and a user callback's
+    /// `return` is no site of its own, so an interrupt raised after the
+    /// callback's last check is taken here, before the native that
+    /// called it goes on. The timer's is the fatal;
     /// otherwise the extensions' hooks, and what they throw is what the
     /// call hands back. A native that threw leaves the interrupt for the
     /// next site, as the loop's own check after a call does.
@@ -482,13 +487,45 @@ impl Request {
     /// ```expect process
     /// thrown by the handler
     /// ```
+    ///
+    /// Here pcntl blocks signals while it serves `SIGUSR1`, so the
+    /// `SIGUSR2` its handler sends lands as that dispatch ends, after the
+    /// callback's last check; the check after the callback returns serves
+    /// it before `usort` raises its deprecation for the `bool` the
+    /// callback gave back:
+    ///
+    /// ```php
+    /// pcntl_async_signals(true);
+    /// pcntl_signal(SIGUSR1, function () { echo "usr1\n"; posix_kill(posix_getpid(), SIGUSR2); });
+    /// pcntl_signal(SIGUSR2, function () { echo "usr2\n"; });
+    /// $a = [2, 1];
+    /// usort($a, function ($x, $y) { posix_kill(posix_getpid(), SIGUSR1); return $x > $y; });
+    /// echo "after\n";
+    /// ```
+    /// ```expect
+    /// usr1
+    /// usr2
+    ///
+    /// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 6
+    /// after
+    /// ```
+    #[inline(always)] // one load and a branch on every callback's return
     fn checked_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
+        if !self.limits().interrupt().raised().load(Ordering::Relaxed) {
+            return served;
+        }
+        self.interrupted_after_call(served)
+    }
+
+    /// [`Request::checked_after_call`] past its load, where the interrupt
+    /// is raised: what the callee served handed on as it stands where it
+    /// threw, and otherwise the check's answer over it.
+    #[cold]
+    #[inline(never)]
+    fn interrupted_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
         let Ok(value) = served else {
             return served;
         };
-        if !self.limits().interrupt().raised().load(Ordering::Relaxed) {
-            return Ok(value);
-        }
         match crate::interrupt::interrupted(self) {
             Ok(false) => Ok(value),
             Ok(true) => {

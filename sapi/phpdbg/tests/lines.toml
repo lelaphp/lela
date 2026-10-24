@@ -754,7 +754,7 @@ stdin = "b {dir}/t.php:#0\nr\nq\n"
 mask = [['\(opline #\d+\)', '(opline #N)']]
 
 # php runs an included file whose code is its one `RETURN` of a constant only
-# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6569-6572`);
+# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6570-6573`);
 # under phpdbg's it executes it, so the loop steps that `RETURN` and a
 # breakpoint on its line stops there. The address php prints is masked.
 [[line]]
@@ -765,7 +765,7 @@ stdin = "b {dir}/inc.php:6\nr\nc\nq\n"
 mask = [['#\d{10,}', '#N']]
 
 # php runs an included file whose code is its one `RETURN` of a constant only
-# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6569-6572`);
+# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6570-6573`);
 # under phpdbg's it executes it, so the loop steps that `RETURN` and a
 # breakpoint on its opline stops there. The address php prints is masked.
 [[line]]
