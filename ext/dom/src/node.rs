@@ -472,7 +472,16 @@ pub(crate) fn is_equal_node_of(
     if node == other {
         return Ok(true);
     }
-    Ok(is_equal_node(node, other, modern))
+    let mut deep = Deep::new(req);
+    let equal = is_equal_node(&mut deep, node, other, modern);
+    if deep.reached() {
+        return Err(throw_error(
+            req,
+            "Error",
+            "Maximum call stack size reached.",
+        ));
+    }
+    Ok(equal)
 }
 
 /// `DOMNode::isSameNode`'s body, `Dom\Node::isSameNode`'s too, where the
@@ -1634,6 +1643,20 @@ impl DOMNode {
     /// bool(true)
     /// bool(false)
     /// bool(false)
+    /// ```
+    ///
+    /// The comparison recurses as php's does and is refused where the stack
+    /// comes down to its limit (GH-23120):
+    ///
+    /// ```php
+    /// function deep() { $d = new DOMDocument; $n = $d->createElement('l', 'x');
+    ///     for ($i = 0; $i < 10000; $i++) { $p = $d->createElement('a'); $p->appendChild($n); $n = $p; }
+    ///     $d->appendChild($n); return $d; }
+    /// try { var_dump(deep()->documentElement->isEqualNode(deep()->documentElement)); }
+    /// catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=small-stack
+    /// Maximum call stack size reached.
     /// ```
     fn isEqualNode(
         req: &mut Request,

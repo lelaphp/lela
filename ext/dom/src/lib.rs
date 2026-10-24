@@ -1622,7 +1622,12 @@ fn is_equal_attr(a: Node, b: Node) -> bool {
 /// `php_dom_node_is_equal_node`: the legacy classes compare an element's
 /// namespace declarations too, a document that follows the standard
 /// (`spec_compliant`) keeps none to compare.
-fn is_equal_node(a: Node, b: Node, spec_compliant: bool) -> bool {
+/// A level past the stack's limit answers unequal, its refusal raised by
+/// the native once the walk ends.
+fn is_equal_node(deep: &mut Deep<'_>, a: Node, b: Node, spec_compliant: bool) -> bool {
+    if deep.overflowed() {
+        return false;
+    }
     if a.kind() != b.kind() {
         return false;
     }
@@ -1631,9 +1636,9 @@ fn is_equal_node(a: Node, b: Node, spec_compliant: bool) -> bool {
             a.name() == b.name()
                 && ns_prefix_equal(a, b)
                 && ns_uri_equal(a, b)
-                && unordered_equal(a.properties(), b.properties(), spec_compliant)
+                && unordered_equal(deep, a.properties(), b.properties(), spec_compliant)
                 && (spec_compliant || unordered_ns_equal(a.ns_def(), b.ns_def()))
-                && ordered_equal(a.children(), b.children(), spec_compliant)
+                && ordered_equal(deep, a.children(), b.children(), spec_compliant)
         }
         Kind::Dtd => {
             a.name() == b.name()
@@ -1656,7 +1661,7 @@ fn is_equal_node(a: Node, b: Node, spec_compliant: bool) -> bool {
                 && a.ns().and_then(Ns::href) == b.ns().and_then(Ns::href)
         }
         Kind::Fragment | Kind::HtmlDocument | Kind::Document => {
-            ordered_equal(a.children(), b.children(), spec_compliant)
+            ordered_equal(deep, a.children(), b.children(), spec_compliant)
         }
         _ => false,
     }
@@ -1972,19 +1977,31 @@ fn ns_uri_equal(a: Node, b: Node) -> bool {
     a.ns().and_then(Ns::href) == b.ns().and_then(Ns::href)
 }
 
-fn ordered_equal(a: Option<Node>, b: Option<Node>, spec_compliant: bool) -> bool {
+fn ordered_equal(
+    deep: &mut Deep<'_>,
+    a: Option<Node>,
+    b: Option<Node>,
+    spec_compliant: bool,
+) -> bool {
     let (a, b) = (node_list(a), node_list(b));
     a.len() == b.len()
         && a.iter()
             .zip(b.iter())
-            .all(|(x, y)| is_equal_node(*x, *y, spec_compliant))
+            .all(|(x, y)| is_equal_node(deep, *x, *y, spec_compliant))
 }
 
-fn unordered_equal(a: Option<Node>, b: Option<Node>, spec_compliant: bool) -> bool {
+fn unordered_equal(
+    deep: &mut Deep<'_>,
+    a: Option<Node>,
+    b: Option<Node>,
+    spec_compliant: bool,
+) -> bool {
     let (a, b) = (node_list(a), node_list(b));
     a.len() == b.len()
-        && a.iter()
-            .all(|x| b.iter().any(|y| is_equal_node(*x, *y, spec_compliant)))
+        && a.iter().all(|x| {
+            b.iter()
+                .any(|y| is_equal_node(deep, *x, *y, spec_compliant))
+        })
 }
 
 fn unordered_ns_equal(a: Option<Ns>, b: Option<Ns>) -> bool {
