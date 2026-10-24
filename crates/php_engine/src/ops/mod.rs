@@ -3685,25 +3685,46 @@ fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<
     if left.heap().is_same(right.heap()) {
         return Ok(Ordering::Equal);
     }
-    // `GC_TRY_ADDREF` and `GC_TRY_DTOR_NO_REF` touch no immutable table,
-    // so two constant arrays are compared with nothing held.
-    let held = (!left.heap().is_immutable() || !right.heap().is_immutable())
-        .then(|| hold_tables(req, left, right));
+    let held = HeldTables::hold(req, left.heap(), right.heap());
     let ordering = compare_held(req, left, right);
-    if let Some((left, right)) = held {
-        req.release(left);
-        req.release(right);
-    }
+    held.give_up(req);
     ordering
 }
 
-/// One owner of each of two tables [`compare_arrays`] walks, as
-/// `GC_TRY_ADDREF` takes it, nothing of an immutable one.
-fn hold_tables(req: &Request, left: PhpArray, right: PhpArray) -> (Value, Value) {
-    let held = (Value::array(left), Value::array(right));
-    req.addref(&held.0);
-    req.addref(&held.1);
-    held
+/// `zend_compare_symbol_tables`' hold over the walk of two tables that
+/// are not one, two arrays' ([`compare_arrays`]) or two objects'
+/// property tables ([`Request::compare_tables`]): `GC_TRY_ADDREF` of
+/// each before the walk, so a table a compared value's `__toString` or
+/// `compare` lets go of stands until it ends, and `GC_TRY_DTOR_NO_REF`
+/// after it, which offers a table another owner still holds to the
+/// cycle collector as a possible root. Neither touches an immutable
+/// table, so two constant arrays are walked with nothing held.
+#[must_use = "a hold is given up after the walk"]
+pub(crate) struct HeldTables(Option<(Value, Value)>);
+
+impl HeldTables {
+    /// `GC_TRY_ADDREF(ht1); GC_TRY_ADDREF(ht2)`.
+    #[inline]
+    pub(crate) fn hold(req: &Request, left: php_heap::Arr, right: php_heap::Arr) -> HeldTables {
+        HeldTables((!left.is_immutable() || !right.is_immutable()).then(|| {
+            let held = (
+                Value::array(PhpArray::of(left)),
+                Value::array(PhpArray::of(right)),
+            );
+            req.addref(&held.0);
+            req.addref(&held.1);
+            held
+        }))
+    }
+
+    /// `GC_TRY_DTOR_NO_REF(ht1); GC_TRY_DTOR_NO_REF(ht2)`.
+    #[inline]
+    pub(crate) fn give_up(self, req: &mut Request) {
+        if let Some((left, right)) = self.0 {
+            req.release(left);
+            req.release(right);
+        }
+    }
 }
 
 /// `zend_hash_compare` over two tables [`compare_arrays`] holds: the

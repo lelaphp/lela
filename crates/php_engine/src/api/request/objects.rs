@@ -1536,21 +1536,41 @@ impl Request {
     /// int(3)
     /// Nesting level too deep - recursive dependency?
     /// ```
+    ///
+    /// The two tables are held for the walk and given up after it, as
+    /// `zend_compare_symbol_tables` holds them ([`crate::ops::HeldTables`]),
+    /// so each is a possible root after it, beside the two objects:
+    ///
+    /// ```php
+    /// function t() {
+    ///     $a = new stdClass; $a->x = 1; $b = new stdClass; $b->x = 1;
+    ///     gc_collect_cycles();
+    ///     var_dump($a == $b, gc_status()['roots']);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(4)
+    /// ```
     fn compare_tables(&mut self, x: Obj, y: Obj) -> Result<std::cmp::Ordering, Thrown> {
         let (left, right) = self.property_tables(x, y)?;
         let table = left.table();
         if table.is_same(right.table()) {
             return Ok(std::cmp::Ordering::Equal);
         }
-        if left.len() != right.len() {
-            return Ok(left.len().cmp(&right.len()));
-        }
-        if table.is_recursive() {
-            return Err(crate::ops::nesting_too_deep(self));
-        }
-        table.protect();
-        let order = self.compare_rows(left, right, ClassId(x.class()));
-        table.unprotect();
+        let held = crate::ops::HeldTables::hold(self, table, right.table());
+        let order = if left.len() != right.len() {
+            Ok(left.len().cmp(&right.len()))
+        } else if table.is_recursive() {
+            Err(crate::ops::nesting_too_deep(self))
+        } else {
+            table.protect();
+            let order = self.compare_rows(left, right, ClassId(x.class()));
+            table.unprotect();
+            order
+        };
+        held.give_up(self);
         order
     }
 
