@@ -1507,6 +1507,36 @@ fn a_loops_trace_keeps_a_way_in_at_the_body_its_back_edge_lands_on() -> Result<(
     Ok(())
 }
 
+/// A `while (true)`'s trace is rooted at its body, where its back edge
+/// lands, as php's CFG heads the loop once its optimizer folds the
+/// constant condition into a `JMP` (`record::loop_root`, #3317): it keeps
+/// no second way in, its back edge landing on its root, and the `JMPNZ`
+/// on `true` that ends its body goes one way and takes no exit, as php's
+/// `JMP` takes none (#3203): no exit goes on past it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_on_a_constant_condition_keeps_no_way_in_at_its_body() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f($n) { $s = 0; while (true) { $s += $n; if ($s > 20) { break; } } return $s; }
+        echo f(5), \"\\n\";",
+    )?;
+    assert_eq!(ir.body, None, "{}", dump::render(&ir));
+    let jump = (ir.ops.iter())
+        .find_map(|op| match op {
+            Op::Line(line) if line.opcode == Opcode::Jmpnz => Some(line.opline),
+            _ => None,
+        })
+        .ok_or_else(|| format!("no JMPNZ in\n{}", dump::render(&ir)))?;
+    let past = OplineIdx(jump.0 + 1);
+    assert!(
+        (ir.exits.iter()).all(|exit| exit.opline != Some(past)),
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
 /// A loop's interrupt test takes php's exit point only where php's code
 /// does not keep the trace's initial instruction pointer or keeps values
 /// in registers at the loop's end, and php's interrupt stub otherwise,
