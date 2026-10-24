@@ -8249,7 +8249,7 @@ fn fetch_static_prop(
 
 /// [`static_slot_at`] and the value its slot holds, one more owner of it
 /// ([`Request::static_value`]), `null` for the silent miss: the read of
-/// `FETCH_STATIC_PROP_R`, `_IS` and `ISSET_ISEMPTY_STATIC_PROP`.
+/// `FETCH_STATIC_PROP_R` and `_IS`.
 #[inline]
 fn static_read(
     req: &mut Request,
@@ -22765,6 +22765,21 @@ pub(crate) fn isset_isempty_this<T: Tier>(
 /// bool(false)
 /// Class "Nope" not found
 /// ```
+///
+/// php reads the slot where it stands
+/// (`zend_fetch_static_property_address` under `BP_VAR_IS`) and takes no
+/// owner, and neither does this read: the slot is read as a view, so a
+/// static that holds an array is no possible root for being asked of.
+///
+/// ```php
+/// class S { static $r; }
+/// S::$r = [str_repeat('a', 2)];
+/// function u() { gc_collect_cycles(); $x = isset(S::$r); $y = empty(S::$r); echo gc_status()['roots'], "\n"; }
+/// u();
+/// ```
+/// ```expect
+/// 0
+/// ```
 pub(crate) fn isset_isempty_static_prop<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -22772,8 +22787,9 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
     op: &Opline,
 ) -> Edge {
     let slot = CacheSlot(op.extended_value & !ISEMPTY);
-    let held = match static_read(req, frame, code, op, slot, PropertyRead::Silent) {
-        Ok(held) => held,
+    let held = match static_slot_at(req, frame, code, op, slot, PropertyRead::Silent) {
+        Ok(Some(StaticSlot { info, .. })) => req.held_static(info).deref(),
+        Ok(None) => Value::null(),
         Err(thrown) => return threw(req, frame, &thrown),
     };
     let answer = if op.extended_value & ISEMPTY == 0 {
@@ -22781,7 +22797,6 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
     } else {
         crate::ops::is_true(req, &held).map(|truth| !truth)
     };
-    req.release(held);
     smart_branch::<T, branch::Peeked>(req, frame, code, op, answer.map(Value::bool))
 }
 
