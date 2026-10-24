@@ -1172,44 +1172,47 @@ impl DOMXPath {
     /// ```
     ///
     /// The namespace's table is filled as the array is walked, so a
-    /// refused entry leaves the ones before it registered, and a refusal
-    /// lays the namespace down; a call with no argument lets any function
-    /// be called and keeps the table, which a later set calls by name
-    /// again.
+    /// refused entry leaves the ones before it in the table; a refusal lays
+    /// the namespace down, and it serves no call until a registration on
+    /// it succeeds (php 8.5.12, GH-23897), after which the entries the
+    /// refused one kept are called by name too. A call with no argument
+    /// lets any function be called and keeps the table, which a later set
+    /// calls by name again.
     ///
     /// ```php
     /// $d = new DOMDocument;
     /// $d->loadXML('<r><a>x</a></r>');
     /// $x = new DOMXPath($d);
     /// $x->registerNamespace('php', 'http://php.net/xpath');
-    /// try { $x->registerPhpFunctions(['f' => fn($s) => "f$s", 'g' => 'no_such_function']); } catch (TypeError $e) { echo get_class($e), "\n"; }
-    /// var_dump($x->evaluate('php:functionString("f", //a)'));
-    /// try { $x->evaluate('php:functionString("g", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-    /// $y = new DOMXPath($d);
-    /// $y->registerNamespace('php', 'http://php.net/xpath');
-    /// try { $y->registerPhpFunctions('no_such_function'); } catch (TypeError $e) { echo get_class($e), "\n"; }
-    /// try { $y->evaluate('php:functionString("g", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $try = function ($f) { try { var_dump($f()); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; } };
+    /// $try(fn() => $x->registerPhpFunctions(['f' => fn($s) => "f$s", 'g' => 'no_such_function']));
+    /// $try(fn() => $x->evaluate('php:functionString("f", //a)'));
     /// $x->registerPhpFunctions(['up' => fn($s) => "U$s"]);
+    /// $try(fn() => $x->evaluate('php:functionString("f", //a)'));
+    /// $try(fn() => $x->evaluate('php:functionString("g", //a)'));
     /// $x->registerPhpFunctions();
-    /// var_dump($x->evaluate('php:functionString("strtoupper", //a)'));
-    /// try { $x->evaluate('php:functionString("up", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $try(fn() => $x->evaluate('php:functionString("strtoupper", //a)'));
+    /// $try(fn() => $x->evaluate('php:functionString("up", //a)'));
     /// $x->registerPhpFunctions(['rev' => 'strrev']);
-    /// var_dump($x->evaluate('php:functionString("up", //a)'), $x->evaluate('php:functionString("f", //a)'));
-    /// try { $x->registerPhpFunctions(['' => 'no_such_function']); } catch (TypeError $e) { echo get_class($e), "\n"; }
-    /// try { $x->registerPhpFunctions(['' => 'strlen']); } catch (ValueError $e) { echo get_class($e), "\n"; }
+    /// $try(fn() => [$x->evaluate('php:functionString("up", //a)'), $x->evaluate('php:functionString("f", //a)')]);
+    /// $try(fn() => $x->registerPhpFunctions(['' => 'no_such_function']));
+    /// $try(fn() => $x->registerPhpFunctions(['' => 'strlen']));
     /// ```
     /// ```expect
-    /// TypeError
+    /// TypeError: DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be an array with valid callbacks as values, function "no_such_function" not found or invalid function name
+    /// Error: No callbacks were registered
     /// string(2) "fx"
-    /// No callback handler "g" registered
-    /// TypeError
-    /// No callback handler "g" registered
+    /// Error: No callback handler "g" registered
     /// string(1) "X"
-    /// Invalid callback up, function "up" not found or invalid function name
-    /// string(2) "Ux"
-    /// string(2) "fx"
-    /// TypeError
-    /// ValueError
+    /// Error: Invalid callback up, function "up" not found or invalid function name
+    /// array(2) {
+    ///   [0]=>
+    ///   string(2) "Ux"
+    ///   [1]=>
+    ///   string(2) "fx"
+    /// }
+    /// TypeError: DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be an array with valid callbacks as values, function "no_such_function" not found or invalid function name
+    /// ValueError: DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be an array containing valid callback names
     /// ```
     #[php(tentative)]
     fn registerPhpFunctions(
