@@ -36,7 +36,7 @@ use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
 use php_engine::tier::{
-    self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, SafepointIdx, Site, Stepped, Word,
+    self, Epoch, Fatal, FrameRef, Held, Request, SafepointIdx, Site, Stepped, Word,
 };
 use php_unit::OplineIdx;
 
@@ -167,18 +167,18 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
             return Flow::Continue;
         }
         let claims = !quieted(state, Some(site));
-        let (rooted, word, start) = match site {
-            Site::Loop(at) => (Rooted::Safepoint(at), held.word(req, at), Start::Loop),
+        let (rooted, word) = match site {
+            Site::Loop(at) => (Rooted::Safepoint(at, Start::Loop), held.word(req, at)),
             Site::Entry => {
                 let at = SafepointIdx::ENTRY;
-                (Rooted::Safepoint(at), held.word(req, at), Start::Enter)
+                (Rooted::Safepoint(at, Start::Enter), held.word(req, at))
             }
             Site::Return(_) => {
                 let Some((caller, at)) = landing_past(req, frame) else {
                     return Flow::Continue;
                 };
                 let (goes, word) = goes_on(req, caller, at);
-                (Rooted::Goes(caller, goes), word, goes.start())
+                (Rooted::Goes(caller, goes), word)
             }
         };
         // A table a hot root found full stopped its counters, as php's
@@ -189,7 +189,7 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
                 return None;
             }
             match rooted {
-                Rooted::Safepoint(at) => Some(Holder::Root {
+                Rooted::Safepoint(at, _) => Some(Holder::Root {
                     epoch: tier::epoch(req),
                     func: held.func(),
                     at,
@@ -197,7 +197,11 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
                 Rooted::Goes(caller, goes) => goes.holder(req, caller),
             }
         };
-        match visit(word, &shared.policy, start, claims, holder) {
+        let decided = match rooted {
+            Rooted::Goes(_, goes) => goes.visit(word, &shared.policy, claims, holder),
+            Rooted::Safepoint(_, start) => visit(word, &shared.policy, start, claims, holder),
+        };
+        match decided {
             Visited::Continue => return Flow::Continue,
             decided => (decided, Arc::clone(shared)),
         }
@@ -211,11 +215,12 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: He
     }
 }
 
-/// Where a site's word stands: a safepoint of the frame's op array, or,
-/// for a return, where its caller goes on past the call it stands at.
+/// Where a site's word stands: a safepoint of the frame's op array,
+/// with what a recording claimed there starts as, or, for a return,
+/// where its caller goes on past the call it stands at.
 #[derive(Debug, Clone, Copy)]
 enum Rooted {
-    Safepoint(SafepointIdx),
+    Safepoint(SafepointIdx, Start),
     Goes(FrameRef, Goes),
 }
 
@@ -227,34 +232,47 @@ enum Goes {
     /// The landing word of the opline, which a compiled trace arms past
     /// a call (`record::landings`): a return root's.
     Landing(OplineIdx),
-    /// The word of the loop rooted at the opline, safepoint `header` of
-    /// the op array `func` names: php's handler there is the loop's, its
-    /// heat or the trace that replaced it (#3318).
-    Header(FuncRef, SafepointIdx),
+    /// The word of the loop rooted at the opline: php's handler there is
+    /// the loop's, its heat or the trace that replaced it (#3318).
+    Header,
 }
 
 impl Goes {
-    /// What a recording claimed from the word starts as.
-    fn start(self) -> Start {
+    /// A visit of the word, `holder` the claim's where one is taken: a
+    /// landing's as a return root's, bumped toward
+    /// `opcache.jit_hot_return` and claimed there; a loop root's entered
+    /// where it is compiled and never bumped or claimed, since the loop's
+    /// back edge counts the loop's heat, one count a turn as php's
+    /// header handler counts one, and an arrival past a return or an exit
+    /// counted too would count a body that ends in a call twice a turn.
+    fn visit(
+        self,
+        word: &Word,
+        policy: &Policy,
+        claims: bool,
+        holder: impl FnOnce() -> Option<Holder>,
+    ) -> Visited {
         match self {
-            Goes::Landing(_) => Start::Return,
-            Goes::Header(..) => Start::Loop,
+            Goes::Landing(_) => visit(word, policy, Start::Return, claims, holder),
+            Goes::Header => match policy::read(word) {
+                State::Compiled(id) => Visited::Enter(id),
+                State::Cold | State::Recording | State::Blacklisted => Visited::Continue,
+            },
         }
     }
 
-    /// The holder a claim of the word in `frame` takes, under the epoch
-    /// `req` started in; none where the frame runs no op array a row
-    /// names.
+    /// The holder a claim of a landing's word in `frame` takes, under
+    /// the epoch `req` started in; none where the frame runs no op array
+    /// a row names, and for a loop root's word, which is not claimed here.
     fn holder(self, req: &Request, frame: FrameRef) -> Option<Holder> {
-        let epoch = tier::epoch(req);
-        Some(match self {
-            Goes::Landing(at) => Holder::Landing {
-                epoch,
+        match self {
+            Goes::Landing(at) => Some(Holder::Landing {
+                epoch: tier::epoch(req),
                 func: tier::running_func(req, frame)?,
                 at,
-            },
-            Goes::Header(func, at) => Holder::Root { epoch, func, at },
-        })
+            }),
+            Goes::Header => None,
+        }
     }
 }
 
@@ -263,10 +281,8 @@ impl Goes {
 /// at: a landing word a compiled trace armed, which it arms at no loop
 /// php counts (`record::landings`); otherwise, at a loop's root, that
 /// loop's word, as php's handler there is the loop's, whose trace is
-/// entered and whose heat is counted from there, and which reads
-/// blacklisted for a loop php counts no heat of once claimed
-/// (`record::counts`); the sealed landing word anywhere else. The op
-/// array is read only past a landing no trace armed.
+/// entered from there ([`Goes::visit`]); the sealed landing word anywhere
+/// else. The op array is read only past a landing no trace armed.
 ///
 /// A loop's trace entered from its root's word tests the interrupt at its
 /// header, as every loop's does but one by recursive return, which takes
@@ -357,7 +373,7 @@ fn goes_on(req: &Request, frame: FrameRef, at: OplineIdx) -> (Goes, &Word) {
     let header =
         tier::served(req, frame).and_then(|held| Some((held, record::loop_at(held.code(), at)?)));
     match header {
-        Some((held, header)) => (Goes::Header(held.func(), header), held.word(req, header)),
+        Some((held, header)) => (Goes::Header, held.word(req, header)),
         None => (Goes::Landing(at), landing),
     }
 }
@@ -783,8 +799,8 @@ fn followed<'t>(
 /// goes on at (`zend_jit_trace_exit_stub`, `zend_jit_trace_return`), the
 /// word [`goes_on`] names: a trace compiled there is entered, and an
 /// armed landing's word bumped and claimed at `opcache.jit_hot_return`
-/// (`jit-design.md` §2.2, #3036), a loop root's at `opcache.jit_hot_loop`
-/// (#3318). Nothing while the interrupt is raised or the request records,
+/// (`jit-design.md` §2.2, #3036), and a loop root's compiled trace
+/// entered (#3318). Nothing while the interrupt is raised or the request records,
 /// nor where the landing is the root of `left`, the trace that left the
 /// frame there, as php's `zend_jit_trace_exit` answers 1 at its own
 /// trace's first opline and the opline's own handler runs, not the trace
@@ -822,7 +838,7 @@ fn visit_landing(
         }
         goes.holder(req, frame)
     };
-    visit(word, &shared.policy, goes.start(), claims, holder)
+    goes.visit(word, &shared.policy, claims, holder)
 }
 
 /// What an exit with no link goes on to (`jit-design.md` §4.9), php's
@@ -1040,8 +1056,9 @@ pub(crate) fn hot(
                 None
             }
             // php's interpreter runs the header's own handler, which php
-            // never swapped, and writes no line: an inner loop's header, which a recording
-            // met, is always counted (`record::header_at`).
+            // never swapped, and writes no line: an inner loop's header,
+            // which a recording met, is always counted
+            // (`record::header_at`).
             Ok(Begins::Uncounted) => {
                 policy::settle(claim, &Outcome::Uncounted);
                 return resumed(frame, stepped);

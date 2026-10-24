@@ -1696,11 +1696,10 @@ pub(crate) fn loop_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
 ///
 /// ```
 pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bool {
-    let mut view = UnitView::new(req);
-    let code = tier::func(req, frame)
-        .filter(|func| view.hold(req, *func))
-        .and_then(|func| view.op_array(func));
-    code.is_none_or(|code| loop_root(code, header).is_some_and(|root| reached(code, root)))
+    tier::served(req, frame).is_none_or(|held| {
+        let code = held.code();
+        loop_root(code, header).is_some_and(|root| reached(code, root))
+    })
 }
 
 /// Whether the opline at `to` is reached from the op array's entry along
@@ -1721,19 +1720,19 @@ pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bo
 /// crate lands, and this tier reads its loop headers from there.
 pub(crate) fn reached(code: &OpArray, to: OplineIdx) -> bool {
     let mut seen = vec![false; code.oplines.len()];
-    let mut work = vec![0u32];
+    let mut work = vec![OplineIdx(0)];
     while let Some(at) = work.pop() {
-        if at == to.0 {
+        if at == to {
             return true;
         }
-        let (Some(op), Some(seen)) = (code.oplines.get(at as usize), seen.get_mut(at as usize))
-        else {
+        let index = at.0 as usize;
+        let (Some(op), Some(seen)) = (code.oplines.get(index), seen.get_mut(index)) else {
             continue;
         };
         if std::mem::replace(seen, true) {
             continue;
         }
-        work.extend(tier::jump_targets(code, OplineIdx(at)).map(|target| target.0));
+        work.extend(tier::jump_targets(code, at));
         let ends = matches!(
             op.opcode,
             Opcode::Return
@@ -1747,7 +1746,7 @@ pub(crate) fn reached(code: &OpArray, to: OplineIdx) -> bool {
                 | Opcode::Match
         );
         if !ends {
-            work.extend(at.checked_add(1));
+            work.extend(at.0.checked_add(1).map(OplineIdx));
         }
     }
     false

@@ -356,8 +356,10 @@ fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
 }
 
 /// Whether php counts each loop of `a()` in `program`, in the order of
-/// their safepoints: its root reached from the entry ([`super::reached`]),
-/// as php's CFG finds a header there (`zend_cfg_identify_loops`).
+/// their safepoints: whether [`super::header_at`] finds the loop at its
+/// root, which it does where the root is reached from the entry
+/// ([`super::reached`]), as php's CFG finds a header there
+/// (`zend_cfg_identify_loops`).
 fn counted(program: &str) -> Result<Vec<bool>, String> {
     let (recorded, _) = testing::records::recording(&at("a", "enter"), program)?;
     let code = recorded
@@ -368,7 +370,8 @@ fn counted(program: &str) -> Result<Vec<bool>, String> {
         .filter(|(number, site)| !super::is_return_site(code, **site, *number))
         .map(|(number, _)| {
             let header = SafepointIdx(u32::try_from(number).unwrap_or(u32::MAX));
-            super::loop_root(code, header).is_some_and(|root| super::reached(code, root))
+            super::loop_root(code, header)
+                .is_some_and(|root| super::header_at(code, root) == Some(header))
         })
         .collect())
 }
