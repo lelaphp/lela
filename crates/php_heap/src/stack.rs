@@ -768,22 +768,21 @@ impl<H> VmStack<H> {
             let at = self.take_room(used);
             return Ok(self.lay(at, slots, Placed::OnPage, header, undefine));
         }
-        self.push_opening(heap, slots, used, header)
+        // The room a page opens is found out of line and the frame laid
+        // here, so what makes the header is never handed to the cold
+        // half, which would hold it in memory for the hot one too.
+        let placed = self.opening(heap, used)?;
+        let at = self.take_room(used);
+        Ok(self.lay(at, slots, placed, header, undefine))
     }
 
-    /// [`VmStack::push_frame`] where no page stands yet or the top one
-    /// has no room for the frame: the first page laid down, and a page
-    /// of the frame's own where that one cannot hold it either
-    /// (`zend_vm_stack_extend`).
+    /// The room [`VmStack::push_frame`] takes where no page stands yet or
+    /// the top one has no room for `used` slots: the first page laid
+    /// down, and a page of the frame's own where that one cannot hold it
+    /// either (`zend_vm_stack_extend`); where the frame stands then.
     #[cold]
     #[inline(never)]
-    fn push_opening(
-        &mut self,
-        heap: &mut Heap,
-        slots: usize,
-        used: usize,
-        header: impl FnOnce() -> H,
-    ) -> Result<FrameRef, Fatal> {
+    fn opening(&mut self, heap: &mut Heap, used: usize) -> Result<Placed, Fatal> {
         self.open(heap)?;
         let placed = if used <= self.left() {
             Placed::OnPage
@@ -806,8 +805,7 @@ impl<H> VmStack<H> {
                 "InternalError: a VM stack with no room for a frame after its push laid a page down",
             ));
         }
-        let at = self.take_room(used);
-        Ok(self.lay(at, slots, placed, header, undefine))
+        Ok(placed)
     }
 
     /// A frame of `len` slots from `at` laid on top of the stack where
