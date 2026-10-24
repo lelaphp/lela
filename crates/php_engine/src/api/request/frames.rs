@@ -2236,8 +2236,8 @@ impl Request {
             self.release_nogc(value);
         }
         self.release_arguments(call);
-        if let Some(name) = annex.as_mut().and_then(|annex| annex.name.take()) {
-            self.release(Value::string(name));
+        if let Some(trampoline) = annex.as_mut().and_then(|annex| annex.trampoline.take()) {
+            self.release(Value::string(trampoline.name));
         }
         if let Some(receiver) = receiver {
             self.give_up_receiver(receiver);
