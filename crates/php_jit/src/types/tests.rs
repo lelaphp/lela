@@ -1979,8 +1979,9 @@ fn class_guards(ir: &TraceIr) -> usize {
 /// or a decrement, under one class guard per object before the first,
 /// as php's code generator compiles one whose `prop_info` it knows on an
 /// immutable class (`zend_jit_class_guard`, `TRACE_FRAME_SET_THIS_CLASS_CHECKED`);
-/// the typed property's write is the handler's, as php's is its
-/// `zend_jit_assign_to_typed_prop`'s (#3337).
+/// a typed property's write of a long its type holds is in place, as the
+/// handler's own inline path writes it, and its write of a string its
+/// type must coerce is the handler's (#3337).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn properties_of_a_published_class_are_inline_under_one_class_guard() -> Result<(), String> {
@@ -2005,6 +2006,7 @@ fn properties_of_a_published_class_are_inline_under_one_class_guard() -> Result<
             (Opcode::AssignObj, Form::Inline),
             (Opcode::AssignObjOp, Form::Inline),
             (Opcode::PreDecObj, Form::Inline),
+            (Opcode::AssignObj, Form::Inline),
             (Opcode::AssignObj, Form::Step),
         ],
         "{}",

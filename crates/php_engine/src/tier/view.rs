@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use php_heap::ZvalType;
 use php_link::LinkedClass;
 use php_unit::decl::Parameter;
 use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
@@ -368,6 +369,7 @@ pub struct PropertySlot {
     class: ClassId,
     slot: u32,
     typed: bool,
+    admits: u16,
 }
 
 impl PropertySlot {
@@ -381,6 +383,16 @@ impl PropertySlot {
     #[must_use]
     pub fn typed(self) -> bool {
         self.typed
+    }
+
+    /// Whether a write of a scalar of `kind` lands in the slot as it
+    /// stands, with nothing to verify or convert, as the handler's inline
+    /// path writes it: any scalar of an untyped slot, one its type's mask
+    /// holds of a typed one, none of a `readonly` one or one of a set
+    /// visibility the scope lacks.
+    #[must_use]
+    pub fn admits(self, kind: ZvalType) -> bool {
+        (self.admits >> (kind as u16 & 15)) & 1 != 0
     }
 }
 
@@ -521,12 +533,27 @@ impl UnitView {
         else {
             return false;
         };
+        // The scalars a write lands as they stand, by the slot type's own
+        // test ([`crate::exec::SlotType::admits`]): none of a guarded
+        // slot, `readonly` or of a set visibility the scope lacks.
+        let scalars = [
+            php_heap::Zval::null(),
+            php_heap::Zval::bool(false),
+            php_heap::Zval::bool(true),
+            php_heap::Zval::long(0),
+            php_heap::Zval::double(0.0),
+        ];
+        let admits = scalars
+            .into_iter()
+            .filter(|z| ty.admits(*z))
+            .fold(0u16, |kinds, z| kinds | 1 << (z.kind() as u16));
         let place = PropertySlot {
             func: f,
             at,
             class,
             slot,
             typed: ty.typed(),
+            admits,
         };
         if !self.places.contains(&place) {
             self.places.push(place);

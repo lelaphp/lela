@@ -2242,11 +2242,13 @@ impl<'a> Builder<'a> {
     /// class the trace recorded (`Z/ext/opcache/jit/zend_jit_ir.c:14313`):
     /// over a constant name, on `$this` or a variable that holds an object
     /// as it is, of a class the recording took the name's slot on
-    /// ([`UnitView::place`]). A write, a compound write, an increment and
-    /// a decrement of a property with a type are served by php's
+    /// ([`UnitView::place`]). A compound write, an increment and a
+    /// decrement of a property with a type are served by php's
     /// `zend_jit_assign_to_typed_prop` and its kin, and so by the
-    /// handler's here, a `readonly` one and one of a set visibility among
-    /// them; a write in place writes a scalar, or a value no scalar where
+    /// handler here, as is a write of what its type does not hold as it
+    /// stands, a `readonly` one and one of a set visibility among them;
+    /// a write of a scalar its type holds is in place, as the handler's
+    /// own inline path writes it; a write in place writes a scalar, or a value no scalar where
     /// nothing reads what it writes to its `out` slot, as an assignment
     /// does; a compound write in place adds, subtracts or multiplies a
     /// number; an increment and a decrement in place write no `out` slot.
@@ -2277,6 +2279,11 @@ impl<'a> Builder<'a> {
         let unused = op.out_type == OperandKind::Unused;
         let served = match op.opcode {
             Opcode::FetchObjR => op.out_type == OperandKind::Tmp,
+            // A typed slot takes a scalar its type holds as it stands, as
+            // the handler's inline path writes one (`data_value`).
+            Opcode::AssignObj if slot.typed() => {
+                td.scalar() && td.tag().is_some_and(|tag| slot.admits(tag))
+            }
             Opcode::AssignObj => data.is_some_and(|data| {
                 td.scalar() || (unused && copied_whole(data.op1_type, data.op1, td, code))
             }),
@@ -2290,7 +2297,8 @@ impl<'a> Builder<'a> {
             }
             _ => unused,
         };
-        (served && (op.opcode == Opcode::FetchObjR || !slot.typed())).then_some(PropertyAt {
+        let typed_served = matches!(op.opcode, Opcode::FetchObjR | Opcode::AssignObj);
+        (served && (typed_served || !slot.typed())).then_some(PropertyAt {
             object,
             class,
             slot,

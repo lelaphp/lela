@@ -153,9 +153,9 @@ pub(crate) const OBJECT_THIS: Fixture = Fixture {
     ],
 };
 
-/// A function's loop over an object it holds: each untyped property's
-/// opline in place under one class guard on the variable, the typed
-/// property's write the handler's (#3337).
+/// A function's loop over an object it holds: each property's opline in
+/// place under one class guard on the variable, a typed property's write
+/// of a long in place and of a string it coerces the handler's (#3337).
 pub(crate) const OBJECT_VALUE: Fixture = Fixture {
     name: "object_value",
     program: "object_value",

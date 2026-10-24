@@ -180,6 +180,28 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// d{"a":[4],"o":null,"r":4,"s":"xxxx"} 4
     /// ```
+    ///
+    /// Typed slots: a long and a `null` their types hold written in place,
+    /// a long a `float` slot converts and a `readonly` slot's refusal the
+    /// handler's:
+    ///
+    /// ```php
+    /// class T { public int $n = 0; public ?int $m = 1; public float $f = 0.0; public readonly int $r; function __construct() { $this->r = 1; } }
+    /// function f($o, $k) { $c = 0; for ($i = 0; $i < $k; $i++) { $o->n = $i; $o->m = $i % 2 ? null : $i; $o->f = $i; try { $o->r = $i; } catch (Error $e) { $c++; } } return [$o->n, $o->m, $o->f, $o->r, $c]; }
+    /// echo json_encode(f(new T, 6)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [5,null,5,1,6]
+    /// ```
+    ///
+    /// ```php
+    /// class T { public int $n = 0; public ?int $m = 1; public float $f = 0.0; public readonly int $r; function __construct() { $this->r = 1; } }
+    /// function f($o, $k) { $c = 0; for ($i = 0; $i < $k; $i++) { $o->n = $i; $o->m = $i % 2 ? null : $i; $o->f = $i; try { $o->r = $i; } catch (Error $e) { $c++; } } return [$o->n, $o->m, $o->f, $o->r, $c]; }
+    /// echo json_encode(f(new T, 6)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [5,null,5,1,6]
+    /// ```
     pub(super) fn assign_obj(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let value = match self.scalar_kind(line.data)? {
             Some(_) => Some(self.scalar(at, line.data)?),

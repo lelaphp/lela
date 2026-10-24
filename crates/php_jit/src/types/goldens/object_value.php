@@ -2,7 +2,8 @@
 // A point a function holds, read and written from outside its class: a
 // read, a write of a string, a compound write and a decrement, each on a
 // published class's declared slot, under one class guard; a typed
-// property's write is the handler's, Core alone.
+// property's write of a long in place, and of a string its type
+// coerces the handler's, Core alone.
 class Point {
     public $x = 0;
     public $y = 0;
@@ -17,7 +18,8 @@ function k($p, $m) {
         $p->y -= 2;
         $p->x--;
         $p->n = $i;
+        $p->n = "7";
     }
-    return $t;
+    return $t + $p->n;
 }
 echo k(new Point, 100), "\n";
