@@ -77,7 +77,7 @@ mod opcodes;
 #[cfg(test)]
 mod tests;
 
-use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall, UnitView};
+use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, UnitView};
 use php_heap::ZvalType;
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
@@ -357,6 +357,24 @@ pub(crate) enum Imm {
     /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
     /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.
     Mask(u32),
+    /// A property opline compiled in place on the declared slot its name
+    /// is placed at on objects of the class a guard before it holds
+    /// (`zend_jit_fetch_obj`, `zend_jit_assign_obj`, `zend_jit_assign_obj_op`,
+    /// `zend_jit_incdec_obj`, `Z/ext/opcache/jit/zend_jit_ir.c:14206-15700`
+    /// over a known `prop_info`): the slot, by its number, and an
+    /// `ASSIGN_OBJ_OP`'s operator.
+    Property {
+        slot: u32,
+        binary: Option<Opcode>,
+    },
+}
+
+/// The object a property opline reads and a class guard holds: `$this`
+/// of a frame, `Z_OBJ(EX(This))`, or a value the trace holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Object {
+    This(Frame),
+    Value(ValueId),
 }
 
 /// The variables of a frame a `RETURN` left in place gives up, as php's
@@ -499,6 +517,11 @@ pub(crate) enum Check {
     /// exit goes back to the interpreter, which pushes the frame on a page
     /// of its own.
     Room { bytes: u32 },
+    /// The object is of this class, php's `zend_jit_class_guard`, which
+    /// compares `obj->ce` (`Z/ext/opcache/jit/zend_jit_ir.c:14191-14204`):
+    /// a published class, whose id names the one linked class in every
+    /// request of the trace's epoch.
+    Class { object: Object, class: ClassId },
     /// A table's jump went elsewhere than this opline: php's exit per
     /// target of `zend_jit_switch`, taken where the stepped jump went
     /// there and landing where it went, so exit-fuzz fails it never.
@@ -823,6 +846,23 @@ pub(crate) fn cannot_raise(op: Opcode, by: Operand) -> bool {
 /// returns, where it declares a return type.
 pub(crate) fn declared(ty: &php_unit::decl::Type) -> Types {
     opcodes::of_type(Some(ty), false)
+}
+
+/// The property oplines compiled code serves in place on a declared slot
+/// ([`Imm::Property`]), whose place the recorder takes from the engine's
+/// cache once the handler has primed it (`UnitView::hold_place`).
+pub(crate) fn on_declared_slot(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::FetchObjR
+            | Opcode::FetchObjW
+            | Opcode::AssignObj
+            | Opcode::AssignObjOp
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj
+    )
 }
 
 /// The trace `rec` builds, read through `view`, or why it builds none.

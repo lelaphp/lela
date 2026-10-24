@@ -51,6 +51,7 @@ use super::{
 
 mod calls;
 mod doors;
+mod objects;
 mod strings;
 use crate::record::{Began, Callee, Stop};
 use crate::types::{
@@ -322,12 +323,121 @@ impl Onward {
     /// holds as php's own functions over two strings hold them, an
     /// assignment, a write to an element and a compound one, a send, a
     /// frameless call to a native, a string's length, a cast to a
-    /// boolean and the free of a `foreach`'s array. None for every other
+    /// boolean, the free of a `foreach`'s array, and a property's fetch,
+    /// write, compound write, increment and decrement, whose `__get` and
+    /// `__set` the handler serves through an `execute` of their own, as
+    /// php's helpers do, and whose typed property it coerces or refuses.
+    /// None for every other
     /// opline: a jump and a comparison, whose handler may take the jump
     /// fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
     /// a return, an include or an `eval`, a generator's opcodes, a
     /// `finally`'s `FAST_CALL` and `FAST_RET`, and the two silence
-    /// opcodes, whose observers a step tells.
+    /// opcodes, whose observers a step tells. A property's `isset()` and
+    /// `empty()` is among them, as php's code calls its handler; fused to
+    /// the jump after it, its handler takes that jump, and its direction
+    /// guard has it stepped, as every opline that holds a guard within it
+    /// is ([`Emit::step_kernel`]).
+    ///
+    /// A property hook writes a variable through the reference the object
+    /// holds to it as the handler serves its `get` and `set`, which the
+    /// loop reads after; and `isset()` and `empty()` of a property served by
+    /// their handler, written to a variable and fused to a jump each way:
+    ///
+    /// ```php
+    /// class H { public $r; public int $v = 0 { get { $this->r = $this->r + 0.5; return $this->v; } set { $this->v = $value * 2; } } }
+    /// function f($n) { $x = 0; $h = new H; $h->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $h->v = $i; $t += $h->v; $t += $x; } return [$t, $x]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [117.5,5]
+    /// ```
+    ///
+    /// ```php
+    /// class H { public $r; public int $v = 0 { get { $this->r = $this->r + 0.5; return $this->v; } set { $this->v = $value * 2; } } }
+    /// function f($n) { $x = 0; $h = new H; $h->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $h->v = $i; $t += $h->v; $t += $x; } return [$t, $x]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [117.5,5]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $b = 0; public $n = null; public $z = "0"; function run($k) { $c = 0; for ($i = 0; $i < $k; $i++) { $x = isset($this->b); $y = empty($this->z); if (isset($this->n)) { $c += 100; } if (!empty($this->b)) { $c += 10; } $c += $x + $y; $this->b = $i % 2; $this->n = $i == 3 ? 1 : null; } return $c; } }
+    /// echo (new S)->run(8), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 146
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $b = 0; public $n = null; public $z = "0"; function run($k) { $c = 0; for ($i = 0; $i < $k; $i++) { $x = isset($this->b); $y = empty($this->z); if (isset($this->n)) { $c += 100; } if (!empty($this->b)) { $c += 10; } $c += $x + $y; $this->b = $i % 2; $this->n = $i == 3 ? 1 : null; } return $c; } }
+    /// echo (new S)->run(8), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 146
+    /// ```
+    ///
+    /// A `__get` the handler serves writes a variable through the
+    /// reference an object holds to it, which the loop reads after; a
+    /// `__set` writes one, and the object's declared property; a typed
+    /// property's coercion throws, caught in the loop: none of the three
+    /// oplines has the `call` effect, and the trace keeps no fact the user
+    /// code can change, a reference's inner type held at every read, as
+    /// revision 83's analysis has it (`jit-design.md` §4.2):
+    ///
+    /// ```php
+    /// class G { public $r; private $v = 3; function __get($n) { $this->r = $this->r + 0.5; return $this->v; } }
+    /// function f($n) { $x = 0; $o = new G; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->missing; $t += $x; $o->r = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [241,19]
+    /// ```
+    ///
+    /// ```php
+    /// class G { public $r; private $v = 3; function __get($n) { $this->r = $this->r + 0.5; return $this->v; } }
+    /// function f($n) { $x = 0; $o = new G; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->missing; $t += $x; $o->r = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [241,19]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $p = 0; public $r; function __set($n, $v) { $this->r = $v * 2.5; $this->p = $this->p + 1; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $o->missing = $i; $t += $x + $o->p; } return [$t, $x, $o->p]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [685,47.5,20]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $p = 0; public $r; function __set($n, $v) { $this->r = $v * 2.5; $this->p = $this->p + 1; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $o->missing = $i; $t += $x + $o->p; } return [$t, $x, $o->p]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [685,47.5,20]
+    /// ```
+    ///
+    /// ```php
+    /// class T { public int $n = 0; public float $f = 0.0; }
+    /// function f($n) { $o = new T; $c = 0; for ($i = 0; $i < $n; $i++) { try { $o->n = $i == 7 ? "x" : $i; $o->f = $i; $c += $o->n + $o->f; } catch (TypeError $e) { $c += 100; } } return [$c, $o->n, $o->f]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [466,19,19]
+    /// ```
+    ///
+    /// ```php
+    /// class T { public int $n = 0; public float $f = 0.0; }
+    /// function f($n) { $o = new T; $c = 0; for ($i = 0; $i < $n; $i++) { try { $o->n = $i == 7 ? "x" : $i; $o->f = $i; $c += $o->n + $o->f; } catch (TypeError $e) { $c += 100; } } return [$c, $o->n, $o->f]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [466,19,19]
+    /// ```
     ///
     /// An array built per turn, and a key the build throws at, caught in
     /// the frame:
@@ -440,8 +550,21 @@ impl Onward {
             | Opcode::FramelessIcall2
             | Opcode::Strlen
             | Opcode::Bool
-            | Opcode::FeFree => Some(Onward(1)),
-            Opcode::AssignDim | Opcode::AssignDimOp | Opcode::FramelessIcall3 => Some(Onward(2)),
+            | Opcode::FeFree
+            | Opcode::FetchObjR
+            | Opcode::FetchObjIs
+            | Opcode::FetchObjW
+            | Opcode::FetchObjRw
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj
+            | Opcode::IssetIsemptyPropObj => Some(Onward(1)),
+            Opcode::AssignDim
+            | Opcode::AssignDimOp
+            | Opcode::AssignObj
+            | Opcode::AssignObjOp
+            | Opcode::FramelessIcall3 => Some(Onward(2)),
             _ => None,
         }
     }
@@ -753,7 +876,10 @@ impl<'a> Emit<'a> {
                     let short = self.short_of(bytes);
                     self.decline_if(short);
                 }
-                Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
+                Check::Direction { .. }
+                | Check::Stands { .. }
+                | Check::Arm { .. }
+                | Check::Class { .. } => {
                     return Err(mismatch("a body entry past a guard it cannot hold"));
                 }
             }
@@ -1030,6 +1156,7 @@ impl<'a> Emit<'a> {
                 let short = self.short_of(bytes);
                 self.leave_if(short, guard.exit)?;
             }
+            Check::Class { object, class } => self.class_guard(object, class, guard.exit)?,
             Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
                 return Err(mismatch("an op's own guard held before it"));
             }
@@ -1607,7 +1734,8 @@ impl<'a> Emit<'a> {
                 Check::Type { .. }
                 | Check::Deref { .. }
                 | Check::Layout { .. }
-                | Check::Room { .. } => {
+                | Check::Room { .. }
+                | Check::Class { .. } => {
                     return Err(mismatch("a stepped opline holds a guard of another kind"));
                 }
             }
@@ -1775,6 +1903,14 @@ impl<'a> Emit<'a> {
                 self.increment(at, line)
             }
             Opcode::FetchDimR => self.fetch(at, line),
+            Opcode::FetchObjR => self.fetch_obj(at, line),
+            Opcode::FetchObjW => self.fetch_obj_w(line),
+            Opcode::AssignObj => self.assign_obj(at, line),
+            Opcode::AssignObjOp
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj => self.compound_obj(at, line),
             Opcode::FeResetR => self.fe_reset(line),
             Opcode::FeFetchR => self.fe_fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
@@ -2378,12 +2514,35 @@ impl<'a> Emit<'a> {
         // is given up after, but a reference is written through, which
         // `zend_jit_assign_to_variable` does past its `ZVAL_DEREF` and the
         // handler does here.
+        self.written_over(line, (element, old), value, (handled, done))?;
+        self.handled_then(at, line, (handled, done))?;
+        match (line.out, value) {
+            (Some(out), Some(value)) => self.define(out, value),
+            (Some(_), None) => Err(mismatch(
+                "an element write of a value no scalar, its result used",
+            )),
+            (None, _) => Ok(()),
+        }
+    }
+
+    /// The zval at `zval`, of type word `old`, written with `line`'s
+    /// value as `zend_jit_assign_to_variable` writes it, then on at
+    /// `done`: written over where it counts nothing, given up after where
+    /// it counts, through the release kernel where it is the last owner;
+    /// a reference to `handled`, whose handler writes through it.
+    fn written_over(
+        &mut self,
+        line: &Line,
+        (zval, old): (Value, Value),
+        value: Option<Scalar>,
+        (handled, done): (Block, Block),
+    ) -> Result<(), Abort> {
         let (plain, owning) = (self.b.create_block(), self.b.create_block());
         let counted = self.b.ins().band_imm_u(old, COUNTED);
         self.b.ins().brif(counted, owning, &[], plain, &[]);
         self.b.switch_to_block(plain);
         self.b.seal_block(plain);
-        self.written(line, element, value)?;
+        self.written(line, zval, value)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(owning);
         self.b.seal_block(owning);
@@ -2393,23 +2552,65 @@ impl<'a> Emit<'a> {
             .ins()
             .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
         self.divert_if(reference, handled);
-        let word = self.b.ins().load(I64, trusted(), element, 0);
-        self.written(line, element, value)?;
+        let word = self.b.ins().load(I64, trusted(), zval, 0);
+        self.written(line, zval, value)?;
         self.release(line, word, old)?;
         self.b.ins().jump(done, &[]);
+        Ok(())
+    }
+
+    /// The `handled` block, `line` served by its handler, then on at
+    /// `done`, where an inline write and its handler meet.
+    fn handled_then(
+        &mut self,
+        at: OpId,
+        line: &Line,
+        (handled, done): (Block, Block),
+    ) -> Result<(), Abort> {
         self.b.switch_to_block(handled);
         self.b.seal_block(handled);
         self.stepped(at, line)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(done);
         self.b.seal_block(done);
-        match (line.out, value) {
-            (Some(out), Some(value)) => self.define(out, value),
-            (Some(_), None) => Err(mismatch(
-                "an element write of a value no scalar, its result used",
-            )),
-            (None, _) => Ok(()),
+        Ok(())
+    }
+
+    /// The number at `zval`, of type byte `kind`, written over with `op`
+    /// of it and `by` in place where it is a long or a double, which php's
+    /// `zend_jit_math_helper` serves inline, a long overflowing to a
+    /// double as php's does, then on at `done`; to `handled` where it is
+    /// anything else.
+    fn compound_at(
+        &mut self,
+        (zval, kind): (Value, Value),
+        (op, by): (Opcode, Scalar),
+        (handled, done): (Block, Block),
+    ) -> Result<(), Abort> {
+        let is_long = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Long));
+        let is_double = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Double));
+        let long = self.b.create_block();
+        let not_long = self.b.create_block();
+        self.b.ins().brif(is_long, long, &[], not_long, &[]);
+        self.b.switch_to_block(not_long);
+        self.b.seal_block(not_long);
+        let double = self.b.create_block();
+        self.b.ins().brif(is_double, double, &[], handled, &[]);
+        for (block, kind) in [(long, Kind::Long), (double, Kind::Double)] {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let x = self.read(zval, 0, kind);
+            let num = self.binary(op, x, by, None)?;
+            self.write_num(zval, 0, num);
+            self.b.ins().jump(done, &[]);
         }
+        Ok(())
     }
 
     /// The element at `element` written with `line`'s value: the scalar
@@ -2595,36 +2796,8 @@ impl<'a> Emit<'a> {
         };
         let (element, old) = self.written_in_place(zval, key, hash, handled);
         let kind = self.b.ins().band_imm_u(old, KIND);
-        let is_long = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Long));
-        let is_double = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Double));
-        let long = self.b.create_block();
-        let not_long = self.b.create_block();
-        self.b.ins().brif(is_long, long, &[], not_long, &[]);
-        self.b.switch_to_block(not_long);
-        self.b.seal_block(not_long);
-        let double = self.b.create_block();
-        self.b.ins().brif(is_double, double, &[], handled, &[]);
-        for (block, kind) in [(long, Kind::Long), (double, Kind::Double)] {
-            self.b.switch_to_block(block);
-            self.b.seal_block(block);
-            let x = self.read(element, 0, kind);
-            let num = self.binary(binary, x, value, None)?;
-            self.write_num(element, 0, num);
-            self.b.ins().jump(done, &[]);
-        }
-        self.b.switch_to_block(handled);
-        self.b.seal_block(handled);
-        self.stepped(at, line)?;
-        self.b.ins().jump(done, &[]);
-        self.b.switch_to_block(done);
-        self.b.seal_block(done);
-        Ok(())
+        self.compound_at((element, kind), (binary, value), (handled, done))?;
+        self.handled_then(at, line, (handled, done))
     }
 
     /// Go to `to` where `cond` is not zero, a block whose branches the

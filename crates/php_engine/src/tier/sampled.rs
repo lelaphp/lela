@@ -67,6 +67,16 @@ fn sampled(z: Zval) -> Sample {
     }
 }
 
+/// The class of `frame`'s `$this`, `Z_OBJCE(EX(This))`, which the
+/// recorder writes down for a property opline or a method's call on
+/// `$this` as it writes down an operand's: none for a frame with no
+/// `$this`.
+#[must_use]
+pub fn this_class(req: &Request, frame: FrameRef) -> Option<ClassId> {
+    let this = req.vm().at(frame)?.this()?;
+    Some(ClassId(this.heap().class()))
+}
+
 /// Whether `frame` serves a generator, its frame moved off the stack by
 /// `GENERATOR_CREATE` and put back for a resumption: a frame the recorder
 /// stops at (`jit-design.md` §4.1, `MovedFrame`).

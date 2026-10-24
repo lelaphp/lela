@@ -94,6 +94,7 @@ tier::PlainCall::activation
 tier::PlainCall::callee
 tier::PlainCall::count
 tier::PlainCall::slots
+tier::PropertySlot
 tier::Refusal
 tier::Request
 tier::SafepointIdx
@@ -175,6 +176,7 @@ tier::stack_room
 tier::stand
 tier::state
 tier::step
+tier::this_class
 tier::trace_num
 tier::under_way
 tier::unwind
