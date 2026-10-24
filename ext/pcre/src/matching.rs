@@ -163,28 +163,111 @@ fn match_value(
 }
 
 /// `add_offset_pair`'s pair: `[text, offset]`, or for a group that did
-/// not take part `[null or "", -1]`.
+/// not take part the request's one `[null or "", -1]`
+/// ([`unmatched_pair`]).
 pub(super) fn offset_pair(
     req: &mut Request,
     subject: &[u8],
     (start, end): (usize, usize),
     unmatched_as_null: bool,
 ) -> Result<Owner<Value>, Thrown> {
-    let mut pair = PhpArray::new(req)?;
     if start == ffi::PCRE2_UNSET {
-        let text = if unmatched_as_null {
-            Owner::null()
-        } else {
-            PhpString::new(req, b"")?.into_value()
-        };
-        pair.append(req, text)?;
-        pair.append(req, Owner::int(-1))?;
-    } else {
-        let text = piece(req, subject, start, end)?;
-        pair.append(req, text)?;
-        pair.append(req, Owner::int(i64::try_from(start).unwrap_or(i64::MAX)))?;
+        return unmatched_pair(req, unmatched_as_null);
     }
+    let mut pair = PhpArray::new(req)?;
+    let text = piece(req, subject, start, end)?;
+    pair.append(req, text)?;
+    pair.append(req, Owner::int(i64::try_from(start).unwrap_or(i64::MAX)))?;
     Ok(pair.into_value())
+}
+
+/// `ZVAL_COPY(&match_pair, &PCRE_G(unmatched_empty_pair))`, or of
+/// `unmatched_null_pair` under `PREG_UNMATCHED_AS_NULL`: one more owner
+/// of the request's one pair, made on first use
+/// (`init_unmatched_empty_pair`, `init_unmatched_null_pair`), so every
+/// group that did not take part shares it and a `$matches` destroyed
+/// with it gives up an array another owner holds, a possible root.
+/// Once `RSHUTDOWN` gave the pairs up, each is made fresh.
+///
+/// ```php
+/// function d($p) {
+///     preg_match_all('#\{(!)?(\w+)\}#', $p, $m, PREG_OFFSET_CAPTURE | PREG_SET_ORDER);
+///     gc_collect_cycles(); unset($m); $one = gc_status()['roots'];
+///     preg_match('/(a)?(b)?c/', 'c', $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+///     gc_collect_cycles(); unset($n); $two = gc_status()['roots'];
+///     var_dump($one, $two);
+/// }
+/// d('/h/{name}');
+/// preg_match('/(x)?(y)/', 'y', $o, PREG_OFFSET_CAPTURE);
+/// var_dump($o);
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// array(3) {
+///   [0]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "y"
+///     [1]=>
+///     int(0)
+///   }
+///   [1]=>
+///   array(2) {
+///     [0]=>
+///     string(0) ""
+///     [1]=>
+///     int(-1)
+///   }
+///   [2]=>
+///   array(2) {
+///     [0]=>
+///     string(1) "y"
+///     [1]=>
+///     int(0)
+///   }
+/// }
+/// ```
+pub(super) fn unmatched_pair(
+    req: &mut Request,
+    unmatched_as_null: bool,
+) -> Result<Owner<Value>, Thrown> {
+    let cached = {
+        let unmatched = &req.state::<State>().unmatched;
+        let slot = if unmatched_as_null {
+            &unmatched.null
+        } else {
+            &unmatched.empty
+        };
+        (!unmatched.ended).then(|| slot.as_ref().map(|pair| **pair))
+    };
+    let pair = match cached {
+        Some(Some(pair)) => pair,
+        held => {
+            let mut pair = PhpArray::new(req)?;
+            let text = if unmatched_as_null {
+                Owner::null()
+            } else {
+                PhpString::new(req, b"")?.into_value()
+            };
+            pair.append(req, text)?;
+            pair.append(req, Owner::int(-1))?;
+            // `EG_FLAGS_IN_SHUTDOWN`'s arm: a pair of its own.
+            if held.is_none() {
+                return Ok(pair.into_value());
+            }
+            let view = *pair;
+            let unmatched = &mut req.state::<State>().unmatched;
+            let slot = if unmatched_as_null {
+                &mut unmatched.null
+            } else {
+                &mut unmatched.empty
+            };
+            *slot = Some(pair);
+            view
+        }
+    };
+    Ok(Owner::take(req, pair).into_value())
 }
 
 /// `add_named` and the numbered insert after it: the value under the
