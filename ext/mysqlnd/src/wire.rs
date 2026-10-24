@@ -2,6 +2,12 @@
 //! php's warnings where one is malformed. What a packet's body says is
 //! decoded once, into the type here, from the bytes the frame codec
 //! handed over; `mysql_common` serves the scrambles (`auth`).
+//!
+//! Every read is bounded by what is left of the body, as php 8.5.11's
+//! fix of GHSA-r6x9-5r99-36j7 bounds it: a parse asks [`Body::need`] for
+//! the bytes its next fields take, at the line of php's
+//! `BAIL_IF_NOT_ENOUGH_DATA_EX`, and a length-encoded integer or a
+//! NUL-terminated string is read only where it ends inside the body.
 
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::Request;
@@ -58,25 +64,47 @@ impl Prot {
             _ => return None,
         })
     }
+}
 
-    /// The name php's premature-end warning gives the packet.
-    fn name(self) -> &'static str {
-        match self {
-            Prot::Greet => "GREET",
-            Prot::Ok => "OK",
-            Prot::Eof => "EOF",
-            Prot::RsetHeader => "RSET_HEADER",
-            Prot::PrepareResponse => "PREPARE",
-            Prot::ChangeUser => "CHANGE_USER",
-            Prot::Sha256PkResponse | Prot::CachedSha2 => "SHA256_PK_REQUEST_RESPONSE",
-            _ => "",
-        }
+/// A line of php's `mysqlnd_wireprotocol.c` at the pinned php-src: the
+/// `__LINE__` of one bail, which its "Premature end of data" warning
+/// names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Line(pub(crate) u32);
+
+/// Why a parse failed, php's `FAIL` out of a packet's read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Malformed {
+    /// `goto premature_end` from the bail at this line: "Premature end
+    /// of data (`mysqlnd_wireprotocol.c:%u`)", then the packet's "%s
+    /// packet shorter than expected".
+    Premature(Line),
+    /// A `DBG_RETURN(FAIL)` past the parse's own warning, or with none.
+    Failed,
+}
+
+impl Malformed {
+    /// `BAIL_PREMATURE_END`'s warning, the first of the two.
+    pub(crate) fn warn_premature(req: &mut Request, line: Line) {
+        docref(
+            req,
+            Level::Warning,
+            &format!("Premature end of data (mysqlnd_wireprotocol.c:{})", line.0),
+        );
     }
 }
 
-/// A body read past its end: how many bytes short it was, for php's
-/// "%s packet %zu bytes shorter than expected".
-pub(crate) struct Short(usize);
+/// `php_mysqlnd_net_field_length`'s answer, its two sentinels decoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Length {
+    /// The length the bytes say.
+    Of(u64),
+    /// `251`, `MYSQLND_NULL_LENGTH`.
+    Null,
+    /// Fewer bytes left than the form takes,
+    /// `MYSQLND_INVALID_NET_FIELD_LENGTH`; the cursor stays where it was.
+    Short,
+}
 
 /// A cursor over one packet's body, php's `p` against `begin` and the
 /// header's size.
@@ -90,10 +118,11 @@ impl<'a> Body<'a> {
         Body { bytes, at: 0 }
     }
 
-    /// `BAIL_IF_NO_MORE_DATA`: whether the cursor stands past the body.
-    pub(crate) fn check(&self) -> Result<(), Short> {
-        if self.at > self.bytes.len() {
-            return Err(Short(self.at - self.bytes.len()));
+    /// `BAIL_IF_NOT_ENOUGH_DATA_EX(n)` at `line`: whether `n` more bytes
+    /// are left of the body.
+    pub(crate) fn need(&self, n: usize, line: u32) -> Result<(), Malformed> {
+        if self.at.saturating_add(n) > self.bytes.len() {
+            return Err(Malformed::Premature(Line(line)));
         }
         Ok(())
     }
@@ -103,6 +132,7 @@ impl<'a> Body<'a> {
         self.at
     }
 
+    /// php's `packet->header.size - (p - begin)`, none once past it.
     pub(crate) fn left(&self) -> usize {
         self.bytes.len().saturating_sub(self.at)
     }
@@ -115,6 +145,8 @@ impl<'a> Body<'a> {
         self.at += n;
     }
 
+    /// One byte, read where [`Body::need`] said it stands; a byte past
+    /// the body reads as zero.
     pub(crate) fn u8(&mut self) -> u8 {
         let b = self.bytes.get(self.at).copied().unwrap_or(0);
         self.at += 1;
@@ -133,6 +165,11 @@ impl<'a> Body<'a> {
         lo | (hi << 16)
     }
 
+    fn u64(&mut self) -> u64 {
+        let lo = u64::from(self.u32());
+        lo | (u64::from(self.u32()) << 32)
+    }
+
     pub(crate) fn take(&mut self, n: usize) -> &'a [u8] {
         let end = (self.at + n).min(self.bytes.len());
         let out = self.bytes.get(self.at.min(end)..end).unwrap_or_default();
@@ -140,20 +177,39 @@ impl<'a> Body<'a> {
         out
     }
 
-    /// A NUL-terminated string and its NUL.
-    pub(crate) fn cstr(&mut self) -> &'a [u8] {
+    /// A NUL-terminated string and its NUL, the NUL looked for in what is
+    /// left (`memchr`); none there is the bail at `line`.
+    pub(crate) fn cstr(&mut self, line: u32) -> Result<&'a [u8], Malformed> {
         let rest = self.rest();
-        let len = rest.iter().position(|b| *b == 0).unwrap_or(rest.len());
-        let out = &rest[..len];
+        let Some(len) = rest.iter().position(|b| *b == 0) else {
+            return Err(Malformed::Premature(Line(line)));
+        };
         self.at += len + 1;
-        out
+        Ok(&rest[..len])
+    }
+
+    /// The form a length-encoded integer's first byte says and how many
+    /// bytes the whole takes, `None` where what is left is shorter.
+    fn form(&self) -> Option<(u8, usize)> {
+        let first = *self.bytes.get(self.at)?;
+        let width = match first {
+            0..=251 => 1,
+            252 => 3,
+            253 => 4,
+            _ => 9,
+        };
+        (width <= self.left()).then_some((first, width))
     }
 
     /// `php_mysqlnd_net_field_length_ll`: a length-encoded integer,
-    /// [`NULL_LENGTH`] for `251`.
-    pub(crate) fn lenenc(&mut self) -> u64 {
-        let first = self.u8();
-        match first {
+    /// [`NULL_LENGTH`] for `251`; too few bytes left is the bail at
+    /// `line`.
+    pub(crate) fn lenenc(&mut self, line: u32) -> Result<u64, Malformed> {
+        let Some((first, _)) = self.form() else {
+            return Err(Malformed::Premature(Line(line)));
+        };
+        self.at += 1;
+        Ok(match first {
             0..=250 => u64::from(first),
             251 => NULL_LENGTH,
             252 => u64::from(self.u16()),
@@ -161,26 +217,31 @@ impl<'a> Body<'a> {
                 let lo = u64::from(self.u16());
                 lo | (u64::from(self.u8()) << 16)
             }
-            _ => {
-                let lo = u64::from(self.u32());
-                lo | (u64::from(self.u32()) << 32)
-            }
-        }
+            _ => self.u64(),
+        })
     }
 
     /// `php_mysqlnd_net_field_length`: as [`Body::lenenc`], where php's
     /// `zend_ulong` value of the nine-byte form reads four bytes and
-    /// skips eight.
-    pub(crate) fn field_length(&mut self) -> u64 {
-        match self.bytes.get(self.at) {
-            Some(254) => {
-                self.at += 1;
-                let n = u64::from(self.u32());
-                self.at += 4;
-                n
+    /// skips eight, and too few bytes left is [`Length::Short`].
+    pub(crate) fn field_length(&mut self) -> Length {
+        let Some((first, width)) = self.form() else {
+            return Length::Short;
+        };
+        let start = self.at;
+        self.at += 1;
+        let length = match first {
+            0..=250 => Length::Of(u64::from(first)),
+            251 => Length::Null,
+            252 => Length::Of(u64::from(self.u16())),
+            253 => {
+                let lo = u64::from(self.u16());
+                Length::Of(lo | (u64::from(self.u8()) << 16))
             }
-            _ => self.lenenc(),
-        }
+            _ => Length::Of(u64::from(self.u32())),
+        };
+        self.at = start + width;
+        length
     }
 }
 
@@ -297,13 +358,39 @@ pub(crate) struct Greet {
     pub(crate) error: Option<PacketError>,
 }
 
-/// `php_mysqlnd_greet_read`'s parse.
-fn greet(body: &[u8]) -> Result<Greet, Short> {
+/// `php_mysqlnd_greet_read`'s parse: the version NUL-terminated inside
+/// the packet, the 31 bytes after it whole, and a scramble longer than
+/// 20 bytes only as long as what is left.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $talks = ['080000000a352e3503030303473e3f6047257c67', '110000000a382e300003000000473e3f6047257c67', '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81ff0000000000000f0000006c6b55463f49335f686c6431006d7973716c5f6e61746976655f70617373776f7264'];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:436)
+/// mysqli::__construct(): GREET packet shorter than expected
+/// mysqli::__construct(): Error while reading greeting packet. PID
+/// mysqli::__construct(): (HY000/2002): Unknown error while trying to connect via tcp://127.0.0.1
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:441)
+/// mysqli::__construct(): GREET packet shorter than expected
+/// mysqli::__construct(): Error while reading greeting packet. PID
+/// mysqli::__construct(): (HY000/2002): Unknown error while trying to connect via tcp://127.0.0.1
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:487)
+/// mysqli::__construct(): GREET packet shorter than expected
+/// mysqli::__construct(): Error while reading greeting packet. PID
+/// mysqli::__construct(): (HY000/2002): Unknown error while trying to connect via tcp://127.0.0.1
+/// ```
+fn greet(body: &[u8], g: &mut Greet) -> Result<(), Malformed> {
     let mut p = Body::new(body);
-    let mut g = Greet::default();
-    p.check()?;
+    p.need(1, 402)?;
     g.protocol_version = p.u8();
-    p.check()?;
+    p.need(1, 409)?;
     if g.protocol_version == ERROR_MARKER {
         let mut e = PacketError::read_from(p.rest());
         // Bug #26426: "Too many connections" comes without its state.
@@ -311,28 +398,21 @@ fn greet(body: &[u8]) -> Result<Greet, Short> {
             e.sqlstate = *b"08004";
         }
         g.error = Some(e);
-        return Ok(g);
+        return Ok(());
     }
     if p.rest().starts_with(b"5.5.5-") {
         p.skip(6);
     }
-    g.server_version = p.cstr().to_vec();
-    p.check()?;
+    g.server_version = p.cstr(436)?.to_vec();
+    p.need(4 + 8 + 1 + 2 + 1 + 2 + 13, 441)?;
     g.thread_id = p.u32();
-    p.check()?;
     let mut scramble = p.take(8).to_vec();
-    p.check()?;
     p.skip(1);
-    p.check()?;
     g.server_capabilities = u32::from(p.u16());
-    p.check()?;
     g.charset_no = p.u8();
-    p.check()?;
     g.server_status = p.u16();
-    p.check()?;
     let pad_start = p.at;
     p.skip(13);
-    p.check()?;
     let mut data_len = 20usize;
     if p.left() > 0 {
         scramble.extend_from_slice(p.take(12));
@@ -351,6 +431,7 @@ fn greet(body: &[u8]) -> Result<Greet, Short> {
         g.server_capabilities |= high << 16;
         data_len = usize::from(pad.get(2).copied().unwrap_or(0));
         if data_len > 20 {
+            p.need(data_len - 20, 487)?;
             scramble.resize(20, 0);
             scramble.extend_from_slice(p.take(data_len - 20));
         }
@@ -361,11 +442,10 @@ fn greet(body: &[u8]) -> Result<Greet, Short> {
     }
     g.auth_plugin_data = scramble;
     if g.server_capabilities & crate::consts::client::PLUGIN_AUTH != 0 {
-        p.check()?;
-        let rest = p.rest();
-        g.auth_protocol = Some(php_ext::coerce::c_str(rest).to_vec());
+        p.need(1, 504)?;
+        g.auth_protocol = Some(php_ext::coerce::c_str(p.rest()).to_vec());
     }
-    Ok(g)
+    Ok(())
 }
 
 /// The answer to an auth packet, `MYSQLND_PACKET_AUTH_RESPONSE`, and to
@@ -381,49 +461,81 @@ pub(crate) struct AuthResponse {
     pub(crate) asked_323: bool,
 }
 
+/// `0xFE`'s switch request: the method's name NUL-terminated inside the
+/// packet (the bail at `line` where it is not), its data the rest.
+fn switch_request(p: &mut Body<'_>, r: &mut AuthResponse, line: u32) -> Result<(), Malformed> {
+    r.new_auth_protocol = Some(p.cstr(line)?.to_vec());
+    r.new_auth_protocol_data = p.rest().to_vec();
+    Ok(())
+}
+
 /// `php_mysqlnd_auth_response_read`'s parse, which carries the switch
-/// request's authentication method and data where the code is `0xFE`.
-fn auth_response(req: &mut Request, body: &[u8]) -> Result<AuthResponse, Short> {
+/// request's authentication method and data where the code is `0xFE`;
+/// the code is kept where the parse fails past it, which the handshake
+/// reads.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c6431006d7973716c5f6e61746976655f70617373776f7264';
+/// $talks = ["$greet,0200000200fe", "$greet,020000020000", "$greet,06000002000000020000", "$greet,16000002fe6d7973716c5f6e61746976655f70617373776f7264"];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:779)
+/// mysqli::__construct(): AUTH_RESPONSE packet shorter than expected
+/// mysqli::__construct(): (HY000/2002): Unknown error while trying to connect via tcp://127.0.0.1
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:785)
+/// mysqli::__construct(): AUTH_RESPONSE packet shorter than expected
+/// mysqli::__construct(): (HY000/2002): Unknown error while trying to connect via tcp://127.0.0.1
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:789)
+/// mysqli::__construct(): AUTH_RESPONSE packet shorter than expected
+/// mysqli::__construct(): (HY000/2002): Unknown error while trying to connect via tcp://127.0.0.1
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:758)
+/// mysqli::__construct(): AUTH_RESPONSE packet shorter than expected
+/// mysqli::__construct(): (HY000/2000): mysqlnd cannot connect to MySQL 4.1+ using the old insecure authentication. Please use an administration tool to reset your password with the command SET PASSWORD = PASSWORD('your_existing_password'). This will store a new, and more secure, hash value in mysql.user. If this user is used in other scripts executed by PHP 5.2 or earlier you might need to remove the old-passwords flag from your my.cnf file
+/// ```
+fn auth_response(req: &mut Request, body: &[u8], r: &mut AuthResponse) -> Result<(), Malformed> {
     let mut p = Body::new(body);
-    let mut r = AuthResponse::default();
-    p.check()?;
+    p.need(1, 738)?;
     r.response_code = p.u8();
-    p.check()?;
+    p.need(1, 743)?;
     if r.response_code == ERROR_MARKER {
         r.error = Some(PacketError::read_from(p.rest()));
-        return Ok(r);
+        return Ok(());
     }
     if r.response_code == EODATA_MARKER {
         if p.left() > 0 {
-            r.new_auth_protocol = Some(p.cstr().to_vec());
-            r.new_auth_protocol_data = p.rest().to_vec();
+            switch_request(&mut p, r, 758)?;
         }
-        return Ok(r);
+        return Ok(());
     }
-    let _affected = p.lenenc();
-    p.check()?;
-    let _insert_id = p.lenenc();
-    p.check()?;
+    let _affected = p.lenenc(779)?;
+    let _insert_id = p.lenenc(785)?;
+    p.need(4, 789)?;
     let _status = p.u16();
-    p.check()?;
     let _warnings = p.u16();
-    p.check()?;
     if p.left() > 0 {
-        let len = p.field_length();
-        if len > 0 {
-            if p.at > body.len() || (body.len() - p.at) < usize::try_from(len).unwrap_or(usize::MAX)
-            {
-                docref(
-                    req,
-                    Level::Warning,
-                    "OK packet message length is past the packet size",
-                );
-                return Err(Short(0));
-            }
-            r.message = Some(p.take(usize::try_from(len).unwrap_or(usize::MAX)).to_vec());
-        }
+        let len = match p.field_length() {
+            Length::Of(0) => return Ok(()),
+            Length::Of(len) => usize::try_from(len).ok().filter(|len| *len <= p.left()),
+            Length::Null | Length::Short => None,
+        };
+        let Some(len) = len else {
+            docref(
+                req,
+                Level::Warning,
+                "OK packet message length is past the packet size",
+            );
+            return Err(Malformed::Failed);
+        };
+        r.message = Some(p.take(len).to_vec());
     }
-    Ok(r)
+    Ok(())
 }
 
 /// `MYSQLND_PACKET_OK`.
@@ -438,35 +550,73 @@ pub(crate) struct Ok {
     pub(crate) message: Option<Vec<u8>>,
 }
 
-/// `php_mysqlnd_ok_read`'s parse.
-fn ok(body: &[u8], cmd_buffer: usize) -> Result<Ok, Short> {
+/// `php_mysqlnd_ok_read`'s parse: the message as long as its length
+/// says, cut at the command buffer's end (`MIN(net_len, buf_len - (p -
+/// begin))`), a `NULL` length reading to that end.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c6431006d7973716c5f6e61746976655f70617373776f7264,0700000200000002000000';
+/// $talks = ["$greet,0200000100fe", "$greet,030000010000fd", "$greet,06000001000000020000", "$greet,0800000100000002000000fd", "$greet,0100000100"];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); var_dump($m->select_db('php_test')); echo $m->error, "\n"; $m->close(); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::select_db(): Premature end of data (mysqlnd_wireprotocol.c:931)
+/// mysqli::select_db(): OK packet shorter than expected
+/// mysqli::select_db(): Error while reading INIT_DB's response packet. PID
+/// bool(false)
+/// Malformed packet
+/// mysqli::select_db(): Premature end of data (mysqlnd_wireprotocol.c:937)
+/// mysqli::select_db(): OK packet shorter than expected
+/// mysqli::select_db(): Error while reading INIT_DB's response packet. PID
+/// bool(false)
+/// Malformed packet
+/// mysqli::select_db(): Premature end of data (mysqlnd_wireprotocol.c:941)
+/// mysqli::select_db(): OK packet shorter than expected
+/// mysqli::select_db(): Error while reading INIT_DB's response packet. PID
+/// bool(false)
+/// Malformed packet
+/// mysqli::select_db(): Premature end of data (mysqlnd_wireprotocol.c:952)
+/// mysqli::select_db(): OK packet shorter than expected
+/// mysqli::select_db(): Error while reading INIT_DB's response packet. PID
+/// bool(false)
+/// Malformed packet
+/// mysqli::select_db(): Premature end of data (mysqlnd_wireprotocol.c:917)
+/// mysqli::select_db(): OK packet shorter than expected
+/// mysqli::select_db(): Error while reading INIT_DB's response packet. PID
+/// bool(false)
+/// Malformed packet
+/// ```
+fn ok(body: &[u8], cmd_buffer: usize, o: &mut Ok) -> Result<(), Malformed> {
     let mut p = Body::new(body);
-    let mut o = Ok::default();
-    p.check()?;
+    p.need(1, 912)?;
     o.field_count = p.u8();
-    p.check()?;
+    p.need(1, 917)?;
     if o.field_count == ERROR_MARKER {
         o.error = Some(PacketError::read_from(p.rest()));
-        return Ok(o);
+        return Ok(());
     }
-    o.affected_rows = p.lenenc();
-    p.check()?;
-    o.last_insert_id = p.lenenc();
-    p.check()?;
+    o.affected_rows = p.lenenc(931)?;
+    o.last_insert_id = p.lenenc(937)?;
+    p.need(4, 941)?;
     o.server_status = u32::from(p.u16());
-    p.check()?;
     o.warning_count = u32::from(p.u16());
-    p.check()?;
     if p.left() > 0 {
-        let len = p.field_length();
-        if len > 0 {
-            let keep =
-                (usize::try_from(len).unwrap_or(usize::MAX)).min(cmd_buffer.saturating_sub(p.at));
-            o.message = Some(p.take(keep).to_vec());
-        }
+        let room = cmd_buffer.saturating_sub(p.at);
+        let keep = match p.field_length() {
+            Length::Of(0) => None,
+            Length::Of(len) => Some(usize::try_from(len).unwrap_or(usize::MAX).min(room)),
+            Length::Null => Some(room),
+            Length::Short => return Err(Malformed::Premature(Line(952))),
+        };
+        o.message = keep.map(|keep| p.take(keep).to_vec());
     }
-    p.check()?;
-    Ok(o)
+    Ok(())
 }
 
 /// `MYSQLND_PACKET_EOF`.
@@ -478,26 +628,47 @@ pub(crate) struct Eof {
     pub(crate) server_status: u32,
 }
 
-/// `php_mysqlnd_eof_read`'s parse: a one-byte EOF after a prepared
-/// statement's column definitions carries no status.
-fn eof(body: &[u8]) -> Result<Eof, Short> {
+/// `php_mysqlnd_eof_read`'s parse: the marker, then the warnings and the
+/// status whole.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c6431006d7973716c5f6e61746976655f70617373776f7264,0700000200000002000000';
+/// $talks = ["$greet,04000001fe000200", "$greet,01000001fe"];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); var_dump($m->multi_query('SELECT 1; SELECT 2')); echo $m->error, "\n"; $m->close(); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::multi_query(): Premature end of data (mysqlnd_wireprotocol.c:1034)
+/// mysqli::multi_query(): EOF packet shorter than expected
+/// mysqli::multi_query(): Error while reading SET_OPTION's response packet. PID
+/// bool(false)
+/// MySQL server has gone away
+/// mysqli::multi_query(): Premature end of data (mysqlnd_wireprotocol.c:1018)
+/// mysqli::multi_query(): EOF packet shorter than expected
+/// mysqli::multi_query(): Error while reading SET_OPTION's response packet. PID
+/// bool(false)
+/// MySQL server has gone away
+/// ```
+fn eof(body: &[u8], e: &mut Eof) -> Result<(), Malformed> {
     let mut p = Body::new(body);
-    let mut e = Eof::default();
-    p.check()?;
+    p.need(1, 1013)?;
     e.field_count = p.u8();
-    p.check()?;
+    p.need(1, 1018)?;
     if e.field_count == ERROR_MARKER {
         e.error = Some(PacketError::read_from(p.rest()));
-        return Ok(e);
+        return Ok(());
     }
     if body.len() > 1 {
+        p.need(4, 1034)?;
         e.warning_count = u32::from(p.u16());
-        p.check()?;
         e.server_status = u32::from(p.u16());
-        p.check()?;
     }
-    p.check()?;
-    Ok(e)
+    Ok(())
 }
 
 /// What a query's first answer is, `MYSQLND_PACKET_RSET_HEADER`.
@@ -518,50 +689,79 @@ pub(crate) enum RsetHeader {
     Fields(u64),
 }
 
-/// `php_mysqlnd_rset_header_read`'s parse.
-fn rset_header(req: &mut Request, body: &[u8]) -> Result<RsetHeader, Short> {
+/// `php_mysqlnd_rset_header_read`'s parse: the column count, or an OK
+/// whose text is read only as long as what is left.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c6431006d7973716c5f6e61746976655f70617373776f7264,0700000200000002000000';
+/// $talks = ["$greet,01000001fd", "$greet,0200000100fd", "$greet,0400000100000000", "$greet,080000010000000200000005"];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); var_dump($m->query('SELECT 1')); echo $m->error, "\n"; $m->close(); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::query(): Premature end of data (mysqlnd_wireprotocol.c:1159)
+/// mysqli::query(): RSET_HEADER packet shorter than expected
+/// mysqli::query(): Error reading result set's header
+/// bool(false)
+///
+/// mysqli::query(): Premature end of data (mysqlnd_wireprotocol.c:1184)
+/// mysqli::query(): RSET_HEADER packet shorter than expected
+/// mysqli::query(): Error reading result set's header
+/// bool(false)
+///
+/// mysqli::query(): Premature end of data (mysqlnd_wireprotocol.c:1194)
+/// mysqli::query(): RSET_HEADER packet shorter than expected
+/// mysqli::query(): Error reading result set's header
+/// bool(false)
+///
+/// mysqli::query(): RSET_HEADER packet additional data length is past 5 bytes the packet size
+/// mysqli::query(): Error reading result set's header
+/// bool(false)
+/// ```
+fn rset_header(req: &mut Request, body: &[u8]) -> Result<RsetHeader, Malformed> {
     let mut p = Body::new(body);
-    p.check()?;
+    p.need(1, 1140)?;
     if body.first() == Some(&ERROR_MARKER) {
         p.skip(1);
-        p.check()?;
+        p.need(1, 1149)?;
         return Ok(RsetHeader::Error(PacketError::read_from(p.rest())));
     }
-    let count = p.field_length();
-    p.check()?;
-    match count {
-        NULL_LENGTH => Ok(RsetHeader::LocalInfile(p.rest().to_vec())),
-        0 => {
-            let affected_rows = p.lenenc();
-            p.check()?;
-            let last_insert_id = p.lenenc();
-            p.check()?;
+    match p.field_length() {
+        Length::Short => Err(Malformed::Premature(Line(1159))),
+        Length::Null => Ok(RsetHeader::LocalInfile(p.rest().to_vec())),
+        Length::Of(0) => {
+            let affected_rows = p.lenenc(1184)?;
+            let last_insert_id = p.lenenc(1190)?;
+            p.need(4, 1194)?;
             let server_status = u32::from(p.u16());
-            p.check()?;
             let warning_count = u32::from(p.u16());
-            p.check()?;
+            let len = match p.field_length() {
+                Length::Of(0) | Length::Short => None,
+                Length::Of(len) => Some(len),
+                Length::Null => Some(NULL_LENGTH),
+            };
             let mut info = None;
-            if p.left() > 0 {
-                let len = p.field_length();
-                if len > 0 {
-                    if p.at > body.len()
-                        || (body.len() - p.at) < usize::try_from(len).unwrap_or(usize::MAX)
-                    {
-                        let over = (p.at + usize::try_from(len).unwrap_or(usize::MAX))
-                            .saturating_sub(body.len());
-                        docref(
-                            req,
-                            Level::Warning,
-                            &format!(
-                                "RSET_HEADER packet additional data length is past {over} bytes the packet size"
-                            ),
-                        );
-                        return Err(Short(usize::MAX));
-                    }
-                    info = Some(p.take(usize::try_from(len).unwrap_or(usize::MAX)).to_vec());
+            if let Some(len) = len {
+                let len = usize::try_from(len).unwrap_or(usize::MAX);
+                if p.left() < len {
+                    // `((p - buf) - packet->header.size) + len`, in `size_t`.
+                    let over = p.at.wrapping_sub(body.len()).wrapping_add(len);
+                    docref(
+                        req,
+                        Level::Warning,
+                        &format!(
+                            "RSET_HEADER packet additional data length is past {over} bytes the packet size"
+                        ),
+                    );
+                    return Err(Malformed::Failed);
                 }
+                info = Some(p.take(len).to_vec());
             }
-            p.check()?;
             Ok(RsetHeader::Upsert {
                 affected_rows,
                 last_insert_id,
@@ -570,10 +770,7 @@ fn rset_header(req: &mut Request, body: &[u8]) -> Result<RsetHeader, Short> {
                 info,
             })
         }
-        n => {
-            p.check()?;
-            Ok(RsetHeader::Fields(n))
-        }
+        Length::Of(n) => Ok(RsetHeader::Fields(n)),
     }
 }
 
@@ -587,9 +784,205 @@ pub(crate) struct PrepareResponse {
     pub(crate) warning_count: u32,
 }
 
-/// The packet readers: each answers the packet it read and parsed, or
-/// `None` for php's `FAIL`, after whatever php set or warned; the `Err`
-/// is the memory limit's fatal, met by the error list's element.
+/// `php_mysqlnd_prepare_read`'s parse: a body of 9 bytes, or of 12 and
+/// more with the warnings.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c6431006d7973716c5f6e61746976655f70617373776f7264,0700000200000002000000';
+/// $talks = ["$greet,00000001", "$greet,0100000100", "$greet,0a00000100010000000000000000"];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); var_dump($m->prepare('SELECT 1')); echo $m->error, "\n"; $m->close(); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::prepare(): Premature end of data (mysqlnd_wireprotocol.c:1924)
+/// mysqli::prepare(): PREPARE packet shorter than expected
+/// bool(false)
+///
+/// mysqli::prepare(): Premature end of data (mysqlnd_wireprotocol.c:1929)
+/// mysqli::prepare(): PREPARE packet shorter than expected
+/// bool(false)
+///
+/// Wrong COM_STMT_PREPARE response size. Received 10
+/// bool(false)
+/// ```
+fn prepare_response(req: &mut Request, body: &[u8]) -> Result<PrepareResponse, Malformed> {
+    let mut p = Body::new(body);
+    let mut r = PrepareResponse::default();
+    p.need(1, 1924)?;
+    let code = p.u8();
+    p.need(1, 1929)?;
+    if code == ERROR_MARKER {
+        r.error = Some(PacketError::read_from(p.rest()));
+        return Ok(r);
+    }
+    let size = body.len();
+    if size != 9 && size < 12 {
+        php_ext::raising::raise(
+            req,
+            Level::Warning,
+            &format!("Wrong COM_STMT_PREPARE response size. Received {size}"),
+        );
+        return Err(Malformed::Failed);
+    }
+    p.need(8, 1949)?;
+    r.stmt_id = p.u32();
+    r.field_count = u32::from(p.u16());
+    r.param_count = u32::from(p.u16());
+    if size > 9 {
+        p.need(3, 1962)?;
+        p.skip(1);
+        r.warning_count = u32::from(p.u16());
+    }
+    Ok(r)
+}
+
+/// `php_mysqlnd_chg_user_read`'s parse: the code kept where the parse
+/// fails past it, and an error packet's error kept where the bail after
+/// it is taken, as `mysqlnd_auth_change_user` reads both.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c6431006d7973716c5f6e61746976655f70617373776f7264,0700000200000002000000';
+/// $talks = ["$greet,00000001", "$greet,0100000100", "$greet,16000001fe6d7973716c5f6e61746976655f70617373776f7264", "$greet,01000001ff"];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); var_dump($m->change_user('root2', '', '')); echo $m->errno, ' [', $m->error, "]\n"; $m->close(); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::change_user(): Premature end of data (mysqlnd_wireprotocol.c:2003)
+/// mysqli::change_user(): CHANGE_USER packet shorter than expected
+/// bool(false)
+/// 0 []
+/// mysqli::change_user(): Premature end of data (mysqlnd_wireprotocol.c:2028)
+/// mysqli::change_user(): CHANGE_USER packet shorter than expected
+/// bool(false)
+/// 0 []
+/// mysqli::change_user(): Premature end of data (mysqlnd_wireprotocol.c:2033)
+/// mysqli::change_user(): CHANGE_USER packet shorter than expected
+/// bool(false)
+/// 2000 [mysqlnd cannot connect to MySQL 4.1+ using the old insecure authentication. Please use an administration tool to reset your password with the command SET PASSWORD = PASSWORD('your_existing_password'). This will store a new, and more secure, hash value in mysql.user. If this user is used in other scripts executed by PHP 5.2 or earlier you might need to remove the old-passwords flag from your my.cnf file]
+/// mysqli::change_user(): Premature end of data (mysqlnd_wireprotocol.c:2028)
+/// mysqli::change_user(): CHANGE_USER packet shorter than expected
+/// bool(false)
+/// 2000 []
+/// ```
+fn change_user_response(
+    body: &[u8],
+    capabilities: u32,
+    r: &mut AuthResponse,
+) -> Result<(), Malformed> {
+    let mut p = Body::new(body);
+    p.need(1, 2003)?;
+    r.response_code = p.u8();
+    if body.len() == 1
+        && r.response_code == EODATA_MARKER
+        && capabilities & crate::consts::client::SECURE_CONNECTION != 0
+    {
+        r.asked_323 = true;
+        return Err(Malformed::Failed);
+    }
+    if r.response_code == ERROR_MARKER {
+        r.error = Some(PacketError::read_from(p.rest()));
+    }
+    p.need(1, 2028)?;
+    if r.response_code == EODATA_MARKER && p.left() > 0 {
+        switch_request(&mut p, r, 2033)?;
+    }
+    Ok(())
+}
+
+/// `php_mysqlnd_sha256_pk_request_response_read`'s parse: the PEM after
+/// the first byte, at least one byte of it.
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '520000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c6431007368613235365f70617373776f7264';
+/// $talks = ["$greet,00000002,0700000400000002000000", "$greet,0100000200,0700000400000002000000"];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); echo $m->connect_errno, "\n"; $m->close(); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:2119)
+/// mysqli::__construct(): SHA256_PK_REQUEST_RESPONSE packet shorter than expected
+/// Error while receiving public key. PID
+/// 0
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:2122)
+/// mysqli::__construct(): SHA256_PK_REQUEST_RESPONSE packet shorter than expected
+/// Error while receiving public key. PID
+/// 0
+/// ```
+fn public_key(body: &[u8]) -> Result<Vec<u8>, Malformed> {
+    let mut p = Body::new(body);
+    p.need(1, 2119)?;
+    p.skip(1);
+    p.need(1, 2122)?;
+    Ok(p.rest().to_vec())
+}
+
+/// `php_mysqlnd_cached_sha2_result_read`'s parse: the code, `0xFF` with
+/// the error, `0xFE` with the switch request, else `0x01` followed by the
+/// fast-auth answer (3) or the full-auth request (4).
+///
+/// ```php
+/// set_error_handler(function ($no, $text) { echo preg_replace(['/PID=\d+/', '/:\d+$/'], ['PID', ''], $text), "\n"; return true; });
+/// $serve = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; foreach (array_slice($argv, 1) as $talk) { $c = stream_socket_accept($s); foreach (explode(",", $talk) as $i => $hex) { if ($i) { fread($c, 65536); } fwrite($c, hex2bin($hex)); } while (in_array(substr((string) fread($c, 65536), 4, 1), ["\x01", "\x19"], true)) {} fclose($c); }';
+/// $greet = '580000000a352e352e352d31302e352e31382d4d6172696144420003000000473e3f6047257c6700fef7080200ff81150000000000000f0000006c6b55463f49335f686c64310063616368696e675f736861325f70617373776f7264';
+/// $ok = '0700000300000002000000';
+/// $talks = ["$greet,00000002$ok", "$greet,0100000201$ok", "$greet,16000002fe6d7973716c5f6e61746976655f70617373776f7264$ok", "$greet,020000020103$ok"];
+/// $p = proc_open([PHP_BINARY, '-n', '-r', $serve, ...$talks], [1 => ['pipe', 'w']], $pipes);
+/// $port = (int) explode(':', fgets($pipes[1]))[1];
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// foreach ($talks as $talk) { $m = new mysqli('127.0.0.1', 'root', 'secret', '', $port); echo $m->connect_errno, "\n"; $m->close(); }
+/// proc_close($p);
+/// ```
+/// ```expect process
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:2198)
+/// mysqli::__construct(): SHA256_PK_REQUEST_RESPONSE packet shorter than expected
+/// 0
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:2202)
+/// mysqli::__construct(): SHA256_PK_REQUEST_RESPONSE packet shorter than expected
+/// 0
+/// mysqli::__construct(): Premature end of data (mysqlnd_wireprotocol.c:2217)
+/// mysqli::__construct(): SHA256_PK_REQUEST_RESPONSE packet shorter than expected
+/// 0
+/// 0
+/// ```
+fn cached_sha2(body: &[u8], r: &mut AuthResponse) -> Result<(), Malformed> {
+    let mut p = Body::new(body);
+    p.need(1, 2198)?;
+    r.response_code = p.u8();
+    p.need(1, 2202)?;
+    if r.response_code == ERROR_MARKER {
+        r.error = Some(PacketError::read_from(p.rest()));
+        return Ok(());
+    }
+    if r.response_code == EODATA_MARKER {
+        if p.left() > 0 {
+            switch_request(&mut p, r, 2217)?;
+        }
+        return Ok(());
+    }
+    p.need(1, 2238)?;
+    r.response_code = p.u8();
+    Ok(())
+}
+
+/// The packet readers: each answers the packet it read and whether its
+/// parse passed, php's `PACKET_READ`, after whatever php set or warned;
+/// the `Err` is the memory limit's fatal, met by the error list's
+/// element.
 impl ConnData {
     /// `mysqlnd_read_packet_header_and_body`: one packet's body, counted
     /// under its kind, the connection marked gone where the server is.
@@ -625,52 +1018,90 @@ impl ConnData {
         Ok(Some(body))
     }
 
-    /// A packet read and parsed, the premature end warned as php warns
-    /// it.
-    fn parsed<T>(
+    /// `PACKET_READ`: a packet read into `packet` and parsed, whether it
+    /// passed; a premature end warned as php warns it, under the name
+    /// `name` its `premature_end:` gives the packet.
+    fn packet_read<T>(
         &mut self,
         req: &mut Request,
         kind: Prot,
-        parse: impl FnOnce(&mut Request, &[u8], usize) -> Result<T, Short>,
-    ) -> Result<Option<T>, Thrown> {
+        name: &str,
+        packet: &mut T,
+        parse: impl FnOnce(&mut Request, &[u8], usize, &mut T) -> Result<(), Malformed>,
+    ) -> Result<bool, Thrown> {
         let Some(body) = self.read_packet(req, kind)? else {
-            return Ok(None);
+            return Ok(false);
         };
-        Ok(match parse(req, &body, self.net.cmd_buffer_len()) {
-            Ok(packet) => Some(packet),
-            Err(Short(usize::MAX | 0)) => None,
-            Err(Short(short)) => {
+        Ok(match parse(req, &body, self.net.cmd_buffer_len(), packet) {
+            Ok(()) => true,
+            Err(Malformed::Failed) => false,
+            Err(Malformed::Premature(line)) => {
+                Malformed::warn_premature(req, line);
                 docref(
                     req,
                     Level::Warning,
-                    &format!("{} packet {short} bytes shorter than expected", kind.name()),
+                    &format!("{name} packet shorter than expected"),
                 );
-                None
+                false
             }
         })
     }
 
-    /// `php_mysqlnd_greet_read`.
-    pub(crate) fn read_greet(&mut self, req: &mut Request) -> Result<Option<Greet>, Thrown> {
-        self.parsed(req, Prot::Greet, |_, body, _| greet(body))
+    /// [`ConnData::packet_read`] of a packet the parse makes whole, `None`
+    /// where it failed.
+    fn read_whole<T>(
+        &mut self,
+        req: &mut Request,
+        kind: Prot,
+        name: &str,
+        parse: impl FnOnce(&mut Request, &[u8], usize) -> Result<T, Malformed>,
+    ) -> Result<Option<T>, Thrown> {
+        let mut packet = None;
+        self.packet_read(req, kind, name, &mut packet, |req, body, cmd, packet| {
+            *packet = Some(parse(req, body, cmd)?);
+            Ok(())
+        })?;
+        Ok(packet)
     }
 
-    /// `php_mysqlnd_auth_response_read`.
+    /// `php_mysqlnd_greet_read`.
+    pub(crate) fn read_greet(&mut self, req: &mut Request) -> Result<Option<Greet>, Thrown> {
+        let mut g = Greet::default();
+        let passed = self.packet_read(req, Prot::Greet, "GREET", &mut g, |_, body, _, g| {
+            greet(body, g)
+        })?;
+        Ok(passed.then_some(g))
+    }
+
+    /// `php_mysqlnd_auth_response_read`: the packet, and whether it
+    /// passed.
     pub(crate) fn read_auth_response(
         &mut self,
         req: &mut Request,
-    ) -> Result<Option<AuthResponse>, Thrown> {
-        self.parsed(req, Prot::Ok, |req, body, _| auth_response(req, body))
+    ) -> Result<(AuthResponse, bool), Thrown> {
+        let mut r = AuthResponse::default();
+        let passed =
+            self.packet_read(req, Prot::Ok, "AUTH_RESPONSE", &mut r, |req, body, _, r| {
+                auth_response(req, body, r)
+            })?;
+        Ok((r, passed))
     }
 
     /// `php_mysqlnd_ok_read`.
     pub(crate) fn read_ok(&mut self, req: &mut Request) -> Result<Option<Ok>, Thrown> {
-        self.parsed(req, Prot::Ok, |_, body, cmd| ok(body, cmd))
+        let mut o = Ok::default();
+        let passed = self.packet_read(req, Prot::Ok, "OK", &mut o, |_, body, cmd, o| {
+            ok(body, cmd, o)
+        })?;
+        Ok(passed.then_some(o))
     }
 
     /// `php_mysqlnd_eof_read`.
     pub(crate) fn read_eof(&mut self, req: &mut Request) -> Result<Option<Eof>, Thrown> {
-        self.parsed(req, Prot::Eof, |_, body, _| eof(body))
+        let mut e = Eof::default();
+        let passed =
+            self.packet_read(req, Prot::Eof, "EOF", &mut e, |_, body, _, e| eof(body, e))?;
+        Ok(passed.then_some(e))
     }
 
     /// `php_mysqlnd_rset_header_read`.
@@ -678,7 +1109,9 @@ impl ConnData {
         &mut self,
         req: &mut Request,
     ) -> Result<Option<RsetHeader>, Thrown> {
-        self.parsed(req, Prot::RsetHeader, |req, body, _| rset_header(req, body))
+        self.read_whole(req, Prot::RsetHeader, "RSET_HEADER", |req, body, _| {
+            rset_header(req, body)
+        })
     }
 
     /// `php_mysqlnd_stats_read`: the server's text as it came.
@@ -691,112 +1124,51 @@ impl ConnData {
         &mut self,
         req: &mut Request,
     ) -> Result<Option<PrepareResponse>, Thrown> {
-        let Some(body) = self.read_packet(req, Prot::PrepareResponse)? else {
-            return Ok(None);
-        };
-        let mut p = Body::new(&body);
-        let mut r = PrepareResponse::default();
-        if body.is_empty() {
-            docref(
-                req,
-                Level::Warning,
-                "PREPARE packet 1 bytes shorter than expected",
-            );
-            return Ok(None);
-        }
-        let code = p.u8();
-        if code == ERROR_MARKER {
-            r.error = Some(PacketError::read_from(p.rest()));
-            return Ok(Some(r));
-        }
-        let size = body.len();
-        if size != 9 && size < 12 {
-            php_ext::raising::raise(
-                req,
-                Level::Warning,
-                &format!("Wrong COM_STMT_PREPARE response size. Received {size}"),
-            );
-            return Ok(None);
-        }
-        r.stmt_id = p.u32();
-        r.field_count = u32::from(p.u16());
-        r.param_count = u32::from(p.u16());
-        if size > 9 {
-            p.skip(1);
-            r.warning_count = u32::from(p.u16());
-        }
-        Ok(Some(r))
+        self.read_whole(req, Prot::PrepareResponse, "PREPARE", |req, body, _| {
+            prepare_response(req, body)
+        })
     }
 
-    /// `php_mysqlnd_chg_user_read`.
+    /// `php_mysqlnd_chg_user_read`: the packet, and whether it passed.
     pub(crate) fn read_change_user_response(
         &mut self,
         req: &mut Request,
-    ) -> Result<Option<AuthResponse>, Thrown> {
+    ) -> Result<(AuthResponse, bool), Thrown> {
         let capabilities = self.server_capabilities;
-        self.parsed(req, Prot::ChangeUser, move |_, body, _| {
-            let mut p = Body::new(body);
-            let mut r = AuthResponse::default();
-            p.check()?;
-            r.response_code = p.u8();
-            if body.len() == 1
-                && body.first() == Some(&EODATA_MARKER)
-                && capabilities & crate::consts::client::SECURE_CONNECTION != 0
-            {
-                r.asked_323 = true;
-                return Ok(r);
-            }
-            if r.response_code == ERROR_MARKER {
-                r.error = Some(PacketError::read_from(p.rest()));
-            }
-            p.check()?;
-            if r.response_code == EODATA_MARKER && p.left() > 0 {
-                r.new_auth_protocol = Some(p.cstr().to_vec());
-                r.new_auth_protocol_data = p.rest().to_vec();
-            }
-            Ok(r)
-        })
+        let mut r = AuthResponse::default();
+        let passed = self.packet_read(
+            req,
+            Prot::ChangeUser,
+            "CHANGE_USER",
+            &mut r,
+            |_, body, _, r| change_user_response(body, capabilities, r),
+        )?;
+        Ok((r, passed))
     }
 
-    /// `php_mysqlnd_sha256_pk_request_response_read`: the PEM after the
-    /// first byte.
+    /// `php_mysqlnd_sha256_pk_request_response_read`.
     pub(crate) fn read_public_key(&mut self, req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
-        self.parsed(req, Prot::Sha256PkResponse, |_, body, _| {
-            let mut p = Body::new(body);
-            p.check()?;
-            p.skip(1);
-            p.check()?;
-            Ok(p.rest().to_vec())
-        })
+        self.read_whole(
+            req,
+            Prot::Sha256PkResponse,
+            "SHA256_PK_REQUEST_RESPONSE",
+            |_, body, _| public_key(body),
+        )
     }
 
-    /// `php_mysqlnd_cached_sha2_result_read`: the code, `0xFF` with the
-    /// error, `0xFE` with the switch request, else `0x01` followed by the
-    /// fast-auth answer (3) or the full-auth request (4).
+    /// `php_mysqlnd_cached_sha2_result_read`.
     pub(crate) fn read_cached_sha2(
         &mut self,
         req: &mut Request,
     ) -> Result<Option<AuthResponse>, Thrown> {
-        self.parsed(req, Prot::CachedSha2, |_, body, _| {
-            let mut p = Body::new(body);
-            let mut r = AuthResponse::default();
-            p.check()?;
-            r.response_code = p.u8();
-            p.check()?;
-            if r.response_code == ERROR_MARKER {
-                r.error = Some(PacketError::read_from(p.rest()));
-                return Ok(r);
-            }
-            if r.response_code == EODATA_MARKER {
-                if p.left() > 0 {
-                    r.new_auth_protocol = Some(p.cstr().to_vec());
-                    r.new_auth_protocol_data = p.rest().to_vec();
-                }
-                return Ok(r);
-            }
-            r.response_code = p.u8();
-            p.check()?;
-            Ok(r)
-        })
+        let mut r = AuthResponse::default();
+        let passed = self.packet_read(
+            req,
+            Prot::CachedSha2,
+            "SHA256_PK_REQUEST_RESPONSE",
+            &mut r,
+            |_, body, _, r| cached_sha2(body, r),
+        )?;
+        Ok(passed.then_some(r))
     }
 }
