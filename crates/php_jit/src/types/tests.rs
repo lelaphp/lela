@@ -20,16 +20,16 @@ use php_unit::{Opcode, OplineIdx};
 
 use super::{
     Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Interrupt, Landing, Line, Op, OpId,
-    Operand, Repeat, Slot, TraceIr, Types, ValueId, build,
+    Operand, Pointee, Repeat, Slot, TraceIr, Types, ValueId, build,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_IS,
-    HASH_ISSET, HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE,
-    OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD,
-    STRING_MATCH, held, traced as built,
+    HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY,
+    NESTED_READ, NESTED_WRITE, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE,
+    SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2239,6 +2239,60 @@ fn a_hashs_separation_and_a_destructor_reload_nothing() -> Result<(), String> {
     let rendered = dump::render(&ir);
     let at = inline_at(&ir, Opcode::AssignDim)?;
     assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
+    Ok(())
+}
+
+/// A write, a compound write and a fetch for writing through the `VAR` a
+/// fetch for writing left pointing at a reference, inline under one guard
+/// that follows the `VAR` and then the reference to its inner type, as
+/// php follows `zend_jit_fetch_indirect_var` with `zend_jit_fetch_reference`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:5078-5096`, `:4749-4770`,
+/// `:5906-5930`); the fetch for writing through the reference leaves a
+/// `VAR` that points at the element, which the write after it follows to
+/// the zval alone (#3410). `Emit::written_array`'s witnesses serve it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_write_through_a_var_that_points_at_a_reference_is_inline() -> Result<(), String> {
+    let ir = golden(INDIRECT_REF_WRITE)?;
+    let rendered = dump::render(&ir);
+    let mut through = Vec::new();
+    for (at, op) in ir.ops.iter().enumerate() {
+        let Op::Line(line) = op else { continue };
+        if !matches!(
+            line.opcode,
+            Opcode::AssignDim | Opcode::AssignDimOp | Opcode::FetchDimW
+        ) {
+            continue;
+        }
+        assert_eq!(line.form, Form::Inline, "{:?}: {rendered}", line.opcode);
+        let at = OpId(u32::try_from(at).map_err(|e| e.to_string())?);
+        let pointee = (ir.guards.iter())
+            .filter(|guard| guard.at == GuardAt::Before(at))
+            .find_map(|guard| match (guard.check, line.op1) {
+                (
+                    Check::Indirect {
+                        value,
+                        tag: ZvalType::Array,
+                        pointee,
+                    },
+                    Operand::Value(op1),
+                ) if value == op1 => Some(pointee),
+                _ => None,
+            });
+        if let Some(pointee) = pointee {
+            through.push((line.opcode, pointee));
+        }
+    }
+    assert_eq!(
+        through,
+        [
+            (Opcode::AssignDim, Pointee::Reference),
+            (Opcode::AssignDimOp, Pointee::Reference),
+            (Opcode::FetchDimW, Pointee::Reference),
+            (Opcode::AssignDim, Pointee::Value),
+        ],
+        "{rendered}"
+    );
     Ok(())
 }
 

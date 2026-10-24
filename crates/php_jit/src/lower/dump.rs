@@ -29,8 +29,8 @@ use php_heap::ZvalType;
 use crate::record::func_name as func;
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
-    Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store,
-    Stored, TraceIr, Types, Unwind, ValueId,
+    Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Pointee, Read, Repeat, Returned,
+    Slot, Store, Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -284,7 +284,12 @@ impl<'a> Dump<'a> {
                 Stored::Copied { value, read } => match read {
                     Read::InPlace => format!("copied #{}", value.0),
                     Read::Through => format!("copied #{} through a reference", value.0),
-                    Read::Indirect => format!("copied #{} through an indirect", value.0),
+                    Read::Indirect(Pointee::Value) => {
+                        format!("copied #{} through an indirect", value.0)
+                    }
+                    Read::Indirect(Pointee::Reference) => {
+                        format!("copied #{} through an indirect reference", value.0)
+                    }
                 },
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
@@ -341,12 +346,24 @@ fn operand(operand: Operand) -> Option<String> {
     })
 }
 
+/// How a guard names what an indirect `VAR` is read as.
+fn pointee_of(pointee: Pointee) -> &'static str {
+    match pointee {
+        Pointee::Value => "ind to ",
+        Pointee::Reference => "ind ref to ",
+    }
+}
+
 fn check(check: Check) -> String {
     let tag = |tag: ZvalType| Types::of_tag(tag).to_string();
     match check {
         Check::Type { value, tag: t } => format!("#{} {}", value.0, tag(t)),
         Check::Deref { value, tag: t } => format!("#{} ref to {}", value.0, tag(t)),
-        Check::Indirect { value, tag: t } => format!("#{} ind to {}", value.0, tag(t)),
+        Check::Indirect {
+            value,
+            tag: t,
+            pointee,
+        } => format!("#{} {}{}", value.0, pointee_of(pointee), tag(t)),
         Check::Layout {
             value,
             layout,
@@ -357,7 +374,7 @@ fn check(check: Check) -> String {
             match read {
                 Read::InPlace => "",
                 Read::Through => "ref to ",
-                Read::Indirect => "ind to ",
+                Read::Indirect(pointee) => pointee_of(pointee),
             },
             match layout {
                 Layout::Packed => "packed",

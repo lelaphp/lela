@@ -1033,14 +1033,15 @@ impl Emit<'_> {
     /// `zend_jit_prepare_array_update` follows it
     /// (`Z/ext/opcache/jit/zend_jit_trace.c:5084-5096`), or the one the
     /// indirect `VAR` points at, as php's `zend_jit_fetch_indirect_var`
-    /// follows it (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`), each of
-    /// either layout.
+    /// follows it (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`), and on
+    /// through the reference it points at, as `zend_jit_fetch_reference`
+    /// follows it (`:17021-17085`, #3410), each of either layout.
     ///
     /// Elements written, compounded and fetched for writing through the
     /// `VAR` a fetch for writing left indirect: an inner array copied
     /// where it is shared, an object written over and destroyed, an
     /// element turned `null`, which the guard on what the `VAR` points at
-    /// leaves at, and one that is a reference, its write the handler's,
+    /// leaves at, and one that is a reference, written through it,
     /// under force and where every guard fails once:
     ///
     /// ```php
@@ -1078,13 +1079,52 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// d[{"a":[12,13,10,11],"b":{"x":91,"y":24576},"c":[[12,0],{"1":13}],"q":[13]},[13],[4,5,2,3]]
     /// ```
+    ///
+    /// A write, a compound write and a fetch for writing through a `VAR`
+    /// that points at a reference, read back through the variable the
+    /// reference is bound to: the array copied where `$copy` shares it,
+    /// and the element no reference once it is unset and written again,
+    /// which the guard on the reference leaves at, under force and where
+    /// every guard fails once:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $q = [0, 0, [0, 0]]; $g = ['q' => 0]; $g['q'] = &$q; $copy = null;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $g['q'][0] = $i; $g['q'][1] += $i; $g['q'][2][$i & 1] = $i;
+    ///         if ($i == 4) { $copy = $q; }
+    ///         if ($i == 9) { unset($g['q']); $g['q'] = [0, 0, [0, 0]]; }
+    ///     }
+    ///     return json_encode([$g, $q, $copy]);
+    /// }
+    /// echo f(14), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [{"q":[13,46,[12,13]]},[9,45,[8,9]],[4,10,[4,3]]]
+    /// ```
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $q = [0, 0, [0, 0]]; $g = ['q' => 0]; $g['q'] = &$q; $copy = null;
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $g['q'][0] = $i; $g['q'][1] += $i; $g['q'][2][$i & 1] = $i;
+    ///         if ($i == 4) { $copy = $q; }
+    ///         if ($i == 9) { unset($g['q']); $g['q'] = [0, 0, [0, 0]]; }
+    ///     }
+    ///     return json_encode([$g, $q, $copy]);
+    /// }
+    /// echo f(14), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [{"q":[13,46,[12,13]]},[9,45,[8,9]],[4,10,[4,3]]]
+    /// ```
     fn written_array(&mut self, at: OpId, array: ValueId) -> Result<((Value, i32), Types), Abort> {
         let held = self.value(array)?;
         let read = self.read_of(at, array);
         let zval = self.zval_of(held.slot, read)?;
         let types = match read {
             Read::InPlace => held.types,
-            Read::Through | Read::Indirect => Types::of_tag(ZvalType::Array),
+            Read::Through | Read::Indirect(_) => Types::of_tag(ZvalType::Array),
         };
         Ok((zval, types))
     }

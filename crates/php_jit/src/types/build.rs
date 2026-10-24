@@ -1945,15 +1945,20 @@ impl<'a> Builder<'a> {
         };
         let temporary = slot.var >= self.meta(slot.frame).code.num_cvs;
         // An indirect `VAR` is followed to what it points at, as php's
-        // `zend_jit_fetch_indirect_var` follows it, and a variable's
-        // reference to what it refers to; one that points at a reference,
-        // and a temporary that is one, are the handler's.
-        let read = Read::sampled(sample)?;
+        // `zend_jit_fetch_indirect_var` follows it, and on to what that
+        // refers to where it is a reference, as `zend_jit_fetch_reference`
+        // follows it, and a variable's reference to what it refers to; a
+        // temporary that is a reference is the handler's.
+        let read = Read::sampled(sample);
         let check = match (read, temporary) {
             (Read::InPlace, _) => None,
-            (Read::Indirect, true) => Some(Check::Indirect { value, tag }),
+            (Read::Indirect(pointee), true) => Some(Check::Indirect {
+                value,
+                tag,
+                pointee,
+            }),
             (Read::Through, false) => Some(Check::Deref { value, tag }),
-            (Read::Indirect | Read::Through, _) => return None,
+            (Read::Indirect(_) | Read::Through, _) => return None,
         };
         if let Some(check) = check {
             self.guards.push(Placed { check, ..before });
@@ -3485,7 +3490,7 @@ fn dim_inline(
     code: &OpArray,
 ) -> bool {
     let array = t1.tag() == Some(ZvalType::Array);
-    let written = op.op1_type == OperandKind::Cv || read1 == Read::Indirect;
+    let written = op.op1_type == OperandKind::Cv || matches!(read1, Read::Indirect(_));
     match op.opcode {
         Opcode::FetchDimR | Opcode::FetchDimIs => fetched_inline(op, t1, t2),
         Opcode::IssetIsemptyDimObj => {
@@ -3852,7 +3857,7 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
             ..
         } => Some((value, ZvalType::Array)),
         Check::Layout {
-            read: Read::Through | Read::Indirect,
+            read: Read::Through | Read::Indirect(_),
             ..
         }
         | Check::Deref { .. }

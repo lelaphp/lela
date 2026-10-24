@@ -57,8 +57,8 @@ mod strings;
 use crate::record::{Began, Callee, Stop};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
-    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Read, Repeat, Slot, Store, Stored,
-    TraceIr, Types, UnwindId, ValueId, cannot_raise,
+    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Pointee, Read, Repeat, Slot, Store,
+    Stored, TraceIr, Types, UnwindId, ValueId, cannot_raise,
 };
 
 /// Where an inline arithmetic that would raise goes instead
@@ -911,7 +911,7 @@ impl<'a> Emit<'a> {
                     self.decline_unless(slot, &[ZvalType::Array], Some(layout))?;
                 }
                 Check::Layout {
-                    read: Read::Through | Read::Indirect,
+                    read: Read::Through | Read::Indirect(_),
                     ..
                 } => return Err(mismatch("a reference's layout held as a trace enters")),
                 Check::Indirect { .. } => {
@@ -1185,7 +1185,11 @@ impl<'a> Emit<'a> {
                 let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
                 self.leave_if(other, guard.exit)?;
             }
-            Check::Indirect { value, tag: t } => {
+            Check::Indirect {
+                value,
+                tag: t,
+                pointee,
+            } => {
                 let held = self.value(value)?;
                 let (room, at) = self.place(held.slot)?;
                 if held.types != Types::INDIRECT {
@@ -1194,8 +1198,17 @@ impl<'a> Emit<'a> {
                     let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, indirect);
                     self.leave_if(other, guard.exit)?;
                 }
-                let target = self.b.ins().load(I64, trusted(), room, at);
-                let byte = self.b.ins().load(I8, trusted(), target, TYPE_AT);
+                let mut target = self.b.ins().load(I64, trusted(), room, at);
+                let mut value_at = 0;
+                if pointee == Pointee::Reference {
+                    let byte = self.b.ins().load(I8, trusted(), target, TYPE_AT);
+                    let reference = tag(ZvalType::Reference);
+                    let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, reference);
+                    self.leave_if(other, guard.exit)?;
+                    target = self.b.ins().load(I64, trusted(), target, 0);
+                    value_at = imm(Ref::VALUE_AT);
+                }
+                let byte = self.b.ins().load(I8, trusted(), target, value_at + TYPE_AT);
                 let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, tag(t));
                 self.leave_if(other, guard.exit)?;
             }
@@ -2553,15 +2566,20 @@ impl<'a> Emit<'a> {
     }
 
     /// Where the zval `slot` holds, read so, is: the slot itself, the
-    /// value of the reference it holds, or the zval its indirect `VAR`
-    /// points at.
+    /// value of the reference it holds, the zval its indirect `VAR` points
+    /// at, or the value of the reference that zval is.
     pub(super) fn zval_of(&mut self, slot: Slot, read: Read) -> Result<(Value, i32), Abort> {
         let (room, at) = self.place(slot)?;
         let mut to = || self.b.ins().load(I64, trusted(), room, at);
         Ok(match read {
             Read::InPlace => (room, at),
             Read::Through => (to(), imm(Ref::VALUE_AT)),
-            Read::Indirect => (to(), 0),
+            Read::Indirect(Pointee::Value) => (to(), 0),
+            Read::Indirect(Pointee::Reference) => {
+                let pointee = to();
+                let reference = self.b.ins().load(I64, trusted(), pointee, 0);
+                (reference, imm(Ref::VALUE_AT))
+            }
         })
     }
 
@@ -2573,7 +2591,9 @@ impl<'a> Emit<'a> {
             .filter(|g| g.at == GuardAt::Before(at))
             .find_map(|g| match g.check {
                 Check::Deref { value: v, .. } if v == value => Some(Read::Through),
-                Check::Indirect { value: v, .. } if v == value => Some(Read::Indirect),
+                Check::Indirect {
+                    value: v, pointee, ..
+                } if v == value => Some(Read::Indirect(pointee)),
                 _ => None,
             })
             .unwrap_or(Read::InPlace)

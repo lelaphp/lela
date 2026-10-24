@@ -18,8 +18,9 @@ use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
-    HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, OBJECT_THIS,
-    OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ,
+    NESTED_WRITE, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE, SPECTRALNORM,
+    STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -1032,7 +1033,7 @@ fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), St
 #[test]
 fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
 -> Result<(), String> {
-    let kernels: [(Fixture, &[(Kernel, usize)]); 3] = [
+    let kernels: [(Fixture, &[(Kernel, usize)]); 4] = [
         (
             NESTED_READ,
             &[
@@ -1055,6 +1056,9 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
             REF_WRITE,
             &[(Kernel::Lookup, 2), (Kernel::Handle, 2), (Kernel::Step, 0)],
         ),
+        // #3410: through a `VAR` that points at a reference, as through
+        // one that points at the array.
+        (INDIRECT_REF_WRITE, &[(Kernel::Step, 0)]),
     ];
     for (fixture, calls) in kernels {
         lowered(fixture)?;
