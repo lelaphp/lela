@@ -309,10 +309,7 @@ impl Request {
                     .map(|key| key.bytes().to_vec())
             })
             .collect();
-        let loaded = (self.accel_loaded.as_ref())
-            .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
-            .map(|(_, served)| *served);
-        let served = loaded.or_else(|| self.preloading.is_some().then_some(AccelServed::Hit));
+        let served = self.accel_served(unit);
         let early = (self.early_bound.take())
             .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
             .map(|(_, early)| early);
@@ -323,6 +320,23 @@ impl Request {
             tried: Vec::new(),
             next: 0,
         }
+    }
+
+    /// How opcache served `unit` to this request, `zend_accel_load_script`'s
+    /// load of it: from what it held, compiled by this request's miss, or
+    /// none where php compiles it without the cache; a unit preloading
+    /// declares is served as a hit.
+    pub(crate) fn accel_served(&self, unit: &PublishedUnit) -> Option<AccelServed> {
+        let loaded = (self.accel_loaded.as_ref())
+            .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
+            .map(|(_, served)| *served);
+        loaded.or_else(|| self.preloading.is_some().then_some(AccelServed::Hit))
+    }
+
+    /// Whether opcache served `unit` from what it held
+    /// ([`Request::accel_served`]).
+    pub(crate) fn accel_hit(&self, unit: &PublishedUnit) -> bool {
+        self.accel_served(unit) == Some(AccelServed::Hit)
     }
 
     /// `unit`'s classes declared in their order up to and including the
