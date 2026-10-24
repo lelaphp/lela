@@ -254,6 +254,20 @@ fn dump_row(req: &mut Request, row: &Row, level: usize) -> Result<(), Thrown> {
 ///   }
 /// }
 /// ```
+///
+/// A float is `%.*H` at `serialize_precision`, which writes a non-finite
+/// one whole however short the precision:
+///
+/// ```php
+/// ini_set('serialize_precision', 1);
+/// var_dump(INF, -INF, NAN, 1.5);
+/// ```
+/// ```expect
+/// float(INF)
+/// float(-INF)
+/// float(NAN)
+/// float(2)
+/// ```
 fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
     // Unguarded in php, held to the thread's floor here.
     call_stack_end(req)?;
@@ -264,7 +278,14 @@ fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
         ValueRef::Null | ValueRef::Undef => req.response_mut().write(b"NULL\n"),
         ValueRef::Int(n) => req.response_mut().write(format!("int({n})\n").as_bytes()),
         ValueRef::Float(f) => {
-            let text = float_format(f, req.ini().serialize_precision(), Exponent::Upper);
+            // `%.*H` writes a non-finite double whole, as `zend_gcvt`
+            // does at -1 (`Z/main/snprintf.c:886-899`).
+            let precision = if f.is_finite() {
+                req.ini().serialize_precision()
+            } else {
+                -1
+            };
+            let text = float_format(f, precision, Exponent::Upper);
             req.response_mut()
                 .write(format!("float({text})\n").as_bytes());
         }
