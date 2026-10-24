@@ -1103,8 +1103,10 @@ impl Heap {
     /// when a destructor is still to be served.
     ///
     /// The table an object's handler hands back is garbage of its own,
-    /// so an array that table is shared with stays whole when a
-    /// destructor keeps it (GH-24050):
+    /// `gc_add_garbage((zend_refcounted *)ht)` where its colour turns
+    /// from white and `GC_INFO(ht)` is none (`Z/Zend/zend_gc.c:1576-1580`,
+    /// php 8.5.12), so an array that table is shared with stays whole
+    /// when a destructor keeps it (GH-24050):
     ///
     /// ```php
     /// class R { public $c; public $self; function __destruct() { $GLOBALS['kept'] = $this->c; } }
