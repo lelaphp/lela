@@ -179,7 +179,13 @@ tier::trace_num
 tier::under_way
 tier::unwind
 [kernels]
+tier::assign_concat
 tier::call_held
+tier::concat
+tier::dispatch_held
 tier::free_cv
 tier::release
+tier::rope_end
+tier::rope_open
+tier::rope_push
 tier::step_held

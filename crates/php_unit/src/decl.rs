@@ -831,14 +831,19 @@ pub struct AttributeArgument {
 /// `zend_attribute.lineno`, the line its name stands on, and
 /// `ZEND_ATTRIBUTE_STRICT_TYPES`, whether the file it was written in
 /// declares `strict_types`: the site and the regime
-/// `zend_get_attribute_object` makes its object under. A native's has
-/// line zero and no regime.
+/// `zend_get_attribute_object` makes its object under; and `own_name`,
+/// whether the string `attr->name` is one no holder the compile
+/// filled before it holds: one `zend_resolve_class_name` made, or the
+/// first copy of the scanner's or a `use`'s, which a later holder copies
+/// again, a promoted parameter's property the parameter's and another
+/// attribute the `use`'s. A native's has line zero and no regime.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
     pub name: Name,
     pub arguments: Vec<AttributeArgument>,
     pub line: u32,
     pub strict: bool,
+    pub own_name: bool,
 }
 
 /// What stands after a parameter's name, decoded once where the

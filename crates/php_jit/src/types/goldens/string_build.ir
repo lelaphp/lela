@@ -1,0 +1,52 @@
+trace loop e1, stop loop
+frame f0 e1 root, 5 cvs 14 temps
+entry
+  #0 f0.CV2 [string]
+  #2 f0.CV3 [long]
+  #4 f0.CV4 [undef, any]
+  #6 f0.CV1 [long]
+  #7 f0.CV0 [string]
+  guard #7 string -> exit 0
+  guard #6 long -> exit 1
+  guard #0 string -> exit 2
+  guard #2 long -> exit 3
+loop at 0, loop, interrupt exit 6
+  #1 f0.CV2 [string] = phi(#0, #18)
+  #3 f0.CV3 [long] reg = phi(#2, #19)
+  #5 f0.CV4 [undef, any] = phi(#4, #10)
+0017 f0 IS_SMALLER #3, #6 fused inline
+  checks direction taken -> exit 4
+0005 f0 CONCAT const#2, #7 inline unwinds -> unwind 0
+  -> #8 f0.T2 [string]
+0006 f0 CONCAT #8, const#3 inline unwinds -> unwind 0
+  -> #9 f0.T3 [string]
+0007 f0 ASSIGN #5, #9 inline unwinds -> unwind 0
+  -> #10 f0.CV4 [string]
+0008 f0 ROPE_INIT const#4 inline
+  -> #11 f0.T6 [ref, any]
+0009 f0 ROPE_ADD #11, #3 step unwinds -> unwind 0
+  -> #12 f0.T6 [ref, any]
+0010 f0 ROPE_ADD #12, const#5 inline
+  -> #13 f0.T6 [ref, any]
+0011 f0 ROPE_ADD #13, #7 inline
+  -> #14 f0.T6 [ref, any]
+0012 f0 ROPE_ADD #14, const#6 inline
+  -> #15 f0.T6 [ref, any]
+0013 f0 ROPE_ADD #15, #10 inline
+  -> #16 f0.T6 [ref, any]
+0014 f0 ROPE_END #16, const#7 inline unwinds -> unwind 0
+  -> #17 f0.T5 [string]
+0015 f0 ASSIGN_OP #1, #17 inline unwinds -> unwind 0
+  -> #18 f0.CV2 [string]
+0016 f0 PRE_INC #3 inline
+  -> #19 f0.CV3 [long] reg
+  checks #19 long -> exit 5
+end: back to 0
+exit 0: f0 0017 plain
+exit 1: f0 0017 plain f0.CV0:string
+exit 2: f0 0017 plain f0.CV0:string f0.CV1:long
+exit 3: f0 0017 plain f0.CV0:string f0.CV1:long f0.CV2:string
+exit 4: f0 0019 plain f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:string f0.CV3:long
+exit 5: f0 0016 plain f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:string f0.CV3:long f0.CV4:string
+exit 6: f0 0017 plain f0.CV3=#3 f0.CV0:string f0.CV1:long f0.CV2:string f0.CV3:long to vm
+unwind 0: f0.CV3=#3

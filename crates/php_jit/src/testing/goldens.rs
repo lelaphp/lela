@@ -113,6 +113,33 @@ pub(crate) const OWNING_LEAVE: Fixture = Fixture {
     ],
 };
 
+/// A loop over strings, as `string_munge`'s line loop: a strict comparison
+/// of a string with the empty string fused to its jump, one with another
+/// string written as a boolean, a string's length and a cast to a
+/// boolean, each inline (#3321).
+pub(crate) const STRING_MATCH: Fixture = Fixture {
+    name: "string_match",
+    program: "string_match",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A blob built in a loop, as `string_munge`'s first loop: strings joined
+/// by `CONCAT`, a line interpolated by `ROPE_*` and appended by `.=`,
+/// each string piece compiled inline (#3321).
+pub(crate) const STRING_BUILD: Fixture = Fixture {
+    name: "string_build",
+    program: "string_build",
+    plan: &[
+        ("record.function", "k"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// `fannkuch`'s first loop, recorded for the view it holds of
 /// `fannkuch()`, which a side trace's record written out by hand is built
 /// through (#3270).

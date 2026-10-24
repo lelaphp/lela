@@ -2010,6 +2010,7 @@ impl Request {
             hold: self.shared_hold,
             heap: &mut self.heap,
             made,
+            interning: true,
         };
         compile(
             &mut strings,

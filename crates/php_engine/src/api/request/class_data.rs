@@ -545,6 +545,23 @@ impl Request {
     /// int(1)
     /// Undefined constant "UNRESOLVED"
     /// ```
+    ///
+    /// Each constant is evaluated in its place and nothing is handed back
+    /// ([`Request::evaluated_in`]), a backed enum's cases made in theirs
+    /// the same way, so the update offers nothing to the collector:
+    ///
+    /// ```php
+    /// final class E { const A = 'a.x'; }
+    /// class M { private const L = [E::A]; }
+    /// enum B: string { case X = 'x'; const C = [self::X]; }
+    /// new M;
+    /// $c = B::C;
+    /// var_dump(gc_status()['roots'], $c[0] === B::X);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// bool(true)
+    /// ```
     pub(crate) fn update_class_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
         if self
             .class_data
@@ -575,8 +592,7 @@ impl Request {
                 .collect();
             for (declaring, name) in constants {
                 let holder = constant_holder(class, declaring);
-                let value = self.evaluated_in(holder, declaring, &name)?;
-                self.release(value);
+                self.evaluated_in(holder, declaring, &name)?;
             }
         }
         let statics: Vec<PropertyInfo> =
@@ -633,10 +649,14 @@ impl Request {
     /// `zend_update_class_constant` over the constant `name` that
     /// `declaring` declares: its value from the row where the request
     /// evaluated it before, and otherwise the expression it was written
-    /// as evaluated in `declaring`'s scope, held to its type, and kept.
-    /// One more owner is the caller's. A value its type refuses is given
-    /// up with the `TypeError`, as `zend_update_class_constant` gives up
-    /// `tmp` (`Z/Zend/zend_API.c:1504`), and nothing is kept.
+    /// as evaluated in `declaring`'s scope, held to its type, and kept,
+    /// all in its place: what comes back is a view of the kept value, no
+    /// owner taken, as `zend_update_class_constant` evaluates into the
+    /// slot and hands nothing back, so a reader that hands the value on
+    /// takes its own owner (`ZVAL_COPY_OR_DUP`) and an update takes none.
+    /// A value its type refuses is given up with the `TypeError`, as
+    /// `zend_update_class_constant` gives up `tmp`
+    /// (`Z/Zend/zend_API.c:1504`), and nothing is kept.
     ///
     /// The row is read in the table of `holder` ([`constant_holder`]),
     /// `declaring` itself for a constant read where it is declared: the
@@ -651,7 +671,6 @@ impl Request {
         name: &[u8],
     ) -> Result<Value, Thrown> {
         if let Some(value) = self.class_data.evaluated_constant(holder, name) {
-            self.addref(&value);
             return Ok(value);
         }
         let Some((expr, ty)) = self
@@ -684,7 +703,6 @@ impl Request {
             }
             _ => evaluated.hand_on(),
         };
-        self.addref(&value);
         let row = self.class_data.rows.row(holder);
         row.constants.push((name.into(), value));
         // `zend_update_class_constant` destroys the expression once its
@@ -782,7 +800,9 @@ impl Request {
         if is_case {
             return self.enum_case(declaring, name).map(|case| case.as_value());
         }
-        self.evaluated_in(declaring, declaring, name)
+        let value = self.evaluated_in(declaring, declaring, name)?;
+        self.addref(&value);
+        Ok(value)
     }
 
     /// `zend_get_class_constant_ex`'s update of the constant `name` that
@@ -813,7 +833,9 @@ impl Request {
         class_name: &str,
     ) -> Result<Value, Thrown> {
         if (self.class_data.evaluated_constant(holder, name)).is_some() {
-            return self.evaluated_in(holder, declaring, name);
+            let value = self.evaluated_in(holder, declaring, name)?;
+            self.addref(&value);
+            return Ok(value);
         }
         let data = self.class_data.rows.row(declaring);
         if data.visiting.iter().any(|held| **held == *name) {
@@ -830,7 +852,9 @@ impl Request {
         if let Some(data) = self.class_data.rows.get_mut(declaring) {
             data.visiting.retain(|held| **held != *name);
         }
-        evaluated
+        let value = evaluated?;
+        self.addref(&value);
+        Ok(value)
     }
 
     /// The default properties table of `class` once the class is

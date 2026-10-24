@@ -1983,7 +1983,7 @@ fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<Cla
             } else {
                 req.standing_string(bare)?
             };
-            let returned = serve(req, loader.target(), &[Value::string(class)], &[]);
+            let returned = serve(req, loader, &[Value::string(class)], &[]);
             req.release(Value::string(class));
             req.release(returned?);
             if let Some(class) = req.class_named(key) {
@@ -2019,7 +2019,7 @@ pub fn perform_autoload(req: &mut Request, name: PhpString) -> Result<Option<Cla
     req.without_site_override(|req| {
         let mut at = 0;
         while let Some(loader) = req.autoloader(at) {
-            let returned = serve(req, loader.target(), &[Value::string(name)], &[]);
+            let returned = serve(req, loader, &[Value::string(name)], &[]);
             req.release(returned?);
             if !lowered.starts_with(b"\\")
                 && let Some(class) = req.class_named(Bare::resolved(&lowered))

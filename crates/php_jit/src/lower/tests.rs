@@ -17,10 +17,12 @@ use super::{Backend, INTERRUPT_AT, INTERRUPTED, Kernel, Symbols, UNWOUND, Unsupp
 use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, FIB, Fixture, MANDELBROT,
-    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, held,
+    NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
-use crate::types::{Check, End, Guard, GuardAt, Imm, Interrupt, Op, Returned, TraceIr};
+use crate::types::{
+    Check, Constant, End, Form, Guard, GuardAt, Imm, Interrupt, Op, Operand, Returned, TraceIr,
+};
 
 /// Where `lower`'s goldens are.
 fn goldens_dir() -> PathBuf {
@@ -54,7 +56,7 @@ fn named(fixture: Fixture) -> TraceName {
 /// holds what the code does with it.
 fn constants_named(ir: &TraceIr, clif: &str) -> String {
     let mut named = clif.to_owned();
-    let constants = ir.ops.iter().filter_map(|op| match op {
+    let returned = ir.ops.iter().filter_map(|op| match op {
         Op::Line(line) => match line.imm {
             Imm::Leave {
                 value: Returned::Constant(address),
@@ -64,7 +66,28 @@ fn constants_named(ir: &TraceIr, clif: &str) -> String {
         },
         _ => None,
     });
-    for (at, address) in constants.enumerate() {
+    // A constant no scalar is, which an inline form copies from its op
+    // array's table.
+    let copied = ir.ops.iter().flat_map(|op| match op {
+        Op::Line(line) if line.form == Form::Inline => [line.op1, line.op2, line.data]
+            .into_iter()
+            .filter_map(|operand| match operand {
+                Operand::Constant(Constant::Other(idx)) => ir
+                    .frames
+                    .get(usize::from(line.frame.0))
+                    .map(|frame| frame.literals + 16 * idx.0 as usize),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    });
+    let mut seen = Vec::new();
+    for address in returned.chain(copied) {
+        if !seen.contains(&address) {
+            seen.push(address);
+        }
+    }
+    for (at, address) in seen.into_iter().enumerate() {
         // CLIF prints a constant in groups of four hex digits.
         let digits = format!("{address:x}");
         let mut grouped = String::new();
@@ -270,6 +293,48 @@ fn an_element_write_lowers_inline_and_steps_where_it_cannot() -> Result<(), Stri
 #[test]
 fn a_natives_call_lowers_in_place() -> Result<(), String> {
     lowered(NATIVE_CALL).map(drop)
+}
+
+/// Strings compared, measured and cast inline: the comparison of two
+/// strings by their pointers, then their lengths, then the `identical`
+/// kernel; a length read at `ZSTR_LEN` (#3321).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn strings_lower_inline() -> Result<(), String> {
+    lowered(STRING_MATCH)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("string_match.clif"))
+        .map_err(|e| e.to_string())?;
+    let address =
+        format!("{:#x}", symbols().address(Kernel::Identical)).replace("0x7000", "0x7000_");
+    let compared = (clif.lines())
+        .filter(|line| line.contains("call_indirect") && line.contains(&address))
+        .count();
+    // `$s !== "zz"`'s bytes; `$s === ''` is answered by the lengths.
+    assert!(compared >= 1, "{clif}");
+    Ok(())
+}
+
+/// A blob built in a loop: the path's two concatenations through
+/// `concat`, each string piece of the rope through the rope's kernels,
+/// the long one through `handle`, and the line appended through
+/// `assign_concat` (#3321).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn ropes_and_appends_lower_through_their_kernels() -> Result<(), String> {
+    lowered(STRING_BUILD)?;
+    let clif = std::fs::read_to_string(goldens_dir().join("string_build.clif"))
+        .map_err(|e| e.to_string())?;
+    let calls = |kernel: Kernel| {
+        let address = format!("{:#x}", symbols().address(kernel)).replace("0x7000", "0x7000_");
+        (clif.lines())
+            .filter(|line| line.contains("call_indirect") && line.contains(&address))
+            .count()
+    };
+    assert_eq!(calls(Kernel::RopeInit), 1, "{clif}");
+    assert_eq!(calls(Kernel::RopeEnd), 1, "{clif}");
+    assert_eq!(calls(Kernel::AssignConcat), 1, "{clif}");
+    assert_eq!(calls(Kernel::Concat), 2, "{clif}");
+    Ok(())
 }
 
 /// A leave over owning variables, each freed in place: its type tested,

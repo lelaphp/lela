@@ -9,6 +9,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use php_unit::OperandKind;
 use php_unit::decl::Bare;
 use std::cmp::Ordering;
 use std::ops::ControlFlow;
@@ -1623,7 +1624,18 @@ pub(crate) fn steps_past_int(held: &Value, stepped: &Value, ty: &php_unit::decl:
 /// `zend_throw_ref_type_error_zval` (`Z/Zend/zend_execute.c:3891`): the
 /// `TypeError` a write through a cell raises, which names the property
 /// that holds the cell and not the name written through.
-fn ref_type_error(
+///
+/// ```php
+/// class C { public int $n = 1; }
+/// $c = new C; $r = &$c->n;
+/// try { $r = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->n);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property C::$n of type int
+/// int(1)
+/// ```
+pub(crate) fn ref_type_error(
     req: &mut Request,
     value: &Value,
     ty: &php_unit::decl::Type,
@@ -2669,6 +2681,62 @@ pub(crate) fn concat(req: &mut Request, left: &Value, right: &Value) -> Result<V
     req.release(Value::string(a));
     req.release(Value::string(b));
     Ok(Value::string(joined?))
+}
+
+/// `ZEND_CONCAT` and `ZEND_FAST_CONCAT` over two strings, the arms of
+/// php's handler before `concat_function` (`Z/Zend/zend_vm_def.h:382-431`,
+/// `:3293-3341`), which its compiled code's `zend_jit_fast_concat_helper`
+/// and `_tmp_helper` serve again (`Z/ext/opcache/jit/zend_jit_helpers.c:1824-1880`):
+/// `a` with its owner where `a_kind` is a temporary the caller took out
+/// of its slot, a view otherwise, and `b` a view, whose temporary the
+/// caller frees after. An empty side that is no `CONST` hands the other
+/// on with an owner more, `ZVAL_STR_COPY`, so `$x . ''` is a new string
+/// and `$x . $e` is `$x`'s; a temporary left side grows where it stands
+/// ([`Request::string_append`]), as `zend_string_extend` grows it when
+/// its owner is the only one and php's alloc arm copies it otherwise; any
+/// other pair is joined into a new string ([`join`]). The joined string
+/// has one owner. What the join refuses, the memory limit or php's
+/// `String size overflow`, is the caller's to raise at its opline.
+///
+/// A variable's empty side hands the other on, so it counts one more
+/// owner; a constant `''` is joined as any string is; a temporary left
+/// side grows into the joined string:
+///
+/// ```php
+/// $a = str_repeat('ab', 2); $e = '';
+/// debug_zval_dump($a . $e, $e . $a, $a . '', str_repeat('x', 3) . 'y');
+/// ```
+/// ```expect
+/// string(4) "abab" refcount(3)
+/// string(4) "abab" refcount(3)
+/// string(4) "abab" refcount(1)
+/// string(4) "xxxy" refcount(1)
+/// ```
+#[inline(always)] // both callers' kinds fold its arms, the handler's at compile time
+pub(crate) fn concat_strings(
+    req: &mut Request,
+    (a, a_kind): (PhpString, OperandKind),
+    (b, b_kind): (PhpString, OperandKind),
+) -> Result<PhpString, Thrown> {
+    let owned = matches!(a_kind, OperandKind::Tmp | OperandKind::Var);
+    if a_kind != OperandKind::Const && a.is_empty() {
+        req.addref(&Value::string(b));
+        if owned {
+            req.release(Value::string(a));
+        }
+        return Ok(b);
+    }
+    if b_kind != OperandKind::Const && b.is_empty() {
+        if !owned {
+            req.addref(&Value::string(a));
+        }
+        return Ok(a);
+    }
+    if owned {
+        req.string_append(a, b)
+    } else {
+        join(req, a, b)
+    }
 }
 
 /// A new string of `a`'s bytes and then `b`'s,
@@ -5136,18 +5204,64 @@ fn wide(n: i64) -> f64 {
 /// ```
 fn merged(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut union = left.copy(req)?;
-    // `zend_hash_merge(result, op2, zval_add_ref, 0)`, which writes only keys
-    // the union lacks and so releases nothing and runs no code of the
-    // program: the right operand's rows read under the borrowed request,
-    // then written.
-    let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(req, right).collect();
-    for (key, value) in rows {
-        if !union.contains(&key) {
-            let key = Owner::take(req, key);
-            union.set(req, key, Owner::take(req, value))?;
-        }
+    for (key, value) in lacking(req, *union, right) {
+        let key = Owner::take(req, key);
+        union.set(req, key, Owner::take(req, value))?;
     }
     Ok(union)
+}
+
+/// What `zend_hash_merge(result, op2, zval_add_ref, 0)` writes: the rows
+/// of `right` whose keys `union` lacks, read under the borrowed request
+/// before any is written. It writes only those keys, so it releases
+/// nothing and runs no code of the program.
+fn lacking(req: &mut Request, union: PhpArray, right: PhpArray) -> Vec<(Key, Value)> {
+    let rows = crate::api::values::walk::rows(req, right);
+    rows.filter(|(key, _)| !union.contains(key)).collect()
+}
+
+/// [`add`] as a compound assignment runs it, `add_function_array` with
+/// `result == op1` (`Z/Zend/zend_operators.c:1129-1142`): `$a += $a`
+/// leaves the place as it stands, and otherwise the left array is the
+/// place's own, so it is separated where it stands (`SEPARATE_ARRAY`)
+/// rather than copied. One the place holds alone is
+/// merged into in place and handed back with one owner more, the one the
+/// place's write takes, so the place keeps the same array and the owner
+/// the handler then gives up of what it wrote over is that one again;
+/// one with other owners, or an immutable one, is copied as [`add`]
+/// copies it. Every other pair is [`add`]'s.
+///
+/// Merged in place, the array the place held is never destroyed, so an
+/// element another name also holds is not given up and offered to the
+/// collector, as a copy and the original's destruction would offer it:
+///
+/// ```php
+/// $shared = [str_repeat('x', 2)];
+/// $outer = ['n' => $shared];
+/// $outer += ['m' => 1];
+/// var_dump(gc_status()['roots'], $outer['m']);
+/// ```
+/// ```expect
+/// int(0)
+/// int(1)
+/// ```
+pub(crate) fn add_assign(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    let held = left.deref();
+    let (Some(mut array), Some(b)) = (held.as_array(), right.deref().as_array()) else {
+        return add(req, left, right);
+    };
+    // `$a += $a`: the place keeps its array as it stands, separated or not.
+    if array.is_same(b) {
+        return Ok(Owner::take(req, array).into_value().hand_on());
+    }
+    if held.is_refcounted() && held.refcount() == 1 {
+        for (key, value) in lacking(req, array, b) {
+            let key = Owner::take(req, key);
+            array.set(req, key, Owner::take(req, value))?;
+        }
+        return Ok(Owner::take(req, array).into_value().hand_on());
+    }
+    add(req, left, right)
 }
 
 /// `ZEND_TRY_BINARY_OBJECT_OPERATION`: an object operand's `do_operation`

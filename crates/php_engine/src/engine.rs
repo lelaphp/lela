@@ -2078,6 +2078,18 @@ impl Shared {
         strings.find(bytes)
     }
 
+    /// The working directory `cwd` in opcache's shared table, as
+    /// `accel_make_persistent_key` puts it there the first time a request
+    /// keys a relative path (`ZCG(cwd_check)`,
+    /// `Z/ext/opcache/ZendAccelerator.c:1240-1256`), so a string of its
+    /// bytes a later compile asks for is the table's.
+    pub(crate) fn intern_cwd(&self, cwd: &[u8]) {
+        if self.permanent(cwd).is_none() {
+            // The table's refusal leaves the key as written, as php's.
+            self.interned.strings().intern(cwd).ok();
+        }
+    }
+
     /// How many strings the engine's table holds, opcache's
     /// `interned_strings_usage.number_of_strings`.
     pub(crate) fn interned_strings(&self) -> usize {
@@ -4161,6 +4173,7 @@ impl Intern for PermanentStrings<'_> {
     fn constant_array(
         &mut self,
         entries: &[(php_heap::Key, php_heap::Zval)],
+        _: usize,
     ) -> Result<php_heap::Arr, php_heap::Fatal> {
         self.made.constant_array(entries)
     }

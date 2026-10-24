@@ -229,6 +229,12 @@ fn compiled(ir: &TraceIr, step: bool) -> Option<Compiled> {
         Kernel::PushCall | Kernel::Call => (refusing::refused_call as *const ()).addr(),
         Kernel::Release => (super::super::super::wrapped::release as *const ()).addr(),
         Kernel::FreeCv => (super::super::super::wrapped::free_cv as *const ()).addr(),
+        Kernel::Identical => (super::super::super::wrapped::identical as *const ()).addr(),
+        Kernel::RopeInit => (super::super::super::wrapped::rope_init as *const ()).addr(),
+        Kernel::RopeAdd => (super::super::super::wrapped::rope_add as *const ()).addr(),
+        Kernel::RopeEnd => (super::super::super::wrapped::rope_end as *const ()).addr(),
+        Kernel::AssignConcat => (super::super::super::wrapped::assign_concat as *const ()).addr(),
+        Kernel::Concat => (super::super::super::wrapped::concat as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend
@@ -300,12 +306,14 @@ fn frames(f: FuncRef, g: FuncRef) -> Vec<FrameInfo> {
             place: Place::Root,
             cvs: 1,
             temps: 2,
+            literals: 0,
         },
         FrameInfo {
             func: g,
             place: Place::Callee(Frame::ROOT),
             cvs: 2,
             temps: 0,
+            literals: 0,
         },
     ]
 }
@@ -499,12 +507,14 @@ fn leave_in_place(req: &mut Request, g: FrameRef) -> Option<(FrameRef, Read)> {
             place: Place::Root,
             cvs: 2,
             temps: 0,
+            literals: 0,
         },
         FrameInfo {
             func: caller,
             place: Place::Caller(Frame::ROOT),
             cvs: 1,
             temps: 2,
+            literals: 0,
         },
     ];
     let ir = trace(frames, ops, (Frame(1), call + 1));
