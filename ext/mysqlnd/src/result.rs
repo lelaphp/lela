@@ -843,18 +843,42 @@ impl Res {
         }
     }
 
-    /// The lengths of a text row decoded, kept for `fetch_lengths`.
+    /// The lengths of a text row decoded, kept for `fetch_lengths` in the
+    /// one buffer of the set's columns, as php's `lengths` array is, each
+    /// row's written over the last's:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $r = mysqli_query($l, "SELECT 'a', NULL UNION ALL SELECT 'bcd', 'xy'");
+    /// mysqli_fetch_row($r);
+    /// echo json_encode(mysqli_fetch_lengths($r)), "\n";
+    /// mysqli_fetch_row($r);
+    /// echo json_encode(mysqli_fetch_lengths($r)), "\n";
+    /// var_dump(mysqli_fetch_row($r), mysqli_fetch_lengths($r));
+    /// $u = mysqli_query($l, "SELECT 'abcd', 'x' UNION ALL SELECT '', NULL", MYSQLI_USE_RESULT);
+    /// mysqli_fetch_row($u);
+    /// echo json_encode(mysqli_fetch_lengths($u)), "\n";
+    /// mysqli_fetch_row($u);
+    /// echo json_encode(mysqli_fetch_lengths($u)), "\n";
+    /// ```
+    /// ```expect mysql
+    /// [1,0]
+    /// [3,2]
+    /// NULL
+    /// bool(false)
+    /// [4,1]
+    /// [0,0]
+    /// ```
     fn keep_lengths(&mut self, decoded: &Result<Row, ()>) {
         if let Ok(row) = decoded
             && !self.binary
         {
-            self.lengths = row
-                .iter()
-                .map(|v| match v.as_ref() {
-                    php_ext::values::ValueRef::Str(s) => s.len() as u64,
-                    _ => 0,
-                })
-                .collect();
+            self.lengths.clear();
+            self.lengths.extend(row.iter().map(|v| match v.as_ref() {
+                php_ext::values::ValueRef::Str(s) => s.len() as u64,
+                _ => 0,
+            }));
         }
     }
 
