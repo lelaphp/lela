@@ -1365,6 +1365,7 @@ impl<'a> Emit<'a> {
             Kernel::RopeAdd => &[I64, I64, I32, I64, I64, I32],
             Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
             Kernel::AssignConcat => &[I64, I64, I32, I32, I64, I32],
+            Kernel::Concat => &[I64, I64, I32, I64, I32, I64, I32, I32, I64],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -1749,6 +1750,7 @@ impl<'a> Emit<'a> {
             Opcode::AssignDimOp => self.assign_dim_op(at, line),
             Opcode::Strlen => self.strlen(line),
             Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
+            Opcode::Concat | Opcode::FastConcat => self.concat(line),
             Opcode::Bool | Opcode::BoolNot => self.bool(at, line),
             Opcode::FeFree => self.free_temp(line, line.op1),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),

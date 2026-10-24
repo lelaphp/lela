@@ -4,15 +4,18 @@
 //! `Z/ext/opcache/jit/zend_jit_ir.c:11753-11799`,
 //! `Z/ext/opcache/jit/zend_jit_helpers.c:3442-3463`), and `.=` of a
 //! string onto a variable's string (`zend_jit_fast_assign_concat_helper`,
-//! `:1788-1822`). Each serves through the one place the interpreter's
-//! handler serves through, the request's ropes ([`Request::rope_push`],
-//! [`Request::rope_end`]) and [`crate::ops::concat_assign`]; a rope's
+//! `:1788-1822`), and a concatenation of two strings
+//! (`zend_jit_fast_concat_helper`, `_tmp_helper`, `:1824-1880`). Each
+//! serves through the one place the interpreter's handler serves through,
+//! the request's ropes ([`Request::rope_push`], [`Request::rope_end`]),
+//! [`crate::ops::concat_assign`] and [`crate::ops::concat_strings`]; a rope's
 //! piece is handed with its owner, as the handler's string arm takes one:
 //! a temporary's moved, a variable's or a constant's with one owner more.
 //! None runs user code; a rope's reads no frame, and compiled code stood
 //! the frame at the opline first where what it serves may raise.
 
 use php_heap::{Fatal, FrameRef, Zval};
+use php_unit::OperandKind;
 
 use crate::api::request::Request;
 use crate::api::request::ropes::RopeAt;
@@ -127,4 +130,35 @@ pub fn assign_concat(
         Err(thrown) => req.leave_pending(&thrown),
     }
     Ok(())
+}
+
+/// `CONCAT` or `FAST_CONCAT` of two strings, `left` of `left_kind`, with
+/// its owner where it is a temporary compiled code moved out of its slot
+/// and a view otherwise, and `right` a view, whose temporary compiled
+/// code gives up after: [`crate::ops::concat_strings`], as the handler
+/// joins them, the joined string with its owner; none where the join
+/// refused, the memory limit or php's `String size overflow`, which is
+/// left pending as the handler leaves it.
+///
+/// # Errors
+///
+/// A side that is no string, which no compiled code hands.
+pub fn concat(
+    req: &mut Request,
+    (left, left_kind): (Zval, OperandKind),
+    (right, right_kind): (Zval, OperandKind),
+) -> Result<Option<Zval>, Fatal> {
+    let strings = left.as_str().zip(right.as_str()).ok_or_else(|| {
+        Fatal::error("InternalError: compiled code joined a side that is no string")
+    })?;
+    let (a, b) = (PhpString::of(strings.0), PhpString::of(strings.1));
+    Ok(
+        match crate::ops::concat_strings(req, (a, left_kind), (b, right_kind)) {
+            Ok(joined) => Some(Zval::string(joined.heap())),
+            Err(thrown) => {
+                req.leave_pending(&thrown);
+                None
+            }
+        },
+    )
 }

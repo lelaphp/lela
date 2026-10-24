@@ -985,7 +985,10 @@ impl<'a> Builder<'a> {
                     || op.opcode == Opcode::FeFree
                     // The join may refuse, the memory limit or the string's
                     // size, and leave it pending.
-                    || op.opcode == Opcode::RopeEnd
+                    || matches!(
+                        op.opcode,
+                        Opcode::RopeEnd | Opcode::Concat | Opcode::FastConcat
+                    )
                     || (op.opcode == Opcode::AssignOp
                         && lattice::binary_of(op.extended_value) == Some(Opcode::Concat))
                     || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
@@ -3193,7 +3196,9 @@ struct Branched {
 /// and an array, which holds no iterator to delete, given up as php's
 /// `zend_jit_free` gives it up (`:11543-11580`); a rope's piece that is a
 /// string, which php's `zend_jit_rope` stores inline and joins through
-/// `zend_jit_rope_end` (`:11753-11799`); and `.=` of a string onto a
+/// `zend_jit_rope_end` (`:11753-11799`); a concatenation of two strings,
+/// through php's `zend_jit_fast_concat_helper` (`zend_jit_concat`,
+/// `:6016-6118`); and `.=` of a string onto a
 /// variable's string, through php's `zend_jit_fast_assign_concat_helper`
 /// (`zend_jit_assign_op`, `:6120-6290`).
 fn strung(op: &Opline, seen: Seen) -> Option<bool> {
@@ -3209,6 +3214,7 @@ fn strung(op: &Opline, seen: Seen) -> Option<bool> {
         Opcode::Bool | Opcode::BoolNot => t1.scalar() && t1 != Types::DOUBLE,
         Opcode::FeFree => t1.tag() == Some(ZvalType::Array),
         Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => string(t2, 1),
+        Opcode::Concat | Opcode::FastConcat => string(t1, 0) && string(t2, 1),
         Opcode::AssignOp if lattice::binary_of(op.extended_value) == Some(Opcode::Concat) => {
             op.op1_type == OperandKind::Cv
                 && op.out_type == OperandKind::Unused

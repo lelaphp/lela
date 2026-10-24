@@ -181,6 +181,7 @@ tier::unwind
 [kernels]
 tier::assign_concat
 tier::call_held
+tier::concat
 tier::dispatch_held
 tier::free_cv
 tier::release

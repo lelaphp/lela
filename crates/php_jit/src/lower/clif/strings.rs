@@ -12,7 +12,7 @@ use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{BlockArg, InstBuilder, Value};
 use php_engine::tier::FRAME;
 use php_heap::{Str, ZvalType};
-use php_unit::Opcode;
+use php_unit::{Opcode, OperandKind};
 
 use super::{COUNTED, Emit, Kernel, Scalar, TYPE_AT, imm, mismatch, slot_offset, tag, trusted};
 use crate::types::{
@@ -433,6 +433,18 @@ impl Emit<'_> {
     /// ```expect regime=jit-exit-fuzz process
     /// [1200,1496]
     /// ```
+    ///
+    /// An append the memory limit refuses is raised at its line, the
+    /// frame stood there:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '2M');
+    /// function f() { $s = ""; for ($i = 0; $i < 100000; $i++) { $s .= str_repeat("x", 100) . "|"; } return $s; }
+    /// echo strlen(f()), "\n";
+    /// ```
+    /// ```expect exit=255 regime=jit-force process
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate %d bytes) in %s on line 3
+    /// ```
     pub(super) fn assign_concat(&mut self, line: &Line) -> Result<(), Abort> {
         let Operand::Value(target) = line.op1 else {
             return Err(mismatch("a .= onto no variable"));
@@ -456,11 +468,130 @@ impl Emit<'_> {
         };
         let [room, opline] = self.served(line)?;
         let var = self.b.ins().iconst(I32, i64::from(var));
-        self.call(
-            Kernel::AssignConcat,
-            &[room, opline, var, word, info],
-            line.unwind.map(Leave::Unwind),
+        self.call_freeing(Kernel::AssignConcat, &[room, opline, var, word, info], line)
+    }
+
+    /// `kernel` called with `args`, then `line`'s `op2` given up where a
+    /// temporary holds it, `FREE_OP2`, before the kernel's status is
+    /// tested, so a throw leaves no temporary behind, as the handler
+    /// frees the operand before it raises and php's code before
+    /// `zend_jit_check_exception`; then the status tested, leaving through
+    /// `line`'s unwind.
+    fn call_freeing(&mut self, kernel: Kernel, args: &[Value], line: &Line) -> Result<(), Abort> {
+        let status = self.call_status(kernel, args)?;
+        self.free_temp(line, line.op2)?;
+        let to = self.left_by(line.unwind.map(Leave::Unwind))?;
+        let on = self.b.create_block();
+        self.b.ins().brif(status, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        Ok(())
+    }
+
+    /// The two words of the zval `operand` of `frame` names, as it stands:
+    /// its slot's, or its constant's.
+    fn zval_words(&mut self, frame: Frame, operand: Operand) -> Result<(Value, Value), Abort> {
+        let (base, at) = match operand {
+            Operand::Value(value) => {
+                let held = self.value(value)?;
+                if held.home == Home::Register {
+                    return Err(mismatch("a string held in a register"));
+                }
+                self.place(held.slot)?
+            }
+            Operand::Constant(Constant::Other(idx)) => (self.constant_zval(frame, idx)?, 0),
+            _ => return Err(mismatch("a string read from a scalar")),
+        };
+        let word = self.b.ins().load(I64, trusted(), base, at);
+        let info = self.b.ins().load(I32, trusted(), base, at + TYPE_AT);
+        Ok((word, info))
+    }
+
+    /// The `IS_*` of the slot or constant `operand` names, as the handler
+    /// reads its kind.
+    fn kind_of(&self, operand: Operand) -> Result<OperandKind, Abort> {
+        Ok(match operand {
+            Operand::Value(value) => {
+                let slot = self.value(value)?.slot;
+                if slot.var < self.frame_cvs(slot.frame)? {
+                    OperandKind::Cv
+                } else {
+                    OperandKind::Tmp
+                }
+            }
+            Operand::Constant(_) => OperandKind::Const,
+            Operand::Unused => return Err(mismatch("a concatenation of an unused operand")),
+        })
+    }
+
+    /// A concatenation of two strings, as php's `zend_jit_concat` calls
+    /// `zend_jit_fast_concat_helper`, or `_tmp_helper` over a temporary
+    /// left side: [`Kernel::Concat`], the handler's join of two strings,
+    /// a temporary left side moved to it, its slot left `UNDEF`, so it
+    /// grows where it stands as the handler grows it, the frame stood at
+    /// the opline; the right side freed after where a temporary held it,
+    /// `FREE_OP2`, and the joined string into what the opline writes. A
+    /// path built of strings, an empty one among them, and a line of one
+    /// joined to strings of another:
+    ///
+    /// ```php
+    /// function f($parts, $n) {
+    ///     $all = []; $e = "";
+    ///     for ($i = 0; $i < $n; $i++) { $p = $parts[$i % 3]; $all[] = "/" . $p . "/x" . $e . $p; }
+    ///     return [count(array_unique($all)), strlen(implode("", $all))];
+    /// }
+    /// echo json_encode(f(["a", "", str_repeat("b", 9)], 30)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [3,290]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function f($parts, $n) {
+    ///     $all = []; $e = "";
+    ///     for ($i = 0; $i < $n; $i++) { $p = $parts[$i % 3]; $all[] = "/" . $p . "/x" . $e . $p; }
+    ///     return [count(array_unique($all)), strlen(implode("", $all))];
+    /// }
+    /// echo json_encode(f(["a", "", str_repeat("b", 9)], 30)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [3,290]
+    /// ```
+    pub(super) fn concat(&mut self, line: &Line) -> Result<(), Abort> {
+        let (a_kind, b_kind) = (self.kind_of(line.op1)?, self.kind_of(line.op2)?);
+        let (a, a_info) = self.zval_words(line.frame, line.op1)?;
+        if a_kind == OperandKind::Tmp
+            && let Operand::Value(value) = line.op1
+        {
+            // The temporary's owner is the join's now.
+            let (room, at) = self.place(self.value(value)?.slot)?;
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
+        }
+        let (b, b_info) = self.zval_words(line.frame, line.op2)?;
+        self.save_opline(line)?;
+        let [room, opline] = self.served(line)?;
+        let kinds = u32::from(a_kind as u8) | u32::from(b_kind as u8) << 8;
+        let kinds = self.b.ins().iconst(I32, i64::from(kinds));
+        let slot = self.answer();
+        let answer = self.b.ins().stack_addr(I64, slot, 0);
+        self.call_freeing(
+            Kernel::Concat,
+            &[room, opline, a, a_info, b, b_info, kinds, answer],
+            line,
         )?;
-        self.free_temp(line, line.op2)
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a concatenation that writes nothing"))?;
+        let (base, at) = self.place(self.value(out)?.slot)?;
+        let joined = self.b.ins().stack_load(I64, I64, slot, 0);
+        let joined_info = self.b.ins().stack_load(I64, I32, slot, TYPE_AT);
+        self.b.ins().store(trusted(), joined, base, at);
+        self.b
+            .ins()
+            .store(trusted(), joined_info, base, at + TYPE_AT);
+        Ok(())
     }
 }

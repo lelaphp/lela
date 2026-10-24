@@ -314,9 +314,10 @@ fn strings_lower_inline() -> Result<(), String> {
     Ok(())
 }
 
-/// A blob built in a loop: each string piece of the rope through the
-/// rope's kernels, the long one through `handle`, and the line appended
-/// through `assign_concat` (#3321).
+/// A blob built in a loop: the path's two concatenations through
+/// `concat`, each string piece of the rope through the rope's kernels,
+/// the long one through `handle`, and the line appended through
+/// `assign_concat` (#3321).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn ropes_and_appends_lower_through_their_kernels() -> Result<(), String> {
@@ -332,6 +333,7 @@ fn ropes_and_appends_lower_through_their_kernels() -> Result<(), String> {
     assert_eq!(calls(Kernel::RopeInit), 1, "{clif}");
     assert_eq!(calls(Kernel::RopeEnd), 1, "{clif}");
     assert_eq!(calls(Kernel::AssignConcat), 1, "{clif}");
+    assert_eq!(calls(Kernel::Concat), 2, "{clif}");
     Ok(())
 }
 

@@ -232,6 +232,7 @@ fn compiled(ir: &TraceIr) -> Option<Compiled> {
         Kernel::RopeAdd => (super::super::super::wrapped::rope_add as *const ()).addr(),
         Kernel::RopeEnd => (super::super::super::wrapped::rope_end as *const ()).addr(),
         Kernel::AssignConcat => (super::super::super::wrapped::assign_concat as *const ()).addr(),
+        Kernel::Concat => (super::super::super::wrapped::concat as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend

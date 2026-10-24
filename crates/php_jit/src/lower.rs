@@ -687,11 +687,19 @@ pub(crate) enum Kernel {
     /// variable `var`, which holds a string, php's
     /// `zend_jit_fast_assign_concat_helper` (`php_engine::tier::assign_concat`).
     AssignConcat,
+    /// `concat(cx, frame, opline: u32, a: u64, a_info: u32, b: u64,
+    /// b_info: u32, kinds: u32, joined: *mut Zval)`: `CONCAT` or
+    /// `FAST_CONCAT` of two strings, the left one handed with its owner
+    /// where it is a temporary, `kinds` their `IS_*`, php's
+    /// `zend_jit_fast_concat_helper` and `_tmp_helper`
+    /// (`php_engine::tier::concat`); a join refused is a throwable
+    /// pending, answered as one.
+    Concat,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 11] = [
+    pub(crate) const ALL: [Kernel; 12] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -703,6 +711,7 @@ impl Kernel {
         Kernel::RopeAdd,
         Kernel::RopeEnd,
         Kernel::AssignConcat,
+        Kernel::Concat,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

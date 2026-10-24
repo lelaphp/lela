@@ -48,7 +48,7 @@ use std::sync::atomic::AtomicBool;
 
 use php_engine::tier::{self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Stepped, TraceNum};
 use php_heap::{HeaderImage, Scalar, Zval};
-use php_unit::{MapPtrOffset, OplineIdx};
+use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
 use crate::lower::{self, Stood, engine_offset};
 use crate::table::{Exit, Trace};
@@ -491,6 +491,7 @@ kernels! {
         RopeAdd => rope_add(rope: u64, word: u64, type_info: u32) = tier::rope_push;
         RopeEnd => rope_end(rope: u64, word: u64, type_info: u32) -> Zval = tier::rope_end;
         AssignConcat => assign_concat(var: u32, word: u64, type_info: u32) = tier::assign_concat;
+        Concat => concat(a: u64, a_info: u32, b: u64, b_info: u32, kinds: u32) -> Zval = tier::concat;
     }
 }
 
@@ -655,6 +656,33 @@ fn assign_concat(
 ) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     tier::assign_concat(req, frame, var, zval(word, type_info))
+}
+
+/// The `concat` kernel: `CONCAT` or `FAST_CONCAT` of two strings
+/// ([`tier::concat`]), `kinds` the left side's `IS_*` in its low byte and
+/// the right side's above it, the left one handed with its owner where it
+/// is a temporary; the joined string's zval, or `UNDEF` where the join
+/// refused and left its throwable pending, which the wrapper answers as
+/// one. Compiled code stood the frame at the opline first.
+fn concat(
+    req: &mut Request,
+    _: On<'_, '_>,
+    a: u64,
+    a_info: u32,
+    b: u64,
+    b_info: u32,
+    kinds: u32,
+) -> Result<Zval, Fatal> {
+    let kind = |byte: u32| match byte & 0xff {
+        1 => Ok(OperandKind::Const),
+        2 => Ok(OperandKind::Tmp),
+        4 => Ok(OperandKind::Var),
+        8 => Ok(OperandKind::Cv),
+        _ => Err(internal("a side of a concatenation of no operand kind")),
+    };
+    let left = (zval(a, a_info), kind(kinds)?);
+    let right = (zval(b, b_info), kind(kinds >> 8)?);
+    Ok(tier::concat(req, left, right)?.unwrap_or(Zval::UNDEF))
 }
 
 /// The frame whose room compiled code handed a kernel, stood at the

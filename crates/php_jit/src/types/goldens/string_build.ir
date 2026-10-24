@@ -16,9 +16,9 @@ loop at 0, loop, interrupt exit 6
   #5 f0.CV4 [undef, any] = phi(#4, #10)
 0017 f0 IS_SMALLER #3, #6 fused inline
   checks direction taken -> exit 4
-0005 f0 CONCAT const#2, #7 step unwinds -> unwind 0
+0005 f0 CONCAT const#2, #7 inline unwinds -> unwind 0
   -> #8 f0.T2 [string]
-0006 f0 CONCAT #8, const#3 step unwinds -> unwind 0
+0006 f0 CONCAT #8, const#3 inline unwinds -> unwind 0
   -> #9 f0.T3 [string]
 0007 f0 ASSIGN #5, #9 inline unwinds -> unwind 0
   -> #10 f0.CV4 [string]
