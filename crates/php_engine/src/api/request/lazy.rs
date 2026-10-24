@@ -75,6 +75,10 @@ pub(crate) struct LentGuard {
     name: Vec<u8>,
 }
 
+/// The write [`Request::lazy_skip`] makes while the slot does not wait,
+/// on the object the initialised proxies lead to.
+pub(crate) type RawWrite<'w> = &'w mut dyn FnMut(&mut Request, PhpObject) -> Result<(), Thrown>;
+
 impl Request {
     fn lazy_row(&self, o: Obj) -> Option<&Info> {
         self.lazy.rows.get(&o.id().0)
@@ -856,11 +860,12 @@ impl Request {
     /// `ReflectionProperty::skipLazyInitialization` and
     /// `setRawValueWithoutLazyInitialization` over the object the
     /// initialised proxies lead to: the declared property `name` takes
-    /// its default, or `value` written without the class's `__set`, and
-    /// no longer waits; an object with no slot left waiting is realised,
-    /// `zend_lazy_object_realize`. A throwing write leaves the slot
-    /// waiting, as php flags it lazy again. The write is
-    /// `write_property`'s, so a readonly property the first write
+    /// its default, or no longer waits while `write` writes it, and
+    /// an object with no slot left waiting is realised,
+    /// `zend_lazy_object_realize` (`Z/ext/reflection/php_reflection.c:6250`).
+    /// A throwing write leaves the slot waiting, as php flags it lazy
+    /// again. The write is the caller's raw set, `write_property` or a
+    /// hook's trampoline, so a readonly property the first write
     /// initialised refuses the second.
     ///
     /// ```php
@@ -878,19 +883,20 @@ impl Request {
     pub(crate) fn lazy_skip(
         &mut self,
         object: PhpObject,
+        declaring: ClassId,
         name: &[u8],
-        value: Option<Owner<Value>>,
+        write: Option<RawWrite<'_>>,
     ) -> Result<(), Thrown> {
         let object = self.lazy_reader(object);
         let o = object.heap();
-        let Some(slot) = self.prop_slot(object.class(), name) else {
-            if let Some(value) = value {
-                value.give_up(self);
-            }
+        // `OBJ_PROP(object, prop->offset)`: the slot of the property
+        // `declaring` declares, a parent's private one apart from the
+        // child's of the same name.
+        let Some(slot) = self.prop_slot(declaring, name) else {
             return Ok(());
         };
         let was_lazy = self.lazy_slot(o, slot);
-        let written = match value {
+        let written = match write {
             None => {
                 if !was_lazy {
                     return Ok(());
@@ -907,30 +913,12 @@ impl Request {
                 }
                 Ok(())
             }
-            Some(value) => {
+            Some(write) => {
+                // `Z_PROP_FLAG_P(var_ptr) &= ~IS_PROP_LAZY`, the write the
+                // caller's `reflection_property_set_raw_value`, and the
+                // flag put back where it threw and left the slot unwritten.
                 self.lazy_set_waiting(o, slot, false);
-                let key = match self.string(name) {
-                    Ok(key) => key,
-                    Err(thrown) => {
-                        value.give_up(self);
-                        return Err(thrown);
-                    }
-                };
-                let written = self.in_declared_scope(object.class(), name, |req| {
-                    // `write_property`'s `found` arm over a slot that
-                    // holds a value: an initialised readonly property
-                    // is not written again.
-                    if !o.slot(slot).is_undef()
-                        && let Some(placed) = req.declared_slot(object.class(), name)
-                        && let Some(thrown) = req.found_refusal(o, &placed, name)
-                    {
-                        value.give_up(req);
-                        req.release(Value::string(key));
-                        return Err(thrown);
-                    }
-                    // The handler layer's key, named for the write.
-                    req.write_std_property(object, Owner::adopt(key), value)
-                });
+                let written = write(self, object);
                 if written.is_err()
                     && was_lazy
                     && o.slot(slot).is_undef()
@@ -965,11 +953,12 @@ impl Request {
         }
     }
 
-    /// `ReflectionProperty::isLazy`: whether the declared property
-    /// `name` of the object the initialised proxies lead to waits.
-    pub(crate) fn lazy_property(&self, object: PhpObject, name: &[u8]) -> bool {
+    /// `ReflectionProperty::isLazy`: whether the property `name` that
+    /// `declaring` declares, in the object the initialised proxies lead
+    /// to, waits (`OBJ_PROP(object, prop->offset)`).
+    pub(crate) fn lazy_property(&self, object: PhpObject, declaring: ClassId, name: &[u8]) -> bool {
         let object = self.lazy_reader(object);
-        self.prop_slot(object.class(), name)
+        self.prop_slot(declaring, name)
             .is_some_and(|slot| self.lazy_slot(object.heap(), slot))
     }
 

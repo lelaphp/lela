@@ -5,6 +5,8 @@
 //! header faults and faults (`wsdl_soap_binding_body`,
 //! `wsdl_soap_binding_header`, `wsdl_message`).
 
+use std::collections::HashSet;
+
 use php_ext::raising::{Thrown, leave_pending};
 use php_ext::request::{Request, StreamCtx};
 use php_ext::values::{Owner, Value, ValueRef};
@@ -46,6 +48,10 @@ pub(crate) struct Ctx {
     services: Table<Node>,
     pub(crate) attributes: Option<Table<crate::model::Attribute>>,
     pub(crate) attribute_groups: Option<Table<crate::model::TypeId>>,
+    /// `fixupInProgress`: the types `schema_pass2` is fixing up, one
+    /// inside the other, by which a group or an attribute group that
+    /// names itself is refused.
+    pub(crate) fixup_in_progress: HashSet<crate::model::TypeId>,
     context: Option<StreamCtx>,
     old_header: Option<Owner<Value>>,
 }
@@ -64,6 +70,7 @@ impl Ctx {
             services: Table::new(),
             attributes: None,
             attribute_groups: None,
+            fixup_in_progress: HashSet::new(),
             context: None,
             old_header: None,
         }

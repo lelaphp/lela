@@ -707,6 +707,29 @@ struct AttrNs {
 /// text child, its namespace the mapper's, and an HTML `id` an ID; the
 /// bridge's status where a length overflows or libxml refused a node, and
 /// the `Err` is the memory limit, met where the mapper makes a declaration.
+/// Only a prefixed attribute takes the `XLink`, XML or XMLNS namespace, and
+/// any `id` in no namespace is an ID.
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createFromString('<!DOCTYPE html><svg id="s" xlink:href="#a" xml:lang="en" xmlns:xlink="urn:x"/><math id="m"></math>', LIBXML_NOERROR);
+/// var_dump($d->getElementById('s')?->tagName, $d->getElementById('m')?->tagName);
+/// foreach ($d->getElementById('s')->attributes as $a) { echo $a->name, ' => ', var_export($a->namespaceURI, true), "\n"; }
+/// $f = Dom\HTMLDocument::createEmpty();
+/// $c = $f->appendChild($f->createElementNS('http://www.w3.org/1999/xlink', 'z'));
+/// $c->innerHTML = '<z id="q" xlink:href="#a"></z>';
+/// echo $c->innerHTML, "\n";
+/// var_dump($f->getElementById('q')?->tagName);
+/// ```
+/// ```expect
+/// string(3) "svg"
+/// string(4) "math"
+/// id => NULL
+/// xlink:href => 'http://www.w3.org/1999/xlink'
+/// xml:lang => 'http://www.w3.org/XML/1998/namespace'
+/// xmlns:xlink => 'http://www.w3.org/2000/xmlns/'
+/// <z id="q" xlink:href="#a"></z>
+/// string(1) "Z"
+/// ```
 fn convert_attributes(
     req: &mut Request,
     mapper: &mut Mapper,
@@ -736,9 +759,13 @@ fn convert_attributes(
         };
         lattr.add_child(text);
         lattr.set_parent(Some(element));
+        // Only a prefixed attribute is in the XLink, XML or XMLNS namespace,
+        // `xmlns` itself aside: an unprefixed one in foreign content is in
+        // none (php 8.5.12), whatever namespace lexbor's context gave it.
+        let prefixed = attr.has_prefix();
         let ns = match attr.namespace() {
             Namespace::Xmlns if local == b"xmlns" => mapper.prefixless_xmlns(req, Some(doc))?,
-            Namespace::Xmlns => {
+            Namespace::Xmlns if prefixed => {
                 if attr_ns.prefixed_xmlns.is_none() {
                     attr_ns.prefixed_xmlns = mapper.get_raw(
                         req,
@@ -749,14 +776,14 @@ fn convert_attributes(
                 }
                 attr_ns.prefixed_xmlns
             }
-            Namespace::XLink => {
+            Namespace::XLink if prefixed => {
                 if attr_ns.xlink.is_none() {
                     attr_ns.xlink =
                         mapper.get_raw(req, Some(doc), Some(b"xlink"), Some(XLINK_NS))?;
                 }
                 attr_ns.xlink
             }
-            Namespace::Xml => {
+            Namespace::Xml if prefixed => {
                 if attr_ns.xml.is_none() {
                     attr_ns.xml = mapper.get_raw(
                         req,
@@ -778,7 +805,8 @@ fn convert_attributes(
             }
         }
         last = Some(lattr);
-        if local == b"id" && attr.namespace() == Namespace::Html && !lattr.add_id(doc, value) {
+        // Any `id` in no namespace is an ID, an SVG or MathML element's too.
+        if local == b"id" && ns.is_none() && !lattr.add_id(doc, value) {
             lattr.set_atype(php_ext_libxml::ffi::XML_ATTRIBUTE_ID);
         }
     }

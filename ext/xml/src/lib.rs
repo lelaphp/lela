@@ -583,8 +583,24 @@ fn deprecate_name(req: &mut Request) -> Result<(), Thrown> {
 }
 
 /// `xml_set_handler` over each slot, the old callable's owner released,
-/// and `XML_Set*Handler`'s registration.
-fn install(req: &mut Request, parser: PhpObject, slots: Vec<(Hook, Option<Handler>)>) {
+/// and `XML_Set*Handler`'s registration; refused while the parser is
+/// parsing, as php 8.5.12 refuses it, the new callables released, so a
+/// handler cannot free the callable libxml is serving.
+fn install(
+    req: &mut Request,
+    parser: PhpObject,
+    slots: Vec<(Hook, Option<Handler>)>,
+) -> Result<(), Thrown> {
+    if parser_mut(req, parser).is_some_and(|p| p.engine.parsing()) {
+        for handler in slots.into_iter().filter_map(|(_, h)| h) {
+            handler.callable.give_up(req);
+        }
+        return Err(php_ext::raising::throw_error(
+            req,
+            "Error",
+            "Cannot change handlers while parsing",
+        ));
+    }
     let mut released = Vec::new();
     if let Some(p) = parser_mut(req, parser) {
         for (hook, handler) in slots {
@@ -597,6 +613,7 @@ fn install(req: &mut Request, parser: PhpObject, slots: Vec<(Hook, Option<Handle
     for old in released {
         old.give_up(req);
     }
+    Ok(())
 }
 
 /// One of the eight single-handler setters.
@@ -611,8 +628,7 @@ fn set_handler(
         deprecate_name(req)?;
     }
     let handler = handler_of(req, parser, given, 2)?;
-    install(req, parser, vec![(hook, handler)]);
-    Ok(())
+    install(req, parser, vec![(hook, handler)])
 }
 
 /// `xml_set_element_handler`'s four tries, then its refusal.
@@ -656,8 +672,7 @@ fn set_element_handler(
         req,
         parser,
         vec![(Hook::StartElement, start), (Hook::EndElement, end)],
-    );
-    Ok(())
+    )
 }
 
 /// `xml_set_object`: each handler resolved by name against the old object

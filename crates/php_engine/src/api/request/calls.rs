@@ -20,6 +20,7 @@ use crate::exec;
 use crate::observer::OnThrow;
 use crate::trampoline::CallTrampoline;
 use php_heap::FrameRef;
+use php_unit::decl::HookKind;
 
 use super::Code;
 use super::Symbols;
@@ -49,6 +50,17 @@ pub(super) struct Calls {
     /// `None` records nothing, and is what a request holds unless its
     /// engine or its test asked (#2168).
     trace: Option<Vec<crate::trace::Entered>>,
+}
+
+/// What a call carries beyond its function and arguments, never two of
+/// them at once: the closure it serves (`ZEND_CALL_CLOSURE`), or the
+/// property a hook trampoline reads or writes, of the hook of `kind`
+/// (`zend_get_property_hook_trampoline`'s `reserved[0]`).
+#[derive(Clone, Copy)]
+enum Carried<'a> {
+    Nothing,
+    Closure(PhpObject),
+    HookTrampoline(&'a [u8], HookKind),
 }
 
 impl Request {
@@ -84,10 +96,40 @@ impl Request {
             function,
             this,
             Some(called_scope),
-            None,
+            Carried::Nothing,
             arguments,
             extra_named,
         )
+    }
+
+    /// `zend_call_known_instance_method` over
+    /// `zend_get_property_hook_trampoline(prop_info, kind, name)`, which
+    /// `ReflectionProperty::getRawValue` and `setRawValue` call over a
+    /// property with a hook of `kind`: the trampoline named `$name::get`
+    /// or `$name::set` and scoped to `scope`, `prop_info->ce`, served on
+    /// `object` with no hold of the call's own, so the read or write it
+    /// makes finds it running and reaches the backing store, and what
+    /// it throws has the trampoline's frame on its trace.
+    pub(crate) fn serve_hook_trampoline(
+        &mut self,
+        object: PhpObject,
+        scope: ClassId,
+        name: &[u8],
+        kind: HookKind,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        let function = self.parent_hook_trampoline(kind);
+        let carried = Carried::HookTrampoline(name, kind);
+        self.serve_call(function, Some(object), Some(scope), carried, arguments, &[])
+    }
+
+    /// The trampoline's record on `call`, given up where the call has no
+    /// annex to hold it.
+    pub(crate) fn carry_trampoline(&mut self, call: FrameRef, built: exec::HookTrampoline) {
+        match self.annex_mut(call) {
+            Some(annex) => annex.trampoline = Some(built),
+            None => self.release(Value::string(built.name)),
+        }
     }
 
     /// `zend_call_known_fcc` over a `Closure`, which is what
@@ -131,7 +173,7 @@ impl Request {
             closure.function,
             closure.this,
             closure.called_scope,
-            Some(object),
+            Carried::Closure(object),
             arguments,
             extra_named,
         )
@@ -184,7 +226,7 @@ impl Request {
             closure.function,
             Some(this),
             Some(scope),
-            Some(object),
+            Carried::Closure(object),
             arguments,
             extra_named,
         );
@@ -280,7 +322,14 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
-        self.serve_call(function, None, None, None, arguments, extra_named)
+        self.serve_call(
+            function,
+            None,
+            None,
+            Carried::Nothing,
+            arguments,
+            extra_named,
+        )
     }
 
     /// `zend_call_function` (`Z/Zend/zend_execute_API.c:806`), which every
@@ -303,7 +352,7 @@ impl Request {
         function: Function,
         this: Option<PhpObject>,
         called_scope: Option<ClassId>,
-        closure: Option<PhpObject>,
+        carried: Carried<'_>,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
@@ -315,7 +364,7 @@ impl Request {
                 function,
                 this,
                 called_scope,
-                closure,
+                carried,
                 arguments,
                 extra_named,
             )
@@ -328,10 +377,14 @@ impl Request {
         function: Function,
         this: Option<PhpObject>,
         called_scope: Option<ClassId>,
-        closure: Option<PhpObject>,
+        carried: Carried<'_>,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        let closure = match carried {
+            Carried::Closure(closure) => Some(closure),
+            Carried::Nothing | Carried::HookTrampoline(..) => None,
+        };
         // `if (EG(exception)) return SUCCESS;`: no call while one is pending.
         if self.pending().is_some() {
             return Ok(Value::null());
@@ -382,8 +435,9 @@ impl Request {
             .any(|argument| matches!(argument.as_ref(), ValueRef::Undef));
         // `zend_call_function` names the callee by
         // `func->common.function_name`, which the function carries; no
-        // constant spelled it, so the call carries no name of its own
-        // and interns none into the request's memory.
+        // constant spelled it, so the call interns no name into the
+        // request's memory. A hook trampoline's name is the one php builds
+        // with the trampoline, laid below once the call stands.
         let extra_named = exec::ExtraNamed::laid(self, extra_named.to_vec())?;
         // `GC_ADDREF(ZEND_CLOSURE_OBJECT(func))` with `ZEND_CALL_CLOSURE`,
         // once the arguments are placed: the call's own owner of the
@@ -403,16 +457,7 @@ impl Request {
         let call = match self.push_call(header) {
             Ok(call) => call,
             Err(fatal) => {
-                for argument in sent {
-                    self.release(argument);
-                }
-                self.release_named(extra_named);
-                if let Some(receiver) = receiver {
-                    self.give_up_receiver(receiver);
-                }
-                if let Some(closure) = closure {
-                    self.release(closure.as_value());
-                }
+                self.give_up_unpushed(sent, extra_named, receiver, closure);
                 return self.fatal_of(Err(fatal));
             }
         };
@@ -425,6 +470,19 @@ impl Request {
             && let Some(annex) = self.annex_mut(call)
         {
             annex.extra_named = extra_named;
+        }
+        // The trampoline's record, made once its call stands, where php
+        // makes it before the call (`zend_get_property_hook_trampoline`):
+        // only the memory limit could tell the two orders apart, and its
+        // fatal ends the request either way.
+        if let Carried::HookTrampoline(property, kind) = carried {
+            match self.hook_trampoline(property, kind) {
+                Ok(built) => self.carry_trampoline(call, built),
+                Err(thrown) => {
+                    self.pop_call();
+                    return Err(thrown);
+                }
+            }
         }
         if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self, call) {
             self.pop_call();
@@ -446,6 +504,28 @@ impl Request {
         let served = self.serve_native(function, OnThrow::ReturnValue);
         self.pop_call();
         self.checked_after_call(served)
+    }
+
+    /// What [`Request::serve_call_body`] took for a call whose frame
+    /// `zend_vm_stack_push_call_frame` refused, given back: each argument,
+    /// the extra named ones, the receiver and the closure.
+    fn give_up_unpushed(
+        &mut self,
+        sent: Vec<Value>,
+        extra_named: exec::ExtraNamed,
+        receiver: Option<exec::Receiver>,
+        closure: Option<PhpObject>,
+    ) {
+        for argument in sent {
+            self.release(argument);
+        }
+        self.release_named(extra_named);
+        if let Some(receiver) = receiver {
+            self.give_up_receiver(receiver);
+        }
+        if let Some(closure) = closure {
+            self.release(closure.as_value());
+        }
     }
 
     /// `zend_call_function`'s check after its callee returns, a native

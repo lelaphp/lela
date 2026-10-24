@@ -33,7 +33,7 @@ use crate::model::{
 use crate::sdl::{get_encoder, get_encoder_ex, get_encoder_from_prefix};
 use crate::shared::{VAR_ENC_NAME, VAR_ENC_NAMENS, VAR_ENC_NS, VAR_ENC_STYPE, VAR_ENC_TYPE};
 use crate::table::Key as TKey;
-use crate::xml::{attr_content, encode_special_chars, get_attribute, href, parse_namespace};
+use crate::xml::{Walk, attr_content, encode_special_chars, get_attribute, href, parse_namespace};
 use crate::{Error, Res, SOAP_1_1, SOAP_1_2, State, soap_error};
 
 /// What one serialisation or deserialisation keeps: `SOAP_GLOBAL(ref_map)`.
@@ -51,7 +51,15 @@ pub(crate) struct Cx {
     slot: Option<PhpRef>,
     /// How many values `State::held` had when this serialisation began.
     held_mark: usize,
+    /// `SOAP_GLOBAL(decode_depth)`: how many decoders are nested, one
+    /// inside the other, held under [`SOAP_MAX_DECODE_DEPTH`].
+    decode_depth: u32,
 }
+
+/// `SOAP_MAX_DECODE_DEPTH`: twice `SOAP_MAX_XML_DEPTH`, the decoders a
+/// value is read through one inside the other before the read is refused,
+/// which bounds an `href` chain the tree's own depth does not.
+const SOAP_MAX_DECODE_DEPTH: u32 = crate::xml::SOAP_MAX_XML_DEPTH * 2;
 
 /// What `soap_check_zval_ref` keys a written value by: an object, or the
 /// PHP reference an array sits in.
@@ -76,6 +84,7 @@ pub(crate) fn encode_reset_ns(req: &mut Request, cx: &mut Cx) {
     let st = req.state::<State>();
     st.cur_uniq_ns = 0;
     st.cur_uniq_ref = 0;
+    cx.decode_depth = 0;
     cx.clear(req);
     cx.tracking = true;
     cx.held_mark = req.state::<State>().held.len();
@@ -86,6 +95,7 @@ pub(crate) fn encode_finish(req: &mut Request, cx: &mut Cx) {
     let st = req.state::<State>();
     st.cur_uniq_ns = 0;
     st.cur_uniq_ref = 0;
+    cx.decode_depth = 0;
     cx.clear(req);
     cx.tracking = false;
     let held = &mut req.state::<State>().held;
@@ -531,20 +541,11 @@ fn soap_add_xml_ref(req: &mut Request, cx: &mut Cx, data: &Value, node: Node) {
 
 /// The first element under `node` and on that carries `attr` (in `ns`)
 /// equal to `value`, by any name: `get_node_with_attribute_recursive_ex`
-/// with no name.
-fn find_with_id(mut node: Option<Node>, value: &[u8], ns: Option<&[u8]>) -> Option<Node> {
-    while let Some(n) = node {
-        if let Some(a) = get_attribute(n.properties(), b"id", ns)
-            && attr_content(a) == value
-        {
-            return Some(n);
-        }
-        if let Some(found) = find_with_id(n.children(), value, ns) {
-            return Some(found);
-        }
-        node = n.next();
-    }
-    None
+/// with no name, over [`Walk`] as php's walks since GHSA-rgrp-mwpx-f6rm.
+fn find_with_id(node: Option<Node>, value: &[u8], ns: Option<&[u8]>) -> Option<Node> {
+    Walk::from(node).map(|(n, _)| n).find(|n| {
+        get_attribute(n.properties(), b"id", ns).is_some_and(|a| attr_content(a) == value)
+    })
 }
 
 /// `check_and_resolve_href`.
@@ -806,7 +807,21 @@ fn loops_back(req: &mut Request, sdl: Option<&Arc<Sdl>>, start: EncRef) -> Res<b
     Ok(false)
 }
 
-/// `master_to_zval_int`.
+/// `master_to_zval_int`: the value read through the encoder the typemap
+/// names, while fewer than [`SOAP_MAX_DECODE_DEPTH`] decoders are nested
+/// one inside the other; past that the read is refused, as an array whose
+/// item refers back to it is.
+///
+/// ```php
+/// function test($arg) { return 'ok'; }
+/// $s = new SoapServer(null, ['uri' => 'urn:test']);
+/// $s->addFunction('test');
+/// $s->handle('<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:e="http://schemas.xmlsoap.org/soap/encoding/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/"><s:Body><test><param xsi:type="e:Array" e:arrayType="xsi:anyType[1]" id="x"><i href="#x"/></param></test></s:Body></s:Envelope>');
+/// ```
+/// ```expect exit=255
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>SOAP-ERROR: Encoding: Nesting level too deep</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+/// ```
 fn master_to_zval_int(
     req: &mut Request,
     cx: &mut Cx,
@@ -831,7 +846,13 @@ fn master_to_zval_int(
             }
         }
     }
-    to_zval(req, cx, &e, data)
+    if cx.decode_depth >= SOAP_MAX_DECODE_DEPTH {
+        return Err(soap_error(format_args!("Encoding: Nesting level too deep")));
+    }
+    cx.decode_depth += 1;
+    let ret = to_zval(req, cx, &e, data);
+    cx.decode_depth -= 1;
+    ret
 }
 
 // ---- dispatch
