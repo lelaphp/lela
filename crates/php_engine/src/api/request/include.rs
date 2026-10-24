@@ -1322,6 +1322,13 @@ impl Request {
             self.end_in_compile_time(error.level, &error.message, &file, line);
             return Thrown::of(None);
         }
+        // The compile met php 8.5.12's hard memory limit: `_exit(137)`
+        // where it asked, so nothing it declared stands and nothing it
+        // raised is rendered.
+        if let php_compile::Raise::HardLimit { limit, asked } = error.raise {
+            self.terminate_at_hard_limit(limit, asked);
+            return Thrown::of(None);
+        }
         let raised = error.raised.iter();
         if !error.bailed() {
             if matches!(kind, SourceKind::Eval(_)) {

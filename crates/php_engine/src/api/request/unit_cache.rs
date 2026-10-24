@@ -774,7 +774,11 @@ impl Request {
     /// the process there with php's line on its standard error and
     /// nothing else served, no shutdown function among it, with opcache and
     /// without it. The request holds nothing of the compile once it
-    /// ends, and a hit compiles nothing:
+    /// ends, and a hit compiles nothing. The ask that crosses the hard
+    /// limit is the fold's 16007168 bytes, as opcache's miss asks it;
+    /// php's own compile without opcache crosses one fold step sooner,
+    /// at 15007744, which the engine's compile, always opcache's, does
+    /// not follow, so the first fence leaves the figure open:
     ///
     /// ```php
     /// ini_set('display_errors', '0');
@@ -792,10 +796,10 @@ impl Request {
     /// include $file;
     /// echo "included\n";
     /// ```
-    /// ```expect process
+    /// ```expect process exit=137
     /// ```
     /// ```stderr
-    /// Hard memory limit of 33554432 bytes exhausted (tried to allocate 15007744 bytes) in %s on line 14
+    /// Hard memory limit of 33554432 bytes exhausted (tried to allocate %d bytes) in %s on line 14
     /// ```
     /// ```php
     /// ini_set('display_errors', '0');
@@ -813,7 +817,7 @@ impl Request {
     /// include $file;
     /// echo "included\n";
     /// ```
-    /// ```expect regime=jit-off process
+    /// ```expect regime=jit-off process exit=137
     /// ```
     /// ```stderr
     /// Hard memory limit of 33554432 bytes exhausted (tried to allocate 16007168 bytes) in %s on line 14
@@ -848,18 +852,19 @@ impl Request {
     /// file_put_contents($f, $child);
     /// foreach (['16M', '24M', '32M', '40M', '128M'] as $limit) {
     ///     foreach (['-n', '-n -d opcache.enable_cli=1 -d opcache.jit=off -d opcache.file_update_protection=0'] as $regime) {
-    ///         echo $limit, ' ', shell_exec(escapeshellarg(PHP_BINARY) . " $regime " . escapeshellarg($f) . " $limit");
+    ///         $out = shell_exec(escapeshellarg(PHP_BINARY) . " $regime " . escapeshellarg($f) . " $limit 2>&1");
+    ///         echo $limit, ' ', preg_replace('/ \(tried to allocate .*/', '', $out);
     ///     }
     /// }
     /// unlink($f);
     /// ```
     /// ```expect process
-    /// 16M Allowed memory size of 16777216 bytes exhausted on line 4
-    /// 16M Allowed memory size of 16777216 bytes exhausted on line 4
-    /// 24M Allowed memory size of 25165824 bytes exhausted on line 4
-    /// 24M Allowed memory size of 25165824 bytes exhausted on line 4
-    /// 32M Allowed memory size of 33554432 bytes exhausted on line 4
-    /// 32M Allowed memory size of 33554432 bytes exhausted on line 4
+    /// 16M Hard memory limit of 33554432 bytes exhausted
+    /// 16M Hard memory limit of 33554432 bytes exhausted
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 13
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 13
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 13
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 13
     /// 40M 16000000 bytes
     /// 40M 16000000 bytes
     /// 128M 16000000 bytes

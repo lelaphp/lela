@@ -83,6 +83,10 @@ impl Request {
     /// ```
     #[cold]
     pub(crate) fn handle_delayed_oom(&mut self) {
+        // Past the hard limit php's process is gone (`_exit(137)`).
+        if self.terminated() {
+            return;
+        }
         self.locate_oom();
         let Some(pending) = self.heap.take_pending_oom() else {
             return;
