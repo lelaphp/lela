@@ -167,7 +167,9 @@ impl View {
     }
 
     /// `sxe_get_element_by_offset`: the element at `offset` of the walk
-    /// from `node`, and how many came before where it stopped.
+    /// from `node`, and how many came before where it stopped. A negative
+    /// offset names none and counts them all, as php 8.5.12 walks it,
+    /// rather than the first.
     fn by_offset(&self, offset: i64, node: Option<Node>) -> (Option<Node>, i64) {
         if self.walk == Walk::Node {
             return (if offset == 0 { node } else { None }, 0);
@@ -175,7 +177,7 @@ impl View {
         let mut at = node;
         let mut index = 0;
         while let Some(n) = at {
-            if index > offset {
+            if offset >= 0 && index > offset {
                 break;
             }
             if n.kind() == Kind::Element && self.matches_ns(n) {
@@ -404,7 +406,38 @@ enum Fetch {
     Write,
 }
 
-/// `sxe_prop_dim_read`.
+/// `sxe_prop_dim_read`: a negative offset names no element of a list,
+/// and an offset other than 0 none of a single node; neither is made by
+/// a write through it.
+///
+/// ```php
+/// $x = simplexml_load_string('<r><i>a</i><i>b</i></r>');
+/// var_dump(isset($x->i[-1]), $x->i[-1], $x->i[0][3]);
+/// $x->i[-1] = 'Z';
+/// $x->i[0][-1] = 'Y';
+/// $x->i[0][2] = 'W';
+/// try { $x->i[-1]->k = 'K'; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// unset($x->i[-1]);
+/// echo $x->asXML();
+/// ```
+/// ```expect
+/// bool(false)
+/// NULL
+/// NULL
+///
+/// Warning: main(): Cannot add element i number -1 when only 2 such elements exist in %s on line 4
+///
+/// Warning: main(): Cannot add element i number -1 when only 0 such elements exist in %s on line 5
+///
+/// Warning: main(): Cannot add element i number 2 when only 0 such elements exist in %s on line 6
+///
+/// Warning: main(): Cannot add element i number -1 when only 2 such elements exist in %s on line 7
+///
+/// Notice: Indirect modification of overloaded element of SimpleXMLElement has no effect in %s on line 7
+/// Attempt to assign property "k" on null
+/// <?xml version="1.0"?>
+/// <r><i>a</i><i>b</i></r>
+/// ```
 fn prop_dim_read(
     req: &mut Request,
     object: PhpObject,
@@ -465,17 +498,18 @@ fn prop_dim_read(
             } else {
                 Some(node)
             };
-            let (found, count) = match member {
-                _ if view.walk == Walk::Node => {
-                    if let Member::Index(i) = member
-                        && i > 0
-                    {
-                        past_the_end(req, mine, i, 0);
-                    }
-                    (from, 0)
+            // A node is no list: its offset other than 0 names nothing, and
+            // nothing is made for it (`appendable`).
+            let (found, count, appendable) = match member {
+                _ if view.walk == Walk::Node => match member {
+                    Member::Index(i) if i != 0 => (None, 0, false),
+                    _ => (from, 0, true),
+                },
+                Member::Index(i) => {
+                    let (found, count) = view.by_offset(i, from);
+                    (found, count, true)
                 }
-                Member::Index(i) => view.by_offset(i, from),
-                Member::Append | Member::Name(_) => (None, 0),
+                Member::Append | Member::Name(_) => (None, 0, true),
             };
             if let Some(n) = found {
                 return Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?.into_value());
@@ -484,9 +518,12 @@ fn prop_dim_read(
                 return Ok(Owner::null());
             }
             if let Member::Index(i) = member
-                && count < i
+                && (i < 0 || count < i)
             {
                 past_the_end(req, mine, i, count);
+            }
+            if !appendable || matches!(member, Member::Index(i) if i < 0) {
+                return Ok(Owner::null());
             }
             let made = mine
                 .parent()
@@ -569,7 +606,9 @@ struct Hits {
 }
 
 /// `sxe_prop_dim_write`'s search: the attribute or the element `member`
-/// names under `mine`, `attr` the attributes the walk reads.
+/// names under `mine`, `attr` the attributes the walk reads; none where
+/// the write is refused, its warning given: an offset other than 0 of a
+/// node, which is no list.
 fn hits(
     req: &mut Request,
     view: &View,
@@ -577,7 +616,7 @@ fn hits(
     access: Access,
     mine: Node,
     attr: Option<Node>,
-) -> Result<Hits, Thrown> {
+) -> Result<Option<Hits>, Thrown> {
     let mut hits = Hits {
         found: None,
         count: 0,
@@ -602,9 +641,10 @@ fn hits(
             match member {
                 _ if view.walk == Walk::Node => {
                     if let Member::Index(i) = member
-                        && *i > 0
+                        && *i != 0
                     {
                         past_the_end(req, mine, *i, 0);
+                        return Ok(None);
                     }
                     Some(mine)
                 }
@@ -625,14 +665,14 @@ fn hits(
                 }
                 at = n.next();
             }
-            return Ok(hits);
+            return Ok(Some(hits));
         }
     };
     if hit.is_some() {
         hits.found = hit;
         hits.count = 1;
     }
-    Ok(hits)
+    Ok(Some(hits))
 }
 
 /// The access a write through `member` makes, php's `access_mode` after
@@ -749,7 +789,9 @@ fn prop_dim_write(
         return Ok(None);
     };
     mine.invalidate_document_lists();
-    let hits = hits(req, &view, member, access, mine, attr)?;
+    let Some(hits) = hits(req, &view, member, access, mine, attr)? else {
+        return Ok(None);
+    };
     if hits.count == 1 {
         if let (Some(n), Some(text)) = (hits.found, &text) {
             while let Some(child) = n.children() {
@@ -772,9 +814,12 @@ fn prop_dim_write(
         (Access::Elements, Member::Name(name)) => mine.new_text_child(None, name, text),
         (Access::Elements, Member::Append | Member::Index(_)) => {
             if let Member::Index(i) = member
-                && hits.seen < *i
+                && (*i < 0 || hits.seen < *i)
             {
                 past_the_end(req, mine, *i, hits.seen);
+                if *i < 0 {
+                    return Ok(None);
+                }
             }
             mine.parent()
                 .and_then(|p| p.new_text_child(mine.ns(), &mine.name(), text))
