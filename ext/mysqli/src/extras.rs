@@ -35,7 +35,7 @@ use crate::{On, Resource, State, VERSION_ID, string};
 /// ```
 /// ```expect
 /// string(14) "mysqlnd 8.5.12"
-/// int(80509)
+/// int(80512)
 /// int(3)
 ///
 /// Deprecated: The driver_version property is deprecated in %s on line 4
@@ -46,7 +46,7 @@ use crate::{On, Resource, State, VERSION_ID, string};
 ///   ["client_info"]=>
 ///   string(14) "mysqlnd 8.5.12"
 ///   ["client_version"]=>
-///   int(80509)
+///   int(80512)
 ///   ["report_mode"]=>
 ///   int(0)
 /// }

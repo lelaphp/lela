@@ -1013,7 +1013,7 @@ fn mysqli_get_client_info(
 /// var_dump(mysqli_get_client_version());
 /// ```
 /// ```expect
-/// int(80509)
+/// int(80512)
 /// ```
 #[php_function]
 fn mysqli_get_client_version() -> i64 {
