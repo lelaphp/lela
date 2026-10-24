@@ -1914,19 +1914,29 @@ impl PDOStatement {
             }
         };
         let info = read(req, stmt, |s| {
-            let c = s.columns.as_ref()?.get(at)?;
+            let c = s
+                .columns
+                .as_ref()?
+                .get(at)
+                .filter(|_| at < s.column_count)?;
             Some((*c.name, c.max_len, c.precision))
         })
         .flatten();
-        if let Some((name, max_len, precision)) = info {
-            // `add_assoc_str(..., zend_string_copy(col->name))`.
-            meta.set_str(req, b"name", Owner::take(req, name).into_value())?;
-            // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
-            #[allow(clippy::cast_possible_wrap)]
-            meta.set_str(req, b"len", Owner::int(max_len as i64))?;
-            #[allow(clippy::cast_possible_wrap)]
-            meta.set_str(req, b"precision", Owner::int(precision as i64))?;
-        }
+        // php 8.5.12 refuses a column the statement has not described,
+        // where 8.5.9 answered the connector's half alone.
+        let Some((name, max_len, precision)) = info else {
+            meta.give_up(req);
+            let supp = Some("invalid column index");
+            error::raise_impl(req, dbh, On::Stmt(stmt), SqlState(*b"07009"), supp)?;
+            return Ok(OrFalse::False);
+        };
+        // `add_assoc_str(..., zend_string_copy(col->name))`.
+        meta.set_str(req, b"name", Owner::take(req, name).into_value())?;
+        // php's `add_assoc_long(..., col->maxlen)` over a `size_t`.
+        #[allow(clippy::cast_possible_wrap)]
+        meta.set_str(req, b"len", Owner::int(max_len as i64))?;
+        #[allow(clippy::cast_possible_wrap)]
+        meta.set_str(req, b"precision", Owner::int(precision as i64))?;
         Ok(OrFalse::Value(meta))
     }
 
