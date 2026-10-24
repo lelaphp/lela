@@ -27,7 +27,9 @@
 //! this face, so a host that binds a tier names none of `php_engine`.
 
 use std::any::Any;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+use php_heap::Zval;
 
 /// What a tier declares its state with, as an extension does (design
 /// §4.4; `jit-design.md` §4, §5.3).
@@ -478,6 +480,51 @@ impl Next {
     }
 }
 
+/// What a handler's inline path answers (design §5.8): the way on in the
+/// frame and nothing else, since an inline path reads and writes the
+/// frame's slots and the op array alone, never the request. The loop,
+/// which holds the frame's slots across the oplines it serves, reads it
+/// with no request in hand; a handler reads it as an edge
+/// (`handlers::inlined`), where a back-edge's interrupt and safepoint
+/// are served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Inline {
+    /// On by so many places from the opline served, as [`Next::by`].
+    On(u32),
+    /// On by so many places over a back-edge, whose safepoint number is
+    /// the second: the interrupt is tested and a bound tier asked before
+    /// the loop goes on there.
+    Back(u32, u32),
+}
+
+impl Inline {
+    /// `ZEND_VM_NEXT_OPCODE`.
+    pub(crate) const ADVANCE: Inline = Inline::On(1);
+
+    /// The jump from `at` to `to`, a back-edge with the safepoint
+    /// `number` where `back` says it goes back.
+    #[inline(always)] // a select of two words, in the loop
+    pub(crate) const fn to(at: u32, to: u32, back: bool, number: u32) -> Inline {
+        let places = to.wrapping_sub(at);
+        if back {
+            Inline::Back(places, number)
+        } else {
+            Inline::On(places)
+        }
+    }
+}
+
+/// What one arm of the loop's dispatch did ([`dispatch::held`]): the
+/// opline served by its handler's inline path over the slots the loop
+/// holds, or by its handler with the request in hand, the slots let go
+/// for it, which the loop takes up again for the frame it goes on in.
+pub(crate) enum Dispatched {
+    /// Served over the slots the loop holds, which still name the frame.
+    Inline(Inline),
+    /// Served with the request in hand: the handler's answer.
+    Cold(Result<Next, Fatal>),
+}
+
 impl From<Stepped> for Next {
     fn from(stepped: Stepped) -> Next {
         let (way, frame) = match stepped {
@@ -519,13 +566,22 @@ mod dispatch {
 
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
 
+    /// The internal error of an opline no handler serves, `why` after its
+    /// opcode's name: out of line, so no arm of the loop reads the opcode
+    /// to build it.
+    #[cold]
+    #[inline(never)]
+    pub(super) fn refused(op: &Opline, why: &str) -> Fatal {
+        Fatal::error(format!("InternalError: {} {why}", op.opcode.name()))
+    }
+
     /// The arm of a handler the loop does not hold in its body: `handler`
     /// called out of line, so what it holds live is its own and not the
     /// loop's. An arm whose handler does not take its opline's place
     /// stands the frame at `at` first, php's `SAVE_OPLINE()`.
     #[cold]
     #[inline(never)]
-    fn aside<F>(
+    pub(super) fn aside<F>(
         req: &mut Request,
         frame: FrameRef,
         code: &OpArray,
@@ -901,6 +957,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
 ) -> Result<Option<Stepped>, Fatal> {
     let declared = D::of(req);
     scope.measured(req);
+    // The interrupt a back-edge tests, held apart from the request so the
+    // loop tests it with the frame's slots in hand.
+    #[cfg(not(dispatch = "tailcall"))]
+    let interrupt = req.limits().interrupt().clone();
     let mut kept = Kept::<'u>::default();
     let mut stepped = first;
     // Every way out of this loop is taken once a serving, a scope or a
@@ -990,17 +1050,49 @@ fn serve_held<'u, T: Tier, D: Telling>(
             start
         };
         let mut oplines = &*body.oplines;
+        // The frame's slots, held across the oplines the loop dispatches
+        // and served by their handlers' inline paths ([`dispatch::held`]):
+        // a borrow of the request, so every arm that takes the request
+        // ends it, and the borrow checker refuses a loop that reads the
+        // slots again before it takes them up for the frame it goes on in,
+        // as it does once such an arm is served.
+        #[cfg(not(dispatch = "tailcall"))]
+        let mut slots: &mut [Zval] = req.slots_mut(frame);
         stepped = loop {
             #[cfg(not(dispatch = "tailcall"))]
             let way = {
                 let Some(op) = oplines.get(at as usize) else {
                     return Err(past_the_end(frame, at));
                 };
-                declared.before(req, frame, at, op.opcode);
-                let next = dispatch::dispatch::<T>(req, frame, body, op, at)?;
-                #[cfg(debug_assertions)]
-                req.sensed_after(body, op)?;
-                next.way()
+                if declared.tells(op.opcode) {
+                    declared.before(req, frame, at, op.opcode);
+                    slots = req.slots_mut(frame);
+                }
+                match dispatch::held!(req, slots, frame, body, op, at) {
+                    Dispatched::Inline(Inline::On(places)) => {
+                        at = at.wrapping_add(places);
+                        continue;
+                    }
+                    Dispatched::Inline(Inline::Back(places, _))
+                        if interpreted::<T>() && !interrupt.raised().load(Ordering::Relaxed) =>
+                    {
+                        at = at.wrapping_add(places);
+                        continue;
+                    }
+                    // A back-edge whose interrupt is raised or whose tier is
+                    // bound, or a string the path gave up: what the handler
+                    // does past its path, the request in hand.
+                    Dispatched::Inline(inline) => {
+                        crate::handlers::inline_path::served::<T>(req, frame, body, at, inline)?
+                            .way()
+                    }
+                    Dispatched::Cold(next) => {
+                        let next = next?;
+                        #[cfg(debug_assertions)]
+                        req.sensed_after(body, op)?;
+                        next.way()
+                    }
+                }
             };
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
@@ -1047,6 +1139,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
                     at = req.vm().opline(frame);
                 }
                 Way::Left(stepped) => break stepped,
+            }
+            #[cfg(not(dispatch = "tailcall"))]
+            {
+                slots = req.slots_mut(frame);
             }
         };
     }

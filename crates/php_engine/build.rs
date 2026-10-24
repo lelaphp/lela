@@ -176,6 +176,8 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     // serves two variants, a `SEND_VAL` whose handler is generic over
     // `op1` alone, is one body under both.
     let mut calls: Vec<(String, Vec<String>)> = Vec::new();
+    // The inline path a call in the loop's body serves first, by the call.
+    let mut inlines: BTreeMap<String, String> = BTreeMap::new();
     let mut serve = |variant: String, call: String| match calls
         .iter_mut()
         .find(|(served, _)| *served == call)
@@ -191,9 +193,12 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
                 handler.ident
             ));
         };
-        for (variant, call) in
+        for (variant, call, inline) in
             arms(handler, spec).map_err(|e| format!("{}: {e}", bodies.display()))?
         {
+            if let Some(inline) = inline {
+                inlines.insert(call.clone(), inline);
+            }
             serve(variant, call);
         }
     }
@@ -208,10 +213,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
         for Variant { name: variant, .. } in variants(spec)? {
             serve(
                 variant,
-                "Err(Fatal::error(format!(\n\
-                 \x20           \"InternalError: {} has no handler in this engine yet\",\n\
-                 \x20           op.opcode.name()\n\
-                 \x20       )))"
+                "Err(crate::tier::dispatch::refused(op, \"has no handler in this engine yet\"))"
                     .to_owned(),
             );
         }
@@ -223,10 +225,10 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
     // holds before publication, and it is still the fatal, never a panic.
     serve(
         "Unresolved".to_owned(),
-        "Err(Fatal::error(format!(\n\
-         \x20           \"InternalError: {} is served from a unit never published, so no handler is resolved for it\",\n\
-         \x20           op.opcode.name()\n\
-         \x20       )))"
+        "Err(crate::tier::dispatch::refused(\n\
+         \x20           op,\n\
+         \x20           \"is served from a unit never published, so no handler is resolved for it\",\n\
+         \x20       ))"
             .to_owned(),
     );
     if let Some(stray) = IN_THE_LOOP.iter().find(|name| {
@@ -248,6 +250,7 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
         String::new()
     };
     let mut arms = String::new();
+    let mut held = String::new();
     for (call, variants) in &calls {
         let pattern = variants
             .iter()
@@ -255,7 +258,9 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
             .collect::<Vec<_>>()
             .join("\n        | ");
         writeln!(arms, "        {pattern} => {call},").ok();
+        held.push_str(&held_arm(&pattern, call, inlines.get(call)));
     }
+    let held = held_macro(&held);
     Ok(format!(
         "/// The one dispatch (design §4.3 seam 7, §5.8), generated from\n\
          /// `ops.toml` and the handlers beside it: the handler the opline at\n\
@@ -300,8 +305,61 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          {arms}\
          \x20   }}\n\
          }}\n\
+         {held}\
          {tails}"
     ))
+}
+
+/// One arm of [`held_macro`]'s `match`: `pattern`'s variants served by
+/// `call`, and first by the inline path `inline` where it has one, over
+/// the slots the loop holds.
+fn held_arm(pattern: &str, call: &str, inline: Option<&String>) -> String {
+    let pattern = pattern.replace("Handler::", "php_unit::Handler::");
+    let cold = format!(
+        "{{\n\
+         \x20               $slots = &mut [];\n\
+         \x20               #[allow(unused_variables)]\n\
+         \x20               let req: &mut crate::api::request::Request = &mut *$req;\n\
+         \x20               crate::tier::Dispatched::Cold({call})\n\
+         \x20           }}"
+    );
+    match inline {
+        Some(inline) => format!(
+            "            {pattern} => match {inline}(&mut *$slots, code, op, at) {{\n\
+             \x20               Some(inline) => crate::tier::Dispatched::Inline(inline),\n\
+             \x20               None => {cold},\n\
+             \x20           }},\n"
+        ),
+        None => format!("            {pattern} => {cold},\n"),
+    }
+}
+
+/// `dispatch::held!`, the macro over `held`'s arms.
+fn held_macro(held: &str) -> String {
+    format!(
+        "\n\
+         /// The same dispatch over the frame's slots the loop holds\n\
+         /// (design §5.8): `held!(req, slots, frame, code, op, at)`, a\n\
+         /// `match` written into the loop's own body, where the borrow\n\
+         /// checker reads every arm with the loop. The arm of a handler\n\
+         /// with an inline path (`crate::handlers::inline_path`) serves it\n\
+         /// over `slots`, with no request in hand; every other arm, and one\n\
+         /// whose inline path stands aside, lets the slots go, an empty\n\
+         /// frame left in their place, and calls the handler as\n\
+         /// [`dispatch`] calls it, and the loop takes them up again for the\n\
+         /// frame it goes on in. The borrow checker refuses any other order:\n\
+         /// no arm reads the slots after a handler that can move them.\n\
+         macro_rules! held {{\n\
+         \x20   ($req:ident, $slots:ident, $frame:expr, $code:expr, $op:expr, $at:expr) => {{{{\n\
+         \x20       let (frame, code, op, at): (php_heap::FrameRef, &php_unit::OpArray, &php_unit::Opline, u32) =\n\
+         \x20           ($frame, $code, $op, $at);\n\
+         \x20       match op.handler {{\n\
+         {held}\
+         \x20       }}\n\
+         \x20   }}}};\n\
+         }}\n\
+         pub(crate) use held;\n"
+    )
 }
 
 /// The same calls threaded, `crate::tier::tail` (design §5.8): under
@@ -517,11 +575,9 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
 /// handler at the kinds each variant names, with the internal-error
 /// fatal for the kinds the spec does not list, which no unit the
 /// compiler wrote has.
-fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String> {
-    let unlisted = "Err(Fatal::error(format!(\n\
-                    \x20           \"InternalError: {} over operand kinds ops.toml does not list\",\n\
-                    \x20           op.opcode.name()\n\
-                    \x20       )))";
+fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String, Option<String>)>, String> {
+    let unlisted =
+        "Err(crate::tier::dispatch::refused(op, \"over operand kinds ops.toml does not list\"))";
     // The branch a handler generic over it is served at, after its kinds.
     let branch = |variant: &Variant| -> Result<String, String> {
         match (handler.branched, variant.branch) {
@@ -537,11 +593,13 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
         let mut out = Vec::new();
         for variant in variants(spec)? {
             if variant.kinds.is_none() && spec.specialise {
-                out.push((variant.name, unlisted.to_owned()));
+                out.push((variant.name, unlisted.to_owned(), None));
                 continue;
             }
-            let call = call(handler, &variant.name, &branch(&variant)?);
-            out.push((variant.name, call));
+            let generics = branch(&variant)?;
+            let call = call(handler, &variant.name, &generics);
+            let inline = inline_of(handler, &variant.name, &generics);
+            out.push((variant.name, call, inline));
         }
         return Ok(out);
     }
@@ -561,7 +619,7 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
     let mut out = Vec::new();
     for variant in variants(spec)? {
         let Some(kinds) = &variant.kinds else {
-            out.push((variant.name, unlisted.to_owned()));
+            out.push((variant.name, unlisted.to_owned(), None));
             continue;
         };
         let mut params = String::new();
@@ -588,7 +646,8 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
             }
         }
         let call = call(handler, &variant.name, &params);
-        out.push((variant.name, call));
+        let inline = inline_of(handler, &variant.name, &params);
+        out.push((variant.name, call, inline));
     }
     Ok(out)
 }
@@ -742,6 +801,56 @@ const IN_THE_LOOP: &[&str] = &[
     "VerifyReturnType",
 ];
 
+/// The handlers with an inline path, a function of
+/// `crate::handlers::inline_path` named as the handler and generic over
+/// what it is generic over but its tier, which the loop serves over the
+/// slots it holds ([`inline_of`]). A name here that has no such function,
+/// or a function there that no name here reaches, is a build error of
+/// the crate, an unresolved path or an unused item.
+const INLINE_PATHS: &[&str] = &[
+    "add",
+    "assign",
+    "assign_op",
+    "div",
+    "fetch_dim_r",
+    "is_equal",
+    "is_identical",
+    "is_not_equal",
+    "is_not_identical",
+    "is_smaller",
+    "is_smaller_or_equal",
+    "jmp",
+    "jmpnz",
+    "jmpnz_ex",
+    "jmpz",
+    "jmpz_ex",
+    "mul",
+    "pre_dec",
+    "pre_inc",
+    "qm_assign",
+    "sub",
+];
+
+/// The inline path the loop's arm for `variant` serves first, over the
+/// slots it holds: `handler`'s, at `generics` after the tier, where the
+/// variant is in the loop's body ([`IN_THE_LOOP`]) and the handler has
+/// one ([`INLINE_PATHS`]).
+fn inline_of(handler: &Handler, variant: &str, generics: &str) -> Option<String> {
+    if !IN_THE_LOOP.contains(&variant) || !INLINE_PATHS.contains(&handler.ident.as_str()) {
+        return None;
+    }
+    let generics = generics.trim_start_matches(", ");
+    let turbofish = if generics.is_empty() {
+        String::new()
+    } else {
+        format!("::<{generics}>")
+    };
+    Some(format!(
+        "crate::handlers::inline_path::{}{turbofish}",
+        handler.ident
+    ))
+}
+
 /// The call one arm makes to `handler` at `generics` for `variant`:
 /// in the loop's body for a variant [`IN_THE_LOOP`] names, and out of
 /// line through the dispatch's `aside` for every other. A handler that
@@ -758,9 +867,9 @@ fn call(handler: &Handler, variant: &str, generics: &str) -> String {
              \x20           {path}(req, frame, code, op)\n\
              \x20       }}"
         ),
-        (false, true) => format!("aside(req, frame, code, op, at, {path})"),
+        (false, true) => format!("crate::tier::dispatch::aside(req, frame, code, op, at, {path})"),
         (false, false) => format!(
-            "aside(req, frame, code, op, at, |req, frame, code, op, at| {{\n\
+            "crate::tier::dispatch::aside(req, frame, code, op, at, |req, frame, code, op, at| {{\n\
              \x20           req.vm_mut().stand(frame, at);\n\
              \x20           {path}(req, frame, code, op)\n\
              \x20       }})"
