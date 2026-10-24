@@ -347,10 +347,14 @@ pub(crate) fn new_string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpStr
 }
 
 /// A string of these bytes as `zend_string_init_fast` and
-/// `ZVAL_STRINGL_FAST` make it: nothing and one byte are the process's
-/// interned strings, what php's cuts and `ZSTR_CHAR` answer.
+/// `ZVAL_STRINGL_FAST` make it ([`PhpString::fast`]): nothing and one
+/// byte are the process's interned strings, what php's cuts and
+/// `ZSTR_CHAR` answer, and a longer one php-8.5.12's
+/// `zend_string_finit` (`Z/ext/mbstring/mbstring.c:2178`, `:2472`,
+/// `:2495`, and the `cut` of `mbfilter_cjk.c`, `mbfilter_utf16.c` and
+/// `mbfilter_utf8.c`).
 pub(crate) fn cut_string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
-    PhpString::new(req, bytes)
+    PhpString::fast(req, bytes)
 }
 
 /// An argument handed back as the return, one more owner taken.
@@ -1467,7 +1471,7 @@ fn mb_chr(
     if is_utf8(enc) {
         // `ZSTR_CHAR(cp)` below 0x80, `zend_string_alloc` above.
         return match char::from_u32(cp) {
-            Some(c) => Ok(OrFalse::Value(cut_string(
+            Some(c) => Ok(OrFalse::Value(PhpString::new(
                 req,
                 c.encode_utf8(&mut [0; 4]).as_bytes(),
             )?)),

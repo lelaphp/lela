@@ -252,6 +252,11 @@ impl WhatWg {
 impl UriParser for WhatWg {
     const CLASS: &'static str = "Uri\\WhatWg\\Url";
 
+    /// `ZVAL_STRINGL_FAST` (`Z/ext/uri/uri_parser_whatwg.c:310`, `:341`).
+    fn credential(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        PhpString::fast(req, bytes)
+    }
+
     /// `php_uri_parser_whatwg_parse_ex`: the errors array made where the
     /// caller wants it or a throw carries it.
     fn parse(
@@ -1092,7 +1097,7 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<W>(
+        crate::component_credential::<W>(
             req,
             this.object(),
             "username",
@@ -1132,7 +1137,7 @@ impl Url {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        crate::component_string::<W>(
+        crate::component_credential::<W>(
             req,
             this.object(),
             "password",

@@ -187,6 +187,30 @@ impl PhpString {
         adopted(req.string_fast(bytes))
     }
 
+    /// php-8.5.12's `zend_string_finit`: a string of the request's own
+    /// whatever its length, even the empty string and one byte, which
+    /// [`PhpString::new`] and [`PhpString::fast`] hand out interned, and
+    /// asking the bytes past the aligned header of the empty string, as
+    /// [`PhpString::fast`] does past one byte (`Z/Zend/zend_string.h:215`).
+    /// It is where php copies a buffer it already has, as `wordwrap`'s
+    /// single-byte break does its subject, so one byte takes the 40-byte
+    /// bin where `substr`'s is the interned character:
+    ///
+    /// ```php
+    /// echo "wordwrap substr\n";
+    /// foreach (['a', 'abcdefg', str_repeat('x', 100)] as $t) { $m = memory_get_usage(); $s = wordwrap($t, 75, "\n"); $a = memory_get_usage() - $m; $r = substr("_$t", 1); echo strlen($t), ' ', $a, ' ', memory_get_usage() - $m - $a, "\n"; $s = $r = null; }
+    /// ```
+    /// ```expect
+    /// wordwrap substr
+    /// 1 40 0
+    /// 7 40 40
+    /// 100 160 160
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn finit(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        adopted(req.string_finit(bytes))
+    }
+
     /// The string a declaration holds for these bytes, with one owner for
     /// the caller, what php copies out of a name a declaration made
     /// (`ce->name`, `fptr->common.function_name`, `prop_info->name`) or
@@ -230,7 +254,7 @@ impl PhpString {
     /// `accel_init_interned_string_for_php`: the engine's string for these
     /// bytes, a name or a constant the engine's startup or a published
     /// unit holds, which costs nothing, once the request has compiled a
-    /// file; a string of the request's own otherwise, `zend_string_init`
+    /// file; a string of the request's own otherwise, `zend_string_finit`
     /// whatever its length, and never one kept to be found again. What
     /// php's unserializer makes of an array's or an object's key. The
     /// `Err` is the memory limit.
@@ -1705,7 +1729,7 @@ impl PhpObject {
     /// $l = new K; $m = memory_get_usage(); $s = serialize($l); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect
-    /// 32
+    /// 40
     /// 56
     /// ```
     pub fn slots_without_table(&self, req: &mut Request) -> Result<Option<walk::Table>, Thrown> {

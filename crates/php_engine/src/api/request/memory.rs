@@ -94,9 +94,9 @@ impl Request {
 /// include $f;
 /// ```
 /// ```expect exit=0
-/// 368
-/// 688
-/// 624
+/// 384
+/// 704
+/// 640
 /// ```
 ///
 /// and more where two constants alike are one string in php's table and
@@ -312,8 +312,9 @@ impl Request {
     /// (`Z/ext/opcache/ZendAccelerator.c:610`): the engine's string for
     /// `bytes` where the request has taken its [`SharedHold`] and the engine's
     /// table, opcache's buffer, holds them, which costs the request
-    /// nothing, and otherwise a string of the request's own,
-    /// `zend_string_init`, whose one owner is the caller's. Nothing is
+    /// nothing, and otherwise a string of the request's own, php-8.5.12's
+    /// `zend_string_finit` ([`Request::string_finit`]), whose one owner
+    /// is the caller's. Nothing is
     /// kept to be found again, so two asks are two strings, and the
     /// empty string and one byte have no shortcut of their own: opcache's
     /// buffer holds `ZSTR_CHAR`'s strings (`accel_copy_permanent_strings`,
@@ -337,16 +338,38 @@ impl Request {
     /// unlink($f);
     /// ```
     /// ```expect regime=jit-off process capture
-    /// 32 32
+    /// 40 40
     /// ```
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn interned(&mut self, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
-        if self.shared_hold == SharedHold::Taken
-            && let Some(held) = self.shared.existing_interned(bytes)
-        {
-            return Ok(Owner::adopt(PhpString::of(held)));
+        match self.held_interned(bytes) {
+            Some(held) => Ok(held),
+            None => self.string_finit(bytes).map(Owner::adopt),
         }
-        self.string_init(bytes).map(Owner::adopt)
+    }
+
+    /// `zend_new_interned_string` of a string `zend_string_init` made, as
+    /// opcache installs it, `accel_new_interned_string_for_php`
+    /// (`Z/ext/opcache/ZendAccelerator.c:577`): the engine's string where
+    /// [`Request::interned`] would answer it, and otherwise the string
+    /// php made, `zend_string_init`'s size and not
+    /// `zend_string_finit`'s.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn new_interned(&mut self, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        match self.held_interned(bytes) {
+            Some(held) => Ok(held),
+            None => self.string_init(bytes).map(Owner::adopt),
+        }
+    }
+
+    /// The engine's string for `bytes` once the request has taken its
+    /// [`SharedHold`] and the engine's table holds them.
+    fn held_interned(&self, bytes: &[u8]) -> Option<Owner<PhpString>> {
+        if self.shared_hold != SharedHold::Taken {
+            return None;
+        }
+        let held = self.shared.existing_interned(bytes)?;
+        Some(Owner::adopt(PhpString::of(held)))
     }
 
     /// The request's [`SharedHold`] taken, as `persistent_compile_file` takes

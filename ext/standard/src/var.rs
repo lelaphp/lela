@@ -1123,13 +1123,13 @@ fn unmangled(out: &mut Vec<u8>, key: &[u8]) {
 /// ob_start(); $s = memory_get_usage(); memory_reset_peak_usage(); var_export(range(1, 40)); $p = memory_get_peak_usage() - $s; ob_end_clean(); echo "print ", $p, "\n";
 /// ```
 /// ```expect
-/// 0 584 272
+/// 0 584 280
 /// 1 4352 728
 /// 2 6528 2008
 /// 3 12544 3288
 /// 4 512 344
-/// 5 288 248
-/// 6 320 248
+/// 5 296 256
+/// 6 328 256
 /// print 5688
 /// ```
 #[php_function]
@@ -1465,13 +1465,15 @@ const fn string_size(len: usize) -> usize {
 }
 
 /// `php_addcslashes(s, "'\\", 2)`'s string: `zend_string_safe_alloc(4,
-/// len, 0, 0)`, cut to what it wrote where that is shorter.
+/// len, 0, 0)`, cut to what it wrote where that is shorter, which
+/// php-8.5.12's `zend_string_truncate` asks as the bytes past the
+/// empty string's header (`Z/Zend/zend_string.h:343`).
 fn addcslashed(req: &mut Request, bytes: &[u8]) -> Result<(Emalloc, usize), Thrown> {
     let len = bytes.len();
     let wrote = len + bytes.iter().filter(|b| matches!(b, b'\'' | b'\\')).count();
     let mut block = Emalloc::new(req, 4 * len + string_size(0))?;
     if wrote < 4 * len {
-        block = block.resize(req, string_size(wrote))?;
+        block = block.resize(req, string_size(0) + wrote)?;
     }
     Ok((block, wrote))
 }
@@ -1493,7 +1495,7 @@ impl Escaped {
             // `zend_string_safe_alloc(count, str_len - needle_len, length)`,
             // then `zend_string_truncate` to what it wrote.
             let made = Emalloc::new(req, nuls * 11 + string_size(len));
-            match made.and_then(|made| made.resize(req, string_size(len + nuls * 11))) {
+            match made.and_then(|made| made.resize(req, string_size(0) + len + nuls * 11)) {
                 Ok(made) => made,
                 Err(thrown) => {
                     slashed.free(req);

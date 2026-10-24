@@ -1511,7 +1511,8 @@ fn wordwrap(
                 laststart = lastspace + 1;
             }
         }
-        return PhpString::new(req, &out);
+        // `zend_string_finit` of the subject (`Z/ext/standard/string.c:726`).
+        return PhpString::finit(req, &out);
     }
     // "Multiple character line break or forced cut": php asks for the
     // longest the text can grow to, `zend_string_safe_alloc`, before a

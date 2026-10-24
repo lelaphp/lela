@@ -535,15 +535,18 @@ pub(crate) fn flush(
         return PhpString::new(req, b"").map(Union::A);
     }
     let (written, raised, thrown) = writer.flush(req);
+    // `smart_str_extract` where `empty` asks, else `zend_string_finit`
+    // of a buffer that holds bytes (`Z/ext/xmlwriter/php_xmlwriter.c:1027`).
     let bytes = match writer.buffered() {
         None => None,
-        Some(_) if empty => Some(writer.take_buffered()),
-        Some(held) => Some(held.to_vec()),
+        Some(_) if empty => Some((writer.take_buffered(), false)),
+        Some(held) => Some((held.to_vec(), !held.is_empty())),
     };
     put(req, object, writer);
     Errors::settle(req, raised, thrown)?;
     match bytes {
-        Some(b) => PhpString::new(req, &b).map(Union::A),
+        Some((b, true)) => PhpString::finit(req, &b).map(Union::A),
+        Some((b, false)) => PhpString::new(req, &b).map(Union::A),
         None => Ok(Union::B(i64::from(written))),
     }
 }

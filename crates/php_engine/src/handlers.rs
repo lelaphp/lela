@@ -13119,7 +13119,7 @@ fn frameless_call<const N: usize>(
 /// ```
 /// ```expect
 /// int(0)
-/// int(-1176)
+/// int(-1200)
 /// ```
 ///
 /// The owner the CV gives up is the last one an object has, so the

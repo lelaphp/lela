@@ -288,7 +288,7 @@ pub fn deprecated(req: &mut Request, message: &str) {
 /// $m = memory_get_usage(); $x = @MHASH_MD5; echo memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect
-/// 80
+/// 96
 /// 0
 /// 32
 /// ```
@@ -431,11 +431,11 @@ pub(crate) enum Origin<'a> {
 /// Warning: unserialize(): Error at offset 0 of 1 bytes in %s on line 3
 ///
 /// Warning: unserialize(): Error at offset 0 of 1 bytes in %s on line 3
-/// 13192 0
-/// 13192 0
 /// 13200 0
-/// 13576 0
-/// 960 0
+/// 13200 0
+/// 13200 0
+/// 13584 0
+/// 976 0
 /// ```
 ///
 /// An escaped copy whose text outgrows `php_escape_html_entities_ex`'s
@@ -1320,7 +1320,7 @@ pub(crate) fn under_name(
 /// pk(function () { echo @${str_repeat('u', 300)}; });
 /// ```
 /// ```expect
-/// 304 32
+/// 312 32
 /// 416 0
 /// 4480 0
 /// ```
@@ -1335,11 +1335,14 @@ pub(crate) fn strpprintf(req: &mut Request, text: &[u8]) -> Result<PhpString, Th
     };
     let block = req.heap_mut().block(size);
     let buffer = req.fatal_of(block)?;
+    // The trim is `zend_string_realloc`, which php-8.5.12 asks as the
+    // bytes past the empty string's header (`Z/Zend/zend_string.h:279`),
+    // `zend_string_finit`'s size, a string of its own at any length.
     if paged {
         req.heap_mut().free_block(buffer);
-        return req.string(text);
+        return req.string_finit(text);
     }
-    let string = req.string(text);
+    let string = req.string_finit(text);
     req.heap_mut().free_block(buffer);
     string
 }

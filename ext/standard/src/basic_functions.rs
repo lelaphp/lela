@@ -733,8 +733,8 @@ fn get_include_path(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thro
 /// ```expect
 /// 160
 /// -160
-/// 56
-/// -56
+/// 64
+/// -64
 /// ```
 #[php_function]
 fn error_get_last(req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> {
