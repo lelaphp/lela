@@ -35,7 +35,7 @@ use php_engine::tier::{
     self, Building, Epoch, Fatal, FrameRef, FuncRef, Request, SafepointIdx, Sample, Stepped,
     UnitView,
 };
-use php_heap::{Scalar, ZvalType};
+use php_heap::{ZvalType, constant_truth};
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use crate::JitRequest;
@@ -1848,27 +1848,9 @@ fn folds_to_jmp(code: &OpArray, at: OplineIdx, to: OplineIdx) -> bool {
         };
         op.op1_type == OperandKind::Const
             && op.jump_target() == Some(to)
-            && constant_truth(code, op.op1) == Some(jumps_when)
+            && (code.literals.get(op.op1 as usize)).and_then(|value| constant_truth(*value))
+                == Some(jumps_when)
     })
-}
-
-/// `zend_is_true` over the constant operand at `at`: a scalar's truth, and an
-/// array's, which is whether it has an element. None for any other.
-fn constant_truth(code: &OpArray, at: u32) -> Option<bool> {
-    let value = code.literals.get(at as usize)?;
-    let scalar = match value.kind() {
-        ZvalType::Null => Scalar::Null,
-        ZvalType::False => Scalar::Bool(false),
-        ZvalType::True => Scalar::Bool(true),
-        ZvalType::Long => Scalar::Long(value.as_long()?),
-        // A NAN, which `Scalar::is_true` is not asked of, is true, as
-        // pass 1's `zend_is_true` reads it.
-        ZvalType::Double => return value.as_double().map(|d| d != 0.0),
-        ZvalType::String => Scalar::Str(value.str_bytes()?),
-        ZvalType::Array => return value.as_arr().map(|arr| !arr.is_empty()),
-        _ => return None,
-    };
-    Some(scalar.is_true())
 }
 
 /// Where the `JMP` right before `site` goes, where it goes past it: a
