@@ -1623,6 +1623,17 @@ pub(crate) fn steps_past_int(held: &Value, stepped: &Value, ty: &php_unit::decl:
 /// `zend_throw_ref_type_error_zval` (`Z/Zend/zend_execute.c:3891`): the
 /// `TypeError` a write through a cell raises, which names the property
 /// that holds the cell and not the name written through.
+///
+/// ```php
+/// class C { public int $n = 1; }
+/// $c = new C; $r = &$c->n;
+/// try { $r = "x"; } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($c->n);
+/// ```
+/// ```expect
+/// Cannot assign string to reference held by property C::$n of type int
+/// int(1)
+/// ```
 pub(crate) fn ref_type_error(
     req: &mut Request,
     value: &Value,
