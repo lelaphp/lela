@@ -1221,6 +1221,26 @@ impl Request {
     /// (`if (!EG(exception))`): a call refused while a throwable stands,
     /// as a native's conversion past a throw meets it, answers that one,
     /// which ext/intl's `umsg_format_helper` is the witness of.
+    ///
+    /// The object is held for the call, `GC_ADDREF(readobj)`, and given up
+    /// after it with `zend_object_release`, so a cast or an interpolation
+    /// leaves an object another owner holds a possible root:
+    ///
+    /// ```php
+    /// class A { function __toString(): string { return 'a'; } }
+    /// function t() {
+    ///     $o = new A;
+    ///     gc_collect_cycles(); $s = (string) $o; $one = gc_status()['roots'];
+    ///     gc_collect_cycles(); $s = "<$o>"; $two = gc_status()['roots'];
+    ///     var_dump($s, $one, $two);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// string(3) "<a>"
+    /// int(1)
+    /// int(1)
+    /// ```
     pub(crate) fn cast_object(
         &mut self,
         object: PhpObject,
@@ -1235,8 +1255,10 @@ impl Request {
                 {
                     return Ok(None);
                 }
-                let value = crate::api::call::call_method_made(self, &object, b"__toString", &[])?;
-                let value = self.unwrap_reference(value);
+                let held = Owner::take(self, object);
+                let value = crate::api::call::call_method_made(self, &object, b"__toString", &[]);
+                held.give_up(self);
+                let value = self.unwrap_reference(value?);
                 if value.as_php_string().is_some() {
                     return Ok(Some(Owner::adopt(value)));
                 }
