@@ -102,8 +102,8 @@ use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Arena, ArenaVec, Holder, Parsed, SyntaxKind, TokenValue};
 
 use php_heap::{
-    Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Str, Zval, ZvalType, double_to_string,
-    numeric_prefix,
+    Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Str, Zval, ZvalType, constant_truth,
+    double_to_string, numeric_prefix,
 };
 use php_link::Indexed;
 use php_unit::decl::{
@@ -1253,8 +1253,8 @@ enum Under {
 #[derive(Clone, Copy)]
 enum Found<'a> {
     /// A persistent constant the engine declared, its value a scalar
-    /// written out.
-    Declared(&'a ConstExpr),
+    /// written out ([`declared_scalar`]).
+    Declared(Scalar<'a>),
     /// A constant whose table holds its value, a view of it: one the
     /// request defined, or `PHP_SAPI` ([`crate::Persistent::host`]).
     Defined(Zval),
@@ -1264,11 +1264,7 @@ impl Found<'_> {
     /// `zend_is_true` over the value, read without copying it.
     fn truth(self) -> bool {
         match self {
-            Found::Declared(ConstExpr::Bool(b)) => *b,
-            Found::Declared(ConstExpr::Long { value, .. }) => *value != 0,
-            Found::Declared(ConstExpr::Double(d)) => *d != 0.0,
-            Found::Declared(ConstExpr::Str(bytes)) => !(bytes.is_empty() || &**bytes == b"0"),
-            Found::Declared(_) => false,
+            Found::Declared(scalar) => scalar.is_true(),
             Found::Defined(value) => truth(value),
         }
     }
@@ -20751,11 +20747,11 @@ impl<'a> Emit<'a> {
     fn ct_constant(&mut self, name: &[u8]) -> Result<Option<Operated>, CompileError> {
         Ok(match self.ct_found(name) {
             Some(Found::Declared(value)) => Some(Operated::Kept(match value {
-                ConstExpr::Str(bytes) => self.string(bytes)?,
-                ConstExpr::Bool(b) => Zval::bool(*b),
-                ConstExpr::Long { value: n, .. } => Zval::long(*n),
-                ConstExpr::Double(d) => Zval::double(*d),
-                _ => Zval::null(),
+                Scalar::Str(bytes) => self.string(bytes)?,
+                Scalar::Bool(b) => Zval::bool(b),
+                Scalar::Long(n) => Zval::long(n),
+                Scalar::Double(d) => Zval::double(d),
+                Scalar::Null => Zval::null(),
             })),
             Some(Found::Defined(value)) => self.request_constant(value),
             None => None,
@@ -20836,15 +20832,9 @@ impl<'a> Emit<'a> {
         if let Some((_, declared)) = self.persistent.declared.find(name) {
             let deprecated = (declared.attributes.iter())
                 .any(|one| one.name.0.eq_ignore_ascii_case(b"Deprecated"));
-            let scalar = matches!(
-                declared.value,
-                ConstExpr::Null
-                    | ConstExpr::Bool(_)
-                    | ConstExpr::Long { .. }
-                    | ConstExpr::Double(_)
-                    | ConstExpr::Str(_)
-            );
-            return (!deprecated && scalar).then_some(Found::Declared(&declared.value));
+            return declared_scalar(&declared.value)
+                .filter(|_| !deprecated)
+                .map(Found::Declared);
         }
         let defined = self.request_constants.as_ref()?.find(name)?;
         (!defined.deprecated && substitutable(defined.value))
@@ -21165,16 +21155,11 @@ fn number(value: Zval) -> Option<Number> {
     }
 }
 
-/// `zval_is_true` over a folded constant: [`Scalar::is_true`] for a
-/// scalar and, for an array, whether it holds anything
-/// (`i_zend_is_true`'s `IS_ARRAY` arm). No object, resource or
-/// reference is a constant a compiler folds.
+/// `zval_is_true` over a folded constant, as [`constant_truth`] reads
+/// one. No object, resource or reference is a constant a compiler
+/// folds, so the truth it has none of is never asked.
 pub(crate) fn truth(value: Zval) -> bool {
-    if let Some(array) = value.as_arr() {
-        return !array.is_empty();
-    }
-    let string = value.as_str();
-    scalar(value, string.as_ref()).is_true()
+    constant_truth(value).unwrap_or(false)
 }
 
 /// `zval_get_long_func` over a folded constant: a null and a false are
@@ -21539,24 +21524,19 @@ fn swap_commutative(oplines: &mut [Opline]) {
     }
 }
 
-/// A constant as [`php_heap::compare`] switches on it: the five kinds a
-/// constant table holds, the string's bytes borrowed from the [`php_heap::Str`]
-/// the caller took.
-fn scalar(value: Zval, string: Option<&php_heap::Str>) -> Scalar<'_> {
-    if let Some(n) = value.as_long() {
-        return Scalar::Long(n);
-    }
-    if let Some(d) = value.as_double() {
-        return Scalar::Double(d);
-    }
-    if let Some(s) = string {
-        return Scalar::Str(s.bytes());
-    }
-    match value.kind() {
-        ZvalType::True => Scalar::Bool(true),
-        ZvalType::False => Scalar::Bool(false),
-        _ => Scalar::Null,
-    }
+/// The scalar a persistent constant's declared value is, which is the
+/// value `can_ct_eval_const` lets be written where its name is: a null,
+/// a bool, a long, a double or a string. Nothing for a value not yet
+/// evaluated, which php folds none of.
+fn declared_scalar(value: &ConstExpr) -> Option<Scalar<'_>> {
+    Some(match value {
+        ConstExpr::Null => Scalar::Null,
+        ConstExpr::Bool(b) => Scalar::Bool(*b),
+        ConstExpr::Long { value, .. } => Scalar::Long(*value),
+        ConstExpr::Double(d) => Scalar::Double(*d),
+        ConstExpr::Str(bytes) => Scalar::Str(bytes),
+        _ => return None,
+    })
 }
 
 /// `FC(declarables)`' half this compiler reads, which is php's

@@ -72,7 +72,9 @@ pub use array::{Arr, ArrIter, EmbeddedArr, Key, SortEntry, canonical_int};
 pub use block::Block;
 pub use call_stack::{CallStack, call_stack_bounds, call_stack_default_size, main_call_stack_size};
 pub use collector::GcStatus;
-pub use compare::{Scalar, compare, compare_constants, identical, identical_constants};
+pub use compare::{
+    Scalar, compare, compare_constants, constant_truth, identical, identical_constants,
+};
 pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, FatalReason, GcTable, HeapHooks};
 pub use lend::{ecalloc, efree, emalloc, erealloc};
