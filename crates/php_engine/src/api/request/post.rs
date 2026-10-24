@@ -281,7 +281,7 @@ impl Request {
         let Some(content_type) = self.post.content_type.take() else {
             return Ok(());
         };
-        match self.post.entry {
+        let handled = match self.post.entry {
             Some(PostEntry::Form) => {
                 let body = self.post.request_body.clone().unwrap_or_default();
                 self.add_post_vars(array, &body, limits)
@@ -289,8 +289,15 @@ impl Request {
             Some(PostEntry::Multipart) => {
                 crate::rfc1867::post_handler(self, &content_type, array, limits)
             }
-            None => Ok(()),
+            None => return Ok(()),
+        };
+        // `if (ZEND_HAS_OOM()) zend_handle_delayed_oom();` (`Z/main/SAPI.c:168`
+        // at 8.5.12): a body that took the request past its memory limit
+        // ends it in the limit's fatal before the script runs.
+        if self.has_oom() {
+            self.handle_delayed_oom();
         }
+        handled
     }
 
     /// What `php://input` reads (`Z/ext/standard/php_fopen_wrapper.c:77`):

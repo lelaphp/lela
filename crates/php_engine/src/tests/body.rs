@@ -183,6 +183,38 @@ fn a_body_declared_over_post_max_size_is_warned_of_and_never_read() {
     assert_eq!(reads, 0);
 }
 
+/// A form whose parse takes the request past `memory_limit` ends it in
+/// the limit's fatal before the program runs, as php 8.5.12's handler
+/// stops registering once `ZEND_HAS_OOM()` and `sapi_handle_post` raises
+/// the delayed OOM with nothing executing; the figure is the chunk the
+/// body's `smart_str`, grown `BUFSIZ` at a time, first asks past the limit.
+/// php-cgi under `-d memory_limit=4M -d html_errors=0` writes the same
+/// fatal and its one-row trace for `a=` and three million `x`, and
+/// `ran 1 2 3` for a small form.
+#[test]
+fn a_form_past_the_memory_limit_ends_the_request_before_the_script() {
+    let engine = Engine::cli_builder()
+        .ini("memory_limit", "4M")
+        .extensions(&[input()])
+        .build();
+    let program = "<?php echo 'ran ', $_POST['a'] ?? '', ' ', $_POST['b'] ?? '', ' ', $_POST['c']['x']['y'] ?? '', \"\\n\";";
+    let mut big = b"a=".to_vec();
+    big.resize(big.len() + 3_000_000, b'x');
+    big.extend_from_slice(b"&b=1");
+    let (stdout, _) = posted(&engine, "application/x-www-form-urlencoded", &big, program);
+    assert_eq!(
+        stdout,
+        "\nFatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in Unknown on line 0\nStack trace:\n#0 {main}\n"
+    );
+    let (stdout, _) = posted(
+        &engine,
+        "application/x-www-form-urlencoded",
+        b"a=1&b=2&c[x][y]=3",
+        program,
+    );
+    assert_eq!(stdout, "ran 1 2 3\n");
+}
+
 /// `file_uploads` and `enable_post_data_reading` are `OnUpdateBool` in
 /// php (`Z/main/main.c`), read by `zend_ini_parse_bool`, so either
 /// quoted in a `-d` line as `"yes"` or `"On"`, which the ini syntax keeps

@@ -19,7 +19,7 @@ use php_unit::AutoGlobal;
 
 use super::{Overwrite, Request};
 use crate::api::raising::{Level, Thrown, docref};
-use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value, walk};
 use crate::c_number::is_space;
 use crate::engine::Known;
 use crate::exec::TableId;
@@ -937,27 +937,106 @@ impl Request {
         let max_input_vars = limits
             .max_input_vars
             .unwrap_or_else(|| self.ini().long(b"max_input_vars"));
-        let mut rest = body;
-        let mut count = 0i64;
-        while !rest.is_empty() {
-            let end = rest.iter().position(|b| *b == b'&').unwrap_or(rest.len());
-            let var = &rest[..end];
-            rest = rest.get(end + 1..).unwrap_or_default();
-            let (name, value) = match var.iter().position(|b| *b == b'=') {
-                Some(eq) => (&var[..eq], url_decode(&var[eq + 1..], true)),
-                None => (var, Vec::new()),
-            };
-            let name = url_decode(name, true);
-            if let Some(value) = self.filter_input(Input::Post, &name, &value)? {
-                self.register_in(into, &name, value, false)?;
+        // `php_std_post_handler` at 8.5.12 (`Z/main/php_variables.c:436`):
+        // the body read `BUFSIZ` at a time into a smart_str on the
+        // request's heap, the variables complete in it registered after
+        // each read and the rest kept for the next, the last one at the
+        // end; once the memory limit is met nothing more is registered.
+        let mut held = SmartStr::default();
+        let mut vars = PostVars {
+            count: 0,
+            max_input_vars,
+        };
+        let step = usize::try_from(crate::layer::BUFSIZ).unwrap_or(8192);
+        let parsed = (|| {
+            let mut appended = false;
+            for chunk in body.chunks(step) {
+                held.append(self, chunk)?;
+                appended = true;
+                if self.has_oom() || !self.add_post_vars_held(into, &mut held, &mut vars, false)? {
+                    return Ok(());
+                }
+                if chunk.len() != step {
+                    break;
+                }
             }
-            count += 1;
-            if count > max_input_vars {
-                too_many_vars(self, max_input_vars);
+            if appended {
+                self.add_post_vars_held(into, &mut held, &mut vars, true)?;
+            }
+            Ok(())
+        })();
+        held.free(self);
+        parsed
+    }
+
+    /// `add_post_vars` (`Z/main/php_variables.c:415` at 8.5.12) over what
+    /// the handler holds: each variable an `&` ends registered by
+    /// `add_post_var`, the one the body ends with too at `eof`, and what
+    /// is left kept at the front for the next read; `false`, php's
+    /// `FAILURE`, past `max_input_vars` or once the memory limit was met.
+    fn add_post_vars_held(
+        &mut self,
+        into: PhpArray,
+        held: &mut SmartStr,
+        vars: &mut PostVars,
+        eof: bool,
+    ) -> Result<bool, Thrown> {
+        let mut at = 0;
+        loop {
+            let bytes = held.as_bytes();
+            if at >= bytes.len() {
                 break;
             }
+            let end = match bytes[at..].iter().position(|b| *b == b'&') {
+                Some(amp) => at + amp,
+                None if eof => bytes.len(),
+                None => break,
+            };
+            let var = bytes[at..end].to_vec();
+            at = end + usize::from(end != bytes.len());
+            if !self.add_post_var(into, &var)? {
+                return Ok(false);
+            }
+            vars.count += 1;
+            if vars.count > vars.max_input_vars {
+                too_many_vars(self, vars.max_input_vars);
+                return Ok(false);
+            }
+            if self.has_oom() {
+                return Ok(false);
+            }
         }
-        Ok(())
+        if self.has_oom() {
+            return Ok(false);
+        }
+        if !eof {
+            held.remove(0..at);
+        }
+        Ok(true)
+    }
+
+    /// `add_post_var`'s one variable: the name and the value each
+    /// `php_url_decode`d, handed to the input filter and registered;
+    /// `false` once the memory limit was met, at the value's own copy on
+    /// the heap (`val = estrndup(...)`) or after it was registered.
+    fn add_post_var(&mut self, into: PhpArray, var: &[u8]) -> Result<bool, Thrown> {
+        let (name, raw) = match var.iter().position(|b| *b == b'=') {
+            Some(eq) => (&var[..eq], &var[eq + 1..]),
+            None => (var, &[][..]),
+        };
+        let name = url_decode(name, true);
+        let copy = PhpString::new(self, raw)?;
+        if self.has_oom() {
+            copy.give_up(self);
+            return Ok(false);
+        }
+        let value = url_decode(raw, true);
+        let filtered = self.filter_input(Input::Post, &name, &value);
+        copy.give_up(self);
+        if let Some(value) = filtered? {
+            self.register_in(into, &name, value, false)?;
+        }
+        Ok(!self.has_oom())
     }
 
     /// `sapi_module.treat_data` where an extension registered one
@@ -1150,6 +1229,11 @@ impl Request {
                 unset?;
                 return Ok(Walked::TooDeep(max_nesting));
             }
+            // Each level holds an array, so the walk stops once the memory
+            // limit was met (`Z/main/php_variables.c:222` at 8.5.12).
+            if self.has_oom() {
+                return Ok(Walked::Dropped);
+            }
             ip += 1;
             let index_s = ip;
             if var.get(ip).is_some_and(|c| is_space(*c)) {
@@ -1275,7 +1359,8 @@ enum Walked {
     /// Written at this index of the last container entered, appended
     /// for `None`.
     At(Option<Vec<u8>>),
-    /// Dropped: a forbidden name, or a next index already taken.
+    /// Dropped: a forbidden name, a next index already taken, or a level
+    /// entered once the memory limit was met.
     Dropped,
     /// Nested past `max_input_nesting_level`, the top-level name unset.
     TooDeep(i64),
@@ -1376,6 +1461,13 @@ impl HttpGlobals {
             AutoGlobal::Request | AutoGlobal::Session => None,
         }
     }
+}
+
+/// What `add_post_vars` counts across the handler's reads, php's
+/// `post_var_data_t.cnt`, and the most it lets through.
+struct PostVars {
+    count: i64,
+    max_input_vars: i64,
 }
 
 /// php's warning where a request's input holds more variables than
