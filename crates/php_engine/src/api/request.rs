@@ -273,6 +273,10 @@ pub struct Request {
     /// array's runtime cache stands in one of them
     /// ([`exec::RuntimeCaches`]) and nowhere else.
     map: crate::exec::RuntimeCaches,
+    /// How many observers the engine declared (`Shared::observers`),
+    /// held on the request, so the observer's homes test it with one load
+    /// (design §4.3 seam 9).
+    observers: u32,
     /// The extensions' request states ([`state::RequestState`]).
     state: state::RequestState,
     /// The entries the request changed, their bytes, the host's locks
@@ -1049,6 +1053,13 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
 }
 
 impl Request {
+    /// How many observers the engine declared, the one load each of the
+    /// observer's homes tests (design §4.3 seam 9).
+    #[inline(always)] // every home's test
+    pub(crate) fn observers(&self) -> u32 {
+        self.observers
+    }
+
     /// A request no host lent a sink, which keeps what it writes in one
     /// of its own that no host reads: the engine's startup, its end where
     /// the host left no sink ([`EngineBuilder::ends_into`](crate::engine::EngineBuilder::ends_into)), and a unit
@@ -1098,6 +1109,7 @@ impl Request {
             .arena
             .enter(|arena| shared.units.restart(&arena.files));
         let typed_ini = shared.typed_ini;
+        let observers = shared.observers;
         let mut req = Box::new(Request {
             // Fields are made in the order written: the request stands
             // inside the engine before its deadlines are laid.
@@ -1112,6 +1124,7 @@ impl Request {
             vm,
             annexes: crate::exec::Annexes::default(),
             map: crate::exec::RuntimeCaches::default(),
+            observers,
             state: state::RequestState::default(),
             ini: ini::IniState::new(typed_ini),
             diagnostics: diagnostics::DiagnosticsState::default(),
