@@ -5136,18 +5136,64 @@ fn wide(n: i64) -> f64 {
 /// ```
 fn merged(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Owner<PhpArray>, Thrown> {
     let mut union = left.copy(req)?;
-    // `zend_hash_merge(result, op2, zval_add_ref, 0)`, which writes only keys
-    // the union lacks and so releases nothing and runs no code of the
-    // program: the right operand's rows read under the borrowed request,
-    // then written.
-    let rows: Vec<(Key, Value)> = crate::api::values::walk::rows(req, right).collect();
-    for (key, value) in rows {
-        if !union.contains(&key) {
-            let key = Owner::take(req, key);
-            union.set(req, key, Owner::take(req, value))?;
-        }
+    for (key, value) in lacking(req, *union, right) {
+        let key = Owner::take(req, key);
+        union.set(req, key, Owner::take(req, value))?;
     }
     Ok(union)
+}
+
+/// What `zend_hash_merge(result, op2, zval_add_ref, 0)` writes: the rows
+/// of `right` whose keys `union` lacks, read under the borrowed request
+/// before any is written. It writes only those keys, so it releases
+/// nothing and runs no code of the program.
+fn lacking(req: &mut Request, union: PhpArray, right: PhpArray) -> Vec<(Key, Value)> {
+    let rows = crate::api::values::walk::rows(req, right);
+    rows.filter(|(key, _)| !union.contains(key)).collect()
+}
+
+/// [`add`] as a compound assignment runs it, `add_function_array` with
+/// `result == op1` (`Z/Zend/zend_operators.c:1129-1142`): `$a += $a`
+/// leaves the place as it stands, and otherwise the left array is the
+/// place's own, so it is separated where it stands (`SEPARATE_ARRAY`)
+/// rather than copied. One the place holds alone is
+/// merged into in place and handed back with one owner more, the one the
+/// place's write takes, so the place keeps the same array and the owner
+/// the handler then gives up of what it wrote over is that one again;
+/// one with other owners, or an immutable one, is copied as [`add`]
+/// copies it. Every other pair is [`add`]'s.
+///
+/// Merged in place, the array the place held is never destroyed, so an
+/// element another name also holds is not given up and offered to the
+/// collector, as a copy and the original's destruction would offer it:
+///
+/// ```php
+/// $shared = [str_repeat('x', 2)];
+/// $outer = ['n' => $shared];
+/// $outer += ['m' => 1];
+/// var_dump(gc_status()['roots'], $outer['m']);
+/// ```
+/// ```expect
+/// int(0)
+/// int(1)
+/// ```
+pub(crate) fn add_assign(req: &mut Request, left: &Value, right: &Value) -> Result<Value, Thrown> {
+    let held = left.deref();
+    let (Some(mut array), Some(b)) = (held.as_array(), right.deref().as_array()) else {
+        return add(req, left, right);
+    };
+    // `$a += $a`: the place keeps its array as it stands, separated or not.
+    if array.is_same(b) {
+        return Ok(Owner::take(req, array).into_value().hand_on());
+    }
+    if held.is_refcounted() && held.refcount() == 1 {
+        for (key, value) in lacking(req, array, b) {
+            let key = Owner::take(req, key);
+            array.set(req, key, Owner::take(req, value))?;
+        }
+        return Ok(Owner::take(req, array).into_value().hand_on());
+    }
+    add(req, left, right)
 }
 
 /// `ZEND_TRY_BINARY_OBJECT_OPERATION`: an object operand's `do_operation`
