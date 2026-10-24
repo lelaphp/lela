@@ -458,7 +458,8 @@ fn item_object(
                 }
             };
             let parent_obj = *parent_value;
-            let Some(fake) = Node::fake_namespace_decl(parent, href.as_deref(), prefix.as_deref())
+            let Some(fake) =
+                Node::fake_namespace_decl(Some(parent), None, href.as_deref(), prefix.as_deref())
             else {
                 parent_value.give_up(req);
                 return Err(crate::dom_throw(req, Code::InvalidState));

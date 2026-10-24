@@ -1437,7 +1437,29 @@ fn copy_document_ref(req: &mut Request, from: PhpObject, to: PhpObject) -> Resul
 /// namespace mapper where the document follows the standard and a copied
 /// document given private data of its own; a namespace node is
 /// `dom_object_namespace_node_clone_obj`'s, a fresh declaration node on
-/// the same element, which the clone keeps alive too.
+/// the same element, which the clone keeps alive too, or on none once
+/// that element's node is gone.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'xi');
+/// file_put_contents($f, '<?xml version="1.0"?><in/>');
+/// $d = new DOMDocument;
+/// $d->loadXML('<r xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include href="file://' . $f . '" xmlns:l="urn:l"/></r>');
+/// $x = new DOMXPath($d);
+/// $x->registerNamespace('xi', 'http://www.w3.org/2001/XInclude');
+/// $ns = $x->query('namespace::l', $x->query('//xi:include')->item(0))->item(0);
+/// echo (clone $ns)->parentNode->nodeName, "\n";
+/// $d->xinclude();
+/// $c = clone $ns;
+/// var_dump($c->nodeName, $c->parentNode, $c->isConnected);
+/// unlink($f);
+/// ```
+/// ```expect
+/// xi:include
+/// string(7) "xmlns:l"
+/// NULL
+/// bool(false)
+/// ```
 fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let node = node_of(req, object);
     let mut payload = crate::object::Dom::default();
@@ -1453,13 +1475,17 @@ fn clone_object(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>
             payload.extra = Extra::NamespaceParent(Owner::take(req, p));
         }
         let ns = n.ns();
-        if let Some(parent) = n.parent()
-            && let Some(cloned) = Node::fake_namespace_decl(
-                parent,
-                ns.and_then(Ns::href).as_deref(),
-                ns.and_then(Ns::prefix).as_deref(),
-            )
-        {
+        // The element is the one the object's owner names, which is none
+        // once a removal took its node away (`xinclude()` among them),
+        // never the declaration's own parent pointer, which can dangle
+        // then (php 8.5.12).
+        let parent = parent_obj.and_then(|p| node_of(req, p));
+        if let Some(cloned) = Node::fake_namespace_decl(
+            parent,
+            n.doc(),
+            ns.and_then(Ns::href).as_deref(),
+            ns.and_then(Ns::prefix).as_deref(),
+        ) {
             let shared = shared_doc(req, object);
             payload.obj.attach(req, cloned, shared);
         }

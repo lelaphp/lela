@@ -1673,8 +1673,11 @@ impl Node {
     /// the declaration of `href` and `prefix` on `parent`, typed `XML_NAMESPACE_DECL`,
     /// named by the prefix (or `xmlns`), its content the href, owning a
     /// copy of the declaration; the object that stands for it frees it.
+    /// With no parent, as for the clone of one whose element is gone, it
+    /// is made in `fallback_doc` and stands under no element (php 8.5.12).
     pub fn fake_namespace_decl(
-        parent: Node,
+        parent: Option<Node>,
+        fallback_doc: Option<Node>,
         href: Option<&[u8]>,
         prefix: Option<&[u8]>,
     ) -> Option<Node> {
@@ -1687,10 +1690,11 @@ impl Node {
             copy.write(|n| n.prefix = owned);
         }
         let name = prefix.unwrap_or(b"xmlns");
-        let node = Node::new_element(parent.doc(), None, name, href)?;
+        let doc = parent.map_or(fallback_doc, Node::doc);
+        let node = Node::new_element(doc, None, name, href)?;
         node.write(|n| {
             n.type_ = sys::XML_NAMESPACE_DECL;
-            n.parent = parent.raw();
+            n.parent = parent.map_or(ptr::null_mut(), Node::raw);
             n.ns = copy.raw();
         });
         Some(node)

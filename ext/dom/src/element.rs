@@ -120,8 +120,12 @@ fn namespace_node(
     elem: Node,
     ns: Ns,
 ) -> Result<Owner<Value>, Thrown> {
-    let Some(fake) = Node::fake_namespace_decl(elem, ns.href().as_deref(), ns.prefix().as_deref())
-    else {
+    let Some(fake) = Node::fake_namespace_decl(
+        Some(elem),
+        None,
+        ns.href().as_deref(),
+        ns.prefix().as_deref(),
+    ) else {
         return Err(dom_throw(req, Code::InvalidState));
     };
     let value = object_for(req, fake, Some(this))?;
