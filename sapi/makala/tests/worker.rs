@@ -98,23 +98,28 @@ fn a_request_after_one_the_limit_ended_in_its_body_starts_fresh_on_the_same_thre
         )
     };
 
-    // The limit's fatal, met by `big`'s string as the body is read and
-    // before the program's first line: `Unknown`, line 0.
+    // The limit's fatal, met as the read of `big`'s value grows its
+    // buffer on the request's heap and before the program's first line:
+    // `Unknown`, line 0, at the figure php-cgi 8.5.12 prints for this
+    // body under memory_limit=4M.
     let (status, first) = post(body("first", "one", 5_000_000));
     assert!(
         first.contains(
-            "Allowed memory size of 4194304 bytes exhausted (tried to allocate 5000032 bytes) in <b>Unknown</b> on line <b>0</b>"
+            "Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in <b>Unknown</b> on line <b>0</b>"
         ),
         "{status}: {first}"
     );
 
-    // What the first request's progress wrote before the limit met it:
-    // the session it names holds the first file, not done, so the
-    // second request has progress to carry over if anything carried.
+    // What the first request's progress wrote: the read stops at the
+    // limit and the body's end is still told to the progress
+    // (`MULTIPART_EVENT_END`), so the session it names holds the first
+    // file, and the second request has progress to carry over if anything
+    // carried. php-cgi 8.5.12 destroys that session at the body's end
+    // instead, its decode under the limit failing.
     let stored = std::fs::read_to_string(sessions.join("sess_worker3199"))
         .unwrap_or_else(|e| panic!("the first request's session: {e}"));
     assert!(
-        stored.contains(r#"s:10:"field_name";s:5:"first""#) && stored.contains(r#"s:4:"done";b:0"#),
+        stored.contains(r#"s:10:"field_name";s:5:"first""#),
         "{stored}"
     );
 
