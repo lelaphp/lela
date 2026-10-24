@@ -17394,6 +17394,28 @@ fn withheld_step(
 /// int(4)
 /// int(0)
 /// ```
+///
+/// A readonly property hands out no place, so its compound assignment
+/// is the pair of handlers, and the write locks the property again: in
+/// `__clone` the first one reinitialises it and the second is refused,
+/// as `Zend/tests/readonly_props/readonly_clone_error4.phpt` holds.
+///
+/// ```php
+/// class Foo {
+///     public function __construct(public readonly int $bar, public readonly string $s = 'a') {}
+///     public function __clone() { $this->bar += 2; var_dump($this->bar); $this->bar += 3; }
+/// }
+/// class Bar extends Foo { public function __clone() { $this->s .= 'b'; var_dump($this->s); $this->s .= 'c'; } }
+/// foreach ([new Foo(1), new Bar(1)] as $o) {
+///     try { clone $o; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// int(3)
+/// Cannot modify readonly property Foo::$bar
+/// string(2) "ab"
+/// Cannot modify readonly property Foo::$s
+/// ```
 fn step_property(
     req: &mut Request,
     frame: FrameRef,
@@ -17475,15 +17497,27 @@ fn step_property(
             };
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
             match req.declared_slot_for_write(object, bytes, "modify", silent) {
-                Ok(Some((slot, typed))) => step_slot(
-                    req,
-                    frame,
-                    code,
-                    step,
-                    (object, slot, typed),
-                    bytes,
-                    Some(precomputed),
-                ),
+                Ok(Some((slot, typed))) => {
+                    let written = step_slot(
+                        req,
+                        frame,
+                        code,
+                        step,
+                        (object, slot, typed),
+                        bytes,
+                        Some(precomputed),
+                    )?;
+                    // `zend_std_write_property`'s `Z_PROP_FLAG_P(variable_ptr)
+                    // &= ~IS_PROP_REINITABLE`: the write
+                    // `zend_assign_op_overloaded_property` makes locks a
+                    // readonly property `__clone` reinitialised again.
+                    if written.is_ok() {
+                        object
+                            .heap()
+                            .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
+                    }
+                    Ok(written)
+                }
                 Ok(None) => {
                     req.release(precomputed);
                     Err(Fatal::error(
