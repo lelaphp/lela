@@ -1736,14 +1736,14 @@ impl ExtensionBuilder {
         self
     }
 
-    /// Served once the primary program has ended and before the request
-    /// shuts down, the moment between `php_execute_script` and
-    /// `php_request_shutdown` where php-fpm's loop puts the line
-    /// `fastcgi.error_header` names into the head
+    /// Served once the primary program has ended, as the request starts
+    /// to shut down: `php_request_shutdown`'s first step, where it sets
+    /// `EG_FLAGS_IN_SHUTDOWN` (`Z/main/main.c:1960`), before the shutdown
+    /// functions are called, and the moment php-fpm's loop puts the line
+    /// `fastcgi.error_header` names into the head just before
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1931-1940`): every extension's hook in
-    /// bundle order, for a program served whole and not for a lint, a
-    /// highlight or a strip. An extension a host declares for itself is
-    /// the one that hands it (ADR-0008, #1348).
+    /// bundle order, on every host's request. An extension a host
+    /// declares for itself is the one that hands it (ADR-0008, #1348).
     #[must_use]
     pub fn program_ended(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
         self.entry.supplies.program_ended = Some(hook);

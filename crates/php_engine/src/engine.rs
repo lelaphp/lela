@@ -48,6 +48,7 @@ use crate::supplied::{Keyed, Resolved, Suppliers};
 use crate::tier::{BindLoops, Loop, Loops, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
 use crate::unit_cache::{Answers, CompileRefused, Fresh, UnitCache};
+use ini_table::{Directive, IniTable};
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -831,7 +832,8 @@ pub(crate) struct Shared {
     /// Where each extension's request and engine state stands, by its
     /// type ([`crate::api::request::StateSlots`]).
     pub(crate) state_slots: crate::api::request::StateSlots,
-    ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    /// `EG(ini_directives)`, each entry's master value ([`IniTable`]).
+    pub(crate) ini: IniTable,
     /// The typed entries `ini`'s master values give, which each request
     /// starts with ([`TypedIni`]).
     pub(crate) typed_ini: TypedIni,
@@ -1591,21 +1593,18 @@ impl Shared {
         self.callees.get(at).map(crate::readable::Record::at)
     }
 
-    /// The extensions' own ini declarations, what `EG(ini_directives)`
-    /// holds past the core table: each extension's in its
-    /// `PHP_INI_BEGIN()` order, the extensions in startup order.
-    pub(crate) fn extension_inis(&self) -> impl Iterator<Item = &IniDecl> {
-        self.extensions
-            .iter()
-            .flat_map(|extension| extension.ini.iter())
+    /// The `on_modify` an extension gave the entry `name`.
+    pub(crate) fn ini_handler(&self, name: &[u8]) -> Option<IniHandler> {
+        self.ini.find(name)?.on_modify.map(|(_, handler)| handler)
     }
 
     /// The declaration of the entry `name` among the extensions' own,
     /// `zend_hash_find_ptr(EG(ini_directives))` over what each extension
     /// registered; none for an entry of the core table or none at all.
     pub(crate) fn extension_ini(&self, name: &[u8]) -> Option<&IniDecl> {
-        self.extension_inis()
-            .find(|decl| decl.name.0.as_ref() == name)
+        let (extension, at) = self.ini.find(name)?.declared?;
+        let declaring = self.extensions.get(usize::try_from(extension.0).ok()?)?;
+        declaring.ini.get(at)
     }
 
     /// `zend_flf_functions` by name, in the frameless table's order
@@ -1711,7 +1710,8 @@ impl Shared {
     pub(crate) fn optimizer(&self) -> crate::unit_cache::Optimizer {
         use crate::unit_cache::Optimizer;
         let level = self
-            .ini_default(b"opcache.optimization_level")
+            .ini
+            .master(b"opcache.optimization_level")
             // The one reading of a whole-number entry, without the
             // sentence `Request::ini_quantity_warn` raises.
             .map_or(0, |value| crate::ini_quantity::parse(value).0);
@@ -1923,7 +1923,8 @@ impl Shared {
     /// to on the thread that asked for it.
     pub(crate) fn stack_limit(&self) -> StackLimit {
         let bytes = |name: &[u8]| {
-            self.ini_default(name)
+            self.ini
+                .master(name)
                 .map_or(0, crate::api::request::Ini::parse_bytes)
         };
         StackLimit::init(
@@ -2096,13 +2097,6 @@ impl Shared {
         self.interned.strings().count()
     }
 
-    /// The value the entry `name` starts every request with as
-    /// `zend_ini_get_value` reads it, the empty string where it has none
-    /// (php's `NULL`); `None` where php has no such entry.
-    pub(crate) fn ini_default(&self, name: &[u8]) -> Option<&[u8]> {
-        master_of(&self.ini, name)
-    }
-
     /// `zend_disable_functions` over a started engine's table, as
     /// php-fpm's child calls it for its pool's `disable_functions`
     /// (`fpm_php_apply_defines_ex`): each native the list names, matched
@@ -2133,24 +2127,17 @@ impl Shared {
     /// The master value of the entry `name` set to `value` where it
     /// stands, which keeps the table in registration order, and the
     /// typed entries and the realpath cache's `CWDG` values with it.
-    fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
-        self.typed_ini.update(&name, value.as_deref());
-        self.realpath_cache.update(&name, value.as_deref());
-        upsert(&mut self.ini, name, value);
+    fn set_ini_default(&mut self, name: &[u8], value: Option<Vec<u8>>) {
+        self.typed_ini.update(name, value.as_deref());
+        self.realpath_cache.update(name, value.as_deref());
+        self.ini.set(name, value);
     }
 
     /// The value the entry `name` starts every request with as php holds
     /// it, `INI_ORIG_STR`: `None` where it has none (php's `NULL`), as for
     /// a name php has no entry for.
     pub(crate) fn ini_default_value(&self, name: &[u8]) -> Option<&[u8]> {
-        self.ini
-            .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .and_then(|(_, v)| v.as_deref())
-    }
-
-    pub(crate) fn ini_defaults(&self) -> &[(Vec<u8>, Option<Vec<u8>>)] {
-        &self.ini
+        self.ini.find(name).and_then(|row| row.value.as_deref())
     }
 
     /// `cfg_get_entry`: the row of `configuration_hash` under `name`.
@@ -3143,13 +3130,9 @@ fn function_table(
     declarations: &mut [Declarations],
     registered: &[usize],
     additional: Vec<(FunctionDecl, Entry)>,
-    ini: &[(Vec<u8>, Option<Vec<u8>>)],
+    ini: &IniTable,
 ) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
-    let list = ini
-        .iter()
-        .find(|(name, _)| name.as_slice() == b"disable_functions")
-        .and_then(|(_, list)| list.as_deref())
-        .unwrap_or_default();
+    let list = ini.master(b"disable_functions").unwrap_or_default();
     let disabled = disabled_functions(list);
     // `module_registry` numbers Core 0 and the bundle from 1.
     let standard = extensions
@@ -3560,10 +3543,6 @@ impl EngineBuilder {
     #[must_use]
     #[allow(clippy::too_many_lines)] // one line per field of the engine
     pub fn build(self) -> Engine {
-        let mut ini: Vec<(Vec<u8>, Option<Vec<u8>>)> = CORE_INI
-            .iter()
-            .map(|(n, v)| (n.as_bytes().to_vec(), v.map(|v| v.as_bytes().to_vec())))
-            .collect();
         let mut extensions = self.extensions;
         extensions.extend(self.tier_extension);
         let additional = self.additional_functions;
@@ -3604,14 +3583,9 @@ impl EngineBuilder {
         let mut declarations = Vec::with_capacity(declared.len() + 1);
         declarations.push(core_declared);
         declarations.extend(declared);
-        for extension in &extensions {
-            for entry in &extension.ini {
-                ini.push((
-                    entry.name.0.to_vec(),
-                    entry.default.as_deref().map(<[u8]>::to_vec),
-                ));
-            }
-        }
+        let core_ini = (CORE_INI.iter())
+            .map(|(n, v)| (n.as_bytes().to_vec(), v.map(|v| v.as_bytes().to_vec())));
+        let mut ini = IniTable::register(core_ini, &extensions);
         let mut ini_files = self.ini_files;
         let configuration = Configuration::read(
             &self.ini_defaults,
@@ -3623,7 +3597,7 @@ impl EngineBuilder {
         // handler has taken the value the host set ([`Engine::register_ini`]).
         let mut held = Vec::new();
         for (name, value) in configuration.directives() {
-            if on_modify(&extensions, &name).is_some() {
+            if ini.find(&name).is_some_and(|row| row.on_modify.is_some()) {
                 held.push((name, value));
                 continue;
             }
@@ -3637,14 +3611,11 @@ impl EngineBuilder {
             if Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected {
                 continue;
             }
-            if let Some(entry) = ini.iter_mut().find(|(n, _)| *n == name) {
-                entry.1 = Some(value);
-            }
+            ini.set(&name, Some(value));
         }
         let on = |name: &str| {
-            ini.iter()
-                .find(|(n, _)| n.as_slice() == name.as_bytes())
-                .and_then(|(_, value)| value.as_deref())
+            (ini.find(name.as_bytes()))
+                .and_then(|row| row.value.as_deref())
                 .is_some_and(crate::api::request::Ini::parse_bool)
         };
         let shebang = match self.shebang_while {
@@ -3707,6 +3678,14 @@ impl EngineBuilder {
                 })
                 .unzip();
         let mut names = permanent_names(&extensions, &functions, &classes, &constants, &ini);
+        // What the host set for an entry its `on_modify` takes as the
+        // engine starts, interned as `zend_register_ini_entries_ex`
+        // interns the value it takes, so `ini_get()` of it costs nothing;
+        // one the rule then refuses is interned with them, which no
+        // reading of the permanent table shows.
+        for (_, value) in &held {
+            names.intern(value).ok();
+        }
         let constant_values = constant_values(&constants, &mut names);
         let constant_names = Names::over(&constants);
         let default_strings = default_strings(&functions, &classes);
@@ -3730,7 +3709,7 @@ impl EngineBuilder {
             interned.clone(),
         ));
         let layer = supplied.stream_hooks.get().map(|hooks| (hooks.state)());
-        let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| master_of(&ini, name));
+        let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| ini.master(name));
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -3761,7 +3740,7 @@ impl EngineBuilder {
                 constant_modules,
                 engine_states: States::new(),
                 state_slots: crate::api::request::StateSlots::default(),
-                typed_ini: TypedIni::of(|name| master_of(&ini, name)),
+                typed_ini: TypedIni::of(|name| ini.master(name)),
                 ini,
                 constant_values,
                 sapi_names,
@@ -4208,7 +4187,7 @@ fn permanent_names(
     functions: &[FunctionDecl],
     classes: &[ClassDecl],
     constants: &[ConstDecl],
-    ini: &[(Vec<u8>, Option<Vec<u8>>)],
+    ini: &IniTable,
 ) -> Strings {
     let mut names = Strings::new();
     names.intern_known(&KNOWN_STRINGS.map(str::as_bytes));
@@ -4263,7 +4242,7 @@ fn permanent_names(
             }
         }
     }
-    for (name, value) in ini {
+    for Directive { name, value, .. } in ini.rows() {
         names.intern(name).ok();
         if let Some(value) = value {
             names.intern(value).ok();
@@ -4463,7 +4442,7 @@ fn start_module(
 /// extension's (`Engine::refused`).
 fn modules_startup(
     req: &mut Request,
-    extensions: &[ExtensionEntry],
+    ini: &IniTable,
     held: Vec<(Vec<u8>, Vec<u8>)>,
     unloaded: Vec<Unloaded>,
     taken: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
@@ -4477,13 +4456,15 @@ fn modules_startup(
         }
     };
     for (name, value) in held {
-        let owner = (extensions.iter())
-            .position(|e| e.on_modify.iter().any(|(n, _)| *n == name))
-            .unwrap_or(usize::MAX);
+        let on_modify = ini.find(&name).and_then(|row| row.on_modify);
+        let owner = on_modify.map_or(usize::MAX, |(owner, _)| {
+            usize::try_from(owner.0).unwrap_or(usize::MAX)
+        });
         refuse_until(req, &mut marks, owner);
         marks.push((owner, req.startup_raised_len()));
-        let accepted = on_modify(extensions, &name)
-            .is_some_and(|handler| matches!(handler.serve(req, &name, Some(&value)), Ok(true)));
+        let accepted = on_modify.is_some_and(|(_, handler)| {
+            matches!(handler.serve(req, &name, Some(&value)), Ok(true))
+        });
         if accepted {
             req.take_startup_value(&name, &value);
             taken.push((name, Some(value)));
@@ -4491,16 +4472,6 @@ fn modules_startup(
     }
     refuse_until(req, &mut marks, usize::MAX);
     marks
-}
-
-/// The handler an extension of `extensions` gave the entry `name`.
-fn on_modify(extensions: &[ExtensionEntry], name: &[u8]) -> Option<IniHandler> {
-    extensions.iter().find_map(|e| {
-        e.on_modify
-            .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, handler)| *handler)
-    })
 }
 
 /// The process-wide engine (design §5.14): immutable once built, shared
@@ -4681,9 +4652,10 @@ impl Engine {
         // finds the host's value for each: the handlers meet the values
         // in declaration order, whatever order the host set them in.
         let declared_at = |name: &[u8]| {
-            (self.shared.extension_inis())
-                .position(|entry| entry.name.0.as_ref() == name)
-                .unwrap_or(usize::MAX)
+            let declared = (self.shared.ini.find(name))
+                .and_then(|row| row.declared)
+                .map(|(extension, at)| (extension.0, at));
+            (declared.is_none(), declared)
         };
         held.sort_by_key(|(name, _)| declared_at(name));
         let sapi_name = self.shared.host;
@@ -4697,13 +4669,7 @@ impl Engine {
             suppliers,
         } = registry;
         let failed = register_extensions(&mut req, loads);
-        let marks = modules_startup(
-            &mut req,
-            &self.shared.extensions,
-            held,
-            unloaded,
-            &mut taken,
-        );
+        let marks = modules_startup(&mut req, &self.shared.ini, held, unloaded, &mut taken);
         req.set_ini_stage(IniStage::Startup);
         let encoding_at = req.startup_raised_len();
         let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
@@ -4723,15 +4689,17 @@ impl Engine {
         // What the startup stage took is the master value and the startup
         // ini alike.
         for (name, value) in taken {
-            shared.set_ini_default(name, value);
+            shared.set_ini_default(&name, value);
         }
-        (shared.realpath_cache).engine_startup(shared.ini_default(b"open_basedir"));
+        (shared.realpath_cache).engine_startup(shared.ini.master(b"open_basedir"));
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
         let mut start = Start {
             ini: StartupIni {
-                entries: shared.ini.clone(),
+                entries: (shared.ini.rows().iter())
+                    .map(|row| (row.name.clone(), row.value.clone()))
+                    .collect(),
             },
             host: sapi_name,
             process: Vec::new(),
@@ -4843,9 +4811,7 @@ impl Engine {
                 (shared.extension_ini(&name))
                     .map_or(Request::ini_modifiable(&name).1, |d| d.per_dir)
             };
-            if shared.ini.iter().all(|(n, _)| *n != name)
-                || (mode == IniOrigin::PerDir && !per_dir())
-            {
+            if shared.ini.find(&name).is_none() || (mode == IniOrigin::PerDir && !per_dir()) {
                 continue;
             }
             // A core handler reads its quantity, with its warning, before
@@ -4856,7 +4822,7 @@ impl Engine {
             if Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected {
                 continue;
             }
-            let took = on_modify(&shared.extensions, &name).is_none_or(|handler| {
+            let took = shared.ini_handler(&name).is_none_or(|handler| {
                 matches!(handler.serve(&mut req, &name, Some(&value)), Ok(true))
             });
             if !took {
@@ -4881,7 +4847,7 @@ impl Engine {
                     if name == b"disable_functions" {
                         shared.disable_functions(&value);
                     }
-                    shared.set_ini_default(name, Some(value));
+                    shared.set_ini_default(&name, Some(value));
                 }
                 shared.locked.extend(locked);
                 Ok(written)
@@ -4962,7 +4928,7 @@ impl Engine {
     /// with, `None` for an entry php does not know.
     #[must_use]
     pub fn ini_get(&self, name: &[u8]) -> Option<Vec<u8>> {
-        self.shared.ini_default(name).map(<[u8]>::to_vec)
+        self.shared.ini.master(name).map(<[u8]>::to_vec)
     }
 
     /// `tsrm_realpath(path, NULL)` outside any request
@@ -5113,7 +5079,7 @@ impl Engine {
     #[must_use]
     pub fn dump_before_optimizer(&self, description: &RequestDescription) -> Option<Vec<u8>> {
         let level =
-            crate::ini_quantity::parse(self.shared.ini_default(b"opcache.opt_debug_level")?).0;
+            crate::ini_quantity::parse(self.shared.ini.master(b"opcache.opt_debug_level")?).0;
         if level & BEFORE_OPTIMIZER == 0 {
             return None;
         }
@@ -5239,9 +5205,9 @@ impl Engine {
         self.shutdown(&mut req)
     }
 
-    /// What a started request serves, then each extension's hook for the
-    /// moment after it, which php-fpm's `fastcgi_request_done` stands at
-    /// for a page as for a program.
+    /// What a started request serves, a page or a program, which php-fpm's
+    /// `fastcgi_request_done` stands after alike; the extensions' hook for
+    /// the moment after it opens [`Engine::shutdown_program`].
     pub(crate) fn serve_in(&self, req: &mut Request, source: Option<&[u8]>, serves: HostServes) {
         match serves {
             HostServes::Program => {
@@ -5260,7 +5226,6 @@ impl Engine {
             HostServes::Nothing => {}
         }
         req.free_path_copies();
-        req.program_ended();
     }
 
     /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
@@ -5854,6 +5819,7 @@ impl Engine {
         // them.
         // Each step is its own `zend_try`, so a fatal's bailout leaves
         // the step it was raised in and the next is served.
+        req.program_ended(); // `EG(flags) |= EG_FLAGS_IN_SHUTDOWN`
         req.enter_phase(crate::api::request::Phase::Shutdown);
         req.catch_bailout();
         crate::observer::end_all(req);
@@ -6494,15 +6460,7 @@ fn serve_rinits(req: &mut Request, extensions: &[ExtensionEntry]) -> Result<(), 
     Ok(())
 }
 
-/// The master value of the entry `name` among `ini` as
-/// `zend_ini_get_value` reads it, the empty string where it has none
-/// (php's `NULL`); `None` where php has no such entry.
-fn master_of<'a>(ini: &'a [(Vec<u8>, Option<Vec<u8>>)], name: &[u8]) -> Option<&'a [u8]> {
-    ini.iter()
-        .find(|(n, _)| n.as_slice() == name)
-        .map(|(_, v)| v.as_deref().unwrap_or_default())
-}
-
+pub(crate) mod ini_table;
 #[cfg(test)]
 mod tests;
 

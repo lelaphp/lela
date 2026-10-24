@@ -473,8 +473,8 @@ impl Request {
         self.heap.overflow_rendered();
     }
 
-    /// Each extension's hook once the primary program has ended and before
-    /// the request shuts down, in bundle order
+    /// Each extension's hook once the primary program has ended, as the
+    /// request starts to shut down, in bundle order
     /// ([`ExtensionBuilder::program_ended`]).
     ///
     /// [`ExtensionBuilder::program_ended`]: crate::api::abi::ExtensionBuilder::program_ended
