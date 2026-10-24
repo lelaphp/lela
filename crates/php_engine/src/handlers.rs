@@ -17595,11 +17595,11 @@ fn landed_out(req: &mut Request, frame: FrameRef, op: &Opline, (landed, garbage)
 }
 
 /// What a compound step made written into the declared slot it read:
-/// `zend_binary_op` over the slot itself where it holds no reference,
-/// the value written there and what the slot held given up as a
-/// compound assignment gives it up ([`release_overwritten`]); through
-/// the cell a reference names otherwise, as the slot's write serves it.
-/// What landed is what the temporary takes.
+/// `zend_binary_op` over the slot itself, or over the value of the cell a
+/// reference there names, held first to each type the cell carries
+/// (`zend_binary_assign_op_typed_ref`, under `strict`); what was written
+/// over is given up as a compound assignment gives it up
+/// ([`release_overwritten`]). What landed is what the temporary takes.
 fn stepped_slot(
     req: &mut Request,
     (frame, op): (FrameRef, &Opline),
@@ -17607,17 +17607,22 @@ fn stepped_slot(
     value: Value,
     strict: bool,
 ) -> Result<(), Thrown> {
-    let place = object.heap().slot_ref(slot);
-    if let Some(at) = place.filter(|at| Value::of_slot(at.read()).as_php_ref().is_none()) {
-        let held = Value::of_slot(at.read());
-        at.write(value.to_zval());
-        write_out(req, frame, op, &value);
-        release_overwritten(req, held);
+    let Some(mut at) = object.heap().slot_ref(slot) else {
+        req.release(value);
         return Ok(());
+    };
+    let mut value = value;
+    if let Some(cell) = object.heap().slot(slot).as_reference() {
+        if cell.sources() != 0 {
+            let verdict = crate::ops::verify_ref_assignable(req, cell, &value, strict);
+            value = crate::ops::landed(req, value, verdict)?;
+        }
+        at = cell.val_ref();
     }
-    let (landed, garbage) = req.assign_declared_slot(object.heap(), slot, value, strict)?;
-    write_out(req, frame, op, &landed);
-    release_overwritten(req, garbage);
+    let held = Value::of_slot(at.read());
+    at.write(value.to_zval());
+    write_out(req, frame, op, &value);
+    release_overwritten(req, held);
     Ok(())
 }
 
