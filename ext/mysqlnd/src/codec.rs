@@ -320,24 +320,23 @@ fn fetch<'a>(
         let b = variable(req, p)?;
         (b.is_empty() || b.len() >= min || too_short(req)).then_some(b)
     };
-    let long = |bits: Bits, req: &mut Request| bits.into_value(req);
     let ty = field.field_type();
     Ok(Some(match ty {
         FieldType::Null => Owner::null(),
         FieldType::Tiny => match fixed(req, p, 1) {
-            Some(b) => long(from_1_to_8_bytes(field, b), req)?,
+            Some(b) => from_1_to_8_bytes(field, b).into_value(req)?,
             None => return Ok(None),
         },
         FieldType::Short | FieldType::Year => match fixed(req, p, 2) {
-            Some(b) => long(from_1_to_8_bytes(field, b), req)?,
+            Some(b) => from_1_to_8_bytes(field, b).into_value(req)?,
             None => return Ok(None),
         },
         FieldType::Int24 | FieldType::Long => match fixed(req, p, 4) {
-            Some(b) => long(from_1_to_8_bytes(field, b), req)?,
+            Some(b) => from_1_to_8_bytes(field, b).into_value(req)?,
             None => return Ok(None),
         },
         FieldType::LongLong => match fixed(req, p, 8) {
-            Some(b) => long(from_1_to_8_bytes(field, b), req)?,
+            Some(b) => from_1_to_8_bytes(field, b).into_value(req)?,
             None => return Ok(None),
         },
         FieldType::Float => match fixed(req, p, 4) {
@@ -373,7 +372,7 @@ fn fetch<'a>(
         },
         // `ps_fetch_bit`: an over-read is warned once, by `variable`.
         FieldType::Bit => match variable(req, p) {
-            Some(b) if b.len() <= 8 => long(from_1_to_8_bytes(field, b), req)?,
+            Some(b) if b.len() <= 8 => from_1_to_8_bytes(field, b).into_value(req)?,
             Some(_) => {
                 over_read(req);
                 return Ok(None);
