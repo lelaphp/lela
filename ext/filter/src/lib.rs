@@ -149,7 +149,7 @@ impl State {
 /// where `zend_string_init`'s would not until 17:
 ///
 /// ```php
-/// $d = sys_get_temp_dir() . '/sf' . getmypid(); @mkdir($d);
+/// $d = sprintf('%s/sf%010d', sys_get_temp_dir(), getmypid()); @mkdir($d);
 /// $read = function (int $n) use ($d) {
 ///     $f = str_repeat('x', $n - 4) . '.php';
 ///     file_put_contents("$d/$f", '<?php echo memory_get_usage();');
@@ -164,7 +164,7 @@ impl State {
 /// 9 64
 /// 15 64
 /// 16 80
-/// 17 144
+/// 17 160
 /// ```
 ///
 /// `parse_str()`'s value is what the filter answered read as a string,
@@ -247,15 +247,15 @@ fn sapi_filter(
     if input != Input::String {
         return Ok(Some(handed));
     }
-    // `parse_str()`'s variable php hands back as bytes, `retval` 1 and
-    // `*val = estrndup(Z_STRVAL(new_var), ...)`, for
-    // `php_default_treat_data` to register with
+    // `parse_str()`'s variable php hands back as bytes, `retval` 1: the
+    // filter's answer read as `zval_get_tmp_string` reads it, a string as
+    // it is and anything else, `filter.default=int`'s int or its `false`,
+    // as its string, copied into `*val` (`Z/ext/filter/filter.c:391-414`),
+    // for `php_default_treat_data` to register with
     // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`: a value of one
-    // byte is the process's string, and allocates nothing, and a longer
-    // one is php-8.5.12's `zend_string_finit`.
-    // What a filter answers that is not a string, `filter.default=int`'s
-    // int or its `false`, is read as `zval_get_tmp_string` reads it
-    // (`Z/ext/filter/filter.c:392`).
+    // byte is the process's string and allocates nothing, and a longer one
+    // is php-8.5.12's `zend_string_finit`. A string answer is read in place
+    // rather than copied first, as `*val`'s copy is a temporary.
     let fast = match handed.as_ref() {
         ValueRef::Str(filtered) => PhpString::fast(req, filtered.as_bytes()),
         _ => {
