@@ -889,6 +889,9 @@ impl SQLite3 {
     /// var_dump($db->close(), $db->close());
     /// try { $s->execute(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// var_dump($db->lastErrorCode(), $db->lastErrorMsg());
+    /// $u = (new ReflectionClass('SQLite3'))->newInstanceWithoutConstructor();
+    /// var_dump($u->close());
+    /// try { $u->lastErrorCode(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect
     /// bool(true)
@@ -896,6 +899,8 @@ impl SQLite3 {
     /// The SQLite3 object has not been correctly initialised or is already closed
     /// int(0)
     /// string(0) ""
+    /// bool(true)
+    /// The SQLite3 object has not been correctly initialised or is already closed
     /// ```
     ///
     /// From inside a user function, an aggregate, a collation or the
@@ -939,20 +944,16 @@ impl SQLite3 {
         let object = this.object();
         let conn = conn(req, object)?;
         let exceptions = conn.exceptions;
-        let open = match &conn.link {
-            Link::Open(open) => Some(open.db()),
-            _ => None,
+        // `if (db_obj->initialised)`: an object never opened stays so.
+        let Link::Open(open) = &conn.link else {
+            return Ok(true);
         };
-        if open.is_some_and(|db| db.in_callback(req)) {
+        if open.db().in_callback(req) {
             let text = "Cannot close SQLite3 database while inside a callback";
             return Err(throw_error(req, "Error", text));
         }
         let conn = self::conn(req, object)?;
         let Link::Open(open) = std::mem::replace(&mut conn.link, Link::Closed) else {
-            if matches!(conn.link, Link::Closed) {
-                return Ok(true);
-            }
-            conn.link = Link::Unopened;
             return Ok(true);
         };
         let Open { owner, stmts } = *open;
