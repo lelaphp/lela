@@ -346,7 +346,8 @@ pub(super) fn name_to_position(
                     "PDO refuses to handle repeating the same :named parameter for multiple positions with this driver, as it might be unsafe to do so.  Consider using a separate name for each parameter instead",
                 ),
             )?;
-            Ok(true)
+            // php 8.5.12 answers `false`; 8.5.9's `-1` read as true.
+            Ok(false)
         }
         Some(Found::Position(position)) => {
             bound.position = i64::try_from(position).unwrap_or(-1);
