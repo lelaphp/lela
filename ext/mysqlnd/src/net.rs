@@ -91,9 +91,9 @@ pub(crate) struct Net {
     pub(crate) compressed: bool,
     /// `MYSQLND_PROTOCOL_FLAG_USE_COMPRESSION`, the option.
     pub(crate) use_compression: bool,
-    /// `pfc->data->uncompressed_data`: what an envelope held that no read
-    /// took yet.
-    uncompressed: Vec<u8>,
+    /// `pfc->data->uncompressed_data`: the envelope last read and how far
+    /// the reads have taken it.
+    uncompressed: ReadBuffer,
     /// `pfc->cmd_buffer`, its length `pfc->cmd_buffer.length`; none
     /// until the frame codec's `init` sets its size.
     pub(crate) cmd_buffer: Option<Alloc>,
@@ -292,7 +292,7 @@ impl Net {
             stream.free(req);
         }
         self.ssl = false;
-        self.uncompressed.clear();
+        self.uncompressed = ReadBuffer::default();
     }
 
     /// `mysqlnd_vio::network_read`: `out` filled, or `false` where the
@@ -338,7 +338,39 @@ impl Net {
 
     /// `mysqlnd_pfc::receive`: `out` filled from the packet stream, out of
     /// the compressed envelopes where the protocol is compressed; `false`
-    /// where the stream ended first.
+    /// where the stream ended first. A read takes what it needs from the
+    /// envelope's [`ReadBuffer`] and the next envelope as the one before
+    /// runs out, so a row that straddles two envelopes, and a packet of
+    /// more than `MYSQLND_MAX_PACKET_SIZE` cut into frames across many,
+    /// read as php's do:
+    ///
+    /// ```php
+    /// $l = mysqli_init();
+    /// mysqli_real_connect($l, '127.0.0.1', 'root', '', 'test', 3306, null, MYSQLI_CLIENT_COMPRESS);
+    /// $q = "WITH RECURSIVE t(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM t WHERE n < 300) SELECT n, REPEAT(CHAR(65 + n % 26), 900 + n * 3) FROM t";
+    /// $h = '';
+    /// foreach (mysqli_query($l, $q)->fetch_all() as [$n, $s]) {
+    ///     $h .= strlen($s) === 900 + $n * 3 ? $s[0] : '!';
+    /// }
+    /// $st = mysqli_prepare($l, $q);
+    /// $st->execute();
+    /// $st->bind_result($n, $s);
+    /// $m = 0;
+    /// while ($st->fetch()) {
+    ///     $m += strlen($s) === 900 + $n * 3;
+    /// }
+    /// var_dump(strlen($h), md5($h), $m);
+    /// $big = mysqli_query($l, "SELECT REPEAT('ab', 9 << 20), 1")->fetch_row();
+    /// var_dump(strlen($big[0]), md5($big[0]), $big[1]);
+    /// ```
+    /// ```expect mysql
+    /// int(300)
+    /// string(32) "63105feeba001e5cf24b1a3685d5292c"
+    /// int(300)
+    /// int(18874368)
+    /// string(32) "78a43b699de8fe639c3ece9276931286"
+    /// string(1) "1"
+    /// ```
     pub(crate) fn receive_into(
         &mut self,
         req: &mut Request,
@@ -348,15 +380,12 @@ impl Net {
         if !self.compressed {
             return self.network_read(req, out, stats);
         }
-        let mut had = 0;
+        let mut had = self.uncompressed.read(out);
         while had < out.len() {
-            if self.uncompressed.is_empty() && !self.fill_envelope(req, stats) {
+            if !self.fill_envelope(req, stats) {
                 return false;
             }
-            let take = (out.len() - had).min(self.uncompressed.len());
-            out[had..had + take].copy_from_slice(&self.uncompressed[..take]);
-            self.uncompressed.drain(..take);
-            had += take;
+            had += self.uncompressed.read(&mut out[had..]);
         }
         true
     }
@@ -404,7 +433,7 @@ impl Net {
             return false;
         };
         if decompressed == 0 {
-            self.uncompressed = payload;
+            self.uncompressed = ReadBuffer::new(payload);
             return true;
         }
         let mut out = Vec::with_capacity(decompressed);
@@ -412,7 +441,7 @@ impl Net {
         if inflated.is_err() || out.len() != decompressed {
             return false;
         }
-        self.uncompressed = out;
+        self.uncompressed = ReadBuffer::new(out);
         true
     }
 
@@ -616,6 +645,37 @@ fn ssl_options(req: &mut Request, context: StreamCtx, o: &VioOptions) -> Result<
         context.set_option(req, b"ssl", b"allow_self_signed", &Value::bool(true))?;
     }
     Ok(peer)
+}
+
+/// `MYSQLND_READ_BUFFER`: one envelope's payload as it was inflated, and
+/// its `offset`, how much of it the reads have taken. A read copies what
+/// it takes and moves the cursor, never the bytes after it; the envelope
+/// is given back whole once read through, as `mysqlnd_pfc::receive` frees
+/// php's.
+#[derive(Default)]
+struct ReadBuffer {
+    data: Vec<u8>,
+    offset: usize,
+}
+
+impl ReadBuffer {
+    /// `mysqlnd_create_read_buffer` over an envelope's bytes.
+    fn new(data: Vec<u8>) -> Self {
+        Self { data, offset: 0 }
+    }
+
+    /// `read` of what is left, up to `out`'s length, into `out`: how many
+    /// bytes it took. The buffer read through is freed, `free_buffer`.
+    fn read(&mut self, out: &mut [u8]) -> usize {
+        let left = self.data.get(self.offset..).unwrap_or_default();
+        let take = out.len().min(left.len());
+        out[..take].copy_from_slice(&left[..take]);
+        self.offset += take;
+        if self.offset == self.data.len() {
+            *self = Self::default();
+        }
+        take
+    }
 }
 
 /// `uint3korr`.
