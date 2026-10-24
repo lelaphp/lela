@@ -1603,7 +1603,9 @@ impl Shared {
     /// registered; none for an entry of the core table or none at all.
     pub(crate) fn extension_ini(&self, name: &[u8]) -> Option<&IniDecl> {
         let (extension, at) = self.ini.find(name)?.declared?;
-        self.extensions.get(extension)?.ini.get(at)
+        (self.extensions.get(usize::try_from(extension.0).ok()?))?
+            .ini
+            .get(at)
     }
 
     /// `zend_flf_functions` by name, in the frameless table's order
@@ -4455,7 +4457,9 @@ fn modules_startup(
     };
     for (name, value) in held {
         let on_modify = ini.find(&name).and_then(|row| row.on_modify);
-        let owner = on_modify.map_or(usize::MAX, |(owner, _)| owner);
+        let owner = on_modify.map_or(usize::MAX, |(owner, _)| {
+            usize::try_from(owner.0).unwrap_or(usize::MAX)
+        });
         refuse_until(req, &mut marks, owner);
         marks.push((owner, req.startup_raised_len()));
         let accepted = on_modify.is_some_and(|(_, handler)| {
@@ -4650,7 +4654,7 @@ impl Engine {
         let declared_at = |name: &[u8]| {
             (self.shared.ini.find(name))
                 .and_then(|row| row.declared)
-                .unwrap_or((usize::MAX, usize::MAX))
+                .map_or((u32::MAX, usize::MAX), |(extension, at)| (extension.0, at))
         };
         held.sort_by_key(|(name, _)| declared_at(name));
         let sapi_name = self.shared.host;

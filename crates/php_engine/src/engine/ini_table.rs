@@ -9,19 +9,19 @@
 use php_link::{Exact, Named, Names};
 
 use crate::api::abi::{ExtensionEntry, IniHandler};
+use crate::api::request::ExtensionId;
 
 /// One entry, php's `zend_ini_entry` as every request starts with it.
 pub(crate) struct Directive {
     pub(crate) name: Vec<u8>,
     /// The master value, `None` where it has none (php's `NULL`).
     pub(crate) value: Option<Vec<u8>>,
-    /// The declaration of an extension's entry, `module_number`: the
-    /// extension's place in the bundle and the entry's among its
-    /// declarations; `None` for an entry of the core table.
-    pub(crate) declared: Option<(usize, usize)>,
-    /// `on_modify`, beside the place in the bundle of the extension
-    /// that gave it.
-    pub(crate) on_modify: Option<(usize, IniHandler)>,
+    /// The declaration of an extension's entry: the extension,
+    /// `module_number`, and the entry's place among its declarations;
+    /// `None` for an entry of the core table.
+    pub(crate) declared: Option<(ExtensionId, usize)>,
+    /// `on_modify`, beside the extension that gave it.
+    pub(crate) on_modify: Option<(ExtensionId, IniHandler)>,
 }
 
 impl Named for Directive {
@@ -43,8 +43,10 @@ pub(crate) struct IniTable {
 
 impl IniTable {
     /// `zend_register_ini_entries` over the core table `core`, each name
-    /// beside its value, then each extension's declarations, each
-    /// entry's `on_modify` the first extension's that gave one.
+    /// beside its value, then each extension's declarations, the bundle
+    /// `extensions` numbered from 1 as `module_registry` numbers it past
+    /// `Core`, each entry's `on_modify` the first extension's that gave
+    /// one.
     pub(crate) fn register(
         core: impl Iterator<Item = (Vec<u8>, Option<Vec<u8>>)>,
         extensions: &[ExtensionEntry],
@@ -57,7 +59,7 @@ impl IniTable {
                 on_modify: None,
             })
             .collect();
-        for (extension, entry) in extensions.iter().enumerate() {
+        for (extension, entry) in (1..).map(ExtensionId::at).zip(extensions) {
             rows.extend(entry.ini.iter().enumerate().map(|(at, decl)| Directive {
                 name: decl.name.0.to_vec(),
                 value: decl.default.as_deref().map(<[u8]>::to_vec),
@@ -69,7 +71,7 @@ impl IniTable {
             names: Names::over(&rows),
             rows,
         };
-        for (extension, entry) in extensions.iter().enumerate() {
+        for (extension, entry) in (1..).map(ExtensionId::at).zip(extensions) {
             for (name, handler) in &entry.on_modify {
                 if let Some(row) = table.find_mut(name)
                     && row.on_modify.is_none()
