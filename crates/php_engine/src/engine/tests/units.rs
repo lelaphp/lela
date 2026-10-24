@@ -251,10 +251,13 @@ fn a_kept_unit_is_read_back_by_the_next_engine_and_another_builds_is_not() {
 }
 
 /// What compiling a file raised is raised on every request that
-/// serves it, the cache hit as the miss, in the unit's own file and
-/// at the compiler's line, before the op array writes anything: what
-/// the oracle does with no cache, and what opcache does on a hit
-/// with `opcache.record_warnings` on. `error_reporting` set from
+/// serves it where php serves it without opcache, the CLI's default
+/// (`opcache.enable_cli` off, so the unit cache's validation is
+/// `EveryHit` and no load is opcache's hit): in the unit's own file and
+/// at the compiler's line, before the op array writes anything, the
+/// second request as the first. Under opcache with
+/// `opcache.record_warnings` off a hit raises none of it, which
+/// `note_compiled`'s witness holds (#3123). `error_reporting` set from
 /// the ini masks it as it masks a runtime warning, since the path
 /// is one.
 #[test]

@@ -6180,6 +6180,33 @@ struct Laid<'a> {
 /// (`Z/ext/opcache/ZendAccelerator.c:1941`), so one made just in time is
 /// in `EG(symbol_table)` before the unit's first line, where the file
 /// names it and whether or not the line that names it is reached.
+///
+/// A file opcache serves from what it holds raises none of them while
+/// `opcache.record_warnings` is off, its default, since the compile that
+/// put it there raised them and opcache kept none; with the entry on,
+/// every hit raises them again, and without opcache, the CLI's default,
+/// every compile raises them (#3123, as #3234's rule takes it): one file
+/// included twice under each.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/w3123-' . getmypid();
+/// mkdir($dir);
+/// file_put_contents("$dir/lib.php", '<?php $f = function (int $x = null) { return $x; };');
+/// touch("$dir/lib.php", time() - 10);
+/// file_put_contents("$dir/main.php", '<?php include __DIR__ . "/lib.php"; include __DIR__ . "/lib.php"; echo "done\n";');
+/// foreach ([[], ['-d', 'opcache.enable_cli=1'], ['-d', 'opcache.enable_cli=1', '-d', 'opcache.record_warnings=1']] as $ini) {
+///     $p = proc_open([PHP_BINARY, '-n', '-d', 'error_reporting=-1', '-d', 'display_errors=1', '-d', 'opcache.file_update_protection=0', ...$ini, "$dir/main.php"], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///     $out = stream_get_contents($pipes[1]);
+///     fclose($pipes[1]); fclose($pipes[2]); proc_close($p);
+///     echo substr_count($out, 'Deprecated:'), ' ', str_ends_with($out, "done\n") ? 'done' : 'not done', "\n";
+/// }
+/// unlink("$dir/lib.php"); unlink("$dir/main.php"); rmdir($dir);
+/// ```
+/// ```expect process
+/// 2 done
+/// 1 done
+/// 2 done
+/// ```
 pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: SourceKind) -> bool {
     // A request-only unit's names, which php's compile made as strings
     // of the request, an `eval`'s and an uncached file's alike; the
@@ -6215,7 +6242,14 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
         SourceKind::File => Some(req.begin_recording()),
         SourceKind::Eval(_) => None,
     };
-    for raised in &unit.diagnostics {
+    // `opcache.record_warnings` off, php's default, keeps no compile's
+    // diagnostics with the script, so a hit raises none of them
+    // (`zend_accel_load_script` replays `persistent_script->warnings`
+    // only where the entry recorded them); the compile that put the
+    // script in the cache raised them, and a request php serves without
+    // the cache compiles and raises them each time.
+    let replayed = !req.accel_hit(unit) || req.ini_flag(b"opcache.record_warnings");
+    for raised in unit.diagnostics.iter().filter(|_| replayed) {
         req.note_error_in(
             raised.level,
             &raised.message,

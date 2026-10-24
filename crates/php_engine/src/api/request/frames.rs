@@ -2240,6 +2240,17 @@ impl Request {
         self.vm.stack.pop_frame(&mut self.heap);
     }
 
+    /// The call `call`'s owner of the `Closure` it was made through,
+    /// taken off its header, which holds none from here, so the call's
+    /// pop gives up no owner of it: `zend_closure_from_frame`'s
+    /// `RETURN_OBJ(ZEND_CLOSURE_OBJECT(mptr))`, which hands the frame's
+    /// owner on as the closure `CALLABLE_CONVERT` writes, where
+    /// `zend_vm_stack_free_call_frame` then frees the frame alone. None
+    /// for a call made through no closure.
+    pub(crate) fn take_call_closure(&mut self, call: FrameRef) -> Option<PhpObject> {
+        self.vm.at_mut(call)?.closure.take()
+    }
+
     /// [`Request::pop_call`] of a call that carries a receiver, a
     /// closure or an annex, each given up after the arguments.
     #[inline(never)]

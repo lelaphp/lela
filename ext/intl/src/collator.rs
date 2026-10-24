@@ -16,7 +16,7 @@ use php_ext::decl::Name;
 use php_ext::raising::{Thrown, fatal, throw_error, warning};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, zend_sort};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, SortAlgorithm, Value, zend_sort};
 
 use crate::error::{self, Carrier, IntlError};
 use crate::ffi::collator::{Collator as Coll, is_space};
@@ -550,15 +550,23 @@ fn sort(
         )?;
         return Ok(false);
     }
-    let mut sorted = given.copy(req)?;
-    let answer = sorted.sort_by(req, renumber, |req, (_, a), (_, b)| match flags {
-        2 => numerically(req, a, b),
-        1 => {
-            let (x, y) = (string_of(req, a)?, string_of(req, b)?);
-            Ok(strcoll(req, object, &x, &y))
-        }
-        _ => regular(req, object, a, b),
-    });
+    let sorted = given.copy(req)?;
+    // `zend_hash_sort` over a copy the native holds alone, which no
+    // comparison here writes, so the view sorts the owner's table.
+    let mut table = *sorted;
+    let answer = table.sort_by(
+        req,
+        SortAlgorithm::Hash,
+        renumber,
+        |req, (_, a), (_, b)| match flags {
+            2 => numerically(req, a, b),
+            1 => {
+                let (x, y) = (string_of(req, a)?, string_of(req, b)?);
+                Ok(strcoll(req, object, &x, &y))
+            }
+            _ => regular(req, object, a, b),
+        },
+    );
     array.set(req, sorted)?;
     answer.map(|()| true)
 }

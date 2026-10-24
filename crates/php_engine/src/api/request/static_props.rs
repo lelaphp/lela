@@ -402,7 +402,9 @@ impl Request {
                 return Err(thrown);
             }
         };
-        self.set_static_slot(info, name, value, strict)
+        // `zend_update_static_property_ex`'s `zend_assign_to_variable(...,
+        // IS_TMP_VAR, ...)` over the owner it took of the value.
+        self.set_static_slot(info, name, value, (strict, php_unit::OperandKind::Tmp))
             .map(|(_, garbage)| self.release(garbage))
     }
 
@@ -431,7 +433,7 @@ impl Request {
         info: PropertyInfo,
         name: &[u8],
         mut value: Value,
-        strict: bool,
+        (strict, handed): (bool, php_unit::OperandKind),
     ) -> Result<(Value, Value), Thrown> {
         let declaring = info.declaring;
         // `zend_verify_property_type`: the value held to the declared
@@ -467,7 +469,16 @@ impl Request {
         if let Some(cell) = self.static_slot_cell(info)
             && cell.heap().sources() != 0
         {
-            if let Err(thrown) = self.assign_to_reference(cell.heap(), value, strict) {
+            // `zend_assign_to_typed_prop` hands its copy on as
+            // `IS_TMP_VAR`; an untyped slot is `zend_assign_to_variable_ex`
+            // over the operand as it came.
+            let typed = self.property_decl(info).is_some_and(|p| p.ty.is_some());
+            let handed = if typed {
+                php_unit::OperandKind::Tmp
+            } else {
+                handed
+            };
+            if let Err(thrown) = self.assign_to_reference(cell.heap(), value, strict, handed) {
                 self.release(garbage);
                 return Err(thrown);
             }

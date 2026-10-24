@@ -1423,13 +1423,16 @@ fn inline_init_closure(
 }
 
 /// What a dynamic call resolved to: the callee, the name the call frame
-/// carries for a method, the receiver it holds one owner of, the called
-/// scope, and the closure the frame holds one owner of, with whether it
-/// reads a runtime cache of its own ([`crate::classes::ClosureCache`]).
+/// carries for a method, the receiver, the called scope, and the closure
+/// the frame holds one owner of, with whether it reads a runtime cache of
+/// its own ([`crate::classes::ClosureCache`]). The receiver is one owner
+/// the call holds (`ZEND_CALL_RELEASE_THIS`), except a closure's bound
+/// one, which the closure the call holds keeps, so the call is lent it
+/// (`ZEND_CALL_CLOSURE | ZEND_CALL_HAS_THIS`).
 struct DynamicTarget {
     function: Function,
     name: Option<PhpString>,
-    this: Option<PhpObject>,
+    receiver: Option<exec::Receiver>,
     called_scope: Option<crate::api::values::ClassId>,
     closure: Option<(PhpObject, bool)>,
 }
@@ -1451,7 +1454,7 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         return Ok(DynamicTarget {
             function: made.function,
             name: None,
-            this: made.this,
+            receiver: made.this.map(exec::Receiver::Owned),
             called_scope: made.called_scope,
             closure: None,
         });
@@ -1474,18 +1477,37 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
     Ok(DynamicTarget {
         function,
         name: Some(name),
-        this,
+        receiver: this.map(exec::Receiver::Owned),
         called_scope: Some(class),
         closure: None,
     })
 }
 
-/// `zend_closure_get_closure` with `GC_ADDREF` of the closure and its
-/// receiver: what a call through `object`, a `Closure`, takes, the
-/// payload read once for the function, the receiver, the called scope
-/// and whether it reads a runtime cache of its own, as php's
-/// `get_closure` hands `fbc` and the object over in one call. None for
-/// an object that is no closure, with nothing touched.
+/// `zend_closure_get_closure` with `GC_ADDREF` of the closure: what a
+/// call through `object`, a `Closure`, takes, the payload read once for
+/// the function, the receiver, the called scope and whether it reads a
+/// runtime cache of its own, as php's `get_closure` hands `fbc` and the
+/// object over in one call. None for an object that is no closure, with
+/// nothing touched. The receiver is lent: the closure the call holds
+/// keeps it, so php sets `ZEND_CALL_HAS_THIS` without
+/// `ZEND_CALL_RELEASE_THIS` and takes no owner of it, and letting the
+/// call go offers it no root. Nor can the closure go while it runs, so a
+/// closure that lets go of its last name inside its own body still reads
+/// its receiver:
+///
+/// ```php
+/// class A {
+///     public $x = 'x';
+///     function m() { $c = function () {}; gc_collect_cycles(); $c(); return gc_status()['roots']; }
+///     function n() { $c = function () use (&$c) { $c = null; return $this->x; }; return $c(); }
+/// }
+/// $a = new A;
+/// var_dump($a->m(), $a->n());
+/// ```
+/// ```expect
+/// int(1)
+/// string(1) "x"
+/// ```
 fn closure_target(req: &Request, object: PhpObject) -> Option<DynamicTarget> {
     let closure = object.native::<crate::classes::ClosureObject>(req)?;
     let (function, this, called_scope) = (
@@ -1495,13 +1517,10 @@ fn closure_target(req: &Request, object: PhpObject) -> Option<DynamicTarget> {
     );
     let own_cache = matches!(closure.cache, crate::classes::ClosureCache::Own(_));
     req.addref(&object.as_value());
-    if let Some(this) = this {
-        req.addref(&this.as_value());
-    }
     Some(DynamicTarget {
         function,
         name: None,
-        this,
+        receiver: this.map(exec::Receiver::lent),
         called_scope,
         closure: Some((object, own_cache)),
     })
@@ -1536,7 +1555,7 @@ fn dynamic_call_string(
     Ok(DynamicTarget {
         function,
         name: None,
-        this: None,
+        receiver: None,
         called_scope: None,
         closure: None,
     })
@@ -1643,7 +1662,7 @@ fn dynamic_call_array(
     Ok(DynamicTarget {
         function,
         name: Some(method),
-        this,
+        receiver: this.map(exec::Receiver::Owned),
         called_scope: Some(object.class()),
         closure: None,
     })
@@ -1704,7 +1723,7 @@ fn dynamic_call_static(
     Ok(DynamicTarget {
         function,
         name: Some(method),
-        this: None,
+        receiver: None,
         called_scope: Some(class),
         closure: None,
     })
@@ -2975,7 +2994,7 @@ fn push_dynamic(
 /// scope, and whether the closure reads a cache of its own.
 fn dynamic_header(target: &DynamicTarget, count: u32) -> exec::Header {
     let mut header = exec::Header::call(target.function, count);
-    header.set_receiver(target.this.map(exec::Receiver::Owned));
+    header.set_receiver(target.receiver);
     header.set_called_scope(target.called_scope);
     header.closure = target.closure.map(|(closure, _)| closure);
     header.info.set_dynamic(true);
@@ -2998,7 +3017,7 @@ fn user_call_target(
         crate::api::call::Target::Function(function) => Ok(DynamicTarget {
             function,
             name: None,
-            this: None,
+            receiver: None,
             called_scope: None,
             closure: None,
         }),
@@ -3014,7 +3033,7 @@ fn user_call_target(
             Ok(DynamicTarget {
                 function,
                 name: Some(name),
-                this,
+                receiver: this.map(exec::Receiver::Owned),
                 called_scope: Some(scope),
                 closure: None,
             })
@@ -4944,6 +4963,23 @@ pub(crate) fn verify_never_type<T: Tier>(
 /// called scope, a private method reached from its own class, and a
 /// closure called through `$f(...)` or `->__invoke(...)` itself.
 ///
+/// A call made through a closure hands its owner of the closure on to
+/// the operand the opline writes, so letting the call go gives up no owner of it and offers
+/// the cycle collector no root:
+///
+/// ```php
+/// function t() {
+///     $c = static function ($a) {};
+///     $x = $c(...);
+///     var_dump($x === $c, gc_status()['roots']);
+/// }
+/// t();
+/// ```
+/// ```expect
+/// bool(true)
+/// int(0)
+/// ```
+///
 /// ```php
 /// class P {
 ///     private function hidden($x) { return "hidden$x"; }
@@ -5023,20 +5059,28 @@ pub(crate) fn callable_convert<T: Tier>(
     _: &OpArray,
     op: &Opline,
 ) -> Edge {
-    let Some(call) = req.building_call().and_then(|call| req.frame_at(call)) else {
+    let Some(at) = req.building_call() else {
         return Err(Fatal::error(
             "InternalError: ZEND_CALLABLE_CONVERT with no call frame under it",
         ));
     };
-    let callee = match call.closure() {
-        Some(closure) => crate::classes::CallFrame::Closure(closure),
-        None => crate::classes::CallFrame::Callee {
+    // `RETURN_OBJ(ZEND_CLOSURE_OBJECT(mptr))`: a call made through a
+    // closure hands its owner of it on to what the opline writes.
+    let made = if let Some(closure) = req.take_call_closure(at) {
+        Ok(closure)
+    } else {
+        let Some(call) = req.frame_at(at) else {
+            return Err(Fatal::error(
+                "InternalError: ZEND_CALLABLE_CONVERT with no call frame under it",
+            ));
+        };
+        let callee = crate::classes::CallFrame::Callee {
             function: call.callee(),
             this: call.this(),
             called_scope: call.called_scope(),
-        },
+        };
+        crate::classes::closure_from_frame(req, callee)
     };
-    let made = crate::classes::closure_from_frame(req, callee);
     // `OBJ_RELEASE(Z_OBJ(call->This))` where `ZEND_CALL_RELEASE_THIS`,
     // and `zend_vm_stack_free_call_frame`.
     req.pop_call();
@@ -9768,8 +9812,8 @@ impl FetchFlag {
 
 /// `ZEND_FETCH_REF` and `ZEND_FETCH_DIM_WRITE`
 /// (`Z/Zend/zend_compile.h:1089-1096`).
-const FETCH_REF: u32 = 1;
-const FETCH_DIM_WRITE: u32 = 2;
+pub(crate) const FETCH_REF: u32 = 1;
+pub(crate) const FETCH_DIM_WRITE: u32 = 2;
 /// `MAY_BE_ARRAY` (`Z/Zend/zend_type_info.h`).
 const MAY_BE_ARRAY: u32 = 1 << 7;
 
@@ -13174,7 +13218,7 @@ fn assigned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> 
     // php copies into `result` what the write landed, which a typed
     // cell may have converted, so the copy is after the write and not
     // before it.
-    let (landed, garbage) = match assign_to_place(req, frame, at, value) {
+    let (landed, garbage) = match assign_to_place(req, frame, at, (value, op.op2_type)) {
         Ok(pair) => pair,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -13382,7 +13426,8 @@ fn assigned_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
     // [`assign_to_place`] does under the frame's own regime (#496).
     // What landed is what `result` takes, so the copy is after the
     // write and not before it.
-    let (landed, garbage) = match assign_to_place(req, frame, at, stepped) {
+    // `zend_binary_assign_op_typed_ref` moves what it made in.
+    let (landed, garbage) = match assign_to_place(req, frame, at, (stepped, OperandKind::Unused)) {
         Ok(pair) => pair,
         Err(thrown) => return threw(req, frame, &thrown),
     };
@@ -13539,7 +13584,10 @@ pub(crate) fn assign_ref<T: Tier>(
         }
         let value = held.undef_as_null();
         req.addref(&value);
-        let (landed, garbage) = match assign_to_place(req, frame, target, value) {
+        // `zend_wrong_assign_to_variable_reference`: one more owner, handed
+        // on as `IS_TMP_VAR`.
+        let (landed, garbage) = match assign_to_place(req, frame, target, (value, OperandKind::Tmp))
+        {
             Ok(pair) => pair,
             Err(thrown) => return threw(req, frame, &thrown),
         };
@@ -13725,7 +13773,8 @@ pub(crate) fn assign_obj_ref<T: Tier>(
         }
         let value = held.undef_as_null();
         req.addref(&value);
-        let (landed, garbage) = match assign_to_place(req, frame, place, value) {
+        let (landed, garbage) = match assign_to_place(req, frame, place, (value, OperandKind::Tmp))
+        {
             Ok(pair) => pair,
             Err(thrown) => return threw(req, frame, &thrown),
         };
@@ -14337,7 +14386,7 @@ fn assigned_obj(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
     let written = match (member.name(req, frame, code, op), container.as_object()) {
         (Ok(name), Some(object)) => {
             prime_constant(req, frame, op, property_cache_slot(op), object, &name);
-            match assign_property(req, frame, op, object, &name, value) {
+            match assign_property(req, frame, op, object, &name, (value, data.op1_type)) {
                 Ok(written) => written,
                 Err(fatal) => {
                     if let Some(held) = guard {
@@ -14398,7 +14447,7 @@ fn assign_property(
     op: &Opline,
     object: crate::api::values::PhpObject,
     name: &Value,
-    value: Value,
+    (value, handed): (Value, OperandKind),
 ) -> Result<Result<(), Thrown>, Fatal> {
     let bytes = name.as_str_bytes().unwrap_or_default();
     // A lazy object takes the write through `write_property`, which is
@@ -14479,7 +14528,9 @@ fn assign_property(
                 Ok(value) => value,
                 Err(thrown) => return Ok(Err(thrown)),
             };
-            match req.assign_declared_slot(object.heap(), slot, value, strict) {
+            // `zend_assign_to_typed_prop` hands its copy on as
+            // `IS_TMP_VAR` whatever the `OP_DATA` was.
+            match req.assign_declared_slot(object.heap(), slot, value, (strict, OperandKind::Tmp)) {
                 Ok(pair) => landed_out(req, frame, op, pair),
                 Err(thrown) => return Ok(Err(thrown)),
             }
@@ -14493,7 +14544,7 @@ fn assign_property(
         Some((slot, false)) => {
             let strict = req.frame_strict_types(frame);
             Ok(req
-                .assign_declared_slot(object.heap(), slot, value, strict)
+                .assign_declared_slot(object.heap(), slot, value, (strict, handed))
                 .map(|pair| landed_out(req, frame, op, pair)))
         }
         None => {
@@ -14700,7 +14751,7 @@ pub(crate) fn assign_static_prop<T: Tier>(
     // is not strict, and php's `TypeError` where it neither satisfies
     // nor coerces. `RETURN_VALUE_USED` copies what landed, after it.
     let strict = req.frame_strict_types(frame);
-    match req.set_static_slot(info, &name, value, strict) {
+    match req.set_static_slot(info, &name, value, (strict, data_type)) {
         Ok(pair) => landed_out(req, frame, op, pair),
         Err(thrown) => return threw(req, frame, &thrown),
     }
@@ -15251,7 +15302,10 @@ pub(crate) fn assign_static_prop_op<T: Tier>(
         .static_slot_cell(info)
         .filter(|cell| !req.ref_type_sources(cell.heap()).is_empty())
     {
-        if let Err(thrown) = req.assign_to_reference(cell.heap(), stepped, strict) {
+        // `zend_binary_assign_op_typed_ref` moves what it made in.
+        if let Err(thrown) =
+            req.assign_to_reference(cell.heap(), stepped, strict, OperandKind::Unused)
+        {
             return threw(req, frame, &thrown);
         }
         write_out(req, frame, op, &cell.get());
@@ -15738,11 +15792,34 @@ pub(crate) fn assign_static_prop_ref<T: Tier>(
 /// }
 /// NULL
 /// ```
+///
+/// A `Tmp` or `Var` value is copied into such a cell and the operand's
+/// own owner given up after it, which leaves what landed a possible root
+/// (`zend_assign_to_typed_ref_ex`, [`Request::assign_to_reference`]);
+/// `ASSIGN`, `ASSIGN_DIM` and `ASSIGN_STATIC_PROP` alike:
+///
+/// ```php
+/// class P { public array $path = []; public static array $s = []; }
+/// function t() {
+///     $p = new P; $id = 'x'; $q = &$p->path; $a = [0]; $a[0] = &$p->path; $r = &P::$s;
+///     gc_collect_cycles(); $q = [$id]; $one = gc_status()['roots'];
+///     gc_collect_cycles(); $a[0] = [$id]; $two = gc_status()['roots'];
+///     gc_collect_cycles(); P::$s = [$id]; $three = gc_status()['roots'];
+///     var_dump($one, $two, $three, $p->path === $a[0]);
+/// }
+/// t();
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// int(1)
+/// bool(true)
+/// ```
 fn assign_to_place(
     req: &mut Request,
     frame: FrameRef,
     at: php_heap::ZvalRef,
-    value: Value,
+    (value, handed): (Value, OperandKind),
 ) -> Result<(Value, Value), Thrown> {
     let mut at = at;
     let mut held = Value::of_slot(at.read());
@@ -15753,6 +15830,12 @@ fn assign_to_place(
             let strict = req.frame_strict_types(frame);
             let verdict = crate::ops::verify_ref_assignable(req, cell.heap(), &value, strict);
             value = crate::ops::landed(req, value, verdict)?;
+            // `zend_assign_to_typed_ref_ex`'s `i_zval_ptr_dtor_noref` of a
+            // `Tmp` or `Var` operand after its copy landed
+            // ([`Request::assign_to_reference`]).
+            if matches!(handed, OperandKind::Tmp | OperandKind::Var) {
+                req.memory_mut().gc_possible_root(&value);
+            }
         }
         at = cell.heap().val_ref();
         held = Value::of_slot(at.read());
@@ -16225,7 +16308,7 @@ fn assigned_dim(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline)
             match landing {
                 Ok(Landing::Entry(entry)) => {
                     let value = exec::take_operand(req, frame, code, data.op1_type, data.op1);
-                    match assign_to_place(req, frame, entry, value) {
+                    match assign_to_place(req, frame, entry, (value, data.op1_type)) {
                         Ok((landed, garbage)) => {
                             write_out(req, frame, op, &landed);
                             req.release(garbage);
@@ -16907,7 +16990,7 @@ fn stepped_entry(
     };
     // `EX_USES_STRICT_TYPES()`: the regime of the frame the opline
     // stands in.
-    let (landed, garbage) = assign_to_place(req, frame, entry, stepped)?;
+    let (landed, garbage) = assign_to_place(req, frame, entry, (stepped, OperandKind::Unused))?;
     write_out(req, frame, op, &landed);
     release_overwritten(req, garbage);
     Ok(())
@@ -17435,6 +17518,28 @@ fn withheld_step(
 /// int(4)
 /// int(0)
 /// ```
+///
+/// A readonly property hands out no place, so its compound assignment
+/// is the pair of handlers, and the write locks the property again: in
+/// `__clone` the first one reinitialises it and the second is refused,
+/// as `Zend/tests/readonly_props/readonly_clone_error4.phpt` holds.
+///
+/// ```php
+/// class Foo {
+///     public function __construct(public readonly int $bar, public readonly string $s = 'a') {}
+///     public function __clone() { $this->bar += 2; var_dump($this->bar); $this->bar += 3; }
+/// }
+/// class Bar extends Foo { public function __clone() { $this->s .= 'b'; var_dump($this->s); $this->s .= 'c'; } }
+/// foreach ([new Foo(1), new Bar(1)] as $o) {
+///     try { clone $o; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// int(3)
+/// Cannot modify readonly property Foo::$bar
+/// string(2) "ab"
+/// Cannot modify readonly property Foo::$s
+/// ```
 fn step_property(
     req: &mut Request,
     frame: FrameRef,
@@ -17516,15 +17621,27 @@ fn step_property(
             };
             let silent = req.serves_accessor(object.class(), crate::api::request::Accessor::Get);
             match req.declared_slot_for_write(object, bytes, "modify", silent) {
-                Ok(Some((slot, typed))) => step_slot(
-                    req,
-                    frame,
-                    code,
-                    step,
-                    (object, slot, typed),
-                    bytes,
-                    Some(precomputed),
-                ),
+                Ok(Some((slot, typed))) => {
+                    let written = step_slot(
+                        req,
+                        frame,
+                        code,
+                        step,
+                        (object, slot, typed),
+                        bytes,
+                        Some(precomputed),
+                    )?;
+                    // `zend_std_write_property`'s `Z_PROP_FLAG_P(variable_ptr)
+                    // &= ~IS_PROP_REINITABLE`: the write
+                    // `zend_assign_op_overloaded_property` makes locks a
+                    // readonly property `__clone` reinitialised again.
+                    if written.is_ok() {
+                        object
+                            .heap()
+                            .set_slot_bit(slot, php_heap::PropBit::Reinitable, false);
+                    }
+                    Ok(written)
+                }
                 Ok(None) => {
                     req.release(precomputed);
                     Err(Fatal::error(
@@ -18611,7 +18728,7 @@ fn incdec_property(
     req.release(held);
     let strict = req.frame_strict_types(frame);
     Ok(req
-        .assign_declared_slot(object.heap(), slot, landed, strict)
+        .assign_declared_slot(object.heap(), slot, landed, (strict, OperandKind::Unused))
         .map(|(_, garbage)| req.release(garbage)))
 }
 
@@ -18685,7 +18802,8 @@ fn typed_step(
         // caller took to `zend_incdec_typed_ref` first, so the store is
         // the property's own.
         let strict = req.frame_strict_types(frame);
-        let stored = req.assign_declared_slot(object.heap(), slot, limit, strict);
+        let stored =
+            req.assign_declared_slot(object.heap(), slot, limit, (strict, OperandKind::Unused));
         return Ok(stored
             .map(|(_, garbage)| req.release(garbage))
             .and(Err(thrown)));
@@ -25373,7 +25491,8 @@ pub(crate) fn catch<T: Tier>(
             // 1)`: a cell a typed property is a source of takes the
             // throwable only where every type holds it, with no
             // coercion, and refuses it with php's `TypeError` otherwise.
-            if let Err(thrown) = req.assign_to_reference(cell.heap(), value, true) {
+            if let Err(thrown) = req.assign_to_reference(cell.heap(), value, true, OperandKind::Tmp)
+            {
                 return threw(req, frame, &thrown);
             }
         } else {
