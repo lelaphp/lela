@@ -1514,7 +1514,23 @@ fn free_stmt_content(req: &mut Request, stmt: &mut StmtData) {
 
 /// `mysqlnd_stmt::close_on_server`: the rows on the line read off, the
 /// statement closed with `COM_STMT_CLOSE` while the connection is ready,
-/// counted by how often it ran.
+/// counted by how often it ran; a close the server did not take is
+/// `false` after the statement's rows are freed as for one it took:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = new mysqli('127.0.0.1', 'root', '', 'test');
+/// $stmts = [];
+/// for ($i = 0; $i < 20; $i++) { $stmts[] = $l->prepare('DO 1'); }
+/// $l->query('KILL ' . $l->thread_id);
+/// do { array_pop($stmts); usleep(1000); } while ($stmts && !$l->errno);
+/// echo "done\n";
+/// ```
+/// ```expect mysql
+///
+/// Warning: main(): Error occurred while closing statement in %s on line 7
+/// done
+/// ```
 fn close_on_server(
     req: &mut Request,
     stmt: &mut StmtData,
@@ -1522,6 +1538,7 @@ fn close_on_server(
     implicit: bool,
 ) -> Result<bool, Thrown> {
     empty_errors(req, stmt, conn);
+    let mut closed = true;
     loop {
         if stmt.state == StmtState::WaitingUseOrStore {
             run_handler(req, stmt, conn)?;
@@ -1543,11 +1560,10 @@ fn close_on_server(
             },
             1,
         );
-        if conn.state == ConnState::Ready
-            && !conn.send_command(req, Com::StmtClose, &stmt.stmt_id.to_le_bytes(), false)?
-        {
-            stmt.error.copy_from(req, &conn.error)?;
-            return Ok(false);
+        // A close the server did not take is the answer, after the rest
+        // is released as for one it took.
+        if conn.state == ConnState::Ready {
+            closed = conn.send_command(req, Com::StmtClose, &stmt.stmt_id.to_le_bytes(), false)?;
         }
     }
     match stmt.execute_count {
@@ -1558,5 +1574,5 @@ fn close_on_server(
     if let Some(result) = stmt.result.take() {
         result.free(req, conn, true)?;
     }
-    Ok(true)
+    Ok(closed)
 }
