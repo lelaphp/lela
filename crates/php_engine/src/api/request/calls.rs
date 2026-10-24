@@ -457,16 +457,7 @@ impl Request {
         let call = match self.push_call(header) {
             Ok(call) => call,
             Err(fatal) => {
-                for argument in sent {
-                    self.release(argument);
-                }
-                self.release_named(extra_named);
-                if let Some(receiver) = receiver {
-                    self.give_up_receiver(receiver);
-                }
-                if let Some(closure) = closure {
-                    self.release(closure.as_value());
-                }
+                self.give_up_unpushed(sent, extra_named, receiver, closure);
                 return self.fatal_of(Err(fatal));
             }
         };
@@ -480,8 +471,10 @@ impl Request {
         {
             annex.extra_named = extra_named;
         }
-        // The trampoline's record, made once its call stands, as php makes
-        // it before the call (`zend_get_property_hook_trampoline`).
+        // The trampoline's record, made once its call stands, where php
+        // makes it before the call (`zend_get_property_hook_trampoline`):
+        // only the memory limit could tell the two orders apart, and its
+        // fatal ends the request either way.
         if let Carried::HookTrampoline(property, kind) = carried {
             match self.hook_trampoline(property, kind) {
                 Ok(built) => self.carry_trampoline(call, built),
@@ -511,6 +504,28 @@ impl Request {
         let served = self.serve_native(function, OnThrow::ReturnValue);
         self.pop_call();
         self.checked_after_call(served)
+    }
+
+    /// What [`Request::serve_call_body`] took for a call whose frame
+    /// `zend_vm_stack_push_call_frame` refused, given back: each argument,
+    /// the extra named ones, the receiver and the closure.
+    fn give_up_unpushed(
+        &mut self,
+        sent: Vec<Value>,
+        extra_named: exec::ExtraNamed,
+        receiver: Option<exec::Receiver>,
+        closure: Option<PhpObject>,
+    ) {
+        for argument in sent {
+            self.release(argument);
+        }
+        self.release_named(extra_named);
+        if let Some(receiver) = receiver {
+            self.give_up_receiver(receiver);
+        }
+        if let Some(closure) = closure {
+            self.release(closure.as_value());
+        }
     }
 
     /// `zend_call_function`'s check after its callee returns, a native
