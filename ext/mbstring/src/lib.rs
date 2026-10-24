@@ -261,7 +261,7 @@ fn info(req: &mut Request) {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// <tr class="h"><th>mbstring extension makes use of "streamable kanji code filter and converter", which is distributed under the GNU Lesser General Public License version 2.1.</th></tr>

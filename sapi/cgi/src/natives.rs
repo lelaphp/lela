@@ -95,7 +95,7 @@ impl Row {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// <h2><a name="module_cgi-fcgi" href="#module_cgi-fcgi">cgi-fcgi</a></h2>
@@ -182,7 +182,7 @@ fn extension() -> Extension {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// NULL
@@ -214,7 +214,7 @@ fn apache_child_terminate(req: &mut Request) {
 /// p=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// Array
@@ -248,7 +248,7 @@ fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// X-Robots-Tag : noindex
 /// Bad-header
 ///  :
@@ -256,7 +256,7 @@ fn apache_request_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> 
 ///
 /// Array
 /// (
-///     [X-Powered-By] => PHP/8.5.9
+///     [X-Powered-By] => PHP/8.5.12
 ///     [X-Robots-Tag] => noindex
 /// )
 /// ```
@@ -279,7 +279,7 @@ fn apache_response_headers(req: &mut Request) -> Result<Owner<PhpArray>, Thrown>
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// bool(false)

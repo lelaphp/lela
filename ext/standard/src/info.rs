@@ -642,7 +642,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// <!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "DTD/xhtml1-transitional.dtd">
@@ -679,7 +679,7 @@ fn print_info(req: &mut Request, flag: i64) -> Result<(), Thrown> {
 ///   hr {background-color: #505153}
 /// }
 /// </style>
-/// <title>PHP 8.5.9 - phpinfo()</title><meta name="ROBOTS" content="NOINDEX,NOFOLLOW,NOARCHIVE" /></head>
+/// <title>PHP 8.5.12 - phpinfo()</title><meta name="ROBOTS" content="NOINDEX,NOFOLLOW,NOARCHIVE" /></head>
 /// <body><div class="center">
 /// <h2>PHP License</h2>
 /// <table>
@@ -912,7 +912,7 @@ fn print_credits(req: &mut Request, flag: i64) {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// <h1>PHP Credits</h1>

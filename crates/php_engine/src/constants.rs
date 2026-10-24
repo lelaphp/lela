@@ -136,7 +136,7 @@ pub(crate) fn host_names(strings: &mut Strings, host: &str) -> Vec<(Box<[u8]>, Z
 /// var_dump(PHP_OUTPUT_HANDLER_STDFLAGS, \PHP_EOL === "\n");
 /// ```
 /// ```expect
-/// 8.5.9
+/// 8.5.12
 /// int(8)
 /// int(30719)
 /// int(9223372036854775807)
@@ -157,9 +157,9 @@ pub(crate) fn host_names(strings: &mut Strings, host: &str) -> Vec<(Box<[u8]>, Z
 /// ```expect
 /// int(8)
 /// int(5)
-/// int(9)
+/// int(12)
 /// string(0) ""
-/// int(80509)
+/// int(80512)
 /// bool(false)
 /// bool(false)
 /// bool(false)
@@ -264,9 +264,9 @@ pub(crate) mod startup {
     const PHP_VERSION: &str = crate::api::request::PHP_VERSION;
     const PHP_MAJOR_VERSION: i64 = 8;
     const PHP_MINOR_VERSION: i64 = 5;
-    const PHP_RELEASE_VERSION: i64 = 9;
+    const PHP_RELEASE_VERSION: i64 = 12;
     const PHP_EXTRA_VERSION: &str = "";
-    const PHP_VERSION_ID: i64 = 80509;
+    const PHP_VERSION_ID: i64 = 80512;
 
     /// `php_build_date`, this build's (`BuildDefs::date`).
     fn PHP_BUILD_DATE() -> String {
