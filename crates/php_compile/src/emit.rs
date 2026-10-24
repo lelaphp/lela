@@ -1538,14 +1538,12 @@ fn folded_const_expr(folded: Zval) -> Option<ConstExpr> {
     if folded.as_arr().is_some() {
         return UnitValue::new(folded).map(ConstExpr::UnitValue);
     }
-    Some(match folded.kind() {
-        ZvalType::Null => ConstExpr::Null,
-        ZvalType::False => ConstExpr::Bool(false),
-        ZvalType::True => ConstExpr::Bool(true),
-        ZvalType::Long => ConstExpr::long(folded.as_long()?),
-        ZvalType::Double => ConstExpr::Double(folded.as_double()?),
-        ZvalType::String => ConstExpr::Str(folded.as_str()?.bytes().into()),
-        _ => return None,
+    Some(match Scalar::of(&folded)? {
+        Scalar::Null => ConstExpr::Null,
+        Scalar::Bool(b) => ConstExpr::Bool(b),
+        Scalar::Long(n) => ConstExpr::long(n),
+        Scalar::Double(d) => ConstExpr::Double(d),
+        Scalar::Str(bytes) => ConstExpr::Str(bytes.into()),
     })
 }
 

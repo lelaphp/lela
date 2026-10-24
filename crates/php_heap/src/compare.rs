@@ -31,7 +31,7 @@ pub enum Scalar<'a> {
 }
 
 impl<'a> Scalar<'a> {
-    /// The scalar a zval is, read off its type byte once: a null, a
+    /// The scalar a zval is, by one match on its type byte: a null, a
     /// bool, a long, a double, or a string's bytes, borrowed for as long
     /// as the zval is ([`Zval::str_bytes`]). `None` for an array, an
     /// object, a resource, a reference, and a slot nothing wrote, which
@@ -39,7 +39,8 @@ impl<'a> Scalar<'a> {
     /// the array ([`constant_truth`], [`compare_constants`]), and the
     /// engine's inline tests leave each to the kernel.
     #[must_use]
-    #[inline]
+    #[inline(always)] // the engine's inline tests read it, and drop what they leave
+    #[allow(clippy::inline_always)]
     pub fn of(value: &'a Zval) -> Option<Scalar<'a>> {
         Some(match value.kind() {
             ZvalType::Null => Scalar::Null,
@@ -358,7 +359,7 @@ pub fn compare_constants(left: Zval, right: Zval, precision: i32) -> Ordering {
         (Some(a), Some(b)) => compare_tables(a, b, precision),
         (Some(a), None) => against_array(a, right.kind()).reverse(),
         (None, Some(b)) => against_array(b, left.kind()),
-        (None, None) => compare(scalar(&left), scalar(&right), precision),
+        (None, None) => compare(constant_scalar(&left), constant_scalar(&right), precision),
     }
 }
 
@@ -376,7 +377,7 @@ pub fn identical_constants(left: Zval, right: Zval) -> bool {
                         .zip(b.iter())
                         .all(|((k, v), (l, w))| k == l && identical_constants(v, w)))
         }
-        (None, None) => identical(scalar(&left), scalar(&right)),
+        (None, None) => identical(constant_scalar(&left), constant_scalar(&right)),
         _ => false,
     }
 }
@@ -457,7 +458,7 @@ pub fn constant_truth(value: Zval) -> Option<bool> {
 /// The scalar a constant table's value is, past the arrays its callers
 /// took first; no constant is anything else, and a slot nothing wrote
 /// reads as null.
-fn scalar(value: &Zval) -> Scalar<'_> {
+fn constant_scalar(value: &Zval) -> Scalar<'_> {
     Scalar::of(value).unwrap_or(Scalar::Null)
 }
 
