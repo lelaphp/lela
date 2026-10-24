@@ -4,7 +4,7 @@
 //! list it takes, each held to the record it wrote and to `dump` then
 //! `parse`; and the text form as a property over generated records.
 
-use php_engine::tier::{self, FuncRef, Sample};
+use php_engine::tier::{self, FuncRef, SafepointIdx, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, Opcode, OperandKind, OplineIdx};
 
@@ -352,6 +352,90 @@ fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
         _ => None,
     });
     assert_eq!(first, Some(body));
+    Ok(())
+}
+
+/// Whether php counts each loop of `a()` in `program`, in the order of
+/// their safepoints: its root reached from the entry ([`super::reached`]),
+/// as php's CFG finds a header there (`zend_cfg_identify_loops`).
+fn counted(program: &str) -> Result<Vec<bool>, String> {
+    let (recorded, _) = testing::records::recording(&at("a", "enter"), program)?;
+    let code = recorded
+        .view
+        .op_array(recorded.record.root)
+        .ok_or("the view holds a()")?;
+    Ok((code.safepoints.iter().enumerate().skip(1))
+        .filter(|(number, site)| !super::is_return_site(code, **site, *number))
+        .map(|(number, _)| {
+            let header = SafepointIdx(u32::try_from(number).unwrap_or(u32::MAX));
+            super::loop_root(code, header).is_some_and(|root| super::reached(code, root))
+        })
+        .collect())
+}
+
+/// A loop past each jump php's CFG draws an edge for is counted: the
+/// edges `reached` follows are each opline's `jump_targets`, the `JMP`'s,
+/// a conditional jump's and a short-circuit's, `JMP_SET`'s, `COALESCE`'s
+/// and `JMP_NULL`'s, `FE_RESET_*`'s past an empty array and
+/// `FE_FETCH_*`'s out of the loop, a table's cases and default, an
+/// `ASSERT_CHECK`'s, and a `FAST_CALL`'s into its `finally`, where the
+/// `try` that reaches it normally goes on past it (`ZEND_FAST_RET`'s
+/// block has no successor; the `FAST_CALL`'s next opline is one).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_past_each_jump_is_counted() -> Result<(), String> {
+    let past = |construct: &str| {
+        format!(
+            "class O {{ public $p = 1; }}
+            function a($n, $o, $u) {{ $s = 0; {construct}
+            for ($i = 0; $i < 2; $i++) {{ $s += $i; }} return $s; }}
+            echo a(1, new O, null), \"\\n\";"
+        )
+    };
+    for construct in [
+        "if ($n) { $s = 1; } else { $s = 2; }",
+        "$v = $n && $u; $w = $n || $u;",
+        "$v = $n ?: 1;",
+        "$v = $u ?? 1;",
+        "$v = $o?->p;",
+        "foreach ([] as $x) { $s += $x; }",
+        "switch ($n) { case 1: $s = 1; break; case 2: $s = 2; break; default: $s = 3; }",
+        "switch (\"$n\") { case 'a': $s = 1; break; case 'b': $s = 2; break; }",
+        "$s = match ($n) { 1 => 1, 2 => 2, default => 3 };",
+        // The program serves no `assert`, which `$n` keeps it from calling.
+        "$n || assert(false);",
+        "try { $s = 1; } finally { $s = 2; }",
+        "try { $s = 1; } catch (A $e) { $s = 2; } catch (B $e) { $s = 3; }",
+    ] {
+        let loops = counted(&past(construct))?;
+        assert_eq!(loops.last(), Some(&true), "past {construct}: {loops:?}");
+        assert!(
+            loops.iter().all(|counted| *counted),
+            "past {construct}: {loops:?}"
+        );
+    }
+    Ok(())
+}
+
+/// A loop reached through a `catch` alone is no loop php counts: one in
+/// the `catch`, and one past a `try` that always throws, where a `finally`
+/// the `try` reaches normally leaves the loops in it and past it counted
+/// (#3201).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_reached_through_a_catch_alone_is_not_counted() -> Result<(), String> {
+    let loops = counted(
+        "function a($n) {
+            try { if ($n) { throw new Exception('x'); } } catch (Exception $e) { for ($i = 0; $i < 2; $i++) {} }
+            try { $y = 1; } finally { for ($j = 0; $j < 2; $j++) {} }
+            for ($k = 0; $k < 2; $k++) {}
+            try { throw new Exception('y'); } catch (Exception $e) {}
+            for ($l = 0; $l < 2; $l++) {}
+            return 1;
+        }
+        echo a(0), \"\\n\";",
+    )?;
+    assert_eq!(loops, [false, true, true, false]);
     Ok(())
 }
 

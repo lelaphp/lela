@@ -907,6 +907,13 @@ pub(crate) fn hot(
                 (frame, stepped) = (header, true);
                 None
             }
+            // php's interpreter runs the header's own handler, which php
+            // never swapped, and writes no line: an inner loop's header, which a recording
+            // met, is always counted (`record::header_at`).
+            Ok(Begins::Uncounted) => {
+                policy::settle(claim, &Outcome::Uncounted);
+                return resumed(frame, stepped);
+            }
             Err(flow) => {
                 policy::settle(claim, &Outcome::Released);
                 return flow;
@@ -1058,13 +1065,16 @@ enum Begins {
     /// At a loop's condition the body was stepped on to
     /// (`record::headed`), in this frame.
     Stepped(FrameRef),
+    /// Nowhere: php counts no heat of the loop (`record::counts`), and
+    /// records it never.
+    Uncounted,
 }
 
 /// Where a loop's recording begins, where php's trace roots: its
 /// condition, behind the frame or past the body the back edge landed
-/// on, the header `claimed` holds; any other start's where the frame
-/// stands. A body that went another way on the way there is the flow to
-/// resume.
+/// on, the header `claimed` holds, or nowhere for a loop php counts no
+/// heat of; any other start's where the frame stands. A body that went
+/// another way on the way there is the flow to resume.
 fn begins(
     req: &mut Request,
     frame: FrameRef,
@@ -1075,6 +1085,9 @@ fn begins(
         return Ok(Begins::Stands);
     };
     let at = *at;
+    if !record::counts(req, frame, at) {
+        return Ok(Begins::Uncounted);
+    }
     if let Some(condition) = record::behind(req, frame, at) {
         return Ok(Begins::Behind(condition));
     }

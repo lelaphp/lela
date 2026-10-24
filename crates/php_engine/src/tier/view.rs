@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use php_link::LinkedClass;
 use php_unit::decl::Parameter;
-use php_unit::{CacheSlot, MapPtrOffset, OpArray, OplineIdx};
+use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::published::SEALED;
 use super::{FrameRef, Request, SafepointIdx, Word};
@@ -290,6 +290,38 @@ pub fn func(req: &Request, frame: FrameRef) -> Option<FuncRef> {
 fn held(req: &Request, frame: FrameRef) -> Option<&super::published::Func> {
     let header = req.vm().at(frame)?;
     own_row(req, header).or_else(|| row(req, req.served_op_array(frame)?.runtime_cache))
+}
+
+/// The oplines the opline at `at` of `code` may jump to, past falling
+/// through to the next one, as `zend_dump_op` prints them and
+/// `zend_build_cfg` draws its edges: each target of a `SWITCH_LONG`,
+/// `SWITCH_STRING` or `MATCH`'s table, its `CONST` `op2`, in the table's
+/// order, then the one field `zend_vm_opcodes_flags` shapes `JMP_ADDR`
+/// ([`php_unit::Opline::jump_target`]): `op1` for a `JMP` or a
+/// `FAST_CALL`, `op2` for a conditional jump, a `FE_RESET_*` or a `CATCH`
+/// that is not its try's last, and `extended_value` for a `FE_FETCH_*`
+/// or a table's default. None for an opline that jumps nowhere, and past
+/// the last.
+pub fn jump_targets(code: &OpArray, at: OplineIdx) -> impl Iterator<Item = OplineIdx> + use<'_> {
+    let op = code.oplines.get(at.0 as usize);
+    let table = op
+        .filter(|op| {
+            matches!(
+                op.opcode,
+                Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match
+            ) && op.op2_type == OperandKind::Const
+        })
+        .and_then(|op| code.literals.get(op.op2 as usize))
+        .and_then(|zval| zval.as_arr());
+    let cases = table.into_iter().flat_map(|table| {
+        table.iter().filter_map(|(_, target)| {
+            target
+                .as_long()
+                .and_then(|at| u32::try_from(at).ok())
+                .map(OplineIdx)
+        })
+    });
+    cases.chain(op.and_then(Opline::jump_target))
 }
 
 /// The landing word of opline `at` of the op array `frame` serves, what

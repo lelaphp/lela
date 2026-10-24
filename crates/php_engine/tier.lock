@@ -150,6 +150,7 @@ tier::frame_cache
 tier::free_operands
 tier::func
 tier::interrupted
+tier::jump_targets
 tier::laid
 tier::landing
 tier::native_returns

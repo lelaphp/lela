@@ -74,8 +74,8 @@ pub use sampled::{
     on_heap, sample, under_way,
 };
 pub use view::{
-    Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, frame_cache, func, landing,
-    running_func,
+    Epoch, FuncRef, Held, MapPtrRaw, UnitView, epoch, epoch_state, frame_cache, func, jump_targets,
+    landing, running_func,
 };
 
 pub use crate::api::values::ClassId;
