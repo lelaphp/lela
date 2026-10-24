@@ -1473,9 +1473,9 @@ impl DOMNode {
     fn cloneNode(
         req: &mut Request,
         this: This<Self>,
-        #[php(default = false)] guard: bool,
+        #[php(default = false)] deep: bool,
     ) -> Result<Untyped<Owner<Value>>, Thrown> {
-        clone_node_of(req, this.object(), guard).map(Untyped)
+        clone_node_of(req, this.object(), deep).map(Untyped)
     }
 
     /// `DOMNode::getLineNo(): int`.

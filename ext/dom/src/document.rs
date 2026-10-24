@@ -1006,7 +1006,7 @@ fn import_node(
     req: &mut Request,
     this: PhpObject,
     node_obj: PhpObject,
-    guard: bool,
+    deep: bool,
 ) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let node = fetch(req, node_obj)?;
@@ -1021,7 +1021,7 @@ fn import_node(
     if node.doc() == Some(doc) {
         return object_for(req, node, Some(this));
     }
-    let Some(copy) = crate::clone_node(node, Some(doc), guard) else {
+    let Some(copy) = crate::clone_node(node, Some(doc), deep) else {
         return Ok(Owner::bool(false));
     };
     if copy.kind() == Kind::Attribute
@@ -1058,7 +1058,7 @@ fn modern_import(
     req: &mut Request,
     this: PhpObject,
     node_obj: Option<PhpObject>,
-    guard: bool,
+    deep: bool,
 ) -> Result<Owner<Value>, Thrown> {
     let doc = fetch(req, this)?;
     let Some(node_obj) = node_obj else {
@@ -1073,7 +1073,7 @@ fn modern_import(
         return object_for(req, node, Some(this));
     }
     let copy = crate::private::with_mapper(req, this, |mapper, req| {
-        crate::node::clone_node_modern(req, mapper, node, Some(doc), guard)
+        crate::node::clone_node_modern(req, mapper, node, Some(doc), deep)
     })?
     .flatten();
     let Some(copy) = copy else {
@@ -1614,9 +1614,9 @@ impl DOMDocument {
         req: &mut Request,
         this: This<Self>,
         node: Instance<DOMNode>,
-        #[php(default = false)] guard: bool,
+        #[php(default = false)] deep: bool,
     ) -> Result<Untyped<Owner<Value>>, Thrown> {
-        import_node(req, this.object(), node.object(), guard).map(Untyped)
+        import_node(req, this.object(), node.object(), deep).map(Untyped)
     }
 
     /// `DOMDocument::load(string $filename, int $options = 0): bool`.
@@ -2307,9 +2307,9 @@ impl Document {
         req: &mut Request,
         this: This<Self>,
         node: Option<Instance<crate::modern::Node>>,
-        #[php(default = false)] guard: bool,
+        #[php(default = false)] deep: bool,
     ) -> Result<Owner<Raw<Instance<crate::modern::Node>>>, Thrown> {
-        let imported = modern_import(req, this.object(), node.map(|n| n.object()), guard)?;
+        let imported = modern_import(req, this.object(), node.map(|n| n.object()), deep)?;
         returned(imported)
     }
 
@@ -2443,9 +2443,9 @@ impl Document {
         req: &mut Request,
         this: This<Self>,
         node: Instance<DOMNode>,
-        #[php(default = false)] guard: bool,
+        #[php(default = false)] deep: bool,
     ) -> Result<Owner<Raw<Instance<crate::modern::Node>>>, Thrown> {
-        let imported = modern_import(req, this.object(), Some(node.object()), guard)?;
+        let imported = modern_import(req, this.object(), Some(node.object()), deep)?;
         returned(imported)
     }
 
