@@ -18,6 +18,7 @@
 )]
 
 use std::ffi::{CStr, CString, c_char};
+use std::ptr;
 
 /// ICU's C functions under the names `urename.h` gives them, the major
 /// version appended (`u_errorName_78`), which `build.rs` hands over as
@@ -276,6 +277,75 @@ pub(crate) fn to_utf8(text: &[u16]) -> Result<Vec<u8>, Code> {
         written
     });
     status.check().map(|_| out)
+}
+
+/// `intl_convert_utf8_offset_to_utf16`: a byte offset into `text` as the
+/// UTF-16 code units before it, by `u_strFromUTF8`'s preflight of the
+/// bytes before it; an offset outside `0..=len` is kept as given, and one
+/// inside a character refused with the code ICU answers,
+/// `U_INVALID_CHAR_FOUND`.
+pub(crate) fn utf8_offset_to_utf16(text: &[u8], position: i32) -> Result<i32, Code> {
+    let Some(prefix) = usize::try_from(position).ok().and_then(|at| text.get(..at)) else {
+        return Ok(position);
+    };
+    let mut units = 0;
+    let mut status = Code::ZERO;
+    // SAFETY: a preflight, which writes nothing, over position bytes of a
+    // live slice.
+    unsafe {
+        sys::u_strFromUTF8(
+            ptr::null_mut(),
+            0,
+            &raw mut units,
+            prefix.as_ptr().cast(),
+            position,
+            &mut status,
+        )
+    };
+    if status != Code::BUFFER_OVERFLOW && status.is_failure() {
+        return Err(status);
+    }
+    Ok(units)
+}
+
+/// `intl_convert_utf16_offset_to_utf8`: a code unit offset into `text` as
+/// the UTF-8 bytes before it, an offset between the two halves of a pair
+/// moved back to the pair's start; one outside `0..=len`, or a prefix
+/// `u_strToUTF8` refuses, is kept as code units.
+pub(crate) fn utf16_offset_to_utf8(text: &[u16], position: i32) -> i32 {
+    let Some(at) = usize::try_from(position)
+        .ok()
+        .filter(|&at| at <= text.len())
+    else {
+        return position;
+    };
+    let splits_pair = at > 0
+        && at < text.len()
+        && (0xD800..0xDC00).contains(&text[at - 1])
+        && (0xDC00..0xE000).contains(&text[at]);
+    let (at, position) = if splits_pair {
+        (at - 1, position - 1)
+    } else {
+        (at, position)
+    };
+    let mut bytes = 0;
+    let mut status = Code::ZERO;
+    // SAFETY: a preflight, which writes nothing, over at units of a live
+    // slice.
+    unsafe {
+        sys::u_strToUTF8(
+            ptr::null_mut(),
+            0,
+            &raw mut bytes,
+            text[..at].as_ptr(),
+            position,
+            &mut status,
+        )
+    };
+    if status != Code::BUFFER_OVERFLOW && status.is_failure() {
+        return position;
+    }
+    bytes
 }
 
 /// `uloc_getDefault`: ICU's default locale for the process, which php

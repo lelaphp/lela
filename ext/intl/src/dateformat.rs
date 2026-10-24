@@ -1055,8 +1055,29 @@ fn parse_text(
         return or_false(Err(stop));
     }
     let units = converted.unwrap_or_default();
+    let mut position = position;
+    // ICU reads and writes the offset in code units, the caller's in
+    // bytes (php 8.5.12); one inside a character is refused, unchanged.
+    if let Some(at) = position.as_deref_mut() {
+        match ffi::utf8_offset_to_utf16(text, *at) {
+            Ok(code_units) => *at = code_units,
+            Err(code) => {
+                if let Err(stop) = check(req, object, code, "Invalid UTF-8 offset") {
+                    return or_false(Err(stop));
+                }
+            }
+        }
+    }
     let mut status = Code::ZERO;
-    let mut millis = udatf.parse(&units, position, how != Parse::Instant, &mut status);
+    let mut millis = udatf.parse(
+        &units,
+        position.as_deref_mut(),
+        how != Parse::Instant,
+        &mut status,
+    );
+    if let Some(at) = position {
+        *at = ffi::utf16_offset_to_utf8(&units, *at);
+    }
     if how == Parse::Calendar {
         if let Err(stop) = check(req, object, status, "Calendar parsing failed") {
             return or_false(Err(stop));
@@ -1745,6 +1766,31 @@ fn datefmt_format_object(
 /// bool(true)
 /// int(10)
 /// string(10) "Asia/Tokyo"
+/// ```
+///
+/// The offset is in bytes of the UTF-8 text, read into ICU's code units
+/// and written back from them, a match ending inside a surrogate pair
+/// moved to the pair's start; one inside a character is refused and
+/// left as given (php 8.5.12).
+///
+/// ```php
+/// $f = new IntlDateFormatter('en_US', IntlDateFormatter::NONE, IntlDateFormatter::NONE, 'UTC', IntlDateFormatter::GREGORIAN, 'yyyy-MM-dd');
+/// $at = 4;
+/// var_dump(gmdate('Y-m-d', $f->parse("😀2017-10-12 tail", $at)), $at);
+/// $at = 1;
+/// var_dump($f->parse("😀2017-10-12", $at), $at, intl_get_error_message());
+/// $f = new IntlDateFormatter('en_US', IntlDateFormatter::NONE, IntlDateFormatter::NONE, 'UTC', IntlDateFormatter::GREGORIAN, "yyyy-MM-dd\u{1F600}");
+/// $at = 0;
+/// $f->localtime("2017-10-12\u{1F601}", $at);
+/// var_dump($at);
+/// ```
+/// ```expect
+/// string(10) "2017-10-12"
+/// int(14)
+/// bool(false)
+/// int(1)
+/// string(70) "IntlDateFormatter::parse(): Invalid UTF-8 offset: U_INVALID_CHAR_FOUND"
+/// int(10)
 /// ```
 #[php_function(before_args = error::reset)]
 fn datefmt_parse(
