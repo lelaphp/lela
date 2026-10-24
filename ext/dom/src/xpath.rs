@@ -28,15 +28,15 @@ use crate::props::Prop;
 use crate::{Read, dom, dom_mut, fetch, object_for, string};
 
 /// `PHP_DOM_REG_FUNC_MODE_*`: how one namespace serves a call.
-///
-/// php lays a namespace down at `PHP_DOM_REG_FUNC_MODE_NONE`, which its
-/// dispatch serves as `SET` (the `ZEND_ASSERT` that tells them apart is
-/// gone from a release build): a refused registration leaves the
-/// namespace there, and a call looks the table up all the same.
 #[derive(Default)]
 enum Mode {
-    /// A call is served from the table, by name.
+    /// `PHP_DOM_REG_FUNC_MODE_NONE`: the namespace was laid down by a
+    /// registration that was refused, and serves no call; php 8.5.12's
+    /// dispatch refuses it as it refuses a namespace with no table
+    /// (GH-23897).
     #[default]
+    None,
+    /// A call is served from the table, by name.
     Set,
     /// `registerPhpFunctions()` with no argument: any function by name,
     /// the table kept for a later set.
@@ -542,7 +542,8 @@ const NOT_A_NAME: &str = "Handler name must be a string";
 
 /// What a namespace's table answers for one name.
 enum Lookup {
-    /// No table for the namespace: no registration made one.
+    /// No table for the namespace: no registration made one, or the one
+    /// that would have was refused.
     NoTable,
     /// `PHP_DOM_REG_FUNC_MODE_ALL`: any function by name.
     Any,
@@ -564,16 +565,37 @@ impl Lookup {
                 .map(|(_, namespace)| namespace),
         };
         match namespace {
-            None => Lookup::NoTable,
+            None
+            | Some(Namespace {
+                mode: Mode::None, ..
+            }) => Lookup::NoTable,
             Some(Namespace {
                 mode: Mode::All, ..
             }) => Lookup::Any,
-            Some(namespace) => Lookup::Named(namespace.find(name).cloned()),
+            Some(
+                namespace @ Namespace {
+                    mode: Mode::Set, ..
+                },
+            ) => Lookup::Named(namespace.find(name).cloned()),
         }
     }
 }
 
-/// `php_dom_xpath_callback_dispatch`. The table is read where the call
+/// `php_dom_xpath_callback_dispatch`. A namespace a refused registration
+/// laid down serves no call:
+///
+/// ```php
+/// $d = new DOMDocument; $d->loadXML('<r/>'); $x = new DOMXPath($d);
+/// $x->registerNamespace('php', 'http://php.net/xpath');
+/// try { $x->registerPhpFunctions('nope'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $x->evaluate('php:function("nope")'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be a callable, function "nope" not found or invalid function name
+/// No callbacks were registered
+/// ```
+///
+/// The table is read where the call
 /// is made and again where it keeps what the call handed out, since the
 /// function called can register, replace or free it in between. A name
 /// no callable answers to is `zend_call_function`'s refusal, chained
