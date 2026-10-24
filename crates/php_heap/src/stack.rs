@@ -707,12 +707,17 @@ impl<H> VmStack<H> {
     }
 
     /// Push a frame of `slots` addressable slots, with the room of
-    /// `extra_args` extra arguments after them, and return its position:
+    /// `extra_args` extra arguments after them, its header the one
+    /// `header` makes, and return its position:
     /// `zend_vm_stack_push_call_frame_ex` over
-    /// `zend_vm_calc_used_stack`. A frame the top page cannot hold takes
-    /// a page of its own from `heap`, the stack's page size or, for a
-    /// frame larger than that, the page size it rounds up to; a heap
-    /// that cannot give it refuses the push with the fatal php raises.
+    /// `zend_vm_calc_used_stack`. The header is made once the room is
+    /// found, so a push the top page has room for writes it where it
+    /// stands, as php's push writes `call->func` and `This` into the
+    /// room, and never lays it out anywhere else first. A frame the top
+    /// page cannot hold takes a page of its own from `heap`, the stack's
+    /// page size or, for a frame larger than that, the page size it
+    /// rounds up to; a heap that cannot give it refuses the push with
+    /// the fatal php raises.
     ///
     /// So a recursion without end is refused where php's is, asking for
     /// a page, and not after the machine's memory is gone:
@@ -754,7 +759,7 @@ impl<H> VmStack<H> {
         heap: &mut Heap,
         slots: usize,
         extra_args: usize,
-        header: H,
+        header: impl FnOnce() -> H,
     ) -> Result<FrameRef, Fatal> {
         let used = FRAME_HEADER_SLOTS + slots + extra_args;
         // `zend_vm_stack_push_call_frame_ex`'s test and bump, where the
@@ -777,7 +782,7 @@ impl<H> VmStack<H> {
         heap: &mut Heap,
         slots: usize,
         used: usize,
-        header: H,
+        header: impl FnOnce() -> H,
     ) -> Result<FrameRef, Fatal> {
         self.open(heap)?;
         let placed = if used <= self.left() {
@@ -806,18 +811,19 @@ impl<H> VmStack<H> {
     }
 
     /// A frame of `len` slots from `at` laid on top of the stack where
-    /// `placed` says it stands, its header written in the room before
-    /// `at` and its slots by `cells`, every one `UNDEF` as
+    /// `placed` says it stands, the header `header` makes written in the
+    /// room before `at` and its slots by `cells`, every one `UNDEF` as
     /// `i_init_func_execute_data` finds them where the push has nothing
     /// to place ([`undefine`]); the room is the push's,
     /// `FRAME_HEADER_SLOTS` and `len` slots long, which nothing else names.
-    #[inline]
+    #[inline(always)] // part of the push's inline path, so the header is made in its room
+    #[allow(clippy::inline_always)]
     fn lay(
         &mut self,
         at: NonNull<Zval>,
         len: usize,
         placed: Placed,
-        header: H,
+        header: impl FnOnce() -> H,
         cells: impl FnOnce(&mut [Zval]),
     ) -> FrameRef {
         let () = Frame::<H>::FITS;
@@ -830,7 +836,7 @@ impl<H> VmStack<H> {
         // SAFETY: the header's room is the `FRAME_HEADER_SLOTS` slots the
         // push gave the frame before its first CV, which `FITS` holds an
         // `H` to fit, aligned, and nothing else names.
-        unsafe { frame.header_at().write(header) };
+        unsafe { frame.header_at().write(header()) };
         cells(frame.cells_mut());
         self.stand(frame)
     }
@@ -963,7 +969,7 @@ impl<H> VmStack<H> {
             }
             (cells, _) => undefine(cells),
         };
-        Ok(self.lay(at, slots, Placed::Loose(room), header, laid))
+        Ok(self.lay(at, slots, Placed::Loose(room), || header, laid))
     }
 
     /// Pop the frame the loop is executing,
@@ -1222,7 +1228,7 @@ impl<H> VmStack<H> {
         }
         let len = frame.len;
         let header = frame.header_copied();
-        let at = self.push_frame(heap, len, 0, header)?;
+        let at = self.push_frame(heap, len, 0, || header)?;
         if let (Some(cells), Some(to)) = (frame.cells().get(..len), self.frames.last_mut()) {
             to.cells_mut().copy_from_slice(cells);
         }
@@ -1432,10 +1438,10 @@ mod tests {
         let mut heap = Heap::new();
         let mut stack = VmStack::<Head>::new();
         let outer = stack
-            .push_frame(&mut heap, 2, 0, Head::default())
+            .push_frame(&mut heap, 2, 0, Head::default)
             .expect("a first frame fits the first page");
         let guard = stack.push_entry(outer);
-        let inner = stack.push_frame(&mut heap, 1, 0, Head::default());
+        let inner = stack.push_frame(&mut heap, 1, 0, Head::default);
         assert_eq!(stack.entry(), outer);
         assert_eq!(inner.ok(), Some(stack.current()));
         stack.pop_frame(&mut heap);
@@ -1464,10 +1470,10 @@ mod tests {
         let mut heap = Heap::new();
         let mut stack = VmStack::<Head>::new();
         let sending = stack
-            .push_frame(&mut heap, 2, 0, Head::default())
+            .push_frame(&mut heap, 2, 0, Head::default)
             .expect("two frames fit the first page");
         let called = stack
-            .push_frame(&mut heap, 3, 0, Head::default())
+            .push_frame(&mut heap, 3, 0, Head::default)
             .expect("two frames fit the first page");
         let (top, below) = stack
             .top_and_frame_mut(sending)
@@ -1504,17 +1510,17 @@ mod tests {
             function,
             ..Head::default()
         };
-        assert!(stack.push_frame(&mut heap, 2, 0, made(1)).is_ok());
+        assert!(stack.push_frame(&mut heap, 2, 0, || made(1)).is_ok());
         let aside = stack.set_aside();
-        assert!(stack.push_frame(&mut heap, 2, 0, made(2)).is_ok());
-        assert!(stack.push_frame(&mut heap, 2, 0, made(3)).is_ok());
+        assert!(stack.push_frame(&mut heap, 2, 0, || made(2)).is_ok());
+        assert!(stack.push_frame(&mut heap, 2, 0, || made(3)).is_ok());
         let dropped = stack.put_back(&mut heap, aside);
         assert_eq!(dropped, [made(3), made(2)]);
         assert_eq!(stack.len(), 1);
         assert_eq!(stack.header(FrameRef(0)), Some(&made(1)));
         let aside = stack.set_aside();
         assert_eq!(stack.put_back(&mut heap, aside), []);
-        assert!(stack.push_frame(&mut heap, 2, 0, made(4)).is_ok());
+        assert!(stack.push_frame(&mut heap, 2, 0, || made(4)).is_ok());
         assert_eq!(stack.close(&mut heap), [made(4), made(1)]);
         assert_eq!(stack.close(&mut heap), []);
     }
@@ -1535,10 +1541,10 @@ mod tests {
         assert_eq!(stack.open(&mut heap), Ok(()));
         assert_eq!(heap.memory_usage(false) - start, PAGE_SIZE);
         for _ in 0..1092 {
-            assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+            assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
         }
         assert_eq!(heap.memory_usage(false) - start, PAGE_SIZE);
-        assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
         assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
         stack.pop_frame(&mut heap);
         assert_eq!(heap.memory_usage(false) - start, PAGE_SIZE);
@@ -1546,7 +1552,7 @@ mod tests {
         // to the page size past the header.
         assert!(
             stack
-                .push_frame(&mut heap, PAGE_SIZE / SLOT, 0, Head::default())
+                .push_frame(&mut heap, PAGE_SIZE / SLOT, 0, Head::default)
                 .is_ok()
         );
         assert_eq!(heap.memory_usage(false) - start, 3 * PAGE_SIZE);
@@ -1568,7 +1574,7 @@ mod tests {
         let start = heap.memory_usage(false);
         let mut stack = VmStack::<Head>::new();
         for _ in 0..1092 {
-            assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+            assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
         }
         let full = heap.memory_usage(false);
         assert_eq!(full - start, PAGE_SIZE);
@@ -1594,7 +1600,7 @@ mod tests {
         assert_eq!(stack.frame(call).map(Frame::len), Some(3));
         // A callback the native serves opens the page php's opens, and a
         // frameless call it makes takes a room of its own.
-        assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
         assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
         let inner = stack.push_frameless(&[Zval::UNDEF], Head::default());
         assert!(
@@ -1629,9 +1635,9 @@ mod tests {
         assert!(stack.spare.is_none());
         stack.pop_frame(&mut heap);
         assert!(stack.spare.is_some());
-        assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
         assert_eq!(heap.memory_usage(false), full);
-        assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
         assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
         drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
@@ -1647,7 +1653,7 @@ mod tests {
         heap.set_memory_limit(4 * 1024 * 1024);
         let mut stack = VmStack::<Head>::new();
         let refused = (0..100_000)
-            .map(|_| stack.push_frame(&mut heap, 10, 0, Head::default()))
+            .map(|_| stack.push_frame(&mut heap, 10, 0, Head::default))
             .find_map(Result::err);
         assert_eq!(
             refused,
@@ -1671,10 +1677,10 @@ mod tests {
         assert_eq!(stack.open(&mut heap), Ok(()));
         assert_eq!(heap.memory_usage(false) - start, FIBER_PAGE_SIZE);
         for _ in 0..67 {
-            assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+            assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
         }
         assert_eq!(heap.memory_usage(false) - start, FIBER_PAGE_SIZE);
-        assert!(stack.push_frame(&mut heap, 10, 0, Head::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
         assert_eq!(heap.memory_usage(false) - start, 2 * FIBER_PAGE_SIZE);
         drop(stack.close(&mut heap));
         assert_eq!(heap.memory_usage(false), start);
@@ -1695,7 +1701,7 @@ mod tests {
             ..Head::default()
         };
         let f = stack
-            .push_frame(&mut heap, 2, 0, written.clone())
+            .push_frame(&mut heap, 2, 0, || written.clone())
             .expect("a frame");
         assert_eq!(stack.header(f), Some(&written));
         if let Some(header) = stack.header_mut(f) {
@@ -1747,7 +1753,7 @@ mod tests {
             ..Head::default()
         };
         let f = stack
-            .push_frame(&mut heap, 2, 0, written.clone())
+            .push_frame(&mut heap, 2, 0, || written.clone())
             .expect("a first frame fits");
         if let Some(frame) = stack.frame_mut(f) {
             frame.set(Slot(0), Zval::long(1));
@@ -1765,7 +1771,7 @@ mod tests {
         assert_eq!(stack.frame(f).map(Frame::len), Some(5 + PAGE_SIZE / SLOT));
         assert_eq!(heap.memory_usage(false) - start, 2 * PAGE_SIZE);
         let g = stack
-            .push_frame(&mut heap, 1, 0, Head::default())
+            .push_frame(&mut heap, 1, 0, Head::default)
             .expect("a frame above fits on a fresh page");
         assert!(
             stack.grow_top(&mut heap, f, 1).is_err(),
@@ -1792,7 +1798,7 @@ mod tests {
             ..Head::default()
         };
         let f = stack
-            .push_frame(&mut heap, 2, 0, written.clone())
+            .push_frame(&mut heap, 2, 0, || written.clone())
             .expect("a frame");
         if let Some(frame) = stack.frame_mut(f) {
             frame.set(Slot(1), Zval::long(8));
@@ -1861,7 +1867,7 @@ mod tests {
         assert_eq!(stack.innermost(), 0);
         assert!(chain(&stack).is_empty());
         for _ in 0..3 {
-            assert!(stack.push_frame(&mut heap, 2, 0, Head::default()).is_ok());
+            assert!(stack.push_frame(&mut heap, 2, 0, Head::default).is_ok());
         }
         assert_eq!(chain(&stack), rooms(&stack));
         assert_eq!(chain(&stack).len(), 3);
@@ -1871,7 +1877,7 @@ mod tests {
                 .is_ok()
         );
         assert_eq!(chain(&stack).len(), 3, "a frameless call is on no chain");
-        assert!(stack.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 1, 0, Head::default).is_ok());
         assert_eq!(chain(&stack), rooms(&stack));
         assert_eq!(chain(&stack).len(), 4);
         stack.pop_frame(&mut heap);
@@ -1885,14 +1891,14 @@ mod tests {
         stack.resume_frame(moved);
         assert_eq!(chain(&stack), rooms(&stack));
         let grown = stack
-            .push_frame(&mut heap, 1, 0, Head::default())
+            .push_frame(&mut heap, 1, 0, Head::default)
             .expect("a frame");
         assert_eq!(stack.grow_top(&mut heap, grown, PAGE_SIZE / SLOT), Ok(()));
         assert_eq!(chain(&stack), rooms(&stack));
         stack.pop_frame(&mut heap);
         let aside = stack.set_aside();
         assert!(chain(&stack).is_empty());
-        assert!(stack.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 1, 0, Head::default).is_ok());
         assert_eq!(chain(&stack).len(), 1);
         drop(stack.put_back(&mut heap, aside));
         assert_eq!(chain(&stack), rooms(&stack));
@@ -1919,12 +1925,12 @@ mod tests {
         let _alone = alone();
         let mut heap = Heap::new();
         let mut stack = VmStack::<Wide>::new();
-        assert!(stack.push_frame(&mut heap, 1, 0, Wide::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 1, 0, Wide::default).is_ok());
         let resumer = stack.innermost();
         let mut room = FakeRoom::new(Wide::default());
         stack.link_room(&mut room);
         assert_eq!(stack.innermost(), room.address());
-        assert!(stack.push_frame(&mut heap, 1, 0, Wide::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 1, 0, Wide::default).is_ok());
         let walked = chain(&stack);
         assert_eq!(walked.len(), 3);
         assert_eq!(walked.get(1..), Some(&[room.address(), resumer][..]));
@@ -1943,12 +1949,12 @@ mod tests {
         let _alone = alone();
         let mut heap = Heap::new();
         let mut stack = VmStack::<Head>::new();
-        assert!(stack.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
+        assert!(stack.push_frame(&mut heap, 1, 0, Head::default).is_ok());
         let resumer = stack.innermost();
         let mut fiber = VmStack::<Head>::fiber();
         fiber.link_below(resumer);
-        assert!(fiber.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
-        assert!(fiber.push_frame(&mut heap, 1, 0, Head::default()).is_ok());
+        assert!(fiber.push_frame(&mut heap, 1, 0, Head::default).is_ok());
+        assert!(fiber.push_frame(&mut heap, 1, 0, Head::default).is_ok());
         let walked = chain(&fiber);
         assert_eq!(walked.len(), 3);
         assert_eq!(walked.last(), Some(&resumer));
@@ -2083,7 +2089,7 @@ mod tests {
         let mut in_place = VmStack::<Head>::new();
         assert!(pushed_in_place(&mut in_place, 2, Head::default()).is_none());
         for stack in [&mut by_push, &mut in_place] {
-            assert!(stack.push_frame(&mut heap, 3, 0, Head::default()).is_ok());
+            assert!(stack.push_frame(&mut heap, 3, 0, Head::default).is_ok());
         }
         let made = |n| Head {
             function: n,
@@ -2091,10 +2097,10 @@ mod tests {
             ..Head::default()
         };
         for n in 0..9 {
-            assert!(by_push.push_frame(&mut heap, 2, 0, made(n)).is_ok());
+            assert!(by_push.push_frame(&mut heap, 2, 0, || made(n)).is_ok());
             if pushed_in_place(&mut in_place, 2, made(n)).is_none() {
                 // The table is full: the engine's push grows it.
-                assert!(in_place.push_frame(&mut heap, 2, 0, made(n)).is_ok());
+                assert!(in_place.push_frame(&mut heap, 2, 0, || made(n)).is_ok());
             }
             assert_eq!(in_place.len(), by_push.len());
             assert_eq!(in_place.room(), by_push.room());
@@ -2118,7 +2124,7 @@ mod tests {
         assert!(pushed_in_place(&mut in_place, PAGE_SIZE / SLOT, Head::default()).is_none());
         assert!(
             in_place
-                .push_frame(&mut heap, PAGE_SIZE / SLOT, 0, Head::default())
+                .push_frame(&mut heap, PAGE_SIZE / SLOT, 0, Head::default)
                 .is_ok()
         );
         assert!(heap.memory_usage(false) > start);

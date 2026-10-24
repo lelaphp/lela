@@ -283,7 +283,7 @@ impl Emit<'_> {
 
     /// Whether a variable of `frame`, whose room is `room`, owns
     /// something: its type word counted, every variable's folded into one
-    /// test, as `Request::leaves_plainly` folds them.
+    /// test, as `Request::leave_plainly` folds them.
     fn owners(&mut self, room: Value, frame: Frame) -> Result<Value, Abort> {
         let cvs = (self.ir.frames.get(usize::from(frame.0)))
             .ok_or_else(|| mismatch("a leave in a frame the trace does not hold"))?
@@ -323,7 +323,7 @@ impl Emit<'_> {
 
     /// A function's `RETURN` that leaves its frame in place, as
     /// `zend_jit_leave_func` leaves it and `Request::leave_plainly` leaves
-    /// a frame `leaves_plainly` finds: the value into the caller's slot
+    /// a frame that owns nothing: the value into the caller's slot
     /// where the call reads it, the frame's record off the table, the word
     /// moved back to its link and the top back to its room, and the caller
     /// on past its call. `types` holds its value a scalar, a constant no

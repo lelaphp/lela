@@ -872,7 +872,7 @@ mod tests {
         let mut heap = crate::Heap::new();
         let mut stack = crate::VmStack::<()>::new();
         let pushed = stack
-            .push_frame(&mut heap, 2, 0, ())
+            .push_frame(&mut heap, 2, 0, || ())
             .expect("a frame of two slots fits the first page");
         let frame = stack.frame_mut(pushed).expect("the frame pushed");
         let at = frame

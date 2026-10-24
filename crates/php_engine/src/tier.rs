@@ -1190,11 +1190,8 @@ fn entered<T: Tier, D: Telling>(
         let at = if told.tells(php_unit::Opcode::Recv) {
             start
         } else {
-            exec::recv_passed(req, callee, code, start)
+            exec::recv_passed(req, callee, code, (start, entry))
         };
-        if at != start {
-            req.vm_mut().stand(callee, at);
-        }
         if at < entry
             && let Some(threw) = exec::prologue(req, callee, code, told)?
         {
@@ -1313,7 +1310,7 @@ pub fn call_held(
         return step_held(req, frame, held, epoch);
     }
     let returns_to = (op.out_type != php_unit::OperandKind::Unused).then_some(op.out);
-    let Some(pushed) = req.enter_call(returns_to, frame, flagged) else {
+    let Some(pushed) = req.enter_call(returns_to, (frame, at), flagged) else {
         return step_held(req, frame, held, epoch);
     };
     // The callee the trace recorded, as its `INIT_*` guarded it; any

@@ -2024,7 +2024,7 @@ result = "used"
 effects = ["throw"]
 throw_cond = "default (zend_may_throw_ex has no case)"
 spec = "QUICK_ARG"
-specialise = false
+specialise = true
 type_spec = ["SEND_VAL_EX_SIMPLE"]
 doc = "send argument value, callee unknown"
 

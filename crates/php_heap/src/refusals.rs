@@ -728,11 +728,11 @@ const POINTS: &[Point] = &[
     Point {
         name: "a frame past the VM stack's page",
         lay: |r| r.stack.open(&mut r.heap),
-        op: |r| r.stack.push_frame(&mut r.heap, 20_000, 0, 1).map(drop),
+        op: |r| r.stack.push_frame(&mut r.heap, 20_000, 0, || 1).map(drop),
     },
     Point {
         name: "the top frame grown past its page",
-        lay: |r| r.stack.push_frame(&mut r.heap, 16_000, 0, 1).map(drop),
+        lay: |r| r.stack.push_frame(&mut r.heap, 16_000, 0, || 1).map(drop),
         op: |r| {
             let top = r.stack.current();
             r.stack.grow_top(&mut r.heap, top, 1000)
@@ -741,7 +741,7 @@ const POINTS: &[Point] = &[
     Point {
         name: "a frame moved to the heap",
         lay: |r| {
-            r.stack.push_frame(&mut r.heap, 4, 2, 1)?;
+            r.stack.push_frame(&mut r.heap, 4, 2, || 1)?;
             if let Some((_, frame)) = r.stack.top_mut() {
                 frame.slots_mut().fill(Zval::long(4));
             }
@@ -758,7 +758,7 @@ const POINTS: &[Point] = &[
         name: "a frame moved to the heap and restored",
         lay: |r| r.stack.open(&mut r.heap),
         op: |r| {
-            r.stack.push_frame(&mut r.heap, 4, 0, 1)?;
+            r.stack.push_frame(&mut r.heap, 4, 0, || 1)?;
             if let Some(frame) = r.stack.move_to_heap(&mut r.heap)? {
                 r.stack.restore_frame(&mut r.heap, frame)?;
             }

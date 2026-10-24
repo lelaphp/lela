@@ -943,9 +943,9 @@ A `loop { match handler }` over the dense `u16` each opline was resolved to at p
 
 <!-- computed exec cmd=scripts/specialised-ops.sh inputs=ops.toml,scripts/specialised-ops.sh name=specialised | do not edit; run computed -->
 
-`ADD`, `SUB`, `MUL`, `CONCAT`, `IS_IDENTICAL`, `IS_EQUAL`, `IS_SMALLER`, `ASSIGN`, `ASSIGN_DIM`, `ASSIGN_OBJ`, `ASSIGN_OP`, `ASSIGN_DIM_OP`, `PRE_INC`, `PRE_DEC`, `JMPZ`, `JMPNZ`, `FAST_CONCAT`, `ROPE_INIT`, `ROPE_ADD`, `ROPE_END`, `INIT_FCALL`, `RETURN`, `SEND_VAL`, `FE_FETCH_R`, `FETCH_DIM_R`, `FETCH_OBJ_R`, `FETCH_DIM_W`, `FETCH_OBJ_W`, `FETCH_DIM_RW`, `FETCH_DIM_FUNC_ARG`, `ISSET_ISEMPTY_DIM_OBJ`, `SEND_VAR`, `DO_ICALL`, `DO_UCALL`, `COUNT`
+`ADD`, `SUB`, `MUL`, `CONCAT`, `IS_IDENTICAL`, `IS_EQUAL`, `IS_SMALLER`, `ASSIGN`, `ASSIGN_DIM`, `ASSIGN_OBJ`, `ASSIGN_OP`, `ASSIGN_DIM_OP`, `PRE_INC`, `PRE_DEC`, `JMPZ`, `JMPNZ`, `FAST_CONCAT`, `ROPE_INIT`, `ROPE_ADD`, `ROPE_END`, `INIT_FCALL`, `RETURN`, `SEND_VAL`, `FE_FETCH_R`, `FETCH_DIM_R`, `FETCH_OBJ_R`, `FETCH_DIM_W`, `FETCH_OBJ_W`, `FETCH_DIM_RW`, `FETCH_DIM_FUNC_ARG`, `ISSET_ISEMPTY_DIM_OBJ`, `SEND_VAL_EX`, `SEND_VAR`, `DO_ICALL`, `DO_UCALL`, `COUNT`
 
-<!-- /computed in=bf0516b8c4a78363e936726b0aa66f3d3968231003d851ada60d8f311d0e5798 out=d90f8536d5d7caa8465435e60c1f734fc31c90f745bd0c0a737d13bf5053745c -->
+<!-- /computed in=66416c68620d1ae4230d55de449a3dd11db20f220be5221f0bf536e54807624e out=fc76300fe8020b1191135e206dec1b366c2b081b904a762f9a3c30d7e1c35faf -->
 
 Which opcodes are specialised is `ops.toml`'s `specialise`, and the list above is rendered from it. An opcode php's `zend_vm_gen.php` specialises on its operand kinds joins in the commit that measures, by instructions retired on a kernel under the protocol, its run-time operand decoding spending what php's specialised handler does not; that commit carries the measurement, and no ruling is asked for (#2997).
 
