@@ -14,8 +14,8 @@ use php_ext::call::{Function, autoload, known_method, lookup_class, new_object};
 use php_ext::coerce::{c_str, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{
-    Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings, type_error,
-    value_error,
+    Thrown, argument_error, deprecated, pending, throw_error, throw_exception_ex,
+    throwing_warnings, type_error, value_error,
 };
 use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
@@ -581,7 +581,11 @@ fn construct_driver(
     let colon = source.iter().position(|b| *b == b':').unwrap_or(0);
     let scheme = &source[..colon];
     let Some(driver) = crate::drivers(req).find(|d| d.name().as_bytes() == scheme) else {
-        return Err(throw(req, "PDOException", "could not find driver"));
+        return Err(throw_exception_ex(
+            req,
+            "PDOException",
+            "could not find driver",
+        ));
     };
     let fresh = specific_object(req, driver, called, current.is_none())?;
     let object = match (&fresh, current) {
@@ -646,7 +650,7 @@ fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown
         };
         if !found.contains(&b':') {
             let alias = String::from_utf8_lossy(&alias).into_owned();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "PDOException",
                 &format!("invalid data source name (via INI: {alias})"),
@@ -930,7 +934,7 @@ fn specific_object(
     let wrong = |req: &mut Request, own: ClassId| {
         let own = crate::class_name(req, own);
         let name = driver.name();
-        throw(
+        throw_exception_ex(
             req,
             "PDOException",
             &format!(
@@ -940,7 +944,7 @@ fn specific_object(
     };
     if based_on_called {
         let Some(own) = own else {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "PDOException",
                 &format!(
@@ -1361,7 +1365,11 @@ fn end_transaction(
 ) -> Result<bool, Thrown> {
     constructed(req, this)?;
     if !in_txn(req, this)? {
-        return Err(throw(req, "PDOException", "There is no active transaction"));
+        return Err(throw_exception_ex(
+            req,
+            "PDOException",
+            "There is no active transaction",
+        ));
     }
     match transaction(req, this, false, call)? {
         Ok(done) => Ok(done),
@@ -1631,7 +1639,7 @@ impl PDO {
         let this = this.object();
         constructed(req, this)?;
         if in_txn(req, this)? {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "PDOException",
                 "There is already an active transaction",
@@ -1639,7 +1647,7 @@ impl PDO {
         }
         match transaction(req, this, true, super::connector::Connection::begin)? {
             Ok(done) => Ok(done),
-            Err(()) => Err(throw(
+            Err(()) => Err(throw_exception_ex(
                 req,
                 "PDOException",
                 "This driver doesn't support transactions",

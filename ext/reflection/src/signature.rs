@@ -16,7 +16,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{Function, autoload, eval_const_expr, eval_declared, lookup_class};
 use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::{ConstExpr, FunctionDecl, Parameter, Type};
-use php_ext::raising::{Thrown, throw, throw_error};
+use php_ext::raising::{Thrown, throw, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -519,7 +519,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
             };
             let Some(found) = found else {
                 let class = class_name_of(req, class);
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "ReflectionException",
                     &format!(
@@ -545,7 +545,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
                 FunctionRef::Method(found.scope, found.decl.function.name.0.to_vec())
             } else {
                 let class = class_name_of(req, object.class());
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "ReflectionException",
                     &format!(
@@ -558,7 +558,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
         ValueRef::Str(_) => {
             let name = first.as_str_bytes().unwrap_or_default().to_vec();
             let Some(found) = lookup_function(req, &name) else {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "ReflectionException",
                     &format!(
@@ -649,7 +649,7 @@ fn parameter_default(parameter: &Parameter) -> Option<&ConstExpr> {
 /// php's `reflection_exception` for a parameter whose default
 /// `get_parameter_default` could not read.
 fn no_default(req: &mut Request) -> Thrown {
-    throw(
+    throw_exception_ex(
         req,
         "ReflectionException",
         "Internal error: Failed to retrieve the default value",
@@ -747,7 +747,7 @@ pub(super) fn this_function(
             }
             let Some(found) = super::method_or_invoke(req, class, &name, kept) else {
                 let class = class_name_of(req, class);
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "ReflectionException",
                     &format!(
@@ -766,7 +766,7 @@ pub(super) fn this_function(
     } else {
         {
             if lookup_function(req, &name).is_none() {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "ReflectionException",
                     &format!(
@@ -1168,7 +1168,7 @@ impl ReflectionParameter {
         };
         match class {
             Ok(class) => Ok(Some(reflection_class_factory(req, class)?.into_instance())),
-            Err(message) => Err(throw(req, "ReflectionException", &message)),
+            Err(message) => Err(throw_exception_ex(req, "ReflectionException", &message)),
         }
     }
 

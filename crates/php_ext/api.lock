@@ -529,6 +529,7 @@ raising::throw_at
 raising::throw_chained
 raising::throw_error
 raising::throw_error_chained
+raising::throw_exception_ex
 raising::throw_value
 raising::throwing_warnings
 raising::type_error

@@ -15,7 +15,7 @@ use php_ext::call::{clone_with, known_method, lookup_class, new_object};
 use php_ext::coerce::{BinaryOp, Exponent, float_format, to_string, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{
-    Thrown, arg_null_deprecated, arg_type_error, deprecated, fatal, throw, throw_error,
+    Thrown, arg_null_deprecated, arg_type_error, deprecated, fatal, throw_error, throw_exception_ex,
 };
 use php_ext::request::Request;
 use php_ext::values::{
@@ -670,7 +670,7 @@ impl Number {
 
 /// "Invalid serialization data for BcMath\Number object".
 fn invalid_serialization(req: &mut Request) -> Thrown {
-    throw(
+    throw_exception_ex(
         req,
         "Exception",
         &format!("Invalid serialization data for {CLASS} object"),

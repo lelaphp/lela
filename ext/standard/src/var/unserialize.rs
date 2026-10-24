@@ -14,8 +14,8 @@ use php_ext::attr::php_function;
 use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, new_object};
 use php_ext::coerce::{callable_checked, value_name};
 use php_ext::raising::{
-    Level, Thrown, call_stack_end, deprecated, docref, throw, throw_error, type_error, value_error,
-    warning,
+    Level, Thrown, call_stack_end, deprecated, docref, throw_error, throw_exception_ex, type_error,
+    value_error, warning,
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -1997,7 +1997,7 @@ impl State<'_> {
         };
         self.p = after;
         if let Some(shown) = not_serializable(req, class) {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("Unserialization of '{shown}' is not allowed"),

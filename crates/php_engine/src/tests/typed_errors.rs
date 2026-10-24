@@ -27,6 +27,30 @@ const PHP_SITES: [(&str, usize); 2] = [
     ("ext/dom/src/token_list.rs", 1),
 ];
 
+/// The classes php throws through `zend_throw_error` and its typed
+/// functions, which `zend_throw_exception` names only at the sites
+/// [`EXCEPTION_SITES`] counts.
+const ERRORS: [&str; 4] = [
+    "\"Error\"",
+    "\"ValueError\"",
+    "\"TypeError\"",
+    "\"ArgumentCountError\"",
+];
+
+/// The files that hold php's `zend_throw_exception` sites of one of
+/// [`ERRORS`], each with its count of calls: `FTP\Connection`'s closed
+/// check (`Z/ext/ftp/php_ftp.c:224`), `HashContext`'s constructor and a
+/// finalized one's clone (`Z/ext/hash/hash.c:1139`, `:1412`) and the
+/// delayed attribute validation's three
+/// (`Z/ext/reflection/php_reflection.c:7533`). Everywhere else a
+/// `throw` naming one is the wrong path: php throws it through
+/// `zend_throw_error`, [`raising::type_error`] or their kin.
+const EXCEPTION_SITES: [(&str, usize); 3] = [
+    ("ext/ftp/src/lib.rs", 1),
+    ("ext/hash/src/natives.rs", 2),
+    ("ext/reflection/src/attr.rs", 3),
+];
+
 /// Every `.rs` file under `dir`, `target` directories left out.
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -44,11 +68,11 @@ fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// The class argument of each `throw_error(` or `throw_error_chained(`
-/// call in `source`: the second argument, or the third of a chained one.
-fn classes(source: &str) -> Vec<String> {
+/// The class argument of each call in `source` to one of `names`, each
+/// with the place of its class among its arguments.
+fn classes_of(source: &str, names: &[(&str, usize)]) -> Vec<String> {
     let mut found = Vec::new();
-    for (name, at) in [("throw_error(", 1), ("throw_error_chained(", 2)] {
+    for &(name, at) in names {
         for (i, _) in source.match_indices(name) {
             let before = &source[..i];
             if before
@@ -68,6 +92,12 @@ fn classes(source: &str) -> Vec<String> {
         }
     }
     found
+}
+
+/// The class argument of each `throw_error(` or `throw_error_chained(`
+/// call in `source`: the second argument, or the third of a chained one.
+fn classes(source: &str) -> Vec<String> {
+    classes_of(source, &[("throw_error(", 1), ("throw_error_chained(", 2)])
 }
 
 /// The top-level arguments of a call whose text starts past its `(`.
@@ -165,4 +195,38 @@ fn the_class_argument_is_read_past_nested_calls_and_strings() {
         my_throw_error(req, "ValueError", "not this one");
     "#;
     assert_eq!(classes(source), ["\"TypeError\"", "\"ArgumentCountError\""]);
+}
+
+#[test]
+fn an_error_class_is_thrown_through_zend_throw_exception_at_phps_sites_alone() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let mut files = Vec::new();
+    for dir in ["crates", "ext", "sapi"] {
+        sources(&root.join(dir), &mut files);
+    }
+    let mut wrong = Vec::new();
+    for file in files {
+        let Ok(source) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let thrown = classes_of(&source, &[("throw(", 1)])
+            .iter()
+            .filter(|class| ERRORS.contains(&class.as_str()))
+            .count();
+        let shown = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .into_owned();
+        let allowed = EXCEPTION_SITES
+            .iter()
+            .find(|(site, _)| *site == shown)
+            .map_or(0, |(_, count)| *count);
+        if thrown != allowed {
+            wrong.push(format!(
+                "{shown}: {thrown} throw calls naming an error class, php's sites {allowed}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
 }

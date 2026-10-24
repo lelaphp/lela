@@ -802,7 +802,7 @@ pub fn throw(req: &mut Request, class: &str, message: &(impl AsRef<[u8]> + ?Size
 
 /// `zend_throw_error` (`Z/Zend/zend.c:1825-1855`): php-8.5.12 prints `message` with
 /// `zend_vstrpprintf` ([`strpprintf`]) and hands that string to
-/// `zend_throw_exception_ex(ce, 0, "%S", message)` ([`throw_formatted`]),
+/// `zend_throw_exception_ex(ce, 0, "%S", message)` ([`throw_exception_ex`]),
 /// which prints it once more into the string the throwable takes as its
 /// message; the first goes after the throw. So a printed throw peaks with
 /// both strings, each laid down by its own 256-byte `smart_str`, where
@@ -810,7 +810,7 @@ pub fn throw(req: &mut Request, class: &str, message: &(impl AsRef<[u8]> + ?Size
 ///
 /// php's four throws of a sentence side by side: `zend_type_error`'s
 /// ([`type_error`]), `zend_throw_error`'s, `zend_throw_exception_ex`'s
-/// ([`throw_formatted`]) and `zend_throw_exception`'s ([`throw`]):
+/// ([`throw_exception_ex`]) and `zend_throw_exception`'s ([`throw`]):
 ///
 /// ```php
 /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
@@ -910,10 +910,32 @@ fn made_and_thrown(
 /// standing while the string is laid down, and the string the
 /// throwable's message, where [`throw`]'s `zend_throw_exception` takes
 /// the C string as it stands. The `%` row of [`throw_error`]'s witness
-/// is php's `zend_mod_by_zero_helper`.
-pub(crate) fn throw_formatted(req: &mut Request, class: &str, message: &str) -> Thrown {
+/// is php's `zend_mod_by_zero_helper`; beside it here, Reflection's and
+/// SPL's printed throws, `intdiv`'s plain `zend_throw_exception` and the
+/// same sentence thrown by the program:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { try { new ReflectionClass("Nope"); } catch (ReflectionException $e) {} });
+/// pk(function () { try { (new ArrayIterator([]))->seek(5); } catch (OutOfBoundsException $e) {} });
+/// pk(function () { $z = 0; try { 1 % $z; } catch (DivisionByZeroError $e) {} });
+/// pk(function () { try { intdiv(1, 0); } catch (DivisionByZeroError $e) {} });
+/// pk(function () { try { throw new DivisionByZeroError("Modulo by zero"); } catch (DivisionByZeroError $e) {} });
+/// ```
+/// ```expect
+/// 2472 32
+/// 2592 0
+/// 1768 0
+/// 2360 0
+/// 1720 0
+/// ```
+pub fn throw_exception_ex(
+    req: &mut Request,
+    class: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
+) -> Thrown {
     made_and_thrown(req, None, |req| {
-        formatted_throwable(req, class, crate::c_number::c_str(message.as_bytes()))
+        formatted_throwable(req, class, crate::c_number::c_str(message.as_ref()))
     })
 }
 

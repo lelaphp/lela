@@ -7,7 +7,7 @@ use std::sync::Arc;
 use php_ext::abi::{Instance, OrFalse, Path, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
-use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
+use php_ext::raising::{Level, Thrown, docref, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString};
 
@@ -694,8 +694,8 @@ impl DateTimeZone {
     /// m(function () { try { new DateTimeZone('Mars/Olympus'); } catch (DateInvalidTimeZoneException $e) {} });
     /// ```
     /// ```expect
-    /// 2800 88
-    /// 2744 0
+    /// 2816 88
+    /// 2760 0
     /// ```
     ///
     /// What the request's heap counts for a zone (design §5.13): each name
@@ -762,7 +762,7 @@ impl DateTimeZone {
             "DateTimeZone::__construct(): {}",
             String::from_utf8_lossy(printed.text())
         );
-        let thrown = throw(req, "DateInvalidTimeZoneException", &message);
+        let thrown = throw_exception_ex(req, "DateInvalidTimeZoneException", &message);
         printed.free(req);
         Err(thrown)
     }

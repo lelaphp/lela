@@ -5,7 +5,7 @@
 use php_ext::abi::{Instance, IteratorElement, Passed, Raw, Static, This, Untyped};
 use php_ext::attr::php_class;
 use php_ext::call::{internal_iterator, new_object};
-use php_ext::raising::{Thrown, deprecated, throw, throw_error, type_error};
+use php_ext::raising::{Thrown, deprecated, throw_error, throw_exception_ex, type_error};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -63,12 +63,12 @@ fn from_iso(req: &mut Request, func: &str, text: &[u8]) -> Result<Iso, Thrown> {
     let shown = String::from_utf8_lossy(text).into_owned();
     match read {
         Ok(iso) => Ok(iso),
-        Err(None) => Err(throw(
+        Err(None) => Err(throw_exception_ex(
             req,
             "DateMalformedPeriodStringException",
             &format!("Unknown or bad format ({shown})"),
         )),
-        Err(Some(what)) => Err(throw(
+        Err(Some(what)) => Err(throw_exception_ex(
             req,
             "DateMalformedPeriodStringException",
             &format!("{func}(): ISO interval must contain {what}, \"{shown}\" given"),
@@ -86,7 +86,7 @@ fn finish(
     recurrences: i64,
 ) -> Result<(), Thrown> {
     if period.end.is_none() && !(1..=MAX_RECURRENCES).contains(&recurrences) {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "DateMalformedPeriodStringException",
             &format!(
@@ -100,7 +100,7 @@ fn finish(
     let total =
         recurrences + i64::from(period.include_start_date) + i64::from(period.include_end_date);
     if total > MAX_RECURRENCES {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "DateMalformedStringException",
             &format!(

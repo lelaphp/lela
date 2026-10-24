@@ -5,7 +5,7 @@
 
 use php_ext::abi::Callable;
 use php_ext::coerce::{to_long, to_string, value_name};
-use php_ext::raising::{Level, Thrown, docref, throw, type_error, value_error};
+use php_ext::raising::{Level, Thrown, docref, throw_exception_ex, type_error, value_error};
 use php_ext::request::{Foreign, Request, Stream};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_pdo::connector::{
@@ -220,7 +220,7 @@ fn open_db(req: &mut Request, source: &Source<'_>) -> Result<Foreign<Conn>, Fail
     {
         let Some(filename) = safe_filename(req, Some(source.dsn)) else {
             let shown = String::from_utf8_lossy(source.dsn).into_owned();
-            return Err(Failure::from(throw(
+            return Err(Failure::from(throw_exception_ex(
                 req,
                 "PDOException",
                 &format!("open_basedir prohibits opening {shown}"),
@@ -482,7 +482,11 @@ impl Connection for Handle {
         if text.contains(&0) {
             let message = "SQLite PDO::quote does not support null bytes";
             return match raises {
-                OnError::Throw => Err(Failure::from(throw(req, "PDOException", message))),
+                OnError::Throw => Err(Failure::from(throw_exception_ex(
+                    req,
+                    "PDOException",
+                    message,
+                ))),
                 OnError::Warn => {
                     docref(req, Level::Warning, message);
                     Err(Failure::silent())

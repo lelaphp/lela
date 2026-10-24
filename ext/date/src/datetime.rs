@@ -14,7 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use php_ext::abi::{Class, ClassRef, Instance, OrFalse, Path, Static, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
-use php_ext::raising::{Level, Thrown, argument_error, docref, throw, throw_error};
+use php_ext::raising::{
+    Level, Thrown, argument_error, docref, throw, throw_error, throw_exception_ex,
+};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
@@ -143,7 +145,7 @@ pub(super) fn initialize(
         Made::Refused(errors) => {
             if how.ctor {
                 let (at, c, message) = first_error(&errors);
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "DateMalformedStringException",
                     &format!(

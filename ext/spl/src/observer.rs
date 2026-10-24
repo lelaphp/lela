@@ -19,7 +19,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_members, new_object};
 use php_ext::coerce::{compare, identical, truthy, value_name};
-use php_ext::raising::{Thrown, throw, type_error};
+use php_ext::raising::{Thrown, throw, throw_exception_ex, type_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -643,7 +643,7 @@ impl SplObjectStorage {
         let position = offset;
         let len = with(req, this, |s| s.len())?;
         if position < 0 || usize::try_from(position).is_ok_and(|p| p >= len) {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "OutOfBoundsException",
                 &format!("Seek position {position} is out of range"),
@@ -814,7 +814,11 @@ impl SplObjectStorage {
         })?;
         match found {
             Some(inf) => Ok(inf.deref()),
-            None => Err(throw(req, "UnexpectedValueException", "Object not found")),
+            None => Err(throw_exception_ex(
+                req,
+                "UnexpectedValueException",
+                "Object not found",
+            )),
         }
     }
 
@@ -1621,7 +1625,11 @@ impl ObjectHandlers for Handlers {
                 match found {
                     Some(inf) => Ok(Owner::take(req, inf.deref())),
                     None if read == DimensionRead::Silent => Ok(Owner::null()),
-                    None => Err(throw(req, "UnexpectedValueException", "Object not found")),
+                    None => Err(throw_exception_ex(
+                        req,
+                        "UnexpectedValueException",
+                        "Object not found",
+                    )),
                 }
             }
             _ => Std.read_dimension(req, object, offset, read),
@@ -2060,7 +2068,7 @@ fn each(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<(), Thrown>
 /// the flags read after each row's calls as php reads them.
 fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<Owner<PhpArray>, Thrown> {
     if with(req, this, |s| s.len())? == 0 {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "RuntimeException",
             &format!("Called {method}() on an invalid iterator"),

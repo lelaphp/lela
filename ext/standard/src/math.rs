@@ -9,7 +9,9 @@ use php_ext::abi::{Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{BinaryOp, binary_op, coerce_param, is_space};
 use php_ext::decl::Type;
-use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw, value_error};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, deprecated, docref, throw_exception_ex, value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
@@ -656,10 +658,14 @@ fn is_infinite(num: f64) -> bool {
 fn intdiv(req: &mut Request, num1: i64, num2: i64) -> Result<i64, Thrown> {
     let (dividend, divisor) = (num1, num2);
     if divisor == 0 {
-        return Err(throw(req, "DivisionByZeroError", "Division by zero"));
+        return Err(throw_exception_ex(
+            req,
+            "DivisionByZeroError",
+            "Division by zero",
+        ));
     }
     if divisor == -1 && dividend == i64::MIN {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ArithmeticError",
             "Division of PHP_INT_MIN by -1 is not an integer",

@@ -6,7 +6,7 @@ use php_ext::abi::{Instance, OrFalse, This};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
 use php_ext::coerce::{to_double, to_long, with_string};
-use php_ext::raising::{Level, Thrown, docref, throw, throw_error};
+use php_ext::raising::{Level, Thrown, docref, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, SmartStr, Value, ValueRef};
 
@@ -43,13 +43,13 @@ fn initialize(req: &mut Request, text: &[u8]) -> Result<RelTime, Thrown> {
         Err(unknown) => unknown,
     };
     if unknown {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "DateMalformedIntervalStringException",
             &format!("Unknown or bad format ({shown})"),
         ));
     }
-    Err(throw(
+    Err(throw_exception_ex(
         req,
         "DateMalformedIntervalStringException",
         &format!("Failed to parse interval ({shown})"),

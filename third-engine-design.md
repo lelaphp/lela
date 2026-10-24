@@ -701,13 +701,13 @@ The set is declared once in `seams.toml`, as its `[[seam]]` rows, and `xtask sta
 | unit | unit.lock | 125 |  |
 | link | link.lock | 62 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1505 | 1525 |
+| api | api.lock | 1506 | 1525 |
 | sapi | sapi.lock | 58 |  |
 | tier | tier.lock | 192 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 427 |  |
 
-<!-- /computed in=414a7ff01edee5590ca547d2615a5e7babf1119e7d7d4e02aad492a9716e2a56 out=bef4e8000354384cd6118b117a09dcdfbbcacdf7af3c77525e156eb35ce12799 -->
+<!-- /computed in=0ac645f6517d8e14dce281136f5b9b1da0b57af10fd5e9082d511dccc9d8abd9 out=dfd9e5b62a243b64c0aea1aef8cad85e775fd3bc225c5209553123853ee629e2 -->
 
 What a lock holds that its row does not say. `heap.lock` carries the VM stack's entry slot and its peers, `VmStack::entry`, `push_entry`, `current` and `MapTable::base`. `tier.lock` is the widening of `php_engine` toward the tier, in two sections: the face, a few dozen items reviewed one by one, and the kernels named by `php_jit`'s `kernels!` list, about three hundred, generated from the list and diffed as one section. `process.lock` is `php_process`'s surface, whose one consumer is `php_engine`. `link.lock` is `php_link`'s surface, the linker and the linked class record that the compiler and the engine both call (ADR-0012). Dax's `effects.lock` is retired, its content being `ops.lock`'s effects column. A lock is one of three kinds, and `xtask api-check` regenerates each from what it is a lock of: the public items of the crate the lock lives with (`heap.lock`, `process.lock`, `unit.lock`, `link.lock`, `api.lock`, and the harness's own `xtask.lock`), or of one module of its producer (`layer.lock`, where a crate outside the seam's consumers that `use`s the module fails); what the consumers import from the producer (`sapi.lock`, `tier.lock`, which is why both are headers carrying nothing until a consumer exists); or the rows of the file the seam is generated from (`ops.lock`, rendered from `ops.toml`'s `[[op]]` rows). All three fail on any difference; adding an item means committing the new lock line with the code. This is how "smallest possible codebase" is measured at the interface, where callers pay, not only in lines.
 
