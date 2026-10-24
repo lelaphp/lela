@@ -27,6 +27,7 @@ impl Request {
     /// between the allocation and the safepoint, the line can be another
     /// than php's: the caller's.
     #[cold]
+    #[inline(never)]
     pub(crate) fn locate_oom(&mut self) {
         if self.oom_unlocated() {
             let (file, line) = self.executed_site();
@@ -80,6 +81,7 @@ impl Request {
     /// #0 %s(4): str_repeat('x', 4194304)
     /// #1 {main}
     /// ```
+    #[cold]
     pub(crate) fn handle_delayed_oom(&mut self) {
         self.locate_oom();
         let Some(pending) = self.heap.take_pending_oom() else {

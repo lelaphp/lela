@@ -75,6 +75,8 @@ pub(crate) fn raised(req: &Request) -> bool {
 /// ```expect exit=255 wall=1s
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
 /// ```
+#[cold]
+#[inline(never)]
 pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
     if let Some(seconds) = req.limits().interrupt().taken() {
         return Err(Fatal::error(format!(
