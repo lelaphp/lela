@@ -71,6 +71,11 @@ struct ConstantRow {
     /// holds for the bytes where any does ([`Request::declared_string`]);
     /// none where the memory limit refused it.
     named: Option<Owner<PhpString>>,
+    /// `zend_register_constant`'s `lowercase_name` for a name with a
+    /// namespace, the table's key, released with the row: a string of its
+    /// own, or the interned one where opcache holds the bytes; none where
+    /// `c->name` is the key.
+    keyed: Option<Owner<PhpString>>,
     owner: ConstantOwner,
     /// The key `EG(zend_constants)` holds the row under: the name with
     /// its namespace lowered, which every lookup compares against.
@@ -213,7 +218,7 @@ impl Request {
             ConstantOwner::User(file) => file,
             ConstantOwner::Core | ConstantOwner::Extension(_) => None,
         };
-        for string in [row.named, file].into_iter().flatten() {
+        for string in [row.named, row.keyed, file].into_iter().flatten() {
             string.give_up(self);
         }
     }
@@ -346,6 +351,38 @@ impl Request {
     /// `CONST_DEPRECATED` raised from them. `false`, nothing hung, the
     /// warning raised and the value given up, where the name stands
     /// already.
+    ///
+    /// A name with a namespace is keyed by a string of its own, the name
+    /// with its namespace lowered, `zend_register_constant`'s
+    /// `lowercase_name`, even where lowering changes nothing; one opcache
+    /// holds is the interned string, `zend_new_interned_string`'s (the
+    /// program under the recipe's
+    /// `TMPDIR`, written into the past so opcache keeps it):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3316-namespaced-constant.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('namespace NSq; const NK = 1;'), "\n";
+    /// echo m('namespace nsr; const nk = 1;'), "\n";
+    /// echo m('define("NSs\\\\DK", 1);'), "\n";
+    /// echo m('const GK = 1;'), "\n";
+    /// echo m('define("Cached\\\\Name", 1);'), "\n";
+    /// echo GK, \Cached\Name, "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 232
+    /// 232
+    /// 232
+    /// 168
+    /// 168
+    /// 11
+    /// ```
     pub(crate) fn define_attributed_constant(
         &mut self,
         name: &[u8],
@@ -376,10 +413,19 @@ impl Request {
         php_compile::values::attribute_values(&attributes, &mut |z| self.heap.addref(z));
         let room = self.constant_room();
         let named = self.declared_string(given).ok();
+        let keyed = if given.contains(&b'\\') {
+            match self.shared.existing_interned(name) {
+                Some(interned) => Some(Owner::take(self, PhpString::of(interned))),
+                None => PhpString::new(self, name).ok(),
+            }
+        } else {
+            None
+        };
         let file = file.and_then(|file| self.executed_file_string(&file).ok());
         self.constants.push(ConstantRow {
             room,
             named,
+            keyed,
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             given: given.to_vec(),
@@ -431,6 +477,7 @@ impl Request {
         self.constants.push(ConstantRow {
             room,
             named,
+            keyed: None,
             owner,
             name: name.to_vec(),
             given: name.to_vec(),
