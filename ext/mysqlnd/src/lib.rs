@@ -290,11 +290,37 @@ impl Handle {
         let mut conn = slot_of(state, self)?.conn.take()?;
         conn.stats.enabled = enabled;
         let answered = f(req, &mut conn);
-        flush(req, &mut conn);
-        if let Some(slot) = slot_of(req.state::<State>(), self) {
+        let state = req.state::<State>();
+        flush(state, &mut conn);
+        if let Some(slot) = slot_of(state, self) {
             slot.conn = Some(conn);
         }
         Some(answered)
+    }
+
+    /// The connection read where it stands, for what reads and counts
+    /// nothing: no lend, so no statistic is switched on or flushed and
+    /// `mysqlnd.collect_statistics` is not read; `None` where the number
+    /// names no connection or the connection is lent already, as for
+    /// [`Handle::with`]. The accessors read through it, so reading the
+    /// connection's facts counts nothing:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// mysqli_query($l, 'SELEC 1');
+    /// $before = mysqli_get_connection_stats($l);
+    /// $facts = [mysqli_errno($l), mysqli_sqlstate($l), mysqli_affected_rows($l), mysqli_warning_count($l), mysqli_real_escape_string($l, "a'b"), mysqli_more_results($l), count(mysqli_error_list($l))];
+    /// echo json_encode($facts), "\n";
+    /// var_dump(array_diff_assoc(mysqli_get_connection_stats($l), $before));
+    /// ```
+    /// ```expect mysql
+    /// [1064,"42000",-1,0,"a\\'b",false,1]
+    /// array(0) {
+    /// }
+    /// ```
+    pub(crate) fn peek<R>(self, req: &mut Request, f: impl FnOnce(&ConnData) -> R) -> Option<R> {
+        slot_of(req.state::<State>(), self)?.conn.as_deref().map(f)
     }
 
     /// `get_reference`: one more owner of the connection.
@@ -305,7 +331,23 @@ impl Handle {
     }
 
     /// `free_reference`: one owner fewer, and the last one's close sent and
-    /// the connection dropped.
+    /// the connection dropped, counted as `mysqlnd.collect_statistics`
+    /// stands when it is:
+    ///
+    /// ```php
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $r = mysqli_query($l, "SELECT 1 UNION ALL SELECT 2", MYSQLI_USE_RESULT);
+    /// ini_set('mysqlnd.collect_statistics', '0');
+    /// $before = mysqli_get_client_stats();
+    /// unset($p);
+    /// $l = null;
+    /// $r = null;
+    /// echo json_encode(array_diff_assoc(mysqli_get_client_stats(), $before)), "\n";
+    /// ```
+    /// ```expect mysql
+    /// []
+    /// ```
     pub(crate) fn release(self, req: &mut Request) {
         let taken = match slot_of(req.state::<State>(), self) {
             Some(slot) => {
@@ -319,8 +361,11 @@ impl Handle {
             None => None,
         };
         if let Some(mut conn) = taken {
+            // The close counts under the entry as it stands now, as a
+            // lend's call does, not as the last lend left it.
+            conn.stats.enabled = ini_bool(req, b"mysqlnd.collect_statistics");
             conn.send_close(req).ok();
-            flush(req, &mut conn);
+            flush(req.state::<State>(), &mut conn);
             conn.dtor(req);
         }
     }
@@ -367,8 +412,7 @@ fn slot_of(state: &mut State, handle: Handle) -> Option<&mut Slot> {
 }
 
 /// What a connection counted for the request's statistics added there.
-fn flush(req: &mut Request, conn: &mut ConnData) {
-    let state = req.state::<State>();
+fn flush(state: &mut State, conn: &mut ConnData) {
     state.stats.resize(stats::COUNT, 0);
     conn.stats.flush(&mut state.stats);
 }

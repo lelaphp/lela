@@ -154,11 +154,11 @@ pub(crate) fn fetch_row(
 ) -> Result<Owner<Value>, Thrown> {
     let flags = (u32::from(mode & NUM != 0) << 1) | u32::from(mode & ASSOC != 0);
     let row = set.fetch_into(req, flags)?;
-    if report_mode(req) & report::ERROR != 0 {
+    // `php_mysqli_fetch_into_hash_aux`: `get_error_no(conn)`, and the
+    // status read whole only for the error it reports.
+    if report_mode(req) & report::ERROR != 0 && set.connection().errno(req) != 0 {
         let status = set.connection().status(req);
-        if status.errno != 0
-            && let Err(thrown) = report_error(req, status.errno, status.sqlstate, &status.error)
-        {
+        if let Err(thrown) = report_error(req, status.errno, status.sqlstate, &status.error) {
             row.give_up(req);
             return Err(thrown);
         }
@@ -205,11 +205,30 @@ pub(crate) type FetchedObject = AsIs<Option<OrFalse<PhpObject>>>;
 /// `null|int|float|string|false`.
 pub(crate) type Column = AsIs<Option<OrFalse<Union<i64, Union<f64, PhpString>>>>>;
 
-/// `mysqli_fetch_array`, `mysqli_fetch_assoc` and `mysqli_fetch_row`.
+/// `mysqli_fetch_array`, `mysqli_fetch_assoc` and `mysqli_fetch_row`:
+/// `MYSQLI_FETCH_RESOURCE`, then `$mode` checked, then the row, in the
+/// one lend of the rows:
+///
+/// ```php
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $r = mysqli_query($l, "SELECT 1");
+/// mysqli_free_result($r);
+/// try { mysqli_fetch_array($r, 99); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// $r = mysqli_query($l, "SELECT 1");
+/// try { mysqli_fetch_array($r, 99); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+/// echo json_encode(mysqli_fetch_array($r, MYSQLI_NUM)), "\n";
+/// ```
+/// ```expect mysql
+/// Error: mysqli_result object is already closed
+/// ValueError: mysqli_fetch_array(): Argument #2 ($mode) must be one of MYSQLI_NUM, MYSQLI_ASSOC, or MYSQLI_BOTH
+/// ["1"]
+/// ```
 pub(crate) fn fetch_array(req: &mut Request, on: On, mode: i64) -> Result<Fetched, Thrown> {
-    with_rows(req, on.object, |_, _| Ok(()))?;
-    let mode = checked_mode(req, on, mode)?;
-    with_rows(req, on.object, |req, set| fetch_row(req, set, mode)).map(AsIs::new)
+    with_rows(req, on.object, |req, set| {
+        let mode = checked_mode(req, on, mode)?;
+        fetch_row(req, set, mode)
+    })
+    .map(AsIs::new)
 }
 
 /// `mysqli_fetch_object`: the row as properties of a new `class`, written
