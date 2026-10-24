@@ -125,6 +125,7 @@ Heap::array_take_at
 Heap::array_update
 Heap::block
 Heap::block_resize
+Heap::block_try_resize
 Heap::call_destructors
 Heap::carve
 Heap::close_resources
