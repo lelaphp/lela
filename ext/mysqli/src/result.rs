@@ -154,11 +154,11 @@ pub(crate) fn fetch_row(
 ) -> Result<Owner<Value>, Thrown> {
     let flags = (u32::from(mode & NUM != 0) << 1) | u32::from(mode & ASSOC != 0);
     let row = set.fetch_into(req, flags)?;
-    if report_mode(req) & report::ERROR != 0 {
+    // `php_mysqli_fetch_into_hash_aux`: `get_error_no(conn)`, and the
+    // status read whole only for the error it reports.
+    if report_mode(req) & report::ERROR != 0 && set.connection().errno(req) != 0 {
         let status = set.connection().status(req);
-        if status.errno != 0
-            && let Err(thrown) = report_error(req, status.errno, status.sqlstate, &status.error)
-        {
+        if let Err(thrown) = report_error(req, status.errno, status.sqlstate, &status.error) {
             row.give_up(req);
             return Err(thrown);
         }
