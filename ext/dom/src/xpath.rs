@@ -9,7 +9,6 @@ use php_ext::call::call;
 use php_ext::coerce::{callable_checked, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, docref, pending, throw_error,
-    throw_error_chained,
 };
 use php_ext::request::{Foreign, Request};
 use php_ext::values::walk::{self, Hold};
@@ -599,20 +598,24 @@ impl Lookup {
 /// The table is read where the call
 /// is made and again where it keeps what the call handed out, since the
 /// function called can register, replace or free it in between. A name
-/// no callable answers to is `zend_call_function`'s refusal, chained
-/// over what an autoloader threw:
+/// no callable answers to is `zend_call_function`'s refusal, and where an
+/// autoloader threw while the name was looked up, what it threw is all
+/// there is (php 8.5.12's `zend_call_function`):
 ///
 /// ```php
 /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
-/// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
 /// $d = new DOMDocument; $d->loadXML('<a/>'); $xp = new DOMXPath($d);
 /// $xp->registerNamespace('php', 'http://php.net/xpath'); $xp->registerPhpFunctions();
-/// pk(function () use ($xp) { try { $xp->evaluate("php:function('Foo::bar')"); } catch (Error $e) {} });
-/// try { $xp->evaluate("php:function('Foo::bar')"); } catch (Error $e) { echo $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+/// $show = function ($expr) use ($xp) { try { $xp->evaluate($expr); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), ' / ', var_export($e->getPrevious()?->getMessage(), true), "\n"; } };
+/// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
+/// pk(function () use ($xp) { try { $xp->evaluate("php:function('Foo::bar')"); } catch (Throwable $e) {} });
+/// $show("php:function('Foo::bar')");
+/// $show("php:function('no_such_function')");
 /// ```
 /// ```expect
-/// 5552
-/// Invalid callback Foo::bar, class "Foo" not found / boom
+/// 3008
+/// RuntimeException: boom / NULL
+/// Error: Invalid callback no_such_function, function "no_such_function" not found or invalid function name / NULL
 /// ```
 fn dispatch(
     req: &mut Request,
@@ -656,12 +659,13 @@ fn dispatch(
                     Ok(error) => error,
                     Err(refused) => return refused,
                 };
-                // An autoloader's throw is the refusal's previous, as
-                // `zend_call_function`'s `zend_throw_error` chains onto
-                // `EG(exception)`, its `zend_vspprintf` buffer standing
-                // across the throw.
+                // What an autoloader threw while the name was looked up is
+                // handed on alone, `error` freed, as php 8.5.12's
+                // `zend_call_function` returns before its refusal; with
+                // nothing pending, the refusal, its `zend_vspprintf` buffer
+                // standing across the throw.
                 let thrown = match pending(req) {
-                    Err(previous) => throw_error_chained(req, previous, "Error", &message),
+                    Err(previous) => previous,
                     Ok(()) => throw_error(req, "Error", &message),
                 };
                 error.free(req);
