@@ -140,6 +140,7 @@ tier::catches
 tier::class_number
 tier::compile
 tier::current
+tier::dim_key
 tier::entry
 tier::epoch
 tier::epoch_state
@@ -186,6 +187,7 @@ tier::call_held
 tier::concat
 tier::dispatch_held
 tier::free_cv
+tier::lookup_element
 tier::release
 tier::rope_end
 tier::rope_open

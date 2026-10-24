@@ -342,12 +342,12 @@ function u0:0(i64, i64) -> i32 tail {
 @0004                               v200 = load.i8 notrap aligned v199+8
 @0004                               v201 = iconst.i8 4
 @0004                               v202 = icmp eq v200, v201  ; v201 = 4
-@0004                               v203 = iconst.i8 5
-@0004                               v204 = icmp eq v200, v203  ; v203 = 5
 @0004                               brif v202, block55, block56
 
                                 block56:
-@0004                               brif.i8 v204, block57, block53
+@0004                               v203 = iconst.i8 5
+@0004                               v204 = icmp.i8 eq v200, v203  ; v203 = 5
+@0004                               brif v204, block57, block53
 
                                 block55:
 @0004                               v205 = load.i64 notrap aligned v199
@@ -390,12 +390,12 @@ function u0:0(i64, i64) -> i32 tail {
 @0005                               v225 = load.i8 notrap aligned v224+8
 @0005                               v226 = iconst.i8 4
 @0005                               v227 = icmp eq v225, v226  ; v226 = 4
-@0005                               v228 = iconst.i8 5
-@0005                               v229 = icmp eq v225, v228  ; v228 = 5
 @0005                               brif v227, block61, block62
 
                                 block62:
-@0005                               brif.i8 v229, block63, block59
+@0005                               v228 = iconst.i8 5
+@0005                               v229 = icmp.i8 eq v225, v228  ; v228 = 5
+@0005                               brif v229, block63, block59
 
                                 block61:
 @0005                               v230 = load.i64 notrap aligned v224

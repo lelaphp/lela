@@ -1005,21 +1005,42 @@ pub(super) fn check_sites(op: &Opline, samples: [Option<Sample>; 3]) -> Vec<Site
     }
 }
 
+/// Whether the key `op2` of a dimension opline, seen as `t2`, is one the
+/// lookups take inline: a long, or a string a constant or a variable
+/// holds, which the opline gives up nothing of.
+pub(super) fn keyed(op: &Opline, t2: Types) -> bool {
+    t2 == Types::LONG
+        || (t2 == Types::STRING && matches!(op.op2_type, OperandKind::Const | OperandKind::Cv))
+}
+
 /// Whether an `ASSIGN_DIM_OP` is compiled inline, as php compiles a
 /// compound write to an element over a variable's array, through the
-/// reference it may be (`t1` what it sees of it), by a long key and with
-/// a number, calling its helpers where the array is shared, a hash or
-/// short of the key, or the element is no number (`zend_jit_assign_dim_op`,
-/// `Z/ext/opcache/jit/zend_jit_ir.c:13528-13750`): its `out` slot unused and
-/// its operator one `zend_jit_math_helper` serves over two numbers.
+/// reference it may be (`t1` what it sees of it), by a key the lookups
+/// take ([`keyed`]), calling its helpers where the array is shared, a
+/// packed array short of the key, a key a hash has not got or an element
+/// of no kind the operator serves (`zend_jit_assign_dim_op`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:13528-13750`): its `out` slot unused,
+/// and its operator one `zend_jit_math_helper` serves over two numbers,
+/// `+`, `-`, `*` and `/`, one `zend_jit_long_math_helper` serves over two
+/// longs, `%`, the shifts and the bitwise operators, or `.` over two
+/// strings, `zend_jit_concat_helper`; php leaves `**` out of all three
+/// (`zend_jit_supported_binary_op`).
 pub(super) fn compound_in_place(op: &Opline, t1: Types, t2: Types, td: Types) -> bool {
+    let served = |binary| match binary {
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
+            td == Types::LONG || td == Types::DOUBLE
+        }
+        Opcode::Mod | Opcode::Sl | Opcode::Sr | Opcode::BwOr | Opcode::BwAnd | Opcode::BwXor => {
+            td == Types::LONG
+        }
+        Opcode::Concat => td == Types::STRING,
+        _ => false,
+    };
     op.op1_type == OperandKind::Cv
         && op.out_type == OperandKind::Unused
         && t1.tag() == Some(ZvalType::Array)
-        && t2 == Types::LONG
-        && (td == Types::LONG || td == Types::DOUBLE)
-        && lattice::binary_of(op.extended_value)
-            .is_some_and(|binary| matches!(binary, Opcode::Add | Opcode::Sub | Opcode::Mul))
+        && keyed(op, t2)
+        && lattice::binary_of(op.extended_value).is_some_and(served)
 }
 
 /// php's packed guard over an array `op1` read or written by a long key
