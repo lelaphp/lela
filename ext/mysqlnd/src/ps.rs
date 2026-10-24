@@ -868,7 +868,25 @@ fn send_execute(
 /// `mysqlnd_stmt_execute_parse_response`: the answer to a
 /// `COM_STMT_EXECUTE` (or the next set of rows, or the OUT parameters a `CALL` sends after its
 /// own), the statement's status taken from the connection, the rows'
-/// reader chosen by the cursor the server opened or did not.
+/// reader chosen by the cursor the server opened or did not. An OK takes
+/// the statement's columns to none, the one that ends a `CALL`'s sets
+/// among them:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+/// $l = new mysqli('127.0.0.1', 'root', '', 'test');
+/// $l->query('DROP PROCEDURE IF EXISTS mysqlnd_witness_field_count');
+/// $l->query('CREATE PROCEDURE mysqlnd_witness_field_count() BEGIN SELECT 1 AS a; SELECT 2 AS b, 3 AS c; END');
+/// $s = $l->prepare('CALL mysqlnd_witness_field_count()');
+/// $s->execute();
+/// do { var_dump($s->field_count); $s->get_result(); } while ($s->next_result());
+/// $l->query('DROP PROCEDURE mysqlnd_witness_field_count');
+/// ```
+/// ```expect mysql
+/// int(1)
+/// int(2)
+/// int(0)
+/// ```
 fn parse_execute_response(
     req: &mut Request,
     stmt: &mut StmtData,
@@ -887,6 +905,9 @@ fn parse_execute_response(
             conn.last_query_type,
             QueryType::Upsert | QueryType::LoadLocal
         ) {
+            // An OK has no columns, the stored procedure's last one among
+            // them: php 8.5.12's `stmt->field_count = conn->field_count`.
+            stmt.field_count = conn.field_count;
             return Ok(true);
         }
         if let Some(result) = stmt.result.as_mut() {
