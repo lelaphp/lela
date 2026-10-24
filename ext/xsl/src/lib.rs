@@ -149,21 +149,36 @@ fn class_name(req: &Request, class: ClassId) -> String {
 /// profile's path and how many transformations are running on it.
 #[derive(Default)]
 pub(crate) struct Intern {
-    sheet: Option<ffi::Sheet>,
+    sheet: Option<Imported>,
     /// `transform_depth`: the transformations in progress, nested where
     /// a callback transforms again, during which `importStylesheet` is
     /// refused (php 8.5.12, GH-23730).
     transform_depth: u32,
-    /// `sheet_ref_obj`: one count of the document reference of the
-    /// clone the sheet was compiled from, its tree handed to libxslt,
-    /// kept so the namespace mappings a modern document's nodes name
-    /// live as long as the sheet; no document while none was imported.
-    sheet_ref: NodeObject,
     has_keys: bool,
     params: Vec<(Vec<u8>, Vec<u8>)>,
     security: i64,
     callbacks: XPathCallbacks,
     profiling: Option<Box<[u8]>>,
+}
+
+/// `intern->ptr` and `intern->sheet_ref_obj`, set, replaced and freed
+/// together: the compiled sheet, and one count of the document reference
+/// of the clone it was compiled from, whose tree the sheet owns, kept so
+/// the namespace mappings a modern document's nodes name live as long as
+/// the sheet.
+pub(crate) struct Imported {
+    sheet: ffi::Sheet,
+    doc_ref: NodeObject,
+}
+
+impl Imported {
+    /// `xsl_free_sheet`, then `php_libxml_decrement_doc_ref_directly` on
+    /// the clone's reference, `xsl_objects_free_storage`'s order.
+    fn close(self, req: &mut Request) {
+        let Imported { sheet, mut doc_ref } = self;
+        sheet.close(req);
+        doc_ref.decrement_doc_ref(req);
+    }
 }
 
 fn intern(req: &mut Request, object: PhpObject) -> Option<&mut Intern> {
@@ -218,13 +233,11 @@ impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         Std.free_obj(req, object);
         if let Some(i) = intern(req, object) {
-            let (sheet, callbacks) = (i.sheet.take(), std::mem::take(&mut i.callbacks));
-            let mut sheet_ref = std::mem::take(&mut i.sheet_ref);
+            let (imported, callbacks) = (i.sheet.take(), std::mem::take(&mut i.callbacks));
             callbacks.release(req);
-            if let Some(sheet) = sheet {
-                sheet.close(req);
+            if let Some(imported) = imported {
+                imported.close(req);
             }
-            sheet_ref.decrement_doc_ref(req);
         }
     }
 
@@ -401,8 +414,8 @@ fn routed(mut raised: Vec<Raised>) -> Vec<Raised> {
 /// the caller's, or `None` where libxslt made none, and the stylesheet
 /// to save it with. The stylesheet stays on the object and is held for
 /// the whole span (ADR-0013), so a callback's nested transformation runs
-/// with it and one that imports another leaves the old one's free to
-/// the end of this one, saving included (#2319).
+/// with it; an import meanwhile is refused (`transform_depth`, GH-23730),
+/// counted from before the profile's path is checked, as php counts it.
 fn apply<R>(
     req: &mut Request,
     this: PhpObject,
@@ -415,7 +428,7 @@ fn apply<R>(
         return Err(arg_type_error(req, 1, "be a valid XML node"));
     };
     let held = intern(req, this).and_then(|i| {
-        let id = i.sheet.as_ref()?.id();
+        let id = i.sheet.as_ref()?.sheet.id();
         let read = (
             i.has_keys,
             i.params.clone(),
@@ -430,11 +443,12 @@ fn apply<R>(
         );
         return Err(throw_error(req, "Error", &message));
     };
-    let profile = profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
     let answer = id.held(req, |req, sheet| {
         if let Some(i) = intern(req, this) {
             i.transform_depth += 1;
         }
+        let profile =
+            profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
         let mut holder = NodeObject::default();
         let doc = if has_keys {
             let copy = doc.copy_doc(true).unwrap_or(doc);
@@ -455,7 +469,7 @@ fn apply<R>(
         at(this).clean_node_list(req);
         holder.decrement_doc_ref(req);
         if let Some(i) = intern(req, this) {
-            i.transform_depth -= 1;
+            i.transform_depth = i.transform_depth.saturating_sub(1);
         }
         finish(req, sheet, made?)
     });
@@ -745,16 +759,21 @@ impl XSLTProcessor {
             owner.give_up(req);
         }
         let copy = cloned?;
-        let Some(newdoc) = import_node(req, *copy).and_then(|e| e.node().doc()) else {
+        // The clone's libxml half, `Z_LIBXML_NODE_P(&clone_zv)`, and the
+        // document reference it counts, which every dom document has.
+        let found = import_node(req, *copy).and_then(|e| e.node().doc());
+        let half = php_ext_libxml::node_object(req, *copy);
+        let (Some(newdoc), Some(mut half)) = (found, half) else {
+            copy.give_up(req);
+            return Err(arg_type_error(req, 1, "be a valid XML node"));
+        };
+        let Some(shared) = half.shared_doc() else {
             copy.give_up(req);
             return Err(arg_type_error(req, 1, "be a valid XML node"));
         };
         // A copy `__clone` kept a name of, the object or a node of its
         // document, would see its tree compiled from under it.
-        let half = php_ext_libxml::node_object(req, *copy);
-        let doc_refs = half.as_ref().map_or(0, |h| h.doc_refcount());
-        let modern = half.as_ref().map(|h| h.class_type()) == Some(ClassType::Modern);
-        if Value::object(*copy).refcount() > 1 || doc_refs > 1 {
+        if Value::object(*copy).refcount() > 1 || half.doc_refcount() > 1 {
             copy.give_up(req);
             return Err(arg_value_error(
                 req,
@@ -762,7 +781,7 @@ impl XSLTProcessor {
                 "not have its clone retained by __clone()",
             ));
         }
-        if modern {
+        if half.class_type() == ClassType::Modern {
             add_ns_defs(newdoc);
         }
         let (sheet, raised, thrown) = ffi::Stylesheet::parse(req, newdoc);
@@ -774,35 +793,38 @@ impl XSLTProcessor {
         };
         // The tree is the sheet's now: the copy's reference lets go of it
         // and is counted once more, for the mappings its nodes name.
-        let mut sheet_ref = NodeObject::default();
-        if let Some(mut half) = php_ext_libxml::node_object(req, *copy) {
-            sheet_ref.share(req, half.shared_doc(), newdoc);
-            half.detach_document();
-        }
-        let mut old_ref = match intern(req, this) {
-            Some(i) => std::mem::replace(&mut i.sheet_ref, sheet_ref),
-            None => sheet_ref,
-        };
-        old_ref.decrement_doc_ref(req);
+        let mut doc_ref = NodeObject::default();
+        doc_ref.share(req, Some(shared), newdoc);
+        half.detach_document();
         copy.give_up(req);
-        let declared_keys = sheet.doc().is_some_and(declares_keys);
-        let sheet = ffi::Sheet::adopt(req, sheet);
+        // `cloneDocument`, or an `xsl:key` at the stylesheet's top level,
+        // makes every transformation copy its document first; php only
+        // ever sets `hasKeys`, so a later import does not clear it.
+        let cloned = match Std.read_property(req, this, b"cloneDocument", PropertyRead::Warning) {
+            Ok(value) => {
+                let cloned = truthy(req, &value);
+                value.give_up(req);
+                cloned
+            }
+            Err(thrown) => Err(thrown),
+        };
+        let has_keys = matches!(cloned, Ok(true)) || sheet.doc().is_some_and(declares_keys);
+        let imported = Imported {
+            sheet: ffi::Sheet::adopt(req, sheet),
+            doc_ref,
+        };
         let replaced = match intern(req, this) {
-            Some(i) => i.sheet.replace(sheet),
-            None => Some(sheet),
+            Some(i) => {
+                i.has_keys |= has_keys;
+                i.sheet.replace(imported)
+            }
+            None => Some(imported),
         };
         if let Some(old) = replaced {
             old.close(req);
         }
         settled?;
-        let clone_document =
-            Std.read_property(req, this, b"cloneDocument", PropertyRead::Warning)?;
-        let cloned = truthy(req, &clone_document);
-        clone_document.give_up(req);
-        let has_keys = cloned? || declared_keys;
-        if let Some(i) = intern(req, this) {
-            i.has_keys = has_keys;
-        }
+        cloned?;
         Ok(true)
     }
 
