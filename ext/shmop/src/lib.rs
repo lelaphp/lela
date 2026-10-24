@@ -330,7 +330,8 @@ fn shmop_read(
         usize::try_from(count).unwrap_or(0),
     );
     let bytes = with(req, shmop, |segment| segment.read(offset, count))?;
-    PhpString::new(req, &bytes)
+    // `zend_string_finit` of the span (`Z/ext/shmop/shmop.c:248`).
+    PhpString::finit(req, &bytes)
 }
 
 /// `shmop_close(Shmop $shmop): void`, which does nothing: the object

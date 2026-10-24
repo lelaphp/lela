@@ -860,10 +860,11 @@ impl Statement for Stmt {
             ffi::SQLITE_NULL => Value::null(),
             ffi::SQLITE_INTEGER => Value::int(self.handle.column_int64(column)),
             ffi::SQLITE_FLOAT => Value::float(self.handle.column_double(column)),
+            // `ZVAL_STRINGL_FAST` (`Z/ext/pdo_sqlite/sqlite_statement.c:296`, `:301`).
             ffi::SQLITE_BLOB => {
-                return Ok(PhpString::new(req, &self.handle.column_blob(column))?.into_value());
+                return Ok(PhpString::fast(req, &self.handle.column_blob(column))?.into_value());
             }
-            _ => return Ok(PhpString::new(req, &self.handle.column_text(column))?.into_value()),
+            _ => return Ok(PhpString::fast(req, &self.handle.column_text(column))?.into_value()),
         };
         Ok(Owner::take(req, scalar))
     }

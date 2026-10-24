@@ -1582,7 +1582,15 @@ impl Request {
             return Ok(std::cmp::Ordering::Equal);
         }
         let held = crate::ops::HeldTables::hold(self, table, right.table());
-        let order = if left.len() != right.len() {
+        // `zend_hash_compare`'s stack check, before its recursion guard
+        // (`Z/Zend/zend_hash.c:3432-3437`), as [`crate::ops`]' walk of two
+        // arrays asks it.
+        let order = if self.limits().stack_overflowed() {
+            Err(crate::api::raising::error(
+                self,
+                "Maximum call stack size reached during comparison",
+            ))
+        } else if left.len() != right.len() {
             Ok(left.len().cmp(&right.len()))
         } else if table.is_recursive() {
             Err(crate::ops::nesting_too_deep(self))
@@ -1988,7 +1996,7 @@ impl Request {
     }
 
     /// The body `ZEND_CLONE` and the `clone()` function share
-    /// (`Z/Zend/zend_vm_def.h:6010`, `Z/Zend/zend_builtin_functions.c:72`):
+    /// (`Z/Zend/zend_vm_def.h:6011`, `Z/Zend/zend_builtin_functions.c:72`):
     /// a null `clone_obj` is php's `Error` for an uncloneable object,
     /// read before anything else; a `__clone` that is not public is held
     /// to `zend_check_method_accessible` from the executed scope, the

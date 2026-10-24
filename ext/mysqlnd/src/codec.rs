@@ -331,8 +331,9 @@ fn fetch<'a>(
             }
             None => return Ok(None),
         },
+        // `ps_fetch_string`'s `ZVAL_STRINGL_FAST` (`Z/ext/mysqlnd/mysqlnd_ps_codec.c:429`).
         _ => match variable(req, p) {
-            Some(b) => text(req, b)?,
+            Some(b) => PhpString::fast(req, b)?.into_value(),
             None => return Ok(None),
         },
     }))

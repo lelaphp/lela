@@ -107,7 +107,7 @@ pub(crate) fn nop<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, _: &
     Ok(advance(req, frame))
 }
 
-/// `ZEND_EXT_STMT` (`Z/Zend/zend_vm_def.h:7923`), which a compile with
+/// `ZEND_EXT_STMT` (`Z/Zend/zend_vm_def.h:7928`), which a compile with
 /// extended info leaves before each statement (`-e`, #1780): each Zend
 /// extension's `statement_handler` told of the statement the frame
 /// stands at, and on to the opline after, or what a handler threw
@@ -142,7 +142,7 @@ pub(crate) fn ext_stmt<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_EXT_FCALL_BEGIN` (`Z/Zend/zend_vm_def.h:7935`), before a call
+/// `ZEND_EXT_FCALL_BEGIN` (`Z/Zend/zend_vm_def.h:7940`), before a call
 /// op compiled with extended info: php tells each loaded Zend
 /// extension's `fcall_begin_handler`, and no Zend extension here has one:
 /// its row carries a statement handler alone (#2038; [`ext_stmt`]'s
@@ -156,7 +156,7 @@ pub(crate) fn ext_fcall_begin<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_EXT_FCALL_END` (`Z/Zend/zend_vm_def.h:7947`), after a call op
+/// `ZEND_EXT_FCALL_END` (`Z/Zend/zend_vm_def.h:7952`), after a call op
 /// compiled with extended info: php tells each loaded Zend extension's
 /// `fcall_end_handler`, and no Zend extension here has one: its row
 /// carries a statement handler alone (#2038; [`ext_stmt`]'s witness
@@ -170,7 +170,7 @@ pub(crate) fn ext_fcall_end<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_EXT_NOP` (`Z/Zend/zend_vm_def.h:8086`): nothing, and on to the
+/// `ZEND_EXT_NOP` (`Z/Zend/zend_vm_def.h:8091`): nothing, and on to the
 /// opline after it. php 8.5's compiler emits none, so only a unit some
 /// other tool wrote would carry one.
 pub(crate) fn ext_nop<T: Tier>(
@@ -182,7 +182,7 @@ pub(crate) fn ext_nop<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_TICKS` (`Z/Zend/zend_vm_def.h:8024`), what `declare(ticks=N)`
+/// `ZEND_TICKS` (`Z/Zend/zend_vm_def.h:8029`), what `declare(ticks=N)`
 /// leaves after each statement in its scope, `N` in `extended_value`:
 /// every `N`th one passed serves the functions `register_tick_function()`
 /// kept ([`Request::tick`]), with fiber switching blocked while they are
@@ -261,7 +261,7 @@ pub(crate) fn free<T: Tier>(req: &mut Request, frame: FrameRef, _: &OpArray, op:
     Ok(advance(req, frame))
 }
 
-/// `ZEND_DECLARE_CLASS` (`Z/Zend/zend_vm_def.h:7959`): `do_bind_class`
+/// `ZEND_DECLARE_CLASS` (`Z/Zend/zend_vm_def.h:7964`): `do_bind_class`
 /// for the class the frame's unit files under the runtime definition
 /// key in the constant after `op1`, which is what php emits for every
 /// class it did not early bind and does not delay — one written inside
@@ -334,7 +334,7 @@ fn constant_bytes(code: &OpArray, op: &Opline, at: u32) -> Result<Vec<u8>, Fatal
         })
 }
 
-/// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7968`), what
+/// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7973`), what
 /// opcache's compiler emits for a top-level class with no interface
 /// and no trait that it could not bind early: nothing where the unit's
 /// load bound the class, and the declaration `ZEND_DECLARE_CLASS` makes
@@ -365,7 +365,7 @@ pub(crate) fn declare_class_delayed<T: Tier>(
     }
 }
 
-/// `ZEND_DECLARE_ANON_CLASS` (`Z/Zend/zend_vm_def.h:7988`): the class
+/// `ZEND_DECLARE_ANON_CLASS` (`Z/Zend/zend_vm_def.h:7993`): the class
 /// the opline's cache slot holds, or the anonymous class the unit files
 /// under the lowered name in `op1` ([`Request::declare_anonymous`]),
 /// linked the first time any opline of its declaration runs and the same
@@ -440,7 +440,7 @@ pub(crate) fn declare_anon_class<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_DECLARE_FUNCTION` (`Z/Zend/zend_vm_def.h:8013`):
+/// `ZEND_DECLARE_FUNCTION` (`Z/Zend/zend_vm_def.h:8018`):
 /// `do_bind_function` over the op array the frame's
 /// `dynamic_func_defs` holds at `op2`, under the lowered name in
 /// `op1`. php's compiler emits one for every function written below
@@ -501,7 +501,7 @@ pub(crate) fn declare_function<T: Tier>(
     }
 }
 
-/// `ZEND_DECLARE_CONST` (`Z/Zend/zend_vm_def.h:8269`), the opline
+/// `ZEND_DECLARE_CONST` (`Z/Zend/zend_vm_def.h:8276`), the opline
 /// `zend_compile_const_decl` leaves for each declarator of a `const`
 /// statement: the name in `op1`, the value in `op2`, and
 /// `zend_register_constant` over them, which is the table `define()`
@@ -569,7 +569,7 @@ pub(crate) fn declare_const<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_DECLARE_ATTRIBUTED_CONST` (`Z/Zend/zend_vm_def.h:8301`), the
+/// `ZEND_DECLARE_ATTRIBUTED_CONST` (`Z/Zend/zend_vm_def.h:8308`), the
 /// opline `zend_compile_const_decl` leaves for a `const` written with
 /// attributes: [`declare_const`]'s registration, then
 /// `zend_constant_add_attributes` over the attributes of the
@@ -661,7 +661,7 @@ pub(crate) fn declare_attributed_const<T: Tier>(
     Ok(advance_over_data(req, frame))
 }
 
-/// `ZEND_DECLARE_LAMBDA_FUNCTION` (`Z/Zend/zend_vm_def.h:8343`):
+/// `ZEND_DECLARE_LAMBDA_FUNCTION` (`Z/Zend/zend_vm_def.h:8350`):
 /// `zend_create_closure` over the op array the frame's
 /// `dynamic_func_defs` holds at `op2`, into the temporary `result`
 /// names. The scope is the enclosing op array's, the class a method
@@ -803,7 +803,7 @@ pub(crate) fn declare_lambda_function<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZVAL_MAKE_REF_EX` over a CV (`Z/Zend/zend_vm_def.h:9112`, the
+/// `ZVAL_MAKE_REF_EX` over a CV (`Z/Zend/zend_vm_def.h:9119`, the
 /// by-reference arm of `BIND_LEXICAL`, and `zend_assign_to_variable_ref`
 /// under `ASSIGN_REF`): the cell the CV holds, or one made over what it
 /// holds and written back into it, the owner the slot had moving into
@@ -823,7 +823,7 @@ fn cv_reference(
     Ok(cell)
 }
 
-/// `ZEND_BIND_LEXICAL` (`Z/Zend/zend_vm_def.h:9101`): one `use`
+/// `ZEND_BIND_LEXICAL` (`Z/Zend/zend_vm_def.h:9108`): one `use`
 /// variable of the closure the temporary in `op1` holds, from the CV in
 /// `op2` into the slot `extended_value` names of the closure's own
 /// table (`zend_closure_bind_var_ex`). By value the variable is
@@ -932,7 +932,7 @@ pub(crate) fn bind_lexical<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_BIND_STATIC` (`Z/Zend/zend_vm_def.h:9133`): the slot
+/// `ZEND_BIND_STATIC` (`Z/Zend/zend_vm_def.h:9140`): the slot
 /// `extended_value` names of the frame's `static` table read into the
 /// CV in `op1`. The table is the closure's own for a closure's frame and
 /// otherwise the request's copy for the function or the main op array
@@ -1119,7 +1119,7 @@ pub(crate) fn bind_static<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_BIND_INIT_STATIC_OR_JMP` (`Z/Zend/zend_vm_def.h:9186`): the
+/// `ZEND_BIND_INIT_STATIC_OR_JMP` (`Z/Zend/zend_vm_def.h:9193`): the
 /// guard before a `static`'s initializer that folds to no constant. The
 /// slot `extended_value` names still holds the `null` the table starts
 /// it at until the `BIND_STATIC` after the initializer binds it, so a
@@ -1171,7 +1171,7 @@ pub(crate) fn bind_init_static_or_jmp<T: Tier>(
     jump_to(op.op2)
 }
 
-/// `ZEND_BIND_GLOBAL` (`Z/Zend/zend_vm_def.h:8679`), one variable of a
+/// `ZEND_BIND_GLOBAL` (`Z/Zend/zend_vm_def.h:8686`), one variable of a
 /// `global` statement: the CV in `op1` bound by reference to the entry
 /// the name in `op2` has in `EG(symbol_table)`, the table the main op
 /// array's variables and `$GLOBALS` are ([`Request::global_cell`]). A
@@ -1230,7 +1230,7 @@ pub(crate) fn bind_global<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_INIT_DYNAMIC_CALL` (`Z/Zend/zend_vm_def.h:3899`): the call
+/// `ZEND_INIT_DYNAMIC_CALL` (`Z/Zend/zend_vm_def.h:3900`): the call
 /// frame for a callee named as the program serves, `$f(…)`, each shape
 /// through php's own initialiser. An object is
 /// `zend_init_dynamic_call_object`: a `Closure` its payload's function
@@ -1371,7 +1371,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     push_dynamic(req, frame, op, resolved)
 }
 
-/// The inline path of `INIT_DYNAMIC_CALL` (`Z/Zend/zend_vm_def.h:3938`)
+/// The inline path of `INIT_DYNAMIC_CALL` (`Z/Zend/zend_vm_def.h:3939`)
 /// over a CV that holds a `Closure`, `$f(...)`:
 /// `zend_init_dynamic_call_object`'s first arm, the payload read once
 /// ([`closure_target`]) and the call pushed with the closure and its
@@ -1751,7 +1751,7 @@ pub(crate) fn echo<T: Tier>(
     }
 }
 
-/// `ZEND_INIT_FCALL` (`Z/Zend/zend_vm_def.h:4057`): the call frame for a
+/// `ZEND_INIT_FCALL` (`Z/Zend/zend_vm_def.h:4058`): the call frame for a
 /// callee named at compile time, its lowered name in `op2` and the
 /// number of arguments in `extended_value`. The callee is read off the
 /// cache slot `result.num` names and, on the first pass, looked up and
@@ -1775,7 +1775,7 @@ pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
 }
 
 /// The inline path of `ZEND_INIT_FCALL` (`ZEND_INIT_FCALL_SPEC_CONST`,
-/// `Z/Zend/zend_vm_def.h:4057`): the callee read off the cache slot
+/// `Z/Zend/zend_vm_def.h:4058`): the callee read off the cache slot
 /// `result.num` names, `CACHED_PTR`, and where it is a user function,
 /// the call pushed with the room its frame shape and the arguments past
 /// its parameters take (`_zend_vm_stack_push_call_frame_ex` over the
@@ -1837,7 +1837,7 @@ fn init_native(
     })
 }
 
-/// `ZEND_INIT_FCALL_BY_NAME` (`Z/Zend/zend_vm_def.h:3871`): the call
+/// `ZEND_INIT_FCALL_BY_NAME` (`Z/Zend/zend_vm_def.h:3872`): the call
 /// frame for a callee php's compiler found no function under, resolved
 /// here instead. `op2` names the constant pair
 /// `zend_add_func_name_literal` laid down, the name as written and then
@@ -2037,7 +2037,7 @@ fn sent(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge
 
 /// The inline path of `ZEND_SEND_VAL` and `ZEND_SEND_VAR` by number
 /// (`ZEND_SEND_VAL_SPEC_CONST_CONST`, `_TMP_CONST`,
-/// `ZEND_SEND_VAR_SPEC_CV_CONST`, `Z/Zend/zend_vm_def.h:4886-4983`):
+/// `ZEND_SEND_VAR_SPEC_CV_CONST`, `Z/Zend/zend_vm_def.h:4887-4984`):
 /// `ZEND_CALL_VAR(EX(call), opline->result.var)` is the callee's slot
 /// for the argument's number, and the operand goes into it as php's
 /// handler puts it, a constant that counts no owner copied
@@ -2153,7 +2153,7 @@ enum Sending {
     Checked,
 }
 
-/// `ZEND_SEND_REF` (`Z/Zend/zend_vm_def.h:5087`), the argument a call
+/// `ZEND_SEND_REF` (`Z/Zend/zend_vm_def.h:5088`), the argument a call
 /// site whose callee the table has places for a by-reference parameter:
 /// the variable is made a reference where it holds none
 /// (`ZVAL_MAKE_REF_EX(varptr, 2)`, the cell taking the variable's owner
@@ -2489,7 +2489,7 @@ pub(crate) fn send_var_ex<T: Tier>(
     send(req, frame, code, op, reserved.slot)
 }
 
-/// `ZEND_SEND_VAR_NO_REF_EX` (`Z/Zend/zend_vm_def.h:5019`): what a call
+/// `ZEND_SEND_VAR_NO_REF_EX` (`Z/Zend/zend_vm_def.h:5020`): what a call
 /// returned, sent to a callee the compiler knew nothing of, which reads
 /// the parameter's by-reference bit off the callee the `INIT` resolved
 /// (`ARG_SHOULD_BE_SENT_BY_REF`) and is `SEND_VAR` where it is unset
@@ -2541,7 +2541,7 @@ pub(crate) fn send_var_no_ref_ex<T: Tier>(
     send_returned(req, frame, op, reserved.slot, prefer)
 }
 
-/// `ZEND_SEND_VAR_NO_REF` (`Z/Zend/zend_vm_def.h:4988`): what a call
+/// `ZEND_SEND_VAR_NO_REF` (`Z/Zend/zend_vm_def.h:4989`): what a call
 /// returned, sent where the compiler knew the parameter takes its
 /// argument by reference and nothing else: [`send_var_no_ref_ex`]'s
 /// by-reference arm, with the bit read at compile time. A call that
@@ -2594,7 +2594,7 @@ fn send_returned(
     place_argument(req, frame, slot, cell.as_value())
 }
 
-/// `ZEND_CHECK_FUNC_ARG` (`Z/Zend/zend_vm_def.h:5183`), before a
+/// `ZEND_CHECK_FUNC_ARG` (`Z/Zend/zend_vm_def.h:5184`), before a
 /// dimension, a property or a class's property sent to a callee the
 /// compiler knew nothing of: the parameter's by-reference bit read off
 /// the callee the `INIT` resolved, by its number or by its name, and
@@ -2670,7 +2670,7 @@ pub(crate) fn check_func_arg<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_SEND_FUNC_ARG` (`Z/Zend/zend_vm_def.h:5215`): what a
+/// `ZEND_SEND_FUNC_ARG` (`Z/Zend/zend_vm_def.h:5216`): what a
 /// `_FUNC_ARG` fetch left, sent as the `CHECK_FUNC_ARG` before it read
 /// the parameter: the place the write fetch laid down, bound as
 /// [`send_ref`] binds a variable, or the value the read fetched, sent
@@ -2770,7 +2770,7 @@ fn sends_arg_by_ref(req: &Request) -> bool {
         .is_some_and(|call| call.info.send_by_ref())
 }
 
-/// `ZEND_CHECK_UNDEF_ARGS` (`Z/Zend/zend_vm_def.h:5656`), after the last
+/// `ZEND_CHECK_UNDEF_ARGS` (`Z/Zend/zend_vm_def.h:5657`), after the last
 /// argument of a call where a named one may have skipped a parameter:
 /// nothing where every slot up to the last one placed is filled, and
 /// otherwise `zend_handle_undef_args` over the call
@@ -2812,7 +2812,7 @@ pub(crate) fn check_undef_args<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_INIT_USER_CALL` (`Z/Zend/zend_vm_def.h:3952`), what php's
+/// `ZEND_INIT_USER_CALL` (`Z/Zend/zend_vm_def.h:3953`), what php's
 /// compiler makes of `call_user_func(...)` and `call_user_func_array(...)`
 /// spelled by a name it resolves (`zend_compile_init_user_func`): the
 /// callback in `op2` resolved by `zend_is_callable_ex` as a native's
@@ -2979,7 +2979,7 @@ fn user_call_target(
     }
 }
 
-/// `ZEND_SEND_USER` (`Z/Zend/zend_vm_def.h:5635`), each argument after
+/// `ZEND_SEND_USER` (`Z/Zend/zend_vm_def.h:5636`), each argument after
 /// the callback of `call_user_func(...)`: the value read, a reference
 /// followed, and copied into the slot at its number; where the parameter
 /// takes its argument by reference and nothing else, php's warning
@@ -3028,7 +3028,7 @@ pub(crate) fn send_user<T: Tier>(
     place_argument(req, frame, reserved.slot, value)
 }
 
-/// `ZEND_SEND_ARRAY` (`Z/Zend/zend_vm_def.h:5484`), the array of
+/// `ZEND_SEND_ARRAY` (`Z/Zend/zend_vm_def.h:5485`), the array of
 /// `call_user_func_array(...)`: what is no array php's `TypeError`; each
 /// integer-keyed element the next positional argument whatever its key,
 /// a string-keyed one placed by its name
@@ -3136,7 +3136,7 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
     }
     let mut have_named = false;
     // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht, name, arg)`
-    // (`Z/Zend/zend_vm_def.h:5583`), no owner of the table taken: the
+    // (`Z/Zend/zend_vm_def.h:5584`), no owner of the table taken: the
     // operand holds it while a by-reference warning reaches the program.
     walk::foreach(req, array, Hold::None, |req, row| -> walk::Step {
         let value = *row.value();
@@ -3208,7 +3208,7 @@ fn send_array_slice(
         return Ok(());
     }
     let length = usize::try_from(length.min(rest)).unwrap_or(0);
-    // `ZEND_HASH_FOREACH_VAL(ht, arg)` (`Z/Zend/zend_vm_def.h:5541`), the
+    // `ZEND_HASH_FOREACH_VAL(ht, arg)` (`Z/Zend/zend_vm_def.h:5542`), the
     // first `skip` rows stepped over, no owner of the table taken: the
     // operand holds it while a by-reference warning reaches the program.
     let (mut skip, mut sent) = (skip, 0);
@@ -3292,7 +3292,7 @@ fn no_call_under(req: &mut Request) -> Thrown {
     )
 }
 
-/// `ZEND_ASSERT_CHECK` (`Z/Zend/zend_vm_def.h:8880`), in front of every
+/// `ZEND_ASSERT_CHECK` (`Z/Zend/zend_vm_def.h:8887`), in front of every
 /// `assert()` php compiles while `zend.assertions` is at or above zero:
 /// while it stands at or below zero as the program serves, the jump in `op2` is
 /// taken over the whole call, so nothing of its arguments is evaluated,
@@ -3651,7 +3651,7 @@ pub(crate) fn do_fcall<T: Tier>(
     do_call(req, frame, op, "ZEND_DO_FCALL")
 }
 
-/// `ZEND_INCLUDE_OR_EVAL` (`Z/Zend/zend_vm_def.h:6544`), the four file
+/// `ZEND_INCLUDE_OR_EVAL` (`Z/Zend/zend_vm_def.h:6545`), the four file
 /// constructs and `eval`: the operand as a string (`zval_try_get_tmp_string`), the
 /// file resolved, compiled and put in the included-files table
 /// ([`Request::include_file`]), and its main op array served on a frame
@@ -3663,7 +3663,7 @@ pub(crate) fn do_fcall<T: Tier>(
 /// a path nothing opens answers `false` under an `include`, after the
 /// two warnings, and is the `Error` under a `require`. A file whose op
 /// array is one `RETURN` of a constant, an empty file among them, is
-/// answered without a frame (`Z/Zend/zend_vm_def.h:6569`). The file's
+/// answered without a frame (`Z/Zend/zend_vm_def.h:6570`). The file's
 /// classes and functions are declared before its frame is pushed, as
 /// opcache binds them when it loads the file, and a function the
 /// request already has is the redeclaration fatal, so a `require` of
@@ -3812,7 +3812,7 @@ pub(crate) fn include_or_eval<T: Tier>(
 /// code is its one `RETURN` of a constant answers that constant with no
 /// frame only while the tier the engine binds hooks no user op array
 /// (`Hooked::user`), php's `zend_execute_ex == execute_ex`
-/// (`Z/Zend/zend_vm_def.h:6569-6572`): where it hooks them, the
+/// (`Z/Zend/zend_vm_def.h:6570-6573`): where it hooks them, the
 /// debugger's loop steps that opline as any other, so a breakpoint on an
 /// included file of declarations alone stops there. The binding is the
 /// engine's and not the handler's `T`, which a tier stepping one handler
@@ -3919,7 +3919,7 @@ fn answered(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_DO_UCALL` (`Z/Zend/zend_vm_def.h:4169`): the callee an
+/// `ZEND_DO_UCALL` (`Z/Zend/zend_vm_def.h:4170`): the callee an
 /// `INIT_FCALL` or an `INIT_STATIC_METHOD_CALL` resolved is a user
 /// function the compiler knew, so this is the `ZEND_USER_FUNCTION` arm
 /// alone: the call frame becomes the callee's frame ([`enter`]), and
@@ -3989,7 +3989,7 @@ fn inline_enter(
 }
 
 /// The `ZEND_USER_FUNCTION` arm of the `DO_*CALL` handlers
-/// (`Z/Zend/zend_vm_def.h:4169`, `i_init_func_execute_data`, design
+/// (`Z/Zend/zend_vm_def.h:4170`, `i_init_func_execute_data`, design
 /// §5.6): the served call taken off the call stack and pushed as the
 /// callee's frame, its arguments in the parameters' CVs and its
 /// receiver carried over ([`Request::push_user_frame`]), the caller's
@@ -4015,7 +4015,7 @@ fn enter(
     Ok(Stepped::Pushed(activated.frame).into())
 }
 
-/// `ZEND_RECV` (`Z/Zend/zend_vm_def.h:5692`): the parameter numbered
+/// `ZEND_RECV` (`Z/Zend/zend_vm_def.h:5693`): the parameter numbered
 /// `op1`, from one, whose argument the caller placed in the CV
 /// `result` names; nothing to do where the call passed it, and
 /// `zend_missing_arg_error` where it did not, php's
@@ -4276,7 +4276,7 @@ fn verified_arg(
     Err(arg_type_error(req, frame, number, &ty, argument))
 }
 
-/// `ZEND_RECV_VARIADIC` (`Z/Zend/zend_vm_def.h:5773`): the arguments
+/// `ZEND_RECV_VARIADIC` (`Z/Zend/zend_vm_def.h:5774`): the arguments
 /// from the one numbered `op1` on, collected into a packed array in the
 /// variadic parameter's CV. The arguments past the declared parameters
 /// are the frame's extra ones ([`exec::Annex::extra_args`]), where
@@ -4451,7 +4451,7 @@ pub(crate) fn recv_variadic<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_VERIFY_RETURN_TYPE` (`Z/Zend/zend_vm_def.h:4431`), which the
+/// `ZEND_VERIFY_RETURN_TYPE` (`Z/Zend/zend_vm_def.h:4432`), which the
 /// compiler puts before every `RETURN` of a function with a declared
 /// return type and once more, with an `UNUSED` operand, at the end of
 /// its body: the value the `RETURN` after it will hand back, held to the
@@ -4852,7 +4852,7 @@ fn resolved_type_name(req: &Request, frame: FrameRef, ty: &php_unit::decl::Type)
     named
 }
 
-/// `ZEND_VERIFY_NEVER_TYPE` (`Z/Zend/zend_vm_def.h:4501`), the opline
+/// `ZEND_VERIFY_NEVER_TYPE` (`Z/Zend/zend_vm_def.h:4502`), the opline
 /// that closes a `never`-returning function's body: control reaching it
 /// is `zend_verify_never_error`'s `TypeError`, since a `never` function
 /// may leave only by a throw or by ending the request.
@@ -4889,7 +4889,7 @@ pub(crate) fn verify_never_type<T: Tier>(
     threw(req, frame, &thrown)
 }
 
-/// `ZEND_CALLABLE_CONVERT` (`Z/Zend/zend_vm_def.h:9725`), the `(...)`
+/// `ZEND_CALLABLE_CONVERT` (`Z/Zend/zend_vm_def.h:9732`), the `(...)`
 /// of a first-class callable: the call the `INIT_*` before it began is
 /// made a closure by [`crate::classes::closure_from_frame`] and never
 /// served, and the call frame is let go, its receiver with it. So what
@@ -5217,7 +5217,7 @@ fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
     crate::api::raising::throw_error(req, "ArgumentCountError", &message)
 }
 
-/// `ZEND_RECV_INIT` (`Z/Zend/zend_vm_def.h:5723`): the parameter
+/// `ZEND_RECV_INIT` (`Z/Zend/zend_vm_def.h:5724`): the parameter
 /// numbered `op1` with a default in `op2`; where the call passed no
 /// argument for it, the default is copied into the CV `result` names
 /// (`ZVAL_COPY(param, default_value)`), and nothing is done otherwise.
@@ -5332,7 +5332,7 @@ pub(crate) fn recv_init<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_NEW` (`Z/Zend/zend_vm_def.h:5941`) over a class named at
+/// `ZEND_NEW` (`Z/Zend/zend_vm_def.h:5942`) over a class named at
 /// compile time: the class looked up by the lowered name of the
 /// constant pair in `op1`, `zend_fetch_class_by_name` with
 /// `ZEND_FETCH_CLASS_EXCEPTION`, so a name nothing declares is php's
@@ -5458,7 +5458,7 @@ pub(crate) fn new<T: Tier>(
     pushed(req, frame, header)
 }
 
-/// `ZEND_INIT_STATIC_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3738`) over a
+/// `ZEND_INIT_STATIC_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3739`) over a
 /// class and a method both named at compile time: the class by the
 /// lowered name of the pair in `op1`, `Class "X" not found` where
 /// nothing declares it; the method by the lowered name of the pair in
@@ -5855,7 +5855,7 @@ fn static_call_frame(
     pushed(req, frame, header)
 }
 
-/// `ZEND_INIT_PARENT_PROPERTY_HOOK_CALL` (`Z/Zend/zend_vm_def.h:9886`),
+/// `ZEND_INIT_PARENT_PROPERTY_HOOK_CALL` (`Z/Zend/zend_vm_def.h:9897`),
 /// `parent::$name::get()` and `parent::$name::set($v)` inside a hook:
 /// the parent of the running hook's class, the property it holds under
 /// the name in `op1`, and the hook of the kind in `op2` called on the
@@ -5964,7 +5964,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_INIT_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3583`) over a
+/// `ZEND_INIT_METHOD_CALL` (`Z/Zend/zend_vm_def.h:3584`) over a
 /// receiver and a method named at compile time: the receiver read as
 /// `GET_OP1_OBJ_ZVAL_PTR_UNDEF` reads it, a reference followed, and
 /// what is no object php's `Error` naming the method as written and
@@ -6150,7 +6150,7 @@ pub(crate) fn init_method_call<T: Tier>(
 
 /// The inline path of `ZEND_INIT_METHOD_CALL` over a constant name
 /// (`ZEND_INIT_METHOD_CALL_SPEC_CV_CONST`, `_TMPVAR_CONST` and
-/// `_UNUSED_CONST`, `Z/Zend/zend_vm_def.h:3778`): the receiver an
+/// `_UNUSED_CONST`, `Z/Zend/zend_vm_def.h:3779`): the receiver an
 /// object a CV or a temporary holds, or the frame's `$this`; the callee
 /// off the cache slot `result.num` names where the slot holds the
 /// receiver's class and was written from this frame's scope
@@ -6355,7 +6355,7 @@ fn take_receiver(
 /// another class or was written from another scope
 /// ([`Cached::ClassAndCallee`]). The answer is written back, the
 /// receiver's class, the frame's scope and the callee together
-/// (`CACHE_POLYMORPHIC_PTR`, `Z/Zend/zend_vm_def.h:3694`), only where
+/// (`CACHE_POLYMORPHIC_PTR`, `Z/Zend/zend_vm_def.h:3695`), only where
 /// `op2` is a constant, the callee is no trampoline and no
 /// `ZEND_ACC_NEVER_CACHE` method ([`Request::never_cached`]), and the
 /// object itself answered, `obj == orig_obj`. A primed slot answers
@@ -6476,7 +6476,7 @@ fn method_on(
     Ok((function, None))
 }
 
-/// `ZEND_FETCH_THIS` (`Z/Zend/zend_vm_def.h:9214`): `$this` read as a
+/// `ZEND_FETCH_THIS` (`Z/Zend/zend_vm_def.h:9221`): `$this` read as a
 /// value, or as a receiver where the compiler could not know a frame
 /// has one. On a frame a method call pushed, `EX(This)` is the receiver
 /// and the temporary takes one more owner of it (`ZVAL_OBJ_COPY`); on
@@ -6771,7 +6771,7 @@ pub(crate) fn fetch_func_arg<T: Tier>(
     fetch_by_name(req, frame, code, op, mode)
 }
 
-/// `ZEND_FETCH_GLOBALS` (`Z/Zend/zend_vm_def.h:9229`), `$GLOBALS`: a
+/// `ZEND_FETCH_GLOBALS` (`Z/Zend/zend_vm_def.h:9236`), `$GLOBALS`: a
 /// copy of `EG(symbol_table)` into the temporary
 /// ([`Request::symbol_table_array`]), so what the program writes into it
 /// is its own and never a variable, the table's names in the table's
@@ -6832,7 +6832,7 @@ pub(crate) fn fetch_globals<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_ISSET_ISEMPTY_VAR` (`Z/Zend/zend_vm_def.h:7481`), `isset($$x)`,
+/// `ZEND_ISSET_ISEMPTY_VAR` (`Z/Zend/zend_vm_def.h:7486`), `isset($$x)`,
 /// `isset($_SERVER)` and `empty(${'a'})`: the name read as
 /// `zval_get_tmp_string` reads it ([`isset_name`]), the table
 /// `zend_get_target_symbol_table` names, and the bucket asked, never
@@ -6921,7 +6921,7 @@ fn isset_name(
     Ok(bytes)
 }
 
-/// `ZEND_UNSET_VAR` (`Z/Zend/zend_vm_def.h:6645`), `unset($$x)` and
+/// `ZEND_UNSET_VAR` (`Z/Zend/zend_vm_def.h:6650`), `unset($$x)` and
 /// `unset($_SERVER)`: the name read as [`fetch_by_name`] reads it, and
 /// `zend_hash_del_ind` in the table `zend_get_target_symbol_table` names
 /// ([`Request::symbol_unset`]): a bucket that holds its value is
@@ -7738,7 +7738,7 @@ fn class_constant_served(req: &mut Request, frame: FrameRef, op: &Opline, value:
     Ok(advance(req, frame))
 }
 
-/// `ZEND_FETCH_CONSTANT` (`Z/Zend/zend_vm_def.h:6075`), the opline
+/// `ZEND_FETCH_CONSTANT` (`Z/Zend/zend_vm_def.h:6076`), the opline
 /// `zend_compile_const` leaves for a name it could not substitute: the
 /// constant is looked up as the program serves and its value copied
 /// into the temporary `result` names.
@@ -10500,7 +10500,7 @@ fn object_held<T>(req: &mut Request, object: PhpObject, step: impl FnOnce(&mut R
 
 /// The dimension a handler over an object reads, php's `if (OP2_TYPE ==
 /// IS_CONST && Z_EXTRA_P(dim) == ZEND_EXTRA_VALUE) dim++`
-/// (`Z/Zend/zend_vm_def.h:6822`): the string as written where
+/// (`Z/Zend/zend_vm_def.h:6827`): the string as written where
 /// `zend_handle_numeric_dim` folded a constant dimension to a long
 /// ([`OpArray::dimension_written`]), so `$o['10']` hands `offsetGet` the
 /// string `"10"` where `$a['10']` is the key `10` (bug #63217); the
@@ -10661,7 +10661,7 @@ fn separated_array(
 /// resource are php's `Error` `Cannot use a scalar value as an array`
 /// (`zend_use_scalar_as_array`). `ZEND_UNSET_DIM` shares the walk and not
 /// this ladder, since php gives it one of its own
-/// (`Z/Zend/zend_vm_def.h:6812`): it makes no array out of what is none.
+/// (`Z/Zend/zend_vm_def.h:6817`): it makes no array out of what is none.
 ///
 /// `null`, an unwritten variable and `false` become a new array
 /// ([`made_array`]), and here the three ladders part. Under a reference
@@ -12057,7 +12057,7 @@ enum Keep {
     Container,
 }
 
-/// `ZEND_CLONE` (`Z/Zend/zend_vm_def.h:6010`), what the compiler emits
+/// `ZEND_CLONE` (`Z/Zend/zend_vm_def.h:6011`), what the compiler emits
 /// for `clone $o` and a one-argument `clone($o)`: the operand read as
 /// `GET_OP1_OBJ_ZVAL_PTR_UNDEF` reads it, a reference followed, an
 /// undefined variable having warned; what is no object is php's
@@ -12152,7 +12152,7 @@ pub(crate) fn clone<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_INSTANCEOF` (`Z/Zend/zend_vm_def.h:8041`) over a class named
+/// `ZEND_INSTANCEOF` (`Z/Zend/zend_vm_def.h:8046`) over a class named
 /// at compile time: `true` where the operand is an object of the class
 /// the lowered name of the pair in `op2` names, or of a class that
 /// extends or implements it (`instanceof_function`), the class looked
@@ -12321,7 +12321,7 @@ fn hold_class(req: &mut Request, frame: FrameRef, out: u32, class: crate::api::v
     req.replace_slot(frame, slot, Value::int(i64::from(class.0)));
 }
 
-/// `ZEND_FETCH_CLASS_NAME` (`Z/Zend/zend_vm_def.h:8895`), `C::class`
+/// `ZEND_FETCH_CLASS_NAME` (`Z/Zend/zend_vm_def.h:8902`), `C::class`
 /// where the compiler could not fold it: over a value, the object's
 /// class's name, what is no object php's `TypeError` `Cannot use
 /// "::class" on int`; over a fetch type, the name of
@@ -12417,7 +12417,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_FETCH_CLASS` (`Z/Zend/zend_vm_def.h:3540`), what
+/// `ZEND_FETCH_CLASS` (`Z/Zend/zend_vm_def.h:3541`), what
 /// `zend_compile_class_ref` emits for a class the program computes,
 /// `$o::X`, `new $name`, `$cls::m()`: an object's class, a string's
 /// class by name through `zend_fetch_class` (the autoloaders asked,
@@ -12600,7 +12600,7 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
 
 /// `DO_FCALL` and `DO_FCALL_BY_NAME` over a callee whose `fn_flags`
 /// carry `ZEND_ACC_DEPRECATED`, or `ZEND_ACC_NODISCARD` where the
-/// opline's `result` operand is `UNUSED` (`Z/Zend/zend_vm_def.h:4316-4335`): the
+/// opline's `result` operand is `UNUSED` (`Z/Zend/zend_vm_def.h:4317-4336`): the
 /// deprecation and then the warning, raised with the call built and not
 /// yet entered, which is why `zend_get_call_op` keeps such a callee off
 /// `DO_UCALL` and `DO_ICALL`, the two that never test. What a handler
@@ -12619,7 +12619,7 @@ fn flagged_call(req: &mut Request, op: &Opline) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// `ZEND_INIT_NS_FCALL_BY_NAME` (`Z/Zend/zend_vm_def.h:4024`): the call
+/// `ZEND_INIT_NS_FCALL_BY_NAME` (`Z/Zend/zend_vm_def.h:4025`): the call
 /// frame for an unqualified name written in a namespace, which php's
 /// compiler resolves as the program serves (`zend_compile_ns_call`).
 /// `op2` names the three constants `zend_add_ns_func_name_literal` laid
@@ -12665,7 +12665,7 @@ pub(crate) fn init_ns_fcall_by_name<T: Tier>(
     init_call(req, frame, code, op, &[lowered, unqualified], written)
 }
 
-/// `ZEND_JMP_FRAMELESS` (`Z/Zend/zend_vm_def.h:9743`): the jump
+/// `ZEND_JMP_FRAMELESS` (`Z/Zend/zend_vm_def.h:9750`): the jump
 /// `zend_compile_ns_call` puts before the call by name of an unqualified
 /// name in a namespace whose global function has a frameless entry.
 /// `op1` is the lowered name with the namespace before it,
@@ -12726,7 +12726,7 @@ pub(crate) fn jmp_frameless<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_FRAMELESS_ICALL_0` (`Z/Zend/zend_vm_def.h:9766`): the native at
+/// `ZEND_FRAMELESS_ICALL_0` (`Z/Zend/zend_vm_def.h:9773`): the native at
 /// `extended_value` of the engine's frameless table served over no
 /// argument, its value written into the temporary `result` names. No
 /// native of php 8.5.9 declares an entry of this arity
@@ -12752,7 +12752,7 @@ pub(crate) fn frameless_icall_0<T: Tier>(
     frameless_call(req, frame, code, (op, at), [])
 }
 
-/// `ZEND_FRAMELESS_ICALL_1` (`Z/Zend/zend_vm_def.h:9786`): the native
+/// `ZEND_FRAMELESS_ICALL_1` (`Z/Zend/zend_vm_def.h:9794`): the native
 /// over `op1`, read `GET_OP1_ZVAL_PTR_DEREF` and freed `FREE_OP1` after
 /// the native returned, as [`frameless_call`] reads and frees it.
 ///
@@ -12800,7 +12800,7 @@ pub(crate) fn frameless_icall_1<T: Tier>(
     frameless_call(req, frame, code, (op, at), [(op.op1_type, op.op1)])
 }
 
-/// `ZEND_FRAMELESS_ICALL_2` (`Z/Zend/zend_vm_def.h:9812`): the native
+/// `ZEND_FRAMELESS_ICALL_2` (`Z/Zend/zend_vm_def.h:9821`): the native
 /// over `op1` and `op2`, the two freed in that order after it returned.
 ///
 /// ```php
@@ -12850,7 +12850,7 @@ pub(crate) fn frameless_icall_2<T: Tier>(
     frameless_call(req, frame, code, (op, at), arguments)
 }
 
-/// `ZEND_FRAMELESS_ICALL_3` (`Z/Zend/zend_vm_def.h:9846`): the native
+/// `ZEND_FRAMELESS_ICALL_3` (`Z/Zend/zend_vm_def.h:9856`): the native
 /// over `op1`, `op2` and the `OP_DATA` after the opline
 /// (`GET_OP_DATA_ZVAL_PTR_DEREF`), the three freed in that order after
 /// it returned, and the loop stepped past the `OP_DATA`,
@@ -12915,7 +12915,7 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// in.
 ///
 /// php lays that call down only where an observer watches the native,
-/// `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9775`); any
+/// `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9782`); any
 /// other is served over no frame, so here its record stands off the
 /// VM stack's pages ([`Request::push_frameless`]) and takes no room
 /// php's does not. A recursion that leaves its last frame one slot
@@ -12978,6 +12978,30 @@ pub(crate) fn frameless_icall_3<T: Tier>(
 /// int(32)
 /// after
 /// ```
+///
+/// The call ends in the interrupt check php's four handlers make once
+/// the operands are freed, `ZEND_VM_FCALL_INTERRUPT_CHECK(execute_data)`
+/// (`Z/Zend/zend_vm_def.h:9790`, `:9817`, `:9852`, `:9893`, new at
+/// php-8.5.12), the one [`crate::interrupt::check`] `DO_ICALL` makes,
+/// so an interrupt raised while the native ran is taken before the next
+/// opline and not at whichever site comes next. Here pcntl's dispatch
+/// of `SIGUSR1` inside `__toString` blocks signals while its handler
+/// runs, so the `SIGUSR2` that handler sends lands as the dispatch ends,
+/// after every check inside the native has been made:
+///
+/// ```php
+/// pcntl_async_signals(true);
+/// pcntl_signal(SIGUSR1, function () { echo "usr1\n"; posix_kill(posix_getpid(), SIGUSR2); });
+/// pcntl_signal(SIGUSR2, function () { echo "usr2\n"; });
+/// class S { function __toString(): string { posix_kill(posix_getpid(), SIGUSR1); return "s"; } }
+/// $s = implode(",", [new S]);
+/// echo "after $s\n";
+/// ```
+/// ```expect
+/// usr1
+/// usr2
+/// after s
+/// ```
 #[inline(never)] // out of the loop's body, whose held state #3022 found at its optimum
 fn frameless_call<const N: usize>(
     req: &mut Request,
@@ -13028,6 +13052,9 @@ fn frameless_call<const N: usize>(
     match served {
         Ok(value) => {
             set_out(req, frame, op, value);
+            if crate::interrupt::check(req)? {
+                return Ok(Stepped::Threw(frame).into());
+            }
             jump_to(at.saturating_add(width))
         }
         Err(thrown) => threw(req, frame, &thrown),
@@ -13084,7 +13111,7 @@ fn frameless_call<const N: usize>(
 /// ```
 /// ```expect
 /// int(0)
-/// int(-1176)
+/// int(-1200)
 /// ```
 ///
 /// The owner the CV gives up is the last one an object has, so the
@@ -15364,7 +15391,7 @@ fn static_prop_step(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_PRE_INC_STATIC_PROP` (`Z/Zend/zend_vm_def.h:6297`), `++C::$p`:
+/// `ZEND_PRE_INC_STATIC_PROP` (`Z/Zend/zend_vm_def.h:6298`), `++C::$p`:
 /// [`crate::ops::increment`] over what the slot holds, written back,
 /// and the value after the step in the temporary under
 /// `RETURN_VALUE_USED`. `C::$p++` written as a statement is this
@@ -16310,7 +16337,7 @@ fn append_value(
     (!held.let_go(req).freed()).then_some(value)
 }
 
-/// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8370`), the opline
+/// `ZEND_SEPARATE` (`Z/Zend/zend_vm_def.h:8377`), the opline
 /// `zend_separate_if_call_and_write` puts after a call whose `VAR` a
 /// write is about to land in: a cell nothing else holds is unwrapped in
 /// place (`ZVAL_UNREF`), so the write reaches the value and not the
@@ -18873,7 +18900,7 @@ const ARRAY_ELEMENT_REF: u32 = 1 << 0;
 const ARRAY_NOT_PACKED: u32 = 1 << 1;
 const ARRAY_SIZE_SHIFT: u32 = 2;
 
-/// `ZEND_UNSET_CV` (`Z/Zend/zend_vm_def.h:6627`), what `unset($a)`
+/// `ZEND_UNSET_CV` (`Z/Zend/zend_vm_def.h:6632`), what `unset($a)`
 /// compiles to: the CV left `IS_UNDEF` and what it held given up after
 /// it (`ZVAL_UNDEF(var)` then `GC_DTOR(garbage)`, in that order, so a
 /// destructor that reads the variable finds it already unset). The
@@ -19142,7 +19169,7 @@ pub(crate) fn unset_static_prop<T: Tier>(
     threw(req, frame, &thrown)
 }
 
-/// `ZEND_UNSET_DIM` (`Z/Zend/zend_vm_def.h:6735`), what `unset($a[$k])`
+/// `ZEND_UNSET_DIM` (`Z/Zend/zend_vm_def.h:6740`), what `unset($a[$k])`
 /// compiles to: the container read as a write fetch reads it
 /// (`GET_OP1_OBJ_ZVAL_PTR_PTR_UNDEF(BP_VAR_UNSET)`), a reference
 /// followed, and an array separated where more than one name holds it
@@ -19256,7 +19283,7 @@ pub(crate) fn unset_dim<T: Tier>(
 }
 
 /// `UNSET_DIM`'s ladder for a container that is no array
-/// (`Z/Zend/zend_vm_def.h:6812`), which is its own and not the write's:
+/// (`Z/Zend/zend_vm_def.h:6817`), which is its own and not the write's:
 /// an object through `unset_dimension`, `offsetUnset` on an
 /// `ArrayAccess`, handed the dimension as written; a string, a `true`, a
 /// number or a resource php's `Error`; a `false` php's deprecation,
@@ -19292,7 +19319,7 @@ fn unset_container(req: &mut Request, container: &Value, offset: &Value) -> Resu
     }
 }
 
-/// `ZEND_UNSET_OBJ` (`Z/Zend/zend_vm_def.h:6837`), what `unset($o->p)`
+/// `ZEND_UNSET_OBJ` (`Z/Zend/zend_vm_def.h:6842`), what `unset($o->p)`
 /// compiles to: the receiver read as a write fetch reads it, a reference
 /// followed, and the object's handler table's `unset_property` over the
 /// name `op2` names, `zend_std_unset_property` at `Std`
@@ -19366,7 +19393,7 @@ pub(crate) fn unset_obj<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_INIT_ARRAY` (`Z/Zend/zend_vm_def.h:6473`), the first opline of
+/// `ZEND_INIT_ARRAY` (`Z/Zend/zend_vm_def.h:6474`), the first opline of
 /// an array expression `zend_try_ct_eval_array` left to the request:
 /// `zend_new_array` sized for the count `extended_value` carries above
 /// `ZEND_ARRAY_SIZE_SHIFT`, laid down as a hash at once where the
@@ -19436,7 +19463,7 @@ pub(crate) fn init_array<T: Tier>(
     add_element(req, frame, code, op, array)
 }
 
-/// `ZEND_ADD_ARRAY_ELEMENT` (`Z/Zend/zend_vm_def.h:6224`): one more
+/// `ZEND_ADD_ARRAY_ELEMENT` (`Z/Zend/zend_vm_def.h:6225`): one more
 /// element into the array the `result` temporary holds, which
 /// `INIT_ARRAY` left there with one owner, through [`add_element`].
 ///
@@ -19546,7 +19573,7 @@ fn add_element(
     }
 }
 
-/// `ZEND_ADD_ARRAY_UNPACK` (`Z/Zend/zend_vm_def.h:6334`), `...$x`
+/// `ZEND_ADD_ARRAY_UNPACK` (`Z/Zend/zend_vm_def.h:6335`), `...$x`
 /// inside an array: the operand read (`GET_OP1_ZVAL_PTR(BP_VAR_R)`, a CV
 /// nothing wrote the warning and `null`) and spread into the array the
 /// `result` temporary holds ([`unpack_into`]), then `FREE_OP1`.
@@ -19624,7 +19651,7 @@ fn unpack_into(req: &mut Request, array: PhpArray, spread: &Value) -> Result<(),
     let a = array.heap();
     if let Some(source) = spread.as_array() {
         // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht, key, val)`
-        // (`Z/Zend/zend_vm_def.h:6369`), no owner of the table taken: the
+        // (`Z/Zend/zend_vm_def.h:6370`), no owner of the table taken: the
         // operand holds it while an update releases what it overwrites. A
         // reference's count is read as php reads it.
         walk::foreach(req, source, Hold::None, |req, row| -> walk::Step {
@@ -19729,7 +19756,7 @@ fn unpacked_key(req: &mut Request, key: Value, during: &str) -> Result<Option<Ph
     ))
 }
 
-/// `ZEND_SEND_UNPACK` (`Z/Zend/zend_vm_def.h:5266`), `f(...$args)`: the
+/// `ZEND_SEND_UNPACK` (`Z/Zend/zend_vm_def.h:5267`), `f(...$args)`: the
 /// operand's elements placed in the call being built after the
 /// arguments placed before it, a reference followed. An integer key is
 /// the next positional argument and a string key a named one, placed by
@@ -19882,7 +19909,7 @@ fn send_unpacked_array(
     // A fatal ends the walk as its break and is handed on after it.
     let fatal = |fatal: Fatal| -> walk::Step<Fatal> { Ok(ControlFlow::Break(fatal)) };
     // `ZEND_HASH_FOREACH_STR_KEY_VAL(ht, name, arg)`
-    // (`Z/Zend/zend_vm_def.h:5309`), no owner of the table taken: the
+    // (`Z/Zend/zend_vm_def.h:5310`), no owner of the table taken: the
     // operand holds it, separated first where an element is bound.
     let walked = walk::foreach(req, array, Hold::None, |req, row| -> walk::Step<Fatal> {
         let key = row.key().clone();
@@ -20044,7 +20071,7 @@ fn positional_after_named(req: &mut Request) -> Thrown {
     )
 }
 
-/// `ZEND_FE_RESET_R` (`Z/Zend/zend_vm_def.h:6882`), the first opline of
+/// `ZEND_FE_RESET_R` (`Z/Zend/zend_vm_def.h:6887`), the first opline of
 /// a `foreach` by value: the subject read under `BP_VAR_R` with a
 /// reference followed (`GET_OP1_ZVAL_PTR_DEREF`), so a CV nothing wrote
 /// is the undefined-variable warning and `null`. An array is copied
@@ -20360,7 +20387,7 @@ fn take_temporary(req: &mut Request, frame: FrameRef, field: u32) {
 }
 
 /// The arm both resets share for what is neither array nor object
-/// (`Z/Zend/zend_vm_def.h:6950`): php's warning naming the value as
+/// (`Z/Zend/zend_vm_def.h:6955`): php's warning naming the value as
 /// `zend_zval_value_name` names it, the `VAR` left `UNDEF` with
 /// `Z_FE_ITER` at `-1` so the `FE_FREE` deletes nothing, the operand
 /// freed and the jump `op2` names.
@@ -20398,7 +20425,7 @@ const NO_WALK: u32 = u32::MAX;
 /// read it: an array is a by-value walk and the word its `Z_FE_POS`; a
 /// reference is a by-reference walk and the word its `Z_FE_ITER`; an
 /// object is an iterator where it is one's wrapper
-/// (`zend_iterator_unwrap`, `Z/Zend/zend_vm_def.h:7073`), which
+/// (`zend_iterator_unwrap`, `Z/Zend/zend_vm_def.h:7078`), which
 /// `zend_fe_reset_iterator` put there for a class with a
 /// `get_iterator`, and otherwise the object itself, walked by its
 /// properties from its `Z_FE_ITER`. The word never tells one kind from
@@ -20556,7 +20583,7 @@ fn set_fe_iter(req: &mut Request, frame: FrameRef, slot: u32, walk: Option<HashI
     }
 }
 
-/// `ZEND_FE_FETCH_R` (`Z/Zend/zend_vm_def.h:7176`): the array in the
+/// `ZEND_FE_FETCH_R` (`Z/Zend/zend_vm_def.h:7181`): the array in the
 /// `VAR` `op1` names, read in place so its `Z_FE_POS` is the position
 /// the last fetch left; the first live bucket from there
 /// ([`php_heap::Arr::live_from`], the `while` over `IS_UNDEF`), or the
@@ -20583,7 +20610,7 @@ fn set_fe_iter(req: &mut Request, frame: FrameRef, slot: u32, walk: Option<HashI
 /// ```
 ///
 /// A `VAR` holding an object is `zend_fe_fetch_object_helper`
-/// (`Z/Zend/zend_vm_def.h:7058`) instead: the next property the
+/// (`Z/Zend/zend_vm_def.h:7063`) instead: the next property the
 /// executing scope may see from where the loop's hash iterator stands
 /// ([`Request::object_walk`]), its unmangled name as the key, and the
 /// same jump where nothing is left. The value is the property's with a
@@ -20616,7 +20643,7 @@ pub(crate) fn fe_fetch_r<T: Tier, A: Operand + Default>(
 }
 
 /// The inline path of `ZEND_FE_FETCH_R` over an array into a CV
-/// (`ZEND_FE_FETCH_R_SPEC_VAR_HANDLER`, `Z/Zend/zend_vm_def.h:7090-7140`):
+/// (`ZEND_FE_FETCH_R_SPEC_VAR_HANDLER`, `Z/Zend/zend_vm_def.h:7095-7145`):
 /// the next live position from `Z_FE_POS`, the jump to
 /// `extended_value` past the end, and otherwise the position moved past
 /// it, the key into the temporary under `RETURN_VALUE_USED` and the
@@ -20750,7 +20777,7 @@ fn fetched_element(req: &mut Request, frame: FrameRef, op: &Opline) -> Edge {
 }
 
 /// The iterator arm of `zend_fe_fetch_object_helper`
-/// (`Z/Zend/zend_vm_def.h:7117`): the next element
+/// (`Z/Zend/zend_vm_def.h:7122`): the next element
 /// [`crate::interfaces::fetch`] finds, its key to `result` where the
 /// opline keeps one and its value to the variable as an array element's
 /// goes, or the jump to `extended_value` at the end. A generator's
@@ -20827,7 +20854,7 @@ fn fe_assign(req: &mut Request, frame: FrameRef, op: &Opline, value: Value) -> E
     Ok(advance(req, frame))
 }
 
-/// `ZEND_FE_RESET_RW` (`Z/Zend/zend_vm_def.h:6958`), the first opline
+/// `ZEND_FE_RESET_RW` (`Z/Zend/zend_vm_def.h:6963`), the first opline
 /// of a `foreach` by reference: the subject read in place
 /// (`GET_OP1_ZVAL_PTR_PTR`), a CV or the place a `_W` fetch's `VAR`
 /// names. An array there is made a reference where it is not one
@@ -21060,7 +21087,7 @@ fn fe_reset_rw_value(
     fe_reset_refused(req, frame, op, &subject)
 }
 
-/// `ZEND_FE_FETCH_RW` (`Z/Zend/zend_vm_def.h:7256`): the subject the
+/// `ZEND_FE_FETCH_RW` (`Z/Zend/zend_vm_def.h:7261`): the subject the
 /// reset's `VAR` holds, a reference followed. Over an array the
 /// iterator's position (`zend_hash_iterator_pos_ex`), which separates
 /// an array the body shared and moves the walk onto a table the body
@@ -21300,7 +21327,7 @@ fn fe_walk_object_rw(req: &mut Request, op: &Opline, object: PhpObject, walk: Ha
     })))
 }
 
-/// `FE_FETCH_RW`'s iterator arm (`Z/Zend/zend_vm_def.h:7358`): the
+/// `FE_FETCH_RW`'s iterator arm (`Z/Zend/zend_vm_def.h:7363`): the
 /// element [`crate::interfaces::fetch`] finds by reference, the zval
 /// `get_current_data` points at made a reference where it is not one.
 /// The one iterator a reset by reference makes is a generator's that
@@ -22375,7 +22402,7 @@ pub(crate) fn strlen<T: Tier>(
     unary(req, frame, code, op, crate::ops::strlen)
 }
 
-/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8781`): the
+/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8788`): the
 /// length [`inline::string_length`] reads of a string as it stands,
 /// into the temporary. `None`, with nothing touched, for a temporary
 /// holding the string's owner, which the opcode gives up (`FREE_OP1`),
@@ -22419,7 +22446,7 @@ pub(crate) fn type_check<T: Tier>(
     smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
-/// The inline path of `ZEND_TYPE_CHECK` (`Z/Zend/zend_vm_def.h:8821`):
+/// The inline path of `ZEND_TYPE_CHECK` (`Z/Zend/zend_vm_def.h:8828`):
 /// [`inline::type_check`]'s answer over the operand as it stands,
 /// branched on where a `JMPZ` or a `JMPNZ` is fused to it
 /// ([`branch::Peeked`]) and written into the temporary otherwise. A
@@ -22664,7 +22691,7 @@ pub(crate) fn bool_xor<T: Tier>(
 /// `empty` and not `isset`.
 const ISEMPTY: u32 = 1 << 0;
 
-/// `ZEND_ISSET_ISEMPTY_CV` (`Z/Zend/zend_vm_def.h:7459`), what
+/// `ZEND_ISSET_ISEMPTY_CV` (`Z/Zend/zend_vm_def.h:7464`), what
 /// `isset($a)` and `empty($a)` compile to over a CV: the slot read where
 /// it stands, and a slot nothing wrote read as the `UNDEF` it is, with
 /// no warning and nothing made of it. Under `isset` the answer is
@@ -22701,7 +22728,7 @@ pub(crate) fn isset_isempty_cv<T: Tier>(
     smart_branch::<T, branch::Peeked>(req, frame, code, op, answer.map(Value::bool))
 }
 
-/// `ZEND_ISSET_ISEMPTY_THIS` (`Z/Zend/zend_vm_def.h:9239`),
+/// `ZEND_ISSET_ISEMPTY_THIS` (`Z/Zend/zend_vm_def.h:9246`),
 /// `isset($this)` and `empty($this)`: whether the frame has a receiver,
 /// the other way round under `ZEND_ISEMPTY`.
 ///
@@ -22732,7 +22759,7 @@ pub(crate) fn isset_isempty_this<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_ISSET_ISEMPTY_STATIC_PROP` (`Z/Zend/zend_vm_def.h:7526`),
+/// `ZEND_ISSET_ISEMPTY_STATIC_PROP` (`Z/Zend/zend_vm_def.h:7531`),
 /// `isset(C::$s)` and `empty(C::$s)`: the class fetched as a `static`
 /// property's is, a class nothing declares php's `Error` even here, and
 /// the property read under `BP_VAR_IS`, which says nothing of one the
@@ -22792,7 +22819,7 @@ pub(crate) fn isset_isempty_static_prop<T: Tier>(
     smart_branch::<T, branch::Peeked>(req, frame, code, op, answer.map(Value::bool))
 }
 
-/// `ZEND_ISSET_ISEMPTY_DIM_OBJ` (`Z/Zend/zend_vm_def.h:7546`), what
+/// `ZEND_ISSET_ISEMPTY_DIM_OBJ` (`Z/Zend/zend_vm_def.h:7551`), what
 /// `isset($a[0])` and `empty($a[0])` compile to over the last link of a
 /// chain: the container read as `GET_OP1_OBJ_ZVAL_PTR_UNDEF(BP_VAR_IS)`
 /// reads it, which warns of nothing, and the answer written into the
@@ -22908,7 +22935,7 @@ pub(crate) fn isset_isempty_dim_obj<T: Tier, A: Operand + Default, B: Operand + 
 }
 
 /// The inline path of `ZEND_ISSET_ISEMPTY_DIM_OBJ` over an array
-/// (`Z/Zend/zend_vm_def.h:7539-7570`, `isset_again`): the element at
+/// (`Z/Zend/zend_vm_def.h:7544-7575`, `isset_again`): the element at
 /// a long or string key ([`inline::dim_key`], [`inline::element`])
 /// read as `isset` reads it, set where it is anything but `null`, and
 /// as `empty` reads it, its truth as [`inline::truth`] reads a scalar;
@@ -22998,7 +23025,7 @@ fn tested_dim<T: Tier>(req: &mut Request, frame: FrameRef, code: &OpArray, op: &
     smart_branch::<T, branch::Peeked>(req, frame, code, op, answer.map(Value::bool))
 }
 
-/// `ZEND_ISSET_ISEMPTY_PROP_OBJ` (`Z/Zend/zend_vm_def.h:7625`), what
+/// `ZEND_ISSET_ISEMPTY_PROP_OBJ` (`Z/Zend/zend_vm_def.h:7630`), what
 /// `isset($o->p)` and `empty($o->p)` compile to: the receiver read as
 /// `BP_VAR_IS` reads it, which says nothing of a variable nothing wrote,
 /// the property named by `op2`, and the object's handler table's
@@ -23171,7 +23198,7 @@ pub(crate) fn defined<T: Tier>(
     smart_branch::<T, branch::Peeked>(req, frame, code, op, computed)
 }
 
-/// `ZEND_FUNC_GET_ARGS` (`Z/Zend/zend_vm_def.h:9639`), what php's
+/// `ZEND_FUNC_GET_ARGS` (`Z/Zend/zend_vm_def.h:9646`), what php's
 /// compiler makes of `func_get_args()` inside a function
 /// (`zend_compile_func_get_args`): the arguments the frame was passed,
 /// as its slots hold them now, each reference followed and a slot
@@ -23250,7 +23277,7 @@ pub(crate) fn func_get_args<T: Tier>(
     }
 }
 
-/// `ZEND_FUNC_NUM_ARGS` (`Z/Zend/zend_vm_def.h:9628`), what php's
+/// `ZEND_FUNC_NUM_ARGS` (`Z/Zend/zend_vm_def.h:9635`), what php's
 /// compiler makes of `func_num_args()` inside a function
 /// (`zend_compile_func_num_args`): `EX_NUM_ARGS()`, every argument the
 /// frame was passed, the extra ones among them, into the temporary.
@@ -23277,7 +23304,7 @@ pub(crate) fn func_num_args<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_GET_CLASS` (`Z/Zend/zend_vm_def.h:9557`), what php's compiler
+/// `ZEND_GET_CLASS` (`Z/Zend/zend_vm_def.h:9564`), what php's compiler
 /// makes of `get_class()` and `get_class($o)` (`zend_compile_func_get_class`):
 /// with no operand, the name of the class the frame's op array was
 /// written in, `EX(func)->common.scope`, behind the 8.3 deprecation,
@@ -23353,7 +23380,7 @@ pub(crate) fn get_class<T: Tier>(
     class_name_into(req, frame, op, class)
 }
 
-/// `ZEND_GET_CALLED_CLASS` (`Z/Zend/zend_vm_def.h:9603`), what php's
+/// `ZEND_GET_CALLED_CLASS` (`Z/Zend/zend_vm_def.h:9610`), what php's
 /// compiler makes of `get_called_class()`
 /// (`zend_compile_func_get_called_class`): the name of the class
 /// `static` names in the frame, the receiver's where there is one and
@@ -23414,7 +23441,7 @@ fn class_name_into(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_GET_TYPE` (`Z/Zend/zend_vm_def.h:9623`), what php's compiler
+/// `ZEND_GET_TYPE` (`Z/Zend/zend_vm_def.h:9630`), what php's compiler
 /// makes of `gettype($v)` (`zend_compile_func_gettype`):
 /// [`crate::ops::legacy_type`] over the operand, a variable nothing
 /// wrote warned of and `NULL`, into the temporary; the operand freed
@@ -23444,7 +23471,7 @@ pub(crate) fn get_type<T: Tier>(
     })
 }
 
-/// `ZEND_ARRAY_KEY_EXISTS` (`Z/Zend/zend_vm_def.h:9747`), what php's
+/// `ZEND_ARRAY_KEY_EXISTS` (`Z/Zend/zend_vm_def.h:9754`), what php's
 /// compiler makes of `array_key_exists($k, $a)`
 /// (`zend_compile_func_array_key_exists`): over an array, a reference
 /// followed, [`crate::ops::array_key_exists`], with the key's
@@ -23533,7 +23560,7 @@ pub(crate) fn count<T: Tier, A: Operand + Default>(
 }
 
 /// The inline path of `ZEND_COUNT` over an array
-/// (`Z/Zend/zend_vm_def.h:9178-9182`): `zend_hash_num_elements` into
+/// (`Z/Zend/zend_vm_def.h:9185-9189`): `zend_hash_num_elements` into
 /// the temporary. `None`, with nothing touched, for an operand that is
 /// no array, one a temporary holds that counts owners, which the count
 /// would give up, a symbol table holding emptied `IS_INDIRECT` slots,
@@ -23906,7 +23933,7 @@ pub(crate) fn jmp_set<T: Tier>(
     jump_to(op.op2)
 }
 
-/// `ZEND_JMP_NULL` (`Z/Zend/zend_vm_def.h:7841`), the short circuit of a
+/// `ZEND_JMP_NULL` (`Z/Zend/zend_vm_def.h:7846`), the short circuit of a
 /// `?->`: a receiver that is neither `null` nor undefined, a reference
 /// followed, goes on to the member after it; otherwise the chain's
 /// value is written into the `result` the whole chain's would be in, `null` for an
@@ -24332,7 +24359,7 @@ fn raise_return<T: Tier>(
 }
 
 /// The inline path of `ZEND_RETURN` (`ZEND_RETURN_SPEC_CONST`, `_TMP`,
-/// `_CV`, `Z/Zend/zend_vm_def.h:4598`, into `zend_leave_helper`'s first
+/// `_CV`, `Z/Zend/zend_vm_def.h:4599`, into `zend_leave_helper`'s first
 /// arm), past the return safepoint: the value copied into the caller's
 /// temporary, a temporary's moved, and a frame whose leave destroys
 /// nothing popped, the caller going on past its call
@@ -25272,7 +25299,7 @@ fn put_argument(req: &mut Request, slot: ArgSlot, value: Value) -> Result<(), Fa
     Ok(())
 }
 
-/// `ZEND_THROW` (`Z/Zend/zend_vm_def.h:4777`): the operand made pending,
+/// `ZEND_THROW` (`Z/Zend/zend_vm_def.h:4778`): the operand made pending,
 /// `zend_throw_exception_object`, with one more owner for the pending
 /// slot before the operand is freed (`Z_TRY_ADDREF_P`, `FREE_OP1`). A
 /// reference is followed; a value that is no object is php's `Error`
@@ -25326,7 +25353,7 @@ fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
     crate::api::raising::throw_value(req, value)
 }
 
-/// `ZEND_CATCH` (`Z/Zend/zend_vm_def.h:4812`): nothing pending is the
+/// `ZEND_CATCH` (`Z/Zend/zend_vm_def.h:4813`): nothing pending is the
 /// fall-through of a `try` that did not throw, and jumps past the
 /// clause; otherwise the class named by the lowered half of the
 /// constant pair in `op1`, looked up silently and without autoloading,
@@ -25445,7 +25472,7 @@ pub(crate) fn catch<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_FAST_CALL` (`Z/Zend/zend_vm_def.h:8647`): the cell of the
+/// `ZEND_FAST_CALL` (`Z/Zend/zend_vm_def.h:8654`): the cell of the
 /// temporary `result` names records the opline to return past and no
 /// delayed throwable, and the frame jumps into the `finally` block
 /// `op1` names, which `pass_two` wrote there over the number of the
@@ -25482,7 +25509,7 @@ pub(crate) fn fast_call<T: Tier>(
     jump_to(op.op1)
 }
 
-/// `ZEND_FAST_RET` (`Z/Zend/zend_vm_def.h:8658`): where the cell records
+/// `ZEND_FAST_RET` (`Z/Zend/zend_vm_def.h:8665`): where the cell records
 /// a `FAST_CALL`, the frame goes on at the opline after it; where it
 /// records none the block was entered by an unwind, so the throwable it
 /// delayed is pending again and the unwind goes on from here, at the
@@ -25520,7 +25547,7 @@ pub(crate) fn fast_ret<T: Tier>(
     unwind_from::<T>(req, frame, code, enclosing, at)
 }
 
-/// `ZEND_DISCARD_EXCEPTION` (`Z/Zend/zend_vm_def.h:8620`): the opline a
+/// `ZEND_DISCARD_EXCEPTION` (`Z/Zend/zend_vm_def.h:8627`): the opline a
 /// `return` out of a `finally` block emits for the block it leaves. The
 /// value a `FAST_CALL` was carrying past the block is given up, since
 /// the return it belonged to never happened, and so is the throwable
@@ -25553,7 +25580,7 @@ pub(crate) fn discard_exception<T: Tier>(
     Ok(advance(req, frame))
 }
 
-/// `ZEND_HANDLE_EXCEPTION` (`Z/Zend/zend_vm_def.h:8176`), the unwinder:
+/// `ZEND_HANDLE_EXCEPTION` (`Z/Zend/zend_vm_def.h:8181`), the unwinder:
 /// what the loop runs at the opline a handler left a throwable pending
 /// at, php's `EG(opline_before_exception)`. The innermost `try` element
 /// the opline stands in is found, the calls the frame was still
@@ -25614,7 +25641,7 @@ pub(crate) fn handle_exception<T: Tier>(
     unwind_from::<T>(req, frame, code, current, op_num)
 }
 
-/// `zend_dispatch_try_catch_finally_helper` (`Z/Zend/zend_vm_def.h:8100`):
+/// `zend_dispatch_try_catch_finally_helper` (`Z/Zend/zend_vm_def.h:8105`):
 /// the `try` elements from `from` outwards, each answered by where
 /// `op_num` stands in it. Before its `catch_op` with a throwable
 /// pending, the frame lands at the clause. Before its `finally_op`, the
@@ -25628,9 +25655,9 @@ pub(crate) fn handle_exception<T: Tier>(
 /// The unwind exit `exit` throws is told apart twice, as php tells it
 /// apart with `zend_is_unwind_exit`: no `finally` block is entered for
 /// it, which php's own comment there says is for now
-/// (`Z/Zend/zend_vm_def.h:8116`), and a throwable a block it is
+/// (`Z/Zend/zend_vm_def.h:8121`), and a throwable a block it is
 /// unwinding through had delayed is given up rather than chained
-/// (`Z/Zend/zend_vm_def.h:8143`), so an `exit` inside a `finally`
+/// (`Z/Zend/zend_vm_def.h:8148`), so an `exit` inside a `finally`
 /// block ends the request with its status and the throwable that
 /// entered the block is never rendered.
 ///
@@ -25740,7 +25767,7 @@ fn unwind_from<T: Tier>(
         }
         at = offset.checked_sub(1);
     }
-    // The uncaught arm (`Z/Zend/zend_vm_def.h:8157-8161`): the frame's
+    // The uncaught arm (`Z/Zend/zend_vm_def.h:8162-8166`): the frame's
     // observers ended with no value before its live temporaries go, the
     // frame standing at `ZEND_HANDLE_EXCEPTION` where the unwinder
     // reached it from a throw, and at the `FAST_RET` that took the
@@ -25824,7 +25851,7 @@ fn jump_from(at: u32, to: u32) -> Edge {
     Ok(Next::by(to.wrapping_sub(at)))
 }
 
-/// `ZEND_RETURN_BY_REF` (`Z/Zend/zend_vm_def.h:4586`), what a function
+/// `ZEND_RETURN_BY_REF` (`Z/Zend/zend_vm_def.h:4587`), what a function
 /// written `function &f` returns by: the variable is made a reference
 /// where it holds none (`ZVAL_MAKE_REF_EX`, as `SEND_REF` makes one),
 /// and the caller's `VAR` holds that cell, so the `ASSIGN_REF` after the
@@ -25941,7 +25968,7 @@ pub(crate) fn return_by_ref<T: Tier>(
     returned_to_caller(req, frame, returned)
 }
 
-/// `ZEND_GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4652`): the frame
+/// `ZEND_GENERATOR_CREATE` (`Z/Zend/zend_vm_def.h:4653`): the frame
 /// moved into the `Generator` the call returns ([`crate::generator::create`]).
 pub(crate) fn generator_create<T: Tier>(
     req: &mut Request,
@@ -25952,7 +25979,7 @@ pub(crate) fn generator_create<T: Tier>(
     crate::generator::create(req, frame).map(Next::from)
 }
 
-/// `ZEND_YIELD` (`Z/Zend/zend_vm_def.h:8397`): the previous value and
+/// `ZEND_YIELD` (`Z/Zend/zend_vm_def.h:8404`): the previous value and
 /// key given up, the value and the key the opline names handed out, an
 /// integer key counted up where none is written, the `VAR` the opline
 /// writes set to `null` for `send()` to fill, and the frame suspended at
@@ -26079,7 +26106,7 @@ fn yielded_by_ref(
     Ok(value)
 }
 
-/// `ZEND_YIELD_FROM` (`Z/Zend/zend_vm_def.h:8518`): the operand becomes
+/// `ZEND_YIELD_FROM` (`Z/Zend/zend_vm_def.h:8525`): the operand becomes
 /// what the generator delegates to ([`crate::generator::yield_from`])
 /// and the frame is suspended at the opline, its temporary `null` until
 /// a generator delegated to returns into it; a generator that has
@@ -26163,7 +26190,7 @@ pub(crate) fn yield_from<T: Tier>(
     }
 }
 
-/// `ZEND_GENERATOR_RETURN` (`Z/Zend/zend_vm_def.h:4730`): the operand
+/// `ZEND_GENERATOR_RETURN` (`Z/Zend/zend_vm_def.h:4731`): the operand
 /// kept as what the generator returned, which `getReturn()` reads, and
 /// the frame closed; the resumption is over.
 ///
@@ -26189,13 +26216,13 @@ pub(crate) fn generator_return<T: Tier>(
     let generator = crate::generator::running(req, frame)?;
     let value = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     // `ZEND_OBSERVER_FCALL_END(generator->execute_data, &generator->retval)`
-    // before the generator is closed (`Z/Zend/zend_vm_def.h:4766`).
+    // before the generator is closed (`Z/Zend/zend_vm_def.h:4767`).
     crate::observer::returned(req, frame, Some(&value));
     crate::generator::returned(req, generator, value);
     Ok(Stepped::Done.into())
 }
 
-/// `ZEND_MAKE_REF` (`Z/Zend/zend_vm_def.h:9262`), what a by-reference
+/// `ZEND_MAKE_REF` (`Z/Zend/zend_vm_def.h:9269`), what a by-reference
 /// `return` emits over its variable where a `finally` stands between
 /// it and the `RETURN_BY_REF`: the CV is made a reference where it
 /// holds none, a CV nothing wrote holding a fresh cell over `null`

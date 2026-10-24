@@ -1036,8 +1036,8 @@ enum FieldPacket {
 /// 192
 /// 192
 /// 192
-/// 16656
-/// 608
+/// 16664
+/// 616
 /// 192
 /// ```
 ///
@@ -1066,7 +1066,7 @@ enum FieldPacket {
 /// 16424
 /// 16424
 /// 16424
-/// 16464
+/// 16472
 /// ```
 ///
 /// A name a published unit interned costs nothing, as a string opcache
@@ -1089,7 +1089,7 @@ enum FieldPacket {
 /// ```
 /// ```expect mysql regime=jit-off
 /// 16424
-/// 16464
+/// 16472
 /// ```
 ///
 /// A name's length past what is left of the packet is the faulty
@@ -1411,7 +1411,8 @@ fn text_value(
     if native && php_type == PhpType::Double {
         return Ok(Owner::float(strtod(text)));
     }
-    PhpString::new(req, text).map(Owner::into_value)
+    // `ZVAL_STRINGL_FAST` (`Z/ext/mysqlnd/mysqlnd_wireprotocol.c:1774`).
+    PhpString::fast(req, text).map(Owner::into_value)
 }
 
 /// The warning of a field's length past the packet's end, the values

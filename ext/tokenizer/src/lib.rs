@@ -222,7 +222,7 @@ impl PhpToken {
     /// $t = 1; var_dump($held, memory_get_usage() - $b);
     /// ```
     /// ```expect
-    /// int(1560)
+    /// int(1576)
     /// int(0)
     /// ```
     fn tokenize(
@@ -545,7 +545,7 @@ impl PhpToken {
 /// $b = memory_get_usage(); $t = PhpToken::tokenize('<?php echo 1; echo 2;'); var_dump(memory_get_usage() - $b);
 /// ```
 /// ```expect
-/// int(1560)
+/// int(1576)
 /// ```
 fn fill_token(
     req: &mut Request,
@@ -956,11 +956,11 @@ fn value_name(req: &Request, value: &Value) -> String {
 /// $t = 1; var_dump($held, memory_get_usage() - $b);
 /// ```
 /// ```expect
-/// int(1176)
+/// int(1200)
 /// int(0)
-/// int(2168)
+/// int(2184)
 /// int(0)
-/// int(2200)
+/// int(2224)
 /// int(0)
 /// ```
 ///
@@ -1065,17 +1065,19 @@ impl<'a> Texts<'a> {
     /// `make_str`: the string a row or a property takes for `text`, one
     /// owner of it handed over, so a repeated text is [`Owner::take`] of
     /// the first call's string.
+    /// A text of one byte is the interned character, and any other
+    /// `zend_string_finit` (`Z/ext/tokenizer/tokenizer.c:274`, `:281`).
     fn make_str(&mut self, req: &mut Request, text: &'a [u8]) -> Result<Owner<Value>, Thrown> {
-        let Texts::Shared(table) = self else {
-            return Ok(PhpString::new(req, text)?.into_value());
-        };
         if text.len() == 1 {
             return Ok(PhpString::new(req, text)?.into_value());
         }
+        let Texts::Shared(table) = self else {
+            return Ok(PhpString::finit(req, text)?.into_value());
+        };
         if let Some(first) = table.get(text) {
             return Ok(Owner::take(req, Value::string(*first)));
         }
-        let first = PhpString::new(req, text)?;
+        let first = PhpString::finit(req, text)?;
         table.insert(text, *first);
         Ok(first.into_value())
     }

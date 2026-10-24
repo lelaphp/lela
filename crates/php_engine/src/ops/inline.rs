@@ -609,7 +609,7 @@ pub(crate) fn arith_numbers(op: Arith, a: Number, b: Number) -> Value {
     number_value(computed(op, a, b))
 }
 
-/// `ZEND_TYPE_CHECK`'s test (`Z/Zend/zend_vm_def.h:8821`): whether the
+/// `ZEND_TYPE_CHECK`'s test (`Z/Zend/zend_vm_def.h:8828`): whether the
 /// type `kind`, in php's `IS_*` numbering, is one of the `MAY_BE_*` bits
 /// in `mask`, `(extended_value >> Z_TYPE_P(value)) & 1`. What
 /// [`crate::ops::type_check`] reads of the value it dereferenced.
@@ -681,7 +681,7 @@ pub(crate) fn type_check(z: Zval, mask: u32) -> Option<bool> {
     }
 }
 
-/// `ZEND_STRLEN`'s inline arm (`Z/Zend/zend_vm_def.h:8781`): the length
+/// `ZEND_STRLEN`'s inline arm (`Z/Zend/zend_vm_def.h:8788`): the length
 /// of a zval that is a string as it stands. None for everything else,
 /// a reference among it, which [`crate::ops::strlen`] follows, converts
 /// or refuses under the frame's regime.

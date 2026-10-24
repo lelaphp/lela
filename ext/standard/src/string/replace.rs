@@ -488,8 +488,8 @@ fn str_to_str(
             return Ok(None);
         }
         *count += 1;
-        // `zend_string_init_fast`.
-        return PhpString::new(req, with).map(Some);
+        // `zend_string_init_fast` (`Z/ext/standard/string.c:3307`).
+        return PhpString::fast(req, with).map(Some);
     }
     if needle.len() == with.len() {
         let Some(first) = memnstr(searched, needle, 0) else {

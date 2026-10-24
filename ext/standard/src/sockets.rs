@@ -191,9 +191,8 @@ pub(crate) fn default_timeout(req: &Request) -> f64 {
 
 /// `PHP_TIMEOUT_ULL_MAX / 1000000.0`, the most seconds a timeout holds.
 const TIMEOUT_MAX: f64 = 18_446_744_073_709.55;
-/// The same bound as the unsigned integer `ZEND_ULONG_FMT` names, which
-/// `fsockopen()`'s argument #6 error prints; php passes the double to it
-/// and prints what a register held (`trace:fsockopen-timeout-bound`).
+/// The same bound as the unsigned integer `fsockopen()`'s argument #5
+/// error prints, php's `(uint64_t)` of the double (`Z/ext/standard/fsock.c:110`).
 const TIMEOUT_MAX_SHOWN: u64 = 18_446_744_073_709;
 
 /// A timeout of seconds as the natives turn it into a `timeval`: `None`,
@@ -287,10 +286,11 @@ fn assign_error(
 /// bool(false)
 /// ```
 ///
-/// A timeout outside `-1` and the bound is argument #6's `ValueError`,
-/// the bound printed as the integer php's format names; the pinned php
-/// prints whatever its integer register holds there, so the line holds
-/// the digits and nothing after them (`trace:fsockopen-timeout-bound`).
+/// A timeout outside `-1` and the bound is the `ValueError` of argument
+/// #5, `$timeout`, its bound `PHP_TIMEOUT_ULL_MAX / 1000000` printed as
+/// an unsigned integer (`Z/ext/standard/fsock.c:110`, as php-src's
+/// GH-23338 fix has it from php-8.5.11; before it php named argument #6
+/// and printed the double's bits, `trace:fsockopen-timeout-bound`).
 ///
 /// ```php
 /// foreach ([1e20, -2.0, NAN] as $t) {
@@ -299,25 +299,12 @@ fn assign_error(
 /// }
 /// ```
 /// ```expect
-/// fsockopen(): Argument #6 must be -1 or between 0 and %d
-/// pfsockopen(): Argument #6 must be -1 or between 0 and %d
-/// fsockopen(): Argument #6 must be -1 or between 0 and %d
-/// pfsockopen(): Argument #6 must be -1 or between 0 and %d
-/// fsockopen(): Argument #6 must be -1 or between 0 and %d
-/// pfsockopen(): Argument #6 must be -1 or between 0 and %d
-/// ```
-///
-/// The digits are `PHP_TIMEOUT_ULL_MAX / 1000000`, which the pinned php
-/// does not print; the row's `covers` holds this fence to the engine
-/// alone (#1553, #1556).
-///
-/// ```php
-/// try { fsockopen('127.0.0.1', 1, $code, $message, 1e20); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// try { pfsockopen('udp://127.0.0.1', 9, $code, $message, 1e20); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
-/// ```
-/// ```expect
-/// fsockopen(): Argument #6 must be -1 or between 0 and 18446744073709
-/// pfsockopen(): Argument #6 must be -1 or between 0 and 18446744073709
+/// fsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709
+/// pfsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709
+/// fsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709
+/// pfsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709
+/// fsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709
+/// pfsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709
 /// ```
 #[php_function]
 fn fsockopen(
@@ -393,7 +380,7 @@ fn fsockopen_stream(
     let limited = timeout != -1.0;
     if limited && !(0.0..=TIMEOUT_MAX).contains(&timeout) {
         let text = format!("must be -1 or between 0 and {TIMEOUT_MAX_SHOWN}");
-        return Err(argument_error(req, "ValueError", 6, &text));
+        return Err(argument_error(req, "ValueError", 5, &text));
     }
     let mut hostname = host.clone();
     if port > 0 {
