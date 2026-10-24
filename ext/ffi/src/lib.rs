@@ -155,7 +155,7 @@ fn restriction(req: &Request) -> Restriction {
 /// q=1
 /// ```
 /// ```expect regime=ffi-preload exit=0
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// int(7)

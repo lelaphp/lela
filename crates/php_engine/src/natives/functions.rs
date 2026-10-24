@@ -13,7 +13,7 @@ use crate::api::request::{NativeCaller, Request};
 use crate::api::values::{Owner, PhpArray, PhpString, Resource, TypeTag, Value};
 
 /// `ZEND_VERSION` at the pin (`Z/Zend/zend.h:23`).
-pub(crate) const ZEND_VERSION: &str = "4.5.9";
+pub(crate) const ZEND_VERSION: &str = "4.5.12";
 
 /// `zend_version(): string`, php's `ZEND_FUNCTION(zend_version)`
 /// (`Z/Zend/zend_builtin_functions.c:146`).
@@ -22,7 +22,7 @@ pub(crate) const ZEND_VERSION: &str = "4.5.9";
 /// var_dump(zend_version());
 /// ```
 /// ```expect
-/// string(5) "4.5.9"
+/// string(6) "4.5.12"
 /// ```
 #[php_function]
 fn zend_version(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {

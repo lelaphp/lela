@@ -34,7 +34,7 @@ use crate::{On, Resource, State, VERSION_ID, string};
 /// var_dump($d);
 /// ```
 /// ```expect
-/// string(13) "mysqlnd 8.5.9"
+/// string(14) "mysqlnd 8.5.12"
 /// int(80509)
 /// int(3)
 ///
@@ -44,7 +44,7 @@ use crate::{On, Resource, State, VERSION_ID, string};
 /// Cannot write read-only property mysqli_driver::$client_info
 /// object(mysqli_driver)#1 (3) {
 ///   ["client_info"]=>
-///   string(13) "mysqlnd 8.5.9"
+///   string(14) "mysqlnd 8.5.12"
 ///   ["client_version"]=>
 ///   int(80509)
 ///   ["report_mode"]=>
