@@ -166,6 +166,25 @@ impl State {
 /// 16 80
 /// 17 144
 /// ```
+///
+/// `parse_str()`'s value is what the filter answered read as a string,
+/// so under `filter.default=int` a number is its digits and a refusal,
+/// `false`, the empty string:
+///
+/// ```php
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'filter.default=int', '-r', 'parse_str("a=1&b=notint", $o); var_dump($o);'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p);
+/// ```
+/// ```expect process
+///
+/// Deprecated: The filter.default ini setting is deprecated in Unknown on line 0
+/// array(2) {
+///   ["a"]=>
+///   string(1) "1"
+///   ["b"]=>
+///   string(0) ""
+/// }
+/// ```
 fn sapi_filter(
     req: &mut Request,
     input: Input,
@@ -234,10 +253,16 @@ fn sapi_filter(
     // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`: a value of one
     // byte is the process's string, and allocates nothing, and a longer
     // one is php-8.5.12's `zend_string_finit`.
-    let ValueRef::Str(filtered) = handed.as_ref() else {
-        return Ok(Some(handed));
-    };
-    let fast = PhpString::fast(req, filtered.as_bytes()).map(Owner::into_value);
+    // What a filter answers that is not a string, `filter.default=int`'s
+    // int or its `false`, is read as `zval_get_tmp_string` reads it
+    // (`Z/ext/filter/filter.c:392`).
+    let fast = match handed.as_ref() {
+        ValueRef::Str(filtered) => PhpString::fast(req, filtered.as_bytes()),
+        _ => {
+            with_string(req, &handed, <[u8]>::to_vec).and_then(|bytes| PhpString::fast(req, &bytes))
+        }
+    }
+    .map(Owner::into_value);
     handed.give_up(req);
     fast.map(Some)
 }
