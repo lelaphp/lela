@@ -547,7 +547,7 @@ fn mark_ids_modified(req: &mut Request, object: PhpObject) {
 }
 
 /// `ce->name` of a class.
-fn class_name(req: &Request, class: ClassId) -> String {
+pub(crate) fn class_name(req: &Request, class: ClassId) -> String {
     req.symbols()
         .class_decl(class)
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())

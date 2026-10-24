@@ -160,6 +160,10 @@ pub(crate) struct XPathState {
     ctx: Foreign<ffi::XPath>,
     register_node_ns: bool,
     callbacks: XPathCallbacks,
+    /// `evaluation_depth`: the evaluations in progress on the object, one
+    /// inside another where a function an expression calls evaluates
+    /// again; the constructor is refused while any is (GH-23729).
+    evaluation_depth: u32,
 }
 
 /// `php_dom_xpath_callbacks`, as `xpath_callbacks.h` exports it
@@ -752,7 +756,13 @@ fn eval(
     let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
         XPathCallbacks::call(req, at, called, operands, modern, &mut proxy)
     };
+    if let Some(state) = state(req, this) {
+        state.evaluation_depth += 1;
+    }
     let evaluated = ffi::XPath::eval_held(req, id, expr, node, scope, &mut handler);
+    if let Some(state) = state(req, this) {
+        state.evaluation_depth = state.evaluation_depth.saturating_sub(1);
+    }
     if let Some(in_scope) = in_scope {
         in_scope.free(req);
     }
@@ -894,7 +904,29 @@ impl DOMXPath {
     #[php(property, virtual)]
     const registerNodeNamespaces: bool;
 
-    /// `DOMXPath::__construct(DOMDocument $document, bool $registerNodeNS = true)`.
+    /// `DOMXPath::__construct(DOMDocument $document, bool $registerNodeNS = true)`:
+    /// refused while an evaluation on the object is in progress, so a
+    /// function an expression calls cannot free the evaluator it runs on
+    /// (GH-23729).
+    ///
+    /// ```php
+    /// class X extends DOMXPath {}
+    /// $d = new DOMDocument; $d->loadXML('<r><a>1</a></r>');
+    /// $o = new DOMDocument; $o->loadXML('<o/>');
+    /// $x = new X($d);
+    /// $x->registerNamespace('php', 'http://php.net/xpath');
+    /// $x->registerPhpFunctions();
+    /// function again() { global $x, $o; try { $x->__construct($o); } catch (Error $e) { echo $e->getMessage(), "\n"; } return 'r'; }
+    /// var_dump($x->evaluate('string(php:function("again"))'), $x->evaluate('string(/r/a)'));
+    /// $x->__construct($o);
+    /// var_dump($x->document === $o);
+    /// ```
+    /// ```expect
+    /// Cannot call X::__construct() while an XPath evaluation is in progress
+    /// string(1) "r"
+    /// string(1) "1"
+    /// bool(true)
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -902,6 +934,16 @@ impl DOMXPath {
         #[php(default = true)] registerNodeNS: bool,
     ) -> Result<(), Thrown> {
         let (this, doc_obj) = (this.object(), document.object());
+        if state(req, this).is_some_and(|s| s.evaluation_depth > 0) {
+            let class = crate::class_name(req, this.class());
+            return Err(throw_error(
+                req,
+                "Error",
+                &format!(
+                    "Cannot call {class}::__construct() while an XPath evaluation is in progress"
+                ),
+            ));
+        }
         let doc = fetch(req, doc_obj)?;
         let Some(ctx) = ffi::XPath::new(doc) else {
             return Err(crate::dom_throw(req, Code::InvalidState));
@@ -916,6 +958,7 @@ impl DOMXPath {
             ctx: req.memory_mut().adopt(ctx),
             register_node_ns: registerNodeNS,
             callbacks: XPathCallbacks::default(),
+            evaluation_depth: 0,
         };
         match dom_mut(req, this) {
             Some(d) => d.extra = Extra::XPath(Box::new(state)),
