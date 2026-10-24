@@ -545,7 +545,7 @@ pub struct VmStack<H> {
     /// `EG(vm_stack_end)`: one past the top page's last slot.
     end: NonNull<Zval>,
     frames: Frames<H>,
-    entries: Vec<FrameRef>,
+    entries: Entries,
     /// The room off the pages the last frameless call's frame gave
     /// back, the next one's.
     spare: Option<Loose>,
@@ -588,7 +588,7 @@ impl<H> Default for VmStack<H> {
             top: NonNull::dangling(),
             end: NonNull::dangling(),
             frames: Frames::new(),
-            entries: Vec::new(),
+            entries: Entries::default(),
             spare: None,
             innermost: AtomicUsize::new(0),
         }
@@ -1302,11 +1302,9 @@ impl<H> VmStack<H> {
     /// The entry frame of the innermost serving on this stack; the
     /// current frame when nothing has pushed an entry.
     #[must_use]
+    #[inline]
     pub fn entry(&self) -> FrameRef {
-        self.entries
-            .last()
-            .copied()
-            .unwrap_or_else(|| self.current())
+        self.entries.innermost.unwrap_or_else(|| self.current())
     }
 
     /// Pushed by the loop on entry, and popped by [`VmStack::pop_entry`]
@@ -1375,13 +1373,43 @@ impl Page {
     }
 }
 
+/// A stack's entry slots, one per serving standing on it, the
+/// innermost held apart from those below it, so the loop's test of
+/// whether a frame is its serving's entry reads one word.
+#[derive(Debug, Default)]
+struct Entries {
+    below: Vec<FrameRef>,
+    innermost: Option<FrameRef>,
+}
+
+impl Entries {
+    /// How many slots stand.
+    fn len(&self) -> usize {
+        self.below.len() + usize::from(self.innermost.is_some())
+    }
+
+    /// `f` the innermost serving's entry.
+    fn push(&mut self, f: FrameRef) {
+        if let Some(was) = self.innermost.replace(f) {
+            self.below.push(was);
+        }
+    }
+
+    /// The slots past the first `len` popped.
+    fn truncate(&mut self, len: usize) {
+        while self.len() > len {
+            self.innermost = self.below.pop();
+        }
+    }
+}
+
 /// The frames of a stack and its entry slots, set aside by
 /// [`VmStack::set_aside`] and put back by [`VmStack::put_back`].
 #[derive(Debug)]
 #[must_use = "the frames are put back by VmStack::put_back, which takes this"]
 pub struct FramesAside<H> {
     frames: Frames<H>,
-    entries: Vec<FrameRef>,
+    entries: Entries,
     /// The word as it stood, the innermost of the frames set aside.
     innermost: usize,
 }
@@ -1471,6 +1499,38 @@ mod tests {
             stack.frame(outer).map(|f| f.slot(Slot(5))),
             Some(Zval::UNDEF)
         );
+        drop(stack.close(&mut heap));
+    }
+
+    /// Entry slots nest: each serving's is the entry while it stands,
+    /// the one below it again once it pops, and the pop of an outer
+    /// guard pops an inner one left standing with it.
+    #[test]
+    fn entry_slots_nest_and_an_outer_pop_takes_the_inner_with_it() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        let mut stack = VmStack::<Head>::new();
+        let frames: Vec<FrameRef> = (0..3)
+            .filter_map(|_| stack.push_frame(&mut heap, 1, 0, Head::default).ok())
+            .collect();
+        let [a, b, c] = frames[..] else {
+            panic!("three frames fit the first page");
+        };
+        assert_eq!(
+            stack.entry(),
+            c,
+            "with no slot the entry is the current frame"
+        );
+        let outer = stack.push_entry(a);
+        let inner = stack.push_entry(b);
+        assert_eq!(stack.entry(), b);
+        stack.pop_entry(inner);
+        assert_eq!(stack.entry(), a);
+        let _left = stack.push_entry(b);
+        let _innermost = stack.push_entry(c);
+        assert_eq!(stack.entry(), c);
+        stack.pop_entry(outer);
+        assert_eq!(stack.entry(), c, "the outer pop leaves no slot");
         drop(stack.close(&mut heap));
     }
 
