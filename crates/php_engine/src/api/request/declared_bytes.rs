@@ -1205,7 +1205,8 @@ fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
 /// table its compile filled at the size it was compiled to, the
 /// `zend_class_entry`, its members and their types in the compile's
 /// arena. A cached file's enum costs its copy and its link, and a cached
-/// class over an `eval`'d parent its copy and the parent's rows (the
+/// class over an `eval`'d parent its copy and the parent's rows, one
+/// using an `eval`'d trait its own and the trait's properties' (the
 /// program under the recipe's `TMPDIR`, written into the past so opcache
 /// keeps it):
 ///
@@ -1213,7 +1214,7 @@ fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
 /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/w3325-$name.inc"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
 /// ini_set('opcache.file_update_protection', '0');
 /// include $put('w0', '<?php class W {} $q0 = 1;');
-/// eval('class EvP { public $a = 1; function f() {} }');
+/// eval('class EvP { public $a = 1; function f() {} } trait EvT { public $t = 1; public $u = 2; public $v = 3; }');
 /// $fs = [
 ///     $put('unit', '<?php enum E1 { case A; case B; }'),
 ///     $put('string', '<?php enum Ez: string { case A = "a"; }'),
@@ -1223,17 +1224,18 @@ fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
 ///     $put('nine', '<?php enum E6 { case A; case B; case C; case D; case E; case F; case G; case H; case I; }'),
 ///     $put('child', '<?php class M1 extends EvP { public $b = 2; function g() {} const K = 1; }'),
 ///     $put('empty', '<?php class M2 extends EvP { }'),
+///     $put('traited', '<?php class M3 { use EvT; public $o = 0; }'),
 /// ];
 /// $costs = [];
 /// foreach ($fs as $f) { $m = memory_get_usage(); include $f; $costs[] = memory_get_usage() - $m; }
 /// echo implode(" ", $costs), "\n";
 /// $junk = array_fill(0, 1000, str_repeat("x", 100));
-/// echo Ez::from("a")->name, E3::A->m(), E4::tryFrom("z") === null ? "-" : "+", E5::A->t(), count(E6::cases()), (new M1)->a, (new M2)->f(), "\n";
+/// echo Ez::from("a")->name, E3::A->m(), E4::tryFrom("z") === null ? "-" : "+", E5::A->t(), count(E6::cases()), (new M1)->a, (new M2)->f(), (new M3)->v, "\n";
 /// foreach ($fs as $f) { unlink($f); }
 /// ```
 /// ```expect regime=jit-off
-/// 1088 1112 1112 1120 1088 1408 1408 752
-/// A1-91
+/// 1088 1112 1112 1120 1088 1408 1408 752 480
+/// A1-913
 /// ```
 fn lazy_copy(req: &mut Request, compiled: Compiled) -> Result<ClassBlocks, Thrown> {
     ClassBlocks::laid(req, |req, blocks| lay_tables(req, blocks, compiled))
@@ -1517,7 +1519,11 @@ impl Request {
         let cached = !self.unit_strings.holds(unit);
         let mut blocks = match self.unit_strings.class_blocks(unit, at) {
             Some(blocks) => blocks,
-            None if cached => match self.symbols().class_decl(class).map(Compiled::of) {
+            // The class as its unit wrote it, before its traits composed it.
+            None if cached => match (self.declared_row(class))
+                .and_then(|row| row.unit.classes.get(row.at as usize))
+                .map(Compiled::of)
+            {
                 Some(compiled) => lazy_copy(self, compiled)?,
                 None => return Ok(()),
             },
