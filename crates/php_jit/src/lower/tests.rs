@@ -20,7 +20,9 @@ use crate::testing::goldens::{
     NATIVE_CALL, NBODY, OWNING_LEAVE, SIEVE, SPECTRALNORM, held,
 };
 use crate::testing::{self, Lane, policy};
-use crate::types::{Check, End, Guard, GuardAt, Imm, Interrupt, Op, Returned, TraceIr};
+use crate::types::{
+    Check, Constant, End, Form, Guard, GuardAt, Imm, Interrupt, Op, Operand, Returned, TraceIr,
+};
 
 /// Where `lower`'s goldens are.
 fn goldens_dir() -> PathBuf {
@@ -54,7 +56,7 @@ fn named(fixture: Fixture) -> TraceName {
 /// holds what the code does with it.
 fn constants_named(ir: &TraceIr, clif: &str) -> String {
     let mut named = clif.to_owned();
-    let constants = ir.ops.iter().filter_map(|op| match op {
+    let returned = ir.ops.iter().filter_map(|op| match op {
         Op::Line(line) => match line.imm {
             Imm::Leave {
                 value: Returned::Constant(address),
@@ -64,7 +66,28 @@ fn constants_named(ir: &TraceIr, clif: &str) -> String {
         },
         _ => None,
     });
-    for (at, address) in constants.enumerate() {
+    // A constant no scalar is, which an inline form copies from its op
+    // array's table.
+    let copied = ir.ops.iter().flat_map(|op| match op {
+        Op::Line(line) if line.form == Form::Inline => [line.op1, line.op2, line.data]
+            .into_iter()
+            .filter_map(|operand| match operand {
+                Operand::Constant(Constant::Other(idx)) => ir
+                    .frames
+                    .get(usize::from(line.frame.0))
+                    .map(|frame| frame.literals + 16 * idx.0 as usize),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    });
+    let mut seen = Vec::new();
+    for address in returned.chain(copied) {
+        if !seen.contains(&address) {
+            seen.push(address);
+        }
+    }
+    for (at, address) in seen.into_iter().enumerate() {
         // CLIF prints a constant in groups of four hex digits.
         let digits = format!("{address:x}");
         let mut grouped = String::new();

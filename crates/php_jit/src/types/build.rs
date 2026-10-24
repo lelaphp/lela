@@ -348,6 +348,7 @@ impl<'a> Builder<'a> {
             place,
             cvs: code.num_cvs,
             temps: code.num_tmps,
+            literals: code.literals.as_ptr().addr(),
         });
         self.meta.push(Meta {
             code,
@@ -2062,6 +2063,8 @@ impl<'a> Builder<'a> {
         let long = |t: Types| t == Types::LONG;
         let scalar = |t: Types| t.scalar();
         let packed = Types::ARRAY.laid_out(Layout::Packed);
+        let code = self.meta(frame).code;
+        let copied = |kind, field, t| copied_whole(kind, field, t, code);
         let inline = match op.opcode {
             Opcode::Jmp => true,
             // A double's truth is the handler's, which warns of a NAN as
@@ -2090,7 +2093,14 @@ impl<'a> Builder<'a> {
                         .and_then(arith)
                         .is_some_and(|served| served.serves(t1, t2))
             }
-            Opcode::Assign => cv1 && scalar(t2) && !t1.meets(Types::REF),
+            // A value no scalar is moved or copied into the variable, as
+            // php's `zend_jit_assign_to_variable` copies it
+            // (`Z/ext/opcache/jit/zend_jit_ir.c:5793-5950`).
+            Opcode::Assign => {
+                cv1 && !t1.meets(Types::REF)
+                    && (scalar(t2)
+                        || (op.out_type == OperandKind::Unused && copied(op.op2_type, op.op2, t2)))
+            }
             Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
                 cv1 && number(t1)
             }
@@ -2107,16 +2117,13 @@ impl<'a> Builder<'a> {
             }
             Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
             Opcode::FeResetR | Opcode::FeFetchR => iterated(op, t1, seen.referenced[0], branch),
-            // A send that moves what a temporary holds into the call, as
-            // php's `zend_jit_send_var` moves a `TMP` or a `VAR` that is
-            // no reference (`Z/ext/opcache/jit/zend_jit_ir.c:9628-9790`).
-            Opcode::SendVar if matches!(op.op1_type, OperandKind::Tmp | OperandKind::Var) => {
-                op.op2_type == OperandKind::Unused
-                    && t1.kinds() != Types::NONE
-                    && !t1.meets(Types::REF.or(Types::UNDEF))
-            }
+            // php's `zend_jit_send_val` and `zend_jit_send_var`, a value
+            // no scalar moved into the call's slot from a temporary, copied
+            // with an owner more from a variable, or as it is from a
+            // constant no reference counts (`:9466-9790`).
             Opcode::SendVal | Opcode::SendVar | Opcode::SendValEx => {
-                op.op2_type == OperandKind::Unused && scalar(t1)
+                op.op2_type == OperandKind::Unused
+                    && (scalar(t1) || copied(op.op1_type, op.op1, t1))
             }
             Opcode::TypeCheck => type_checked(op, t1, seen.referenced[0]),
             // A check of an argument the trace knows the callee takes by
@@ -3199,6 +3206,23 @@ fn type_checked(op: &Opline, t1: Types, referenced: bool) -> bool {
             }
             OperandKind::Const | OperandKind::Unused => false,
         }
+}
+
+/// Whether an inline form moves or copies an operand of `kind`, at
+/// `field`, seen as `t`, whole: what a temporary or a variable holds, of a
+/// kind the trace knows, no reference and set, or a constant of `code` no
+/// reference counts, which needs no owner.
+fn copied_whole(kind: OperandKind, field: u32, t: Types, code: &OpArray) -> bool {
+    match kind {
+        OperandKind::Tmp | OperandKind::Var | OperandKind::Cv => {
+            t.kinds() != Types::NONE && !t.meets(Types::REF.or(Types::UNDEF))
+        }
+        OperandKind::Const => code
+            .literals
+            .get(field as usize)
+            .is_some_and(|literal| !literal.is_refcounted()),
+        OperandKind::Unused => false,
+    }
 }
 
 /// Whether a `foreach`'s reset or fetch is compiled inline over `t1`,

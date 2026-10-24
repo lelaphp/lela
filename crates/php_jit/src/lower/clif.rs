@@ -1861,14 +1861,46 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
-    /// An assignment of a scalar to a variable: the variable written, and
-    /// where what it held was counted, released after, as
+    /// An assignment to a variable, php's `zend_jit_assign` over
+    /// `zend_jit_assign_to_variable` (`Z/ext/opcache/jit/zend_jit_ir.c:5793-5950`):
+    /// a scalar written, or a value no scalar moved from a temporary,
+    /// copied from a variable with one owner more, or copied as it is from
+    /// a constant no reference counts ([`Emit::copy_operand`]); and where
+    /// what the variable held was counted, released after, as
     /// `zend_assign_to_variable` frees it, what its destructor throws
-    /// leaving through the opline's exit. A register's slot is written
+    /// leaving through the opline's unwind. A register's slot is written
     /// too where the old value was counted, so no slot names a value
-    /// freed.
+    /// freed. Strings, arrays and a constant assigned over strings and
+    /// arrays, an object's destructor among the releases:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// function f($n) {
+    ///     $s = ""; $a = [1]; $k = "k"; $o = new D;
+    ///     for ($i = 0; $i < $n; $i++) { $t = str_repeat("x", $i % 3); $s = $t; $b = $a; $a = [$i]; $k = "k"; if ($i == 1) { $o = $s; } }
+    ///     return [$s, $b, $a, $k, $o];
+    /// }
+    /// echo json_encode(f(5)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// d["x",[3],[4],"k","x"]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// function f($n) {
+    ///     $s = ""; $a = [1]; $k = "k"; $o = new D;
+    ///     for ($i = 0; $i < $n; $i++) { $t = str_repeat("x", $i % 3); $s = $t; $b = $a; $a = [$i]; $k = "k"; if ($i == 1) { $o = $s; } }
+    ///     return [$s, $b, $a, $k, $o];
+    /// }
+    /// echo json_encode(f(5)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// d["x",[3],[4],"k","x"]
+    /// ```
     fn assign(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let held = self.scalar(at, line.op2)?;
         let Operand::Value(target) = line.op1 else {
             return Err(mismatch("an assignment to no variable"));
         };
@@ -1882,25 +1914,91 @@ impl<'a> Emit<'a> {
             }
             None => None,
         };
-        if let Some(def) = line.op1_def {
-            self.define(def, held)?;
-            if old.is_some() && self.value(def)?.home == Home::Register {
-                self.store(slot, held)?;
+        if self.scalar_kind(line.op2)?.is_some() {
+            let held = self.scalar(at, line.op2)?;
+            if let Some(def) = line.op1_def {
+                self.define(def, held)?;
+                if old.is_some() && self.value(def)?.home == Home::Register {
+                    self.store(slot, held)?;
+                }
             }
-        }
-        if let Some(out) = line.out {
-            self.define(out, held)?;
+            if let Some(out) = line.out {
+                self.define(out, held)?;
+            }
+        } else {
+            let into = self.place(slot)?;
+            self.copy_operand(line.frame, line.op2, into)?;
         }
         if let Some((word, info)) = old {
-            let counted = self.b.ins().band_imm_u(info, COUNTED);
-            let [room, opline] = self.served(line)?;
-            self.when(counted, |emit| {
-                emit.call(
-                    Kernel::Release,
-                    &[room, opline, word, info],
-                    line.unwind.map(Leave::Unwind),
-                )
-            })?;
+            self.release(line, word, info)?;
+        }
+        Ok(())
+    }
+
+    /// Whether `operand` is a scalar compiled code holds as one kind: a
+    /// scalar constant, or a value of one kind of the scalar core; none
+    /// for a constant no scalar is and a value of no one scalar kind.
+    fn scalar_kind(&self, operand: Operand) -> Result<Option<Kind>, Abort> {
+        Ok(match operand {
+            Operand::Constant(Constant::Other(_)) | Operand::Unused => None,
+            Operand::Constant(Constant::Null) => Some(Kind::Null),
+            Operand::Constant(Constant::False) => Some(Kind::False),
+            Operand::Constant(Constant::True) => Some(Kind::True),
+            Operand::Constant(Constant::Long(_)) => Some(Kind::Long),
+            Operand::Constant(Constant::Double(_)) => Some(Kind::Double),
+            Operand::Value(value) => Kind::of(self.value(value)?.types),
+        })
+    }
+
+    /// The value no scalar `operand` names, of `frame`, written whole to
+    /// the zval at `base + at`: what a temporary holds moved with its
+    /// owner, its slot left `UNDEF` as the handler takes the operand,
+    /// php's `ZVAL_COPY_VALUE`; what a variable holds copied with one
+    /// owner more, `ZVAL_COPY`; a constant no reference counts copied as
+    /// it is from the op array's constants, `ZVAL_COPY_CONST`.
+    fn copy_operand(
+        &mut self,
+        frame: Frame,
+        operand: Operand,
+        (base, at): (Value, i32),
+    ) -> Result<(), Abort> {
+        match operand {
+            Operand::Value(value) => {
+                let from = self.value(value)?.slot;
+                let (room, from_at) = self.place(from)?;
+                let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
+                if from.var >= self.frame_cvs(from.frame)? {
+                    let word = self.b.ins().load(I64, trusted(), room, from_at);
+                    self.b.ins().store(trusted(), word, base, at);
+                    self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+                    let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+                    self.b
+                        .ins()
+                        .store(trusted(), undef, room, from_at + TYPE_AT);
+                } else {
+                    let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
+                    self.copy_at(zval, info, (base, at))?;
+                }
+            }
+            Operand::Constant(Constant::Other(idx)) => {
+                let literals = self
+                    .ir
+                    .frames
+                    .get(usize::from(frame.0))
+                    .ok_or_else(|| mismatch("a constant of a frame the trace does not have"))?
+                    .literals;
+                let address = (idx.0 as usize)
+                    .checked_mul(16)
+                    .and_then(|offset| literals.checked_add(offset))
+                    .and_then(|address| i64::try_from(address).ok())
+                    .ok_or_else(|| mismatch("a constant past the host's addresses"))?;
+                let zval = self.b.ins().iconst(I64, address);
+                let word = self.b.ins().load(I64, trusted(), zval, 0);
+                let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
+                self.b.ins().store(trusted(), word, base, at);
+                self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+            }
+            _ => return Err(mismatch("a value copied whole from a scalar")),
         }
         Ok(())
     }
@@ -2488,10 +2586,17 @@ impl<'a> Emit<'a> {
     /// ["abab",[1,2],[7],"abab",[1,2],[7]] [7,8]
     /// ```
     fn copy(&mut self, zval: Value, info: Value, slot: Slot) -> Result<(), Abort> {
+        let dest = self.place(slot)?;
+        self.copy_at(zval, info, dest)
+    }
+
+    /// The zval at `zval`, no reference, of type word `info`, copied to
+    /// the zval at `base + at` with one owner more where it is counted, as
+    /// [`Emit::copy`] copies it to a slot.
+    fn copy_at(&mut self, zval: Value, info: Value, (base, at): (Value, i32)) -> Result<(), Abort> {
         let word = self.b.ins().load(I64, trusted(), zval, 0);
-        let (room, at) = self.place(slot)?;
-        self.b.ins().store(trusted(), word, room, at);
-        self.b.ins().store(trusted(), info, room, at + TYPE_AT);
+        self.b.ins().store(trusted(), word, base, at);
+        self.b.ins().store(trusted(), info, base, at + TYPE_AT);
         let counted = self.b.ins().band_imm_u(info, COUNTED);
         self.when(counted, |emit| {
             let count_at = imm(Zval::COUNT_AT);
@@ -2678,7 +2783,11 @@ impl<'a> Emit<'a> {
         })
     }
 
-    /// A send of a scalar: the call's slot for the argument written.
+    /// A send, php's `zend_jit_send_val` and `zend_jit_send_var`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9466-9790`): the call's slot for
+    /// the argument written with a scalar, or with a value no scalar moved
+    /// from a temporary, copied from a variable with one owner more, or
+    /// copied as it is from a constant ([`Emit::copy_operand`]).
     fn send(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Imm::Arg(number) = line.imm else {
             return Err(mismatch("a send with no argument number"));
@@ -2688,22 +2797,9 @@ impl<'a> Emit<'a> {
                 .checked_sub(1)
                 .ok_or_else(|| mismatch("an argument numbered zero"))?,
         )?;
-        if let Operand::Value(value) = line.op1
-            && Kind::of(self.value(value)?.types).is_none()
-            && self.value(value)?.slot.var >= self.frame_cvs(line.frame)?
-        {
-            // What a temporary holds, moved into the call whole, its
-            // owner with it, as `ZVAL_COPY_VALUE` moves it, and the slot
-            // it leaves `UNDEF`, as the handler takes the operand.
-            let (room, from) = self.place(self.value(value)?.slot)?;
-            let word = self.b.ins().load(I64, trusted(), room, from);
-            let info = self.b.ins().load(I32, trusted(), room, from + TYPE_AT);
+        if self.scalar_kind(line.op1)?.is_none() {
             let call = self.call_room()?;
-            self.b.ins().store(trusted(), word, call, arg);
-            self.b.ins().store(trusted(), info, call, arg + TYPE_AT);
-            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
-            self.b.ins().store(trusted(), undef, room, from + TYPE_AT);
-            return Ok(());
+            return self.copy_operand(line.frame, line.op1, (call, arg));
         }
         let held = self.scalar(at, line.op1)?;
         let call = self.call_room()?;

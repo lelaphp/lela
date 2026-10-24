@@ -292,12 +292,14 @@ fn frames(f: FuncRef, g: FuncRef) -> Vec<FrameInfo> {
             place: Place::Root,
             cvs: 1,
             temps: 2,
+            literals: 0,
         },
         FrameInfo {
             func: g,
             place: Place::Callee(Frame::ROOT),
             cvs: 2,
             temps: 0,
+            literals: 0,
         },
     ]
 }
@@ -435,12 +437,14 @@ fn leave_in_place(req: &mut Request, g: FrameRef) -> Option<(FrameRef, Read)> {
             place: Place::Root,
             cvs: 2,
             temps: 0,
+            literals: 0,
         },
         FrameInfo {
             func: caller,
             place: Place::Caller(Frame::ROOT),
             cvs: 1,
             temps: 2,
+            literals: 0,
         },
     ];
     let ir = trace(frames, ops, (Frame(1), call + 1));
