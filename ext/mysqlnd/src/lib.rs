@@ -79,11 +79,13 @@ enum Scope {
 }
 
 /// The request's state: the connections, lent out to one call at a
-/// time, and `mysqlnd_global_stats`.
+/// time, `mysqlnd_global_stats`, and `MYSQLND_G(collect_statistics)`,
+/// the entry as `OnUpdateBool` keeps it ([`on_update_collect_statistics`]).
 #[derive(Default)]
 struct State {
     conns: Vec<Slot>,
     stats: Vec<u64>,
+    collect_statistics: bool,
 }
 
 /// One connection of the table: its data, absent while it is lent; the
@@ -139,7 +141,9 @@ pub fn extension() -> Extension {
         .on_update_long(b"mysqlnd.net_read_timeout", LongHandler::Any)
         .on_update_long(b"mysqlnd.log_mask", LongHandler::Any)
         .on_update_long(b"mysqlnd.mempool_default_size", LongHandler::Any)
+        .on_modify(COLLECT_STATISTICS, on_update_collect_statistics)
         .request_state::<State>()
+        .rinit(rinit)
         .info(mysqlnd_info)
         .version(VERSION)
         .build("mysqlnd")
@@ -202,7 +206,7 @@ fn mysqlnd_info(req: &mut Request) {
     // The two `OnUpdateLong` entries, as their quantities.
     let read = req.ini().long(b"mysqlnd.net_read_buffer_size").to_string();
     let timeout = req.ini().long(b"mysqlnd.net_read_timeout").to_string();
-    let stats = yes(req, b"mysqlnd.collect_statistics");
+    let stats = yes(req, COLLECT_STATISTICS);
     let memory = yes(req, b"mysqlnd.collect_memory_statistics");
     let tracing = req.ini().value(b"mysqlnd.debug").map_or_else(
         || "n/a".to_owned(),
@@ -281,8 +285,9 @@ impl Handle {
         req: &mut Request,
         f: impl FnOnce(&mut Request, &mut ConnData) -> R,
     ) -> Option<R> {
-        let enabled = ini_bool(req, b"mysqlnd.collect_statistics");
-        let mut conn = slot_of(req.state::<State>(), self)?.conn.take()?;
+        let state = req.state::<State>();
+        let enabled = state.collect_statistics;
+        let mut conn = slot_of(state, self)?.conn.take()?;
         conn.stats.enabled = enabled;
         let answered = f(req, &mut conn);
         flush(req, &mut conn);
@@ -380,6 +385,51 @@ impl State {
 /// A boolean entry as `OnUpdateBool` reads it.
 fn ini_bool(req: &Request, name: &[u8]) -> bool {
     req.ini().get(name).is_some_and(Ini::parse_bool)
+}
+
+/// The entry whose value decides whether a connection counts.
+const COLLECT_STATISTICS: &[u8] = b"mysqlnd.collect_statistics";
+
+/// The request's `MYSQLND_G(collect_statistics)` laid from the entry as
+/// the request starts with it, as `MYSQLND_G` holds the value the entry
+/// was registered with.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the `rinit` slot's shape, which a hook that throws needs"
+)]
+fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    req.state::<State>().collect_statistics = ini_bool(req, COLLECT_STATISTICS);
+    Ok(())
+}
+
+/// `OnUpdateBool` over `MYSQLND_G(collect_statistics)`: the value read
+/// as `zend_ini_parse_bool` reads it, written where every lend of a
+/// connection reads it, at `ini_set()`, `ini_restore()` and the
+/// request's end alike. A connection counts what it does while the entry
+/// is on and nothing while it is off:
+///
+/// ```php
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $rows = fn () => mysqli_get_connection_stats($l)['buffered_sets'];
+/// $fetch = function () use ($l) { $r = mysqli_query($l, 'SELECT 1'); mysqli_fetch_row($r); };
+/// $fetch(); echo $rows(), "\n";
+/// var_dump(ini_set('mysqlnd.collect_statistics', '0')); $fetch(); echo $rows(), "\n";
+/// ini_restore('mysqlnd.collect_statistics'); var_dump(ini_get('mysqlnd.collect_statistics')); $fetch(); echo $rows(), "\n";
+/// ```
+/// ```expect
+/// 1
+/// string(1) "1"
+/// 1
+/// string(1) "1"
+/// 2
+/// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the `on_modify` slot's shape, which a handler that throws needs"
+)]
+fn on_update_collect_statistics(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    req.state::<State>().collect_statistics = value.is_some_and(Ini::parse_bool);
+    Ok(true)
 }
 
 #[cfg(test)]
