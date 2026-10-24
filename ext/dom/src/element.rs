@@ -21,11 +21,25 @@ use crate::{
 };
 
 /// What a qualified name finds on an element for the legacy classes: an
-/// attribute, or a namespace declaration `xmlns[:p]` names.
+/// attribute, the default a DTD declares for one the element does not
+/// carry (`XML_ATTRIBUTE_DECL`, which `xmlHasNsProp` answers), or a
+/// namespace declaration `xmlns[:p]` names.
 #[derive(Clone, Copy)]
 enum Found {
     Attr(Node),
+    Default(Node),
     Decl(Ns),
+}
+
+impl Found {
+    /// What `xmlHasNsProp` answered, told apart by its kind.
+    fn prop(node: Node) -> Found {
+        if node.kind() == Kind::AttributeDecl {
+            Found::Default(node)
+        } else {
+            Found::Attr(node)
+        }
+    }
 }
 
 /// `dom_get_attribute_or_nsdecl`: for the modern classes the attribute
@@ -51,7 +65,7 @@ fn attribute_or_decl(modern: bool, elem: Node, name: &[u8]) -> Option<Found> {
         if let Some(ns) = elem.search_ns(Some(prefix))
             && let Some(href) = ns.href()
         {
-            return elem.has_ns_prop(local, Some(&href)).map(Found::Attr);
+            return elem.has_ns_prop(local, Some(&href)).map(Found::prop);
         }
     } else if name == b"xmlns" {
         let mut ns = elem.ns_def();
@@ -63,7 +77,7 @@ fn attribute_or_decl(modern: bool, elem: Node, name: &[u8]) -> Option<Found> {
         }
         return None;
     }
-    elem.has_ns_prop(name, None).map(Found::Attr)
+    elem.has_ns_prop(name, None).map(Found::prop)
 }
 
 /// `dom_get_attribute_ns`: the value, and for the legacy classes a
@@ -192,9 +206,37 @@ pub(crate) fn mapped_ns(
     Ok(ns.flatten())
 }
 
-/// `dom_remove_attribute`.
-fn remove_found(elem: Node, found: Found) {
+/// `dom_remove_attribute`: whether anything was removed, which a DTD's
+/// default never is (GH-22825); the element reads the default, and a
+/// write gives it an attribute of its own.
+///
+/// ```php
+/// foreach (['A CDATA #FIXED "d"', 'A CDATA "d"'] as $decl) {
+///     $el = fn() => (function () use ($decl) { $d = new DOMDocument; $d->loadXML("<!DOCTYPE r [<!ATTLIST r $decl>]><r/>"); return $d->documentElement; })();
+///     $e = $el(); var_dump($e->hasAttribute('A'), $e->getAttribute('A'), $e->removeAttribute('A'), $e->hasAttribute('A'));
+///     $e = $el(); var_dump($e->toggleAttribute('A', false), $e->toggleAttribute('A', true));
+///     $e = $el(); echo get_class($e->setAttribute('A', 'v')), ' ', $e->ownerDocument->saveXML($e), "\n";
+/// }
+/// ```
+/// ```expect
+/// bool(true)
+/// string(1) "d"
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// DOMAttr <r A="v"/>
+/// bool(true)
+/// string(1) "d"
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// DOMAttr <r A="v"/>
+/// ```
+fn remove_found(elem: Node, found: Found) -> bool {
     match found {
+        Found::Default(_) => return false,
         Found::Attr(a) => {
             if a.object().is_none() {
                 node_list_unlink(a.children());
@@ -206,7 +248,7 @@ fn remove_found(elem: Node, found: Found) {
         }
         Found::Decl(ns) => {
             let Some(first) = elem.ns_def() else {
-                return;
+                return true;
             };
             if first == ns {
                 elem.set_ns_def(ns.next());
@@ -225,6 +267,7 @@ fn remove_found(elem: Node, found: Found) {
             deep_ns_redef(elem, ns);
         }
     }
+    true
 }
 
 /// `dom_deep_ns_redef`: every use of `removed` under `node` given a
@@ -618,12 +661,12 @@ fn set_attribute(
         return Ok(Owner::null());
     }
     match attribute_or_decl(false, elem, name) {
-        Some(Found::Attr(a)) if a.kind() == Kind::Attribute => {
+        Some(Found::Attr(a)) => {
             crate::attr_value_will_change(req, this, a);
             node_list_unlink(a.children());
         }
         Some(Found::Decl(_)) => return Ok(Owner::bool(false)),
-        _ => {}
+        Some(Found::Default(_)) | None => {}
     }
     if name == b"xmlns" {
         return Ok(match elem.new_ns(value, None) {
@@ -745,7 +788,7 @@ fn get_attribute_node(
         None if modern => Ok(Owner::null()),
         None => Ok(Owner::bool(false)),
         Some(Found::Decl(ns)) => namespace_node(req, this, elem, ns),
-        Some(Found::Attr(a)) => object_for(req, a, Some(this)),
+        Some(Found::Attr(a) | Found::Default(a)) => object_for(req, a, Some(this)),
     }
 }
 
@@ -970,9 +1013,10 @@ impl DOMElement {
         let elem = fetch(req, this)?;
         let modern = follows_spec(req, this);
         let value = match attribute_or_decl(modern, elem, qualifiedName.as_bytes()) {
-            Some(Found::Attr(a)) if a.kind() == Kind::Attribute => a.list_string(),
+            Some(Found::Attr(a)) => a.list_string(),
+            Some(Found::Default(d)) => d.attribute_decl_default(),
             Some(Found::Decl(ns)) => ns.href(),
-            _ => None,
+            None => None,
         };
         let value = match value {
             Some(v) => string(req, &v)?,
@@ -1221,10 +1265,7 @@ impl DOMElement {
         let modern = follows_spec(req, this);
         match attribute_or_decl(modern, elem, qualifiedName.as_bytes()) {
             None => Ok(false),
-            Some(found) => {
-                remove_found(elem, found);
-                Ok(true)
-            }
+            Some(found) => Ok(remove_found(elem, found)),
         }
     }
 
@@ -1635,8 +1676,7 @@ impl DOMElement {
             }
             Some(found) => {
                 if force != Some(true) {
-                    remove_found(elem, found);
-                    return Ok(false);
+                    return Ok(!remove_found(elem, found));
                 }
                 Ok(true)
             }

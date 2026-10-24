@@ -472,6 +472,19 @@ impl Node {
             .map(owned)
     }
 
+    /// `((xmlAttributePtr) node)->defaultValue`: the value an attribute's
+    /// DTD declaration gives an element that does not carry it; none for
+    /// any other node.
+    pub fn attribute_decl_default(self) -> Option<Vec<u8>> {
+        if self.kind() != Kind::AttributeDecl {
+            return None;
+        }
+        // SAFETY: an attribute declaration is an `xmlAttribute`, live by
+        // the invariant.
+        let p = unsafe { &*self.0.as_ptr().cast::<sys::xmlAttribute>() }.defaultValue;
+        (!p.is_null()).then(|| owned(p))
+    }
+
     // ---- libxml2's tree calls
 
     /// `xmlUnlinkNode`.
