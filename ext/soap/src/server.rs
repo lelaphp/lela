@@ -315,7 +315,7 @@ fn fatal_fault(
 /// ```
 /// ```expect exit=255
 /// Status: 500 Internal Server Error
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-Length: 295
 /// Content-Type: text/xml; charset=utf-8
 ///
@@ -344,7 +344,7 @@ fn fatal_fault(
 /// <?xml version="1.0"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="http://test-uri/"><SOAP-ENV:Body><ns1:f><a>1</a></ns1:f></SOAP-ENV:Body></SOAP-ENV:Envelope>
 /// ```
 /// ```expect exit=255
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-Length: 295
 /// Content-Type: text/xml; charset=utf-8
 ///

@@ -560,7 +560,7 @@ fn a_host_looks_at_its_request_after_every_rinit() {
     );
     assert_eq!(
         String::from_utf8_lossy(&sink.headers),
-        "X-Powered-By: PHP/8.5.9\r\nX-Rinit: 2\r\nContent-type: text/plain;charset=UTF-8\r\n"
+        "X-Powered-By: PHP/8.5.12\r\nX-Rinit: 2\r\nContent-type: text/plain;charset=UTF-8\r\n"
     );
     assert_eq!(String::from_utf8_lossy(&sink.stdout), "pong");
 }

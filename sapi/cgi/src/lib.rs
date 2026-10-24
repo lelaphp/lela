@@ -407,7 +407,7 @@ impl OutputSink for Process {
     /// ```
     /// ```expect
     /// Status: 200 OK
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// x
@@ -427,7 +427,7 @@ impl OutputSink for Process {
     /// ```
     /// ```expect
     /// HTTP/1.1 404 Not Found
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// x
@@ -499,7 +499,7 @@ consult the installation file that came with this distribution, or visit \n\
 /// PATH_INFO=/extra
 /// ```
 /// ```expect regime=cgi-fix-pathinfo-off
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// 0
@@ -700,7 +700,7 @@ pub fn environment() -> Environment {
 /// p=Hello+World
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// X-Witness: 1
 /// Content-type: text/html; charset=UTF-8
 ///

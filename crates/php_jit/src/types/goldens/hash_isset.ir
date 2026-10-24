@@ -1,0 +1,56 @@
+trace loop e2, stop loop
+frame f0 e2 root, 5 cvs 11 temps
+entry
+  #0 f0.CV2 [long]
+  #2 f0.CV4 [long]
+  #4 f0.CV1 [long]
+  #5 f0.CV0 [hash array]
+  #7 f0.CV3 [string]
+  guard #5 array -> exit 0
+  guard #5 hash -> exit 1
+  guard #4 long -> exit 2
+  guard #0 long -> exit 3
+  guard #7 string -> exit 4
+  guard #2 long -> exit 5
+loop at 0, loop, interrupt exit 14
+  #1 f0.CV2 [long] reg = phi(#0, #11)
+  #3 f0.CV4 [long] reg = phi(#2, #12)
+0014 f0 IS_SMALLER #3, #4 fused inline
+  checks direction taken -> exit 6
+0006 f0 ISSET_ISEMPTY_DIM_OBJ #5, const#3 fused inline
+  checks direction fell -> exit 7
+0008 f0 PRE_INC #1 inline
+  -> #6 f0.CV2 [long] reg
+  checks #6 long -> exit 8
+0009 f0 ISSET_ISEMPTY_DIM_OBJ #5, #7 inline
+  -> #8 f0.T5 [bool] reg
+0010 f0 ISSET_ISEMPTY_DIM_OBJ #5, #3 inline
+  -> #9 f0.T6 [bool] reg
+  guard #9 false -> exit 9
+  guard #8 true -> exit 10
+0011 f0 ADD #8, #9 step unwinds -> unwind 0
+  -> #10 f0.T7 [long]
+  guard #10 long -> exit 11
+0012 f0 ASSIGN_OP #6, #10 inline
+  -> #11 f0.CV2 [long] reg
+  checks #11 long -> exit 12
+0013 f0 PRE_INC #3 inline
+  -> #12 f0.CV4 [long] reg
+  checks #12 long -> exit 13
+end: back to 0
+exit 0: f0 0014 plain
+exit 1: f0 0014 plain f0.CV0:array packed guard
+exit 2: f0 0014 plain f0.CV0:array
+exit 3: f0 0014 plain f0.CV0:array f0.CV1:long
+exit 4: f0 0014 plain f0.CV0:array f0.CV1:long f0.CV2:long
+exit 5: f0 0014 plain f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string
+exit 6: f0 0016 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 7: f0 0009 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 8: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 9: f0 0011 plain f0.CV2=#6 f0.CV4=#3 f0.T5=#8 f0.T6=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 10: f0 0011 plain f0.CV2=#6 f0.CV4=#3 f0.T5=#8 f0.T6=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T6:false
+exit 11: f0 0012 plain f0.CV2=#6 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 12: f0 0012 plain f0.CV2=#6 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long
+exit 13: f0 0013 plain f0.CV2=#11 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
+exit 14: f0 0014 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long to vm
+unwind 0: f0.CV2=#6 f0.CV4=#3

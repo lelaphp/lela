@@ -68,7 +68,7 @@ fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown>
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// array(1) {

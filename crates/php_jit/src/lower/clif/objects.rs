@@ -380,7 +380,7 @@ impl Emit<'_> {
         let handled = self.b.create_block();
         let done = self.b.create_block();
         let kind = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
-        self.compound_at((zval, kind), (binary, by), (handled, done))?;
+        self.compound_at((zval, kind), (binary, by, false), (handled, done))?;
         self.handled_then(at, line, (handled, done))
     }
 }

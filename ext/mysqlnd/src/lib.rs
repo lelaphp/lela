@@ -49,7 +49,7 @@ use php_ext::request::{Ini, Request};
 use crate::conn::ConnData;
 
 /// `PHP_MYSQLND_VERSION`, `"mysqlnd " PHP_VERSION`.
-const VERSION: &str = "mysqlnd 8.5.9";
+const VERSION: &str = "mysqlnd 8.5.12";
 
 /// The `mysqlnd.*` entries, `PHP_INI_BEGIN` in php's order: the name,
 /// the default, and who may set it.
@@ -116,7 +116,7 @@ pub struct ReverseApi {
 /// bool(true)
 /// string(4) "4096"
 /// string(1) "1"
-/// string(13) "mysqlnd 8.5.9"
+/// string(14) "mysqlnd 8.5.12"
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
@@ -161,7 +161,7 @@ pub fn extension() -> Extension {
 /// mysqlnd
 ///
 /// mysqlnd => enabled
-/// Version => mysqlnd 8.5.9
+/// Version => mysqlnd 8.5.12
 /// Compression => supported
 /// core SSL => supported
 /// extended SSL => supported

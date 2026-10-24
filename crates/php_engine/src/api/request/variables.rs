@@ -357,7 +357,7 @@ impl Request {
     /// a=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// [{"a":"1"},[],""]

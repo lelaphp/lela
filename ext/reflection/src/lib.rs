@@ -115,7 +115,7 @@ struct State {
 /// echo new ReflectionExtension('reflection');
 /// ```
 /// ```expect
-/// Extension [ <persistent> extension #%N% Reflection version 8.5.9 ] {
+/// Extension [ <persistent> extension #%N% Reflection version 8.5.12 ] {
 ///
 ///   - Classes [26] {
 ///     Class [ <internal:Reflection> class ReflectionException extends Exception implements Throwable, Stringable ] {
@@ -7641,7 +7641,7 @@ impl ReflectionExtension {
     /// echo new ReflectionExtension('ctype');
     /// ```
     /// ```expect
-    /// Extension [ <persistent> extension #%N% ctype version 8.5.9 ] {
+    /// Extension [ <persistent> extension #%N% ctype version 8.5.12 ] {
     ///
     ///   - Functions {
     ///     Function [ <internal:ctype> function ctype_alnum ] {
@@ -7729,7 +7729,7 @@ impl ReflectionExtension {
     /// echo new ReflectionExtension('tokenizer');
     /// ```
     /// ```expect
-    /// Extension [ <persistent> extension #%N% tokenizer version 8.5.9 ] {
+    /// Extension [ <persistent> extension #%N% tokenizer version 8.5.12 ] {
     ///
     ///   - Constants [154] {
     ///     Constant [ <persistent> int T_LNUMBER ] { 260 }
@@ -8014,7 +8014,7 @@ impl ReflectionExtension {
     /// echo preg_replace('/#\d+/', '#N', strstr(new ReflectionExtension('dom'), "\n", true)), "\n";
     /// ```
     /// ```expect
-    /// string(5) "8.5.9"
+    /// string(6) "8.5.12"
     /// string(8) "20031129"
     /// Extension [ <persistent> extension #N dom version 20031129 ] {
     /// ```

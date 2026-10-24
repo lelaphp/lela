@@ -143,7 +143,7 @@ ini = [
 # path; the CGI-only variables it sets are the CGI adapter's, not the recipe's.
 env_clear = true
 [recipe.env]
-TEST_PHP_EXECUTABLE = "/opt/homebrew/Cellar/php/8.5.9/bin/php"
+TEST_PHP_EXECUTABLE = "/opt/homebrew/Cellar/php/8.5.12/bin/php"
 TZ = "UTC"
 LANG = "C"
 LC_ALL = "C"
@@ -291,8 +291,8 @@ ini = ["cgi.fix_pathinfo=0"]
 # digest of the [closure] the macOS build was made against (#2935)
 flags = ["--enable-zend-test"]
 darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e2419777e6eac85467d80117397de3c0", closure = "sha256:8163e22bca71ac7aabe9ede650d4b3284aa049c37cfeb7d115a75847b3f2ea1c" }
-linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "a4d2632ad5a39206e905b7df1ba31b1a", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
-linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "36a4972453e44183222752661fad198b", image = "sha256:3ad1c71aa6b7e477f7aa91445a5442fbb163742849393b511661a88081c3d7a2" }
+linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "12f5bd0b1ea2f2f3555640f974e8429a", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
+linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e02dd6c14fc0d045384be0b477b78a5d", image = "sha256:3ad1c71aa6b7e477f7aa91445a5442fbb163742849393b511661a88081c3d7a2" }
 
 [sapi]
 # The oracle's other hosts, from the keg and build `[oracle]` pins: parity is
@@ -301,9 +301,9 @@ linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "36a4972
 # (get_binary, run-tests.php:1003-1019; php-fpm by FPM\Tester::findExecutable,
 # sapi/fpm/tests/tester.inc:226-257, at the tag). Each is asserted by its digest
 # as `php` is, before the first program that runs it.
-cgi = { path = "/opt/homebrew/Cellar/php/8.5.9/bin/php-cgi", md5 = "66f6a8919f22d92b7978ae66305f873c" }
-fpm = { path = "/opt/homebrew/Cellar/php/8.5.9/sbin/php-fpm", md5 = "58aa917bf815cde59ed9e550e1f10f39" }
-phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.9/bin/phpdbg", md5 = "6bb7d99d6dc623367ea110ae49bd054b" }
+cgi = { path = "/opt/homebrew/Cellar/php/8.5.12/bin/php-cgi", md5 = "f4f783bf54d2bfa24a558693f7c12188" }
+fpm = { path = "/opt/homebrew/Cellar/php/8.5.12/sbin/php-fpm", md5 = "f7b17a549250f398e137eef2bd917f1c" }
+phpdbg = { path = "/opt/homebrew/Cellar/php/8.5.12/bin/phpdbg", md5 = "51f2a186e3b1154552a44b0c9ad69790" }
 
 [fastcgi]
 # The HTTP-to-FastCGI mapping `[sapi] fpm` is driven under, so the pinned

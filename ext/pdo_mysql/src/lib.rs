@@ -106,7 +106,7 @@ pub fn extension() -> Extension {
 /// pdo_mysql
 ///
 /// PDO Driver for MySQL => enabled
-/// Client API version => mysqlnd 8.5.9
+/// Client API version => mysqlnd 8.5.12
 ///
 /// Directive => Local Value => Master Value
 ///
