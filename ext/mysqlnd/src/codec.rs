@@ -190,21 +190,34 @@ fn over_read(req: &mut Request) {
 }
 
 /// `mysqlnd_ps_fetch_functions[type].func` for one column, with `left`
-/// bytes of the packet past its start (php's `pack_len` argument).
-fn fetch(
+/// bytes of the packet past its start (php's `pack_len` argument). Each
+/// kind reads its bytes where they stand in the row's packet:
+///
+/// ```php
+/// $db = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_EMULATE_PREPARES => false]);
+/// $db->exec('CREATE TEMPORARY TABLE kinds (t TINYINT, s SMALLINT, y YEAR, m MEDIUMINT, b BIGINT UNSIGNED, d DOUBLE, tm TIME(3), dt DATE, bt BIT(12), v VARBINARY(8))');
+/// $db->exec("INSERT INTO kinds VALUES (-7, -300, 2026, -70000, 18446744073709551615, 2.5, '-30:01:02.5', '2026-10-24', b'101000000001', 'ab\\0c'), (NULL, 1, NULL, 2, 3, NULL, '00:00:00', NULL, b'0', '')");
+/// $st = $db->prepare('SELECT * FROM kinds');
+/// $st->execute();
+/// echo json_encode($st->fetchAll(PDO::FETCH_NUM)), "\n";
+/// ```
+/// ```expect mysql
+/// [[-7,-300,"2026",-70000,"18446744073709551615",2.5,"-30:01:02.500","2026-10-24",2561,"ab\u0000c"],[null,1,null,2,3,null,"00:00:00.000",null,0,""]]
+/// ```
+fn fetch<'a>(
     req: &mut Request,
     field: &Field,
-    p: &mut Body<'_>,
+    p: &mut Body<'a>,
     left: usize,
 ) -> Result<Option<Owner<Value>>, Thrown> {
-    let fixed = |req: &mut Request, p: &mut Body<'_>, n: usize| -> Option<Vec<u8>> {
+    let fixed = |req: &mut Request, p: &mut Body<'a>, n: usize| -> Option<&'a [u8]> {
         if n > left {
             over_read(req);
             return None;
         }
-        Some(p.take(n).to_vec())
+        Some(p.take(n))
     };
-    let variable = |req: &mut Request, p: &mut Body<'_>| -> Option<Vec<u8>> {
+    let variable = |req: &mut Request, p: &mut Body<'a>| -> Option<&'a [u8]> {
         let before = p.position();
         let len = p.field_length();
         let length_len = p.position() - before;
@@ -213,7 +226,7 @@ fn fetch(
             over_read(req);
             return None;
         }
-        Some(p.take(len).to_vec())
+        Some(p.take(len))
     };
     let long = |bits: Bits, req: &mut Request| -> Result<Owner<Value>, Thrown> {
         match bits {
@@ -225,24 +238,24 @@ fn fetch(
     Ok(Some(match ty {
         FieldType::Null => Owner::null(),
         FieldType::Tiny => match fixed(req, p, 1) {
-            Some(b) => long(from_1_to_8_bytes(field, &b), req)?,
+            Some(b) => long(from_1_to_8_bytes(field, b), req)?,
             None => return Ok(None),
         },
         FieldType::Short | FieldType::Year => match fixed(req, p, 2) {
-            Some(b) => long(from_1_to_8_bytes(field, &b), req)?,
+            Some(b) => long(from_1_to_8_bytes(field, b), req)?,
             None => return Ok(None),
         },
         FieldType::Int24 | FieldType::Long => match fixed(req, p, 4) {
-            Some(b) => long(from_1_to_8_bytes(field, &b), req)?,
+            Some(b) => long(from_1_to_8_bytes(field, b), req)?,
             None => return Ok(None),
         },
         FieldType::LongLong => match fixed(req, p, 8) {
-            Some(b) => long(from_1_to_8_bytes(field, &b), req)?,
+            Some(b) => long(from_1_to_8_bytes(field, b), req)?,
             None => return Ok(None),
         },
         FieldType::Float => match fixed(req, p, 4) {
             Some(b) => {
-                let f = f32::from_le_bytes(b.as_slice().try_into().unwrap_or([0; 4]));
+                let f = f32::from_le_bytes(b.try_into().unwrap_or([0; 4]));
                 let decimals = if field.decimals >= 31 {
                     None
                 } else {
@@ -254,26 +267,26 @@ fn fetch(
         },
         FieldType::Double => match fixed(req, p, 8) {
             Some(b) => {
-                let d = f64::from_le_bytes(b.as_slice().try_into().unwrap_or([0; 8]));
+                let d = f64::from_le_bytes(b.try_into().unwrap_or([0; 8]));
                 Owner::float(d)
             }
             None => return Ok(None),
         },
         FieldType::Time => match variable(req, p) {
-            Some(b) => text(req, time(field, &b).as_bytes())?,
+            Some(b) => text(req, time(field, b).as_bytes())?,
             None => return Ok(None),
         },
         FieldType::Date => match variable(req, p) {
-            Some(b) => text(req, date(&b).as_bytes())?,
+            Some(b) => text(req, date(b).as_bytes())?,
             None => return Ok(None),
         },
         FieldType::DateTime | FieldType::Timestamp => match variable(req, p) {
-            Some(b) => text(req, datetime(field, &b).as_bytes())?,
+            Some(b) => text(req, datetime(field, b).as_bytes())?,
             None => return Ok(None),
         },
         // `ps_fetch_bit`: an over-read is warned once, by `variable`.
         FieldType::Bit => match variable(req, p) {
-            Some(b) if b.len() <= 8 => long(from_1_to_8_bytes(field, &b), req)?,
+            Some(b) if b.len() <= 8 => long(from_1_to_8_bytes(field, b), req)?,
             Some(_) => {
                 over_read(req);
                 return Ok(None);
@@ -281,7 +294,7 @@ fn fetch(
             None => return Ok(None),
         },
         _ => match variable(req, p) {
-            Some(b) => text(req, &b)?,
+            Some(b) => text(req, b)?,
             None => return Ok(None),
         },
     }))
