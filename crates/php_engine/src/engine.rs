@@ -3678,6 +3678,14 @@ impl EngineBuilder {
                 })
                 .unzip();
         let mut names = permanent_names(&extensions, &functions, &classes, &constants, &ini);
+        // What the host set for an entry its `on_modify` takes as the
+        // engine starts, interned as `zend_register_ini_entries_ex`
+        // interns the value it takes, so `ini_get()` of it costs nothing;
+        // one the rule then refuses is interned with them, which no
+        // reading of the permanent table shows.
+        for (_, value) in &held {
+            names.intern(value).ok();
+        }
         let constant_values = constant_values(&constants, &mut names);
         let constant_names = Names::over(&constants);
         let default_strings = default_strings(&functions, &classes);

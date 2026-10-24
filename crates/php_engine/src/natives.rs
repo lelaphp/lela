@@ -2210,6 +2210,18 @@ fn extension_loaded(req: &mut Request, extension: PhpString) -> bool {
 /// 0
 /// 0 Europe/Amsterdam
 /// ```
+///
+/// A value the host set for an entry whose `on_modify` takes it as the
+/// engine starts is interned with the rest, as
+/// `zend_register_ini_entries_ex` interns it:
+///
+/// ```php
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'date.timezone=Europe/Amsterdam', '-r', '$m = memory_get_usage(); $x = ini_get("date.timezone"); echo memory_get_usage() - $m, " $x\n";'], [1 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p);
+/// ```
+/// ```expect process
+/// 0 Europe/Amsterdam
+/// ```
 #[php_function]
 fn ini_get(req: &mut Request, option: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     Ok(match req.ini_string(option.as_bytes())? {
