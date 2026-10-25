@@ -217,14 +217,14 @@ mod names {
     fn a_variable_binds_in_the_forms_its_build_reads_alone() {
         let host = env!("XTASK_TARGET").to_uppercase().replace('-', "_");
         let forms = |variable: &str| {
-            let reads = NATIVES.iter().find(|n| n.variable == variable).unwrap();
+            let native = NATIVES.iter().find(|n| n.variable == variable).unwrap();
             [
                 variable.to_owned(),
                 format!("{host}_{variable}"),
                 format!("POWERPC64_IBM_AIX_{variable}"),
                 format!("DEP_{variable}"),
             ]
-            .map(|form| reads.names(&form))
+            .map(|form| native.names(&form))
         };
         assert_eq!(forms("OPENSSL_DIR"), [true, true, false, false]);
         assert_eq!(forms("SQLITE3_LIB_DIR"), [true, false, false, false]);
