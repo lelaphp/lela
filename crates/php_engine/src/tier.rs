@@ -251,7 +251,23 @@ pub(crate) fn interpreted<T: Tier>() -> bool {
 /// Where a request keeps its tier's [`Tier::State`]
 /// (`jit-design.md` §2.2, #3144): laid once with the request, by the
 /// loop the engine bound ([`Loops::bound`]), and read by [`state`].
-pub(crate) struct TierState(Option<Box<dyn Any + Send>>);
+/// Its box is never replaced, moved out of or borrowed mutably while
+/// the request lives, and the types hold that outside `api::request`,
+/// where the request is made: the box is this type's private field,
+/// with no `&mut` method, and the request's field holding it is private
+/// to `api::request`, which hands it out only shared
+/// ([`Request::tier_state`]). A tier lends its state across the
+/// request's own borrow on that (`php_jit`'s `enter::lent`, #3437),
+/// holding a [`Lending`] for as long as the lend stands, so where
+/// `api::request` drops or replaces the state while one is held, a debug
+/// assertion fails as it drops.
+pub(crate) struct TierState {
+    state: Option<Box<dyn Any + Send>>,
+    /// How many [`Lending`]s stand, counted under `debug_assertions`
+    /// alone.
+    #[cfg(debug_assertions)]
+    lends: std::sync::Arc<AtomicU32>,
+}
 
 impl TierState {
     /// The tier state of a request of the engine `shared`, as the loop it
@@ -262,7 +278,57 @@ impl TierState {
 
     /// `T`'s state for a request of the engine `started`.
     fn of<T: Tier>(started: Started<'_>) -> TierState {
-        TierState(T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>))
+        TierState {
+            state: T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>),
+            #[cfg(debug_assertions)]
+            lends: std::sync::Arc::default(),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for TierState {
+    fn drop(&mut self) {
+        let lends = self.lends.load(std::sync::atomic::Ordering::Relaxed);
+        debug_assert!(
+            lends == 0 || std::thread::panicking(),
+            "a request's tier state was dropped or replaced while a tier lent it ({lends} lends stand)"
+        );
+    }
+}
+
+/// A tier's lend of its request's state across the request's own
+/// borrow (`php_jit`'s `enter::lent`, #3437), held for as long as the
+/// lend stands: the state dropped or replaced meanwhile fails a debug
+/// assertion as it drops ([`TierState`]). Nothing at all where debug
+/// assertions are off, so the lend costs nothing there.
+#[must_use]
+pub struct Lending {
+    #[cfg(debug_assertions)]
+    lends: std::sync::Arc<AtomicU32>,
+}
+
+#[cfg(debug_assertions)]
+impl Drop for Lending {
+    fn drop(&mut self) {
+        self.lends
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A [`Lending`] of `req`'s tier state, for as long as a tier lends it.
+#[inline]
+pub fn lending(req: &Request) -> Lending {
+    #[cfg(debug_assertions)]
+    {
+        let lends = std::sync::Arc::clone(&req.tier_state().lends);
+        lends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Lending { lends }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = req;
+        Lending {}
     }
 }
 
@@ -271,7 +337,7 @@ impl TierState {
 /// the engine binds a loop that lays none, `Nop`'s.
 #[must_use]
 pub fn state<S: Any>(req: &Request) -> Option<&S> {
-    req.tier.0.as_deref()?.downcast_ref()
+    req.tier_state().state.as_deref()?.downcast_ref()
 }
 
 /// One safepoint's word (`jit-design.md` §3.2): two atomics, zero at

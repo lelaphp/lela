@@ -839,9 +839,10 @@ impl<P: Pages> TraceTable<P> {
 
 /// The trace table of the epoch `req` started in, made the first time a
 /// request of it asks, over `policy`'s bounds; none only where the
-/// epoch's slot holds another tier's value.
+/// epoch's slot holds another tier's value. The slot holds it shared, so
+/// a request can keep it for as long as it serves (`enter::lent`).
 pub(crate) fn of<'r>(req: &'r Request, policy: &Policy, outputs: &Outputs) -> Option<&'r Table> {
-    tier::epoch_state(req, || Table::new(policy, outputs))
+    tier::epoch_state(req, || Arc::new(Table::new(policy, outputs))).map(Arc::as_ref)
 }
 
 /// A hold on the epoch `req` started in, its trace table made as [`of`]
@@ -854,7 +855,12 @@ pub(crate) fn holding(req: &Request, policy: &Policy, outputs: &Outputs) -> Epoc
 
 /// The trace table `epoch` keeps, where a request of it made one.
 pub(crate) fn of_epoch(epoch: &Epoch) -> Option<&Table> {
-    epoch.tier_state::<Table>()
+    shared_of_epoch(epoch).map(Arc::as_ref)
+}
+
+/// [`of_epoch`], shared, for a request that keeps it.
+pub(crate) fn shared_of_epoch(epoch: &Epoch) -> Option<&Arc<Table>> {
+    epoch.tier_state::<Arc<Table>>()
 }
 
 /// The word of exit `exit` of trace `trace` in `epoch`'s table; the
