@@ -351,20 +351,35 @@ fn xtype(req: &mut Request, mode: i64) -> Result<Kind, Thrown> {
 /// `uint64_t`: the seconds past which the timeout's microseconds overflow.
 const TIMEOUT_SEC_MAX: i64 = 18_446_744_073_709;
 
+/// Where a timeout in seconds is given: a connect's `$timeout`, or
+/// `ftp_set_option`'s `$value` for `FTP_TIMEOUT_SEC`, whose refusals say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimeoutFrom {
+    Connect,
+    SetOption,
+}
+
+impl TimeoutFrom {
+    /// What ends each refusal's sentence.
+    const fn tail(self) -> &'static str {
+        match self {
+            TimeoutFrom::Connect => "",
+            TimeoutFrom::SetOption => " for the FTP_TIMEOUT_SEC option",
+        }
+    }
+}
+
 /// `timeout_sec` held above zero and below [`TIMEOUT_SEC_MAX`], as
-/// argument 3, each refusal's sentence ending in `option` (php 8.5.12's
-/// GH-20601: `ftp_ssl_connect` and `ftp_set_option` check the bound too).
-fn bounded_timeout(req: &mut Request, timeout: i64, option: &str) -> Result<(), Thrown> {
+/// argument 3 (php 8.5.12's GH-20601: `ftp_ssl_connect` and
+/// `ftp_set_option` check the bound too).
+fn bounded_timeout(req: &mut Request, timeout: i64, from: TimeoutFrom) -> Result<(), Thrown> {
+    let tail = from.tail();
     if timeout <= 0 {
-        return Err(arg_value_error(
-            req,
-            3,
-            &format!("be greater than 0{option}"),
-        ));
+        return Err(arg_value_error(req, 3, &format!("be greater than 0{tail}")));
     }
     if timeout >= TIMEOUT_SEC_MAX {
-        let tail = format!("be less than {TIMEOUT_SEC_MAX}{option}");
-        return Err(arg_value_error(req, 3, &tail));
+        let text = format!("be less than {TIMEOUT_SEC_MAX}{tail}");
+        return Err(arg_value_error(req, 3, &text));
     }
     Ok(())
 }
@@ -410,7 +425,7 @@ fn ftp_connect(
     #[php(default = 21)] port: i64,
     #[php(default = 90)] timeout: i64,
 ) -> Result<OrFalse<Owner<Instance<Connection>>>, Thrown> {
-    bounded_timeout(req, timeout, "")?;
+    bounded_timeout(req, timeout, TimeoutFrom::Connect)?;
     match Ftp::open(req, hostname.as_bytes(), port, timeout, false)? {
         Some(session) => Ok(OrFalse::Value(connection(req, session)?)),
         None => Ok(OrFalse::False),
@@ -437,7 +452,7 @@ fn ftp_ssl_connect(
     #[php(default = 21)] port: i64,
     #[php(default = 90)] timeout: i64,
 ) -> Result<OrFalse<Owner<Instance<Connection>>>, Thrown> {
-    bounded_timeout(req, timeout, "")?;
+    bounded_timeout(req, timeout, TimeoutFrom::Connect)?;
     match Ftp::open(req, hostname.as_bytes(), port, timeout, true)? {
         Some(session) => Ok(OrFalse::Value(connection(req, session)?)),
         None => Ok(OrFalse::False),
@@ -1842,7 +1857,7 @@ fn ftp_set_option(
     };
     let setting = match (opt, value.as_ref()) {
         (Opt::Timeout, ValueRef::Int(n)) => {
-            bounded_timeout(req, n, " for the FTP_TIMEOUT_SEC option")?;
+            bounded_timeout(req, n, TimeoutFrom::SetOption)?;
             Setting::Timeout(n)
         }
         (Opt::Timeout, _) => return Err(wrong(req, "int", "FTP_TIMEOUT_SEC")),
