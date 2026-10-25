@@ -12,6 +12,7 @@ use std::fs::File;
 use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
 
+use crate::archive::Encryption;
 use crate::codec::{PkwareKeys, WinzipAes};
 use crate::error::{Detail, Er, Status};
 
@@ -28,7 +29,7 @@ struct Carried(Status);
 
 impl std::fmt::Display for Carried {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "libzip error {}", self.0.zip)
+        write!(f, "libzip error {}", self.0.er.code())
     }
 }
 
@@ -207,13 +208,13 @@ impl Window {
         }
         self.file.seek(self.start + self.offset);
         match self.file.read(&mut buf[..n]) {
-            Ok(0) | Err(_) if self.archive => Err(Status::of(Er::Eof, 0)),
-            Ok(0) => Err(Status::of(Er::DataLength, 0)),
+            Ok(0) | Err(_) if self.archive => Err(Status::new(Er::Eof)),
+            Ok(0) => Err(Status::new(Er::DataLength)),
             Ok(k) => {
                 self.offset += k as u64;
                 Ok(k)
             }
-            Err(e) => Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
+            Err(e) => Err(Status::os(Er::Read, &e)),
         }
     }
 
@@ -222,7 +223,7 @@ impl Window {
         let mut got = 0;
         while got < buf.len() {
             match self.read_some(&mut buf[got..])? {
-                0 => return Err(Status::of(Er::Eof, 0)),
+                0 => return Err(Status::new(Er::Eof)),
                 n => got += n,
             }
         }
@@ -260,7 +261,7 @@ impl Aes {
             let mut code = [0u8; 10];
             self.window.read_exact(&mut code)?;
             if ctx.finish()[..10] != code {
-                return Err(Status::of(Er::Crc, 0));
+                return Err(Status::new(Er::Crc));
             }
             return Ok(0);
         }
@@ -297,7 +298,7 @@ impl Raw {
             && u16::from(header[11]) != time >> 8
             && u32::from(header[11]) != crc >> 24
         {
-            return Err(Status::of(Er::Wrongpasswd, 0));
+            return Err(Status::new(Er::Wrongpasswd));
         }
         Ok(Raw::Pkware(window, keys))
     }
@@ -344,13 +345,13 @@ impl Raw {
         let salt_len = 4 * usize::from(strength) + 4;
         let aux = salt_len as u64 + 2 + 10;
         if comp_size < aux {
-            return Err(Status::of(Er::Opnotsupp, 0));
+            return Err(Status::new(Er::Opnotsupp));
         }
         let mut header = vec![0u8; salt_len + 2];
         window.read_exact(&mut header)?;
         let (ctx, verifier) = WinzipAes::new(password, &header[..salt_len], strength)?;
         if verifier != header[salt_len..] {
-            return Err(Status::of(Er::Wrongpasswd, 0));
+            return Err(Status::new(Er::Wrongpasswd));
         }
         Ok(Raw::Aes(Box::new(Aes {
             window,
@@ -392,7 +393,7 @@ fn read_raw(lower: &mut Raw, buf: &mut [u8]) -> Result<usize, Status> {
             Err(e) => Err(e
                 .get_ref()
                 .and_then(|i| i.downcast_ref::<Carried>())
-                .map_or(Status::of(Er::Read, 0), |c| c.0)),
+                .map_or(Status::new(Er::Read), |c| c.0)),
         };
     }
 }
@@ -435,11 +436,9 @@ impl Algorithm {
                     Ok(flate2::Status::Ok) => Step::Ok,
                     Ok(flate2::Status::StreamEnd) => Step::End,
                     Ok(flate2::Status::BufError) if used == input.len() => Step::NeedData,
-                    Ok(flate2::Status::BufError) => Step::Error(Status::of(Er::Zlib, -5)),
-                    Err(e) if e.needs_dictionary().is_some() => {
-                        Step::Error(Status::of(Er::Zlib, 2))
-                    }
-                    Err(_) => Step::Error(Status::of(Er::Zlib, -3)),
+                    Ok(flate2::Status::BufError) => Step::Error(Status::zlib(-5)),
+                    Err(e) if e.needs_dictionary().is_some() => Step::Error(Status::zlib(2)),
+                    Err(_) => Step::Error(Status::zlib(-3)),
                 };
                 (step, used, made)
             }
@@ -453,14 +452,14 @@ impl Algorithm {
                 let made = moved(o, b.total_out());
                 let step = match ret {
                     Ok(bzip2::Status::StreamEnd) => Step::End,
-                    Ok(bzip2::Status::MemNeeded) => Step::Error(Status::of(Er::Memory, 0)),
+                    Ok(bzip2::Status::MemNeeded) => Step::Error(Status::new(Er::Memory)),
                     Ok(_) if used == input.len() => Step::NeedData,
                     Ok(_) => Step::Ok,
                     Err(bzip2::Error::Data | bzip2::Error::DataMagic) => {
-                        Step::Error(Status::of(Er::CompressedData, 0))
+                        Step::Error(Status::new(Er::CompressedData))
                     }
-                    Err(bzip2::Error::Param) => Step::Error(Status::of(Er::Inval, 0)),
-                    Err(bzip2::Error::Sequence) => Step::Error(Status::of(Er::Internal, 0)),
+                    Err(bzip2::Error::Param) => Step::Error(Status::new(Er::Inval)),
+                    Err(bzip2::Error::Sequence) => Step::Error(Status::new(Er::Internal)),
                 };
                 (step, used, made)
             }
@@ -571,12 +570,12 @@ impl Decompressor {
                             Ok(_) => true,
                         };
                         if left && self.check {
-                            self.error = Some(Status::of(Er::Incons, 0));
+                            self.error = Some(Status::new(Er::Incons));
                             break;
                         }
                     }
                     if !self.started {
-                        self.error = Some(Status::of(Er::Internal, 0));
+                        self.error = Some(Status::new(Er::Internal));
                         break;
                     }
                     end = true;
@@ -785,7 +784,7 @@ impl Zstd {
     /// One frame header, block or skipped frame read.
     fn turn(&mut self) -> Made {
         use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
-        let fault = Status::of(Er::Internal, 0);
+        let fault = Status::new(Er::Internal);
         let Some(d) = &mut self.frame else {
             self.feed.kept = Some(Vec::new());
             self.blocks.clear();
@@ -870,13 +869,13 @@ impl Codec {
         let Some(mut feed) = feed else {
             return (
                 Codec::LzmaHeader(None, size),
-                Made::Stopped(Stop::Failed(Status::of(Er::Internal, 0)), 0),
+                Made::Stopped(Stop::Failed(Status::new(Er::Internal)), 0),
             );
         };
         while feed.left() < 14 && feed.fetch() {}
         let at = feed.reads;
         let head = &feed.buffer[feed.at..];
-        let corrupt = Made::Stopped(Stop::Failed(Status::of(Er::CompressedData, 0)), at);
+        let corrupt = Made::Stopped(Stop::Failed(Status::new(Er::CompressedData)), at);
         if head.len() >= 9 && head[2..4] != [5, 0] {
             return (Codec::LzmaHeader(Some(feed), size), corrupt);
         }
@@ -896,7 +895,7 @@ impl Codec {
             // `LZMA_PROG_ERROR`, which `map_error` reads as internal.
             return (
                 Codec::LzmaHeader(Some(feed), size),
-                Made::Stopped(Stop::Failed(Status::of(Er::Internal, 0)), at),
+                Made::Stopped(Stop::Failed(Status::new(Er::Internal)), at),
             );
         }
         feed.at += 9;
@@ -933,7 +932,7 @@ impl Codec {
             }
         };
         let Some(feed) = self.feed() else {
-            return Made::Stopped(Stop::Failed(Status::of(Er::Internal, 0)), 0);
+            return Made::Stopped(Stop::Failed(Status::new(Er::Internal)), 0);
         };
         let at = feed.reads;
         match got {
@@ -941,14 +940,11 @@ impl Codec {
             _ if feed.starved => Made::Stopped(Stop::Starved, at),
             Ok(m) => Made::Bytes(scratch[..m].to_vec(), at),
             Err(_) => Made::Stopped(
-                Stop::Failed(Status::of(
-                    if magic {
-                        Er::CompressedData
-                    } else {
-                        Er::Internal
-                    },
-                    0,
-                )),
+                Stop::Failed(Status::new(if magic {
+                    Er::CompressedData
+                } else {
+                    Er::Internal
+                })),
                 at,
             ),
         }
@@ -1295,7 +1291,7 @@ impl Pulled {
                     self.end_of_stream = true;
                     match self.trailing() {
                         Err(e) => self.error = Some(e),
-                        Ok(true) if self.check => self.error = Some(Status::of(Er::Incons, 0)),
+                        Ok(true) if self.check => self.error = Some(Status::new(Er::Incons)),
                         Ok(_) => {}
                     }
                     break;
@@ -1445,7 +1441,7 @@ impl Reader {
     /// `ZIP_ER_ZIPCLOSED`.
     pub(crate) fn closed() -> Reader {
         let mut zf = Reader::bytes(Vec::new());
-        zf.source_error = Some(Status::of(Er::Zipclosed, 0));
+        zf.source_error = Some(Status::new(Er::Zipclosed));
         zf
     }
 
@@ -1461,30 +1457,29 @@ impl Reader {
         window: impl FnOnce() -> Result<Window, Status>,
         l: &Layers<'_>,
     ) -> Result<Reader, Status> {
-        let decrypt = l.password.is_some();
-        if decrypt
-            && !matches!(
-                l.encryption,
-                crate::archive::EM_TRAD_PKWARE
-                    | crate::archive::EM_AES_128
-                    | crate::archive::EM_AES_192
-                    | crate::archive::EM_AES_256
-            )
-        {
-            return Err(Status::of(Er::Encrnotsupp, 0));
-        }
+        let encryption = Encryption::of(l.encryption);
+        // The password the decryption layer is opened with, where one is
+        // given; a method it has no layer for is refused.
+        let key = match (l.password, encryption) {
+            (None, _) => None,
+            (Some(p), Encryption::Pkware | Encryption::Aes(_)) => Some(p),
+            (Some(_), Encryption::None | Encryption::Unknown) => {
+                return Err(Status::new(Er::Encrnotsupp));
+            }
+        };
+        let decrypt = key.is_some();
         if !matches!(l.method, 0 | 8 | 12 | 14 | 93 | 95) {
-            return Err(Status::of(Er::Compnotsupp, 0));
+            return Err(Status::new(Er::Compnotsupp));
         }
         // The decryption layer's refusal as libzip 1.12 creates it, before
         // the empty data's shortcut: twelve bytes of PKWARE header, and
         // WinZip AES's salt, check and code.
-        let least = match l.encryption {
-            crate::archive::EM_TRAD_PKWARE => 12,
-            e => 4 * u64::from((e & 0xff) as u8) + 16,
-        };
-        if decrypt && l.comp_size < least {
-            return Err(Status::of(Er::Opnotsupp, 0));
+        if decrypt
+            && encryption
+                .overhead()
+                .is_some_and(|least| l.comp_size < least)
+        {
+            return Err(Status::new(Er::Opnotsupp));
         }
         let crc = l.crc.map(|c| (c, l.size));
         let empty = if decrypt || l.method != 0 {
@@ -1503,12 +1498,10 @@ impl Reader {
             ));
         }
         let window = window()?;
-        let raw = match l.password {
-            None => Raw::Plain(window),
-            Some(p) if l.encryption == crate::archive::EM_TRAD_PKWARE => {
-                Raw::pkware(window, p, l.crc.map(|c| (l.dostime, c)))?
-            }
-            Some(p) => Raw::aes(window, p, (l.encryption & 0xff) as u8, l.comp_size)?,
+        let raw = match (key, encryption) {
+            (Some(p), Encryption::Pkware) => Raw::pkware(window, p, l.crc.map(|c| (l.dostime, c)))?,
+            (Some(p), Encryption::Aes(strength)) => Raw::aes(window, p, strength, l.comp_size)?,
+            _ => Raw::Plain(window),
         };
         if l.method == 0 {
             return Ok(match raw {
@@ -1559,6 +1552,12 @@ impl Reader {
             Body::Compressed(d) => Some(d.lower.window()),
             Body::Pulled(p) => p.codec.feed().map(|f| f.lower.window()),
         }
+    }
+
+    /// Whether the entry is read from the archive's own file, as an
+    /// unchanged entry is, where an added one is read from its source.
+    pub(crate) fn reads_archive(&mut self) -> bool {
+        self.window_mut().is_some_and(|w| w.archive)
     }
 
     /// `zip_fread` through `file`, the archive's `FILE`, which its data
@@ -1618,7 +1617,7 @@ impl Reader {
             if c.hashed == c.position {
                 c.complete = true;
                 if c.hasher.clone().finalize() != c.expect {
-                    return Err(Status::of(Er::Crc, 0));
+                    return Err(Status::new(Er::Crc));
                 }
             }
             if c.position != c.size {
@@ -1707,7 +1706,7 @@ impl Reader {
                     .filter(|t| *t <= len)
             });
         let Some(to) = target else {
-            self.error = Some(Status::of(Er::Inval, 0));
+            self.error = Some(Status::new(Er::Inval));
             return false;
         };
         self.body.set_offset(to);
