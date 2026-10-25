@@ -151,12 +151,16 @@ const BITS_ALLOWED: u16 = 0x083e;
 
 /// `_zip_dirent_apply_attributes`: whether it changed the dirent.
 fn apply_attributes(de: &mut Dirent, a: &Attributes) -> bool {
-    let before = (
-        de.bitflags,
-        de.ext_attrib,
-        de.version_needed,
-        de.version_madeby,
-    );
+    // What `_zip_dirent_apply_attributes` may write, read before and after.
+    let fields = |de: &Dirent| {
+        (
+            de.bitflags,
+            de.ext_attrib,
+            de.version_needed,
+            de.version_madeby,
+        )
+    };
+    let before = fields(de);
     if let Some((flags, mask)) = a.bits {
         let mask = mask & BITS_ALLOWED;
         de.bitflags = (de.bitflags & !mask) | (flags & mask);
@@ -195,13 +199,7 @@ fn apply_attributes(de: &mut Dirent, a: &Attributes) -> bool {
         madeby = (madeby & 0xff) | (u16::from(host) << 8);
     }
     de.version_madeby = madeby;
-    before
-        != (
-            de.bitflags,
-            de.ext_attrib,
-            de.version_needed,
-            de.version_madeby,
-        )
+    before != fields(de)
 }
 
 /// `_zip_dirent_needs_zip64`.
@@ -731,11 +729,11 @@ impl Archive {
     /// dirent as the callbacks during the data left it, as libzip's `de` is
     /// `entry->changes`: the error the end of an added entry's data found,
     /// as libzip finds it past the data's last progress point, then the
-    /// entry's dirent settled on its data, its
-    /// local header written again where `add_data`'s `dirent_changed`
-    /// holds, then the `write_data_descriptor` record where the dirent's
-    /// bits ask for one. `ZIP_WANT_TORRENTZIP` is read past the data's
-    /// callbacks, as `add_data` reads it there.
+    /// entry's dirent settled on its data, its local header written again
+    /// where `add_data`'s `dirent_changed` holds, then the
+    /// `write_data_descriptor` record where the dirent's bits ask for one.
+    /// `ZIP_WANT_TORRENTZIP` is read past the data's callbacks, as
+    /// `add_data` reads it there.
     ///
     /// A buffer's source knows no CRC, so the preliminary header is
     /// written again, with the time a callback set:
@@ -979,13 +977,7 @@ impl Archive {
     /// e 8 2837 132000
     /// ```
     fn add_data(&mut self, i: usize, de: &mut Dirent, torrentzip: bool) -> Result<Written, Status> {
-        let (data, before) = self.source_data(i)?;
-        // What the end of an unchanged entry's data finds, past its last
-        // progress point.
-        let end = match &self.entries[i].orig {
-            Some(o) if self.entries[i].source.is_none() => data_end(o, &data),
-            _ => Ok(()),
-        };
+        let Sourced { data, before, end } = self.source_data(i)?;
         // The preliminary dirent, written before the data: what the stat
         // knows, a stored entry's compressed size its size, and what it
         // does not know as the dirent held it.
@@ -1070,12 +1062,13 @@ impl Archive {
         })
     }
 
-    /// The data as `add_data`'s source gives it and what its stat says
-    /// before the copy: a new source's bytes, or the unchanged entry through `zip_source_zip_file_create(za, i,
+    /// What `add_data` reads of entry `i`'s source: a new source's bytes,
+    /// or the unchanged entry through `zip_source_zip_file_create(za, i,
     /// ZIP_FL_UNCHANGED, ...)`, decrypted with the default password and
-    /// decompressed, whose stat carries the entry's size and CRC. Either
-    /// stats as stored and unencrypted.
-    fn source_data(&mut self, i: usize) -> Result<(Vec<u8>, Before), Status> {
+    /// decompressed, whose stat carries the entry's size and CRC, and
+    /// whose end [`data_end`] holds. Either stats as stored and
+    /// unencrypted.
+    fn source_data(&mut self, i: usize) -> Result<Sourced, Status> {
         Ok(if let Some(s) = &mut self.entries[i].source {
             let st = s.stat();
             let before = Before {
@@ -1085,7 +1078,11 @@ impl Archive {
                 host: s.attributes(),
             };
             let data = s.read_all().inspect_err(|s| self.error = *s)?;
-            (data, before)
+            Sourced {
+                data,
+                before,
+                end: Ok(()),
+            }
         } else {
             let password = self.default_password.clone();
             let (data, fault) = self
@@ -1100,13 +1097,26 @@ impl Archive {
             };
             let before = Before {
                 size: o.uncomp_size,
-                crc: Some(o.crc),
+                crc: o.crc_valid.then_some(o.crc),
                 time: Time::Dos(o.last_mod),
                 host: None,
             };
-            (data, before)
+            Sourced {
+                end: data_end(o, &data),
+                data,
+                before,
+            }
         })
     }
+}
+
+/// What `add_data` reads of an entry's source: its data, its stat before
+/// the copy, and what the data's end found, which `finish` raises past
+/// the data's last progress point, where libzip finds it.
+struct Sourced {
+    data: Vec<u8>,
+    before: Before,
+    end: Result<(), Status>,
 }
 
 /// What `add_data`'s `zip_source_stat` of its source says before the
