@@ -55,8 +55,8 @@ pub trait OutputSink {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted>;
     /// The body's flush.
     fn flush(&mut self);
-    /// The head.
-    fn send_headers(&mut self, head: &ResponseHead);
+    /// The head, and whether it was sent.
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), Aborted>;
     /// One log entry.
     fn log(&mut self, entry: &[u8]);
     /// The error stream.

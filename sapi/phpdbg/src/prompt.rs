@@ -1547,6 +1547,8 @@ pub fn compiled_in_init(s: &mut Session) {
     if !s.initializing || std::mem::replace(&mut s.init_compiled, true) {
         return;
     }
+    // What the compile wrote comes here, before its notice.
+    s.out.compiled(false);
     if let Some(exec) = &s.exec {
         let message = if s.stdin_code.is_some() {
             b"Successful compilation of stdin input".to_vec()

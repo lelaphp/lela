@@ -432,8 +432,9 @@ impl OutputSink for Process {
     ///
     /// x
     /// ```
-    fn send_headers(&mut self, head: &ResponseHead) {
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), Aborted> {
         self.write(&php_sapi::cgi::head(head)).ok();
+        Ok(())
     }
 
     fn log(&mut self, entry: &[u8]) {

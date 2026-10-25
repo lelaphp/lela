@@ -176,7 +176,9 @@ fn lib_rs(lints: &str, name: &str, bin: &str) -> String {
          \x20       std::io::stdout().lock().flush().ok();\n\
          \x20   }}\n\
          \n\
-         \x20   fn send_headers(&mut self, _head: &ResponseHead) {{}}\n\
+         \x20   fn send_headers(&mut self, _head: &ResponseHead) -> Result<(), php_sapi::Aborted> {{\n\
+         \x20       Ok(())\n\
+         \x20   }}\n\
          \n\
          \x20   fn log(&mut self, entry: &[u8]) {{\n\
          \x20       let mut stderr = std::io::stderr().lock();\n\

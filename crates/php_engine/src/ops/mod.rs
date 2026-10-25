@@ -4590,7 +4590,8 @@ pub(crate) fn count(req: &mut Request, value: &Value, sizeof: bool) -> Result<i6
             // (GH-21605): a method that frees the variable holding the
             // object still has its `$this`.
             let held = Owner::take(req, object);
-            let returned = req.serve_method(method, Some(object), class, &[], &[]);
+            let returned =
+                crate::api::values::adopted(req.serve_known_method(method, object, class, &[]));
             held.give_up(req);
             let returned = returned?;
             let count = get_long(req, &returned);

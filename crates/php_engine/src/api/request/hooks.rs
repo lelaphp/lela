@@ -14,7 +14,7 @@ use php_unit::decl::{
     Bare, ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility, native_function, parameter,
 };
 
-use super::calls::Retval;
+use super::calls::{Callee, Family, Retval};
 use super::{Link, Member, MemberAt, Request};
 use crate::api::abi::{
     Entry, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
@@ -405,7 +405,8 @@ impl Request {
     ) -> Result<Value, Thrown> {
         let held = Owner::take(self, object);
         let class = object.class();
-        let served = self.serve_method_into(retval, hook, Some(object), class, arguments, &[]);
+        let method = Callee::method(hook, Some(object), class);
+        let served = self.serve_method_into(retval, Family::Known, method, arguments, &[]);
         held.give_up(self);
         served
     }
