@@ -825,9 +825,10 @@ fn a_natives_call_returns_what_it_declares() -> Result<(), String> {
 /// array a trace runs through (`zend_get_func_info`,
 /// `Z/Zend/Optimizer/zend_func_info.c:132-150`): `class_exists()`
 /// returns a `bool`, so what it wrote is no reference the clobber rule
-/// reads again, and an opline that reads it holds it as php's does; the
-/// pinned php's trace of `substr()` in a loop holds no guard on its
-/// `string` at the `strlen()` that reads it (#3438).
+/// reads again, and an opline that reads it holds it as php's does. The
+/// engine with no extension this test serves on has no `substr()`; the
+/// pinned php's trace of `strlen(substr($s, 1))` in a loop holds no guard
+/// on its `string` at the `STRLEN` (#3438).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_frameless_call_returns_what_its_native_declares() -> Result<(), String> {

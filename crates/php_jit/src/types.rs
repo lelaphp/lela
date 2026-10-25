@@ -743,6 +743,11 @@ impl Frees {
         op1: false,
         op2: false,
     };
+
+    /// Whether it frees either.
+    pub(crate) fn any(self) -> bool {
+        self.op1 || self.op2
+    }
 }
 
 /// How the trace ends.

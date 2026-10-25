@@ -717,7 +717,7 @@ impl UnitView {
 
     /// What the native of row `index` of the engine's frameless table
     /// declares it returns; none unless [`UnitView::hold_frameless`] took
-    /// it, and where it declares nothing.
+    /// it, where it declares nothing, and where it returns by reference.
     #[must_use]
     pub fn frameless_returns(&self, index: u32) -> Option<&Type> {
         (self.frameless.iter())

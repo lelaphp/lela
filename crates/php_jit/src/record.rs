@@ -1092,7 +1092,7 @@ impl<'p> Recorder<'p> {
     fn begun(
         &mut self,
         req: &Request,
-        view: &UnitView,
+        view: &mut UnitView,
         frame: FrameRef,
         root: FuncRef,
         behind: Option<OplineIdx>,
@@ -1105,16 +1105,10 @@ impl<'p> Recorder<'p> {
         let op = (view.op_array(root))
             .and_then(|code| code.oplines.get(condition.0 as usize).copied())
             .ok_or_else(|| Bailed::Fatal(off_the_end(condition)))?;
-        let (op1, op2, _) = sampled(req, frame, &op, None);
-        let classes = classes(&op, op1, op2);
-        self.events.push(Event::Op {
-            func: root,
-            opline: condition,
-            op1,
-            op2,
-            data: None,
-            branch: Some(true),
-        });
+        let (_, classes) = self.write_down(req, view, frame, (root, condition), (&op, None));
+        if let Some(Event::Op { branch, .. }) = self.events.last_mut() {
+            *branch = Some(true);
+        }
         Ok(self.count(1 + classes))
     }
 
@@ -1775,7 +1769,8 @@ pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bo
 /// Whether php's CFG finds loop `header`: its root is [`reachable`] from
 /// the entry, and so is a jump back to where its back edge lands, as
 /// `zend_cfg_identify_loops` finds a loop by a back edge from a block the
-/// entry reaches, an unreached block drawing no edge (`Z/Zend/Optimizer/zend_cfg.c:607-617`, `:778-880`). A `foreach`
+/// entry reaches, an unreached block drawing no edge
+/// (`Z/Zend/Optimizer/zend_cfg.c:607-617`, `:778-880`). A `foreach`
 /// whose body always returns has none: the `JMP` its compiler emits past
 /// the body is dead, and php's trace records through the `FE_FETCH_R` as
 /// through any other opline.
@@ -1809,13 +1804,12 @@ pub(crate) fn found(code: &OpArray, header: SafepointIdx) -> bool {
         return false;
     };
     let seen = reachable(code);
-    let reaches = |at: usize| seen.get(at).copied().unwrap_or(false);
-    reaches(root.0 as usize)
-        && (site.0 as usize..code.oplines.len()).any(|at| {
-            reaches(at)
-                && u32::try_from(at)
-                    .is_ok_and(|at| tier::jump_targets(code, OplineIdx(at)).any(|to| to == site))
-        })
+    let reaches = |at: OplineIdx| seen.get(at.0 as usize).copied().unwrap_or(false);
+    let end = u32::try_from(code.oplines.len()).unwrap_or(u32::MAX);
+    reaches(root)
+        && (site.0..end)
+            .map(OplineIdx)
+            .any(|at| reaches(at) && tier::jump_targets(code, at).any(|to| to == site))
 }
 
 /// Per opline, whether it is reached from the op array's entry along

@@ -102,12 +102,11 @@ enum At {
     /// The frame stands where it goes on.
     Stands,
     /// After a fetch whose element's type a guard holds: the opline past
-    /// it with the element, read as `read` says, stored and its
-    /// temporaries freed, or, while a call is under way, the fetch again.
+    /// it with the element, read as `read` says, stored, the temporaries
+    /// it read freed, and a call under way restored.
     Fetched {
         fetch: OplineIdx,
-        op1: bool,
-        op2: bool,
+        frees: Frees,
         out: ValueId,
         read: Read,
     },
@@ -811,8 +810,8 @@ impl<'a> Builder<'a> {
         // names (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`), and a
         // frameless call's by the native its opline names, through the
         // call map (`zend_get_func_info`).
-        // Only a `DO_ICALL`'s callee is fixed where the opline is
-        // compiled: a call by name, a method's or a dynamic one may serve
+        // Only those two callees are fixed where the opline is compiled:
+        // a call by name, a method's or a dynamic one may serve
         // another function than the one recorded, which php's trace holds
         // with a guard on the callee this tier does not take.
         let returns = if op.opcode.is_frameless_icall() {
@@ -2070,8 +2069,10 @@ impl<'a> Builder<'a> {
             (_, Some((def, frame, opline, kind, op1, op2))) => {
                 let fetched = |read| At::Fetched {
                     fetch: opline,
-                    op1: self.is_temp(op1),
-                    op2: self.is_temp(op2),
+                    frees: Frees {
+                        op1: self.is_temp(op1),
+                        op2: self.is_temp(op2),
+                    },
                     out: value,
                     read,
                 };
@@ -3242,8 +3243,7 @@ impl<'a> Builder<'a> {
             At::Stands => (None, restored(calls)),
             At::Fetched {
                 fetch,
-                op1,
-                op2,
+                frees,
                 out,
                 read,
             } => {
@@ -3260,7 +3260,7 @@ impl<'a> Builder<'a> {
                     from: Stored::Copied { value: out, read },
                 });
                 let landing = Landing {
-                    frees: Frees { op1, op2 },
+                    frees,
                     restores_call: calls,
                 };
                 (Some(OplineIdx(fetch.0 + 1)), landing)
