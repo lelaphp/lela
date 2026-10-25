@@ -216,6 +216,7 @@ Heap::string_extend
 Heap::string_finit
 Heap::string_fresh
 Heap::string_safe_alloc
+Heap::string_sized
 Heap::string_truncate
 Heap::string_with
 Heap::symtable_clean
@@ -350,6 +351,7 @@ Scalar
 Scalar::is_true
 Scalar::of
 Sizing
+Sizing::bytes
 Slot
 SortEntry
 StackLayout

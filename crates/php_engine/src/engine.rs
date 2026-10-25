@@ -4054,11 +4054,7 @@ impl<'a> PermanentStrings<'a> {
         if bytes.len() <= 1 {
             return Ok(None);
         }
-        let laid = match sizing {
-            php_heap::Sizing::Alloc => heap.string(bytes),
-            php_heap::Sizing::Finit => heap.string_finit(bytes),
-        };
-        laid.map(Some).inspect_err(|_| {
+        heap.string_sized(bytes, sizing).map(Some).inspect_err(|_| {
             self.answers = Answers::Asker;
         })
     }

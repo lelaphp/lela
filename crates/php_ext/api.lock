@@ -1260,6 +1260,7 @@ values::FreshString::is_empty
 values::FreshString::len
 values::FreshString::new
 values::FreshString::set_len
+values::FreshString::sized
 values::FreshString::truncate
 values::HashIterator
 values::HashIterator::new
@@ -1459,6 +1460,8 @@ values::Resource::unlist
 values::ResourceType
 values::ResourceView
 values::ResourceView::resource
+values::Sizing
+values::Sizing::bytes
 values::SmartStr
 values::SmartStr::append
 values::SmartStr::as_bytes
