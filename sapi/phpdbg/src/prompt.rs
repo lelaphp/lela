@@ -1268,9 +1268,8 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// [Successful compilation of %SCRATCH%/witness.php]
 /// prompt> 128M
 /// prompt>%s
-/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in eval()'d code on line 1
-/// prompt> 5
-/// prompt>
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in eval()'d code on line 1
+/// prompt> prompt>
 /// ```
 ///
 /// ```php
@@ -1288,7 +1287,7 @@ fn ev_command(s: &mut Session, here: &mut Here<'_>, params: &[Param]) -> Ret {
 /// [Successful compilation of %SCRATCH%/witness.php]
 /// prompt> 128M
 /// prompt>%s
-/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in eval()'d code on line 1
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in eval()'d code on line 1
 /// prompt> Do you really want to restart execution? (type y or n): Please enter either y (yes) or n (no):
 /// ```
 fn ev(s: &mut Session, here: &mut Here<'_>, code: &[u8]) -> Ret {
