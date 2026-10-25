@@ -722,19 +722,26 @@ impl<'r> Frames<&'r Request> {
     /// `zend_get_executed_filename`: the scope's file while a constant
     /// expression is evaluated ([`site_override`]), and an attribute's
     /// while its object is made and nothing stands above its site
-    /// ([`exec::Site`]).
+    /// ([`exec::Site`]). Where no frame of user code stands, the file the
+    /// request was described with, `script_name`.
     #[must_use]
     pub fn current_file(self) -> Option<&'r [u8]> {
+        let script = self.0.description.script_name.as_deref();
+        self.executed_file().or(script)
+    }
+
+    /// `zend_get_executed_filename_ex`: the file [`Self::current_file`]
+    /// names, and `None` where no frame of user code stands, a native a
+    /// shutdown function or an extension's request end calls with
+    /// nothing beneath it, which a diagnostic names as `Unknown`.
+    pub(crate) fn executed_file(self) -> Option<&'r [u8]> {
         if let Some((file, _)) = self.0.overridden_site() {
             return Some(file);
         }
         if let Some(site) = self.0.vm.innermost_site() {
             return Some(&site.file);
         }
-        self.0
-            .innermost_frame()
-            .and_then(exec::FrameAt::file)
-            .or(self.0.description.script_name.as_deref())
+        self.0.innermost_frame().and_then(exec::FrameAt::file)
     }
 
     /// `zend_get_executed_lineno`: the line the innermost frame stands

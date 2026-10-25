@@ -124,7 +124,7 @@ impl Request {
         if self.bailout {
             return;
         }
-        let (file, line) = self.executed_site();
+        let (file, line) = self.executed_site(Level::Error);
         self.end_in_fatal_at(message, &file, line);
     }
 
