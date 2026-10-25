@@ -144,8 +144,10 @@ pub(crate) fn ready(pid: i32) -> Option<Memory> {
     None
 }
 
-/// `fpm_trace_close`: the task port given back, the one thing held
-/// past the read.
+/// `fpm_trace_close`, which lets go of what the read held and forgets the
+/// task port (`fpm_mach_vm_deallocate`, `target = 0`): here the reads
+/// hold nothing past their call, and the port's send right goes back in
+/// `Memory`'s drop, which php leaves to the process's end.
 #[cfg(target_os = "macos")]
 pub(crate) fn close(memory: Memory) -> bool {
     drop(memory);
@@ -166,7 +168,7 @@ pub(crate) fn signal(pid: i32) -> bool {
 #[cfg(not(target_os = "macos"))]
 #[expect(
     clippy::unnecessary_wraps,
-    reason = "one face on every platform: macOS's kernel can refuse the task port"
+    reason = "one signature on every platform: macOS's kernel can refuse the task port"
 )]
 pub(crate) fn ready(pid: i32) -> Option<Memory> {
     Some(Memory { pid })
@@ -176,7 +178,7 @@ pub(crate) fn ready(pid: i32) -> Option<Memory> {
 #[cfg(not(target_os = "macos"))]
 #[expect(
     clippy::needless_pass_by_value,
-    reason = "close takes what ready opened, as macOS's gives its task port back"
+    reason = "one signature on every platform: close takes what ready opened"
 )]
 pub(crate) fn close(memory: Memory) -> bool {
     let pid = memory.pid;
