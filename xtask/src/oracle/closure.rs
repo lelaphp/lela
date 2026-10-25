@@ -240,14 +240,20 @@ const LOADS: [u32; 5] = [0xc, 0x8000_0018, 0x8000_001f, 0x20, 0x8000_0023];
 /// `LC_RPATH`: a directory an `@rpath/` name is searched in.
 const RPATH: u32 = 0x8000_001c;
 
-/// `LC_BUILD_VERSION`: the platform a file was linked for, and its
-/// `minos`; and `LC_VERSION_MIN_MACOSX`, which an older ld writes instead.
+/// `LC_BUILD_VERSION`: the platform a file was linked for, at +8, and its
+/// `minos`, at +12.
 const BUILD_VERSION: u32 = 0x32;
+
+/// `PLATFORM_MACOS`, the platform of `LC_BUILD_VERSION` a macOS file names.
+const MACOS: u32 = 1;
+
+/// `LC_VERSION_MIN_MACOSX`: the macOS a file was linked for, at +8, which
+/// an older ld writes in place of `LC_BUILD_VERSION`.
 const VERSION_MIN_MACOSX: u32 = 0x24;
 
 /// The oldest macOS a Mach-O file was linked to run on, `LC_BUILD_VERSION`'s
 /// `minos` as the command encodes it, `xxxx.yy.zz` in one word, and the
-/// version `MACOSX_DEPLOYMENT_TARGET` names the link's for (#3356).
+/// version a `MACOSX_DEPLOYMENT_TARGET` names (#3356).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Minos(u32);
 
@@ -349,8 +355,7 @@ impl Loads {
                 loads.names.extend(text());
             } else if command == RPATH {
                 loads.rpaths.extend(text());
-            } else if command == BUILD_VERSION {
-                // platform at +8, minos at +12.
+            } else if command == BUILD_VERSION && word(&commands, at + 8) == Some(MACOS) {
                 loads.minos = word(&commands, at + 12).map(Minos);
             } else if command == VERSION_MIN_MACOSX {
                 loads.minos = word(&commands, at + 8).map(Minos);
@@ -603,12 +608,13 @@ mod tests {
         );
     }
 
-    /// A Mach-O stand-in linked for `minos`, its one command the
-    /// `LC_BUILD_VERSION` `ld -platform_version macos <minos> 15.4` writes.
-    fn built_for(minos: u32) -> Vec<u8> {
+    /// A Mach-O stand-in linked for `minos` of `platform`, its one command
+    /// the `LC_BUILD_VERSION` `ld -platform_version <platform> <minos>
+    /// 15.4` writes.
+    fn built_for(platform: u32, minos: u32) -> Vec<u8> {
         let mut file = macho(&[]);
         file[16..24].copy_from_slice(&[1, 0, 0, 0, 24, 0, 0, 0]);
-        for w in [BUILD_VERSION, 24, 1, minos, 0x000f_0400, 0] {
+        for w in [BUILD_VERSION, 24, platform, minos, 0x000f_0400, 0] {
             file.extend(u32::to_le_bytes(w));
         }
         file
@@ -618,7 +624,7 @@ mod tests {
     fn the_macos_a_binary_is_linked_for_is_its_build_version_minos() {
         let tree = Tree::new("closure-minos").unwrap();
         let php = tree.path().join("php");
-        fs::write(&php, built_for(0x000f_0000)).unwrap();
+        fs::write(&php, built_for(MACOS, 0x000f_0000)).unwrap();
         let minos = Minos::of(&php).unwrap().unwrap();
         assert_eq!(minos.to_string(), "15.0");
         assert_eq!(Minos::parse("15.0"), Some(minos));
@@ -628,6 +634,10 @@ mod tests {
         for shape in ["", "15.x", "15.0.0.1", "15.256"] {
             assert_eq!(Minos::parse(shape), None, "{shape}");
         }
+        // An iOS binary (platform 2) and one with no such command are no
+        // macOS file's.
+        fs::write(&php, built_for(2, 0x000f_0000)).unwrap();
+        assert_eq!(Minos::of(&php).unwrap(), None);
         fs::write(&php, macho(&[])).unwrap();
         assert_eq!(Minos::of(&php).unwrap(), None);
     }
