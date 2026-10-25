@@ -454,3 +454,69 @@ fn max_file_uploads_and_body_parts_read_by_base_zero_strtol() {
         "\nWarning: PHP Request Startup: Multipart body parts limit exceeded 3. To increase the limit change max_multipart_body_parts in php.ini. in Unknown on line 0\n11 10"
     );
 }
+
+/// An uploaded file costs the program's `memory_get_usage()` what it
+/// costs php-cgi 8.5.12's (#3426): `$_FILES[f][name]`, `[full_path]`
+/// and `[type]` are made as `php_register_variable_safe`'s
+/// `ZVAL_STRINGL_FAST` makes them, `zend_string_finit`'s ask of the
+/// bytes past the empty string's aligned header, so the two names step
+/// to the next bin at nine bytes, seventeen and twenty-five, where
+/// `zend_string_alloc`'s step at eight, sixteen and twenty-four, and a
+/// five-byte name takes the 40-byte bin. php-cgi 8.5.12 `-n`, handed one
+/// part `name="f"; filename="<n bytes>"` with `Content-Type: image/png`,
+/// reads 420728 at seven bytes and at eight, and 420744 at nine. With
+/// `-d upload_tmp_dir=<160 bytes>`, since the temporary name's string is
+/// as long as the directory, it reads 419112 for the body with no part,
+/// 420712 for `a.txt` and 420760 for `a.txt` with `Content-Type:
+/// text/plain`: 1600 and 1648 past it, where the engine read 16 and 24
+/// under. The program is served once before, so each figure is read past
+/// its compile.
+#[test]
+fn an_uploaded_file_costs_the_program_what_php_cgi_counts() {
+    let engine = Engine::cli_builder()
+        .ini("upload_tmp_dir", padded_dir())
+        .build();
+    let used = |body: &[u8]| -> i64 {
+        let (out, _) = posted(
+            &engine,
+            "multipart/form-data; boundary=b",
+            body,
+            "<?php echo memory_get_usage();",
+        );
+        out.parse().expect("memory_get_usage()'s figure")
+    };
+    let at = |n: usize| {
+        let name = "a".repeat(n);
+        used(format!("--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"{name}\"\r\nContent-Type: image/png\r\n\r\nhello\r\n--b--\r\n").as_bytes())
+    };
+    // The program's first request compiles it and the rest find it kept,
+    // so the figures are read past one request.
+    at(1);
+    let steps = [
+        at(8) - at(7),
+        at(9) - at(8),
+        at(17) - at(16),
+        at(25) - at(24),
+    ];
+    let none = used(b"--b--\r\n");
+    let file = used(b"--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\r\nhello\r\n--b--\r\n");
+    let typed = used(b"--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--b--\r\n");
+    assert_eq!(
+        (steps, file - none, typed - none),
+        ([0, 16, 16, 16], 1600, 1648)
+    );
+}
+
+/// A directory of 160 bytes under the temporary one, the length the
+/// oracle's figures were read under.
+fn padded_dir() -> String {
+    let base = std::fs::canonicalize(std::env::temp_dir()).expect("the temporary directory");
+    let base = base
+        .to_str()
+        .expect("a UTF-8 temporary directory")
+        .trim_end_matches('/')
+        .to_owned();
+    let dir = format!("{base}/{}", "u".repeat(160 - base.len() - 1));
+    std::fs::create_dir_all(&dir).expect("the upload directory");
+    dir
+}
