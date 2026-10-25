@@ -52,7 +52,6 @@ pub(crate) struct Memory {
     #[cfg(target_os = "macos")]
     task: libc::mach_port_t,
     #[cfg(not(target_os = "macos"))]
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pid: i32,
 }
 
@@ -145,9 +144,11 @@ pub(crate) fn ready(pid: i32) -> Option<Memory> {
     None
 }
 
-/// `fpm_trace_close`: nothing held past the read.
+/// `fpm_trace_close`: the task port given back, the one thing held
+/// past the read.
 #[cfg(target_os = "macos")]
-pub(crate) fn close(_pid: i32) -> bool {
+pub(crate) fn close(memory: Memory) -> bool {
+    drop(memory);
     true
 }
 
@@ -163,13 +164,22 @@ pub(crate) fn signal(pid: i32) -> bool {
 
 /// `fpm_trace_ready`: the attached child is ready as it stands.
 #[cfg(not(target_os = "macos"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "one face on every platform: macOS's kernel can refuse the task port"
+)]
 pub(crate) fn ready(pid: i32) -> Option<Memory> {
     Some(Memory { pid })
 }
 
 /// `fpm_trace_close`: the master detached.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn close(pid: i32) -> bool {
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "close takes what ready opened, as macOS's gives its task port back"
+)]
+pub(crate) fn close(memory: Memory) -> bool {
+    let pid = memory.pid;
     if let Err(e) = nix::sys::ptrace::detach(Pid::from_raw(pid), None) {
         crate::zlog_sys!(Error @ fpm_trace_close:47, e, "failed to ptrace(DETACH) child {pid}");
         return false;
