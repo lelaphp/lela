@@ -516,7 +516,10 @@ fn padded_dir() -> String {
         .expect("a UTF-8 temporary directory")
         .trim_end_matches('/')
         .to_owned();
-    let dir = format!("{base}/{}", "u".repeat(160 - base.len() - 1));
+    let pad = 159_usize
+        .checked_sub(base.len())
+        .expect("a temporary directory shorter than 159 bytes");
+    let dir = format!("{base}/{}", "u".repeat(pad));
     std::fs::create_dir_all(&dir).expect("the upload directory");
     dir
 }
