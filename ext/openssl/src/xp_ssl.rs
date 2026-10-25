@@ -132,17 +132,17 @@ const DEFAULT_RENEG_WINDOW: i64 = 300;
 /// bool(true)
 /// ```
 pub(crate) fn transports() -> Vec<XportFactory> {
-    [
-        "ssl", "sslv3", "tls", "tlsv1.0", "tlsv1.1", "tlsv1.2", "tlsv1.3", "tcp",
-    ]
-    .into_iter()
-    .filter(|&name| HAVE_SSL3 || name != "sslv3")
-    .map(|name| XportFactory {
-        name,
-        label: "tcp_socket/ssl",
-        layer: factory,
-    })
-    .collect()
+    let ssl3: &[&'static str] = if HAVE_SSL3 { &["sslv3"] } else { &[] };
+    let tls = ["tls", "tlsv1.0", "tlsv1.1", "tlsv1.2", "tlsv1.3", "tcp"];
+    std::iter::once("ssl")
+        .chain(ssl3.iter().copied())
+        .chain(tls)
+        .map(|name| XportFactory {
+            name,
+            label: "tcp_socket/ssl",
+            layer: factory,
+        })
+        .collect()
 }
 
 /// A crypto method, `php_stream_xport_crypt_method_t` decoded: whether
@@ -256,7 +256,10 @@ impl San {
     /// URI or an SRV-ID; a certificate that presents one is never matched
     /// by its CN (php 8.5.11, GHSA-vvx9-73fr-5jjx).
     fn is_service_id(&self) -> bool {
-        !matches!(self, San::Ip(_))
+        match self {
+            San::Dns(_) | San::DnsUnreadable | San::Uri | San::Srv => true,
+            San::Ip(_) => false,
+        }
     }
 }
 
@@ -772,6 +775,14 @@ fn error_reason(code: std::ffi::c_ulong) -> c_int {
         code & 0x7FFF_FFFF
     };
     c_int::try_from(reason).unwrap_or(0)
+}
+
+/// `php_openssl_set_blocking(sslsock, blocked)` at the handshake's end:
+/// the socket blocks again where it blocked before.
+fn restore_blocking(socket: &mut CryptoSocket<'_>, blocked: bool) {
+    if socket.blocked != blocked {
+        socket.set_blocking(blocked);
+    }
 }
 
 /// `php_openssl_matches_wildcard_name`: the names equal, ignoring case,
@@ -1522,9 +1533,7 @@ impl Layer {
             {
                 // php 8.5.12 makes the socket block again where it did
                 // before the warning, which may run PHP code.
-                if socket.blocked != blocked {
-                    socket.set_blocking(blocked);
-                }
+                restore_blocking(socket, blocked);
                 warn(req, "SSL: Handshake timed out");
                 return Ok(Handshake::Failed);
             }
@@ -1543,9 +1552,7 @@ impl Layer {
             };
             let _ready = socket.wait(want, limit.map(|l| l.saturating_sub(elapsed)));
         };
-        if socket.blocked != blocked {
-            socket.set_blocking(blocked);
-        }
+        restore_blocking(socket, blocked);
         let peer = tls.peer_certificate();
         if io.ret == 1 {
             if let (Some(peer), Some(context)) = (&peer, socket.ctx) {

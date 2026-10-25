@@ -166,7 +166,8 @@ impl Ctx {
     pub(crate) fn alpn_protos(&self, wire: &[u8]) -> bool {
         let len = c_uint::try_from(wire.len()).unwrap_or(0);
         // SAFETY: the context is live; the library copies `len` bytes.
-        unsafe { sys::SSL_CTX_set_alpn_protos(self.as_ptr(), wire.as_ptr(), len) == 0 }
+        let answer = unsafe { sys::SSL_CTX_set_alpn_protos(self.as_ptr(), wire.as_ptr(), len) };
+        answer == 0
     }
 
     /// `SSL_CTX_use_certificate_chain_file`.
