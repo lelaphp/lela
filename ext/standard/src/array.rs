@@ -13,7 +13,7 @@ use php_ext::abi::{Callable, FromArgument, Instance, Raw, Ref, Union, Variadic};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
 use php_ext::coerce::{compare, to_double, to_long, to_string, with_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_limit, docref};
+use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, call_stack_limit, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self as rows, Hold};
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, zend_sort};
@@ -773,6 +773,9 @@ fn count(
 /// ```
 fn count_recursive(req: &mut Request, array: PhpArray) -> Result<i64, Thrown> {
     call_stack_limit(req)?;
+    // The floor stands under it, where `-1` sets no limit and php
+    // would run to the thread's end.
+    call_stack_end(req)?;
     if array.is_recursive() {
         docref(req, Level::Warning, "Recursion detected");
         return Ok(0);

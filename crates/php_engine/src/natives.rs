@@ -1603,7 +1603,7 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
         .write(format!("{common}array({}) {{\n", array.len()).as_bytes());
     let held = Hold::Owner(GiveUp::Dtor);
     let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
-        if too_deep(req, level, req.stack_limit().overflowed()) {
+        if too_deep(req, level, req.stack_limit().refuses_a_level()) {
             return Ok(ControlFlow::Continue(()));
         }
         // `php_array_element_dump`.
@@ -1850,7 +1850,7 @@ fn dump_object_header(req: &mut Request, common: &str, object: PhpObject, count:
 /// whether the value is still to be dumped.
 #[inline(never)]
 fn dump_property_head(req: &mut Request, level: usize, row: &walk::Row) -> bool {
-    if too_deep(req, level, req.stack_limit().overflowed()) {
+    if too_deep(req, level, req.stack_limit().refuses_a_level()) {
         return false;
     }
     match row.key() {

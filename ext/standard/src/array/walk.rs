@@ -12,7 +12,7 @@ use php_ext::abi::{Callable, Passed, Raw, Ref, True, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
-use php_ext::raising::{Thrown, arg_type_error, call_stack_limit, throw_error};
+use php_ext::raising::{Thrown, arg_type_error, call_stack_end, call_stack_limit, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::Hold;
 use php_ext::values::{Emalloc, Key, Layout, Owner, PhpArray, PhpRef, Value, ValueRef, walk};
@@ -426,6 +426,9 @@ fn walk_level(req: &mut Request, holder: PhpRef, walk: &Walk) -> Result<(), Thro
 fn visit(req: &mut Request, reference: PhpRef, key: &Key, walk: &Walk) -> Result<(), Thrown> {
     if walk.recursive && reference.get().as_array().is_some() {
         call_stack_limit(req)?;
+        // The floor stands under it, where `-1` sets no limit and php
+        // would run to the thread's end.
+        call_stack_end(req)?;
         let Some(nested) = reference.separate_array(req)? else {
             return Ok(());
         };

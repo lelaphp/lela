@@ -405,6 +405,9 @@ fn replace_recursive(
     src: PhpArray,
 ) -> Result<(), Thrown> {
     call_stack_limit(req)?;
+    // The floor stands under it, where `-1` sets no limit and php
+    // would run to the thread's end.
+    call_stack_end(req)?;
     // `ZEND_HASH_FOREACH_KEY_VAL(src, num_key, string_key, src_entry)`
     // (`Z/ext/standard/array.c:4148`), no owner of the table taken: the
     // argument holds it while an overwrite's release serves a destructor.

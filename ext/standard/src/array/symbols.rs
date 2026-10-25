@@ -12,7 +12,8 @@ use php_ext::abi::{Passed, Ref, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, call_stack_limit, docref, throw_error,
+    Level, Thrown, arg_value_error, argument_error, call_stack_end, call_stack_limit, docref,
+    throw_error,
 };
 use php_ext::request::{Overwrite, Request};
 use php_ext::values::walk::{self, GiveUp, Hold};
@@ -677,6 +678,9 @@ fn compact_var(
             // php 8.5.12 asks the stack limit before the recursion
             // (`Z/ext/standard/array.c:2727`, gh23115).
             call_stack_limit(req)?;
+            // The floor stands under it, where `-1` sets no limit and php
+            // would run to the thread's end.
+            call_stack_end(req)?;
             if array.is_recursive() {
                 return Err(throw_error(req, "Error", "Recursion detected"));
             }

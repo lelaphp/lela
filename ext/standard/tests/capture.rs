@@ -99,14 +99,13 @@ fn a_product_that_overflows_is_php_s_fatal_and_no_allocation() {
 /// guarded the way php 8.5.12 guards them, `nesting level too deep` in
 /// place of the row and no `Error`.
 #[test]
-fn an_unguarded_walk_deeper_than_the_thread_is_refused_at_its_floor() {
+fn a_walk_deeper_than_the_thread_is_refused_at_its_limit_or_its_floor() {
     let source = r#"<?php
 $a = []; for ($i = 0; $i < 200000; $i++) { $a = ['k' => $a]; }
 $b = $a;
 $walks = [
     fn () => print_r($a, true),
     fn () => var_export($a, true),
-    function () use ($a) { ob_start(); debug_zval_dump($a); if (str_contains(ob_get_clean(), 'nesting level too deep')) { throw new Error('Maximum call stack size of rows'); } },
     function () use ($a) { $c = $a; array_walk_recursive($c, fn () => null); },
     fn () => array_merge_recursive($a, $b),
     fn () => array_replace_recursive($a, $b),
@@ -117,13 +116,17 @@ $walks = [
 foreach ($walks as $walk) {
     try { $walk(); echo "whole\n"; } catch (Error $e) { echo strstr($e->getMessage(), ' of ', true), "\n"; }
 }
+ob_start(); debug_zval_dump($a); echo str_contains(ob_get_clean(), 'nesting level too deep') ? "nesting level too deep\n" : "whole\n";
 echo 'done';
 "#;
     let (stdout, fatal) = served(source);
     assert_eq!(fatal, None);
     assert_eq!(
         stdout,
-        format!("{}done", "Maximum call stack size\n".repeat(9))
+        format!(
+            "{}nesting level too deep\ndone",
+            "Maximum call stack size\n".repeat(8)
+        )
     );
 }
 

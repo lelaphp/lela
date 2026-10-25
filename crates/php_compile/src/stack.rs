@@ -399,6 +399,16 @@ impl StackLimit {
         position() <= self.floor
     }
 
+    /// Whether a walk php guards at the limit refuses its next level
+    /// here: past the limit, as [`overflowed`](Self::overflowed) asks,
+    /// or past the floor where no limit is set or the floor stands above
+    /// it, as [`exhausted`](Self::exhausted) asks, since this engine
+    /// never runs a walk to the thread's end. `var_dump()`'s rows ask it.
+    #[must_use]
+    pub fn refuses_a_level(&self) -> bool {
+        self.overflowed() || self.exhausted()
+    }
+
     /// The stack's base less its floor, the size a walk held to the
     /// floor had when it was refused, in the words of
     /// [`max_stack_size`](Self::max_stack_size).
