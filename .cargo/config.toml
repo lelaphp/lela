@@ -27,6 +27,12 @@ rustflags = ["-C", "llvm-args=--cgp-max-address-users-to-scan=1000"]
 [env]
 CARGO_WORKSPACE_DIR = { value = "", relative = true, force = true }
 
+# Every build in the workspace asks php_engine's build.rs to refuse a
+# release-like build whose rustflags lack the LLVM option above, where one
+# from outside it is warned (design §10 Profiles, #3372); not forced, so
+# `PHP_ENGINE_FOLD=warn` builds one unfolded on purpose.
+PHP_ENGINE_FOLD = "refuse"
+
 # pcre2-sys finds libpcre2-8 through pkg-config, which on a Mac is
 # Homebrew's `pcre2` keg, the library the oracle links (design §7.2, #624,
 # #717), and builds the source it bundles, a release of its own, only when

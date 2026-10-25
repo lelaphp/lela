@@ -1,0 +1,18 @@
+# The negative control of php_engine's refusal of a release-like build
+# without the LLVM option every profile passes (design §10 Profiles,
+# #3372): a crate whose build script is the engine's own rule,
+# `crates/php_engine/build/rustflags.rs`, built by
+# `xtask/tests/rustflags.rs` under the workspace's cargo configuration and
+# under flags that replace its rustflags table.
+[package]
+name = "rustflags"
+version = "0.0.0"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[workspace]
+
+[profile.release-da]
+inherits = "release"
+debug-assertions = true
