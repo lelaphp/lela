@@ -14,7 +14,7 @@ use php_ext::test::{Capture, Engine};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use php_ext_pdo::connector::{
     BindKind, Column, Connection, Connector, Executed, Failure, Orientation, Placeholders,
-    Prepared, Rowsets, Source, SqlState, Statement,
+    Prepared, Rowsets, Source, Statement,
 };
 
 /// The connector, `rowsets:`.
@@ -140,8 +140,10 @@ impl Statement for Three {
 impl Rowsets for Three {
     fn next_rowset(&mut self, req: &mut Request) -> Result<Executed, Failure> {
         let _ = req;
+        // No rowset after the last, and the error code left as it was,
+        // as a connector slot answering `0` with no error function leaves it.
         if self.rowset + 1 == ROWSETS {
-            return Err(Failure::error(SqlState(*b"HY000")));
+            return Err(Failure::silent());
         }
         (self.rowset, self.row) = (self.rowset + 1, 0);
         Ok(Executed {
@@ -196,7 +198,7 @@ fn close_cursor_without_a_closer_walks_every_rowset_and_keeps_the_error() {
             "1 true 11\n",
             "false IM001\n",
             "true IM001\n",
-            "false HY000\n",
+            "false 00000\n",
             "1\n",
         ),
         "{stdout}"

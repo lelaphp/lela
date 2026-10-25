@@ -1223,31 +1223,30 @@ fn bind(
 /// and `pdo_stmt_invalidate_result`'s: every row of every rowset fetched
 /// and discarded, a rowset at a time through [`do_next_rowset`], stopping
 /// where the connector has no `next_rowset` or found no further rowset.
-/// A throwable the fetch raised is handed on.
+/// A failure of the connector's is recorded on the statement, as php's
+/// connector writes `stmt->error_code` itself, and is not handled: php's
+/// loop has no `PDO_HANDLE_STMT_ERR`. A throwable it carried is handed on.
 fn drain(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
     loop {
-        while fetched(with_driver(req, stmt, |req, driver| {
-            driver.fetch(req, crate::connector::Orientation::Forward, 0)
-        })?)? {}
+        loop {
+            let fetched = with_driver(req, stmt, |req, driver| {
+                driver.fetch(req, crate::connector::Orientation::Forward, 0)
+            })?;
+            match fetched {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(failure) => {
+                    record(req, stmt, failure)?;
+                    break;
+                }
+            }
+        }
         if !with_driver(req, stmt, |_, driver| driver.rowsets().is_some())? {
             return Ok(());
         }
-        if do_next_rowset(req, stmt)?.is_err() {
-            return Ok(());
+        if let Err(failure) = do_next_rowset(req, stmt)? {
+            return record(req, stmt, failure);
         }
-    }
-}
-
-/// A fetch's answer as the loops that discard rows read it: whether a
-/// row came, a failure no row, and a throwable handed on.
-fn fetched(answer: Result<bool, Failure>) -> Result<bool, Thrown> {
-    match answer {
-        Ok(row) => Ok(row),
-        Err(Failure {
-            thrown: Some(thrown),
-            ..
-        }) => Err(thrown),
-        Err(Failure { thrown: None, .. }) => Ok(false),
     }
 }
 
