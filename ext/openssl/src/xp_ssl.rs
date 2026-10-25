@@ -239,11 +239,36 @@ pub(crate) struct Cipher {
 }
 
 /// One name of a certificate's subjectAltName extension as
-/// `php_openssl_matches_san_list` reads it: a DNS name, or an IP
-/// address's bytes.
+/// `php_openssl_matches_san_list` reads it: a DNS name, one that does not
+/// read as UTF-8 or holds a NUL, an IP address's bytes, a URI, or an
+/// SRV-ID otherName.
 pub(crate) enum San {
     Dns(Vec<u8>),
+    DnsUnreadable,
     Ip(Vec<u8>),
+    Uri,
+    Srv,
+}
+
+impl San {
+    /// Whether the name is one of the identifiers RFC 6125 §6.4.4 puts
+    /// before the CN, php's `has_service_id`: a DNS name, read or not, a
+    /// URI or an SRV-ID; a certificate that presents one is never matched
+    /// by its CN (php 8.5.11, GHSA-vvx9-73fr-5jjx).
+    fn is_service_id(&self) -> bool {
+        !matches!(self, San::Ip(_))
+    }
+}
+
+/// What `php_openssl_matches_san_list` found for a peer name: a name of
+/// the list that matched it; no match, with an identifier the CN gives
+/// way to in the list ([`San::is_service_id`]), so the CN is not read; or
+/// neither, so the CN is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SanMatch {
+    Matched,
+    Missed,
+    NoServiceId,
 }
 
 /// The renegotiation bucket, `php_openssl_handshake_bucket_t`: when the
@@ -751,7 +776,7 @@ fn error_reason(code: std::ffi::c_ulong) -> c_int {
 
 /// `php_openssl_matches_wildcard_name`: the names equal, ignoring case,
 /// or the certificate's name with one `*` in its left-most label that
-/// covers no dot of the subject.
+/// covers no dot of the subject, its prefix and suffix not overlapping.
 pub(crate) fn matches_wildcard_name(subject: &[u8], cert: &[u8]) -> bool {
     if subject.eq_ignore_ascii_case(cert) {
         return true;
@@ -769,15 +794,16 @@ pub(crate) fn matches_wildcard_name(subject: &[u8], cert: &[u8]) -> bool {
     {
         return false;
     }
+    // php 8.5.12 (GHSA-xr7j-rvgx-xq5p): the prefix and the suffix both
+    // fit in the subject, side by side, or nothing matches.
     let suffix = &cert[star + 1..];
-    if suffix.len() > subject.len() {
+    let Some(middle_end) = subject.len().checked_sub(suffix.len()) else {
         return false;
-    }
-    let tail = &subject[subject.len() - suffix.len()..];
-    let middle = subject
-        .get(star..subject.len() - suffix.len())
-        .unwrap_or(&[]);
-    tail.eq_ignore_ascii_case(suffix) && !middle.contains(&b'.')
+    };
+    let Some(middle) = subject.get(star..middle_end) else {
+        return false;
+    };
+    subject[middle_end..].eq_ignore_ascii_case(suffix) && !middle.contains(&b'.')
 }
 
 /// `EXPAND_IPV6_ADDRESS`: eight groups in upper-case hex, no leading
@@ -794,39 +820,83 @@ fn expand_ipv6(bytes: &[u8]) -> String {
         .join(":")
 }
 
-/// `php_openssl_matches_san_list`.
-fn matches_san_list(cert: &Certificate, subject: &[u8]) -> bool {
+/// `php_openssl_matches_san_list`, with what its `has_service_id` says.
+/// A wildcard's prefix and suffix must both fit in the name asked for
+/// (GHSA-xr7j-rvgx-xq5p), and a certificate whose list holds a DNS name,
+/// a URI or an SRV-ID is never matched by its CN (GHSA-vvx9-73fr-5jjx),
+/// while one whose list holds only addresses still is:
+///
+/// ```php
+/// function served(string $san, array $names): void {
+///     $f = tempnam(sys_get_temp_dir(), 'san');
+///     file_put_contents($f, "[req]\ndistinguished_name = dn\n[dn]\n[ext]\nsubjectAltName = $san\n");
+///     $o = ['config' => $f, 'private_key_bits' => 2048, 'digest_alg' => 'sha256', 'req_extensions' => 'ext', 'x509_extensions' => 'ext'];
+///     $k = openssl_pkey_new($o);
+///     $x = openssl_csr_sign(openssl_csr_new(['commonName' => 'cn.example.org'], $k, $o), null, $k, 1, $o);
+///     openssl_x509_export($x, $pem); openssl_pkey_export($k, $key, null, $o);
+///     file_put_contents($f, $pem . $key);
+///     $s = stream_socket_server('ssl://127.0.0.1:0', $e, $m, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, stream_context_create(['ssl' => ['local_cert' => $f]]));
+///     if (!pcntl_fork()) { foreach ($names as $_) { @stream_socket_accept($s, 5); } exit; }
+///     $addr = stream_socket_get_name($s, false);
+///     foreach ($names as $name) {
+///         $said = null;
+///         set_error_handler(function ($no, $text) use (&$said) { $said ??= $text; return true; });
+///         $c = stream_socket_client("ssl://$addr", $e, $m, 5, STREAM_CLIENT_CONNECT, stream_context_create(['ssl' => ['verify_peer' => false, 'peer_name' => $name]]));
+///         restore_error_handler();
+///         echo $name, ': ', $c ? 'connected' : $said, "\n";
+///     }
+///     pcntl_wait($status);
+///     unlink($f);
+/// }
+/// served('DNS:a*aaaa, DNS:w*www.example.org', ['aaaa', 'www.example.org', 'cn.example.org', 'axaaaa']);
+/// served('IP:127.0.0.1', ['cn.example.org', 'other']);
+/// ```
+/// ```expect process
+/// aaaa: stream_socket_client(): Peer certificate subjectAltName did not match expected name `aaaa'
+/// www.example.org: stream_socket_client(): Peer certificate subjectAltName did not match expected name `www.example.org'
+/// cn.example.org: stream_socket_client(): Peer certificate subjectAltName did not match expected name `cn.example.org'
+/// axaaaa: connected
+/// cn.example.org: connected
+/// other: stream_socket_client(): Peer certificate CN=`cn.example.org' did not match expected CN=`other'
+/// ```
+fn matches_san_list(cert: &Certificate, subject: &[u8]) -> SanMatch {
     let subject_v6 = std::str::from_utf8(subject)
         .ok()
         .and_then(|s| s.parse::<std::net::Ipv6Addr>().ok())
         .map(|ip| expand_ipv6(&ip.octets()));
+    let mut has_service_id = false;
     for san in ffi::ssl::san_names(cert) {
+        has_service_id |= san.is_service_id();
         match san {
             San::Dns(mut name) => {
                 if name.last() == Some(&b'.') {
                     name.pop();
                 }
                 if matches_wildcard_name(subject, &name) {
-                    return true;
+                    return SanMatch::Matched;
                 }
             }
             San::Ip(bytes) if bytes.len() == 4 => {
                 let text = format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3]);
                 if subject.eq_ignore_ascii_case(text.as_bytes()) {
-                    return true;
+                    return SanMatch::Matched;
                 }
             }
             San::Ip(bytes) if bytes.len() == 16 => {
                 if let Some(expanded) = &subject_v6
                     && expanded.eq_ignore_ascii_case(&expand_ipv6(&bytes))
                 {
-                    return true;
+                    return SanMatch::Matched;
                 }
             }
-            San::Ip(_) => {}
+            San::Ip(_) | San::DnsUnreadable | San::Uri | San::Srv => {}
         }
     }
-    false
+    if has_service_id {
+        SanMatch::Missed
+    } else {
+        SanMatch::NoServiceId
+    }
 }
 
 /// `php_openssl_matches_common_name`, with its warnings.
@@ -1327,7 +1397,21 @@ impl Layer {
             let Some(name) = name else {
                 return false;
             };
-            return matches_san_list(peer, &name) || matches_common_name(req, peer, &name);
+            return match matches_san_list(peer, &name) {
+                SanMatch::Matched => true,
+                // The CN is never read beside a DNS name, URI or SRV-ID.
+                SanMatch::Missed => {
+                    let shown = c_str(&name);
+                    warn(
+                        req,
+                        &format!(
+                            "Peer certificate subjectAltName did not match expected name `{shown}'"
+                        ),
+                    );
+                    false
+                }
+                SanMatch::NoServiceId => matches_common_name(req, peer, &name),
+            };
         }
         true
     }
