@@ -124,6 +124,15 @@ impl<const N: usize> NumberText<N> {
         }
     }
 
+    /// `tail`'s bytes after the text, as php writes `.0` into the
+    /// buffer `zend_gcvt` filled (`Z/ext/json/json_encoder.c:86`). A
+    /// byte past the room, or one that is not ASCII, is dropped.
+    pub fn push_str(&mut self, tail: &str) {
+        for byte in tail.bytes() {
+            self.push(byte);
+        }
+    }
+
     /// The last byte, where there is one.
     pub(crate) fn last(&self) -> Option<u8> {
         if self.end == self.start {

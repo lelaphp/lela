@@ -280,6 +280,7 @@ Number::double
 NumberText
 NumberText::as_bytes
 NumberText::as_str
+NumberText::push_str
 Obj
 Obj::CLASS_AT
 Obj::SLOTS_AT
