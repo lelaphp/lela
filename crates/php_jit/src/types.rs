@@ -680,7 +680,8 @@ pub(crate) enum Read {
 
 /// What an indirect `VAR` is read as: the zval it points at, or the value
 /// of the reference that zval is, as php follows `zend_jit_fetch_indirect_var`
-/// with `zend_jit_fetch_reference` where the recorder saw both.
+/// with `zend_jit_fetch_reference` where the recorder saw both
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`, `:17021-17085`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Pointee {
     Value,

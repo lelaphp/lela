@@ -46,7 +46,9 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::ptr::{self, NonNull};
 use std::sync::atomic::AtomicBool;
 
-use php_engine::tier::{self, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Stepped, TraceNum};
+use php_engine::tier::{
+    self, CachedSlot, Epoch, Fatal, FrameRef, FuncRef, Held, Request, Stepped, TraceNum,
+};
 use php_heap::{Arr, HeaderImage, Key, Scalar, Zval, ZvalRef, ZvalType};
 use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
@@ -1019,7 +1021,7 @@ pub(crate) fn enter<'t>(
     // trace's row for the jumps to it.
     let touched = Touched::of(req, (epoch, trace));
     let stack = tier::stack(req).as_ptr();
-    let (images, rows) = Images::of(req, (epoch, trace), touched.addresses());
+    let (images, rows) = Images::of(req, (epoch, trace), touched.kept());
     let ready = images.ready();
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
@@ -1124,12 +1126,15 @@ impl Touched {
         let none = ptr::from_ref(&NO_PLACE).expose_provenance();
         let addresses: Box<[usize]> = (trace.map_ptrs.iter())
             .map(|raw| match tier::touch(req, epoch, *raw) {
-                Ok(Some(slot)) => slot.address(),
+                Ok(Some(slot)) => CachedSlot::address(slot),
                 Ok(None) | Err(_) => none,
             })
             .collect();
         match tier::state::<crate::JitRequest>(req) {
-            Some(state) => Touched::Kept(state.headers.touch(trace.id, addresses)),
+            Some(state) => match state.headers.keep_touched(trace.id, addresses) {
+                Ok(at) => Touched::Kept(at),
+                Err(addresses) => Touched::Own(addresses),
+            },
             None => Touched::Own(addresses),
         }
     }
@@ -1140,6 +1145,17 @@ impl Touched {
             Touched::None => ptr::null(),
             Touched::Kept(at) => *at,
             Touched::Own(addresses) => addresses.as_ptr(),
+        }
+    }
+
+    /// Where the request keeps the addresses for as long as it runs, which
+    /// a jump to the trace reads: null for a trace that reads none, and
+    /// none for addresses made for this entry alone.
+    fn kept(&self) -> Option<*const usize> {
+        match self {
+            Touched::None => Some(ptr::null()),
+            Touched::Kept(at) => Some(*at),
+            Touched::Own(_) => None,
         }
     }
 }
@@ -1179,7 +1195,7 @@ impl Images {
     fn of(
         req: &Request,
         (epoch, trace): (&Epoch, &Trace),
-        caches: *const usize,
+        caches: Option<*const usize>,
     ) -> (Images, *const usize) {
         if let Some(state) = tier::state::<crate::JitRequest>(req) {
             let images = if trace.calls.is_empty() {
@@ -1191,7 +1207,15 @@ impl Images {
             let rows = (state.headers).rows(|| {
                 crate::table::of_epoch(epoch).map_or(0, crate::table::TraceTable::segments)
             });
-            rows.lay(trace.id, (images.addresses(), caches), images.ready());
+            // A jump enters the trace only where the request keeps the cache
+            // slots its code reads.
+            let touched = caches.is_some() || trace.map_ptrs.is_empty();
+            let caches = caches.unwrap_or(ptr::null());
+            rows.lay(
+                trace.id,
+                (images.addresses(), caches),
+                images.ready() && touched,
+            );
             return (images, rows.base());
         }
         (Images::own(req, trace), NO_ROWS.as_ptr())
@@ -1330,18 +1354,24 @@ impl Headers {
         Some(kept.touched.get(row)?.as_ref()?.as_ptr())
     }
 
-    /// `addresses`, the cache slots trace `id` reads, kept for the request.
-    fn touch(&self, id: crate::table::TraceId, addresses: Box<[usize]>) -> *const usize {
+    /// `addresses`, the cache slots trace `id` reads, kept for the
+    /// request, and where they are kept; handed back for a number no row
+    /// holds.
+    fn keep_touched(
+        &self,
+        id: crate::table::TraceId,
+        addresses: Box<[usize]>,
+    ) -> Result<*const usize, Box<[usize]>> {
         let mut kept = self.kept.borrow_mut();
         let at = addresses.as_ptr();
         let Ok(row) = usize::try_from(id.get()) else {
-            return ptr::null();
+            return Err(addresses);
         };
         if kept.touched.len() <= row {
             kept.touched.resize_with(row + 1, || None);
         }
         kept.touched[row] = Some(addresses);
-        at
+        Ok(at)
     }
 
     /// The request's rows, laid down the first time a trace is entered,

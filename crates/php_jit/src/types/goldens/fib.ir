@@ -9,7 +9,7 @@ loop at 0, recursive call, interrupt exit 0
 0001 f0 IS_SMALLER #1, int(2) fused inline
   checks direction taken -> exit 1
   guard room 192 -> exit 2
-0005 f0 INIT_FCALL_BY_NAME const#1 inline map 0
+0005 f0 INIT_FCALL_BY_NAME const#1 inline
      f0 init e1 in-place
 0006 f0 SUB #1, int(1) inline
   -> #2 f0.T1 [long] reg
@@ -21,7 +21,7 @@ loop at 0, recursive call, interrupt exit 0
 0001 f1 IS_SMALLER #3, int(2) fused inline
   checks direction taken -> exit 1
   guard room 192 -> exit 2
-0005 f1 INIT_FCALL_BY_NAME const#1 inline map 0
+0005 f1 INIT_FCALL_BY_NAME const#1 inline
      f1 init e1 in-place
 0006 f1 SUB #3, int(1) inline
   -> #4 f1.T1 [long] reg
@@ -36,4 +36,3 @@ exit 1: f0 0003 plain f0.CV0:long
 exit 2: f0 0005 plain f0.CV0:long to vm
 exit 3: f0 0006 restore call f0.CV0:long
 unwind 0:
-map 0: offset 1 slot 0

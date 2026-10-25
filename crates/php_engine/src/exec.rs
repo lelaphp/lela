@@ -1616,7 +1616,7 @@ pub(crate) struct FastCall {
 /// the tag for [`PROPERTY`] before it reads the [`PropertyPlace`] at
 /// [`Cached::PLACE_AT`] (`jit-design.md` §4.3, `tier::PLACE`). The size
 /// and the niche are what they were without it, which the asserts below
-/// hold. The tag is a word, not a byte, because the handler then reads
+/// hold. The tag is four bytes, not one, because the handler then reads
 /// the tag and the class a property was placed on with one load and one
 /// compare, as it did before the representation was named: a `u8` tag
 /// cost the property handlers an instruction a pass.
@@ -1927,8 +1927,13 @@ impl SlotType {
     /// bit [`SlotType::KINDS`] clears, so neither guard bit is read as a kind.
     #[inline]
     pub(crate) fn admits(self, z: Zval) -> bool {
-        self.0 & SlotType::NO_TYPE != 0
-            || (self.0 & SlotType::KINDS) >> (z.kind() as u16 & 15) & 1 != 0
+        self.0 & SlotType::NO_TYPE != 0 || self.0 & SlotType::KINDS & SlotType::bit(z.kind()) != 0
+    }
+
+    /// The bit of a kind of value among the kind bits, `1 << IS_*`, none
+    /// past them, which compiled code tests too (`tier::PLACE`).
+    pub(crate) const fn bit(kind: php_heap::ZvalType) -> u16 {
+        (1 << (kind as u16 & 15)) & SlotType::KINDS
     }
 
     /// Whether the property carries a type.

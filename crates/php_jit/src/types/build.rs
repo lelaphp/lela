@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample, UnitView};
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
-use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
+use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::opcodes::{
@@ -673,7 +673,7 @@ impl<'a> Builder<'a> {
         self.sampled.insert(idx, samples);
         let map_ptr = match property.and_then(|property| property.slot.cached()) {
             Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
-            _ => self.map_ptr(func, &op, form),
+            _ => None,
         };
         self.record_send(frame, &op, op1);
         if !keeps_temporaries(op.opcode) {
@@ -2407,21 +2407,6 @@ impl<'a> Builder<'a> {
         } else {
             Owners::Each(owners)
         }
-    }
-
-    /// The runtime cache slot an inline call's `INIT_*` reads its callee
-    /// from, `result.num`.
-    fn map_ptr(&mut self, func: FuncRef, op: &Opline, form: Form) -> Option<usize> {
-        if form != Form::Inline
-            || !matches!(
-                op.opcode,
-                Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName
-            )
-        {
-            return None;
-        }
-        let raw = self.view.cache_slot(func, CacheSlot(op.out))?;
-        Some(self.map_ptr_of(raw))
     }
 
     /// The slot of [`TraceIr::map_ptrs`] that holds `raw`, taken where

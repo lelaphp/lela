@@ -13,13 +13,17 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{InstBuilder, Value};
-use php_engine::tier::{self, ClassId, FRAME, PLACE};
+use php_engine::tier::{self, ClassId, FRAME, PLACE, PlaceLayout};
 use php_heap::{Obj, ZvalType};
 use php_unit::Opcode;
 
 use super::{Emit, KIND, Kind, Refuse, SLOT, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
 use crate::lower::CACHES_AT;
 use crate::types::{Abort, ExitId, Imm, Line, Object, OpId, Operand, Slotted};
+
+/// The engine's runtime-cache slot layout, as the guard on a request's own
+/// slot reads it.
+const P: PlaceLayout = PLACE;
 
 impl Emit<'_> {
     /// The object `object` names, a `zend_object *`: `$this` of its frame,
@@ -79,7 +83,8 @@ impl Emit<'_> {
     /// object its `op1` names, `$this` where it names none: by its number
     /// on a published class, or read from the request's cache slot where
     /// it holds a declared slot of the object's class whose type has a bit
-    /// of `kinds`, as php's code reads it for a class that is not
+    /// of `kinds` (each of them, none tested where `kinds` is none), as
+    /// php's code reads it for a class that is not
     /// immutable, and refused to `refuse` otherwise
     /// (`zend_jit_fetch_obj`, `Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`;
     /// `zend_jit_assign_obj`, `:14874-14895`).
@@ -128,7 +133,12 @@ impl Emit<'_> {
     /// 10 4 3
     /// hHhHhH sSsS
     /// ```
-    fn property(&mut self, line: &Line, kinds: u32, refuse: Refuse) -> Result<Value, Abort> {
+    fn property(
+        &mut self,
+        line: &Line,
+        kinds: Option<u32>,
+        refuse: Refuse,
+    ) -> Result<Value, Abort> {
         let Imm::Property { slot, .. } = line.imm else {
             return Err(mismatch("a property opline with no slot"));
         };
@@ -139,34 +149,47 @@ impl Emit<'_> {
         };
         let obj = self.object(object)?;
         let slots = i64::from(imm(Obj::SLOTS_AT));
-        let Slotted::Cached = slot else {
-            let Slotted::Declared(slot) = slot else {
-                return Err(mismatch("a slot neither declared nor cached"));
-            };
-            return Ok(self.b.ins().iadd_imm_s(obj, slots + SLOT * i64::from(slot)));
-        };
-        let place = self.cache_guard(line, (PLACE.property(), PLACE.class()), obj, refuse)?;
-        let offset = self
-            .b
-            .ins()
-            .load(I8, trusted(), place, imm(PLACE.offset_tag() as usize));
-        let dynamic =
-            (self.b.ins()).icmp_imm_u(IntCC::NotEqual, offset, i64::from(PLACE.declared()));
-        let ty = self
-            .b
-            .ins()
-            .uload16(I32, trusted(), place, imm(PLACE.ty() as usize));
-        let held = self.b.ins().band_imm_u(ty, i64::from(kinds));
-        let refused = self.b.ins().icmp_imm_u(IntCC::Equal, held, 0);
-        let refused = self.b.ins().bor(dynamic, refused);
-        self.refuse_if(refused, refuse)?;
-        let number = self
-            .b
-            .ins()
-            .uload32(trusted(), place, imm(PLACE.slot() as usize));
-        let offset = self.b.ins().imul_imm_u(number, SLOT);
-        let slot = self.b.ins().iadd(obj, offset);
-        Ok(self.b.ins().iadd_imm_s(slot, slots))
+        match slot {
+            Slotted::Declared(slot) => {
+                Ok(self.b.ins().iadd_imm_s(obj, slots + SLOT * i64::from(slot)))
+            }
+            Slotted::Cached => {
+                let place = self.cache_guard(line, (P.property(), P.class()), obj, refuse)?;
+                self.declared_in(place, kinds, refuse)?;
+                let number = (self.b.ins()).uload32(trusted(), place, imm(P.slot() as usize));
+                let offset = self.b.ins().imul_imm_u(number, SLOT);
+                let slot = self.b.ins().iadd(obj, offset);
+                Ok(self.b.ins().iadd_imm_s(slot, slots))
+            }
+        }
+    }
+
+    /// Refused to `refuse` unless the property's place at `place` is a
+    /// declared slot whose type holds every bit of `kinds`, where the
+    /// opline writes: `zend_get_property_offset`'s offset past
+    /// `ZEND_FIRST_PROPERTY_OFFSET` and the `prop_info` php's code reads at
+    /// `cache_slot + 2` before it writes in place
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14370`, `:14417`, `:14947`,
+    /// `:14963`).
+    fn declared_in(
+        &mut self,
+        place: Value,
+        kinds: Option<u32>,
+        refuse: Refuse,
+    ) -> Result<(), Abort> {
+        let offset = (self.b.ins()).load(I8, trusted(), place, imm(P.offset_tag() as usize));
+        let declared = i64::from(P.declared());
+        let mut refused = self.b.ins().icmp_imm_u(IntCC::NotEqual, offset, declared);
+        if let Some(kinds) = kinds {
+            let ty = (self.b.ins()).uload16(I32, trusted(), place, imm(P.ty() as usize));
+            let held = self.b.ins().band_imm_u(ty, i64::from(kinds));
+            let short = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, held, i64::from(kinds));
+            refused = self.b.ins().bor(refused, short);
+        }
+        self.refuse_if(refused, refuse)
     }
 
     /// The one guard on a slot of the request's own runtime cache, the
@@ -197,7 +220,7 @@ impl Emit<'_> {
         let held = self
             .b
             .ins()
-            .load(I32, trusted(), place, imm(PLACE.tag() as usize));
+            .load(I32, trusted(), place, imm(P.tag() as usize));
         let other = self
             .b
             .ins()
@@ -274,7 +297,7 @@ impl Emit<'_> {
         let out = line
             .out
             .ok_or_else(|| mismatch("a property fetch that writes nothing"))?;
-        let zval = self.property(line, ANY_TYPE, Refuse::Exit(exit))?;
+        let zval = self.property(line, None, Refuse::Exit(exit))?;
         let byte = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
         let undef = self
             .b
@@ -333,7 +356,7 @@ impl Emit<'_> {
         let out = line
             .out
             .ok_or_else(|| mismatch("a property fetch that writes nothing"))?;
-        let zval = self.property(line, PLACE.untyped(), Refuse::Exit(exit))?;
+        let zval = self.property(line, Some(P.untyped()), Refuse::Exit(exit))?;
         let byte = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
         let undef = self
             .b
@@ -409,7 +432,7 @@ impl Emit<'_> {
         };
         let handled = self.b.create_block();
         let done = self.b.create_block();
-        let zval = self.property(line, kinds_of(kind), Refuse::To(handled))?;
+        let zval = self.property(line, Some(kinds_of(kind)), Refuse::To(handled))?;
         let old = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
         let kind = self.b.ins().band_imm_u(old, KIND);
         let undef = self
@@ -502,29 +525,25 @@ impl Emit<'_> {
         };
         let handled = self.b.create_block();
         let done = self.b.create_block();
-        let zval = self.property(line, PLACE.untyped(), Refuse::To(handled))?;
+        let zval = self.property(line, Some(P.untyped()), Refuse::To(handled))?;
         let kind = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
         self.compound_at((zval, kind), (binary, by, false), (handled, done))?;
         self.handled_then(at, line, (handled, done))
     }
 }
 
-/// Every bit of a slot's type: a read takes a slot of any type.
-const ANY_TYPE: u32 = u16::MAX as u32;
-
 /// The bits of a slot's type a write of a scalar of `kind` lands in as it
 /// stands, by the handler's own test (`SlotType::admits`): its kind's, both
-/// booleans' for one the value says, or a slot with no type's for a value
-/// no scalar.
+/// booleans' for one the value says, so a slot of `true` or of `false`
+/// alone refuses it, or a slot with no type's for a value no scalar.
 fn kinds_of(kind: Option<Kind>) -> u32 {
-    let bit = |t: ZvalType| 1u32 << (t as u32);
     match kind {
-        Some(Kind::Long) => bit(ZvalType::Long),
-        Some(Kind::Double) => bit(ZvalType::Double),
-        Some(Kind::Null) => bit(ZvalType::Null),
-        Some(Kind::False) => bit(ZvalType::False),
-        Some(Kind::True) => bit(ZvalType::True),
-        Some(Kind::Bool) => bit(ZvalType::False) | bit(ZvalType::True),
-        None => PLACE.untyped(),
+        Some(Kind::Long) => P.kind(ZvalType::Long),
+        Some(Kind::Double) => P.kind(ZvalType::Double),
+        Some(Kind::Null) => P.kind(ZvalType::Null),
+        Some(Kind::False) => P.kind(ZvalType::False),
+        Some(Kind::True) => P.kind(ZvalType::True),
+        Some(Kind::Bool) => P.kind(ZvalType::False) | P.kind(ZvalType::True),
+        None => P.untyped(),
     }
 }

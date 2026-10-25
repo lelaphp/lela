@@ -191,19 +191,44 @@ mod touched {
         class: u32,
     }
 
-    /// The slot at `address`, read at `PLACE`'s offsets.
+    /// `sizeof(void *)`: a slot's bytes as an opline numbers them.
+    const SLOT_BYTES: u32 = 8;
+
+    /// The slot at `address`, read at `PLACE`'s offsets: its tag, and what
+    /// stands past it only where the tag is a property's, as compiled code
+    /// reads it, since another variant's bytes there may hold nothing.
     fn read(address: usize) -> Read {
         let base = ptr::with_exposed_provenance::<u8>(address);
         let at = |offset: u32| base.wrapping_add(offset as usize);
         // SAFETY: `address` is a slot of the request's runtime cache, laid
-        // down for as long as the request runs, and each offset `PLACE`
-        // names is within the slot.
+        // down for as long as the request runs, whose tag every variant
+        // writes at `PLACE.tag()`.
         let tag = unsafe { at(PLACE.tag()).cast::<u32>().read_unaligned() };
-        // SAFETY: as above.
+        if tag != PLACE.property() {
+            return Read {
+                tag,
+                class: 0,
+                offset_tag: 0,
+                ty: 0,
+                number: 0,
+            };
+        }
+        // SAFETY: the slot holds a property's place, whose class and
+        // offset's tag stand at the offsets `PLACE` names within it.
         let class = unsafe { at(PLACE.class()).cast::<u32>().read_unaligned() };
         // SAFETY: as above.
         let offset_tag = unsafe { at(PLACE.offset_tag()).read() };
-        // SAFETY: as above.
+        if offset_tag != PLACE.declared() {
+            return Read {
+                tag,
+                class,
+                offset_tag,
+                ty: 0,
+                number: 0,
+            };
+        }
+        // SAFETY: the offset is a declared slot's, whose type and number
+        // stand at the offsets `PLACE` names.
         let ty = unsafe { at(PLACE.ty()).cast::<u16>().read_unaligned() };
         // SAFETY: as above.
         let number = unsafe { at(PLACE.slot()).cast::<u32>().read_unaligned() };
@@ -223,7 +248,7 @@ mod touched {
         let epoch = tier::epoch(req);
         if let Some(raw) = PLACED.get().copied() {
             let call = MapPtrRaw {
-                slot: raw.slot - 8,
+                slot: raw.slot - SLOT_BYTES,
                 ..raw
             };
             for raw in [raw, call] {

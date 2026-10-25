@@ -374,7 +374,8 @@ impl CachedSlot {
 /// The touch (`jit-design.md` §4.6, #2957's note): where slot `raw` of
 /// the runtime cache of the op array `epoch` holds at its offset stands
 /// in `req`, its cache laid down first where the request has not, as the
-/// op array's first activation lays it (`zend_init_func_run_time_cache`)
+/// op array's first activation lays it (`zend_init_func_run_time_cache`,
+/// `Z/Zend/zend_execute.c:4497`)
 /// and every activation after finds it. A function's cache stands where
 /// it was laid for as long as the request runs, so compiled code that
 /// was handed the slot reads it for as long as it may. None for a file's

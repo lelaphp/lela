@@ -366,7 +366,7 @@ pub const PLACE: PlaceLayout = {
 };
 
 impl PlaceLayout {
-    /// Where the slot's tag is, a half-word.
+    /// Where the slot's tag is, four bytes.
     #[must_use]
     pub const fn tag(&self) -> u32 {
         self.tag
@@ -406,8 +406,8 @@ impl PlaceLayout {
 
     /// Where a declared slot's type is, sixteen bits: [`PlaceLayout::untyped`]
     /// for a property with no type, else one bit per kind of value that
-    /// lands in it as it stands, `1 << IS_*`, none for a `readonly` slot
-    /// and one of a set visibility the scope lacks.
+    /// lands in it as it stands ([`PlaceLayout::kind`]), none for a
+    /// `readonly` slot and one of a set visibility the scope lacks.
     #[must_use]
     pub const fn ty(&self) -> u32 {
         self.ty
@@ -417,6 +417,13 @@ impl PlaceLayout {
     #[must_use]
     pub const fn slot(&self) -> u32 {
         self.slot
+    }
+
+    /// The bit of a slot's type that admits a value of `kind` as it
+    /// stands, the one [`PlaceLayout::ty`] keeps for it.
+    #[must_use]
+    pub const fn kind(&self, kind: php_heap::ZvalType) -> u32 {
+        crate::exec::SlotType::bit(kind) as u32
     }
 
     /// The bit of a slot's type that says the property has none; every

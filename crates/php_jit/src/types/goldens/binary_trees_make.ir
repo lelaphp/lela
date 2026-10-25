@@ -16,7 +16,7 @@ loop at 0, recursive return, interrupt none
 0009 f0 INIT_ARRAY #1 step unwinds -> unwind 0
   -> #2 f0.T4 [array]
   guard room 208 -> exit 0
-0010 f0 INIT_FCALL_BY_NAME const#5 inline map 0
+0010 f0 INIT_FCALL_BY_NAME const#5 inline
      f0 init e1 in-place
   guard #3 long -> exit 1
 0011 f0 SEND_VAR #3 inline
@@ -36,7 +36,7 @@ loop at 0, recursive return, interrupt none
 0009 f2 INIT_ARRAY #7 step unwinds -> unwind 0
   -> #8 f2.T4 [array]
   guard room 208 -> exit 0
-0010 f2 INIT_FCALL_BY_NAME const#5 inline map 0
+0010 f2 INIT_FCALL_BY_NAME const#5 inline
      f2 init e1 in-place
   guard #9 long -> exit 1
 0011 f2 SEND_VAR #9 inline
@@ -51,7 +51,7 @@ loop at 0, recursive return, interrupt none
 0005 f3 ASSIGN #12, #11 inline
   -> #13 f3.CV1 [long] reg
   guard room 208 -> exit 4
-0006 f3 INIT_FCALL_BY_NAME const#3 inline map 1
+0006 f3 INIT_FCALL_BY_NAME const#3 inline
      f3 init e1 in-place
 0007 f3 SEND_VAR #13 inline
 0008 f3 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 1
@@ -65,7 +65,7 @@ loop at 0, recursive return, interrupt none
 0009 f3 INIT_ARRAY #15 step unwinds -> unwind 1
   -> #16 f3.T4 [array]
   guard room 208 -> exit 5
-0010 f3 INIT_FCALL_BY_NAME const#5 inline map 0
+0010 f3 INIT_FCALL_BY_NAME const#5 inline
      f3 init e1 in-place
 0011 f3 SEND_VAR #13 inline
 0012 f3 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 1
@@ -95,5 +95,3 @@ exit 4: f3 0006 plain f3.CV1=#13 f3.CV0:long f3.CV1:long to vm
 exit 5: f3 0010 plain f3.CV1=#13 f3.CV0:long f3.CV1:long f3.T4:array to vm
 unwind 0:
 unwind 1: f3.CV1=#13
-map 0: offset 1 slot 8
-map 1: offset 1 slot 0

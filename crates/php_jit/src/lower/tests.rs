@@ -1035,6 +1035,30 @@ fn a_cache_slot_that_names_another_class_sends_the_opline_to_its_handler() {
     assert_eq!(testing::stdout(&served), "42 50\n");
 }
 
+/// A slot of `true` alone, met through a request-scoped class's cache
+/// slot after an untyped one, takes `true` and sends `false` to the
+/// handler's `TypeError`, at the fourth pass as php's interpreter raises it
+/// (#3346). php 8.5.12's own compiled tier raises it on the first pass
+/// here under the oracle's hot counters, so the interpreter's answer is
+/// held, not the oracle's, and the program is no witness.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_slot_of_true_alone_refuses_false_to_its_handler() {
+    let scratch = testing::Scratch::new();
+    for mode in ["force", "exit-fuzz"] {
+        let engine = testing::engine::<Lane>(&[("jit.mode", mode), ("jit.compile", "inline")]);
+        let program = "eval('class A { public $t = 0; } class B { public true $t = true; }');
+            function f($o, $m) { for ($i = 0; $i < $m; $i++) { try { $o->t = $i < 3; } catch (TypeError $e) { echo $i, ' ', $e->getMessage(), \"\\n\"; return; } } echo 'done ', $o->t ? 'true' : 'false', \"\\n\"; }
+            f(new A, 10); f(new B, 10); f(new A, 2);";
+        let served = scratch.serve(&engine, program);
+        assert_eq!(
+            testing::stdout(&served),
+            "done false\n3 Cannot assign false to property B::$t of type true\ndone true\n",
+            "{mode}"
+        );
+    }
+}
+
 /// The hash slice's dimension oplines lowered, each element reached
 /// through the kernel php's code calls the table's lookup through: the
 /// `find` kernel for a read, a test and a compound write, the `lookup`

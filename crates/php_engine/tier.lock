@@ -38,6 +38,7 @@ tier::Activation::opline
 tier::Argument
 tier::Aside
 tier::Building
+tier::CachedSlot
 tier::Called
 tier::ClassId
 tier::Compiled
@@ -90,6 +91,7 @@ tier::Hooked
 tier::MapPtrRaw
 tier::PLACE
 tier::Parked
+tier::PlaceLayout
 tier::PlainCall
 tier::PlainCall::activation
 tier::PlainCall::callee
