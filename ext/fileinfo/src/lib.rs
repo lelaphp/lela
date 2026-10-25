@@ -422,7 +422,11 @@ const S_IFDIR: i64 = 0o040_000;
 /// set's `bytes_max` bytes read, with its stat's `st_mode` and `st_size`
 /// and the fd under it; php's `Failed identify data` where libmagic
 /// answers nothing.
-fn identify_stream(req: &mut Request, magic: &mut Magic, stream: Stream) -> Option<Vec<u8>> {
+fn identify_stream(
+    req: &mut Request,
+    magic: &mut Magic,
+    stream: Stream,
+) -> Result<Option<Vec<u8>>, Thrown> {
     let stat = stream.stat(req).unwrap_or_default();
     let mut bytes = vec![0u8; magic.bytes_max()];
     let mut had = 0;
@@ -439,7 +443,9 @@ fn identify_stream(req: &mut Request, magic: &mut Magic, stream: Stream) -> Opti
         mode: u32::try_from(stat[2]).unwrap_or(0),
         size: stat[7],
     };
-    let answer = magic.stream(&read);
+    // Under the lend, so `cdf.c`'s tables are the request's heap's and
+    // one past the memory limit is refused, as php 8.5.12's are.
+    let answer = req.memory_mut().lend_heap(|| magic.stream(&read))?;
     raise_kept(req);
     if answer.is_none() {
         let (errno, error) = magic.error();
@@ -449,7 +455,7 @@ fn identify_stream(req: &mut Request, magic: &mut Magic, stream: Stream) -> Opti
             &format!("Failed identify data {errno}:{error}"),
         );
     }
-    answer
+    Ok(answer)
 }
 
 /// `php_fileinfo_from_path`: the path opened through its wrapper under
@@ -471,7 +477,13 @@ fn from_path(
     };
     let answer = match stream.stat(req) {
         Some(stat) if stat[2] & S_IFMT == S_IFDIR => Some(b"directory".to_vec()),
-        Some(_) => identify_stream(req, magic, *stream),
+        Some(_) => match identify_stream(req, magic, *stream) {
+            Ok(answer) => answer,
+            Err(thrown) => {
+                stream.free(req);
+                return Err(thrown);
+            }
+        },
         None => None,
     };
     stream.free(req);
@@ -525,6 +537,29 @@ fn file(
 /// bool(false)
 /// finfo_file(): Argument #2 ($filename) must not be empty
 /// ```
+///
+/// A CDF file's tables are the request's heap's since 8.5.12, each asked
+/// for fallibly: a chain that claims more than the memory limit allows is
+/// refused, and the limit's fatal is raised as the call returns.
+///
+/// ```php
+/// $cdf = "\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1" . str_repeat("\0", 16) . pack('vvvvv', 0x3e, 4, 0xfffe, 15, 6) . str_repeat("\0", 10)
+///     . pack('V8', 2, 2, 0, 4096, 2, 10000, -2, 0) . pack('V2', 0, 1) . str_repeat(pack('V', -1), 107);
+/// $fat = array_fill(0, 16384, -1);
+/// $fat[0] = $fat[1] = -3;
+/// for ($i = 2; $i < 10001; $i++) $fat[$i] = $i + 1;
+/// $fat[10001] = -2;
+/// $cdf .= str_repeat("\0", 32768 - 512) . pack('V*', ...$fat) . str_repeat("\0", 32768);
+/// $f = sys_get_temp_dir() . '/finfo-chain.cdf';
+/// file_put_contents($f, $cdf);
+/// register_shutdown_function(fn() => unlink($f));
+/// finfo_file(finfo_open(FILEINFO_MIME_TYPE), $f);
+/// echo "unreached\n";
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 327680000 bytes) in %s on line 12
+/// ```
 #[php_function]
 fn finfo_file(
     req: &mut Request,
@@ -556,7 +591,10 @@ fn buffer(
         if flags != 0 {
             magic.set_flags(c_int(flags));
         }
-        let answer = magic.buffer(string.as_bytes());
+        // Under the lend, as `identify_stream`'s.
+        let answer = req
+            .memory_mut()
+            .lend_heap(|| magic.buffer(string.as_bytes()))?;
         let error = magic.error();
         if flags != 0 {
             magic.set_flags(old);
@@ -589,6 +627,25 @@ fn buffer(
 /// string(28) "text/plain; charset=us-ascii"
 /// string(%d) "%s"
 /// string(%d) "%s"
+/// ```
+///
+/// A CDF buffer's tables are asked for fallibly since 8.5.12, as
+/// `finfo_file`'s are:
+///
+/// ```php
+/// $cdf = "\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1" . str_repeat("\0", 16) . pack('vvvvv', 0x3e, 4, 0xfffe, 15, 6) . str_repeat("\0", 10)
+///     . pack('V8', 2, 2, 0, 4096, 2, 10000, -2, 0) . pack('V2', 0, 1) . str_repeat(pack('V', -1), 107);
+/// $fat = array_fill(0, 16384, -1);
+/// $fat[0] = $fat[1] = -3;
+/// for ($i = 2; $i < 10001; $i++) $fat[$i] = $i + 1;
+/// $fat[10001] = -2;
+/// $cdf .= str_repeat("\0", 32768 - 512) . pack('V*', ...$fat) . str_repeat("\0", 32768);
+/// finfo_buffer(finfo_open(FILEINFO_MIME_TYPE), $cdf);
+/// echo "unreached\n";
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 327680000 bytes) in %s on line 9
 /// ```
 #[php_function]
 fn finfo_buffer(
@@ -687,7 +744,7 @@ fn mime_content_type(
             stream.seek(req, 0, Whence::Set);
             let answer = identify_stream(req, &mut magic, stream);
             stream.seek(req, at, Whence::Set);
-            answer
+            answer?
         }
     };
     match answer {

@@ -24,8 +24,13 @@ fn main() {
         .include("libmagic")
         .include(".")
         .opt_level(2)
-        .warnings(false)
-        .file("shim/shim.c");
+        .warnings(false);
+    // `cdf.c` and `readcdf.c` free the tables `cdf.c` asks of the lent
+    // heap, so their `efree` is php_heap's (`shim/php.h`): compiled apart
+    // with the define, their objects put into the one archive.
+    let mut lent = build.clone();
+    lent.define("FILEINFO_SHIM_LENT_FREE", None);
+    build.file("shim/shim.c");
     let mut sources = 0;
     for word in m4.split_whitespace() {
         if word.starts_with("libmagic/")
@@ -33,13 +38,18 @@ fn main() {
                 .extension()
                 .is_some_and(|e| e == "c")
         {
-            build.file(word);
+            if matches!(word, "libmagic/cdf.c" | "libmagic/readcdf.c") {
+                lent.file(word);
+            } else {
+                build.file(word);
+            }
             sources += 1;
         }
     }
     if sources == 0 {
         println!("cargo:warning=config.m4 names no libmagic source");
     }
+    build.objects(lent.compile_intermediates());
     build.compile("magic");
     for path in ["libmagic", "shim", "data_file.c", "config.m4", "build.rs"] {
         println!("cargo:rerun-if-changed={path}");
