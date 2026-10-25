@@ -419,24 +419,54 @@ impl StreamOp<'_> {
     }
 
     /// `_php_stream_fill_read_buffer`'s filtered arm
-    /// (`Z/main/streams/streams.c:571`): while the stream is not at eof
-    /// and the buffer holds fewer than `size` bytes, at most a chunk, one
-    /// chunk read from the kind and wound through the chain, the last
-    /// read with `PSFS_FLAG_FLUSH_CLOSE` once the kind is at eof and an
-    /// empty one with `PSFS_FLAG_FLUSH_INC`; what the chain passes on
-    /// goes into the buffer, what a filter keeps waits for the next
-    /// round, and `PSFS_ERR_FATAL` breaks the stream. `false` is a read
-    /// that failed before a byte was had, or the break.
+    /// (`Z/main/streams/streams.c:567`): `chunk_buf` asked for at the
+    /// chunk size first, fallibly as php 8.5.12's `femalloc` asks, so a
+    /// chunk the memory limit has no room for is a fill that failed and
+    /// the limit's fatal is raised after the call; then, while the stream
+    /// is not at eof and the buffer holds fewer than `size` bytes, at most
+    /// a chunk, one chunk read from the kind and wound through the chain,
+    /// the last read with `PSFS_FLAG_FLUSH_CLOSE` once the kind is at eof
+    /// and an empty one with `PSFS_FLAG_FLUSH_INC`; what the chain passes
+    /// on goes into the buffer, what a filter keeps waits for the next
+    /// round, and `PSFS_ERR_FATAL` breaks the stream. `false` is the
+    /// chunk refused, a read that failed before a byte was had, or the
+    /// break.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $fp = fopen(__FILE__, 'rb');
+    /// stream_filter_append($fp, "string.rot13");
+    /// stream_set_chunk_size($fp, 100 * 1024 * 1024);
+    /// var_dump(fread($fp, 1));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 104857600 bytes) in %s on line 6
+    /// ```
     pub(super) fn fill_filtered(&mut self, size: usize) -> bool {
         let Some(chunk_size) = self.with(|s| s.chunk_size()) else {
             return false;
         };
-        let to_read_now = size.min(chunk_size);
-        let mut chunk = vec![0u8; chunk_size];
+        let Ok(Some(mut chunk)) = self
+            .req
+            .memory_mut()
+            .fallible(|req| Emalloc::new(req, chunk_size))
+        else {
+            return false;
+        };
+        let filled = self.fill_through_chain(size.min(chunk_size), chunk.bytes_mut());
+        chunk.free(self.req);
+        filled
+    }
+
+    /// The rounds of [`StreamOp::fill_filtered`] while the buffer holds
+    /// fewer than `to_read_now` bytes, each read of the kind into
+    /// `chunk`, php's `chunk_buf`.
+    fn fill_through_chain(&mut self, to_read_now: usize, chunk: &mut [u8]) -> bool {
         let mut inp = Brigade::new();
         let mut outp = Brigade::new();
         while self.with(|s| !s.eof && s.writepos - s.readpos < to_read_now) == Some(true) {
-            let justread = self.read_kind(&mut chunk);
+            let justread = self.read_kind(chunk);
             self.count_progress(justread.unwrap_or(0));
             let Some((empty, eof)) = self.with(|s| (s.writepos == s.readpos, s.eof)) else {
                 return false;
@@ -471,7 +501,12 @@ impl StreamOp<'_> {
                 FilterStatus::PassOn => {
                     while let Some(bucket) = inp.pop_front() {
                         if !self.buffer_bucket(&bucket) {
-                            return false;
+                            // php 8.5.12 drops the buckets left and goes
+                            // on with a buffer that still holds its
+                            // bytes; this one is empty, so the fill ends
+                            // here and no read waits on the kind for
+                            // bytes the limit's fatal discards.
+                            return true;
                         }
                     }
                 }
@@ -492,15 +527,23 @@ impl StreamOp<'_> {
     }
 
     /// One bucket appended to the read buffer, the buffer compacted first
-    /// where it has not the room and grown where compacting was not
-    /// enough; `false` is the memory limit's fatal, rendered.
+    /// where it has not the room and grown by the bucket's length where
+    /// compacting was not enough, `fperealloc` asked fallibly as php
+    /// 8.5.12 asks it, since what a filter hands on is unbounded by what
+    /// it was fed; `false` is the growth the memory limit refused.
     fn buffer_bucket(&mut self, bucket: &[u8]) -> bool {
-        self.with(|s| {
+        let Some((room, len)) = self.with(|s| {
             if !s.readbuf.is_empty() && s.readbuf.len() - s.writepos < bucket.len() {
                 s.compact();
             }
-        });
-        self.append_read(bucket)
+            (s.readbuf.len() - s.writepos, s.readbuf.len())
+        }) else {
+            return false;
+        };
+        if room < bucket.len() && !self.grow_readbuf(len + bucket.len()) {
+            return false;
+        }
+        self.with(|s| s.push_read(bucket)) == Some(true)
     }
 
     /// One bucket written after `writepos`, the buffer grown by the

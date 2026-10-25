@@ -811,6 +811,33 @@ fn array_all(req: &mut Request, array: PhpArray, callback: Callable) -> Result<b
 /// 424 376
 /// 2336 2320
 /// ```
+///
+/// Over several arrays the answer's table is laid down at once since
+/// 8.5.12, asked for fallibly, and without a callback each tuple is made
+/// only while the memory limit has not been met: past it the call returns
+/// and the limit's fatal is raised.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $input = array_fill(0, 250000, 0);
+/// var_dump(count(array_map(null, $input, $input)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 4
+/// ```
+///
+/// With a callback, the table refused:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $a = range(1, 400000);
+/// var_dump(count(array_map(fn ($x, $y) => 0, $a, $a)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 8404992 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn array_map(
     req: &mut Request,
@@ -957,7 +984,17 @@ fn mapped_together(
     let longest = arrays.iter().map(PhpArray::len).max().unwrap_or(0);
     let mut positions = vec![0u32; arrays.len()];
     let array_pos = Emalloc::new(req, arrays.len() * 4)?;
-    let mut out = PhpArray::init_size(req, u32::try_from(longest).unwrap_or(u32::MAX))?;
+    // `array_finit_size_packed` since 8.5.12: the table laid down at
+    // once and asked for fallibly, `RETURN_OOM()` where the memory limit
+    // refused it.
+    let longest_size = u32::try_from(longest).unwrap_or(u32::MAX);
+    let laid = req
+        .memory_mut()
+        .fallible(|req| PhpArray::sized(req, longest_size, Layout::Packed))?;
+    let Some(mut out) = laid else {
+        array_pos.free(req);
+        return Ok(None);
+    };
     let params = match callback {
         Some(_) => Some(Emalloc::new(req, arrays.len() * 16)?),
         None => None,
@@ -1007,6 +1044,9 @@ fn map_together(
             })
             .collect();
         let element = match callback {
+            // A tuple is made only while the memory limit has not been
+            // met (8.5.12), else the native returns (`RETURN_OOM()`).
+            None if req.memory().has_oom() => return Ok(true),
             None => {
                 let n = u32::try_from(arrays.len()).unwrap_or(u32::MAX);
                 let mut tuple = PhpArray::init_size(req, n)?;

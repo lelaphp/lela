@@ -12567,9 +12567,19 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
     // a signal the native delivered to its own process is dispatched
     // under `pcntl_async_signals(true)`. A native that threw leaves the
     // interrupt raised for the next site, since php calls no PHP handler
-    // while `EG(exception)` stands.
+    // while `EG(exception)` stands, but for the memory limit: php checks
+    // before it reads `EG(exception)`, and `zend_handle_delayed_oom`
+    // gives up what the native threw for the unwind exit, so no `catch`
+    // takes it (a DOM parse lexbor stopped at the limit throws its
+    // `DOMException` and the limit's fatal is raised in its place).
     let interrupted = match &served {
         Ok(_) => crate::interrupt::check(req),
+        Err(thrown) if req.has_oom() && crate::interrupt::raised(req) => {
+            req.leave_pending(thrown);
+            let interrupted = crate::interrupt::interrupted(req);
+            req.pop_call();
+            return interrupted.map(|_| Stepped::Threw(frame).into());
+        }
         Err(_) => Ok(false),
     };
     req.pop_call();
@@ -22385,12 +22395,21 @@ pub(crate) fn strlen<T: Tier>(
     unary(req, frame, code, op, crate::ops::strlen)
 }
 
-/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8788`): the
+/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8772`): the
 /// length [`inline::string_length`] reads of a string as it stands,
-/// into the temporary. `None`, with nothing touched, for a temporary
-/// holding the string's owner, which the opcode gives up (`FREE_OP1`),
-/// for everything the rule leaves to the kernel, and for a temporary
-/// for the answer holding an owner.
+/// into the temporary, and then a temporary's owner of the string given
+/// up as the handler's `zval_ptr_dtor_str` gives it up, so the string a
+/// conversion or a join made for the call is freed here. `None`, with
+/// nothing touched, for everything the rule leaves to the kernel and for
+/// a temporary for the answer holding an owner.
+///
+/// ```php
+/// $i = 1234; $s = "ab";
+/// echo strlen((string)$i), "|", strlen($s . $s), "|", strlen("x$i"), "|", strlen($s), "\n";
+/// ```
+/// ```expect
+/// 4|4|5|2
+/// ```
 #[inline(always)] // as `inline_arith`
 fn inline_strlen(
     req: &mut Request,
@@ -22401,11 +22420,20 @@ fn inline_strlen(
 ) -> Option<Edge> {
     let slots = req.slots_mut(frame);
     let z = a.read(slots, code, op.op1);
-    if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) && z.is_refcounted() {
-        return None;
-    }
     let length = inline::string_length(z)?;
+    let owner = match z.as_str() {
+        Some(s) if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) && z.is_refcounted() => {
+            Some((a.slot(op.op1)?, s))
+        }
+        _ => None,
+    };
     write_owning_nothing(slots, op, Zval::long(length))?;
+    if let Some((operand, s)) = owner {
+        if let Some(slot) = slots.get_mut(operand) {
+            *slot = Zval::UNDEF;
+        }
+        req.heap_mut().release_string(s);
+    }
     Some(Ok(advanced()))
 }
 
@@ -22487,8 +22515,62 @@ pub(crate) fn cast<T: Tier>(
             op.extended_value
         )));
     };
+    if to == crate::ops::CastTo::Str
+        && let Some(edge) = inline_cast_string(req, frame, code, op, ByKind(op.op1_type))
+    {
+        return edge;
+    }
     unary(req, frame, code, op, |req, value| {
         crate::ops::cast(req, value, to)
+    })
+}
+
+/// The inline path of `ZEND_CAST` to a string (`Z/Zend/zend_vm_def.h:6512`)
+/// over an int or a float as it stands, `zval_get_string`'s two arms
+/// for them: [`crate::ops::long_to_str`] and [`crate::ops::double_to_str`]
+/// into the temporary, neither operand holding anything to free. `None`,
+/// with nothing touched, for any other operand, for a NAN, whose warning
+/// the kernel raises, and for a temporary for the answer holding an
+/// owner. The memory limit ends the request at this opline, as the
+/// kernel's does.
+///
+/// ```php
+/// $i = 42; $f = -2.5; $n = NAN;
+/// echo (string)$i, "|", (string)$f, "|", (string)($i * 1000000), "|", (string)0.1, "|", (string)$n, "\n";
+/// ```
+/// ```expect
+/// 42|-2.5|42000000|0.1|
+/// Warning: unexpected NAN value was coerced to string in %s on line 3
+/// NAN
+/// ```
+#[inline(always)] // as `inline_arith`
+fn inline_cast_string(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let z = a.read(slots, code, op.op1);
+    let out = op.out as usize;
+    if slots.get(out)?.is_refcounted() {
+        return None;
+    }
+    let made = if let Some(n) = z.as_long() {
+        crate::ops::long_to_str(req, n)
+    } else {
+        let f = z.as_double().filter(|f| !f.is_nan())?;
+        crate::ops::double_to_str(req, f)
+    };
+    Some(match made {
+        Ok(text) => {
+            if let Some(into) = req.slots_mut(frame).get_mut(out) {
+                *into = Zval::string(text.heap());
+            }
+            Ok(advanced())
+        }
+        Err(thrown) => threw(req, frame, &thrown),
     })
 }
 
@@ -23685,12 +23767,8 @@ fn jumped<T: Tier>(
         // handlers' backtrace starts there, and a tier the engine asks
         // at its safepoints (ADR-0006). `Nop`'s loop goes on at the
         // target in its own hand, as every other jump's does.
-        if crate::interrupt::raised(req) {
-            std::hint::cold_path();
-            req.vm_mut().stand(frame, target);
-            if crate::interrupt::interrupted(req)? {
-                return Ok(Stepped::Threw(frame).into());
-            }
+        if crate::interrupt::raised(req) && interrupted_at_back_edge(req, frame, target)? {
+            return Ok(Stepped::Threw(frame).into());
         }
         if !crate::tier::interpreted::<T>() {
             req.vm_mut().stand(frame, target);
@@ -23703,6 +23781,22 @@ fn jumped<T: Tier>(
         }
     }
     jump_from(served, target)
+}
+
+/// [`jumped`]'s interrupt, out of the loop's line: a delayed OOM named at
+/// the site the frame stands on before the stand moves it to `target`
+/// ([`Request::locate_oom`]), then the frame stood there and the
+/// interrupt served; whether it threw is the answer.
+#[cold]
+#[inline(never)]
+fn interrupted_at_back_edge(
+    req: &mut Request,
+    frame: FrameRef,
+    target: u32,
+) -> Result<bool, Fatal> {
+    req.locate_oom();
+    req.vm_mut().stand(frame, target);
+    crate::interrupt::interrupted(req)
 }
 
 /// `ZEND_JMPNZ`: the jump `zend_emit_cond_jump` leaves at the end of a
@@ -24290,16 +24384,27 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
             return edge;
         }
     }
-    req.vm_mut().stand(frame, at);
-    returned(req, frame, code, op)
+    returned(req, frame, code, op, at)
 }
 
-/// `RETURN` past its return safepoint and its inline path: the operand
-/// taken as the handler's own ([`exec::take_operand`]) and the frame
-/// left with it ([`returned_to_caller`]). A call of its own, so that the
-/// inline path before it keeps to the registers it needs.
+/// `RETURN` past its return safepoint and its inline path: the frame
+/// stood at the return, the operand taken as the handler's own
+/// ([`exec::take_operand`]) and the frame left with it
+/// ([`returned_to_caller`]). A call of its own, so that the inline path
+/// before it keeps to the registers it needs.
+///
+/// A delayed OOM not yet named is named first, where the frame stood
+/// before the return moves it: for the serving's entry frame, which
+/// leaves with nothing executing above it, this is the site
+/// `zend_execute_scripts` raises it at. The inline path pays nothing
+/// for it; a frame it returns leaves the site to its caller's next
+/// safepoint.
 #[inline(never)]
-fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at: u32) -> Edge {
+    if req.oom_unlocated() {
+        req.locate_oom();
+    }
+    req.vm_mut().stand(frame, at);
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     returned_to_caller(req, frame, returned)
 }
@@ -24406,11 +24511,10 @@ fn inline_return(
 /// the frame popped, and `returned` into the `VAR` the call opline
 /// named, or released where the caller reads nothing.
 fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
-    crate::observer::returned(req, frame, Some(&returned));
     if req.stack_mut().entry() == frame {
-        req.set_returned(returned);
-        return Ok(Stepped::Done.into());
+        return entry_returned(req, frame, returned);
     }
+    crate::observer::returned(req, frame, Some(&returned));
     let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
     if handed_back(req, returns_to, returned) {
@@ -24420,6 +24524,16 @@ fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Ed
     // goes on from the one after it.
     req.vm_mut().advance(caller);
     Ok(Stepped::Popped(caller).into())
+}
+
+/// [`returned_to_caller`]'s return of the serving's entry frame
+/// ([`Request::entry_returned`]), out of line: the interpreter's `RETURN`
+/// meets it once per serving, where every other return pops a frame.
+#[cold]
+#[inline(never)]
+fn entry_returned(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
+    req.entry_returned(frame, returned);
+    Ok(Stepped::Done.into())
 }
 
 /// What a call returned, handed to the frame that made the call: into

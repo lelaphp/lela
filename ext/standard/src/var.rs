@@ -922,8 +922,7 @@ pub(super) fn render(
     // `case IS_DOUBLE`: `smart_str_append_double(buf, d, EG(precision),
     // false)`, the text `zend_double_to_str` makes without its warning.
     if let Some(f) = value.as_float() {
-        let text = float_format(f, req.ini().precision(), Exponent::Upper);
-        out.extend_from_slice(text.as_bytes());
+        render_double(out, f, req.ini().precision());
         return Ok(());
     }
     // `zval_get_string_func`, whose string is the caller's to release:
@@ -1245,13 +1244,7 @@ pub fn export(
             put_long(req, out, n)?;
         }
     } else if let Some(f) = value.as_float() {
-        // `smart_str_append_double` with `zero_fraction`: the text, and
-        // `.0` after a finite one that carries no point of its own.
-        let text = float_format(f, req.ini().serialize_precision(), Exponent::Upper);
-        out.put(req, text.as_bytes())?;
-        if f.is_finite() && !text.contains('.') {
-            out.put(req, b".0")?;
-        }
+        export_double(req, out, f)?;
     } else if let Some(s) = value.as_php_string() {
         let temps = Escaped::new(req, s.as_bytes())?;
         let put = quoted(req, out, s.as_bytes());
@@ -1586,4 +1579,27 @@ fn escaped(req: &mut Request, out: &mut impl ExportOut, bytes: &[u8]) -> Result<
         rest = &rest[at + 1..];
     }
     out.put(req, rest)
+}
+
+/// `print_r`'s `case IS_DOUBLE`, out of line, so the buffer
+/// `smart_str_append_double` lays the text in stands in this leaf's
+/// frame and not in every nesting level of [`render`], as php's does.
+#[inline(never)]
+fn render_double(out: &mut Vec<u8>, f: f64, precision: i32) {
+    out.extend_from_slice(float_format(f, precision, Exponent::Upper).as_bytes());
+}
+
+/// `smart_str_append_double` at `serialize_precision` with
+/// `zero_fraction`, for `var_export`: the text, and `.0` after a finite
+/// one that carries no point of its own. Out of line, so the text's
+/// buffer stands in this leaf's frame and not in every nesting level of
+/// [`export`], as php's `buf` stands in `smart_str_append_double`'s.
+#[inline(never)]
+fn export_double(req: &mut Request, out: &mut impl ExportOut, f: f64) -> Result<(), Thrown> {
+    let text = float_format(f, req.ini().serialize_precision(), Exponent::Upper);
+    out.put(req, text.as_bytes())?;
+    if f.is_finite() && !text.contains('.') {
+        out.put(req, b".0")?;
+    }
+    Ok(())
 }

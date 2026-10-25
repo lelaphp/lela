@@ -91,12 +91,48 @@ pub struct Lent {
 /// string(20) "https://münchen.de/"
 /// ```
 ///
+/// Every ask lexbor makes under the lend is fallible, as php 8.5.12's
+/// lexbor allocator is: a parse that meets the memory limit is refused
+/// there, the native throws as lexbor's error leaves it, and the limit's
+/// fatal is raised in that throwable's place as the call returns, no
+/// `catch` and no `finally` served:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// try {
+///     Dom\HTMLDocument::createFromString(str_repeat('<div class=a><p>hello <b>world</b></p></div>', 20000), LIBXML_NOERROR);
+///     echo "parsed\n";
+/// } catch (Throwable $e) { echo get_class($e), "\n"; } finally { echo "finally\n"; }
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
+/// ```
+///
 /// # Errors
 ///
 /// The limit's fatal, for the caller to end the request in.
 pub fn lent<R>(req: &mut Request, call: impl FnOnce(&Lent) -> R) -> Result<R, Thrown> {
-    req.memory_mut()
-        .lend_heap(|| call(&Lent { _made_by_lent: () }))
+    // php 8.5.12 points lexbor's allocator at `femalloc`, `safe_ferealloc`
+    // and `fecalloc` (`Z/ext/lexbor/php_lexbor.c:33-46`): every ask lexbor
+    // makes is fallible, refused past the soft limit as the NULL lexbor
+    // answers with its own error, the delayed OOM left for the next
+    // safepoint, and never held to the hard limit. The scope covers the
+    // lend alone, and `call` reaches nothing but lexbor.
+    let mut answered = None;
+    req.memory_mut().fallible(|req| {
+        answered = Some(
+            req.memory_mut()
+                .lend_heap(|| call(&Lent { _made_by_lent: () })),
+        );
+        Ok(())
+    })?;
+    answered.unwrap_or_else(|| {
+        Err(php_ext::raising::fatal(
+            req,
+            "InternalError: a lend to lexbor answered nothing",
+        ))
+    })
 }
 
 /// A value that holds lexbor's memory past the call that made it, with no

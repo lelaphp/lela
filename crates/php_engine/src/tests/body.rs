@@ -14,8 +14,8 @@ use php_macros::php_function;
 
 use crate::api::abi::{Extension, ExtensionBuilder};
 use crate::api::raising::Thrown;
-use crate::api::request::Request;
-use crate::api::values::{Owner, PhpString};
+use crate::api::request::{BodyLimits, Request};
+use crate::api::values::{Owner, PhpArray, PhpString};
 use crate::engine::{Body, Engine, Method, RequestDescription, WebRequest};
 use crate::test::Capture;
 
@@ -27,9 +27,20 @@ fn body_input(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     PhpString::new(req, &bytes)
 }
 
+/// `parse_body(): array`: `request_parse_body()` with no options, as
+/// ext/standard's native makes its pair, `[$_POST, $_FILES]`.
+#[php_function]
+fn parse_body(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
+    let (post, files) = req.variables_mut().parse_body(&BodyLimits::default())?;
+    let mut pair = PhpArray::new(req)?;
+    pair.append(req, post.into_value())?;
+    pair.append(req, files.into_value())?;
+    Ok(pair)
+}
+
 fn input() -> Extension {
     ExtensionBuilder::default()
-        .functions(vec![body_input::declared()])
+        .functions(vec![body_input::declared(), parse_body::declared()])
         .build("body")
 }
 
@@ -75,6 +86,17 @@ fn form() -> Vec<u8> {
 /// before it: what the program wrote, and how many reads the request
 /// made of the body.
 fn posted(engine: &Engine, content_type: &str, body: &[u8], program: &str) -> (String, usize) {
+    sent(engine, Method::Post, content_type, body, program)
+}
+
+/// [`posted`] under `method`.
+fn sent(
+    engine: &Engine,
+    method: Method,
+    content_type: &str,
+    body: &[u8],
+    program: &str,
+) -> (String, usize) {
     let (feed, arriving) = sync_channel(1);
     let reads = Arc::new(AtomicUsize::new(0));
     let description = RequestDescription {
@@ -83,7 +105,7 @@ fn posted(engine: &Engine, content_type: &str, body: &[u8], program: &str) -> (S
         source: Some(program.as_bytes().to_vec()),
         cwd: std::env::current_dir().expect("the working directory"),
         web: Some(WebRequest {
-            method: Some(Method::Post),
+            method: Some(method),
             content_type: Some(content_type.as_bytes().to_vec()),
             content_length: i64::try_from(body.len()).unwrap_or(i64::MAX),
             body: Body::Stream(Box::new(Pieces {
@@ -181,6 +203,108 @@ fn a_body_declared_over_post_max_size_is_warned_of_and_never_read() {
         "\nWarning: PHP Request Startup: POST Content-Length of 20014 bytes exceeds the limit of 1024 bytes in Unknown on line 0\nempty\n"
     );
     assert_eq!(reads, 0);
+}
+
+/// A form whose parse takes the request past `memory_limit` ends it in
+/// the limit's fatal before the program runs, as php 8.5.12's handler
+/// stops registering once `ZEND_HAS_OOM()` and `sapi_handle_post` raises
+/// the delayed OOM with nothing executing; the figure is the chunk the
+/// body's `smart_str`, grown `BUFSIZ` at a time, first asks past the limit.
+/// php-cgi under `-d memory_limit=4M -d html_errors=0` writes the same
+/// fatal and its one-row trace for `a=` and three million `x`, and
+/// `ran 1 2 3` for a small form.
+#[test]
+fn a_form_past_the_memory_limit_ends_the_request_before_the_script() {
+    let engine = Engine::cli_builder()
+        .ini("memory_limit", "4M")
+        .extensions(&[input()])
+        .build();
+    let program = "<?php echo 'ran ', $_POST['a'] ?? '', ' ', $_POST['b'] ?? '', ' ', $_POST['c']['x']['y'] ?? '', \"\\n\";";
+    let mut big = b"a=".to_vec();
+    big.resize(big.len() + 3_000_000, b'x');
+    big.extend_from_slice(b"&b=1");
+    let (stdout, _) = posted(&engine, "application/x-www-form-urlencoded", &big, program);
+    assert_eq!(
+        stdout,
+        "\nFatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in Unknown on line 0\nStack trace:\n#0 {main}\n"
+    );
+    let (stdout, _) = posted(
+        &engine,
+        "application/x-www-form-urlencoded",
+        b"a=1&b=2&c[x][y]=3",
+        program,
+    );
+    assert_eq!(stdout, "ran 1 2 3\n");
+}
+
+/// A multipart body whose read takes the request past `memory_limit`
+/// ends it in the limit's fatal before the program runs, as php 8.5.12's
+/// `rfc1867_post_handler` does: a field's value grown on the heap a read
+/// at a time, fallibly, and a header line's value grown as its
+/// `smart_string` grows, each stopped at the limit. The figures, the
+/// trace and the small body's `ran 1 1` are php-cgi 8.5.12's under `-n -d
+/// memory_limit=4M -d html_errors=0` over the same three bodies on its
+/// standard input; the small body's second `Content-Disposition` and its
+/// `X-1` line are passed over, as 8.5.12 keeps only the first of the two
+/// lines it reads.
+#[test]
+fn a_multipart_body_past_the_memory_limit_ends_the_request_before_the_script() {
+    let engine = Engine::cli_builder()
+        .ini("memory_limit", "4M")
+        .extensions(&[input()])
+        .build();
+    let program =
+        "<?php echo 'ran ', $_POST['a'] ?? '', ' ', isset($_FILES['u']) ? 1 : 0, \"\\n\";";
+    let multipart = "multipart/form-data; boundary=b";
+    let fatal = "\nFatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in Unknown on line 0\nStack trace:\n#0 {main}\n";
+    let mut value = b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n".to_vec();
+    value.resize(value.len() + 5_000_000, b'x');
+    value.extend_from_slice(b"\r\n--b--\r\n");
+    assert_eq!(posted(&engine, multipart, &value, program).0, fatal);
+    let mut header = b"--b\r\nContent-Type: pad\r\n".to_vec();
+    for _ in 0..1500 {
+        header.push(b' ');
+        header.resize(header.len() + 4000, b'a');
+        header.extend_from_slice(b"\r\n");
+    }
+    header.extend_from_slice(b"Content-Disposition: form-data; name=\"a\"\r\n\r\nv\r\n--b--\r\n");
+    assert_eq!(posted(&engine, multipart, &header, program).0, fatal);
+    let small = b"--b\r\nX-1: v\r\nContent-Disposition: form-data; name=\"a\"\r\nContent-Disposition: form-data; name=\"z\"\r\n\r\n1\r\n--b\r\nContent-Disposition: form-data; name=\"u\"; filename=\"f.txt\"\r\nContent-Type: text/plain\r\n\r\nxx\r\n--b--\r\n";
+    assert_eq!(posted(&engine, multipart, small, program).0, "ran 1 1\n");
+}
+
+/// A multipart body `request_parse_body()` refuses part of the way
+/// through gives back every block its parse asked of the heap: the
+/// `RequestParseBodyException` thrown at `max_file_uploads` while a
+/// file part's name and filename are held, and the one thrown at
+/// `max_input_vars` while a field's name and value are held, leave the
+/// heap as the request found it, so a debug engine's leak sensor names
+/// nothing at the request's end. The messages are php-cgi 8.5.12's for
+/// the same two `PUT` bodies under `-d max_file_uploads=1` and `-d
+/// max_input_vars=1` (php-src's `multipart_max_files.phpt` and
+/// `multipart_max_input_vars.phpt`).
+#[test]
+fn a_body_parse_refused_by_a_limit_gives_back_what_its_part_held() {
+    let program = "<?php try { [$_POST, $_FILES] = parse_body(); } catch (RequestParseBodyException $e) { echo $e->getMessage(), \"\\n\"; } echo $_POST === [] && $_FILES === [] ? 'none' : 'some', \"\\n\";";
+    let multipart = "multipart/form-data; boundary=b";
+    let engine = Engine::cli_builder()
+        .ini("max_file_uploads", "1")
+        .extensions(&[input()])
+        .build();
+    let files = b"--b\r\nContent-Disposition: form-data; name=\"file1\"; filename=\"file1.txt\"\r\nContent-Type: text/plain\r\n\r\nfile data\r\n--b\r\nContent-Disposition: form-data; name=\"file2\"; filename=\"file2.txt\"\r\nContent-Type: text/plain\r\n\r\nfile data\r\n--b--\r\n";
+    assert_eq!(
+        sent(&engine, Method::Put, multipart, files, program).0,
+        "Maximum number of allowable file uploads has been exceeded\nnone\n"
+    );
+    let engine = Engine::cli_builder()
+        .ini("max_input_vars", "1")
+        .extensions(&[input()])
+        .build();
+    let fields = b"--b\r\nContent-Disposition: form-data; name=\"field1\"\r\n\r\npost field data\r\n--b\r\nContent-Disposition: form-data; name=\"field2\"\r\n\r\npost field data\r\n--b--\r\n";
+    assert_eq!(
+        sent(&engine, Method::Put, multipart, fields, program).0,
+        "Input variables exceeded 1. To increase the limit change max_input_vars in php.ini.\nnone\n"
+    );
 }
 
 /// `file_uploads` and `enable_post_data_reading` are `OnUpdateBool` in

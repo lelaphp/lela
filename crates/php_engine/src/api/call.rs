@@ -424,6 +424,23 @@ pub(crate) fn call_made(
     serve(req, callable.target(), arguments, &[])
 }
 
+/// [`call_made`] where php calls the callee's C directly rather than
+/// through `zend_call_function`: a native function served past the
+/// memory limit's refusal of every call once it was met
+/// ([`Request::serve_function_from_c`]); any other callee as
+/// [`call_made`] serves it.
+pub(crate) fn call_made_from_c(
+    req: &mut Request,
+    callable: &Callable,
+    arguments: &[Value],
+) -> Result<Value, Thrown> {
+    let served = match callable.target() {
+        Target::Function(function) => req.serve_function_from_c(function, arguments),
+        target => return serve(req, target, arguments, &[]),
+    };
+    without_frame(req, served)
+}
+
 /// `zend_call_function` with named arguments after the positional ones,
 /// as its walk of `fci->named_params` places them
 /// (`Z/Zend/zend_execute_API.c:894`): each one at the offset the callee
@@ -1866,6 +1883,28 @@ pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
     req.function_named(Bare::of(name))
 }
 
+/// `zend_fetch_function` (`Z/Zend/zend_execute.c:4468`): the function
+/// [`lookup_function`] finds, its runtime cache laid down where the
+/// request has not yet, as php lays it for a reflector made over the
+/// function by name (`ReflectionFunction::__construct`,
+/// `ReflectionParameter::__construct`), so a closure made from it
+/// shares the cache, as one made by `g(...)` does:
+///
+/// ```php
+/// function g($o) { return $o->a . $o->b . $o->c . $o->d; }
+/// $m = memory_get_usage(); $c = (new ReflectionFunction('g'))->getClosure();
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 384
+/// ```
+///
+/// The `Err` is the memory limit's fatal.
+pub fn fetch_function(req: &mut Request, name: &[u8]) -> Result<Option<Function>, Thrown> {
+    let fetched = req.fetch_function(Bare::of(name));
+    req.fatal_of(fetched)
+}
+
 /// The `static` variables of what `callable` names, name and value in the
 /// order the op array's table holds them, as
 /// `ReflectionFunctionAbstract::getStaticVariables` copies
@@ -3156,14 +3195,18 @@ fn function_callable(
         };
         return crate::classes::closure_from_frame(req, frame).map(|made| made.as_value());
     }
-    let found = req.function_named(name.into()).or_else(|| {
-        if name_kind == php_unit::decl::NameKind::FullyQualified {
-            return None;
-        }
-        let at = name.0.iter().rposition(|b| *b == b'\\')?;
-        req.function_named(Bare::resolved(name.0.get(at + 1..)?))
-    });
-    let Some(function) = found else {
+    // `zend_fetch_function` (`Z/Zend/zend_ast.c:1074`), which lays the
+    // function's runtime cache down as it finds it, by the name and then,
+    // unqualified, by its last segment.
+    let mut found = req.fetch_function(name.into());
+    if matches!(found, Ok(None))
+        && name_kind != php_unit::decl::NameKind::FullyQualified
+        && let Some(tail) =
+            (name.0.iter().rposition(|b| *b == b'\\')).and_then(|at| name.0.get(at + 1..))
+    {
+        found = req.fetch_function(Bare::resolved(tail));
+    }
+    let Some(function) = req.fatal_of(found)? else {
         return Err(undefined_function(req, &name.0));
     };
     req.keep_callable(unit, at, function);

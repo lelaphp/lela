@@ -53,7 +53,7 @@ impl From<CompileError> for Unfolded {
     fn from(refused: CompileError) -> Unfolded {
         match refused.raise {
             Raise::Unread => Unfolded::Unread(refused),
-            Raise::Fatal | Raise::Thrown => Unfolded::Refused(refused),
+            Raise::Fatal | Raise::Thrown | Raise::HardLimit { .. } => Unfolded::Refused(refused),
         }
     }
 }

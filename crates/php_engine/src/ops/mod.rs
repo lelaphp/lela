@@ -58,17 +58,11 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             req.addref(value);
             Ok(s)
         }
-        // `zend_long_to_str` and `zend_double_to_str` mark what they
-        // make valid UTF-8, the digits being ASCII.
-        ValueRef::Int(n) => req
-            .string(crate::c_number::Long::of(n).as_bytes())
-            .inspect(PhpString::mark_valid_utf8),
+        ValueRef::Int(n) => long_to_str(req, n),
         ValueRef::Float(f) => {
-            // `zend_double_to_str`: the text, then the warning php raises
-            // when the value it converted was NAN.
-            let text =
-                req.string(double_to_string(f, req.ini().precision(), Exponent::Upper).as_bytes())?;
-            text.mark_valid_utf8();
+            // The text, then the warning php raises when the value it
+            // converted was NAN.
+            let text = double_to_str(req, f)?;
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to string");
             }
@@ -87,6 +81,58 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             req.string(b"")
         }
     }
+}
+
+/// `zend_long_to_str` (`Z/Zend/zend_operators.c:3532`): a digit is the
+/// process's interned string of it (`ZSTR_CHAR`), and any other long its
+/// digits laid in a buffer on the stack and copied into one string of
+/// the request's (`zend_string_init`), marked valid UTF-8 as php marks
+/// it. So `7` costs nothing and `-7` a string. The `Err` is the memory
+/// limit.
+///
+/// ```php
+/// $n = [1234567, 7, -7, 10, PHP_INT_MIN];
+/// $before = memory_get_usage(); $s = (string) $n[0]; $t = (string) $n[1]; $u = (string) $n[2]; $v = (string) $n[3]; $w = (string) $n[4];
+/// echo $s, "|", $t, "|", $u, "|", $v, "|", $w, "|", memory_get_usage() - $before, "\n";
+/// debug_zval_dump($t, $u);
+/// ```
+/// ```expect
+/// 1234567|7|-7|10|-9223372036854775808|176
+/// string(1) "7" interned
+/// string(2) "-7" refcount(2)
+/// ```
+pub(crate) fn long_to_str(req: &mut Request, n: i64) -> Result<PhpString, Thrown> {
+    if let Ok(digit @ 0..=9) = u8::try_from(n) {
+        return req.string(&[b'0' + digit]);
+    }
+    req.string_init(php_heap::LongText::long(n).as_bytes())
+        .inspect(PhpString::mark_valid_utf8)
+}
+
+/// `zend_double_to_str` (`Z/Zend/zend_operators.c:3616`): `zend_gcvt` at
+/// `precision ? precision : 1` into a buffer on the stack, copied into
+/// one string of the request's (`zend_string_init`) whatever its length,
+/// so a float that prints as one character is a string of its own where
+/// the int of that digit is the interned one, and marked valid UTF-8.
+/// The warning php raises after it for a NAN is its caller's. Kept out
+/// of line, so the buffer's room is taken only where a double is
+/// converted. The `Err` is the memory limit.
+///
+/// ```php
+/// $f = [1.47, 1e100, 2.0, 0.0, -0.0];
+/// $before = memory_get_usage(); $s = (string) $f[0]; $t = (string) $f[1]; $u = (string) $f[2]; $v = (string) $f[3]; $w = (string) $f[4];
+/// echo $s, "|", $t, "|", $u, "|", $v, "|", $w, "|", memory_get_usage() - $before, "\n";
+/// debug_zval_dump($u, $v);
+/// ```
+/// ```expect
+/// 1.47|1.0E+100|2|0|-0|200
+/// string(1) "2" refcount(2)
+/// string(1) "0" refcount(2)
+/// ```
+#[inline(never)]
+pub(crate) fn double_to_str(req: &mut Request, f: f64) -> Result<PhpString, Thrown> {
+    req.string_init(double_to_string(f, req.ini().precision(), Exponent::Upper).as_bytes())
+        .inspect(PhpString::mark_valid_utf8)
 }
 
 /// `zval_get_string_func` over an object: its class's `cast_object`
@@ -2949,12 +2995,13 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// int(14000)
 /// ```
 ///
-/// An append the limit refuses leaves each place holding the string it
-/// held, as php's `zend_string_extend` leaves it, for the shutdown
-/// functions to read: a class's property, an array's element, a declared
-/// property and a reference's cell, as a variable
-/// (`php_heap`'s `Mm::realloc_huge`). A left side converted to a string
-/// had its place `null`ed before the append, and it stays `null`:
+/// An append past the limit is served, since php 8.5.12, and leaves each
+/// place holding the grown string, which the shutdown functions read
+/// after the fatal the end of the program raises: a class's property, an
+/// array's element, a declared property and a reference's cell, as a
+/// variable (`php_heap`'s `Mm::realloc_huge`), each grown where it stands
+/// by the difference or moved by the whole rounding. A left side converted
+/// to a string is written with the grown string:
 ///
 /// ```php
 /// ini_set('memory_limit', '7M');
@@ -2964,8 +3011,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// C::$s .= C::$s;
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
-/// int(3000000)
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6012928 bytes) in %s on line 6
+/// int(6000000)
 /// ```
 ///
 /// ```php
@@ -2975,8 +3022,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// $a['k'] .= $a['k'];
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
-/// int(3000000)
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6012928 bytes) in %s on line 5
+/// int(6000000)
 /// ```
 ///
 /// ```php
@@ -2987,8 +3034,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// $o->p .= $o->p;
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
-/// int(3000000)
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6012928 bytes) in %s on line 6
+/// int(6000000)
 /// ```
 ///
 /// ```php
@@ -2998,8 +3045,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// $r .= $r;
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
-/// int(3000000)
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 2998272 bytes) in %s on line 5
+/// int(6000000)
 /// ```
 ///
 /// ```php
@@ -3009,8 +3056,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// $n .= $t;
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 3000032 bytes) in %s on line %d
-/// NULL
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 5
+/// string(3000002) "12%s"
 /// ```
 pub(crate) fn concat_assign(
     req: &mut Request,
@@ -5908,8 +5955,8 @@ fn dval_to_lval_cap(d: f64) -> i64 {
 /// A double as php's `%H` renders it in a message: `zend_gcvt` at the
 /// shortest digits, which is [`double_to_string`] under
 /// `serialize_precision`'s -1.
-fn rendered(d: f64) -> String {
-    String::from_utf8_lossy(double_to_string(d, -1, Exponent::Upper).as_bytes()).into_owned()
+fn rendered(d: f64) -> php_heap::DoubleText {
+    double_to_string(d, -1, Exponent::Upper)
 }
 
 /// `ZEND_DOUBLE_FITS_LONG` on a 64-bit long: `(double) ZEND_LONG_MAX`

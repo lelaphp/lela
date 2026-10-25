@@ -111,8 +111,8 @@ fn an_extension_is_interrupted_at_the_period_it_asked_for() {
 /// ADR-0010: nothing of a periodic interrupt outlives the request that
 /// asked for it, though the extension never stopped it: by the time
 /// `rshutdown` is served the engine's schedule has let go of the
-/// request's interrupt, leaving the request, its deadlines and the
-/// sampler's own clone; once the request is gone the sampler's clone is
+/// request's interrupt, leaving the request, its deadlines, its heap,
+/// which raises it at a delayed OOM, and the sampler's own clone; once the request is gone the sampler's clone is
 /// the only one left, and the engine's timer thread waits parked for the
 /// next request with nothing scheduled (#2541), joined only before a
 /// fork and at the engine's end.
@@ -124,8 +124,8 @@ fn nothing_of_a_periodic_outlives_the_request_that_asked() {
     let mut seen = noted(&SEEN);
     assert!(!seen.periods.is_empty(), "the sampler was served");
     assert_eq!(
-        seen.at_rshutdown, 3,
-        "the request, its deadlines, the sampler"
+        seen.at_rshutdown, 4,
+        "the request, its deadlines, its heap, the sampler"
     );
     let holders = seen.interrupt.take().map(|interrupt| interrupt.holders());
     assert_eq!(holders, Some(1), "the sampler's clone alone");

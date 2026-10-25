@@ -53,7 +53,9 @@ CallStack
 ChunkCache
 ChunkCache::new
 DeclaredRows
+DelayedOom
 Direction
+DoubleText
 EmbeddedArr
 EmbeddedArr::arr
 EmbeddedArr::free_data
@@ -65,6 +67,7 @@ FakeRoom
 FakeRoom::new
 Fatal
 Fatal::error
+Fatal::hard_limit
 Fatal::into_reason
 Fatal::out_of_memory
 Fatal::reason
@@ -124,9 +127,11 @@ Heap::array_take_at
 Heap::array_update
 Heap::block
 Heap::block_resize
+Heap::block_try_resize
 Heap::call_destructors
 Heap::carve
 Heap::close_resources
+Heap::delayed_oom
 Heap::dup_value
 Heap::fast_shutdown
 Heap::fatal_leaving
@@ -141,6 +146,7 @@ Heap::gc_mem_caches
 Heap::gc_protect
 Heap::gc_startup
 Heap::gc_status
+Heap::has_oom
 Heap::holds
 Heap::in_memory_limit_error
 Heap::iterator_add
@@ -156,6 +162,7 @@ Heap::iterators_carry
 Heap::iterators_lower_pos
 Heap::iterators_update
 Heap::lend
+Heap::locate_oom
 Heap::mark_destructed
 Heap::memory_limit
 Heap::memory_peak
@@ -180,8 +187,8 @@ Heap::object_take_properties
 Heap::object_with
 Heap::objects
 Heap::observe_allocations
+Heap::oom_handled
 Heap::origin
-Heap::overflow_rendered
 Heap::pin_block
 Heap::proptable_to_symtable
 Heap::reference
@@ -193,6 +200,7 @@ Heap::release_kept
 Heap::release_nogc
 Heap::release_nogc_kept
 Heap::release_string
+Heap::reset_oom
 Heap::reset_peak
 Heap::resource
 Heap::resource_at
@@ -206,6 +214,8 @@ Heap::resource_with
 Heap::resources
 Heap::sense_leaks
 Heap::separate
+Heap::set_fallible
+Heap::set_memory_hard_limit_percent
 Heap::set_memory_limit
 Heap::set_origin
 Heap::stored
@@ -221,11 +231,14 @@ Heap::string_truncate
 Heap::string_with
 Heap::symtable_clean
 Heap::symtable_to_proptable
+Heap::take_pending_oom
+Heap::take_refused
 Heap::take_sensed
 Heap::trace_allocations
 Heap::unobserve_allocations
 Heap::unpin
 Heap::unpin_block
+Heap::wake_on_oom
 HeapHooks
 HeapHooks::destruct
 HeapHooks::forget_lazy
@@ -261,6 +274,8 @@ Intern::intern_marked
 Intern::interning
 Key
 Laziness
+LongText
+LongText::long
 Made
 Made::value
 MapPtr
@@ -274,6 +289,10 @@ MapTable::new
 Number
 Number::compare
 Number::double
+NumberText
+NumberText::as_bytes
+NumberText::as_str
+NumberText::push_str
 Obj
 Obj::CLASS_AT
 Obj::SLOTS_AT
@@ -316,6 +335,7 @@ Pending::constant_array
 Pending::give_back
 Pending::hold
 Pending::intern
+PendingOom
 PropBit
 PropertyTable
 PropertyTable::backward

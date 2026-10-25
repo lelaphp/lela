@@ -79,6 +79,11 @@ pub(super) fn encode(
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
+    // `FAILURE` once the memory limit was met, since 8.5.12, the limit's
+    // fatal raised as the call returns.
+    if req.memory().has_oom() {
+        return Ok(false);
+    }
     let value = value.deref();
     match value.as_ref() {
         ValueRef::Object(object) => {
@@ -243,13 +248,28 @@ fn escape_string(
         }
     }
     let checkpoint = buf.as_bytes().len();
-    buf.reserve(req, s.len().saturating_add(2))?;
+    // `smart_str_falloc(buf, len + 2, 0, fallible: true)` since 8.5.12:
+    // `FAILURE` where the memory limit refused the room.
+    if req
+        .memory_mut()
+        .fallible(|req| buf.reserve(req, s.len().saturating_add(2)))?
+        .is_none()
+    {
+        return Ok(false);
+    }
     buf.append(req, b"\"")?;
     let (mut at, mut run) = (0, 0);
     while let Some(&byte) = s.get(at) {
         if !escaped(byte) {
             at += 1;
             continue;
+        }
+        // "An escaped byte can append six": `FAILURE` once the memory
+        // limit was met, the buffer cut back to where the string began,
+        // since 8.5.12.
+        if req.memory().has_oom() {
+            buf.remove(checkpoint..usize::MAX);
+            return Ok(false);
         }
         buf.append(req, s.get(run..at).unwrap_or_default())?;
         if byte < 0x80 {
@@ -797,7 +817,9 @@ fn write_row(
     *comma = true;
     pretty_break(req, buf, options, enc)?;
     if as_object {
-        write_key(req, buf, key, options, enc)?;
+        if !write_key(req, buf, key, options, enc)? {
+            return Ok(false);
+        }
         buf.append(
             req,
             if options & JSON_PRETTY_PRINT != 0 {
@@ -813,7 +835,8 @@ fn write_row(
 /// One key of an object: the string escaped with `JSON_NUMERIC_CHECK`
 /// taken off it, and an integer key quoted as php's
 /// `smart_str_append_long` between two quotes. A call of its own, as
-/// [`encode_scalar`] is.
+/// [`encode_scalar`] is. `false` where the key failed to escape once the
+/// memory limit was met, and the walk stops there, since 8.5.12.
 #[inline(never)]
 fn write_key(
     req: &mut Request,
@@ -821,7 +844,7 @@ fn write_key(
     key: &Key,
     options: i64,
     enc: &mut Encoder,
-) -> Result<(), Thrown> {
+) -> Wrote {
     match key {
         Key::Str(name) => {
             let at = buf.as_bytes().len();
@@ -832,13 +855,19 @@ fn write_key(
                 options & !JSON_NUMERIC_CHECK,
                 enc,
             )?;
+            if !wrote && req.memory().has_oom() {
+                return Ok(false);
+            }
             if !wrote && options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
                 buf.remove(at..usize::MAX);
                 buf.append(req, b"\"\"")?;
             }
-            Ok(())
+            Ok(true)
         }
-        Key::Int(n) => buf.append(req, format!("\"{n}\"").as_bytes()),
+        Key::Int(n) => {
+            buf.append(req, format!("\"{n}\"").as_bytes())?;
+            Ok(true)
+        }
     }
 }
 

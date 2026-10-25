@@ -86,8 +86,31 @@ pub(crate) fn guess(raw: &[u8]) -> Enc {
 }
 
 /// The UTF-8 half of `_zip_guess_encoding`: lead bytes of two to four
-/// bytes, each followed by its trailing `10xxxxxx` bytes.
+/// bytes, each followed by its trailing `10xxxxxx` bytes, and the code
+/// point they make neither overlong, a surrogate half nor past U+10FFFF,
+/// as libzip 1.12 holds it.
+///
+/// ```php
+/// $z = new ZipArchive; $z->open('utf8-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+/// $names = ["caf\xc3\xa9", "over\xc0\xaf", "half\xed\xa0\x80", "past\xf4\x90\x80\x80", "four\xf0\x9f\x98\x80"];
+/// foreach ($names as $n) $z->addFromString($n, '1');
+/// $z->close(); $z->open('utf8-witness.zip');
+/// for ($i = 0; $i < $z->numFiles; $i++) echo bin2hex($z->getNameIndex($i)), ' ', bin2hex($z->getNameIndex($i, ZipArchive::FL_ENC_RAW)), "\n";
+/// $b = file_get_contents('utf8-witness.zip'); $f = [];
+/// for ($at = 0; ($at = strpos($b, "PK\1\2", $at)) !== false; $at += 4) $f[] = unpack('v', $b, $at + 8)[1] & 0x800 ? 'utf8' : 'cp437';
+/// echo implode(' ', $f), "\n"; $z->close(); unlink('utf8-witness.zip');
+/// ```
+/// ```expect
+/// 636166c3a9 636166c3a9
+/// 6f766572e29494c2bb 6f766572c0af
+/// 68616c66cf86c3a1c387 68616c66eda080
+/// 70617374e28ca0c389c387c387 70617374f4908080
+/// 666f7572f09f9880 666f7572f09f9880
+/// utf8 cp437 cp437 cp437 utf8
+/// ```
 fn can_be_utf8(raw: &[u8]) -> bool {
+    /// `_utf8_minimum_code_point`, by the count of trailing bytes.
+    const MINIMUM: [u32; 4] = [0, 0x80, 0x800, 0x1_0000];
     let mut i = 0;
     while i < raw.len() {
         let b = raw[i];
@@ -95,19 +118,29 @@ fn can_be_utf8(raw: &[u8]) -> bool {
             i += 1;
             continue;
         }
-        let ulen = if b & 0xe0 == 0xc0 {
-            1
+        let (ulen, lead) = if b & 0xe0 == 0xc0 {
+            (1, b & 0x1f)
         } else if b & 0xf0 == 0xe0 {
-            2
+            (2, b & 0x0f)
         } else if b & 0xf8 == 0xf0 {
-            3
+            (3, b & 0x07)
         } else {
             return false;
         };
         if i + ulen >= raw.len() {
             return false;
         }
-        if raw[i + 1..=i + ulen].iter().any(|c| c & 0xc0 != 0x80) {
+        let mut codepoint = u32::from(lead);
+        for c in &raw[i + 1..=i + ulen] {
+            if c & 0xc0 != 0x80 {
+                return false;
+            }
+            codepoint = (codepoint << 6) | u32::from(c & 0x3f);
+        }
+        if codepoint < MINIMUM[ulen]
+            || (0xd800..=0xdfff).contains(&codepoint)
+            || codepoint > 0x10_ffff
+        {
             return false;
         }
         i += ulen + 1;

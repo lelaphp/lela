@@ -44,6 +44,24 @@ pub enum FatalReason {
     Error(String),
     /// The memory limit, with the bytes that were asked for.
     OutOfMemory(usize),
+    /// php 8.5.12's hard limit (`zend_mm_hard_limit_error`,
+    /// `Z/Zend/zend_alloc.c:162`): an allocation past it ends the
+    /// process where it stands, `_exit(137)`, with no shutdown of any
+    /// kind, and nothing but one line on the standard error, which names
+    /// the hard limit and the bytes that were asked for.
+    HardLimit {
+        /// `heap->hard_limit`.
+        limit: usize,
+        /// The bytes past what the chunks held.
+        asked: usize,
+    },
+    /// A fallible allocation the soft limit refused, php's `NULL` from
+    /// `_femalloc` with the delayed OOM left pending: no end of the
+    /// request, but the `Err` that carries the refusal out of the
+    /// allocation to the fallible scope that asked
+    /// ([`crate::Heap::set_fallible`]), which reads it as php's
+    /// `RETURN_OOM`.
+    Refused,
 }
 
 impl Fatal {
@@ -59,6 +77,21 @@ impl Fatal {
     #[must_use]
     pub fn out_of_memory(bytes: usize) -> Fatal {
         Fatal(Box::new(FatalReason::OutOfMemory(bytes)))
+    }
+
+    /// The hard limit met asking for `asked` bytes
+    /// ([`FatalReason::HardLimit`]).
+    #[cold]
+    #[must_use]
+    pub fn hard_limit(limit: usize, asked: usize) -> Fatal {
+        Fatal(Box::new(FatalReason::HardLimit { limit, asked }))
+    }
+
+    /// A fallible allocation refused ([`FatalReason::Refused`]).
+    #[cold]
+    #[must_use]
+    pub(crate) fn refused() -> Fatal {
+        Fatal(Box::new(FatalReason::Refused))
     }
 
     /// Why the request ends.

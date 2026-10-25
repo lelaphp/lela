@@ -1193,16 +1193,18 @@ fn append_double(
             } else {
                 Exponent::Lower
             };
-            let mut text = float_format(
+            let text = float_format(
                 number,
                 i32::try_from(precision).unwrap_or(i32::MAX),
                 exponent,
             );
             let negative = text.starts_with('-');
-            if !negative && spec.always_sign {
-                text.insert(0, '+');
-            }
-            (text, negative)
+            let signed = if !negative && spec.always_sign {
+                format!("+{text}")
+            } else {
+                text.as_str().to_owned()
+            };
+            (signed, negative)
         }
     };
     // `LCONV_DECIMAL_POINT` for `f`, `g` and `G`, the request's

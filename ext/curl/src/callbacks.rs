@@ -155,10 +155,16 @@ pub(crate) fn write(cx: &mut Cx<'_>, object: PhpObject, data: &[u8]) -> usize {
             let stream = curl.write.stream();
             to_stream(cx.req, stream, data)
         }
-        WriteTo::Return => {
-            curl.returned.extend_from_slice(data);
-            data.len()
-        }
+        // `CURL_WRITEFUNC_ERROR` where the memory limit refused the
+        // room, since 8.5.12; the transfer ends in `CURLE_WRITE_ERROR`.
+        WriteTo::Return => match crate::handle::keep(cx.req, object, data) {
+            Ok(true) => data.len(),
+            Ok(false) => 0xFFFF_FFFF,
+            Err(thrown) => {
+                cx.raise(thrown);
+                0xFFFF_FFFF
+            }
+        },
         WriteTo::User => user_write(cx, object, false, data),
     }
 }

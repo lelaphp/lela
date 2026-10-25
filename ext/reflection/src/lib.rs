@@ -5580,7 +5580,9 @@ fn value_string(req: &mut Request, value: &Value) -> String {
     match value.deref().as_ref() {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
-        ValueRef::Float(number) => float_format(number, req.ini().precision(), Exponent::Upper),
+        ValueRef::Float(number) => float_format(number, req.ini().precision(), Exponent::Upper)
+            .as_str()
+            .to_owned(),
         _ => php_ext::coerce::with_string(req, value, |s| String::from_utf8_lossy(s).into_owned())
             .unwrap_or_default(),
     }

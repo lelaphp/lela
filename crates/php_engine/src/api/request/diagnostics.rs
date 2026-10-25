@@ -234,7 +234,10 @@ impl Request {
     /// ```
     ///
     /// phpdbg's prompt inside a fatal's log is inside the guard, so the
-    /// warnings what `ev` serves there raises are not logged:
+    /// warnings what `ev` serves there raises are not logged. The fatal is
+    /// the memory limit's, which php 8.5.12 raises after `str_repeat`
+    /// refused its string fallibly, so `$s` is the empty string and the
+    /// program runs on once phpdbg is told to continue:
     ///
     /// ```php
     /// ini_set("log_errors", "1"); ini_set("display_errors", "0"); ini_set("memory_limit", "2M");
@@ -250,12 +253,12 @@ impl Request {
     /// ```
     /// ```expect exit=255
     /// [Successful compilation of %SCRATCH%/witness.php]
-    /// prompt> [PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %SCRATCH%/witness.php on line 3]
+    /// prompt> [PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %SCRATCH%/witness.php on line 3]
     /// >00003: $s = str_repeat("x", 4 << 20);
     ///  00004: echo "after\n";
-    /// prompt>%s
-    /// prompt>%s
-    /// prompt> [Script ended normally]
+    /// prompt> prompt>%s
+    /// prompt> after
+    /// [Script ended normally]
     /// prompt>
     /// ```
     fn log_err(&mut self, entry: &[u8], priority: i32) -> bool {
@@ -621,6 +624,10 @@ impl Request {
         // trace is fetched for the fatal (`Z/Zend/zend.c:1503-1526`). An
         // object in the slot that is no `Throwable`, which no PHP code
         // leaves there, stays where it is.
+        // The unwind exit `zend_handle_delayed_oom` threw stands as php's
+        // `EG(exception)` while the limit's fatal is raised, and is no
+        // throwable to report (`Z/Zend/zend.c:1513` at 8.5.12).
+        let handling = *self.heap.delayed_oom() == php_heap::DelayedOom::Handling;
         if let Some(Raised::Throwable(pending)) = self.raised {
             let throwable = self
                 .class_named(Bare::resolved(b"Throwable"))
@@ -628,7 +635,10 @@ impl Request {
             if throwable && fatal_errors(level) {
                 self.exception_error(Level::Warning).ok();
             }
-        } else if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+        } else if (self.raised.is_none() || handling)
+            && self.fatal_error_backtraces()
+            && fatal_errors(level)
+        {
             self.diagnostics.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         // The string the native raised is its caller's; the one made of

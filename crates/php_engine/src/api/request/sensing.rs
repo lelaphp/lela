@@ -183,7 +183,11 @@ impl Request {
             php_heap::FatalReason::Error(message) => {
                 self.end_in_fatal_at(message, &code.filename.0, op.lineno);
             }
-            php_heap::FatalReason::OutOfMemory(_) => self.end_in(&sensed),
+            php_heap::FatalReason::OutOfMemory(_)
+            | php_heap::FatalReason::HardLimit { .. }
+            | php_heap::FatalReason::Refused => {
+                self.end_in(&sensed);
+            }
         }
         Err(sensed)
     }

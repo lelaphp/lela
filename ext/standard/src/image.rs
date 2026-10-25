@@ -463,15 +463,20 @@ struct Answer {
 /// `handlers` are the bundle's registered readers, which a file every
 /// fixed format refused after twelve bytes is handed to in turn
 /// (`Z/ext/standard/image.c:1468`).
-fn image_size(bytes: &[u8], want_info: bool, handlers: &[ImageHandler]) -> Answer {
+fn image_size(
+    req: &mut Request,
+    bytes: &[u8],
+    want_info: bool,
+    handlers: &[ImageHandler],
+) -> Result<Answer, Thrown> {
     let mut s = Stream::new(bytes);
     let mut warnings = Vec::new();
     let mut segments = Vec::new();
-    let (itype, unmatched) = get_image_type(&mut s, &mut warnings);
+    let (itype, unmatched) = get_image_type(req, &mut s, &mut warnings);
     if unmatched {
         for (at, handler) in (TYPE_FIXED_COUNT..).zip(handlers) {
             if let Some(size) = (handler.read)(bytes) {
-                return Answer {
+                return Ok(Answer {
                     data: Some(ImageData {
                         width: size.width,
                         height: size.height,
@@ -484,7 +489,7 @@ fn image_size(bytes: &[u8], want_info: bool, handlers: &[ImageHandler]) -> Answe
                     }),
                     segments,
                     warnings,
-                };
+                });
             }
         }
     }
@@ -496,7 +501,7 @@ fn image_size(bytes: &[u8], want_info: bool, handlers: &[ImageHandler]) -> Answe
         }
         IMAGETYPE_PNG => handle_png(&mut s),
         IMAGETYPE_SWF => handle_swf(&mut s),
-        IMAGETYPE_SWC => handle_swc(&mut s),
+        IMAGETYPE_SWC => handle_swc(req, &mut s)?,
         IMAGETYPE_PSD => handle_psd(&mut s),
         IMAGETYPE_BMP => handle_bmp(&mut s),
         IMAGETYPE_TIFF_II => handle_tiff(&mut s, false),
@@ -505,7 +510,7 @@ fn image_size(bytes: &[u8], want_info: bool, handlers: &[ImageHandler]) -> Answe
         IMAGETYPE_JP2 => handle_jp2(&mut s, &mut warnings),
         IMAGETYPE_IFF => handle_iff(&mut s),
         IMAGETYPE_WBMP => get_wbmp(&mut s, true),
-        IMAGETYPE_XBM => get_xbm(&mut s),
+        IMAGETYPE_XBM => get_xbm(req, &mut s),
         IMAGETYPE_ICO => handle_ico(&mut s),
         IMAGETYPE_WEBP => handle_webp(&mut s),
         IMAGETYPE_AVIF => handle_avif(&mut s),
@@ -518,7 +523,7 @@ fn image_size(bytes: &[u8], want_info: bool, handlers: &[ImageHandler]) -> Answe
         }
         _ => None,
     };
-    Answer {
+    Ok(Answer {
         data: gfx.map(|g| ImageData {
             width: g.width,
             height: g.height,
@@ -531,7 +536,7 @@ fn image_size(bytes: &[u8], want_info: bool, handlers: &[ImageHandler]) -> Answe
         }),
         segments,
         warnings,
-    }
+    })
 }
 
 /// `struct php_image_handler` (`Z/ext/standard/php_image.h`): an image type
@@ -669,7 +674,7 @@ fn extension(image_type: i64) -> Option<&'static str> {
 /// where php asks each `php_image_register_handler` handler in turn
 /// (`Z/ext/standard/image.c:1468`), which [`image_size`] does with the
 /// bundle's registered [`ImageHandler`]s.
-fn get_image_type(s: &mut Stream<'_>, w: &mut Vec<Warning>) -> (i64, bool) {
+fn get_image_type(req: &Request, s: &mut Stream<'_>, w: &mut Vec<Warning>) -> (i64, bool) {
     let mut ft = [0u8; 12];
     if s.read(&mut ft[..3]) != 3 {
         w.push(Warning::ErrorReading);
@@ -748,7 +753,7 @@ fn get_image_type(s: &mut Stream<'_>, w: &mut Vec<Warning>) -> (i64, bool) {
         w.push(Warning::ErrorReading);
         return (IMAGETYPE_UNKNOWN, false);
     }
-    if get_xbm(s).is_some() {
+    if get_xbm(req, s).is_some() {
         return (IMAGETYPE_XBM, false);
     }
     (IMAGETYPE_UNKNOWN, true)
@@ -986,12 +991,15 @@ fn uncompress(source: &[u8], dest_len: usize) -> (Z, Vec<u8>) {
 }
 
 /// `php_handle_swc`, `Z/ext/standard/image.c:159`: the SWF header behind a
-/// zlib stream.
-fn handle_swc(s: &mut Stream<'_>) -> Option<GfxInfo> {
+/// zlib stream. The `Err` is what the memory limit threw outside the
+/// fallible ask: the request's end.
+fn handle_swc(req: &mut Request, s: &mut Stream<'_>) -> Result<Option<GfxInfo>, Thrown> {
     if !s.seek_cur(5) {
-        return None;
+        return Ok(None);
     }
-    let a = s.read_exact::<64>()?;
+    let Some(a) = s.read_exact::<64>() else {
+        return Ok(None);
+    };
     // b is ecalloc(1, len + 1): 65 zero bytes.
     let mut b = [0u8; 65];
     let (first, got) = uncompress(&a, 64);
@@ -1004,33 +1012,58 @@ fn handle_swc(s: &mut Stream<'_>) -> Option<GfxInfo> {
         // `len` is what the failed first call wrote.
         let len = got.len();
         if !s.seek_set(8) {
-            return None;
+            return Ok(None);
         }
         let bufz = s.copy_rest();
-        // php retries with room for len * 2, 4, ... 32768 while the room is
-        // too small. A valid stream succeeds at the first room it fits and a
-        // bad one fails at every size, so one attempt with the largest room
-        // decides the same way. (php's Z_MEM_ERROR for a size past ULONG_MAX
-        // is the `None` of the multiplication.)
-        let szlength = bufz.len().checked_mul(1 << 15)?;
-        let (status, buf) = uncompress(bufz, szlength);
+        // php retries with room for the rest's length times 2, 4, ...
+        // 32768 while the room is too small, each room `buf` reallocated
+        // to, fallibly since 8.5.12 (`safe_ferealloc`): a room past the
+        // memory limit is refused and the image is no image, the
+        // limit's fatal raised as `getimagesize` returns.
+        let mut buf: Option<php::Emalloc> = None;
+        let mut factor: usize = 1;
+        let mut status;
+        let mut decoded = Vec::new();
+        loop {
+            factor <<= 1;
+            let Some(szlength) = bufz.len().checked_mul(factor) else {
+                // `ZSTR_LEN(bufz) > ULONG_MAX / factor`: Z_MEM_ERROR.
+                status = Z::DataError;
+                break;
+            };
+            let grown = req.memory_mut().fallible(|req| match buf.take() {
+                Some(held) => held.resize(req, szlength),
+                None => php::Emalloc::new(req, szlength),
+            })?;
+            let Some(grown) = grown else {
+                return Ok(None);
+            };
+            buf = Some(grown);
+            (status, decoded) = uncompress(bufz, szlength);
+            if status != Z::BufError || factor >= 1 << 15 {
+                break;
+            }
+        }
         if status == Z::Ok
-            && let (Some(dst), Some(src)) = (b.get_mut(..len), buf.get(..len))
+            && let (Some(dst), Some(src)) = (b.get_mut(..len), decoded.get(..len))
         {
             dst.copy_from_slice(src);
+        }
+        if let Some(held) = buf {
+            held.free(req);
         }
         status
     };
     if status != Z::Ok {
-        return None;
+        return Ok(None);
     }
     let (width, height) = swf_rect(&b);
-    Some(GfxInfo {
+    Ok(Some(GfxInfo {
         width,
         height,
         bits: 0,
         channels: 0,
-    })
+    }))
 }
 
 /// `php_handle_png`, `Z/ext/standard/image.c:271`.
@@ -1453,13 +1486,18 @@ fn scan_define(line: &[u8]) -> Option<(&[u8], i32)> {
 
 /// `php_get_xbm`, `Z/ext/standard/image.c:994`, which also serves as
 /// `php_handle_xbm` (image.c:1053).
-fn get_xbm(s: &mut Stream<'_>) -> Option<GfxInfo> {
+fn get_xbm(req: &Request, s: &mut Stream<'_>) -> Option<GfxInfo> {
     if !s.rewind() {
         return None;
     }
     let mut width: u32 = 0;
     let mut height: u32 = 0;
     while let Some(line) = s.gets() {
+        // "The line is bounded by the stream, and iname duplicates it":
+        // php 8.5.12 reads no line once the memory limit was met.
+        if req.memory().has_oom() {
+            break;
+        }
         if let Some((name, value)) = scan_define(line) {
             let kind = match name.iter().rposition(|&b| b == b'_') {
                 Some(i) => name.get(i + 1..).unwrap_or(&[]),
@@ -1703,7 +1741,7 @@ fn raise_all(req: &mut Request, warnings: &[Warning], shown: &[u8]) {
 pub fn php_getimagetype(req: &mut Request, bytes: &[u8], input: &[u8]) -> i64 {
     let mut s = Stream::new(bytes);
     let mut warnings = Vec::new();
-    let (itype, unmatched) = get_image_type(&mut s, &mut warnings);
+    let (itype, unmatched) = get_image_type(req, &mut s, &mut warnings);
     raise_all(req, &warnings, input);
     if unmatched {
         let handlers: Vec<ImageHandler> = req.registered::<ImageHandler>().copied().collect();
@@ -1735,7 +1773,7 @@ fn answer(
 ) -> Result<OrFalse<php::Owner<php::PhpArray>>, Thrown> {
     let want_info = image_info.is_given();
     let handlers: Vec<ImageHandler> = req.registered::<ImageHandler>().copied().collect();
-    let found = image_size(bytes, want_info, &handlers);
+    let found = image_size(req, bytes, want_info, &handlers)?;
     raise_all(req, &found.warnings, shown);
     if want_info {
         let mut info = php::PhpArray::new(req)?;
@@ -1881,6 +1919,23 @@ fn getimagesize(
 /// array(0) {
 /// }
 /// bool(false)
+/// ```
+///
+/// A compressed SWF whose header did not inflate into 64 bytes is
+/// inflated whole into a room twice the rest's length, then four times,
+/// up to 32768 times, each room reallocated fallibly since 8.5.12: the
+/// room past the memory limit is refused, the image is no image, and the
+/// limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $d = deflate_init(ZLIB_ENCODING_DEFLATE, ['level' => 9]); $z = '';
+/// for ($i = 0; $i < 32; $i++) $z .= deflate_add($d, str_repeat('A', 1 << 20), $i === 31 ? ZLIB_FINISH : ZLIB_NO_FLUSH);
+/// var_dump(getimagesizefromstring("CWS\x06" . pack('V', 8 + (32 << 20)) . $z), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4177920 bytes) in %s on line 5
 /// ```
 #[php_function]
 fn getimagesizefromstring(

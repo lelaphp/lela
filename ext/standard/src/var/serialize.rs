@@ -371,11 +371,7 @@ fn write(
         ValueRef::Int(n) => write_long(out, n),
         ValueRef::Float(f) => {
             out.extend_from_slice(b"d:");
-            // `zend_gcvt` at `serialize_precision` as the entry stands,
-            // with no `precision ? precision : 1` of its own.
-            out.extend_from_slice(
-                gcvt(f, req.ini().serialize_precision(), Exponent::Upper).as_bytes(),
-            );
+            write_double(out, f, req.ini().serialize_precision());
             out.push(b';');
         }
         ValueRef::Str(s) => write_string(out, s.as_bytes()),
@@ -942,4 +938,14 @@ fn sleep_props(
             Err(thrown)
         }
     }
+}
+
+/// The `d:` arm's text: `zend_gcvt` at `serialize_precision` as the
+/// entry stands, with no `precision ? precision : 1` of its own. Out of
+/// line, so the buffer the text is laid in stands in this leaf's frame
+/// and not in every nesting level of [`write`], as php's `buf` stands in
+/// `smart_str_append_double`'s and not in `php_var_serialize_intern`'s.
+#[inline(never)]
+fn write_double(out: &mut Vec<u8>, f: f64, precision: i32) {
+    out.extend_from_slice(gcvt(f, precision, Exponent::Upper).as_bytes());
 }

@@ -33,7 +33,7 @@ apr = "1.7.6"
 apr-util = "1.6.5_1"
 argon2 = "20190702_1"
 autoconf = "2.73"
-brotli = "1.2.0"
+brotli = "1.2.1"
 ca-certificates = "2026-10-20"
 curl = "8.23.0"
 dav1d = "1.5.4"
@@ -67,7 +67,7 @@ m4 = "1.4.21"
 net-snmp = "5.9.5.2_2"
 oniguruma = "6.9.10"
 openldap = "2.7.1_1"
-"openssl@3" = "3.6.5"
+"openssl@3" = "3.5.9"
 "openssl@4" = "4.0.3"
 pcre2 = "10.49"
 readline = "8.3.6"
@@ -290,7 +290,7 @@ ini = ["cgi.fix_pathinfo=0"]
 # image's manifest digest the Linux build reproduces from (#1948); closure is the
 # digest of the [closure] the macOS build was made against (#2935)
 flags = ["--enable-zend-test"]
-darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e2419777e6eac85467d80117397de3c0", closure = "sha256:8163e22bca71ac7aabe9ede650d4b3284aa049c37cfeb7d115a75847b3f2ea1c" }
+darwin-arm64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e2419777e6eac85467d80117397de3c0", closure = "sha256:e32b9660456562fce097f05f282f8966cd6a6aed79aaefe9b7176e6e2c1128f0" }
 linux-x86_64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "12f5bd0b1ea2f2f3555640f974e8429a", image = "sha256:88a381d5b5eeb2b35d3ad70925a362c37ce569daf43ede89ff818ec20e4d3794" }
 linux-aarch64 = { path = "/opt/dax-php/oracle/zend-test/bin/php", md5 = "e02dd6c14fc0d045384be0b477b78a5d", image = "sha256:3ad1c71aa6b7e477f7aa91445a5442fbb163742849393b511661a88081c3d7a2" }
 

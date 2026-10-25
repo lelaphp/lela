@@ -255,7 +255,7 @@ fn a_request_ending_in_a_fatal_reports_nothing() {
     for (fatal, rendered) in [
         ("trigger_error('boom', E_USER_ERROR);", "Fatal error: boom"),
         (
-            "ini_set('memory_limit', '2M'); $s = 'x'; while (true) { $s .= $s; }",
+            "ini_set('memory_limit', '2M'); $t = 'x'; for ($i = 0; $i < 16; $i++) { $t .= $t; } $s = ''; while (true) { $s .= $t; }",
             "Fatal error: Allowed memory size of 2097152 bytes exhausted",
         ),
         (

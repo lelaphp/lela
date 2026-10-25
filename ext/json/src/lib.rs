@@ -349,6 +349,46 @@ fn depth_within(req: &mut Request, depth: i64, position: u32) -> Result<(), Thro
 /// 296 40
 /// 4312 640
 /// ```
+///
+/// Since 8.5.12 a string's room is asked for fallibly, and the encoder
+/// stops at its next value or escaped byte once the memory limit was
+/// met, so a buffer the limit refused, or one an escaped string, a value
+/// or a key has grown past it, ends the call with the limit's fatal as it
+/// returns rather than growing on to the hard limit. Each case crosses the
+/// limit where a new chunk is asked for, whose figure is the chunk's in any
+/// layout; a huge block's growth in place names a figure the address space
+/// decides, in php's process as in the engine's (#3442):
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $a = [str_repeat('a', 1200000), str_repeat('b', 1200000), str_repeat('c', 1200000)];
+/// $j = json_encode($a);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $j = json_encode(str_repeat("\0", 500000));
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $j = json_encode([str_repeat("\x01", 500000) => 1]);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn json_encode(
     req: &mut Request,
@@ -489,6 +529,33 @@ fn json_encode(
 /// ```
 /// ```expect
 /// json_decode(): Argument #1 ($json) must be of type string, null given
+/// ```
+///
+/// Since 8.5.12 an array, an object and an array's growth are asked for
+/// fallibly, as `array_finit`, `object_finit` and
+/// `zend_hash_next_index_finsert`: one the memory limit refuses is the
+/// parser's `YYERROR`, and the limit's fatal is raised as the call
+/// returns, rather than the values growing on to the hard limit:
+///
+/// ```php
+/// $j = '[' . str_repeat('[[]],', 1024 * 1024) . '[]]';
+/// ini_set('memory_limit', '10M');
+/// $a = json_decode($j);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 10485760 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '10M');
+/// $a = json_decode('[{}' . str_repeat(',{}', 1024 * 1024) . ']');
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 10485760 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn json_decode(

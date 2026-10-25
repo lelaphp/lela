@@ -73,7 +73,30 @@ impl Buffers {
 }
 
 /// `zlib.inflate`: the stream, ended and dropped once it reached its end,
-/// and the buffers, `None` once the dtor freed them.
+/// and the buffers, `None` once the dtor freed them. What inflating hands
+/// on is unbounded by what it is fed, so php 8.5.12 inflates no further
+/// once the memory limit was met (`ZEND_HAS_OOM()`), and twelve
+/// megabytes of zeros read through a four megabyte limit raise the soft
+/// limit's fatal after the read, short of the hard limit:
+///
+/// ```php
+/// $file = __DIR__ . '/oom_inflate.gz';
+/// $ctx = deflate_init(ZLIB_ENCODING_GZIP, ['level' => 9]);
+/// $chunk = str_repeat("\0", 65536);
+/// $gz = '';
+/// for ($i = 0; $i < 192; $i++) { $gz .= deflate_add($ctx, $chunk, ZLIB_NO_FLUSH); }
+/// $gz .= deflate_add($ctx, '', ZLIB_FINISH);
+/// file_put_contents($file, $gz);
+/// unset($gz, $chunk, $ctx);
+/// ini_set('memory_limit', '4M');
+/// $fp = fopen($file, 'rb');
+/// stream_filter_append($fp, 'zlib.inflate', STREAM_FILTER_READ, ['window' => 0x2f]);
+/// var_dump(fgets($fp));
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 13
+/// ```
 struct Inflating {
     stream: Option<Inflate>,
     buffers: Option<Buffers>,
@@ -115,6 +138,12 @@ impl StreamFilter for Inflating {
                 let Some(stream) = self.stream.as_mut() else {
                     break;
                 };
+                // What inflating hands on is unbounded by what it is fed:
+                // php 8.5.12 stops once the memory limit was met
+                // (`ZEND_HAS_OOM()`).
+                if req.memory().has_oom() {
+                    break;
+                }
                 let desired = (bucket.len() - bin).min(BUFFER);
                 let (piece, out) = buffers.take_in(&bucket[bin..bin + desired]);
                 let step = stream.inflate(req, piece, out, flush)?;
@@ -143,7 +172,7 @@ impl StreamFilter for Inflating {
         if flags == FilterFlags::FlushClose
             && let Some(stream) = self.stream.as_mut()
         {
-            loop {
+            while !req.memory().has_oom() {
                 let step = stream.inflate(req, &[], buffers.outbuf.bytes_mut(), Flush::Finish)?;
                 if step.written > 0 {
                     output.push_back(buffers.out(step.written));

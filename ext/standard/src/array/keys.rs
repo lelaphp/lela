@@ -624,6 +624,18 @@ fn array_change_key_case(
 /// ```expect
 /// 2728 32
 /// ```
+///
+/// Since 8.5.12 the table is asked for fallibly: past the memory limit it
+/// is refused, and the limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(array_fill(0, 1 << 20, 0)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn array_fill(
     req: &mut Request,
@@ -655,7 +667,16 @@ fn array_fill(
     } else {
         (count, Layout::Hash)
     };
-    let mut out = PhpArray::sized(req, u32::try_from(size).unwrap_or(u32::MAX), layout)?;
+    // `array_finit_size_packed` and `array_finit_size_mixed` since
+    // 8.5.12: the table asked for fallibly, `RETURN_OOM()` where the
+    // memory limit refused it.
+    let size = u32::try_from(size).unwrap_or(u32::MAX);
+    let Some(mut out) = req
+        .memory_mut()
+        .fallible(|req| PhpArray::sized(req, size, layout))?
+    else {
+        return Ok(Owner::take(req, PhpArray::empty()));
+    };
     for at in 0..count {
         out.set(req, Owner::index(start + at), Owner::take(req, value))?;
     }
@@ -742,6 +763,30 @@ fn array_fill_keys(
 /// }
 /// array_pad(): Argument #2 ($length) must not exceed the maximum allowed array size
 /// ```
+///
+/// Since 8.5.12 a packed input's table is asked for fallibly, and each
+/// insert into a hash: past the memory limit the ask is refused, and the
+/// limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(array_pad([1], 1 << 20, 0)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 3
+/// ```
+///
+/// A hash, padded on the left:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(array_pad(['a' => 1], -(1 << 20), 0)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn array_pad(
     req: &mut Request,
@@ -763,16 +808,52 @@ fn array_pad(
         return Ok(Owner::take(req, input));
     }
     let pads = size.abs() - have;
-    let mut out = PhpArray::new(req)?;
-    let fill = |req: &mut Request, out: &mut Owner<PhpArray>| -> Result<(), Thrown> {
-        for _ in 0..pads {
-            out.append(req, Owner::take(req, pad))?;
-        }
-        Ok(())
+    // `array_init_size(return_value, pad_size_abs)`, and since 8.5.12
+    // its packed table, or each insert into a hash, asked for fallibly:
+    // where the memory limit refuses one the native returns
+    // (`RETURN_OOM()`).
+    let abs = u32::try_from(size.abs()).unwrap_or(u32::MAX);
+    let mut out = if input.is_packed() {
+        let laid = req
+            .memory_mut()
+            .fallible(|req| PhpArray::sized(req, abs, Layout::Packed))?;
+        let Some(out) = laid else {
+            return Ok(Owner::take(req, PhpArray::empty()));
+        };
+        out
+    } else {
+        PhpArray::init_size(req, abs)?
     };
-    if size < 0 {
-        fill(req, &mut out)?;
+    let packed = input.is_packed();
+    // Whether an insert was refused.
+    let insert = |req: &mut Request,
+                  out: &mut Owner<PhpArray>,
+                  key: Option<Owner<Key>>,
+                  value: Owner<Value>|
+     -> Result<bool, Thrown> {
+        let written = |req: &mut Request| match key {
+            Some(key) => out.set(req, key, value),
+            None => out.append(req, value),
+        };
+        if packed {
+            written(req)?;
+            return Ok(false);
+        }
+        Ok(req.memory_mut().fallible(written)?.is_none())
+    };
+    let fill = |req: &mut Request, out: &mut Owner<PhpArray>| -> Result<bool, Thrown> {
+        for _ in 0..pads {
+            if insert(req, out, None, Owner::take(req, pad))? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    };
+    if size < 0 && fill(req, &mut out)? {
+        // RETURN_OOM()
+        return Ok(out);
     }
+    let mut refused = false;
     // `ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(input), key, value)`
     // (`Z/ext/standard/array.c:4859`), no owner of the table taken: the
     // argument holds it.
@@ -780,16 +861,17 @@ fn array_pad(
         let key = row.key().clone();
         let element = *row.value();
         let element = Owner::take(req, element);
-        match key {
-            Key::Str(_) => {
-                let key = Owner::take(req, key.clone());
-                out.set(req, key, element)?;
-            }
-            Key::Int(_) => out.append(req, element)?,
+        let key = match key {
+            Key::Str(_) => Some(Owner::take(req, key.clone())),
+            Key::Int(_) => None,
+        };
+        if insert(req, &mut out, key, element)? {
+            refused = true;
+            return Ok(ControlFlow::Break(()));
         }
         Ok(ControlFlow::Continue(()))
     })?;
-    if size > 0 {
+    if !refused && size > 0 {
         fill(req, &mut out)?;
     }
     Ok(out)
@@ -894,6 +976,20 @@ fn array_reverse(
 /// }
 /// array_chunk(): Argument #2 ($length) must be greater than 0
 /// ```
+///
+/// Since 8.5.12 the table of chunks is asked for fallibly, and a chunk is
+/// opened only while the memory limit has not been met: past it the call
+/// returns and the limit's fatal is raised.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $input = array_fill(0, 250000, 0);
+/// var_dump(count(array_chunk($input, 1)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 4
+/// ```
 #[php_function]
 fn array_chunk(
     req: &mut Request,
@@ -908,8 +1004,18 @@ fn array_chunk(
     if input.is_empty() {
         return Ok(Owner::take(req, PhpArray::empty()));
     }
-    let size = usize::try_from(size).unwrap_or(usize::MAX);
-    let mut out = PhpArray::new(req)?;
+    // `if (size > num_in)`, the chunk's size at most the input's.
+    let size = usize::try_from(size).unwrap_or(usize::MAX).min(input.len());
+    // `array_finit_size_packed` since 8.5.12: the table for every chunk
+    // asked for fallibly, `RETURN_OOM()` where the memory limit refused
+    // it.
+    let chunks = u32::try_from((input.len() - 1) / size + 1).unwrap_or(u32::MAX);
+    let Some(mut out) = req
+        .memory_mut()
+        .fallible(|req| PhpArray::sized(req, chunks, Layout::Packed))?
+    else {
+        return Ok(Owner::take(req, PhpArray::empty()));
+    };
     let mut chunk: Option<Owner<PhpArray>> = None;
     let mut current = 0;
     // `ZEND_HASH_FOREACH_KEY_VAL(Z_ARRVAL_P(input), …)`
@@ -921,9 +1027,16 @@ fn array_chunk(
         .collect();
     let mut rows = rows.into_iter();
     while let Some((key, value)) = rows.next() {
+        // A chunk is opened only while the memory limit has not been met
+        // (8.5.12), else the native returns (`RETURN_OOM()`).
+        if chunk.is_none() && req.memory().has_oom() {
+            value.give_up(req);
+            give_up_rows(req, rows);
+            return Ok(out);
+        }
         let opened = match chunk.take() {
             Some(open) => Ok(open),
-            None => PhpArray::new(req),
+            None => PhpArray::init_size(req, u32::try_from(size).unwrap_or(u32::MAX)),
         };
         let mut open = match opened {
             Ok(open) => open,

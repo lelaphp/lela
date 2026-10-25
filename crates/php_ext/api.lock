@@ -383,6 +383,7 @@ call::constant
 call::eval_const_expr
 call::eval_declared
 call::fetch_constant
+call::fetch_function
 call::initialize_lazy
 call::instantiate
 call::instantiate_named
@@ -790,8 +791,10 @@ request::MAXPATHLEN
 request::Memory
 request::Memory::adopt
 request::Memory::disown
+request::Memory::fallible
 request::Memory::foreign
 request::Memory::gc_possible_root
+request::Memory::has_oom
 request::Memory::heap_holds
 request::Memory::holding
 request::Memory::lend_heap

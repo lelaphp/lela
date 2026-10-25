@@ -311,18 +311,7 @@ fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
         ValueRef::Bool(true) => req.response_mut().write(b"bool(true)\n"),
         ValueRef::Null | ValueRef::Undef => req.response_mut().write(b"NULL\n"),
         ValueRef::Int(n) => req.response_mut().write(format!("int({n})\n").as_bytes()),
-        ValueRef::Float(f) => {
-            // `%.*H` writes a non-finite double whole, as `zend_gcvt`
-            // does at -1 (`Z/main/snprintf.c:886-899`).
-            let precision = if f.is_finite() {
-                req.ini().serialize_precision()
-            } else {
-                -1
-            };
-            let text = float_format(f, precision, Exponent::Upper);
-            req.response_mut()
-                .write(format!("float({text})\n").as_bytes());
-        }
+        ValueRef::Float(f) => dump_double(req, f),
         ValueRef::Str(s) => {
             req.response_mut()
                 .write(format!("string({}) \"", s.len()).as_bytes());
@@ -515,4 +504,21 @@ fn dump_object(
         (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => Err(thrown),
         (Ok(()), Ok(())) => Ok(()),
     }
+}
+
+/// `var_dump`'s `float(%.*H)` line. `%.*H` writes a non-finite double
+/// whole, as `zend_gcvt` does at -1 (`Z/main/snprintf.c:886-899`). Out of
+/// line, so the text's buffer stands in this leaf's frame and not in
+/// every nesting level of [`dump`], as php's `num_buf` stands in
+/// `format_converter`'s and not in `php_var_dump`'s.
+#[inline(never)]
+fn dump_double(req: &mut Request, f: f64) {
+    let precision = if f.is_finite() {
+        req.ini().serialize_precision()
+    } else {
+        -1
+    };
+    let text = float_format(f, precision, Exponent::Upper);
+    req.response_mut()
+        .write(format!("float({text})\n").as_bytes());
 }

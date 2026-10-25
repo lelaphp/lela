@@ -99,7 +99,7 @@ mod virtual_cwd;
 /// What `php_string.h`, `html.h` and `php_var.h` declare `PHPAPI` for the
 /// extensions that include them, ext/filter's sanitizers and ext/session's
 /// and ext/spl's serializers (ADR-0004; design §4.10).
-pub use html::escape as escape_html_entities;
+pub use html::escape_string as escape_html_entities;
 pub use string::strip_tags_ex;
 // `html.h`'s `php_next_utf8_char`, which `xml.c` decodes a target
 // encoding's characters with (design §4.10).

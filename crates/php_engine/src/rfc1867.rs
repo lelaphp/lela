@@ -9,16 +9,42 @@
 //! read in the encoding its header lines are detected in and converted
 //! to the internal one, through the functions an extension handed the
 //! engine ([`Translation`]).
+//!
+//! What php keeps of a body on the request's heap is kept there: the
+//! buffer, the header lines kept, each word of a part's disposition, a
+//! form field's value and the names a file is described under. php
+//! 8.5.12 grows a value fallibly and stops at each `ZEND_HAS_OOM()`
+//! once the memory limit was met, so a body past the limit ends the
+//! request in the limit's fatal, raised by `sapi_handle_post`, and never
+//! at the hard limit.
 
 use crate::api::abi::{Encoding, Multibyte};
 use crate::api::raising::{Level, Thrown, docref, throw_exception_ex};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
-use crate::api::values::{Owner, PhpArray, PhpString, Value};
+use crate::api::values::{Emalloc, Owner, PhpArray, PhpString, Value};
 use crate::c_number::{c_str, is_space};
+
+/// The class `EMIT_WARNING_OR_ERROR` throws under `request_parse_body()`
+/// (`Z/main/rfc1867.c:716`).
+const PARSE_BODY_EXCEPTION: &str = "RequestParseBodyException";
 
 /// `FILLUNIT` (`Z/main/rfc1867.c:188`).
 const FILLUNIT: usize = 1024 * 5;
+
+/// `sizeof(multipart_buffer)` (`Z/main/rfc1867.c:190`).
+const MULTIPART_BUFFER: usize = 72;
+
+/// `sizeof(zend_llist_element) + sizeof(mime_header_entry) - 1`, what
+/// `zend_llist_add_element` asks for each header line kept.
+const HEADER_ELEMENT: usize = 39;
+
+/// `MAX_SIZE_OF_INDEX + 1`, `sizeof("[full_path]") + 1`: what `lbuf`
+/// holds past a file's field name.
+const INDEX_ROOM: usize = 13;
+
+/// `MAX_SIZE_ANONNAME` (`Z/main/rfc1867.c:58`).
+const ANONYMOUS_NAME: usize = 33;
 
 /// `UPLOAD_ERR_*` (`Z/main/rfc1867.h:30-37`).
 const UPLOAD_ERROR_A: i64 = 1;
@@ -28,6 +54,150 @@ const UPLOAD_ERROR_D: i64 = 4;
 const UPLOAD_ERROR_E: i64 = 6;
 const UPLOAD_ERROR_F: i64 = 7;
 const UPLOAD_ERROR_X: i64 = 8;
+
+/// A `char *` php holds on the request's heap: `estrndup`'s copy of a
+/// text, `emalloc(len + 1)`, or `emalloc(size)` where php asks for more
+/// than the text fills (`substring_conf`), the text and its terminator
+/// at the front.
+struct Text {
+    block: Emalloc,
+    len: usize,
+}
+
+impl Text {
+    /// `estrndup(bytes, len)`.
+    fn dup(req: &mut Request, bytes: &[u8]) -> Result<Text, Thrown> {
+        Text::sized(req, bytes.len() + 1, bytes)
+    }
+
+    /// `emalloc(size)` holding `bytes`, `size` past them.
+    fn sized(req: &mut Request, size: usize, bytes: &[u8]) -> Result<Text, Thrown> {
+        let mut block = Emalloc::new(req, size.max(bytes.len() + 1))?;
+        block.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        Ok(Text {
+            block,
+            len: bytes.len(),
+        })
+    }
+
+    /// The text.
+    fn bytes(&self) -> &[u8] {
+        &self.block.bytes()[..self.len]
+    }
+
+    /// `efree`.
+    fn free(self, req: &mut Request) {
+        self.block.free(req);
+    }
+}
+
+/// `efree` of a `char *` php may hold.
+fn free(req: &mut Request, text: Option<Text>) {
+    if let Some(text) = text {
+        text.free(req);
+    }
+}
+
+/// `smart_string` (`Z/Zend/zend_smart_string.h`), a header line's value
+/// as `multipart_buffer_headers` builds it: laid down at 255 bytes, and
+/// grown to the page past what it holds once an append reaches its room
+/// (`_smart_string_alloc`, `Z/Zend/zend_smart_str.c:206`).
+#[derive(Default)]
+struct SmartString {
+    block: Option<Emalloc>,
+    len: usize,
+    room: usize,
+}
+
+impl SmartString {
+    /// `SMART_STRING_START_LEN`.
+    const START: usize = 255;
+
+    /// `smart_string_appendl`.
+    fn append(&mut self, req: &mut Request, bytes: &[u8]) -> Result<(), Thrown> {
+        let more = bytes.len();
+        let page = |len: usize| (len + 1).next_multiple_of(4096) - 1;
+        let block = match self.block.take() {
+            None => {
+                self.len = 0;
+                self.room = if more <= Self::START {
+                    Self::START
+                } else {
+                    page(more)
+                };
+                Emalloc::new(req, self.room + 1)?
+            }
+            Some(block) if more >= self.room - self.len => {
+                self.room = page(self.len + more);
+                block.resize(req, self.room + 1)?
+            }
+            Some(block) => block,
+        };
+        let block = self.block.insert(block);
+        block.bytes_mut()[self.len..self.len + more].copy_from_slice(bytes);
+        self.len += more;
+        Ok(())
+    }
+
+    /// Whether anything was appended, php's `buf_value.c`.
+    fn started(&self) -> bool {
+        self.block.is_some()
+    }
+
+    /// `smart_string_0` and the buffer handed on as the `char *` it is.
+    fn into_text(self) -> Option<Text> {
+        let len = self.len;
+        self.block.map(|block| Text { block, len })
+    }
+}
+
+/// One header line kept, its `mime_header_entry` in the
+/// `zend_llist_element` that holds it: the name `estrdup`'d and the
+/// value [`SmartString`] grew.
+struct Header {
+    key: Text,
+    value: Text,
+    element: Emalloc,
+}
+
+/// The part's header lines, php's `zend_llist header`.
+#[derive(Default)]
+struct Headers(Vec<Header>);
+
+impl Headers {
+    /// `php_mime_get_hdr_value`: the first line of `name`, in any case.
+    fn find(&self, name: &[u8]) -> Option<&[u8]> {
+        (self.0.iter())
+            .find(|header| header.key.bytes().eq_ignore_ascii_case(name))
+            .map(|header| header.value.bytes())
+    }
+
+    /// `zend_llist_add_element`.
+    fn add(&mut self, req: &mut Request, key: Text, value: Text) -> Result<(), Thrown> {
+        let element = Emalloc::new(req, HEADER_ELEMENT)?;
+        self.0.push(Header {
+            key,
+            value,
+            element,
+        });
+        Ok(())
+    }
+
+    /// `zend_llist_clean`: each line's name, value and element freed,
+    /// first to last.
+    fn clean(&mut self, req: &mut Request) {
+        for header in std::mem::take(&mut self.0) {
+            header.key.free(req);
+            header.value.free(req);
+            header.element.free(req);
+        }
+    }
+}
+
+/// `php_mime_should_save_hdr`: the two header lines php reads.
+fn kept_header(name: &[u8]) -> bool {
+    name.eq_ignore_ascii_case(b"Content-Disposition") || name.eq_ignore_ascii_case(b"Content-Type")
+}
 
 /// `multipart_buffer` (`Z/main/rfc1867.c:190`): the bytes read from the
 /// host and not yet handed out, `buf_begin..buf_begin+bytes_in_buffer` of
@@ -42,17 +212,26 @@ struct Buffer {
     /// The last header line read, which translation detects the part's
     /// encoding over (`self->input_encoding`, `Z/main/rfc1867.c:390`).
     last: Vec<u8>,
+    /// What `multipart_buffer_new` asks the request's heap for: the
+    /// struct, its buffer and the two boundaries `spprintf` writes.
+    held: Vec<Emalloc>,
 }
 
 impl Buffer {
     /// `multipart_buffer_new`.
-    fn new(boundary: &[u8]) -> Buffer {
+    fn new(req: &mut Request, boundary: &[u8]) -> Result<Buffer, Thrown> {
         let size = (boundary.len() + 6).max(FILLUNIT);
         let mut dashed = b"--".to_vec();
         dashed.extend_from_slice(boundary);
         let mut next = b"\n--".to_vec();
         next.extend_from_slice(boundary);
-        Buffer {
+        let held = vec![
+            Emalloc::new(req, MULTIPART_BUFFER)?,
+            Emalloc::new(req, size + 1)?,
+            Emalloc::printf_buffer(req, dashed.len())?,
+            Emalloc::printf_buffer(req, next.len())?,
+        ];
+        Ok(Buffer {
             bytes: vec![0; size + 1],
             begin: 0,
             len: 0,
@@ -60,6 +239,15 @@ impl Buffer {
             boundary: dashed,
             boundary_next: next,
             last: Vec::new(),
+            held,
+        })
+    }
+
+    /// The boundaries, the buffer and the struct freed, as
+    /// `fileupload_done` frees them.
+    fn free(self, req: &mut Request) {
+        for block in self.held.into_iter().rev() {
+            block.free(req);
         }
     }
 
@@ -134,15 +322,18 @@ impl Buffer {
         false
     }
 
-    /// `multipart_buffer_headers`: past the boundary, each header line
-    /// up to the blank one, a line opening with white space or holding
-    /// no colon added to the one before.
-    fn headers(&mut self, req: &mut Request) -> Option<Vec<(Vec<u8>, Vec<u8>)>> {
+    /// `multipart_buffer_headers` at 8.5.12: past the boundary, each
+    /// header line up to the blank one, a line opening with white space
+    /// or holding no colon added to the one before. Only a
+    /// `Content-Disposition` and a `Content-Type` line are kept, the
+    /// first of each; `false` where no boundary came, or once the memory
+    /// limit was met.
+    fn headers(&mut self, req: &mut Request, headers: &mut Headers) -> Result<bool, Thrown> {
         if !self.find_boundary(req) {
-            return None;
+            return Ok(false);
         }
-        let mut headers = Vec::new();
-        let mut current: Option<(Vec<u8>, Vec<u8>)> = None;
+        let mut key: Option<Text> = None;
+        let mut value = SmartString::default();
         while let Some(line) = self.get_line(req) {
             let line = c_str(&line).to_vec();
             if line.is_empty() {
@@ -155,25 +346,41 @@ impl Buffer {
                 line.iter().position(|b| *b == b':')
             };
             if let Some(colon) = colon {
-                if let Some(done) = current.take() {
-                    headers.push(done);
+                if value.started()
+                    && let Some(done) = key.take()
+                    && let Some(text) = std::mem::take(&mut value).into_text()
+                {
+                    headers.add(req, done, text)?;
                 }
-                let mut value = colon + 1;
-                while line.get(value).is_some_and(|b| is_space(*b)) {
-                    value += 1;
+                let name = &line[..colon];
+                if kept_header(name) && headers.find(name).is_none() {
+                    key = Some(Text::dup(req, name)?);
+                    let mut at = colon + 1;
+                    while line.get(at).is_some_and(|b| is_space(*b)) {
+                        at += 1;
+                    }
+                    value.append(req, &line[at.min(line.len())..])?;
+                } else {
+                    key = None;
                 }
-                current = Some((
-                    line[..colon].to_vec(),
-                    line[value.min(line.len())..].to_vec(),
-                ));
-            } else if let Some((_, value)) = current.as_mut() {
-                value.extend_from_slice(&line);
+            } else if value.started() {
+                value.append(req, &line)?;
+            } else {
+                continue;
+            }
+            if req.has_oom() {
+                free(req, key);
+                free(req, value.into_text());
+                return Ok(false);
             }
         }
-        if let Some(done) = current {
-            headers.push(done);
+        if value.started()
+            && let Some(done) = key
+            && let Some(text) = value.into_text()
+        {
+            headers.add(req, done, text)?;
         }
-        Some(headers)
+        Ok(true)
     }
 
     /// `multipart_buffer_read`: up to `bytes - 1` bytes up to where a
@@ -208,19 +415,30 @@ impl Buffer {
         out
     }
 
-    /// `multipart_buffer_read_body`: what `read` hands out, to the end
-    /// of the part.
-    fn read_body(&mut self, req: &mut Request) -> Option<Vec<u8>> {
-        let mut out: Option<Vec<u8>> = None;
+    /// `multipart_buffer_read_body` at 8.5.12: what `read` hands out, to
+    /// the end of the part, in a buffer on the request's heap grown by
+    /// each read, fallibly (`safe_ferealloc`); a growth the memory limit
+    /// refuses ends the read, the delayed OOM recorded, and what was
+    /// read is kept.
+    fn read_body(&mut self, req: &mut Request) -> Result<Option<Text>, Thrown> {
+        let mut out: Option<Emalloc> = None;
+        let mut total = 0;
         let mut end = false;
         loop {
             let chunk = self.read(req, FILLUNIT, &mut end);
             if chunk.is_empty() {
                 break;
             }
-            out.get_or_insert_with(Vec::new).extend_from_slice(&chunk);
+            let size = total + chunk.len() + 1;
+            let grown = grow(req, &mut out, size)?;
+            let Some(mut grown) = grown else {
+                break;
+            };
+            grown.bytes_mut()[total..total + chunk.len()].copy_from_slice(&chunk);
+            total += chunk.len();
+            out = Some(grown);
         }
-        out
+        Ok(out.map(|block| Text { block, len: total }))
     }
 }
 
@@ -282,18 +500,20 @@ fn getword(line: &mut &[u8], stop: u8, width: &dyn Fn(u8) -> usize) -> Vec<u8> {
 
 /// `php_ap_getword_conf`: the value after its leading white space,
 /// quoted or up to the next white space, an escaped quote or backslash
-/// taken for itself; `php_mb_rfc1867_getword_conf` under `step`.
-fn getword_conf(s: &[u8], step: &dyn Fn(u8) -> usize) -> Vec<u8> {
+/// taken for itself; `php_mb_rfc1867_getword_conf` under `step`. With
+/// it the length `substring_conf` is handed, which its `emalloc` asks
+/// for, `None` for the `estrdup("")` of an empty value.
+fn getword_conf(s: &[u8], step: &dyn Fn(u8) -> usize) -> (Vec<u8>, Option<usize>) {
     let start = s.iter().take_while(|b| is_space(**b)).count();
     let s = &s[start..];
     let Some(&first) = s.first() else {
-        return Vec::new();
+        return (Vec::new(), None);
     };
     if first == b'"' || first == b'\'' {
-        substring_conf(&s[1..], first, step)
+        (substring_conf(&s[1..], first, step), Some(s.len() - 1))
     } else {
         let end = s.iter().position(|b| is_space(*b)).unwrap_or(s.len());
-        substring_conf(&s[..end], 0, step)
+        (substring_conf(&s[..end], 0, step), Some(end))
     }
 }
 
@@ -361,16 +581,82 @@ impl Translation {
     }
 
     /// `text` in `input`, converted to the internal encoding where both
-    /// stand and the conversion answers.
-    fn convert(&self, text: Vec<u8>, input: Option<Encoding>) -> Vec<u8> {
-        match (input, self.internal) {
-            (Some(input), Some(internal)) => self
-                .functions
-                .convert(&text, internal, input)
-                .unwrap_or(text),
-            _ => text,
-        }
+    /// stand and the conversion answers, as
+    /// `zend_multibyte_encoding_converter` converts it: mbstring's
+    /// converted string copied into `emalloc(len + 1)` and freed, then
+    /// the text it replaces freed.
+    fn convert(
+        &self,
+        req: &mut Request,
+        text: Text,
+        input: Option<Encoding>,
+    ) -> Result<Text, Thrown> {
+        let (Some(input), Some(internal)) = (input, self.internal) else {
+            return Ok(text);
+        };
+        let Some(converted) = self.functions.convert(text.bytes(), internal, input) else {
+            return Ok(text);
+        };
+        let (made, room) = converted_string(req, text.len, converted.len())?;
+        let copy = Text::dup(req, &converted[..converted.len().min(room)]);
+        made.free(req);
+        let copy = copy?;
+        text.free(req);
+        Ok(copy)
     }
+}
+
+/// The string `mb_fast_convert` writes a conversion into
+/// (`Z/ext/mbstring/libmbfl/mbfl/mbfl_convert.c:324` at 8.5.12): laid
+/// down with room for the input's length (`mb_convert_buf_init`), and
+/// grown by half again whenever the converted text fills it, fallibly
+/// (`mb_convert_buf_ensure`, `Z/ext/mbstring/libmbfl/mbfl/mbfl_encoding.h:164`).
+/// With it the room it reached, short of `converted` where the memory limit
+/// refused a growth and the conversion stopped there.
+fn converted_string(
+    req: &mut Request,
+    input: usize,
+    converted: usize,
+) -> Result<(Emalloc, usize), Thrown> {
+    // `_ZSTR_STRUCT_SIZE(len)`: the string's 24-byte header, its bytes
+    // and the terminator.
+    let size = |room: usize| room + 25;
+    let mut room = input;
+    let mut made = Some(Emalloc::new(req, size(room))?);
+    while room < converted {
+        let grown_room = room + (room >> 1).max(1);
+        let Some(grown) = grow(req, &mut made, size(grown_room))? else {
+            break;
+        };
+        made = Some(grown);
+        room = grown_room;
+    }
+    match made {
+        Some(made) => Ok((made, room)),
+        None => Ok((Emalloc::new(req, size(room))?, room)),
+    }
+}
+
+/// `held` grown to `len` bytes fallibly, `safe_ferealloc(held, ...,
+/// true)`, or laid down where nothing is held: `None` where the memory
+/// limit refused it, the delayed OOM recorded and `held` left as it
+/// stood, as php keeps a block whose growth was refused.
+fn grow(
+    req: &mut Request,
+    held: &mut Option<Emalloc>,
+    len: usize,
+) -> Result<Option<Emalloc>, Thrown> {
+    let taken = held.take();
+    let mut kept = None;
+    let grown = req.memory_mut().fallible(|req| match taken {
+        Some(block) => block.try_resize(req, len).map_err(|(block, thrown)| {
+            kept = Some(block);
+            thrown
+        }),
+        None => Emalloc::new(req, len),
+    });
+    *held = kept;
+    grown
 }
 
 /// `normalize_protected_variable`: the name less its leading spaces, a
@@ -412,12 +698,19 @@ fn normalize_protected(name: &[u8]) -> Vec<u8> {
 
 /// What one pass of the handler holds beside the request: the names a file
 /// upload protects (`PG(rfc1867_protected_variables)`), the arrays it
-/// writes, and whether a refusal is thrown (`request_parse_body()`).
+/// writes, whether a refusal is thrown (`request_parse_body()`), and what
+/// it keeps on the request's heap from part to part to `fileupload_done`:
+/// the part's header lines, `lbuf` with its room `llen`, `abuf` and
+/// `array_index`.
 struct Handler {
-    protected: Vec<Vec<u8>>,
+    protected: Owner<PhpArray>,
     post: PhpArray,
     files: PhpArray,
     throwing: bool,
+    headers: Headers,
+    lbuf: Option<(Emalloc, usize)>,
+    abuf: Option<Text>,
+    array_index: Option<Text>,
 }
 
 impl Handler {
@@ -425,18 +718,24 @@ impl Handler {
     /// `request_parse_body()`, the warning otherwise.
     fn refuse(&self, req: &mut Request, message: &str) -> Result<(), Thrown> {
         if self.throwing {
-            return Err(throw_exception_ex(
-                req,
-                "RequestParseBodyException",
-                message,
-            ));
+            return Err(throw_exception_ex(req, PARSE_BODY_EXCEPTION, message));
         }
         docref(req, Level::Warning, message);
         Ok(())
     }
 
-    /// `safe_php_register_variable_ex`: a protected name skipped unless
-    /// `override_protection`.
+    /// `add_protected_variable` at 8.5.12: the name, normalized, kept in
+    /// the table (`zend_hash_str_add_empty_element`); `false` once the
+    /// memory limit was met.
+    fn protect(&mut self, req: &mut Request, name: &[u8]) -> Result<bool, Thrown> {
+        let name = normalize_protected(name);
+        self.protected.set_str(req, &name, Owner::null())?;
+        Ok(!req.has_oom())
+    }
+
+    /// `safe_php_register_variable_ex` at 8.5.12: a protected name
+    /// skipped unless `override_protection`; `false` once the memory
+    /// limit was met.
     fn register(
         &self,
         req: &mut Request,
@@ -444,24 +743,71 @@ impl Handler {
         name: &[u8],
         value: Owner<Value>,
         override_protection: bool,
-    ) -> Result<(), Thrown> {
-        if !override_protection && self.protected.contains(&normalize_protected(name)) {
+    ) -> Result<bool, Thrown> {
+        if !override_protection && self.protected.find(&normalize_protected(name)).is_some() {
             value.give_up(req);
-            return Ok(());
+        } else {
+            req.register_in(into, name, value, false)?;
         }
-        req.register_in(into, name, value, false)
+        Ok(!req.has_oom())
     }
 
-    /// A string value registered into `$_FILES`.
+    /// A string value registered into `$_FILES`
+    /// (`register_http_post_files_variable`).
     fn file_string(
         &self,
         req: &mut Request,
         name: &[u8],
         value: &[u8],
         override_protection: bool,
-    ) -> Result<(), Thrown> {
+    ) -> Result<bool, Thrown> {
         let value = PhpString::new(req, value)?.into_value();
         self.register(req, self.files, name, value, override_protection)
+    }
+
+    /// `lbuf` with room for `param` and its longest index:
+    /// `safe_ferealloc(lbuf, strlen(param), 1, MAX_SIZE_OF_INDEX + 1,
+    /// true)` where it has less; `false` where the memory limit refused
+    /// it.
+    fn room_for(&mut self, req: &mut Request, param: &[u8]) -> Result<bool, Thrown> {
+        if self
+            .lbuf
+            .as_ref()
+            .is_some_and(|(_, llen)| *llen >= param.len() + INDEX_ROOM)
+        {
+            return Ok(true);
+        }
+        let size = param.len() + INDEX_ROOM;
+        let (mut held, llen) = match self.lbuf.take() {
+            Some((block, llen)) => (Some(block), llen),
+            None => (None, 0),
+        };
+        let Some(grown) = grow(req, &mut held, size)? else {
+            self.lbuf = held.map(|block| (block, llen));
+            return Ok(false);
+        };
+        self.lbuf = Some((grown, size));
+        Ok(true)
+    }
+
+    /// What `fileupload_done` frees: `lbuf`, `abuf`, `array_index`, the
+    /// protected names' table and the header lines.
+    fn free(self, req: &mut Request) {
+        let Handler {
+            protected,
+            mut headers,
+            lbuf,
+            abuf,
+            array_index,
+            ..
+        } = self;
+        if let Some((block, _)) = lbuf {
+            block.free(req);
+        }
+        free(req, abuf);
+        free(req, array_index);
+        protected.give_up(req);
+        headers.clean(req);
     }
 }
 
@@ -489,21 +835,15 @@ pub(crate) fn post_handler(
         .unwrap_or_else(|| req.ini().long(b"upload_max_filesize"));
     let throwing = req.post_throwing();
     let content_length = req.content_length();
-    let files = if let Some(files) = req.files_track() {
-        files
-    } else {
-        let files = req.array()?;
-        req.set_files_track(files);
-        files
-    };
-    let mut upload = Handler {
-        protected: Vec::new(),
-        post,
-        files,
-        throwing,
+    let refuse = |req: &mut Request, message: &str| {
+        if throwing {
+            return Err(throw_exception_ex(req, PARSE_BODY_EXCEPTION, message));
+        }
+        docref(req, Level::Warning, message);
+        Ok(())
     };
     if post_max_size > 0 && content_length > post_max_size {
-        return upload.refuse(
+        return refuse(
             req,
             &format!(
                 "POST Content-Length of {content_length} bytes exceeds the limit of {post_max_size} bytes"
@@ -524,13 +864,13 @@ pub(crate) fn post_handler(
             .position(|b| *b == b'=')
             .map(|eq| at + eq)
     }) else {
-        return upload.refuse(req, "Missing boundary in multipart/form-data POST data");
+        return refuse(req, "Missing boundary in multipart/form-data POST data");
     };
     let mut boundary = &content_type[eq + 1..];
     if boundary.first() == Some(&b'"') {
         boundary = &boundary[1..];
         let Some(close) = boundary.iter().position(|b| *b == b'"') else {
-            return upload.refuse(req, "Invalid boundary in multipart/form-data POST data");
+            return refuse(req, "Invalid boundary in multipart/form-data POST data");
         };
         boundary = &boundary[..close];
     } else if let Some(end) = boundary.iter().position(|b| matches!(b, b',' | b';')) {
@@ -544,7 +884,25 @@ pub(crate) fn post_handler(
         );
         return Ok(());
     }
-    let mut mbuff = Buffer::new(boundary);
+    let mut mbuff = Buffer::new(req, boundary)?;
+    let protected = PhpArray::new(req)?;
+    let files = if let Some(files) = req.files_track() {
+        files
+    } else {
+        let files = req.array()?;
+        req.set_files_track(files);
+        files
+    };
+    let mut upload = Handler {
+        protected,
+        post,
+        files,
+        throwing,
+        headers: Headers::default(),
+        lbuf: None,
+        abuf: None,
+        array_index: None,
+    };
     let translation = Translation::of(req);
     let limits = Limits {
         upload_cnt,
@@ -553,12 +911,17 @@ pub(crate) fn post_handler(
         max_input_vars,
         upload_max_filesize,
     };
-    if req.upload_event(&Upload::Start { content_length })? {
-        parts(req, &mut upload, &mut mbuff, limits, translation.as_ref())?;
-    }
-    let read = req.post_bytes_read();
-    req.upload_event(&Upload::End { read })?;
-    Ok(())
+    let served = (|| {
+        if req.upload_event(&Upload::Start { content_length })? && !req.has_oom() {
+            parts(req, &mut upload, &mut mbuff, limits, translation.as_ref())?;
+        }
+        let read = req.post_bytes_read();
+        req.upload_event(&Upload::End { read })?;
+        Ok(())
+    })();
+    upload.free(req);
+    mbuff.free(req);
+    served
 }
 
 /// The limits one body is read under, as `rfc1867_post_handler` reads
@@ -572,7 +935,87 @@ struct Limits {
     upload_max_filesize: i64,
 }
 
-/// `rfc1867_post_handler`'s loop over the parts, to `fileupload_done`.
+/// What a part's `Content-Disposition` names: `name` and `filename`, each
+/// as `getword_conf` copied it onto the request's heap.
+#[derive(Default)]
+struct Disposition {
+    param: Option<Text>,
+    filename: Option<Text>,
+}
+
+impl Disposition {
+    /// `efree` of both, where php frees them on its way to
+    /// `fileupload_done`.
+    fn free(self, req: &mut Request) {
+        free(req, self.filename);
+        free(req, self.param);
+    }
+}
+
+/// The words of a part's `Content-Disposition`, each pair and its key
+/// copied by `getword`, freed as the next is read; `None` once the memory
+/// limit was met (`Z/main/rfc1867.c:847-916` at 8.5.12).
+fn disposition(
+    req: &mut Request,
+    mut cd: &[u8],
+    step_in: &dyn Fn(u8) -> usize,
+    mb: bool,
+    convert: &dyn Fn(&mut Request, Text) -> Result<Text, Thrown>,
+) -> Result<Option<Disposition>, Thrown> {
+    let mut words = Disposition::default();
+    cd = &cd[cd.iter().take_while(|b| is_space(**b)).count()..];
+    while !cd.is_empty() {
+        let pair = getword(&mut cd, b';', step_in);
+        let word = Text::dup(req, &pair)?;
+        if req.has_oom() {
+            word.free(req);
+            break;
+        }
+        cd = &cd[cd.iter().take_while(|b| is_space(**b)).count()..];
+        let mut key = None;
+        if pair.contains(&b'=') {
+            let mut rest: &[u8] = &pair;
+            let name = getword(&mut rest, b'=', step_in);
+            let copied = Text::dup(req, &name)?;
+            if req.has_oom() {
+                word.free(req);
+                copied.free(req);
+                break;
+            }
+            let slot = if name.eq_ignore_ascii_case(b"name") {
+                Some(&mut words.param)
+            } else if name.eq_ignore_ascii_case(b"filename") {
+                Some(&mut words.filename)
+            } else {
+                None
+            };
+            if let Some(slot) = slot {
+                free(req, slot.take());
+                let (value, asked) = getword_conf(rest, step_in);
+                let size = asked.map_or(1, |len| len + 1 + usize::from(mb));
+                let value = Text::sized(req, size, &value)?;
+                *slot = Some(convert(req, value)?);
+            }
+            if req.has_oom() {
+                word.free(req);
+                copied.free(req);
+                break;
+            }
+            key = Some(copied);
+        }
+        free(req, key);
+        word.free(req);
+    }
+    if req.has_oom() {
+        words.free(req);
+        return Ok(None);
+    }
+    Ok(Some(words))
+}
+
+/// `rfc1867_post_handler`'s loop over the parts, to `fileupload_done`,
+/// stopping at each of php 8.5.12's `ZEND_HAS_OOM()` once the memory
+/// limit was met.
 #[allow(clippy::too_many_lines)] // php's one loop, kept as one
 fn parts(
     req: &mut Request,
@@ -593,16 +1036,19 @@ fn parts(
     let mut max_file_size: i64 = 0;
 
     while !mbuff.eof(req) {
-        let Some(header) = mbuff.headers(req) else {
+        upload.headers.clean(req);
+        // A previous body part has reached the soft memory limit.
+        if req.has_oom() {
             break;
-        };
-        let find_header = |name: &[u8]| {
-            header
-                .iter()
-                .find(|(key, _)| key.eq_ignore_ascii_case(name))
-                .map(|(_, value)| value.clone())
-        };
-        let Some(cd) = find_header(b"Content-Disposition") else {
+        }
+        if !mbuff.headers(req, &mut upload.headers)? {
+            break;
+        }
+        let Some(cd) = upload
+            .headers
+            .find(b"Content-Disposition")
+            .map(<[u8]>::to_vec)
+        else {
             continue;
         };
         body_parts_cnt -= 1;
@@ -624,73 +1070,105 @@ fn parts(
             (Some(t), Some(input)) => t.functions.char_len(input, lead),
             _ => 1,
         };
-        let convert = |text: Vec<u8>| match translation {
-            Some(t) => t.convert(text, input),
-            None => text,
+        let convert = |req: &mut Request, text: Text| match translation {
+            Some(t) => t.convert(req, text, input),
+            None => Ok(text),
         };
-        let mut cd: &[u8] = &cd[cd.iter().take_while(|b| is_space(**b)).count()..];
-        let mut param: Option<Vec<u8>> = None;
-        let mut filename: Option<Vec<u8>> = None;
-        while !cd.is_empty() {
-            let pair = getword(&mut cd, b';', &step_in);
-            cd = &cd[cd.iter().take_while(|b| is_space(**b)).count()..];
-            if pair.contains(&b'=') {
-                let mut rest: &[u8] = &pair;
-                let key = getword(&mut rest, b'=', &step_in);
-                if key.eq_ignore_ascii_case(b"name") {
-                    param = Some(convert(getword_conf(rest, &step_in)));
-                } else if key.eq_ignore_ascii_case(b"filename") {
-                    filename = Some(convert(getword_conf(rest, &step_in)));
-                }
-            }
-        }
+        let Some(Disposition { param, filename }) =
+            disposition(req, &cd, &step_in, words.is_some(), &convert)?
+        else {
+            break;
+        };
 
         // A form field, read whole.
         if filename.is_none()
             && let Some(param) = param
         {
-            let value = convert(mbuff.read_body(req).unwrap_or_default());
+            let value = mbuff.read_body(req)?;
+            if req.has_oom() {
+                free(req, value);
+                param.free(req);
+                break;
+            }
+            let value = match value {
+                Some(value) => value,
+                None => Text::dup(req, b"")?,
+            };
+            let value = convert(req, value)?;
             count += 1;
             let read = req.post_bytes_read();
             let kept = if count <= max_input_vars {
-                req.filter_input(Input::Post, &param, &value)?
+                req.filter_input(Input::Post, param.bytes(), value.bytes())?
             } else {
                 None
             };
-            if let Some(kept) = kept {
+            let name = c_str(param.bytes()).to_vec();
+            let registered = if let Some(kept) = kept {
+                if req.has_oom() {
+                    kept.give_up(req);
+                    value.free(req);
+                    param.free(req);
+                    break;
+                }
                 let shown = kept.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default();
                 let event = Upload::FormData {
                     read,
-                    name: c_str(&param),
+                    name: &name,
                     value: &shown,
                 };
                 match req.upload_event(&event) {
-                    Ok(true) => upload.register(req, upload.post, &param, kept, false)?,
-                    Ok(false) => kept.give_up(req),
+                    Ok(true) if req.has_oom() => {
+                        kept.give_up(req);
+                        false
+                    }
+                    Ok(true) => upload.register(req, upload.post, param.bytes(), kept, false)?,
+                    Ok(false) => {
+                        kept.give_up(req);
+                        !req.has_oom()
+                    }
                     Err(thrown) => {
                         kept.give_up(req);
+                        value.free(req);
+                        param.free(req);
                         return Err(thrown);
                     }
                 }
             } else {
-                if count == max_input_vars + 1 {
+                let refused = if count == max_input_vars + 1 {
                     upload.refuse(
                         req,
                         &format!(
                             "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
                         ),
-                    )?;
-                }
-                let event = Upload::FormData {
-                    read,
-                    name: c_str(&param),
-                    value: &value,
+                    )
+                } else {
+                    Ok(())
                 };
-                req.upload_event(&event)?;
+                let told = refused.and_then(|()| {
+                    let event = Upload::FormData {
+                        read,
+                        name: &name,
+                        value: value.bytes(),
+                    };
+                    req.upload_event(&event)
+                });
+                if let Err(thrown) = told {
+                    value.free(req);
+                    param.free(req);
+                    return Err(thrown);
+                }
+                !req.has_oom()
+            };
+            if !registered {
+                value.free(req);
+                param.free(req);
+                break;
             }
-            if c_str(&param).eq_ignore_ascii_case(b"MAX_FILE_SIZE") {
-                max_file_size = crate::c_number::strtol(&value);
+            if name.eq_ignore_ascii_case(b"MAX_FILE_SIZE") {
+                max_file_size = crate::c_number::strtol(value.bytes());
             }
+            param.free(req);
+            value.free(req);
             continue;
         }
 
@@ -701,22 +1179,32 @@ fn parts(
             skip_upload = true;
             if upload_cnt == 0 {
                 upload_cnt -= 1;
-                upload.refuse(
+                let refused = upload.refuse(
                     req,
                     "Maximum number of allowable file uploads has been exceeded",
-                )?;
+                );
+                if let Err(thrown) = refused {
+                    Disposition { param, filename }.free(req);
+                    return Err(thrown);
+                }
             }
         }
-        if param.is_none() && filename.is_none() {
+        let Some(filename) = filename else {
             upload.refuse(req, "File Upload Mime headers garbled")?;
             break;
-        }
-        let param = param.unwrap_or_else(|| {
+        };
+        let param_text = if let Some(param) = param {
+            param
+        } else {
             let name = anonymous_index.to_string().into_bytes();
             anonymous_index += 1;
-            name
-        });
-        let param = c_str(&param).to_vec();
+            Text::sized(req, ANONYMOUS_NAME, &name)?
+        };
+        let param = c_str(param_text.bytes()).to_vec();
+        let named = Disposition {
+            param: Some(param_text),
+            filename: Some(filename),
+        };
         // Never repair potential malicious input: brackets that do not
         // nest, or text after a closing one, skip the upload.
         if !skip_upload {
@@ -740,16 +1228,29 @@ fn parts(
                 skip_upload = true;
             }
         }
-        let filename = c_str(&filename.unwrap_or_default()).to_vec();
+        let filename = (named.filename.as_ref())
+            .map(|t| c_str(t.bytes()).to_vec())
+            .unwrap_or_default();
         if !skip_upload {
             let event = Upload::FileStart {
                 read: req.post_bytes_read(),
                 name: &param,
                 filename: &filename,
             };
-            skip_upload = !req.upload_event(&event)?;
+            skip_upload = match req.upload_event(&event) {
+                Ok(told) => !told,
+                Err(thrown) => {
+                    named.free(req);
+                    return Err(thrown);
+                }
+            };
+            if !skip_upload && req.has_oom() {
+                named.free(req);
+                break;
+            }
         }
         if skip_upload {
+            named.free(req);
             continue;
         }
         let mut cancel_upload = 0;
@@ -766,7 +1267,12 @@ fn parts(
             temp = req.open_temporary_fd(dir.as_deref(), b"php", TemporaryGuard::OnFallback);
             upload_cnt -= 1;
             if temp.is_none() {
-                upload.refuse(req, "File upload error - unable to create a temporary file")?;
+                let refused =
+                    upload.refuse(req, "File upload error - unable to create a temporary file");
+                if let Err(thrown) = refused {
+                    named.free(req);
+                    return Err(thrown);
+                }
                 cancel_upload = UPLOAD_ERROR_E;
             }
         }
@@ -778,7 +1284,17 @@ fn parts(
                 offset,
                 length: size,
             };
-            if !req.upload_event(&event)? {
+            let told = match req.upload_event(&event) {
+                Ok(told) => told,
+                Err(thrown) => {
+                    if let Some((_, path)) = &temp {
+                        std::fs::remove_file(path).ok();
+                    }
+                    named.free(req);
+                    return Err(thrown);
+                }
+            };
+            if !told || req.has_oom() {
                 cancel_upload = UPLOAD_ERROR_X;
                 continue;
             }
@@ -809,7 +1325,17 @@ fn parts(
             temp: shown.as_deref(),
             error: cancel_upload,
         };
-        if !req.upload_event(&event)? {
+        let told = match req.upload_event(&event) {
+            Ok(told) => told,
+            Err(thrown) => {
+                if let Some(path) = &temp_path {
+                    std::fs::remove_file(path).ok();
+                }
+                named.free(req);
+                return Err(thrown);
+            }
+        };
+        if !told || req.has_oom() {
             cancel_upload = UPLOAD_ERROR_X;
         }
         let temp_name = if cancel_upload != 0 {
@@ -822,6 +1348,10 @@ fn parts(
         } else {
             temp_path.inspect(|path| req.note_uploaded(path.clone()))
         };
+        if req.has_oom() {
+            named.free(req);
+            break;
+        }
 
         // `$foo[name]`, `$foo[full_path]`, `$foo[type]`, `$foo[tmp_name]`,
         // `$foo[error]` and `$foo[size]`, or `$foo[name][index]` and its
@@ -830,6 +1360,26 @@ fn parts(
             .iter()
             .position(|b| *b == b'[')
             .filter(|_| param.last() == Some(&b']'));
+        if let Some(open) = array {
+            free(req, upload.array_index.take());
+            upload.array_index = Some(Text::dup(req, &param[open + 1..param.len() - 1])?);
+            if req.has_oom() {
+                named.free(req);
+                break;
+            }
+        }
+        if !upload.room_for(req, &param)? {
+            named.free(req);
+            break;
+        }
+        if let Some(open) = array {
+            free(req, upload.abuf.take());
+            upload.abuf = Some(Text::dup(req, &param[..open])?);
+            if req.has_oom() {
+                named.free(req);
+                break;
+            }
+        }
         let slot = |field: &str| -> Vec<u8> {
             let (base, index) = array.map_or((param.as_slice(), None), |open| {
                 (&param[..open], Some(&param[open + 1..param.len() - 1]))
@@ -845,49 +1395,87 @@ fn parts(
             }
             name
         };
-        let step_internal = |lead: u8| match words.zip(words.and_then(|t| t.internal)) {
+        let step_internal = |lead: u8| match words_of(translation) {
             Some((t, internal)) => t.functions.char_len(internal, lead),
             None => 1,
         };
-        upload.file_string(
+        let described = describe(
             req,
-            &slot("name"),
+            upload,
+            &param,
+            &slot,
             basename(&filename, &step_internal),
-            false,
+            &filename,
+            cancel_upload,
+            temp_name,
+            total_bytes,
         )?;
-        upload.file_string(req, &slot("full_path"), &filename, false)?;
-        let content_type = if cancel_upload != 0 {
-            Vec::new()
-        } else {
-            find_header(b"Content-Type")
-                .map(|value| {
-                    c_str(&value)
-                        .split(|b| *b == b';')
-                        .next()
-                        .unwrap_or_default()
-                        .to_vec()
-                })
-                .unwrap_or_default()
-        };
-        upload.file_string(req, &slot("type"), &content_type, false)?;
-        upload.protected.push(normalize_protected(&param));
-        let tmp_slot = slot("tmp_name");
-        upload.protected.push(normalize_protected(&tmp_slot));
-        let kept = temp_name
-            .map(|path| path.into_os_string().into_encoded_bytes())
-            .unwrap_or_default();
-        upload.file_string(req, &tmp_slot, &kept, true)?;
-        upload.register(
-            req,
-            upload.files,
-            &slot("error"),
-            Owner::int(cancel_upload),
-            false,
-        )?;
-        let size = if cancel_upload != 0 { 0 } else { total_bytes };
-        upload.register(req, upload.files, &slot("size"), Owner::int(size), false)?;
+        named.free(req);
+        if !described {
+            break;
+        }
     }
     Ok(())
+}
+
+/// The internal encoding a translated body's words step by, where it
+/// has one.
+fn words_of(translation: Option<&Translation>) -> Option<(&Translation, Encoding)> {
+    translation.and_then(|t| t.internal.map(|internal| (t, internal)))
+}
+
+/// A file's six rows of `$_FILES` and the two names it protects, in
+/// php's order; `false` once the memory limit was met at one, php's
+/// `goto oom_with_param`.
+#[allow(clippy::too_many_arguments)] // the locals php's loop holds
+fn describe(
+    req: &mut Request,
+    upload: &mut Handler,
+    param: &[u8],
+    slot: &dyn Fn(&str) -> Vec<u8>,
+    name: &[u8],
+    filename: &[u8],
+    cancel_upload: i64,
+    temp_name: Option<std::path::PathBuf>,
+    total_bytes: i64,
+) -> Result<bool, Thrown> {
+    if !upload.file_string(req, &slot("name"), name, false)?
+        || !upload.file_string(req, &slot("full_path"), filename, false)?
+    {
+        return Ok(false);
+    }
+    let content_type = if cancel_upload != 0 {
+        Vec::new()
+    } else {
+        (upload.headers.find(b"Content-Type"))
+            .map(|value| {
+                c_str(value)
+                    .split(|b| *b == b';')
+                    .next()
+                    .unwrap_or_default()
+                    .to_vec()
+            })
+            .unwrap_or_default()
+    };
+    if !upload.file_string(req, &slot("type"), &content_type, false)? {
+        return Ok(false);
+    }
+    let tmp_slot = slot("tmp_name");
+    if !upload.protect(req, param)? || !upload.protect(req, &tmp_slot)? {
+        return Ok(false);
+    }
+    let kept = temp_name
+        .map(|path| path.into_os_string().into_encoded_bytes())
+        .unwrap_or_default();
+    if !upload.file_string(req, &tmp_slot, &kept, true)? {
+        return Ok(false);
+    }
+    let files = upload.files;
+    if !upload.register(req, files, &slot("error"), Owner::int(cancel_upload), false)? {
+        return Ok(false);
+    }
+    let size = if cancel_upload != 0 { 0 } else { total_bytes };
+    upload.register(req, files, &slot("size"), Owner::int(size), false)
 }
 
 /// Where `needle` first stands in `haystack`, as `strstr` finds it.
@@ -911,14 +1499,14 @@ mod tests {
         assert_eq!(pair, b"name=\"a;b\"");
         let mut value: &[u8] = &pair;
         assert_eq!(getword(&mut value, b'=', &byte), b"name");
-        assert_eq!(getword_conf(value, &byte), b"a;b");
-        assert_eq!(getword_conf(b" 'x\\'y'", &byte), b"x'y");
-        assert_eq!(getword_conf(b"name\\\\5", &byte), b"name\\5");
+        assert_eq!(getword_conf(value, &byte).0, b"a;b");
+        assert_eq!(getword_conf(b" 'x\\'y'", &byte).0, b"x'y");
+        assert_eq!(getword_conf(b"name\\\\5", &byte).0, b"name\\5");
         assert_eq!(basename(b"C:\\dir/sub\\f.txt", &byte), b"f.txt");
         // Shift_JIS's `\x95\x5c`, one character whose second byte is a
         // backslash: stepped over whole, it neither escapes nor splits.
         let sjis = |lead: u8| if lead >= 0x81 { 2 } else { 1 };
-        assert_eq!(getword_conf(b"\"a\x95\\b\"", &sjis), b"a\x95\\b");
+        assert_eq!(getword_conf(b"\"a\x95\\b\"", &sjis).0, b"a\x95\\b");
         assert_eq!(basename(b"d/\x95\\x", &sjis), b"\x95\\x");
         assert_eq!(normalize_protected(b" a.b[ x][y]"), b"a_b[x][y]");
     }

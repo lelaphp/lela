@@ -783,6 +783,11 @@ impl Request {
     pub(crate) fn fatal_of<T>(&mut self, answered: Result<T, Fatal>) -> Result<T, Thrown> {
         match answered {
             Ok(value) => Ok(value),
+            // A fallible ask's refusal ends nothing: it is carried out to
+            // its scope ([`Memory::fallible`]).
+            Err(fatal) if *fatal.reason() == php_heap::FatalReason::Refused => {
+                Err(Thrown::of(None))
+            }
             Err(fatal) => {
                 self.end_in(&fatal);
                 Err(Thrown::of(None))
@@ -799,6 +804,50 @@ impl Request {
             .limit_bytes(b"memory_limit")
             .min(self.limit_bytes(b"max_memory_limit"));
         self.heap.set_memory_limit(limit.min(usize::MAX >> 1));
+        // `memory_hard_limit_percent`, which follows the soft limit;
+        // php's `NULL`, its default, is the heap's own `-1`.
+        let percent = self.ini().get(b"memory_hard_limit_percent");
+        if let Some(percent) = percent.filter(|p| !p.is_empty()).map(Ini::parse_bytes) {
+            self.heap.set_memory_hard_limit_percent(percent);
+        }
+    }
+
+    /// `OnChangeMemoryHardLimitPercent` (`Z/main/main.c:391` at 8.5.12)
+    /// over `value`, `None` for php's `NULL`, which is `-1`: a percent
+    /// under 100 other than `-1` is php's warning and refused, and so is
+    /// one the heap refuses while the soft limit is exceeded,
+    /// `zend_set_memory_hard_limit_percent`'s `FAILURE`; whether the
+    /// entry takes it is the answer.
+    ///
+    /// ```php
+    /// var_dump(ini_set('memory_hard_limit_percent', '50'), ini_set('memory_hard_limit_percent', '150'), ini_get('memory_hard_limit_percent'));
+    /// ini_set('memory_limit', '2M');
+    /// ini_set('memory_hard_limit_percent', '300');
+    /// $a = str_repeat('x', 5 << 20);
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect exit=255
+    /// Warning: memory_hard_limit_percent must be >= 100, or -1 in %s on line 2
+    /// bool(false)
+    /// string(0) ""
+    /// string(3) "150"
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 5259264 bytes) in %s on line 5
+    /// ```
+    pub(crate) fn memory_hard_limit_percent_taken(&mut self, value: Option<&[u8]>) -> bool {
+        let percent = value.map_or(-1, Ini::parse_bytes);
+        if percent < 100 && percent != -1 {
+            crate::api::raising::warning(self, "memory_hard_limit_percent must be >= 100, or -1");
+            return false;
+        }
+        if !self.heap.set_memory_hard_limit_percent(percent) {
+            crate::api::raising::warning(
+                self,
+                &format!("Failed to set memory_hard_limit_percent to {percent}"),
+            );
+            return false;
+        }
+        true
     }
 
     /// An entry `zend_ini_parse_uquantity` reads, `-1` the largest size.
@@ -1177,6 +1226,19 @@ impl Request {
 }
 
 impl Memory<&Request> {
+    /// `ZEND_HAS_OOM()` (`Z/Zend/zend_alloc.h:63` at 8.5.12): whether the
+    /// memory limit was met in this request, its fatal pending or being
+    /// raised, until `php_request_shutdown` begins. php 8.5.12's natives
+    /// read it to stop a loop whose allocations were served past the
+    /// limit, as `RETURN_OOM` stops a fallible one, and leave the fatal
+    /// to the interrupt check after the call. One load of the heap's
+    /// state.
+    #[must_use]
+    #[inline]
+    pub fn has_oom(self) -> bool {
+        self.0.has_oom()
+    }
+
     /// `memory_get_usage()`.
     #[must_use]
     pub fn usage(self, real: bool) -> usize {
@@ -1205,6 +1267,48 @@ impl Memory<&Request> {
 }
 
 impl Memory<&mut Request> {
+    /// `ask` served with the request's heap fallible, php's
+    /// `zend_mm_set_fallible(true)` around one allocation, as php 8.5.12's
+    /// `femalloc`, `zend_string_safe_falloc` and their kin ask
+    /// (`ZEND_MM_FALLIBLE_FORWARD`, `Z/Zend/zend_alloc.c:3060`): an
+    /// allocation the memory limit has no room for is refused rather than
+    /// served, the delayed OOM recorded, and the answer is `None`, php's
+    /// `NULL`, for the native to end on as `RETURN_OOM` ends it, with
+    /// nothing pending; the next safepoint, the interrupt check after the
+    /// call, raises the limit's fatal. A fallible ask is held to the soft
+    /// limit alone, never to the hard one. The heap's fallibility is put
+    /// back as `ask` returns, so scopes nest as php's saved word does.
+    ///
+    /// The scope is the allocation's, as php's forward wraps the one call:
+    /// a native asks fallibly for the string it returns and nothing else,
+    /// so no PHP code it serves is served fallibly.
+    ///
+    /// # Errors
+    ///
+    /// What `ask` threw, the request's end among it: a fatal, the hard
+    /// limit an allocation outside the scope met, or a throwable.
+    pub fn fallible<T>(
+        self,
+        ask: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+    ) -> Result<Option<T>, Thrown> {
+        let was = self.0.heap.set_fallible(true);
+        let answered = ask(self.0);
+        self.0.heap.set_fallible(was);
+        let refused = self.0.heap.take_refused();
+        match answered {
+            Ok(value) => Ok(Some(value)),
+            // The heap's latch says a refusal was met in the scope; it
+            // cannot say the `Err` in hand is that refusal, since a
+            // throwable or a fatal can follow one in the same scope (a
+            // lend's system refusal after lexbor's), so the `Err` is the
+            // refusal only where it carries nothing else.
+            Err(thrown) if refused && thrown.exception().is_none() && self.0.ending().is_none() => {
+                Ok(None)
+            }
+            Err(thrown) => Err(thrown),
+        }
+    }
+
     /// `call` served with the request's heap lent to C for its length
     /// (ADR-0014, design §5.14): a C library compiled against
     /// `php_heap`'s `emalloc`, `ecalloc`, `erealloc`, `estrdup`,

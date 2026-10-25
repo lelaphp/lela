@@ -7,7 +7,7 @@
 
 use crate::case::{self, CaseMode};
 use crate::convert::convert;
-use crate::ffi::mbfl::{Encoder, Encoding, fast_convert, strcut};
+use crate::ffi::mbfl::{Converted, Encoder, Encoding, fast_convert, fast_convert_held, strcut};
 use crate::settings::{Substitute, encoding, settings};
 use crate::tables::{
     ENCODING_2022JPMS, ENCODING_CP50220, ENCODING_CP50222, ENCODING_INVALID, ENCODING_JIS,
@@ -20,7 +20,7 @@ use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpArray, PhpString};
+use php_ext::values::{Layout, Owner, PhpArray, PhpString};
 
 /// `MBFL_SUBSTR_UNTIL_END`.
 pub(crate) const UNTIL_END: usize = usize::MAX;
@@ -338,6 +338,17 @@ fn int(n: usize) -> i64 {
     i64::try_from(n).unwrap_or(i64::MAX)
 }
 
+/// `call` served with the request's heap lent to libmbfl (ADR-0014): what
+/// libmbfl allocates while it runs, its conversion buffers and memory
+/// devices, is the request's and counted as php counts it, so the memory
+/// limit meets them as php's `zend_mm` meets php's, and since 8.5.12 a
+/// buffer's growth past it is refused. `call` reaches nothing of the
+/// request and gives back what libmbfl made before it returns; the `Err`
+/// is the hard limit's end of the request.
+pub(crate) fn on_heap<R>(req: &mut Request, call: impl FnOnce() -> R) -> Result<R, Thrown> {
+    req.memory_mut().lend_heap(call)
+}
+
 /// A string of these bytes allocated as its own, `zend_string_init`,
 /// `RETVAL_STRINGL` and what `mb_convert_buf` answers: nothing and one
 /// byte are strings of the request's too, as every converter's are.
@@ -399,6 +410,29 @@ pub(crate) fn substitute(req: &mut Request) -> Substitute {
 /// 1b2442302130221b2842,7879
 /// mb_str_split(): Argument #2 ($length) must be greater than 0
 /// ```
+///
+/// Since 8.5.12 the table of every chunk is laid down first and fallibly, so
+/// a split past the memory limit is refused there, and each chunk stops the
+/// split once the limit was met; either way the limit's fatal is raised as
+/// the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(mb_str_split(str_repeat("a", 2 << 20))), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 33570816 bytes) in %s on line 3
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(mb_str_split(str_repeat("a", 2 << 20), 1, "UTF-7")), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 33570816 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn mb_str_split(
     req: &mut Request,
@@ -412,18 +446,43 @@ fn mb_str_split(
     if length > i64::from(u32::MAX / 4) {
         return Err(value_error(req, 2, "is too large"));
     }
+    let bytes = string.as_bytes();
+    // Since 8.5.12 a length past the string's is its length.
+    let split = usize::try_from(length).unwrap_or(1).min(bytes.len());
     let enc = self::encoding(req, encoding, 3)?;
     if string.is_empty() {
         return Ok(Owner::take(req, PhpArray::empty()));
     }
-    let mut out = PhpArray::new(req)?;
-    let bytes = string.as_bytes();
-    let split = usize::try_from(length).unwrap_or(1);
-    let mut chunks: Vec<Vec<u8>> = Vec::new();
+    // `array_finit_size_packed` since 8.5.12: the table for every chunk
+    // laid down first and fallibly, `RETURN_OOM()` where the memory limit
+    // refused it; then each chunk added, the split stopped once the
+    // memory limit was met (`ZEND_HAS_OOM()`).
     let width = char_len(enc);
-    if bytes.is_empty() {
-    } else if width != 0 {
-        chunks.extend(bytes.chunks(width * split).map(<[u8]>::to_vec));
+    let chunks = if width != 0 {
+        (bytes.len() / (width * split)).div_ceil(split)
+    } else {
+        bytes.len().div_ceil(split)
+    };
+    let chunks = u32::try_from(chunks).unwrap_or(u32::MAX);
+    let Some(mut out) = req
+        .memory_mut()
+        .fallible(|req| PhpArray::sized(req, chunks, Layout::Packed))?
+    else {
+        // RETURN_OOM()
+        return Ok(Owner::take(req, PhpArray::empty()));
+    };
+    let add =
+        |req: &mut Request, out: &mut Owner<PhpArray>, chunk: &[u8]| -> Result<bool, Thrown> {
+            let s = new_string(req, chunk)?;
+            out.append(req, s.into_value())?;
+            Ok(req.memory().has_oom())
+        };
+    if width != 0 {
+        for chunk in bytes.chunks(width * split) {
+            if add(req, &mut out, chunk)? {
+                return Ok(split_refused(req, out));
+            }
+        }
     } else if let Some(table) = enc.mblen_table() {
         let mut p = 0;
         while p < bytes.len() {
@@ -435,47 +494,86 @@ fn mb_str_split(
                 p += usize::from(table[usize::from(bytes[p])]);
             }
             p = p.min(bytes.len());
-            chunks.push(bytes[start..p].to_vec());
-        }
-    } else {
-        let sub = substitute(req);
-        let mut pending: Option<(Encoder, usize)> = None;
-        decode_runs(enc, bytes, 128, |w, rest| {
-            let mut i = 0;
-            if let Some((mut buf, count)) = pending.take() {
-                if w.len() >= split - count {
-                    buf.write(&w[..split - count], true);
-                    i = split - count;
-                    chunks.push(buf.into_vec());
-                } else {
-                    buf.write(w, rest.is_empty());
-                    pending = Some((buf, count + w.len()));
-                    return true;
-                }
+            if add(req, &mut out, &bytes[start..p])? {
+                return Ok(split_refused(req, out));
             }
-            while i < w.len() {
-                let mut buf = Encoder::new(enc, split, sub.char, sub.raw_mode());
-                if w.len() - i >= split {
-                    buf.write(&w[i..i + split], true);
-                    i += split;
-                    chunks.push(buf.into_vec());
-                } else {
-                    buf.write(&w[i..], rest.is_empty());
-                    pending = Some((buf, w.len() - i));
-                    break;
-                }
-            }
-            true
-        });
-        if let Some((buf, _)) = pending {
-            chunks.push(buf.into_vec());
         }
-    }
-    for chunk in chunks {
-        let s = new_string(req, &chunk)?;
-        out.append(req, s.into_value())?;
+    } else if split_filtered(req, &mut out, bytes, enc, split)? {
+        return Ok(split_refused(req, out));
     }
     Ok(out)
+}
+
+/// `mb_str_split` through an encoding with neither a fixed width nor a
+/// `mblen_table`: each chunk encoded afresh from 128 codepoints at a time,
+/// a chunk left open carried into the next batch; `true` where the memory
+/// limit was met and the split stopped.
+fn split_filtered(
+    req: &mut Request,
+    out: &mut Owner<PhpArray>,
+    bytes: &[u8],
+    enc: Encoding,
+    split: usize,
+) -> Result<bool, Thrown> {
+    let add = |req: &mut Request, out: &mut Owner<PhpArray>, chunk: &[u8]| -> Result<(), Thrown> {
+        let s = new_string(req, chunk)?;
+        out.append(req, s.into_value())
+    };
+    let sub = substitute(req);
+    let (mut rest, mut state, mut wchars) = (bytes, 0, [0u32; 128]);
+    let mut pending: Option<(Encoder, usize)> = None;
+    while !rest.is_empty() {
+        if req.memory().has_oom() {
+            return Ok(true);
+        }
+        let n = enc.decode(&mut rest, &mut wchars, &mut state);
+        let (w, end) = (&wchars[..n], rest.is_empty());
+        let mut i = 0;
+        if let Some((mut buf, count)) = pending.take() {
+            if n >= split - count {
+                let chunk = on_heap(req, || {
+                    buf.write(&w[..split - count], true);
+                    buf.into_vec()
+                })?;
+                i = split - count;
+                add(req, out, &chunk)?;
+            } else {
+                on_heap(req, || buf.write(w, end))?;
+                pending = Some((buf, count + n));
+                continue;
+            }
+        }
+        while i < n {
+            if req.memory().has_oom() {
+                return Ok(true);
+            }
+            let mut buf = on_heap(req, || Encoder::new(enc, split, sub.char, sub.raw_mode()))?;
+            if n - i >= split {
+                let chunk = on_heap(req, || {
+                    buf.write(&w[i..i + split], true);
+                    buf.into_vec()
+                })?;
+                i += split;
+                add(req, out, &chunk)?;
+            } else {
+                on_heap(req, || buf.write(&w[i..], end))?;
+                pending = Some((buf, n - i));
+                break;
+            }
+        }
+    }
+    if let Some((buf, _)) = pending {
+        let chunk = on_heap(req, || buf.into_vec())?;
+        add(req, out, &chunk)?;
+    }
+    Ok(false)
+}
+
+/// `RETURN_OOM()` from `mb_str_split`: the chunks given up, and the
+/// cheapest array, which the limit's fatal after the call leaves unseen.
+fn split_refused(req: &mut Request, out: Owner<PhpArray>) -> Owner<PhpArray> {
+    out.give_up(req);
+    Owner::take(req, PhpArray::empty())
 }
 
 /// `mb_strlen(string $string, ?string $encoding = null): int`.
@@ -526,16 +624,16 @@ fn mb_strpos(
     #[php(default = null)] encoding: Option<PhpString>,
 ) -> Result<OrFalse<i64>, Thrown> {
     let enc = self::encoding(req, encoding, 4)?;
-    found(
-        req,
+    let at = on_heap(req, || {
         find(
             haystack.as_bytes(),
             needle.as_bytes(),
             enc,
             self::offset(offset),
             false,
-        ),
-    )
+        )
+    })?;
+    found(req, at)
 }
 
 /// `mb_strrpos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false`.
@@ -575,16 +673,16 @@ fn mb_strrpos(
     #[php(default = null)] encoding: Option<PhpString>,
 ) -> Result<OrFalse<i64>, Thrown> {
     let enc = self::encoding(req, encoding, 4)?;
-    found(
-        req,
+    let at = on_heap(req, || {
         find(
             haystack.as_bytes(),
             needle.as_bytes(),
             enc,
             self::offset(offset),
             true,
-        ),
-    )
+        )
+    })?;
+    found(req, at)
 }
 
 /// `mb_stripos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false`.
@@ -607,16 +705,16 @@ fn mb_stripos(
     #[php(default = null)] encoding: Option<PhpString>,
 ) -> Result<OrFalse<i64>, Thrown> {
     let enc = self::encoding(req, encoding, 4)?;
-    found(
-        req,
+    let at = on_heap(req, || {
         find_folded(
             haystack.as_bytes(),
             needle.as_bytes(),
             enc,
             self::offset(offset),
             false,
-        ),
-    )
+        )
+    })?;
+    found(req, at)
 }
 
 /// `mb_strripos(string $haystack, string $needle, int $offset = 0, ?string $encoding = null): int|false`.
@@ -638,16 +736,16 @@ fn mb_strripos(
     #[php(default = null)] encoding: Option<PhpString>,
 ) -> Result<OrFalse<i64>, Thrown> {
     let enc = self::encoding(req, encoding, 4)?;
-    found(
-        req,
+    let at = on_heap(req, || {
         find_folded(
             haystack.as_bytes(),
             needle.as_bytes(),
             enc,
             self::offset(offset),
             true,
-        ),
-    )
+        )
+    })?;
+    found(req, at)
 }
 
 /// `php_mb_strstr_variants`: the part before or from the match.
@@ -662,20 +760,24 @@ fn strstr_variant(
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let enc = self::encoding(req, encoding, 4)?;
     let (h, n) = (haystack.as_bytes(), needle.as_bytes());
-    let at = if folded {
-        find_folded(h, n, enc, 0, reverse)
-    } else {
-        find(h, n, enc, 0, reverse)
-    };
+    let at = on_heap(req, || {
+        if folded {
+            find_folded(h, n, enc, 0, reverse)
+        } else {
+            find(h, n, enc, 0, reverse)
+        }
+    })?;
     let Ok(at) = at else {
         return Ok(OrFalse::False);
     };
     let sub = substitute(req);
-    let part = if before_needle {
-        substr(h, 0, at, enc, sub)
-    } else {
-        substr(h, at, UNTIL_END, enc, sub)
-    };
+    let part = on_heap(req, || {
+        if before_needle {
+            substr(h, 0, at, enc, sub)
+        } else {
+            substr(h, at, UNTIL_END, enc, sub)
+        }
+    })?;
     Ok(OrFalse::Value(part.into_string(req)?))
 }
 
@@ -790,6 +892,20 @@ pub(crate) fn must_not_be_empty(req: &mut Request, arg: u32) -> Thrown {
 /// mb_substr_count(): Argument #2 ($needle) must not be empty
 /// mb_substr_count(): Argument #2 ($needle) must not be empty
 /// ```
+///
+/// Since 8.5.12 a conversion's buffer grows fallibly, so a needle whose UTF-8
+/// is past the memory limit is refused its growth, and the limit's fatal is
+/// raised as the call returns. The case crosses the limit where a new chunk
+/// is asked for, whose figure holds in any layout (#3442):
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// var_dump(mb_substr_count("abc", str_repeat("\x80", 400000), "CP1252"), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn mb_substr_count(
     req: &mut Request,
@@ -801,29 +917,45 @@ fn mb_substr_count(
         return Err(must_not_be_empty(req, 2));
     }
     let enc = self::encoding(req, encoding, 3)?;
-    let convert = |s: &PhpString| {
-        if is_utf8(enc) && (s.is_valid_utf8() || std::str::from_utf8(s.as_bytes()).is_ok()) {
-            s.as_bytes().to_vec()
-        } else {
-            search_utf8(s.as_bytes(), enc)
-        }
-    };
-    let (h, n) = (convert(&haystack), convert(&needle));
-    if !is_utf8(enc) && n.is_empty() {
-        return Err(must_not_be_empty(req, 2));
-    }
-    let mut count = 0;
-    let mut at = 0;
-    while h.len() >= n.len() && at + n.len() <= h.len() {
-        match find_first(&h[at..], &n) {
-            Some(found) => {
-                at += found + n.len();
-                count += 1;
+    // php's `haystack_u8` and `needle_u8`, held on the request's heap
+    // while they are searched; the search itself is `zend_memnstr`'s.
+    let counted = on_heap(req, || {
+        let convert = |s: &PhpString| {
+            if is_utf8(enc) && (s.is_valid_utf8() || std::str::from_utf8(s.as_bytes()).is_ok()) {
+                None
+            } else {
+                Some(
+                    fast_convert_held(
+                        s.as_bytes(),
+                        enc,
+                        Encoding::utf8(),
+                        0,
+                        MBFL_OUTPUTFILTER_ILLEGAL_MODE_BADUTF8,
+                    )
+                    .0,
+                )
             }
-            None => break,
+        };
+        let (hc, nc) = (convert(&haystack), convert(&needle));
+        let h = hc.as_ref().map_or(haystack.as_bytes(), Converted::bytes);
+        let n = nc.as_ref().map_or(needle.as_bytes(), Converted::bytes);
+        if !is_utf8(enc) && n.is_empty() {
+            return None;
         }
-    }
-    Ok(count)
+        let mut count = 0;
+        let mut at = 0;
+        while h.len() >= n.len() && at + n.len() <= h.len() {
+            match find_first(&h[at..], n) {
+                Some(found) => {
+                    at += found + n.len();
+                    count += 1;
+                }
+                None => break,
+            }
+        }
+        Some(count)
+    })?;
+    counted.ok_or_else(|| must_not_be_empty(req, 2))
 }
 
 /// `mb_substr(string $string, int $start, ?int $length = null, ?string $encoding = null): string`.
@@ -884,7 +1016,7 @@ fn mb_substr(
         Some(_) => 0,
     };
     let sub = substitute(req);
-    substr(string.as_bytes(), from, len, enc, sub).into_string(req)
+    on_heap(req, || substr(string.as_bytes(), from, len, enc, sub))?.into_string(req)
 }
 
 /// `mb_strcut(string $string, int $start, ?int $length = null, ?string $encoding = null): string`.
@@ -940,6 +1072,19 @@ fn mb_substr(
 /// 82a0
 /// e38182
 /// ```
+///
+/// Since 8.5.12 the memory device of a cut through a filter grows fallibly,
+/// so a cut past the memory limit is refused there and the limit's fatal is
+/// raised as the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_strcut(str_repeat("_", 500000), 0, 500000, "UTF-7")), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn mb_strcut(
     req: &mut Request,
@@ -966,7 +1111,7 @@ fn mb_strcut(
         usize::try_from(from).unwrap_or(0),
         usize::try_from(len).unwrap_or(usize::MAX),
     );
-    let out = if let Some(cut) = enc.cut(bytes, from, len) {
+    let out = if let Some(cut) = on_heap(req, || enc.cut(bytes, from, len))? {
         cut
     } else if char_len(enc) != 0 {
         let width = char_len(enc);
@@ -999,7 +1144,20 @@ fn mb_strcut(
         };
         bytes[start..end].to_vec()
     } else {
-        return new_string(req, &strcut(bytes, enc, from, len));
+        // Since 8.5.12 a cut whose memory device was refused its growth
+        // is `NULL`, and the native returns (`RETURN_OOM()`); the cut is
+        // `RETVAL_FSTRINGL`, asked for fallibly.
+        let Some(cut) = on_heap(req, || strcut(bytes, enc, from, len))? else {
+            // RETURN_OOM()
+            return cut_string(req, b"");
+        };
+        return match req
+            .memory_mut()
+            .fallible(|req| PhpString::finit(req, &cut))?
+        {
+            Some(made) => Ok(made),
+            None => cut_string(req, b""),
+        };
     };
     cut_string(req, &out)
 }
@@ -1148,6 +1306,19 @@ fn trim_string(
 /// string(8) "Hello W."
 /// mb_strimwidth(): Argument #2 ($start) is out of range
 /// ```
+///
+/// Since 8.5.12 the trim marker's room is asked for fallibly, so a marker
+/// past the memory limit is refused and the limit's fatal is raised as the
+/// call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(strlen(mb_strimwidth(str_repeat("a", 3 << 20), 0, (3 << 20) - 1, str_repeat("b", 3 << 20))), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn mb_strimwidth(
     req: &mut Request,
@@ -1179,7 +1350,9 @@ fn mb_strimwidth(
         );
         width += int(strwidth(bytes, enc));
         if from > 0 {
-            let trimmed = substr(bytes, 0, usize::try_from(from).unwrap_or(0), enc, sub);
+            let trimmed = on_heap(req, || {
+                substr(bytes, 0, usize::try_from(from).unwrap_or(0), enc, sub)
+            })?;
             width -= int(strwidth(&trimmed.into_bytes(), enc));
         }
         if width < 0 {
@@ -1190,7 +1363,8 @@ fn mb_strimwidth(
         usize::try_from(from).unwrap_or(0),
         usize::try_from(width).unwrap_or(0),
     );
-    match trim_string(bytes, trim_marker.as_bytes(), enc, from, width, sub) {
+    let marker = trim_marker.as_bytes();
+    match on_heap(req, || trim_string(bytes, marker, enc, from, width, sub))? {
         Trimmed::Input => Ok(same(req, string)),
         Trimmed::Marker => Ok(same(req, trim_marker)),
         Trimmed::Part(part) => part.into_string(req),
@@ -1207,13 +1381,16 @@ fn ulcfirst(
     let enc = self::encoding(req, encoding, 2)?;
     let sub = substitute(req);
     let bytes = string.as_bytes();
-    let first = substr(bytes, 0, 1, enc, sub).into_bytes();
-    let head = case::convert(mode, &first, enc, enc, sub);
+    let (first, head) = on_heap(req, || {
+        let first = substr(bytes, 0, 1, enc, sub).into_bytes();
+        let head = case::convert(mode, &first, enc, enc, sub);
+        (first, head)
+    })?;
     if first == head {
         return Ok(same(req, string));
     }
     let mut out = head;
-    out.extend(substr(bytes, 1, UNTIL_END, enc, sub).into_bytes());
+    out.extend(on_heap(req, || substr(bytes, 1, UNTIL_END, enc, sub))?.into_bytes());
     new_string(req, &out)
 }
 
@@ -1333,13 +1510,15 @@ fn do_trim(
         return Ok(same(req, string));
     }
     let sub = substitute(req);
-    substr(
-        string.as_bytes(),
-        left,
-        total.saturating_sub(right + left),
-        enc,
-        sub,
-    )
+    on_heap(req, || {
+        substr(
+            string.as_bytes(),
+            left,
+            total.saturating_sub(right + left),
+            enc,
+            sub,
+        )
+    })?
     .into_string(req)
 }
 
@@ -1490,7 +1669,9 @@ fn mb_chr(
         };
     }
     let sub = substitute(req);
-    let (out, errors) = convert(&cp.to_be_bytes(), Encoding::ucs4be(), enc, sub);
+    let (out, errors) = on_heap(req, || {
+        convert(&cp.to_be_bytes(), Encoding::ucs4be(), enc, sub)
+    })?;
     if errors != 0 {
         return Ok(OrFalse::False);
     }
@@ -1511,6 +1692,19 @@ fn mb_chr(
 /// string(3) "abc"
 /// mb_str_pad(): Argument #3 ($pad_string) must not be empty
 /// mb_str_pad(): Argument #4 ($pad_type) must be STR_PAD_LEFT, STR_PAD_RIGHT, or STR_PAD_BOTH
+/// ```
+///
+/// Since 8.5.12 the string is asked for fallibly, so padding past the
+/// memory limit is refused and the limit's fatal is raised as the call
+/// returns:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(strlen(mb_str_pad("a", 100 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 104873984 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn mb_str_pad(
@@ -1548,22 +1742,57 @@ fn mb_str_pad(
     };
     let pad = pad_string.as_bytes();
     let sub = substitute(req);
-    let piece = |n: usize| -> Option<Vec<u8>> {
-        let mut out = Vec::new();
-        out.try_reserve((n / pad_length).checked_mul(pad.len())?)
-            .ok()?;
-        for _ in 0..n / pad_length {
-            out.extend_from_slice(pad);
-        }
-        out.extend(substr(pad, 0, n % pad_length, enc, sub).into_bytes());
-        Some(out)
-    };
-    let (Some(mut out), Some(tail)) = (piece(left), piece(right)) else {
+    let (full_left, full_right) = (left / pad_length, right / pad_length);
+    let (Some(full_left_bytes), Some(full_right_bytes)) = (
+        full_left.checked_mul(pad.len()),
+        full_right.checked_mul(pad.len()),
+    ) else {
         return Err(throw_error(req, "Error", "String size overflow"));
     };
-    out.extend_from_slice(string.as_bytes());
-    out.extend(tail);
-    new_string(req, &out)
+    let (tail_left, tail_right) = on_heap(req, || {
+        (
+            substr(pad, 0, left % pad_length, enc, sub).into_bytes(),
+            substr(pad, 0, right % pad_length, enc, sub).into_bytes(),
+        )
+    })?;
+    // `ZSTR_MAX_LEN`, `SIZE_MAX` less `ZSTR_MAX_OVERHEAD`, the aligned
+    // header and terminator.
+    let max = usize::MAX - 32;
+    let bytes = full_left_bytes
+        .checked_add(tail_left.len())
+        .zip(full_right_bytes.checked_add(tail_right.len()))
+        .and_then(|(l, r)| l.checked_add(r))
+        .filter(|&pads| pads <= max && string.len() <= max - pads);
+    let Some(pads) = bytes else {
+        return Err(throw_error(req, "Error", "String size overflow"));
+    };
+    let input = string.as_bytes();
+    // `zend_string_safe_falloc` since 8.5.12: the string asked for
+    // fallibly, `RETURN_OOM()` where the memory limit refused it.
+    let fill = |out: &mut [u8]| {
+        let mut at = 0;
+        let mut put = |bytes: &[u8]| {
+            out[at..at + bytes.len()].copy_from_slice(bytes);
+            at += bytes.len();
+        };
+        for _ in 0..full_left {
+            put(pad);
+        }
+        put(&tail_left);
+        put(input);
+        for _ in 0..full_right {
+            put(pad);
+        }
+        put(&tail_right);
+    };
+    match req
+        .memory_mut()
+        .fallible(|req| PhpString::product(req, 1, input.len(), pads, fill))?
+    {
+        Some(made) => Ok(made),
+        // RETURN_OOM()
+        None => cut_string(req, b""),
+    }
 }
 
 /// `mb_scrub(string $string, ?string $encoding = null): string`.
@@ -1589,7 +1818,7 @@ fn mb_scrub(
         return Ok(same(req, string));
     }
     let sub = substitute(req);
-    let (out, errors) = convert(string.as_bytes(), enc, enc, sub);
+    let (out, errors) = on_heap(req, || convert(string.as_bytes(), enc, enc, sub))?;
     req.state::<crate::settings::State>().illegal_chars += u64::from(errors);
     new_string(req, &out)
 }

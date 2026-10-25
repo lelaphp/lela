@@ -235,6 +235,7 @@ fn compiled(ir: &TraceIr) -> Option<Compiled> {
         Kernel::Concat => (super::super::super::wrapped::concat as *const ()).addr(),
         Kernel::Find => (super::super::super::wrapped::find as *const ()).addr(),
         Kernel::Lookup => (super::super::super::wrapped::lookup as *const ()).addr(),
+        Kernel::Leave => (super::super::super::wrapped::leave as *const ()).addr(),
     });
     let backend = Backend::new(&testing::policy(&[]), symbols).ok()?;
     backend
@@ -257,7 +258,7 @@ fn entered(req: &mut Request, frame: FrameRef, ir: &TraceIr) -> Option<FrameRef>
     let table = table::of_epoch(&epoch)?;
     let id = table.publish(body, Start::Enter).ok()?;
     let trace = table.get(id)?;
-    match super::super::super::enter(req, frame, (&epoch, trace), super::super::super::At::First)
+    match super::crossed(req, frame, (&epoch, trace), super::super::super::At::First)
         .ok()?
         .left
     {
