@@ -439,6 +439,22 @@ fn from_file(
 /// D/./a.php
 /// D/./a.php
 /// ```
+///
+/// A path the system cannot open directly, a `file://` URL, is opened
+/// as a php stream, and the `BZip2` stream reads and writes a copy of
+/// its fd, as 8.5.12's `php_bz2_bzdopen` hands libbz2 one:
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'bz');
+/// var_dump(file_put_contents("compress.bzip2://file://$f", str_repeat('ab', 50)));
+/// var_dump(file_get_contents("compress.bzip2://file://$f"), bzdecompress(file_get_contents($f)) === str_repeat('ab', 50));
+/// unlink($f);
+/// ```
+/// ```expect
+/// int(100)
+/// string(100) "abababababababababababababababababababababababababababababababababababababababababababababababababab"
+/// bool(true)
+/// ```
 fn open(
     req: &mut Request,
     path: &[u8],
