@@ -158,6 +158,7 @@ tier::interrupted
 tier::jump_targets
 tier::laid
 tier::landing
+tier::lending
 tier::native_returns
 tier::numbered_class
 tier::observes

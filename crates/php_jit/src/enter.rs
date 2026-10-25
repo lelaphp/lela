@@ -433,6 +433,7 @@ pub(crate) fn lent<T>(
 ) -> Option<T> {
     let state = tier::state::<crate::JitRequest>(req)?;
     state.epoch.get_or_init(|| tier::epoch(req));
+    let lending = tier::lending(req);
     let found = ptr::from_ref(state);
     // SAFETY: the request lays its tier's state once, as it is made, in a
     // box of its own, and drops it only as the request ends; `serve`
@@ -446,10 +447,12 @@ pub(crate) fn lent<T>(
     // through its cells, for as long as `serve` serves: what the box
     // holds is not the request's own memory, which `serve`'s borrow
     // covers. What the types leave open is `api::request` itself and
-    // every file below it, and a swap of two whole requests. The assertion past `serve`, in
-    // every build with debug assertions, catches such a write that still
-    // stands when `serve` returns; one undone before then, or a read of
-    // the state during `serve` after one, it does not.
+    // every file below it, and a swap of two whole requests. Two debug
+    // assertions hold those: `lending` fails as a state dropped or
+    // replaced while it stands drops (`tier::Lending`), and the one past
+    // `serve` catches a state swapped away that stands swapped when
+    // `serve` returns; a swap undone before then, or a read of the state
+    // during `serve` after one, they do not.
     let state = unsafe { &*found };
     let epoch = state.epoch.get()?;
     let table = match state.table.get() {
@@ -468,6 +471,7 @@ pub(crate) fn lent<T>(
     // The state stands where it was lent: not replaced or moved while
     // the crossing borrowed it.
     debug_assert!(tier::state::<crate::JitRequest>(req).is_some_and(|now| ptr::eq(now, found)));
+    drop(lending);
     Some(served)
 }
 

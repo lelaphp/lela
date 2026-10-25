@@ -1625,6 +1625,66 @@ mod tests {
     use super::Request;
     use crate::engine::Engine;
 
+    /// A tier state laid for the test, so a lend has a state to lend.
+    struct Laying;
+
+    impl crate::tier::Tier for Laying {
+        type State = u32;
+
+        fn safepoint(
+            _: &mut Request,
+            _: php_heap::FrameRef,
+            _: crate::tier::Site,
+            _: crate::tier::Held<'_>,
+        ) -> crate::tier::Flow {
+            crate::tier::Flow::Continue
+        }
+
+        fn lay(_: &crate::tier::Started<'_>) -> Option<u32> {
+            Some(7)
+        }
+    }
+
+    /// The rule the lend of a request's tier state stands on (#3437,
+    /// `php_jit`'s `enter::lent`): `api::request`, the one place the
+    /// types leave able to, replacing the state while a tier lends it
+    /// fails the lend's debug assertion as the old state drops.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "while a tier lent it")]
+    fn a_tier_state_replaced_while_lent_fails_the_lends_assertion() {
+        let engine = Engine::cli_builder().tier::<Laying>().build();
+        let mut req = Request::new(
+            std::sync::Arc::clone(&engine.shared),
+            crate::engine::RequestDescription::default(),
+        );
+        assert_eq!(
+            crate::tier::state::<u32>(&req),
+            Some(&7),
+            "the state is laid"
+        );
+        let lending = crate::tier::lending(&req);
+        req.tier = crate::tier::TierState::laid(&req.shared);
+        drop(lending);
+    }
+
+    /// The same state, replaced once no lend stands: no assertion fails.
+    #[test]
+    fn a_tier_state_replaced_with_no_lend_standing_is_dropped_quietly() {
+        let engine = Engine::cli_builder().tier::<Laying>().build();
+        let mut req = Request::new(
+            std::sync::Arc::clone(&engine.shared),
+            crate::engine::RequestDescription::default(),
+        );
+        drop(crate::tier::lending(&req));
+        req.tier = crate::tier::TierState::laid(&req.shared);
+        assert_eq!(
+            crate::tier::state::<u32>(&req),
+            Some(&7),
+            "the state is laid again"
+        );
+    }
+
     /// A class declaring `__destruct`, as an extension declares one:
     /// what [`Request::destruct`] looks for on the class of the object
     /// it is handed. Its entry is never served, since the branch under
