@@ -358,16 +358,18 @@ fn shm_attach(
         Ok(segment) => segment,
         Err(errno) => {
             let text = req.environment().os_error_text(errno);
+            let refused = failed(req, &text);
             unmake();
-            return Ok(failed(req, &text));
+            return Ok(refused);
         }
     };
     // The size is the kernel's, `shm_desc.shm_segsz`, not `$size`.
     let len = segment.size();
     if len < HEAD {
+        let refused = failed(req, "segment too small");
         drop(segment);
         unmake();
-        return Ok(failed(req, "segment too small"));
+        return Ok(refused);
     }
     let magic = segment.read(0, MAGIC.len());
     if magic.as_deref().map(php_ext::coerce::c_str) != Some(&b"PHP_SM"[..]) {
