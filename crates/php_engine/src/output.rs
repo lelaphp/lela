@@ -1673,7 +1673,12 @@ pub(crate) fn discard_all(req: &mut Request) {
 /// runs between the two, so they are one act here.
 pub(crate) fn deactivate(req: &mut Request) {
     if req.output().flags & ACTIVATED != 0 {
-        header(req);
+        // php's `_exit(137)` at the hard memory limit never reaches
+        // `php_output_deactivate`, so a request ended there commits no
+        // head and runs no header callback (`Ending::Terminated`, #3435).
+        if !req.terminated() {
+            header(req);
+        }
         let output = req.output_mut();
         output.flags ^= ACTIVATED;
         output.running = None;
