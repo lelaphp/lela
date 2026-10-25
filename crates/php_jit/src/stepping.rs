@@ -2,8 +2,9 @@
 //! §4.1 *What recording costs*, §10): what `step` costs per opline under
 //! recording, measured as the recorder's loop without the record. Reached
 //! only under `cfg(php_jit_stepping)` ([`crate::Jit`]'s `safepoint`), which
-//! the bench's build of the engine alone sets, through `RUSTFLAGS` into a
-//! target directory of its own; no ini and no `Policy` value reaches it.
+//! the bench's build of the engine alone sets, added to the workspace's
+//! rustflags by a `--config` line, into a target directory of its own; no
+//! ini and no `Policy` value reaches it.
 //!
 //! At the first safepoint the engine asks, [`driven`] takes the serving
 //! over and runs it to its end one `tier::step` at a time, as

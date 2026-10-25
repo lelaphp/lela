@@ -46,7 +46,9 @@ impl OutputSink for Process {
         std::io::stdout().lock().flush().ok();
     }
 
-    fn send_headers(&mut self, _head: &ResponseHead) {}
+    fn send_headers(&mut self, _head: &ResponseHead) -> Result<(), Aborted> {
+        Ok(())
+    }
 
     fn log(&mut self, entry: &[u8]) {
         let mut stderr = std::io::stderr().lock();
@@ -467,7 +469,9 @@ mod tests {
             Ok(())
         }
         fn flush(&mut self) {}
-        fn send_headers(&mut self, _head: &ResponseHead) {}
+        fn send_headers(&mut self, _head: &ResponseHead) -> Result<(), Aborted> {
+            Ok(())
+        }
         fn log(&mut self, entry: &[u8]) {
             self.0.extend_from_slice(entry);
             self.0.push(b'\n');

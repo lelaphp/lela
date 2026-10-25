@@ -3781,6 +3781,70 @@ pub(crate) fn do_fcall<T: Tier>(
 /// #1 %s(3): eval()
 /// #2 {main}
 /// ```
+///
+/// The operand is released after the new frame is current, as php's
+/// `FREE_OP1()` stands after `i_init_code_execute_data` and before
+/// `ZEND_VM_ENTER` (`Z/Zend/zend_vm_def.h:6598-6605`): what a temporary's
+/// destructor throws there is raised on the new frame at its first
+/// opline, so none of the code runs, and the throwable unwinds into the
+/// caller's `catch`.
+///
+/// ```php
+/// class D { function __destruct() { throw new Exception("dtor"); } function __toString(): string { return "echo 'ran';"; } }
+/// function f() { return new D; }
+/// try { eval(f()); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// caught dtor
+/// ```
+///
+/// The same holds for a file a temporary names, and the throwable is
+/// the new frame's: its trace stands in the code, and a `try` the code
+/// opens at its first opline catches it.
+///
+/// ```php
+/// class D { function __construct(public string $s) {} function __destruct() { throw new Exception("dtor"); } function __toString(): string { return $this->s; } }
+/// file_put_contents(__DIR__ . '/ran.php', "<?php echo 'ran';");
+/// try { include new D(__DIR__ . '/ran.php'); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// try { require new D(__DIR__ . '/ran.php'); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
+/// try { eval(new D("echo 'ran';")); } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
+/// var_dump(eval(new D("try { echo 'ran'; } catch (Exception \$e) { echo 'inner ', \$e->getMessage(), ' '; } return 5;")));
+/// unlink(__DIR__ . '/ran.php');
+/// ```
+/// ```expect
+/// caught dtor
+/// caught dtor
+/// #0 %s(6) : eval()'d code(1): D->__destruct()
+/// #1 %s(6): eval()
+/// #2 {main}
+/// inner dtor int(5)
+/// ```
+///
+/// Where no frame is entered, the file already included, the one that
+/// failed to open and the unit that is one `RETURN` of a constant, the
+/// release stands at this opline after the value is written, and
+/// `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` raises what it threw here,
+/// before the opline after it runs.
+///
+/// ```php
+/// class D { function __construct(public string $s) {} function __destruct() { throw new Exception("dtor"); } function __toString(): string { return $this->s; } }
+/// function t($how, $f) { try { $r = $f(); echo "after "; var_dump($r); } catch (Exception $e) { echo $how, ": caught ", $e->getMessage(), "\n"; } }
+/// file_put_contents(__DIR__ . '/one.php', "<?php return 1;");
+/// include_once __DIR__ . '/one.php';
+/// t('include_once', fn() => include_once new D(__DIR__ . '/one.php'));
+/// t('constant', fn() => include new D(__DIR__ . '/one.php'));
+/// t('missing', fn() => include new D(__DIR__ . '/missing.php'));
+/// unlink(__DIR__ . '/one.php');
+/// ```
+/// ```expect
+/// include_once: caught dtor
+/// constant: caught dtor
+///
+/// Warning: include(%s/missing.php): Failed to open stream: No such file or directory in %s on line 8
+///
+/// Warning: include(): Failed opening '%s/missing.php' for inclusion (include_path='%s') in %s on line 8
+/// missing: caught dtor
+/// ```
 pub(crate) fn include_or_eval<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
@@ -3794,21 +3858,51 @@ pub(crate) fn include_or_eval<T: Tier>(
     };
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1);
     let returns_to = (op.out_type != OperandKind::Unused).then_some((frame, op.out));
-    let edge = match crate::ops::to_string(req, &operand) {
+    let made = match crate::ops::to_string(req, &operand) {
         // `tmp_inc_filename`, held across the compile and given up after
         // it, as `zend_include_or_eval` holds it.
         Ok(string) => {
             let site = (&*code.filename.0, op.lineno);
-            let edge = included(req, frame, kind, string.as_bytes(), site, returns_to);
+            let made = included(req, frame, kind, string.as_bytes(), site, returns_to);
             req.release(Value::string(string));
-            edge
+            made
         }
-        Err(thrown) => threw(req, frame, &thrown),
+        Err(thrown) => Ok(Included::threw(req, frame, &thrown)),
     };
     // `FREE_OP1()`: the operand stands while the file is opened and its
-    // frame pushed, and goes before the file runs.
+    // frame pushed. Where the frame was entered it goes with that frame
+    // current, before `ZEND_VM_ENTER`, so what its destructor throws is
+    // raised on the new frame and its first opline is `HANDLE_EXCEPTION`;
+    // on every other path it goes at this opline, and
+    // `ZEND_VM_NEXT_OPCODE_CHECK_EXCEPTION` raises what it threw here.
     exec::free_operand(req, frame, op.op1_type, op.op1);
-    edge
+    Ok(match made? {
+        Included::Entered(callee) if req.is_pending() => Stepped::Threw(callee).into(),
+        Included::Entered(callee) => Stepped::Pushed(callee).into(),
+        Included::Answered => advance(req, frame),
+        Included::Threw(at) => Stepped::Threw(at).into(),
+    })
+}
+
+/// What [`included`] made of an `INCLUDE_OR_EVAL` before the handler's
+/// `FREE_OP1()`, which decides where what that release throws is raised.
+enum Included {
+    /// The value written, or given up, with no frame: the file already
+    /// included, the one that failed to open, and the unit that is one
+    /// `RETURN` of a constant.
+    Answered,
+    /// The code frame pushed and current, its first opline next.
+    Entered(FrameRef),
+    /// A throwable left pending on this frame.
+    Threw(FrameRef),
+}
+
+impl Included {
+    /// `thrown` left pending on `frame`, as [`threw`] leaves it.
+    fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Included {
+        req.leave_pending(thrown);
+        Included::Threw(frame)
+    }
 }
 
 /// `zend_include_or_eval` over the path or the code `written`, and the
@@ -3859,7 +3953,7 @@ fn included(
     written: &[u8],
     site: (&[u8], u32),
     returns_to: Option<(FrameRef, u32)>,
-) -> Edge {
+) -> Result<Included, Fatal> {
     let opened = match kind {
         exec::IncludeKind::Eval => req.eval_string(written, site),
         exec::IncludeKind::Include
@@ -3869,22 +3963,26 @@ fn included(
     };
     let unit = match opened {
         Ok(Opened::Unit(unit)) => unit,
-        Ok(Opened::Already) => return answered(req, frame, returns_to, Value::bool(true)),
-        Ok(Opened::Failed) => return answered(req, frame, returns_to, Value::bool(false)),
-        Err(thrown) => return threw(req, frame, &thrown),
+        Ok(Opened::Already) => return Ok(answered(req, returns_to, Value::bool(true))),
+        Ok(Opened::Failed) => return Ok(answered(req, returns_to, Value::bool(false))),
+        Err(thrown) => {
+            return Ok(Included::threw(req, frame, &thrown));
+        }
     };
     let source = match kind {
         exec::IncludeKind::Eval => php_compile::SourceKind::EVAL,
         _ => php_compile::SourceKind::File,
     };
     if !crate::engine::note_compiled(req, &unit, source) {
-        return Ok(Stepped::Threw(frame).into());
+        return Ok(Included::Threw(frame));
     }
     // The op array `zend_accel_load_script` copies out of the cache, or
     // `zend_compile` makes, the request's while the file runs.
     let copy = match crate::api::values::Emalloc::new(req, exec::OP_ARRAY_SIZE) {
         Ok(copy) => copy,
-        Err(thrown) => return threw(req, frame, &thrown),
+        Err(thrown) => {
+            return Ok(Included::threw(req, frame, &thrown));
+        }
     };
     let main = exec::code_of(&unit);
     if !req.shared.declared().hooked.user
@@ -3897,31 +3995,26 @@ fn included(
         copy.free(req);
         // `destroy_op_array`: its names go with it.
         req.release_unit_strings(Some(&unit));
-        return answered(req, frame, returns_to, value);
+        return Ok(answered(req, returns_to, value));
     }
     let callee = req.push_code_frame(unit, CodeFrom::Nested(frame, returns_to))?;
     crate::observer::call(req, callee);
     if let Err(thrown) = req.hold_op_array(callee, copy) {
-        return threw(req, callee, &thrown);
+        return Ok(Included::threw(req, callee, &thrown));
     }
-    Ok(Stepped::Pushed(callee).into())
+    Ok(Included::Entered(callee))
 }
 
 /// The value an `INCLUDE_OR_EVAL` answers without a frame, into the
 /// `VAR` where the opline's value is read and given up where it is not.
-fn answered(
-    req: &mut Request,
-    frame: FrameRef,
-    returns_to: Option<(FrameRef, u32)>,
-    value: Value,
-) -> Edge {
+fn answered(req: &mut Request, returns_to: Option<(FrameRef, u32)>, value: Value) -> Included {
     match returns_to {
         Some((at, slot)) => {
             req.replace_slot(at, slot, value);
         }
         None => req.release(value),
     }
-    Ok(advance(req, frame))
+    Included::Answered
 }
 
 /// `ZEND_DO_UCALL` (`Z/Zend/zend_vm_def.h:4170`): the callee an

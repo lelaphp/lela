@@ -99,10 +99,8 @@ struct State {
 /// done
 /// ```
 pub fn extension() -> Extension {
-    let builder = ExtensionBuilder::default();
-    #[cfg(target_vendor = "apple")]
-    let builder = builder.class::<process::QosClass>();
-    builder
+    ExtensionBuilder::default()
+        .class::<process::QosClass>()
         .constants(constants::declared())
         .functions(vec![
             process::pcntl_fork::declared(),

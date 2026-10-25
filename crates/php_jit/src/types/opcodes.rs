@@ -822,7 +822,8 @@ fn named(op: &Opline, code: &OpArray) -> bool {
 
 /// The operands php's switch in `zend_jit_trace_build_tssa` adds a guard
 /// for (`ADD_OP1_TRACE_GUARD`, `ADD_OP2_TRACE_GUARD`,
-/// `ADD_OP1_DATA_TRACE_GUARD`), in its order.
+/// `ADD_OP1_DATA_TRACE_GUARD`), in its order, which marks them; the code
+/// generator holds them in [`checked_order`].
 ///
 /// Where php types an operand from its inference over the whole
 /// function, which this tier does not keep (`jit-design.md` §4.2,
@@ -1002,6 +1003,21 @@ pub(super) fn guard_sites(
             vec![Op2]
         }
         _ => vec![],
+    }
+}
+
+/// The order php's code generator holds an opline's operands' types in,
+/// as each case of `zend_jit_trace`'s switch calls `CHECK_OP1_TRACE_TYPE`,
+/// `CHECK_OP2_TRACE_TYPE` and `CHECK_OP1_DATA_TRACE_TYPE`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:4380-6500`): an `ASSIGN`'s value
+/// before its variable (`:5130-5150`), and every other opline's `op1`,
+/// then its `op2`, then its `OP_DATA`'s. Their exits are taken in this
+/// order, each knowing the types the guards before it held, so it is the
+/// order they are numbered in, where [`guard_sites`] says which are held.
+pub(super) fn checked_order(opcode: Opcode) -> [Site; 3] {
+    match opcode {
+        Opcode::Assign => [Site::Op2, Site::Op1, Site::Data],
+        _ => [Site::Op1, Site::Op2, Site::Data],
     }
 }
 

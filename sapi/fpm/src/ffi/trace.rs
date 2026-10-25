@@ -47,12 +47,12 @@ unsafe extern "C" {
 }
 
 /// A stopped child's memory, open for the master to read: its task port
-/// on macOS, its pid where the master is attached to it.
+/// on macOS, its pid where the master is attached to it. Dropping it is
+/// `fpm_trace_close`, so it closes on every path out of the read.
 pub(crate) struct Memory {
     #[cfg(target_os = "macos")]
     task: libc::mach_port_t,
     #[cfg(not(target_os = "macos"))]
-    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pid: i32,
 }
 
@@ -103,6 +103,11 @@ impl Memory {
     }
 }
 
+/// `fpm_trace_close`, once the read is done, which on macOS lets go of
+/// what the read held and forgets the task port
+/// (`fpm_mach_vm_deallocate`, `target = 0`): here the reads hold nothing
+/// past their call, and the port's send right goes back, which php leaves
+/// to the process's end.
 #[cfg(target_os = "macos")]
 impl Drop for Memory {
     fn drop(&mut self) {
@@ -145,12 +150,6 @@ pub(crate) fn ready(pid: i32) -> Option<Memory> {
     None
 }
 
-/// `fpm_trace_close`: nothing held past the read.
-#[cfg(target_os = "macos")]
-pub(crate) fn close(_pid: i32) -> bool {
-    true
-}
-
 /// `fpm_trace_signal`: the master attached to the child, which stops it.
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn signal(pid: i32) -> bool {
@@ -163,18 +162,24 @@ pub(crate) fn signal(pid: i32) -> bool {
 
 /// `fpm_trace_ready`: the attached child is ready as it stands.
 #[cfg(not(target_os = "macos"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "one signature on every platform: macOS's kernel can refuse the task port"
+)]
 pub(crate) fn ready(pid: i32) -> Option<Memory> {
     Some(Memory { pid })
 }
 
-/// `fpm_trace_close`: the master detached.
+/// `fpm_trace_close`, once the read is done: the master detached, which
+/// `fpm_php_trace` goes on from whether or not it could.
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn close(pid: i32) -> bool {
-    if let Err(e) = nix::sys::ptrace::detach(Pid::from_raw(pid), None) {
-        crate::zlog_sys!(Error @ fpm_trace_close:47, e, "failed to ptrace(DETACH) child {pid}");
-        return false;
+impl Drop for Memory {
+    fn drop(&mut self) {
+        let pid = self.pid;
+        if let Err(e) = nix::sys::ptrace::detach(Pid::from_raw(pid), None) {
+            crate::zlog_sys!(Error @ fpm_trace_close:47, e, "failed to ptrace(DETACH) child {pid}");
+        }
     }
-    true
 }
 
 /// `fpm_pctl_kill(pid, FPM_PCTL_CONT)`: the child let go on.

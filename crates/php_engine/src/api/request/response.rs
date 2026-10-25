@@ -202,7 +202,9 @@ impl OutputSink for Kept {
 
     fn flush(&mut self) {}
 
-    fn send_headers(&mut self, _: &ResponseHead) {}
+    fn send_headers(&mut self, _: &ResponseHead) -> Result<(), Aborted> {
+        Ok(())
+    }
 
     fn log(&mut self, entry: &[u8]) {
         self.aside.push(Aside::Log(entry.to_vec()));
@@ -367,7 +369,7 @@ impl Request {
     /// (`Z/sapi/cgi/cgi_main.c:2468-2471`): what an extension's `rinit`
     /// displays commits the head under `-q` too, a failed start's fatal
     /// among it (#1879).
-    pub(crate) fn send_header_block(&mut self) {
+    pub(crate) fn send_header_block(&mut self) -> Result<(), Aborted> {
         if self.phase() != Phase::Startup
             && self
                 .description
@@ -375,7 +377,7 @@ impl Request {
                 .as_ref()
                 .is_some_and(|web| web.no_headers)
         {
-            return;
+            return Ok(());
         }
         let names = self
             .description
@@ -392,7 +394,7 @@ impl Request {
             lines: self.response.output.headers().map(<[u8]>::to_vec).collect(),
             ini,
         };
-        self.response.sink.send_headers(&head);
+        self.response.sink.send_headers(&head)
     }
 
     /// `sapi_module.send_headers` made one that sends nothing, for the

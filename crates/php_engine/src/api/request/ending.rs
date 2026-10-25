@@ -144,8 +144,10 @@ impl Request {
         self.bail_out();
     }
 
-    /// `zend_error_noreturn(E_CORE_ERROR, ...)`: the one core fatal
-    /// this engine raises, `zend_objects_destroy_object`'s. php gives
+    /// `zend_error_noreturn(E_CORE_ERROR, ...)`: what
+    /// `zend_objects_store_del` raises for a pending throwable's
+    /// destruction, a link refused at that level and `zend_call_known_function`'s
+    /// refused call. php gives
     /// `E_CORE_ERROR` no site at all (`get_filename_lineno`,
     /// `Z/Zend/zend.c:1642`), so it is rendered at `Unknown` on line
     /// zero wherever it was raised, and the request ends in it.

@@ -54,7 +54,7 @@ fn exit_at(opline: u32, grows: Grows) -> ExitSpec {
     ExitSpec {
         frame: Frame::ROOT,
         opline: Some(OplineIdx(opline)),
-        landing: Landing::Plain,
+        landing: Landing::PLAIN,
         stores: Vec::new(),
         known: Vec::new(),
         grows,

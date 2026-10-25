@@ -126,6 +126,7 @@ fn entered(req: &mut Request, frame: FrameRef) -> Flow {
         // The init files' own request comes before the context's first
         // compile, as do the servings inside them.
         s.started |= !s.initializing && s.plan != Some(Plan::Init);
+        s.out.entered();
         s.plan
     })
     .flatten() else {
@@ -251,6 +252,8 @@ fn initialized(req: &mut Request) -> bool {
     session.program_held = true;
     crate::init::run(&mut session, &mut Here::Idle { req });
     session.program_held = false;
+    // The run's compile after them comes under `PHPDBG_DISCARD_OUTPUT`.
+    compiled_after_init(&mut session, req, true);
     // `run`'s clean up from the last execution, after the init files:
     // no seek and no throwable handled, the hits at zero, and a step the
     // init files' prompt asked for kept.
@@ -385,6 +388,19 @@ fn unopened(session: &mut Session, req: &mut Request) -> bool {
     true
 }
 
+/// What the cycle's compile of the execution context wrote, which php
+/// writes after the init files (`Z/sapi/phpdbg/phpdbg.c:1502-1553`),
+/// written there, its log discarded where `discard` says; where the init
+/// files stopped the session or left something pending, php's compile
+/// does not come, and what the engine's wrote is let go.
+fn compiled_after_init(session: &mut Session, req: &Request, discard: bool) {
+    if session.stopped.is_some() || read::open_refused(req) {
+        session.out.drop_compiled();
+    } else {
+        session.out.compiled(discard);
+    }
+}
+
 /// The execution context compiled and standing at its first opline: the
 /// compile notice, then the prompt, until `run` goes on in this same
 /// request or a command ends it. Where the init files left something
@@ -394,9 +410,13 @@ fn held(req: &mut Request, frame: FrameRef) -> Flow {
     let Some(mut session) = session::take(req) else {
         return Flow::Continue;
     };
+    // The first cycle's compile writes its log; a later cycle's comes
+    // under `PHPDBG_DISCARD_OUTPUT`.
+    let later = session.init_ran;
     session.program_held = true;
     crate::init::run(&mut session, &mut Here::Idle { req });
     session.program_held = false;
+    compiled_after_init(&mut session, req, later);
     if session.stopped.is_none() && session.inline_run {
         // A `run` among them runs the program now, the loop stopping for
         // nothing but a throwable nothing catches.

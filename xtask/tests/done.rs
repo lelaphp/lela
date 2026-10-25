@@ -429,6 +429,59 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
     assert!(verdict.unmet.contains(&named), "{verdict:#?}");
 }
 
+/// Condition 10 (#3372): a diff that changes `.cargo/config.toml` asks for
+/// a fresh passing `fold` reading of `sapi/cli`, and one taken before the
+/// file changed is stale, since `sapi/cli`'s key covers the files rustc is
+/// built under; a failing one is unmet with its message, a skip, a host
+/// the sensor cannot read, is met and a note, and a diff that changes none
+/// of those files asks for no reading.
+#[test]
+fn a_change_to_what_rustc_is_built_under_asks_for_a_fold_reading() {
+    let root = scratch("fold");
+    let asked = |verdict: &Verdict| -> Vec<String> {
+        let fold = verdict.unmet.iter().filter(|u| u.starts_with("fold: "));
+        fold.cloned().collect()
+    };
+    write(
+        &root,
+        "sapi/cli/Cargo.toml",
+        "[package]\nname = \"php_sapi_cli\"\nversion = \"0.0.0\"\n\n[dependencies]\nphp_bundle = { path = \"../../crates/php_bundle\" }\n",
+    );
+    assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+    let store = Store::of_workspace(&root);
+    store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
+
+    write(
+        &root,
+        ".cargo/config.toml",
+        "[target.'cfg(all())']\nrustflags = []\n",
+    );
+    assert_eq!(
+        asked(&judge(&root)),
+        [
+            "fold: no reading for sapi/cli over the tree now, and .cargo/config.toml changed; `cargo xtask fold` takes it, building the release sapi/cli first (minutes)"
+        ]
+    );
+    let mut skipped = fresh(&root, "fold", "sapi/cli");
+    skipped.status = Status::Skip;
+    skipped.message = "sapi/cli: not held; this host is x86_64".into();
+    store.record(&[skipped]).unwrap();
+    let verdict = judge(&root);
+    assert_eq!(asked(&verdict), Vec::<String>::new());
+    let note = "fold: sapi/cli not held on this host: sapi/cli: not held; this host is x86_64";
+    assert!(verdict.notes.contains(&note.to_owned()), "{verdict:#?}");
+    let mut failing = fresh(&root, "fold", "sapi/cli");
+    failing.status = Status::Fail;
+    failing.message = "sapi/cli: hoisted".into();
+    store.record(&[failing]).unwrap();
+    assert_eq!(
+        asked(&judge(&root)),
+        ["fold: sapi/cli fail: sapi/cli: hoisted"]
+    );
+    store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
+    assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+}
+
 // ------------------------------------------- the base is main
 
 /// A scratch repository on `t9`, cut from `main`, with `main` one commit
@@ -1511,7 +1564,7 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
 /// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done
 /// step names as `--not-run` exactly the instruments of condition 1 that
 /// job's steps run, so a lane added there is named here or `done` is red
-/// for its absence (#2477).
+/// for its absence (#2477); and `fold`, which no runner takes, always.
 #[test]
 fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -1544,7 +1597,18 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
         .skip(1)
         .filter_map(|rest| rest.split_whitespace().next())
         .collect();
-    assert_eq!(named, runs, "{step}");
+    // `fold` is named on every run, before the test of the oracle job:
+    // no runner is the aarch64 Mac it reads (#3384).
+    let mut asked = runs.clone();
+    asked.insert("fold");
+    assert_eq!(named, asked, "{step}");
+    let always = step
+        .find("set -- --not-run fold\n")
+        .expect("fold is named on every run");
+    assert!(
+        always < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
+        "{step}"
+    );
     assert!(
         step.contains("::warning title=the oracle lane did not run::"),
         "{step}"
@@ -2087,6 +2151,101 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
         "{lines:?}"
     );
     assert!(!verdict.met(), "{verdict:#?}");
+}
+
+/// A withdrawal is renewed past the commits after it (#3476): a bundle
+/// branch withdraws its recorded ticket first and then lands its other
+/// tickets' commits, as t3459 withdrew #3459 at e61851ebe and landed
+/// #3440's and #3449's after it. The first commit stales the withdrawal's
+/// reading, and the `ticket read` `done` names reads the ticket the
+/// tracker now holds closed with the withdrawal's comment, so it writes a
+/// passing reading that carries the withdrawal and the condition is met
+/// again. A read used to hold the unticked boxes, and a second withdrawal
+/// is refused as closed already, so nothing renewed it. A refused
+/// withdrawal is no closing comment, and stays unmet.
+#[test]
+fn a_withdrawal_is_renewed_by_a_read_past_a_later_commit_and_a_refused_one_is_not() {
+    use xtask::ticket::{Act, Reach, Successors, Verdict as Close};
+    let root = scratch("withdrawn-then-commit");
+    let repo = Repo::at(&root);
+    repo.git(&["config", "branch.main.ticket", "31"]);
+    let withdrawn = |reason: &str| {
+        let reach = Reach::of(&root).unwrap();
+        Act::Close(
+            Close::Withdrawn(reason.to_owned()),
+            Successors::Nothing,
+            reach,
+        )
+    };
+    let commit = |name: &str| {
+        std::fs::write(root.join(name), "another ticket's work\n").unwrap();
+        repo.git(&["add", "--", name]);
+        repo.git(&["commit", "-q", "-m", name]);
+    };
+    // The tracker after the close: the ticket closed, carrying the comment
+    // the close wrote, or none where the close was refused.
+    let read_closed = |body: &str, comments: &[&str]| {
+        let tracker = Tracker::empty("done-withdrawn");
+        let mut answer = serde_json::to_value(xtask::ticket::Issue {
+            body: std::fs::read_to_string(fixtures().join("done/ticket").join(body)).unwrap(),
+            state: xtask::ticket::State::Closed,
+            ..issue(31)
+        })
+        .unwrap();
+        let comments: Vec<_> = comments
+            .iter()
+            .map(|c| serde_json::json!({ "body": c }))
+            .collect();
+        answer["comments"] = comments.into();
+        tracker.with_answer(31, &answer.to_string());
+        let reading = xtask::ticket::run(
+            &root,
+            &xtask::manifest::Manifest::load(&root).unwrap(),
+            &tracker.gh(),
+            Act::Read,
+            xtask::track::Ticket::new(31),
+            None,
+        )
+        .unwrap();
+        Store::of_workspace(&root)
+            .record(std::slice::from_ref(&reading))
+            .unwrap();
+        reading
+    };
+
+    let reading = ticket_act(
+        &root,
+        31,
+        "withdrawn.md",
+        withdrawn("measured on HEAD: not in the tree"),
+    );
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    commit("after-the-withdrawal.txt");
+    let lines = about_the_ticket(&judge(&root));
+    assert!(lines.len() == 1 && lines[0].contains("stale"), "{lines:?}");
+    let comment = "Withdrawn by `xtask ticket close` at 1234567: measured on HEAD: not in the tree; 0 of 2 criteria ticked; opens nothing";
+    let read = read_closed("withdrawn.md", &["an earlier comment", comment]);
+    assert_eq!(read.status, Status::Pass, "{}", read.message);
+    assert_eq!(read.numbers["withdrawn"], 1.into(), "{read:#?}");
+    assert!(
+        read.message
+            .contains("withdrawn at 1234567: measured on HEAD"),
+        "{}",
+        read.message
+    );
+    let verdict = judge(&root);
+    assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
+
+    let reading = ticket_act(&root, 31, "unticked.md", withdrawn("nothing here"));
+    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+    commit("after-the-refusal.txt");
+    let read = read_closed("withdrawn.md", &["an earlier comment"]);
+    assert_eq!(read.status, Status::Fail, "{}", read.message);
+    let lines = about_the_ticket(&judge(&root));
+    assert!(
+        lines.len() == 1 && lines[0].contains("0 of 2 criteria ticked"),
+        "{lines:?}"
+    );
 }
 
 /// The phpt skip the missing engine binary causes is met, and `done`
