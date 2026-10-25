@@ -1472,7 +1472,22 @@ impl Layer {
         Ok(Handshake::Failed)
     }
 
-    /// The handshake half of [`Layer::enable_crypto`].
+    /// The handshake half of [`Layer::enable_crypto`]. A handshake that
+    /// runs out of time blocks again where the socket blocked before, as php
+    /// 8.5.12 does, where 8.5.9 left it non-blocking:
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0');
+    /// $c = stream_socket_client('tcp://' . stream_socket_get_name($s, false), $e, $m, 0.2);
+    /// var_dump(stream_get_meta_data($c)['blocked'], stream_socket_enable_crypto($c, true, STREAM_CRYPTO_METHOD_TLS_CLIENT), stream_get_meta_data($c)['blocked']);
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: stream_socket_enable_crypto(): SSL: Handshake timed out in %s on line 4
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
     fn handshake(
         &mut self,
         req: &mut Request,
@@ -1505,6 +1520,11 @@ impl Layer {
             if let Some(limit) = limit
                 && elapsed > limit
             {
+                // php 8.5.12 makes the socket block again where it did
+                // before the warning, which may run PHP code.
+                if socket.blocked != blocked {
+                    socket.set_blocking(blocked);
+                }
                 warn(req, "SSL: Handshake timed out");
                 return Ok(Handshake::Failed);
             }
