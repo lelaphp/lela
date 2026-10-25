@@ -190,13 +190,8 @@ pub(crate) struct Trace<P: Pages = Native> {
     /// Where it is entered at a loop's body too, the opline its back edge
     /// lands on.
     pub(crate) body: Option<OplineIdx>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "enter lays them down once lower reads past the request's map base"
-        )
-    )]
+    /// The runtime-cache slots its code reads, which `enter` touches on a
+    /// request's first entry of it.
     pub(crate) map_ptrs: Box<[MapPtrRaw]>,
     #[cfg_attr(
         not(test),

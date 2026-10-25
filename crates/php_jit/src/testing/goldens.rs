@@ -390,6 +390,19 @@ pub(crate) const INDIRECT_REF_WRITE: Fixture = Fixture {
     ],
 };
 
+/// The property oplines of a request-scoped class, `zend_lazy_class_load`'s
+/// copy of a class linked over one the request declared, compiled in place
+/// under the guard on the request's own cache slot (#3346).
+pub(crate) const OBJECT_SCOPED: Fixture = Fixture {
+    name: "object_scoped",
+    program: "scoped_objects",
+    plan: &[
+        ("record.function", "scoped"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// Where `types`' goldens are, the programs and their records among them.
 pub(crate) fn types() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/types/goldens")

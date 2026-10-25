@@ -169,10 +169,11 @@ fn raced(req: &mut Request, frame: FrameRef) -> Result<Turns, String> {
     // The side's row, ready, as the crossing lays one for a trace with no
     // calls in place: from here only the slot keeps the jump closed.
     let state = tier::state::<crate::JitRequest>(req).ok_or("no request state")?;
-    state
-        .headers
-        .rows(|| table.segments())
-        .lay(side_id, std::ptr::null(), true);
+    state.headers.rows(|| table.segments()).lay(
+        side_id,
+        (std::ptr::null(), std::ptr::null()),
+        true,
+    );
     let grown = Start::Side {
         parent: root,
         exit: ExitId(0),

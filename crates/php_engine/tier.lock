@@ -88,6 +88,7 @@ tier::FuncRef::offset
 tier::Held
 tier::Hooked
 tier::MapPtrRaw
+tier::PLACE
 tier::Parked
 tier::PlainCall
 tier::PlainCall::activation
@@ -178,6 +179,7 @@ tier::stand
 tier::state
 tier::step
 tier::this_class
+tier::touch
 tier::trace_num
 tier::under_way
 tier::unwind

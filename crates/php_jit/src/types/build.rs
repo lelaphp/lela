@@ -22,8 +22,8 @@ use super::opcodes::{
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
     Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
-    LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store,
-    Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
+    LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Slotted,
+    Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -662,14 +662,19 @@ impl<'a> Builder<'a> {
             (opcode, None) if on_declared_slot(opcode) => Form::Step,
             _ => form,
         };
-        if let (Form::Inline, Some(property)) = (form, property) {
+        if let (Form::Inline, Some(property)) = (form, property)
+            && property.slot.cached().is_none()
+        {
             self.class_guard(idx, frame, at, property);
         }
         let in_place = (form == Form::Inline)
             .then(|| self.in_place(frame, &op, next))
             .flatten();
         self.sampled.insert(idx, samples);
-        let map_ptr = self.map_ptr(func, &op, form);
+        let map_ptr = match property.and_then(|property| property.slot.cached()) {
+            Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
+            _ => self.map_ptr(func, &op, form),
+        };
         self.record_send(frame, &op, op1);
         if !keeps_temporaries(op.opcode) {
             // The opline frees every temporary it reads, as its handler
@@ -728,7 +733,10 @@ impl<'a> Builder<'a> {
                 },
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
                     Imm::Property {
-                        slot: property.slot.slot(),
+                        slot: match property.slot.cached() {
+                            Some(_) => Slotted::Cached,
+                            None => Slotted::Declared(property.slot.slot()),
+                        },
                         binary: (op.opcode == Opcode::AssignObjOp)
                             .then(|| lattice::binary_of(op.extended_value))
                             .flatten(),
@@ -2413,11 +2421,17 @@ impl<'a> Builder<'a> {
             return None;
         }
         let raw = self.view.cache_slot(func, CacheSlot(op.out))?;
+        Some(self.map_ptr_of(raw))
+    }
+
+    /// The slot of [`TraceIr::map_ptrs`] that holds `raw`, taken where
+    /// none does.
+    fn map_ptr_of(&mut self, raw: MapPtrRaw) -> usize {
         if let Some(at) = self.map_ptrs.iter().position(|held| *held == raw) {
-            return Some(at);
+            return at;
         }
         self.map_ptrs.push(raw);
-        Some(self.map_ptrs.len() - 1)
+        self.map_ptrs.len() - 1
     }
 
     // ------------------------------------------------------------ the end

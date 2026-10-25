@@ -33,9 +33,9 @@ use super::{
     engine_offset, imm, mismatch, trusted,
 };
 use crate::lower::{
-    ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, ESCAPED, IMAGES_AT, LANDING_BYTES, LANDING_KEY,
-    LANDING_TAG, LANDINGS, Linked, READY_AT, ROOT_AT, ROW_BYTES, ROW_IMAGES, ROW_READY,
-    ROW_SEGMENT, ROWS_AT, STOOD_AT, Stands, TRACE_AT,
+    CACHES_AT, ENTRANCE_BODY, ENTRANCE_TRACE, ENTRY_AT, ESCAPED, IMAGES_AT, LANDING_BYTES,
+    LANDING_KEY, LANDING_TAG, LANDINGS, Linked, READY_AT, ROOT_AT, ROW_BYTES, ROW_CACHES,
+    ROW_IMAGES, ROW_READY, ROW_SEGMENT, ROWS_AT, STOOD_AT, Stands, TRACE_AT,
 };
 use crate::types::{Abort, End, ExitId, Grows, Landing};
 
@@ -466,6 +466,7 @@ impl Emit<'_> {
         let ready = self.b.ins().load(I32, trusted(), row, ROW_READY);
         self.closed_unless(ready, closed);
         let images = self.b.ins().load(I64, trusted(), row, ROW_IMAGES);
+        let caches = self.b.ins().load(I64, trusted(), row, ROW_CACHES);
         // The entry, as `enter` lays it.
         let Leaving {
             room,
@@ -481,6 +482,7 @@ impl Emit<'_> {
         for (value, field) in [
             (first_op, ENTRY_AT),
             (images, IMAGES_AT),
+            (caches, CACHES_AT),
             (one, READY_AT),
             (place, ROOT_AT),
             (trace, TRACE_AT),

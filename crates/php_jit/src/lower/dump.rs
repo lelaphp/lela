@@ -30,7 +30,7 @@ use crate::record::func_name as func;
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
     Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Pointee, Read, Repeat, Returned,
-    Slot, Store, Stored, TraceIr, Types, Unwind, ValueId,
+    Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -403,7 +403,14 @@ fn check(check: Check) -> String {
 fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
     let (value, owners) = match imm {
         Imm::Make { .. } => return write!(text, " in-place"),
-        Imm::Property { slot, .. } => return write!(text, " slot {slot}"),
+        Imm::Property {
+            slot: Slotted::Declared(slot),
+            ..
+        } => return write!(text, " slot {slot}"),
+        Imm::Property {
+            slot: Slotted::Cached,
+            ..
+        } => return write!(text, " cached"),
         Imm::Leave { value, owners } => (value, owners),
         _ => return Ok(()),
     };

@@ -19,8 +19,9 @@ use php_heap::ZvalType;
 use php_unit::{Opcode, OplineIdx};
 
 use super::{
-    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Interrupt, Landing, Line, Op, OpId,
-    Operand, Pointee, Repeat, Slot, TraceIr, Types, ValueId, build,
+    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Imm, Interrupt, Landing, Line, Op,
+    OpId, Operand, Pointee, Repeat, Slot, Slotted, TraceIr, Types, ValueId, build,
+    on_declared_slot,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
@@ -28,8 +29,8 @@ use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_IS,
     HASH_ISSET, HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY,
-    NESTED_READ, NESTED_WRITE, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE,
-    SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
+    NESTED_READ, NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE,
+    SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2025,33 +2026,51 @@ fn properties_of_a_published_class_are_inline_under_one_class_guard() -> Result<
 
 /// A class of the cached file linked over a class the request declared,
 /// `zend_lazy_class_load`'s copy, is the request's own, with an id of
-/// its own (#3322): the recording takes no place on it, so no class
-/// guard assumes it is a published one, and its property oplines are the
-/// handler's.
+/// its own (#3322): no class guard assumes it is a published one, and
+/// each of its property oplines is compiled in place on the place the
+/// request's own cache slot holds, which it reads where it runs, as php's
+/// code reads `CACHED_PTR(cache_slot)` for a class that is not immutable
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`, #3346).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_request_scoped_copy_of_a_class_is_guarded_by_no_class_id() -> Result<(), String> {
-    let ir = built(
-        &[
-            ("record.function", "k"),
-            ("record.start", "loop"),
-            ("record.headers", "0"),
-        ],
-        "eval('class Base { public $x = 1; }');
-        class Child extends Base { }
-        function k($o, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { $t += $o->x; $o->x = $i; } return $t; }
-        echo k(new Child, 100), \"\\n\";",
-    )?;
+fn a_request_scoped_copy_of_a_class_is_guarded_through_its_cache_slot() -> Result<(), String> {
+    let ir = golden(OBJECT_SCOPED)?;
+    let rendered = dump::render(&ir);
+    let lines: Vec<&Line> = (ir.ops.iter())
+        .filter_map(|op| match op {
+            Op::Line(line) if on_declared_slot(line.opcode) => Some(line),
+            _ => None,
+        })
+        .collect();
     assert_eq!(
-        property_forms(&ir),
+        lines
+            .iter()
+            .map(|line| (line.opcode, line.form))
+            .collect::<Vec<_>>(),
         [
-            (Opcode::FetchObjR, Form::Step),
-            (Opcode::AssignObj, Form::Step)
+            (Opcode::FetchObjR, Form::Inline),
+            (Opcode::AssignObj, Form::Inline),
+            (Opcode::AssignObjOp, Form::Inline),
+            (Opcode::PreIncObj, Form::Inline),
+            (Opcode::AssignObj, Form::Inline),
         ],
-        "{}",
-        dump::render(&ir)
+        "{rendered}"
     );
-    assert_eq!(class_guards(&ir), 0, "{}", dump::render(&ir));
+    for line in &lines {
+        assert!(
+            matches!(
+                line.imm,
+                Imm::Property {
+                    slot: Slotted::Cached,
+                    ..
+                }
+            ),
+            "{rendered}"
+        );
+        let map = line.map_ptr.ok_or_else(|| rendered.clone())?;
+        assert!(map < ir.map_ptrs.len(), "{rendered}");
+    }
+    assert_eq!(class_guards(&ir), 0, "{rendered}");
     Ok(())
 }
 

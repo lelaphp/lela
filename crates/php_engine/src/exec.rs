@@ -1416,6 +1416,16 @@ impl RuntimeCache {
             .unwrap_or_default()
     }
 
+    /// Where the slot at `slot` stands, which compiled code reads in
+    /// place (`tier::touch`): none for a cache not laid down and a slot
+    /// past it. The slots stand where they were laid until the cache is
+    /// laid again or given back, which a function's never is while the
+    /// request runs.
+    pub(crate) fn place_of(&self, slot: CacheSlot) -> Option<std::ptr::NonNull<Cached>> {
+        let cell = self.slots.as_ref()?.get((slot.0 / SLOT_BYTES) as usize)?;
+        Some(std::ptr::NonNull::from(cell))
+    }
+
     /// `CACHE_PTR(num, ptr)`: `value` into the slot at `slot`, where
     /// every pass after reads it. A slot past `cache_size` takes nothing.
     fn set(&mut self, slot: CacheSlot, value: Cached) {

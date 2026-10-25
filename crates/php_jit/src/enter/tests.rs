@@ -153,6 +153,158 @@ fn the_bench_arms_leave_one_tally() {
     assert!(calls(Through::Direct, 1000).is_ok_and(|t| t != 0));
 }
 
+/// A runtime-cache slot read as compiled code reads it, by pointer casts
+/// at the offsets `tier::PLACE` names, at the address the touch answers
+/// (#3346): a primed property's place, whose tag, class, offset tag, slot
+/// and type are the interpreter's, a call's slot, whose tag is another
+/// variant's, and both unprimed on a request whose first activation of
+/// the method the touch reads them at. A variant reordered or a
+/// representation drifted fails here rather than in a trace.
+mod touched {
+    use std::ptr;
+    use std::sync::OnceLock;
+
+    use php_engine::tier::{
+        self, Extension, ExtensionBuilder, Flow, FrameRef, MapPtrRaw, PLACE, PropertySlot, Request,
+        Site, Tier, UnitView,
+    };
+
+    use crate::testing::{self, Scratch, function_of, stdout};
+
+    /// The property's slot in `m`, once a request took its place.
+    static PLACED: OnceLock<MapPtrRaw> = OnceLock::new();
+
+    /// One slot as compiled code reads it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Read {
+        tag: u32,
+        class: u32,
+        offset_tag: u8,
+        ty: u16,
+        number: u32,
+    }
+
+    /// What the tier read in one request, and the class of `$this`.
+    #[derive(Debug, Default)]
+    struct Seen {
+        reads: Vec<Read>,
+        class: u32,
+    }
+
+    /// The slot at `address`, read at `PLACE`'s offsets.
+    fn read(address: usize) -> Read {
+        let base = ptr::with_exposed_provenance::<u8>(address);
+        let at = |offset: u32| base.wrapping_add(offset as usize);
+        // SAFETY: `address` is a slot of the request's runtime cache, laid
+        // down for as long as the request runs, and each offset `PLACE`
+        // names is within the slot.
+        let tag = unsafe { at(PLACE.tag()).cast::<u32>().read_unaligned() };
+        // SAFETY: as above.
+        let class = unsafe { at(PLACE.class()).cast::<u32>().read_unaligned() };
+        // SAFETY: as above.
+        let offset_tag = unsafe { at(PLACE.offset_tag()).read() };
+        // SAFETY: as above.
+        let ty = unsafe { at(PLACE.ty()).cast::<u16>().read_unaligned() };
+        // SAFETY: as above.
+        let number = unsafe { at(PLACE.slot()).cast::<u32>().read_unaligned() };
+        Read {
+            tag,
+            class,
+            offset_tag,
+            ty,
+            number,
+        }
+    }
+
+    /// At an activation of `m`: its property's slot and the call's slot
+    /// before it, touched and read, once a request took the place; and the
+    /// place taken where the handler primed it.
+    fn look(req: &mut Request, frame: FrameRef) {
+        let epoch = tier::epoch(req);
+        if let Some(raw) = PLACED.get().copied() {
+            let call = MapPtrRaw {
+                slot: raw.slot - 8,
+                ..raw
+            };
+            for raw in [raw, call] {
+                if let Ok(Some(slot)) = tier::touch(req, &epoch, raw) {
+                    req.state::<Seen>().reads.push(read(slot.address()));
+                }
+            }
+            return;
+        }
+        let (Some(class), Some(f)) = (tier::this_class(req, frame), tier::func(req, frame)) else {
+            return;
+        };
+        req.state::<Seen>().class = tier::class_number(class);
+        let Some(at) = tier::frame(req, frame)
+            .and_then(|view| view.op_array())
+            .and_then(|code| {
+                code.oplines()
+                    .find(|op| op.opcode().name() == "ZEND_FETCH_OBJ_R")
+                    .map(|op| op.at())
+            })
+        else {
+            return;
+        };
+        let mut view = UnitView::new(req);
+        if view.hold_place(req, frame, at, class)
+            && let Some(raw) = view.place(f, at, class).and_then(PropertySlot::cached)
+        {
+            PLACED.get_or_init(|| raw);
+        }
+    }
+
+    /// The tier that reads the slots at each activation of `m`.
+    struct Looking;
+
+    impl Tier for Looking {
+        type State = ();
+
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
+            if site == Site::Entry && function_of(req, frame).as_deref() == Some(&b"m"[..]) {
+                look(req, frame);
+            }
+            Flow::Continue
+        }
+
+        fn extension() -> Option<Extension> {
+            Some(
+                ExtensionBuilder::default()
+                    .request_state::<Seen>()
+                    .build("looking"),
+            )
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+    #[test]
+    fn a_touched_slot_reads_as_the_interpreter_wrote_it() {
+        let engine = testing::engine::<Looking>(&[]);
+        let scratch = Scratch::new();
+        let program = "eval('class Base { }');
+            function g() { return 1; }
+            class K extends Base { public $a = 0; public $x = 7; function m() { return g() + $this->x; } }
+            $k = new K; echo $k->m() + $k->m() + $k->m(), \"\\n\";";
+        let (served, primed) = scratch.serve_kept::<Seen>(&engine, program);
+        assert_eq!(stdout(&served), "24\n");
+        let primed = primed.unwrap_or_default();
+        let [place, call] = primed.reads[..] else {
+            panic!("{primed:?}");
+        };
+        assert_eq!(place.tag, PLACE.property(), "{primed:?}");
+        assert_eq!(place.class, primed.class, "{primed:?}");
+        assert_eq!(place.offset_tag, PLACE.declared(), "{primed:?}");
+        let untyped = u32::from(place.ty) & PLACE.untyped();
+        assert_eq!((place.number, untyped), (1, PLACE.untyped()), "{primed:?}");
+        assert!(call.tag != PLACE.property() && call.tag != PLACE.unprimed());
+        let (_, fresh) = scratch.serve_kept::<Seen>(&engine, program);
+        let fresh = fresh.unwrap_or_default();
+        let tags: Vec<u32> = fresh.reads.iter().take(2).map(|slot| slot.tag).collect();
+        assert_eq!(tags, [PLACE.unprimed(); 2], "{fresh:?}");
+    }
+}
+
 /// Hand-assembled bodies entered through `enter` on real requests
 /// (`jit-design.md` §4.6 *Tested*), on the one target whose arena maps
 /// code today: a test tier enters, at a function's activation, the body

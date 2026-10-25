@@ -2421,6 +2421,21 @@ impl Request {
         self.map.laid(at)
     }
 
+    /// The cache at `at` laid down as the first activation of its op
+    /// array lays it ([`exec::lay_runtime_cache`], of `size`), where the
+    /// request has not yet, and where its slot at `slot` stands, which
+    /// compiled code reads in place (`tier::touch`). The `Err` is the
+    /// memory limit's fatal, with nothing laid down.
+    pub(crate) fn touch_cache(
+        &mut self,
+        at: exec::CacheAt,
+        size: exec::CacheSize,
+        slot: CacheSlot,
+    ) -> Result<Option<std::ptr::NonNull<exec::Cached>>, Fatal> {
+        exec::lay_runtime_cache(&mut self.map, &mut self.heap, at, size)?;
+        Ok(self.map.get(at).and_then(|cache| cache.place_of(slot)))
+    }
+
     /// The scope the cache at `at` was laid down for by the first closure
     /// made over its op array ([`exec::RuntimeCache::laid_for`]).
     pub(crate) fn laid_for(&self, at: exec::CacheAt) -> Option<crate::api::values::ClassId> {

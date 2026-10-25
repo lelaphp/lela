@@ -361,12 +361,27 @@ pub(crate) enum Imm {
     /// is placed at on objects of the class a guard before it holds
     /// (`zend_jit_fetch_obj`, `zend_jit_assign_obj`, `zend_jit_assign_obj_op`,
     /// `zend_jit_incdec_obj`, `Z/ext/opcache/jit/zend_jit_ir.c:14206-15700`
-    /// over a known `prop_info`): the slot, by its number, and an
+    /// over a known `prop_info`): where it finds the slot, and an
     /// `ASSIGN_OBJ_OP`'s operator.
     Property {
-        slot: u32,
+        slot: Slotted,
         binary: Option<Opcode>,
     },
+}
+
+/// Where a property opline compiled in place finds its declared slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Slotted {
+    /// By its number, on objects of the published class a guard before
+    /// the opline holds.
+    Declared(u32),
+    /// In the request's own runtime-cache slot the opline reads
+    /// ([`Line::map_ptr`]), under the guard compiled code holds there on
+    /// its tag and its class, as php's code reads `CACHED_PTR(cache_slot)`
+    /// and the offset past it for a class that is not immutable
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`): a request-scoped
+    /// class's, whose id and slots are the request's.
+    Cached,
 }
 
 /// The object a property opline reads and a class guard holds: `$this`
