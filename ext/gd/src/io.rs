@@ -7,7 +7,7 @@
 use php_ext::abi::{Instance, OrFalse, Path, True, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, type_error};
+use php_ext::raising::{Cause, Level, Thrown, arg_type_error, arg_value_error, docref, type_error};
 use php_ext::request::{Ini, Opening, OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::{Emalloc, Owner, PhpString, Value, ValueRef};
 
@@ -531,8 +531,9 @@ enum Target {
 /// The bytes `php_gd_stream_ctx` holds, `sizeof(stream_ctx->buf)`.
 const STREAM_BUF: usize = 8192;
 
-/// `sizeof(php_gd_stream_ctx)`: the `gdIOCtx`, `buf_len` and the buffer.
-const STREAM_CTX_SIZE: usize = ffi::CTX_SIZE + 8 + STREAM_BUF;
+/// `sizeof(php_gd_stream_ctx)`: the `gdIOCtx`, its `size_t buf_len` and
+/// the buffer.
+const STREAM_CTX_SIZE: usize = ffi::CTX_SIZE + std::mem::size_of::<usize>() + STREAM_BUF;
 
 impl Target {
     /// `php_stream_write`: the count the stream took, `None` for a
@@ -598,7 +599,7 @@ impl Sink {
             }
             (To::Output, ffi::Written::Bytes(bytes)) => {
                 req.response_mut().write(bytes);
-                took(Some(bytes.len()))
+                i32::try_from(bytes.len()).unwrap_or(i32::MAX)
             }
             (To::Stream { stream, buf }, ffi::Written::Byte(byte)) => {
                 if buf.len() == STREAM_BUF {
@@ -614,15 +615,21 @@ impl Sink {
         }
     }
 
-    /// `gd_free`: a stream's buffer written where the encode ran to its
-    /// end (`_php_image_stream_flush`; an `E_ERROR` leaves php's ctx
-    /// unfreed), the stream closed where it was opened here, then the
-    /// `gdIOCtx` freed.
-    fn free(self, req: &mut Request, completed: bool) {
-        if let To::Stream { stream, mut buf } = self.to {
-            if completed {
-                flush(req, &stream, &mut buf);
-            }
+    /// `gd_free`: a stream's buffer written (`_php_image_stream_flush`),
+    /// the stream closed where it was opened here, then the `gdIOCtx`
+    /// freed.
+    fn free(mut self, req: &mut Request) {
+        if let To::Stream { stream, buf } = &mut self.to {
+            flush(req, stream, buf);
+        }
+        self.abandon(req);
+    }
+
+    /// What a fatal leaves of the sink, which php's `zend_bailout` never
+    /// hands to `gd_free`: nothing more written, the stream opened here
+    /// closed and the `gdIOCtx` given back as the request's end frees it.
+    fn abandon(self, req: &mut Request) {
+        if let To::Stream { stream, .. } = self.to {
             stream.release(req);
         }
         self.ctx.free(req);
@@ -631,7 +638,7 @@ impl Sink {
     /// A native refused after its sink was made: `gd_free`, then the
     /// refusal.
     fn drop_with(self, req: &mut Request, thrown: Thrown) -> Thrown {
-        self.free(req, true);
+        self.free(req);
         thrown
     }
 
@@ -660,8 +667,16 @@ impl Sink {
             Some(thrown) => Err(thrown),
             None => raise(req, left),
         };
-        self.free(req, raised.is_ok());
-        raised.map(|()| true)
+        match raised {
+            Err(thrown) if thrown.cause(req) == Cause::Fatal => {
+                self.abandon(req);
+                Err(thrown)
+            }
+            raised => {
+                self.free(req);
+                raised.map(|()| true)
+            }
+        }
     }
 }
 
