@@ -1520,6 +1520,15 @@ pub fn refused_again(s: &mut Session, here: &mut Here<'_>) {
     let logging = s.out.logging();
     let in_log_prompt = s.out.in_log_prompt();
     let code = s.stdin_code.clone();
+    // What the init files left pending, an exit or the unwind exit of an
+    // `ev` that met the memory limit, has `php_stream_open_for_zend_ex`
+    // refuse the file, so nothing compiles and nothing is displayed but
+    // phpdbg's error.
+    if code.is_none() && (read::pending(req).is_some() || read::exiting(req)) {
+        s.out
+            .error(format!("Could not open file {}", String::from_utf8_lossy(&exec)).as_bytes());
+        return;
+    }
     let compiled = crate::session::lend(req, s, |req| tier::compile(req, &exec, code.as_deref()));
     match compiled {
         tier::Compiled::Refused if logging => {
