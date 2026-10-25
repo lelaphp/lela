@@ -11,7 +11,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Emalloc, FreshString, Owner, PhpArray, PhpObject, PhpString, Sizing, Value};
 use php_ext_mysqlnd::client::{
     CLIENT_INFO, CLIENT_VERSION, ClientOption, CloseType, Command, Connect, Mysqlnd, ServerOption,
 };
@@ -1066,15 +1066,26 @@ pub(crate) fn stat(req: &mut Request, on: On) -> Result<OrFalse<Owner<PhpString>
     }
 }
 
-/// `mysqli_real_escape_string`.
+/// `mysqli_real_escape_string`: escaped into `zend_string_safe_alloc(2,
+/// len, 0)` and cut by `zend_string_truncate` to what was written
+/// (`ext/mysqli/mysqli_api.c:1369-1371` at php-8.5.12), so even the empty
+/// string and one byte are a string of the request's, at the cut's bin.
 pub(crate) fn escape(
     req: &mut Request,
     on: On,
     from: PhpString,
 ) -> Result<Owner<PhpString>, Thrown> {
     let mysql = conn(req, on.object, Need::Open)?;
-    let escaped = mysql.escape(req, from.as_bytes());
-    PhpString::new(req, &escaped)
+    let len = from.len();
+    // A length that overflows is the sizing's fatal, php's `safe_address`.
+    let mut escaped = FreshString::sized(
+        req,
+        len.saturating_mul(2),
+        Sizing::SafeAlloc { n: 2, m: len },
+    )?;
+    let written = mysql.escape(req, from.as_bytes());
+    escaped.bytes_mut()[..written.len()].copy_from_slice(&written);
+    Ok(escaped.truncate(req, written.len())?.finish())
 }
 
 /// `mysqli_options`: the value converted to the option's type and the

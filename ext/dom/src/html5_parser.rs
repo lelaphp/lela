@@ -5,7 +5,7 @@
 //! each element in the namespace the mapper hands out and each template's
 //! contents a fragment of its own.
 
-use php_ext::raising::{Thrown, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_value_error, throw_exception_ex};
 use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_lexbor::ffi::array::ArrayObj;
@@ -1380,7 +1380,7 @@ pub(crate) fn create_from_file(
     let Some(stream) = req.open_stream(&path, b"rb", false)? else {
         // `zend_throw_exception_ex`'s `%s`: the name's bytes as they are.
         let message = [&b"Cannot open file '"[..], &path, b"'"].concat();
-        return Err(throw(req, "Exception", &message));
+        return Err(throw_exception_ex(req, "Exception", &message));
     };
     // The MIME sniff: the charset of the http headers the stream carries,
     // where no encoding was given and lexbor knows the one named.

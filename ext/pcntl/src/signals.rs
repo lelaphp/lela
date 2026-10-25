@@ -524,9 +524,8 @@ fn waited(
             return Err(arg_value_error(req, 4, "be between 0 and 1e9"));
         }
         if seconds == 0 && nanoseconds == 0 {
-            return Err(php_ext::raising::throw_error(
+            return Err(php_ext::raising::value_error(
                 req,
-                "ValueError",
                 "pcntl_sigtimedwait(): At least one of argument #3 ($seconds) or argument #4 ($nanoseconds) must be greater than 0",
             ));
         }

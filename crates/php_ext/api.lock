@@ -505,6 +505,7 @@ raising::arg_count_error
 raising::arg_null_deprecated
 raising::arg_type_error
 raising::arg_value_error
+raising::argument_count_error
 raising::argument_error
 raising::arity
 raising::call_stack_end
@@ -531,9 +532,12 @@ raising::throw_at
 raising::throw_chained
 raising::throw_error
 raising::throw_error_chained
+raising::throw_exception_ex
 raising::throw_value
 raising::throwing_warnings
+raising::type_error
 raising::uncaught_at
+raising::value_error
 raising::warning
 raising::while_pending
 request::Allocation
@@ -1259,6 +1263,7 @@ values::FreshString::is_empty
 values::FreshString::len
 values::FreshString::new
 values::FreshString::set_len
+values::FreshString::sized
 values::FreshString::truncate
 values::HashIterator
 values::HashIterator::new
@@ -1458,6 +1463,8 @@ values::Resource::unlist
 values::ResourceType
 values::ResourceView
 values::ResourceView::resource
+values::Sizing
+values::Sizing::bytes
 values::SmartStr
 values::SmartStr::append
 values::SmartStr::as_bytes

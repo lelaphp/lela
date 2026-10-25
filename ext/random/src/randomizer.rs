@@ -7,7 +7,7 @@
 use php_ext::abi::{Instance, This};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::raising::{Thrown, arg_value_error, fatal, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, fatal, throw_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
@@ -258,9 +258,8 @@ impl Randomizer {
             (true, true) => gammasection::open_open(algo, min, max),
         })?;
         if open_low && open_high && float.is_nan() {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 "The given interval is empty, there are no floats between argument #1 ($min) and argument #2 ($max)",
             ));
         }

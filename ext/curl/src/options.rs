@@ -7,7 +7,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::Instance;
 use php_ext::attr::php_function;
 use php_ext::coerce::{callable_checked, to_long, truthy, with_string};
-use php_ext::raising::{Level, Thrown, argument_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, argument_error, docref, type_error, value_error};
 use php_ext::request::{Cast, Request, Stream};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value, ValueRef};
@@ -407,7 +407,7 @@ fn option_str(req: &mut Request, object: PhpObject, option: i64, value: &[u8]) -
             "{}(): cURL option must not contain any null bytes",
             req.frames().active_function_name()
         );
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     }
     let easy = easy_of(req, object)?;
     let code = easy.set_str(req, option, Some(value));
@@ -535,14 +535,14 @@ fn stream_of(req: &mut Request, value: &Value) -> Result<Option<(Stream, i32)>, 
             "{}(): supplied argument is not a valid File-Handle resource",
             req.frames().active_function_name()
         );
-        return Err(throw_error(req, "TypeError", &text));
+        return Err(type_error(req, &text));
     };
     let Some(stream) = Stream::from_value(req, &resource.as_value()) else {
         let text = format!(
             "{}(): supplied resource is not a valid File-Handle resource",
             req.frames().active_function_name()
         );
-        return Err(throw_error(req, "TypeError", &text));
+        return Err(type_error(req, &text));
     };
     let label = stream.can_cast(req, Cast::Fd).err();
     if let Some(fd) = stream.cast(req, Cast::Fd, false) {
@@ -586,7 +586,7 @@ fn set_stream(req: &mut Request, object: PhpObject, which: StreamOpt, value: &Va
             "{}(): The provided file handle must be writable",
             req.frames().active_function_name()
         );
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     }
     let kept = what.map(|_| Owner::take(req, value));
     let curl = match payload(req, object) {
@@ -638,7 +638,7 @@ fn set_list(req: &mut Request, object: PhpObject, option: i64, value: &Value) ->
             req.frames().active_function_name(),
             list_name(option)
         );
-        return Err(throw_error(req, "TypeError", &text));
+        return Err(type_error(req, &text));
     };
     let mut lines = Vec::new();
     // `ZEND_HASH_FOREACH_VAL(ph, current)` (`Z/ext/curl/interface.c:2131`),
@@ -755,7 +755,7 @@ pub(crate) fn setopt(
                     "{}(): Disabling safe uploads is no longer supported",
                     req.frames().active_function_name()
                 );
-                return Err(throw_error(req, "ValueError", &text));
+                return Err(value_error(req, &text));
             }
             saved(req, object, 0)
         }
@@ -834,9 +834,8 @@ pub(crate) fn setopt(
         }
         Opt::HeaderOut => {
             if payload(req, object)?.hook(Hook::Debug).is_some() {
-                return Err(throw_error(
+                return Err(value_error(
                     req,
-                    "ValueError",
                     "CURLINFO_HEADER_OUT option must not be set when the CURLOPT_DEBUGFUNCTION option is set",
                 ));
             }

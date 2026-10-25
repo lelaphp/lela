@@ -10,7 +10,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{to_long, truthy};
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, throw_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Key, Owner, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::Node;
@@ -476,11 +476,7 @@ fn value_read(req: &mut Request, object: PhpObject) -> crate::Read {
 fn value_write(req: &mut Request, object: PhpObject, value: &Value) -> Result<(), Thrown> {
     let bytes = value.as_str_bytes().map(<[u8]>::to_vec).unwrap_or_default();
     if bytes.contains(&0) {
-        return Err(throw_error(
-            req,
-            "ValueError",
-            "Value must not contain any null bytes",
-        ));
+        return Err(value_error(req, "Value must not contain any null bytes"));
     }
     if let Some(elem) = element(req, object) {
         elem.set_ns_prop(None, b"class", &bytes);

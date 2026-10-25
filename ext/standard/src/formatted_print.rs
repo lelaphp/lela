@@ -14,7 +14,7 @@ use crate::string::Decimal;
 use php_ext::abi::{Raw, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{Exponent, float_format, to_double, to_long, to_string};
-use php_ext::raising::{Level, Thrown, docref, fatal, throw_error};
+use php_ext::raising::{Level, Thrown, argument_count_error, docref, fatal};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{Emalloc, FreshString, Owner, PhpArray, PhpString, Value};
 
@@ -647,9 +647,8 @@ fn format_into(
                     args.len()
                 ),
             ),
-            Some(additional) => throw_error(
+            Some(additional) => argument_count_error(
                 req,
-                "ArgumentCountError",
                 &format!(
                     "{} arguments are required, {} given",
                     missing + additional + 1,
@@ -838,7 +837,7 @@ fn next_argument(currarg: &mut usize) -> usize {
 
 /// `zend_value_error`: a `ValueError` with the message as it is.
 fn value_error(req: &mut Request, message: &str) -> Thrown {
-    throw_error(req, "ValueError", message)
+    php_ext::raising::value_error(req, message)
 }
 
 /// `php_sprintf_getnumber`: `ZEND_STRTOL` over the digits at `at`,

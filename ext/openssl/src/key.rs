@@ -11,7 +11,7 @@ use php_ext::abi::{Instance, OrFalse, Passed, Path, Ref, Refusals, Untyped};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::with_string;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, pending, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, pending, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key as ArrayKey, Owner, PhpArray, PhpString, Value, ValueRef};
 
@@ -196,7 +196,7 @@ pub(crate) fn key_from(
     if let ValueRef::Array(array) = value.as_ref() {
         let form = "Key array must be of the form array(0 => key, 1 => phrase)";
         let Some(given) = array.get(&ArrayKey::Int(1)) else {
-            let thrown = throw_error(req, "ValueError", form);
+            let thrown = value_error(req, form);
             defer(req, thrown);
             return Ok(None);
         };
@@ -205,7 +205,7 @@ pub(crate) fn key_from(
             _ => with_string(req, &given, <[u8]>::to_vec)?,
         });
         let Some(inner) = array.get(&ArrayKey::Int(0)) else {
-            let thrown = throw_error(req, "ValueError", form);
+            let thrown = value_error(req, form);
             defer(req, thrown);
             return Ok(None);
         };

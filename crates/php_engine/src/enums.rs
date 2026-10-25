@@ -18,7 +18,7 @@
 use php_unit::decl::{ClassKind, EnumBacking, Type};
 
 use crate::api::abi::{Entry, Refusals};
-use crate::api::raising::{Thrown, arity, error, throw_error};
+use crate::api::raising::{Thrown, arity, error, value_error};
 use crate::api::request::{ByValue, Request};
 use crate::api::values::{ClassId, Owner, Value, adopted};
 
@@ -291,9 +291,8 @@ fn not_backing(
         ),
     };
     req.release(wanted);
-    Err(throw_error(
+    Err(value_error(
         req,
-        "ValueError",
         &format!("{shown} is not a valid backing value for enum {class_name}"),
     ))
 }

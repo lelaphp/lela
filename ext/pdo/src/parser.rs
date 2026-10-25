@@ -11,10 +11,10 @@
 //!
 //! [`Placeholders::Emulated`]: crate::connector::Placeholders::Emulated
 
-use php_ext::coerce::{to_long, truthy, with_string};
+use php_ext::coerce::{to_long, to_string, truthy};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{FreshString, Owner, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Emalloc, FreshString, Owner, PhpObject, PhpString, Value, ValueRef};
 
 use crate::bound::{Bound, BoundKey, BoundTable};
 use crate::connector::{
@@ -83,13 +83,31 @@ pub(crate) fn scan(sql: &[u8], at: usize) -> Option<(Token, usize)> {
     }
 }
 
-/// One placeholder: where it stands, its text, its number, and the text
-/// it is replaced by.
+/// `sizeof(struct placeholder)` (`ext/pdo/pdo_sql_parser.re:47`): the
+/// position, the length, the quoted string, the number and the link, each
+/// a word.
+const PLACEHOLDER_SIZE: usize = 40;
+
+/// One placeholder: where it stands, its text, its number, and the
+/// string it is replaced by, `plc->quoted`, which holds one owner until
+/// the query is built. `block` is the `emalloc(sizeof(*plc))` php keeps
+/// it in from the scan to `clean_up`.
 struct Placeholder {
     at: usize,
     len: usize,
     bindno: i64,
-    quoted: Vec<u8>,
+    quoted: Option<Owner<PhpString>>,
+    block: Emalloc,
+}
+
+impl Placeholder {
+    /// The text that takes the placeholder's place: what was quoted, or
+    /// the placeholder as written.
+    fn text<'a>(&'a self, sql: &'a [u8]) -> &'a [u8] {
+        self.quoted
+            .as_deref()
+            .map_or(&sql[self.at..self.at + self.len], PhpString::as_bytes)
+    }
 }
 
 /// What `pdo_parse_params` answers: the query unchanged (`0`), the
@@ -105,16 +123,61 @@ pub(crate) enum Parsed {
 /// `pdo_parse_params` for a connector that emulates prepares: every
 /// placeholder found, the mix of the two kinds and a count that does not
 /// match refused, and each bound value quoted into its place as its type
-/// says.
+/// says. Each placeholder and its quoted string are held until
+/// `clean_up`, after the query is built, so the query's allocation peaks
+/// with them as php's does.
+///
+/// ```php
+/// $q = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_EMULATE_PREPARES => true]);
+/// foreach ([1, 30, 113] as $n) {
+///     $s = $q->prepare('DO ?, ?');
+///     $s->bindValue(1, str_repeat('a', $n));
+///     $s->bindValue(2, str_repeat('b', $n));
+///     memory_reset_peak_usage(); $m = memory_get_usage(); $s->execute();
+///     echo $n, ' ', memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
+///     unset($s);
+/// }
+/// $s = $q->prepare('DO ?, ?, ?');
+/// $s->bindValue(1, null); $s->bindValue(2, true, PDO::PARAM_BOOL); $s->bindValue(3, 1234, PDO::PARAM_INT);
+/// memory_reset_peak_usage(); $m = memory_get_usage(); $s->execute();
+/// echo memory_get_peak_usage() - $m, ' ', memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect mysql regime=jit-off
+/// 1 200 88
+/// 30 304 112
+/// 113 720 336
+/// 200 64
+/// ```
 pub(super) fn parse_params(
     req: &mut Request,
     object: PhpObject,
     dbh: PhpObject,
     sql: &[u8],
 ) -> Result<Parsed, Thrown> {
+    let mut placeholders = Vec::new();
+    let parsed = parse_into(req, object, dbh, sql, &mut placeholders);
+    // `clean_up`: each quoted string released and each placeholder freed,
+    // in the order of the list.
+    for placeholder in placeholders {
+        if let Some(quoted) = placeholder.quoted {
+            quoted.give_up(req);
+        }
+        placeholder.block.free(req);
+    }
+    parsed
+}
+
+/// [`parse_params`] up to `clean_up`, the placeholders it found left in
+/// `placeholders` for it to free.
+fn parse_into(
+    req: &mut Request,
+    object: PhpObject,
+    dbh: PhpObject,
+    sql: &[u8],
+    placeholders: &mut Vec<Placeholder>,
+) -> Result<Parsed, Thrown> {
     let scanner = crate::dbh::with_connection(req, dbh, |_, conn| Ok(conn.scanner()))?;
     let scan = scanner.unwrap_or(scan);
-    let mut placeholders = Vec::new();
     let (mut named, mut positional) = (false, false);
     let mut at = 0;
     let mut bindno = 0;
@@ -136,7 +199,8 @@ pub(super) fn parse_params(
                 at,
                 len: end - at,
                 bindno,
-                quoted: Vec::new(),
+                quoted: None,
+                block: Emalloc::new(req, PLACEHOLDER_SIZE)?,
             });
             bindno += 1;
         }
@@ -176,7 +240,7 @@ pub(super) fn parse_params(
         return Ok(Parsed::Unchanged);
     }
     if !params.is_empty() {
-        for placeholder in &mut placeholders {
+        for placeholder in placeholders.iter_mut() {
             let key = if positional {
                 BoundKey::Position(placeholder.bindno)
             } else {
@@ -186,17 +250,12 @@ pub(super) fn parse_params(
                 return fail(req, "parameter was not defined");
             };
             match quote(req, object, dbh, (bound.1, bound.2))? {
-                Some(quoted) => placeholder.quoted = quoted,
+                Some(quoted) => placeholder.quoted = Some(quoted),
                 None => return Ok(Parsed::Failed),
             }
         }
     }
-    Ok(Parsed::Rewritten(build(
-        req,
-        sql,
-        &placeholders,
-        !params.is_empty(),
-    )?))
+    Ok(Parsed::Rewritten(build(req, sql, placeholders)?))
 }
 
 /// The `rewrite:` arm: `newbuffer_len`, then the query built into
@@ -230,15 +289,11 @@ fn build(
     req: &mut Request,
     sql: &[u8],
     placeholders: &[Placeholder],
-    quoted: bool,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let newbuffer_len = if quoted {
-        placeholders
-            .iter()
-            .fold(sql.len(), |len, p| len + p.quoted.len())
-    } else {
-        sql.len()
-    };
+    let newbuffer_len = placeholders
+        .iter()
+        .filter_map(|p| p.quoted.as_deref())
+        .fold(sql.len(), |len, quoted| len + quoted.len());
     let mut out = FreshString::new(req, newbuffer_len)?;
     let to = out.bytes_mut();
     let mut put = 0;
@@ -249,11 +304,7 @@ fn build(
     let mut from = 0;
     for placeholder in placeholders {
         copy(&sql[from..placeholder.at]);
-        if quoted {
-            copy(&placeholder.quoted);
-        } else {
-            copy(&sql[placeholder.at..placeholder.at + placeholder.len]);
-        }
+        copy(placeholder.text(sql));
         from = placeholder.at + placeholder.len;
     }
     copy(&sql[from..]);
@@ -269,24 +320,27 @@ fn find<'a>(params: &'a [Seen], key: &BoundKey) -> Option<&'a Seen> {
 /// A bound entry as the parser reads it: its key, its type and its value.
 type Seen = (BoundKey, BindType, Value);
 
-/// One bound value as the query text it stands for: `NULL`, `1` or `0`,
-/// an integer, or the connector's quoting of its string; `None` where the
-/// quoter failed, its state copied onto the statement.
+/// One bound value as the string that stands for it in the query, one
+/// owner the placeholder's: `NULL` (`ZSTR_KNOWN(ZEND_STR_NULL)`), `1` or
+/// `0` (`ZSTR_CHAR`), an integer (`zend_long_to_str`, interned for one
+/// digit), or the connector's quoting of its string; `None` where the
+/// quoter failed, its state copied onto the statement. The string a
+/// value converts to (`zval_try_get_string`) or a stream's contents
+/// (`php_stream_copy_to_mem`) is held while the quoter runs and released
+/// after it, as php releases `buf`. Where the quoter fails, php's `goto
+/// clean_up` skips that release (`ext/pdo/pdo_sql_parser.re:303-307`),
+/// which leaks `buf` until the request ends. No bundled connector that
+/// emulates prepares has a quoter that fails, and the engine releases it.
 fn quote(
     req: &mut Request,
     object: PhpObject,
     dbh: PhpObject,
     (ty, value): (BindType, Value),
-) -> Result<Option<Vec<u8>>, Thrown> {
+) -> Result<Option<Owner<PhpString>>, Thrown> {
     let value = value.deref();
-    let text = match (ty.kind(), value.as_ref()) {
+    let buf = match (ty.kind(), value.as_ref()) {
         (BindKind::Lob, ValueRef::Resource(_)) => {
-            if let Some(stream) = php_ext::request::Stream::from_value(req, &value) {
-                let copied = stream.copy_to_mem(req, None)?;
-                let bytes = copied.as_bytes().to_vec();
-                copied.give_up(req);
-                bytes
-            } else {
+            let Some(stream) = php_ext::request::Stream::from_value(req, &value) else {
                 error::raise_impl(
                     req,
                     dbh,
@@ -295,23 +349,29 @@ fn quote(
                     Some("Expected a stream resource"),
                 )?;
                 return Ok(None);
-            }
+            };
+            stream.copy_to_mem(req, None)?
         }
-        (_, ValueRef::Null) | (BindKind::Null, _) => return Ok(Some(b"NULL".to_vec())),
+        (_, ValueRef::Null) | (BindKind::Null, _) => {
+            let null = PhpString::interned(req, b"NULL")?;
+            return Ok(Some(Owner::take(req, null)));
+        }
         (BindKind::Bool, _) => {
-            return Ok(Some(if truthy(req, &value)? {
-                b"1".to_vec()
-            } else {
-                b"0".to_vec()
-            }));
+            let digit: &[u8] = if truthy(req, &value)? { b"1" } else { b"0" };
+            return PhpString::new(req, digit).map(Some);
         }
-        (BindKind::Int, _) => return Ok(Some(to_long(req, &value)?.to_string().into_bytes())),
-        _ => with_string(req, &value, <[u8]>::to_vec)?,
+        (BindKind::Int, _) => {
+            let long = to_long(req, &value)?;
+            return PhpString::new(req, long.to_string().as_bytes()).map(Some);
+        }
+        _ => to_string(req, &value)?,
     };
     let mode = crate::dbh::state(req, dbh).map_or(OnError::Throw, |d| d.error_mode);
-    let quoted =
-        crate::dbh::with_connection(req, dbh, |req, conn| Ok(conn.quote(req, &text, ty, mode)))?;
-    match quoted {
+    let quoted = crate::dbh::with_connection(req, dbh, |req, conn| {
+        Ok(conn.quote(req, buf.as_bytes(), ty, mode))
+    });
+    buf.give_up(req);
+    match quoted? {
         Ok(quoted) => Ok(Some(quoted)),
         Err(failure) => {
             error::record(req, dbh, On::Dbh, failure.cause)?;

@@ -1847,6 +1847,20 @@ impl crate::Heap {
         self.array_sized(0)
     }
 
+    /// `zend_new_array_singleton()`, `array_init_singleton`
+    /// (`Z/Zend/zend_hash.c:344`): the header of [`Heap::array`] with
+    /// `nTableSize` set to one past `zend_hash_check_size`'s eight, so
+    /// its first write lays down room for one element, a packed slot
+    /// and the two hash slots in 24 bytes, or a bucket and two hash
+    /// slots in 40, and each growth doubles from there. php-8.5.12 makes
+    /// the arrays of the request's input with it.
+    pub fn array_singleton(&mut self) -> Result<Arr, Fatal> {
+        let at = self.mm.alloc(HEADER)?;
+        // SAFETY: the allocation is the header's size and nothing else
+        // holds it.
+        Ok(unsafe { Arr::init(at, 1) })
+    }
+
     /// `zend_new_array(size)`, `array_init_size`: the header, with the
     /// first data allocation sized for `size` elements through
     /// `zend_hash_check_size`.
