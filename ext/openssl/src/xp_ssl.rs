@@ -1964,6 +1964,10 @@ impl Crypto for Layer {
         self.tls.as_ref().map_or(0, Tls::pending)
     }
 
+    fn resumable(&self) -> bool {
+        self.tls.as_ref().is_some_and(Tls::session_resumable)
+    }
+
     /// `PHP_STREAM_OPTION_CHECK_LIVENESS` with an active layer, asked with
     /// php's zero: one `SSL_peek` that does not wait, a peer that is still
     /// there or has only not written yet being alive.

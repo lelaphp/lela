@@ -589,6 +589,7 @@ request::Crypto::enable
 request::Crypto::meta
 request::Crypto::pending
 request::Crypto::read
+request::Crypto::resumable
 request::Crypto::setup
 request::Crypto::write
 request::CryptoSocket

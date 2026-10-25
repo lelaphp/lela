@@ -188,6 +188,16 @@ pub trait Crypto: Any + Send {
         buf: &[u8],
     ) -> Option<usize>;
 
+    /// Whether the session the layer holds is one the peer issued and so
+    /// can be resumed: exactly when php's FTP client would have stored it
+    /// as `ftp->last_ssl_session` (`ftp_ssl_new_session_cb`,
+    /// `Z/ext/ftp/ftp.c:219-228`, which OpenSSL calls for a session it
+    /// may cache), `SSL_SESSION_is_resumable(SSL_get_session(ssl))` over
+    /// the `SSL` `xp_ssl.c` keeps (`Z/ext/openssl/xp_ssl.c`'s
+    /// `ssl_handle`). An FTPS data connection is refused where the control
+    /// connection's is not (`data_accept`, `Z/ext/ftp/ftp.c:1776-1784`).
+    fn resumable(&self) -> bool;
+
     /// `SSL_pending`: the decrypted bytes the layer holds, which the
     /// `PHP_STREAM_AS_FD_FOR_SELECT` cast moves into the read buffer so
     /// `stream_select` sees them.

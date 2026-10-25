@@ -12,7 +12,7 @@ use std::time::Duration;
 use php_ext::coerce::{c_str, strtol};
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{
-    Handshake, OptionAnswer, OwnedStream as _, Request, SocketOptions, Stream, StreamCtx,
+    Crypto, Handshake, OptionAnswer, OwnedStream as _, Request, SocketOptions, Stream, StreamCtx,
     StreamOption, Streams as _, Xport, XportFailure,
 };
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
@@ -900,11 +900,18 @@ impl Ftp {
                 stream
             }
         };
-        if matches!(self.tls, Tls::Up { data: true }) && !secure(req, *stream, Some(*self.control))
-        {
-            docref(req, Level::Warning, "data_accept: SSL/TLS handshake failed");
-            stream.free(req);
-            return Ok(None);
+        if matches!(self.tls, Tls::Up { data: true }) {
+            let session = self.control.crypto(req, |layer| data_session(layer));
+            if let Err(refused) = session.unwrap_or(Err(NO_SESSION)) {
+                docref(req, Level::Warning, refused);
+                stream.free(req);
+                return Ok(None);
+            }
+            if !secure(req, *stream, Some(*self.control)) {
+                docref(req, Level::Warning, "data_accept: SSL/TLS handshake failed");
+                stream.free(req);
+                return Ok(None);
+            }
         }
         Ok(Some(stream))
     }
@@ -1367,6 +1374,60 @@ fn secure(req: &mut Request, stream: Stream, session: Option<Stream>) -> bool {
         && matches!(stream.crypto_enable(req, true), Handshake::Done)
 }
 
+/// php 8.5.12's `data_accept` refusal where the control connection holds
+/// no session the server issued (GH-23619).
+const NO_SESSION: &str = "data_accept: failed to retrieve the existing SSL session from the control connection. The server does not support TLS session resumption on the data connection, which is necessary to protect against session data stealing. PHP does not support such configuration.";
+
+/// `data_accept`'s `ftp->last_ssl_session` (`Z/ext/ftp/ftp.c:1776-1784`):
+/// a protected data connection is made only over a session the server
+/// issued the control connection, which `layer` answers as
+/// [`Crypto::resumable`], and php's refusal otherwise.
+///
+/// The oracle shows the refusal only against a server that issues no
+/// session, which no php server is: `xp_ssl.c` gives every TLS 1.2
+/// handshake a session id and leaves TLS 1.3's `num_tickets` at OpenSSL's two.
+/// So the refusal is held by this file's unit test over a layer that
+/// answers no, and the witness below pins the transfer over a session a
+/// php server issued:
+///
+/// ```php
+/// $k = openssl_pkey_new(['private_key_bits' => 2048]); $x = openssl_csr_sign(openssl_csr_new(['commonName' => 'localhost'], $k), null, $k, 1);
+/// openssl_x509_export($x, $pem); openssl_pkey_export($k, $key); file_put_contents($cert = __DIR__ . '/ftps.pem', $pem . $key);
+/// $ctx = stream_context_create(['ssl' => ['local_cert' => $cert]]);
+/// $srv = stream_socket_server('tcp://127.0.0.1:0', $e, $m, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $ctx); $port = (int) explode(':', stream_socket_get_name($srv, false))[1];
+/// if (!pcntl_fork()) {
+///     $s = stream_socket_accept($srv); fwrite($s, "220 hi\r\n"); fgets($s); fwrite($s, "234 tls\r\n"); stream_socket_enable_crypto($s, true, STREAM_CRYPTO_METHOD_SSLv23_SERVER);
+///     while (($l = fgets($s)) !== false) {
+///         $c = strtok(trim($l), ' ');
+///         if ($c === 'PASV') { $d = stream_socket_server('tcp://127.0.0.1:0', $e, $m, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $ctx); $p = (int) explode(':', stream_socket_get_name($d, false))[1]; fwrite($s, sprintf("227 ok (127,0,0,1,%d,%d)\r\n", $p >> 8, $p & 255)); }
+///         elseif ($c === 'NLST') { fwrite($s, "150 go\r\n"); $f = stream_socket_accept($d); stream_socket_enable_crypto($f, true, STREAM_CRYPTO_METHOD_SSLv23_SERVER); fwrite($f, "a\r\nb\r\n"); fclose($f); fwrite($s, "226 done\r\n"); }
+///         elseif ($c === 'QUIT') { fwrite($s, "221 bye\r\n"); break; }
+///         else fwrite($s, (['USER' => "331 pass?", 'PASS' => "230 in", 'PBSZ' => "200 ok", 'PROT' => "200 ok", 'TYPE' => "200 ok"][$c] ?? "500 what") . "\r\n");
+///     }
+///     exit;
+/// }
+/// $ftp = ftp_ssl_connect('127.0.0.1', $port, 5);
+/// var_dump(ftp_login($ftp, 'u', 'p'), ftp_pasv($ftp, true), ftp_nlist($ftp, '.'));
+/// ftp_close($ftp); pcntl_wait($status); unlink($cert);
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// array(2) {
+///   [0]=>
+///   string(1) "a"
+///   [1]=>
+///   string(1) "b"
+/// }
+/// ```
+fn data_session(layer: &dyn Crypto) -> Result<(), &'static str> {
+    if layer.resumable() {
+        Ok(())
+    } else {
+        Err(NO_SESSION)
+    }
+}
+
 /// `data_close` of a connection not yet accepted.
 fn close_data(req: &mut Request, data: Data) {
     match data {
@@ -1465,4 +1526,99 @@ pub(crate) fn mlsd_line(req: &mut Request, line: &[u8]) -> Result<Option<Owner<P
         facts = &facts[semi + 1..];
     }
     Ok(Some(entry))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NO_SESSION, data_session};
+    use php_ext::raising::Thrown;
+    use php_ext::request::{Crypto, CryptoSocket, Handshake, Request, Stream};
+    use php_ext::values::{Owner, PhpArray};
+
+    /// A crypto layer whose session is resumable or not, and which does
+    /// nothing else.
+    struct Session(bool);
+
+    impl Crypto for Session {
+        fn setup(
+            &mut self,
+            _req: &mut Request,
+            _socket: &mut CryptoSocket<'_>,
+            _method: i64,
+            _session: Option<Stream>,
+        ) -> Result<bool, Thrown> {
+            Ok(false)
+        }
+
+        fn enable(
+            &mut self,
+            _req: &mut Request,
+            _socket: &mut CryptoSocket<'_>,
+            _activate: bool,
+        ) -> Result<Handshake, Thrown> {
+            Ok(Handshake::Failed)
+        }
+
+        fn active(&self) -> bool {
+            false
+        }
+
+        fn read(
+            &mut self,
+            _req: &mut Request,
+            _socket: &mut CryptoSocket<'_>,
+            _buf: &mut [u8],
+            _eof: &mut bool,
+        ) -> Result<Option<usize>, Thrown> {
+            Ok(None)
+        }
+
+        fn write(
+            &mut self,
+            _req: &mut Request,
+            _socket: &mut CryptoSocket<'_>,
+            _buf: &[u8],
+        ) -> Option<usize> {
+            None
+        }
+
+        fn pending(&self) -> usize {
+            0
+        }
+
+        fn resumable(&self) -> bool {
+            self.0
+        }
+
+        fn alive(&mut self, _req: &mut Request, _socket: &mut CryptoSocket<'_>) -> bool {
+            false
+        }
+
+        fn meta(&self, _req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> {
+            Ok(None)
+        }
+
+        fn connected(
+            &mut self,
+            _req: &mut Request,
+            _socket: &mut CryptoSocket<'_>,
+        ) -> Result<Result<(), String>, Thrown> {
+            Ok(Ok(()))
+        }
+
+        fn accepted(&self) -> Box<dyn Crypto> {
+            Box::new(Session(self.0))
+        }
+
+        fn allocations(&self) -> Vec<usize> {
+            Vec::new()
+        }
+    }
+
+    #[test]
+    fn a_data_connection_needs_a_session_the_server_issued() {
+        assert_eq!(data_session(&Session(true)), Ok(()));
+        assert_eq!(data_session(&Session(false)), Err(NO_SESSION));
+        assert!(NO_SESSION.starts_with("data_accept: failed to retrieve the existing SSL session"));
+    }
 }
