@@ -367,8 +367,12 @@ impl Heap {
     /// A request-scoped string of `bytes`, php's `zend_string_init`:
     /// one allocation out of this heap, one owner, and the bytes as
     /// given.
+    #[inline]
     pub fn string(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
-        self.string_sized(bytes, Sizing::Alloc)
+        let at = self.mm.alloc(Str::allocation_size(bytes.len()))?;
+        // SAFETY: the allocation is exactly the header, the bytes and the
+        // NUL `init` writes, and nothing else holds it.
+        Ok(unsafe { Str::init(at, bytes, 0) })
     }
 
     /// A request-scoped string of `bytes` laid at `sizing`'s size
