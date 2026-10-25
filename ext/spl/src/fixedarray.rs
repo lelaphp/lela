@@ -93,7 +93,10 @@ fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Throw
     }
     // `safe_ferealloc` before the row grows: the overflow's fatal and the
     // memory limit's come before a slot is laid down, and where the limit
-    // refused the growth the row stands as it was (`RETURN_OOM()`).
+    // refused the growth the elements stand as they were (`RETURN_OOM()`);
+    // the allocation that charged them is left to the request's end, which
+    // the limit's fatal brings at the next check, where php keeps its
+    // untouched block.
     if size > len && fit(req, object, size)?.is_err() {
         return Ok(());
     }
@@ -259,6 +262,23 @@ impl SplFixedArray {
 
     /// `__wakeup(): void`, deprecated: the properties an old serialization
     /// left become the elements.
+    ///
+    /// The row is asked for fallibly since 8.5.12, before the properties are
+    /// copied, so one the memory limit refuses leaves them standing and the
+    /// limit's fatal is raised as the call returns:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '16M');
+    /// $a = new SplFixedArray();
+    /// for ($i = 0; $i < 128 * 1024; $i++) { @$a->{$i} = 0; }
+    /// $pad = str_repeat('a', max(16 * 1024 * 1024 - memory_get_usage(true) - 512 * 1024, 1));
+    /// @$a->__wakeup();
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 6
+    /// ```
     #[php(
         tentative,
         deprecated(
@@ -271,16 +291,24 @@ impl SplFixedArray {
         if with(req, this, |a| a.elements.is_empty() && a.resizing.is_none())? {
             let table = Std.get_properties(req, this)?;
             let props: Vec<(Key, Value)> = walk::rows(req, table).collect();
+            // `spl_fixedarray_init` before the properties are copied and
+            // cleaned, as php orders them: where the memory limit refused
+            // the row, RETURN_OOM() with the properties standing.
+            let Ok(allocation) = laid(req, props.len())? else {
+                return Ok(());
+            };
             let mut elements = Vec::with_capacity(props.len());
             for (key, value) in props {
                 elements.push(Owner::take(req, value.deref()));
                 if let Err(thrown) = this.unset_row(req, &key) {
                     crate::give_up_all(req, elements);
+                    if let Some(allocation) = allocation {
+                        allocation.free(req);
+                    }
                     return Err(thrown);
                 }
             }
-            // RETURN_OOM() where the row was refused.
-            lay_laid(req, this, elements)?;
+            lay(req, this, elements, allocation)?;
         }
         Ok(())
     }
