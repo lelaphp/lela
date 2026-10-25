@@ -20,7 +20,7 @@ use php_ext::raising::arity;
 #[cfg(target_vendor = "apple")]
 use php_ext::raising::throw_error;
 use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref};
-use php_ext::request::{Forked, Request};
+use php_ext::request::{Forked, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
@@ -55,11 +55,36 @@ use crate::{State, failed, ffi};
 /// ```expect exit=255 process wall=1s
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 5
 /// ```
+///
+/// The child starts with the stat cache empty, as php 8.5.12's
+/// `php_child_init` empties it (`main/main.c:1901`, GH-23986), so a file
+/// the parent stat'ed and another process changed reads as it is now:
+/// the cache is the stream layer's, above the engine's fork, so it is
+/// emptied here.
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'fork');
+/// var_dump(filesize($f));
+/// if (($pid = pcntl_fork()) === 0) { file_put_contents($f, 'grown'); exit(0); }
+/// pcntl_waitpid($pid, $status);
+/// if (($pid = pcntl_fork()) === 0) { var_dump(filesize($f)); exit(0); }
+/// pcntl_waitpid($pid, $status);
+/// var_dump(filesize($f));
+/// unlink($f);
+/// ```
+/// ```expect process
+/// int(0)
+/// int(5)
+/// int(0)
+/// ```
 #[php_function]
 pub(crate) fn pcntl_fork(req: &mut Request) -> i64 {
     match req.limits_mut().fork() {
         Ok(Forked::Parent { child }) => child.as_raw().into(),
-        Ok(Forked::Child) => 0,
+        Ok(Forked::Child) => {
+            req.clear_stat_cache();
+            0
+        }
         Err(error) => {
             let errno = Errno::from_raw(error.raw_os_error().unwrap_or(0));
             failed(req, errno);
