@@ -21,7 +21,9 @@ use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown, docref, throw_error};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, adopted};
-use crate::engine::{Body, Method};
+use crate::engine::{Body, Method, WebRequest};
+use crate::exec::TableId;
+use php_unit::AutoGlobal;
 
 /// `SAPI_POST_BLOCK_SIZE` (`Z/main/SAPI.h:28`): what the form reader
 /// asks the host for at a time.
@@ -112,6 +114,36 @@ pub(crate) struct Post {
     /// multipart handler refuses is thrown and not warned of, under
     /// `request_parse_body()`.
     pub(crate) throwing: bool,
+}
+
+/// `sapi_module.read_post` (`Z/main/SAPI.h`): what hands a request its
+/// body, a block at a time, as the request asks. A host serves one
+/// ([`Body::Stream`]), and a native swaps one in for the length of a
+/// parse ([`Variables::read_post_body`]), as php's `zend_test` swaps
+/// `sapi_module.read_post`. A reader of bytes is one: it fills the
+/// block from the reader until the block is full or the reader ends, as
+/// php's hosts fill the buffer they are handed (`sapi_cgi_read_post`,
+/// `Z/sapi/cgi/cgi_main.c:477`), a read that fails ending the body there
+/// as their `read` answering `-1` does.
+pub trait ReadPost: Send {
+    /// Up to `buf.len()` bytes of the body into `buf`, and how many; fewer
+    /// than asked ends the body (`SG(post_read)`).
+    fn read_post(&mut self, req: &mut Request, buf: &mut [u8]) -> usize;
+}
+
+impl<R: Read + Send> ReadPost for R {
+    fn read_post(&mut self, _: &mut Request, buf: &mut [u8]) -> usize {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match self.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
+            }
+        }
+        filled
+    }
 }
 
 impl Request {
@@ -242,32 +274,29 @@ impl Request {
         block
     }
 
-    /// `sapi_module.read_post`: up to `max` bytes of the body, pulled from
-    /// the host's reader until `max` came or the reader ended, as php's
-    /// hosts fill the buffer they are handed (`sapi_cgi_read_post`,
-    /// `Z/sapi/cgi/cgi_main.c:477`), `SG(read_post_bytes)` moved on; a
-    /// read that fails ends the body there, as their `read` answering
-    /// `-1` does. Nothing, and the host's warning raised, where it could
-    /// not read the body.
+    /// `sapi_module.read_post`: up to `max` bytes of the body from the
+    /// reader that serves it ([`ReadPost`]), `SG(read_post_bytes)` moved
+    /// on; nothing, and the host's warning raised, where it could not read
+    /// the body.
     pub(crate) fn read_post(&mut self, max: usize) -> Vec<u8> {
-        let reader = match self.description.web.as_mut().map(|web| &mut web.body) {
-            Some(Body::Stream(reader)) => reader,
-            Some(Body::Refused(warning)) => {
-                let warning = warning.clone();
-                crate::api::raising::warning(self, &warning);
-                return Vec::new();
-            }
-            None => return Vec::new(),
+        let Some(web) = self.description.web.as_mut() else {
+            return Vec::new();
         };
+        if let Body::Refused(warning) = &web.body {
+            let warning = warning.clone();
+            crate::api::raising::warning(self, &warning);
+            return Vec::new();
+        }
+        let mut body = std::mem::take(&mut web.body);
         let mut block = vec![0; max];
-        let mut filled = 0;
-        while filled < max {
-            match reader.read(&mut block[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                Err(_) => break,
-            }
+        // The reader is handed the request it serves, and out of it while
+        // it reads.
+        let filled = match &mut body {
+            Body::Stream(reader) => reader.read_post(self, &mut block).min(max),
+            Body::Refused(_) => 0,
+        };
+        if let Some(web) = self.description.web.as_mut() {
+            web.body = body;
         }
         block.truncate(filled);
         self.post.read = self.post.read.saturating_add(filled);
@@ -366,6 +395,79 @@ impl Request {
         self.release(crate::api::values::Value::array(post));
         self.release(crate::api::values::Value::array(files));
         Err(thrown)
+    }
+
+    /// [`Variables::read_post_body`].
+    fn read_post_body(
+        &mut self,
+        read: Box<dyn ReadPost>,
+        content_type: &[u8],
+        content_length: i64,
+    ) -> Result<(), Thrown> {
+        // `zend_test_reset_track_vars`: each made first, so its first use
+        // after does not make it again over what the parse filled, and its
+        // track given a fresh array.
+        for global in [AutoGlobal::Post, AutoGlobal::Files] {
+            self.arm(global)?;
+            let fresh = PhpArray::new(self)?.hand_on();
+            if let Some(kept) = self
+                .http_globals
+                .track(global)
+                .and_then(|t| t.replace(fresh))
+            {
+                self.release(Value::array(kept));
+            }
+        }
+        // What a previous parse uploaded, torn down as the request's end would.
+        self.destroy_uploaded_files();
+        let mut kept = std::mem::take(&mut self.post);
+        self.post.throwing = kept.throwing;
+        self.post.uploaded = kept.uploaded.take();
+        let described = self.description.web.is_some();
+        let web = self.description.web.get_or_insert_with(WebRequest::default);
+        let request_info = (
+            std::mem::replace(&mut web.body, Body::Stream(read)),
+            web.method.replace(Method::Post),
+            web.content_type.replace(content_type.to_vec()),
+            std::mem::replace(&mut web.content_length, content_length),
+        );
+        self.read_post_data(&BodyLimits::default());
+        let handled = match self.http_globals.track(AutoGlobal::Post).and_then(|t| *t) {
+            Some(post) => self.handle_post(post, &BodyLimits::default()),
+            None => Ok(()),
+        };
+        // `zend_test_publish_track_vars`: `$_POST` and `$_FILES` the
+        // arrays the parse filled.
+        let published = [AutoGlobal::Post, AutoGlobal::Files]
+            .into_iter()
+            .try_for_each(|global| self.publish_track(global));
+        // The request body the default reader kept closed, and the
+        // request's own description put back.
+        let parsed = std::mem::replace(&mut self.post, kept);
+        self.post.uploaded = parsed.uploaded;
+        if described {
+            if let Some(web) = self.description.web.as_mut() {
+                (web.body, web.method, web.content_type, web.content_length) = request_info;
+            }
+        } else {
+            self.description.web = None;
+        }
+        published.and(handled)
+    }
+
+    /// `zend_test_publish_track_vars`: the auto-global's name in
+    /// `EG(symbol_table)` bound to the array its track holds, which the
+    /// table owns once more.
+    fn publish_track(&mut self, global: AutoGlobal) -> Result<(), Thrown> {
+        let Some(array) = self.http_globals.track(global).and_then(|t| *t) else {
+            return Ok(());
+        };
+        let value = Value::array(array);
+        self.addref(&value);
+        let name = self.declared_string(global.name())?;
+        self.symbol_update(TableId::GLOBAL, *name, value);
+        name.give_up(self);
+        Ok(())
     }
 
     /// `destroy_uploaded_files_hash` (`Z/main/rfc1867.c:170`), at
@@ -494,6 +596,30 @@ impl Variables<&mut Request> {
     ) -> Result<(Owner<PhpArray>, Owner<PhpArray>), Thrown> {
         let (post, files) = self.0.parse_body_made(limits)?;
         Ok((Owner::adopt(post), Owner::adopt(files)))
+    }
+
+    /// `sapi_read_post_data()` and `sapi_handle_post()` over a body the
+    /// caller reads, as if it were the request's, a `POST` of
+    /// `content_type` declared `content_length` long: `$_POST` and `$_FILES`
+    /// made afresh and filled by the content type's handler, the files an
+    /// earlier parse uploaded removed, and the request's own description
+    /// of its body and what was read of it as they stood after. `read`
+    /// stands in for the host's [`ReadPost`] meanwhile. What the
+    /// handlers refuse is warned of, as at request start; a body no
+    /// handler takes is read and kept by no one. What php 8.5.12's
+    /// `zend_test` runs for `zend_test_handle_post_data()`
+    /// (`Z/ext/zend_test/test.c:1121`). A fatal the parse raised ends the
+    /// request after the arrays are published and the description is put
+    /// back, as php's `zend_try` bails out again.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn read_post_body(
+        self,
+        read: impl ReadPost + 'static,
+        content_type: &[u8],
+        content_length: i64,
+    ) -> Result<(), Thrown> {
+        self.0
+            .read_post_body(Box::new(read), content_type, content_length)
     }
 
     /// `move_uploaded_file()`'s first half: take the upload's temporary
