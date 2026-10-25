@@ -2483,9 +2483,47 @@ impl Request {
     /// on the object with the property's name as its first argument and
     /// `arguments` after it, under `bit` in the property guard, which is
     /// taken before the call and given back after it whatever the call
-    /// did. The object is one more owner for the span of the call
-    /// (`GC_ADDREF`, `OBJ_RELEASE`), so an accessor that drops the last
-    /// other owner does not free the object under the handler.
+    /// did. The object is one more owner for the span of the guard
+    /// (`GC_ADDREF` before `(*guard) |= bit`, `OBJ_RELEASE` after
+    /// `(*guard) &= ~bit`, as `zend_std_read_property` and its kin order
+    /// them), so an accessor that drops the last other owner does not
+    /// free the object under the handler, its destructor runs with the
+    /// guard down, and no guard row outlives the object it names.
+    ///
+    /// Each accessor drops the last owner of the object it serves, which
+    /// the next `new` makes again, and the destructor reads through
+    /// `__get` and `__isset` again:
+    ///
+    /// ```php
+    /// class F {
+    ///     function __get($n) { if ($n === 'x') { $GLOBALS['o'] = null; } return 7; }
+    ///     function __set($n, $v) { $GLOBALS['o'] = null; }
+    ///     function __isset($n) { if ($n === 'q') { $GLOBALS['o'] = null; } return true; }
+    ///     function __unset($n) { $GLOBALS['o'] = null; }
+    ///     function __destruct() { echo '[', $this->x, isset($this->q) ? 'i' : '-', ']'; }
+    /// }
+    /// $f = 0; for ($i = 0; $i < 3; $i++) { $o = new F; $f += $o->x; }
+    /// echo "| "; $o = new F; $o->z = 1; echo "| "; $o = new F; var_dump(isset($o->q)); $o = new F; unset($o->u);
+    /// echo "\n", $f, "\n";
+    /// ```
+    /// ```expect
+    /// [7i][7i][7i]| [7i]| [7i]bool(true)
+    /// [7i]
+    /// 21
+    /// ```
+    ///
+    /// A destructor served inside one `__get`, and another object's last
+    /// owner dropped inside its own `__get` that the first reads:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// class G { public $keep; function __get($n) { $this->keep = null; return isset($GLOBALS['h']) ? $GLOBALS['h']->y : 2; } }
+    /// class H { function __get($n) { unset($GLOBALS['h']); return 3; } }
+    /// $g = new G; $g->keep = new D; echo $g->a, " "; $h = new H; echo $g->b, " "; $h = new H; echo $g->c, "\n";
+    /// ```
+    /// ```expect
+    /// d2 3 3
+    /// ```
     fn call_accessor(
         &mut self,
         object: PhpObject,
@@ -2494,16 +2532,18 @@ impl Request {
         name: &[u8],
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        let held = Owner::take(self, object.as_value());
         self.guard_take(object, name, bit);
         let served = self.serve_accessor(object, accessor, name, arguments);
         self.guard_drop(object, name, bit);
+        held.give_up(self);
         served
     }
 
-    /// [`Request::call_accessor`] without the guard, for the one site
-    /// that holds a bit across two calls: `zend_std_has_property` keeps
-    /// `IN_ISSET` standing while it asks the `__get` that `empty` reads
-    /// the truth of.
+    /// [`Request::call_accessor`] without the guard and the hold, for the
+    /// one site that holds both across two calls: `zend_std_has_property`
+    /// keeps `IN_ISSET` standing, and the object, while it asks the
+    /// `__get` that `empty` reads the truth of.
     fn serve_accessor(
         &mut self,
         object: PhpObject,
@@ -2515,9 +2555,7 @@ impl Request {
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(*name));
         sent.extend_from_slice(arguments);
-        let held = Owner::take(self, object.as_value());
         let served = self.serve_method_made(accessor, Some(object), object.class(), &sent, &[]);
-        held.give_up(self);
         name.give_up(self);
         served
     }
