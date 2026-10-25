@@ -84,22 +84,22 @@ pub(super) struct Units {
 }
 
 /// How many [`Units`] a request keeps for its next servings
-/// ([`Spare`]): one per serving standing at once, up to this, which a
+/// ([`UnitsLeft`]): one per serving standing at once, up to this, which a
 /// native calling back into PHP from inside a callback nests.
-const SPARE: usize = 16;
+const LEFT: usize = 16;
 
 /// The [`Units`] a request's servings left, each laid down once and
 /// taken up again by the next serving, as php's `execute_ex` lays
 /// nothing down to serve a callback a native makes
 /// (`zend_call_function`): a serving takes one with its blocks already
-/// laid and the shares it held still held ([`Spare::take`],
-/// [`Units::leave`]) and hands it back after ([`Spare::put`]), so a
+/// laid and the shares it held still held ([`UnitsLeft::take`],
+/// [`Units::leave`]) and hands it back after ([`UnitsLeft::put`]), so a
 /// callback's serving allocates nothing and takes no share of a unit
 /// held before.
 #[derive(Default)]
-pub(crate) struct Spare(Vec<Units>);
+pub(crate) struct UnitsLeft(Vec<Units>);
 
-impl Spare {
+impl UnitsLeft {
     /// The [`Units`] a serving left, where one is kept; an empty one
     /// otherwise, moved onto the serving's own stack, where the loop
     /// reads it as it read a [`Units`] it laid itself.
@@ -109,11 +109,11 @@ impl Spare {
     }
 
     /// `units`, left by its serving ([`Units::leave`]), kept for the next
-    /// serving while fewer than [`SPARE`] are; past that its shares go
+    /// serving while fewer than [`LEFT`] are; past that its shares go
     /// with it.
     #[inline]
     pub(super) fn put(&mut self, units: Units) {
-        if self.0.len() < SPARE {
+        if self.0.len() < LEFT {
             self.0.push(units);
         }
     }
@@ -357,13 +357,15 @@ impl Units {
     }
 
     /// The serving over: where a unit the request compiled for itself is
-    /// among the units held, every share given back
-    /// ([`Units::give_back`]); otherwise each share kept for the next
-    /// serving, since a function's unit and a cached file's are held by
-    /// the request as long as it runs, so the next callback a native
-    /// serves finds its unit held and takes no share of it.
+    /// among the units held, or more than one block of them, every share
+    /// given back ([`Units::give_back`]); otherwise each share kept for
+    /// the next serving, since a function's unit and a cached file's are
+    /// held by the request as long as it runs, so the next callback a
+    /// native serves finds its unit held and takes no share of it, and
+    /// [`Units::hold`]'s search of the units held walks one block at
+    /// most.
     pub(super) fn leave(&mut self, req: &mut Request) {
-        if self.took.get() {
+        if self.took.get() || self.len.get() > BLOCK {
             self.give_back(req);
         }
     }

@@ -70,7 +70,7 @@ pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
-pub(crate) use held::Spare;
+pub(crate) use held::UnitsLeft;
 use held::{Entered, Kept, Scope, Units};
 pub use layout::{Activation, FRAME, FrameLayout, PlainCall, call_image, plain_call};
 pub use sampled::{
@@ -888,7 +888,7 @@ fn refused_at_entry(req: &mut Request) -> bool {
 /// its own units go for it.
 fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
     let mut stepped = first;
-    let mut units = req.spare_units.take();
+    let mut units = req.units_left.take();
     loop {
         let served = serve_held::<T, D>(req, stepped, &units, Scope::Whole)?;
         if let Some(again) = served {
@@ -896,7 +896,7 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
             stepped = again;
         } else {
             units.leave(req);
-            req.spare_units.put(units);
+            req.units_left.put(units);
             return Ok(());
         }
     }

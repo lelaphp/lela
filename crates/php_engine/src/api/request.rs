@@ -258,8 +258,8 @@ pub struct Request {
     /// The tier's state, laid with the request ([`crate::tier::state`]).
     pub(crate) tier: crate::tier::TierState,
     /// The units the loop's servings held, kept with their shares for the
-    /// next serving ([`crate::tier::Spare`]).
-    pub(crate) spare_units: crate::tier::Spare,
+    /// next serving ([`crate::tier::UnitsLeft`]).
+    pub(crate) units_left: crate::tier::UnitsLeft,
     description: RequestDescription,
     /// The uncaught throwable kept for a host that renders it ([`inspect::Inspected`]).
     inspect: inspect::Inspected,
@@ -1108,7 +1108,7 @@ impl Request {
             _inside: crate::fork::Inside::enter(),
             limits: limits::LimitsState::new(&shared.timer),
             tier: crate::tier::TierState::laid(&shared),
-            spare_units: crate::tier::Spare::default(),
+            units_left: crate::tier::UnitsLeft::default(),
             shared,
             description,
             inspect: inspect::Inspected::default(),
