@@ -3,6 +3,19 @@
 [alias]
 xtask = "run --quiet --package xtask --"
 
+# Every profile passes LLVM's --cgp-max-address-users-to-scan=1000, so
+# CodeGenPrepare folds a request field's address into each access of
+# `serve_frame`'s loop, `ldr x8, [x19, #C]`, where at LLVM's default of
+# 100 users a field the loop reaches more often stays one address the
+# register allocator holds or spills (design §10 Profiles; #3372, #3345).
+# `cfg(all())` holds for every target, and cargo joins a `--config` line's
+# array for the same key to this one, which is how the harness adds a cfg
+# (`xtask/src/oracle/profile.rs`, `scripts/ci/tailcall.sh`); a `RUSTFLAGS`
+# variable replaces the table instead, and php_engine's build.rs refuses a
+# release-like build it leaves without the option.
+[target.'cfg(all())']
+rustflags = ["-C", "llvm-args=--cgp-max-address-users-to-scan=1000"]
+
 # expect-test finds the file a snapshot lives in from the outermost ancestor
 # that has a Cargo.toml, which in a worktree laid under the checkout, as
 # `.claude/worktrees/` held them before revision 56, is the clone's root and
