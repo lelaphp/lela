@@ -767,7 +767,7 @@ impl PhpStream {
     }
 
     /// The read buffer lent out, with its two cursors, for the
-    /// reallocation [`StreamOp::resize_readbuf`] makes with the request, which
+    /// reallocation [`StreamOp::change_readbuf`] makes with the request, which
     /// serves no PHP code; the stream reads as holding no bytes until it
     /// is back ([`PhpStream::put_readbuf`]).
     fn lend_readbuf(&mut self) -> (ReadBuf, usize, usize) {
@@ -1552,12 +1552,13 @@ impl StreamOp<'_> {
         let mut left = maxlen.unwrap_or(0);
         loop {
             // php 8.5.12 stops a line of any length once the memory limit
-            // was met (`ZEND_HAS_OOM()`), before it grows the line by what
-            // is buffered.
+            // was met (`ZEND_HAS_OOM()`), after it located the end of the
+            // line and before it grows the line by what is buffered.
             let oom = maxlen.is_none() && self.req.memory().has_oom();
             let (done, eof, chunk) = self.with(|s| {
                 let held = s.writepos > s.readpos;
                 if held && oom {
+                    s.locate_eol();
                     return (true, false, 0);
                 }
                 let done = held && s.line_from_buffer(&mut line, maxlen.is_some(), &mut left);
