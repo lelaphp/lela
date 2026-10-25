@@ -24,6 +24,7 @@ use crate::connector::{BindEvent, BindKind, Orientation, SqlState};
 use crate::dbh::Nulls;
 use crate::error::{self, On};
 use crate::stmt;
+use crate::throwables::Throwables;
 
 /// `enum pdo_fetch_type`, the style without its bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -133,10 +134,11 @@ fn verify(
     arg: u32,
     fetch_all: bool,
 ) -> Result<(), Thrown> {
+    let ce = Throwables::of(req)?;
     let bitmask = |req: &mut Request| {
         argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             arg,
             "must be a bitmask of PDO::FETCH_* constants",
         )
@@ -155,7 +157,7 @@ fn verify(
         if class_flags && kind != Some(Kind::Class) {
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 arg,
                 "cannot use PDO::FETCH_CLASSTYPE, PDO::FETCH_PROPS_LATE, or PDO::FETCH_SERIALIZE fetch flags with a fetch mode other than PDO::FETCH_CLASS",
             ));
@@ -171,19 +173,19 @@ fn verify(
     match kind {
         Some(Kind::Func) if !fetch_all => Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             arg,
             "PDO::FETCH_FUNC can only be used with PDOStatement::fetchAll()",
         )),
         Some(Kind::Lazy) if fetch_all => Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             arg,
             "PDO::FETCH_LAZY cannot be used with PDOStatement::fetchAll()",
         )),
         Some(Kind::Into) if fetch_all => Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             arg,
             "PDO::FETCH_INTO cannot be used with PDOStatement::fetchAll()",
         )),
@@ -1236,18 +1238,13 @@ pub(super) fn setup_mode(
                 return Err(count_error(req, "exactly", first));
             }
             let Some(n) = args[0].as_int() else {
-                let name = value_name(req, &args[0]);
-                return Err(argument_error(
-                    req,
-                    "TypeError",
-                    first,
-                    &format!("must be of type int, {name} given"),
-                ));
+                return wrong_type(req, first, "int", &args[0]);
             };
             if n < 0 {
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     first,
                     "must be greater than or equal to 0",
                 ));
@@ -1266,20 +1263,15 @@ pub(super) fn setup_mode(
                 return Err(count_error(req, "exactly", first));
             }
             let Some(into) = args[0].as_object() else {
-                let shown = value_name(req, &args[0]);
-                return Err(argument_error(
-                    req,
-                    "TypeError",
-                    first,
-                    &format!("must be of type object, {shown} given"),
-                ));
+                return wrong_type(req, first, "object", &args[0]);
             };
             Target::Into(Owner::take(req, into))
         }
         Some(Kind::Func) | None => {
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 mode_arg,
                 "must be one of the PDO::FETCH_* constants",
             ));
@@ -1299,6 +1291,19 @@ pub(super) fn setup_mode(
     };
     old.release(req);
     Ok(())
+}
+
+/// php's `zend_argument_type_error(n, "must be of type %s, %s given")`
+/// over `zend_zval_value_name(arg)`, as `setup_mode` raises it.
+fn wrong_type<T>(req: &mut Request, n: u32, want: &str, arg: &Value) -> Result<T, Thrown> {
+    let shown = value_name(req, arg);
+    let ce = Throwables::of(req)?;
+    Err(argument_error(
+        req,
+        ce.type_error,
+        n,
+        &format!("must be of type {want}, {shown} given"),
+    ))
 }
 
 /// `setup_fetch_mode`'s `FETCH_CLASS` arm: the class the first argument
@@ -1342,17 +1347,19 @@ fn class_target(
     }
     let Some(name) = args[0].as_str_bytes().map(<[u8]>::to_vec) else {
         let shown = value_name(req, &args[0]);
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "TypeError",
+            ce.type_error,
             first,
             &format!("must be of type string, {shown} given"),
         ));
     };
     let Some(class) = autoload(req, &name)? else {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "TypeError",
+            ce.type_error,
             first,
             "must be a valid class",
         ));
@@ -1364,9 +1371,10 @@ fn class_target(
             ValueRef::Array(array) => {
                 if !array.is_empty() {
                     if !has_constructor(req, class) {
+                        let ce = Throwables::of(req)?;
                         return Err(argument_error(
                             req,
-                            "ValueError",
+                            ce.value_error,
                             3,
                             "must be empty when class provided in argument #2 ($class) does not have a constructor",
                         ));
@@ -1376,9 +1384,10 @@ fn class_target(
             }
             _ => {
                 let shown = value_name(req, extra);
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "TypeError",
+                    ce.type_error,
                     mode_arg + 2,
                     &format!("must be of type ?array, {shown} given"),
                 ));
@@ -1465,9 +1474,10 @@ pub(super) fn fetch_object(
                 class
             } else {
                 let shown = String::from_utf8_lossy(&name).into_owned();
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "TypeError",
+                    ce.type_error,
                     1,
                     &format!("must be a valid class name, {shown} given"),
                 ));
@@ -1481,9 +1491,10 @@ pub(super) fn fetch_object(
     let (object, _) = stmt::this_stmt(req, this)?;
     stmt::clear_error(req, object);
     if args.is_some_and(|a| !a.is_empty()) && !has_constructor(req, class) {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             2,
             "must be empty when class provided in argument #1 ($class) does not have a constructor",
         ));
@@ -1552,19 +1563,24 @@ fn all_class(
         Some(named) => {
             let Some(bytes) = named.as_str_bytes().map(<[u8]>::to_vec) else {
                 let shown = value_name(req, &named);
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "TypeError",
+                    ce.type_error,
                     2,
                     &format!("must be of type string, {shown} given"),
                 ));
             };
-            match autoload(req, &bytes)? {
-                Some(class) => class,
-                None => {
-                    return Err(argument_error(req, "TypeError", 2, "must be a valid class"));
-                }
-            }
+            let Some(class) = autoload(req, &bytes)? else {
+                let ce = Throwables::of(req)?;
+                return Err(argument_error(
+                    req,
+                    ce.type_error,
+                    2,
+                    "must be a valid class",
+                ));
+            };
+            class
         }
         None => match lookup_class(req, b"stdClass")? {
             Some(class) => class,
@@ -1575,9 +1591,10 @@ fn all_class(
         Some(args) => match args.as_array() {
             Some(args) if !args.is_empty() => {
                 if !has_constructor(req, class) {
+                    let ce = Throwables::of(req)?;
                     return Err(argument_error(
                         req,
-                        "ValueError",
+                        ce.value_error,
                         3,
                         "must be empty when class provided in argument #2 ($class) does not have a constructor",
                     ));
@@ -1618,9 +1635,10 @@ fn all_arguments(
                 ));
             }
             let Some(callback) = second.filter(|v| !crate::is_null(v)) else {
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "TypeError",
+                    ce.type_error,
                     2,
                     "must be a callable, null given",
                 ));
@@ -1641,17 +1659,19 @@ fn all_arguments(
                 Some(column) => {
                     let Some(n) = column.as_int() else {
                         let shown = value_name(req, &column);
+                        let ce = Throwables::of(req)?;
                         return Err(argument_error(
                             req,
-                            "TypeError",
+                            ce.type_error,
                             2,
                             &format!("must be of type int, {shown} given"),
                         ));
                     };
                     if n < 0 {
+                        let ce = Throwables::of(req)?;
                         return Err(argument_error(
                             req,
-                            "ValueError",
+                            ce.value_error,
                             2,
                             "must be greater than or equal to 0",
                         ));
@@ -1887,9 +1907,10 @@ pub(super) fn set_fetch_mode(
     let args: Vec<Value> = args.iter().map(Value::deref).collect();
     let (object, _) = stmt::this_stmt(req, this)?;
     if stmt::read(req, object, |s| s.in_fetch).unwrap_or(false) {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot change default fetch mode while fetching",
         ));
     }

@@ -24,6 +24,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
 use std::ffi::CString;
 
@@ -41,6 +42,7 @@ use php_ext::request::{
 use php_ext::values::{Owner, PhpObject, PhpString, Resource, Value, ValueRef};
 
 use crate::ffi::{Magic, Read};
+use crate::throwables::Throwables;
 
 /// The extension value (design §7.1): the six functions, the class and
 /// its constants.
@@ -65,6 +67,7 @@ pub fn extension() -> Extension {
         ])
         .constants(constants::declared())
         .class::<class::finfo>()
+        .engine_state(Throwables::start)
         .info(fileinfo_info)
         .build("fileinfo")
 }
@@ -146,6 +149,7 @@ mod class {
     use php_ext::values::{Owner, PhpString, Resource};
 
     use crate::ffi::Magic;
+    use crate::throwables::Throwables;
     use crate::{buffer, file, open, set_flags};
 
     /// `class finfo`, `@not-serializable`: one `finfo_object`, 64 bytes, its
@@ -191,10 +195,11 @@ mod class {
             #[php(default = null)] magic_database: Option<Path>,
         ) -> Result<(), Thrown> {
             *this.payload_mut(req)? = None;
+            let ce = Throwables::of(req)?;
             let opened =
-                throwing_warnings(req, "Exception", |req| open(req, flags, magic_database))?;
+                throwing_warnings(req, ce.exception, |req| open(req, flags, magic_database))?;
             if opened.is_none() {
-                return Err(throw(req, "Exception", "Constructor failed"));
+                return Err(throw(req, ce.exception, "Constructor failed"));
             }
             *this.payload_mut(req)? = opened;
             Ok(())
@@ -272,7 +277,8 @@ fn with_magic<R>(
     f: impl FnOnce(&mut Request, &mut Magic) -> Result<R, Thrown>,
 ) -> Result<R, Thrown> {
     let Some(mut magic) = object.native_mut_or_fatal::<Option<Magic>>(req)?.take() else {
-        return Err(throw_error(req, "Error", "Invalid finfo object"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Invalid finfo object"));
     };
     let answer = f(req, &mut magic);
     let slot = object.native_mut_or_fatal::<Option<Magic>>(req)?;
@@ -365,7 +371,8 @@ fn finfo_open(
         return Ok(OrFalse::False);
     };
     let Some(class) = lookup_class(req, b"finfo")? else {
-        return Err(throw_error(req, "Error", "Class \"finfo\" not found"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Class \"finfo\" not found"));
     };
     let object = new_object(req, class)?.into_instance::<class::finfo>();
     *object.payload_mut(req)? = Some(magic);

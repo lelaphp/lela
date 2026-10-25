@@ -16,6 +16,7 @@ use crate::State;
 use crate::constants as c;
 use crate::ffi::{Persistent, Share, ShareRef, Shared, share_strerror};
 use crate::handle::made;
+use crate::throwables::Throwables;
 
 /// `php_curlsh` less its `zend_object`, which both share classes lay.
 #[derive(Default)]
@@ -192,15 +193,18 @@ fn curl_share_setopt(
             let code = share_of(req, object).map_or(1, |share| share.set_long(req, option, n));
             (code, None)
         }
-        _ => (
-            1,
-            Some(argument_error(
-                req,
-                "ValueError",
-                2,
-                "is not a valid cURL share option",
-            )),
-        ),
+        _ => {
+            let ce = Throwables::of(req)?;
+            (
+                1,
+                Some(argument_error(
+                    req,
+                    ce.value_error,
+                    2,
+                    "is not a valid cURL share option",
+                )),
+            )
+        }
     };
     if let Some(sh) = object.native_mut::<Sh>(req) {
         sh.err = code;
@@ -251,7 +255,11 @@ fn curl_share_strerror(
 /// `CURL_G(persistent_curlsh)` as the engine keeps it (design §4.10,
 /// #1172): the persistent shares no request holds, each under the bits
 /// of the options it was made with, lent to one request at a time.
-pub(crate) struct Pooled(pub(crate) Pool<u8, Persistent>);
+pub(crate) struct Pooled {
+    pub(crate) pool: Pool<u8, Persistent>,
+    /// The classes the natives raise, resolved at the same start.
+    pub(crate) throwables: Throwables,
+}
 
 /// The idle shares the pool keeps. php keeps one per set of options in
 /// each php-fpm worker and bounds them by nothing else; this is the
@@ -266,7 +274,7 @@ fn lend(req: &mut Request, id: u8) -> Option<Persistent> {
     if let Some(at) = held.find(&id) {
         return held.get_mut(at).map(|share| share.clone());
     }
-    let share = req.engine::<Pooled>()?.0.take(&id)?;
+    let share = req.engine::<Pooled>()?.pool.take(&id)?;
     req.state::<State>().persistent.hold(id, share.clone());
     Some(share)
 }
@@ -283,7 +291,7 @@ pub(crate) fn give_back(req: &mut Request) {
     let held = req.state::<State>().persistent.drain();
     for (id, share) in held {
         let past = match (share.alone(), req.engine::<Pooled>()) {
-            (Some(share), Some(Pooled(pool))) => pool.give_back(id, share),
+            (Some(share), Some(Pooled { pool, .. })) => pool.give_back(id, share),
             (share, _) => share,
         };
         drop(past);
@@ -353,8 +361,9 @@ fn curl_share_init_persistent(
     req: &mut Request,
     share_options: PhpArray,
 ) -> Result<Owner<Instance<CurlSharePersistentHandle>>, Thrown> {
+    let ce = Throwables::of(req)?;
     if share_options.is_empty() {
-        return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+        return Err(argument_error(req, ce.value_error, 1, "must not be empty"));
     }
     let mut id = 0u8;
     // `ZEND_HASH_FOREACH_VAL(share_opts, zval *entry)`
@@ -367,12 +376,12 @@ fn curl_share_init_persistent(
                 "must contain only int values, {} given",
                 value_name(req, &entry)
             );
-            return Err(argument_error(req, "TypeError", 1, &tail));
+            return Err(argument_error(req, ce.type_error, 1, &tail));
         };
         if option == c::CURL_LOCK_DATA_COOKIE {
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 1,
                 "must not contain CURL_LOCK_DATA_COOKIE because sharing cookies across PHP requests is unsafe",
             ));
@@ -380,7 +389,7 @@ fn curl_share_init_persistent(
         let Some((_, bit)) = LOCKS.iter().find(|(lock, _)| *lock == option) else {
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 1,
                 "must contain only CURL_LOCK_DATA_* constants",
             ));
@@ -406,7 +415,7 @@ fn curl_share_init_persistent(
             object.give_up(req);
             return Err(throw(
                 req,
-                "Exception",
+                ce.exception,
                 "Could not construct persistent cURL share handle: out of memory",
             ));
         };
@@ -422,7 +431,7 @@ fn curl_share_init_persistent(
                     "Could not construct persistent cURL share handle: {}",
                     String::from_utf8_lossy(&share_strerror(code).unwrap_or_default())
                 );
-                return Err(throw_exception_ex(req, "Exception", &text));
+                return Err(throw_exception_ex(req, ce.exception, &text));
             }
         }
         req.state::<State>().persistent.hold(id, share.clone());

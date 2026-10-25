@@ -16,6 +16,7 @@ use crate::conn::{
     remove_stmt, take, text,
 };
 use crate::result::{self, Origin, SQLite3Result};
+use crate::throwables::Throwables;
 
 /// `php_sqlite3_stmt` less its `zend_object`: the `SQLite3` it was
 /// prepared on, an owner of it, and its place in that connection's
@@ -776,7 +777,8 @@ impl SQLite3Stmt {
     fn setExplain(req: &mut Request, this: This<Self>, mode: i64) -> Answer<bool> {
         if !(0..=2).contains(&mode) {
             let tail = "must be one of the SQLite3Stmt::EXPLAIN_MODE_* constants";
-            return Err(argument_error(req, "ValueError", 1, tail));
+            let ce = Throwables::of(req)?;
+            return Err(argument_error(req, ce.value_error, 1, tail));
         }
         with(req, this.object(), true, |_, t| {
             Ok(t.stmt

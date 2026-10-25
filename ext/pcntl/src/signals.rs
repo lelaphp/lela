@@ -21,6 +21,7 @@ use php_ext::request::{Receiving, Request, Siginfo, take_signals};
 use php_ext::values::{Owner, PhpArray, Value, ValueRef, walk};
 
 use crate::ffi::{self, Disposition, SignalSet};
+use crate::throwables::Throwables;
 use crate::{State, failed};
 
 /// `PCNTL_G(num_signals)`: one past the last signal number, `NSIG` where
@@ -564,12 +565,13 @@ fn signal_set(
     // Read first under the rows walk; what is refused after takes the
     // request mutably.
     let values: Vec<Value> = walk::rows(req, signals).map(|(_, value)| value).collect();
+    let ce = Throwables::of(req)?;
     for value in values {
         let Some(number) = try_long(&value.deref()) else {
             let given = value_name(req, &value);
             return Err(argument_error(
                 req,
-                "TypeError",
+                ce.type_error,
                 position,
                 &format!("signals must be of type int, {given} given"),
             ));
@@ -581,7 +583,7 @@ fn signal_set(
         let Some(number) = number else {
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 position,
                 &format!("signals must be between 1 and {}", NUMBERS - 1),
             ));

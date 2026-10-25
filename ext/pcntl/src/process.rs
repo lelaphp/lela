@@ -25,6 +25,7 @@ use php_ext::request::{Forked, Request};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
+use crate::throwables::Throwables;
 use crate::{State, failed, ffi};
 
 /// `pcntl_fork(): int`: the child's id in the parent, `0` in the child,
@@ -429,11 +430,12 @@ pub(crate) fn pcntl_exec(
     // `ZEND_HASH_FOREACH_VAL(args_hash, element)` and `zval_get_string`,
     // which may serve `__toString`: a foreach walk holding nothing, the
     // argument holding the array.
+    let ce = Throwables::of(req)?;
     walk::foreach(req, args, Hold::None, |req, row| -> walk::Step {
         let Ok(argument) = with_string(req, row.value(), |bytes| CString::new(bytes))? else {
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 2,
                 "individual argument must not contain null bytes",
             ));
@@ -449,7 +451,7 @@ pub(crate) fn pcntl_exec(
                 if value.contains(&0) {
                     return Err(argument_error(
                         req,
-                        "ValueError",
+                        ce.value_error,
                         3,
                         "value for environment variable must not contain null bytes",
                     ));
@@ -461,7 +463,7 @@ pub(crate) fn pcntl_exec(
                 if pair.contains(&0) {
                     return Err(argument_error(
                         req,
-                        "ValueError",
+                        ce.value_error,
                         3,
                         "name for environment variable must not contain null bytes",
                     ));
@@ -677,9 +679,13 @@ fn priority_refused(
                 "be either 0 (zero) or PRIO_DARWIN_BG, for mode PRIO_DARWIN_THREAD",
             );
         }
+        let ce = match Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
         argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             pid_at,
             "is not a valid process, process group, or user ID",
         )
@@ -788,6 +794,7 @@ pub(crate) fn pcntl_setcpuaffinity(
         .map(|(_, value)| value.deref())
         .collect();
     let mut cpus = Vec::new();
+    let ce = Throwables::of(req)?;
     for value in values {
         let cpu = match value.as_ref() {
             php_ext::values::ValueRef::Int(n) => n,
@@ -796,18 +803,18 @@ pub(crate) fn pcntl_setcpuaffinity(
                 Key::Str(s) => {
                     let shown = String::from_utf8_lossy(s.as_bytes()).into_owned();
                     let tail = format!("cpu id invalid value ({shown})");
-                    return Err(argument_error(req, "ValueError", 2, &tail));
+                    return Err(argument_error(req, ce.value_error, 2, &tail));
                 }
             },
             _ => {
                 let given = php_ext::coerce::value_name(req, &value);
                 let tail = format!("value must be of type int|string, {given} given");
-                return Err(argument_error(req, "TypeError", 2, &tail));
+                return Err(argument_error(req, ce.type_error, 2, &tail));
             }
         };
         if !(0..configured).contains(&cpu) {
             let tail = format!("cpu id must be between 0 and {configured} ({cpu})");
-            return Err(argument_error(req, "ValueError", 2, &tail));
+            return Err(argument_error(req, ce.value_error, 2, &tail));
         }
         cpus.push(usize::try_from(cpu).unwrap_or(0));
     }
@@ -832,15 +839,16 @@ fn affinity_refused(
     cpu_ids_at: Option<u32>,
 ) -> Result<(), Thrown> {
     failed(req, errno);
+    let ce = Throwables::of(req)?;
     match errno {
         Errno::ESRCH => {
             let tail = format!("invalid process ({pid})");
-            Err(argument_error(req, "ValueError", 1, &tail))
+            Err(argument_error(req, ce.value_error, 1, &tail))
         }
         Errno::EINVAL => Err(match cpu_ids_at {
             Some(at) => argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 at,
                 "invalid cpu affinity mask size or unmapped cpu id(s)",
             ),
@@ -920,9 +928,10 @@ pub(crate) fn pcntl_getqos_class(req: &mut Request) -> Result<QosClass, Thrown> 
         }),
         Err((class, errno)) => {
             failed(req, errno);
+            let ce = Throwables::of(req)?;
             Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("invalid QOS class {class}"),
             ))
         }
@@ -962,7 +971,8 @@ pub(crate) fn pcntl_setqos_class(
     };
     if let Err(errno) = ffi::set_qos_class(class) {
         failed(req, errno);
-        return Err(throw_error(req, "Error", "pcntl_setqos_class failed"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "pcntl_setqos_class failed"));
     }
     Ok(())
 }

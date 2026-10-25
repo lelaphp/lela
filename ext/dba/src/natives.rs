@@ -18,6 +18,7 @@ use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use crate::flatfile::{Flatfile, Stored};
 use crate::inifile::Key as IniKey;
 use crate::link::{Access, BadMode, Handler, Held, Link, Locking, Mode, Store, not_possible};
+use crate::throwables::Throwables;
 use crate::{Conn, Connection, LinkId, State, default_handler};
 
 /// `dba_popen(string $path, string $mode, ?string $handler = null, int
@@ -151,9 +152,10 @@ fn c_text(bytes: &[u8]) -> String {
 /// `object_init_ex(return_value, dba_connection_ce)`.
 fn new_connection(req: &mut Request) -> Result<Owner<PhpObject>, Thrown> {
     let Some(class) = lookup_class(req, b"Dba\\Connection")? else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Class \"Dba\\Connection\" not found",
         ));
     };
@@ -214,7 +216,7 @@ fn open(
         if found.is_none() {
             let kept = req
                 .engine::<crate::Pooled>()
-                .and_then(|crate::Pooled(pool)| pool.take(&key));
+                .and_then(|crate::Pooled { pool, .. }| pool.take(&key));
             if let Some(kept) = kept {
                 let link = kept.take_up(req)?;
                 let state = req.state::<State>();
@@ -235,12 +237,13 @@ fn open(
     let Some(handler) = handler_asked(req, asked.handler.as_deref()) else {
         return Ok(OrFalse::False);
     };
+    let ce = Throwables::of(req)?;
     let mode = match Mode::decode(&asked.mode) {
         Ok(mode) => mode,
         Err(BadMode::TooLong) => {
             return Err(arg_value_error(req, 2, "be at most 3 characters"));
         }
-        Err(bad) => return Err(argument_error(req, "ValueError", 2, bad.text())),
+        Err(bad) => return Err(argument_error(req, ce.value_error, 2, bad.text())),
     };
     let lock = mode.lock();
     if mode.test && lock == Held::None {
@@ -500,20 +503,19 @@ fn with_link<R>(
     dba: Instance<Connection>,
     f: impl FnOnce(&mut Request, &mut Link) -> Result<R, Thrown>,
 ) -> Result<R, Thrown> {
-    let id = match dba.payload_mut(req)? {
-        Some(conn) => conn.link,
-        None => {
-            return Err(throw_error(
-                req,
-                "Error",
-                "DBA connection has already been closed",
-            ));
-        }
-    };
-    let Some(mut link) = req.state::<State>().slot(id).and_then(Option::take) else {
+    let Some(id) = dba.payload_mut(req)?.map(|conn| conn.link) else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
+            "DBA connection has already been closed",
+        ));
+    };
+    let Some(mut link) = req.state::<State>().slot(id).and_then(Option::take) else {
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(
+            req,
+            ce.error,
             "DBA connection has already been closed",
         ));
     };
@@ -533,9 +535,10 @@ fn key_bytes(req: &mut Request, key: Union<PhpArray, PhpString>) -> Result<Vec<u
         Union::A(array) => array,
     };
     if array.len() != 2 {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "Error",
+            ce.error,
             1,
             "must have exactly two elements: \"key\" and \"name\"",
         ));
@@ -590,6 +593,7 @@ fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
 /// ```
 #[php_function]
 pub(crate) fn dba_close(req: &mut Request, dba: Instance<Connection>) -> Result<(), Thrown> {
+    let ce = Throwables::of(req)?;
     match dba.payload_mut(req)?.take() {
         Some(conn) => {
             crate::close_connection(req, conn);
@@ -597,7 +601,7 @@ pub(crate) fn dba_close(req: &mut Request, dba: Instance<Connection>) -> Result<
         }
         None => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "DBA connection has already been closed",
         )),
     }

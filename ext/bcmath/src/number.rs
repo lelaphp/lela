@@ -23,6 +23,7 @@ use php_ext::values::{
 };
 
 use crate::num;
+use crate::throwables::Throwables;
 use crate::{Decimal, INT_MAX, RoundingMode, value_error};
 
 /// The class's name, `ZSTR_VAL(bcmath_number_ce->name)`.
@@ -670,18 +671,26 @@ impl Number {
 
 /// "Invalid serialization data for BcMath\Number object".
 fn invalid_serialization(req: &mut Request) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_exception_ex(
         req,
-        "Exception",
+        ce.exception,
         &format!("Invalid serialization data for {CLASS} object"),
     )
 }
 
 /// `zend_readonly_property_modification_error_ex`.
 fn readonly(req: &mut Request, name: &str) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         &format!("Cannot modify readonly property {CLASS}::${name}"),
     )
 }
@@ -1274,9 +1283,10 @@ impl ObjectHandlers for Handlers {
     ) -> Result<(), Thrown> {
         if is_virtual(name) {
             let name = String::from_utf8_lossy(name);
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("Cannot unset readonly property {CLASS}::${name}"),
             ));
         }

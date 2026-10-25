@@ -27,6 +27,7 @@ use php_ext_mysqlnd::client::{Field, ResultSet};
 
 use crate::link::{self, Need, mysqli};
 use crate::props::{self, Props};
+use crate::throwables::Throwables;
 use crate::{On, Resource, class_name, closed, long_or_string, report, report_error, report_mode};
 
 /// `MYSQLI_ASSOC`, `MYSQLI_NUM` and `MYSQLI_BOTH`.
@@ -261,9 +262,10 @@ pub(crate) fn fetch_object(
         .is_some_and(|d| d.kind != php_ext::decl::ClassKind::Class || d.flags.is_abstract);
     if refused {
         let name = class_name(req, target);
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Class {name} cannot be instantiated"),
         ));
     }
@@ -630,9 +632,10 @@ pub(crate) fn data_seek(req: &mut Request, on: On, offset: i64) -> Result<bool, 
         } else {
             "mysqli_data_seek()"
         };
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("{name} cannot be used in MYSQLI_USE_RESULT mode"),
         ));
     }
@@ -674,9 +677,10 @@ pub(crate) fn num_rows(req: &mut Request, on: On) -> Result<AsIs<Union<i64, PhpS
         Ok((!set.is_buffered() && !set.eof(), set.num_rows()))
     })?;
     if unfinished {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "mysqli_num_rows() cannot be used in MYSQLI_USE_RESULT mode",
         ));
     }
@@ -1003,9 +1007,10 @@ impl ObjectHandlers for ResultHandlers {
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "An iterator cannot be used with foreach by reference",
             ));
         }

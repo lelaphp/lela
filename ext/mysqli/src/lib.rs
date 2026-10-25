@@ -50,6 +50,7 @@ mod link;
 mod props;
 mod result;
 mod stmt;
+mod throwables;
 
 use php_ext::abi::{
     Dependency, DependencyKind, Extension, ExtensionBuilder, Lent, LongHandler, Pool,
@@ -122,7 +123,11 @@ pub(crate) struct State {
 /// persistent connections, each key's a stack of free links, php's
 /// `plist->free_links`, each link the connection itself with its socket,
 /// in no other list between the requests that take it up.
-pub(crate) struct Pooled(pub(crate) Pool<Vec<u8>, Idle>);
+pub(crate) struct Pooled {
+    pub(crate) pool: Pool<Vec<u8>, Idle>,
+    /// The classes the natives raise, resolved at the same start.
+    pub(crate) throwables: throwables::Throwables,
+}
 
 /// The idle persistent connections the pool keeps; php bounds mysqli's by
 /// `mysqli.max_persistent` alone, and this is the engine's own streams'
@@ -134,7 +139,7 @@ const POOLED: usize = 1024;
 pub(crate) fn num_inactive_persistent(req: &mut Request) -> i64 {
     let pooled = req
         .engine::<Pooled>()
-        .map_or(0, |Pooled(pool)| pool.idle_len());
+        .map_or(0, |Pooled { pool, .. }| pool.idle_len());
     req.state::<State>().num_free_persistent + i64::try_from(pooled).unwrap_or(i64::MAX)
 }
 
@@ -342,7 +347,12 @@ pub fn extension() -> Extension {
             extension: "mysqli",
         })
         .request_state::<State>()
-        .engine_state(|_| Ok(Pooled(Pool::new(POOLED))))
+        .engine_state(|start| {
+            Ok(Pooled {
+                pool: Pool::new(POOLED),
+                throwables: throwables::Throwables::start(start)?,
+            })
+        })
         .post_deactivate(link::post_deactivate)
         .engine_end(link::engine_end)
         .info(mysqli_info)
@@ -562,7 +572,8 @@ pub(crate) fn sql_exception(
         );
         return Ok(());
     }
-    let value = new_throwable(req, "mysqli_sql_exception", message.as_bytes())?;
+    let ce = throwables::Throwables::of(req)?;
+    let value = new_throwable(req, ce.mysqli_sql_exception, message.as_bytes())?;
     if let Some(object) = value.as_object() {
         let facts = [
             ("sqlstate", Fact::Text(sqlstate)),
@@ -635,15 +646,23 @@ pub(crate) fn class_name(req: &Request, class: ClassId) -> String {
 /// `zend_throw_error(NULL, "%s object is already closed", ...)`.
 pub(crate) fn closed(req: &mut Request, object: PhpObject) -> Thrown {
     let name = class_name(req, object.class());
-    throw_error(req, "Error", &format!("{name} object is already closed"))
+    let ce = match throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_error(req, ce.error, &format!("{name} object is already closed"))
 }
 
 /// `zend_throw_error(NULL, "%s object is not fully initialized", ...)`.
 pub(crate) fn not_initialized(req: &mut Request, object: PhpObject) -> Thrown {
     let name = class_name(req, object.class());
+    let ce = match throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         &format!("{name} object is not fully initialized"),
     )
 }

@@ -28,6 +28,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
 use std::ffi::{CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
@@ -224,6 +225,7 @@ pub fn extension() -> Extension {
             posix_fpathconf::declared(),
         ])
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .info(posix_info)
         .build("posix")
 }
@@ -1011,9 +1013,10 @@ fn posix_mknod(
     let mut dev = 0;
     if flags & device != 0 {
         if major == 0 {
+            let ce = throwables::Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 3,
                 "cannot be 0 for the POSIX_S_IFCHR and POSIX_S_IFBLK modes",
             ));

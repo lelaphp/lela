@@ -28,6 +28,7 @@ use crate::connector::{
 };
 use crate::error::{self, On};
 use crate::stmt::{DbLink, PDOStatement, Stmt};
+use crate::throwables::Throwables;
 
 /// `enum pdo_case_conversion`: what the column names are folded to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -191,7 +192,11 @@ fn share(req: &mut Request, object: PhpObject, at: usize) {
 
 /// `EG(persistent_list)` as far as PDO reaches it (design §4.10): the
 /// engine's pool of persistent connections, keyed `PDO:DBH:DSN=…`.
-pub(crate) struct Pooled(pub(crate) Pool<Vec<u8>, Box<DbhState>>);
+pub(crate) struct Pooled {
+    pub(crate) pool: Pool<Vec<u8>, Box<DbhState>>,
+    /// The classes the natives raise, resolved at the same start.
+    pub(crate) throwables: Throwables,
+}
 
 /// The idle persistent connections the pool keeps; php bounds pdo's by
 /// nothing but the process, and this is the engine's own streams' bound.
@@ -255,7 +260,7 @@ pub(crate) fn post_deactivate(req: &mut Request) {
             conn.give_back(req);
         }
         let past = match req.engine::<Pooled>() {
-            Some(Pooled(pool)) => pool.give_back(key, dbh),
+            Some(Pooled { pool, .. }) => pool.give_back(key, dbh),
             None => Some(dbh),
         };
         if let Some(mut dbh) = past {
@@ -272,7 +277,7 @@ pub(crate) fn post_deactivate(req: &mut Request) {
 pub(crate) fn engine_end(req: &mut Request) {
     let idle = req
         .engine::<Pooled>()
-        .map(|Pooled(pool)| pool.drain())
+        .map(|Pooled { pool, .. }| pool.drain())
         .unwrap_or_default();
     for (_, mut dbh) in idle {
         close_pooled(req, &mut dbh);
@@ -461,9 +466,10 @@ pub(super) fn constructed(req: &mut Request, object: PhpObject) -> Result<(), Th
         return Ok(());
     }
     let class = crate::class_name(req, object.class());
+    let ce = Throwables::of(req)?;
     Err(throw_error(
         req,
-        "Error",
+        ce.error,
         &format!("{class} object is uninitialized"),
     ))
 }
@@ -581,9 +587,10 @@ fn construct_driver(
     let colon = source.iter().position(|b| *b == b':').unwrap_or(0);
     let scheme = &source[..colon];
     let Some(driver) = crate::drivers(req).find(|d| d.name().as_bytes() == scheme) else {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "PDOException",
+            ce.pdo_exception,
             "could not find driver",
         ));
     };
@@ -638,12 +645,13 @@ fn construct_driver(
 /// bool(false)
 /// ```
 fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown> {
+    let ce = Throwables::of(req)?;
     if !source.contains(&b':') {
         let alias = [b"pdo.dsn.".as_slice(), &source].concat();
         let Some(found) = req.ini().get(&alias).map(<[u8]>::to_vec) else {
             return Err(argument_error(
                 req,
-                "PDOException",
+                ce.pdo_exception,
                 1,
                 "must be a valid data source name",
             ));
@@ -652,7 +660,7 @@ fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown
             let alias = String::from_utf8_lossy(&alias).into_owned();
             return Err(throw_exception_ex(
                 req,
-                "PDOException",
+                ce.pdo_exception,
                 &format!("invalid data source name (via INI: {alias})"),
             ));
         }
@@ -667,7 +675,7 @@ fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown
         let Some(mut line) = dsn_from_uri(req, &uri)? else {
             return Err(argument_error(
                 req,
-                "PDOException",
+                ce.pdo_exception,
                 1,
                 "must be a valid data source URI",
             ));
@@ -676,7 +684,7 @@ fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown
         if !line.contains(&b':') {
             return Err(argument_error(
                 req,
-                "PDOException",
+                ce.pdo_exception,
                 1,
                 "must be a valid data source name (via URI)",
             ));
@@ -712,6 +720,7 @@ fn open(
         1 => OnError::Warn,
         _ => OnError::Throw,
     };
+    let ce = Throwables::of(req)?;
     let mut dead = None;
     let key = persistent.then(|| persistent_key(source, username, password, named.as_deref()));
     if let Some(key) = &key {
@@ -722,7 +731,7 @@ fn open(
             Ok(at) => {
                 share(req, object, at);
                 dbh_mut(req, object, |d| d.error_mode = error_mode);
-                return throwing_warnings(req, "PDOException", |req| {
+                return throwing_warnings(req, ce.pdo_exception, |req| {
                     apply_options(req, object, options)
                 });
             }
@@ -744,7 +753,7 @@ fn open(
             ..DbhState::fresh()
         };
     });
-    throwing_warnings(req, "PDOException", |req| {
+    throwing_warnings(req, ce.pdo_exception, |req| {
         let source = Source {
             dsn,
             username,
@@ -828,7 +837,7 @@ fn lend(req: &mut Request, key: &[u8]) -> Result<usize, Option<usize>> {
     }
     let Some(mut dbh) = req
         .engine::<Pooled>()
-        .and_then(|Pooled(pool)| pool.take(&key.to_vec()))
+        .and_then(|Pooled { pool, .. }| pool.take(&key.to_vec()))
     else {
         return Err(None);
     };
@@ -931,12 +940,13 @@ fn specific_object(
     }
     let verb = if connecting { "connect" } else { "__construct" };
     let called_name = crate::class_name(req, called);
+    let ce = Throwables::of(req)?;
     let wrong = |req: &mut Request, own: ClassId| {
         let own = crate::class_name(req, own);
         let name = driver.name();
         throw_exception_ex(
             req,
-            "PDOException",
+            ce.pdo_exception,
             &format!(
                 "{called_name}::{verb}() cannot be used for connecting to the \"{name}\" driver, either call {own}::{verb}() or PDO::{verb}() instead"
             ),
@@ -946,7 +956,7 @@ fn specific_object(
         let Some(own) = own else {
             return Err(throw_exception_ex(
                 req,
-                "PDOException",
+                ce.pdo_exception,
                 &format!(
                     "{called_name}::{verb}() cannot be used for connecting to an unknown driver, call PDO::{verb}() instead"
                 ),
@@ -997,9 +1007,10 @@ fn attribute_set(
                 1 => OnError::Warn,
                 2 => OnError::Throw,
                 _ => {
+                    let ce = Throwables::of(req)?;
                     return Err(argument_error(
                         req,
-                        "ValueError",
+                        ce.value_error,
                         value_arg,
                         "Error mode must be one of the PDO::ERRMODE_* constants",
                     ));
@@ -1014,9 +1025,10 @@ fn attribute_set(
                 1 => Case::Upper,
                 2 => Case::Lower,
                 _ => {
+                    let ce = Throwables::of(req)?;
                     return Err(argument_error(
                         req,
-                        "ValueError",
+                        ce.value_error,
                         value_arg,
                         "Case folding mode must be one of the PDO::CASE_* constants",
                     ));
@@ -1088,9 +1100,10 @@ fn default_fetch_mode(req: &mut Request, value: &Value, value_arg: u32) -> Resul
             && let Some(kind) = first.as_int()
             && (kind == 9 || kind == 8)
         {
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 value_arg,
                 "PDO::FETCH_INTO and PDO::FETCH_CLASS cannot be set as the default fetch mode",
             ));
@@ -1100,9 +1113,10 @@ fn default_fetch_mode(req: &mut Request, value: &Value, value_arg: u32) -> Resul
         crate::connector::long_attribute(req, value)?
     };
     if mode == 0 {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             value_arg,
             "Fetch mode must be a bitmask of PDO::FETCH_* constants",
         ));
@@ -1187,8 +1201,9 @@ pub(super) fn statement_class(
     value: &Value,
     arg: Option<u32>,
 ) -> Result<(ClassId, Option<PhpArray>), Thrown> {
+    let ce = Throwables::of(req)?;
     let type_error = |req: &mut Request, tail: &str| match arg {
-        Some(at) => argument_error(req, "TypeError", at, tail),
+        Some(at) => argument_error(req, ce.type_error, at, tail),
         None => type_error(req, tail),
     };
     let Some(array) = value.as_array() else {
@@ -1201,7 +1216,7 @@ pub(super) fn statement_class(
     let Some(first) = array.get(&Key::Int(0)) else {
         let tail = "PDO::ATTR_STATEMENT_CLASS value must be an array with the format array(classname, constructor_args)";
         return Err(match arg {
-            Some(at) => argument_error(req, "ValueError", at, tail),
+            Some(at) => argument_error(req, ce.value_error, at, tail),
             None => value_error(req, tail),
         });
     };
@@ -1285,9 +1300,10 @@ fn instantiate(
         },
     };
     if with_args && constructor_visibility(req, class).is_none() {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "User-supplied statement does not accept constructor arguments",
         ));
     }
@@ -1365,9 +1381,10 @@ fn end_transaction(
 ) -> Result<bool, Thrown> {
     constructed(req, this)?;
     if !in_txn(req, this)? {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "PDOException",
+            ce.pdo_exception,
             "There is no active transaction",
         ));
     }
@@ -1638,10 +1655,11 @@ impl PDO {
     fn beginTransaction(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let this = this.object();
         constructed(req, this)?;
+        let ce = Throwables::of(req)?;
         if in_txn(req, this)? {
             return Err(throw_exception_ex(
                 req,
-                "PDOException",
+                ce.pdo_exception,
                 "There is already an active transaction",
             ));
         }
@@ -1649,7 +1667,7 @@ impl PDO {
             Ok(done) => Ok(done),
             Err(()) => Err(throw_exception_ex(
                 req,
-                "PDOException",
+                ce.pdo_exception,
                 "This driver doesn't support transactions",
             )),
         }
@@ -1790,7 +1808,8 @@ impl PDO {
         let this = this.object();
         let sql = statement.as_bytes().to_vec();
         if sql.is_empty() {
-            return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+            let ce = Throwables::of(req)?;
+            return Err(argument_error(req, ce.value_error, 1, "must not be empty"));
         }
         clear_error(req, this);
         constructed(req, this)?;
@@ -1990,7 +2009,8 @@ impl PDO {
         };
         constructed(req, this)?;
         if sql.is_empty() {
-            return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+            let ce = Throwables::of(req)?;
+            return Err(argument_error(req, ce.value_error, 1, "must not be empty"));
         }
         clear_error(req, this);
         let (class, args) = match options.and_then(|o| o.get(&Key::Int(PDO::ATTR_STATEMENT_CLASS)))
@@ -2069,7 +2089,8 @@ impl PDO {
         let extra: Vec<Value> = fetchModeArgs.iter().map(Value::deref).collect();
         constructed(req, this)?;
         if sql.is_empty() {
-            return Err(argument_error(req, "ValueError", 1, "must not be empty"));
+            let ce = Throwables::of(req)?;
+            return Err(argument_error(req, ce.value_error, 1, "must not be empty"));
         }
         clear_error(req, this);
         let (class, args) = dbh_ref(req, this, |d| {

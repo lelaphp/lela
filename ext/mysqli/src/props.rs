@@ -17,6 +17,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::class_name;
+use crate::throwables::Throwables;
 
 /// One class's `mysqli_property_entry` rows and `free_obj`.
 pub(crate) trait Props: 'static {
@@ -113,7 +114,8 @@ impl<P: Props> ObjectHandlers for Handlers<P> {
         value.give_up(req);
         let class = class_name(req, object.class());
         let text = format!("Cannot write read-only property {class}::${handled}");
-        Err(throw_error(req, "Error", &text))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &text))
     }
 
     fn write_overloaded(&self) -> bool {
@@ -183,9 +185,10 @@ pub(crate) fn not_yet(req: &mut Request, quiet: bool) -> Result<Option<Owner<Val
     if quiet {
         return Ok(None);
     }
+    let ce = Throwables::of(req)?;
     Err(throw_error(
         req,
-        "Error",
+        ce.error,
         "Property access is not allowed yet",
     ))
 }

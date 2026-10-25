@@ -19,6 +19,7 @@ use php_ext_mysqlnd::client::{CLIENT_INFO, CLIENT_VERSION, Mysqlnd, ResultSet};
 
 use crate::link::{self, Link, Need};
 use crate::props::{self, Props};
+use crate::throwables::Throwables;
 use crate::{On, Resource, State, VERSION_ID, string};
 
 // ---- mysqli_driver
@@ -206,9 +207,10 @@ impl mysqli_warning {
     #[php(private)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
+        let ce = Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot directly construct mysqli_warning",
         ))
     }

@@ -10,6 +10,7 @@ use php_ext::values::{Owner, PhpArray, PhpObject, Value};
 
 use crate::connector::{Cause, Failure, NativeError, OnError, SqlError, SqlState};
 use crate::stmt::Stmt;
+use crate::throwables::Throwables;
 
 /// `err_initializer`, each state's five characters and its description,
 /// `|` between rows, in `pdo_sqlstate.c`'s order.
@@ -185,7 +186,8 @@ fn throw_pdo(
     code: Owner<Value>,
     info: Option<Owner<PhpArray>>,
 ) -> Thrown {
-    let value = match new_throwable(req, "PDOException", message) {
+    let made = Throwables::of(req).and_then(|ce| new_throwable(req, ce.pdo_exception, message));
+    let value = match made {
         Ok(value) => value,
         Err(thrown) => {
             code.give_up(req);
@@ -388,7 +390,11 @@ pub(super) fn throw_connect(req: &mut Request, failure: Failure) -> Thrown {
         return thrown;
     }
     let Cause::Refused(error) = failure.cause else {
-        return php_ext::raising::throw(req, "PDOException", "Constructor failed");
+        let ce = match Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
+        return php_ext::raising::throw(req, ce.pdo_exception, "Constructor failed");
     };
     let text = String::from_utf8_lossy(&error.message).into_owned();
     let message = format!("SQLSTATE[{}] [{}] {text}", error.state.as_str(), error.code);
