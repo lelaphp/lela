@@ -1008,14 +1008,20 @@ fn listing(
     Ok(Listed::Names(names, data))
 }
 
-/// `php_ftp_dirstream_read`'s cut of one listed line: its base name,
-/// `php_basename`, less the last two bytes, a line's `\r\n`, as php's
-/// `tmp_len - 1` terminator lands; a lone `\n` so costs the name's last
-/// byte, as php's does.
+/// `php_ftp_dirstream_read`'s cut of one listed line
+/// (`Z/ext/standard/ftp_fopen_wrapper.c:613`): its base name,
+/// `php_basename`, held to the `MAXPATHLEN - 1` bytes `d_name` keeps
+/// before its NUL, then its trailing `\n`, `\r`, `\t` and spaces trimmed,
+/// so a line ended by a lone `\n` keeps its last byte as one ended by
+/// `\r\n` does; read as `readdir` reads `d_name`, to its first NUL.
 fn entry_name(line: &[u8]) -> Vec<u8> {
     let base = crate::string::path::php_basename(line, b"");
-    let kept = base.len().min(MAXPATHLEN).saturating_sub(2);
-    c_str(&base[..kept]).to_vec()
+    let kept = &base[..base.len().min(MAXPATHLEN - 1)];
+    let end = kept
+        .iter()
+        .rposition(|byte| !matches!(byte, b'\n' | b'\r' | b'\t' | b' '))
+        .map_or(0, |last| last + 1);
+    c_str(&kept[..end]).to_vec()
 }
 
 /// The thirteen fields of a stat as the array the engine reads an
