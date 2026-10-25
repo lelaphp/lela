@@ -202,13 +202,20 @@ fn fetch(req: &mut Request, name: &[u8], crypto: bool) -> Result<&'static Algo, 
     }
 }
 
+/// The hexits `php_hash_bin2hex` writes, lower case.
+const HEXITS: &[u8; 16] = b"0123456789abcdef";
+
+/// `php_hash_bin2hex`'s two hexits of one byte.
+fn hexits(byte: u8) -> [u8; 2] {
+    [
+        HEXITS[usize::from(byte >> 4)],
+        HEXITS[usize::from(byte & 15)],
+    ]
+}
+
 /// `php_hash_bin2hex`.
 fn hex(digest: &[u8]) -> Vec<u8> {
-    const HEXITS: &[u8; 16] = b"0123456789abcdef";
-    digest
-        .iter()
-        .flat_map(|b| [HEXITS[usize::from(b >> 4)], HEXITS[usize::from(b & 15)]])
-        .collect()
+    digest.iter().flat_map(|&b| hexits(b)).collect()
 }
 
 /// The digest as a native answers it: raw, or its hex.
@@ -1308,25 +1315,21 @@ fn hash_pbkdf2(
     for freed in [k1_block, k2_block, salted, state, digest_block, temp] {
         freed.free(req);
     }
-    let mut out = match FreshString::new(req, length) {
-        Ok(out) => out,
-        Err(thrown) => {
-            result.free(req);
-            return Err(thrown);
-        }
-    };
+    // A refusal here is the memory limit's fatal, which ends the request
+    // and frees what it held, as every allocation's `?` above leaves it.
+    let mut out = FreshString::new(req, length)?;
     if binary {
         out.bytes_mut().copy_from_slice(&result.bytes()[..length]);
     } else {
         // `php_hash_bin2hex` writes `digest_length * 2` hexits; an odd
         // length's last falls on the terminator php then writes.
-        for (hexits, byte) in out
+        for (out_pair, byte) in out
             .bytes_mut()
             .chunks_mut(2)
             .zip(&result.bytes()[..digest_length])
         {
-            let pair = hex(&[*byte]);
-            hexits.copy_from_slice(&pair[..hexits.len()]);
+            let pair = hexits(*byte);
+            out_pair.copy_from_slice(&pair[..out_pair.len()]);
         }
     }
     result.free(req);
