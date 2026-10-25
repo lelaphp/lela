@@ -141,6 +141,20 @@ impl State {
 /// 1=1 248
 /// x=1&y=2 408
 /// ```
+///
+/// Since 8.5.12 both strings are asked for fallibly and the variable is
+/// taken out once the memory limit was met registering the raw copy or
+/// filtering, the limit's fatal raised at the next check, here as
+/// `parse_str()` returns:
+///
+/// ```php
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'memory_limit=8M', '-d', 'filter.default=special_chars', '-d', 'error_reporting=' . (E_ALL & ~E_DEPRECATED), '-d', 'fatal_error_backtraces=Off', '-r', 'parse_str("a=" . str_repeat("%3C", 700000), $o); echo "unreached\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p);
+/// ```
+/// ```expect process
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in Command line code on line 1
+/// ```
 fn sapi_filter(
     req: &mut Request,
     input: Input,
@@ -165,14 +179,24 @@ fn sapi_filter(
     // `ZVAL_STRINGL`, `zend_string_init`, which makes even an empty or
     // a one-byte value a string of its own, for the raw copy, and for the
     // value handed on where it has a byte, `ZVAL_EMPTY_STRING` where not.
+    // Both asked for fallibly since 8.5.12, `return 0` where one is
+    // refused or the memory limit was met registering the raw copy.
     if let Some(array) = kept {
-        let raw = string_init(req, value)?;
+        let Some(raw) = req.memory_mut().fallible(|req| string_init(req, value))? else {
+            return Ok(None);
+        };
         req.variables_mut().register_variable(array, name, raw)?;
+        if req.memory().has_oom() {
+            return Ok(None);
+        }
     }
     let raw = if value.is_empty() {
         string_value(req, value)?
     } else {
-        string_init(req, value)?
+        let Some(raw) = req.memory_mut().fallible(|req| string_init(req, value))? else {
+            return Ok(None);
+        };
+        raw
     };
     let default = req
         .ini()
@@ -197,7 +221,13 @@ fn sapi_filter(
             options: None,
             native: "filter",
         };
-        zval_filter(req, raw, default, &run)?
+        let filtered = zval_filter(req, raw, default, &run)?;
+        // `return 0` once the memory limit was met filtering, since 8.5.12.
+        if req.memory().has_oom() {
+            filtered.give_up(req);
+            return Ok(None);
+        }
+        filtered
     };
     if input != Input::String {
         return Ok(Some(handed));

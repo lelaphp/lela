@@ -6,7 +6,7 @@ use php_ext::call::call;
 use php_ext::coerce::{is_callable, to_callable};
 use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
-use php_ext::values::Owner;
+use php_ext::values::{FreshString, Owner, SmartStr};
 
 use crate::constants::{
     FILTER_FLAG_ALLOW_FRACTION, FILTER_FLAG_ALLOW_SCIENTIFIC, FILTER_FLAG_ALLOW_THOUSAND,
@@ -61,17 +61,42 @@ fn html_map(flags: i64, quotes: bool) -> [bool; 256] {
     map
 }
 
-/// `php_filter_encode_html`: each byte the map names as `&#N;`.
-fn encode_html(s: &[u8], map: &[bool; 256]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(s.len());
-    for &c in s {
+/// `php_filter_encode_html`: each byte the map names as `&#N;`, onto a
+/// `smart_str` on the request's heap in php's appends, the bytes before
+/// it, `&#`, the number and `;`; and since 8.5.12 `None` where the memory
+/// limit was met after a byte (`ZEND_HAS_OOM()`), what was written given
+/// up, for the caller's `ZVAL_EMPTY_STRING`. Nothing is allocated for an
+/// empty string.
+fn encode_html(req: &mut Request, s: &[u8], map: &[bool; 256]) -> Result<Option<SmartStr>, Thrown> {
+    let mut out = SmartStr::default();
+    if s.is_empty() {
+        return Ok(Some(out));
+    }
+    let mut last = 0;
+    for (at, &c) in s.iter().enumerate() {
         if map[usize::from(c)] {
-            out.extend_from_slice(format!("&#{c};").as_bytes());
-        } else {
-            out.push(c);
+            out.append(req, &s[last..at])?;
+            out.append(req, b"&#")?;
+            out.append(req, c.to_string().as_bytes())?;
+            out.append(req, b";")?;
+            last = at + 1;
+        }
+        if req.memory().has_oom() {
+            out.free(req);
+            return Ok(None);
         }
     }
-    out
+    out.append(req, &s[last..])?;
+    Ok(Some(out))
+}
+
+/// The value `php_filter_encode_html` leaves: `smart_str_extract` of
+/// what it wrote, or the empty string where the memory limit stopped it.
+fn encoded_value(req: &mut Request, encoded: Option<SmartStr>) -> Result<Outcome, Thrown> {
+    match encoded {
+        Some(out) => Ok(Outcome::Value(out.extract(req)?.into_value())),
+        None => value(req, b""),
+    }
 }
 
 /// `filter_map_apply`: the bytes the allowed list names, kept.
@@ -97,10 +122,27 @@ fn keep(s: &[u8], allowed: &[&[u8]]) -> Vec<u8> {
 /// NULL
 /// string(17) "a&#38;b&#1;&#255;"
 /// ```
+///
+/// Since 8.5.12 the encoding stops once the memory limit was met, and the
+/// limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(@filter_var(str_repeat("'", 2 << 20), 513), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 pub(crate) fn string(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
     let stripped = strip(s, run.flags);
-    let encoded = encode_html(&stripped, &html_map(run.flags, true));
-    let out = php_ext_standard::strip_tags_ex(&encoded, None, true);
+    // `return FAILURE` where the memory limit stopped the encoding, since
+    // 8.5.12.
+    let Some(mut encoded) = encode_html(req, &stripped, &html_map(run.flags, true))? else {
+        return Ok(Outcome::Failed);
+    };
+    let out = php_ext_standard::strip_tags_ex(encoded.as_bytes(), None, true);
+    encoded.free(req);
     if out.is_empty() && run.flags & FILTER_FLAG_EMPTY_STRING_NULL != 0 {
         return Ok(Outcome::Value(Owner::null()));
     }
@@ -117,16 +159,49 @@ pub(crate) fn string(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, 
 /// string(24) "a%20b%26c%2F%C3%A9-._%7E"
 /// string(2) "ab"
 /// ```
+///
+/// The string of three bytes for each is asked for fallibly since 8.5.12:
+/// past the memory limit it is refused, and the limit's fatal is raised
+/// as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(filter_var(str_repeat(' ', 3 << 20), FILTER_SANITIZE_ENCODED), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 9453568 bytes) in %s on line 3
+/// ```
 pub(crate) fn encoded(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
-    let mut out = Vec::with_capacity(s.len() * 3);
-    for c in strip(s, run.flags) {
+    let stripped = strip(s, run.flags);
+    // `php_filter_encode_url`'s string of three bytes for each, asked for
+    // fallibly since 8.5.12 (`zend_string_safe_falloc`), the value the
+    // empty string where the memory limit refused it; the string keeps
+    // that room, cut to what was written only in its length.
+    let room = stripped.len().saturating_mul(3);
+    let Some(mut out) = req
+        .memory_mut()
+        .fallible(|req| FreshString::new(req, room))?
+    else {
+        return value(req, b"");
+    };
+    let mut len = 0;
+    for c in stripped {
         if c.is_ascii_alphanumeric() || b"-._".contains(&c) {
-            out.push(c);
+            out.bytes_mut()[len] = c;
+            len += 1;
         } else {
-            out.extend_from_slice(format!("%{c:02X}").as_bytes());
+            let hex = b"0123456789ABCDEF";
+            out.bytes_mut()[len..len + 3].copy_from_slice(&[
+                b'%',
+                hex[usize::from(c >> 4)],
+                hex[usize::from(c & 15)],
+            ]);
+            len += 3;
         }
     }
-    value(req, &out)
+    out.set_len(len);
+    Ok(Outcome::Value(out.finish().into_value()))
 }
 
 /// `php_filter_special_chars`, `FILTER_SANITIZE_SPECIAL_CHARS`: stripped,
@@ -140,13 +215,26 @@ pub(crate) fn encoded(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome,
 /// string(88) "262336303b6120687265663d262333393b78262333393b262336323b262333383b262333343b2623393b7fe9"
 /// string(6) "&#233;"
 /// ```
+///
+/// Since 8.5.12 the encoding stops once the memory limit was met, and the
+/// limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(filter_var(str_repeat("\xFF", 2 << 20), FILTER_SANITIZE_SPECIAL_CHARS, FILTER_FLAG_ENCODE_HIGH), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 pub(crate) fn special_chars(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
     let mut map = html_map(run.flags & FILTER_FLAG_ENCODE_HIGH, false);
     for c in *b"'\"<>&" {
         map[usize::from(c)] = true;
     }
     map[..32].fill(true);
-    value(req, &encode_html(&strip(s, run.flags), &map))
+    let encoded = encode_html(req, &strip(s, run.flags), &map)?;
+    encoded_value(req, encoded)
 }
 
 /// `php_filter_full_special_chars`, `FILTER_SANITIZE_FULL_SPECIAL_CHARS`:
@@ -189,10 +277,23 @@ pub(crate) fn full_special_chars(
 /// NULL
 /// string(6) "&#233;"
 /// ```
+///
+/// Since 8.5.12 the encoding stops once the memory limit was met, and the
+/// limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(filter_var(str_repeat("\xFF", 2 << 20), FILTER_UNSAFE_RAW, FILTER_FLAG_ENCODE_HIGH), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 pub(crate) fn unsafe_raw(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
     if run.flags != 0 && !s.is_empty() {
         let map = html_map(run.flags, false);
-        return value(req, &encode_html(&strip(s, run.flags), &map));
+        let encoded = encode_html(req, &strip(s, run.flags), &map)?;
+        return encoded_value(req, encoded);
     }
     if s.is_empty() && run.flags & FILTER_FLAG_EMPTY_STRING_NULL != 0 {
         return Ok(Outcome::Value(Owner::null()));
