@@ -182,6 +182,7 @@ tier::state
 tier::step
 tier::this_class
 tier::touch
+tier::touchable
 tier::trace_num
 tier::under_way
 tier::unwind
@@ -193,6 +194,7 @@ tier::dispatch_held
 tier::free_cv
 tier::lookup_element
 tier::release
+tier::return_entry
 tier::rope_end
 tier::rope_open
 tier::rope_push

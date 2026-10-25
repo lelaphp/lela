@@ -252,7 +252,7 @@ mod touched {
                 ..raw
             };
             for raw in [raw, call] {
-                if let Ok(Some(slot)) = tier::touch(req, &epoch, raw) {
+                if let Some(slot) = tier::touch(req, &epoch, raw) {
                     req.state::<Seen>().reads.push(read(slot.address()));
                 }
             }
@@ -416,6 +416,7 @@ pub(crate) mod entered {
                     | crate::enter::Left::Escaped(frame),
                 ) => Flow::Resume(frame),
                 Ok(crate::enter::Left::Declined) => Flow::Continue,
+                Ok(crate::enter::Left::Returned) => Flow::Returned,
                 Err(fatal) => Flow::Bail(fatal),
             }
         }

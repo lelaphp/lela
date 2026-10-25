@@ -1615,7 +1615,7 @@ impl<'a> Emit<'a> {
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
-            Kernel::RopeInit => &[I64, I64, I32, I64, I32, I64],
+            Kernel::RopeInit | Kernel::Leave => &[I64, I64, I32, I64, I32, I64],
             Kernel::RopeAdd | Kernel::AssignConcat => &[I64, I64, I32, I64, I64, I32],
             Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
             Kernel::Concat => &[I64, I64, I32, I64, I32, I64, I32, I32, I64],
@@ -1681,14 +1681,7 @@ impl<'a> Emit<'a> {
     /// [`Kernel::Call`] for a call the trace follows into its callee, its
     /// operands held in registers stored to their slots first.
     fn step_kernel(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        for operand in [line.op1, line.op2, line.data] {
-            if let Operand::Value(value) = operand
-                && self.value(value)?.home == Home::Register
-            {
-                let held = self.register(value)?;
-                self.store(self.value(value)?.slot, held)?;
-            }
-        }
+        self.spill_operands(line)?;
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
         let stood = self.b.ins().stack_addr(I64, self.stood, 0);
@@ -1707,6 +1700,20 @@ impl<'a> Emit<'a> {
                 self.handled(line, onward, [room, opline, func])?;
             }
             None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
+        }
+        Ok(())
+    }
+
+    /// `line`'s operands held in registers stored to their slots, for a
+    /// kernel that serves it through its handler, which reads them there.
+    pub(super) fn spill_operands(&mut self, line: &Line) -> Result<(), Abort> {
+        for operand in [line.op1, line.op2, line.data] {
+            if let Operand::Value(value) = operand
+                && self.value(value)?.home == Home::Register
+            {
+                let held = self.register(value)?;
+                self.store(self.value(value)?.slot, held)?;
+            }
         }
         Ok(())
     }
