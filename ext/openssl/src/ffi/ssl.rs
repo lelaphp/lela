@@ -160,11 +160,13 @@ impl Ctx {
         unsafe { sys::SSL_CTX_set_security_level(self.as_ptr(), level) };
     }
 
-    /// `SSL_CTX_set_alpn_protos`: the list a client offers, in wire form.
-    pub(crate) fn alpn_protos(&self, wire: &[u8]) {
+    /// `SSL_CTX_set_alpn_protos`: the list a client offers, in wire form;
+    /// whether the library took it, which it refuses where a name is
+    /// empty (its answer is zero on success).
+    pub(crate) fn alpn_protos(&self, wire: &[u8]) -> bool {
         let len = c_uint::try_from(wire.len()).unwrap_or(0);
         // SAFETY: the context is live; the library copies `len` bytes.
-        unsafe { sys::SSL_CTX_set_alpn_protos(self.as_ptr(), wire.as_ptr(), len) };
+        unsafe { sys::SSL_CTX_set_alpn_protos(self.as_ptr(), wire.as_ptr(), len) == 0 }
     }
 
     /// `SSL_CTX_use_certificate_chain_file`.

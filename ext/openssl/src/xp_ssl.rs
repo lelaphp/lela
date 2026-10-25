@@ -1162,7 +1162,29 @@ impl Layer {
 
     /// The cipher list, the default where none is given, the security
     /// level and the ALPN protocols of `php_openssl_setup_crypto`; `false`
-    /// where the list or the protocols are refused.
+    /// where the list or the protocols are refused. A client's list with
+    /// an empty name is refused by the library, and php 8.5.10 says so
+    /// before the handshake starts:
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0');
+    /// $addr = stream_socket_get_name($s, false);
+    /// foreach (['', ',h2', 'h2,,http/1.1'] as $protocols) {
+    ///     $c = stream_socket_client("tcp://$addr", $e, $m, 1, STREAM_CLIENT_CONNECT, stream_context_create(['ssl' => ['alpn_protocols' => $protocols]]));
+    ///     var_dump(stream_socket_enable_crypto($c, true, STREAM_CRYPTO_METHOD_TLS_CLIENT));
+    /// }
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: stream_socket_enable_crypto(): Failed setting TLS ALPN protocols, protocol names must not be empty in %s on line 6
+    /// bool(false)
+    ///
+    /// Warning: stream_socket_enable_crypto(): Failed setting TLS ALPN protocols, protocol names must not be empty in %s on line 6
+    /// bool(false)
+    ///
+    /// Warning: stream_socket_enable_crypto(): Failed setting TLS ALPN protocols, protocol names must not be empty in %s on line 6
+    /// bool(false)
+    /// ```
     fn set_ciphers(&self, req: &mut Request, setup: &mut Setup) -> bool {
         let ciphers = self.options.ciphers.clone().unwrap_or_else(|| {
             crate::constants::OPENSSL_DEFAULT_STREAM_CIPHERS
@@ -1189,7 +1211,14 @@ impl Layer {
                 return false;
             };
             if self.is_client {
-                setup.ctx().alpn_protos(&wire);
+                // php 8.5.10 reads the library's answer.
+                if !setup.ctx().alpn_protos(&wire) {
+                    warn(
+                        req,
+                        "Failed setting TLS ALPN protocols, protocol names must not be empty",
+                    );
+                    return false;
+                }
             } else {
                 setup.hooks().alpn = wire;
                 setup.alpn_select_callback();
