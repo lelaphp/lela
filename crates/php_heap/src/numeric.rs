@@ -701,14 +701,17 @@ mod tests {
             123_456_789_012_345.0,
             999_999_999_999_999.9,
         ];
-        for e in -1074..1024 {
+        // Miri interprets the whole sweep in hours; it takes every
+        // 211th power, five patterns and the shorter counts.
+        let step = if cfg!(miri) { 211 } else { 1 };
+        for e in (-1074..1024).step_by(step) {
             values.push(2_f64.powi(e));
         }
-        for e in -323..309 {
+        for e in (-323..309).step_by(step) {
             values.push(format!("1e{e}").parse().unwrap());
         }
         let mut state = 0x9e37_79b9_7f4a_7c15_u64;
-        for _ in 0..20_000 {
+        for _ in 0..(if cfg!(miri) { 5 } else { 20_000 }) {
             state ^= state << 13;
             state ^= state >> 7;
             state ^= state << 17;
@@ -718,7 +721,12 @@ mod tests {
             }
         }
         for value in values {
-            for ndigit in [-1, 0, 1, 2, 3, 6, 14, 15, 16, 17, 18, 25, 40] {
+            let counts: &[i32] = if cfg!(miri) {
+                &[-1, 0, 2, 14, 17]
+            } else {
+                &[-1, 0, 1, 2, 3, 6, 14, 15, 16, 17, 18, 25, 40]
+            };
+            for &ndigit in counts {
                 let mut out = Vec::new();
                 let asked = if ndigit < 0 {
                     dtoa::Digits::Shortest
@@ -749,7 +757,12 @@ mod tests {
         }
         // The widest digit runs: a subnormal's whole expansion, and the
         // largest double's.
-        for value in [5e-324, 2.225_073_858_507_201e-308, f64::MAX] {
+        let widest: &[f64] = if cfg!(miri) {
+            &[5e-324]
+        } else {
+            &[5e-324, 2.225_073_858_507_201e-308, f64::MAX]
+        };
+        for &value in widest {
             let mut out = Vec::new();
             let point = dtoa::dtoa(value, dtoa::Digits::Significant(800), &mut out);
             let digits = String::from_utf8(out).unwrap();
