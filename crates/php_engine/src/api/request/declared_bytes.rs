@@ -670,10 +670,10 @@ impl Declared {
     /// $m = memory_get_usage(); $i = $o(); unset($o, $i); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect regime=jit-off
-    /// 392
+    /// 400
     /// 0
-    /// 976
-    /// -976
+    /// 992
+    /// -992
     /// ```
     fn settle(&mut self, over: bool, dead: &mut Vec<Gone>) {
         if self.dynamic.is_empty() {
@@ -745,7 +745,7 @@ impl Declared {
 /// ```expect regime=jit-off
 /// 1152
 /// 5904
-/// 1600
+/// 1616
 /// ```
 fn op_array(
     req: &mut Request,

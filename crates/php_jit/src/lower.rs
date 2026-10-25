@@ -473,6 +473,15 @@ pub(crate) const DECLINED: u32 = u32::MAX - 3;
 /// left it, whose handler `dispatch` runs as php's interpreter does.
 pub(crate) const ESCAPED: u32 = u32::MAX - 4;
 
+/// What compiled code answers where the `RETURN` its trace ends at left
+/// the serving's entry frame, a frame a native called, through
+/// [`Kernel::Leave`]: the serving is over and its return value set, as
+/// php's `zend_jit_leave_func` returns `ZEND_VM_RETURN` to `execute_ex`
+/// for a `ZEND_CALL_TOP` frame (`Z/ext/opcache/jit/zend_jit_ir.c:11160`).
+/// Past every [`ExitId`](crate::types::ExitId), and none of the answers
+/// above; nothing is stored, and `enter` hands back no frame.
+pub(crate) const RETURNED: u32 = u32::MAX - 5;
+
 /// Where compiled code reads, in the `ExitCtx`, where it is entered
 /// (`enter::At`), a `u32` that is not zero at a loop's body
 /// (`types::BodyEntry`): the field `enter` lays down past the interrupt
@@ -497,9 +506,13 @@ pub(crate) const STOOD_AT: i32 = 24;
 pub(crate) const STACK_AT: i32 = 56;
 
 /// Where compiled code reads, in the `ExitCtx`, the address of the
-/// request's headers for the calls it pushes in place, one address a call
-/// in [`Compiled::calls`]' order, each `php_engine::tier::FRAME`'s
-/// `header_bytes` long (`php_engine::tier::call_image`).
+/// request's addresses its code reads: the headers for the calls it pushes
+/// in place, one address a call in [`Compiled::calls`]' order, each
+/// `php_engine::tier::FRAME`'s `header_bytes` long
+/// (`php_engine::tier::call_image`), then the runtime-cache slots it reads,
+/// one a slot of [`Compiled::map_ptrs`], each laid down by the touch on the
+/// request's first entry of the trace (`jit-design.md` §4.6,
+/// `php_engine::tier::touch`).
 pub(crate) const IMAGES_AT: i32 = 64;
 
 /// Where compiled code reads, in the `ExitCtx`, the place on the stack of
@@ -711,11 +724,19 @@ pub(crate) enum Kernel {
     /// runs no user code, and the memory limit's fatal, which the request
     /// ends in, is answered as its unwinding.
     Lookup,
+    /// `leave(cx, frame, opline: u32, word: u64, type_info: u32, left: *mut
+    /// u64)`: the value the `RETURN` a trace ends at hands over with its
+    /// owner, in a frame served from outside the loop, set as the
+    /// serving's return value where the frame is the serving's entry, as
+    /// the handler's `RETURN` of such a frame sets it
+    /// (`php_engine::tier::return_entry`), `left` then one; zero, with
+    /// nothing done, for any other frame.
+    Leave,
 }
 
 impl Kernel {
     /// Every kernel, in the order [`Symbols`] keeps them.
-    pub(crate) const ALL: [Kernel; 14] = [
+    pub(crate) const ALL: [Kernel; 15] = [
         Kernel::Step,
         Kernel::PushCall,
         Kernel::Call,
@@ -730,6 +751,7 @@ impl Kernel {
         Kernel::Concat,
         Kernel::Find,
         Kernel::Lookup,
+        Kernel::Leave,
     ];
 
     /// The kernel's place in [`Kernel::ALL`].

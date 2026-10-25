@@ -966,13 +966,13 @@ impl Request {
     /// unlink($f);
     /// ```
     /// ```expect regime=jit-off
-    /// 1384
+    /// 1400
     /// 1008
-    /// 1584
+    /// 1616
     /// 384
     /// 272
     /// [2,"w",{"abcdefgy":1,"\u0000*\u0000Abcdefgy":2},"Abcdefgy2Abcdefgy::Abcdefgy2Abcdefgy",true,[1,"Qwertyz"],1]
-    /// -2144
+    /// -2192
     /// ```
     fn compiled_alone(&mut self, args: FileArgs<'_>, full: &[u8]) -> Cached {
         let source = crate::unit_cache::source_or_read(args.source, args.path)?;

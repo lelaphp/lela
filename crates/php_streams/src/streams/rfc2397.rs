@@ -5,7 +5,7 @@
 //! `stream_get_meta_data` starts with what the URL said: the media type,
 //! each parameter, and whether the data was base64.
 
-use super::{MetaValue, PhpStream, TempMode, Whence, temp_stream};
+use super::{MetaValue, TempMode, Whence, temp_stream};
 use crate::api::raising::Thrown;
 use crate::api::request::{Request, Stream};
 use crate::api::values::Owner;
@@ -69,11 +69,13 @@ pub(super) fn open(req: &mut Request, path: &[u8], mode: &[u8]) -> Result<Opened
         url_decode(data)
     };
     let stream = temp_stream(req, TempMode::Default, usize::MAX, "RFC2397", meta)?;
-    req.stream_op(*stream, |req, s: &mut PhpStream| {
-        let _ = s.ops.write(req, &data);
-        let mut at = 0;
-        let _ = s.ops.seek(req, 0, Some(Whence::Set), &mut at);
-        s.mode = super::Mode::of(mode);
+    req.stream_op(*stream, |op| {
+        op.kind(|req, ops| {
+            let _ = ops.write(req, &data);
+            let mut at = 0;
+            let _ = ops.seek(req, 0, Some(Whence::Set), &mut at);
+        });
+        op.with(|s| s.mode = super::Mode::of(mode));
     });
     Ok(Ok(stream))
 }

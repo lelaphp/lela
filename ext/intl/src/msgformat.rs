@@ -70,10 +70,10 @@ impl Formatter {
 }
 
 /// `MessageFormatter_object` past its `zend_object`: the error, the
-/// formatter a constructor opened, the pattern it was given, which a
-/// clone does not carry, and whether date subformats were handed the
-/// default zone (`tz_set`), which a second constructor leaves set, as
-/// `msgformat_data_free` does.
+/// formatter a constructor opened, the pattern it was given, and whether
+/// date subformats were handed the default zone (`tz_set`), which a
+/// second constructor leaves set, as `msgformat_data_free` does; a clone
+/// carries both (php 8.5.12).
 #[derive(Default)]
 pub(crate) struct MessageFormatterObject {
     error: IntlError,
@@ -161,18 +161,24 @@ impl ObjectHandlers for Handlers {
     }
 }
 
-/// `MessageFormatter_object_clone`: the members and `umsg_clone`, the
-/// pattern and the cached types left behind, or php's `Error` once the
-/// copy is made.
+/// `MessageFormatter_object_clone`: the members, the pattern and
+/// `tz_set` copied, as php 8.5.12 copies them, and `umsg_clone`, the
+/// cached types left behind, or php's `Error` once the copy is made.
 fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let mut status = Code::ZERO;
-    let copy = object
-        .native::<MessageFormatterObject>(req)
-        .and_then(|o| o.formatter.as_ref())
-        .map(|f| f.umsgf.try_clone(&mut status));
+    let (copy, pattern, zoned) = match object.native::<MessageFormatterObject>(req) {
+        Some(o) => (
+            o.formatter.as_ref().map(|f| f.umsgf.try_clone(&mut status)),
+            o.pattern.clone(),
+            o.zoned,
+        ),
+        None => (None, None, false),
+    };
     let opened = copy.is_some();
     let payload = MessageFormatterObject {
         formatter: copy.flatten().map(Formatter::new),
+        pattern,
+        zoned,
         ..MessageFormatterObject::default()
     };
     let new = clone_with(req, &object, payload)?;
@@ -1038,7 +1044,7 @@ fn set_pattern(req: &mut Request, object: PhpObject, pattern: PhpString) -> Answ
     Ok(Some(()))
 }
 
-/// `msgfmt_get_pattern`: the pattern as given, `false` for a clone's.
+/// `msgfmt_get_pattern`: the pattern as given, a clone's copied with it.
 fn get_pattern(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpString>> {
     fetch(req, object)?;
     let pattern = object
@@ -1075,7 +1081,7 @@ fn or_false<T>(answer: Option<T>) -> OrFalse<T> {
 }
 
 /// `class MessageFormatter`: one `UMessageFormat` each, cloned with the
-/// object without its pattern; one `new` without a constructor has none.
+/// object and its pattern; one `new` without a constructor has none.
 ///
 /// ```php
 /// $m = new MessageFormatter('en_US', '{0,number} monkeys on {1,number} trees');
@@ -1096,7 +1102,7 @@ fn or_false<T>(answer: Option<T>) -> OrFalse<T> {
 /// string(5) "en_US"
 /// int(0)
 /// string(12) "U_ZERO_ERROR"
-/// bool(false)
+/// string(38) "{0,number} monkeys on {1,number} trees"
 /// string(20) "1 monkeys on 2 trees"
 /// bool(true)
 /// string(7) "x 1,970"
@@ -1120,6 +1126,22 @@ fn or_false<T>(answer: Option<T>) -> OrFalse<T> {
 /// MessageFormatter::__construct(): pattern syntax error (parse error at offset 1, after "{", before or at "0,choice}")
 /// Cannot clone uninitialized MessageFormatter
 /// Found unconstructed MessageFormatter
+/// ```
+///
+/// A clone keeps `tz_set` too, so its date subformats keep the zone the
+/// original was handed rather than taking today's default (php 8.5.12).
+///
+/// ```php
+/// date_default_timezone_set('UTC');
+/// $t = new MessageFormatter('en_US', '{0,time,short}');
+/// $at = new DateTimeImmutable('2024-01-02 03:04:05', new DateTimeZone('UTC'));
+/// $t->format([$at]);
+/// $c = clone $t;
+/// date_default_timezone_set('America/New_York');
+/// echo str_replace("\u{202F}", ' ', $c->format([$at])), "\n";
+/// ```
+/// ```expect
+/// 3:04 AM
 /// ```
 #[php_class(not_serializable, size = 112, payload = MessageFormatterObject, handlers = crate::msgformat::HANDLERS)]
 pub(crate) struct MessageFormatter;
@@ -1390,7 +1412,7 @@ fn msgfmt_set_pattern(
 /// ```
 /// ```expect
 /// string(5) "{0} x"
-/// bool(false)
+/// string(5) "{0} x"
 /// ```
 #[php_function(before_args = error::reset)]
 fn msgfmt_get_pattern(

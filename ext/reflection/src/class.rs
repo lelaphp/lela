@@ -15,7 +15,7 @@ use php_ext::call::{
     read_class_prop_silent, update_class_constants, write_static_prop,
 };
 use php_ext::decl::{ClassKind, MethodDecl, Name, TraitAdaptation, Visibility};
-use php_ext::raising::{Thrown, deprecated, throw, throw_error};
+use php_ext::raising::{Thrown, deprecated, throw_error, throw_exception_ex};
 use php_ext::request::{MethodRow, Request};
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
 
@@ -175,7 +175,7 @@ fn reflector_class(
     };
     match autoload(req, &name)? {
         Some(class) => Ok(class),
-        None => Err(throw(
+        None => Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!(
@@ -282,7 +282,7 @@ fn new_instance(
         object.give_up(req);
         let name = class_name_of(req, class);
         let message = refusal.replace("{}", &String::from_utf8_lossy(&name));
-        return Err(throw(req, "ReflectionException", &message));
+        return Err(throw_exception_ex(req, "ReflectionException", &message));
     }
     let Some(callable) = constructor
         .and_then(|(decl, _)| known_method(req, class, &decl.function.name, Some(*object)))
@@ -1084,7 +1084,7 @@ impl ReflectionClass {
         let kept = kept_closure(req, this.object());
         let Some(found) = method_or_invoke(req, class, &name, kept) else {
             let named = class_name_of(req, class);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -1265,7 +1265,7 @@ impl ReflectionClass {
             let base = class_named(req, &name[..at])?;
             if !req.symbols().instance_of(class, base) {
                 let (base, named) = (class_name_of(req, base), class_name_of(req, class));
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "ReflectionException",
                     &format!(
@@ -1282,7 +1282,7 @@ impl ReflectionClass {
             }
         }
         let named = class_name_of(req, ce);
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!(
@@ -1941,7 +1941,7 @@ impl ReflectionClass {
             && is_internal(req, class)
             && req.symbols().class_has_create_object(class)
         {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -2540,7 +2540,7 @@ impl ReflectionClass {
                 ),
             ));
         }
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!("Property {shown}::${name} does not exist"),
@@ -2640,7 +2640,7 @@ impl ReflectionClass {
         let held = read_class_prop_silent(req, class, &name)?;
         let Some(held) = held else {
             let shown = class_name_of(req, class);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -2780,7 +2780,7 @@ impl ReflectionClass {
         let interface = reflector_class(req, interface, "Interface")?;
         if kind_of(req, interface) != ClassKind::Interface {
             let name = class_name_of(req, interface);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!("{} is not an interface", String::from_utf8_lossy(&name)),

@@ -2607,9 +2607,11 @@ fn constant_text(constants: &[ConstDecl], name: &[u8], precision: i32) -> Option
         ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
         ConstExpr::Bool(true) => Some(b"1".to_vec()),
         ConstExpr::Long { value: n, .. } => Some(n.to_string().into_bytes()),
-        ConstExpr::Double(d) => {
-            Some(php_heap::double_to_string(*d, precision, php_heap::Exponent::Upper).into_bytes())
-        }
+        ConstExpr::Double(d) => Some(
+            php_heap::double_to_string(*d, precision, php_heap::Exponent::Upper)
+                .as_bytes()
+                .to_vec(),
+        ),
         ConstExpr::Str(s) => Some(s.to_vec()),
         _ => None,
     }
@@ -2635,7 +2637,9 @@ impl crate::ini_syntax::Host for Configure<'_> {
     }
 
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
-        Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper).into_bytes())
+        Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper)
+            .as_bytes()
+            .to_vec())
     }
 
     fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {
@@ -2661,7 +2665,9 @@ impl crate::ini_syntax::Host for Startup<'_> {
     /// `zend_double_to_str` before any ini entry is registered, when
     /// `EG(precision)` is still zero and `zend_gcvt` is handed one digit.
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
-        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper).into_bytes())
+        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper)
+            .as_bytes()
+            .to_vec())
     }
 
     fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {
@@ -4050,20 +4056,25 @@ impl<'a> PermanentStrings<'a> {
     }
 
     /// The string php's compile makes of `bytes` on the asking request's
-    /// heap (`zend_string_init`, the string `concat_function` makes),
+    /// heap at `sizing`'s size (`zend_string_init`, the string
+    /// `concat_function` makes, or a name `zend_strpprintf` prints),
     /// asked of that heap before the table is: none where the compile is
     /// the engine's, the empty string and one byte being the process's
     /// (`ZSTR_CHAR`). The `Err` is the memory limit, and with it the
     /// answer is the asking request's alone, which no cache holds; the
     /// table is left as it stood.
-    fn charge(&mut self, bytes: &[u8]) -> Result<Option<php_heap::Str>, php_heap::Fatal> {
+    fn charge(
+        &mut self,
+        bytes: &[u8],
+        sizing: php_heap::Sizing,
+    ) -> Result<Option<php_heap::Str>, php_heap::Fatal> {
         let CompileHeap::Request(heap) = &mut self.heap else {
             return Ok(None);
         };
         if bytes.len() <= 1 {
             return Ok(None);
         }
-        heap.string(bytes).map(Some).inspect_err(|_| {
+        heap.string_sized(bytes, sizing).map(Some).inspect_err(|_| {
             self.answers = Answers::Asker;
         })
     }
@@ -4122,8 +4133,9 @@ impl Intern for PermanentStrings<'_> {
         &mut self,
         bytes: &[u8],
         valid_utf8: bool,
+        sizing: php_heap::Sizing,
     ) -> Result<php_heap::Str, php_heap::Fatal> {
-        let copy = self.charge(bytes)?;
+        let copy = self.charge(bytes, sizing)?;
         if let Some(held) = self.names.find(bytes) {
             self.stand(copy, None);
             return Ok(held);

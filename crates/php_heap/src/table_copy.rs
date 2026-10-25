@@ -33,6 +33,7 @@
 
 use crate::array::{Arr, DeclaredRows, Key, canonical_int};
 use crate::hooks::{Fatal, HeapHooks};
+use crate::numeric::LongText;
 use crate::string::{self, Str};
 use crate::{Heap, Zval};
 
@@ -185,7 +186,7 @@ impl Heap {
     /// owner of it the caller's, the process's own string for a digit
     /// (`ZSTR_CHAR`).
     fn long_to_str(&mut self, n: i64) -> Result<Str, Fatal> {
-        let spelt = n.to_string();
+        let spelt = LongText::long(n);
         match string::frozen_string(spelt.as_bytes()) {
             Some(digit) => Ok(digit),
             None => self.string(spelt.as_bytes()),

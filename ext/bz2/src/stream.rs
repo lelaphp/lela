@@ -18,7 +18,7 @@ use std::io::{ErrorKind, Read, Write};
 use php_ext::abi::{OrFalse, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, type_error};
 use php_ext::request::{
     Cast, HostPath, Opening, OwnedStream as _, Request, Stream, StreamOps, StreamWrapper,
     Streams as _,
@@ -673,9 +673,8 @@ fn bzopen(
         }
         ValueRef::Resource(_) => {
             let Some(stream) = Stream::from_value(req, &file) else {
-                return Err(throw_error(
+                return Err(type_error(
                     req,
-                    "TypeError",
                     "bzopen(): supplied resource is not a valid stream resource",
                 ));
             };

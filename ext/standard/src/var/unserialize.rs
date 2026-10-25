@@ -12,9 +12,10 @@ use std::ops::ControlFlow;
 use php_ext::abi::Passed;
 use php_ext::attr::php_function;
 use php_ext::call::{autoload, call, call_method, class_constant, lookup_class, new_object};
-use php_ext::coerce::{callable_checked, value_name};
+use php_ext::coerce::{to_callable, value_name};
 use php_ext::raising::{
-    Level, Thrown, call_stack_end, deprecated, docref, throw, throw_error, warning,
+    Level, Thrown, call_stack_end, deprecated, docref, throw_exception_ex, type_error, value_error,
+    warning,
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -1135,9 +1136,8 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             }
             _ => {
                 let name = value_name(req, &classes);
-                return Err(throw_error(
+                return Err(type_error(
                     req,
-                    "TypeError",
                     &format!(
                         "{function}(): Option \"allowed_classes\" must be of type array|bool, {name} given"
                     ),
@@ -1152,17 +1152,15 @@ fn options(req: &mut Request, given: Option<PhpArray>, function: &str) -> Result
             // `goto cleanup`: the `class_hash` made above freed.
             allowed.free(req);
             let name = value_name(req, &max);
-            return Err(throw_error(
+            return Err(type_error(
                 req,
-                "TypeError",
                 &format!("{function}(): Option \"max_depth\" must be of type int, {name} given"),
             ));
         };
         if n < 0 {
             allowed.free(req);
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 &format!("{function}(): Option \"max_depth\" must be greater than or equal to 0"),
             ));
         }
@@ -1193,9 +1191,8 @@ fn allowed_names(
         let entry = entry.deref();
         if !matches!(entry.as_ref(), ValueRef::Str(_) | ValueRef::Object(_)) {
             let name = value_name(req, &entry);
-            return Err(throw_error(
+            return Err(type_error(
                 req,
-                "TypeError",
                 &format!(
                     "{function}(): Option \"allowed_classes\" must be an array of class names, {name} given"
                 ),
@@ -1207,9 +1204,8 @@ fn allowed_names(
             // byte.
             let bytes = name.as_bytes();
             let shown = String::from_utf8_lossy(php_ext::coerce::c_str(bytes)).into_owned();
-            let thrown = throw_error(
+            let thrown = value_error(
                 req,
-                "ValueError",
                 &format!(
                     "{function}(): Option \"allowed_classes\" must be an array of class names, \"{shown}\" given"
                 ),
@@ -1810,8 +1806,18 @@ impl State<'_> {
         // `array_init_size` and `zend_hash_real_init_mixed`: "we can't
         // convert from packed to hash during unserialization"; and
         // `ZVAL_EMPTY_ARRAY` for none, which costs the request nothing.
+        // `array_finit_size_mixed` since 8.5.12: `return 0` where the
+        // memory limit refused it.
         let made = match u32::try_from(elements) {
-            Ok(size) if size > 0 => PhpArray::sized(req, size, Layout::Hash)?,
+            Ok(size) if size > 0 => {
+                let laid = req
+                    .memory_mut()
+                    .fallible(|req| PhpArray::sized(req, size, Layout::Hash))?;
+                let Some(laid) = laid else {
+                    return Ok(false);
+                };
+                laid
+            }
             _ => Owner::take(req, PhpArray::empty()),
         };
         let array = *made;
@@ -1854,6 +1860,22 @@ impl State<'_> {
     /// ```expect
     /// int(0)
     /// ```
+    ///
+    /// Since 8.5.12 the elements stop once the memory limit was met, the
+    /// unserialization failing there and the limit's fatal raised as the
+    /// call returns:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $ser = 'a:40000:{';
+    /// for ($i = 0; $i < 40000; $i++) { $ser .= 'i:' . $i . ';a:1:{i:0;i:0;}'; }
+    /// $u = unserialize($ser . '}');
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 5
+    /// ```
     fn array_body(
         &mut self,
         req: &mut Request,
@@ -1895,6 +1917,10 @@ impl State<'_> {
                 self.p -= 1;
                 return Ok(false);
             }
+            // `goto failure` once the memory limit was met, since 8.5.12.
+            if req.memory().has_oom() {
+                return Ok(false);
+            }
         }
         Ok(true)
     }
@@ -1929,6 +1955,21 @@ impl State<'_> {
     /// 1528
     /// 96
     /// 752
+    /// ```
+    ///
+    /// The name's copy and its lowered copy are asked for fallibly since
+    /// 8.5.12; the limit is set from what the request holds, which the
+    /// engines answer differently, so its figure is `%d`:
+    ///
+    /// ```php
+    /// $name = str_repeat('A', 4 << 20);
+    /// $payload = 'O:' . strlen($name) . ':"' . $name . '":0:{}';
+    /// ini_set('memory_limit', memory_get_usage() + (6 << 20));
+    /// var_dump(gettype(unserialize($payload)));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of %d bytes exhausted (tried to allocate 4210688 bytes) in %s on line 5
     /// ```
     // php's rule is one block; its checks stay in its order.
     #[allow(clippy::too_many_lines)]
@@ -1965,7 +2006,28 @@ impl State<'_> {
         if name[0] == 0 || name[0] == b'\\' {
             return Ok(false);
         }
+        // `zend_string_finit_existing_interned` of the name and
+        // `zend_string_ftolower` of it, both asked for fallibly since
+        // 8.5.12, the copy held while the lowered one is asked: `return
+        // 0` where the memory limit refused either.
+        let Some(held) = req
+            .memory_mut()
+            .fallible(|req| PhpString::existing_interned(req, &name))?
+        else {
+            return Ok(false);
+        };
         let lower = name.to_ascii_lowercase();
+        if lower != name {
+            let lowered = req
+                .memory_mut()
+                .fallible(|req| PhpString::new(req, &lower))?;
+            let Some(lowered) = lowered else {
+                held.give_up(req);
+                return Ok(false);
+            };
+            lowered.give_up(req);
+        }
+        held.give_up(req);
         let allowed = self.hash.allowed.admits(&lower);
         let mut incomplete = false;
         let class = if allowed {
@@ -2001,7 +2063,7 @@ impl State<'_> {
         };
         self.p = after;
         if let Some(shown) = not_serializable(req, class) {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("Unserialization of '{shown}' is not allowed"),
@@ -2067,7 +2129,15 @@ impl State<'_> {
             }
             // `array_init_size` and `zend_hash_real_init_mixed`, "Avoid
             // reallocation due to packed -> mixed conversion".
-            let array = PhpArray::sized(req, u32::try_from(elements).unwrap_or(0), Layout::Hash)?;
+            // `array_finit_size_mixed` since 8.5.12.
+            let size = u32::try_from(elements).unwrap_or(0);
+            let laid = req
+                .memory_mut()
+                .fallible(|req| PhpArray::sized(req, size, Layout::Hash))?;
+            let Some(array) = laid else {
+                object.mark_destructor_called();
+                return Ok(false);
+            };
             match self.array_elements(req, *array, elements) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -2153,18 +2223,9 @@ impl State<'_> {
         };
         let shown = String::from_utf8_lossy(&function).into_owned();
         let callee = PhpString::new(req, &function)?;
-        let checked = callable_checked(req, &Value::string(*callee));
+        let checked = to_callable(req, &Value::string(*callee));
         callee.give_up(req);
-        let callable = match checked {
-            Ok(callable) => callable,
-            Err(error) => {
-                return Err(throw_error(
-                    req,
-                    "Error",
-                    &format!("Invalid callback {shown}, {error}"),
-                ));
-            }
-        };
+        let callable = checked?;
         let argument = PhpString::new(req, name)?;
         let answer = call(req, &callable, &[Value::string(*argument)]);
         argument.give_up(req);
@@ -2369,6 +2430,10 @@ impl State<'_> {
             }
             if elements > 0 && !matches!(self.at(self.p - 1), b';' | b'}') {
                 self.p -= 1;
+                return Ok(false);
+            }
+            // `goto failure` once the memory limit was met, since 8.5.12.
+            if req.memory().has_oom() {
                 return Ok(false);
             }
         }

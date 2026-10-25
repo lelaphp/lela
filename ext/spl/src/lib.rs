@@ -46,7 +46,7 @@ use php_ext::attr::php_class;
 use php_ext::call::{Iter, call_method, iterate, lookup_class};
 use php_ext::coerce::{key_of, truthy};
 use php_ext::decl::ClassKind;
-use php_ext::raising::{Thrown, throw, throw_error};
+use php_ext::raising::{Thrown, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::walk::Hold;
@@ -688,7 +688,7 @@ pub(crate) fn record_end(
     let Some(at) = broke_at else {
         return finished;
     };
-    let broke = throw(
+    let broke = throw_exception_ex(
         req,
         "UnexpectedValueException",
         &format!("Error at offset {at} of {len} bytes"),

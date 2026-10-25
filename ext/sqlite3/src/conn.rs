@@ -10,11 +10,11 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{
-    Level, Thrown, argument_error, docref, fatal, throw, throw_error, throw_error_chained,
-    while_pending,
+    Level, Thrown, argument_error, docref, fatal, throw, throw_chained, throw_error,
+    throw_exception_ex, while_pending,
 };
 use php_ext::request::{Foreign, Ini, Request, Resolve, Streams as _};
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pdo_sqlite::BlobStream;
 use php_ext_pdo_sqlite::ffi::{
     self, Conn as Connection, Db, Function, Handler, Registration, SQLITE_BUSY, SQLITE_LOCKED,
@@ -127,8 +127,9 @@ pub(crate) fn not_ready(req: &mut Request, class: &str) -> Thrown {
 /// with `code` where `exceptions` is on, `E_WARNING` otherwise. With one
 /// pending, [`fail_after`]'s, and the throwable is handed on either way.
 /// php prints the message with `vspprintf` and throws it with
-/// `zend_throw_exception` before it frees the buffer, so the throw is
-/// [`throw_error`]'s, the buffer standing across it:
+/// `zend_throw_exception` before it frees the buffer
+/// (`Z/ext/sqlite3/sqlite3.c:76-92`), so the throw is [`throw`]'s with
+/// that buffer standing across it ([`printed`]):
 ///
 /// ```php
 /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
@@ -157,15 +158,30 @@ pub(crate) fn fail(
         docref(req, Level::Warning, message);
         return Ok(());
     }
-    let thrown = throw_error(req, "SQLite3Exception", message);
+    let thrown = printed(req, message, |req| throw(req, "SQLite3Exception", message));
     Err(with_code(req, thrown, code))
+}
+
+/// `php_sqlite3_error`'s `vspprintf` buffer of `message`
+/// ([`Emalloc::printf_buffer`]) standing while `throw` makes the
+/// throwable, and freed after it, as php frees `message` once
+/// `zend_throw_exception` returns.
+fn printed(req: &mut Request, message: &str, throw: impl FnOnce(&mut Request) -> Thrown) -> Thrown {
+    match Emalloc::printf_buffer(req, message.len()) {
+        Ok(buffer) => {
+            let thrown = throw(req);
+            buffer.free(req);
+            thrown
+        }
+        Err(refused) => refused,
+    }
 }
 
 /// `php_sqlite3_error` with a throwable pending, as php raises it with
 /// `EG(exception)` set: the `SQLite3Exception` chained over it, or the warning
 /// raised while it is pending and the throwable handed on. The throw is
-/// [`throw_error_chained`], `vspprintf`'s buffer standing across it as
-/// [`fail`] says.
+/// [`throw_chained`], `vspprintf`'s buffer standing across it as [`fail`]
+/// says.
 pub(crate) fn fail_after(
     req: &mut Request,
     exceptions: bool,
@@ -174,7 +190,14 @@ pub(crate) fn fail_after(
     message: &str,
 ) -> Thrown {
     if exceptions {
-        let thrown = throw_error_chained(req, pending, "SQLite3Exception", message);
+        let thrown = match Emalloc::printf_buffer(req, message.len()) {
+            Ok(buffer) => {
+                let thrown = throw_chained(req, pending, "SQLite3Exception", message);
+                buffer.free(req);
+                thrown
+            }
+            Err(refused) => pending.chain(req, refused),
+        };
         return with_code(req, thrown, code);
     }
     while_pending(req, &pending, |req| docref(req, Level::Warning, message));
@@ -465,7 +488,7 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
             .is_err()
         {
             let shown = text(&full);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("open_basedir prohibits opening {shown}"),
@@ -482,7 +505,7 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
         Err((_, message)) => {
             conn(req, object)?.link = Link::Closed;
             let message = format!("Unable to open database: {}", text(&message));
-            return Err(throw(req, "Exception", &message));
+            return Err(throw_exception_ex(req, "Exception", &message));
         }
     };
     if req

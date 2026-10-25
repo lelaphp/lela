@@ -24,7 +24,7 @@ use crate::api::abi::{DimensionRead, PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{
     Level, Thrown, cannot_add_element, deprecated, error, illegal_container_offset, none_pending,
-    throw, throw_error, type_error, warning,
+    throw_error, throw_exception_ex, type_error, warning,
 };
 use crate::api::request::{HookedTable, Request};
 use crate::api::values::walk::{self, Table};
@@ -57,17 +57,11 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             req.addref(value);
             Ok(s)
         }
-        // `zend_long_to_str` and `zend_double_to_str` mark what they
-        // make valid UTF-8, the digits being ASCII.
-        ValueRef::Int(n) => req
-            .string(crate::c_number::Long::of(n).as_bytes())
-            .inspect(PhpString::mark_valid_utf8),
+        ValueRef::Int(n) => long_to_str(req, n),
         ValueRef::Float(f) => {
-            // `zend_double_to_str`: the text, then the warning php raises
-            // when the value it converted was NAN.
-            let text =
-                req.string(double_to_string(f, req.ini().precision(), Exponent::Upper).as_bytes())?;
-            text.mark_valid_utf8();
+            // The text, then the warning php raises when the value it
+            // converted was NAN.
+            let text = double_to_str(req, f)?;
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to string");
             }
@@ -86,6 +80,58 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             req.string(b"")
         }
     }
+}
+
+/// `zend_long_to_str` (`Z/Zend/zend_operators.c:3532`): a digit is the
+/// process's interned string of it (`ZSTR_CHAR`), and any other long its
+/// digits laid in a buffer on the stack and copied into one string of
+/// the request's (`zend_string_init`), marked valid UTF-8 as php marks
+/// it. So `7` costs nothing and `-7` a string. The `Err` is the memory
+/// limit.
+///
+/// ```php
+/// $n = [1234567, 7, -7, 10, PHP_INT_MIN];
+/// $before = memory_get_usage(); $s = (string) $n[0]; $t = (string) $n[1]; $u = (string) $n[2]; $v = (string) $n[3]; $w = (string) $n[4];
+/// echo $s, "|", $t, "|", $u, "|", $v, "|", $w, "|", memory_get_usage() - $before, "\n";
+/// debug_zval_dump($t, $u);
+/// ```
+/// ```expect
+/// 1234567|7|-7|10|-9223372036854775808|176
+/// string(1) "7" interned
+/// string(2) "-7" refcount(2)
+/// ```
+pub(crate) fn long_to_str(req: &mut Request, n: i64) -> Result<PhpString, Thrown> {
+    if let Ok(digit @ 0..=9) = u8::try_from(n) {
+        return req.string(&[b'0' + digit]);
+    }
+    req.string_init(php_heap::LongText::long(n).as_bytes())
+        .inspect(PhpString::mark_valid_utf8)
+}
+
+/// `zend_double_to_str` (`Z/Zend/zend_operators.c:3616`): `zend_gcvt` at
+/// `precision ? precision : 1` into a buffer on the stack, copied into
+/// one string of the request's (`zend_string_init`) whatever its length,
+/// so a float that prints as one character is a string of its own where
+/// the int of that digit is the interned one, and marked valid UTF-8.
+/// The warning php raises after it for a NAN is its caller's. Kept out
+/// of line, so the buffer's room is taken only where a double is
+/// converted. The `Err` is the memory limit.
+///
+/// ```php
+/// $f = [1.47, 1e100, 2.0, 0.0, -0.0];
+/// $before = memory_get_usage(); $s = (string) $f[0]; $t = (string) $f[1]; $u = (string) $f[2]; $v = (string) $f[3]; $w = (string) $f[4];
+/// echo $s, "|", $t, "|", $u, "|", $v, "|", $w, "|", memory_get_usage() - $before, "\n";
+/// debug_zval_dump($u, $v);
+/// ```
+/// ```expect
+/// 1.47|1.0E+100|2|0|-0|200
+/// string(1) "2" refcount(2)
+/// string(1) "0" refcount(2)
+/// ```
+#[inline(never)]
+pub(crate) fn double_to_str(req: &mut Request, f: f64) -> Result<PhpString, Thrown> {
+    req.string_init(double_to_string(f, req.ini().precision(), Exponent::Upper).as_bytes())
+        .inspect(PhpString::mark_valid_utf8)
 }
 
 /// `zval_get_string_func` over an object: its class's `cast_object`
@@ -458,7 +504,7 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
         req.zval_text(subject, cut)
     };
     let text = quoted.unwrap_or_else(|| format!("of type {}", type_name(req, subject)));
-    throw(
+    throw_exception_ex(
         req,
         "UnhandledMatchError",
         &format!("Unhandled match case {text}"),
@@ -2175,7 +2221,12 @@ pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Va
     let (a, b) = longs(req, "%", left, right)?;
     match inline::remainder(a, b) {
         Some(n) => Ok(Value::int(n)),
-        None => Err(throw(req, "DivisionByZeroError", "Modulo by zero")),
+        // `zend_throw_exception_ex` (`Z/Zend/zend_operators.c:1550`).
+        None => Err(crate::api::raising::throw_exception_ex(
+            req,
+            "DivisionByZeroError",
+            "Modulo by zero",
+        )),
     }
 }
 
@@ -2301,7 +2352,7 @@ fn shift(req: &mut Request, side: Shift, left: &Value, right: &Value) -> Result<
     }
     match u64::try_from(b) {
         Ok(by) => Ok(Value::int(by_heap(a, by))),
-        Err(_) => Err(throw(
+        Err(_) => Err(throw_exception_ex(
             req,
             "ArithmeticError",
             "Bit shift by negative number",
@@ -5731,8 +5782,8 @@ fn dval_to_lval_cap(d: f64) -> i64 {
 /// A double as php's `%H` renders it in a message: `zend_gcvt` at the
 /// shortest digits, which is [`double_to_string`] under
 /// `serialize_precision`'s -1.
-fn rendered(d: f64) -> String {
-    String::from_utf8_lossy(double_to_string(d, -1, Exponent::Upper).as_bytes()).into_owned()
+fn rendered(d: f64) -> php_heap::DoubleText {
+    double_to_string(d, -1, Exponent::Upper)
 }
 
 /// `ZEND_DOUBLE_FITS_LONG` on a 64-bit long: `(double) ZEND_LONG_MAX`

@@ -37,7 +37,7 @@ use php_ext::abi::{
     Callable, Dependency, DependencyKind, Extension, ExtensionBuilder, Path, Raw, This, Untyped,
 };
 use php_ext::attr::php_class;
-use php_ext::raising::{Thrown, argument_error, throw};
+use php_ext::raising::{Thrown, argument_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_pdo::connector::Connector;
@@ -247,7 +247,7 @@ impl Sqlite {
         php_ext_pdo::connector::with_connection(req, this, |req, conn| {
             let shown = String::from_utf8_lossy(&name).into_owned();
             let Some(full) = req.environment_mut().realpath(&name) else {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "PDOException",
                     &format!("Unable to load extension \"{shown}\""),
@@ -265,7 +265,7 @@ impl Sqlite {
                 Ok(()) => Ok(()),
                 Err(text) => {
                     let text = String::from_utf8_lossy(&text).into_owned();
-                    Err(throw(
+                    Err(throw_exception_ex(
                         req,
                         "PDOException",
                         &format!("Unable to load extension \"{text}\""),

@@ -4,7 +4,7 @@
 
 use php_ext::abi::{OrFalse, Path, Untyped};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString, Resource, ResourceType, Value};
 
@@ -89,7 +89,7 @@ fn fetch(
 ) -> Result<Resource, Thrown> {
     if res.kind() != Some(kind) {
         let text = format!("{native}(): supplied resource is not a valid {name} resource");
-        return Err(throw(req, "TypeError", &text));
+        return Err(type_error(req, &text));
     }
     Ok(res)
 }
@@ -342,7 +342,10 @@ fn zip_entry_name(
     zip_entry: Resource,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match info(req, zip_entry, "zip_entry_name")? {
-        Some(sb) => Ok(OrFalse::Value(PhpString::new(req, &sb.name)?)),
+        Some(sb) => Ok(OrFalse::Value(PhpString::new(
+            req,
+            php_ext::coerce::c_str(&sb.name),
+        )?)),
         None => Ok(OrFalse::False),
     }
 }

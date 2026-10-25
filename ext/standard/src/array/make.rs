@@ -8,7 +8,9 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Passed, Raw, Ref, True, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{numeric_string, to_array};
-use php_ext::raising::{Level, Thrown, argument_error, call_stack_end, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, argument_error, call_stack_end, docref, throw_error, value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, Value, ValueRef};
@@ -823,9 +825,8 @@ fn double_range(
     let size = |req: &mut Request, high: f64, low: f64| -> Result<u32, Thrown> {
         let calc = ((high - low) / step) + 1.0;
         if calc >= limit {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 &format!(
                     "The supplied range exceeds the maximum array size by {:.1} elements: start={low:.1}, end={high:.1}, step={step:.1}. Max size: {limit:.0}",
                     calc - limit
@@ -919,9 +920,8 @@ fn long_range(
     let size = |req: &mut Request, high: i64, low: i64| -> Result<u64, Thrown> {
         let calc = high.wrapping_sub(low).cast_unsigned() / step;
         if calc >= HT_MAX_SIZE - 1 {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 &format!(
                     "The supplied range exceeds the maximum array size by {} elements: start={low}, end={high}, step={step}. Calculated size: {calc}. Maximum size: {HT_MAX_SIZE}.",
                     calc - (HT_MAX_SIZE - 1)

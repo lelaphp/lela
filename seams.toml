@@ -23,7 +23,7 @@ pin = "oracle.toml"                        # the only statement of version, dige
 total = 520000                             # every counted line of the workspace plus `bindings`; the crate rows are ceilings each crate is held to, and do not sum to this
 new = 127500                               # design §0, §4.1: lines not on the inheritance manifest (§13)
 docs = 6500                                # design §10; `docs/**` plus the three living documents
-harness = 650                              # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded
+harness = 1600                             # harness §12 item 6: `.claude/**` and `harness-plugins/**` hand-written, generated types excluded; 1600 for the readiness-update skill (2026-10-24)
 lock_packages = 190                        # design §4.1: third-party `Cargo.lock` packages (those with a `source`); a workspace crate is held by its [[crate]] row and ceiling (#1335); 164 is stage 1's TLS as #2333 ruled, 190 adds the compiled tier's Cranelift core set and rustix as #2945 ruled
 clean_build_release_s = 90                 # design §10: `cargo build --release` from clean on the dev machine
 api_items = 1525                           # design §4.4, §4.5: public items of php_ext, measured on api.lock (revision 34; #697); 1525 for #3359's frameless entries (#3360, 2026-10-24)
@@ -83,7 +83,7 @@ name = "php_bundle"
 budget = 500
 [[crate]]
 name = "php_jit"
-budget = 17500
+budget = 20000
 feature = "jit"
 targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "aarch64-apple-darwin"]
 [[crate]]

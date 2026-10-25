@@ -55,6 +55,7 @@ ChunkCache::new
 DeclaredRows
 DelayedOom
 Direction
+DoubleText
 EmbeddedArr
 EmbeddedArr::arr
 EmbeddedArr::free_data
@@ -117,6 +118,7 @@ Heap::array_lookup
 Heap::array_mixed
 Heap::array_next_entry
 Heap::array_packed
+Heap::array_singleton
 Heap::array_sized
 Heap::array_sort
 Heap::array_str_take
@@ -224,6 +226,7 @@ Heap::string_extend
 Heap::string_finit
 Heap::string_fresh
 Heap::string_safe_alloc
+Heap::string_sized
 Heap::string_truncate
 Heap::string_with
 Heap::symtable_clean
@@ -271,6 +274,8 @@ Intern::intern_marked
 Intern::interning
 Key
 Laziness
+LongText
+LongText::long
 Made
 Made::value
 MapPtr
@@ -284,6 +289,10 @@ MapTable::new
 Number
 Number::compare
 Number::double
+NumberText
+NumberText::as_bytes
+NumberText::as_str
+NumberText::push_str
 Obj
 Obj::CLASS_AT
 Obj::SLOTS_AT
@@ -361,6 +370,8 @@ ResourceType
 Scalar
 Scalar::is_true
 Scalar::of
+Sizing
+Sizing::bytes
 Slot
 SortEntry
 StackLayout
@@ -489,6 +500,7 @@ ecalloc
 efree
 emalloc
 erealloc
+gcvt
 identical
 identical_constants
 main_call_stack_size

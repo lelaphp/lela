@@ -26,7 +26,8 @@ use php_ext::call::{
 use php_ext::coerce::{coerce_param, to_string, truthy, with_string};
 use php_ext::decl::{Name, Type};
 use php_ext::raising::{
-    Thrown, arg_type_error, arg_value_error, arity, throw, throw_error, throwing_warnings,
+    Thrown, arg_type_error, arg_value_error, arity, throw, throw_error, throw_exception_ex,
+    throwing_warnings,
 };
 use php_ext::request::Request;
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value};
@@ -794,7 +795,7 @@ impl IteratorIterator {
             };
             let Some(held) = crate::object_answered(req, answered, b"Traversable") else {
                 let name = String::from_utf8_lossy(&crate::class_name(req, cast)).into_owned();
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "LogicException",
                     &format!(
@@ -1404,7 +1405,7 @@ impl CachingIterator {
             == 0
         {
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "BadMethodCallException",
                 &format!("{class} does not fetch string value (see CachingIterator::__construct)"),
@@ -2374,7 +2375,7 @@ impl RecursiveTreeIterator {
                 .is_some_and(|o| crate::is_a(req, o.class(), b"Traversable"))
             {
                 answered.give_up(req);
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "LogicException",
                     "getIterator() must return an object that implements Traversable",
@@ -2674,7 +2675,7 @@ fn checked(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
 /// constructor call is `BadMethodCallException`, named for `base`.
 fn unconstructed(req: &mut Request, this: PhpObject, base: &str) -> Result<(), Thrown> {
     if dual(req, this, |it| it.kind)? != Kind::Unknown {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "BadMethodCallException",
             &format!("{base}::getIterator() must be called exactly once per instance"),
@@ -2931,14 +2932,14 @@ fn limit_seek_to(req: &mut Request, this: PhpObject, pos: i64) -> Result<(), Thr
     dual_free(req, this)?;
     let (offset, count, current) = dual(req, this, |it| (it.offset, it.count, it.pos))?;
     if pos < offset {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "OutOfBoundsException",
             &format!("Cannot seek to {pos} which is below the offset {offset}"),
         ));
     }
     if count != -1 && pos - offset >= count {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "OutOfBoundsException",
             &format!("Cannot seek to {pos} which is behind offset {offset} plus count {count}"),
@@ -3069,7 +3070,7 @@ fn full_cache(req: &mut Request, this: PhpObject) -> Result<PhpArray, Thrown> {
         Some(cache) if flags & CachingIterator::FULL_CACHE != 0 => Ok(cache),
         _ => {
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
-            Err(throw(
+            Err(throw_exception_ex(
                 req,
                 "BadMethodCallException",
                 &format!("{class} does not use a full cache (see CachingIterator::__construct)"),
@@ -3107,7 +3108,7 @@ fn no_rewind_iter(req: &mut Request, this: PhpObject) -> Result<Option<Iter>, Th
 fn appended(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
     match dual(req, this, |it| it.appended.as_deref().copied())? {
         Some(list) => Ok(list),
-        None => Err(throw(
+        None => Err(throw_exception_ex(
             req,
             "BadMethodCallException",
             "Classes derived from AppendIterator must call AppendIterator::__construct()",
@@ -3854,7 +3855,7 @@ fn rec_construct(
         let answered = call_method(req, &given, b"getIterator", &[])?;
         let Some(held) = crate::object_answered(req, answered, b"Traversable") else {
             let name = String::from_utf8_lossy(&crate::class_name(req, given.class())).into_owned();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "LogicException",
                 &format!("{name}::getIterator() must return an object that implements Traversable"),

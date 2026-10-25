@@ -13,12 +13,12 @@ use crate::archive::{
     AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, AFL_IS_TORRENTZIP, Archive, CM_BZIP2, CM_DEFAULT,
     CM_DEFLATE, CM_LZMA, D_ATTRIBUTES, D_COMMENT, D_COMP_METHOD, D_ENCRYPTION_METHOD,
     D_EXTRA_FIELD, D_FILENAME, D_LAST_MOD, D_PASSWORD, Dirent, EM_AES_128, EM_AES_192, EM_AES_256,
-    EM_NONE, EM_TRAD_PKWARE, GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, Source,
-    TRUNCATE, actual, is_default,
+    EM_NONE, EM_TRAD_PKWARE, GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, TRUNCATE,
+    actual, is_default,
 };
 use crate::codec;
 use crate::dostime::TORRENTZIP;
-use crate::error::{Done, Er, Failed, Status};
+use crate::error::{Detail, Done, Er, Failed, Status};
 use crate::strings::{Enc, ZStr};
 
 /// What a running `close` asks the program: the progress callback with
@@ -174,9 +174,49 @@ fn ef_utf8(id: u16, s: &ZStr) -> Vec<u8> {
     ef
 }
 
-/// `_zip_dirent_write`: a local header or a central record.
+/// `_zip_dirent_write`: a local header or a central record, refused
+/// with libzip 1.12's `ZIP_ER_EF_TOO_LARGE` where libzip's own extra
+/// fields and the entry's pass 65535 bytes.
+///
+/// A `WinZip` AES entry is AE-2 below 20 bytes and AE-1 from there:
+///
+/// ```php
+/// $z = new ZipArchive; $z->open('aes-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+/// $z->addFromString('small', 'tiny'); $z->addFromString('big', str_repeat('b', 64));
+/// foreach (['small', 'big'] as $n) $z->setEncryptionName($n, ZipArchive::EM_AES_256, 'pw');
+/// $z->close(); $b = file_get_contents('aes-witness.zip');
+/// $v = []; for ($at = 0; ($at = strpos($b, "\x01\x99\x07\x00", $at)) !== false; $at += 4) $v[] = 'AE-' . unpack('v', $b, $at + 4)[1];
+/// echo implode(' ', $v), "\n"; $z->open('aes-witness.zip'); $z->setPassword('pw'); var_dump($z->getFromName('small'), strlen($z->getFromName('big')));
+/// $z->close(); unlink('aes-witness.zip');
+/// ```
+/// ```expect
+/// AE-2 AE-1 AE-2 AE-1
+/// string(4) "tiny"
+/// int(64)
+/// ```
+///
+/// An entry whose own central field leaves no room for the AES field:
+///
+/// ```php
+/// $ef = pack('vv', 0xcafe, 65527) . str_repeat('z', 65527);
+/// $local = "PK\3\4" . pack('vvvvvVVVvv', 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, 0) . 'a' . 'hello';
+/// $cd = "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, strlen($ef), 0, 0, 0, 0x81a40000, 0) . 'a' . $ef;
+/// file_put_contents('ef-witness.zip', $local . $cd . "PK\5\6" . pack('vvvvVVv', 0, 0, 1, 1, strlen($cd), strlen($local), 0));
+/// $z = new ZipArchive; var_dump($z->open('ef-witness.zip'), $z->getFromName('a'));
+/// $z->setEncryptionName('a', ZipArchive::EM_AES_256, 'pw'); var_dump($z->close(), $z->status, $z->getStatusString());
+/// unlink('ef-witness.zip');
+/// ```
+/// ```expect
+/// bool(true)
+/// string(5) "hello"
+///
+/// Warning: ZipArchive::close(): Extra fields too large in %s on line %d
+/// bool(false)
+/// int(36)
+/// string(22) "Extra fields too large"
+/// ```
 #[expect(clippy::too_many_lines, reason = "_zip_dirent_write's one body")]
-fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
+fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Result<Vec<u8>, Status> {
     let name_enc = de.filename.as_ref().map_or(Enc::Ascii, ZStr::guess);
     let com_enc = de.comment.as_ref().map_or(Enc::Ascii, ZStr::guess);
     let mut efs: Vec<Vec<u8>> = Vec::new();
@@ -223,12 +263,15 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
     }
     let aes = matches!(de.encryption_method, EM_AES_128 | EM_AES_192 | EM_AES_256);
     if aes {
+        // `winzip_aes_version` (libzip 1.12): AE-2, the CRC field zero,
+        // below 20 bytes, and AE-1 from there.
+        let version = if de.uncomp_size < 20 { 2 } else { 1 };
         let mut ef = vec![
             0x01,
             0x99,
             7,
             0,
-            2,
+            version,
             0,
             b'A',
             b'E',
@@ -243,6 +286,9 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
         (false, false) => de.extra_local.clone().unwrap_or_default(),
     };
     let internal: Vec<u8> = efs.concat();
+    let Ok(ef_len) = u16::try_from(internal.len() + own.len()) else {
+        return Err(Status::of(Er::EfTooLarge, 0));
+    };
     let name = de.filename.as_ref().map_or(&[][..], |f| f.raw.as_slice());
     let comment = de.comment.as_ref().map_or(&[][..], |c| c.raw.as_slice());
     let mut b = Vec::with_capacity(46 + name.len() + internal.len() + own.len());
@@ -272,7 +318,7 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
     } else {
         put!(b; u32_of(de.comp_size), u32_of(de.uncomp_size));
     }
-    put!(b; u16_of(name.len()), u16_of(internal.len() + own.len()));
+    put!(b; u16_of(name.len()), ef_len);
     if central {
         let comment_len = if torrentzip { 0 } else { u16_of(comment.len()) };
         put!(b; comment_len, u16_of(de.disk_number), de.int_attrib, de.ext_attrib, u32_of(de.offset));
@@ -283,7 +329,7 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
     if central && !torrentzip {
         b.extend_from_slice(comment);
     }
-    b
+    Ok(b)
 }
 
 /// `write_data_descriptor`.
@@ -408,7 +454,8 @@ impl Archive {
             return Ok(0);
         };
         let Ok((start, _)) = self.local_header(i) else {
-            return self.fail(Er::Incons);
+            self.error = Status::bare(Detail::CdirEntryInvalid);
+            return Err(Failed);
         };
         let Some(orig) = self.entries[i].orig.clone() else {
             return Ok(0);
@@ -555,7 +602,7 @@ impl Archive {
                 if de.encryption_method != EM_TRAD_PKWARE {
                     de.bitflags &= !GPBF_DATA_DESCRIPTOR;
                 }
-                out.write(&dirent_bytes(&mut de, false, torrentzip))?;
+                out.write(&dirent_bytes(&mut de, false, torrentzip)?)?;
                 let raw = self.raw_data(i).inspect_err(|s| self.error = *s)?;
                 let total = raw.len() as f64;
                 let mut done = 0usize;
@@ -581,7 +628,7 @@ impl Archive {
             let ((Some(de), _) | (None, Some(de))) = (&mut e.changes, &mut e.orig) else {
                 continue;
             };
-            out.write(&dirent_bytes(de, true, torrentzip))?;
+            out.write(&dirent_bytes(de, true, torrentzip)?)?;
         }
         let cdir_crc = out.crc.take().map(crc32fast::Hasher::finalize);
         let size = out.pos - offset;
@@ -611,11 +658,30 @@ impl Archive {
 
     /// `add_data`: the entry's data from its source or its old self,
     /// decrypted, decompressed, compressed and encrypted as its dirent
-    /// asks, the dirent written before it.
+    /// asks, the dirent written before it. An unchanged entry is read as
+    /// libzip's zip source reads it, decrypted and decompressed, so any
+    /// method but store compresses it again, at the level its dirent asks:
+    ///
+    /// ```php
+    /// $d = ''; for ($i = 0; $i < 4000; $i++) $d .= md5((string) ($i % 97)) . ' ';
+    /// $z = new ZipArchive; $z->open('rc-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// $z->addFromString('s', str_repeat('a', 999)); $z->setCompressionName('s', ZipArchive::CM_STORE);
+    /// $z->addFromString('l', $d); $z->setCompressionName('l', ZipArchive::CM_DEFLATE, 9);
+    /// $z->addFromString('e', $d); $z->setCompressionName('e', ZipArchive::CM_DEFLATE, 1); $z->close();
+    /// $z->open('rc-witness.zip'); $z->setCompressionName('s', ZipArchive::CM_DEFLATE);
+    /// $z->setCompressionName('l', ZipArchive::CM_DEFLATE, 1); $z->setEncryptionName('e', ZipArchive::EM_TRAD_PKWARE, 'pw'); $z->close();
+    /// $z->open('rc-witness.zip'); $z->setPassword('pw');
+    /// foreach (['s', 'l', 'e'] as $n) { $s = $z->statName($n); echo "$n {$s['comp_method']} {$s['comp_size']} ", strlen($z->getFromName($n)), "\n"; }
+    /// $z->close(); unlink('rc-witness.zip');
+    /// ```
+    /// ```expect
+    /// s 8 11 999
+    /// l 8 3071 132000
+    /// e 8 2837 132000
+    /// ```
     #[expect(
-        clippy::too_many_lines,
         clippy::cast_precision_loss,
-        reason = "add_data's one body, and its progress as libzip's doubles"
+        reason = "add_data's progress as libzip's doubles"
     )]
     fn add_data(
         &mut self,
@@ -625,83 +691,45 @@ impl Archive {
         progress: &mut Progress<'_>,
         torrentzip: bool,
     ) -> Result<(), Status> {
-        let has_source = self.entries[i].source.is_some();
-        let (st_method, st_enc, st_crc, st_mtime, st_dostime, st_attr) = if has_source {
-            let Some(s) = &self.entries[i].source else {
-                return Err(Status::of(Er::Internal, 0));
-            };
-            let st = s.stat();
-            (0u16, EM_NONE, None, st.mtime, None, s.attributes())
+        // The data as `add_data`'s source gives it: a new source's bytes,
+        // or the unchanged entry through `zip_source_zip_file_create(za, i,
+        // ZIP_FL_UNCHANGED, ...)`, decrypted with the default password,
+        // decompressed and its CRC checked. Either stats as stored and
+        // unencrypted.
+        let (data, st_mtime, st_dostime, st_attr) = if let Some(s) = &mut self.entries[i].source {
+            let (mtime, attr) = (s.stat().mtime, s.attributes());
+            let data = s.read_all().inspect_err(|s| self.error = *s)?;
+            (data, mtime, None, attr)
         } else {
-            let Some(o) = &self.entries[i].orig else {
+            let Some(last_mod) = self.entries[i].orig.as_ref().map(|o| o.last_mod) else {
                 return Err(Status::of(Er::Internal, 0));
             };
-            let crc = o.crc_valid.then_some(o.crc);
-            (
-                actual(o.comp_method.max(0)),
-                o.encryption_method,
-                crc,
-                0,
-                Some(o.last_mod),
-                None,
-            )
-        };
-        de.bitflags &= !GPBF_DATA_DESCRIPTOR;
-        if is_default(de.comp_method) && st_method != 0 {
-            de.comp_method = i32::from(st_method);
-        }
-        if de.changed & D_LAST_MOD == 0 {
-            de.last_mod = st_dostime.unwrap_or_else(|| self.zone.u2d(st_mtime));
-        }
-        let recompress = torrentzip || st_method != actual(de.comp_method);
-        let decompress = recompress && st_method != 0;
-        let reencrypt =
-            recompress || de.changed & D_PASSWORD != 0 || de.encryption_method != st_enc;
-        let decrypt = reencrypt && st_enc != EM_NONE;
-        let encrypt = reencrypt && de.encryption_method != EM_NONE;
-        if !decrypt && st_enc == EM_TRAD_PKWARE && de.changed & D_LAST_MOD != 0 {
-            de.changed &= !D_LAST_MOD;
-        }
-        // The data and the method it is in, with its CRC where known.
-        let (mut data, mut method, crc, size): (Vec<u8>, u16, u32, u64) = if has_source {
-            let read = self.entries[i].source.as_mut().map(Source::read_all);
-            let data = match read {
-                Some(Ok(d)) => d,
-                Some(Err(s)) => {
-                    self.error = s;
-                    return Err(s);
-                }
-                None => return Err(Status::of(Er::Internal, 0)),
-            };
-            let crc = crc32fast::hash(&data);
-            let size = data.len() as u64;
-            (data, 0u16, crc, size)
-        } else if decrypt || decompress {
             let password = self.default_password.clone();
             let (data, fault) = self
-                .decoded(i, if decrypt { password.as_deref() } else { None })
+                .decoded(i, password.as_deref())
                 .inspect_err(|s| self.error = *s)?;
             if let Some(fault) = fault {
                 self.error = fault;
                 return Err(fault);
             }
-            let crc = crc32fast::hash(&data);
-            let size = data.len() as u64;
-            if !decompress && st_method != 0 {
-                // Decrypted only: compressed again in the method it was in.
-                de.comp_method = i32::from(st_method);
-            }
-            (data, 0, crc, size)
-        } else {
-            let raw = self.raw_data(i).inspect_err(|s| self.error = *s)?;
-            let size = self.entries[i].orig.as_ref().map_or(0, |o| o.uncomp_size);
-            (raw, st_method, st_crc.unwrap_or(0), size)
+            (data, 0, Some(last_mod), None)
         };
+        de.bitflags &= !GPBF_DATA_DESCRIPTOR;
+        if de.changed & D_LAST_MOD == 0 {
+            de.last_mod = st_dostime.unwrap_or_else(|| self.zone.u2d(st_mtime));
+        }
+        // `needs_compress`: what is stored needs no decompression, and a
+        // method other than store is a recompression (`needs_recompress`).
+        let compress = actual(de.comp_method) != 0;
+        let encrypt = de.encryption_method != EM_NONE;
+        let crc = crc32fast::hash(&data);
+        let size = data.len() as u64;
+        let (mut data, mut method) = (data, 0u16);
         let mut attrs = Attributes {
             host: st_attr,
             ..Attributes::default()
         };
-        if method == 0 && (decompress || has_source || decrypt) && actual(de.comp_method) != 0 {
+        if compress {
             let c = codec::compress(
                 &data,
                 actual(de.comp_method),
@@ -740,7 +768,7 @@ impl Archive {
         if !torrentzip {
             apply_attributes(de, &attrs);
         }
-        out.write(&dirent_bytes(de, false, torrentzip))?;
+        out.write(&dirent_bytes(de, false, torrentzip)?)?;
         let total = size.max(1) as f64;
         let chunks = data.chunks(8192).count().max(1);
         for (n, chunk) in data.chunks(8192).enumerate() {

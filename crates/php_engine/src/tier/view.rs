@@ -355,6 +355,61 @@ pub struct MapPtrRaw {
     pub slot: u32,
 }
 
+/// Where one slot of a held op array's runtime cache stands in one
+/// request ([`touch`]): the engine's slot itself, which compiled code
+/// reads in place past [`PLACE`](super::PLACE), standing there for as long
+/// as the request runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedSlot(std::ptr::NonNull<u8>);
+
+impl CachedSlot {
+    /// The slot's address, its provenance exposed, as compiled code is
+    /// handed it.
+    #[must_use]
+    pub fn address(self) -> usize {
+        self.0.as_ptr().expose_provenance()
+    }
+}
+
+/// The touch (`jit-design.md` §4.6, #2957's note): where slot `raw` of
+/// the runtime cache of the op array `epoch` holds at its offset stands
+/// in `req`, where the request has laid that cache down. php lays a
+/// function's cache at the first `INIT_*` that pushes its call in the
+/// request (`init_func_run_time_cache`, `Z/Zend/zend_vm_def.h:4072`),
+/// and so does the engine's `push_call`, so a
+/// trace entered before its inlined callee's first call finds none, and
+/// the touch lays nothing down: the slot is answered none, its opline is
+/// its handler's until the call's `INIT_*` lays the cache, and a later
+/// entry touches it again. A function's cache stands where it was laid
+/// for as long as the request is served, so compiled code that was handed
+/// the slot reads it for as long as it may. None also for a file's own
+/// code, whose every activation lays a fresh cache, for an op array the
+/// epoch holds no row for, and for a slot past its cache.
+#[must_use]
+pub fn touch(req: &Request, epoch: &Epoch, raw: MapPtrRaw) -> Option<CachedSlot> {
+    let code = touched_code(epoch, raw)?;
+    let at = crate::exec::CacheAt::of(code.runtime_cache);
+    let slot = req.touch_cache(at, CacheSlot(raw.slot))?;
+    Some(CachedSlot(slot.cast()))
+}
+
+/// Whether [`touch`] can ever answer slot `raw` in a request: not for a
+/// file's own code, an op array the epoch holds no row for, or a slot past
+/// its cache, which no call lays down.
+#[must_use]
+pub fn touchable(epoch: &Epoch, raw: MapPtrRaw) -> bool {
+    touched_code(epoch, raw)
+        .is_some_and(|code| crate::exec::CacheSize::of(code).holds(CacheSlot(raw.slot)))
+}
+
+/// The op array of a function's whose cache slot `raw` names, which the
+/// touch reads.
+fn touched_code(epoch: &Epoch, raw: MapPtrRaw) -> Option<&OpArray> {
+    (epoch.func(FuncRef(MapPtrOffset::Engine(raw.offset))))
+        .filter(|func| !func.is_main())
+        .and_then(|func| func.op_array())
+}
+
 /// Where a property opline over a constant name finds the property on an
 /// object of one published class, from one op array
 /// ([`UnitView::hold_place`]): the declared slot, `OBJ_PROP_NUM`, and
@@ -362,6 +417,12 @@ pub struct MapPtrRaw {
 /// step php's code generator serves through `zend_jit_assign_to_typed_prop`
 /// and its kin and this tier through the handler, a `readonly` one and one
 /// of a set visibility among them.
+///
+/// For a request-scoped class, whose id and slots are the request's, the
+/// place is the one the recording's request found, by which the trace
+/// decides how it serves the opline, and compiled code reads the place
+/// of the request it runs in from that request's cache slot
+/// ([`PropertySlot::cached`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PropertySlot {
     func: FuncRef,
@@ -370,9 +431,20 @@ pub struct PropertySlot {
     slot: u32,
     typed: bool,
     admits: u16,
+    cached: Option<MapPtrRaw>,
 }
 
 impl PropertySlot {
+    /// The runtime-cache slot compiled code reads the place from, in the
+    /// request it runs in, for a request-scoped class, as php's code reads
+    /// `CACHED_PTR(cache_slot)` for a class that is not immutable
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`); none for a
+    /// published class, whose place is this one in every request.
+    #[must_use]
+    pub fn cached(self) -> Option<MapPtrRaw> {
+        self.cached
+    }
+
     /// The declared slot, by its number among the object's slots.
     #[must_use]
     pub fn slot(self) -> u32 {
@@ -476,15 +548,18 @@ impl UnitView {
     /// class, as php's code generator does for a property its
     /// `zend_get_known_property_info` finds on an immutable class
     /// (`Z/ext/opcache/jit/zend_jit_ir.c:14313-14340`). Taken only where
-    /// the place is the same in every request and every frame that runs
-    /// the op array: `class` is published, so its id names one linked,
-    /// immutable class in every request of the epoch and its slots and
-    /// their types are that record's (a class a request linked over one of
-    /// its own, `zend_lazy_class_load`'s copy, and every enum are the
-    /// request's, with ids of their own); the frame reads its op array's
-    /// own cache, so it is no closure's and no trait method's copy's; and
-    /// the op array runs in one scope ([`super::published::Func::fixes_scope`]),
-    /// which is what the placement asks of the frame. `false`, taking
+    /// every frame that runs the op array finds the place one way: the
+    /// frame reads its op array's own cache, so it is no closure's and no
+    /// trait method's copy's, and the op array runs in one scope
+    /// ([`super::published::Func::fixes_scope`]), which is what the
+    /// placement asks of the frame. A published class's id names one
+    /// linked, immutable class in every request of the epoch, whose slots
+    /// and their types are that record's; a request-scoped one, a class a
+    /// request linked over one of its own (`zend_lazy_class_load`'s copy),
+    /// every enum and an evaluated class, has an id and slots of the
+    /// request's, so its place is read where compiled code runs from that
+    /// request's slot ([`PropertySlot::cached`]), as php's code reads it
+    /// for a class that is not immutable (`:14341-14370`). `false`, taking
     /// nothing, for any other, and where the cache names no declared slot.
     pub fn hold_place(
         &mut self,
@@ -527,9 +602,22 @@ impl UnitView {
             },
             _ => return false,
         };
-        if op.op2_type != OperandKind::Const || !self.hold(req, f) || !self.hold_class(req, class) {
+        if op.op2_type != OperandKind::Const || !self.hold(req, f) {
             return false;
         }
+        // A request-scoped class's place is read from the cache slot of
+        // the request compiled code runs in.
+        let cached = if class.is_published() {
+            if !self.hold_class(req, class) {
+                return false;
+            }
+            None
+        } else {
+            match self.cache_slot(f, slot) {
+                Some(raw) => Some(raw),
+                None => return false,
+            }
+        };
         let Some(crate::exec::PropertyOffset::Declared { slot, ty }) =
             req.cached_property(frame, slot, class)
         else {
@@ -556,6 +644,7 @@ impl UnitView {
             slot,
             typed: ty.typed(),
             admits,
+            cached,
         };
         if !self.places.contains(&place) {
             self.places.push(place);

@@ -9,7 +9,7 @@ use php_ext::abi::{OrFalse, This};
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, value_name};
-use php_ext::raising::{Cause, Level, Thrown, docref, fatal, throw_error};
+use php_ext::raising::{Cause, Level, Thrown, docref, fatal, throw_error, type_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
@@ -171,9 +171,8 @@ fn verify_bool(req: &mut Request, answer: Option<Owner<Value>>) -> bool {
     let verdict = verdict.unwrap_or_else(|| {
         if !pending(req) {
             let name = value_name(req, &value);
-            let thrown = throw_error(
+            let thrown = type_error(
                 req,
-                "TypeError",
                 &format!("Session callback must have a return value of type bool, {name} returned"),
             );
             req.state::<State>().thrown = Some(thrown);

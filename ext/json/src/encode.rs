@@ -16,7 +16,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::PropertyPurpose;
 use php_ext::call;
-use php_ext::coerce::{Exponent, float_format, numeric_string};
+use php_ext::coerce::{Exponent, gcvt, numeric_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
@@ -79,6 +79,11 @@ pub(super) fn encode(
     options: i64,
     enc: &mut Encoder,
 ) -> Wrote {
+    // `FAILURE` once the memory limit was met, since 8.5.12, the limit's
+    // fatal raised as the call returns.
+    if req.memory().has_oom() {
+        return Ok(false);
+    }
     let value = value.deref();
     match value.as_ref() {
         ValueRef::Object(object) => {
@@ -172,9 +177,24 @@ fn held(
     wrote
 }
 
-/// `php_json_encode_double`: `zend_gcvt` at `serialize_precision`, with
-/// `.0` appended under `JSON_PRESERVE_ZERO_FRACTION` where the text
-/// carries no decimal point.
+/// `php_json_encode_double`: `zend_gcvt` at `serialize_precision` as the
+/// entry stands (`Z/ext/json/json_encoder.c:84`), with `.0` appended
+/// under `JSON_PRESERVE_ZERO_FRACTION` where the text carries no decimal
+/// point. The entry reaches `zend_gcvt` with none of the `precision ?
+/// precision : 1` that `var_export` reads it through, so at `0` the one
+/// digit is written exponentially once the point stands past it:
+///
+/// ```php
+/// foreach ([0, 1, -1] as $p) {
+///     ini_set('serialize_precision', $p);
+///     echo $p, ": ", json_encode([10/3, 0.25, 1.5, 0.0, -1.5, 1e25, 0.1]), "|", json_encode(0.0, JSON_PRESERVE_ZERO_FRACTION), "|", var_export(10/3, true), "\n";
+/// }
+/// ```
+/// ```expect
+/// 0: [3.0e+0,0.2,2.0e+0,0.0e+0,-2.0e+0,1.0e+25,0.1]|0.0e+0|3.0
+/// 1: [3,0.2,2,0,-2,1.0e+25,0.1]|0.0|3.0
+/// -1: [3.3333333333333335,0.25,1.5,0,-1.5,1.0e+25,0.1]|0.0|3.3333333333333335
+/// ```
 fn encode_double(
     req: &mut Request,
     buf: &mut SmartStr,
@@ -182,7 +202,7 @@ fn encode_double(
     options: i64,
     precision: i32,
 ) -> Result<(), Thrown> {
-    let mut text = float_format(value, precision, Exponent::Lower);
+    let mut text = gcvt(value, precision, Exponent::Lower);
     if options & JSON_PRESERVE_ZERO_FRACTION != 0 && !text.contains('.') {
         text.push_str(".0");
     }
@@ -228,13 +248,28 @@ fn escape_string(
         }
     }
     let checkpoint = buf.as_bytes().len();
-    buf.reserve(req, s.len().saturating_add(2))?;
+    // `smart_str_falloc(buf, len + 2, 0, fallible: true)` since 8.5.12:
+    // `FAILURE` where the memory limit refused the room.
+    if req
+        .memory_mut()
+        .fallible(|req| buf.reserve(req, s.len().saturating_add(2)))?
+        .is_none()
+    {
+        return Ok(false);
+    }
     buf.append(req, b"\"")?;
     let (mut at, mut run) = (0, 0);
     while let Some(&byte) = s.get(at) {
         if !escaped(byte) {
             at += 1;
             continue;
+        }
+        // "An escaped byte can append six": `FAILURE` once the memory
+        // limit was met, the buffer cut back to where the string began,
+        // since 8.5.12.
+        if req.memory().has_oom() {
+            buf.remove(checkpoint..usize::MAX);
+            return Ok(false);
         }
         buf.append(req, s.get(run..at).unwrap_or_default())?;
         if byte < 0x80 {
@@ -765,7 +800,9 @@ fn write_row(
     *comma = true;
     pretty_break(req, buf, options, enc)?;
     if as_object {
-        write_key(req, buf, key, options, enc)?;
+        if !write_key(req, buf, key, options, enc)? {
+            return Ok(false);
+        }
         buf.append(
             req,
             if options & JSON_PRETTY_PRINT != 0 {
@@ -781,7 +818,8 @@ fn write_row(
 /// One key of an object: the string escaped with `JSON_NUMERIC_CHECK`
 /// taken off it, and an integer key quoted as php's
 /// `smart_str_append_long` between two quotes. A call of its own, as
-/// [`encode_scalar`] is.
+/// [`encode_scalar`] is. `false` where the key failed to escape once the
+/// memory limit was met, and the walk stops there, since 8.5.12.
 #[inline(never)]
 fn write_key(
     req: &mut Request,
@@ -789,7 +827,7 @@ fn write_key(
     key: &Key,
     options: i64,
     enc: &mut Encoder,
-) -> Result<(), Thrown> {
+) -> Wrote {
     match key {
         Key::Str(name) => {
             let at = buf.as_bytes().len();
@@ -800,13 +838,19 @@ fn write_key(
                 options & !JSON_NUMERIC_CHECK,
                 enc,
             )?;
+            if !wrote && req.memory().has_oom() {
+                return Ok(false);
+            }
             if !wrote && options & JSON_PARTIAL_OUTPUT_ON_ERROR != 0 {
                 buf.remove(at..usize::MAX);
                 buf.append(req, b"\"\"")?;
             }
-            Ok(())
+            Ok(true)
         }
-        Key::Int(n) => buf.append(req, format!("\"{n}\"").as_bytes()),
+        Key::Int(n) => {
+            buf.append(req, format!("\"{n}\"").as_bytes())?;
+            Ok(true)
+        }
     }
 }
 

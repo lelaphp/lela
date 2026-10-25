@@ -247,7 +247,10 @@ fn bare(name: &str) -> String {
 /// `--file` and `--item` narrow the run and `--accept` to the fences they
 /// name (#1146): of two bare fences, one in each file of the crate, a
 /// narrowed accept pins the named one and leaves the other's line as it
-/// stood, and the run judges one witness and counts no coverage.
+/// stood, and the run judges one witness and counts no coverage. Each
+/// narrowed accept records the verdict it wrote in the crate's accepted
+/// scope, as a run over the crate does, which is what `permit` reads a
+/// captured status by ([`witness::record_accepted`]).
 #[test]
 fn file_and_item_narrow_the_run_and_accept_to_the_named_fences() {
     if oracle().is_none() {
@@ -272,6 +275,12 @@ fn file_and_item_narrow_the_run_and_accept_to_the_named_fences() {
         assert_eq!(count(&reading, "run"), 1, "{reading:#?}");
         assert_eq!(count(&reading, "accepted"), 1, "{reading:#?}");
         assert_eq!(count(&reading, "subjects"), 0, "{reading:#?}");
+        let record = Store::of_workspace(&root)
+            .read("witness", "ext/fixture@accepted")
+            .unwrap()
+            .expect("the narrowed accept records the verdict it wrote");
+        assert_eq!(record.status, Status::Pass, "{record:#?}");
+        assert!(!record.key().is_empty(), "{record:#?}");
     };
     let pinned = |file: &str| {
         !fs::read_to_string(root.join("ext/fixture/src").join(file))

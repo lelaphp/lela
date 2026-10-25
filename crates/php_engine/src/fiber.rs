@@ -49,7 +49,7 @@ use crate::api::abi::{
     Callable, DtorObj, GcTable, Instance, NamedVariadic, ObjectHandlers, Refusals, This,
 };
 use crate::api::call::call_named_made;
-use crate::api::raising::{Thrown, error, throw, throw_error};
+use crate::api::raising::{Thrown, error, throw_error, throw_exception_ex};
 use crate::api::request::{ObservedChain, Raised, Request};
 use crate::api::values::{Owner, PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
@@ -2201,7 +2201,7 @@ fn lay_down<P: HoldsCoroutine>(
     let stack = match stack {
         Ok(stack) => stack,
         Err(StackRefused::TooSmall(least)) => {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("Fiber stack size is too small, it needs to be at least {least} bytes"),
@@ -2214,7 +2214,7 @@ fn lay_down<P: HoldsCoroutine>(
                 .strip_suffix(&format!(" (os error {errno})"))
                 .unwrap_or(&text)
                 .to_string();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("Fiber stack allocate failed: mmap failed: {text} ({errno})"),

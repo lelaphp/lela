@@ -1021,7 +1021,7 @@ impl Request {
     /// ([`Request::name_unit`]). The `Err` is the memory limit.
     fn eval_name(&mut self, file: &[u8], line: u32) -> Result<PhpString, Thrown> {
         const TAIL: &[u8] = b") : eval()'d code";
-        let line = crate::c_number::Long::of(i64::from(line));
+        let line = php_heap::LongText::long(i64::from(line));
         let parts = [file, b"(", line.as_bytes(), TAIL];
         let len = parts.iter().map(|part| part.len()).sum();
         self.string_with(len, |mut into| {

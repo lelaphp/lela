@@ -83,7 +83,7 @@ use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
     MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
-use php_ext::raising::{Thrown, arg_count_error, throw, throw_error};
+use php_ext::raising::{Thrown, arg_count_error, throw, throw_error, throw_exception_ex};
 use php_ext::request::{ExtensionId, MethodRow, Request};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
@@ -4623,7 +4623,7 @@ impl ObjectHandlers for ReflectorHandlers {
             value.give_up(req);
             name.give_up(req);
             let class = class_name_of(req, object.class());
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -4957,7 +4957,7 @@ fn class_of(
 fn class_named(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
     match autoload(req, name)? {
         Some(class) => Ok(class),
-        None => Err(throw(
+        None => Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!("Class \"{}\" does not exist", String::from_utf8_lossy(name)),
@@ -5036,7 +5036,7 @@ fn this_extension(req: &mut Request, this: PhpObject) -> Result<ExtensionId, Thr
     let name = this_name(req, this, "ReflectionExtension")?;
     match req.extensions().named(&name) {
         Some(extension) => Ok(extension),
-        None => Err(throw(
+        None => Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!(
@@ -5580,7 +5580,9 @@ fn value_string(req: &mut Request, value: &Value) -> String {
     match value.deref().as_ref() {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
-        ValueRef::Float(number) => float_format(number, req.ini().precision(), Exponent::Upper),
+        ValueRef::Float(number) => float_format(number, req.ini().precision(), Exponent::Upper)
+            .as_str()
+            .to_owned(),
         _ => php_ext::coerce::with_string(req, value, |s| String::from_utf8_lossy(s).into_owned())
             .unwrap_or_default(),
     }
@@ -7609,7 +7611,7 @@ impl ReflectionExtension {
     fn __construct(req: &mut Request, this: This<Self>, name: PhpString) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
         let Some(extension) = req.extensions().named(&name) else {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -8367,7 +8369,7 @@ impl ReflectionZendExtension {
     fn __construct(req: &mut Request, this: This<Self>, name: PhpString) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
         if zend_extension_named(req, &name).is_none() {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(

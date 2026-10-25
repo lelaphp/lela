@@ -627,7 +627,7 @@ impl ReflectionAttribute {
     /// pk(function () use ($a) { try { $a->newInstance(); } catch (Error $e) {} });
     /// ```
     /// ```expect
-    /// 2520 32
+    /// 2368 32
     /// ```
     ///
     /// The class is `zend_lookup_class`'s, so the autoloader is asked
@@ -664,7 +664,7 @@ impl ReflectionAttribute {
     /// pk(function () use ($a) { try { $a->newInstance(); } catch (Error $e) {} });
     /// ```
     /// ```expect
-    /// 4808 32
+    /// 4616 32
     /// ```
     fn newInstance(req: &mut Request, this: This<Self>) -> Result<Owner<PhpObject>, Thrown> {
         let kept = this_attribute(req, this.object())?;

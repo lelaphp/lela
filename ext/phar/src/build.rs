@@ -8,7 +8,7 @@ use std::sync::Arc;
 use php_ext::abi::{Passed, Raw};
 use php_ext::call::{instantiate, lookup_class};
 use php_ext::coerce::{value_name, with_string};
-use php_ext::raising::{Thrown, arity, deprecated, throw};
+use php_ext::raising::{Thrown, arity, deprecated, throw_exception_ex};
 use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_spl::directory::{self as spl, Filesystem};
@@ -34,7 +34,7 @@ pub(crate) enum Source<'a> {
 /// A flush's error as `PharException`.
 fn flushed(req: &mut Request, id: ArchiveId) -> Result<(), Thrown> {
     match write::flush(req, id)? {
-        Some(error) => Err(throw(req, "PharException", &error)),
+        Some(error) => Err(throw_exception_ex(req, "PharException", &error)),
         None => Ok(()),
     }
 }
@@ -57,7 +57,7 @@ pub(crate) fn add_file(
     source: Source<'_>,
 ) -> Result<(), Thrown> {
     if path::is_magic(name) {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "BadMethodCallException",
             "Cannot create any files in magic \".phar\" directory",
@@ -68,7 +68,7 @@ pub(crate) fn add_file(
         Ok(data) => data,
         Err(error) => {
             let tail = error.map(|e| format!(": {e}")).unwrap_or_default();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "BadMethodCallException",
                 &format!(
@@ -96,7 +96,7 @@ pub(crate) fn add_file(
         };
         if !bytes.is_empty() && write::stream_write(req, &mut data, &bytes) != Some(bytes.len()) {
             entry::delref(req, data);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "BadMethodCallException",
                 &format!("Entry {} could not be written to", lossy(name)),
@@ -136,7 +136,7 @@ pub(crate) fn mkdir(req: &mut Request, id: ArchiveId, dir: &[u8]) -> Result<(), 
         Ok(data) => data,
         Err(error) => {
             let tail = error.map(|e| format!(": {e}")).unwrap_or_default();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "BadMethodCallException",
                 &format!(
@@ -150,6 +150,9 @@ pub(crate) fn mkdir(req: &mut Request, id: ArchiveId, dir: &[u8]) -> Result<(), 
     flushed(req, id)
 }
 
+/// `spl_ce_UnexpectedValueException`, what `Phar::copy` refuses with.
+const UNEXPECTED: &str = "UnexpectedValueException";
+
 /// `Phar::copy()`: the entry's row copied under a new name, its contents
 /// the copy's own where they are not the archive's file, and the archive
 /// written.
@@ -157,7 +160,7 @@ pub(crate) fn copy(req: &mut Request, id: ArchiveId, old: &[u8], new: &[u8]) -> 
     let fname = lossy(&fname_of(req, id)).into_owned();
     let (o, n) = (lossy(old).into_owned(), lossy(new).into_owned());
     let is_data = archives(req).get(id).is_some_and(|a| a.is_data);
-    let refuse = |req: &mut Request, m: String| Err(throw(req, "UnexpectedValueException", &m));
+    let refuse = |req: &mut Request, m: String| Err(throw_exception_ex(req, UNEXPECTED, &m));
     if readonly(req) && !is_data {
         return refuse(
             req,
@@ -218,7 +221,7 @@ pub(crate) fn copy(req: &mut Request, id: ArchiveId, old: &[u8], new: &[u8]) -> 
     {
         Some(false) => match write::copy_contents(req, id, source)? {
             Ok(bytes) => Some(bytes),
-            Err(error) => return Err(throw(req, "PharException", &error)),
+            Err(error) => return Err(throw_exception_ex(req, "PharException", &error)),
         },
         _ => None,
     };
@@ -283,7 +286,7 @@ pub(crate) fn stub_of(req: &mut Request, id: ArchiveId) -> Result<Vec<u8>, Throw
             None => match archive::read_file(req, &fname, false)? {
                 Some(bytes) => (Arc::new(bytes), csize),
                 None => {
-                    return Err(throw(
+                    return Err(throw_exception_ex(
                         req,
                         "UnexpectedValueException",
                         &format!("phar error: unable to open phar \"{}\"", lossy(&fname)),
@@ -305,7 +308,7 @@ pub(crate) fn stub_of(req: &mut Request, id: ArchiveId) -> Result<Vec<u8>, Throw
                 } else {
                     "zlib"
                 };
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "UnexpectedValueException",
                     &format!(
@@ -319,7 +322,11 @@ pub(crate) fn stub_of(req: &mut Request, id: ArchiveId) -> Result<Vec<u8>, Throw
             raw.to_vec()
         };
         if out.len() < len {
-            return Err(throw(req, "RuntimeException", "Unable to read stub"));
+            return Err(throw_exception_ex(
+                req,
+                "RuntimeException",
+                "Unable to read stub",
+            ));
         }
         return Ok(out[..len].to_vec());
     }
@@ -328,12 +335,22 @@ pub(crate) fn stub_of(req: &mut Request, id: ArchiveId) -> Result<Vec<u8>, Throw
         Some(bytes) => bytes,
         None => match archive::read_file(req, &fname, false)? {
             Some(bytes) => Arc::new(bytes),
-            None => return Err(throw(req, "RuntimeException", "Unable to read stub")),
+            None => {
+                return Err(throw_exception_ex(
+                    req,
+                    "RuntimeException",
+                    "Unable to read stub",
+                ));
+            }
         },
     };
     match bytes.get(..len) {
         Some(stub) => Ok(stub.to_vec()),
-        None => Err(throw(req, "RuntimeException", "Unable to read stub")),
+        None => Err(throw_exception_ex(
+            req,
+            "RuntimeException",
+            "Unable to read stub",
+        )),
     }
 }
 
@@ -346,7 +363,7 @@ pub(crate) fn set_alias(req: &mut Request, id: ArchiveId, alias: &[u8]) -> Resul
     let (is_data, is_tar, fname) = (a.is_data, a.is_tar(), lossy(&a.fname).into_owned());
     let same = a.alias.as_deref().unwrap_or_default() == alias;
     if readonly(req) && !is_data {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "UnexpectedValueException",
             "Cannot write out phar archive, phar is read-only",
@@ -359,7 +376,7 @@ pub(crate) fn set_alias(req: &mut Request, id: ArchiveId, alias: &[u8]) -> Resul
         } else {
             "A Phar alias cannot be set in a plain zip archive"
         };
-        return Err(throw(req, "UnexpectedValueException", message));
+        return Err(throw_exception_ex(req, "UnexpectedValueException", message));
     }
     if same {
         return Ok(());
@@ -367,7 +384,7 @@ pub(crate) fn set_alias(req: &mut Request, id: ArchiveId, alias: &[u8]) -> Resul
     if let Some(holder) = archives(req).by_alias(alias) {
         let other = fname_of(req, holder);
         if !archive::free_alias(req, holder) {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "PharException",
                 &format!(
@@ -378,7 +395,7 @@ pub(crate) fn set_alias(req: &mut Request, id: ArchiveId, alias: &[u8]) -> Resul
             ));
         }
     } else if !path::valid_alias(alias) {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "UnexpectedValueException",
             &format!(
@@ -407,7 +424,7 @@ pub(crate) fn set_alias(req: &mut Request, id: ArchiveId, alias: &[u8]) -> Resul
         if readd && let Some(old) = old {
             table.alias_map.add(&old, id).ok();
         }
-        return Err(throw(req, "PharException", &error));
+        return Err(throw_exception_ex(req, "PharException", &error));
     }
     archives(req).alias_map.add(alias, id).ok();
     Ok(())
@@ -426,7 +443,7 @@ fn no_stub_in_data(req: &mut Request, id: ArchiveId) -> Result<(), Thrown> {
     } else {
         "A Phar stub cannot be set in a plain zip archive"
     };
-    Err(throw(req, "UnexpectedValueException", message))
+    Err(throw_exception_ex(req, "UnexpectedValueException", message))
 }
 
 /// A stub written, its error as `PharException`.
@@ -437,7 +454,7 @@ fn flushed_with(
     is_default: bool,
 ) -> Result<(), Thrown> {
     match write::flush_ex(req, id, stub, is_default)? {
-        Some(error) => Err(throw(req, "PharException", &error)),
+        Some(error) => Err(throw_exception_ex(req, "PharException", &error)),
         None => Ok(()),
     }
 }
@@ -463,7 +480,7 @@ pub(crate) fn set_default_stub(
         ));
     }
     if readonly(req) {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "UnexpectedValueException",
             "Cannot change stub: phar.readonly=1",
@@ -474,7 +491,7 @@ pub(crate) fn set_default_stub(
     } else {
         match write::default_stub(index, web) {
             Ok(stub) => Some(stub),
-            Err(error) => return Err(throw(req, "UnexpectedValueException", &error)),
+            Err(error) => return Err(throw_exception_ex(req, "UnexpectedValueException", &error)),
         }
     };
     flushed_with(req, id, stub.as_deref(), true)
@@ -490,7 +507,7 @@ pub(crate) fn set_stub(
 ) -> Result<(), Thrown> {
     let is_data = archives(req).get(id).is_some_and(|a| a.is_data);
     if readonly(req) && !is_data {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "UnexpectedValueException",
             "Cannot change stub, phar is read-only",
@@ -512,7 +529,7 @@ pub(crate) fn set_stub(
             &format!("Calling {name}(resource $stub, int $length) is deprecated"),
         );
         let Some(stream) = stream else {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "UnexpectedValueException",
                 "Cannot change stub, unable to read from input stream",
@@ -561,13 +578,17 @@ fn long_quiet(value: &Value) -> Option<i64> {
 pub(crate) fn unlink_archive(req: &mut Request, name: &[u8]) -> Result<(), Thrown> {
     let shown = lossy(name).into_owned();
     if name.is_empty() {
-        return Err(throw(req, "PharException", "Unknown phar archive \"\""));
+        return Err(throw_exception_ex(
+            req,
+            "PharException",
+            "Unknown phar archive \"\"",
+        ));
     }
     let id = match open::open_from_filename(req, name, None, true)? {
         Ok(id) => id,
         Err(error) => {
             let tail = error.map(|e| format!(": {e}")).unwrap_or_default();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "PharException",
                 &format!("Unknown phar archive \"{shown}\"{tail}"),
@@ -580,14 +601,14 @@ pub(crate) fn unlink_archive(req: &mut Request, name: &[u8]) -> Result<(), Throw
         && let Ok(split) = path::split_fname(req, &file, path::Exec::Either, path::Create::No)?
         && split.arch == name
     {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "PharException",
             &format!("phar archive \"{shown}\" cannot be unlinked from within itself"),
         ));
     }
     if archives(req).get(id).is_some_and(|a| a.refcount != 0) {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "PharException",
             &format!(
@@ -712,7 +733,7 @@ fn walk(
         Ok(None) => Ok(ret),
         Ok(Some(error)) => {
             ret.give_up(req);
-            Err(throw(req, "PharException", &error))
+            Err(throw_exception_ex(req, "PharException", &error))
         }
         Err(thrown) => {
             ret.give_up(req);
@@ -735,7 +756,7 @@ fn string_key(req: &mut Request, b: &Build, it: php_ext::call::Iter) -> Result<V
     let bytes = key.deref().as_str_bytes().map(<[u8]>::to_vec);
     key.give_up(req);
     bytes.ok_or_else(|| {
-        throw(
+        throw_exception_ex(
             req,
             "UnexpectedValueException",
             &format!(
@@ -752,7 +773,7 @@ fn string_key(req: &mut Request, b: &Build, it: php_ext::call::Iter) -> Result<V
 fn build_one(req: &mut Request, b: &mut Build, it: php_ext::call::Iter) -> Result<bool, Thrown> {
     let value = it.value(req)?;
     let current = value.deref();
-    let bad = |req: &mut Request, class: &str, m: String| Err(throw(req, class, &m));
+    let bad = |req: &mut Request, class: &str, m: String| Err(throw_exception_ex(req, class, &m));
     let mut fname: Vec<u8>;
     let key: Vec<u8>;
     match current.as_ref() {
@@ -938,7 +959,7 @@ fn add_built(
         Ok(Err(error)) => {
             done(req, owned);
             let error = error.unwrap_or_default();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "BadMethodCallException",
                 &format!("Entry {} cannot be created: {error}", lossy(key)),

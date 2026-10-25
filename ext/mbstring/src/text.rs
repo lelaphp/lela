@@ -257,15 +257,14 @@ pub(crate) fn find(
         n = search_utf8(needle, enc);
         (&h[..], &n[..])
     };
-    find_utf8(haystack_u8, needle_u8, needle, offset, reverse)
+    find_utf8(haystack_u8, needle_u8, offset, reverse)
 }
 
-/// `mb_find_strpos` over its UTF-8, `needle_raw` the needle as given,
-/// whose length php counts in the backward search.
+/// `mb_find_strpos` over its UTF-8: haystack and needle both as UTF-8,
+/// the needle's codepoints what a backward search steps past.
 fn find_utf8(
     haystack: &[u8],
     needle: &[u8],
-    needle_raw: &[u8],
     offset: isize,
     reverse: bool,
 ) -> Result<usize, Missed> {
@@ -278,7 +277,7 @@ fn find_utf8(
     } else if offset >= 0 {
         find_last(&haystack[start..], needle).map(|at| start + at)
     } else {
-        let needle_len = fast_strlen_utf8(needle_raw);
+        let needle_len = fast_strlen_utf8(needle);
         let end = utf8_position(
             &haystack[start..],
             isize::try_from(needle_len).unwrap_or(isize::MAX),
@@ -309,7 +308,7 @@ pub(crate) fn find_folded(
         )
     };
     let (h, n) = (fold(haystack), fold(needle));
-    find_utf8(&h, &n, &n, offset, reverse)
+    find_utf8(&h, &n, offset, reverse)
 }
 
 /// `handle_strpos_error`, and `false`.
@@ -651,6 +650,20 @@ fn mb_strpos(
 /// int(3)
 /// mb_strrpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// ```
+///
+/// A negative offset steps back past the needle's codepoints as the
+/// search's UTF-8 counts them, not its bytes in the encoding given
+/// (GH-22779), so a one-byte needle in ISO-8859-1 or SJIS's two-byte
+/// `あ` steps one, and UTF-16's two-byte `A` steps one.
+///
+/// ```php
+/// var_dump(mb_strrpos("\xA9\xA9X", "\xA9", -2, 'ISO-8859-1'), mb_strrpos("\x82\xA0\x82\xA0A", "\x82\xA0", -2, 'SJIS'), mb_strrpos("\x00A\x00X\x00A", "\x00A", -2, 'UTF-16BE'));
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// int(0)
+/// ```
 #[php_function]
 fn mb_strrpos(
     req: &mut Request,
@@ -882,15 +895,16 @@ pub(crate) fn must_not_be_empty(req: &mut Request, arg: u32) -> Thrown {
 ///
 /// Since 8.5.12 a conversion's buffer grows fallibly, so a needle whose UTF-8
 /// is past the memory limit is refused its growth, and the limit's fatal is
-/// raised as the call returns:
+/// raised as the call returns. The case crosses the limit where a new chunk
+/// is asked for, whose figure holds in any layout (#3442):
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(mb_substr_count("abc", str_repeat("\x80", 2 << 20), "CP1252"), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(mb_substr_count("abc", str_repeat("\x80", 400000), "CP1252"), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 1572864 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn mb_substr_count(
@@ -1064,12 +1078,12 @@ fn mb_substr(
 /// raised as the call returns:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(strlen(mb_strcut(str_repeat("_", 2 << 20), 0, 2 << 20, "UTF-7")), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_strcut(str_repeat("_", 500000), 0, 500000, "UTF-7")), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16384 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn mb_strcut(
@@ -1594,9 +1608,8 @@ fn mb_ord(
     let enc = self::encoding(req, encoding, 2)?;
     if is_unsupported(enc) {
         let name = String::from_utf8_lossy(enc.name());
-        return Err(throw_error(
+        return Err(php_ext::raising::value_error(
             req,
-            "ValueError",
             &format!("mb_ord() does not support the \"{name}\" encoding"),
         ));
     }
@@ -1634,9 +1647,8 @@ fn mb_chr(
     let enc = self::encoding(req, encoding, 2)?;
     if is_unsupported(enc) {
         let name = String::from_utf8_lossy(enc.name());
-        return Err(throw_error(
+        return Err(php_ext::raising::value_error(
             req,
-            "ValueError",
             &format!("mb_chr() does not support the \"{name}\" encoding"),
         ));
     }

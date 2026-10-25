@@ -100,7 +100,7 @@ use php_ext::abi::{ConstValue, Instance, OrFalse, Passed, Ref, This, Untyped};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{autoload, call_method, lookup_class, new_object, write_prop};
 use php_ext::coerce::{is_callable, to_long};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error};
 use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
 };
@@ -345,9 +345,21 @@ fn bucket_type(req: &mut Request) -> ResourceType {
 }
 
 /// A filter written in PHP (`userfilter_ops`): the object its factory
-/// made, one owner, until `close` gives it up.
+/// made, one owner, until `close` gives it up, and which of the object's
+/// two filters it is.
 struct UserFilter {
     object: Option<Owner<PhpObject>>,
+    held: Held,
+}
+
+/// The filter on its chain, whose close is `userfilter_dtor`, or one
+/// shared for a call PHP code makes on the stream inside the chain's own
+/// ([`StreamFilter::share`]), whose close gives its owner of the object
+/// back and calls nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Held {
+    Chain,
+    Call,
 }
 
 /// php's warning for a call that left buckets on its input brigade.
@@ -520,11 +532,13 @@ impl StreamFilter for UserFilter {
     /// `onClose()` where the object has it and no throwable is pending,
     /// as `zend_call_method_if_exists` calls nothing under
     /// `EG(exception)`, then the object given up either way.
+    /// A filter shared for one call calls nothing: its owner of the
+    /// object is given back alone.
     fn close(&mut self, req: &mut Request) -> Result<(), Thrown> {
         let Some(object) = self.object.take() else {
             return Ok(());
         };
-        let closed = if req.diagnostics_mut().stream_thrown().is_some() {
+        let closed = if self.held == Held::Call || req.diagnostics_mut().stream_thrown().is_some() {
             Ok(None)
         } else {
             call_if_exists(req, *object, b"onclose")
@@ -534,6 +548,17 @@ impl StreamFilter for UserFilter {
             value.give_up(req);
         }
         Ok(())
+    }
+
+    /// The same object's filter for one more call, as php calls
+    /// `filter()` again where the method reads its own stream: one more
+    /// owner of the object, given back as the call ends.
+    fn share(&self, req: &mut Request) -> Option<Box<dyn StreamFilter>> {
+        let object = *self.object.as_deref()?;
+        Some(Box::new(UserFilter {
+            object: Some(Owner::take(req, object)),
+            held: Held::Call,
+        }))
     }
 }
 
@@ -628,6 +653,7 @@ fn user_filter_factory(
             }
             Ok(Some(Box::new(UserFilter {
                 object: Some(object),
+                held: Held::Chain,
             })))
         }
         Err(thrown) => {
@@ -661,7 +687,7 @@ fn brigade_of(req: &mut Request, res: Resource, native: &str) -> Result<Resource
         let text = format!(
             "{native}(): supplied resource is not a valid userfilter.bucket brigade resource"
         );
-        return Err(throw_error(req, "TypeError", &text));
+        return Err(type_error(req, &text));
     }
     Ok(res)
 }
@@ -779,7 +805,7 @@ fn bucket_attach(
             "argument"
         };
         let text = format!("{native}(): supplied {what} is not a valid userfilter.bucket resource");
-        return Err(throw_error(req, "TypeError", &text));
+        return Err(type_error(req, &text));
     };
     // `zend_read_property(..., "data", silent=false)`: an unset typed
     // `$data` is php's `Error`, raised before the bucket moves, as 8.5.12
@@ -1116,9 +1142,8 @@ fn stream_filter_append(
 fn stream_filter_remove(req: &mut Request, stream_filter: Resource) -> Result<bool, Thrown> {
     match req.remove_filter(stream_filter)? {
         Some(removed) => Ok(removed),
-        None => Err(throw_error(
+        None => Err(type_error(
             req,
-            "TypeError",
             "stream_filter_remove(): supplied resource is not a valid stream filter resource",
         )),
     }

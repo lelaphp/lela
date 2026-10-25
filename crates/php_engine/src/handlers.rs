@@ -65,7 +65,9 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
-use crate::api::raising::{Thrown, non_static_method_call, none_pending, undefined_method};
+use crate::api::raising::{
+    Thrown, non_static_method_call, none_pending, type_error, undefined_method,
+};
 use crate::api::request::ropes::RopeAt;
 use crate::api::request::{CodeFrom, ConstantRead, Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
@@ -2894,7 +2896,12 @@ pub(crate) fn init_user_call<T: Tier>(
             let message =
                 format!("{native}(): Argument #1 ($callback) must be a valid callback, {refusal}");
             Err(refusal.across(req, |req| {
-                crate::api::raising::throw_over_pending(req, "TypeError", &message)
+                crate::api::raising::throw_over_pending(
+                    req,
+                    crate::api::raising::Printing::Buffered,
+                    "TypeError",
+                    &message,
+                )
             }))
         }
     };
@@ -3106,9 +3113,8 @@ pub(crate) fn send_array<T: Tier>(
     let given = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let Some(array) = given.as_array() else {
         let shown = crate::ops::value_name(req, &given.undef_as_null());
-        let thrown = crate::api::raising::throw_error(
+        let thrown = type_error(
             req,
-            "TypeError",
             &format!(
                 "call_user_func_array(): Argument #2 ($args) must be of type array, {shown} given"
             ),
@@ -3194,9 +3200,8 @@ fn send_array_slice(
     let Some(mut length) = length else {
         let shown = crate::ops::value_name(req, &given);
         exec::free_operand(req, frame, op.op2_type, op.op2);
-        return Err(crate::api::raising::throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             &format!("array_slice(): Argument #3 ($length) must be of type ?int, {shown} given"),
         ));
     };
@@ -4837,7 +4842,7 @@ fn return_type_error(
         None => String::from("none"),
     };
     let message = format!("{name}(): Return value must be of type {declared}, {given} returned");
-    Ok(crate::api::raising::throw_error(req, "TypeError", &message))
+    Ok(type_error(req, &message))
 }
 
 /// `zend_verify_type_error_common`'s `need_msg`: the type resolved
@@ -4885,7 +4890,7 @@ pub(crate) fn verify_never_type<T: Tier>(
         "function"
     };
     let message = format!("{name}(): never-returning {kind} must not implicitly return");
-    let thrown = crate::api::raising::throw_error(req, "TypeError", &message);
+    let thrown = type_error(req, &message);
     threw(req, frame, &thrown)
 }
 
@@ -5104,9 +5109,9 @@ pub(crate) fn callable_convert<T: Tier>(
 /// pk(function () use ($s) { try { $s->invoke(null, []); } catch (TypeError $e) {} });
 /// ```
 /// ```expect
-/// 3496 32
-/// 3544 0
-/// 3584 0
+/// 3352 32
+/// 3384 0
+/// 3424 0
 /// ```
 fn arg_type_error(
     req: &mut Request,
@@ -7698,7 +7703,7 @@ fn fetch_class_constant_found(
                 named.type_name()
             );
             exec::free_operand(req, frame, op.op2_type, op.op2);
-            let thrown = crate::api::raising::throw_error(req, "TypeError", &message);
+            let thrown = type_error(req, &message);
             return threw(req, frame, &thrown);
         };
         Cow::Owned(name)
@@ -9654,9 +9659,8 @@ fn verify_ref_array_assignable(req: &mut Request, cell: PhpRef) -> Result<(), Th
         return Ok(());
     };
     let class = req.symbols().class_name(declaring);
-    Err(crate::api::raising::throw_error(
+    Err(type_error(
         req,
-        "TypeError",
         &format!(
             "Cannot auto-initialize an array inside a reference held by property {class}::${shown} of type {ty}"
         ),
@@ -9680,9 +9684,8 @@ fn refuse_fetch(
                 let class = req.symbols().class_name(typed.declaring);
                 let ty = php_unit::type_to_string(&typed.ty);
                 let shown = String::from_utf8_lossy(name);
-                return Err(crate::api::raising::throw_error(
+                return Err(type_error(
                     req,
-                    "TypeError",
                     &format!(
                         "Cannot auto-initialize an array inside property {class}::${shown} of type {ty}"
                     ),
@@ -12134,9 +12137,8 @@ pub(crate) fn clone<T: Tier>(
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let cloned = match operand.as_object() {
         Some(object) => req.clone_object(object, None).map(Owner::hand_on),
-        None => Err(crate::api::raising::throw_error(
+        None => Err(type_error(
             req,
-            "TypeError",
             &format!(
                 "clone(): Argument #1 ($object) must be of type object, {} given",
                 crate::ops::value_name(req, &operand)
@@ -12393,11 +12395,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         let class = value.as_object().map(|v| v.class());
         let Some(class) = class else {
             let shown = crate::ops::value_name(req, &value);
-            let thrown = crate::api::raising::throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot use \"::class\" on {shown}"),
-            );
+            let thrown = type_error(req, &format!("Cannot use \"::class\" on {shown}"));
             exec::free_operand(req, frame, op.op1_type, op.op1);
             return threw(req, frame, &thrown);
         };
@@ -19728,9 +19726,8 @@ fn append_unpacked(req: &mut Request, a: php_heap::Arr, value: Value) -> Result<
 fn unpack_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     if !crate::interfaces::is_traversable(req, object.class()) {
         let given = crate::ops::value_name(req, &object.as_value());
-        return Err(crate::api::raising::throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             &format!("Only arrays and Traversables can be unpacked, {given} given"),
         ));
     }
@@ -19876,9 +19873,8 @@ pub(crate) fn send_unpack<T: Tier>(
             exec::operand(req, frame, code, op.op1_type, op.op1);
         }
         let given = crate::ops::value_name(req, &spread.undef_as_null());
-        Ok(Err(crate::api::raising::throw_error(
+        Ok(Err(type_error(
             req,
-            "TypeError",
             &format!("Only arrays and Traversables can be unpacked, {given} given"),
         )))
     };
@@ -22412,12 +22408,21 @@ pub(crate) fn strlen<T: Tier>(
     unary(req, frame, code, op, crate::ops::strlen)
 }
 
-/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8788`): the
+/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8772`): the
 /// length [`inline::string_length`] reads of a string as it stands,
-/// into the temporary. `None`, with nothing touched, for a temporary
-/// holding the string's owner, which the opcode gives up (`FREE_OP1`),
-/// for everything the rule leaves to the kernel, and for a temporary
-/// for the answer holding an owner.
+/// into the temporary, and then a temporary's owner of the string given
+/// up as the handler's `zval_ptr_dtor_str` gives it up, so the string a
+/// conversion or a join made for the call is freed here. `None`, with
+/// nothing touched, for everything the rule leaves to the kernel and for
+/// a temporary for the answer holding an owner.
+///
+/// ```php
+/// $i = 1234; $s = "ab";
+/// echo strlen((string)$i), "|", strlen($s . $s), "|", strlen("x$i"), "|", strlen($s), "\n";
+/// ```
+/// ```expect
+/// 4|4|5|2
+/// ```
 #[inline(always)] // as `inline_arith`
 fn inline_strlen(
     req: &mut Request,
@@ -22428,11 +22433,20 @@ fn inline_strlen(
 ) -> Option<Edge> {
     let slots = req.slots_mut(frame);
     let z = a.read(slots, code, op.op1);
-    if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) && z.is_refcounted() {
-        return None;
-    }
     let length = inline::string_length(z)?;
+    let owner = match z.as_str() {
+        Some(s) if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) && z.is_refcounted() => {
+            Some((a.slot(op.op1)?, s))
+        }
+        _ => None,
+    };
     write_owning_nothing(slots, op, Zval::long(length))?;
+    if let Some((operand, s)) = owner {
+        if let Some(slot) = slots.get_mut(operand) {
+            *slot = Zval::UNDEF;
+        }
+        req.heap_mut().release_string(s);
+    }
     Some(Ok(advanced()))
 }
 
@@ -22514,8 +22528,62 @@ pub(crate) fn cast<T: Tier>(
             op.extended_value
         )));
     };
+    if to == crate::ops::CastTo::Str
+        && let Some(edge) = inline_cast_string(req, frame, code, op, ByKind(op.op1_type))
+    {
+        return edge;
+    }
     unary(req, frame, code, op, |req, value| {
         crate::ops::cast(req, value, to)
+    })
+}
+
+/// The inline path of `ZEND_CAST` to a string (`Z/Zend/zend_vm_def.h:6512`)
+/// over an int or a float as it stands, `zval_get_string`'s two arms
+/// for them: [`crate::ops::long_to_str`] and [`crate::ops::double_to_str`]
+/// into the temporary, neither operand holding anything to free. `None`,
+/// with nothing touched, for any other operand, for a NAN, whose warning
+/// the kernel raises, and for a temporary for the answer holding an
+/// owner. The memory limit ends the request at this opline, as the
+/// kernel's does.
+///
+/// ```php
+/// $i = 42; $f = -2.5; $n = NAN;
+/// echo (string)$i, "|", (string)$f, "|", (string)($i * 1000000), "|", (string)0.1, "|", (string)$n, "\n";
+/// ```
+/// ```expect
+/// 42|-2.5|42000000|0.1|
+/// Warning: unexpected NAN value was coerced to string in %s on line 3
+/// NAN
+/// ```
+#[inline(always)] // as `inline_arith`
+fn inline_cast_string(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let z = a.read(slots, code, op.op1);
+    let out = op.out as usize;
+    if slots.get(out)?.is_refcounted() {
+        return None;
+    }
+    let made = if let Some(n) = z.as_long() {
+        crate::ops::long_to_str(req, n)
+    } else {
+        let f = z.as_double().filter(|f| !f.is_nan())?;
+        crate::ops::double_to_str(req, f)
+    };
+    Some(match made {
+        Ok(text) => {
+            if let Some(into) = req.slots_mut(frame).get_mut(out) {
+                *into = Zval::string(text.heap());
+            }
+            Ok(advanced())
+        }
+        Err(thrown) => threw(req, frame, &thrown),
     })
 }
 
@@ -23374,9 +23442,8 @@ pub(crate) fn get_class<T: Tier>(
         let class = value.as_object().map(|v| v.class());
         let Some(class) = class else {
             let shown = crate::ops::value_name(req, &value);
-            let thrown = crate::api::raising::throw_error(
+            let thrown = type_error(
                 req,
-                "TypeError",
                 &format!(
                     "get_class(): Argument #1 ($object) must be of type object, {shown} given"
                 ),
@@ -23535,9 +23602,8 @@ pub(crate) fn array_key_exists<T: Tier>(
         }
         if !req.is_pending() {
             let shown = crate::ops::value_name(req, &subject);
-            let thrown = crate::api::raising::throw_error(
+            let thrown = type_error(
                 req,
-                "TypeError",
                 &format!(
                     "array_key_exists(): Argument #2 ($array) must be of type array, {shown} given"
                 ),
@@ -24458,11 +24524,10 @@ fn inline_return(
 /// the frame popped, and `returned` into the `VAR` the call opline
 /// named, or released where the caller reads nothing.
 fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
-    crate::observer::returned(req, frame, Some(&returned));
     if req.stack_mut().entry() == frame {
-        req.set_returned(returned);
-        return Ok(Stepped::Done.into());
+        return entry_returned(req, frame, returned);
     }
+    crate::observer::returned(req, frame, Some(&returned));
     let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
     if handed_back(req, returns_to, returned) {
@@ -24472,6 +24537,16 @@ fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Ed
     // goes on from the one after it.
     req.vm_mut().advance(caller);
     Ok(Stepped::Popped(caller).into())
+}
+
+/// [`returned_to_caller`]'s return of the serving's entry frame
+/// ([`Request::entry_returned`]), out of line: the interpreter's `RETURN`
+/// meets it once per serving, where every other return pops a frame.
+#[cold]
+#[inline(never)]
+fn entry_returned(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
+    req.entry_returned(frame, returned);
+    Ok(Stepped::Done.into())
 }
 
 /// What a call returned, handed to the frame that made the call: into
