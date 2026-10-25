@@ -808,14 +808,20 @@ impl<'a> Builder<'a> {
         let pushes = form == Form::Inline && is_call(op.opcode);
         // A native's call returns what its declaration says, as php's
         // trace TSSA types a `DO_ICALL`'s result by the `func` its record
-        // names (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`).
+        // names (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`), and a
+        // frameless call's by the native its opline names, through the
+        // call map (`zend_get_func_info`).
         // Only a `DO_ICALL`'s callee is fixed where the opline is
         // compiled: a call by name, a method's or a dynamic one may serve
         // another function than the one recorded, which php's trace holds
         // with a guard on the callee this tier does not take.
-        let returns = (op.opcode == Opcode::DoIcall)
-            .then(|| self.calls.last().and_then(|call| call.returns))
-            .flatten();
+        let returns = if op.opcode.is_frameless_icall() {
+            (self.view.frameless_returns(op.extended_value)).map(super::declared)
+        } else if op.opcode == Opcode::DoIcall {
+            self.calls.last().and_then(|call| call.returns)
+        } else {
+            None
+        };
         let out = match slot {
             Some(slot) if !pushes && !fused => {
                 let types = out_types(op, [t1, t2, td], seen.read[0], code);

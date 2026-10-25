@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use php_heap::ZvalType;
 use php_link::LinkedClass;
-use php_unit::decl::Parameter;
+use php_unit::decl::{Parameter, Type};
 use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::published::SEALED;
@@ -486,6 +486,10 @@ pub struct UnitView {
     places: Vec<PropertySlot>,
     /// Whether an observer of calls was declared ([`UnitView::observed`]).
     observed: bool,
+    /// What the natives of the frameless calls the recording served
+    /// declare they return, by their row of the engine's frameless table
+    /// ([`UnitView::hold_frameless`]).
+    frameless: Vec<(u32, Option<Type>)>,
 }
 
 /// A view and an epoch hold leave the request's thread with a claim and
@@ -509,6 +513,7 @@ impl UnitView {
             calls: Vec::new(),
             places: Vec::new(),
             observed: crate::observer::observing(req),
+            frameless: Vec::new(),
         }
     }
 
@@ -687,6 +692,37 @@ impl UnitView {
             self.calls.push(plain);
         }
         true
+    }
+
+    /// Take what the native of row `index` of the engine's frameless
+    /// table, the one a `FRAMELESS_ICALL_*` whose `extended_value` is
+    /// `index` calls (`ZEND_FLF_FUNC`), declares it returns: none where it
+    /// declares nothing or returns by reference. php's trace types what
+    /// such a call writes by it, through the call map it builds for every
+    /// op array a trace runs through, a file's own code among them
+    /// (`zend_jit_trace_build_ssa`, `Z/ext/opcache/jit/zend_jit_trace.c:555-557`;
+    /// `zend_get_func_info`, `Z/Zend/Optimizer/zend_func_info.c:132-150`),
+    /// as it types a `DO_ICALL`'s by the function its record names.
+    pub fn hold_frameless(&mut self, req: &Request, index: u32) {
+        if self.frameless.iter().any(|(held, _)| *held == index) {
+            return;
+        }
+        let returns = req
+            .frameless_entry(index)
+            .and_then(|(function, _)| req.symbols().function_decl(function))
+            .filter(|decl| !decl.returns_by_ref)
+            .and_then(|decl| decl.return_type.clone());
+        self.frameless.push((index, returns));
+    }
+
+    /// What the native of row `index` of the engine's frameless table
+    /// declares it returns; none unless [`UnitView::hold_frameless`] took
+    /// it, and where it declares nothing.
+    #[must_use]
+    pub fn frameless_returns(&self, index: u32) -> Option<&Type> {
+        (self.frameless.iter())
+            .find(|(held, _)| *held == index)
+            .and_then(|(_, returns)| returns.as_ref())
     }
 
     /// The plain call to the op array `f` names with `count` arguments;

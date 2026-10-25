@@ -820,6 +820,39 @@ fn a_natives_call_returns_what_it_declares() -> Result<(), String> {
     Ok(())
 }
 
+/// A frameless call returns what its native declares, as php's trace
+/// TSSA types what one writes through the call map it builds for every op
+/// array a trace runs through (`zend_get_func_info`,
+/// `Z/Zend/Optimizer/zend_func_info.c:132-150`): `class_exists()`
+/// returns a `bool`, so what it wrote is no reference the clobber rule
+/// reads again, and an opline that reads it holds it as php's does; the
+/// pinned php's trace of `substr()` in a loop holds no guard on its
+/// `string` at the `strlen()` that reads it (#3438).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_frameless_call_returns_what_its_native_declares() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f(int $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += (int) class_exists('stdClass'); } return $t; }
+        echo f(10), \"\\n\";",
+    )?;
+    let at = stepped(&ir, Opcode::FramelessIcall1)?;
+    let Some(Op::Line(call)) = ir.ops.get(at.index()) else {
+        return Err("no FRAMELESS_ICALL_1".to_owned());
+    };
+    let out = call.out.ok_or("the call keeps no result")?;
+    assert_eq!(
+        ir.values[out.0 as usize].types,
+        Types::BOOL,
+        "{}",
+        dump::render(&ir)
+    );
+    let again = (ir.values.iter())
+        .any(|value| value.def == Def::Reload(at) && value.slot == ir.values[out.0 as usize].slot);
+    assert!(!again, "{}", dump::render(&ir));
+    Ok(())
+}
+
 /// php's code generator holds an `ASSIGN_DIM`'s variable before the
 /// value its `OP_DATA` writes (`CHECK_OP1_TRACE_TYPE`, then
 /// `CHECK_OP1_DATA_TRACE_TYPE`, `Z/ext/opcache/jit/zend_jit_trace.c:5064-5101`),

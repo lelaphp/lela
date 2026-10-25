@@ -946,6 +946,34 @@ impl<'p> Recorder<'p> {
         policy::bad_stop(word, times)
     }
 
+    /// The opline at `at` of `func`, about to be served in `frame`,
+    /// written down as one `Op` with its operands sampled, and the native
+    /// a frameless call names taken into `view`
+    /// ([`UnitView::hold_frameless`]); its `op1`'s sample and how many
+    /// class records php's trace adds beside it ([`classes`]).
+    fn write_down(
+        &mut self,
+        req: &Request,
+        view: &mut UnitView,
+        frame: FrameRef,
+        (func, at): (FuncRef, OplineIdx),
+        (op, after): (&Opline, Option<&Opline>),
+    ) -> (Option<Sample>, u32) {
+        let (op1, op2, data) = sampled(req, frame, op, after);
+        self.events.push(Event::Op {
+            func,
+            opline: at,
+            op1,
+            op2,
+            data,
+            branch: None,
+        });
+        if op.opcode.is_frameless_icall() {
+            view.hold_frameless(req, op.extended_value);
+        }
+        (op1, classes(op, op1, op2))
+    }
+
     /// The recording loop from `frame`, rooted in `root`'s op array.
     fn record(
         &mut self,
@@ -978,16 +1006,8 @@ impl<'p> Recorder<'p> {
             if !stepped && behind.is_none() && unsupported(op.opcode) {
                 return Ok((Stop::NotSupported, ended(frame, false)));
             }
-            let (op1, op2, data) = sampled(req, frame, &op, after.as_ref());
-            let classes = classes(&op, op1, op2);
-            self.events.push(Event::Op {
-                func,
-                opline: at,
-                op1,
-                op2,
-                data,
-                branch: None,
-            });
+            let (op1, classes) =
+                self.write_down(req, view, frame, (func, at), (&op, after.as_ref()));
             if self.count(1 + classes) {
                 return Ok((Stop::TooLong, ended(frame, stepped)));
             }
