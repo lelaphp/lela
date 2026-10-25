@@ -242,6 +242,7 @@ abi::ObjectHandlers::iterator_element
 abi::ObjectHandlers::iterator_size
 abi::ObjectHandlers::method_receiver
 abi::ObjectHandlers::own_iterator
+abi::ObjectHandlers::properties
 abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
@@ -291,6 +292,7 @@ abi::PreloadThread
 abi::PreloadThread::joined
 abi::PreloadThread::new
 abi::PropertiesFor
+abi::PropertyAccess
 abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead
