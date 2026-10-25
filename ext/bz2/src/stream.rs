@@ -37,69 +37,80 @@ const MAX_UNUSED: usize = 5000;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct FileId(u64);
 
-/// `bzf->handle`: the file `BZ2_bzopen` opened on the path, with
-/// whether a read of it met its end (`feof`), or the php stream whose fd
-/// `BZ2_bzdopen` was handed, which the kind closes with its own, and the
-/// owner of it the kind holds.
-enum Handle {
-    File { file: File, eof: bool },
-    Stream(Owner<Stream>),
+/// `bzf->handle`: the file libbz2 reads and writes, with whether a read
+/// of it met its end (`feof`): the one `BZ2_bzopen` opened on the path, or
+/// the copy of a php stream's fd 8.5.12's `php_bz2_bzdopen` hands
+/// `BZ2_bzdopen`, since libbz2 closes the fd it is given. Beside the copy,
+/// the owner of that stream the kind holds, php's `stream_res` with its
+/// `GC_ADDREF`: the stream may be closed under it, and the copy reads
+/// and writes on all the same.
+struct Handle {
+    file: File,
+    eof: bool,
+    inner: Option<Owner<Stream>>,
 }
 
 impl Handle {
+    /// The file opened on the path.
+    fn file(file: File) -> Handle {
+        Handle {
+            file,
+            eof: false,
+            inner: None,
+        }
+    }
+
+    /// `php_bz2_bzdopen` over `inner`, cast to its fd already: the fd
+    /// copied, `dup`, and the copy the file; `None` where it cannot be,
+    /// the owner given back to the caller to free.
+    fn over(req: &mut Request, inner: Owner<Stream>) -> Result<Handle, Owner<Stream>> {
+        match inner.dup_fd(req) {
+            Some(fd) => Ok(Handle {
+                file: File::from(fd),
+                eof: false,
+                inner: Some(inner),
+            }),
+            None => Err(inner),
+        }
+    }
+
     /// `fread(buf, 1, BZ_MAX_UNUSED, handle)`: up to `MAX_UNUSED` bytes,
     /// `None` for `ferror`.
-    fn fill(&mut self, req: &mut Request, buf: &mut Vec<u8>) -> Option<()> {
+    fn fill(&mut self, buf: &mut Vec<u8>) -> Option<()> {
         buf.clear();
-        match self {
-            Handle::File { file, eof } => {
-                buf.resize(MAX_UNUSED, 0);
-                let mut got = 0;
-                while got < MAX_UNUSED {
-                    match file.read(&mut buf[got..]) {
-                        Ok(0) => {
-                            *eof = true;
-                            break;
-                        }
-                        Ok(n) => got += n,
-                        Err(error) if error.kind() == ErrorKind::Interrupted => {}
-                        Err(_) => return None,
-                    }
+        buf.resize(MAX_UNUSED, 0);
+        let mut got = 0;
+        while got < MAX_UNUSED {
+            match self.file.read(&mut buf[got..]) {
+                Ok(0) => {
+                    self.eof = true;
+                    break;
                 }
-                buf.truncate(got);
-                Some(())
-            }
-            Handle::Stream(inner) => {
-                let chunk = inner.read(req, MAX_UNUSED).ok()??;
-                buf.extend_from_slice(chunk.as_bytes());
-                chunk.give_up(req);
-                Some(())
+                Ok(n) => got += n,
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(_) => return None,
             }
         }
+        buf.truncate(got);
+        Some(())
     }
 
     /// `myfeof(handle)`: whether the file has no byte left to read.
-    fn at_end(&self, req: &mut Request) -> bool {
-        match self {
-            Handle::File { eof, .. } => *eof,
-            Handle::Stream(inner) => inner.eof(req),
-        }
+    fn at_end(&self) -> bool {
+        self.eof
     }
 
     /// `fwrite` of the whole of `bytes`, `n != n2` its failure.
-    fn put(&mut self, req: &mut Request, bytes: &[u8]) -> bool {
-        match self {
-            Handle::File { file, .. } => file.write_all(bytes).is_ok(),
-            Handle::Stream(inner) => inner.write(req, bytes) == Some(bytes.len()),
-        }
+    fn put(&mut self, bytes: &[u8]) -> bool {
+        self.file.write_all(bytes).is_ok()
     }
 
-    /// `fclose(handle)`, and `php_stream_free` of the stream under it:
-    /// closed, and the owner the kind holds, php's `GC_ADDREF` on that
-    /// stream (`php_stream_bz2open_from_BZFILE`), given up as its
-    /// `zend_list_delete` gives it up.
+    /// `fclose(handle)`, then the stream under it where there is one:
+    /// `php_stream_free` where it is still open, and its owner given up
+    /// where the program closed it already, `zend_list_delete`.
     fn close(self, req: &mut Request) {
-        if let Handle::Stream(inner) = self {
+        drop(self.file);
+        if let Some(inner) = self.inner {
             inner.free(req);
         }
     }
@@ -206,7 +217,7 @@ impl BzFile {
         if self.last(req) == Code::StreamEnd {
             return Some(0);
         }
-        let (count, code) = self.read_into(req, out);
+        let (count, code) = self.read_into(out);
         self.set(req, code);
         matches!(code, Code::Ok | Code::StreamEnd).then_some(count)
     }
@@ -215,7 +226,7 @@ impl BzFile {
     /// ends, reading the file `MAX_UNUSED` bytes at a time; an error
     /// answers no bytes, and a file that ends inside the stream
     /// `BZ_UNEXPECTED_EOF`.
-    fn read_into(&mut self, req: &mut Request, out: &mut [u8]) -> (usize, Code) {
+    fn read_into(&mut self, out: &mut [u8]) -> (usize, Code) {
         let (Some(handle), Some(direction)) = (self.handle.as_mut(), self.direction.as_mut())
         else {
             return (0, Code::SequenceError);
@@ -231,8 +242,8 @@ impl BzFile {
             if self.failed {
                 return (0, Code::IoError);
             }
-            if *taken == buf.len() && !handle.at_end(req) {
-                if handle.fill(req, buf).is_none() {
+            if *taken == buf.len() && !handle.at_end() {
+                if handle.fill(buf).is_none() {
                     self.failed = true;
                     return (0, Code::IoError);
                 }
@@ -246,7 +257,7 @@ impl BzFile {
                 Code::Ok => {}
                 failed => return (0, failed),
             }
-            if handle.at_end(req) && *taken == buf.len() && written < out.len() {
+            if handle.at_end() && *taken == buf.len() && written < out.len() {
                 return (0, Code::UnexpectedEof);
             }
             if written == out.len() {
@@ -257,14 +268,14 @@ impl BzFile {
 
     /// `BZ2_bzwrite`: `BZ2_bzWrite`, the whole for its success.
     fn bzwrite(&mut self, req: &mut Request, data: &[u8]) -> Option<usize> {
-        let code = self.write_from(req, data);
+        let code = self.write_from(data);
         self.set(req, code);
         (code == Code::Ok).then_some(data.len())
     }
 
     /// `BZ2_bzWrite`: compress `data` with `BZ_RUN`, writing each
     /// `MAX_UNUSED` bytes of what comes out to the file.
-    fn write_from(&mut self, req: &mut Request, data: &[u8]) -> Code {
+    fn write_from(&mut self, data: &[u8]) -> Code {
         let (Some(handle), Some(Direction::Writing { stream })) =
             (self.handle.as_mut(), self.direction.as_mut())
         else {
@@ -284,7 +295,7 @@ impl BzFile {
             if step.code != Code::RunOk {
                 return step.code;
             }
-            if step.written > 0 && !handle.put(req, &out[..step.written]) {
+            if step.written > 0 && !handle.put(&out[..step.written]) {
                 self.failed = true;
                 return Code::IoError;
             }
@@ -312,7 +323,7 @@ impl BzFile {
             if !matches!(step.code, Code::FinishOk | Code::StreamEnd) {
                 return;
             }
-            if step.written > 0 && !handle.put(req, &out[..step.written]) {
+            if step.written > 0 && !handle.put(&out[..step.written]) {
                 return;
             }
             if step.code == Code::StreamEnd {
@@ -453,7 +464,7 @@ fn open(
         if opening.for_zend_stream {
             req.set_opened_path(path);
         }
-        Handle::File { file, eof: false }
+        Handle::file(file)
     } else {
         let Some(inner) = req.open_stream_with(path, mode, opening)? else {
             return Ok(None);
@@ -462,13 +473,17 @@ fn open(
             inner.free(req);
             return Ok(None);
         }
-        Handle::Stream(inner)
+        match Handle::over(req, inner) {
+            Ok(handle) => handle,
+            Err(inner) => {
+                inner.free(req);
+                return Ok(None);
+            }
+        }
     };
     let Some(direction) = parsed.direction() else {
         // `php_stream_close(stream)`: what this open opened, given up.
-        if let Handle::Stream(inner) = handle {
-            inner.free(req);
-        }
+        handle.close(req);
         return Ok(None);
     };
     from_file(req, handle, mode, direction).map(Some)
@@ -664,7 +679,29 @@ fn bzopen(
 }
 
 /// `bzopen` over a stream: its `stream->mode` held to what `mode` needs, php's
-/// warnings where it is not, then its fd, which `BZ2_bzdopen` opens.
+/// warnings where it is not, then a copy of its fd, which `BZ2_bzdopen`
+/// opens. So the stream may be closed first, and the `BZip2` stream reads
+/// and writes its own fd still, never the next file opened under the
+/// number (8.5.12's `php_bz2_bzdopen`):
+///
+/// ```php
+/// $f = tempnam(sys_get_temp_dir(), 'bz');
+/// $fp = fopen($f, 'w'); $bz = bzopen($fp, 'w');
+/// var_dump(bzwrite($bz, 'payload'), fclose($fp));
+/// $other = fopen($f . '.other', 'w'); bzclose($bz); fclose($other);
+/// var_dump(bzdecompress(file_get_contents($f)), filesize($f . '.other'));
+/// $fp = fopen($f, 'r'); $bz = bzopen($fp, 'r');
+/// var_dump(fclose($fp), bzread($bz));
+/// bzclose($bz); unlink($f); unlink($f . '.other');
+/// ```
+/// ```expect
+/// int(7)
+/// bool(true)
+/// string(7) "payload"
+/// int(0)
+/// bool(true)
+/// string(7) "payload"
+/// ```
 fn open_stream(
     req: &mut Request,
     stream: Stream,
@@ -706,8 +743,16 @@ fn open_stream(
     let Some(direction) = Mode::parse(mode).direction() else {
         return Ok(None);
     };
+    // `php_bz2_bzdopen`'s `dup` failing is `RETURN_FALSE`.
     let held = Owner::take(req, stream);
-    from_file(req, Handle::Stream(held), mode, direction).map(Some)
+    let handle = match Handle::over(req, held) {
+        Ok(handle) => handle,
+        Err(held) => {
+            held.give_up(req);
+            return Ok(None);
+        }
+    };
+    from_file(req, handle, mode, direction).map(Some)
 }
 
 /// `bzread($bz, int $length = 1024): string|false`: up to `$length`

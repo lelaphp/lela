@@ -523,6 +523,23 @@ fn deflate_rounds(
 /// Encoding mode must be ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP or ZLIB_ENCODING_DEFLATE
 /// bool(true)
 /// ```
+///
+/// Raw deflate takes its dictionary at once under any window, as 8.5.12
+/// reads the encoding asked for and not the window bits made of it:
+///
+/// ```php
+/// $dict = 'the quick brown fox jumps over the lazy dog';
+/// $data = str_repeat("$dict ", 4);
+/// foreach ([10, 15] as $window) {
+///     $opts = ['window' => $window, 'dictionary' => $dict];
+///     $comp = deflate_add(deflate_init(ZLIB_ENCODING_RAW, $opts), $data, ZLIB_FINISH);
+///     var_dump(inflate_add(inflate_init(ZLIB_ENCODING_RAW, $opts), $comp, ZLIB_FINISH) === $data);
+/// }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
 #[php_function]
 fn inflate_init(
     req: &mut Request,
@@ -552,7 +569,10 @@ fn inflate_init(
         );
         return Ok(OrFalse::False);
     };
-    if bits == ZLIB_ENCODING_RAW
+    // The encoding asked for, not the window bits made of it: a raw
+    // stream under any window takes its dictionary now (8.5.12's
+    // `orig_encoding`).
+    if encoding == ZLIB_ENCODING_RAW
         && let Some(dict) = dictionary.take_if(|dict| !dict.is_empty())
         && stream.set_dictionary(req, &dict)? == Status::DataError
     {
