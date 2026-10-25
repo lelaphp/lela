@@ -39,6 +39,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::api::values::ClassId;
 use std::any::Any;
 
 use php_compile::StackLimit;
@@ -899,7 +900,7 @@ fn payload(req: &mut Request, object: PhpObject) -> Result<&mut ZendFiber, Throw
 
 /// `FiberError` with php's sentence.
 fn fiber_error(req: &mut Request, message: &str) -> Thrown {
-    throw_error(req, "FiberError", message)
+    throw_error(req, ClassId::FIBER_ERROR, message)
 }
 
 /// `Fiber`: `ZEND_ACC_FINAL`, `@strict-properties` and
@@ -2209,7 +2210,7 @@ fn lay_down<P: HoldsCoroutine>(
         Err(StackRefused::TooSmall(least)) => {
             return Err(throw_exception_ex(
                 req,
-                "Exception",
+                ClassId::EXCEPTION,
                 &format!("Fiber stack size is too small, it needs to be at least {least} bytes"),
             ));
         }
@@ -2222,7 +2223,7 @@ fn lay_down<P: HoldsCoroutine>(
                 .to_string();
             return Err(throw_exception_ex(
                 req,
-                "Exception",
+                ClassId::EXCEPTION,
                 &format!("Fiber stack allocate failed: mmap failed: {text} ({errno})"),
             ));
         }

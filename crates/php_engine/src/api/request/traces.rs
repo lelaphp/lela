@@ -896,7 +896,7 @@ impl Request {
                 "InternalError: SensitiveParameterValue is not linked",
             ));
         };
-        crate::api::call::instantiate_named_made(self, class, &[argument], &[])
+        crate::api::call::instantiate_made(self, class, &[argument], &[])
             .map(|object| object.as_value())
     }
 

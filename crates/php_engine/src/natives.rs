@@ -25,6 +25,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::api::values::ClassId;
 use std::ops::ControlFlow;
 
 use php_macros::php_function;
@@ -985,7 +986,7 @@ fn define(
     if bytes.windows(2).any(|pair| pair == b"::") {
         return Err(argument_error(
             req,
-            "ValueError",
+            ClassId::VALUE_ERROR,
             1,
             "cannot be a class constant",
         ));
@@ -1002,7 +1003,7 @@ fn define(
         if !constant_array_is_acyclic(req, array)? {
             return Err(argument_error(
                 req,
-                "ValueError",
+                ClassId::VALUE_ERROR,
                 2,
                 "cannot be a recursive array",
             ));

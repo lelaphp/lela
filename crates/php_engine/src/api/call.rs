@@ -831,7 +831,7 @@ fn user_default(req: &mut Request, unit: &Unit, body: Body, at: usize) -> Result
     } else {
         Err(argument_error(
             req,
-            "ArgumentCountError",
+            ClassId::ARGUMENT_COUNT_ERROR,
             position,
             "not passed",
         ))
@@ -859,7 +859,7 @@ fn native_default(req: &mut Request, function: Function, at: usize) -> Result<Va
     if at < required {
         return Err(argument_error(
             req,
-            "ArgumentCountError",
+            ClassId::ARGUMENT_COUNT_ERROR,
             position,
             "not passed",
         ));
@@ -872,7 +872,7 @@ fn native_default(req: &mut Request, function: Function, at: usize) -> Result<Va
     let ParameterDefault::Expr(default) = parameter.default else {
         return Err(argument_error(
             req,
-            "ArgumentCountError",
+            ClassId::ARGUMENT_COUNT_ERROR,
             position,
             "must be passed explicitly, because the default value is not known",
         ));
@@ -1224,25 +1224,9 @@ pub fn write_raw_property(
     Ok(())
 }
 
-/// `new $class(...$arguments)`: [`new_object`] and then the
-/// constructor the object's `get_constructor` answers, served on it
-/// with `arguments`, as `NEW` and its `DO_FCALL` serve them; a class
-/// with none takes the arguments and serves nothing
-/// (`zend_pass_function`). A constructor that throws leaves the object
-/// marked as one whose constructor failed, so it is given up with no
-/// destructor served (`zend_object_store_ctor_failed`).
-#[cfg_attr(debug_assertions, track_caller)]
-pub fn instantiate(
-    req: &mut Request,
-    class: ClassId,
-    arguments: &[Value],
-) -> Result<Owner<PhpObject>, Thrown> {
-    instantiate_named(req, class, arguments, &[])
-}
-
-/// `object_init_with_constructor` (`Z/Zend/zend_API.c:1876`), what
-/// `zend_get_attribute_object` makes an attribute's object with:
-/// [`new_object`], the constructor the class's `get_constructor`
+/// `new $class(...$arguments)` and `object_init_with_constructor`
+/// (`Z/Zend/zend_API.c:1876`), what `zend_get_attribute_object` makes an
+/// attribute's object with: [`new_object`], the constructor the class's `get_constructor`
 /// answers, php's `Error` where the scope may not call it, then served
 /// with the positional arguments and the named ones placed as
 /// [`call_named`] places them. A class with no constructor takes
@@ -1265,17 +1249,17 @@ pub fn instantiate(
 /// c
 /// ```
 #[cfg_attr(debug_assertions, track_caller)]
-pub fn instantiate_named(
+pub fn instantiate(
     req: &mut Request,
     class: ClassId,
     arguments: &[Value],
     named: &[(PhpString, Value)],
 ) -> Result<Owner<PhpObject>, Thrown> {
-    adopted(instantiate_named_made(req, class, arguments, named))
+    adopted(instantiate_made(req, class, arguments, named))
 }
 
-/// What [`instantiate_named`] makes, its one owner not yet named.
-pub(crate) fn instantiate_named_made(
+/// What [`instantiate`] makes, its one owner not yet named.
+pub(crate) fn instantiate_made(
     req: &mut Request,
     class: ClassId,
     arguments: &[Value],
@@ -1309,7 +1293,7 @@ enum Constructed {
     ByConstantExpression,
 }
 
-/// The one constructor call [`instantiate_named`] and a constant
+/// The one constructor call [`instantiate`] and a constant
 /// expression's `new` share: the constructor `object`'s
 /// `get_constructor` answers, served on it with the positional
 /// arguments and the named ones placed as `zend_call_function` places
@@ -1452,7 +1436,7 @@ impl Arguments {
 /// `zend_get_attribute_object` (`Z/Zend/zend_attributes.c:336`): an
 /// object of `class` made for `attribute`, each argument evaluated as a
 /// constant expression of `scope` ([`eval_const_expr`]) and handed to
-/// the constructor, the named ones by name ([`instantiate_named`]).
+/// the constructor, the named ones by name ([`instantiate`]).
 /// Where the attribute is a program's, `file` is the file it was
 /// written in, and the arguments are evaluated and the constructor
 /// served under php's dummy frame, a site of the attribute's own at
@@ -1587,7 +1571,7 @@ fn attribute_object_at(
             return Err(thrown);
         }
     };
-    let made = instantiate_named_made(req, class, &arguments.positional, &arguments.named);
+    let made = instantiate_made(req, class, &arguments.positional, &arguments.named);
     arguments.give_up(req);
     if let Some(array) = array {
         req.heap_mut().free_block(array);

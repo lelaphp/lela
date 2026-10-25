@@ -1243,6 +1243,27 @@ impl ClassKeys {
     }
 }
 
+/// The linked classes as an extension's engine start reads them,
+/// `CG(class_table)` once `zend_startup_modules` has registered every
+/// extension's classes ([`Start::class`]).
+pub(crate) struct ClassTable<'e> {
+    classes: &'e [ClassDecl],
+    keys: &'e ClassKeys,
+}
+
+impl ClassTable<'_> {
+    /// The class `name` names, whatever its case.
+    pub(crate) fn find(&self, name: &[u8]) -> Option<ClassId> {
+        self.keys.find(self.classes, name)
+    }
+}
+
+impl std::fmt::Debug for ClassTable<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ClassTable({} classes)", self.classes.len())
+    }
+}
+
 /// A class's trampolines by name, any case, which its `get_method`
 /// answers past its function table ([`trampoline_tables`]): one lookup.
 pub(crate) type FunctionTable = NameMap<Folded, Function>;
@@ -1619,20 +1640,6 @@ impl Shared {
                     .unwrap_or_default()
             })
             .collect()
-    }
-
-    /// The opcodes the bundle observes, asked of each extension once its
-    /// engine start is over, and the loop bound to them and to the tier
-    /// the engine started: the one that tells their observers where any
-    /// is declared and the one with no test where none is, as php
-    /// resolves an opline's handler when it compiles it (design §5.8,
-    /// §7.1), and `Nop`'s where the tier does not serve the engine
-    /// ([`crate::tier::Tier::asked`]).
-    fn observe_opcodes(&mut self, start: &Start, bind_loops: BindLoops) {
-        (self.supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(start)));
-        self.observers = self.supplied.observers.count();
-        self.opcodes = crate::observer::ObservedOpcodes::start(&self.supplied.opcodes, start);
-        self.loops = bind_loops(self);
     }
 
     /// The tables the compiler reads, as [`Declared`].
@@ -4732,6 +4739,10 @@ impl Engine {
             opcodes: (shared.supplied.opcodes.links().iter())
                 .map(|&(_, observer)| observer)
                 .collect(),
+            classes: ClassTable {
+                classes: &shared.classes,
+                keys: &shared.class_keys,
+            },
         };
         // `zend_startup_modules`: each `MINIT` in bundle order, its process
         // start (once for the process, ADR-0010) and then its engine
@@ -4758,8 +4769,19 @@ impl Engine {
         }
         shared.state_slots =
             crate::api::request::StateSlots::of(&shared.extensions, &shared.engine_states);
+        // The opcodes the bundle observes, asked of each extension once
+        // its engine start is over, and the loop bound to them and to the
+        // tier the engine started: the one that tells their observers
+        // where any is declared and the one with no test where none is,
+        // as php resolves an opline's handler when it compiles it (design
+        // §5.8, §7.1), and `Nop`'s where the tier does not serve the
+        // engine ([`crate::tier::Tier::asked`]).
         if shared.refused.is_none() {
-            shared.observe_opcodes(&start, bind_loops);
+            let supplied = &mut shared.supplied;
+            (supplied.observers).retain(|(_, registered)| registered.is_none_or(|r| r(&start)));
+            shared.observers = supplied.observers.count();
+            shared.opcodes = crate::observer::ObservedOpcodes::start(&supplied.opcodes, &start);
+            shared.loops = bind_loops(shared);
         }
         shared.startup_raised = raised;
     }

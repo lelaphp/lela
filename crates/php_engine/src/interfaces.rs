@@ -728,7 +728,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
                 req.symbols().class_name(object.class()),
                 b"::getIterator() must be traversable or implement interface Iterator"
             );
-            Err(throw_exception_ex(req, "Exception", &message))
+            Err(throw_exception_ex(req, ClassId::EXCEPTION, &message))
         }
     }
 }

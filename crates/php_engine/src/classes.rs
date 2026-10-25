@@ -1176,7 +1176,7 @@ impl Closure {
             return Err(throw_over_pending(
                 req,
                 Printing::Buffered,
-                "TypeError",
+                ClassId::TYPE_ERROR,
                 "Failed to create closure from callable",
             ));
         }
@@ -1187,14 +1187,14 @@ impl Closure {
                 return Err(throw_over_pending(
                     req,
                     Printing::Buffered,
-                    "TypeError",
+                    ClassId::TYPE_ERROR,
                     "Failed to create closure from callable",
                 ));
             }
             Err(refusal) => {
                 return Err(refusal.across(req, |req| {
                     let message = format!("Failed to create closure from callable: {refusal}");
-                    throw_over_pending(req, Printing::Buffered, "TypeError", &message)
+                    throw_over_pending(req, Printing::Buffered, ClassId::TYPE_ERROR, &message)
                 }));
             }
         };
@@ -1555,7 +1555,7 @@ impl Exception {
         let _ = this;
         Err(throw(
             req,
-            "Exception",
+            ClassId::EXCEPTION,
             "Cannot clone object using __clone()",
         ))
     }

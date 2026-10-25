@@ -12,8 +12,7 @@
 use crate::api::abi::{Beneath, chain};
 use crate::api::call::write_prop;
 use crate::api::request::Request;
-use crate::api::values::{Owner, PhpObject, PhpString, Value, adopted};
-use php_unit::decl::Bare;
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value, adopted};
 
 /// php's error levels, `E_*`: the unit's, since a compile-time
 /// diagnostic is recorded on the unit at one of them and raised here
@@ -786,15 +785,14 @@ pub fn leave_pending(req: &mut Request, thrown: Thrown) {
 /// throwable or an exit, or a fatal leaving on for the next `zend_try`
 /// out, as the `zend_catch` bails out again. A client's fault thrown
 /// over the engine's fatal is the witness, in `ext/soap`.
-pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: &str) -> Result<Thrown, Thrown> {
+pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: ClassId) -> Result<Thrown, Thrown> {
     if !req.diagnostics().bailing_out() || req.unwind_exit() {
         return Err(thrown);
     }
     let held = thrown.exception().copied();
-    let caught = held.or_else(|| req.pending()).filter(|throwable| {
-        req.class_named(Bare::resolved(class.as_bytes()))
-            .is_some_and(|class| req.symbols().instance_of(throwable.class(), class))
-    });
+    let caught = held
+        .or_else(|| req.pending())
+        .filter(|throwable| req.symbols().instance_of(throwable.class(), class));
     let Some(throwable) = caught else {
         return Err(thrown);
     };
@@ -822,7 +820,7 @@ pub fn catch_fatal(req: &mut Request, thrown: Thrown, class: &str) -> Result<Thr
 /// object(stdClass)#1 (0) {
 /// }
 /// ```
-pub fn throw(req: &mut Request, class: &str, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+pub fn throw(req: &mut Request, class: ClassId, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
     match new_throwable(req, class, message) {
         Ok(throwable) => {
             let thrown = throw_value(req, &throwable);
@@ -860,7 +858,7 @@ pub fn throw(req: &mut Request, class: &str, message: &(impl AsRef<[u8]> + ?Size
 /// ```
 pub fn throw_error(
     req: &mut Request,
-    class: &str,
+    class: ClassId,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
     throw_printed(req, Printing::Twice, None, class, message.as_ref())
@@ -890,7 +888,7 @@ fn throw_printed(
     req: &mut Request,
     printing: Printing,
     previous: Option<Thrown>,
-    class: &str,
+    class: ClassId,
     message: &[u8],
 ) -> Thrown {
     let refused = |req: &mut Request, previous: Option<Thrown>, thrown: Thrown| match previous {
@@ -987,7 +985,7 @@ fn made_and_thrown(
 /// ```
 pub fn throw_exception_ex(
     req: &mut Request,
-    class: &str,
+    class: ClassId,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
     made_and_thrown(req, None, |req| {
@@ -999,7 +997,13 @@ pub fn throw_exception_ex(
 /// `message`, printed as [`Printing::Buffered`] says. The `TypeError` row
 /// of [`throw_error`]'s witness is `unserialize`'s.
 pub fn type_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
-    throw_printed(req, Printing::Buffered, None, "TypeError", message.as_ref())
+    throw_printed(
+        req,
+        Printing::Buffered,
+        None,
+        ClassId::TYPE_ERROR,
+        message.as_ref(),
+    )
 }
 
 /// `zend_value_error` (`Z/Zend/zend.c:1905`): php's `ValueError` with
@@ -1020,7 +1024,7 @@ pub fn value_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> 
         req,
         Printing::Buffered,
         None,
-        "ValueError",
+        ClassId::VALUE_ERROR,
         message.as_ref(),
     )
 }
@@ -1033,14 +1037,14 @@ pub fn argument_count_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Si
         req,
         Printing::Buffered,
         None,
-        "ArgumentCountError",
+        ClassId::ARGUMENT_COUNT_ERROR,
         message.as_ref(),
     )
 }
 
 /// `zend_throw_error(NULL, …)`: [`throw_error`] of php's `Error`.
 pub(crate) fn error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
-    throw_error(req, "Error", message)
+    throw_error(req, ClassId::ERROR, message)
 }
 
 /// A throwable of `class` made at a site of its own, the `file` and
@@ -1051,7 +1055,13 @@ pub(crate) fn error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) ->
 /// empty file name, and its witness in `ext/tokenizer` pins the
 /// rendering; `a_parse_error_is_rendered_as_its_level` below holds it
 /// without the extension.
-pub fn throw_at(req: &mut Request, class: &str, message: &str, file: &[u8], line: u32) -> Thrown {
+pub fn throw_at(
+    req: &mut Request,
+    class: ClassId,
+    message: &str,
+    file: &[u8],
+    line: u32,
+) -> Thrown {
     match throwable_at(req, class, message, file, line) {
         Ok(object) => throw_object(req, object),
         Err(fatal) => fatal,
@@ -1062,12 +1072,12 @@ pub fn throw_at(req: &mut Request, class: &str, message: &str, file: &[u8], line
 /// `Err` is the memory limit refusing them.
 fn throwable_at(
     req: &mut Request,
-    class: &str,
+    class: ClassId,
     message: &str,
     file: &[u8],
     line: u32,
 ) -> Result<PhpObject, Thrown> {
-    let object = req.new_object_of(class)?;
+    let object = req.new_object(class)?;
     let message = PhpString::new(req, message.as_bytes())?;
     write_prop(req, &object, b"message", message.into_value())?;
     let file = PhpString::new(req, file)?;
@@ -1249,7 +1259,7 @@ pub(crate) fn non_object_error(
 /// ```expect
 /// RuntimeException: Failed to call sub iterator method / inner
 /// ```
-pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: &str) -> Thrown {
+pub fn throw_chained(req: &mut Request, previous: Thrown, class: ClassId, message: &str) -> Thrown {
     chained(req, previous, |req| new_throwable_made(req, class, message))
 }
 
@@ -1297,7 +1307,7 @@ fn chained(
 pub fn throw_error_chained(
     req: &mut Request,
     previous: Thrown,
-    class: &str,
+    class: ClassId,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
     throw_printed(
@@ -1318,7 +1328,7 @@ pub fn throw_error_chained(
 pub(crate) fn throw_over_pending(
     req: &mut Request,
     printing: Printing,
-    class: &str,
+    class: ClassId,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
     let message = message.as_ref();
@@ -1432,7 +1442,7 @@ pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn new_throwable(
     req: &mut Request,
-    class: &str,
+    class: ClassId,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Result<Owner<Value>, Thrown> {
     adopted(new_throwable_made(req, class, message))
@@ -1441,7 +1451,7 @@ pub fn new_throwable(
 /// What [`new_throwable`] makes, its one owner not yet named.
 pub(crate) fn new_throwable_made(
     req: &mut Request,
-    class: &str,
+    class: ClassId,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Result<Value, Thrown> {
     // `zend_throw_exception` makes the message's string before the
@@ -1458,7 +1468,7 @@ pub(crate) fn new_throwable_made(
 /// the message printed by `zend_vstrpprintf` ([`strpprintf`]), whose
 /// string the object takes as its message, made before the object so it
 /// stands across the trace.
-fn formatted_throwable(req: &mut Request, class: &str, message: &[u8]) -> Result<Value, Thrown> {
+fn formatted_throwable(req: &mut Request, class: ClassId, message: &[u8]) -> Result<Value, Thrown> {
     let message = Owner::adopt(strpprintf(req, message)?);
     throwable_with_message(req, class, message)
 }
@@ -1468,10 +1478,10 @@ fn formatted_throwable(req: &mut Request, class: &str, message: &[u8]) -> Result
 /// as its message; `message` is given up where the object is refused.
 fn throwable_with_message(
     req: &mut Request,
-    class: &str,
+    class: ClassId,
     message: Owner<PhpString>,
 ) -> Result<Value, Thrown> {
-    let object = match req.new_object_of(class) {
+    let object = match req.new_object(class) {
         Ok(object) => object,
         Err(refused) => {
             message.give_up(req);
@@ -1507,7 +1517,7 @@ pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
     let member = active_member(req);
     let member = member.as_deref().map(str::as_bytes);
-    throw_argument_error(req, member, "TypeError", tail, message.as_bytes())
+    throw_argument_error(req, member, ClassId::TYPE_ERROR, tail, message.as_bytes())
 }
 
 /// `zend_argument_error_variadic` (`Z/Zend/zend_API.c:398`) around the
@@ -1532,7 +1542,7 @@ pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 pub(crate) fn throw_argument_error(
     req: &mut Request,
     member: Option<&[u8]>,
-    class: &str,
+    class: ClassId,
     tail: &str,
     message: &[u8],
 ) -> Thrown {
@@ -1640,7 +1650,7 @@ pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
     let member = active_member(req);
     let member = member.as_deref().map(str::as_bytes);
-    throw_argument_error(req, member, "ValueError", tail, message.as_bytes())
+    throw_argument_error(req, member, ClassId::VALUE_ERROR, tail, message.as_bytes())
 }
 
 /// `zend_argument_error`: a throwable of `class` for the argument at
@@ -1655,7 +1665,7 @@ pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 /// ```expect
 /// SplDoublyLinkedList::offsetGet(): Argument #1 ($index) is out of range
 /// ```
-pub fn argument_error(req: &mut Request, class: &str, position: u32, tail: &str) -> Thrown {
+pub fn argument_error(req: &mut Request, class: ClassId, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, "");
     let message = format!("{}{tail}", message.trim_end_matches("must "));
     let member = active_member(req);
@@ -1876,10 +1886,10 @@ pub(crate) fn none_pending(req: &Request) -> Result<(), Thrown> {
 /// ```
 pub fn throwing_warnings<R>(
     req: &mut Request,
-    class: &str,
+    class: ClassId,
     f: impl FnOnce(&mut Request) -> Result<R, Thrown>,
 ) -> Result<R, Thrown> {
-    let previous = req.replace_error_handling(Some(class.to_owned()));
+    let previous = req.replace_error_handling(Some(class));
     let answered = f(req);
     req.replace_error_handling(previous);
     match (answered, req.take_error_handling_thrown()) {
@@ -1915,7 +1925,8 @@ mod tests {
     use crate::engine::Engine;
     use crate::test::Capture;
 
-    use super::{Thrown, arg_type_error, arg_value_error, new_throwable, throw, throw_at};
+    use super::{Thrown, arg_type_error, arg_value_error, throw_at};
+    use crate::api::values::ClassId;
 
     fn parameter(name: &[u8], ty: Type, variadic: bool) -> Parameter {
         Parameter {
@@ -1946,19 +1957,7 @@ mod tests {
     /// `ParseError` at the compiled site, the empty file name and the
     /// scanner's line.
     fn refuse(req: &mut Request) -> Result<crate::api::values::Owner<Value>, Thrown> {
-        Err(throw_at(req, "ParseError", "Unclosed '('", b"", 1))
-    }
-
-    /// A native whose body throws a class the bundle may not link, as
-    /// `php_macros`' parity test met it (#970).
-    fn unlinked(req: &mut Request) -> Result<crate::api::values::Owner<Value>, Thrown> {
-        Err(throw(req, "LogicException", "never returns"))
-    }
-
-    /// The same class made and not thrown.
-    fn unlinked_made(req: &mut Request) -> Result<crate::api::values::Owner<Value>, Thrown> {
-        new_throwable(req, "LogicException", "never made")
-            .map(crate::api::values::Owner::into_value)
+        Err(throw_at(req, ClassId::PARSE_ERROR, "Unclosed '('", b"", 1))
     }
 
     /// The fatal a source comes to under an engine with the natives
@@ -1988,11 +1987,6 @@ mod tests {
                     array_merge as Entry,
                 ),
                 (declared(b"refuse", Vec::new()), refuse as Entry),
-                (declared(b"unlinked", Vec::new()), unlinked as Entry),
-                (
-                    declared(b"unlinked_made", Vec::new()),
-                    unlinked_made as Entry,
-                ),
             ])
             .build("raising");
         Engine::cli_builder()
@@ -2078,28 +2072,5 @@ mod tests {
             ),
             ("\nParse error: Unclosed '(' in  on line 1\n", 255, None)
         );
-    }
-
-    /// A raiser naming a class the bundle does not link, `spl`'s
-    /// `LogicException` under an engine that links only the natives
-    /// above, ends the request in the `InternalError` fatal naming the
-    /// class, where it threw an object of whatever class held id zero,
-    /// its properties written as dynamic ones. php has no such call:
-    /// `zend_throw_error` takes a class entry, so nothing throws a
-    /// class nothing registered.
-    #[test]
-    fn a_raiser_naming_an_unlinked_class_is_the_internal_error_naming_it() {
-        for native in ["unlinked", "unlinked_made"] {
-            let served = served(&format!("<?php {native}(); echo 'after';"));
-            let stdout = served.stdout_text();
-            assert_eq!(
-                stdout,
-                format!(
-                    "\nFatal error: InternalError: the class LogicException is not linked into this engine in Standard input code on line 1\nStack trace:\n#0 Standard input code(1): {native}()\n#1 {{main}}\n"
-                ),
-                "{native}"
-            );
-            assert_eq!(served.exit_code, 255, "{native}");
-        }
     }
 }

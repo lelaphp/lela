@@ -9,6 +9,7 @@ use crate::api::abi::{
 };
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
+use crate::api::values::ClassId;
 use crate::engine::{
     Engine, EngineBuilder, HostPage, HostServes, IniOrigin, Method, NotAlone, RequestDescription,
     WebRequest,
@@ -439,7 +440,7 @@ fn throws<const N: u8>(req: &mut Request) -> Result<(), Thrown> {
     record(N, Rinit(Some(0)));
     Err(crate::api::raising::throw_error(
         req,
-        "Error",
+        ClassId::ERROR,
         &format!("thrown by {N}"),
     ))
 }

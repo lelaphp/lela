@@ -633,10 +633,22 @@ mod tests {
     /// does not decode (#1775); the CLI reads no cookie, so no extension
     /// of the bundle fails a CLI request's start.
     fn failing_start() -> Engine {
+        /// Core's `Error`.
+        #[php_ext::attr::php_class(extern)]
+        struct Error;
+        /// `Error` as the extension's engine start resolved it.
+        struct Failing(php_ext::values::ClassId);
         fn throws(req: &mut php_ext::request::Request) -> Result<(), php_ext::raising::Thrown> {
-            Err(php_ext::raising::throw_error(req, "Error", "rinit threw"))
+            let Some(&Failing(error)) = req.engine::<Failing>() else {
+                return Err(php_ext::raising::fatal(
+                    req,
+                    "InternalError: no engine state",
+                ));
+            };
+            Err(php_ext::raising::throw_error(req, error, "rinit threw"))
         }
         let failing = php_ext::abi::ExtensionBuilder::default()
+            .engine_state(|start| start.class::<Error>().map(Failing))
             .rinit(throws)
             .build("failing");
         Engine::builder()

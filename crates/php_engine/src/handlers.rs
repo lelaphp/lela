@@ -55,6 +55,7 @@
 // safepoint or a fatal are the ones that name the tier or return an `Err`.
 #![allow(clippy::extra_unused_type_parameters, clippy::unnecessary_wraps)]
 
+use crate::api::values::ClassId;
 use php_unit::decl::Bare;
 use std::borrow::Cow;
 use std::cmp::Ordering;
@@ -1366,7 +1367,7 @@ pub(crate) fn init_dynamic_call<T: Tier>(
     } else {
         Err(crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             &format!("Value of type {} is not callable", callee.type_name()),
         ))
     };
@@ -1465,7 +1466,7 @@ fn dynamic_call_object(req: &mut Request, object: PhpObject) -> Result<DynamicTa
         let shown = req.symbols().class_name(class).to_vec();
         return Err(crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             &bytes!(b"Object of type ", shown, b" is not callable"),
         ));
     };
@@ -1596,7 +1597,7 @@ fn dynamic_call_array(
     this: Option<PhpObject>,
 ) -> Result<DynamicTarget, Thrown> {
     let refuse =
-        |req: &mut Request, text: &str| crate::api::raising::throw_error(req, "Error", text);
+        |req: &mut Request, text: &str| crate::api::raising::throw_error(req, ClassId::ERROR, text);
     if array.len() != 2 {
         return Err(refuse(req, "Array callback must have exactly two elements"));
     }
@@ -2319,7 +2320,7 @@ fn cannot_pass_by_reference(req: &mut Request, number: u32) -> Thrown {
         name,
         format!("(): Argument #{number}{parameter} could not be passed by reference")
     );
-    crate::api::raising::throw_error(req, "Error", &message)
+    crate::api::raising::throw_error(req, ClassId::ERROR, &message)
 }
 
 /// `ZEND_SEND_VAL_EX`: `SEND_VAL` for an argument that is no variable,
@@ -2901,7 +2902,7 @@ pub(crate) fn init_user_call<T: Tier>(
                 crate::api::raising::throw_over_pending(
                     req,
                     crate::api::raising::Printing::Buffered,
-                    "TypeError",
+                    ClassId::TYPE_ERROR,
                     &message,
                 )
             }))
@@ -3161,7 +3162,7 @@ fn send_array_elements(req: &mut Request, array: PhpArray) -> Result<(), Thrown>
                 if have_named {
                     return Err(crate::api::raising::throw_error(
                         req,
-                        "Error",
+                        ClassId::ERROR,
                         "Cannot use positional argument after named argument",
                     ));
                 }
@@ -5254,7 +5255,7 @@ fn arg_type_error(
         .any(|pair| pair == b"::")
         .then_some(member.as_slice());
     crate::api::raising::under_name(req, need, |req| {
-        crate::api::raising::throw_argument_error(req, member, "TypeError", &tail, &message)
+        crate::api::raising::throw_argument_error(req, member, ClassId::TYPE_ERROR, &tail, &message)
     })
 }
 
@@ -5323,7 +5324,7 @@ fn missing_argument(req: &mut Request, frame: FrameRef, passed: u32) -> Thrown {
         None => format!("(), {passed} passed and {how} {required} expected"),
     };
     let message = bytes!(b"Too few arguments to function ", name, tail);
-    crate::api::raising::throw_error(req, "ArgumentCountError", &message)
+    crate::api::raising::throw_error(req, ClassId::ARGUMENT_COUNT_ERROR, &message)
 }
 
 /// `ZEND_RECV_INIT` (`Z/Zend/zend_vm_def.h:5724`): the parameter
@@ -5761,8 +5762,11 @@ pub(crate) fn init_static_method_call<T: Tier>(
     let function = match op.op2_type {
         OperandKind::Unused => {
             let Some(constructor) = req.constructor(class) else {
-                let thrown =
-                    crate::api::raising::throw_error(req, "Error", "Cannot call constructor");
+                let thrown = crate::api::raising::throw_error(
+                    req,
+                    ClassId::ERROR,
+                    "Cannot call constructor",
+                );
                 return threw(req, frame, &thrown);
             };
             // `Z_OBJ(EX(This))->ce != ce->constructor->common.scope` over a
@@ -5778,7 +5782,7 @@ pub(crate) fn init_static_method_call<T: Tier>(
                 let name = req.symbols().class_name(class).to_vec();
                 let thrown = crate::api::raising::throw_error(
                     req,
-                    "Error",
+                    ClassId::ERROR,
                     &bytes!(b"Cannot call private ", name, b"::__construct()"),
                 );
                 return threw(req, frame, &thrown);
@@ -6004,7 +6008,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     let Some(parent) = scope.and_then(|scope| req.symbols().class_parent(scope)) else {
         let thrown = crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "Cannot use \"parent\" when current class scope has no parent",
         );
         return threw(req, frame, &thrown);
@@ -6016,7 +6020,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     let Some((declaring, property)) = req.property_info_of(parent, &name) else {
         let thrown = crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             &bytes!(b"Undefined property ", parent_name, b"::$", shown),
         );
         return threw(req, frame, &thrown);
@@ -6024,7 +6028,7 @@ pub(crate) fn init_parent_property_hook_call<T: Tier>(
     if property.visibility == php_unit::decl::Visibility::Private {
         let thrown = crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             &bytes!(
                 b"Cannot access private property ",
                 parent_name,
@@ -6347,7 +6351,7 @@ fn method_call(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) 
         }
         None => Err(crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             &format!(
                 "Call to a member function {}() on {}",
                 String::from_utf8_lossy(method.written.as_str_bytes().unwrap_or_default()),
@@ -6668,7 +6672,7 @@ pub(crate) fn fetch_this<T: Tier>(
     let Some(this) = req.vm().this(frame) else {
         let thrown = crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "Using $this when not in object context",
         );
         return threw(req, frame, &thrown);
@@ -7498,7 +7502,7 @@ fn fetch_this_by_name(req: &mut Request, frame: FrameRef, out: u32, mode: ByName
             } else {
                 "Cannot re-assign $this"
             };
-            let thrown = crate::api::raising::throw_error(req, "Error", message);
+            let thrown = crate::api::raising::throw_error(req, ClassId::ERROR, message);
             return threw(req, frame, &thrown);
         }
         (Some(this), _) => {
@@ -9528,7 +9532,8 @@ pub(crate) fn fetch_dim_func_arg<T: Tier, A: Operand + Default, B: Operand + Def
     if B::default().kind() == OperandKind::Unused {
         // `zend_use_undef_in_read_context_helper`.
         req.vm_mut().stand(frame, at);
-        let thrown = crate::api::raising::throw_error(req, "Error", "Cannot use [] for reading");
+        let thrown =
+            crate::api::raising::throw_error(req, ClassId::ERROR, "Cannot use [] for reading");
         exec::free_operand(req, frame, op.op1_type, op.op1);
         return threw(req, frame, &thrown);
     }
@@ -9575,7 +9580,7 @@ pub(crate) fn fetch_static_prop_func_arg<T: Tier>(
 fn use_tmp_in_write_context(req: &mut Request, frame: FrameRef, op: &Opline) -> Edge {
     let thrown = crate::api::raising::throw_error(
         req,
-        "Error",
+        ClassId::ERROR,
         "Cannot use temporary expression in write context",
     );
     exec::free_operand(req, frame, op.op2_type, op.op2);
@@ -10862,7 +10867,7 @@ fn write_container(
         _ => {
             return Err(crate::api::raising::throw_error(
                 req,
-                "Error",
+                ClassId::ERROR,
                 "Cannot use a scalar value as an array",
             ));
         }
@@ -11153,7 +11158,7 @@ fn assign_string_offset(
     if count == 0 {
         return Err(crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "Cannot assign an empty string to a string offset",
         ));
     }
@@ -11996,7 +12001,7 @@ fn text_dim_place(
     if op.op2_type == OperandKind::Unused {
         return crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "[] operator not supported for strings",
         );
     }
@@ -12018,7 +12023,7 @@ fn text_dim_place(
     if op.opcode == Opcode::FetchListW {
         return crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "Cannot create references to/from string offsets",
         );
     }
@@ -12028,7 +12033,7 @@ fn text_dim_place(
         FETCH_DIM_INCDEC => "Cannot increment/decrement string offsets",
         _ => "Cannot use string offset as an array",
     };
-    crate::api::raising::throw_error(req, "Error", message)
+    crate::api::raising::throw_error(req, ClassId::ERROR, message)
 }
 
 /// `zend_check_string_offset` under `BP_VAR_UNSET`: what
@@ -12055,7 +12060,7 @@ fn unset_string_offset(req: &mut Request, dim: &Value) -> Result<(), Thrown> {
     }
     Err(crate::api::raising::throw_error(
         req,
-        "Error",
+        ClassId::ERROR,
         "Cannot unset string offsets",
     ))
 }
@@ -12482,7 +12487,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         let Some(scope) = req.frame_scope(frame) else {
             let thrown = crate::api::raising::throw_error(
                 req,
-                "Error",
+                ClassId::ERROR,
                 &format!("Cannot use \"{word}\" in the global scope"),
             );
             return threw(req, frame, &thrown);
@@ -12493,7 +12498,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
                 let Some(parent) = req.symbols().class_parent(scope) else {
                     let thrown = crate::api::raising::throw_error(
                         req,
-                        "Error",
+                        ClassId::ERROR,
                         "Cannot use \"parent\" when current class scope has no parent",
                     );
                     return threw(req, frame, &thrown);
@@ -12596,7 +12601,7 @@ pub(crate) fn fetch_class<T: Tier>(
         } else {
             Err(crate::api::raising::throw_error(
                 req,
-                "Error",
+                ClassId::ERROR,
                 "Class name must be a valid object or a string",
             ))
         };
@@ -13634,7 +13639,7 @@ pub(crate) fn assign_ref<T: Tier>(
             let Some(entry) = at.and_then(|at| at.read().as_indirect()) else {
                 let thrown = crate::api::raising::throw_error(
                     req,
-                    "Error",
+                    ClassId::ERROR,
                     "Cannot assign by reference to an array dimension of an object",
                 );
                 exec::free_operand(req, frame, op.op1_type, op.op1);
@@ -13720,7 +13725,7 @@ fn overloaded_reference(req: &mut Request, object: PhpObject, name: &[u8]) -> Th
             value.give_up(req);
             crate::api::raising::throw_error(
                 req,
-                "Error",
+                ClassId::ERROR,
                 "Cannot assign by reference to overloaded object",
             )
         }
@@ -15986,7 +15991,7 @@ fn assign_text_dim(
     if op.op2_type == OperandKind::Unused {
         return Err(crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "[] operator not supported for strings",
         ));
     }
@@ -16978,9 +16983,13 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
         Ok(Container::Object(object)) => object_held(req, object, |req| {
             binary_assign_op_obj_dim(req, frame, code, step, object)
         }),
-        Ok(Container::Text(_)) if op.op2_type == OperandKind::Unused => Err(
-            crate::api::raising::throw_error(req, "Error", "[] operator not supported for strings"),
-        ),
+        Ok(Container::Text(_)) if op.op2_type == OperandKind::Unused => {
+            Err(crate::api::raising::throw_error(
+                req,
+                ClassId::ERROR,
+                "[] operator not supported for strings",
+            ))
+        }
         // `zend_binary_assign_op_dim_slow`: `zend_check_string_offset`
         // under `BP_VAR_RW`, its warnings and its `Error`, and then
         // `zend_wrong_string_offset_error`, nothing over a throwable a
@@ -16992,7 +17001,7 @@ fn assigned_dim_op(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opli
                 Ok(_) if req.is_pending() => Err(Thrown::of(None)),
                 Ok(_) => Err(crate::api::raising::throw_error(
                     req,
-                    "Error",
+                    ClassId::ERROR,
                     "Cannot use assign-op operators with string offsets",
                 )),
             }
@@ -17133,7 +17142,7 @@ fn binary_assign_op_obj_dim(
             let class = req.symbols().class_name(object.class()).to_vec();
             let error = crate::api::raising::throw_error(
                 req,
-                "Error",
+                ClassId::ERROR,
                 &bytes!(b"Cannot use object of type ", class, b" as array"),
             );
             return Err(req.raised_over(error, ran_on));
@@ -19127,7 +19136,7 @@ pub(crate) fn fetch_dim_unset<T: Tier>(
                 }
                 _ => Err(crate::api::raising::throw_error(
                     req,
-                    "Error",
+                    ClassId::ERROR,
                     "Cannot unset offset in a non-array variable",
                 )),
             }
@@ -19276,7 +19285,7 @@ pub(crate) fn unset_static_prop<T: Tier>(
     let class = req.symbols().class_name(class).to_vec();
     let thrown = crate::api::raising::throw_error(
         req,
-        "Error",
+        ClassId::ERROR,
         &bytes!(
             b"Attempt to unset static property ",
             class,
@@ -19415,7 +19424,7 @@ fn unset_container(req: &mut Request, container: &Value, offset: &Value) -> Resu
         }
         ValueRef::Str(_) => Err(crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "Cannot unset string offsets",
         )),
         ValueRef::Bool(false) => {
@@ -19431,7 +19440,7 @@ fn unset_container(req: &mut Request, container: &Value, offset: &Value) -> Resu
         ValueRef::Undef | ValueRef::Null => Ok(()),
         _ => Err(crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "Cannot unset offset in a non-array variable",
         )),
     }
@@ -19790,7 +19799,7 @@ fn unpack_into(req: &mut Request, array: PhpArray, spread: &Value) -> Result<(),
         let given = crate::ops::value_name(req, spread);
         return Err(crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             &format!("Only arrays and Traversables can be unpacked, {given} given"),
         ));
     };
@@ -19868,7 +19877,7 @@ fn unpacked_key(req: &mut Request, key: Value, during: &str) -> Result<Option<Ph
     }
     Err(crate::api::raising::throw_error(
         req,
-        "Error",
+        ClassId::ERROR,
         &format!("Keys must be of type int|string during {during} unpacking"),
     ))
 }
@@ -20182,7 +20191,7 @@ fn send_unpacked_iterator(
 fn positional_after_named(req: &mut Request) -> Thrown {
     crate::api::raising::throw_error(
         req,
-        "Error",
+        ClassId::ERROR,
         "Cannot use positional argument after named argument during unpacking",
     )
 }
@@ -23540,7 +23549,7 @@ pub(crate) fn get_class<T: Tier>(
         let Some(scope) = req.frame_scope(frame) else {
             let thrown = crate::api::raising::throw_error(
                 req,
-                "Error",
+                ClassId::ERROR,
                 "get_class() without arguments must be called from within a class",
             );
             return threw(req, frame, &thrown);
@@ -23601,7 +23610,7 @@ pub(crate) fn get_called_class<T: Tier>(
     let Some(class) = called else {
         let thrown = crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "get_called_class() must be called from within a class",
         );
         return threw(req, frame, &thrown);
@@ -25558,13 +25567,13 @@ pub(crate) fn throw<T: Tier>(
 /// words where the value is no object or its class implements nothing.
 fn thrown_value(req: &mut Request, value: &Value) -> Thrown {
     let Some(object) = value.as_object() else {
-        return crate::api::raising::throw_error(req, "Error", "Can only throw objects");
+        return crate::api::raising::throw_error(req, ClassId::ERROR, "Can only throw objects");
     };
     let throwable = req.class_named(Bare::resolved(b"throwable"));
     if !throwable.is_some_and(|of| req.symbols().instance_of(object.class(), of)) {
         return crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "Cannot throw objects that do not implement Throwable",
         );
     }
@@ -26259,7 +26268,7 @@ pub(crate) fn r#yield<T: Tier>(
         // `zend_yield_in_closed_generator_helper`.
         let thrown = crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "Cannot yield from finally in a force-closed generator",
         );
         exec::free_operand(req, frame, op.op2_type, op.op2);
@@ -26388,7 +26397,7 @@ pub(crate) fn yield_from<T: Tier>(
     if crate::generator::forced_close(req, generator) {
         let thrown = crate::api::raising::throw_error(
             req,
-            "Error",
+            ClassId::ERROR,
             "Cannot use \"yield from\" in a force-closed generator",
         );
         exec::free_operand(req, frame, op.op1_type, op.op1);

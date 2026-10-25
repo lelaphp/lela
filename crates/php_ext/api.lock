@@ -320,6 +320,7 @@ abi::Refusals::construction
 abi::Removed
 abi::Shell
 abi::Start
+abi::Start::class
 abi::Start::host
 abi::Start::ini
 abi::Start::process
@@ -386,7 +387,6 @@ call::fetch_constant
 call::fetch_function
 call::initialize_lazy
 call::instantiate
-call::instantiate_named
 call::internal_iterator
 call::iterate
 call::known_method

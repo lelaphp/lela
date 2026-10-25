@@ -380,7 +380,7 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
                 }
                 _ => None,
             };
-            let thrown = crate::api::raising::throw_error(req, "Error", &message);
+            let thrown = crate::api::raising::throw_error(req, ClassId::ERROR, &message);
             if let Some(made) = made {
                 made.give_up(req);
             }

@@ -9,6 +9,7 @@
 // The `expect` fence's `exit=` is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+use crate::api::values::ClassId;
 use php_unit::OperandKind;
 use php_unit::decl::Bare;
 use std::cmp::Ordering;
@@ -508,7 +509,7 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
     let text = quoted.unwrap_or_else(|| format!("of type {}", type_name(req, subject)));
     throw_exception_ex(
         req,
-        "UnhandledMatchError",
+        ClassId::UNHANDLED_MATCH_ERROR,
         &format!("Unhandled match case {text}"),
     )
 }
@@ -2187,7 +2188,11 @@ pub(crate) fn div(req: &mut Request, left: &Value, right: &Value) -> Result<Valu
         return Ok(inline::number_value(n));
     }
     if b.double() == 0.0 {
-        return Err(throw_error(req, "DivisionByZeroError", "Division by zero"));
+        return Err(throw_error(
+            req,
+            ClassId::DIVISION_BY_ZERO_ERROR,
+            "Division by zero",
+        ));
     }
     // php's own case, "prevent overflow error/crash": `PHP_INT_MIN / -1`
     // as a double, the one other pair the rule refuses.
@@ -2270,7 +2275,7 @@ pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Va
         // `zend_throw_exception_ex` (`Z/Zend/zend_operators.c:1550`).
         None => Err(crate::api::raising::throw_exception_ex(
             req,
-            "DivisionByZeroError",
+            ClassId::DIVISION_BY_ZERO_ERROR,
             "Modulo by zero",
         )),
     }
@@ -2400,7 +2405,7 @@ fn shift(req: &mut Request, side: Shift, left: &Value, right: &Value) -> Result<
         Ok(by) => Ok(Value::int(by_heap(a, by))),
         Err(_) => Err(throw_exception_ex(
             req,
-            "ArithmeticError",
+            ClassId::ARITHMETIC_ERROR,
             "Bit shift by negative number",
         )),
     }
