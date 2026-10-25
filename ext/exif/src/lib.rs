@@ -23,6 +23,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod decode;
+mod held;
 mod image;
 mod tags;
 mod walk;
@@ -313,6 +314,38 @@ fn exif_tagname(req: &mut Request, index: i64) -> Result<OrFalse<Owner<PhpString
 /// Warning: exif_read_data(): Invalid TIFF file in %s on line 5
 /// bool(false)
 /// ```
+///
+/// Since 8.5.12 the read stops once the memory limit was met: every JPEG
+/// section is kept on the request's heap, so a file of many small ones
+/// passes it, and the limit's fatal is raised as the call returns with
+/// no warning after it.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $f = sys_get_temp_dir() . '/exif-sections.jpg';
+/// file_put_contents($f, "\xFF\xD8" . str_repeat("\xFF\xE9\x00\x02", 524287) . "\xFF\xD9");
+/// register_shutdown_function(fn() => unlink($f));
+/// var_dump(exif_read_data($f), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 3145728 bytes) in %s on line 6
+/// ```
+///
+/// A HEIF `meta` box larger than the file is refused before anything is
+/// asked for it, since 8.5.12:
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/exif-meta.heic';
+/// file_put_contents($f, pack("N", 20) . "ftypheic" . str_repeat("\0", 8) . pack("N", 0x08000000) . "meta" . str_repeat("\0", 8) . "\0");
+/// var_dump(exif_read_data($f));
+/// unlink($f);
+/// ```
+/// ```expect
+///
+/// Warning: exif_read_data(exif-meta.heic): Invalid HEIF file in %s on line 4
+/// bool(false)
+/// ```
 #[php_function]
 fn exif_read_data(
     req: &mut Request,
@@ -329,18 +362,43 @@ fn exif_read_data(
     reader.img.found.add(Section::File);
     let missing = needed.is_some_and(|n| n != Found::default() && !n.meets(reader.img.found));
     if !ok || missing {
+        reader.discard();
         return Ok(OrFalse::False);
     }
-    computed(&mut reader, &found.list());
-    let mut array = PhpArray::new(reader.req)?;
+    if let Err(thrown) = computed(&mut reader, &found.list()) {
+        reader.discard();
+        return Err(thrown);
+    }
+    let mut array = match PhpArray::new(reader.req) {
+        Ok(array) => array,
+        Err(thrown) => {
+            reader.discard();
+            return Err(thrown);
+        }
+    };
     for section in OUTPUT {
         let sub = as_arrays
             || matches!(
                 section,
                 Section::Computed | Section::Thumbnail | Section::Comment
             );
-        add_section(reader.req, &mut array, &reader.img, section, sub)?;
+        match add_section(reader.req, &mut array, &reader.img, section, sub) {
+            Ok(true) => {}
+            // `goto oom` since 8.5.12: the image discarded, the array
+            // given up, and `RETURN_OOM()`.
+            Ok(false) => {
+                reader.discard();
+                array.give_up(reader.req);
+                return Ok(OrFalse::False);
+            }
+            Err(thrown) => {
+                reader.discard();
+                array.give_up(reader.req);
+                return Err(thrown);
+            }
+        }
     }
+    reader.discard();
     Ok(OrFalse::Value(array))
 }
 
@@ -369,34 +427,37 @@ const OUTPUT: [Section; 13] = [
     clippy::cast_precision_loss,
     reason = "php's `int` and `%d` of its `time_t`, `size_t` and `float` fields"
 )]
-fn computed(reader: &mut Reader<'_>, sections: &str) {
+#[expect(clippy::too_many_lines, reason = "php's run of adds, one a fact")]
+fn computed(reader: &mut Reader<'_>, sections: &str) -> Result<(), Thrown> {
     use Section::{Computed, File, Thumbnail, WinXp};
+    let req = &mut *reader.req;
     let img = &mut reader.img;
     let name = img.file_name.clone();
-    img.add_str(File, b"FileName", name.as_deref());
-    img.add_int(File, "FileDateTime", img.file_date_time as i32);
-    img.add_int(File, "FileSize", c_int(img.file_size));
-    img.add_int(File, "FileType", img.file_type.code() as i32);
-    let mime = php_ext_standard::php_image_type_to_mime_type(reader.req, img.file_type.code());
-    img.add_str(File, b"MimeType", Some(mime.as_bytes()));
-    img.add_str(File, b"SectionsFound", Some(sections.as_bytes()));
+    img.add_str(req, File, b"FileName", name.as_deref())?;
+    img.add_int(req, File, "FileDateTime", img.file_date_time as i32)?;
+    img.add_int(req, File, "FileSize", c_int(img.file_size))?;
+    img.add_int(req, File, "FileType", img.file_type.code() as i32)?;
+    let mime = php_ext_standard::php_image_type_to_mime_type(req, img.file_type.code());
+    img.add_str(req, File, b"MimeType", Some(mime.as_bytes()))?;
+    img.add_str(req, File, b"SectionsFound", Some(sections.as_bytes()))?;
     if img.width > 0 && img.height > 0 {
         let html = format!("width=\"{}\" height=\"{}\"", img.width, img.height);
-        img.add_str(Computed, b"html", Some(html.as_bytes()));
-        img.add_int(Computed, "Height", img.height);
-        img.add_int(Computed, "Width", img.width);
+        img.add_str(req, Computed, b"html", Some(html.as_bytes()))?;
+        img.add_int(req, Computed, "Height", img.height)?;
+        img.add_int(req, Computed, "Width", img.width)?;
     }
-    img.add_int(Computed, "IsColor", i32::from(img.is_color));
+    img.add_int(req, Computed, "IsColor", i32::from(img.is_color))?;
     if let Some(order) = img.order {
         img.add_int(
+            req,
             Computed,
             "ByteOrderMotorola",
             i32::from(order == image::Order::Motorola),
-        );
+        )?;
     }
     if img.ccd_width != 0.0 {
         let text = format!("{}mm", img.ccd_width as i32);
-        img.add_str(Computed, b"CCDWidth", Some(text.as_bytes()));
+        img.add_str(req, Computed, b"CCDWidth", Some(text.as_bytes()))?;
     }
     if img.exposure_time > 0.0 {
         let recip = 0.5f32 + 1.0 / img.exposure_time;
@@ -405,11 +466,11 @@ fn computed(reader: &mut Reader<'_>, sections: &str) {
         } else {
             format!("{:.3} s", img.exposure_time)
         };
-        img.add_str(Computed, b"ExposureTime", Some(text.as_bytes()));
+        img.add_str(req, Computed, b"ExposureTime", Some(text.as_bytes()))?;
     }
     if img.aperture_f_number != 0.0 {
         let text = format!("f/{:.1}", img.aperture_f_number);
-        img.add_str(Computed, b"ApertureFNumber", Some(text.as_bytes()));
+        img.add_str(req, Computed, b"ApertureFNumber", Some(text.as_bytes()))?;
     }
     if img.distance != 0.0 {
         let text = if img.distance < 0.0 {
@@ -417,12 +478,12 @@ fn computed(reader: &mut Reader<'_>, sections: &str) {
         } else {
             format!("{:.2}m", img.distance)
         };
-        img.add_str(Computed, b"FocusDistance", Some(text.as_bytes()));
+        img.add_str(req, Computed, b"FocusDistance", Some(text.as_bytes()))?;
     }
     if let Some(comment) = img.user_comment.clone() {
-        img.add_buffer(Computed, "UserComment", &comment);
+        img.add_buffer(req, Computed, "UserComment", &comment)?;
         if let Some(encoding) = img.user_comment_encoding.clone().filter(|e| !e.is_empty()) {
-            img.add_str(Computed, b"UserCommentEncoding", Some(&encoding));
+            img.add_str(req, Computed, b"UserCommentEncoding", Some(&encoding))?;
         }
     }
     let copyright = [
@@ -434,11 +495,11 @@ fn computed(reader: &mut Reader<'_>, sections: &str) {
         (b"Copyright.Editor", img.copyright_editor.clone()),
     ];
     for (name, value) in copyright {
-        img.add_str(Computed, name, value.as_deref());
+        img.add_str(req, Computed, name, value.as_deref())?;
     }
     for (tag, value) in img.xp_fields.clone() {
         let name = tags::debug_name(tag, WinXp.table());
-        img.add_str(WinXp, name.as_bytes(), value.as_deref());
+        img.add_str(req, WinXp, name.as_bytes(), value.as_deref())?;
     }
     if img.thumbnail.size != 0 {
         if img.read_thumbnail {
@@ -446,7 +507,15 @@ fn computed(reader: &mut Reader<'_>, sections: &str) {
             let size = usize::try_from(img.thumbnail.size).unwrap_or(0);
             let format = image::Format::Undefined;
             let name = b"THUMBNAIL".to_vec();
-            let warning = img.add_value(Thumbnail, name, TAG_NONE, format, size, data.as_deref());
+            let warning = img.add_value(
+                req,
+                Thumbnail,
+                name,
+                TAG_NONE,
+                format,
+                size,
+                data.as_deref(),
+            )?;
             if let Some(warning) = warning {
                 reader.error(Level::Warning, &warning);
             }
@@ -458,31 +527,42 @@ fn computed(reader: &mut Reader<'_>, sections: &str) {
         let filetype = reader.img.thumbnail.filetype.code();
         reader
             .img
-            .add_int(Computed, "Thumbnail.FileType", filetype as i32);
+            .add_int(reader.req, Computed, "Thumbnail.FileType", filetype as i32)?;
         let mime = php_ext_standard::php_image_type_to_mime_type(reader.req, filetype);
-        reader
-            .img
-            .add_str(Computed, b"Thumbnail.MimeType", Some(mime.as_bytes()));
+        reader.img.add_str(
+            reader.req,
+            Computed,
+            b"Thumbnail.MimeType",
+            Some(mime.as_bytes()),
+        )?;
     }
+    let req = &mut *reader.req;
     let img = &mut reader.img;
     if img.thumbnail.width != 0 && img.thumbnail.height != 0 {
-        img.add_int(Computed, "Thumbnail.Height", c_int(img.thumbnail.height));
-        img.add_int(Computed, "Thumbnail.Width", c_int(img.thumbnail.width));
+        img.add_int(
+            req,
+            Computed,
+            "Thumbnail.Height",
+            c_int(img.thumbnail.height),
+        )?;
+        img.add_int(req, Computed, "Thumbnail.Width", c_int(img.thumbnail.width))?;
     }
+    Ok(())
 }
 
 /// `add_assoc_image_info`: one section's values into `array`, or into
-/// an array of their own under the section's name.
+/// an array of their own under the section's name; `false` where the
+/// memory limit was met on the way, php 8.5.12's `FAILURE`.
 fn add_section(
     req: &mut Request,
     array: &mut Owner<PhpArray>,
     img: &Image,
     section: Section,
     sub_array: bool,
-) -> Result<(), Thrown> {
+) -> Result<bool, Thrown> {
     let entries = &img.sections[section.index()];
     if entries.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     let mut own = if sub_array {
         Some(PhpArray::new(req)?)
@@ -503,6 +583,9 @@ fn add_section(
                     let text = PhpString::new(req, text)?.into_value();
                     target.set(req, Owner::index(index), text)?;
                     index += 1;
+                    if req.memory().has_oom() {
+                        return Ok(given_up(req, own));
+                    }
                     continue;
                 }
                 Stored::Bytes(bytes) | Stored::Text(bytes) => {
@@ -515,6 +598,12 @@ fn add_section(
                         for (at, one) in (0..).zip(many) {
                             let value = number(req, *one)?;
                             list.set(req, Owner::index(at), value)?;
+                            // Since 8.5.12 each value stops the section
+                            // once the memory limit was met.
+                            if req.memory().has_oom() {
+                                list.give_up(req);
+                                return Ok(given_up(req, own));
+                            }
                         }
                         list.into_value()
                     }
@@ -522,11 +611,23 @@ fn add_section(
             }
         };
         target.set_symtable_str(req, &entry.name, value)?;
+        if req.memory().has_oom() {
+            return Ok(given_up(req, own));
+        }
     }
     if let Some(own) = own {
         array.set_str(req, section.name().as_bytes(), own.into_value())?;
     }
-    Ok(())
+    Ok(!req.memory().has_oom())
+}
+
+/// `add_assoc_image_info`'s `failure:` since 8.5.12: the section's own
+/// array given up, and `FAILURE`.
+fn given_up(req: &mut Request, own: Option<Owner<PhpArray>>) -> bool {
+    if let Some(own) = own {
+        own.give_up(req);
+    }
+    false
 }
 
 /// One number as `add_assoc_image_info` renders it: an `int` of the
@@ -565,6 +666,41 @@ fn number(req: &mut Request, number: Number) -> Result<Owner<Value>, Thrown> {
 /// int(2)
 /// int(2)
 /// ```
+///
+/// Since 8.5.12 a TIFF thumbnail is read only where its bytes lie in the
+/// file, and into a buffer asked for fallibly: one larger than the file
+/// is warned about and none is read, and one past the memory limit is
+/// refused, the limit's fatal raised as the call returns.
+///
+/// ```php
+/// $t = "II*\0" . pack("V", 8) . pack("v", 2) . pack("vvVV", 0x0100, 4, 1, 1) . pack("vvVV", 0x0101, 4, 1, 1) . pack("V", 38)
+///     . pack("v", 2) . pack("vvVV", 0x0111, 4, 1, 1) . pack("vvVV", 0x0117, 4, 1, -1) . pack("V", 0);
+/// $f = sys_get_temp_dir() . '/exif-thumb.tif';
+/// file_put_contents($f, $t);
+/// var_dump(exif_thumbnail($f));
+/// unlink($f);
+/// ```
+/// ```expect
+///
+/// Warning: exif_thumbnail(exif-thumb.tif): Thumbnail goes IFD boundary or end of file reached in %s on line 6
+/// bool(false)
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $f = sys_get_temp_dir() . '/exif-big.tif';
+/// $h = fopen($f, 'w');
+/// fwrite($h, "II*\0" . pack("V", 8) . pack("v", 2) . pack("vvVV", 0x0100, 4, 1, 1) . pack("vvVV", 0x0101, 4, 1, 1) . pack("V", 38)
+///     . pack("v", 2) . pack("vvVV", 0x0111, 4, 1, 68) . pack("vvVV", 0x0117, 4, 1, 12 << 20) . pack("V", 0));
+/// for ($i = 0; $i < 12; $i++) fwrite($h, str_repeat("\xAB", 1 << 20));
+/// fclose($h);
+/// register_shutdown_function(fn() => unlink($f));
+/// var_dump(exif_thumbnail($f), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 12582912 bytes) in %s on line 10
+/// ```
 #[php_function]
 fn exif_thumbnail(
     req: &mut Request,
@@ -578,10 +714,29 @@ fn exif_thumbnail(
     let thumb = &reader.img.thumbnail;
     let data = match thumb.data.clone() {
         Some(data) if ok && thumb.size != 0 => data,
-        _ => return Ok(OrFalse::False),
+        _ => {
+            reader.discard();
+            return Ok(OrFalse::False);
+        }
     };
     let size = usize::try_from(thumb.size).unwrap_or(0).min(data.len());
-    let answer = PhpString::new(reader.req, &data[..size])?;
+    // `RETVAL_FSTRINGL`, fallible since 8.5.12.
+    let made = reader
+        .req
+        .memory_mut()
+        .fallible(|req| PhpString::finit(req, &data[..size]));
+    let answer = match made {
+        Ok(Some(answer)) => answer,
+        // RETURN_OOM()
+        Ok(None) => {
+            reader.discard();
+            return Ok(OrFalse::False);
+        }
+        Err(thrown) => {
+            reader.discard();
+            return Err(thrown);
+        }
+    };
     if (width.is_given() || height.is_given())
         && (thumb.width == 0 || thumb.height == 0)
         && !reader.scan_thumbnail()
@@ -599,9 +754,11 @@ fn exif_thumbnail(
     for (slot, value) in answers {
         if let Err(thrown) = slot.set(reader.req, Untyped(Value::int(value))) {
             answer.give_up(reader.req);
+            reader.discard();
             return Err(thrown);
         }
     }
+    reader.discard();
     Ok(OrFalse::Value(answer))
 }
 
@@ -725,6 +882,7 @@ fn read<'r>(
         stream.seek(reader.req, old_pos, Whence::Set);
     }
     if let Some(thrown) = reader.thrown.take() {
+        reader.discard();
         return Err(thrown);
     }
     Ok((reader, ok))
