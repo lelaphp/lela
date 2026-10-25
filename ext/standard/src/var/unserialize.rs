@@ -2035,80 +2035,9 @@ impl State<'_> {
         else {
             return Ok(false);
         };
-        if self.hash.incomplete_classes_only {
-            // "Do not look the class up at all, so that no user code can
-            // run."
-            held.give_up(req);
-            if !valid_class_name(&name) {
-                return Ok(false);
-            }
-            let Some(class) = lookup_class(req, INCOMPLETE_CLASS)? else {
-                return Ok(false);
-            };
-            return self.object_of(req, slot, entry, after, custom, class, &name, true);
-        }
-        let lower = name.to_ascii_lowercase();
-        if lower != name {
-            let lowered = req
-                .memory_mut()
-                .fallible(|req| PhpString::new(req, &lower))?;
-            let Some(lowered) = lowered else {
-                held.give_up(req);
-                return Ok(false);
-            };
-            lowered.give_up(req);
-        }
-        held.give_up(req);
-        let allowed = self.hash.allowed.admits(&lower);
-        let mut incomplete = false;
-        let class = if allowed {
-            // `zend_is_valid_class_name` before the table is asked, since
-            // the one class php finds there without the test, a linked
-            // one, is never anonymous, whose name holds a NUL.
-            if !valid_class_name(&name) {
-                return Ok(false);
-            }
-            // The class loader and the callback run with
-            // `BG(serialize_lock)` held, so what they unserialize is read
-            // through a var hash of its own.
-            if let Some(class) = locked(req, |req| autoload(req, &name))? {
-                Some(class)
-            } else {
-                incomplete = true;
-                if locked(req, |req| Self::callback(req, &name))? {
-                    incomplete = false;
-                    lookup_class(req, &name)?
-                } else {
-                    lookup_class(req, INCOMPLETE_CLASS)?
-                }
-            }
-        } else {
-            if !valid_class_name(&name) {
-                return Ok(false);
-            }
-            incomplete = true;
-            lookup_class(req, INCOMPLETE_CLASS)?
-        };
-        let Some(class) = class else {
+        let Some((class, incomplete)) = self.resolve(req, &name, held)? else {
             return Ok(false);
         };
-        self.object_of(req, slot, entry, after, custom, class, &name, incomplete)
-    }
-
-    /// `object_common` and `object_custom` once the class is known: the
-    /// object of `class` made and written, its data read.
-    #[allow(clippy::too_many_arguments)] // php's scanner state, one each
-    fn object_of(
-        &mut self,
-        req: &mut Request,
-        slot: &Slot,
-        entry: Option<usize>,
-        after: usize,
-        custom: bool,
-        class: ClassId,
-        name: &[u8],
-        incomplete: bool,
-    ) -> Result<bool, Thrown> {
         self.p = after;
         if let Some(shown) = not_serializable(req, class) {
             return Err(throw_exception_ex(
@@ -2118,7 +2047,7 @@ impl State<'_> {
             ));
         }
         if custom {
-            return self.custom(req, slot, entry, class, name, incomplete);
+            return self.custom(req, slot, entry, class, &name, incomplete);
         }
         if self.p + 2 >= self.buf.len() {
             warning(req, "Bad unserialize data");
@@ -2160,7 +2089,7 @@ impl State<'_> {
         let object = *made;
         self.write(req, slot, entry, made.into_value())?;
         if incomplete {
-            store_member(req, object, MAGIC_MEMBER, name)?;
+            store_member(req, object, MAGIC_MEMBER, &name)?;
         }
         if has_unserialize {
             if elements >= HT_MAX_SIZE {
@@ -2213,6 +2142,72 @@ impl State<'_> {
             self.hash.tmp_var(req, Dtor::Wakeup(held))?;
         }
         Ok(self.finish())
+    }
+
+    /// The class an `O:` or `C:` record names, held as `class_name` is
+    /// while its lowered copy is asked for, and whether the object is an
+    /// incomplete one: under `incomplete_classes_only` no class is looked
+    /// up at all; otherwise the allowed class through the loader and
+    /// `unserialize_callback_func`, `__PHP_Incomplete_Class` past them or
+    /// where it is not allowed. `None` fails the read.
+    fn resolve(
+        &mut self,
+        req: &mut Request,
+        name: &[u8],
+        held: Owner<PhpString>,
+    ) -> Result<Option<(ClassId, bool)>, Thrown> {
+        if self.hash.incomplete_classes_only {
+            // "Do not look the class up at all, so that no user code can
+            // run."
+            held.give_up(req);
+            if !valid_class_name(name) {
+                return Ok(None);
+            }
+            return Ok(lookup_class(req, INCOMPLETE_CLASS)?.map(|class| (class, true)));
+        }
+        let lower = name.to_ascii_lowercase();
+        if lower != name {
+            let lowered = req
+                .memory_mut()
+                .fallible(|req| PhpString::new(req, &lower))?;
+            let Some(lowered) = lowered else {
+                held.give_up(req);
+                return Ok(None);
+            };
+            lowered.give_up(req);
+        }
+        held.give_up(req);
+        let allowed = self.hash.allowed.admits(&lower);
+        let mut incomplete = false;
+        let class = if allowed {
+            // `zend_is_valid_class_name` before the table is asked, since
+            // the one class php finds there without the test, a linked
+            // one, is never anonymous, whose name holds a NUL.
+            if !valid_class_name(name) {
+                return Ok(None);
+            }
+            // The class loader and the callback run with
+            // `BG(serialize_lock)` held, so what they unserialize is read
+            // through a var hash of its own.
+            if let Some(class) = locked(req, |req| autoload(req, name))? {
+                Some(class)
+            } else {
+                incomplete = true;
+                if locked(req, |req| Self::callback(req, name))? {
+                    incomplete = false;
+                    lookup_class(req, name)?
+                } else {
+                    lookup_class(req, INCOMPLETE_CLASS)?
+                }
+            }
+        } else {
+            if !valid_class_name(name) {
+                return Ok(None);
+            }
+            incomplete = true;
+            lookup_class(req, INCOMPLETE_CLASS)?
+        };
+        Ok(class.map(|class| (class, incomplete)))
     }
 
     /// `unserialize_callback_func`: the function the ini names, handed the

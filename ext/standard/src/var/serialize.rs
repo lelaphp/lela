@@ -654,10 +654,12 @@ fn object_value(
 /// the class name it holds; `false`, for the ordinary path, where it
 /// holds neither or no class name.
 fn incomplete_raw(req: &mut Request, out: &mut Vec<u8>, object: PhpObject) -> bool {
+    // `Z_TYPE_P(member) == IS_STRING` over the row as it stands, a
+    // reference not followed.
     let string = |req: &mut Request, name: &[u8]| {
         object
             .prop(req, name)
-            .and_then(|v| v.deref().as_str_bytes().map(<[u8]>::to_vec))
+            .and_then(|v| v.as_str_bytes().map(<[u8]>::to_vec))
     };
     if let Some(payload) = string(req, MAGIC_MEMBER_SERIALIZED) {
         let Some(class) = string(req, MAGIC_MEMBER) else {
