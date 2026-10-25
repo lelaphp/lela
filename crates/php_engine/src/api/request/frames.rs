@@ -1319,15 +1319,16 @@ impl Request {
     /// [`Request::push_laid`] and [`Request::push_room`], since the pass
     /// that primed the slot laid the callee's cache. A closure's cache
     /// was chosen as it was made ([`crate::classes::closure_cache`]).
+    #[inline(always)] // the push of every INIT's slow path, its header moved, not copied
     pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
+        let Some((room, header)) = self.laid_call(header) else {
+            return Err(Fatal::error("InternalError: a call pushed with no callee"));
+        };
         if header.closure.is_none()
             && let Some(function) = header.function
         {
             self.init_func_run_time_cache(function)?;
         }
-        let Some((room, header)) = self.laid_call(header) else {
-            return Err(Fatal::error("InternalError: a call pushed with no callee"));
-        };
         self.push_room(room, header)
     }
 
@@ -2504,7 +2505,7 @@ impl Request {
     /// 384 384 384 384 384
     /// 384 384 384 384 384
     /// ```
-    #[inline]
+    #[inline(always)] // a test of one word on every pushed call, as php's
     pub(crate) fn init_func_run_time_cache(&mut self, function: Function) -> Result<(), Fatal> {
         let Some(shape) = self.user_function(function).map(|user| user.shape) else {
             return Ok(());
