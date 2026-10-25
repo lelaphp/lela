@@ -1671,7 +1671,8 @@ impl DateTime {
     /// So a `memory_limit` falls where php's does: under opcache's regime a
     /// request starts with php's memory (design §5.13, #2863), each object
     /// costs what php's does, and the array of them meets the limit on
-    /// the same growth of its buckets, asking for php's size (#2854):
+    /// the same growth of its buckets (#2854), where php 8.5.12 names the
+    /// chunk the growth asks the system for:
     ///
     /// ```php
     /// ini_set('memory_limit', '2M');
@@ -1683,7 +1684,8 @@ impl DateTime {
     /// echo "unexpected success\n";
     /// ```
     /// ```expect regime=jit-off exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 135168 bytes) in %SCRATCH%/witness.php on line 6
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 6
     /// ```
     ///
     /// An `@` timestamp one above `PHP_INT_MIN`, at `PHP_INT_MAX`, and

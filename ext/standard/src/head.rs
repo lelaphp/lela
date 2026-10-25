@@ -20,7 +20,7 @@ use php_ext::raising::{
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value};
 
 /// `header(string $header, bool $replace = true, int $response_code = 0): void`
 /// (`Z/ext/standard/head.c:32`): `sapi_header_op` under `REPLACE` or
@@ -369,6 +369,9 @@ fn php_setcookie(
     }
     let mut line = b"Set-Cookie: ".to_vec();
     line.extend_from_slice(name);
+    // php's `smart_str buf`, on the request's heap, held until the
+    // header's own copy is made.
+    let mut buf = SmartStr::default();
     match value.filter(|v| !v.is_empty()) {
         None => {
             line.extend_from_slice(b"=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0");
@@ -379,6 +382,18 @@ fn php_setcookie(
                 crate::url::url_encode(value, true, &mut line);
             } else {
                 line.extend_from_slice(value);
+            }
+            // "The encoded value is up to three copies of the input":
+            // 8.5.12 appends it fallibly, and where the memory limit
+            // refuses it no header is set and the call answers false,
+            // the limit's fatal raised as it returns.
+            if req
+                .memory_mut()
+                .fallible(|req| buf.append(req, &line))?
+                .is_none()
+            {
+                buf.free(req);
+                return Ok(false);
             }
             if cookie.expires > 0 {
                 line.extend_from_slice(b"; expires=");
@@ -414,7 +429,9 @@ fn php_setcookie(
     if cookie.partitioned {
         line.extend_from_slice(b"; Partitioned");
     }
-    Ok(req.response_mut().header_add(&line, false, 0))
+    let added = req.response_mut().header_add(&line, false, 0);
+    buf.free(req);
+    Ok(added)
 }
 
 /// `php_head_parse_cookie_options_array` (`Z/ext/standard/head.c:205`).
@@ -527,6 +544,19 @@ fn setcookie_common(
 /// setcookie(): option "nope" is invalid
 /// setcookie(): option array cannot have numeric keys
 /// setcookie(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array
+/// ```
+///
+/// The value, encoded or not, is appended to the header's line fallibly
+/// since 8.5.12: past the memory limit it is refused, no header is set,
+/// and the limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(setcookie("c", str_repeat("\xff", 2 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 6307840 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn setcookie(

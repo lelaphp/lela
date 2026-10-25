@@ -165,7 +165,24 @@ enum Status {
 
 /// `bzip2.decompress`: the status, `small_footprint`,
 /// `expect_concatenated` and `persistent`, and the buffers, `None` once
-/// the dtor freed them.
+/// the dtor freed them. What decompressing hands on is unbounded by what
+/// it is fed, so php 8.5.12 decompresses no further once the memory limit
+/// was met (`ZEND_HAS_OOM()`), and twelve megabytes of zeros read through
+/// a four megabyte limit raise the soft limit's fatal after the read,
+/// short of the hard limit:
+///
+/// ```php
+/// $file = __DIR__ . '/oom_decompress.bz2';
+/// file_put_contents($file, bzcompress(str_repeat("\0", 12 * 1024 * 1024), 9));
+/// ini_set('memory_limit', '4M');
+/// $fp = fopen($file, 'rb');
+/// stream_filter_append($fp, 'bzip2.decompress', STREAM_FILTER_READ);
+/// var_dump(stream_get_contents($fp));
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3604480 bytes) in %s on line 7
+/// ```
 struct Decompressing {
     status: Status,
     small: bool,
@@ -202,6 +219,12 @@ impl StreamFilter for Decompressing {
         while let Some(bucket) = input.pop_front() {
             let mut bin = 0;
             while bin < bucket.len() {
+                // What decompressing hands on is unbounded by what it is
+                // fed: php 8.5.12 stops once the memory limit was met
+                // (`ZEND_HAS_OOM()`).
+                if req.memory().has_oom() {
+                    break;
+                }
                 if matches!(self.status, Status::Uninitialized) {
                     let Ok(stream) = Decompressor::new(req, self.small, self.persistent)? else {
                         return Ok(FilterStatus::ErrFatal);
@@ -245,7 +268,7 @@ impl StreamFilter for Decompressing {
         if flags == FilterFlags::FlushClose
             && let Status::Running(stream) = &mut self.status
         {
-            loop {
+            while !req.memory().has_oom() {
                 let step = stream.decompress(req, &[], buffers.outbuf.bytes_mut())?;
                 if step.written > 0 {
                     output.push_back(buffers.out(step.written));

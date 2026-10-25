@@ -356,6 +356,13 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        // `if (ZEND_HAS_OOM()) { zend_handle_delayed_oom(); return FAILURE; }`
+        // (`Z/Zend/zend_execute_API.c:838` at 8.5.12): no call once the
+        // memory limit was met, its fatal raised here if no safepoint has.
+        if self.has_oom() {
+            self.handle_delayed_oom();
+            return Ok(Value::null());
+        }
         // `EG(fake_scope) = NULL` for the call and put back after it: a
         // destructor or a `__toString` a scoped write serves stands in its
         // own scope.
@@ -368,6 +375,21 @@ impl Request {
                 arguments,
                 extra_named,
             )
+        })
+    }
+
+    /// A native function served where php calls its C directly rather
+    /// than through `zend_call_function`, as phpdbg's `ev` calls
+    /// `zend_print_zval_r`: [`Request::serve_function`] past the memory
+    /// limit's refusal of every call once it was met, so what such a
+    /// call renders is rendered for the rest of the request.
+    pub(crate) fn serve_function_from_c(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        self.in_fake_scope(None, |req| {
+            req.serve_call_body(function, None, None, Carried::Nothing, arguments, &[])
         })
     }
 

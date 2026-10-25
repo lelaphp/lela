@@ -303,12 +303,34 @@ impl<P: UriParser> ObjectHandlers for Handlers<P> {
     }
 }
 
+///
+/// A copy the memory limit refused since 8.5.12 leaves the clone with no
+/// URI, and the limit's fatal is raised at the next check, here the
+/// method's return, where php raises it at the clone itself (the line
+/// the engine names is the check's, #3260):
+///
+/// ```php
+/// ini_set("memory_limit", "8M");
+/// $a = new Uri\Rfc3986\Uri("http://EXAMPLE.COM/" . str_repeat("a/../", 60000));
+/// $b = clone $a; $a->equals($b);
+/// echo "not reached\n";
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
+/// ```
 fn clone_uri<P: UriParser>(
     req: &mut Request,
     object: PhpObject,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let copy = with_uri::<P, _>(req, object, |req, uri| uri.duplicate(req))?;
     let Some(copy) = copy else {
+        // A copy the memory limit refused since 8.5.12: the clone stands
+        // with no URI, and the limit's fatal is raised at the next check,
+        // before anything reads it ([`with_uri`]).
+        if req.memory().has_oom() {
+            return clone_with(req, &object, Slot::<P>(None));
+        }
         return Err(fatal(req, "InternalError: a URI could not be copied"));
     };
     clone_with(req, &object, Slot(Some(copy)))
@@ -326,6 +348,15 @@ fn with_uri<P: UriParser, R>(
         .native_mut::<Slot<P>>(req)
         .and_then(|slot| slot.0.take())
     else {
+        // A clone whose copy the memory limit refused: a throwable, which
+        // the check after the call gives up for the limit's fatal.
+        if req.memory().has_oom() {
+            return Err(throw_exception_ex(
+                req,
+                "Uri\\UriError",
+                "The URI could not be copied",
+            ));
+        }
         return Err(fatal(
             req,
             &format!(

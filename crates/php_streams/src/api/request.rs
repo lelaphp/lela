@@ -445,7 +445,12 @@ impl Stream {
             .stream_op(self, |op| op.get_record(maxlen, delim))
             .flatten()
         {
-            Some(record) => Ok(Some(PhpString::new(req, &record)?)),
+            // php 8.5.12's `zend_string_falloc(tent_ret_len, 0, true)`:
+            // a record the memory limit has no room for is `NULL`, the
+            // limit's fatal raised after the call.
+            Some(record) => req
+                .memory_mut()
+                .fallible(|req| PhpString::new(req, &record)),
             None => Ok(None),
         }
     }
@@ -490,7 +495,7 @@ impl Stream {
     /// bool(true)
     /// int(3)
     ///
-    /// Fatal error: Allowed memory size of %d bytes exhausted (tried to allocate 9223372036854775832 bytes) in %s on line 4
+    /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 9223372036854792192 bytes) in %s on line 4
     /// ```
     pub fn truncate(self, req: &mut Request, size: usize) -> Result<Option<bool>, Thrown> {
         let answer = req.stream_op(self, |op| op.truncate(size)).flatten();

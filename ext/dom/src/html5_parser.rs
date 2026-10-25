@@ -629,7 +629,7 @@ fn parse(
 /// int(1172688)
 /// int(31525256)
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 36864 bytes) in %SCRATCH%/witness.php on line 10
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %SCRATCH%/witness.php on line 10
 /// ```
 fn with_document<R>(
     req: &mut Request,

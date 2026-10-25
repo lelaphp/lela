@@ -214,7 +214,7 @@ impl Request {
     /// eval('$outer = "o"; $main .= "2"; eval(\'$inner = "i"; $outer .= "!"; ini_set("memory_limit", "2M"); str_repeat("x", 4 << 20);\');');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 1
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 1
     /// string(1) "i"
     /// string(2) "o!"
     /// string(2) "m2"

@@ -1895,12 +1895,13 @@ pub(crate) fn unit(
         &emit.own_names,
         emit.strings,
     ) {
+        let (raise, message) = crate::fatal_refusal(limit);
         return Err(Refused {
             level: Level::Error,
-            message: crate::fatal_message(limit).into(),
+            message: message.into(),
             line: lines.max(1),
             raised: diagnostics,
-            raise: crate::Raise::Fatal,
+            raise,
             stage: crate::Stage::Compiling,
             declared: None,
             keys_made: u32::try_from(emit.runtime_keys.len()).unwrap_or(u32::MAX),
@@ -2191,8 +2192,10 @@ impl<'a> Emit<'a> {
     /// `try` around an `eval` catches it, and no fold passes over it
     /// ([`Self::constant_of`] holds all three).
     fn fatal_of(&self, fatal: Fatal) -> CompileError {
-        let mut refused = self.fatal(crate::fatal_message(fatal));
+        let (raise, message) = crate::fatal_refusal(fatal);
+        let mut refused = self.fatal(message);
         refused.level = Level::Error;
+        refused.raise = raise;
         refused
     }
 
@@ -2461,34 +2464,36 @@ impl<'a> Emit<'a> {
     /// it stands, and every other refusal through, since php's compiler
     /// leaves the file at the fatal and folds nothing after it.
     ///
-    /// So the heap refusing the string a class constant's fold makes is
-    /// the request's `E_ERROR` at the constant's line, as php's
-    /// `zend_eval_const_expr` raises it, and not a node left to the class
-    /// to evaluate; the function the `eval` declared before it stands.
-    /// The constant is folded from a smaller one, so the fold, and not
-    /// the source or its scan, is what outgrows the limit:
+    /// So the string a class constant's fold makes past the memory limit
+    /// is php 8.5.12's delayed OOM, recorded at the line of the `eval` the
+    /// fold ran under and raised as the request's `E_ERROR` at the next
+    /// safepoint, and not a node left to the class to evaluate. The string
+    /// is served, so the compile ends: the function the `eval` declared
+    /// before it stands and so does the class, its constant whole. A unit
+    /// of declarations alone answers with no frame, so the next safepoint
+    /// is the main unit's return, past the `echo`. The constant is folded
+    /// from a smaller one, so the fold, and not the source or its scan, is
+    /// what outgrows the limit:
     ///
     /// ```php
     /// ini_set('display_errors', '0');
     /// register_shutdown_function(function () {
     ///     $e = error_get_last();
     ///     echo $e['type'], ' ', strtok($e['message'], '('), 'on line ', $e['line'], "\n";
-    ///     var_dump(function_exists('f'), class_exists('C', false));
+    ///     var_dump(function_exists('f'), class_exists('C', false), strlen(C::X));
     /// });
     /// $a = str_repeat('a', 1000000);
     /// $x = implode(' . ', array_fill(0, 16, 'self::A'));
-    /// ini_set('memory_limit', '16M');
-    /// try {
-    ///     eval("function f() {}\nclass C {\n    const A = '$a';\n    const X = $x;\n}");
-    /// } catch (ParseError $e) {
-    ///     echo "caught\n";
-    /// }
-    /// echo "unreached\n";
+    /// ini_set('memory_limit', '20M');
+    /// eval("function f() {}\nclass C {\n    const A = '$a';\n    const X = $x;\n}");
+    /// echo "reached\n";
     /// ```
     /// ```expect exit=255
-    /// 1 Allowed memory size of 16777216 bytes exhausted on line 4
+    /// reached
+    /// 1 Allowed memory size of 20971520 bytes exhausted on line 11
     /// bool(true)
-    /// bool(false)
+    /// bool(true)
+    /// int(16000000)
     /// ```
     ///
     /// What the limit holds is what php's fold holds at once, the string
@@ -2496,7 +2501,9 @@ impl<'a> Emit<'a> {
     /// node over it stands ([`eval::Claims`]): never the sum of the
     /// strings the chain made on the way. So sixteen copies of a megabyte
     /// fold under `memory_limit=40M`, and not under 32M, with opcache and
-    /// without it:
+    /// without it. Under 16M the fold would pass php 8.5.12's hard limit,
+    /// twice the soft one, which ends the process with no shutdown, so the
+    /// lowest limit asked is 20M:
     ///
     /// ```php
     /// $child = <<<'PHP'
@@ -2513,7 +2520,7 @@ impl<'a> Emit<'a> {
     /// PHP;
     /// $f = sys_get_temp_dir() . '/fold-' . getmypid() . '.php';
     /// file_put_contents($f, $child);
-    /// foreach (['16M', '24M', '32M', '40M', '128M'] as $limit) {
+    /// foreach (['20M', '24M', '32M', '40M', '128M'] as $limit) {
     ///     foreach (['-n', '-n -d opcache.enable_cli=1 -d opcache.jit=off'] as $regime) {
     ///         echo $limit, ' ', shell_exec(escapeshellarg(PHP_BINARY) . " $regime " . escapeshellarg($f) . " $limit");
     ///     }
@@ -2521,12 +2528,12 @@ impl<'a> Emit<'a> {
     /// unlink($f);
     /// ```
     /// ```expect process
-    /// 16M Allowed memory size of 16777216 bytes exhausted on line 3
-    /// 16M Allowed memory size of 16777216 bytes exhausted on line 3
-    /// 24M Allowed memory size of 25165824 bytes exhausted on line 3
-    /// 24M Allowed memory size of 25165824 bytes exhausted on line 3
-    /// 32M Allowed memory size of 33554432 bytes exhausted on line 3
-    /// 32M Allowed memory size of 33554432 bytes exhausted on line 3
+    /// 20M Allowed memory size of 20971520 bytes exhausted on line 10
+    /// 20M Allowed memory size of 20971520 bytes exhausted on line 10
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 10
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 10
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 10
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 10
     /// 40M 16000000 bytes
     /// 40M 16000000 bytes
     /// 128M 16000000 bytes

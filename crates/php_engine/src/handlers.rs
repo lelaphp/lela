@@ -12571,9 +12571,19 @@ fn do_call(req: &mut Request, frame: FrameRef, op: &Opline, opcode: &str) -> Edg
     // a signal the native delivered to its own process is dispatched
     // under `pcntl_async_signals(true)`. A native that threw leaves the
     // interrupt raised for the next site, since php calls no PHP handler
-    // while `EG(exception)` stands.
+    // while `EG(exception)` stands, but for the memory limit: php checks
+    // before it reads `EG(exception)`, and `zend_handle_delayed_oom`
+    // gives up what the native threw for the unwind exit, so no `catch`
+    // takes it (a DOM parse lexbor stopped at the limit throws its
+    // `DOMException` and the limit's fatal is raised in its place).
     let interrupted = match &served {
         Ok(_) => crate::interrupt::check(req),
+        Err(thrown) if req.has_oom() && crate::interrupt::raised(req) => {
+            req.leave_pending(thrown);
+            let interrupted = crate::interrupt::interrupted(req);
+            req.pop_call();
+            return interrupted.map(|_| Stepped::Threw(frame).into());
+        }
         Err(_) => Ok(false),
     };
     req.pop_call();
@@ -23770,12 +23780,8 @@ fn jumped<T: Tier>(
         // handlers' backtrace starts there, and a tier the engine asks
         // at its safepoints (ADR-0006). `Nop`'s loop goes on at the
         // target in its own hand, as every other jump's does.
-        if crate::interrupt::raised(req) {
-            std::hint::cold_path();
-            req.vm_mut().stand(frame, target);
-            if crate::interrupt::interrupted(req)? {
-                return Ok(Stepped::Threw(frame).into());
-            }
+        if crate::interrupt::raised(req) && interrupted_at_back_edge(req, frame, target)? {
+            return Ok(Stepped::Threw(frame).into());
         }
         if !crate::tier::interpreted::<T>() {
             req.vm_mut().stand(frame, target);
@@ -23788,6 +23794,22 @@ fn jumped<T: Tier>(
         }
     }
     jump_from(served, target)
+}
+
+/// [`jumped`]'s interrupt, out of the loop's line: a delayed OOM named at
+/// the site the frame stands on before the stand moves it to `target`
+/// ([`Request::locate_oom`]), then the frame stood there and the
+/// interrupt served; whether it threw is the answer.
+#[cold]
+#[inline(never)]
+fn interrupted_at_back_edge(
+    req: &mut Request,
+    frame: FrameRef,
+    target: u32,
+) -> Result<bool, Fatal> {
+    req.locate_oom();
+    req.vm_mut().stand(frame, target);
+    crate::interrupt::interrupted(req)
 }
 
 /// `ZEND_JMPNZ`: the jump `zend_emit_cond_jump` leaves at the end of a
@@ -24375,16 +24397,27 @@ pub(crate) fn r#return<T: Tier, A: Operand + Default>(
             return edge;
         }
     }
-    req.vm_mut().stand(frame, at);
-    returned(req, frame, code, op)
+    returned(req, frame, code, op, at)
 }
 
-/// `RETURN` past its return safepoint and its inline path: the operand
-/// taken as the handler's own ([`exec::take_operand`]) and the frame
-/// left with it ([`returned_to_caller`]). A call of its own, so that the
-/// inline path before it keeps to the registers it needs.
+/// `RETURN` past its return safepoint and its inline path: the frame
+/// stood at the return, the operand taken as the handler's own
+/// ([`exec::take_operand`]) and the frame left with it
+/// ([`returned_to_caller`]). A call of its own, so that the inline path
+/// before it keeps to the registers it needs.
+///
+/// A delayed OOM not yet named is named first, where the frame stood
+/// before the return moves it: for the serving's entry frame, which
+/// leaves with nothing executing above it, this is the site
+/// `zend_execute_scripts` raises it at. The inline path pays nothing
+/// for it; a frame it returns leaves the site to its caller's next
+/// safepoint.
 #[inline(never)]
-fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
+fn returned(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline, at: u32) -> Edge {
+    if req.oom_unlocated() {
+        req.locate_oom();
+    }
+    req.vm_mut().stand(frame, at);
     let returned = exec::take_operand(req, frame, code, op.op1_type, op.op1);
     returned_to_caller(req, frame, returned)
 }

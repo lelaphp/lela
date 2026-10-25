@@ -226,9 +226,9 @@ fn returning_a_view_of_an_element_takes_the_engines_own_owner() {
     served.assert_clean("x9223372036854775807\ny9223372036854775807\n");
 }
 
-/// An owner a native holds as it meets the memory limit is dropped on
-/// the fatal's path, which php leaves by `zend_bailout` with the native's
-/// locals the heap's to discard: the request renders php's fatal alone
+/// An owner a native holds as it meets the hard memory limit is dropped
+/// on the path that ends the request, which php leaves by `_exit` with
+/// the native's locals unfreed: the request writes php's line alone
 /// (#2048). The same native given room gives its owner up.
 #[test]
 fn an_owner_dropped_on_the_path_to_a_fatal_is_not_reported() {
@@ -238,13 +238,14 @@ fn an_owner_dropped_on_the_path_to_a_fatal_is_not_reported() {
         Capture::default(),
     );
     let stdout = served.stdout_text();
+    let stderr = String::from_utf8_lossy(&served.stderr);
+    assert_eq!(stdout, "room", "{stdout}");
     assert!(
-        stdout.starts_with("room\nFatal error: Allowed memory size of 2097152 bytes exhausted"),
-        "{stdout}"
+        stderr.starts_with("Hard memory limit of 4194304 bytes exhausted"),
+        "{stderr}"
     );
-    assert!(!stdout.contains("InternalError"), "{stdout}");
-    assert!(!stdout.contains("went on"), "{stdout}");
-    assert_eq!(served.exit_code, 255);
+    assert!(!stderr.contains("InternalError"), "{stderr}");
+    assert_eq!(served.exit_code, 137);
 }
 
 /// An owner dropped unconsumed as its native leaves by a throwable is on

@@ -13,7 +13,7 @@ use php_ext::raising::{
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_random::Rng;
 
 use super::sort::key_value;
@@ -602,6 +602,30 @@ fn finite(req: &mut Request, position: u32, d: f64) -> Result<f64, Thrown> {
 ///   float(0)
 /// }
 /// ```
+///
+/// Since 8.5.12 the table is laid down for every element and asked for
+/// fallibly: past the memory limit it is refused, and the limit's fatal is
+/// raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(range(1, 1 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 3
+/// ```
+///
+/// A float range, the same:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(range(0.5, 1 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 33570816 bytes) in %s on line 3
+/// ```
 // php's body is one function with its gotos; the arms stay together.
 #[allow(clippy::too_many_lines)]
 #[php_function]
@@ -829,7 +853,10 @@ fn double_range(
     } else {
         (1, false)
     };
-    PhpArray::filled(req, |req, out| {
+    let Some(out) = finit_packed(req, size, start > end || end > start)? else {
+        return Ok(Owner::take(req, PhpArray::empty()));
+    };
+    filling(req, out, |req, out| {
         let mut i = 0u32;
         let mut element = start;
         while i < size && if down { element >= end } else { element <= end } {
@@ -848,6 +875,40 @@ fn double_range(
 
 /// `RANGE_CHECK_LONG_INIT_ARRAY` and the fill, over unsigned
 /// arithmetic as php's is.
+/// The array `RANGE_CHECK_DOUBLE_INIT_ARRAY` and
+/// `RANGE_CHECK_LONG_INIT_ARRAY` lay down for a range of `size`:
+/// `array_init_size` and, since 8.5.12, `zend_hash_real_finit_packed`
+/// fallibly, `None` where the memory limit refused the table, which the
+/// native ends on as `RETURN_OOM()` does; a range of one element, where
+/// `ranged` is false, is `array_init`'s.
+fn finit_packed(
+    req: &mut Request,
+    size: u32,
+    ranged: bool,
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
+    if !ranged {
+        return PhpArray::new(req).map(Some);
+    }
+    req.memory_mut()
+        .fallible(|req| PhpArray::sized(req, size, Layout::Packed))
+}
+
+/// `out` as `fill` writes it, given up where a step throws, as
+/// [`PhpArray::filled`] gives up the array it makes.
+fn filling(
+    req: &mut Request,
+    mut out: Owner<PhpArray>,
+    fill: impl FnOnce(&mut Request, &mut Owner<PhpArray>) -> Result<(), Thrown>,
+) -> Result<Owner<PhpArray>, Thrown> {
+    match fill(req, &mut out) {
+        Ok(()) => Ok(out),
+        Err(thrown) => {
+            out.give_up(req);
+            Err(thrown)
+        }
+    }
+}
+
 #[allow(clippy::comparison_chain)]
 fn long_range(
     req: &mut Request,
@@ -886,7 +947,11 @@ fn long_range(
     } else {
         (1, false)
     };
-    PhpArray::filled(req, |req, out| {
+    let laid = u32::try_from(size).unwrap_or(u32::MAX);
+    let Some(out) = finit_packed(req, laid, start != end)? else {
+        return Ok(Owner::take(req, PhpArray::empty()));
+    };
+    filling(req, out, |req, out| {
         for i in 0..size {
             let distance = i.wrapping_mul(step).cast_signed();
             let element = if down {

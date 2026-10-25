@@ -126,6 +126,19 @@ use crate::{error_code, exec_error, set_error};
 /// bool(false)
 /// bool(false)
 /// ```
+///
+/// Since 8.5.12 the pieces stop once the memory limit was met, and the
+/// limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $p = preg_split('//', str_repeat('a', 1200000));
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2113536 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn preg_split(
     req: &mut Request,
@@ -176,6 +189,12 @@ pub(super) fn split_impl(
         let mut start;
         let mut rc = scratch.run(pattern, &mut subject, 0, 0, true);
         let walked: Result<(), Thrown> = 'search: loop {
+            // The pieces stop once the memory limit was met, with
+            // `PREG_INTERNAL_ERROR`, since 8.5.12.
+            if req.memory().has_oom() {
+                set_error(req, PREG_INTERNAL_ERROR);
+                break Ok(());
+            }
             if rc >= 0 {
                 if rc == 0 {
                     docref(req, Level::Notice, "Matched, but too many substrings");

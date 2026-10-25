@@ -2994,12 +2994,13 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// int(14000)
 /// ```
 ///
-/// An append the limit refuses leaves each place holding the string it
-/// held, as php's `zend_string_extend` leaves it, for the shutdown
-/// functions to read: a class's property, an array's element, a declared
-/// property and a reference's cell, as a variable
-/// (`php_heap`'s `Mm::realloc_huge`). A left side converted to a string
-/// had its place `null`ed before the append, and it stays `null`:
+/// An append past the limit is served, since php 8.5.12, and leaves each
+/// place holding the grown string, which the shutdown functions read
+/// after the fatal the end of the program raises: a class's property, an
+/// array's element, a declared property and a reference's cell, as a
+/// variable (`php_heap`'s `Mm::realloc_huge`), each grown where it stands
+/// by the difference or moved by the whole rounding. A left side converted
+/// to a string is written with the grown string:
 ///
 /// ```php
 /// ini_set('memory_limit', '7M');
@@ -3009,8 +3010,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// C::$s .= C::$s;
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
-/// int(3000000)
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6012928 bytes) in %s on line 6
+/// int(6000000)
 /// ```
 ///
 /// ```php
@@ -3020,8 +3021,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// $a['k'] .= $a['k'];
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
-/// int(3000000)
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6012928 bytes) in %s on line 5
+/// int(6000000)
 /// ```
 ///
 /// ```php
@@ -3032,8 +3033,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// $o->p .= $o->p;
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
-/// int(3000000)
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6012928 bytes) in %s on line 6
+/// int(6000000)
 /// ```
 ///
 /// ```php
@@ -3043,8 +3044,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// $r .= $r;
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 6000032 bytes) in %s on line %d
-/// int(3000000)
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 2998272 bytes) in %s on line 5
+/// int(6000000)
 /// ```
 ///
 /// ```php
@@ -3054,8 +3055,8 @@ fn concat_operand(req: &mut Request, value: &Value) -> Result<PhpString, Thrown>
 /// $n .= $t;
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 3000032 bytes) in %s on line %d
-/// NULL
+/// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 5
+/// string(3000002) "12%s"
 /// ```
 pub(crate) fn concat_assign(
     req: &mut Request,

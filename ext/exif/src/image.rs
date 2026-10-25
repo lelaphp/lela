@@ -3,6 +3,10 @@
 //! and the byte order and format vocabulary every read goes through.
 
 use php_ext::coerce::c_str;
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
+
+use crate::held::{Held, INFO_VALUE};
 
 /// php's `motorola_intel`: the byte order a TIFF header declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -466,6 +470,8 @@ pub(crate) struct Image {
     pub(crate) ifd_nesting_level: u32,
     pub(crate) ifd_count: u32,
     pub(crate) num_errors: u32,
+    /// What php's image holds on the request's heap ([`Held`]).
+    pub(crate) held: Held,
 }
 
 impl Image {
@@ -509,6 +515,7 @@ impl Image {
             ifd_nesting_level: 0,
             ifd_count: 0,
             num_errors: 0,
+            held: Held::default(),
         }
     }
 
@@ -524,16 +531,27 @@ impl Image {
     }
 
     /// `exif_iif_add_value`: `length` values of `format` from `value`,
-    /// whose first `value_len` bytes are the directory's.
+    /// whose first `value_len` bytes are the directory's, with the
+    /// entry, the name and the value's copy laid on the request's heap
+    /// as php lays them; a list of numbers is asked for fallibly since
+    /// 8.5.12, and where the memory limit refused it the entry is kept
+    /// with no value. The `Err` is the memory limit's end.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "php's `exif_iif_add_value` and the request"
+    )]
     pub(crate) fn add_value(
         &mut self,
+        req: &mut Request,
         section: Section,
         name: Vec<u8>,
         tag: u16,
         format: Format,
         length: usize,
         value: Option<&[u8]>,
-    ) -> Option<String> {
+    ) -> Result<Option<String>, Thrown> {
+        self.held.entry(req, section.index())?;
+        self.held.block(req, name.len() + 1)?;
         let order = self.order();
         let value_len = value.map_or(0, <[u8]>::len);
         let mut warning = None;
@@ -554,23 +572,33 @@ impl Image {
             Format::String => {
                 let value = value.filter(|_| !too_long(length));
                 let text = value.map_or(&[][..], |v| c_str(&v[..length]));
+                self.held.block(req, text.len() + 1)?;
                 (text.len(), Stored::Text(text.to_vec()))
             }
             Format::Byte | Format::SByte | Format::Ifd if length == 0 => {
                 (0, Stored::Bytes(Vec::new()))
             }
             Format::Byte | Format::SByte | Format::Ifd | Format::Undefined => {
-                match value.filter(|_| !too_long(length)) {
-                    Some(v) => {
-                        let bytes = if tag == 0x927C {
-                            c_str(&v[..length])
-                        } else {
-                            &v[..length]
-                        };
-                        (bytes.len(), Stored::Bytes(bytes.to_vec()))
-                    }
-                    None => (0, Stored::Bytes(Vec::new())),
+                if let Some(v) = value.filter(|_| !too_long(length)) {
+                    let bytes = if tag == 0x927C {
+                        c_str(&v[..length])
+                    } else {
+                        &v[..length]
+                    };
+                    self.held.block(req, bytes.len() + 1)?;
+                    (bytes.len(), Stored::Bytes(bytes.to_vec()))
+                } else {
+                    self.held.block(req, 1)?;
+                    (0, Stored::Bytes(Vec::new()))
                 }
+            }
+            _ if length == 0 => (0, Stored::Numbers(Vec::new())),
+            _ if length > 1
+                && !self
+                    .held
+                    .block_fallibly(req, length.saturating_mul(INFO_VALUE))? =>
+            {
+                (0, Stored::Numbers(Vec::new()))
             }
             _ => {
                 let bytes = value.unwrap_or(&[]);
@@ -622,11 +650,19 @@ impl Image {
                 value: stored,
             },
         );
-        warning
+        Ok(warning)
     }
 
-    /// `exif_iif_add_int`.
-    pub(crate) fn add_int(&mut self, section: Section, name: &str, value: i32) {
+    /// `exif_iif_add_int`: the entry and the name on the heap.
+    pub(crate) fn add_int(
+        &mut self,
+        req: &mut Request,
+        section: Section,
+        name: &str,
+        value: i32,
+    ) -> Result<(), Thrown> {
+        self.held.entry(req, section.index())?;
+        self.held.block(req, name.len() + 1)?;
         let entry = Entry {
             tag: TAG_NONE,
             format: Format::SLong,
@@ -635,11 +671,22 @@ impl Image {
             value: Stored::Numbers(vec![Number::Signed(value)]),
         };
         self.push(section, entry);
+        Ok(())
     }
 
-    /// `exif_iif_add_str`: nothing for `None`.
-    pub(crate) fn add_str(&mut self, section: Section, name: &[u8], value: Option<&[u8]>) {
+    /// `exif_iif_add_str`: nothing for `None`; the entry, the name and
+    /// the value's `estrdup` on the heap.
+    pub(crate) fn add_str(
+        &mut self,
+        req: &mut Request,
+        section: Section,
+        name: &[u8],
+        value: Option<&[u8]>,
+    ) -> Result<(), Thrown> {
         if let Some(value) = value {
+            self.held.entry(req, section.index())?;
+            self.held.block(req, name.len() + 1)?;
+            self.held.block(req, c_str(value).len() + 1)?;
             let entry = Entry {
                 tag: TAG_NONE,
                 format: Format::String,
@@ -649,10 +696,21 @@ impl Image {
             };
             self.push(section, entry);
         }
+        Ok(())
     }
 
-    /// `exif_iif_add_buffer`.
-    pub(crate) fn add_buffer(&mut self, section: Section, name: &str, value: &[u8]) {
+    /// `exif_iif_add_buffer`: the entry, the name and `safe_emalloc(length,
+    /// 1, 1)` on the heap.
+    pub(crate) fn add_buffer(
+        &mut self,
+        req: &mut Request,
+        section: Section,
+        name: &str,
+        value: &[u8],
+    ) -> Result<(), Thrown> {
+        self.held.entry(req, section.index())?;
+        self.held.block(req, name.len() + 1)?;
+        self.held.block(req, value.len() + 1)?;
         let entry = Entry {
             tag: TAG_NONE,
             format: Format::Undefined,
@@ -661,6 +719,7 @@ impl Image {
             value: Stored::Bytes(value.to_vec()),
         };
         self.push(section, entry);
+        Ok(())
     }
 }
 

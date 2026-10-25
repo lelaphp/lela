@@ -24,7 +24,7 @@ use php_ext::abi::{Callable, OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value};
 
 /// `ONIG_OPTION_*`.
 const IGNORECASE: u32 = 1;
@@ -584,20 +584,26 @@ fn char_bytes(s: &[u8], enc: Encoding) -> usize {
 /// what those groups matched; anything else as it is.
 #[allow(clippy::too_many_lines)] // one C function, kept whole
 fn substitute(
-    out: &mut Vec<u8>,
+    req: &mut Request,
+    out: &mut SmartStr,
     subject: &[u8],
     replace: &[u8],
     re: &Compiled,
     region: &Region,
     enc: Encoding,
-) {
+) -> Result<(), Thrown> {
     let groups = region.groups();
     let mut p = 0usize;
     let eos = replace.len();
     while p < eos {
+        // Since 8.5.12 the substitution stops once the memory limit was
+        // met.
+        if req.memory().has_oom() {
+            return Ok(());
+        }
         let clen = char_bytes(&replace[p..], enc);
         if clen != 1 || replace[p] != b'\\' {
-            out.extend_from_slice(&replace[p..(p + clen).min(eos)]);
+            out.append(req, &replace[p..(p + clen).min(eos)])?;
             p += clen;
             continue;
         }
@@ -605,7 +611,7 @@ fn substitute(
         p += 1;
         let clen = char_bytes(&replace[p.min(eos)..], enc);
         if clen != 1 || p == eos {
-            out.extend_from_slice(&replace[sp..p.min(eos)]);
+            out.append(req, &replace[sp..p.min(eos)])?;
             continue;
         }
         let no: i32;
@@ -617,7 +623,7 @@ fn substitute(
             c @ b'1'..=b'9' => {
                 if !re.regex.numbered_groups() {
                     p += 1;
-                    out.extend_from_slice(&replace[sp..p]);
+                    out.append(req, &replace[sp..p])?;
                     continue;
                 }
                 no = i32::from(c - b'0');
@@ -628,7 +634,7 @@ fn substitute(
                 let clen = char_bytes(&replace[p.min(eos)..], enc);
                 if clen != 1 || p == eos || (replace[p] != b'<' && replace[p] != b'\'') {
                     p = (p + clen).min(eos);
-                    out.extend_from_slice(&replace[sp..p]);
+                    out.append(req, &replace[sp..p])?;
                     continue;
                 }
                 let delim = if replace[p] == b'<' { b'>' } else { b'\'' };
@@ -652,13 +658,13 @@ fn substitute(
                 }
                 p = name_end + 1;
                 if name_end <= name || name_end >= eos {
-                    out.extend_from_slice(&replace[sp..p.min(eos)]);
+                    out.append(req, &replace[sp..p.min(eos)])?;
                     continue;
                 }
                 let digits = &replace[name..name_end];
                 if maybe_num {
                     if !re.regex.numbered_groups() {
-                        out.extend_from_slice(&replace[sp..p]);
+                        out.append(req, &replace[sp..p])?;
                         continue;
                     }
                     no = if digits.len() == 1 {
@@ -676,22 +682,23 @@ fn substitute(
                 }
             }
             _ => {
-                out.extend_from_slice(&replace[sp..p]);
+                out.append(req, &replace[sp..p])?;
                 continue;
             }
         }
         let group = usize::try_from(no).ok().and_then(|n| groups.get(n));
         let Some(&(beg, end)) = group else {
-            out.extend_from_slice(&replace[sp..p]);
+            out.append(req, &replace[sp..p])?;
             continue;
         };
         if let (Ok(b), Ok(e)) = (usize::try_from(beg), usize::try_from(end))
             && b < e
             && e <= subject.len()
         {
-            out.extend_from_slice(&subject[b..e]);
+            out.append(req, &subject[b..e])?;
         }
     }
+    Ok(())
 }
 
 /// What replaces each match: text with group references, or a callback.
@@ -717,9 +724,32 @@ fn replace(
     let Some(re) = compile(req, pattern.as_bytes(), options, syntax) else {
         return Ok(Some(OrFalse::False));
     };
-    let subject = string.as_bytes();
-    let mut out = Vec::with_capacity(subject.len());
-    let mut matched = false;
+    // `smart_str out_buf`, on the request's heap, given back on every
+    // way out but the string it becomes.
+    let mut out = SmartStr::default();
+    match replaced(req, &mut out, &re, replacement, string.as_bytes(), enc.mbfl) {
+        Ok(true) => Ok(Some(OrFalse::Value(out.extract(req)?))),
+        Ok(false) => {
+            out.free(req);
+            Ok(Some(OrFalse::False))
+        }
+        Err(thrown) => {
+            out.free(req);
+            Err(thrown)
+        }
+    }
+}
+
+/// [`replace`]'s walk over the matches onto `out`: `false` after a
+/// search failure's warning.
+fn replaced(
+    req: &mut Request,
+    out: &mut SmartStr,
+    re: &Compiled,
+    replacement: &Replacement<'_>,
+    subject: &[u8],
+    enc: Encoding,
+) -> Result<bool, Thrown> {
     let mut pos = 0usize;
     let limits = limits(req);
     loop {
@@ -734,19 +764,20 @@ fn replace(
                 Level::Warning,
                 &format!("mbregex search failure in php_mbereg_replace_exec(): {text}"),
             );
-            return Ok(Some(OrFalse::False));
+            return Ok(false);
         }
         if err < 0 {
-            out.extend_from_slice(subject.get(pos..).unwrap_or_default());
+            out.append(req, subject.get(pos..).unwrap_or_default())?;
             break;
         }
-        matched = true;
         let g = region.groups();
         let (beg0, end0) = g.first().copied().unwrap_or((0, 0));
         let beg0 = usize::try_from(beg0).unwrap_or(pos);
-        out.extend_from_slice(subject.get(pos..beg0).unwrap_or_default());
+        out.append(req, subject.get(pos..beg0).unwrap_or_default())?;
         match replacement {
-            Replacement::Text(text) => substitute(&mut out, subject, text, &re, &region, enc.mbfl),
+            Replacement::Text(text) => {
+                substitute(req, out, subject, text, re, &region, enc)?;
+            }
             Replacement::Callback(callback) => {
                 let mut subpats = PhpArray::new(req)?;
                 for &(beg, end) in &g {
@@ -775,11 +806,9 @@ fn replace(
                 let returned = php_ext::call::call(req, callback, &[Value::array(*subpats)]);
                 subpats.give_up(req);
                 let returned = returned?;
-                let read = php_ext::coerce::with_string(req, &returned, |text| {
-                    out.extend_from_slice(text);
-                });
+                let read = php_ext::coerce::with_string(req, &returned, <[u8]>::to_vec);
                 returned.give_up(req);
-                read?;
+                out.append(req, &read?)?;
             }
         }
         let n = usize::try_from(end0).unwrap_or(pos);
@@ -787,20 +816,15 @@ fn replace(
             pos = n;
         } else {
             if pos < subject.len() {
-                out.push(subject[pos]);
+                out.append(req, &subject[pos..=pos])?;
             }
             pos += 1;
         }
     }
-    // `smart_str_extract`: a buffer nothing was appended to, no match
-    // over an empty subject, is `ZSTR_EMPTY_ALLOC()`; one a match or the
-    // tail started is the request's, though it holds nothing.
-    let answer = if matched || !out.is_empty() {
-        new_string(req, &out)?
-    } else {
-        crate::text::cut_string(req, b"")?
-    };
-    Ok(Some(OrFalse::Value(answer)))
+    // `smart_str_extract` after: a buffer nothing was appended to, no
+    // match over an empty subject, is `ZSTR_EMPTY_ALLOC()`; one a match or
+    // the tail started is the request's, though it holds nothing.
+    Ok(true)
 }
 
 /// `mb_ereg_replace(string $pattern, string $replacement, string $string, ?string $options = null): string|false|null`.
@@ -816,6 +840,18 @@ fn replace(
 /// string(5) "-a-b-"
 /// NULL
 /// Option "q" is not supported
+/// ```
+///
+/// Since 8.5.12 a substitution stops once the memory limit was met, and the
+/// limit's fatal is raised as the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_ereg_replace("a", "bbbbbbbbbb", str_repeat("a", 400000))), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 pub(crate) fn mb_ereg_replace(
@@ -842,6 +878,18 @@ pub(crate) fn mb_ereg_replace(
 /// ```
 /// ```expect
 /// string(4) "anbn"
+/// ```
+///
+/// As [`mb_ereg_replace`]'s, a substitution stops once the memory limit was
+/// met:
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_eregi_replace("a", "bbbbbbbbbb", str_repeat("a", 400000))), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 pub(crate) fn mb_eregi_replace(
@@ -913,6 +961,18 @@ pub(crate) fn mb_ereg_replace_callback(
 ///   string(0) ""
 /// }
 /// ```
+///
+/// Since 8.5.12 the split stops once the memory limit was met, as a search
+/// failure stops it, and the limit's fatal is raised as the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// var_dump(count(mb_split("a", str_repeat("a", 400000))), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[php_function]
 pub(crate) fn mb_split(
     req: &mut Request,
@@ -968,6 +1028,12 @@ pub(crate) fn mb_split(
             chunk = end;
         } else {
             pos += 1;
+        }
+        // Since 8.5.12 the split stops once the memory limit was met, as
+        // a search failure stops it.
+        if req.memory().has_oom() {
+            failed = Some(-2);
+            break;
         }
     }
     if let Some(err) = failed {
