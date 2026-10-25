@@ -476,6 +476,7 @@ ecalloc
 efree
 emalloc
 erealloc
+gcvt
 identical
 identical_constants
 main_call_stack_size
