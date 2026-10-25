@@ -47,7 +47,7 @@ use syn::punctuated::Punctuated;
 use crate::batch::{Run, Targets, tail};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest};
-use crate::reading::{Reading, Status, Store};
+use crate::reading::{Reading, Status, Store, joined};
 use crate::rust;
 use crate::sources::{self, Standing};
 
@@ -503,11 +503,7 @@ fn levels_of(attrs: &[syn::Attribute], file: &Path) -> Result<Levels> {
 }
 
 fn path_text(path: &syn::Path) -> String {
-    path.segments
-        .iter()
-        .map(|s| s.ident.to_string())
-        .collect::<Vec<_>>()
-        .join("::")
+    joined(path.segments.iter().map(|s| s.ident.to_string()), "::")
 }
 
 /// The levels the crate's Cargo `[lints]` set, the workspace's

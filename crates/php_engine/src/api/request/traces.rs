@@ -130,6 +130,25 @@ fn relifetimed<'b>(spare: Vec<Link<'_>>) -> Vec<Link<'b>> {
 /// none where the frame is the innermost link.
 pub(super) enum Traced {
     Function(Function),
+    /// A hook trampoline's call, named as php's row copies the
+    /// trampoline's `function_name`, `$name::set`, in the class of the
+    /// property, its scope:
+    ///
+    /// ```php
+    /// class P { public int $a; }
+    /// class C extends P { public int $a { set(int|string $value) { parent::$a::set($value); } } }
+    /// $c = new C;
+    /// try { $c->a = "x"; } catch (TypeError $e) { echo $e->getTraceAsString(), "\n"; }
+    /// ```
+    /// ```expect
+    /// #0 %s(3): P->$a::set('x')
+    /// #1 %s(5): C->$a::set('x')
+    /// #2 {main}
+    /// ```
+    HookTrampoline {
+        function: Function,
+        name: PhpString,
+    },
     /// A frameless call's native (`ZEND_FRAMELESS_ICALL_*`), whose row
     /// php lays down off the user frame at the call's opline before that
     /// frame's own (`Z/Zend/zend_builtin_functions.c:2003`): `function`
@@ -298,6 +317,11 @@ impl Request {
             chain.clear();
             relifetimed(chain)
         };
+        // `skip_frame: if (ZEND_HAS_OOM()) return;` (8.5.12): once the
+        // memory limit was met the walk stops after its first frame.
+        if self.has_oom() {
+            rows.laid.truncate(1);
+        }
         // `frameno < limit`: the walk stops once `limit` rows are in,
         // before it lays down the next, and a dropped row is no row.
         if let Ok(limit) = usize::try_from(limit)
@@ -428,7 +452,7 @@ impl Request {
     /// try { str_contains(new stdClass, 'a'); } catch (TypeError $e) { echo implode(',', array_keys($e->getTrace()[0])), "\n"; }
     /// ```
     /// ```expect
-    /// 3136 32
+    /// 2992 32
     /// function,file,line,args
     /// ```
     pub(super) fn render_trace(
@@ -454,25 +478,23 @@ impl Request {
             // row is a hash laid down before its first key.
             let mut row = PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?.hand_on();
             if let Traced::Frameless(function) = traced {
-                let name = Value::string(self.function_name_string(function)?);
-                self.set_string_key(&mut row, Known::Function, Owner::adopt(name))?;
-                self.set_site(&mut row, site)?;
-                if !ignore_arguments {
-                    let mut args =
-                        PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?.hand_on();
-                    for argument in arguments {
-                        let argument = Owner::take(self, argument.deref());
-                        args.append(self, argument)?;
-                    }
-                    self.set_string_key(&mut row, Known::Args, Owner::adopt(Value::array(args)))?;
-                }
+                let arguments = (!ignore_arguments).then_some(arguments);
+                self.frameless_row(&mut row, function, site, arguments)?;
                 trace.append(self, Owner::adopt(Value::array(row)))?;
                 continue;
             }
             self.set_site(&mut row, site)?;
+            // A hook trampoline's row is a function's under the name its
+            // call was built under.
+            let (traced, built) = match traced {
+                Traced::HookTrampoline { function, name } => {
+                    (Traced::Function(function), Some(name))
+                }
+                traced => (traced, None),
+            };
             match traced {
                 Traced::Function(function) => {
-                    let name = Value::string(self.function_name_string(function)?);
+                    let name = self.row_function_name(function, built)?;
                     self.set_string_key(&mut row, Known::Function, Owner::adopt(name))?;
                     // `ce->name` whole: an anonymous class's with its NUL
                     // and site; a receiver's class name for a function of
@@ -501,7 +523,15 @@ impl Request {
                         self.set_string_key(&mut row, Known::Type, join)?;
                     }
                     if !ignore_arguments {
-                        let args = self.trace_row_arguments(function, arguments, named)?;
+                        // `debug_backtrace_get_args`'s `false` since
+                        // 8.5.12, once the memory limit refused the row's
+                        // arguments or was met filling them: the row is
+                        // destroyed and the trace so far is the answer.
+                        let Some(args) = self.trace_row_arguments(function, arguments, named)?
+                        else {
+                            self.release(Value::array(row));
+                            break;
+                        };
                         self.set_string_key(
                             &mut row,
                             Known::Args,
@@ -536,12 +566,77 @@ impl Request {
                     self.release(Value::array(row));
                     continue;
                 }
-                Traced::Frameless(_) => {}
+                Traced::Frameless(_) | Traced::HookTrampoline { .. } => {}
             }
             trace.append(self, Owner::adopt(Value::array(row)))?;
+            // The rows stop once the memory limit was met, since 8.5.12.
+            if self.has_oom() {
+                break;
+            }
         }
         rows.files = files;
         Ok(trace)
+    }
+
+    /// A frameless call's row: its function before its file and line, and
+    /// its arguments, where they are asked for, in a hash.
+    fn frameless_row(
+        &mut self,
+        row: &mut PhpArray,
+        function: Function,
+        site: Option<(PhpString, i64)>,
+        arguments: Option<Vec<Value>>,
+    ) -> Result<(), Thrown> {
+        let name = Value::string(self.function_name_string(function)?);
+        self.set_string_key(row, Known::Function, Owner::adopt(name))?;
+        self.set_site(row, site)?;
+        if let Some(arguments) = arguments {
+            let mut args = PhpArray::sized(self, 8, crate::api::values::Layout::Hash)?.hand_on();
+            for argument in arguments {
+                let argument = Owner::take(self, argument.deref());
+                args.append(self, argument)?;
+            }
+            self.set_string_key(row, Known::Args, Owner::adopt(Value::array(args)))?;
+        }
+        Ok(())
+    }
+
+    /// What a call's row names, and the class it is in: a hook
+    /// trampoline's in the class of the property, the trampoline's scope,
+    /// its call's; any other call's in its closure's scope, if any.
+    fn call_traced(&self, call: &crate::exec::FrameAt<'_>) -> (Traced, Option<ClassId>) {
+        let function = call.callee();
+        match call.annex().and_then(|annex| annex.trampoline.as_ref()) {
+            Some(trampoline) => {
+                let name = trampoline.name;
+                (
+                    Traced::HookTrampoline { function, name },
+                    call.called_scope(),
+                )
+            }
+            None if call.info().frameless() => (
+                Traced::Frameless(function),
+                self.closure_scope(call.closure()),
+            ),
+            None => (
+                Traced::Function(function),
+                self.closure_scope(call.closure()),
+            ),
+        }
+    }
+
+    /// A framed row's `function`: the name a hook trampoline's call was
+    /// built under, one more owner of it, or the function's own.
+    fn row_function_name(
+        &mut self,
+        function: Function,
+        built: Option<PhpString>,
+    ) -> Result<Value, Thrown> {
+        let Some(built) = built else {
+            return Ok(Value::string(self.function_name_string(function)?));
+        };
+        self.addref(&Value::string(built));
+        Ok(Value::string(built))
     }
 
     /// `func->common.function_name` as a row copies it: the engine's
@@ -617,20 +712,45 @@ impl Request {
     /// followed through a reference and given the row's owner, since the
     /// row has them borrowed from the frame, or the
     /// `SensitiveParameterValue` in its place where
-    /// [`Request::sensitive_parameters`] marks it.
+    /// [`Request::sensitive_parameters`] marks it. Since 8.5.12 the table
+    /// is `array_finit_size_packed`'s, asked for fallibly, a redaction is
+    /// followed by a test of the memory limit, and a named one is
+    /// `zend_hash_fadd_new`'s: `None`, php's `false`, where the limit
+    /// refused one or was met.
+    ///
+    /// A row's arguments the memory limit refused end the trace before that
+    /// row, the limit's fatal raised as the call returns; the limit is set
+    /// from what the request holds, which differs between the engines, so its
+    /// figure is `%d`:
+    ///
+    /// ```php
+    /// function f(...$a) { ini_set('memory_limit', ((memory_get_usage(true) >> 20) + 4) . 'M'); $t = debug_backtrace(); var_dump("unreached"); }
+    /// f(...range(1, 500000));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of %d bytes exhausted (tried to allocate 8404992 bytes) in %s on line 2
+    /// ```
     fn trace_row_arguments(
         &mut self,
         function: Function,
         arguments: Vec<Value>,
         named: Vec<(PhpString, Value)>,
-    ) -> Result<PhpArray, Thrown> {
+    ) -> Result<Option<PhpArray>, Thrown> {
         let sensitive = self.sensitive_parameters(function);
         // `ZVAL_EMPTY_ARRAY` for a call with no arguments, which a named
         // extra one then separates.
         let mut args = if arguments.is_empty() {
             PhpArray::empty()
         } else {
-            self.array()?
+            let size = u32::try_from(arguments.len()).unwrap_or(u32::MAX);
+            let laid = self.memory_mut().fallible(|req| {
+                PhpArray::sized(req, size, crate::api::values::Layout::Packed).map(Owner::hand_on)
+            })?;
+            let Some(laid) = laid else {
+                return Ok(None);
+            };
+            laid
         };
         for (at, argument) in arguments.into_iter().enumerate() {
             let argument = argument.deref();
@@ -641,19 +761,35 @@ impl Request {
                 Owner::take(self, argument)
             };
             args.append(self, argument)?;
+            if sensitive.at(at) && self.has_oom() {
+                self.release(Value::array(args));
+                return Ok(None);
+            }
         }
         for (name, argument) in named {
             let argument = argument.deref();
-            let argument = if sensitive.variadic {
+            let redact = sensitive.variadic;
+            let argument = if redact {
                 let redacted = self.sensitive_value(argument)?;
                 Owner::adopt(redacted)
             } else {
                 Owner::take(self, argument)
             };
+            if redact && self.has_oom() {
+                argument.give_up(self);
+                self.release(Value::array(args));
+                return Ok(None);
+            }
             let name = Owner::take(self, Key::Str(name));
-            args.set(self, name, argument)?;
+            let added = self
+                .memory_mut()
+                .fallible(|req| args.set(req, name, argument))?;
+            if added.is_none() {
+                self.release(Value::array(args));
+                return Ok(None);
+            }
         }
-        Ok(args)
+        Ok(Some(args))
     }
 
     /// `zend_fetch_debug_backtrace`'s first row while a constant
@@ -996,15 +1132,11 @@ impl Request {
                 // rows after it.
                 Link::Site(_) | Link::Fake(_) => {}
                 Link::Call(call) => {
-                    let traced = if call.info().frameless() {
-                        Traced::Frameless(call.callee())
-                    } else {
-                        Traced::Function(call.callee())
-                    };
+                    let (traced, scope) = self.call_traced(call);
                     rows.laid.push((
                         traced,
                         call.this(),
-                        self.closure_scope(call.closure()),
+                        scope,
                         call.arguments(),
                         call.extra_named().to_vec(),
                         site,
@@ -1413,8 +1545,7 @@ impl Frames<&mut Request> {
     /// served: the rows below it, under php's options and limit.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn backtrace(self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.fetch_debug_backtrace(true, options, limit);
-        adopted(made)
+        adopted(self.0.fetch_debug_backtrace(true, options, limit))
     }
 
     /// `zend_fetch_debug_backtrace(return_value, 0, options, limit)`,
@@ -1424,7 +1555,6 @@ impl Frames<&mut Request> {
     /// limit.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn backtrace_here(self, options: i64, limit: i64) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.fetch_debug_backtrace(false, options, limit);
-        adopted(made)
+        adopted(self.0.fetch_debug_backtrace(false, options, limit))
     }
 }

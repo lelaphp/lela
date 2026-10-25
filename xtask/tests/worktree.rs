@@ -4,6 +4,7 @@
 //! holding this working tree's tracked files, so the harness the add builds
 //! in the worktree and asks for the local file is this one, and the store
 //! the retire appends to is the real store.
+#![cfg(tracked)]
 
 use std::ffi::OsString;
 use std::fs;
@@ -811,7 +812,8 @@ fn retiring_carries_the_worktrees_kept_phpt_runs_into_mains() {
     assert!(unkept.contains("no run of ext/pcre is kept"), "{unkept}");
     let tree = engine_tree(&root);
 
-    let recipe = Manifest::load(&root).unwrap().pin.digest().to_owned();
+    let manifest = Manifest::load(&root).unwrap();
+    let recipe = manifest.pin().unwrap().digest().to_owned();
     let run = |engine: &str| {
         format!(
             "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"{engine}\", \"recipe\": \"{recipe}\", \"verdicts\": {{\"phpt:php-src/ext/pcre/tests/one.phpt\": \"pass\"}}}}\n"
@@ -887,7 +889,7 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
         &format!("{tree}/ext/pcre.json"),
         &format!(
             "{{\"commit\": \"0000000\", \"corpus\": \"php-8.5.9\", \"engine\": \"CI's\", \"recipe\": \"{}\", \"verdicts\": {{\"phpt:php-src/ext/pcre/tests/one.phpt\": \"pass\"}}}}\n",
-            Manifest::load(&root).unwrap().pin.digest()
+            Manifest::load(&root).unwrap().pin().unwrap().digest()
         ),
     );
     let bin = Tree::new("worktree-ci-runs-gh").unwrap();
@@ -916,12 +918,17 @@ fn a_run_ci_kept_fetched_by_the_skips_line_is_the_bases_run() {
     assert!(found.contains("this run measured no engine"), "{found}");
 }
 
+/// The crate directories of the manifest at `root`.
+fn layout(root: &Path) -> xtask::manifest::Layout {
+    xtask::manifest::Manifest::load(root).unwrap().layout()
+}
+
 /// The engine tree a run at `root`'s `HEAD` on a binary with no dep-info
 /// is kept under (`xtask::phpt::kept_run`).
 fn engine_tree(root: &Path) -> String {
     let head = sh(root, &["git", "rev-parse", "HEAD"]);
     let snapshot = xtask::key::Snapshot::commit(root, head.trim()).unwrap();
-    let run = xtask::phpt::kept_run(&snapshot, "ext/pcre").unwrap();
+    let run = xtask::phpt::kept_run(&snapshot, &layout(root), "ext/pcre").unwrap();
     let tree = run
         .parent()
         .and_then(Path::parent)
@@ -1014,7 +1021,8 @@ fn one_call_takes_the_merge_bases_run_and_keeps_it_in_the_main_worktree() {
         "target/harness/phpt-runs/{}/ext/ctype.json",
         engine_tree(&root)
     );
-    let recipe = Manifest::load(&root).unwrap().pin.digest().to_owned();
+    let manifest = Manifest::load(&root).unwrap();
+    let recipe = manifest.pin().unwrap().digest().to_owned();
     write(
         &root,
         &none,

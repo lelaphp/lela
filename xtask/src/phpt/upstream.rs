@@ -41,11 +41,11 @@ pub(crate) fn compare(
     files: &[PathBuf],
     jobs: Option<std::num::NonZeroUsize>,
 ) -> Result<()> {
-    let source = manifest.pin.source.tree()?;
+    let source = manifest.pin()?.source.tree()?;
     let subset = Subset::resolve(manifest, &source, name)?;
     let tests = named(&source, &subset, files)?;
     let variants = manifest.variants();
-    let oracles = Oracles::new(&manifest.pin, &variants);
+    let oracles = Oracles::new(manifest.pin()?, &variants);
     let oracle = oracles.of(manifest.variant_of(&subset.scope))?;
     oracle.asserted()?;
     let own = Own::of(oracle, &subset, &subset.scope, true)?;
@@ -201,24 +201,8 @@ pub(super) fn verdict<'a>(said: &'a str, test: &Path) -> Option<&'a str> {
 /// both runners', [`Judgement::Warn`].
 pub(super) fn alike(ours: Option<Judgement>, theirs: Option<&str>) -> bool {
     let unwarned = theirs.map(|theirs| theirs.strip_prefix("WARN&").unwrap_or(theirs));
-    ours.and_then(word)
+    ours.and_then(Judgement::word)
         .is_some_and(|ours| Some(ours) == unwarned)
-}
-
-/// What `run-tests.php` calls a verdict of this runner's: a difference a
-/// registry row accepts is still its `FAIL`, and a test the compiler did
-/// not read has none, since only the engine's compiler refuses one, nor
-/// one the served lane left out, since only that lane sends HTTP.
-fn word(judgement: Judgement) -> Option<&'static str> {
-    match judgement {
-        Judgement::Pass => Some("PASS"),
-        Judgement::Fail | Judgement::Diverged => Some("FAIL"),
-        Judgement::Skip => Some("SKIP"),
-        Judgement::Bork => Some("BORK"),
-        Judgement::XFail => Some("XFAIL"),
-        Judgement::Warn => Some("WARN"),
-        Judgement::Unread | Judgement::Unsent => None,
-    }
 }
 
 #[cfg(test)]
@@ -246,7 +230,8 @@ mod tests {
             scope: "ext/a".to_owned(),
             dirs: vec![Dir {
                 under: PathBuf::from("ext/a"),
-                dir: tree.join("ext/a"),
+                path: tree.join("ext/a"),
+                needs: None,
             }],
             root: tree.to_path_buf(),
             holds: crate::phpt::Holds::Every,
@@ -300,7 +285,7 @@ mod tests {
         assert_eq!(verdict(capitals, test), Some("BORK"));
         let another = "PASS y [ext/a/tests/y.phpt] \nwhat came after\n[ext/a/tests/x.phpt]";
         assert_eq!(verdict(another, test), None);
-        assert_eq!(word(Judgement::Diverged), Some("FAIL"));
+        assert_eq!(Judgement::word(Judgement::Diverged), Some("FAIL"));
         assert!(alike(Some(Judgement::Fail), Some("WARN&FAIL")));
         assert!(alike(Some(Judgement::Warn), Some("WARN")));
         assert!(!alike(Some(Judgement::Pass), Some("WARN")));

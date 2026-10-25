@@ -3,7 +3,7 @@
 //! with extended info leaves before a statement (`-e`, #1780, #1822),
 //! as `ZEND_EXT_STMT` applies `zend_extension_statement_handler` to
 //! every loaded Zend extension in the order they were loaded
-//! (`Z/Zend/zend_vm_def.h:7923-7933`, `Z/Zend/zend_execute.c:2457-2462`).
+//! (`Z/Zend/zend_vm_def.h:7928-7938`, `Z/Zend/zend_execute.c:2457-2462`).
 //! It is what a debugger's line breakpoints and stepping stand on, as
 //! xdebug's `xdebug_statement_call` does.
 //!
@@ -22,7 +22,6 @@
 //!
 //! [`ZendExtension::statement_handler`]: crate::api::abi::ZendExtension::statement_handler
 
-use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use php_heap::FrameRef;
@@ -48,26 +47,34 @@ pub struct Statement<'a> {
     frame: FrameRef,
 }
 
-impl Deref for Statement<'_> {
-    type Target = Request;
-    fn deref(&self) -> &Request {
-        self.req
-    }
-}
+/// A handler's view that holds the request as its `req`: the request
+/// read and written through it, and the request whose time limit a
+/// [`TimeLimitSuspended`] over the view suspends.
+macro_rules! over_request {
+    ($view:ident) => {
+        impl std::ops::Deref for $view<'_> {
+            type Target = Request;
+            fn deref(&self) -> &Request {
+                self.req
+            }
+        }
 
-impl DerefMut for Statement<'_> {
-    fn deref_mut(&mut self) -> &mut Request {
-        self.req
-    }
-}
+        impl std::ops::DerefMut for $view<'_> {
+            fn deref_mut(&mut self) -> &mut Request {
+                self.req
+            }
+        }
 
-impl AsMut<Request> for Statement<'_> {
-    /// The request whose time limit a [`TimeLimitSuspended`] over the
-    /// statement suspends.
-    fn as_mut(&mut self) -> &mut Request {
-        self.req
-    }
+        impl AsMut<Request> for $view<'_> {
+            fn as_mut(&mut self) -> &mut Request {
+                self.req
+            }
+        }
+    };
 }
+pub(crate) use over_request;
+
+over_request!(Statement);
 
 impl Statement<'_> {
     /// The frame that stands before the statement, read for as long as the
@@ -86,7 +93,7 @@ impl Statement<'_> {
     }
 }
 
-/// `ZEND_EXT_STMT`'s walk (`Z/Zend/zend_vm_def.h:7927-7930`): unless
+/// `ZEND_EXT_STMT`'s walk (`Z/Zend/zend_vm_def.h:7932-7935`): unless
 /// `EG(no_extensions)` is set ([`Request::serve_host_string`]), each
 /// Zend extension's handler told of the statement `frame` stands at, in
 /// the order the extensions start, and what was thrown raised after the

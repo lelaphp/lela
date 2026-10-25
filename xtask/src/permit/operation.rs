@@ -56,6 +56,13 @@
 //! side. A start no command hook judges, its every candidate failing to
 //! run, is handed on unrecorded and is refused to its own starter.
 //!
+//! One line starts one operation in a checkout: a second start after
+//! the first, `git merge --no-commit a && git commit && git merge
+//! --no-commit b`, is refused as an operation the session did not start
+//! ([`second_start`]), since the hook records the first start's base and
+//! cannot know the second's, which would leave the second foreign to its
+//! own starter (#3261).
+//!
 //! A git command past a directory change the line makes after its first
 //! command is read where that change took the shell, never where it
 //! started (#2720, [`placed`]): a sibling agent's `cat f; cd <its
@@ -80,7 +87,7 @@ use serde::{Deserialize, Serialize};
 
 use super::argv::{Argv, Line};
 use super::call::Call;
-use super::rules::{acts_in, fired_in, placed};
+use super::rules::{Places, acts_in, fired_in, placed};
 use crate::manifest::OneOrMany;
 use crate::reading::{self, Store};
 use crate::{git, track};
@@ -197,10 +204,21 @@ const STARTING: [&str; 5] = [
 pub(crate) struct Foreign {
     pub(crate) operation: Operation,
     pub(crate) checkout: PathBuf,
+    /// Whether the line itself starts it after another in the same
+    /// checkout ([`second_start`]), rather than finding it standing.
+    pub(crate) second: bool,
 }
 
 impl fmt::Display for Foreign {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.second {
+            return write!(
+                f,
+                "This line starts {} in {} after another operation it starts there: one operation per line, since the base of the second is not known when the line is judged, and so it could not be recorded as this session's.",
+                self.operation,
+                self.checkout.display()
+            );
+        }
         write!(
             f,
             "{} is in progress in {} and this session did not start it.",
@@ -256,21 +274,28 @@ impl Starter {
 
 /// The operation standing where a command of `line` that `fires` runs
 /// git, from `root` moved by the line's leading `cd` or `pushd` and the
-/// command's own `-C` ([`fired_in`]), when the session making `call` did
-/// not start it; `None` where nothing stands or it is the caller's own. A
-/// call with no line is judged in `root`.
+/// command's own `-C`, or in the git dir its `GIT_DIR` or `--git-dir`
+/// names in place of where it runs ([`fired_in`], [`Places::Repositories`],
+/// #3271), when the session making `call` did not start it; `None` where
+/// nothing stands or it is the caller's own. A call with no line is
+/// judged in `root`.
 pub(crate) fn foreign(
     root: &Path,
     line: Option<&Line>,
     call: &Call,
     fires: impl Fn(&Argv) -> bool,
 ) -> Option<Foreign> {
+    if let Some(line) = line
+        && let Some(second) = second_start(root, line)
+    {
+        return Some(second);
+    }
     let checkouts = match line {
-        Some(line) => fired_in(root, line, fires),
+        Some(line) => fired_in(root, line, Places::Repositories, fires),
         None => vec![root.to_path_buf()],
     };
     let caller = Session::of(call);
-    checkouts.into_iter().find_map(|checkout| {
+    checkouts.into_iter().map(checkout_at).find_map(|checkout| {
         let git_dir = git::git_dir(&checkout)?;
         let operation = Operation::in_progress(&git_dir)?;
         let ours = read(&starter_file(&checkout, &git_dir)).is_some_and(|starter| {
@@ -281,8 +306,53 @@ pub(crate) fn foreign(
         (!ours).then_some(Foreign {
             operation,
             checkout,
+            second: false,
         })
     })
+}
+
+/// The second operation `line` starts in a checkout where it starts one
+/// already, by the command that starts it ([`STARTING`]): what [`record`]
+/// cannot take for the session, since only the first start's base is
+/// `HEAD` when the hook runs, and which permit therefore refuses as it
+/// refuses an operation the session did not start. A line that runs two
+/// merges, `git merge --no-commit a && git commit && git merge
+/// --no-commit b`, recorded the first alone and left the second foreign
+/// to its own starter, its commit and its `--abort` refused (#3261).
+fn second_start(root: &Path, line: &Line) -> Option<Foreign> {
+    let mut started: Vec<PathBuf> = Vec::new();
+    for (git, place) in placed(root, line, Places::Repositories) {
+        let Some(phrase) = STARTING.iter().find(|phrase| starts(git, phrase)) else {
+            continue;
+        };
+        let checkout = checkout_at(place);
+        if started.contains(&checkout) {
+            let operation = match *phrase {
+                "git cherry-pick" => Operation::CherryPick,
+                "git revert" => Operation::Revert,
+                "git rebase" => Operation::Rebase,
+                _ => Operation::Merge,
+            };
+            return Some(Foreign {
+                operation,
+                checkout,
+                second: true,
+            });
+        }
+        started.push(checkout);
+    }
+    None
+}
+
+/// The checkout a place git reads its repository in stands for: itself,
+/// or, for a gitfile, the `.git` file of a linked worktree that `GIT_DIR`
+/// names, the worktree it stands in, whose git dir the file points at
+/// (#3271).
+fn checkout_at(place: PathBuf) -> PathBuf {
+    match place.parent() {
+        Some(dir) if place.is_file() => dir.to_path_buf(),
+        _ => place,
+    }
 }
 
 /// Before a call: what `line` does to the records of the checkouts it runs
@@ -413,7 +483,8 @@ fn marker_text(git_dir: &Path, file: &str) -> Option<String> {
         .map(|text| text.trim().to_owned())
 }
 
-/// Each checkout `line` runs git in whose place it reads ([`placed`]),
+/// Each checkout `line` runs git in whose place it reads, a git dir its
+/// words name in place of where it runs ([`placed`], #3271),
 /// its git dir, the operation standing there and whether the line starts
 /// one there, with its record tended on the way. A record whose operation
 /// stands takes that operation's identity, or is dropped where it names
@@ -430,10 +501,11 @@ fn tend<'a>(
     caller: Option<&Session>,
     line: &'a Line,
 ) -> Result<(Vec<fs::File>, Vec<Tended<'a>>)> {
-    let placed: Vec<_> = placed(root, line)
+    let placed: Vec<_> = placed(root, line, Places::Repositories)
         .into_iter()
         .filter(|(argv, _)| argv.runs("git"))
-        .filter_map(|(git, checkout)| {
+        .filter_map(|(git, place)| {
+            let checkout = checkout_at(place);
             let git_dir = git::git_dir(&checkout)?;
             let file = starter_file(&checkout, &git_dir);
             Some((git, checkout, git_dir, file))
@@ -549,11 +621,13 @@ pub(super) fn ran_in(workspace: &Path, line: Option<&Line>) -> PathBuf {
 pub(super) fn staged(checkout: &Path, path: &str) -> Option<Operation> {
     let operation = Operation::in_progress(&git::git_dir(checkout)?)?;
     let args = ["diff", "--cached", "--quiet", "--diff-filter=u", "--", path];
-    let differs = git::git(checkout, &args, None).is_err();
+    let differs = git::git(checkout, &args).is_err();
     differs.then_some(operation)
 }
 
-fn head(checkout: &Path) -> Option<String> {
+/// The commit `HEAD` stands at in `checkout`, its full id; `None` for an
+/// unborn one.
+pub(super) fn head(checkout: &Path) -> Option<String> {
     git::rev_parse(checkout, &["--verify", "--quiet", "HEAD"]).ok()
 }
 
@@ -600,6 +674,21 @@ mod tests {
         git(&dir, &["init", "-q", "-b", "main"]);
         git(&dir, &["commit", "-q", "--allow-empty", "-m", "one"]);
         dir
+    }
+
+    /// A linked worktree of `dir` at `linked`, on a branch of its own.
+    fn worktree(dir: &Path, linked: &Path) {
+        git(
+            dir,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "t1",
+                linked.to_str().unwrap(),
+            ],
+        );
     }
 
     fn merging(dir: &Path) {
@@ -1009,17 +1098,7 @@ mod tests {
     fn a_linked_worktree_s_operation_is_read_from_its_own_git_dir() {
         let dir = repository("operation-worktree");
         let linked = dir.join("linked");
-        git(
-            &dir,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "t1",
-                linked.to_str().unwrap(),
-            ],
-        );
+        worktree(&dir, &linked);
         merging(&dir);
         let add = "git add -- a";
         assert_eq!(standing(&linked, add, "s1", None), None);
@@ -1053,6 +1132,63 @@ mod tests {
         assert!(checkout.ends_with("linked"), "{}", checkout.display());
     }
 
+    /// #3271: under `GIT_DIR` or `--git-dir` git reads that repository
+    /// alone, so a commit into another one from a checkout where a merge
+    /// stands is not refused and one into the merging checkout's git dir
+    /// from elsewhere is, while `GIT_WORK_TREE` naming the merging
+    /// checkout is still judged there. A start under `GIT_DIR` is
+    /// recorded where its merge stands, so it is its starter's there,
+    /// named by its git dir or not.
+    #[test]
+    fn a_command_under_a_git_dir_is_judged_in_that_git_dir_alone() {
+        let dir = repository("operation-git-dir");
+        let other = repository("operation-git-dir-other");
+        let (here, there) = (dir.join(".git"), other.join(".git"));
+        let (here, there) = (here.display(), there.display());
+        let commit = "commit -q -F m -- a";
+        merging(&dir);
+        for line in [
+            format!("GIT_DIR={there} git {commit}"),
+            format!("git --git-dir={there} {commit}"),
+            format!(
+                "GIT_DIR={there} GIT_WORK_TREE={} git {commit}",
+                other.display()
+            ),
+        ] {
+            assert_eq!(standing(&dir, &line, "s1", None), None, "{line}");
+        }
+        for line in [
+            format!("GIT_DIR={here} git {commit}"),
+            format!("git --git-dir={here} {commit}"),
+            format!("GIT_WORK_TREE={} git add -- a", dir.display()),
+        ] {
+            let judged = standing(&other, &line, "s1", None);
+            assert_eq!(judged, Some(Operation::Merge), "{line}");
+        }
+        ended(&dir);
+        let start = format!("GIT_DIR={here} git merge --no-commit topic");
+        record(&other, &call("s1", None), &Line::read(&start)).unwrap();
+        merging(&dir);
+        let named = format!("GIT_DIR={here} git {commit}");
+        assert_eq!(standing(&other, &named, "s1", None), None);
+        assert_eq!(standing(&dir, &format!("git {commit}"), "s1", None), None);
+        let refused = standing(&other, &named, "s2", None);
+        assert_eq!(refused, Some(Operation::Merge));
+        ended(&dir);
+
+        // A linked worktree's `.git` is a file naming its git dir, and git
+        // takes it as `GIT_DIR`: a merge standing there is judged there.
+        let linked = dir.join("linked");
+        worktree(&dir, &linked);
+        merging(&linked);
+        let line = format!("GIT_DIR={}/.git git {commit}", linked.display());
+        assert_eq!(standing(&other, &line, "s1", None), Some(Operation::Merge));
+        assert_eq!(
+            standing(&linked, &format!("GIT_DIR=.git git {commit}"), "s1", None),
+            Some(Operation::Merge)
+        );
+    }
+
     /// The checkout a call ran in is its workspace moved by a leading
     /// `cd`, past the assignments before it, at the top of the worktree
     /// the `cd` names; a `cd` into no checkout leaves the workspace.
@@ -1061,17 +1197,7 @@ mod tests {
         let dir = repository("operation-ran-in");
         let base = Tree::new("operation-ran-in-linked").unwrap();
         let linked = base.join("t1");
-        git(
-            &dir,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "t1",
-                linked.to_str().unwrap(),
-            ],
-        );
+        worktree(&dir, &linked);
         std::fs::create_dir(linked.join("sub")).unwrap();
         let top = linked.canonicalize().unwrap();
         let ran_in = |line: &str| super::ran_in(&dir, Some(&Line::read(line)));
@@ -1096,17 +1222,7 @@ mod tests {
         let dir = repository("operation-ran-in-shapes");
         let base = Tree::new("operation-ran-in-shapes-linked").unwrap();
         let linked = base.join("t1");
-        git(
-            &dir,
-            &[
-                "worktree",
-                "add",
-                "-q",
-                "-b",
-                "t1",
-                linked.to_str().unwrap(),
-            ],
-        );
+        worktree(&dir, &linked);
         std::fs::create_dir(linked.join("sub")).unwrap();
         let top = linked.canonicalize().unwrap();
         let workspace = dir.canonicalize().unwrap();
@@ -1114,9 +1230,11 @@ mod tests {
         let at = linked.display();
         assert_eq!(ran_in(&format!("W={at} && cd \"$W\" && touch x")), top);
         assert_eq!(ran_in(&format!("W={at}; cd $W/sub && touch x")), top);
-        // #2995: a `cd` joined by `;` may fail, and the line may run where
-        // it started as well, so it is held there.
-        assert_eq!(ran_in(&format!("W={at}; cd $W/sub; touch x")), workspace);
+        // #2995: a `cd` into a file joined by `;` fails, and the line may
+        // run where it started as well, so it is held there; one into a
+        // directory it can enter does not fail (#3257).
+        assert_eq!(ran_in(&format!("W={at}; cd $W/.git; touch x")), workspace);
+        assert_eq!(ran_in(&format!("W={at}; cd $W/sub; touch x")), top);
         let exported = format!("export A=1 W={at} && cd \"${{W}}\" && touch x");
         assert_eq!(ran_in(&exported), top);
         assert_eq!(ran_in("cd \"$UNSET_BY_THE_LINE\" && touch x"), workspace);

@@ -10,11 +10,11 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{
-    Level, Thrown, argument_error, docref, fatal, throw, throw_error, throw_error_chained,
-    while_pending,
+    Level, Thrown, argument_error, docref, fatal, throw, throw_chained, throw_error,
+    throw_exception_ex, while_pending,
 };
 use php_ext::request::{Foreign, Ini, Request, Resolve, Streams as _};
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_pdo_sqlite::BlobStream;
 use php_ext_pdo_sqlite::ffi::{
     self, Conn as Connection, Db, Function, Handler, Registration, SQLITE_BUSY, SQLITE_LOCKED,
@@ -127,8 +127,9 @@ pub(crate) fn not_ready(req: &mut Request, class: &str) -> Thrown {
 /// with `code` where `exceptions` is on, `E_WARNING` otherwise. With one
 /// pending, [`fail_after`]'s, and the throwable is handed on either way.
 /// php prints the message with `vspprintf` and throws it with
-/// `zend_throw_exception` before it frees the buffer, so the throw is
-/// [`throw_error`]'s, the buffer standing across it:
+/// `zend_throw_exception` before it frees the buffer
+/// (`Z/ext/sqlite3/sqlite3.c:76-92`), so the throw is [`throw`]'s with
+/// that buffer standing across it ([`printed`]):
 ///
 /// ```php
 /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
@@ -157,15 +158,30 @@ pub(crate) fn fail(
         docref(req, Level::Warning, message);
         return Ok(());
     }
-    let thrown = throw_error(req, "SQLite3Exception", message);
+    let thrown = printed(req, message, |req| throw(req, "SQLite3Exception", message));
     Err(with_code(req, thrown, code))
+}
+
+/// `php_sqlite3_error`'s `vspprintf` buffer of `message`
+/// ([`Emalloc::printf_buffer`]) standing while `throw` makes the
+/// throwable, and freed after it, as php frees `message` once
+/// `zend_throw_exception` returns.
+fn printed(req: &mut Request, message: &str, throw: impl FnOnce(&mut Request) -> Thrown) -> Thrown {
+    match Emalloc::printf_buffer(req, message.len()) {
+        Ok(buffer) => {
+            let thrown = throw(req);
+            buffer.free(req);
+            thrown
+        }
+        Err(refused) => refused,
+    }
 }
 
 /// `php_sqlite3_error` with a throwable pending, as php raises it with
 /// `EG(exception)` set: the `SQLite3Exception` chained over it, or the warning
 /// raised while it is pending and the throwable handed on. The throw is
-/// [`throw_error_chained`], `vspprintf`'s buffer standing across it as
-/// [`fail`] says.
+/// [`throw_chained`], `vspprintf`'s buffer standing across it as [`fail`]
+/// says.
 pub(crate) fn fail_after(
     req: &mut Request,
     exceptions: bool,
@@ -174,7 +190,14 @@ pub(crate) fn fail_after(
     message: &str,
 ) -> Thrown {
     if exceptions {
-        let thrown = throw_error_chained(req, pending, "SQLite3Exception", message);
+        let thrown = match Emalloc::printf_buffer(req, message.len()) {
+            Ok(buffer) => {
+                let thrown = throw_chained(req, pending, "SQLite3Exception", message);
+                buffer.free(req);
+                thrown
+            }
+            Err(refused) => pending.chain(req, refused),
+        };
         return with_code(req, thrown, code);
     }
     while_pending(req, &pending, |req| docref(req, Level::Warning, message));
@@ -465,7 +488,7 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
             .is_err()
         {
             let shown = text(&full);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("open_basedir prohibits opening {shown}"),
@@ -482,7 +505,7 @@ fn open(req: &mut Request, object: PhpObject, filename: &[u8], flags: i64) -> Re
         Err((_, message)) => {
             conn(req, object)?.link = Link::Closed;
             let message = format!("Unable to open database: {}", text(&message));
-            return Err(throw(req, "Exception", &message));
+            return Err(throw_exception_ex(req, "Exception", &message));
         }
     };
     if req
@@ -889,6 +912,9 @@ impl SQLite3 {
     /// var_dump($db->close(), $db->close());
     /// try { $s->execute(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// var_dump($db->lastErrorCode(), $db->lastErrorMsg());
+    /// $u = (new ReflectionClass('SQLite3'))->newInstanceWithoutConstructor();
+    /// var_dump($u->close());
+    /// try { $u->lastErrorCode(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect
     /// bool(true)
@@ -896,30 +922,44 @@ impl SQLite3 {
     /// The SQLite3 object has not been correctly initialised or is already closed
     /// int(0)
     /// string(0) ""
+    /// bool(true)
+    /// The SQLite3 object has not been correctly initialised or is already closed
     /// ```
     ///
-    /// From inside a user function or a collation the call in progress
-    /// holds the connection, so the close is refused as the library
-    /// refuses it for the statement the call runs, and the call runs to
-    /// its end:
+    /// From inside a user function, an aggregate, a collation or the
+    /// authorizer the close throws before it finalizes a statement
+    /// (`in_callback`, php 8.5.12), and the call runs to its end:
     ///
     /// ```php
     /// $db = new SQLite3(':memory:');
-    /// $db->createFunction('f', function ($x) use ($db) { var_dump($db->close()); return $x * 2; });
-    /// $db->createCollation('c', function ($a, $b) use ($db) { var_dump($db->close()); return strcmp($a, $b); });
+    /// $close = function () use ($db) {
+    ///     try { var_dump($db->close()); } catch (Error $e) { echo $e::class, ': ', $e->getMessage(), "\n"; }
+    /// };
+    /// $db->createFunction('f', function ($x) use ($close) { $close(); return $x * 2; });
+    /// $db->createCollation('c', function ($a, $b) use ($close) { $close(); return strcmp($a, $b); });
+    /// $db->createAggregate('g', function ($c, $n, $a) use ($close) { $close(); return $c + $a; }, fn ($c) => $c, 1);
     /// var_dump($db->querySingle('SELECT f(21)'));
     /// var_dump($db->querySingle("SELECT 'b' AS x UNION ALL SELECT 'a' ORDER BY x COLLATE c"));
-    /// var_dump($db->lastErrorMsg(), $db->close());
+    /// var_dump($db->querySingle('SELECT g(x) FROM (SELECT 1 AS x UNION ALL SELECT 2)'));
+    /// $live = $db->prepare('SELECT 7');
+    /// $db->setAuthorizer(function () use ($close) { $close(); return SQLite3::OK; });
+    /// $db->prepare('SELECT 1');
+    /// $db->setAuthorizer(null);
+    /// var_dump($live->execute()->fetchArray(SQLITE3_NUM), $db->close());
     /// ```
     /// ```expect
-    /// Warning: SQLite3::close(): Unable to close database: unable to close due to unfinalized statements or unfinished backups in %s on line 3
-    /// bool(false)
+    /// Error: Cannot close SQLite3 database while inside a callback
     /// int(42)
-    ///
-    /// Warning: SQLite3::close(): Unable to close database: unable to close due to unfinalized statements or unfinished backups in %s on line 4
-    /// bool(false)
+    /// Error: Cannot close SQLite3 database while inside a callback
     /// string(1) "a"
-    /// string(12) "not an error"
+    /// Error: Cannot close SQLite3 database while inside a callback
+    /// Error: Cannot close SQLite3 database while inside a callback
+    /// int(3)
+    /// Error: Cannot close SQLite3 database while inside a callback
+    /// array(1) {
+    ///   [0]=>
+    ///   int(7)
+    /// }
     /// bool(true)
     /// ```
     #[php(tentative)]
@@ -927,11 +967,16 @@ impl SQLite3 {
         let object = this.object();
         let conn = conn(req, object)?;
         let exceptions = conn.exceptions;
+        // `if (db_obj->initialised)`: an object never opened stays so.
+        let Link::Open(open) = &conn.link else {
+            return Ok(true);
+        };
+        if open.db().in_callback(req) {
+            let text = "Cannot close SQLite3 database while inside a callback";
+            return Err(throw_error(req, "Error", text));
+        }
+        let conn = self::conn(req, object)?;
         let Link::Open(open) = std::mem::replace(&mut conn.link, Link::Closed) else {
-            if matches!(conn.link, Link::Closed) {
-                return Ok(true);
-            }
-            conn.link = Link::Unopened;
             return Ok(true);
         };
         let Open { owner, stmts } = *open;

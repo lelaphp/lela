@@ -2,18 +2,27 @@
 
 `loop.php` is one hot `for` loop. `oracle.lines` is what the pinned php
 writes on its second stream for it under the recipe, `[regime.jit-inline]`
-and the instrument's ini, the `---- TRACE` lines alone, its directory
+and the instrument's ini, its trace lines alone, the loop's exit line among
+them (#3155's ruling), its directory
 standing as the recipe's `scratch_token`: the lines a run keeps as the
 oracle's. `engine.lines` is what the engine built with the tier's feature
 wrote for it under `jit.mode=force` when the fixture was laid: its loop
 root on line 4, the body, where php roots a `for` loop at its condition on
-line 3 (#3134), and no side trace from the loop's exit (#2964).
+line 3 (#3134), and no exit line and no side trace from the loop's exit
+(#2964).
 
 The control that must fail is in `xtask/tests/trace_dump.rs`: a binary that
 writes `engine.lines` stands for the engine's through `run`, and the
 reading is a fail naming both lines of the loop's root; the same binary
 writing `oracle.lines` is a pass, and the lines the run keeps for the
 oracle are `oracle.lines`.
+
+`fib-moved.toml` is #3291's control: an accepted `trace:dump/fib` row
+pinning `oracle.lines` and `engine-pinned.lines`, which is `engine.lines`
+with one exit line more. `trace_dump`'s unit tests hold it: against
+`engine.lines` the row accepts nothing and the verdict names the engine's
+side as the one that moved; against the lines it pins it accepts the
+difference.
 
 `fiber_hot_loop.php` suspends a fiber on every pass of a hot loop and
 resumes it until it ends, so the loop's recording takes the suspension

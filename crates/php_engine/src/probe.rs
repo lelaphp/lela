@@ -29,7 +29,9 @@ pub(crate) struct Asked {
 pub(crate) struct Probe;
 
 impl Tier for Probe {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    type State = ();
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: crate::tier::Held<'_>) -> Flow {
         let asked = req.state::<Asked>();
         asked.sites.push((site, frame));
         let resume = asked.resume.take();

@@ -382,16 +382,15 @@ pub fn run(
     // The regime is the pin's and the lane states no ini of its own; a pin
     // without it refuses the run before anything is dumped, naming the
     // block and the file a person writes it in.
-    manifest.pin.regime(REGIME).with_context(|| {
+    let pin = manifest.pin()?;
+    pin.regime(REGIME).with_context(|| {
         format!(
             "{INSTRUMENT}: the recipe php dumps its op arrays under is `[regime.{REGIME}]` of {} (design §6.1), and the pin moves only by a person's hand",
-            manifest.oracle.pin
+            manifest.pin_file().unwrap_or_default()
         )
     })?;
     if let Some(name) = &ask.regime {
-        manifest
-            .pin
-            .regime(name)
+        pin.regime(name)
             .with_context(|| format!("{INSTRUMENT}: `--regime {name}`"))?;
     }
     let regimes = ask.regimes();
@@ -401,7 +400,7 @@ pub fn run(
     // The engine's binary, built from the tree the reading is stamped
     // with; one the tree has moved past, or none, dumps nothing, and the
     // lane says why (#475, #2166).
-    let runner = Runner::resolve(root, &manifest.pin, ask.engine.as_deref())?;
+    let runner = Runner::resolve(root, &manifest.layout(), pin, ask.engine.as_deref())?;
     if let Runner::Absent(why) | Runner::Stale(why) = &runner {
         println!("{INSTRUMENT}: {why}");
     }
@@ -409,8 +408,8 @@ pub fn run(
     // and never per file (harness §4.3). A binary that is not at the pin's
     // path refuses nothing: nothing is dumped, every file is counted as
     // not dumped, and the reading says why.
-    let oracle = manifest.pin.oracle();
-    let oracle_absent = manifest.pin.oracle.absent();
+    let oracle = pin.oracle();
+    let oracle_absent = pin.oracle.absent();
     if oracle_absent.is_none() {
         oracle.asserted()?;
     }
@@ -429,7 +428,7 @@ pub fn run(
     }
     let corpus = match &ask.corpus {
         Some(dir) => Corpus::at(dir)?,
-        None => Corpus::per_commit(&manifest.pin.source.tree()?),
+        None => Corpus::per_commit(&pin.source.tree()?),
     };
     let tally = judge(
         &oracle,
@@ -473,7 +472,7 @@ pub(crate) fn judge(
 /// key a run of the corpus would give it; otherwise the directory the
 /// file stands in, which is a corpus of the caller's own.
 fn around(manifest: &Manifest, file: &Path) -> Result<Corpus> {
-    if let Ok(tree) = manifest.pin.source.tree()
+    if let Ok(tree) = manifest.pin()?.source.tree()
         && file.starts_with(&tree)
     {
         return Ok(Corpus::per_commit(&tree));

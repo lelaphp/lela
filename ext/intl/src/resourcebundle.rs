@@ -15,6 +15,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{internal_iterator, lookup_class, new_object};
 use php_ext::raising::{
     Thrown, arg_value_error, argument_error, fatal, illegal_container_offset, throw_error,
+    value_error,
 };
 use php_ext::request::{MAXPATHLEN, Request};
 use php_ext::values::{Layout, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -169,7 +170,7 @@ fn fetch(
     let mut status = Code::ZERO;
     let (child, what) = match *offset {
         Offset::Key([]) if arg > 0 => return Err(arg_value_error(req, arg, "not be empty")),
-        Offset::Key([]) => return Err(throw_error(req, "ValueError", "Offset must not be empty")),
+        Offset::Key([]) => return Err(value_error(req, "Offset must not be empty")),
         Offset::Key(key) => {
             let key = c_string(key);
             let child = match bundle(req, object) {
@@ -184,7 +185,7 @@ fn fetch(
                 return Err(if arg > 0 {
                     argument_error(req, "ValueError", arg, &format!("index must be {range}"))
                 } else {
-                    throw_error(req, "ValueError", &format!("Index must be {range}"))
+                    value_error(req, &format!("Index must be {range}"))
                 });
             };
             let child = match bundle(req, object) {

@@ -117,11 +117,10 @@ pkg-config = "0.3"                  # ext/libxml's build.rs finds the platform's
 libsqlite3-sys = { version = "0.38", features = ["bundled_bindings"] } # ext/pdo_sqlite: the platform's libsqlite3, the keg the oracle links, found through pkg-config and never vendored; the crate's prebuilt declarations, no bindgen (design §7.2, #1510, `.cargo/config.toml`'s SQLITE3_LIB_DIR)
 libz-sys = { version = "1.1", default-features = false, features = ["libc"] }  # ext/zlib: the platform's zlib, whose deflate bytes are the oracle's at every level (design §7.2, revision 34; #950)
 libbz2-rs-sys = { version = "0.2.5", default-features = false, features = ["rust-allocator"] }  # ext/bz2: libbzip2 ported to Rust, whose bytes are the oracle's libbz2 1.0.8's at every block size and work factor (design §7.2, revision 39; #1116)
-openssl-sys = "0.9"                # ext/openssl: the platform's libcrypto, OpenSSL 3 as the oracle links it, found through pkg-config and never vendored (design §7.2; #1108)
+openssl-sys = "0.9"                # ext/openssl: the platform's libcrypto, of the major version the oracle links (4 since #3381), found through pkg-config and never vendored (design §7.2; #1108)
 curl-sys = { version = "0.4.90", default-features = false, features = ["upkeep_7_62_0"] }  # ext/curl: the declarations of the platform's libcurl, the one the oracle links, which ext/curl's build.rs holds it to and never lets it vendor (design §7.2; #1332)
 mysql_common = { version = "0.38", default-features = false }  # ext/mysqlnd: the MySQL wire protocol's packet types and scrambles, no I/O; mysqlnd ported over it, every read and write through the engine's streams (#1345)
 flate2 = { version = "1", default-features = false, features = ["zlib"] }  # ext/mysqlnd: the compressed protocol's envelopes, over the locked libz-sys (#1345)
-zip = { version = "8.6", default-features = false }  # ext/zip: the central directory found and read through the pure-Rust zip crate, no codec and no cipher; every entry's data is read and written by ext/zip over the crates below (design §7.2, revision 70; #1515, #1545, #1631)
 bzip2 = "0.6"                       # ext/zip: BZIP2 entries read and written over libbz2-rs-sys
 lzma-rust2 = { version = "0.16", default-features = false, features = ["std", "encoder", "optimization", "xz"] }  # ext/zip: LZMA and XZ entries read and written
 ruzstd = "0.9"                      # ext/zip: ZSTD entries, pure Rust, over the locked twox-hash

@@ -9,7 +9,7 @@ use php_ext::abi::{Instance, OrFalse, Path, Raw, This, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::coerce::value_name;
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, docref, throw, throw_error,
+    Level, Thrown, arg_value_error, argument_error, docref, throw_error, throw_exception_ex,
 };
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
@@ -22,10 +22,11 @@ use crate::object::{Code, Dom};
 use crate::parent::replace_validity;
 use crate::private::{Mapper, Private};
 use crate::{
-    children_valid, class_name, clone_node, copy_document_ref, dom_error, dom_error_message, fetch,
-    has_feature, hierarchy_ok, instance_of, invalidate, is_equal_attr, is_equal_node, is_read_only,
-    normalize, nullable_object, object_for, reconcile_attribute_namespace, reconcile_ns,
-    reconcile_ns_list, returned, set_document_ref_pointers, shared_doc, strict,
+    StackGuard, StackRefusal, children_valid, class_name, clone_node, copy_document_ref, dom_error,
+    dom_error_message, fetch, has_feature, hierarchy_ok, instance_of, invalidate, is_equal_attr,
+    is_equal_node, is_read_only, normalize, nullable_object, object_for,
+    reconcile_attribute_namespace, reconcile_ns, reconcile_ns_list, returned,
+    set_document_ref_pointers, shared_doc, strict,
 };
 
 /// `dom_insert_fragment`: the fragment's children moved in between
@@ -100,13 +101,13 @@ fn check_legacy_insertion(
 }
 
 /// An attribute of the same name `parent` already has, which `appendChild`
-/// and `insertBefore` replace.
+/// and `insertBefore` replace: in no namespace for one in none (php
+/// 8.5.12), never one of the name in a namespace.
 fn existing_attr(parent: Node, child: Node) -> Option<Node> {
-    match child.ns().and_then(Ns::href) {
-        None => parent.has_prop(&child.name()),
+    crate::carried(match child.ns().and_then(Ns::href) {
+        None => parent.has_ns_prop(&child.name(), None),
         Some(href) => parent.has_ns_prop(&child.name(), Some(&href)),
-    }
-    .filter(|a| a.kind() != Kind::AttributeDecl)
+    })
 }
 
 /// `dom_node_replace_child`: the standard's checks where `modern`, the
@@ -418,7 +419,10 @@ fn cloned_object(
 
 /// `php_dom_normalize_modern`: every descendant text node that is empty
 /// removed, and the text nodes that follow one merged into it.
-fn normalize_modern(this: Node) {
+fn normalize_modern(guard: &mut StackGuard<'_>, this: Node) {
+    if guard.overflowed() {
+        return;
+    }
     let mut at = this.children();
     while let Some(node) = at {
         match node.kind() {
@@ -445,7 +449,7 @@ fn normalize_modern(this: Node) {
                     next = after;
                 }
             }
-            Kind::Element => normalize_modern(node),
+            Kind::Element => normalize_modern(guard, node),
             _ => {}
         }
         at = node.next();
@@ -468,7 +472,11 @@ pub(crate) fn is_equal_node_of(
     if node == other {
         return Ok(true);
     }
-    Ok(is_equal_node(node, other, modern))
+    let mut guard = StackGuard::new(req);
+    let equal = is_equal_node(&mut guard, node, other, modern);
+    let reached = guard.reached();
+    StackRefusal::Compare.raise_if(req, reached)?;
+    Ok(equal)
 }
 
 /// `DOMNode::isSameNode`'s body, `Dom\Node::isSameNode`'s too, where the
@@ -1011,7 +1019,14 @@ fn insert_before(
                 dom_error(req, Code::NotFound, strict)?;
                 return Ok(Owner::bool(false));
             }
-            Some(refp)
+            // A node inserted before itself goes before what follows it
+            // (php 8.5.12, GH-23365): unlinking it first would leave the
+            // reference out of the list.
+            if refp == child {
+                child.next()
+            } else {
+                Some(refp)
+            }
         }
         None => None,
     };
@@ -1549,6 +1564,28 @@ impl DOMNode {
     /// <r><a/><b/><c/></r>
     /// Not Found Error
     /// ```
+    ///
+    /// A node inserted before itself stays where it is (GH-23365), and an
+    /// attribute in no namespace replaces only the one of its name in none:
+    ///
+    /// ```php
+    /// $d = new DOMDocument;
+    /// $d->loadXML('<r xmlns:p="urn:p" p:a="0" a="1" b="2">t<c/></r>');
+    /// $r = $d->documentElement;
+    /// [$t, $c, $a] = [$r->firstChild, $r->lastChild, $r->getAttributeNode('a')];
+    /// var_dump($r->insertBefore($t, $t) === $t, $r->insertBefore($c, $c) === $c, $r->insertBefore($a, $a) === $a, $t->nextSibling === $c);
+    /// $n = $d->createAttribute('a');
+    /// $n->value = 'new';
+    /// $r->appendChild($n);
+    /// echo $d->saveXML($r), "\n";
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// bool(true)
+    /// <r xmlns:p="urn:p" p:a="0" b="2" a="new">t<c/></r>
+    /// ```
     #[allow(clippy::too_many_lines)] // php's function, one step per clause of the specification
     fn insertBefore(
         req: &mut Request,
@@ -1630,6 +1667,20 @@ impl DOMNode {
     /// bool(true)
     /// bool(false)
     /// bool(false)
+    /// ```
+    ///
+    /// The comparison recurses as php's does and is refused where the stack
+    /// comes down to its limit (GH-23120):
+    ///
+    /// ```php
+    /// function deep() { $d = new DOMDocument; $n = $d->createElement('l', 'x');
+    ///     for ($i = 0; $i < 10000; $i++) { $p = $d->createElement('a'); $p->appendChild($n); $n = $p; }
+    ///     $d->appendChild($n); return $d; }
+    /// try { var_dump(deep()->documentElement->isEqualNode(deep()->documentElement)); }
+    /// catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=small-stack
+    /// Maximum call stack size reached.
     /// ```
     fn isEqualNode(
         req: &mut Request,
@@ -1758,16 +1809,41 @@ impl DOMNode {
     /// int(2)
     /// string(3) "abc"
     /// ```
+    ///
+    /// Both recurse as php's do and are refused where the stack comes down
+    /// to its limit (GH-23116, GH-23117), what the levels above did kept:
+    ///
+    /// ```php
+    /// foreach ([new DOMDocument, Dom\XMLDocument::createEmpty()] as $d) {
+    ///     $n = $d->createElement('a');
+    ///     for ($i = 0; $i < 25000; $i++) { $p = $d->createElement('a'); $p->appendChild($n); $n = $p; }
+    ///     $r = $d->appendChild($d->createElement('r'));
+    ///     $r->append('x', 'y', $n);
+    ///     try { $d->normalize(); } catch (Error $e) { echo $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+    ///     var_dump($r->childNodes->length);
+    /// }
+    /// ```
+    /// ```expect regime=small-stack
+    /// Maximum call stack size reached. Infinite recursion?
+    /// NULL
+    /// int(2)
+    /// Maximum call stack size reached. Infinite recursion?
+    /// NULL
+    /// int(2)
+    /// ```
     #[php(tentative)]
     fn normalize(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let this = this.object();
         let node = fetch(req, this)?;
-        if follows_spec(req, this) {
-            normalize_modern(node);
+        let modern = follows_spec(req, this);
+        let mut guard = StackGuard::new(req);
+        if modern {
+            normalize_modern(&mut guard, node);
         } else {
-            normalize(node);
+            normalize(&mut guard, node);
         }
-        Ok(())
+        let reached = guard.reached();
+        StackRefusal::Normalize.raise_if(req, reached)
     }
 
     /// `DOMNode::removeChild(DOMNode $child): DOMNode|false`.
@@ -2034,7 +2110,7 @@ impl DOMNode {
     /// ```
     fn __sleep(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let name = class_name(req, this.object().class());
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "Exception",
             &format!(
@@ -2053,7 +2129,7 @@ impl DOMNode {
     /// ```
     fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let name = class_name(req, this.object().class());
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "Exception",
             &format!(

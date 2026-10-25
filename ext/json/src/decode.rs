@@ -573,6 +573,21 @@ impl Parser<'_> {
     /// between the shift and the goto. An empty pair is the value
     /// whole; one with something inside is left open on `open`, its
     /// first value next.
+    ///
+    /// A string is asked for fallibly since 8.5.12, the scanner's
+    /// `zend_string_falloc` at its closing quote, so one past the memory
+    /// limit is refused, the parse with it, and the limit's fatal is raised
+    /// as the call returns rather than the hard limit met:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '16M');
+    /// $n = 10 * 1024 * 1024; $json = str_repeat("\x80", $n); $json[0] = '"'; $json[$n - 1] = '"';
+    /// var_dump(json_decode($json, false, 512, JSON_INVALID_UTF8_SUBSTITUTE), "unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 31473664 bytes) in %s on line 4
+    /// ```
     fn begin(&mut self, req: &mut Request, open: &mut Vec<Open>) -> Result<Begun, Thrown> {
         let token = std::mem::replace(&mut self.token, Token::Eoi);
         let bracket = matches!(token, Token::ArrayOpen | Token::ObjectOpen);
@@ -602,13 +617,25 @@ impl Parser<'_> {
             Token::False => Owner::bool(false),
             Token::Int(n) => Owner::int(n),
             Token::Double(d) => Owner::float(d),
-            Token::Str(bytes) if !self.validating => PhpString::new(req, &bytes)?.into_value(),
+            Token::Str(bytes) if !self.validating => {
+                let Some(string) = token_string(req, &bytes)? else {
+                    self.syntax();
+                    return Ok(Begun::Refused);
+                };
+                string.into_value()
+            }
             Token::ArrayOpen => {
                 self.advance();
                 let array = if self.validating {
                     None
                 } else {
-                    Some(PhpArray::new(req)?)
+                    // `array_finit` since 8.5.12: `YYERROR` where the
+                    // memory limit refused it.
+                    let Some(array) = req.memory_mut().fallible(PhpArray::new)? else {
+                        self.syntax();
+                        return Ok(Begun::Refused);
+                    };
+                    Some(array)
                 };
                 let frame = Open::Array { at, array };
                 return self.opened(req, frame, open);
@@ -644,7 +671,11 @@ impl Parser<'_> {
                 return Ok(Begun::Refused);
             }
             if let Open::Object { holder, .. } = &mut frame {
-                *holder = self.holder(req)?;
+                let Some(made) = self.holder(req)? else {
+                    frame.give_up(req);
+                    return Ok(Begun::Refused);
+                };
+                *holder = made;
             }
             return Ok(self.close(frame, req).map_or(Begun::Refused, Begun::Value));
         }
@@ -693,7 +724,19 @@ impl Parser<'_> {
         let at = match frame {
             Open::Array { at, array } => {
                 match array.as_mut() {
-                    Some(array) => array.append(req, value)?,
+                    // `zend_hash_next_index_finsert` since 8.5.12:
+                    // `YYERROR` where the memory limit refused the table's
+                    // growth.
+                    Some(array) => {
+                        if req
+                            .memory_mut()
+                            .fallible(|req| array.append(req, value))?
+                            .is_none()
+                        {
+                            self.syntax();
+                            return Ok(Attached::Refused);
+                        }
+                    }
                     None => value.give_up(req),
                 }
                 *at
@@ -701,7 +744,11 @@ impl Parser<'_> {
             Open::Object { at, holder, key } => {
                 if matches!(holder, Holder::Nothing) {
                     *holder = match self.holder(req) {
-                        Ok(holder) => holder,
+                        Ok(Some(holder)) => holder,
+                        Ok(None) => {
+                            value.give_up(req);
+                            return Ok(Attached::Refused);
+                        }
                         Err(thrown) => {
                             value.give_up(req);
                             return Err(thrown);
@@ -710,14 +757,27 @@ impl Parser<'_> {
                 }
                 match holder {
                     Holder::Array(array) => {
-                        let name = match PhpString::new(req, key) {
-                            Ok(name) => Key::from_string(req, name),
+                        let name = match token_string(req, key) {
+                            Ok(Some(name)) => Key::from_string(req, name),
+                            Ok(None) => {
+                                value.give_up(req);
+                                self.syntax();
+                                return Ok(Attached::Refused);
+                            }
                             Err(thrown) => {
                                 value.give_up(req);
                                 return Err(thrown);
                             }
                         };
-                        array.set(req, name, value)?;
+                        // `zend_symtable_fupdate` since 8.5.12.
+                        if req
+                            .memory_mut()
+                            .fallible(|req| array.set(req, name, value))?
+                            .is_none()
+                        {
+                            self.syntax();
+                            return Ok(Attached::Refused);
+                        }
                     }
                     Holder::Object(object) => {
                         if key.first() == Some(&0) {
@@ -728,14 +788,25 @@ impl Parser<'_> {
                             value.give_up(req);
                             return Ok(Attached::Refused);
                         }
-                        let name = match PhpString::new(req, key) {
-                            Ok(name) => name,
+                        let name = match token_string(req, key) {
+                            Ok(Some(name)) => name,
+                            Ok(None) => {
+                                value.give_up(req);
+                                self.syntax();
+                                return Ok(Attached::Refused);
+                            }
                             Err(thrown) => {
                                 value.give_up(req);
                                 return Err(thrown);
                             }
                         };
                         object.set_prop(req, name, value)?;
+                        // `FAILURE` once the memory limit was met, since
+                        // 8.5.12.
+                        if req.memory().has_oom() {
+                            self.syntax();
+                            return Ok(Attached::Refused);
+                        }
                     }
                     Holder::Nothing => value.give_up(req),
                 }
@@ -802,18 +873,27 @@ impl Parser<'_> {
 
     /// `php_json_parser_object_create`: the `stdClass` an object decodes
     /// to, its array under `JSON_OBJECT_AS_ARRAY`, and nothing while
-    /// validating.
-    fn holder(&mut self, req: &mut Request) -> Result<Holder, Thrown> {
+    /// validating; both asked for fallibly since 8.5.12 (`array_finit`,
+    /// `object_finit`), `None` with the syntax error where the memory
+    /// limit refused it, php's `YYERROR`.
+    fn holder(&mut self, req: &mut Request) -> Result<Option<Holder>, Thrown> {
         if self.validating {
-            return Ok(Holder::Nothing);
+            return Ok(Some(Holder::Nothing));
         }
-        if self.scanner.options & JSON_OBJECT_AS_ARRAY != 0 {
-            return Ok(Holder::Array(PhpArray::new(req)?));
-        }
-        let Some(class) = call::lookup_class(req, b"stdClass")? else {
-            return Ok(Holder::Nothing);
+        let made = if self.scanner.options & JSON_OBJECT_AS_ARRAY != 0 {
+            req.memory_mut().fallible(PhpArray::new)?.map(Holder::Array)
+        } else {
+            let Some(class) = call::lookup_class(req, b"stdClass")? else {
+                return Ok(Some(Holder::Nothing));
+            };
+            req.memory_mut()
+                .fallible(|req| call::new_object(req, class))?
+                .map(Holder::Object)
         };
-        Ok(Holder::Object(call::new_object(req, class)?))
+        if made.is_none() {
+            self.syntax();
+        }
+        Ok(made)
     }
 }
 
@@ -896,4 +976,12 @@ pub(super) fn validate(
     depth: i64,
 ) -> Result<Result<Owner<Value>, i64>, Thrown> {
     parse(req, text, options, depth, true)
+}
+
+/// The string a scanned token is made into, php 8.5.12's
+/// `zend_string_falloc` at the token's closing quote
+/// (`Z/ext/json/json_scanner.re:267`): `None` where the memory limit
+/// refused it, the delayed OOM recorded for the call's return.
+fn token_string(req: &mut Request, bytes: &[u8]) -> Result<Option<Owner<PhpString>>, Thrown> {
+    req.memory_mut().fallible(|req| PhpString::new(req, bytes))
 }

@@ -38,7 +38,7 @@ use std::os::fd::RawFd;
 
 use php_ext::abi::{OrFalse, Ref};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error, value_error};
 use php_ext::request::{Cast, Request, Stream, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef};
@@ -66,7 +66,7 @@ pub(super) fn fetch_stream(
         _ => "argument",
     };
     let text = format!("{native}(): supplied {what} is not a valid stream resource");
-    Err(throw_error(req, "TypeError", &text))
+    Err(type_error(req, &text))
 }
 
 /// `Z_PARAM_ARRAY_EX2(arr, 1, 1, 0)`: an array, `null` or no argument
@@ -296,11 +296,7 @@ fn select_over(
         }
     }
     if sets.iter().all(Vec::is_empty) {
-        return Err(throw_error(
-            req,
-            "ValueError",
-            "No stream arrays were passed",
-        ));
+        return Err(value_error(req, "No stream arrays were passed"));
     }
     let max_fd = sets.iter().flatten().copied().max().unwrap_or(0);
     if max_fd >= crate::ffi::FD_SETSIZE {

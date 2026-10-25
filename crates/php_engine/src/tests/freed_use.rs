@@ -220,7 +220,7 @@ fn an_addref_of_a_freed_block_after_a_fatal_is_raised_at_the_request_end() {
             .build("freed_use_after_fatal")])
         .build();
     let served = engine.serve_capture(
-        "<?php ini_set('memory_limit', '2M');\n$s = 'x';\nwhile (true) { $s .= $s; }\n",
+        "<?php ini_set('memory_limit', '2M');\n$t = 'x'; for ($i = 0; $i < 16; $i++) { $t .= $t; }\n$s = '';\nwhile (true) { $s .= $t; }\n",
         Capture::default(),
     );
     let stdout = served.stdout_text();

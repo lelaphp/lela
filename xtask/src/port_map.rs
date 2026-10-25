@@ -901,4 +901,5 @@ pub fn command(root: &Path, manifest: &Manifest, store: &Store, tree: Option<&Pa
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests;

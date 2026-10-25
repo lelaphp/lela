@@ -22,7 +22,7 @@ use php_unit::decl::Bare;
 use super::{Hooks, IN_GET, Request};
 use crate::api::abi::Callable;
 use crate::api::call::Target;
-use crate::api::raising::{Thrown, throw_error};
+use crate::api::raising::{Thrown, error, type_error};
 use crate::api::values::{ClassId, Owner, PhpArray, PhpObject, TypeTag, Value};
 
 /// `ZEND_LAZY_OBJECT_SKIP_INITIALIZATION_ON_SERIALIZE`.
@@ -73,7 +73,14 @@ pub(crate) struct Table {
 pub(crate) struct LentGuard {
     instance: PhpObject,
     name: Vec<u8>,
+    /// The hold of the instance across the window, given up after the
+    /// guard, as [`Request::guarded`] holds one.
+    held: Owner<Value>,
 }
+
+/// The write [`Request::lazy_skip`] makes while the slot does not wait,
+/// on the object the initialised proxies lead to.
+pub(crate) type RawWrite<'w> = &'w mut dyn FnMut(&mut Request, PhpObject) -> Result<(), Thrown>;
 
 impl Request {
     fn lazy_row(&self, o: Obj) -> Option<&Info> {
@@ -256,9 +263,8 @@ impl Request {
             |req: &Request, at: ClassId| req.class_is_internal(at) && Some(at) != std_class;
         let name = self.symbols().class_name(class);
         if internal(self, class) {
-            return Some(throw_error(
+            return Some(error(
                 self,
-                "Error",
                 &format!("Cannot make instance of internal class lazy: {name} is internal"),
             ));
         }
@@ -266,9 +272,8 @@ impl Request {
             .ancestors(class)
             .find(|&parent| internal(self, parent))?;
         let parent = self.symbols().class_name(parent);
-        Some(throw_error(
+        Some(error(
             self,
-            "Error",
             &format!(
                 "Cannot make instance of internal class lazy: {name} inherits internal class {parent}"
             ),
@@ -369,9 +374,8 @@ impl Request {
         let iterating = |at: Obj| at.properties().is_some_and(php_heap::Arr::has_iterators);
         let forwarded = self.lazy_instance(o);
         if iterating(o) || forwarded.is_some_and(|i| iterating(i.heap())) {
-            return Err(throw_error(
+            return Err(error(
                 self,
-                "Error",
                 "Can not reset an object during property iteration",
             ));
         }
@@ -380,9 +384,8 @@ impl Request {
             self.lazy_forget(o);
         } else {
             if self.lazy_row(o).is_some() {
-                return Err(throw_error(
+                return Err(error(
                     self,
-                    "Error",
                     "Can not reset an object while it is being initialized",
                 ));
             }
@@ -557,10 +560,12 @@ impl Request {
             && self.uses_guards(instance.class())
             && self.guard_word(instance, name) & IN_GET == 0
         {
+            let held = Owner::take(self, instance.as_value());
             self.guard_take(instance, name, IN_GET);
             let lent = LentGuard {
                 instance,
                 name: name.to_vec(),
+                held,
             };
             return Ok((instance, Some(lent)));
         }
@@ -570,8 +575,14 @@ impl Request {
     /// The `IN_GET` a [`LentGuard`] took on the instance, given back once
     /// the place is resolved.
     pub(crate) fn give_back_guard(&mut self, lent: Option<LentGuard>) {
-        if let Some(LentGuard { instance, name }) = lent {
+        if let Some(LentGuard {
+            instance,
+            name,
+            held,
+        }) = lent
+        {
             self.guard_drop(instance, &name, IN_GET);
+            held.give_up(self);
         }
     }
 
@@ -613,7 +624,7 @@ impl Request {
         let Some((initializer, lazy)) = self.lazy_waiting(o) else {
             return Ok(object);
         };
-        let defaults = self.property_defaults(object.class())?;
+        let defaults = self.default_properties(object.class())?;
         self.addref(&object.as_value());
         o.set_laziness(Laziness::Eager);
         let table = o.properties();
@@ -645,9 +656,8 @@ impl Request {
             Ok(returned) if returned.tag() != TypeTag::Null => {
                 self.lazy_revert(o, snapshot, table);
                 self.release(returned);
-                Err(throw_error(
+                Err(type_error(
                     self,
-                    "TypeError",
                     "Lazy object initializer must return NULL or no value",
                 ))
             }
@@ -733,9 +743,8 @@ impl Request {
             o.set_laziness(Laziness::Proxy);
             let shown = crate::ops::value_name(self, &returned);
             self.release(returned);
-            return Err(throw_error(
+            return Err(type_error(
                 self,
-                "TypeError",
                 &format!(
                     "Lazy proxy factory must return an instance of a class compatible with {class}, {shown} returned"
                 ),
@@ -745,9 +754,8 @@ impl Request {
             o.set_laziness(Laziness::Proxy);
             let shown = self.symbols().class_name(instance.class());
             self.release(returned);
-            return Err(throw_error(
+            return Err(type_error(
                 self,
-                "TypeError",
                 &format!(
                     "The real instance class {shown} is not compatible with the proxy class {class}. The proxy must be a instance of the same class as the real instance, or a sub-class with no additional properties, and no overrides of the __destructor or __clone methods."
                 ),
@@ -756,9 +764,8 @@ impl Request {
         if instance == object || instance.heap().laziness() != Laziness::Eager {
             o.set_laziness(Laziness::Proxy);
             self.release(returned);
-            return Err(throw_error(
+            return Err(error(
                 self,
-                "Error",
                 "Lazy proxy factory must return a non-lazy object",
             ));
         }
@@ -827,11 +834,7 @@ impl Request {
             self.release(object.as_value());
             return outcome;
         }
-        let thrown = throw_error(
-            self,
-            "Error",
-            "Lazy object was released during initialization",
-        );
+        let thrown = error(self, "Lazy object was released during initialization");
         // `zend_throw_error` over a pending throwable chains it as the
         // new one's previous.
         if let (Some(new), Err(earlier)) = (thrown.exception().copied(), &outcome)
@@ -851,7 +854,7 @@ impl Request {
         let Some((_, lazy)) = self.lazy_waiting(o) else {
             return Ok(());
         };
-        let defaults = self.property_defaults(object.class())?;
+        let defaults = self.default_properties(object.class())?;
         o.set_laziness(Laziness::Eager);
         for (i, default) in (0..o.slots()).zip(defaults) {
             let Some(value) = default else { continue };
@@ -868,11 +871,12 @@ impl Request {
     /// `ReflectionProperty::skipLazyInitialization` and
     /// `setRawValueWithoutLazyInitialization` over the object the
     /// initialised proxies lead to: the declared property `name` takes
-    /// its default, or `value` written without the class's `__set`, and
-    /// no longer waits; an object with no slot left waiting is realised,
-    /// `zend_lazy_object_realize`. A throwing write leaves the slot
-    /// waiting, as php flags it lazy again. The write is
-    /// `write_property`'s, so a readonly property the first write
+    /// its default, or no longer waits while `write` writes it, and
+    /// an object with no slot left waiting is realised,
+    /// `zend_lazy_object_realize` (`Z/ext/reflection/php_reflection.c:6250`).
+    /// A throwing write leaves the slot waiting, as php flags it lazy
+    /// again. The write is the caller's raw set, `write_property` or a
+    /// hook's trampoline, so a readonly property the first write
     /// initialised refuses the second.
     ///
     /// ```php
@@ -890,25 +894,26 @@ impl Request {
     pub(crate) fn lazy_skip(
         &mut self,
         object: PhpObject,
+        declaring: ClassId,
         name: &[u8],
-        value: Option<Owner<Value>>,
+        write: Option<RawWrite<'_>>,
     ) -> Result<(), Thrown> {
         let object = self.lazy_reader(object);
         let o = object.heap();
-        let Some(slot) = self.prop_slot(object.class(), name) else {
-            if let Some(value) = value {
-                value.give_up(self);
-            }
+        // `OBJ_PROP(object, prop->offset)`: the slot of the property
+        // `declaring` declares, a parent's private one apart from the
+        // child's of the same name.
+        let Some(slot) = self.prop_slot(declaring, name) else {
             return Ok(());
         };
         let was_lazy = self.lazy_slot(o, slot);
-        let written = match value {
+        let written = match write {
             None => {
                 if !was_lazy {
                     return Ok(());
                 }
                 self.lazy_set_waiting(o, slot, false);
-                let defaults = self.property_defaults(object.class())?;
+                let defaults = self.default_properties(object.class())?;
                 for (i, default) in defaults.into_iter().enumerate() {
                     let Some(default) = default else { continue };
                     if i == slot as usize {
@@ -919,30 +924,12 @@ impl Request {
                 }
                 Ok(())
             }
-            Some(value) => {
+            Some(write) => {
+                // `Z_PROP_FLAG_P(var_ptr) &= ~IS_PROP_LAZY`, the write the
+                // caller's `reflection_property_set_raw_value`, and the
+                // flag put back where it threw and left the slot unwritten.
                 self.lazy_set_waiting(o, slot, false);
-                let key = match self.string(name) {
-                    Ok(key) => key,
-                    Err(thrown) => {
-                        value.give_up(self);
-                        return Err(thrown);
-                    }
-                };
-                let written = self.in_declared_scope(object.class(), name, |req| {
-                    // `write_property`'s `found` arm over a slot that
-                    // holds a value: an initialised readonly property
-                    // is not written again.
-                    if !o.slot(slot).is_undef()
-                        && let Some(placed) = req.declared_slot(object.class(), name)
-                        && let Some(thrown) = req.found_refusal(o, &placed, name)
-                    {
-                        value.give_up(req);
-                        req.release(Value::string(key));
-                        return Err(thrown);
-                    }
-                    // The handler layer's key, named for the write.
-                    req.write_std_property(object, Owner::adopt(key), value)
-                });
+                let written = write(self, object);
                 if written.is_err()
                     && was_lazy
                     && o.slot(slot).is_undef()
@@ -977,11 +964,12 @@ impl Request {
         }
     }
 
-    /// `ReflectionProperty::isLazy`: whether the declared property
-    /// `name` of the object the initialised proxies lead to waits.
-    pub(crate) fn lazy_property(&self, object: PhpObject, name: &[u8]) -> bool {
+    /// `ReflectionProperty::isLazy`: whether the property `name` that
+    /// `declaring` declares, in the object the initialised proxies lead
+    /// to, waits (`OBJ_PROP(object, prop->offset)`).
+    pub(crate) fn lazy_property(&self, object: PhpObject, declaring: ClassId, name: &[u8]) -> bool {
         let object = self.lazy_reader(object);
-        self.prop_slot(object.class(), name)
+        self.prop_slot(declaring, name)
             .is_some_and(|slot| self.lazy_slot(object.heap(), slot))
     }
 

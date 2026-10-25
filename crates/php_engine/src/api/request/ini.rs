@@ -15,10 +15,11 @@ use super::Environment;
 use super::{
     DISPLAY_ERRORS_STDERR, ExtensionId, InfoRow, IniFiles, Request, display_errors_mode_of,
 };
-use crate::api::abi::{IniHandler, IniStage, IniVerdict, LongHandler};
+use crate::api::abi::{IniStage, IniVerdict, LongHandler};
 use crate::api::raising::{Level, Thrown};
 use crate::api::values::{Owner, PhpArray, PhpString, Value, adopted_some};
 use crate::c_number::{atoi, strtol, strtol_prefixed};
+use crate::engine::ini_table::{Directive, DirectiveAt};
 use crate::engine::{Configured, ConfiguredKey};
 
 /// The request's ini facet (design §4.4): the ini directives: their
@@ -60,9 +61,10 @@ pub struct IniEntry {
     pub modified: bool,
 }
 
-/// One entry of `EG(modified_ini_directives)`: its name, the value it
-/// holds, and the request string that value is where it is one.
-type IniChanged = (Vec<u8>, Option<Vec<u8>>, Option<PhpString>);
+/// One entry of `EG(modified_ini_directives)`: its place in the
+/// engine's table, the value it holds, and the request string that value
+/// is where it is one.
+type IniChanged = (DirectiveAt, Option<Vec<u8>>, Option<PhpString>);
 
 /// The request's ini state, whose fields no file but this one reads.
 pub(super) struct IniState {
@@ -135,6 +137,23 @@ fn ini_key_compare(a: &[u8], b: &[u8]) -> std::cmp::Ordering {
 }
 
 impl IniState {
+    /// The entry at `at`, where the request changed it.
+    fn changed(&self, at: DirectiveAt) -> Option<&IniChanged> {
+        self.changed.iter().find(|(held, ..)| *held == at)
+    }
+
+    /// [`IniState::changed`] to write.
+    fn changed_mut(&mut self, at: DirectiveAt) -> Option<&mut IniChanged> {
+        self.changed.iter_mut().find(|(held, ..)| *held == at)
+    }
+
+    /// The entry at `at` taken out of the entries the request changed:
+    /// what it held.
+    fn unchange(&mut self, at: DirectiveAt) -> Option<IniChanged> {
+        let found = self.changed.iter().position(|(held, ..)| *held == at)?;
+        Some(self.changed.remove(found))
+    }
+
     /// The ini state a request starts with: nothing changed, and the
     /// typed entries the engine's master values give.
     pub(super) fn new(typed: TypedIni) -> IniState {
@@ -280,7 +299,7 @@ impl CoreQuantity {
     /// order (`Z/main/main.c:807-885`), then `zend.c`'s, which
     /// `zend_register_standard_ini_entries` registers after them
     /// (`Z/Zend/zend.c:262-279`).
-    pub(crate) const ENTRIES: [CoreQuantityEntry; 18] = [
+    pub(crate) const ENTRIES: [CoreQuantityEntry; 19] = [
         (
             b"xmlrpc_error_number",
             CoreQuantity::Signed(LongHandler::Any),
@@ -303,6 +322,10 @@ impl CoreQuantity {
         ),
         (b"max_memory_limit", CoreQuantity::Unsigned),
         (b"memory_limit", CoreQuantity::Unsigned),
+        (
+            b"memory_hard_limit_percent",
+            CoreQuantity::Signed(LongHandler::Any),
+        ),
         (
             b"realpath_cache_size",
             CoreQuantity::Signed(LongHandler::Any),
@@ -458,12 +481,16 @@ impl Request {
         } else {
             value
         };
+        if name == b"memory_hard_limit_percent" && !self.memory_hard_limit_percent_taken(new_value)
+        {
+            return Ok(None);
+        }
         if name == b"report_memleaks" && !Ini::parse_bool(value) {
             let message = "Directive 'report_memleaks' is deprecated";
             crate::api::raising::docref(self, Level::Deprecated, message);
         }
         let value = new_value.map(|_| value);
-        if let Some(handler) = self.ini_handler(name)
+        if let Some(handler) = self.shared.ini_handler(name)
             && !handler.serve(self, name, value)?
         {
             return Ok(None);
@@ -489,20 +516,55 @@ impl Request {
     /// The entry `name` holding `value` in the request: in its place
     /// among the entries the request changed, or last where it had not
     /// changed it yet.
-    fn ini_hold(&mut self, name: &[u8], value: Option<&[u8]>) {
+    fn ini_hold(&mut self, name: &[u8], value: Option<&[u8]>) -> Option<DirectiveAt> {
+        let at = self.shared.ini.at(name)?;
         self.ini.typed.update(name, value);
         let value = value.map(<[u8]>::to_vec);
-        if let Some((_, held, _)) = self
-            .ini
-            .changed
-            .iter_mut()
-            .find(|(n, ..)| n.as_slice() == name)
-        {
+        if let Some((_, held, _)) = self.ini.changed_mut(at) {
             *held = value;
         } else {
-            self.ini.changed.push((name.to_vec(), value, None));
+            self.ini.changed.push((at, value, None));
             self.ini_modified(name);
         }
+        Some(at)
+    }
+
+    /// The entry `name` where the request changed it.
+    fn ini_changed(&self, name: &[u8]) -> Option<&IniChanged> {
+        self.ini.changed(self.shared.ini.at(name)?)
+    }
+
+    /// The value in force of the entry `name`, `None` where it has none
+    /// (php's `NULL`), beside the request string it is where it is one:
+    /// the request's where it changed the entry, else the master value,
+    /// found by one look-up of the engine's table; nothing where php has
+    /// no such entry.
+    fn ini_in_force(&self, name: &[u8]) -> Option<(&Option<Vec<u8>>, Option<PhpString>)> {
+        let table = &self.shared.ini;
+        let at = table.at(name)?;
+        match self.ini.changed(at) {
+            Some((_, value, string)) => Some((value, *string)),
+            None => table.row(at).map(|row| (&row.value, None)),
+        }
+    }
+
+    /// `ZVAL_SET_INI_STR` over the value in force of the entry `name`,
+    /// as `ini_get()` hands it back: the string the entry holds, one more
+    /// owner of the request's string a changed entry took, the engine's
+    /// for a value its startup interned, which costs the request nothing,
+    /// and a string of the request's only for bytes neither holds; `None`
+    /// where php has no such entry. The `Err` is the memory limit.
+    pub(crate) fn ini_string(&mut self, name: &[u8]) -> Result<Option<Owner<PhpString>>, Thrown> {
+        let Some((value, string)) = self.ini_in_force(name) else {
+            return Ok(None);
+        };
+        let bytes = value.as_deref().unwrap_or_default();
+        if let Some(string) = string.or_else(|| self.held_name(bytes)) {
+            return Ok(Some(Owner::take(self, string)));
+        }
+        // Copied first: the bytes stand in the request the string is made in.
+        let bytes = bytes.to_vec();
+        PhpString::new(self, &bytes).map(Some)
     }
 
     /// [`Request::ini_hold`] with the entry the owner `string` hands it,
@@ -515,12 +577,8 @@ impl Request {
         value: Option<&[u8]>,
         string: Option<PhpString>,
     ) {
-        self.ini_hold(name, value);
-        let before = self
-            .ini
-            .changed
-            .iter_mut()
-            .find(|(n, ..)| n.as_slice() == name)
+        let at = self.ini_hold(name, value);
+        let before = (at.and_then(|at| self.ini.changed_mut(at)))
             .and_then(|(.., held)| std::mem::replace(held, string));
         if let Some(before) = before {
             self.release(Value::string(before));
@@ -531,25 +589,10 @@ impl Request {
     /// the entry marked changed, holding the value it holds, as the
     /// handler adds it to `EG(modified_ini_directives)`.
     pub(crate) fn silence_modifies_error_reporting(&mut self) {
-        if !self
-            .ini
-            .changed
-            .iter()
-            .any(|(n, ..)| n == b"error_reporting")
-        {
+        if self.ini_changed(b"error_reporting").is_none() {
             let held = self.ini().value(b"error_reporting").map(<[u8]>::to_vec);
             self.ini_hold(b"error_reporting", held.as_deref());
         }
-    }
-
-    /// The handler an extension gave the entry `name`.
-    fn ini_handler(&self, name: &[u8]) -> Option<IniHandler> {
-        self.shared.extensions.iter().find_map(|e| {
-            e.on_modify
-                .iter()
-                .find(|(n, _)| n.as_slice() == name)
-                .map(|(_, h)| *h)
-        })
     }
 
     /// `zend_ini_deactivate` (`Z/Zend/zend_ini.c:190-203`), from
@@ -590,27 +633,31 @@ impl Request {
     /// ```
     pub(crate) fn ini_deactivate(&mut self) {
         self.ini.stage = IniStage::Deactivate;
-        let changed: Vec<Vec<u8>> = self.ini.changed.iter().map(|(n, ..)| n.clone()).collect();
-        for name in changed {
-            let original = self.shared.ini_default_value(&name).map(<[u8]>::to_vec);
+        let shared = Arc::clone(&self.shared);
+        let changed: Vec<DirectiveAt> = self.ini.changed.iter().map(|(at, ..)| *at).collect();
+        for at in changed {
+            let Some(row) = shared.ini.row(at) else {
+                continue;
+            };
+            let (name, original) = (row.name.as_slice(), row.value.as_deref());
             // A core handler that reads a quantity reads its startup
             // value again, and warns again where the rule interprets it.
-            if let Some(reading) = CoreQuantity::of(&name) {
-                self.core_quantity_warn(&name, reading, original.as_deref().unwrap_or_default());
+            if let Some(reading) = CoreQuantity::of(name) {
+                self.core_quantity_warn(name, reading, original.unwrap_or_default());
             }
-            if let Some(handler) = self.ini_handler(&name) {
+            if let Some((_, handler)) = row.on_modify {
                 // Each rule under its own `zend_try`: what it bails out
                 // with leaves it, and the next entry is restored.
-                handler.serve(self, &name, original.as_deref()).ok();
+                handler.serve(self, name, original).ok();
                 self.catch_bailout();
             }
-            if let Some(at) = self.ini.changed.iter().position(|(n, ..)| *n == name) {
-                let (.., string) = self.ini.changed.remove(at);
+            if let Some((.., string)) = self.ini.unchange(at) {
                 if let Some(string) = string {
                     self.release(Value::string(string));
                 }
-                let master = self.shared.ini_default(&name);
-                self.ini.typed.update(&name, master);
+                self.ini
+                    .typed
+                    .update(name, Some(original.unwrap_or_default()));
             }
             if name == b"open_basedir" {
                 self.ini.open_basedir = None;
@@ -938,8 +985,7 @@ impl Request {
                         ConfiguredKey::Index(n) => Owner::index(*n),
                         ConfiguredKey::Name(name) => PhpString::new(self, name)?.into_key(),
                     };
-                    let value = self.configured_value(entry)?;
-                    let value = Owner::adopt(value);
+                    let value = Owner::adopt(self.configured_value(entry)?);
                     array.set(self, key, value)?;
                 }
                 Value::array(array)
@@ -960,63 +1006,46 @@ impl Request {
         self.ini_hold(name, Some(value));
     }
 
-    /// An extension's entries in the order it declared them.
+    /// An extension's entries in the order it declared them, `Core`'s
+    /// the engine's own table: the rows of the engine's table it
+    /// registered.
     fn registered_ini(&self, extension: ExtensionId) -> Vec<IniEntry> {
-        if extension == ExtensionId::CORE {
-            return self.core_ini();
-        }
-        let Some(module) = self.extension_of(extension) else {
-            return Vec::new();
-        };
-        module
-            .ini
-            .iter()
-            .map(|decl| self.ini_entry(decl.clone(), extension))
+        let core = extension == ExtensionId::CORE;
+        (self.shared.ini.rows().iter())
+            .filter(|row| row.declared.map(|(of, _)| of) == (!core).then_some(extension))
+            .map(|row| self.ini_entry(row))
             .collect()
     }
 
-    /// `Core`'s entries, `main.c`'s and `zend.c`'s table: every entry of
-    /// the engine's no extension declared.
-    fn core_ini(&self) -> Vec<IniEntry> {
-        self.shared
-            .ini_defaults()
-            .iter()
-            .filter(|(name, _)| self.shared.extension_ini(name).is_none())
-            .map(|(name, default)| {
-                let (user, per_dir, system) = Request::ini_modifiable(name);
-                let decl = IniDecl {
-                    name: Name(name.as_slice().into()),
-                    default: default.as_deref().map(Into::into),
-                    user,
-                    per_dir,
-                    system,
-                };
-                self.ini_entry(decl, ExtensionId::CORE)
-            })
-            .collect()
-    }
-
-    /// One entry as the request sees it: the value in force, the
-    /// request's `ini_set` over the engine's startup value, the startup
-    /// value, and whether the request changed it.
-    fn ini_entry(&self, decl: IniDecl, extension: ExtensionId) -> IniEntry {
-        let name = decl.name.0.as_ref();
-        let master = self
-            .shared
-            .ini_defaults()
-            .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .map_or_else(
-                || decl.default.clone(),
-                |(_, v)| v.as_deref().map(Into::into),
-            );
-        let changed = self.ini.changed.iter().find(|(n, ..)| n.as_slice() == name);
+    /// One entry as the request sees it: its declaration, a core entry's
+    /// with the core table's `modifiable` bits ([`Request::ini_modifiable`]),
+    /// the value in force, the request's `ini_set` over the engine's
+    /// startup value, the startup value, and whether the request changed
+    /// it.
+    fn ini_entry(&self, row: &Directive) -> IniEntry {
+        let declared = row
+            .declared
+            .and_then(|(of, at)| self.extension_of(of)?.ini.get(at));
+        let decl = declared.cloned().unwrap_or_else(|| {
+            let (user, per_dir, system) = Request::ini_modifiable(&row.name);
+            let default = row.value.as_deref().map(Into::into);
+            let name = Name(row.name.as_slice().into());
+            IniDecl {
+                name,
+                default,
+                user,
+                per_dir,
+                system,
+            }
+        });
+        let master: Option<Box<[u8]>> = row.value.as_deref().map(Into::into);
+        let changed = self.ini_changed(&row.name);
         IniEntry {
             value: changed.map_or_else(|| master.clone(), |(_, v, _)| v.as_deref().map(Into::into)),
             master,
             modified: changed.is_some(),
             decl,
-            extension,
+            extension: row.declared.map_or(ExtensionId::CORE, |(of, _)| of),
         }
     }
 
@@ -1116,10 +1145,6 @@ impl Request {
     /// The typed entries as this request holds them now ([`TypedIni`]).
     pub(crate) fn typed_ini(&self) -> &TypedIni {
         &self.ini.typed
-    }
-
-    pub(super) fn ini_parse_bytes_of(&self, name: &str) -> i64 {
-        self.ini().get(name.as_bytes()).map_or(0, Ini::parse_bytes)
     }
 
     /// One entry added to `EG(modified_ini_directives)`, which the
@@ -1285,16 +1310,8 @@ impl<'r> Ini<&'r Request> {
     /// value (php's `NULL`); `None` where php has no such entry.
     #[must_use]
     pub fn get(self, name: &[u8]) -> Option<&'r [u8]> {
-        match self
-            .0
-            .ini
-            .changed
-            .iter()
-            .find(|(n, ..)| n.as_slice() == name)
-        {
-            Some((_, value, _)) => Some(value.as_deref().unwrap_or_default()),
-            None => self.0.shared.ini_default(name),
-        }
+        let (value, _) = self.0.ini_in_force(name)?;
+        Some(value.as_deref().unwrap_or_default())
     }
 
     /// `INI_STR`, `zend_ini_string_ex`: the entry's value in force as php
@@ -1315,16 +1332,7 @@ impl<'r> Ini<&'r Request> {
     /// ```
     #[must_use]
     pub fn value(self, name: &[u8]) -> Option<&'r [u8]> {
-        match self
-            .0
-            .ini
-            .changed
-            .iter()
-            .find(|(n, ..)| n.as_slice() == name)
-        {
-            Some((_, value, _)) => value.as_deref(),
-            None => self.0.shared.ini_default_value(name),
-        }
+        self.0.ini_in_force(name)?.0.as_deref()
     }
 
     /// `EG(ini_directives)`, what `ini_get_all()` walks: the engine's
@@ -1365,10 +1373,8 @@ impl<'r> Ini<&'r Request> {
     /// ```
     #[must_use]
     pub fn entries(self) -> Vec<IniEntry> {
-        let entries = (0..self.0.shared.extensions.len())
-            .filter_map(|at| u32::try_from(at).ok())
-            .flat_map(|at| self.0.registered_ini(ExtensionId(at)))
-            .collect();
+        let rows = self.0.shared.ini.rows().iter();
+        let entries = rows.map(|row| self.0.ini_entry(row)).collect();
         self.0.in_table_order(entries)
     }
 
@@ -1670,7 +1676,7 @@ impl Ini<&mut Request> {
     /// ```
     pub fn restore(self, name: &[u8]) -> Result<(), Thrown> {
         let user = Request::ini_modifiable(name).0 && self.0.ini_user(name);
-        if !user || self.0.ini_locked(name) || !self.0.ini.changed.iter().any(|(n, ..)| n == name) {
+        if !user || self.0.ini_locked(name) || self.0.ini_changed(name).is_none() {
             return Ok(());
         }
         let original = self.0.shared.ini_default_value(name).map(<[u8]>::to_vec);
@@ -1678,9 +1684,9 @@ impl Ini<&mut Request> {
             .0
             .ini_alter(name, original.as_deref(), true, None)?
             .is_some()
-            && let Some(at) = self.0.ini.changed.iter().position(|(n, ..)| n == name)
+            && let Some(at) = self.0.shared.ini.at(name)
+            && self.0.ini.unchange(at).is_some()
         {
-            self.0.ini.changed.remove(at);
             self.0.ini_unmodified(name);
         }
         Ok(())
@@ -1790,7 +1796,7 @@ impl Ini<&mut Request> {
                 [
                     String::from_utf8_lossy(name).into_owned(),
                     shown(self.0.ini().get(name)),
-                    shown(self.0.shared.ini_default(name)),
+                    shown(self.0.shared.ini.master(name)),
                 ]
             })
             .collect();
@@ -1870,6 +1876,7 @@ impl Ini<&mut Request> {
     /// max_input_vars => 1000 => 1000
     /// max_memory_limit => -1 => -1
     /// max_multipart_body_parts => -1 => -1
+    /// memory_hard_limit_percent => no value => no value
     /// memory_limit => 128M => 128M
     /// open_basedir => no value => no value
     /// output_buffering => no value => no value
@@ -1926,7 +1933,7 @@ impl Ini<&mut Request> {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// PHP Core</h2>
@@ -1987,6 +1994,7 @@ impl Ini<&mut Request> {
     /// <tr><td class="e">max_input_vars</td><td class="v">1000</td><td class="v">1000</td></tr>
     /// <tr><td class="e">max_memory_limit</td><td class="v">-1</td><td class="v">-1</td></tr>
     /// <tr><td class="e">max_multipart_body_parts</td><td class="v">-1</td><td class="v">-1</td></tr>
+    /// <tr><td class="e">memory_hard_limit_percent</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">memory_limit</td><td class="v">128M</td><td class="v">128M</td></tr>
     /// <tr><td class="e">open_basedir</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">output_buffering</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
@@ -2034,18 +2042,12 @@ impl Ini<&mut Request> {
     /// ```
     pub fn core_ini_info(self) {
         let shared = Arc::clone(&self.0.shared);
-        let names: Vec<&[u8]> = shared
-            .ini_defaults()
-            .iter()
-            .map(|(name, _)| name.as_slice())
-            .filter(|name| shared.extension_ini(name).is_none())
-            .collect();
-        let rows: Vec<(String, IniCell, IniCell)> = names
-            .iter()
-            .map(|name| {
+        let rows: Vec<(String, IniCell, IniCell)> = (shared.ini.rows().iter())
+            .filter(|row| row.declared.is_none())
+            .map(|Directive { name, value, .. }| {
                 let displayer = IniDisplayer::of(name);
                 let local = self.0.ini().get(name).unwrap_or_default();
-                let master = shared.ini_default(name).unwrap_or_default();
+                let master = value.as_deref().unwrap_or_default();
                 (
                     String::from_utf8_lossy(name).into_owned(),
                     self.0.ini_display(displayer, local),
@@ -2072,7 +2074,7 @@ impl Ini<&mut Request> {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// <h2><a name="module_iconv" href="#module_iconv">iconv</a></h2>

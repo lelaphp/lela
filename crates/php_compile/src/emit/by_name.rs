@@ -23,7 +23,9 @@ use php_heap::Zval;
 use php_syntax::tree::{self, NodeId};
 use php_unit::{AutoGlobal, Opcode, OperandKind, Opline};
 
-use super::{Base, Emit, FETCH_GLOBAL, FETCH_LOCAL, Fetch, Over, SimpleVar, Source, Where};
+use super::{
+    Base, Emit, FETCH_GLOBAL, FETCH_LOCAL, Fetch, HeldBack, Over, SimpleVar, Source, Where,
+};
 use crate::CompileError;
 
 /// `ZEND_FETCH_GLOBAL_LOCK` (`Z/Zend/zend_compile.h:1084`): the `FETCH_W`
@@ -326,7 +328,12 @@ impl Emit<'_> {
     pub(super) fn held_by_name(&mut self, name: Where, table: Symbols) -> Base {
         let name = self.operand(name);
         let out = self.temporary();
-        Base::ByName { name, table, out }
+        Base::ByName {
+            name,
+            table,
+            out,
+            held: HeldBack::default(),
+        }
     }
 
     /// The fetch by name [`Self::base_fetch`] lays down: `FETCH_R` or
@@ -359,7 +366,7 @@ impl Emit<'_> {
         (out_type, out)
     }
 
-    /// `FETCH_GLOBALS` (`Z/Zend/zend_vm_def.h:9229`), `$GLOBALS` itself
+    /// `FETCH_GLOBALS` (`Z/Zend/zend_vm_def.h:9236`), `$GLOBALS` itself
     /// (`zend_compile_simple_var`'s `is_globals_fetch` arm): a copy of
     /// `EG(symbol_table)` into a temporary under a read and into a `VAR`
     /// under a write, which `isset` and `empty` never reach, since php
@@ -463,9 +470,10 @@ impl Emit<'_> {
         value: Source,
     ) -> Result<Where, CompileError> {
         let line = self.line;
-        let Some(held) = self.delayed_named(target, Fetch::Write)? else {
+        let Some(mut held) = self.delayed_named(target, Fetch::Write)? else {
             return Err(self.fatal("an assignment by name to what is no variable"));
         };
+        self.hold_base(&mut held);
         let value = self.source(value)?;
         let (op2_type, op2) = self.operand(value);
         let (op1_type, op1) = self.base_fetch(held, Fetch::Write, Over::Dim);
@@ -493,9 +501,10 @@ impl Emit<'_> {
         opcode: u32,
         value: tree::Expr,
     ) -> Result<Where, CompileError> {
-        let Some(held) = self.delayed_named(target, Fetch::Rw)? else {
+        let Some(mut held) = self.delayed_named(target, Fetch::Rw)? else {
             return Err(self.fatal("a compound assignment by name to what is no variable"));
         };
+        self.hold_base(&mut held);
         let value = self.expr(value)?;
         let (op2_type, op2) = self.operand(value);
         let (op1_type, op1) = self.base_fetch(held, Fetch::Rw, Over::Dim);

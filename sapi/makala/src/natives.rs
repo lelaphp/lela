@@ -49,7 +49,7 @@ pub(crate) fn declare(builder: EngineBuilder) -> EngineBuilder {
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// sent
@@ -78,7 +78,7 @@ fn fastcgi_finish_request(req: &mut Request) -> bool {
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// Array

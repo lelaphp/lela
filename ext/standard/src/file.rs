@@ -148,9 +148,7 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::lookup_class;
 use php_ext::coerce::{to_string, with_string};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, docref, raise, throw_error,
-};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, raise, type_error};
 use php_ext::request::{
     Ini, MAXPATHLEN, OptionAnswer, OwnedStream as _, Request, Resolve, Stream, StreamOption,
     Streams as _, Whence, WrapperOp,
@@ -429,7 +427,7 @@ fn dir_stream(req: &mut Request, given: Option<Stream>) -> Result<Stream, Thrown
         );
         let default = req.state::<State>().default_dir.as_deref().copied();
         let Some(stream) = default.and_then(|res| Stream::from_value(req, &res.as_value())) else {
-            return Err(throw_error(req, "TypeError", "No resource supplied"));
+            return Err(type_error(req, "No resource supplied"));
         };
         stream
     };
@@ -828,21 +826,23 @@ pub fn fgetc(req: &mut Request, stream: Stream) -> Result<OrFalse<Owner<PhpStrin
 /// ```
 ///
 /// A plain file's line longer than a chunk is read whole, and the
-/// length is asked for as a string before a byte is read, so one the
-/// memory limit cannot hold is php's fatal.
+/// length is asked for as a string before a byte is read, so one past
+/// the hard memory limit, twice the soft one, ends the process there
+/// with php 8.5.12's line on its standard error and nothing after it.
 ///
 /// ```php
 /// $p = __DIR__ . '/fgets.txt'; $w = fopen($p, 'w'); fwrite($w, str_repeat("x", 10000) . "\nend"); fclose($w);
 /// $r = fopen($p, 'r'); var_dump(strlen(fgets($r)), fgets($r), fgets($r), feof($r));
 /// fgets($r, PHP_INT_MAX);
 /// ```
-/// ```expect exit=255
+/// ```expect exit=137
 /// int(10001)
 /// string(3) "end"
 /// bool(false)
 /// bool(true)
-///
-/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate %d bytes) in %s on line 4
+/// ```
+/// ```stderr
+/// Hard memory limit of 268435456 bytes exhausted (tried to allocate %d bytes) in %s on line 4
 /// ```
 #[php_function]
 pub fn fgets(
@@ -856,7 +856,20 @@ pub fn fgets(
         None => None,
     };
     Ok(match stream.get_line(req, maxlen)? {
-        Some(line) => OrFalse::Value(PhpString::new(req, &line)?),
+        // php 8.5.12's `zend_string_finit(buf, line_len, false, true)` for
+        // a line of any length (`Z/ext/standard/file.c:891`): "this copy
+        // can double an already large buffer".
+        Some(line) if maxlen.is_none() => {
+            match req
+                .memory_mut()
+                .fallible(|req| PhpString::finit(req, &line))?
+            {
+                Some(line) => OrFalse::Value(line),
+                // RETURN_OOM()
+                None => OrFalse::False,
+            }
+        }
+        Some(line) => OrFalse::Value(PhpString::finit(req, &line)?),
         None => OrFalse::False,
     })
 }
@@ -899,7 +912,8 @@ pub fn fgets(
 /// var_dump(fread(fopen('php://memory', 'r'), PHP_INT_MAX));
 /// ```
 /// ```expect exit=255
-/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate %d bytes) in %s on line 2
+///
+/// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 9223372036854792192 bytes) in %s on line 2
 /// ```
 #[php_function]
 pub fn fread(
@@ -1620,9 +1634,8 @@ fn file_put_contents(
         ValueRef::Resource(_) => match Stream::from_value(req, &data) {
             Some(stream) => Some(stream),
             None => {
-                return Err(throw_error(
+                return Err(type_error(
                     req,
-                    "TypeError",
                     "file_put_contents(): supplied resource is not a valid stream resource",
                 ));
             }
@@ -2332,10 +2345,38 @@ fn file(
             return Err(thrown);
         }
     };
-    stream.free(req);
-    let buf = contents.as_bytes().to_vec();
-    // `zend_string_free(target_buf)`: the lines are copies.
+    let built = file_lines(req, contents.as_bytes(), include_new_line, skip_blank_lines);
+    // `zend_string_free(target_buf)` once the lines are copied out of it,
+    // then `php_stream_close(stream)`.
     contents.give_up(req);
+    stream.free(req);
+    Ok(OrFalse::Value(built?))
+}
+
+/// `file`'s lines of `buf` as a list, each a copy, the newline kept
+/// under `include_new_line` and `\n` or `\r\n` cut otherwise, a blank
+/// one dropped under `skip_blank_lines`; php 8.5.12 takes no line once
+/// the memory limit was met (`ZEND_HAS_OOM()`), "each one byte line
+/// becomes a zval plus a `zend_string`", so the half million lines here
+/// stop short of the hard limit, twice the soft one, and the soft
+/// limit's fatal is raised after the call.
+///
+/// ```php
+/// $p = __DIR__ . '/oom_file.txt';
+/// file_put_contents($p, str_repeat("a\n", 500000));
+/// ini_set('memory_limit', '10M');
+/// var_dump(count(file($p)));
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 10485760 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 5
+/// ```
+fn file_lines(
+    req: &mut Request,
+    buf: &[u8],
+    include_new_line: bool,
+    skip_blank_lines: bool,
+) -> Result<Owner<PhpArray>, Thrown> {
     let mut lines: Vec<&[u8]> = Vec::new();
     let mut s = 0;
     for (p, _) in buf.iter().enumerate().filter(|(_, c)| **c == b'\n') {
@@ -2356,10 +2397,13 @@ fn file(
     }
     let mut array = PhpArray::new(req)?;
     for line in lines {
+        if req.memory().has_oom() {
+            break;
+        }
         let v = PhpString::new(req, line)?.into_value();
         array.append(req, v)?;
     }
-    Ok(OrFalse::Value(array))
+    Ok(array)
 }
 
 /// `flock($stream, int $operation, &$would_block = null): bool`,
@@ -2727,10 +2771,32 @@ fn meta_tags(
 /// of the stream written to the request's body a read of up to 8192
 /// bytes at a time, each read given up once written, as php's
 /// `char buf[8192]` holds one read at a time, and how many bytes that
-/// was.
+/// was. php 8.5.12 writes no read once the memory limit was met
+/// (`ZEND_HAS_OOM()`), so twelve megabytes into an `ob_start` buffer under a
+/// four megabyte limit raise the soft limit's fatal, short of the hard
+/// one:
+///
+/// ```php
+/// $p = __DIR__ . '/pass.txt'; $f = fopen($p, 'w'); for ($i = 0; $i < 12; $i++) fwrite($f, str_repeat('x', 1 << 20)); fclose($f);
+/// ini_set('memory_limit', '4M');
+/// ob_start();
+/// $n = readfile("php://filter/read=string.toupper/resource=$p");
+/// ob_end_clean();
+/// var_dump($n);
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 5
+/// ```
 fn passthru(req: &mut Request, stream: Stream) -> Result<i64, Thrown> {
     let mut size: i64 = 0;
     while let Some(chunk) = stream.read(req, 8192)? {
+        // php 8.5.12 stops once the memory limit was met
+        // (`ZEND_HAS_OOM()`), the read not written.
+        if req.memory().has_oom() {
+            chunk.give_up(req);
+            break;
+        }
         let written = chunk.len();
         if written > 0 {
             req.response_mut().write(chunk.as_bytes());
@@ -2881,11 +2947,10 @@ fn fscanf(
 ) -> Result<Option<OrFalse<Scanned>>, Thrown> {
     // `php_sscanf_internal` assigns through the call's own arguments from
     // the third on, `vars` as the frame holds them.
-    let count = vars.0.len();
+    let count = vars.len();
     let Some(stream) = Stream::from_value(req, &stream.as_value()) else {
-        return Err(throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             "fscanf(): supplied resource is not a valid File-Handle resource",
         ));
     };
@@ -3206,6 +3271,11 @@ fn fgetcsv(
         None => array.append(req, Owner::null())?,
         Some(fields) => {
             for field in fields {
+                // php 8.5.12's `php_fgetcsv` stops once the memory limit
+                // was met (`ZEND_HAS_OOM()`).
+                if req.memory().has_oom() {
+                    break;
+                }
                 let value = PhpString::new(req, &field)?.into_value();
                 array.append(req, value)?;
             }

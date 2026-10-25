@@ -131,13 +131,14 @@ pub(crate) mod makala;
 mod process;
 pub(crate) mod row;
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests;
 mod watch;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -282,6 +283,10 @@ pub(crate) struct Tally {
     pub wall: Duration,
     /// The fence lines `--accept` wrote.
     pub captured: Vec<Captured>,
+    /// The verdicts an `--accept` run found the oracle reproducing as they
+    /// stand, each at its file and the 1-based line of its `expect` fence
+    /// ([`record_accepted`]).
+    pub reproduced: Vec<(PathBuf, usize)>,
     /// Where the pinned php is not, when it is not on this machine: then
     /// no witness ran, each is counted as not run, and a complete tally's
     /// green would be a claim. A binary at the path whose digest is not
@@ -458,12 +463,6 @@ fn tail(tally: &Tally) -> String {
         format!("; {n} {what}{es} {clause}")
     });
     said.collect::<Vec<_>>().concat()
-}
-
-/// The value under `lock`, a poisoned one included: a fence whose run
-/// panicked leaves what it gathered as it was.
-fn held<T>(lock: &Mutex<T>) -> MutexGuard<'_, T> {
-    lock.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// `krate`'s reading over `snapshot`, under the coverage rule where the
@@ -643,6 +642,7 @@ fn run_in(
     journal: Option<&Journal>,
     binary: &Binary,
 ) -> Result<Vec<Reading>> {
+    let pin = manifest.pin()?;
     let Some(crates) = asked(root, manifest, ask)? else {
         return Ok(Vec::new());
     };
@@ -652,7 +652,7 @@ fn run_in(
     // witness or per crate (harness §4.3). A crate whose row names a
     // variant is read under it (#1782).
     let variants = manifest.variants();
-    let oracles = Oracles::new(&manifest.pin, &variants);
+    let oracles = Oracles::new(pin, &variants);
     // Each crate is read in three steps (#2212): found and prepared in the
     // manifest's order, its fences served on one pool with every other
     // crate's, so no crate's last fences leave a thread idle while the
@@ -676,7 +676,7 @@ fn run_in(
     for slot in slots {
         let (one, tally) = match slot {
             Slot::Unrun(krate, why, failed) => {
-                let mut unrun = under_rule(krate, &snapshot, rule)?.under(&manifest.pin);
+                let mut unrun = under_rule(krate, &snapshot, rule)?.under(manifest.pin()?);
                 unrun.message = format!("{}: {why}", krate.name);
                 if failed {
                     unrun.status = Status::Fail;
@@ -687,7 +687,7 @@ fn run_in(
             Slot::Ready(at) => (&ready[at], finished[at].take()),
         };
         if let Some(why) = &full {
-            let unrun = under_rule(one.krate, &snapshot, rule)?.under(&manifest.pin);
+            let unrun = under_rule(one.krate, &snapshot, rule)?.under(manifest.pin()?);
             readings.push(Full::skipped(unrun, &one.krate.name, why)?);
             continue;
         }
@@ -729,10 +729,10 @@ fn find<'a>(
         }
         // The harness measures the engine and carries no witness of its
         // own; `done` asks it for none either (§4.5).
-        let unrun = if krate.name == crate::done::HARNESS {
-            Some("the harness carries no witness")
-        } else {
+        let unrun = if crate::manifest::of_the_engine(krate) {
             (!sources::exists(root, krate)).then_some(sources::NOT_YET_CREATED)
+        } else {
+            Some("the harness carries no witness")
         };
         if let Some(why) = unrun {
             slots.push(Slot::Unrun(krate, why.to_owned(), false));
@@ -894,6 +894,22 @@ fn finished_reading(
         capture(root, &tally.captured)?;
         *snapshot = Snapshot::disk(root)?;
     }
+    if ask.accept != Accept::Nothing {
+        // What `--accept` wrote and what the oracle reproduced as it
+        // stood are both the oracle's verdicts, recorded alike.
+        let taken: Vec<(&Path, usize)> = tally
+            .captured
+            .iter()
+            .map(|one| (one.file.as_path(), one.line))
+            .chain(
+                tally
+                    .reproduced
+                    .iter()
+                    .map(|(file, line)| (file.as_path(), *line)),
+            )
+            .collect();
+        record_accepted(root, &krate.name, &taken)?;
+    }
     // The diff is the review, fence by fence, as a person reads it before
     // the commit (#801).
     for captured in &tally.captured {
@@ -917,7 +933,7 @@ fn finished_reading(
             tally.witnesses.judged.len()
         );
     }
-    let mut judged = reading(tally, snapshot, krate, rule)?.under(&manifest.pin);
+    let mut judged = reading(tally, snapshot, krate, rule)?.under(manifest.pin()?);
     if let Some(under) = one.oracle.pin().oracle.read_under() {
         judged.message = format!("{}; {under}", judged.message);
     }
@@ -1009,6 +1025,7 @@ fn covered(rule: Option<&Rule>, path: &Path) -> bool {
 /// and [`finish`]. `run` serves every crate's fences on one pool instead
 /// (#2212); a crate's tally is the same either way.
 #[cfg(test)]
+#[cfg(tracked)]
 pub(crate) fn judge(
     oracle: &Oracle<'_>,
     binary: &Binary,
@@ -1053,6 +1070,7 @@ pub(crate) struct Prepared<'a> {
 #[derive(Default)]
 pub(crate) struct Gathered {
     captured: Mutex<Vec<Captured>>,
+    reproduced: Mutex<Vec<(PathBuf, usize)>>,
     entered: Mutex<HashMap<String, Record>>,
 }
 
@@ -1105,8 +1123,9 @@ fn serve(
     }
     let mut kept = judge::Kept::default();
     let judged = judge::one(oracle, registry, ask, witness, regime, binary, &mut kept)?;
-    held(&gathered.captured).extend(kept.captured);
-    held(&gathered.entered).insert(witness.id(), kept.entered);
+    crate::locked(&gathered.captured).extend(kept.captured);
+    crate::locked(&gathered.reproduced).extend(kept.reproduced);
+    crate::locked(&gathered.entered).insert(witness.id(), kept.entered);
     if let Some(watch) = watch {
         watch.served(witness)?;
     }
@@ -1137,7 +1156,7 @@ fn serve_absent(
                 Record::Unserved
             }
         };
-        held(&gathered.entered).insert(witness.id(), record);
+        crate::locked(&gathered.entered).insert(witness.id(), record);
     }
     unserved
 }
@@ -1177,6 +1196,11 @@ fn finish(
         .into_inner()
         .unwrap_or_else(PoisonError::into_inner);
     captured.sort_by(|a, b| (&a.file, a.line).cmp(&(&b.file, b.line)));
+    let mut reproduced = gathered
+        .reproduced
+        .into_inner()
+        .unwrap_or_else(PoisonError::into_inner);
+    reproduced.sort();
     Tally {
         witnesses,
         subjects: subjects.len(),
@@ -1188,6 +1212,7 @@ fn finish(
         problems: prepared.problems,
         wall,
         captured,
+        reproduced,
         oracle_absent: prepared.oracle_absent,
         unserved,
     }
@@ -1264,6 +1289,66 @@ pub(crate) fn capture(root: &Path, captured: &[Captured]) -> Result<()> {
     Ok(())
 }
 
+/// What a crate's record of the verdicts `--accept` wrote is scoped to: the
+/// crate's name and [`ACCEPTED`], a scope beside the crate's own, so the
+/// record never stands in for the crate's reading ([`record_accepted`]).
+pub(crate) fn accepted_scope(krate: &str) -> String {
+    format!("{krate}{ACCEPTED}")
+}
+
+/// The mark a scope of the record of accepted verdicts carries after its
+/// crate's name.
+const ACCEPTED: &str = "@accepted";
+
+/// Whether `reading` is a record of a verdict `--accept` wrote and not a
+/// reading of what a crate's fences pin: the renderings of the crate's
+/// readings leave it out.
+pub(crate) fn is_accepted(reading: &Reading) -> bool {
+    reading.instrument == INSTRUMENT && reading.scope.ends_with(ACCEPTED)
+}
+
+/// The record of the verdicts an `--accept` run took in `krate`, each at
+/// its file and 1-based line as the file now stands: those it wrote, and
+/// those it found the oracle reproducing as they stood, since a verdict
+/// the oracle gives again is the oracle's as one written now is. One
+/// reading of the crate's accepted scope ([`accepted_scope`]) per verdict
+/// the store does not record yet, keyed by its block ([`fence::verdict`]),
+/// written whether the run was the crate's or narrowed to a file or an
+/// item. It is what `permit`'s `unless` sensor
+/// reads a captured `exit=` or `capture` fence by, so a verdict taken with
+/// `--item` stands as one taken over the crate, and an edit around it or a
+/// merge that moves the crate on leaves it standing; a verdict typed by
+/// hand that no `--accept` run has found the oracle giving is a block no
+/// record names. A line no rustdoc block holds, a host's
+/// `tests/lines.toml`, leaves none.
+pub fn record_accepted(root: &Path, krate: &str, taken: &[(&Path, usize)]) -> Result<()> {
+    let scope = accepted_scope(krate);
+    let store = Store::of_workspace(root);
+    let mut verdicts = BTreeMap::new();
+    for (file, line) in taken {
+        let text = crate::read(&root.join(file))?;
+        if let Some(verdict) = line.checked_sub(1).and_then(|at| fence::verdict(&text, at)) {
+            verdicts.entry(verdict).or_insert((*file, *line));
+        }
+    }
+    // A verdict the store records already is left as it stands, so an
+    // `--accept` over a crate whose verdicts stand writes nothing again.
+    let keys: std::collections::BTreeSet<String> = verdicts.keys().cloned().collect();
+    let recorded = store.measured_over(INSTRUMENT, &scope, &keys)?;
+    let mut records = Vec::new();
+    for (verdict, (file, line)) in verdicts {
+        if recorded.contains(&verdict) {
+            continue;
+        }
+        let mut record = Reading::keyed(INSTRUMENT, &scope, verdict)?;
+        record.status = Status::Pass;
+        record.message = format!("{}:{line}: taken by --accept", file.display());
+        records.push(record);
+    }
+    // Every record passes, so the outcome owes no exit.
+    store.record(&records).map(|_| ())
+}
+
 /// Every crate that exists less those whose `witness` reading passes and
 /// was taken over the crate's key now ([`Snapshot::key`], its tree and
 /// its dependency closure's, #1318) under the pin now, `done`'s fresh:
@@ -1276,7 +1361,7 @@ fn unmeasured(root: &Path, manifest: &Manifest, store: &Store) -> Result<Vec<Str
         let tree = snapshot.key(&krate.path())?;
         let stands = store
             .read(INSTRUMENT, &krate.name)?
-            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree, manifest.pin.digest()));
+            .is_some_and(|r| r.status == Status::Pass && r.fresh_for(&tree, manifest.pin_digest()));
         if !stands {
             left.push(krate.name.clone());
         }

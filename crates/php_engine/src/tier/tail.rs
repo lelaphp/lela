@@ -49,7 +49,6 @@ pub(crate) struct Table<D>(pub(crate) [Tail<D>; HANDLERS]);
 impl<D> Table<D> {
     /// The function `handler` is served by.
     #[inline(always)] // each handler's tail
-    #[allow(clippy::inline_always)]
     pub(crate) fn of(&self, handler: Handler) -> Tail<D> {
         self.0[handler as usize]
     }
@@ -79,7 +78,6 @@ pub(super) fn chain<T: Tier, D: Telling>(
 /// told to the observers of a declared opcode as the loop tells them,
 /// or out of the chain with the answer, which leaves the frame.
 #[inline(always)] // each handler's tail
-#[allow(clippy::inline_always)]
 pub(crate) fn onward<'a, D: Telling>(
     req: &mut Request,
     frame: FrameRef,
@@ -92,10 +90,10 @@ pub(crate) fn onward<'a, D: Telling>(
     // handler whose answer is known on its path goes on from that path:
     // as the loop's, the add does not wrap.
     let to = if next == Next::ADVANCE {
-        at.wrapping_add(1)
+        crate::exec::after(at)
     } else {
         match next.way() {
-            Way::Advance => at.wrapping_add(1),
+            Way::On(places) => at.wrapping_add(places),
             Way::Jump(to) => to,
             Way::Left(_) => return Ok(ControlFlow::Break(next)),
         }

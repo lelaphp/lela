@@ -26,6 +26,7 @@
 //! generator's, and the call an `INIT_*` began. `php_sapi` re-exports
 //! this face, so a host that binds a tier names none of `php_engine`.
 
+use std::any::Any;
 use std::sync::atomic::AtomicU32;
 
 /// What a tier declares its state with, as an extension does (design
@@ -39,6 +40,7 @@ use crate::{exec, interrupt};
 use php_unit::OpArray;
 
 pub use crate::api::request::Request;
+use crate::api::request::TierStatus;
 /// The compiled tier's compile thread (`jit-design.md` §4.8), an engine's
 /// thread as ADR-0010's Threads has them: started through the engine's
 /// one home and joined before every fork.
@@ -50,21 +52,39 @@ pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 
 mod crossing;
+mod dims;
 mod frames;
 mod held;
+mod layout;
 pub(crate) mod published;
 mod sampled;
+mod strings;
 #[cfg(dispatch = "tailcall")]
 mod tail;
 mod view;
-pub use crossing::{at_room, current, free_operands, primed, release, room, stand};
+pub use crossing::{
+    at_room, current, free_cv, free_operands, laid, primed, release, return_entry, room, stack,
+    stack_room, stand,
+};
+pub use dims::{dim_key, lookup_element};
 pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
+pub(crate) use held::UnitsLeft;
 use held::{Entered, Kept, Scope, Units};
-pub use sampled::{Building, Sample, building, class_number, numbered_class, on_heap, sample};
-pub use view::{Epoch, FuncRef, MapPtrRaw, UnitView, epoch, epoch_state, func, word};
+pub use layout::{
+    Activation, FRAME, FrameLayout, PLACE, PlaceLayout, PlainCall, call_image, plain_call,
+};
+pub use sampled::{
+    Building, Sample, building, building_call, class_number, native_returns, numbered_class,
+    on_heap, sample, this_class, under_way,
+};
+pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push};
+pub use view::{
+    CachedSlot, Epoch, FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch, epoch_state,
+    frame_cache, func, jump_targets, landing, running_func, served, touch, touchable,
+};
 
 pub use crate::api::values::ClassId;
 
@@ -118,8 +138,28 @@ pub enum Flow {
 /// The tier: one method at the safepoints, and the state it declares as
 /// an extension would.
 pub trait Tier: 'static {
-    /// Asked at the three sites and nowhere else.
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow;
+    /// The tier's state on a request (`jit-design.md` §2.2, #3144): its
+    /// engine state resolved once, as the request is laid, and what its
+    /// visits keep on the request between them, as php's tracing tier
+    /// keeps `JIT_G`. Read at one place, [`state`], with no lookup in the
+    /// slot table the extensions' states stand in; `()` for a tier that
+    /// keeps none.
+    type State: Send + 'static;
+
+    /// Asked at the three sites and nowhere else, with `held`, the op
+    /// array the loop holds for `frame` (`jit-design.md` §2.2, #3144), so
+    /// the tier reads the site's word from what the loop has in hand.
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow;
+
+    /// The tier's [`State`](Tier::State) for a request of the engine
+    /// `started`, laid with the request where the engine binds the tier's
+    /// loop ([`Tier::asked`]): none where it binds `Nop`'s, and by
+    /// default.
+    #[must_use]
+    fn lay(started: &Started<'_>) -> Option<Self::State> {
+        let _ = started;
+        None
+    }
 
     /// Which of php's execution hooks the tier replaces, as phpdbg
     /// replaces `zend_execute_ex`: every unit the engine compiles is
@@ -156,6 +196,18 @@ pub trait Tier: 'static {
         let _ = started;
         true
     }
+
+    /// What php's `zend_jit_status` reports of the tier on `req`'s
+    /// engine, `opcache_get_status()['jit']`, whether or not the engine
+    /// binds the tier's loop, as php reports it whether or not its
+    /// compiled tier runs: read by `UnitCache::status` alone, never on
+    /// the dispatch path. A tier that compiles nothing, all zero, by
+    /// default.
+    #[must_use]
+    fn status(req: &Request) -> TierStatus {
+        let _ = req;
+        TierStatus::default()
+    }
 }
 
 /// The started engine as its tier reads it at [`Tier::asked`]: the
@@ -180,11 +232,113 @@ impl<'a> Started<'a> {
 pub struct Nop;
 
 impl Tier for Nop {
+    type State = ();
+
     #[inline(always)] // jit-design.md §2.2: one constant, so the branch on `Flow` folds
-    #[allow(clippy::inline_always)]
-    fn safepoint(_: &mut Request, _: FrameRef, _: Site) -> Flow {
+    fn safepoint(_: &mut Request, _: FrameRef, _: Site, _: Held<'_>) -> Flow {
         Flow::Continue
     }
+}
+
+/// Whether the loop of `T` is the interpreter's alone, [`Nop`]'s, which
+/// asks nothing at its safepoints: what only a safepoint reads, the
+/// frame stood at a back-edge's target, is written for every other
+/// tier alone. A constant of the instantiation, so the test folds.
+#[inline(always)] // a constant of the instantiation
+pub(crate) fn interpreted<T: Tier>() -> bool {
+    std::any::TypeId::of::<T>() == std::any::TypeId::of::<Nop>()
+}
+
+/// Where a request keeps its tier's [`Tier::State`]
+/// (`jit-design.md` §2.2, #3144): laid once with the request, by the
+/// loop the engine bound ([`Loops::bound`]), and read by [`state`].
+/// Its box is never replaced, moved out of or borrowed mutably while
+/// the request lives, and the types hold that outside `api::request`,
+/// where the request is made: the box is this type's private field,
+/// with no `&mut` method, and the request's field holding it is private
+/// to `api::request`, which hands it out only shared
+/// ([`Request::tier_state`]). A tier lends its state across the
+/// request's own borrow on that (`php_jit`'s `enter::lent`, #3437),
+/// holding a [`Lending`] for as long as the lend stands, so where
+/// `api::request` drops or replaces the state while one is held, a debug
+/// assertion fails as it drops.
+pub(crate) struct TierState {
+    state: Option<Box<dyn Any + Send>>,
+    /// How many [`Lending`]s stand, counted under `debug_assertions`
+    /// alone.
+    #[cfg(debug_assertions)]
+    lends: std::sync::Arc<AtomicU32>,
+}
+
+impl TierState {
+    /// The tier state of a request of the engine `shared`, as the loop it
+    /// bound lays it.
+    pub(crate) fn laid(shared: &crate::engine::Shared) -> TierState {
+        (shared.loops.lay)(Started { shared })
+    }
+
+    /// `T`'s state for a request of the engine `started`.
+    fn of<T: Tier>(started: Started<'_>) -> TierState {
+        TierState {
+            state: T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>),
+            #[cfg(debug_assertions)]
+            lends: std::sync::Arc::default(),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for TierState {
+    fn drop(&mut self) {
+        let lends = self.lends.load(std::sync::atomic::Ordering::Relaxed);
+        debug_assert!(
+            lends == 0 || std::thread::panicking(),
+            "a request's tier state was dropped or replaced while a tier lent it ({lends} lends stand)"
+        );
+    }
+}
+
+/// A tier's lend of its request's state across the request's own
+/// borrow (`php_jit`'s `enter::lent`, #3437), held for as long as the
+/// lend stands: the state dropped or replaced meanwhile fails a debug
+/// assertion as it drops ([`TierState`]). Nothing at all where debug
+/// assertions are off, so the lend costs nothing there.
+#[must_use]
+pub struct Lending {
+    #[cfg(debug_assertions)]
+    lends: std::sync::Arc<AtomicU32>,
+}
+
+#[cfg(debug_assertions)]
+impl Drop for Lending {
+    fn drop(&mut self) {
+        self.lends
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A [`Lending`] of `req`'s tier state, for as long as a tier lends it.
+#[inline]
+pub fn lending(req: &Request) -> Lending {
+    #[cfg(debug_assertions)]
+    {
+        let lends = std::sync::Arc::clone(&req.tier_state().lends);
+        lends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Lending { lends }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = req;
+        Lending {}
+    }
+}
+
+/// The tier's state the request was laid with, where it is an `S`
+/// ([`Tier::State`]): one check of its type, and no lookup. None where
+/// the engine binds a loop that lays none, `Nop`'s.
+#[must_use]
+pub fn state<S: Any>(req: &Request) -> Option<&S> {
+    req.tier_state().state.as_deref()?.downcast_ref()
 }
 
 /// One safepoint's word (`jit-design.md` §3.2): two atomics, zero at
@@ -316,17 +470,24 @@ pub enum Stepped {
 ///
 /// One word, so that a handler's answer, `Result<Next, Fatal>`, is two
 /// registers and never a slot in memory the loop reads back: the way in
-/// the high half and the opline or the frame in the low, which
-/// [`Next::way`] reads back as a [`Way`].
+/// the high half and the opline, the distance to it or the frame in the
+/// low, which [`Next::way`] reads back as a [`Way`]. Going on in the
+/// frame is the high half zero and the distance from the opline served,
+/// so `ZEND_VM_NEXT_OPCODE` and a jump whose handler holds its own place
+/// are one way, read by one compare of the word and one add.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Next(u64);
 
 /// What a [`Next`] says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Way {
-    /// `ZEND_VM_NEXT_OPCODE`: the opline after this one.
-    Advance,
-    /// `ZEND_VM_SET_OPCODE`: this opline of the same frame.
+    /// `ZEND_VM_NEXT_OPCODE`, and `ZEND_VM_SET_OPCODE` from a handler
+    /// that holds its own place: the opline this many places on from the
+    /// one served, the add wrapping, so a jump back is the distance's
+    /// two's complement.
+    On(u32),
+    /// `ZEND_VM_SET_OPCODE` from a handler that does not hold its place:
+    /// this opline of the same frame.
     Jump(u32),
     /// Any other edge, the positions on the chain written.
     Left(Stepped),
@@ -335,7 +496,7 @@ pub(crate) enum Way {
 impl Next {
     /// The high half of each way, written by the constructors below and
     /// read by [`Next::way`] and nowhere else.
-    const ADVANCE_WAY: u64 = 0;
+    const ON_WAY: u64 = 0;
     const JUMP_WAY: u64 = 1;
     const SAME_WAY: u64 = 2;
     const PUSHED_WAY: u64 = 3;
@@ -345,22 +506,35 @@ impl Next {
     const DONE_WAY: u64 = 7;
 
     /// `ZEND_VM_NEXT_OPCODE`.
-    pub(crate) const ADVANCE: Next = Next(Next::ADVANCE_WAY << 32);
+    pub(crate) const ADVANCE: Next = Next::by(1);
 
-    /// `ZEND_VM_SET_OPCODE(to)`.
+    /// The opline `places` on from the one served, `ZEND_VM_NEXT_OPCODE`
+    /// at one and `ZEND_VM_SET_OPCODE(opline + places)` at any other;
+    /// a jump from `at` to `to` is `by(to.wrapping_sub(at))`.
+    pub(crate) const fn by(places: u32) -> Next {
+        Next(Next::ON_WAY << 32 | places as u64)
+    }
+
+    /// `ZEND_VM_SET_OPCODE(to)`, from a handler that does not hold the
+    /// place of the opline it serves.
     pub(crate) const fn jump(to: u32) -> Next {
         Next(Next::JUMP_WAY << 32 | to as u64)
     }
 
     /// Where the handler sends the loop.
     #[inline(always)] // read once per opline by the loop: a shift and a compare
-    #[allow(clippy::inline_always)]
     pub(crate) const fn way(self) -> Way {
         // The low half is the opline or the frame, as the high half says.
         #[allow(clippy::cast_possible_truncation)]
         let low = self.0 as u32;
+        // On, tested on the whole word first, so the way met most is one
+        // compare and not a search of the high half: its high half is
+        // zero.
+        const { assert!(Next::ON_WAY == 0) };
+        if self.0 <= u32::MAX as u64 {
+            return Way::On(low);
+        }
         match self.0 >> 32 {
-            Next::ADVANCE_WAY => Way::Advance,
             Next::JUMP_WAY => Way::Jump(low),
             Next::SAME_WAY => Way::Left(Stepped::Same(FrameRef(low))),
             Next::PUSHED_WAY => Way::Left(Stepped::Pushed(FrameRef(low))),
@@ -396,7 +570,7 @@ impl From<Stepped> for Next {
 pub(crate) fn settled(req: &mut Request, frame: FrameRef, at: u32, next: Next) -> Stepped {
     let to = match next.way() {
         Way::Left(stepped) => return stepped,
-        Way::Advance => at.saturating_add(1),
+        Way::On(places) => at.wrapping_add(places),
         Way::Jump(to) => to,
     };
     req.vm_mut().stand(frame, to);
@@ -414,6 +588,26 @@ mod dispatch {
     use crate::tier::{Next, Tier};
 
     include!(concat!(env!("OUT_DIR"), "/dispatch.rs"));
+
+    /// The arm of a handler the loop does not hold in its body: `handler`
+    /// called out of line, so what it holds live is its own and not the
+    /// loop's. An arm whose handler does not take its opline's place
+    /// stands the frame at `at` first, php's `SAVE_OPLINE()`.
+    #[cold]
+    #[inline(never)]
+    fn aside<F>(
+        req: &mut Request,
+        frame: FrameRef,
+        code: &OpArray,
+        op: &Opline,
+        at: u32,
+        handler: F,
+    ) -> Result<Next, Fatal>
+    where
+        F: FnOnce(&mut Request, FrameRef, &OpArray, &Opline, u32) -> Result<Next, Fatal>,
+    {
+        handler(req, frame, code, op, at)
+    }
 }
 
 /// What a handler's site, a backward `JMP*` or a `RETURN*`, does with a
@@ -451,15 +645,19 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
     Ok(Stepped::Same(at))
 }
 
-/// The activation of a frame, its prologue having raised nothing
-/// (design §5.6, §4.3 seam 8): the interrupt check, then `Site::Entry`,
-/// then the frame the loop goes on in.
+/// The activation of a frame serving `code`, its prologue having
+/// raised nothing (design §5.6, §4.3 seam 8): the interrupt check, then
+/// `Site::Entry`, then the frame the loop goes on in.
 #[inline]
-fn activated<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
+fn activated<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+) -> Result<Stepped, Fatal> {
     if interrupt::check(req)? {
         return Ok(Stepped::Threw(frame));
     }
-    let flow = T::safepoint(req, frame, Site::Entry);
+    let flow = T::safepoint(req, frame, Site::Entry, Held::of(code));
     answered(req, flow, frame)
 }
 
@@ -484,6 +682,12 @@ pub(crate) struct Loops {
     pub(crate) reenter: Loop,
     /// The same loop over a generator's frame the resumption put back.
     pub(crate) resume: Loop,
+    /// The tier's state a request of the engine is laid with, the bound
+    /// tier's ([`Tier::lay`]).
+    pub(crate) lay: fn(Started<'_>) -> TierState,
+    /// The engine's tier's [`Tier::status`], its own whichever loop is
+    /// bound; read by `UnitCache::status` alone.
+    pub(crate) status: fn(&Request) -> TierStatus,
 }
 
 impl Loops {
@@ -495,7 +699,10 @@ impl Loops {
         if T::HOLDS || T::HOOKED != Hooked::NONE || T::asked(&Started { shared }) {
             Loops::told::<T>(&shared.opcodes)
         } else {
-            Loops::told::<Nop>(&shared.opcodes)
+            Loops {
+                status: T::status,
+                ..Loops::told::<Nop>(&shared.opcodes)
+            }
         }
     }
 
@@ -521,6 +728,8 @@ impl Loops {
             entry: execute::<T, D>,
             reenter: reenter::<T, D>,
             resume: resume::<T, D>,
+            lay: TierState::of::<T>,
+            status: T::status,
         }
     }
 }
@@ -659,8 +868,20 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
         crate::observer::returned(req, entry, None);
         return Ok(());
     }
-    let flow = T::safepoint(req, entry, Site::Entry);
+    // The op array the entry frame serves, held for its site through a
+    // share of its unit, once a serving: the loop holds none of it yet.
+    let flow = {
+        let serving = exec::standing(req, entry)?;
+        let code = exec::serving_code(&serving, entry)?;
+        T::safepoint(req, entry, Site::Entry, Held::of(code))
+    };
     let first = answered(req, flow, entry)?;
+    // A tier that served the entry frame to its end, `Flow::Returned`, left
+    // the loop nothing to serve, as php's `execute_ex` returns at once
+    // where the entry's compiled code returned `ZEND_VM_RETURN`.
+    if first == Stepped::Done {
+        return Ok(());
+    }
     serve_frame::<T, D>(req, first)
 }
 
@@ -742,13 +963,16 @@ fn refused_at_entry(req: &mut Request) -> bool {
 /// its own units go for it.
 fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
     let mut stepped = first;
-    let mut units = Units::default();
+    let mut units = req.units_left.take();
     loop {
         let served = serve_held::<T, D>(req, stepped, &units, Scope::Whole)?;
-        units.give_back(req);
-        match served {
-            Some(again) => stepped = again,
-            None => return Ok(()),
+        if let Some(again) = served {
+            units.give_back(req);
+            stepped = again;
+        } else {
+            units.leave(req);
+            req.units_left.put(units);
+            return Ok(());
         }
     }
 }
@@ -758,8 +982,8 @@ fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result
 /// and the edge it was taking up where every place is taken or where the
 /// edge left the scope. One body of the loop, called once a serving and
 /// once a scope.
-#[inline(always)] // the loop's body, called once a serving and once a scope
-#[allow(clippy::inline_always)]
+#[inline(always)]
+// the loop's body, called once a serving and once a scope
 // One function, so the optimiser reads every edge of the loop together:
 // the loop out of line, one copy for both callers, measured the call
 // edges 3 to 6% higher (#3051).
@@ -875,10 +1099,7 @@ fn serve_held<'u, T: Tier, D: Telling>(
             #[cfg(dispatch = "tailcall")]
             let way = tail::chain::<T, D>(req, frame, body, oplines, at, &declared)?.way();
             match way {
-                // `at` is the index of an opline that stands, so it is
-                // under the length of an op array, which no 32-byte opline
-                // count brings to `u32::MAX`: the add does not wrap.
-                Way::Advance => at = at.wrapping_add(1),
+                Way::On(places) => at = at.wrapping_add(places),
                 Way::Jump(to) => at = to,
                 // A return to a frame the loop entered: its op array as
                 // the loop left it for the call.
@@ -956,7 +1177,10 @@ fn serve_held<'u, T: Tier, D: Telling>(
 /// `eval` does not, so php's limit moves below each by what it takes
 /// ([`php_compile::StackLimit::nested`]), and where the thread has no
 /// room for another the frame is served in the scope it stands in, as
-/// php serves every `eval`. A recursion through `eval` is php's depth
+/// php serves every `eval`. On a fiber's stack the limit is the
+/// fiber's floor and cannot move, so there every such frame is served
+/// without a scope, its unit given back as the loop takes its edge up
+/// afresh (#3192). A recursion through `eval` is php's depth
 /// whatever the limit, and past what the thread holds of scopes:
 ///
 /// ```php
@@ -974,8 +1198,24 @@ fn serve_held<'u, T: Tier, D: Telling>(
 /// ```expect
 /// 40000
 /// ```
+///
+/// Inside a fiber, a native's own recursion below a thousand nested
+/// `eval`s has the whole of the fiber's budget, as php's has: a chain
+/// php's `serialize()` takes is taken, and one php refuses is refused.
+///
+/// ```php
+/// function chain($d) { $o = $first = new stdClass; for ($i = 0; $i < $d; $i++) { $o->next = new stdClass; $o = $o->next; } return $first; }
+/// function unchain($o) { while ($next = $o->next ?? null) { $o->next = $next->next ?? null; } }
+/// function serialized($d) { $c = chain($d); try { serialize($c); return "served"; } catch (Error $e) { return preg_replace('/\d+ bytes/', 'N bytes', $e->getMessage()); } finally { unchain($c); } }
+/// function f($n, $d) { return $n ? eval('return f($n - 1, $d);') : serialized($d); }
+/// $fiber = new Fiber(function () { echo f(1000, 1336), "\n", f(1000, 100000), "\n"; });
+/// $fiber->start();
+/// ```
+/// ```expect
+/// served
+/// Maximum call stack size of N bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
 #[inline(always)] // once a scope, in the loop's body
-#[allow(clippy::inline_always)]
 fn serve_took<T: Tier, D: Telling>(
     req: &mut Request,
     (first, frame): (Stepped, FrameRef),
@@ -1019,7 +1259,6 @@ fn serve_scope<T: Tier, D: Telling>(
 /// ([`exec::entry_of`]), and then its activation, the interrupt check
 /// and `Site::Entry`. `Threw` of the callee where a `RECV` raised.
 #[inline(always)] // once per call edge, in the loop
-#[allow(clippy::inline_always)]
 fn entered<T: Tier, D: Telling>(
     req: &mut Request,
     callee: FrameRef,
@@ -1034,18 +1273,15 @@ fn entered<T: Tier, D: Telling>(
         let at = if told.tells(php_unit::Opcode::Recv) {
             start
         } else {
-            exec::recv_passed(req, callee, code, start)
+            exec::recv_passed(req, callee, code, (start, entry))
         };
-        if at != start {
-            req.vm_mut().stand(callee, at);
-        }
         if at < entry
             && let Some(threw) = exec::prologue(req, callee, code, told)?
         {
             return Ok(Stepped::Threw(threw));
         }
     }
-    activated::<T>(req, callee)
+    activated::<T>(req, callee, code)
 }
 
 /// The internal error for a frame the loop was sent into that serves no
@@ -1094,25 +1330,132 @@ fn unwind_frame<T: Tier>(req: &mut Request, frame: FrameRef) -> Result<Stepped, 
 pub fn step(req: &mut Request, frame: FrameRef) -> Result<Stepped, Fatal> {
     let serving = exec::standing(req, frame)?;
     let code = exec::serving_code(&serving, frame)?;
+    match stepped_over(req, frame, code)? {
+        Stepped::Pushed(callee) => {
+            let serving = exec::standing(req, callee)?;
+            let code = exec::serving_code(&serving, callee)?;
+            activated_over(req, callee, code)
+        }
+        stepped => Ok(stepped),
+    }
+}
+
+/// [`step`] over `held`, the op array a holder holds for `frame`, as
+/// compiled code steps an opline of the op array its trace recorded: no
+/// share of a unit is taken and the frame's function is not looked up
+/// (`jit-design.md` §5.2, #3147). A frame the handler pushed is activated
+/// over the op array `epoch`, the epoch the holder holds `held` in,
+/// holds for it, and over a share of its unit where the epoch holds none,
+/// a request's.
+pub fn step_held(
+    req: &mut Request,
+    frame: FrameRef,
+    held: Held<'_>,
+    epoch: &Epoch,
+) -> Result<Stepped, Fatal> {
+    match stepped_over(req, frame, held.code())? {
+        Stepped::Pushed(callee) => {
+            if let Some(code) = func(req, callee).and_then(|f| epoch.held(f)) {
+                return activated_over(req, callee, code.code());
+            }
+            let serving = exec::standing(req, callee)?;
+            let code = exec::serving_code(&serving, callee)?;
+            activated_over(req, callee, code)
+        }
+        stepped => Ok(stepped),
+    }
+}
+
+/// The handler of the opline `frame` stands at in `held`, one that goes
+/// on at an opline of its own frame or throws there, served as php's
+/// compiled code calls such an opline's handler directly
+/// (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`):
+/// one dispatch, the frame stood where the handler went on, and nothing
+/// [`step_held`] reads past it. No observer is told: a tier runs only
+/// where no opcode but `BEGIN_SILENCE` and `END_SILENCE` is observed
+/// (`jit-design.md` §4.3), and compiled code steps those. A handler that
+/// went anywhere else, a frame it pushed or popped, is an internal error,
+/// which no opline compiled code hands here reaches.
+pub fn dispatch_held(req: &mut Request, frame: FrameRef, held: Held<'_>) -> Result<(), Fatal> {
+    let code = held.code();
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
+    let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;
+    #[cfg(debug_assertions)]
+    req.sensed_after(code, op)?;
+    match settled(req, frame, at, next) {
+        Stepped::Same(went) | Stepped::Threw(went) if went == frame => Ok(()),
+        _ => Err(Fatal::error(
+            "InternalError: a handler compiled code serves in its frame went on elsewhere",
+        )),
+    }
+}
+
+/// The `DO_UCALL`, `DO_FCALL` or `DO_FCALL_BY_NAME` at `frame`'s opline
+/// of `held`, made as compiled code makes a call to the callee its trace
+/// recorded, `callee`, which the `INIT_*` before it pushed: the handler's
+/// inline path, php's `i_init_func_execute_data` writing the header's
+/// words ([`Request::enter_call`]), and the callee's activation over
+/// `callee`, with no dispatch (`jit-design.md` §5.2, #3147). `Pushed`
+/// of the callee, or `Threw` of it where its prologue or the interrupt
+/// left a throwable pending. Where an observer of the opcode is
+/// declared, the opline is another, or the inline path refuses the call,
+/// the opline is stepped over `held` as [`step_held`] steps it.
+pub fn call_held(
+    req: &mut Request,
+    frame: FrameRef,
+    (held, callee): (Held<'_>, Held<'_>),
+    epoch: &Epoch,
+) -> Result<Stepped, Fatal> {
+    let at = req.vm().opline(frame);
+    let op = exec::opline_at(held.code(), at).ok_or_else(|| past_the_end(frame, at))?;
+    let flagged = match op.opcode {
+        php_unit::Opcode::DoUcall => false,
+        php_unit::Opcode::DoFcall | php_unit::Opcode::DoFcallByName => true,
+        _ => return step_held(req, frame, held, epoch),
+    };
+    if Declared::of(req).tells(op.opcode) {
+        return step_held(req, frame, held, epoch);
+    }
+    let returns_to = (op.out_type != php_unit::OperandKind::Unused).then_some(op.out);
+    let Some(pushed) = req.enter_call(returns_to, (frame, at), flagged) else {
+        return step_held(req, frame, held, epoch);
+    };
+    // The callee the trace recorded, as its `INIT_*` guarded it; any
+    // other is served from its unit.
+    if running_func(req, pushed) == Some(callee.func()) {
+        return activated_over(req, pushed, callee.code());
+    }
+    let serving = exec::standing(req, pushed)?;
+    let code = exec::serving_code(&serving, pushed)?;
+    activated_over(req, pushed, code)
+}
+
+/// The one handler at `frame`'s opline over `code`, with `Nop` at the
+/// safepoints, the observers told as the loop tells them ([`step`]).
+#[inline]
+fn stepped_over(req: &mut Request, frame: FrameRef, code: &OpArray) -> Result<Stepped, Fatal> {
     let at = req.vm().opline(frame);
     let op = exec::opline_at(code, at).ok_or_else(|| past_the_end(frame, at))?;
     crate::observer::tell_before(req, frame, op.opcode);
     let next = dispatch::dispatch::<Nop>(req, frame, code, op, at)?;
     #[cfg(debug_assertions)]
     req.sensed_after(code, op)?;
-    match settled(req, frame, at, next) {
-        Stepped::Pushed(callee) => {
-            let serving = exec::standing(req, callee)?;
-            let told = Declared::of(req);
-            let code = exec::serving_code(&serving, callee)?;
-            let start = req.vm().opline(callee);
-            let entry = exec::entry_of(code);
-            match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
-                Stepped::Threw(at) => Ok(Stepped::Threw(at)),
-                _ => Ok(Stepped::Pushed(callee)),
-            }
-        }
-        stepped => Ok(stepped),
+    Ok(settled(req, frame, at, next))
+}
+
+/// A callee a step pushed, serving `code`, activated as the loop
+/// activates it, with `Nop` at its `Site::Entry` ([`step`]): `Threw` of
+/// it where its prologue or the interrupt left a throwable pending,
+/// `Pushed` of it otherwise.
+#[inline]
+fn activated_over(req: &mut Request, callee: FrameRef, code: &OpArray) -> Result<Stepped, Fatal> {
+    let told = Declared::of(req);
+    let start = req.vm().opline(callee);
+    let entry = exec::entry_of(code);
+    match entered::<Nop, Declared>(req, callee, code, (start, entry), told)? {
+        Stepped::Threw(at) => Ok(Stepped::Threw(at)),
+        _ => Ok(Stepped::Pushed(callee)),
     }
 }
 

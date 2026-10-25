@@ -12,7 +12,7 @@
 //! kind.
 
 use php_heap::{Zval, ZvalType};
-use php_unit::{OpArray, OperandKind};
+use php_unit::{OpArray, OperandKind, Opline};
 
 /// One way of addressing an operand: where it stands, read without an
 /// owner taken.
@@ -33,7 +33,6 @@ pub(crate) trait Operand: Copy {
     /// what a kernel would warn of, so an undefined CV is the kernel's,
     /// and its warning with it.
     #[inline(always)] // one load at a fixed offset, which is the point
-    #[allow(clippy::inline_always)]
     fn read(self, slots: &[Zval], code: &OpArray, field: u32) -> Zval {
         let found = if self.kind() == OperandKind::Const {
             code.literals.get(field as usize)
@@ -60,7 +59,9 @@ pub(crate) struct Const;
 pub(crate) struct Tmp;
 
 /// `IS_VAR`: a temporary as `IS_TMP_VAR` is, which may hold a reference
-/// or an `IS_INDIRECT`; an inline path takes neither.
+/// or an `IS_INDIRECT`; an inline path takes neither as a value, and a
+/// property opcode's follows both to its receiver
+/// (`handlers::inline_receiver`).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Var;
 
@@ -96,7 +97,6 @@ impl Operand for Tmp {
     }
 
     #[inline(always)] // as `read`
-    #[allow(clippy::inline_always)]
     fn slot(self, field: u32) -> Option<usize> {
         Some(field as usize)
     }
@@ -108,7 +108,6 @@ impl Operand for Var {
     }
 
     #[inline(always)] // as `read`
-    #[allow(clippy::inline_always)]
     fn slot(self, field: u32) -> Option<usize> {
         Some(field as usize)
     }
@@ -120,7 +119,6 @@ impl Operand for Cv {
     }
 
     #[inline(always)] // as `read`
-    #[allow(clippy::inline_always)]
     fn slot(self, field: u32) -> Option<usize> {
         Some(field as usize)
     }
@@ -138,18 +136,59 @@ impl Operand for Unused {
 
 impl Operand for ByKind {
     #[inline(always)] // as `read`
-    #[allow(clippy::inline_always)]
     fn kind(self) -> OperandKind {
         self.0
     }
 
     #[inline(always)] // as `read`
-    #[allow(clippy::inline_always)]
     fn slot(self, field: u32) -> Option<usize> {
         match self.0 {
             OperandKind::Cv | OperandKind::Tmp | OperandKind::Var => Some(field as usize),
             OperandKind::Const | OperandKind::Unused => None,
         }
+    }
+}
+
+/// Whether an opline's `out` is read, `RETURN_VALUE_USED(opline)`: a
+/// constant of the handler where the opcode's line says `SPEC(RETVAL)`
+/// and the hot list specialises it, as php resolves `_RETVAL_UNUSED`
+/// and `_RETVAL_USED` where it publishes the opline
+/// (`php_unit::Handler`), and read off the opline's `out_type` byte
+/// everywhere else ([`RetvalByte`]).
+pub(crate) trait Retval {
+    /// Whether `op`'s `out` is read.
+    fn used(op: &Opline) -> bool;
+}
+
+/// php's `_RETVAL_UNUSED` handler: the compiler wrote `UNUSED` into the
+/// `out_type`, as `zend_do_free` does where nothing reads the value.
+pub(crate) struct RetvalUnused;
+
+/// php's `_RETVAL_USED` handler.
+pub(crate) struct RetvalUsed;
+
+/// An `out` whose use the opline's `out_type` byte says, read while
+/// the request is served: a handler the spec does not resolve over it.
+pub(crate) struct RetvalByte;
+
+impl Retval for RetvalUnused {
+    #[inline(always)] // a constant, so the write of `out` folds away
+    fn used(_: &Opline) -> bool {
+        false
+    }
+}
+
+impl Retval for RetvalUsed {
+    #[inline(always)] // a constant, as `RetvalUnused`'s
+    fn used(_: &Opline) -> bool {
+        true
+    }
+}
+
+impl Retval for RetvalByte {
+    #[inline(always)] // a test of the opline's byte, on an inline path
+    fn used(op: &Opline) -> bool {
+        op.out_type != OperandKind::Unused
     }
 }
 
@@ -159,7 +198,6 @@ impl Operand for ByKind {
 /// expression, which no variable may hold, and anything refcounted are
 /// not.
 #[inline(always)] // a test of two bytes, on an inline path
-#[allow(clippy::inline_always)]
 pub(crate) fn owns_nothing(z: Zval) -> bool {
     !z.is_refcounted()
         && matches!(
@@ -177,7 +215,6 @@ pub(crate) fn owns_nothing(z: Zval) -> bool {
 /// `ZVAL_DEREF`: the value a reference holds, and any other zval as it
 /// stands.
 #[inline(always)] // a test of the type byte, on an inline path
-#[allow(clippy::inline_always)]
 pub(crate) fn deref(z: Zval) -> Zval {
     match z.as_reference() {
         Some(cell) => cell.val(),
@@ -192,7 +229,6 @@ pub(crate) fn deref(z: Zval) -> Zval {
 /// an `IS_INDIRECT` a write fetch left, a constant expression or an
 /// `IS_PTR`.
 #[inline(always)] // a test of the type byte, on an inline path
-#[allow(clippy::inline_always)]
 pub(crate) fn movable(z: Zval) -> bool {
     !matches!(
         z.kind(),

@@ -46,14 +46,11 @@ impl Request {
             ..
         } in std::mem::take(&mut self.ticks.tick_functions)
         {
-            callback.give_up(self);
-            for value in arguments {
-                self.release(value);
-            }
+            self.drop_callback(callback, arguments);
         }
     }
 
-    /// `ZEND_TICKS`' count (`Z/Zend/zend_vm_def.h:8024`): `EG(ticks_count)`
+    /// `ZEND_TICKS`' count (`Z/Zend/zend_vm_def.h:8029`): `EG(ticks_count)`
     /// stepped, and where it reaches `every` it starts again and the
     /// round is served, `zend_ticks_function` as `php_run_ticks`
     /// runs `PG(tick_functions)`: each extension's hook in bundle order,
@@ -133,9 +130,8 @@ impl Code<&mut Request> {
             return Ok(false);
         };
         if self.0.ticks.tick_functions[at].calling {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self.0,
-                "Error",
                 "Registered tick function cannot be unregistered while it is being executed",
             ));
         }
@@ -144,10 +140,7 @@ impl Code<&mut Request> {
             arguments,
             ..
         } = self.0.ticks.tick_functions.remove(at);
-        held.give_up(self.0);
-        for value in arguments {
-            self.0.release(value);
-        }
+        self.0.drop_callback(held, arguments);
         Ok(true)
     }
 }

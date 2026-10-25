@@ -58,9 +58,10 @@ impl Emit<'_> {
             }
             return match self.memo.held.iter().find(|(held, _)| *held == node) {
                 Some(&(_, value)) => Ok(value),
-                None => Err(self.fatal(
-                    "InternalError: a `??=` wrote through an expression its read never compiled",
-                )),
+                None => {
+                    Err(self
+                        .internal("a `??=` wrote through an expression its read never compiled"))
+                }
             };
         }
         self.memo.mode = MemoMode::None;

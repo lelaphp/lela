@@ -1,5 +1,5 @@
 //! `xtask trace-dump`, the trace-dump diff (`jit-design.md` §4.1;
-//! harness §7): a program's `---- TRACE` lines written by the oracle
+//! harness §7): a program's trace and exit lines written by the oracle
 //! under `[regime.jit-inline]`, kept in the store, and held against the
 //! engine's, one reading per program. Every test here goes through the
 //! instrument's `run`, with a binary standing for the engine's that
@@ -8,17 +8,18 @@
 //! The tests that spawn the oracle say so on stderr and return when the
 //! pinned binary is not on this machine, unless the machine promised it
 //! (#38); the rest run anywhere.
+#![cfg(tracked)]
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
-use xtask::divergence::Registry;
+use xtask::divergence::{Digests, Registry, Side};
 use xtask::manifest::Manifest;
 use xtask::oracle::Promise;
 use xtask::reading::{Number, Reading, Status, Store};
 use xtask::scratch::Tree;
-use xtask::trace_dump::{self, Ask, Side};
+use xtask::trace_dump::{self, Ask};
 
 mod common {
     pub mod manifest;
@@ -95,7 +96,7 @@ impl Scratch {
 
     /// What the run kept for `side` of `loop.php`.
     fn kept(&self, side: Side) -> String {
-        let digest = self.manifest.pin.digest();
+        let digest = self.manifest.pin().unwrap().digest();
         fs::read_to_string(trace_dump::kept(&self.store, digest, "loop", side)).unwrap()
     }
 }
@@ -109,8 +110,9 @@ fn count(reading: &Reading, key: &str) -> i64 {
 
 /// The negative control (harness §14 item 4): php's own lines standing
 /// for the engine's are a pass, and the lines the run keeps for the
-/// oracle are the fixture's; the engine's lines, whose loop root is a line
-/// apart and which grow no side trace, are a fail naming both roots.
+/// oracle are the fixture's, the loop's exit line among them; the engine's
+/// lines, whose loop root is a line apart and which grow no side trace,
+/// are a fail naming both roots.
 #[test]
 fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
     if oracle().is_none() {
@@ -125,11 +127,11 @@ fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
         oracle_lines,
         "php's lines are kept"
     );
-    assert_eq!(count(&reading, "oracle_lines"), 8, "{reading:#?}");
+    assert_eq!(count(&reading, "oracle_lines"), 9, "{reading:#?}");
     assert!(
         reading
             .message
-            .contains("the engine's 8 TRACE lines are the oracle's")
+            .contains("the engine's 9 trace lines are the oracle's")
             && reading
                 .message
                 .contains("jit.mode=force jit.compile=inline"),
@@ -160,17 +162,21 @@ fn the_oracles_lines_are_a_pass_and_the_engines_lines_apart_are_not() {
     }
 }
 
-/// An accepted `trace:dump/<program>` row is what a difference passes
-/// under, naming the row; an `open` one accepts nothing.
+/// An accepted `trace:dump/<program>` row pinning both sides' lines as
+/// the run keeps them is what a difference passes under, naming the row
+/// (#3291); an `open` one accepts nothing.
 #[test]
 fn an_accepted_row_passes_the_difference_and_an_open_one_does_not() {
     if oracle().is_none() {
         return;
     }
     let scratch = Scratch::new("row");
+    let read = |name: &str| fs::read(fixtures().join(name)).unwrap();
+    let pins = Digests::of(&read("oracle.lines"), &read("engine.lines"));
     let row = |status: &str| {
         let row = format!(
-            "[[divergence]]\nid = \"trace:dump/loop\"\nkind = \"trace\"\nreason = \"a for loop's root (#3134)\"\nstatus = \"{status}\"\nsince = \"2026-10-21\"\n"
+            "[[divergence]]\nid = \"trace:dump/loop\"\nkind = \"trace\"\nreason = \"a for loop's root (#3134)\"\nstatus = \"{status}\"\nsince = \"2026-10-21\"\noracle = \"{}\"\nengine = \"{}\"\n",
+            pins.oracle, pins.engine
         );
         registry(&row)
     };
@@ -191,7 +197,7 @@ fn an_accepted_row_passes_the_difference_and_an_open_one_does_not() {
 #[test]
 fn an_absent_oracle_is_a_skip_and_not_a_pass() {
     let mut scratch = Scratch::new("absent");
-    scratch.manifest.pin.oracle.path = scratch.root.join("nowhere/php");
+    scratch.manifest.pin.as_mut().unwrap().oracle.path = scratch.root.join("nowhere/php");
     let reading = scratch.one("engine.lines", &registry(""));
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
     assert!(

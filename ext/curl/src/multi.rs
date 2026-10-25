@@ -13,7 +13,7 @@ use crate::constants as c;
 use crate::ffi::{Address, Cx, Easy, EasyId, Multi, MultiId, multi_strerror};
 use crate::handle::{
     Curl, CurlHandle, Handler, WriteTo, cast_object, cleanup_handle, copy_handlers, curl, easy_of,
-    made, verify_handlers,
+    hand_out, made, verify_handlers,
 };
 use crate::info::Assoc;
 
@@ -323,6 +323,31 @@ fn curl_multi_select(
 /// string(6) "multi
 /// "
 /// ```
+///
+/// A body kept under `CURLOPT_RETURNTRANSFER` is grown fallibly since
+/// 8.5.12: past the memory limit the transfer ends in a write error, and
+/// the limit's fatal is raised as the call returns. The figure is the
+/// growth of a huge block, which the address space lets grow in place or
+/// not, so it varies between runs.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// $h = fopen($f, 'w');
+/// for ($i = 0; $i < 10; $i++) fwrite($h, str_repeat('a', 1 << 20));
+/// fclose($h);
+/// register_shutdown_function(fn() => unlink($f));
+/// $m = curl_multi_init();
+/// $c = curl_init("file://$f");
+/// curl_setopt($c, CURLOPT_RETURNTRANSFER, true);
+/// curl_multi_add_handle($m, $c);
+/// do { curl_multi_exec($m, $running); } while ($running);
+/// echo "unreached\n";
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate %d bytes) in %s on line 12
+/// ```
 #[php_function]
 fn curl_multi_exec(
     req: &mut Request,
@@ -372,23 +397,10 @@ fn curl_multi_getcontent(
     req: &mut Request,
     handle: Instance<CurlHandle>,
 ) -> Result<Option<Owner<PhpString>>, Thrown> {
-    let held = curl(req, handle)?;
-    if held.write.to != WriteTo::Return {
+    if curl(req, handle)?.write.to != WriteTo::Return {
         return Ok(None);
     }
-    let body = std::mem::take(&mut held.returned);
-    let string = PhpString::new(req, &body);
-    let held = match curl(req, handle) {
-        Ok(held) => held,
-        Err(thrown) => {
-            if let Ok(string) = string {
-                string.give_up(req);
-            }
-            return Err(thrown);
-        }
-    };
-    held.returned = body;
-    string.map(Some)
+    hand_out(req, handle.object()).map(Some)
 }
 
 /// `curl_multi_info_read(CurlMultiHandle $multi_handle, &$queued_messages = null): array|false`.

@@ -12,11 +12,13 @@ use php_ext::attr::php_class;
 use php_ext::call::{call, lookup_class, lookup_function};
 use php_ext::coerce::{callable_checked, value_name, with_string};
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, clear, docref, exit, leave_pending,
+    Level, Thrown, arg_value_error, argument_error, clear, docref, exit, leave_pending, pending,
     throw_error, throw_value,
 };
 use php_ext::request::{Ini, OutputOp, OwnedStream as _, Request, StartHandler, Streams as _};
-use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
+use php_ext::values::{
+    ClassId, Emalloc, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk,
+};
 use php_ext_libxml::ffi::{Kind, Node, Save};
 
 use crate::classes::{Fault as FaultArgs, SoapFault, SoapHeader};
@@ -315,7 +317,7 @@ fn fatal_fault(
 /// ```
 /// ```expect exit=255
 /// Status: 500 Internal Server Error
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-Length: 295
 /// Content-Type: text/xml; charset=utf-8
 ///
@@ -344,7 +346,7 @@ fn fatal_fault(
 /// <?xml version="1.0"?><SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="http://test-uri/"><SOAP-ENV:Body><ns1:f><a>1</a></ns1:f></SOAP-ENV:Body></SOAP-ENV:Envelope>
 /// ```
 /// ```expect exit=255
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-Length: 295
 /// Content-Type: text/xml; charset=utf-8
 ///
@@ -386,7 +388,11 @@ pub(crate) fn soap_error_handler(req: &mut Request, beneath: Beneath<'_, chain::
     );
     if let Some(client) = error_object.filter(|o| instance_of(req, *o, "SoapClient")) {
         let exceptions = client_throws(client);
-        if fatal && exceptions {
+        if req.memory().has_oom() {
+            // Since 8.5.12 the memory limit's fatal is the one beneath's,
+            // not a `SoapFault`.
+            beneath.serve(req);
+        } else if fatal && exceptions {
             // `add_soap_fault_ex_en` and `zend_throw_exception_object`,
             // then `zend_bailout()`, which the engine makes once this
             // returns; a fault the memory limit refuses has bailed out.
@@ -852,7 +858,7 @@ impl SoapServer {
         };
         service_of(req, object)?;
         // `ZVAL_COPY` of each argument into `soap_class.argv`.
-        let args: Vec<Owner<Value>> = args.0.into_iter().map(|a| Owner::take(req, a)).collect();
+        let args: Vec<Owner<Value>> = args.into_iter().map(|a| Owner::take(req, a)).collect();
         let old = match service_mut(req, object) {
             Some(s) => {
                 s.kind = ServiceKind::Class;
@@ -1005,9 +1011,8 @@ impl SoapServer {
                     };
                     let Some(declared) = declared_function(req, &name) else {
                         let shown = String::from_utf8_lossy(&name).into_owned();
-                        return Err(php_ext::raising::throw(
+                        return Err(php_ext::raising::type_error(
                             req,
-                            "TypeError",
                             &format!("SoapServer::addFunction(): Function \"{shown}\" not found"),
                         ));
                     };
@@ -1109,6 +1114,41 @@ impl SoapServer {
     /// ```
     /// ```expect
     /// 56
+    /// ```
+    ///
+    /// Since 8.5.12 the arguments are read into a table asked for fallibly
+    /// and stop once the memory limit was met, none handed on; the call's
+    /// entry raises the limit's fatal, which the server answers as a fault:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '16M');
+    /// function f() { echo "unreached\n"; }
+    /// $request = '<?xml version="1.0"?><E:Envelope xmlns:E="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="u"><E:Body><ns1:f>'
+    ///     . str_repeat('<p><a/></p>', 100000) . '</ns1:f></E:Body></E:Envelope>';
+    /// $server = new SoapServer(null, ['uri' => 'u']);
+    /// $server->addFunction('f');
+    /// $server->handle($request);
+    /// ```
+    /// ```expect exit=255
+    /// <?xml version="1.0" encoding="UTF-8"?>
+    /// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>Allowed memory size of 16777216 bytes exhausted (tried to allocate 2097152 bytes)</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
+    /// ```
+    ///
+    /// The headers stop once the memory limit was met, since 8.5.12, each
+    /// one's arguments the siblings that follow it:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '16M');
+    /// function f() { echo "unreached\n"; }
+    /// $request = '<?xml version="1.0"?><E:Envelope xmlns:E="http://schemas.xmlsoap.org/soap/envelope/" xmlns:ns1="u"><E:Header>'
+    ///     . str_repeat('<ns1:h/>', 5000) . '</E:Header><E:Body><ns1:f/></E:Body></E:Envelope>';
+    /// $server = new SoapServer(null, ['uri' => 'u']);
+    /// $server->addFunction('f');
+    /// $server->handle($request);
+    /// ```
+    /// ```expect exit=255
+    /// <?xml version="1.0" encoding="UTF-8"?>
+    /// <SOAP-ENV:Envelope xmlns:SOAP-ENV="http://schemas.xmlsoap.org/soap/envelope/"><SOAP-ENV:Body><SOAP-ENV:Fault><faultcode>SOAP-ENV:Server</faultcode><faultstring>Allowed memory size of 16777216 bytes exhausted (tried to allocate 2097152 bytes)</faultstring></SOAP-ENV:Fault></SOAP-ENV:Body></SOAP-ENV:Envelope>
     /// ```
     #[php(tentative)]
     fn handle(
@@ -1324,12 +1364,61 @@ struct Call<'a> {
     params: Vec<Owner<Value>>,
     version: i64,
     headers: Vec<HeaderCall<'a>>,
+    /// The `zval` tables `deserialize_parameters` laid on the request's
+    /// heap for the arguments and the headers' ([`Tables`]).
+    tables: Tables,
 }
 
 impl Call<'_> {
     fn release(self, req: &mut Request) {
         release_all(req, self.params);
         release_headers(req, self.headers);
+        self.tables.free(req);
+    }
+}
+
+/// What a call answered, and then, as php reads `EG(exception)` after
+/// `call_user_function`, what it left pending: the memory limit's fatal
+/// raised at the call's entry leaves php's unwind exit and no answer
+/// (8.5.12).
+fn called_pending(req: &mut Request, called: R<Owner<Value>>) -> R<Owner<Value>> {
+    let value = called?;
+    if let Err(thrown) = pending(req) {
+        value.give_up(req);
+        return Err(thrown);
+    }
+    Ok(value)
+}
+
+/// `sizeof(zval)`.
+const ZVAL_SIZE: usize = 16;
+
+/// The `zval` table `deserialize_parameters` asks for each list of
+/// arguments, `safe_emalloc(num_of_params, sizeof(zval), 0)`, of php's
+/// size on the request's heap beside the engine's own list, each held
+/// until the call's arguments are let go.
+#[derive(Default)]
+struct Tables(Vec<Emalloc>);
+
+impl Tables {
+    /// One table for `count` arguments, asked for fallibly where
+    /// `fallibly`; `false` where the memory limit refused it.
+    fn ask(&mut self, req: &mut Request, count: usize, fallibly: bool) -> R<bool> {
+        let len = count.saturating_mul(ZVAL_SIZE);
+        let table = if fallibly {
+            req.memory_mut().fallible(|req| Emalloc::new(req, len))?
+        } else {
+            Some(Emalloc::new(req, len)?)
+        };
+        let refused = table.is_none();
+        self.0.extend(table);
+        Ok(!refused)
+    }
+
+    fn free(self, req: &mut Request) {
+        for table in self.0 {
+            table.free(req);
+        }
     }
 }
 
@@ -1737,7 +1826,8 @@ fn serve(
                     return Ok(());
                 };
                 let params: Vec<Value> = parsed.headers[i].parameters.iter().map(|p| **p).collect();
-                match call(req, &callable, &params) {
+                let called = call(req, &callable, &params);
+                match called_pending(req, called) {
                     Ok(v) => {
                         let old = std::mem::replace(&mut parsed.headers[i].retval, v);
                         old.give_up(req);
@@ -1788,7 +1878,11 @@ fn serve(
                 return Ok(());
             };
             let params: Vec<Value> = parsed.params.iter().map(|p| **p).collect();
+            // `if (EG(exception))` after the call as well: the memory
+            // limit's fatal, raised at the call's entry, leaves php's
+            // unwind exit and no answer (8.5.12).
             let called = call(req, &callable, &params);
+            let called = called_pending(req, called);
             if kind == ServiceKind::Class {
                 release_made(req, &mut made);
             }
@@ -2008,6 +2102,7 @@ fn deserialize_parameters(
     sdl: Option<&Sdl>,
     params: Option<Node>,
     function: Option<&Function>,
+    tables: &mut Tables,
 ) -> Res<Vec<Owner<Value>>> {
     let mut out: Vec<Owner<Value>> = Vec::new();
     if let Some(f) = function {
@@ -2018,6 +2113,7 @@ fn deserialize_parameters(
             .values()
             .any(|p| get_node(params, p.param_name.as_deref().unwrap_or_default(), None).is_some());
         if use_names {
+            tables.ask(req, rp.values().count(), false)?;
             for p in rp.values() {
                 let val = get_node(params, p.param_name.as_deref().unwrap_or_default(), None);
                 match val {
@@ -2050,6 +2146,11 @@ fn deserialize_parameters(
     if document_with_no_params {
         return Ok(out);
     }
+    // The table asked for fallibly since 8.5.12, no arguments where the
+    // memory limit refused it.
+    if num > 0 && !tables.ask(req, num, true)? {
+        return Ok(out);
+    }
     for (cur, node) in elements.into_iter().enumerate() {
         let mut enc = None;
         if let Some(f) = function {
@@ -2074,6 +2175,12 @@ fn deserialize_parameters(
                 release_all(req, out);
                 return Err(e);
             }
+        }
+        // Since 8.5.12 the arguments stop once the memory limit was met,
+        // and none is handed on.
+        if req.memory().has_oom() {
+            release_all(req, out);
+            return Ok(Vec::new());
         }
     }
     Ok(out)
@@ -2350,6 +2457,10 @@ fn deserialize_function_call_in<'a>(
         }
     }
     let mut headers: Vec<HeaderCall<'a>> = Vec::new();
+    let mut tables = Tables::default();
+    // Since 8.5.12 the headers stop once the memory limit was met, and the
+    // call is found no function, the headers read so far kept.
+    let mut oom = false;
     // The blocks read so far are given back where a later one fails.
     let read = (|| -> Res<()> {
         let Some(head) = head else {
@@ -2436,6 +2547,8 @@ fn deserialize_function_call_in<'a>(
                 hdr = ih.get_str(&key);
             }
             let parameters = if let Some(h) = hdr {
+                // `h->parameters = emalloc(sizeof(zval))`.
+                tables.ask(req, 1, false)?;
                 vec![master_to_zval(req, cx, h.encode, hdr_func)?]
             } else {
                 let mut node = Some(hdr_func);
@@ -2444,7 +2557,7 @@ fn deserialize_function_call_in<'a>(
                 {
                     node = hdr_func.children();
                 }
-                deserialize_parameters(req, cx, sdl, node, hfunction)?
+                deserialize_parameters(req, cx, sdl, node, hfunction, &mut tables)?
             };
             headers.push(HeaderCall {
                 function: hfunction,
@@ -2454,12 +2567,34 @@ fn deserialize_function_call_in<'a>(
                 retval: Owner::null(),
                 hdr,
             });
+            if req.memory().has_oom() {
+                oom = true;
+                return Ok(());
+            }
         }
         Ok(())
     })();
     if let Err(e) = read {
         release_headers(req, headers);
+        tables.free(req);
         return Err(e);
+    }
+    if oom {
+        // `find_function` named the call before the headers were read.
+        if function.is_none()
+            && function_name.is_empty()
+            && let Some(f) = func
+        {
+            function_name = f.name();
+        }
+        return Ok(Call {
+            function: None,
+            function_name,
+            params: Vec::new(),
+            version,
+            headers,
+            tables,
+        });
     }
     let mut params_node = func;
     if let Some(fnb) = soap_binding(sdl, function) {
@@ -2469,10 +2604,11 @@ fn deserialize_function_call_in<'a>(
     } else {
         params_node = func.and_then(Node::children);
     }
-    let params = match deserialize_parameters(req, cx, sdl, params_node, function) {
+    let params = match deserialize_parameters(req, cx, sdl, params_node, function, &mut tables) {
         Ok(params) => params,
         Err(e) => {
             release_headers(req, headers);
+            tables.free(req);
             return Err(e);
         }
     };
@@ -2488,5 +2624,6 @@ fn deserialize_function_call_in<'a>(
         params,
         version,
         headers,
+        tables,
     })
 }

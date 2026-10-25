@@ -74,6 +74,11 @@ pub(crate) enum Sensed {
         named: String,
         trace: Option<String>,
     },
+    /// A heap made on a thread where a lend still stood (ADR-0014): the
+    /// slot a lend fills for one call was not emptied where the call
+    /// returned, so C called outside this heap's own lends would be
+    /// served by another heap, a request's that may have ended.
+    MadeUnderLend,
 }
 
 /// One block a heap held where the request ended: where it stands and the
@@ -153,6 +158,9 @@ impl Sensed {
                     "InternalError: {made} was dropped without being handed to a sink or given up{others}"
                 ))
             }
+            Sensed::MadeUnderLend => Fatal::error(
+                "InternalError: a request's heap was made on a thread where another heap's lend still stood: the lend's slot was not emptied where its call returned (ADR-0014)",
+            ),
             Sensed::Leak {
                 bytes,
                 blocks,

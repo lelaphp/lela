@@ -80,9 +80,9 @@ use crate::divergence::{Kind, Registry};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{
-    self, Ended, Invocation, Observation, Oracle, Oracles, Program, Verdict, linked,
+    self, Ended, Invocation, Observation, Oracle, Oracles, Pin, Program, Verdict, linked,
 };
-use crate::reading::{Reading, Status, Store, listed, plural};
+use crate::reading::{Reading, Status, Store, joined, listed, plural};
 use crate::sources::{self, Outside, Standing};
 use crate::tally;
 use crate::witness::Binary;
@@ -244,6 +244,7 @@ pub(crate) fn judge(registry: &Registry, id: &str, oracle: &[u8], engine: &Rende
         Rendering::Bytes(bytes) => match oracle::compare(registry, id, oracle, bytes) {
             Verdict::Same => Judgement::Pass,
             Verdict::Diverged(row) => Judgement::Diverged(row.reason.clone()),
+            Verdict::Moved(moved) => Judgement::Fail(moved.to_string()),
             Verdict::Differs(diff) => Judgement::Fail(first_difference(&diff, "rendering")),
         },
     }
@@ -274,12 +275,7 @@ pub(crate) fn first_difference(diff: &str, what: &str) -> String {
         .take_while(|line| changed(line))
         .copied()
         .collect();
-    let shown = hunk
-        .iter()
-        .take(HUNK)
-        .copied()
-        .collect::<Vec<_>>()
-        .join("\n");
+    let shown = joined(hunk.iter().take(HUNK).copied(), "\n");
     let rest = hunk.len().saturating_sub(HUNK);
     let more = if rest == 0 {
         String::new()
@@ -316,12 +312,12 @@ pub(crate) fn render(oracle: &Oracle<'_>, name: &str, column: Column) -> Result<
 /// The recipe as the reading names it: the invocation the oracle's bytes
 /// came from, and through a host other than the CLI, the host and the
 /// program it serves.
-pub(crate) fn recipe(manifest: &Manifest, name: &str, host: Host, column: Column) -> String {
+pub(crate) fn recipe(pin: &Pin, name: &str, host: Host, column: Column) -> String {
     if host != Host::Cli {
         return format!(
             "{} {} serving {}",
             host.invocation(),
-            manifest.pin.recipe.args.join(" "),
+            pin.recipe.args.join(" "),
             column.program(name)
         );
     }
@@ -333,7 +329,7 @@ pub(crate) fn recipe(manifest: &Manifest, name: &str, host: Host, column: Column
     };
     format!(
         "php {} {} {module}",
-        manifest.pin.recipe.args.join(" "),
+        pin.recipe.args.join(" "),
         column.flag()
     )
 }
@@ -368,7 +364,8 @@ pub fn run(
     // that row's extension is rendered (#1782); each digest is asserted at
     // the first rendering under it and never again.
     let variants = manifest.variants();
-    let oracles = Oracles::new(&manifest.pin, &variants);
+    let pin = manifest.pin()?;
+    let oracles = Oracles::new(pin, &variants);
     let engines = Engines {
         linked: Carried::linked(root)?,
         binary: Binary::of(root),
@@ -389,7 +386,7 @@ pub fn run(
     // next, so the items run side by side, in their order still (#2166).
     tally::each_beside(&items, |&(name, host, column)| {
             let mut reading = reading_of(&snapshot, manifest, name, host, column)?;
-            let recipe = recipe(manifest, name, host, column);
+            let recipe = recipe(pin, name, host, column);
             // A row whose crate the linked engine's workspace has not
             // created yet has no rendering to hold, as `budget` and
             // `unsafe-audit` count nothing for it (#64); for a host's own
@@ -520,7 +517,7 @@ fn rendering(
         } else if linked {
             linked::serve_by(
                 engines.server.as_deref(),
-                &manifest.pin.recipe,
+                &manifest.pin()?.recipe,
                 None,
                 &program,
             )
@@ -548,7 +545,7 @@ fn rendering(
     }
     let bytes = fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
     Ok(Rendering::Bytes(oracle::normalise(
-        &manifest.pin.recipe.normalise,
+        &manifest.pin()?.recipe.normalise,
         bytes,
     )))
 }
@@ -596,7 +593,7 @@ fn reading_of(
 ) -> Result<Reading> {
     let scope = host.scope(name, column);
     let path = stamped_path(manifest, name, host);
-    Ok(Reading::stamped_over(INSTRUMENT, &scope, snapshot, &path)?.under(&manifest.pin))
+    Ok(Reading::stamped_over(INSTRUMENT, &scope, snapshot, &path)?.under(manifest.pin()?))
 }
 
 /// The path both columns of `name` through `host` are stamped over: the

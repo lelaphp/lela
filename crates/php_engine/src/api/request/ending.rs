@@ -55,6 +55,12 @@ pub(crate) enum Ending {
     /// `E_PARSE`: the text is already on the stream `php_error_cb` put it
     /// on, and what is left is php's status, 255.
     Parse,
+    /// php 8.5.12's hard memory limit, `zend_mm_hard_limit_error`'s
+    /// `_exit(137)`: its line is on the error stream, and nothing more of
+    /// the request is served, no shutdown function, no destructor, no
+    /// `ob_start()` buffer flushed, no extension's `RSHUTDOWN`; the host ends on the
+    /// status ([`Request::terminate_at_hard_limit`]).
+    Terminated,
 }
 
 /// Where the request stands, whose field no file but this one reads.
@@ -147,7 +153,7 @@ impl Request {
         if self.bailout {
             return;
         }
-        self.note_error_in(Level::CoreError, message, b"Unknown", 0);
+        self.note_error_in(Level::CoreError, message.as_bytes(), b"Unknown", 0);
         self.bail_out();
     }
 
@@ -195,8 +201,7 @@ impl Request {
                 string.as_bytes(),
                 crate::observer::Told::Uncaught,
             );
-            let text = String::from_utf8_lossy(message);
-            self.zend_error_cb(level, Bail::DontBail, string, &text, file, line);
+            self.zend_error_cb(level, Bail::DontBail, string, file, line);
             self.release(Value::string(string));
         }
     }
@@ -229,12 +234,19 @@ impl Request {
     /// d
     /// ```
     pub(crate) fn bail_out(&mut self) {
+        self.bailout_marks();
+        self.leave();
+    }
+
+    /// What `_zend_bailout` leaves before its `longjmp`, which a
+    /// `zend_catch` that catches it keeps: the collector protected
+    /// (`gc_protect(1)`) and `CG(unclean_shutdown)`.
+    pub(super) fn bailout_marks(&mut self) {
         self.heap.gc_protect(true);
         #[cfg(debug_assertions)]
         {
             self.progress.unclean = true;
         }
-        self.leave();
     }
 
     /// `CG(unclean_shutdown)`: whether a fatal's `zend_bailout` was
@@ -286,10 +298,9 @@ impl Request {
         let ErrorArgs {
             level,
             bail,
-            message,
+            string,
             file,
             line,
-            ..
         } = error;
         if !diagnostics::fatal_errors(level) {
             return;
@@ -317,7 +328,9 @@ impl Request {
         self.ending = Some(match level {
             Level::Parse => Ending::Parse,
             _ => Ending::Fatal(format!(
-                "PHP Fatal error:  {message} in {} on line {line}{}",
+                "PHP Fatal error:  {} in {} on line {line}{}",
+                // The log form's `%s`, to the message's first NUL.
+                String::from_utf8_lossy(crate::c_number::c_str(string.as_bytes())),
                 String::from_utf8_lossy(file),
                 self.stack_trace_after_the_site()
             )),
@@ -346,8 +359,20 @@ impl Request {
             self.end_in_uncaught(level, message.as_bytes(), file, line);
             return;
         }
-        self.note_error_in(level, message, file, line);
+        self.note_error_in(level, message.as_bytes(), file, line);
         self.bail_out();
+    }
+
+    /// The request ended as php's process ends at the hard memory limit
+    /// ([`Ending::Terminated`]), whatever it was ending in before.
+    pub(super) fn end_as_terminated(&mut self) {
+        self.ending = Some(Ending::Terminated);
+    }
+
+    /// Whether the request ended at the hard memory limit, after which
+    /// nothing of it is served ([`Ending::Terminated`]).
+    pub(crate) fn terminated(&self) -> bool {
+        matches!(self.ending, Some(Ending::Terminated))
     }
 
     /// `EG(exit_status) = status`, `ZEND_FUNCTION(exit)`'s int arm: the
@@ -407,7 +432,7 @@ impl Request {
     /// ```expect exit=255
     /// cb 1
     ///
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 3
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 3
     /// ```
     ///
     /// No `finally` is served on the way out, and each step of
@@ -422,10 +447,10 @@ impl Request {
     /// try { str_repeat('y', 4 << 20); } finally { echo "finally\n"; }
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 5
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 5
     /// sd1
     ///
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 2
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 2
     /// ```
     pub(crate) fn catch_bailout(&mut self) {
         self.set_bailing_out(false);
@@ -453,26 +478,29 @@ impl Request {
     }
 
     pub(crate) fn end_in(&mut self, fatal: &Fatal) {
-        // `php_output_discard_all()` where the heap refused with its
-        // limit lifted, before the fatal is displayed
-        // (`zend_alloc_in_memory_limit_error_reporting`).
-        if self.heap.in_memory_limit_error() {
-            crate::output::discard_all(self);
-        }
         match fatal.reason() {
             php_heap::FatalReason::Error(message) => self.end_in_fatal(message),
             php_heap::FatalReason::OutOfMemory(bytes) => self.end_in_fatal(&format!(
                 "Allowed memory size of {} bytes exhausted (tried to allocate {bytes} bytes)",
-                self.ini_parse_bytes_of("memory_limit")
+                self.ini()
+                    .get(b"memory_limit")
+                    .map_or(0, super::Ini::parse_bytes)
             )),
+            php_heap::FatalReason::HardLimit { limit, asked } => {
+                self.terminate_at_hard_limit(*limit, *asked);
+            }
+            // A fallible refusal is read by its scope ([`Memory::fallible`])
+            // and never ends a request; one that reaches here left its scope.
+            //
+            // [`Memory::fallible`]: crate::api::request::Memory::fallible
+            php_heap::FatalReason::Refused => {
+                self.end_in_fatal("InternalError: a fallible refusal left its scope");
+            }
         }
-        // A fatal the heap raised lifted its limit for the rendering, as
-        // `zend_mm_safe_error` does; it holds again from here.
-        self.heap.overflow_rendered();
     }
 
-    /// Each extension's hook once the primary program has ended and before
-    /// the request shuts down, in bundle order
+    /// Each extension's hook once the primary program has ended, as the
+    /// request starts to shut down, in bundle order
     /// ([`ExtensionBuilder::program_ended`]).
     ///
     /// [`ExtensionBuilder::program_ended`]: crate::api::abi::ExtensionBuilder::program_ended

@@ -332,17 +332,14 @@ impl Request {
         }
         let source = std::fs::read(String::from_utf8_lossy(path).as_ref()).ok()?;
         let shared = Arc::clone(&self.shared);
-        let bound = crate::multibyte::bound(self, shared.compile_multibyte());
-        let holds = |name: &[u8]| self.class_named(Bare::resolved(name)).is_some();
-        let request_classes = php_compile::RequestClasses::new(&holds);
-        let unit = shared.publish_file(
-            &source,
-            path,
-            &self.cwd,
-            self.stack_limit(),
-            request_classes,
-            bound.as_ref().map(crate::multibyte::Bound::settings),
-        );
+        let unit = self.compile_for_cache(&source, path).unit;
+        if let Ok(unit) = &unit {
+            self.count_keys_made(crate::unit_cache::keys_of(unit));
+        }
+        // The preload optimizes what it holds (`zend_optimize_script`
+        // in `preload_optimize`).
+        let optimizer = shared.optimizer();
+        let unit = unit.map(|unit| shared.publish_compiled(optimizer.optimized(unit)));
         if let (Ok(unit), Some(preloading)) = (&unit, &mut self.preloading) {
             let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
             preloading
@@ -498,14 +495,15 @@ impl Request {
                 raised.site().line,
             );
         }
-        self.bind_declared(
+        // The memory limit refusing what the link lays ends the request.
+        let bound = self.bind_declared(
             &candidate.unit,
             candidate.at,
             linking.composed,
             linking.record,
         );
-        candidate.linked = true;
-        true
+        candidate.linked = bound.is_ok();
+        candidate.linked
     }
 
     /// `preload_resolve_deps`: the parent, interface or trait `decl`
@@ -570,7 +568,11 @@ impl Request {
             .scripts
             .into_iter()
             .zip(0u64..)
-            .map(|((path, unit, size), order)| Arc::new(Held::preloaded(unit, path, size, order)))
+            .map(|((path, unit, size), order)| {
+                // `preload_script_in_shared_memory` persists each file.
+                self.shared.units.persist_names(&path, &unit);
+                Arc::new(Held::preloaded(unit, path, size, order))
+            })
             .collect();
         Some(Preloaded {
             classes: tables.classes,
@@ -898,11 +900,7 @@ impl Frames<&Request> {
             return false;
         };
         body != Body::Main
-            && preloaded.scripts.iter().any(|held| {
-                held.unit
-                    .as_ref()
-                    .is_ok_and(|held| PublishedUnit::ptr_eq(held, unit))
-            })
+            && (preloaded.scripts.iter()).any(|held| PublishedUnit::ptr_eq(&held.unit, unit))
     }
 }
 

@@ -133,7 +133,18 @@ pub(super) fn unit_length(pattern: &Pattern, subject: &[u8], at: usize) -> usize
 }
 
 /// The bytes of `subject` between two offsets as a new string,
-/// `ZVAL_STRINGL_FAST`.
+/// `populate_match_value_str`'s `ZVAL_STRINGL_FAST`
+/// (`Z/ext/pcre/php_pcre.c:951-954`), sized as php-8.5.12 sizes it
+/// ([`PhpString::fast`]).
+///
+/// ```php
+/// echo "groups\n"; $s = str_repeat('abcdefgh', 4);
+/// $m = memory_get_usage(); preg_match('/(a.{6})(.{7})/', $s, $g); echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// groups
+/// 376
+/// ```
 pub(super) fn piece(
     req: &mut Request,
     subject: &[u8],
@@ -141,7 +152,7 @@ pub(super) fn piece(
     end: usize,
 ) -> Result<Owner<Value>, Thrown> {
     let bytes = subject.get(start..end).unwrap_or_default();
-    Ok(PhpString::new(req, bytes)?.into_value())
+    Ok(PhpString::fast(req, bytes)?.into_value())
 }
 
 /// `populate_match_value`: the group's text, or for one that did not
@@ -163,28 +174,108 @@ fn match_value(
 }
 
 /// `add_offset_pair`'s pair: `[text, offset]`, or for a group that did
-/// not take part `[null or "", -1]`.
+/// not take part the request's one `[null or "", -1]`
+/// ([`unmatched_pair`]).
 pub(super) fn offset_pair(
     req: &mut Request,
     subject: &[u8],
     (start, end): (usize, usize),
     unmatched_as_null: bool,
 ) -> Result<Owner<Value>, Thrown> {
-    let mut pair = PhpArray::new(req)?;
     if start == ffi::PCRE2_UNSET {
-        let text = if unmatched_as_null {
-            Owner::null()
-        } else {
-            PhpString::new(req, b"")?.into_value()
-        };
-        pair.append(req, text)?;
-        pair.append(req, Owner::int(-1))?;
-    } else {
-        let text = piece(req, subject, start, end)?;
-        pair.append(req, text)?;
-        pair.append(req, Owner::int(i64::try_from(start).unwrap_or(i64::MAX)))?;
+        return unmatched_pair(req, unmatched_as_null);
     }
+    let mut pair = PhpArray::new(req)?;
+    let text = piece(req, subject, start, end)?;
+    pair.append(req, text)?;
+    pair.append(req, Owner::int(i64::try_from(start).unwrap_or(i64::MAX)))?;
     Ok(pair.into_value())
+}
+
+/// `ZVAL_COPY(&match_pair, &PCRE_G(unmatched_empty_pair))`, or of
+/// `unmatched_null_pair` under `PREG_UNMATCHED_AS_NULL`: one more owner
+/// of the request's one pair, made on first use
+/// (`init_unmatched_empty_pair`, `init_unmatched_null_pair`), so every
+/// group that did not take part shares it and a `$matches` destroyed
+/// with it gives up an array another owner holds, a possible root.
+/// Once the program has ended, in a shutdown function or a destructor
+/// the request's end serves, a pair not cached yet is made fresh and
+/// cached no more, as under `EG_FLAGS_IN_SHUTDOWN`; one cached before
+/// is still handed out.
+///
+/// ```php
+/// function d($p) {
+///     preg_match_all('#\{(!)?(\w+)\}#', $p, $m, PREG_OFFSET_CAPTURE | PREG_SET_ORDER);
+///     gc_collect_cycles(); unset($m); var_dump(gc_status()['roots']);
+/// }
+/// d('/h/{name}');
+/// preg_match('/(x)?(y)/', 'y', $o, PREG_OFFSET_CAPTURE);
+/// var_dump($o[1]);
+/// register_shutdown_function(function () {
+///     preg_match('/(a)?(b)?c/', 'c', $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+///     gc_collect_cycles(); unset($n); $fresh = gc_status()['roots'];
+///     preg_match('/(x)?(y)/', 'y', $m, PREG_OFFSET_CAPTURE);
+///     gc_collect_cycles(); unset($m); var_dump($fresh, gc_status()['roots']);
+/// });
+/// ```
+/// ```expect
+/// int(1)
+/// array(2) {
+///   [0]=>
+///   string(0) ""
+///   [1]=>
+///   int(-1)
+/// }
+/// int(0)
+/// int(1)
+/// ```
+///
+/// Under `PREG_UNMATCHED_AS_NULL` the program's own null pair is shared
+/// the same way, every unmatched group of a match handed the one array:
+///
+/// ```php
+/// function n() {
+///     preg_match('/(a)?(b)?c/', 'c', $m, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+///     gc_collect_cycles(); unset($m); var_dump(gc_status()['roots']);
+/// }
+/// n();
+/// preg_match('/(a)?(b)?c/', 'c', $o, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL);
+/// var_dump($o[1], $o[1] === $o[2]);
+/// ```
+/// ```expect
+/// int(1)
+/// array(2) {
+///   [0]=>
+///   NULL
+///   [1]=>
+///   int(-1)
+/// }
+/// bool(true)
+/// ```
+pub(super) fn unmatched_pair(
+    req: &mut Request,
+    unmatched_as_null: bool,
+) -> Result<Owner<Value>, Thrown> {
+    if let Some(pair) = req.state::<State>().unmatched.cached(unmatched_as_null) {
+        return Ok(Owner::take(req, pair).into_value());
+    }
+    let mut pair = PhpArray::new(req)?;
+    let text = if unmatched_as_null {
+        Owner::null()
+    } else {
+        PhpString::new(req, b"")?.into_value()
+    };
+    pair.append(req, text)?;
+    pair.append(req, Owner::int(-1))?;
+    match req
+        .state::<State>()
+        .unmatched
+        .cache(unmatched_as_null, pair)
+    {
+        Ok(cached) => Ok(Owner::take(req, cached).into_value()),
+        // `EG_FLAGS_IN_SHUTDOWN`'s arm: the group's own pair.
+        Err(own) => Ok(own.into_value()),
+    }
 }
 
 /// `add_named` and the numbered insert after it: the value under the
@@ -213,7 +304,9 @@ fn insert(
 /// `populate_subpat_array`: one match's groups, each under its number
 /// and its name, as text or as `[text, offset]` pairs, the groups past
 /// the last that took part only under `PREG_UNMATCHED_AS_NULL`, and
-/// `MARK` last where the match passed one.
+/// `MARK` last where the match passed one. `false`, php's `FAILURE`,
+/// once the memory limit was met, the groups after it left out, since
+/// 8.5.12.
 pub(super) fn populate(
     req: &mut Request,
     into: &mut Owner<PhpArray>,
@@ -222,7 +315,7 @@ pub(super) fn populate(
     subject: &[u8],
     count: usize,
     flags: i64,
-) -> Result<(), Thrown> {
+) -> Result<bool, Thrown> {
     let offsets = flags & PREG_OFFSET_CAPTURE != 0;
     let as_null = flags & PREG_UNMATCHED_AS_NULL != 0;
     let name = |group: usize| pattern.names.get(group).and_then(|n| n.as_deref());
@@ -235,6 +328,9 @@ pub(super) fn populate(
         };
         let unset = at.0 == ffi::PCRE2_UNSET;
         insert(req, into, name(group), value, unset)?;
+        if req.memory().has_oom() {
+            return Ok(false);
+        }
     }
     if as_null {
         for group in count..pattern.groups {
@@ -245,13 +341,16 @@ pub(super) fn populate(
                 Owner::null()
             };
             insert(req, into, name(group), value, true)?;
+            if req.memory().has_oom() {
+                return Ok(false);
+            }
         }
     }
     if let Some(mark) = scratch.data.mark() {
         let mark = PhpString::new(req, &mark)?.into_value();
         into.set_str(req, b"MARK", mark)?;
     }
-    Ok(())
+    Ok(!req.memory().has_oom())
 }
 
 /// `preg_match(string $pattern, string $subject, &$matches = null, int
@@ -673,6 +772,30 @@ fn preg_match(
 /// }
 /// preg_match_all(): Argument #4 ($flags) must be a PREG_* constant
 /// ```
+///
+/// Since 8.5.12 the matches stop once the memory limit was met, `$matches`
+/// emptied, and the limit's fatal is raised as the call returns, rather
+/// than the arrays growing on to the hard limit:
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $n = preg_match_all('/./', str_repeat('a', 1200000), $m);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2113536 bytes) in %s on line 3
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $n = preg_match_all('/(.)/', str_repeat('a', 300000), $m, PREG_SET_ORDER);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn preg_match_all(
     req: &mut Request,
@@ -815,8 +938,15 @@ fn matches_loop(
     let mut marks: Option<Owner<PhpArray>> = None;
     let mut subject = Subject::of(&string);
     let mut matched: i64 = 0;
+    // Whether the walk stopped at the memory limit, php's `goto oom`.
+    let mut met = false;
     let mut count = scratch.run(pattern, &mut subject, *start, 0, true);
     'search: loop {
+        // `goto oom` once the memory limit was met, since 8.5.12.
+        if req.memory().has_oom() {
+            met = true;
+            break;
+        }
         if count >= 0 {
             if count == 0 {
                 docref(req, Level::Notice, "Matched, but too many substrings");
@@ -838,7 +968,7 @@ fn matches_loop(
                 }
                 if let Some(out) = out.as_mut() {
                     if !global {
-                        populate(req, out, pattern, scratch, bytes, n, flags)?;
+                        met = !populate(req, out, pattern, scratch, bytes, n, flags)?;
                         break 'search;
                     }
                     if order == PREG_PATTERN_ORDER {
@@ -850,6 +980,10 @@ fn matches_loop(
                                 match_value(req, bytes, at, as_null)?
                             };
                             set.append(req, value)?;
+                            if req.memory().has_oom() {
+                                met = true;
+                                break 'search;
+                            }
                         }
                         if let Some(mark) = scratch.data.mark() {
                             let marks = match marks.as_mut() {
@@ -867,10 +1001,18 @@ fn matches_loop(
                                 match_value(req, bytes, unset, as_null)?
                             };
                             set.append(req, value)?;
+                            if req.memory().has_oom() {
+                                met = true;
+                                break 'search;
+                            }
                         }
                     } else {
                         let mut set = PhpArray::new(req)?;
-                        populate(req, &mut set, pattern, scratch, bytes, n, flags)?;
+                        if !populate(req, &mut set, pattern, scratch, bytes, n, flags)? {
+                            set.give_up(req);
+                            met = true;
+                            break 'search;
+                        }
                         out.append(req, set.into_value())?;
                     }
                 }
@@ -906,6 +1048,24 @@ fn matches_loop(
             break;
         }
         count = scratch.run(pattern, &mut subject, *start, 0, true);
+    }
+    // `oom:` the sets and the marks freed, `$matches` cleaned, and
+    // `RETURN_OOM()`, the limit's fatal raised as the call returns.
+    if met {
+        for set in sets {
+            set.give_up(req);
+        }
+        if let Some(marks) = marks {
+            marks.give_up(req);
+        }
+        let cleaned = match out {
+            Some(out) => {
+                out.give_up(req);
+                Some(PhpArray::new(req)?)
+            }
+            None => None,
+        };
+        return Ok((None, cleaned));
     }
     if let Some(out) = out.as_mut()
         && !sets.is_empty()

@@ -11,7 +11,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, with_string};
 use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Emalloc, FreshString, Owner, PhpArray, PhpObject, PhpString, Sizing, Value};
 use php_ext_mysqlnd::client::{
     CLIENT_INFO, CLIENT_VERSION, ClientOption, CloseType, Command, Connect, Mysqlnd, ServerOption,
 };
@@ -1066,15 +1066,26 @@ pub(crate) fn stat(req: &mut Request, on: On) -> Result<OrFalse<Owner<PhpString>
     }
 }
 
-/// `mysqli_real_escape_string`.
+/// `mysqli_real_escape_string`: escaped into `zend_string_safe_alloc(2,
+/// len, 0)` and cut by `zend_string_truncate` to what was written
+/// (`ext/mysqli/mysqli_api.c:1369-1371` at php-8.5.12), so even the empty
+/// string and one byte are a string of the request's, at the cut's bin.
 pub(crate) fn escape(
     req: &mut Request,
     on: On,
     from: PhpString,
 ) -> Result<Owner<PhpString>, Thrown> {
     let mysql = conn(req, on.object, Need::Open)?;
-    let escaped = mysql.escape(req, from.as_bytes());
-    PhpString::new(req, &escaped)
+    let len = from.len();
+    // A length that overflows is the sizing's fatal, php's `safe_address`.
+    let mut escaped = FreshString::sized(
+        req,
+        len.saturating_mul(2),
+        Sizing::SafeAlloc { n: 2, m: len },
+    )?;
+    let written = mysql.escape(req, from.as_bytes());
+    escaped.bytes_mut()[..written.len()].copy_from_slice(&written);
+    Ok(escaped.truncate(req, written.len())?.finish())
 }
 
 /// `mysqli_options`: the value converted to the option's type and the
@@ -1807,6 +1818,28 @@ impl Props for LinkProps {
         "warning_count",
     ];
 
+    /// `mysqli_link_property_entries`' read functions: a link a failed
+    /// `connect` left made is not fully initialized, where a failed
+    /// `real_connect` keeps its connection unconnected (GH-22854):
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// foreach (['connect', 'real_connect'] as $how) {
+    ///     $m = new mysqli('127.0.0.1', 'root', '', 'test');
+    ///     @$m->$how('127.0.0.1', 'root', '', 'no_such_database');
+    ///     foreach (['host_info', 'errno', 'error'] as $name) {
+    ///         try { var_dump($m->$name); } catch (Error $e) { echo "$name: ", $e->getMessage(), "\n"; }
+    ///     }
+    /// }
+    /// ```
+    /// ```expect mysql
+    /// host_info: Property access is not allowed yet
+    /// errno: mysqli object is not fully initialized
+    /// error: mysqli object is not fully initialized
+    /// host_info: Property access is not allowed yet
+    /// int(1049)
+    /// string(35) "Unknown database 'no_such_database'"
+    /// ```
     fn read(
         req: &mut Request,
         object: PhpObject,
@@ -1848,8 +1881,10 @@ impl Props for LinkProps {
         if !open && !made_enough {
             return props::not_yet(req, quiet);
         }
+        // A link a failed reconnect left made has no `mysql`, php
+        // 8.5.12's `if (!p)` in `MYSQLI_GET_MYSQL`.
         let Some(mysql) = mysql else {
-            return props::gone(req, object, quiet);
+            return props::not_initialized(req, object, quiet);
         };
         let s = mysql.status(req);
         let value = match name {

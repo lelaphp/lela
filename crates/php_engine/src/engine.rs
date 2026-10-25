@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use php_compile::multibyte::Multibyte;
-use php_compile::{CompileError, RequestClasses, SourceKind, StackLimit};
+use php_compile::{CompileError, RequestClasses, RequestConstants, SourceKind, StackLimit};
 use php_heap::{Intern, Strings, Zval};
 use php_link::{Exact, Folded, Indexed, LinkedClass, NameMap, Names};
 use php_unit::decl::{
@@ -47,7 +47,8 @@ use crate::natives::StubPlace;
 use crate::supplied::{Keyed, Resolved, Suppliers};
 use crate::tier::{BindLoops, Loop, Loops, Nop, Tier};
 pub(crate) use crate::unit_cache::Cached;
-use crate::unit_cache::{CompileRefused, UnitCache};
+use crate::unit_cache::{Answers, CompileRefused, Fresh, UnitCache};
+use ini_table::{Directive, IniTable};
 
 /// Everything a host knows about one request before it starts (design
 /// §4.3 seam 4): one plain `Send` value, handed over once.
@@ -99,6 +100,16 @@ pub struct RequestDescription {
     /// one before it left, as phpdbg's cycle keeps one request standing
     /// across its commands (`Z/sapi/phpdbg/phpdbg.c:1578-1619`).
     pub exit_status: i32,
+}
+
+impl RequestDescription {
+    /// A request of the host `sapi_name` that describes nothing else.
+    pub(crate) fn of_host(sapi_name: &str) -> RequestDescription {
+        RequestDescription {
+            sapi_name: sapi_name.to_owned(),
+            ..RequestDescription::default()
+        }
+    }
 }
 
 /// How a host has its program served: wrapped, as `php_execute_script`
@@ -690,10 +701,10 @@ pub struct Observables {
 /// What `php_request_startup` came to ([`Engine::begin`]).
 enum Begun {
     /// The request started, and what the host asked for is served in it.
-    Started(Request),
+    Started(Box<Request>),
     /// An extension's `rinit` raised, and its throwable was rendered as
     /// the uncaught fatal: the request, which the host's own branch ends.
-    Failed(Request),
+    Failed(Box<Request>),
     /// No request started: the engine's start refused, `opcache.preload`
     /// refused, or `php_module_startup` failed, and what the host is
     /// handed instead, with its sink.
@@ -821,7 +832,8 @@ pub(crate) struct Shared {
     /// Where each extension's request and engine state stands, by its
     /// type ([`crate::api::request::StateSlots`]).
     pub(crate) state_slots: crate::api::request::StateSlots,
-    ini: Vec<(Vec<u8>, Option<Vec<u8>>)>,
+    /// `EG(ini_directives)`, each entry's master value ([`IniTable`]).
+    pub(crate) ini: IniTable,
     /// The typed entries `ini`'s master values give, which each request
     /// starts with ([`TypedIni`]).
     pub(crate) typed_ini: TypedIni,
@@ -1014,6 +1026,21 @@ pub(crate) struct NativeMethod {
     pub(crate) flags: crate::attributes::Flags,
 }
 
+/// The declaration of the native method at `at`: a class's own, or
+/// one of the trampolines no class lists.
+fn native_method_decl<'a>(
+    classes: &'a [ClassDecl],
+    trampolines: &'a [MethodDecl],
+    at: MethodAt,
+) -> Option<&'a MethodDecl> {
+    match at {
+        MethodAt::Declared { class, at } => classes.get(class.0 as usize)?.methods.get(at as usize),
+        MethodAt::Trampoline { at, .. }
+        | MethodAt::ParentHook { at, .. }
+        | MethodAt::Unlisted { at } => trampolines.get(at as usize),
+    }
+}
+
 /// The callees of the natives and then of the native methods, in the
 /// numbers their `Function`s take ([`Shared::callees`]): each under
 /// the name its declaration holds, php's `common.function_name`, which
@@ -1025,14 +1052,7 @@ fn native_callees(
     trampolines: &[MethodDecl],
 ) -> Box<[crate::readable::Record]> {
     let method_name = |method: &NativeMethod| -> &[u8] {
-        let decl = match method.at {
-            MethodAt::Declared { class, at } => classes
-                .get(class.0 as usize)
-                .and_then(|class| class.methods.get(at as usize)),
-            MethodAt::Trampoline { at, .. }
-            | MethodAt::ParentHook { at, .. }
-            | MethodAt::Unlisted { at } => trampolines.get(at as usize),
-        };
+        let decl = native_method_decl(classes, trampolines, method.at);
         decl.map_or(&[][..], |decl| &decl.function.name.0)
     };
     functions
@@ -1318,7 +1338,7 @@ fn native_placed(
             .properties
             .get(usize::try_from(info.at).ok()?)
     };
-    let place = |at: usize, parent: &[PropertyInfo]| {
+    let place = |at: usize, parent: &Placed| {
         let class = ClassId(u32::try_from(at).unwrap_or(u32::MAX));
         let decl = classes.get(at)?;
         Some(placed_of(class, decl, records.get(at), parent, decl_of))
@@ -1336,7 +1356,7 @@ fn native_placed(
                     .ok()
                     .and_then(|parent| placed.get(parent)?.clone()),
             };
-            let built = parent.and_then(|parent| place(at, parent.slots()));
+            let built = parent.and_then(|parent| place(at, &parent));
             if let (Some(built), Some(slot)) = (built, placed.get_mut(at)) {
                 *slot = Some(built);
                 progress = true;
@@ -1346,7 +1366,11 @@ fn native_placed(
     placed
         .into_iter()
         .enumerate()
-        .map(|(at, built)| built.or_else(|| place(at, &[])).unwrap_or_default())
+        .map(|(at, built)| {
+            built
+                .or_else(|| place(at, &Placed::default()))
+                .unwrap_or_default()
+        })
         .collect()
 }
 
@@ -1359,35 +1383,15 @@ fn trampoline_tables(
     trampolines: &[MethodDecl],
     functions: usize,
 ) -> Vec<FunctionTable> {
-    tables_of(classes, methods, functions, |at| match at {
-        MethodAt::Trampoline { class, at } => {
-            Some((class, trampolines.get(usize::try_from(at).ok()?)?))
-        }
-        _ => None,
-    })
-}
-
-/// One table per class, `classes` of them: each row of `methods` that
-/// `place` gives a class and a declaration, filed among that class's
-/// rows under the declaration's name and numbered past the
-/// `functions` natives; the first of a name stays.
-fn tables_of<'a>(
-    classes: usize,
-    methods: &[NativeMethod],
-    functions: usize,
-    place: impl Fn(MethodAt) -> Option<(ClassId, &'a MethodDecl)>,
-) -> Vec<FunctionTable> {
     let mut tables = vec![FunctionTable::new(); classes];
     for (row, method) in (functions..).zip(methods) {
-        let Some((class, decl)) = place(method.at) else {
+        let MethodAt::Trampoline { class, at } = method.at else {
             continue;
         };
-        let (Some(table), Ok(row)) = (
-            usize::try_from(class.0)
-                .ok()
-                .and_then(|class| tables.get_mut(class)),
-            u32::try_from(row),
-        ) else {
+        let table = tables.get_mut(class.0 as usize);
+        let (Some(decl), Some(table), Ok(row)) =
+            (trampolines.get(at as usize), table, u32::try_from(row))
+        else {
             continue;
         };
         table.add(&decl.function.name.0, Function(row));
@@ -1395,7 +1399,6 @@ fn tables_of<'a>(
     tables
 }
 
-/// `zend_string_tolower`: the key a name is found under.
 /// `zend_parse_arg_object`'s class for each parameter of each native, by
 /// the native's number among the functions and then the methods: the
 /// class a parameter's type names where it names one, `?Class` among
@@ -1428,15 +1431,7 @@ fn parameter_classes(
                 .collect()
         })
     };
-    let method_decl = |method: &NativeMethod| match method.at {
-        MethodAt::Declared { class, at } => classes
-            .get(class.0 as usize)?
-            .methods
-            .get(usize::try_from(at).ok()?),
-        MethodAt::Trampoline { at, .. }
-        | MethodAt::ParentHook { at, .. }
-        | MethodAt::Unlisted { at } => trampolines.get(usize::try_from(at).ok()?),
-    };
+    let method_decl = |method: &NativeMethod| native_method_decl(classes, trampolines, method.at);
     functions
         .iter()
         .map(|decl| of(Some(decl)))
@@ -1446,10 +1441,6 @@ fn parameter_classes(
                 .map(|method| of(method_decl(method).map(|decl| &decl.function))),
         )
         .collect()
-}
-
-fn lowered(name: &[u8]) -> Box<[u8]> {
-    name.to_ascii_lowercase().into_boxed_slice()
 }
 
 /// `zend_declare_class_constant_ex` over a class another extension
@@ -1483,6 +1474,16 @@ fn link_trampolines(
     methods: &mut Vec<NativeMethod>,
 ) -> Vec<MethodDecl> {
     let mut trampolines = Vec::new();
+    let mut lay = |method: MethodDecl, entry, at: &dyn Fn(u32) -> MethodAt| {
+        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
+        let flags = crate::attributes::Flags::of(&method.function.attributes);
+        methods.push(NativeMethod {
+            at: at(index),
+            entry,
+            flags,
+        });
+        trampolines.push(method);
+    };
     let own = crate::classes::trampolines();
     let laid = (declarations.iter_mut()).flat_map(|d| std::mem::take(&mut d.trampolines));
     for (class_name, method, entry) in own.into_iter().chain(laid) {
@@ -1492,35 +1493,15 @@ fn link_trampolines(
         else {
             continue;
         };
-        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
-        methods.push(NativeMethod {
-            at: MethodAt::Trampoline {
-                class: ClassId(u32::try_from(at).unwrap_or(u32::MAX)),
-                at: index,
-            },
-            entry,
-            flags: crate::attributes::Flags::of(&method.function.attributes),
-        });
-        trampolines.push(method);
+        let class = ClassId(u32::try_from(at).unwrap_or(u32::MAX));
+        lay(method, entry, &|at| MethodAt::Trampoline { class, at });
     }
     // `zend_get_property_hook_trampoline`'s two, which no class holds.
     for (kind, method, entry) in crate::api::request::parent_hook_trampolines() {
-        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
-        methods.push(NativeMethod {
-            at: MethodAt::ParentHook { kind, at: index },
-            entry,
-            flags: crate::attributes::Flags::of(&method.function.attributes),
-        });
-        trampolines.push(method);
+        lay(method, entry, &|at| MethodAt::ParentHook { kind, at });
     }
     for (method, entry) in crate::fiber::unlisted_functions() {
-        let index = u32::try_from(trampolines.len()).unwrap_or(u32::MAX);
-        methods.push(NativeMethod {
-            at: MethodAt::Unlisted { at: index },
-            entry,
-            flags: crate::attributes::Flags::of(&method.function.attributes),
-        });
-        trampolines.push(method);
+        lay(method, entry, &|at| MethodAt::Unlisted { at });
     }
     trampolines
 }
@@ -1531,34 +1512,60 @@ fn link_trampolines(
 /// (`VCWD_GETCWD`, the request's own under ZTS), which is the request's
 /// for a request and the process's for a unit compiled outside one
 /// ([`Engine::unit`]), and whether the source is a file or the string an
-/// `eval` handed over ([`SourceKind`]), with the runtime definition keys
-/// the request made before it where it is an `eval`'s
-/// ([`php_compile::Options::keys_before`]), and the classes the request
-/// had declared by then, which a unit compiled for no request has none of
-/// ([`php_compile::RequestClasses`]); and, where `zend.multibyte` is on,
-/// the encoding functions bound to the request and what the scanner
-/// reads beside them ([`crate::multibyte::Bound`]).
+/// `eval` handed over ([`SourceKind`]), with what the request it
+/// compiles for brings ([`ForRequest`]).
 #[derive(Clone, Copy)]
 struct Origin<'a> {
     filename: &'a [u8],
     cwd: &'a Path,
     kind: SourceKind,
-    keys_before: u32,
-    request_classes: RequestClasses<'a>,
-    multibyte: Option<Multibyte<'a>>,
+    request: ForRequest<'a>,
+}
+
+/// What the request a source compiles for brings to its compile: the
+/// classes it has declared ([`php_compile::RequestClasses`]), the
+/// constants it has defined where the compile is one php runs without
+/// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`
+/// ([`php_compile::RequestConstants`]), where
+/// `zend.multibyte` is on the encoding functions bound for it and what
+/// the scanner reads beside them ([`crate::multibyte::Bound`]), and
+/// `CG(rtd_key_counter)` as it stands
+/// ([`php_compile::Options::keys_before`]).
+#[derive(Clone, Copy)]
+pub(crate) struct ForRequest<'a> {
+    pub(crate) classes: RequestClasses<'a>,
+    pub(crate) constants: Option<RequestConstants<'a>>,
+    pub(crate) multibyte: Option<Multibyte<'a>>,
+    pub(crate) keys_before: u32,
+}
+
+impl<'a> ForRequest<'a> {
+    /// A unit compiled for no request, under `multibyte`: it has
+    /// declared nothing and made no keys.
+    pub(crate) fn none(multibyte: Option<Multibyte<'a>>) -> ForRequest<'a> {
+        ForRequest {
+            classes: RequestClasses::default(),
+            constants: None,
+            multibyte,
+            keys_before: 0,
+        }
+    }
 }
 
 /// What the engine has declared, as the compiler reads it: php's
 /// `CG(function_table)`, `CG(class_table)` and the persistent constants,
-/// each a view of the engine's own table.
+/// each a view of the engine's own table; and what startup set beside
+/// them, the hooks, extended info and the op array extension slots
+/// ([`php_compile::Options::op_array_extensions`]).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Declared<'a> {
-    pub(crate) constants: Indexed<'a, ConstDecl, Exact>,
+    pub(crate) constants: php_compile::Persistent<'a>,
     pub(crate) functions: Indexed<'a, FunctionDecl, Folded>,
     pub(crate) frameless: &'a [FramelessEntry],
     pub(crate) classes: Indexed<'a, ClassDecl, Folded>,
     pub(crate) hooked: php_compile::Hooked,
     pub(crate) extended_info: bool,
+    pub(crate) op_array_extensions: u32,
 }
 
 impl Shared {
@@ -1586,21 +1593,18 @@ impl Shared {
         self.callees.get(at).map(crate::readable::Record::at)
     }
 
-    /// The extensions' own ini declarations, what `EG(ini_directives)`
-    /// holds past the core table: each extension's in its
-    /// `PHP_INI_BEGIN()` order, the extensions in startup order.
-    pub(crate) fn extension_inis(&self) -> impl Iterator<Item = &IniDecl> {
-        self.extensions
-            .iter()
-            .flat_map(|extension| extension.ini.iter())
+    /// The `on_modify` an extension gave the entry `name`.
+    pub(crate) fn ini_handler(&self, name: &[u8]) -> Option<IniHandler> {
+        self.ini.find(name)?.on_modify.map(|(_, handler)| handler)
     }
 
     /// The declaration of the entry `name` among the extensions' own,
     /// `zend_hash_find_ptr(EG(ini_directives))` over what each extension
     /// registered; none for an entry of the core table or none at all.
     pub(crate) fn extension_ini(&self, name: &[u8]) -> Option<&IniDecl> {
-        self.extension_inis()
-            .find(|decl| decl.name.0.as_ref() == name)
+        let (extension, at) = self.ini.find(name)?.declared?;
+        let declaring = self.extensions.get(usize::try_from(extension.0).ok()?)?;
+        declaring.ini.get(at)
     }
 
     /// `zend_flf_functions` by name, in the frameless table's order
@@ -1634,12 +1638,88 @@ impl Shared {
     /// The tables the compiler reads, as [`Declared`].
     pub(crate) fn declared(&self) -> Declared<'_> {
         Declared {
-            constants: Indexed::new(&self.constants, &self.constant_names),
+            constants: php_compile::Persistent {
+                declared: Indexed::new(&self.constants, &self.constant_names),
+                host: self.host_sapi(),
+            },
             functions: Indexed::new(&self.functions, &self.function_names),
             frameless: &self.frameless,
             classes: Indexed::new(&self.classes, &self.class_keys.names),
             hooked: self.hooked,
             extended_info: self.extended_info,
+            op_array_extensions: self.op_array_extensions(),
+        }
+    }
+
+    /// `zend_op_array_extension_handles` once startup is over
+    /// (`Z/Zend/zend_extensions.c:290-303`), the slots at the head of
+    /// every op array's runtime cache compiled after it
+    /// ([`php_compile::Options::op_array_extensions`]): two for each
+    /// observer registered, where any is, as `zend_observer_post_startup`
+    /// takes them (`Z/Zend/zend_observer.c:64-70`), and one where opcache
+    /// set its tier up ([`UnitCache::tier_set_up`]) and
+    /// `zend_jit_check_support` let it start, `zend_jit_startup`'s for
+    /// `zend_jit_profile_counter_rid` (`Z/ext/opcache/jit/zend_jit.c:3782`).
+    /// The check refuses the tier where a hook replaced `zend_execute_ex`,
+    /// as phpdbg's does, and where an extension observes an opcode other
+    /// than the two silence opcodes (`:3728-3756`). `opcache.jit=off` sets
+    /// the tier up with nothing to compile; the default `disable` never
+    /// does.
+    ///
+    /// A program's or an included file's runtime cache is `emalloc`ed at
+    /// its size as `i_init_code_execute_data` lays it down, and freed
+    /// with its frame, the program's before the shutdown functions are served;
+    /// so the slot moves what a file reads while it is served where it moves
+    /// the cache into the next bin. Two files of one length, the first a
+    /// slot more than the second, read their caches in one 16-byte bin
+    /// under opcache without the tier, and 24 and 16 with it:
+    ///
+    /// ```php
+    /// file_put_contents(__DIR__ . '/a.inc', '<?php new stdClass;        return memory_get_usage();');
+    /// file_put_contents(__DIR__ . '/b.inc', '<?php /* no slot here */ return memory_get_usage();');
+    /// touch(__DIR__ . '/a.inc', time() - 10); touch(__DIR__ . '/b.inc', time() - 10);
+    /// $read = function ($file) { include $file; $m = memory_get_usage(); return (include $file) - $m; };
+    /// echo $read(__DIR__ . '/a.inc') - $read(__DIR__ . '/b.inc'), "\n";
+    /// ```
+    /// ```expect regime=immutable-literals
+    /// 0
+    /// ```
+    /// ```php
+    /// file_put_contents(__DIR__ . '/a.inc', '<?php new stdClass;        return memory_get_usage();');
+    /// file_put_contents(__DIR__ . '/b.inc', '<?php /* no slot here */ return memory_get_usage();');
+    /// touch(__DIR__ . '/a.inc', time() - 10); touch(__DIR__ . '/b.inc', time() - 10);
+    /// $read = function ($file) { include $file; $m = memory_get_usage(); return (include $file) - $m; };
+    /// echo $read(__DIR__ . '/a.inc') - $read(__DIR__ . '/b.inc'), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 8
+    /// ```
+    pub(crate) fn op_array_extensions(&self) -> u32 {
+        let tier = self.units.tier_set_up() && !self.hooked.user && !self.opcodes.refuses_tier();
+        self.observers
+            .saturating_mul(2)
+            .saturating_add(u32::from(tier))
+    }
+
+    /// What opcache's optimizer makes of a unit the accelerator persists
+    /// ([`crate::unit_cache::Optimizer`]): pass 11's count where the
+    /// startup's `opcache.optimization_level` has its bit, from past the
+    /// op array extensions' slots, which is where the compiler's first
+    /// slot stands too; no pass where it has not, or where no extension
+    /// declares the entry.
+    pub(crate) fn optimizer(&self) -> crate::unit_cache::Optimizer {
+        use crate::unit_cache::Optimizer;
+        let level = self
+            .ini
+            .master(b"opcache.optimization_level")
+            // The one reading of a whole-number entry, without the
+            // sentence `Request::ini_quantity_warn` raises.
+            .map_or(0, |value| crate::ini_quantity::parse(value).0);
+        if level & Optimizer::PASS_11 == 0 {
+            return Optimizer::Off;
+        }
+        Optimizer::CompactLiterals {
+            first: self.op_array_extensions().saturating_mul(exec::SLOT_BYTES),
         }
     }
 
@@ -1656,38 +1736,46 @@ impl Shared {
         origin: Origin<'_>,
         stack: StackLimit,
     ) -> Result<PublishedUnit, CompileError> {
-        self.compile_shared(source, origin, stack)
+        (self
+            .compile_shared(source, origin, stack, CompileHeap::Engine)
+            .unit)
             .map(|unit| self.publish_compiled(unit))
     }
 
     /// [`Shared::publish`]'s compile alone: the constant strings in the
     /// engine's table and no map-pointer offset taken, for a caller that
     /// decides afterwards whether the unit is published
-    /// ([`Shared::publish_compiled`]) or the request's own.
+    /// ([`Shared::publish_compiled`]) or the request's own, and charged
+    /// to `heap` while it runs ([`CompileHeap`]).
     fn compile_shared(
         &self,
         source: &[u8],
         origin: Origin<'_>,
         stack: StackLimit,
-    ) -> Result<Unit, CompileError> {
+        heap: CompileHeap<'_>,
+    ) -> Fresh {
         let mut strings = self.interned.strings();
-        compile(
+        let mut home = PermanentStrings::new(&self.interned.names, &mut strings, heap);
+        let unit = compile(
             source,
             origin,
             self.compile_ini(),
             self.declared(),
             stack,
-            &mut PermanentStrings {
-                names: &self.interned.names,
-                strings: &mut strings,
-            },
+            &mut home,
             // A unit for every request is compiled on the thread that
             // asked, no request's arena at hand, so it brings its own.
             Laid {
                 arena: &mut php_compile::syntax::Arena::new(),
                 room: php_compile::Room::default(),
             },
-        )
+        );
+        debug_assert!(
+            !(unit.as_ref().ok()).is_some_and(php_compile::values::holds_counted_value),
+            "a unit for every request holds a counted value"
+        );
+        let answers = home.settle(strings_kept(&unit));
+        Fresh { unit, answers }
     }
 
     /// `unit` published for every request: each op array given its
@@ -1740,8 +1828,8 @@ impl Shared {
         let mut made = self.compiled_for(req, source, filename, kind);
         let room = match &mut made {
             Ok(unit) => {
-                req.count_keys_made(u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX));
-                req.note_loop_vars(unit.loop_vars);
+                req.count_keys_made(crate::unit_cache::keys_of(unit));
+                req.note_pushed(crate::api::request::Pushed::of(unit));
                 req.ready_unit(unit)
             }
             Err(_) => None,
@@ -1764,11 +1852,11 @@ impl Shared {
                 let refused = CompileRefused::published(error, |unit| {
                     let unit = req.take_unit(unit);
                     req.hold_compiled(&unit);
-                    // An `eval`'s names, made as php's compile made them;
-                    // the memory limit refusing them ends the request.
-                    if matches!(kind, SourceKind::Eval(_)) {
-                        req.hold_unit_names(&unit).ok();
-                    }
+                    // Its names, made as php's compile made them, an
+                    // `eval`'s and a file's alike, as `note_compiled`
+                    // makes a whole unit's; the memory limit refusing them
+                    // ends the request.
+                    req.hold_unit_names(&unit, kind).ok();
                     unit
                 });
                 if refused.declared.is_none() {
@@ -1803,14 +1891,17 @@ impl Shared {
             ..self.declared()
         };
         let room = req.compile_room();
-        req.compiling(|heap, request_classes, arena, cwd| {
+        req.compiling(|heap, request_classes, request_constants, arena, cwd| {
             let origin = Origin {
                 filename,
                 cwd,
                 kind,
-                keys_before,
-                request_classes,
-                multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
+                request: ForRequest {
+                    classes: request_classes,
+                    constants: Some(request_constants),
+                    multibyte: bound.as_ref().map(crate::multibyte::Bound::settings),
+                    keys_before,
+                },
             };
             compile(
                 source,
@@ -1832,7 +1923,8 @@ impl Shared {
     /// to on the thread that asked for it.
     pub(crate) fn stack_limit(&self) -> StackLimit {
         let bytes = |name: &[u8]| {
-            self.ini_default(name)
+            self.ini
+                .master(name)
                 .map_or(0, crate::api::request::Ini::parse_bytes)
         };
         StackLimit::init(
@@ -1882,31 +1974,27 @@ impl Shared {
             path: &full,
             source: None,
             written: None,
+            opened: true,
             validation: Validation::EveryHit,
             protection: 0,
             now: crate::unit_cache::now(),
             levels: crate::unit_cache::Levels::Memory,
+            optimizer: self.optimizer(),
         };
         let arena = self.arena.current();
         let (compiled, _, _) = self.units.file(
+            &mut (),
             &arena.files,
             asked,
-            |source| {
-                let multibyte = self.unbound();
-                self.compile_file(
-                    source,
-                    path,
-                    cwd,
-                    stack,
-                    RequestClasses::default(),
-                    multibyte,
-                )
+            |(), source| {
+                let request = ForRequest::none(self.unbound());
+                self.compile_file(source, path, cwd, stack, request, CompileHeap::Engine)
             },
             |_| None,
             |unit| self.publish_compiled(unit),
             // No request to publish its early-bound classes for, so
             // a request that loads it binds them as its own.
-            |_| Arc::new([]),
+            |(), _| Arc::new([]),
         );
         // With no request to own it, a unit held nowhere is published
         // all the same.
@@ -1920,53 +2008,41 @@ impl Shared {
     /// unit.
     pub(crate) fn decode_kept(&self, body: &[u8]) -> Option<Unit> {
         let mut strings = self.interned.strings();
-        crate::unit_cache::decode(
-            body,
-            &mut PermanentStrings {
-                names: &self.interned.names,
-                strings: &mut strings,
-            },
-        )
+        let mut home =
+            PermanentStrings::new(&self.interned.names, &mut strings, CompileHeap::Engine);
+        let unit = crate::unit_cache::decode(body, &mut home);
+        home.settle(unit.is_some());
+        unit
     }
 
-    /// `source`, read from the file `path` names, compiled and published
-    /// as a file of its own, for a request that has declared
-    /// `request_classes`.
-    pub(crate) fn publish_file(
-        &self,
-        source: &[u8],
-        path: &[u8],
-        cwd: &Path,
-        stack: StackLimit,
-        request_classes: RequestClasses<'_>,
-        multibyte: Option<Multibyte<'_>>,
-    ) -> Result<PublishedUnit, CompileError> {
-        self.compile_file(source, path, cwd, stack, request_classes, multibyte)
-            .map(|unit| self.publish_compiled(unit))
-    }
-
-    /// [`Shared::publish_file`]'s compile alone, which the unit cache
-    /// publishes where it holds the unit and hands its request otherwise.
+    /// `source`, read from the file `path` names, compiled as a file of
+    /// its own, which the unit cache and the preload publish where they
+    /// hold the unit and the unit cache hands its request otherwise,
+    /// its runtime definition keys made on from the `keys_before` the
+    /// request it compiles for had made, as opcache's miss compiles under
+    /// the request's `CG(rtd_key_counter)` and persists the names it made
+    /// ([`Request::count_keys_made`]); a unit compiled for no request
+    /// starts from none. The compile is charged to `heap` while it runs
+    /// ([`CompileHeap`]).
     pub(crate) fn compile_file(
         &self,
         source: &[u8],
         path: &[u8],
         cwd: &Path,
         stack: StackLimit,
-        request_classes: RequestClasses<'_>,
-        multibyte: Option<Multibyte<'_>>,
-    ) -> Result<Unit, CompileError> {
+        request: ForRequest<'_>,
+        heap: CompileHeap<'_>,
+    ) -> Fresh {
         self.compile_shared(
             source,
             Origin {
                 filename: path,
                 cwd,
                 kind: SourceKind::File,
-                keys_before: 0,
-                request_classes,
-                multibyte,
+                request,
             },
             stack,
+            heap,
         )
     }
 
@@ -2003,17 +2079,22 @@ impl Shared {
         strings.find(bytes)
     }
 
+    /// The working directory `cwd` in opcache's shared table, as
+    /// `accel_make_persistent_key` puts it there the first time a request
+    /// keys a relative path (`ZCG(cwd_check)`,
+    /// `Z/ext/opcache/ZendAccelerator.c:1240-1256`), so a string of its
+    /// bytes a later compile asks for is the table's.
+    pub(crate) fn intern_cwd(&self, cwd: &[u8]) {
+        if self.permanent(cwd).is_none() {
+            // The table's refusal leaves the key as written, as php's.
+            self.interned.strings().intern(cwd).ok();
+        }
+    }
+
     /// How many strings the engine's table holds, opcache's
     /// `interned_strings_usage.number_of_strings`.
     pub(crate) fn interned_strings(&self) -> usize {
         self.interned.strings().count()
-    }
-
-    /// The value the entry `name` starts every request with as
-    /// `zend_ini_get_value` reads it, the empty string where it has none
-    /// (php's `NULL`); `None` where php has no such entry.
-    pub(crate) fn ini_default(&self, name: &[u8]) -> Option<&[u8]> {
-        master_of(&self.ini, name)
     }
 
     /// `zend_disable_functions` over a started engine's table, as
@@ -2046,27 +2127,17 @@ impl Shared {
     /// The master value of the entry `name` set to `value` where it
     /// stands, which keeps the table in registration order, and the
     /// typed entries and the realpath cache's `CWDG` values with it.
-    fn set_ini_default(&mut self, name: Vec<u8>, value: Option<Vec<u8>>) {
-        self.typed_ini.update(&name, value.as_deref());
-        self.realpath_cache.update(&name, value.as_deref());
-        match self.ini.iter_mut().find(|(n, _)| *n == name) {
-            Some(entry) => entry.1 = value,
-            None => self.ini.push((name, value)),
-        }
+    fn set_ini_default(&mut self, name: &[u8], value: Option<Vec<u8>>) {
+        self.typed_ini.update(name, value.as_deref());
+        self.realpath_cache.update(name, value.as_deref());
+        self.ini.set(name, value);
     }
 
     /// The value the entry `name` starts every request with as php holds
     /// it, `INI_ORIG_STR`: `None` where it has none (php's `NULL`), as for
     /// a name php has no entry for.
     pub(crate) fn ini_default_value(&self, name: &[u8]) -> Option<&[u8]> {
-        self.ini
-            .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .and_then(|(_, v)| v.as_deref())
-    }
-
-    pub(crate) fn ini_defaults(&self) -> &[(Vec<u8>, Option<Vec<u8>>)] {
-        &self.ini
+        self.ini.find(name).and_then(|row| row.value.as_deref())
     }
 
     /// `cfg_get_entry`: the row of `configuration_hash` under `name`.
@@ -2084,23 +2155,38 @@ impl Shared {
         self.configured(name).and_then(Configured::text)
     }
 
-    /// The value of the constant `name` as the bundle declared it, or as
-    /// the engine's own table has it: a value nothing owns, since the
-    /// string ones are the engine's interned strings.
     /// `PHP_SAPI` for a request its host named `sapi`: the string the
     /// engine interned for that name at build, or, for a name no host
     /// of [`crate::constants::HOSTS`] has, one interned into the
     /// engine's table the first time a request asks, where every later
     /// request finds it.
     pub(crate) fn sapi_constant(&self, sapi: &[u8]) -> Option<Value> {
-        if let Some((_, z)) = self.sapi_names.iter().find(|(n, _)| n.as_ref() == sapi) {
-            return Some(Value::of_slot(*z));
+        if let Some(z) = self.sapi_named(sapi) {
+            return Some(Value::of_slot(z));
         }
         let mut strings = self.interned.strings();
         let interned = strings.intern(sapi).ok()?;
         Some(Value::of_slot(Zval::string(interned)))
     }
 
+    /// `PHP_SAPI` of the engine's own host, interned at build
+    /// ([`crate::constants::host_names`]), read without waiting on the
+    /// table, which a compile holds while it asks; none for an engine
+    /// built for no host, a test's, whose requests name one each.
+    fn host_sapi(&self) -> Option<Zval> {
+        self.sapi_named(self.host.as_bytes())
+    }
+
+    /// The interned name of the host `sapi` among those built in.
+    fn sapi_named(&self, sapi: &[u8]) -> Option<Zval> {
+        (self.sapi_names.iter())
+            .find(|(n, _)| n.as_ref() == sapi)
+            .map(|(_, z)| *z)
+    }
+
+    /// The value of the constant `name` as the bundle declared it, or as
+    /// the engine's own table has it: a value nothing owns, since the
+    /// string ones are the engine's interned strings.
     pub(crate) fn constant(&self, name: &[u8]) -> Option<Value> {
         self.constant_at(self.constant_names.find(&self.constants, name)?)
     }
@@ -2123,9 +2209,9 @@ impl Shared {
     /// `ZEND_CONSTANT_MODULE_NUMBER` of the constant `name` an extension
     /// or the engine declared with a value.
     pub(crate) fn constant_module(&self, name: &[u8]) -> Option<ExtensionId> {
-        let at = self.constant_names.find(&self.constants, name)?;
-        self.constant_values.get(at)?.as_ref()?;
-        self.constant_modules.get(at).copied()
+        self.constant_modules
+            .get(self.constant_index(name)?)
+            .copied()
     }
 
     /// `CONST_DEPRECATED` of an extension's or the engine's constant,
@@ -2163,7 +2249,7 @@ impl Shared {
 /// echo implode(' ', array_keys((new ReflectionExtension('Core'))->getINIEntries())), "\n";
 /// ```
 /// ```expect
-/// highlight.comment highlight.default highlight.html highlight.keyword highlight.string display_errors display_startup_errors enable_dl expose_php docref_root docref_ext html_errors xmlrpc_errors xmlrpc_error_number max_input_time ignore_user_abort implicit_flush log_errors ignore_repeated_errors ignore_repeated_source report_memleaks report_zend_debug output_buffering output_handler register_argc_argv auto_globals_jit short_open_tag unserialize_callback_func serialize_precision arg_separator.output arg_separator.input auto_append_file auto_prepend_file doc_root default_charset default_mimetype internal_encoding input_encoding output_encoding error_log error_log_mode extension_dir sys_temp_dir include_path max_execution_time open_basedir file_uploads upload_max_filesize post_max_size upload_tmp_dir max_input_nesting_level max_input_vars user_dir variables_order request_order error_append_string error_prepend_string SMTP smtp_port mail.add_x_header mail.mixed_lf_and_crlf mail.cr_lf_mode mail.log browscap max_memory_limit memory_limit precision sendmail_from sendmail_path mail.force_extra_parameters disable_functions max_file_uploads max_multipart_body_parts allow_url_fopen allow_url_include enable_post_data_reading realpath_cache_size realpath_cache_ttl user_ini.filename user_ini.cache_ttl hard_timeout syslog.facility syslog.ident syslog.filter error_reporting fatal_error_backtraces zend.assertions zend.enable_gc zend.multibyte zend.script_encoding zend.detect_unicode zend.signal_check zend.exception_ignore_args zend.exception_string_param_max_len fiber.stack_size zend.max_allowed_stack_size zend.reserved_stack_size
+/// highlight.comment highlight.default highlight.html highlight.keyword highlight.string display_errors display_startup_errors enable_dl expose_php docref_root docref_ext html_errors xmlrpc_errors xmlrpc_error_number max_input_time ignore_user_abort implicit_flush log_errors ignore_repeated_errors ignore_repeated_source report_memleaks report_zend_debug output_buffering output_handler register_argc_argv auto_globals_jit short_open_tag unserialize_callback_func serialize_precision arg_separator.output arg_separator.input auto_append_file auto_prepend_file doc_root default_charset default_mimetype internal_encoding input_encoding output_encoding error_log error_log_mode extension_dir sys_temp_dir include_path max_execution_time open_basedir file_uploads upload_max_filesize post_max_size upload_tmp_dir max_input_nesting_level max_input_vars user_dir variables_order request_order error_append_string error_prepend_string SMTP smtp_port mail.add_x_header mail.mixed_lf_and_crlf mail.cr_lf_mode mail.log browscap max_memory_limit memory_limit memory_hard_limit_percent precision sendmail_from sendmail_path mail.force_extra_parameters disable_functions max_file_uploads max_multipart_body_parts allow_url_fopen allow_url_include enable_post_data_reading realpath_cache_size realpath_cache_ttl user_ini.filename user_ini.cache_ttl hard_timeout syslog.facility syslog.ident syslog.filter error_reporting fatal_error_backtraces zend.assertions zend.enable_gc zend.multibyte zend.script_encoding zend.detect_unicode zend.signal_check zend.exception_ignore_args zend.exception_string_param_max_len fiber.stack_size zend.max_allowed_stack_size zend.reserved_stack_size
 /// ```
 ///
 /// An entry php registers with no value, `NULL`, has `None`: `ini_get()`
@@ -2301,6 +2387,10 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     // (`Z/main/main.c:865-866`).
     ("max_memory_limit", Some("-1")),
     ("memory_limit", Some("128M")),
+    // `memory_hard_limit_percent`, `PHP_INI_ALL` (`Z/main/main.c:891` at
+    // 8.5.12): the hard limit as a percent of `memory_limit`, `NULL` its
+    // default, php's `-1`.
+    ("memory_hard_limit_percent", None),
     ("precision", Some("14")),
     ("sendmail_from", None),
     ("sendmail_path", Some("/usr/sbin/sendmail -t -i")),
@@ -2466,10 +2556,8 @@ impl Configuration {
         };
         if let Some(file) = &mut files.loaded {
             startup.read(&std::mem::take(&mut file.bytes), &file.path);
-            startup.set(
-                b"cfg_file_path".to_vec(),
-                Configured::Str(file.path.clone()),
-            );
+            let path = Configured::Str(file.path.clone());
+            upsert(&mut startup.table, b"cfg_file_path".to_vec(), path);
         }
         files
             .scanned
@@ -2519,9 +2607,11 @@ fn constant_text(constants: &[ConstDecl], name: &[u8], precision: i32) -> Option
         ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
         ConstExpr::Bool(true) => Some(b"1".to_vec()),
         ConstExpr::Long { value: n, .. } => Some(n.to_string().into_bytes()),
-        ConstExpr::Double(d) => {
-            Some(php_heap::double_to_string(*d, precision, php_heap::Exponent::Upper).into_bytes())
-        }
+        ConstExpr::Double(d) => Some(
+            php_heap::double_to_string(*d, precision, php_heap::Exponent::Upper)
+                .as_bytes()
+                .to_vec(),
+        ),
         ConstExpr::Str(s) => Some(s.to_vec()),
         _ => None,
     }
@@ -2546,13 +2636,10 @@ impl crate::ini_syntax::Host for Configure<'_> {
         self.shared.directive(name).map(<[u8]>::to_vec)
     }
 
-    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        std::env::var_os(&*String::from_utf8_lossy(name))
-            .map(std::ffi::OsString::into_encoded_bytes)
-    }
-
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
-        Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper).into_bytes())
+        Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper)
+            .as_bytes()
+            .to_vec())
     }
 
     fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {
@@ -2575,15 +2662,12 @@ impl crate::ini_syntax::Host for Startup<'_> {
             .and_then(|(_, value)| value.text().map(<[u8]>::to_vec))
     }
 
-    fn env(&mut self, name: &[u8]) -> Option<Vec<u8>> {
-        std::env::var_os(&*String::from_utf8_lossy(name))
-            .map(std::ffi::OsString::into_encoded_bytes)
-    }
-
     /// `zend_double_to_str` before any ini entry is registered, when
     /// `EG(precision)` is still zero and `zend_gcvt` is handed one digit.
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
-        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper).into_bytes())
+        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper)
+            .as_bytes()
+            .to_vec())
     }
 
     fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {
@@ -2608,14 +2692,6 @@ impl Startup<'_> {
                 false
             }
             Err(never) => match never {},
-        }
-    }
-
-    /// `zend_hash_update` of the table.
-    fn set(&mut self, name: Vec<u8>, value: Configured) {
-        match self.table.iter_mut().find(|(n, _)| *n == name) {
-            Some(entry) => entry.1 = value,
-            None => self.table.push((name, value)),
         }
     }
 
@@ -2668,13 +2744,10 @@ impl Startup<'_> {
                 let value = ini_text(&value);
                 if let Some(rows) = self.section_rows() {
                     let key = configured_key(&label);
-                    match rows.iter_mut().find(|(k, _)| *k == key) {
-                        Some(row) => row.1 = Configured::Str(value),
-                        None => rows.push((key, Configured::Str(value))),
-                    }
+                    upsert(rows, key, Configured::Str(value));
                     return;
                 }
-                self.set(label, Configured::Str(value));
+                upsert(&mut self.table, label, Configured::Str(value));
             }
             // `ZEND_INI_PARSER_POP_ENTRY`: the array under the label in
             // the active table, a section's where one is active, made where
@@ -2748,10 +2821,7 @@ fn configured_insert(rows: &mut Vec<(ConfiguredKey, Configured)>, offset: &[u8],
     } else {
         configured_key(offset)
     };
-    match rows.iter_mut().find(|(k, _)| *k == key) {
-        Some(row) => row.1 = value,
-        None => rows.push((key, value)),
-    }
+    upsert(rows, key, value);
 }
 
 /// `ZEND_HANDLE_NUMERIC_STR`: the offset as an integer where it is one
@@ -2781,13 +2851,6 @@ fn ini_text(value: &IniValue) -> Vec<u8> {
 /// the bit of `opcache.opt_debug_level` that asks for each op array as
 /// the compiler left it.
 const BEFORE_OPTIMIZER: i64 = 0x1_0000;
-
-/// `zend_ini_parse_quantity`, which `OnUpdateLong` reads every
-/// whole-number ini entry by: `crate::ini_quantity`, the one reading
-/// of it, here without the sentence `Request::ini_quantity_warn` raises.
-fn ini_quantity(value: &[u8]) -> i64 {
-    crate::ini_quantity::parse(value).0
-}
 
 /// `php_module_startup`'s check for deprecated directives
 /// (`Z/main/main.c:2393-2450`), its last step: each name of the
@@ -2894,6 +2957,16 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
                 let message = "Directive 'report_memleaks' is deprecated";
                 crate::api::raising::docref(req, Level::Deprecated, message);
             }
+            // `OnChangeMemoryHardLimitPercent` at startup: a refused
+            // percent warned about and the default, `NULL`, kept.
+            b"memory_hard_limit_percent" => {
+                let value = req.ini().get(name).map(<[u8]>::to_vec);
+                if let Some(value) = value.filter(|v| !v.is_empty())
+                    && !req.memory_hard_limit_percent_taken(Some(&value))
+                {
+                    taken.push((name.to_vec(), None));
+                }
+            }
             b"memory_limit" => {
                 let limit = req.ini().get(name).map(<[u8]>::to_vec).unwrap_or_default();
                 let held = match req.memory_limit_verdict(&limit) {
@@ -2929,7 +3002,7 @@ fn core_default(name: &[u8]) -> Option<Vec<u8>> {
 /// $tried = '/^Warning: (.+) \(tried: (\S+) \(.+?\), (\/\S+) \(.+\)\) in Unknown on line 0$/m';
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-v'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
-/// preg_match($tried, $out, $m); echo "$m[1]: $m[2], $m[3]\n", str_contains($out, "\nPHP 8.5.9 (cli)") ? "version\n" : $out;
+/// preg_match($tried, $out, $m); echo "$m[1]: $m[2], $m[3]\n", str_contains($out, "\nPHP 8.5.12 (cli)") ? "version\n" : $out;
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/z/', '-d', 'extension=/a/q.so', '-d', 'zend_extension=y', '-d', 'zend_extension=/a/z.so', '-r', 'echo "ran\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// $out = stream_get_contents($pipes[1]); echo strstr(stream_get_contents($pipes[2]), ':  ', true), "\n", proc_close($p), "\n";
 /// preg_match_all($tried, $out, $m, PREG_SET_ORDER); foreach ($m as $w) { echo "$w[1]: $w[2], $w[3]\n"; } echo substr($out, strrpos(rtrim($out), "\n") + 1);
@@ -3077,13 +3150,9 @@ fn function_table(
     declarations: &mut [Declarations],
     registered: &[usize],
     additional: Vec<(FunctionDecl, Entry)>,
-    ini: &[(Vec<u8>, Option<Vec<u8>>)],
+    ini: &IniTable,
 ) -> (Vec<Option<ExtensionId>>, Vec<(FunctionDecl, Entry)>) {
-    let list = ini
-        .iter()
-        .find(|(name, _)| name.as_slice() == b"disable_functions")
-        .and_then(|(_, list)| list.as_deref())
-        .unwrap_or_default();
+    let list = ini.master(b"disable_functions").unwrap_or_default();
     let disabled = disabled_functions(list);
     // `module_registry` numbers Core 0 and the bundle from 1.
     let standard = extensions
@@ -3494,10 +3563,6 @@ impl EngineBuilder {
     #[must_use]
     #[allow(clippy::too_many_lines)] // one line per field of the engine
     pub fn build(self) -> Engine {
-        let mut ini: Vec<(Vec<u8>, Option<Vec<u8>>)> = CORE_INI
-            .iter()
-            .map(|(n, v)| (n.as_bytes().to_vec(), v.map(|v| v.as_bytes().to_vec())))
-            .collect();
         let mut extensions = self.extensions;
         extensions.extend(self.tier_extension);
         let additional = self.additional_functions;
@@ -3538,14 +3603,9 @@ impl EngineBuilder {
         let mut declarations = Vec::with_capacity(declared.len() + 1);
         declarations.push(core_declared);
         declarations.extend(declared);
-        for extension in &extensions {
-            for entry in &extension.ini {
-                ini.push((
-                    entry.name.0.to_vec(),
-                    entry.default.as_deref().map(<[u8]>::to_vec),
-                ));
-            }
-        }
+        let core_ini = (CORE_INI.iter())
+            .map(|(n, v)| (n.as_bytes().to_vec(), v.map(|v| v.as_bytes().to_vec())));
+        let mut ini = IniTable::register(core_ini, &extensions);
         let mut ini_files = self.ini_files;
         let configuration = Configuration::read(
             &self.ini_defaults,
@@ -3557,7 +3617,7 @@ impl EngineBuilder {
         // handler has taken the value the host set ([`Engine::register_ini`]).
         let mut held = Vec::new();
         for (name, value) in configuration.directives() {
-            if on_modify(&extensions, &name).is_some() {
+            if ini.find(&name).is_some_and(|row| row.on_modify.is_some()) {
                 held.push((name, value));
                 continue;
             }
@@ -3571,14 +3631,11 @@ impl EngineBuilder {
             if Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected {
                 continue;
             }
-            if let Some(entry) = ini.iter_mut().find(|(n, _)| *n == name) {
-                entry.1 = Some(value);
-            }
+            ini.set(&name, Some(value));
         }
         let on = |name: &str| {
-            ini.iter()
-                .find(|(n, _)| n.as_slice() == name.as_bytes())
-                .and_then(|(_, value)| value.as_deref())
+            (ini.find(name.as_bytes()))
+                .and_then(|row| row.value.as_deref())
                 .is_some_and(crate::api::request::Ini::parse_bool)
         };
         let shebang = match self.shebang_while {
@@ -3641,16 +3698,30 @@ impl EngineBuilder {
                 })
                 .unzip();
         let mut names = permanent_names(&extensions, &functions, &classes, &constants, &ini);
+        // What the host set for an entry its `on_modify` takes as the
+        // engine starts, interned as `zend_register_ini_entries_ex`
+        // interns the value it takes, so `ini_get()` of it costs nothing;
+        // one the rule then refuses is interned with them, which no
+        // reading of the permanent table shows.
+        for (_, value) in &held {
+            names.intern(value).ok();
+        }
         let constant_values = constant_values(&constants, &mut names);
         let constant_names = Names::over(&constants);
         let default_strings = default_strings(&functions, &classes);
         let mut strings = Strings::new();
-        let sapi_names = crate::constants::host_names(&mut strings);
-        let units = UnitCache::new(self.hooked, self.extended_info, &functions, &classes);
+        let sapi_names = crate::constants::host_names(&mut strings, self.sapi_name);
         let interned = crate::arena::Interned {
             names: Arc::new(names),
             strings: Arc::new(Mutex::new(strings)),
         };
+        let units = UnitCache::new(
+            self.hooked,
+            self.extended_info,
+            &functions,
+            &classes,
+            interned.clone(),
+        );
         let arena = crate::arena::Epochs::of(crate::arena::Arena::of_engine(
             Arc::clone(&records),
             functions.len().saturating_add(methods.len()),
@@ -3658,7 +3729,7 @@ impl EngineBuilder {
             interned.clone(),
         ));
         let layer = supplied.stream_hooks.get().map(|hooks| (hooks.state)());
-        let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| master_of(&ini, name));
+        let realpath_cache = crate::virtual_cwd::RealpathCache::of(|name| ini.master(name));
         let mut engine = Engine {
             shared: Arc::new(Shared {
                 extensions,
@@ -3689,7 +3760,7 @@ impl EngineBuilder {
                 constant_modules,
                 engine_states: States::new(),
                 state_slots: crate::api::request::StateSlots::default(),
-                typed_ini: TypedIni::of(|name| master_of(&ini, name)),
+                typed_ini: TypedIni::of(|name| ini.master(name)),
                 ini,
                 constant_values,
                 sapi_names,
@@ -3896,14 +3967,165 @@ fn default_strings(functions: &[FunctionDecl], classes: &[ClassDecl]) -> Strings
     strings
 }
 
+/// The heap a compile bound for the cache runs on, which is what it is
+/// charged to while it runs (design §5.13, §6.3). php compiles a file on
+/// the heap of the request that includes it, with opcache and without
+/// it, and opcache's persist copies what the miss made into its segment
+/// and frees the request's copies once the compile is done. So the
+/// request's `memory_limit` holds the compile, the strings a fold of a
+/// constant expression makes among them, and none of it stands on the
+/// request after the compile; a hit compiles nothing and costs nothing.
+/// The unit's strings are the engine's either way (§5.2).
+pub(crate) enum CompileHeap<'a> {
+    /// No request asked: a unit the engine compiles for itself, whose
+    /// compile no request's limit holds.
+    Engine,
+    /// The heap of the request that asked.
+    Request(&'a mut php_heap::Heap),
+}
+
 /// php's one `interned_strings_permanent` as a shared compile reads it:
 /// the names the engine laid down at startup ([`permanent_names`]) first,
 /// so a unit's constant string that spells one is that one, flags and
 /// all, as `zend_new_interned_string` finds it, then the table units
-/// intern into, which a string that is in neither joins.
+/// intern into, and a string that is in neither made apart from both
+/// ([`php_heap::Pending`]), which joins the table only where the compile
+/// answered a unit ([`PermanentStrings::settle`]), as opcache's buffer
+/// takes only what `zend_accel_store_interned_string` persists. So a
+/// fold's intermediate, given back as the fold goes on, is freed and
+/// never counted, and the strings of a compile refused with nothing
+/// declared go with it. A unit the cache serves without holding it
+/// (`Filed::Compiled`, `Filed::Unheld`) still puts its strings there,
+/// where php's are the request's. Each string the compile makes is
+/// charged to its [`CompileHeap`] as well. With the file's full path,
+/// the name it was included by and the keys of the functions and
+/// classes it binds, which opcache's persist interns as the unit is held
+/// (`UnitCache::persist_names`, `UnitCache::add_key`),
+/// `number_of_strings` moves as php's does, and not at all for a compile
+/// refused:
+///
+/// ```php
+/// $n = fn () => opcache_get_status()['interned_strings_usage']['number_of_strings'];
+/// $f = sys_get_temp_dir() . '/ns-' . getmypid();
+/// file_put_contents("$f.php", "<?php\nclass NS { const A = 'zq7w'; const X = self::A . self::A . self::A . self::A; }\n");
+/// $before = $n(); include "$f.php"; echo $n() - $before, " ", strlen(NS::X), "\n";
+/// file_put_contents("$f-r.php", "<?php\nclass NR { const A = 'refused' . 'fold'; const A = 1; }\n");
+/// $before = $n();
+/// register_shutdown_function(function () use ($n, $before, $f) { echo "\n", $n() - $before, "\n"; unlink("$f.php"); unlink("$f-r.php"); });
+/// include "$f-r.php";
+/// ```
+/// ```expect regime=jit-off exit=255
+/// 3 16
+///
+/// Fatal error: Cannot redefine class constant NR::A in %s on line 2
+///
+/// 0
+/// ```
 struct PermanentStrings<'a> {
     names: &'a Strings,
     strings: &'a mut Strings,
+    /// What the compile made that neither table holds.
+    made: php_heap::Pending,
+    heap: CompileHeap<'a>,
+    /// The request's copy of each string the compile made and has not
+    /// given back, standing until the compile ends.
+    standing: Vec<Standing>,
+    /// Whom the compile's answer serves: [`Answers::Asker`] once the
+    /// request's heap has refused one of its strings.
+    answers: Answers,
+}
+
+/// The request's copy of one string a cache-bound compile made, beside
+/// the table's string it stands for, which a claim given back names.
+struct Standing {
+    interned: php_heap::Str,
+    copy: php_heap::Str,
+}
+
+impl<'a> PermanentStrings<'a> {
+    /// The home of a compile charged to `heap`.
+    fn new(names: &'a Strings, strings: &'a mut Strings, heap: CompileHeap<'a>) -> Self {
+        PermanentStrings {
+            names,
+            strings,
+            made: php_heap::Pending::default(),
+            heap,
+            standing: Vec::new(),
+            answers: Answers::Every,
+        }
+    }
+
+    /// The string php's compile makes of `bytes` on the asking request's
+    /// heap at `sizing`'s size (`zend_string_init`, the string
+    /// `concat_function` makes, or a name `zend_strpprintf` prints),
+    /// asked of that heap before the table is: none where the compile is
+    /// the engine's, the empty string and one byte being the process's
+    /// (`ZSTR_CHAR`). The `Err` is the memory limit, and with it the
+    /// answer is the asking request's alone, which no cache holds; the
+    /// table is left as it stood.
+    fn charge(
+        &mut self,
+        bytes: &[u8],
+        sizing: php_heap::Sizing,
+    ) -> Result<Option<php_heap::Str>, php_heap::Fatal> {
+        let CompileHeap::Request(heap) = &mut self.heap else {
+            return Ok(None);
+        };
+        if bytes.len() <= 1 {
+            return Ok(None);
+        }
+        heap.string_sized(bytes, sizing).map(Some).inspect_err(|_| {
+            self.answers = Answers::Asker;
+        })
+    }
+
+    /// The request's `copy` of the string the table's `interned` stands
+    /// for: given back at once for a name startup interned, as
+    /// `zend_new_interned_string` releases the string it was handed for
+    /// the permanent one, and otherwise standing until the fold that made
+    /// it has read it ([`Intern::give_back`]) or the compile ends
+    /// ([`PermanentStrings::settle`]), as each string a miss makes stands
+    /// in its op array until opcache's persist. A string the table holds
+    /// stands too: opcache's buffer takes a string only as a unit is
+    /// persisted, so php's miss makes its own of a string an earlier
+    /// unit put there.
+    fn stand(&mut self, copy: Option<php_heap::Str>, interned: Option<php_heap::Str>) {
+        let (CompileHeap::Request(heap), Some(copy)) = (&mut self.heap, copy) else {
+            return;
+        };
+        match interned {
+            Some(interned) => self.standing.push(Standing { interned, copy }),
+            None => heap.release_string(copy),
+        }
+    }
+
+    /// The compile ended: the request's copies given back, as opcache's
+    /// persist frees them once the unit is in its segment; what it made
+    /// put in the table where its unit stands, `kept`, and given back
+    /// with a unit refused that declared nothing; and whom its answer
+    /// serves.
+    fn settle(self, kept: bool) -> Answers {
+        if let CompileHeap::Request(heap) = self.heap {
+            for standing in self.standing {
+                heap.release_string(standing.copy);
+            }
+        }
+        if kept {
+            self.strings.publish(self.made);
+        }
+        self.answers
+    }
+}
+
+/// Whether what the compile that answered `unit` made stands past it: a
+/// unit's, and a refused one's that declared something, whose functions
+/// and classes the request keeps (`Refused::declared`); a refusal that
+/// declared nothing leaves nothing to name them.
+fn strings_kept(unit: &Result<Unit, CompileError>) -> bool {
+    match unit {
+        Ok(_) => true,
+        Err(refused) => refused.declared.is_some(),
+    }
 }
 
 impl Intern for PermanentStrings<'_> {
@@ -3911,18 +4133,54 @@ impl Intern for PermanentStrings<'_> {
         &mut self,
         bytes: &[u8],
         valid_utf8: bool,
+        sizing: php_heap::Sizing,
     ) -> Result<php_heap::Str, php_heap::Fatal> {
-        match self.names.find(bytes) {
-            Some(held) => Ok(held),
-            None => self.strings.intern_marked(bytes, valid_utf8),
+        let copy = self.charge(bytes, sizing)?;
+        if let Some(held) = self.names.find(bytes) {
+            self.stand(copy, None);
+            return Ok(held);
         }
+        let interned = match self.strings.find(bytes) {
+            Some(held) => Ok(held),
+            None => self.made.intern(bytes, valid_utf8),
+        };
+        self.stand(copy, interned.as_ref().ok().copied());
+        interned
+    }
+
+    /// A string the fold that made it has read, given back, as
+    /// `zend_eval_const_expr` frees an operand once the value it made
+    /// stands: the request's copy, and the string itself where the
+    /// compile made it and nothing else asked for it; a string the table
+    /// held stays, the unit's to share. An array goes with the asks it
+    /// took over ([`php_heap::Pending::give_back`]).
+    fn give_back(&mut self, made: php_heap::Made) {
+        let value = made.value();
+        if let (CompileHeap::Request(heap), Some(string)) = (&mut self.heap, value.as_str()) {
+            let named = |standing: &Standing| standing.interned.is_same(string);
+            if let Some(at) = self.standing.iter().rposition(named) {
+                let standing = self.standing.swap_remove(at);
+                heap.release_string(standing.copy);
+            }
+        }
+        self.made.give_back(value);
+    }
+
+    /// One more owner of `value`: an ask on a string or an array this
+    /// compile made, so giving back the array a fold read it out of
+    /// leaves it standing (`ZVAL_COPY_OR_DUP`); nothing counts any other
+    /// a cache-bound compile holds.
+    fn hold(&mut self, value: php_heap::Zval) -> bool {
+        self.made.hold(value);
+        !value.is_refcounted()
     }
 
     fn constant_array(
         &mut self,
         entries: &[(php_heap::Key, php_heap::Zval)],
+        _: usize,
     ) -> Result<php_heap::Arr, php_heap::Fatal> {
-        self.strings.constant_array(entries)
+        self.made.constant_array(entries)
     }
 }
 
@@ -3955,12 +4213,14 @@ fn permanent_names(
     functions: &[FunctionDecl],
     classes: &[ClassDecl],
     constants: &[ConstDecl],
-    ini: &[(Vec<u8>, Option<Vec<u8>>)],
+    ini: &IniTable,
 ) -> Strings {
     let mut names = Strings::new();
     names.intern_known(&KNOWN_STRINGS.map(str::as_bytes));
     for extension in extensions {
-        names.intern(&lowered(extension.name.as_bytes())).ok();
+        names
+            .intern(&extension.name.as_bytes().to_ascii_lowercase())
+            .ok();
     }
     let declared = functions
         .iter()
@@ -3999,7 +4259,7 @@ fn permanent_names(
                 .chain(decl.methods.iter().map(|method| &method.function.name))
         }));
     for name in keyed {
-        names.intern(&lowered(&name.0)).ok();
+        names.intern(&name.0.to_ascii_lowercase()).ok();
     }
     for decl in classes {
         for constant in &decl.constants {
@@ -4008,7 +4268,7 @@ fn permanent_names(
             }
         }
     }
-    for (name, value) in ini {
+    for Directive { name, value, .. } in ini.rows() {
         names.intern(name).ok();
         if let Some(value) = value {
             names.intern(value).ok();
@@ -4208,7 +4468,7 @@ fn start_module(
 /// extension's (`Engine::refused`).
 fn modules_startup(
     req: &mut Request,
-    extensions: &[ExtensionEntry],
+    ini: &IniTable,
     held: Vec<(Vec<u8>, Vec<u8>)>,
     unloaded: Vec<Unloaded>,
     taken: &mut Vec<(Vec<u8>, Option<Vec<u8>>)>,
@@ -4222,13 +4482,15 @@ fn modules_startup(
         }
     };
     for (name, value) in held {
-        let owner = (extensions.iter())
-            .position(|e| e.on_modify.iter().any(|(n, _)| *n == name))
-            .unwrap_or(usize::MAX);
+        let on_modify = ini.find(&name).and_then(|row| row.on_modify);
+        let owner = on_modify.map_or(usize::MAX, |(owner, _)| {
+            usize::try_from(owner.0).unwrap_or(usize::MAX)
+        });
         refuse_until(req, &mut marks, owner);
         marks.push((owner, req.startup_raised_len()));
-        let accepted = on_modify(extensions, &name)
-            .is_some_and(|handler| matches!(handler.serve(req, &name, Some(&value)), Ok(true)));
+        let accepted = on_modify.is_some_and(|(_, handler)| {
+            matches!(handler.serve(req, &name, Some(&value)), Ok(true))
+        });
         if accepted {
             req.take_startup_value(&name, &value);
             taken.push((name, Some(value)));
@@ -4236,16 +4498,6 @@ fn modules_startup(
     }
     refuse_until(req, &mut marks, usize::MAX);
     marks
-}
-
-/// The handler an extension of `extensions` gave the entry `name`.
-fn on_modify(extensions: &[ExtensionEntry], name: &[u8]) -> Option<IniHandler> {
-    extensions.iter().find_map(|e| {
-        e.on_modify
-            .iter()
-            .find(|(n, _)| n.as_slice() == name)
-            .map(|(_, handler)| *handler)
-    })
 }
 
 /// The process-wide engine (design §5.14): immutable once built, shared
@@ -4319,10 +4571,7 @@ impl Drop for EngineEnd {
         {
             return;
         }
-        let description = RequestDescription {
-            sapi_name: shared.host.to_owned(),
-            ..RequestDescription::default()
-        };
+        let description = RequestDescription::of_host(shared.host);
         let sink = (self.sink.get_mut())
             .unwrap_or_else(PoisonError::into_inner)
             .take();
@@ -4340,8 +4589,8 @@ impl Drop for EngineEnd {
 }
 
 impl Engine {
-    /// A builder under the CLI's `HARDCODED_INI` (`Z/sapi/cli/php_cli.c:116-121`),
-    /// for the tests that hold what php's CLI writes.
+    /// A builder under the CLI's `HARDCODED_INI` (`Z/sapi/cli/php_cli.c:116-121`)
+    /// and its name, for the tests that hold what php's CLI writes.
     #[cfg(test)]
     pub(crate) fn cli_builder() -> EngineBuilder {
         let hardcoded = [
@@ -4351,11 +4600,10 @@ impl Engine {
             ("max_execution_time", "0"),
             ("max_input_time", "-1"),
         ];
-        hardcoded
-            .into_iter()
-            .fold(Engine::builder(), |builder, (name, value)| {
-                builder.ini(name, value)
-            })
+        hardcoded.into_iter().fold(
+            Engine::builder().sapi_name("cli"),
+            |builder, (name, value)| builder.ini(name, value),
+        )
     }
 
     /// A builder with no extensions, `Nop` as the tier and the core ini.
@@ -4430,16 +4678,14 @@ impl Engine {
         // finds the host's value for each: the handlers meet the values
         // in declaration order, whatever order the host set them in.
         let declared_at = |name: &[u8]| {
-            (self.shared.extension_inis())
-                .position(|entry| entry.name.0.as_ref() == name)
-                .unwrap_or(usize::MAX)
+            let declared = (self.shared.ini.find(name))
+                .and_then(|row| row.declared)
+                .map(|(extension, at)| (extension.0, at));
+            (declared.is_none(), declared)
         };
         held.sort_by_key(|(name, _)| declared_at(name));
         let sapi_name = self.shared.host;
-        let description = RequestDescription {
-            sapi_name: sapi_name.to_owned(),
-            ..RequestDescription::default()
-        };
+        let description = RequestDescription::of_host(sapi_name);
         let mut req = Request::new(Arc::clone(&self.shared), description);
         req.begin_startup();
         let mut taken = core_startup(&mut req);
@@ -4449,13 +4695,7 @@ impl Engine {
             suppliers,
         } = registry;
         let failed = register_extensions(&mut req, loads);
-        let marks = modules_startup(
-            &mut req,
-            &self.shared.extensions,
-            held,
-            unloaded,
-            &mut taken,
-        );
+        let marks = modules_startup(&mut req, &self.shared.ini, held, unloaded, &mut taken);
         req.set_ini_stage(IniStage::Startup);
         let encoding_at = req.startup_raised_len();
         let (script_encodings, taken_encoding) = crate::multibyte::startup(&mut req);
@@ -4475,15 +4715,17 @@ impl Engine {
         // What the startup stage took is the master value and the startup
         // ini alike.
         for (name, value) in taken {
-            shared.set_ini_default(name, value);
+            shared.set_ini_default(&name, value);
         }
-        (shared.realpath_cache).engine_startup(shared.ini_default(b"open_basedir"));
+        (shared.realpath_cache).engine_startup(shared.ini.master(b"open_basedir"));
         shared.startup_errors.extend_from_slice(&failed);
         shared.script_encodings = script_encodings;
         shared.startup_errors.extend_from_slice(&written);
         let mut start = Start {
             ini: StartupIni {
-                entries: shared.ini.clone(),
+                entries: (shared.ini.rows().iter())
+                    .map(|row| (row.name.clone(), row.value.clone()))
+                    .collect(),
             },
             host: sapi_name,
             process: Vec::new(),
@@ -4540,10 +4782,7 @@ impl Engine {
         let Some(refused) = self.shared.refused.as_ref() else {
             return (None, sink);
         };
-        let description = RequestDescription {
-            sapi_name: self.shared.host.to_owned(),
-            ..RequestDescription::default()
-        };
+        let description = RequestDescription::of_host(self.shared.host);
         let mut req = Request::lent(Arc::clone(&self.shared), description, sink);
         for (level, message) in &refused.raised {
             req.note_startup_error(*level, message);
@@ -4588,10 +4827,7 @@ impl Engine {
         entries: Vec<(Vec<u8>, Vec<u8>, IniOrigin)>,
     ) -> Result<Vec<u8>, NotAlone> {
         let shared = &self.shared;
-        let description = RequestDescription {
-            sapi_name: shared.host.to_owned(),
-            ..RequestDescription::default()
-        };
+        let description = RequestDescription::of_host(shared.host);
         let mut req = Request::new(Arc::clone(shared), description);
         req.begin_startup();
         req.set_ini_stage(IniStage::Activate);
@@ -4601,9 +4837,7 @@ impl Engine {
                 (shared.extension_ini(&name))
                     .map_or(Request::ini_modifiable(&name).1, |d| d.per_dir)
             };
-            if shared.ini.iter().all(|(n, _)| *n != name)
-                || (mode == IniOrigin::PerDir && !per_dir())
-            {
+            if shared.ini.find(&name).is_none() || (mode == IniOrigin::PerDir && !per_dir()) {
                 continue;
             }
             // A core handler reads its quantity, with its warning, before
@@ -4614,7 +4848,7 @@ impl Engine {
             if Request::ini_verdict(&name, &value) == crate::api::abi::IniVerdict::Rejected {
                 continue;
             }
-            let took = on_modify(&shared.extensions, &name).is_none_or(|handler| {
+            let took = shared.ini_handler(&name).is_none_or(|handler| {
                 matches!(handler.serve(&mut req, &name, Some(&value)), Ok(true))
             });
             if !took {
@@ -4639,7 +4873,7 @@ impl Engine {
                     if name == b"disable_functions" {
                         shared.disable_functions(&value);
                     }
-                    shared.set_ini_default(name, Some(value));
+                    shared.set_ini_default(&name, Some(value));
                 }
                 shared.locked.extend(locked);
                 Ok(written)
@@ -4720,7 +4954,7 @@ impl Engine {
     /// with, `None` for an entry php does not know.
     #[must_use]
     pub fn ini_get(&self, name: &[u8]) -> Option<Vec<u8>> {
-        self.shared.ini_default(name).map(<[u8]>::to_vec)
+        self.shared.ini.master(name).map(<[u8]>::to_vec)
     }
 
     /// `tsrm_realpath(path, NULL)` outside any request
@@ -4839,9 +5073,7 @@ impl Engine {
             filename,
             cwd: &cwd,
             kind: SourceKind::File,
-            keys_before: 0,
-            request_classes: RequestClasses::default(),
-            multibyte: self.shared.unbound(),
+            request: ForRequest::none(self.shared.unbound()),
         };
         self.shared.publish(source, origin, stack).ok()
     }
@@ -4872,7 +5104,8 @@ impl Engine {
     /// strings live, so the two compiles print one dump.
     #[must_use]
     pub fn dump_before_optimizer(&self, description: &RequestDescription) -> Option<Vec<u8>> {
-        let level = ini_quantity(self.shared.ini_default(b"opcache.opt_debug_level")?);
+        let level =
+            crate::ini_quantity::parse(self.shared.ini.master(b"opcache.opt_debug_level")?).0;
         if level & BEFORE_OPTIMIZER == 0 {
             return None;
         }
@@ -4887,9 +5120,7 @@ impl Engine {
                     filename: &script,
                     cwd: &description.cwd,
                     kind: SourceKind::File,
-                    keys_before: 0,
-                    request_classes: RequestClasses::default(),
-                    multibyte: self.shared.unbound(),
+                    request: ForRequest::none(self.shared.unbound()),
                 };
                 self.shared.publish(source, origin, stack).ok()?
             }
@@ -5000,9 +5231,9 @@ impl Engine {
         self.shutdown(&mut req)
     }
 
-    /// What a started request serves, then each extension's hook for the
-    /// moment after it, which php-fpm's `fastcgi_request_done` stands at
-    /// for a page as for a program.
+    /// What a started request serves, a page or a program, which php-fpm's
+    /// `fastcgi_request_done` stands after alike; the extensions' hook for
+    /// the moment after it opens [`Engine::shutdown_program`].
     pub(crate) fn serve_in(&self, req: &mut Request, source: Option<&[u8]>, serves: HostServes) {
         match serves {
             HostServes::Program => {
@@ -5021,7 +5252,6 @@ impl Engine {
             HostServes::Nothing => {}
         }
         req.free_path_copies();
-        req.program_ended();
     }
 
     /// `php_lint_script` under the CLI's `-l` (`Z/main/main.c:2779-2798`,
@@ -5143,14 +5373,14 @@ impl Engine {
     /// host but the built-in server ends on ([`Engine::start_failed`]).
     #[expect(
         clippy::result_large_err,
-        reason = "the request the Ok variant carries is many times the Err's size"
+        reason = "the Err side, the large one, is the observables a refused start hands the host once"
     )]
     pub(crate) fn begin(
         &self,
         description: RequestDescription,
         sink: Lent,
         traced: bool,
-    ) -> Result<Request, (Observables, Lent)> {
+    ) -> Result<Box<Request>, (Observables, Lent)> {
         match self.start_request(description, sink, traced) {
             Begun::Started(req) => Ok(req),
             Begun::Failed(req) => Err(Engine::start_failed(req)),
@@ -5254,7 +5484,7 @@ impl Engine {
     /// and each host's tests hold its ending, since a fence carries
     /// neither the ini nor the session file a failing `rinit` needs
     /// (#1634).
-    fn start_failed(mut req: Request) -> (Observables, Lent) {
+    fn start_failed(mut req: Box<Request>) -> (Observables, Lent) {
         #[cfg(debug_assertions)]
         req.end_in_sensed();
         let fatal = match req.ending() {
@@ -5615,6 +5845,19 @@ impl Engine {
         // them.
         // Each step is its own `zend_try`, so a fatal's bailout leaves
         // the step it was raised in and the next is served.
+        // php's `_exit(137)` at the hard memory limit runs none of
+        // `php_request_shutdown`: what the program would still run is not
+        // run, and its output buffers are dropped unflushed, as the output
+        // layer's deactivation drops them.
+        if req.terminated() {
+            req.unset_timer();
+            return;
+        }
+        req.program_ended(); // `EG(flags) |= EG_FLAGS_IN_SHUTDOWN`
+        // `EG(delayed_oom).state = ZEND_OOM_STATE_NONE` (`Z/main/main.c:2000`
+        // at 8.5.12): the shutdown functions and destructors run as if the
+        // memory limit had not been met.
+        req.heap_mut().reset_oom();
         req.enter_phase(crate::api::request::Phase::Shutdown);
         req.catch_bailout();
         crate::observer::end_all(req);
@@ -5640,7 +5883,9 @@ impl Engine {
         // as a release one does.
         #[cfg(debug_assertions)]
         let report_memleaks = req.ini_flag(b"report_memleaks");
-        end_phase(&self.shared.extensions, req, |e| e.rshutdown);
+        if !req.terminated() {
+            end_phase(&self.shared.extensions, req, |e| e.rshutdown);
+        }
         crate::output::deactivate(req);
         req.catch_bailout();
         req.free_shutdown_functions();
@@ -5668,7 +5913,7 @@ impl Engine {
         // `zend_deactivate`'s `zend_ini_deactivate`, after
         // `shutdown_executor` (`Z/Zend/zend.c:1320-1330`).
         req.ini_deactivate();
-        req.free_loop_var_stack();
+        req.free_compiler_stacks();
         // `php_free_request_globals`' `clear_last_error()`.
         req.clear_last_error_strings();
         // `zend_post_deactivate_modules`, after the executor is shut
@@ -5828,12 +6073,14 @@ fn compile(
         functions: declared.functions,
         frameless: declared.frameless,
         classes: declared.classes,
-        request_classes: origin.request_classes,
+        request_classes: origin.request.classes,
+        request_constants: origin.request.constants,
         stack,
-        keys_before: origin.keys_before,
-        multibyte: origin.multibyte,
+        keys_before: origin.request.keys_before,
+        multibyte: origin.request.multibyte,
         hooked: declared.hooked,
         extended_info: declared.extended_info,
+        op_array_extensions: declared.op_array_extensions,
     };
     php_compile::compile_source_into(laid.arena, source, &options, strings, laid.room)
 }
@@ -5939,10 +6186,38 @@ struct Laid<'a> {
 /// (`Z/ext/opcache/ZendAccelerator.c:1941`), so one made just in time is
 /// in `EG(symbol_table)` before the unit's first line, where the file
 /// names it and whether or not the line that names it is reached.
+///
+/// A file opcache serves from what it holds raises none of them while
+/// `opcache.record_warnings` is off, its default, since the compile that
+/// put it there raised them and opcache kept none; with the entry on,
+/// every hit raises them again, and without opcache, the CLI's default,
+/// every compile raises them (#3123, as #3234's rule takes it): one file
+/// included twice under each.
+///
+/// ```php
+/// $dir = sys_get_temp_dir() . '/w3123-' . getmypid();
+/// mkdir($dir);
+/// file_put_contents("$dir/lib.php", '<?php $f = function (int $x = null) { return $x; };');
+/// touch("$dir/lib.php", time() - 10);
+/// file_put_contents("$dir/main.php", '<?php include __DIR__ . "/lib.php"; include __DIR__ . "/lib.php"; echo "done\n";');
+/// foreach ([[], ['-d', 'opcache.enable_cli=1'], ['-d', 'opcache.enable_cli=1', '-d', 'opcache.record_warnings=1']] as $ini) {
+///     $p = proc_open([PHP_BINARY, '-n', '-d', 'error_reporting=-1', '-d', 'display_errors=1', '-d', 'opcache.file_update_protection=0', ...$ini, "$dir/main.php"], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+///     $out = stream_get_contents($pipes[1]);
+///     fclose($pipes[1]); fclose($pipes[2]); proc_close($p);
+///     echo substr_count($out, 'Deprecated:'), ' ', str_ends_with($out, "done\n") ? 'done' : 'not done', "\n";
+/// }
+/// unlink("$dir/lib.php"); unlink("$dir/main.php"); rmdir($dir);
+/// ```
+/// ```expect process
+/// 2 done
+/// 1 done
+/// 2 done
+/// ```
 pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: SourceKind) -> bool {
     // A request-only unit's names, which php's compile made as strings
-    // of the request; the memory limit refusing them ends the request.
-    if matches!(kind, SourceKind::Eval(_)) && req.hold_unit_names(unit).is_err() {
+    // of the request, an `eval`'s and an uncached file's alike; the
+    // memory limit refusing them ends the request.
+    if req.hold_unit_names(unit, kind).is_err() {
         return false;
     }
     // And the op arrays and classes it declares, as php's compile
@@ -5973,10 +6248,17 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
         SourceKind::File => Some(req.begin_recording()),
         SourceKind::Eval(_) => None,
     };
-    for raised in &unit.diagnostics {
+    // `opcache.record_warnings` off, php's default, keeps no compile's
+    // diagnostics with the script, so a hit raises none of them
+    // (`zend_accel_load_script` replays `persistent_script->warnings`
+    // only where the entry recorded them); the compile that put the
+    // script in the cache raised them, and a request php serves without
+    // the cache compiles and raises them each time.
+    let replayed = !req.accel_hit(unit) || req.ini_flag(b"opcache.record_warnings");
+    for raised in unit.diagnostics.iter().filter(|_| replayed) {
         req.note_error_in(
             raised.level,
-            &raised.message,
+            raised.message.as_bytes(),
             &unit.main.filename.0,
             raised.line,
         );
@@ -6047,7 +6329,7 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileRefused, file:
     };
     let error = &refused.error;
     for raised in error.raised.get(noted..).unwrap_or_default() {
-        req.note_error_in(raised.level, &raised.message, file, raised.line);
+        req.note_error_in(raised.level, raised.message.as_bytes(), file, raised.line);
     }
     refusal_raised(req, error, file);
 }
@@ -6055,13 +6337,13 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileRefused, file:
 /// The refusal itself, past what was raised before it
 /// ([`refused_program`]).
 pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[u8]) {
-    match (refused.stage, refused.thrown) {
+    match (refused.stage, refused.raise) {
         // Opened before anything compiled or ran: `zend_error` finds no
         // file compiling and none executing.
         (php_compile::Stage::Opening, _) => {
             req.end_in_compile_time(refused.level, &refused.message, b"Unknown", 0);
         }
-        (php_compile::Stage::Compiling, true) => {
+        (php_compile::Stage::Compiling, php_compile::Raise::Thrown) => {
             req.end_in_uncaught(
                 refused.level,
                 refused.message.as_bytes(),
@@ -6069,8 +6351,11 @@ pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[
                 refused.line,
             );
         }
-        (php_compile::Stage::Compiling, false) => {
+        (php_compile::Stage::Compiling, php_compile::Raise::Fatal | php_compile::Raise::Unread) => {
             req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+        }
+        (php_compile::Stage::Compiling, php_compile::Raise::HardLimit { limit, asked }) => {
+            req.terminate_at_hard_limit(limit, asked);
         }
     }
 }
@@ -6179,6 +6464,12 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
         req.end_in(&fatal);
     }
     req.leave_code(standing, frame);
+    // `zend_execute_scripts` at 8.5.12: a delayed OOM no safepoint raised
+    // is raised once the file has run, with nothing executing, so its
+    // bailout ends the request.
+    if req.has_oom() {
+        req.handle_delayed_oom();
+    }
     let exited = req.unwind_exit();
     // What the loop left pending for the user exception handler, served
     // with the main frame left (`zend_execute_scripts`).
@@ -6210,27 +6501,23 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
 /// zlib.*,bzip2.*,convert.iconv.*,string.rot13,string.toupper,string.tolower,convert.*,consumed,dechunk
 /// ```
 fn serve_rinits(req: &mut Request, extensions: &[ExtensionEntry]) -> Result<(), Thrown> {
-    let mut served = Ok(());
     for (at, extension) in extensions.iter().enumerate() {
-        let Some(rinit) = extension.rinit else {
-            continue;
-        };
-        served = req.serve_for(ExtensionId::at(at), rinit);
-        if served.is_err() {
-            break;
+        if let Some(rinit) = extension.rinit {
+            req.serve_for(ExtensionId::at(at), rinit)?;
         }
     }
-    served
+    Ok(())
 }
 
-/// The master value of the entry `name` among `ini` as
-/// `zend_ini_get_value` reads it, the empty string where it has none
-/// (php's `NULL`); `None` where php has no such entry.
-fn master_of<'a>(ini: &'a [(Vec<u8>, Option<Vec<u8>>)], name: &[u8]) -> Option<&'a [u8]> {
-    ini.iter()
-        .find(|(n, _)| n.as_slice() == name)
-        .map(|(_, v)| v.as_deref().unwrap_or_default())
-}
-
+pub(crate) mod ini_table;
 #[cfg(test)]
 mod tests;
+
+/// `zend_hash_update` over a table kept as rows: the row of `key` takes
+/// `value`, or a row of the two is added last.
+fn upsert<K: PartialEq, V>(rows: &mut Vec<(K, V)>, key: K, value: V) {
+    match rows.iter_mut().find(|(k, _)| *k == key) {
+        Some(row) => row.1 = value,
+        None => rows.push((key, value)),
+    }
+}

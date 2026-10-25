@@ -18,6 +18,7 @@ use php_ext::coerce::{is_callable, to_callable};
 use php_ext::decl::{FunctionDecl, MethodDecl, Name, Visibility};
 use php_ext::raising::{
     Thrown, arg_count_error, argument_error, deprecated, fatal, throw, throw_error,
+    throw_exception_ex,
 };
 use php_ext::request::{Execution, Request};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
@@ -89,7 +90,7 @@ fn this_method(
     let kept = kept_closure(req, this);
     let Some(found) = method_or_invoke(req, class, &name, kept) else {
         let named = class_name_of(req, class);
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!(
@@ -300,7 +301,7 @@ fn invoke_method(
 /// php's `ReflectionException` for a call that named no callee.
 fn invocation_failed(req: &mut Request, function: &FunctionRef) -> Thrown {
     let what = invocation_of(req, function);
-    throw(
+    throw_exception_ex(
         req,
         "ReflectionException",
         &format!("Invocation of {what} failed"),
@@ -353,7 +354,7 @@ fn receiver(
     }
     let Some(object) = given else {
         let class = class_name_of(req, scope);
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!(
@@ -380,7 +381,7 @@ fn abstract_refused(req: &mut Request, decl: &MethodDecl, scope: ClassId) -> Res
         return Ok(());
     }
     let class = class_name_of(req, scope);
-    Err(throw(
+    Err(throw_exception_ex(
         req,
         "ReflectionException",
         &format!(
@@ -1448,8 +1449,8 @@ impl ReflectionFunction {
             }
             Union::B(name) => name.as_bytes().to_vec(),
         };
-        let Some(function) = lookup_function(req, &name) else {
-            return Err(throw(
+        let Some(function) = php_ext::call::fetch_function(req, &name)? else {
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -1490,7 +1491,7 @@ impl ReflectionFunction {
             return PhpString::new(req, text.as_bytes());
         }
         let Some(function) = lookup_function(req, &name) else {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -2084,8 +2085,8 @@ impl ReflectionMethod {
     /// pk(function () { try { ReflectionMethod::createFromMethodName('a'); } catch (ReflectionException $e) {} });
     /// ```
     /// ```expect
-    /// 3120 32
-    /// 3016 0
+    /// 2992 32
+    /// 2888 0
     /// ```
     #[php(arity = manual)]
     fn __construct(
@@ -2147,7 +2148,7 @@ impl ReflectionMethod {
         };
         let Some(found) = found else {
             let class = class_name_of(req, class);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -2212,7 +2213,7 @@ impl ReflectionMethod {
         let held = req.symbols().method_row(class, &name).map(HeldMethod::Row);
         let Some(found) = held.and_then(|held| super::LinkedMethod::of_held(req, held)) else {
             let named = class_name_of(req, class);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -2347,7 +2348,7 @@ impl ReflectionMethod {
             .or_else(|| method_or_invoke(req, class, &name, kept))
         else {
             let class = class_name_of(req, class);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -2713,7 +2714,7 @@ impl ReflectionMethod {
         let Some(prototype) = prototype_of(req, this.object(), &name)? else {
             let (class, _, _) = this_method(req, this.object())?;
             let class = class_name_of(req, class);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(

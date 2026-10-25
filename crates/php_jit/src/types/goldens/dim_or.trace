@@ -1,0 +1,7 @@
+start loop
+root e11
+op e11 8 long long - taken
+op e11 4 long - - -
+op e11 5 array - long -
+op e11 7 long - - -
+stop loop

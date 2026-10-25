@@ -413,13 +413,18 @@ impl Heap {
         if iter.ht.is(a) || self.iterators.find_copy_pos(idx, a) {
             return Ok((self.iterators.get(idx).map_or(0, |i| i.pos), a));
         }
-        if let Target::Table(old) = iter.ht {
-            old.dec_iterators();
-        }
+        // php counts the iterator off its old table before it copies
+        // (`Z/Zend/zend_hash.c:633-643`) and leaves by a jump where the
+        // copy fails; here the copy comes first, so a copy the limit
+        // refuses leaves the iterator counted on the table it stands on,
+        // and that table's destruction poisons it.
         let mut held = a;
         if a.refcount() > 1 || a.is_immutable() {
             held = self.array_dup(a)?;
             let _ = a.delref();
+        }
+        if let Target::Table(old) = iter.ht {
+            old.dec_iterators();
         }
         held.inc_iterators();
         let pos = held.position();

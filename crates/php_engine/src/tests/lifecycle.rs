@@ -560,7 +560,7 @@ fn a_host_looks_at_its_request_after_every_rinit() {
     );
     assert_eq!(
         String::from_utf8_lossy(&sink.headers),
-        "X-Powered-By: PHP/8.5.9\r\nX-Rinit: 2\r\nContent-type: text/plain;charset=UTF-8\r\n"
+        "X-Powered-By: PHP/8.5.12\r\nX-Rinit: 2\r\nContent-type: text/plain;charset=UTF-8\r\n"
     );
     assert_eq!(String::from_utf8_lossy(&sink.stdout), "pong");
 }
@@ -1107,10 +1107,13 @@ fn a_diagnostic_raised_at_engine_end_is_displayed_and_logged_where_the_host_left
 struct Declaring;
 
 impl crate::tier::Tier for Declaring {
+    type State = ();
+
     fn safepoint(
         _: &mut Request,
         _: php_heap::FrameRef,
         _: crate::tier::Site,
+        _: crate::tier::Held<'_>,
     ) -> crate::tier::Flow {
         crate::tier::Flow::Continue
     }

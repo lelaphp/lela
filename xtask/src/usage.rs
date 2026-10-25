@@ -238,9 +238,9 @@ mod tests {
     /// over, and where a branch records its ticket or not.
     fn repository(name: &str) -> Tree {
         let tree = Tree::new(&format!("usage-{name}")).unwrap();
-        git(&tree, &["init", "-q", "-b", "main"], None).unwrap();
+        git(&tree, &["init", "-q", "-b", "main"]).unwrap();
         std::fs::write(tree.join("a.txt"), "a\n").unwrap();
-        git(&tree, &["add", "--", "a.txt"], None).unwrap();
+        git(&tree, &["add", "--", "a.txt"]).unwrap();
         crate::scratch::committing(&tree, &["commit", "-q", "-m", "scratch"]);
         tree
     }
@@ -254,7 +254,7 @@ mod tests {
     #[test]
     fn a_turn_on_a_branch_with_a_ticket_is_read_under_the_ticket() {
         let tree = repository("ticket");
-        git(&tree, &["checkout", "-q", "-b", "t-x/t210"], None).unwrap();
+        git(&tree, &["checkout", "-q", "-b", "t-x/t210"]).unwrap();
         record_ticket(&tree, "t-x/t210", Ticket::new(210)).unwrap();
         let usage = SessionUsage::parse(PRICED).unwrap();
         let reading = reading(&tree, &usage, "3f2a1b0c-session", 14).unwrap();

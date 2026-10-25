@@ -211,9 +211,9 @@ fn callee_named(req: &Request, function: Function, method: &str, function_word: 
 /// ```expect
 /// 552 32
 /// 472 0
-/// 312 0
+/// 320 0
 /// 472 0
-/// 448 0
+/// 464 0
 /// ```
 #[cold] // a flagged callee alone; out of the call path's frames (#3022)
 pub(crate) fn deprecated_function(req: &mut Request, function: Function) -> Result<(), Thrown> {

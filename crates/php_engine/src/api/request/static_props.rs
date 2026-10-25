@@ -5,11 +5,11 @@
 //! type, and bound by reference. The slots are [`StaticProps`]'s, whose
 //! field no file but this one reads.
 
-use php_unit::decl::{ClassKind, Visibility};
+use php_unit::decl::ClassKind;
 
 use crate::api::abi::PropertyRead;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, PhpRef, TypeTag, Value, ValueRef};
+use crate::api::values::{ClassId, Emalloc, PhpRef, TypeTag, Value, ValueRef};
 
 use super::{PropertyInfo, Request, WordMap};
 
@@ -29,23 +29,17 @@ pub(super) struct StaticProps {
     /// is laid down `IS_UNDEF`. php's table hangs off a map pointer and
     /// is the request's; so is this one.
     slots: WordMap<PropertyInfo, Value>,
+    /// The table itself, by the class it is laid for: the block
+    /// `zend_class_init_statics` `emalloc`s, a zval for each of the
+    /// class's `default_static_members_count` slots, an inherited one
+    /// among them ([`Request::init_statics`]).
+    /// A class whose chain has no slot is kept with none, so its next
+    /// access walks nothing.
+    tables: WordMap<ClassId, Option<Emalloc>>,
     /// The rows in the order their slots were laid down, which a debug
     /// build's teardown gives them up in.
     #[cfg(debug_assertions)]
     laid: Vec<PropertyInfo>,
-}
-
-impl StaticProps {
-    /// The slot of the `static` property `info` names; none where it is
-    /// not laid down.
-    fn slot(&self, info: PropertyInfo) -> Option<&Value> {
-        self.slots.get(&info)
-    }
-
-    /// [`StaticProps::slot`] to write.
-    fn slot_mut(&mut self, info: PropertyInfo) -> Option<&mut Value> {
-        self.slots.get_mut(&info)
-    }
 }
 
 impl Request {
@@ -56,10 +50,85 @@ impl Request {
     /// to the heap's mass release.
     #[cfg(debug_assertions)]
     pub(super) fn free_static_members(&mut self) {
-        let StaticProps { mut slots, laid } = std::mem::take(&mut self.static_props);
+        let StaticProps {
+            mut slots,
+            tables,
+            laid,
+        } = std::mem::take(&mut self.static_props);
         for value in laid.iter().filter_map(|info| slots.remove(info)) {
             self.release(value);
         }
+        for table in tables.into_values().flatten() {
+            table.free(self);
+        }
+    }
+
+    /// `zend_class_init_statics` (`Z/Zend/zend_object_handlers.c:2094`): the table of
+    /// `class`'s static members laid down on its first static access or
+    /// the first update of a class with expressions still to evaluate,
+    /// its parent's before it, one zval a slot of each class of the chain
+    /// that has any, as `CE_STATIC_MEMBERS` is the request's. The slots'
+    /// values are laid one by one ([`Request::lay_down_static`]). A
+    /// table is 16 bytes a slot, the parent's slots among a child's; a
+    /// class whose table stands lays none again, and one whose
+    /// declaration holds no expression lays its own at its first static
+    /// access, not at its first object:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } }');
+    /// m('$q0 = 1;');
+    /// foreach ([
+    ///     'class C17 { const K = R17::B; public static $s = 1; } class R17 { const B = 2; }',
+    ///     '$GLOBALS["g"] = C17::$s;',
+    ///     '$GLOBALS["h"] = C17::K;',
+    ///     'class Q10 { public static $p = R::B; } class R { const B = 1; }',
+    ///     '$GLOBALS["m2"] = Q10::$p;',
+    ///     'class S1 { public static $a = 1, $b = 2; } class S2 extends S1 { public static $c = 3; }',
+    ///     '$GLOBALS["s2"] = S2::$c;',
+    ///     '$GLOBALS["s1"] = S1::$a;',
+    ///     'class S3 { public static $a = 1; public $x = 2; }',
+    ///     '$GLOBALS["s3"] = new S3;',
+    ///     '$GLOBALS["s3a"] = S3::$a;',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1312  class C17 { const K = R17::B; public static $s = 1; } class R17 { const B = 2; }
+    /// 416  $GLOBALS["g"] = C17::$s;
+    /// 0  $GLOBALS["h"] = C17::K;
+    /// 896  class Q10 { public static $p = R::B; } class R { const B = 1; }
+    /// 48  $GLOBALS["m2"] = Q10::$p;
+    /// 944  class S1 { public static $a = 1, $b = 2; } class S2 extends S1 { public static $c = 3; }
+    /// 112  $GLOBALS["s2"] = S2::$c;
+    /// 32  $GLOBALS["s1"] = S1::$a;
+    /// 512  class S3 { public static $a = 1; public $x = 2; }
+    /// 88  $GLOBALS["s3"] = new S3;
+    /// 48  $GLOBALS["s3a"] = S3::$a;
+    /// ```
+    pub(super) fn init_statics(&mut self, class: ClassId) -> Result<(), Thrown> {
+        if self.static_props.tables.contains_key(&class) {
+            return Ok(());
+        }
+        let lineage: Vec<ClassId> = self.symbols().lineage(class).collect();
+        for class in lineage.into_iter().rev() {
+            if self.static_props.tables.contains_key(&class) {
+                continue;
+            }
+            let count = if self.native_class(class) {
+                0
+            } else {
+                self.static_members(class)
+            };
+            let table = match count {
+                0 => None,
+                count => Some(Emalloc::new(
+                    self,
+                    count * std::mem::size_of::<php_heap::Zval>(),
+                )?),
+            };
+            self.static_props.tables.insert(class, table);
+        }
+        Ok(())
     }
 
     /// `zend_std_get_static_property_with_info`
@@ -127,9 +196,7 @@ impl Request {
             Some((info, property.visibility, property.is_instance))
         });
         if let Some((info, visibility, _)) = found
-            && visibility != Visibility::Public
-            && Some(info.declaring) != scope
-            && (visibility == Visibility::Private || !self.check_protected(info.declaring, scope))
+            && !self.may_access_from(info.declaring, visibility, scope)
         {
             if silent {
                 return Ok(None);
@@ -141,9 +208,8 @@ impl Request {
                 return Ok(None);
             }
             let class = self.symbols().class_name(class);
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!(
                     "Access to undeclared static property {class}::${}",
                     String::from_utf8_lossy(name)
@@ -151,12 +217,9 @@ impl Request {
             ));
         };
         self.update_class_constants(class)?;
+        self.init_statics(class)?;
         self.lay_down_static(info)?;
-        if self
-            .symbols()
-            .class_decl(class)
-            .is_some_and(|decl| decl.kind == ClassKind::Trait)
-        {
+        if self.class_is(class, ClassKind::Trait) {
             let shown = format!(
                 "{}::${}",
                 self.symbols().class_name(info.declaring),
@@ -178,7 +241,7 @@ impl Request {
     /// evaluated in the declaring scope and held to its type under the
     /// strict rule, and `IS_UNDEF` for a typed one with no default.
     pub(super) fn lay_down_static(&mut self, info: PropertyInfo) -> Result<(), Thrown> {
-        if self.static_props.slot(info).is_some() {
+        if self.static_props.slots.contains_key(&info) {
             return Ok(());
         }
         let declaring = info.declaring;
@@ -207,7 +270,8 @@ impl Request {
     /// `IS_UNDEF` where the slot stands unwritten or the table has none.
     pub(crate) fn held_static(&self, info: PropertyInfo) -> Value {
         self.static_props
-            .slot(info)
+            .slots
+            .get(&info)
             .map_or_else(Value::undef, |value| *value)
     }
 
@@ -231,21 +295,34 @@ impl Request {
         scope: Option<ClassId>,
         read: PropertyRead,
     ) -> Result<Value, Thrown> {
-        let Some(info) = self.static_slot(class, name, scope, read)? else {
-            return Ok(Value::null());
-        };
+        match self.static_slot(class, name, scope, read)? {
+            Some(info) => self.static_value(info, read),
+            None => Ok(Value::null()),
+        }
+    }
+
+    /// [`Request::static_property`] over a slot already addressed, as a
+    /// handler that read the slot off its runtime cache reads it
+    /// (`zend_fetch_static_property_address`, `Z/Zend/zend_execute.c:3793`):
+    /// one more owner of the value the slot of `info` holds, a reference
+    /// followed, and under [`PropertyRead::Warning`] php's `Error` for a
+    /// typed slot nothing has written, `null` under the silent read.
+    pub(crate) fn static_value(
+        &mut self,
+        info: PropertyInfo,
+        read: PropertyRead,
+    ) -> Result<Value, Thrown> {
         let held = self.held_static(info);
         if held.tag() == TypeTag::Undef {
-            if self.property_typed(info) && read == PropertyRead::Warning {
-                let declaring = self.symbols().class_name(info.declaring);
-                return Err(crate::api::raising::throw_error(
-                    self,
-                    "Error",
-                    &format!(
-                        "Typed static property {declaring}::${} must not be accessed before initialization",
-                        String::from_utf8_lossy(name)
-                    ),
-                ));
+            if read == PropertyRead::Warning
+                && let Some(property) = self.property_decl(info).filter(|p| p.ty.is_some())
+            {
+                let message = format!(
+                    "Typed static property {}::${} must not be accessed before initialization",
+                    self.symbols().class_name(info.declaring),
+                    String::from_utf8_lossy(&property.name.0)
+                );
+                return Err(crate::api::raising::error(self, &message));
             }
             return Ok(Value::null());
         }
@@ -325,7 +402,9 @@ impl Request {
                 return Err(thrown);
             }
         };
-        self.set_static_slot(info, name, value, strict)
+        // `zend_update_static_property_ex`'s `zend_assign_to_variable(...,
+        // IS_TMP_VAR, ...)` over the owner it took of the value.
+        self.set_static_slot(info, name, value, (strict, php_unit::OperandKind::Tmp))
             .map(|(_, garbage)| self.release(garbage))
     }
 
@@ -354,14 +433,23 @@ impl Request {
         info: PropertyInfo,
         name: &[u8],
         mut value: Value,
-        strict: bool,
+        (strict, handed): (bool, php_unit::OperandKind),
     ) -> Result<(Value, Value), Thrown> {
         let declaring = info.declaring;
         // `zend_verify_property_type`: the value held to the declared
         // type and coerced by the weak rule where the writer's regime is
         // not strict, and php's `TypeError` where it neither satisfies
         // nor coerces, the value given up as php gives it up.
-        let ty = self.property_decl(info).and_then(|p| p.ty.clone());
+        // The declaration's type is copied only for a value it may
+        // coerce or refuse (`ZEND_TYPE_CONTAINS_CODE` first,
+        // [`crate::exec::SlotType::admits`]).
+        let held_to = self.property_decl(info).map_or(
+            crate::exec::SlotType::UNTYPED,
+            crate::exec::SlotType::set_reached,
+        );
+        let ty = (!held_to.admits(value.to_zval()))
+            .then(|| self.property_decl(info).and_then(|p| p.ty.clone()))
+            .flatten();
         if let Some(ty) = ty {
             let verdict =
                 crate::ops::verify_property_type(self, &value, &ty, declaring, name, strict);
@@ -372,7 +460,8 @@ impl Request {
         // another `static` than this one (`Test::$x =& Test::$y`).
         let held = |req: &Request| {
             req.static_props
-                .slot(info)
+                .slots
+                .get(&info)
                 .map_or(Value::null(), Value::deref)
         };
         let garbage = held(self);
@@ -380,7 +469,16 @@ impl Request {
         if let Some(cell) = self.static_slot_cell(info)
             && cell.heap().sources() != 0
         {
-            if let Err(thrown) = self.assign_to_reference(cell.heap(), value, strict) {
+            // `zend_assign_to_typed_prop` hands its copy on as
+            // `IS_TMP_VAR`; an untyped slot is `zend_assign_to_variable_ex`
+            // over the operand as it came.
+            let typed = self.property_decl(info).is_some_and(|p| p.ty.is_some());
+            let handed = if typed {
+                php_unit::OperandKind::Tmp
+            } else {
+                handed
+            };
+            if let Err(thrown) = self.assign_to_reference(cell.heap(), value, strict, handed) {
                 self.release(garbage);
                 return Err(thrown);
             }
@@ -416,18 +514,28 @@ impl Request {
     /// string(32) "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
     /// ```
     pub(crate) fn store_static_property(&mut self, info: PropertyInfo, value: Value) {
-        let Some(slot) = self.static_props.slot_mut(info) else {
+        let previous = self.replace_static_property(info, value);
+        self.release(previous);
+    }
+
+    /// [`Request::store_static_property`]'s write without its give-up:
+    /// the value is the slot's from here, written through a reference
+    /// the slot holds, and what the slot or its cell held is handed back
+    /// as the caller's owner to give up, as a compound assignment gives
+    /// up the value it wrote over; `null` where the slot is gone, the
+    /// value given up.
+    pub(crate) fn replace_static_property(&mut self, info: PropertyInfo, value: Value) -> Value {
+        let Some(slot) = self.static_props.slots.get_mut(&info) else {
             self.release(value);
-            return;
+            return Value::null();
         };
         if let ValueRef::Reference(cell) = slot.as_ref() {
-            // What the cell held is given up after the write.
-            let cell = cell.heap();
-            self.reference_set(cell, value);
-            return;
+            let at = cell.heap().val_ref();
+            let previous = Value::of_slot(at.read());
+            at.write(value.into_zval());
+            return previous;
         }
-        let previous = std::mem::replace(slot, value);
-        self.release(previous);
+        std::mem::replace(slot, value)
     }
 
     /// `zend_fetch_static_property_address` under `BP_VAR_W`
@@ -465,7 +573,7 @@ impl Request {
         // The row owns what it holds and the cell takes that owner, so
         // the row's value is replaced and never released.
         let cell = self.reference(held)?;
-        if let Some(slot) = self.static_props.slot_mut(info) {
+        if let Some(slot) = self.static_props.slots.get_mut(&info) {
             *slot = Value::reference(cell);
         }
         Ok(cell.heap().val_ref())
@@ -477,41 +585,25 @@ impl Request {
     /// `ZEND_ASSIGN_STATIC_PROP_OP`); none where the slot holds a value.
     pub(crate) fn static_slot_cell(&self, info: PropertyInfo) -> Option<PhpRef> {
         self.static_props
-            .slot(info)
+            .slots
+            .get(&info)
             .and_then(super::super::values::Value::as_php_ref)
     }
 
-    /// `zend_assign_to_variable_reference` over a `static` property's
-    /// slot, which `ZEND_ASSIGN_STATIC_PROP_REF` runs: the cell itself
+    /// `zend_assign_to_variable_reference` over the slot of the `static`
+    /// property `info` names, one the opline has already addressed,
+    /// which `ZEND_ASSIGN_STATIC_PROP_REF` runs: the cell itself
     /// becomes what the slot holds, so the property and every name
     /// bound to it are one value, and what the slot held is given up
     /// after the write. This is not [`Request::set_static_property`],
     /// which writes *through* a reference standing there; a bind
     /// replaces it.
-    pub(crate) fn bind_static_property(
-        &mut self,
-        class: ClassId,
-        name: &[u8],
-        scope: Option<ClassId>,
-        bound: Value,
-    ) -> Result<(), Thrown> {
-        let info = match self.static_slot(class, name, scope, PropertyRead::Warning) {
-            Ok(Some(info)) => info,
-            Ok(None) => {
-                self.release(bound);
-                return Ok(());
-            }
-            Err(thrown) => {
-                self.release(bound);
-                return Err(thrown);
-            }
-        };
-        let Some(slot) = self.static_props.slot_mut(info) else {
+    pub(crate) fn bind_static_property(&mut self, info: PropertyInfo, bound: Value) {
+        let Some(slot) = self.static_props.slots.get_mut(&info) else {
             self.release(bound);
-            return Ok(());
+            return;
         };
         let previous = std::mem::replace(slot, bound);
         self.release(previous);
-        Ok(())
     }
 }

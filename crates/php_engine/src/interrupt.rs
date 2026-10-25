@@ -30,21 +30,30 @@ use php_heap::Fatal;
 use crate::api::request::{Interrupt, Request};
 
 /// The interrupt check (design §5.8): one relaxed load and a branch, at
-/// the loop's four sites and nowhere else. php's check costs the same load,
-/// and an interrupt nobody raised costs nothing beyond it. `Ok(true)`
+/// the loop's four sites, and where compiled code hands it the check
+/// through `tier::interrupted`, and nowhere else. php's check costs the
+/// same load, and an interrupt nobody raised costs nothing beyond it. `Ok(true)`
 /// is a check whose extension hooks left a throwable pending, which the
 /// site hands to the loop as thrown where it stands, as `zend_interrupt_helper`
 /// leaves `EG(exception)` for the opline it re-enters.
 #[inline]
 pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
-    if req.limits().interrupt().raised().load(Ordering::Relaxed) {
+    if raised(req) {
         return interrupted(req);
     }
     Ok(false)
 }
 
+/// The check's one load: whether the interrupt is raised, for a site
+/// that does something of its own before [`interrupted`] where it is,
+/// as the loop's back-edge stands the frame at its target.
+#[inline]
+pub(crate) fn raised(req: &Request) -> bool {
+    req.limits().interrupt().raised().load(Ordering::Relaxed)
+}
+
 /// What a check that found the interrupt raised does
-/// (`Z/Zend/zend_vm_def.h:10526`): it clears the interrupt and then
+/// (`Z/Zend/zend_vm_def.h:10537`): it clears the interrupt and then
 /// either raises php's timeout fatal, when the execution timer was what
 /// raised it, or serves each extension's interrupt hook from the top of
 /// php's `zend_interrupt_function` chain, the last `MINIT` to set it
@@ -66,12 +75,53 @@ pub(crate) fn check(req: &mut Request) -> Result<bool, Fatal> {
 /// ```expect exit=255 wall=1s
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
 /// ```
+///
+/// The delayed OOM of the memory limit is raised here wherever a check
+/// stands: after a frameless call, `implode`'s here, whose string php
+/// 8.5.12 asks for fallibly, so the call's own function goes no further
+/// and no `finally` is served,
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $a = array_fill(0, 100, str_repeat('x', 30000));
+/// function f($a) { $s = implode(',', $a); echo "after implode\n"; return $s; }
+/// try { f($a); } finally { echo "finally\n"; }
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 4
+/// ```
+///
+/// and after a native a callback called, as `zend_call_function` checks
+/// at 8.5.12, so the caller calls no further callback:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $r = array_map(function ($n) { echo "cb $n\n"; return str_repeat('x', $n << 20); }, [1, 10, 2]);
+/// echo "unreached\n";
+/// ```
+/// ```expect exit=255
+/// cb 1
+/// cb 10
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 10502144 bytes) in %s on line 3
+/// ```
+#[cold]
+#[inline(never)]
 pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
     if let Some(seconds) = req.limits().interrupt().taken() {
         return Err(Fatal::error(format!(
             "Maximum execution time of {seconds} second{} exceeded",
             if seconds == 1 { "" } else { "s" }
         )));
+    }
+    // `else if (ZEND_HAS_OOM()) { zend_handle_delayed_oom(); HANDLE_EXCEPTION(); }`
+    // (`Z/Zend/zend_vm_def.h:10548` at 8.5.12): the heap raised the
+    // interrupt as it recorded the delayed OOM, so the memory limit's
+    // fatal costs the loop no test of its own.
+    if req.has_oom() {
+        req.handle_delayed_oom();
+        return Ok(req.is_pending());
     }
     req.serve_interrupt_hooks();
     Ok(req.is_pending())
@@ -251,13 +301,6 @@ pub(crate) struct Timer(Arc<Mutex<Control>>);
 /// the engine alive: what a fork stops first, whoever asks for it.
 static TIMERS: Mutex<Vec<Weak<Mutex<Control>>>> = Mutex::new(Vec::new());
 
-/// [`TIMERS`], held, with the timers of engines that have ended let go.
-fn registered() -> MutexGuard<'static, Vec<Weak<Mutex<Control>>>> {
-    let mut timers = TIMERS.lock().unwrap_or_else(PoisonError::into_inner);
-    timers.retain(|timer| timer.strong_count() > 0);
-    timers
-}
-
 impl Default for Timer {
     /// A timer with no deadline and no thread, entered among the
     /// process's timers so a fork finds it. The entry stands inside the
@@ -265,7 +308,7 @@ impl Default for Timer {
     fn default() -> Timer {
         let timer = Timer(Arc::default());
         let _inside = crate::fork::Inside::enter();
-        registered().push(Arc::downgrade(&timer.0));
+        crate::fork::living(&TIMERS).push(Arc::downgrade(&timer.0));
         timer
     }
 }
@@ -310,7 +353,7 @@ impl Timers {
     /// The timers of every engine that stands in the process.
     pub(crate) fn live() -> Timers {
         Timers(
-            registered()
+            crate::fork::living(&TIMERS)
                 .iter()
                 .filter_map(Weak::upgrade)
                 .map(Timer)
@@ -369,10 +412,7 @@ impl Stopped {
     pub(crate) fn resume(self) {
         let _inside = crate::fork::Inside::enter();
         for timer in &self.0 {
-            let mut control = timer.control();
-            if control.thread.is_none() {
-                control.start();
-            }
+            timer.stand();
         }
     }
 }
@@ -1647,7 +1687,7 @@ mod tests {
         assert_eq!(interrupt.taken(), Some(1));
     }
 
-    /// The two arms of `Z/Zend/zend_vm_def.h:10526`: the timer's fatal,
+    /// The two arms of `Z/Zend/zend_vm_def.h:10537`: the timer's fatal,
     /// and the interrupt cleared with nothing raised when signal
     /// delivery was what raised it and no PHP handler is installed.
     #[test]

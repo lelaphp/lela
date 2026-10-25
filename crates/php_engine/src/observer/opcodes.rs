@@ -12,7 +12,7 @@
 //! opcode with a user handler resolves to `ZEND_USER_OPCODE`'s
 //! (`zend_vm_set_opcode_handler`, `Z/Zend/zend_execute.c:5913-5926`),
 //! whose handler calls the user's and then dispatches the opline's own
-//! (`Z/Zend/zend_vm_def.h:8237-8268`). So it is told of every opline the
+//! (`Z/Zend/zend_vm_def.h:8244-8275`). So it is told of every opline the
 //! VM dispatches and of no other: not of an `OP_DATA` its predecessor
 //! reads, not of a `JMPZ` a smart branch steps over, not of the `RECV`
 //! of a passed argument a function with no declared type skips, and not
@@ -85,7 +85,6 @@ impl Opcodes {
 
     /// Whether `opcode` is in the set.
     #[inline(always)] // the loop's test of an opline: one word and one bit, never a call
-    #[allow(clippy::inline_always)]
     pub(crate) fn contains(&self, opcode: Opcode) -> bool {
         let (word, bit) = Self::place(opcode);
         self.0.get(word).is_some_and(|word| word & bit != 0)
@@ -102,7 +101,6 @@ impl Opcodes {
 
     /// The word and the bit `opcode`'s number stands at.
     #[inline(always)] // as `contains`
-    #[allow(clippy::inline_always)]
     fn place(opcode: Opcode) -> (usize, u64) {
         let n = opcode.num();
         (usize::from(n >> 6), 1 << (n & 63))
@@ -181,6 +179,17 @@ impl ObservedOpcodes {
     pub(crate) fn declares_any(&self) -> bool {
         !self.any.is_empty()
     }
+
+    /// Whether an extension declared an opcode other than
+    /// `ZEND_BEGIN_SILENCE` and `ZEND_END_SILENCE`, which
+    /// `zend_jit_check_support` refuses the tier over
+    /// (`Z/ext/opcache/jit/zend_jit.c:3743-3756`).
+    pub(crate) fn refuses_tier(&self) -> bool {
+        (0..=u8::MAX)
+            .filter_map(Opcode::from_u8)
+            .filter(|opcode| !matches!(opcode, Opcode::BeginSilence | Opcode::EndSilence))
+            .any(|opcode| self.any.contains(opcode))
+    }
 }
 
 /// Whether a loop tells the observers of the declared opcodes, a type
@@ -212,17 +221,14 @@ pub(crate) struct Untold;
 
 impl Telling for Untold {
     #[inline(always)] // nothing, so the loop has nothing of it
-    #[allow(clippy::inline_always)]
     fn of(_: &Request) -> Untold {
         Untold
     }
 
     #[inline(always)] // as `of`
-    #[allow(clippy::inline_always)]
     fn before(self, _: &mut Request, _: FrameRef, _: u32, _: Opcode) {}
 
     #[inline(always)] // as `of`
-    #[allow(clippy::inline_always)]
     fn tells(self, _: Opcode) -> bool {
         false
     }
@@ -237,13 +243,11 @@ pub(crate) struct Declared(Opcodes);
 
 impl Telling for Declared {
     #[inline(always)] // read at the loop's entry, outside the loop
-    #[allow(clippy::inline_always)]
     fn of(req: &Request) -> Declared {
         Declared(req.shared.opcodes.any)
     }
 
     #[inline(always)] // the loop pays a test and a branch, never a call
-    #[allow(clippy::inline_always)]
     fn before(self, req: &mut Request, frame: FrameRef, at: u32, opcode: Opcode) {
         if self.0.contains(opcode) {
             req.vm_mut().stand(frame, at);
@@ -252,7 +256,6 @@ impl Telling for Declared {
     }
 
     #[inline(always)] // as `before`
-    #[allow(clippy::inline_always)]
     fn tells(self, opcode: Opcode) -> bool {
         self.0.contains(opcode)
     }
@@ -265,7 +268,6 @@ impl Telling for Declared {
 /// reads the set the same way, through [`Declared`]
 /// ([`crate::exec::parameter_prologue`]).
 #[inline(always)] // as `Telling::before`
-#[allow(clippy::inline_always)]
 pub(crate) fn tell_before(req: &mut Request, frame: FrameRef, opcode: Opcode) {
     let at = req.vm().opline(frame);
     Declared::of(req).before(req, frame, at, opcode);

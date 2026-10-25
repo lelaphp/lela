@@ -150,7 +150,8 @@ fn the_startup_entries_are_read_as_php_init_config_reads_them() {
         let engine = Engine::cli_builder().ini(name, value).build();
         engine
             .shared
-            .ini_default(probe)
+            .ini
+            .master(probe)
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
     };
     assert_eq!(
@@ -315,7 +316,7 @@ fn disable_functions_takes_its_natives_out_of_the_function_table() {
 /// is zero.
 #[test]
 fn a_whole_number_ini_value_is_read_as_php_s_quantity_reads_it() {
-    let read = |value: &str| ini_quantity(value.as_bytes());
+    let read = |value: &str| crate::ini_quantity::parse(value.as_bytes()).0;
     assert_eq!(
         read("0x10000"),
         0x1_0000,

@@ -60,10 +60,36 @@ use crate::observe::{Allocation, AllocationObserverId, ObserveAllocations, Obser
 mod cache;
 #[cfg(debug_assertions)]
 mod leaks;
+mod oom;
 #[cfg(debug_assertions)]
 mod origins;
+pub(crate) mod tracked;
 
 pub use cache::ChunkCache;
+pub use oom::{DelayedOom, PendingOom};
+
+use oom::{HardLimitPercent, Wake};
+use tracked::Tracked;
+
+/// Which allocator a heap serves its blocks from, php's
+/// `use_custom_heap` and the handlers it names: Zend's own chunks, bins
+/// and runs, or the system's allocator with each block's size kept
+/// ([`tracked`]), chosen once for every heap of the process
+/// ([`tracked::chosen`]).
+#[derive(Debug)]
+enum Allocator {
+    Zend,
+    Tracked(Box<Tracked>),
+}
+
+/// The arm `alloc`, `realloc` and `free` take, php's `use_custom_heap`:
+/// Zend's own, or the custom one that serves the tracked allocator and
+/// tells the observers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Entries {
+    Zend,
+    Custom,
+}
 
 /// `ZEND_MM_CHUNK_SIZE`: 2 MiB, and the alignment of every chunk, so the
 /// chunk an allocation belongs to is its address with the low bits cut.
@@ -226,6 +252,12 @@ struct Huge {
 /// blocks and the four numbers php answers `memory_get_usage()` and
 /// `memory_get_peak_usage()` with.
 pub(crate) struct Mm {
+    /// The allocator its blocks come from.
+    allocator: Allocator,
+    /// php's `heap->use_custom_heap`: whether the entries take their cold
+    /// arm, for the tracked allocator or for the observers, the one test
+    /// an allocation pays for either ([`Mm::reckon_custom`]).
+    entries: Entries,
     /// The chunks in php's walk order; the first is php's `main_chunk`
     /// and is never moved or deleted.
     chunks: Vec<NonNull<Chunk>>,
@@ -250,12 +282,25 @@ pub(crate) struct Mm {
     real_size: usize,
     real_peak: usize,
     limit: usize,
-    /// `overflow`: set where the heap refuses an allocation with its
-    /// fatal, `zend_mm_safe_error`, and cleared once the fatal is
-    /// rendered ([`Mm::overflow_rendered`]). While it is set the limit
-    /// refuses nothing, so rendering the fatal, its backtrace among it,
-    /// is not refused by the limit it reports.
+    /// `hard_limit` and `hard_limit_percent`: past the hard limit an
+    /// allocation ends the process ([`Mm::check_limit`]).
+    hard_limit: usize,
+    hard_limit_percent: HardLimitPercent,
+    /// `fallible`: whether an allocation past the soft limit is refused,
+    /// php's `NULL`, rather than served ([`Mm::set_fallible`]).
+    fallible: Asks,
+    /// Whether a fallible ask was refused since [`Mm::take_refused`]
+    /// last read it.
+    refused: bool,
+    /// `overflow`: set while the limit's fatal is raised
+    /// ([`Mm::take_pending_oom`]), the window php discards the buffers
+    /// `ob_start()` laid down in (`zend_alloc_in_memory_limit_error_reporting`).
     overflow: bool,
+    /// php's `EG(delayed_oom)`, which the limit records and the engine
+    /// raises ([`DelayedOom`]).
+    delayed: DelayedOom,
+    /// The request's interrupt, raised as a delayed OOM is recorded.
+    wake: Option<Wake>,
     /// The profilers told of what the entries serve, `alloc`, `realloc`,
     /// `free` and `gc`, and of nothing the heap does on its own behalf.
     observers: Observers,
@@ -287,6 +332,21 @@ pub(crate) struct Mm {
     traces: Option<std::collections::HashMap<usize, std::backtrace::Backtrace>>,
     /// php's fast shutdown has begun ([`Mm::keep_emptied`]).
     keep_emptied: bool,
+    /// A test's arming of the limit ([`Mm::refuse_after`]), off unless a
+    /// test arms it.
+    #[cfg(test)]
+    armed: Armed,
+}
+
+/// Where a test's arming of the limit stands ([`Mm::refuse_after`]).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Armed {
+    Off,
+    /// This many more asks served before the one refused.
+    After(usize),
+    /// The ask it was armed for refused.
+    Fired,
 }
 
 impl Mm {
@@ -308,13 +368,43 @@ impl Mm {
         Mm::over(Some(cache))
     }
 
+    /// A heap of the allocator the process chose: Zend's, or, where the
+    /// environment asked for it, the tracked one, which maps no chunk and
+    /// takes nothing from the cache.
     fn over(cache: Option<Arc<ChunkCache>>) -> Mm {
-        let kept = cache.as_ref().and_then(|cache| cache.take());
+        let allocator = if tracked::chosen() {
+            Allocator::Tracked(Box::default())
+        } else {
+            Allocator::Zend
+        };
+        Mm::of(allocator, cache)
+    }
+
+    /// A tracked heap, whatever the process chose, for the tests. Its
+    /// blocks are asked for raw: the debug build's freed-block mark and
+    /// owner table read the process's choice ([`tracked::chosen`]), not
+    /// the heap's, since they reach a block with no heap in hand, so a
+    /// counted value laid on this heap in a process that chose Zend's
+    /// would be read as a chunk's.
+    #[cfg(test)]
+    pub(crate) fn tracked() -> Mm {
+        Mm::of(Allocator::Tracked(Box::default()), None)
+    }
+
+    fn of(allocator: Allocator, cache: Option<Arc<ChunkCache>>) -> Mm {
+        let zend = matches!(allocator, Allocator::Zend);
+        let kept = cache
+            .as_ref()
+            .filter(|_| zend)
+            .and_then(|cache| cache.take());
         let (main, cached, avg_chunks_count) = match kept {
             Some(kept) => (Some(kept.main), kept.cached, kept.avg_chunks_count),
-            None => (chunk_alloc(CHUNK_SIZE), Vec::new(), 1.0),
+            None if zend => (chunk_alloc(CHUNK_SIZE), Vec::new(), 1.0),
+            None => (None, Vec::new(), 1.0),
         };
         let mut mm = Mm {
+            allocator,
+            entries: if zend { Entries::Zend } else { Entries::Custom },
             chunks: Vec::new(),
             cached,
             free_slot: [std::ptr::null_mut(); BINS],
@@ -328,7 +418,13 @@ impl Mm {
             real_size: 0,
             real_peak: 0,
             limit: NO_LIMIT,
+            hard_limit: NO_LIMIT,
+            hard_limit_percent: HardLimitPercent::Default,
+            fallible: Asks::Infallibly,
+            refused: false,
             overflow: false,
+            delayed: DelayedOom::None,
+            wake: None,
             observers: Observers::default(),
             retired: Vec::new(),
             #[cfg(debug_assertions)]
@@ -341,7 +437,15 @@ impl Mm {
             #[cfg(debug_assertions)]
             traces: None,
             keep_emptied: false,
+            #[cfg(test)]
+            armed: Armed::Off,
         };
+        // A debug build's sensor of the lend's slot (ADR-0014): a heap is
+        // made where its request starts, and no lend stands there.
+        #[cfg(debug_assertions)]
+        if crate::lend::standing() {
+            mm.sensed.record(crate::sensed::Sensed::MadeUnderLend);
+        }
         if let Some(chunk) = main {
             mm.chunk_init(chunk, 0);
             mm.chunks.push(chunk);
@@ -384,11 +488,13 @@ impl Mm {
         self.limit
     }
 
-    /// `zend_set_memory_limit` (`Z/Zend/zend_alloc.c:2899`): a limit
-    /// under what the chunks hold is met by giving cached chunks back
-    /// where that is enough, the limit itself then left as it stood, as
-    /// php leaves it, and refused where it is not.
+    /// `zend_set_memory_limit` (`Z/Zend/zend_alloc.c:3201` at 8.5.12): a
+    /// limit past php's `ZEND_MM_LIMIT_MAX` is that, and one under what
+    /// the chunks hold is met by giving cached chunks back where that is
+    /// enough and refused where it is not; the hard limit follows the
+    /// soft one it is held to.
     pub(crate) fn set_limit(&mut self, limit: usize) -> bool {
+        let limit = limit.min(NO_LIMIT);
         if limit < self.real_size {
             if limit < self.real_size - self.cached.len() * CHUNK_SIZE {
                 return false;
@@ -400,38 +506,273 @@ impl Mm {
                 chunk_free(chunk, CHUNK_SIZE);
                 self.real_size -= CHUNK_SIZE;
             }
-            return true;
         }
         self.limit = limit;
+        self.hard_limit = self.hard_limit_percent.hard_limit(limit);
+        true
+    }
+
+    /// `zend_set_memory_hard_limit_percent` (`Z/Zend/zend_alloc.c:3215`):
+    /// php's `-1` or a percent of 100 and above, refused while the soft
+    /// limit is exceeded, since the hard limit must stay above what the
+    /// chunks hold.
+    pub(crate) fn set_hard_limit_percent(&mut self, percent: i64) -> bool {
+        let Some(percent) = HardLimitPercent::from_php(percent) else {
+            return false;
+        };
+        if self.real_size > self.limit {
+            return false;
+        }
+        self.hard_limit_percent = percent;
+        self.hard_limit = percent.hard_limit(self.limit);
         true
     }
 
     /// `heap->overflow`, `zend_alloc_in_memory_limit_error_reporting`:
-    /// whether the fatal the limit raised is being reported.
+    /// whether the limit's fatal is being raised.
     pub(crate) fn overflowed(&self) -> bool {
         self.overflow
     }
 
-    /// `heap->overflow = 0` after `zend_error` returns in
-    /// `zend_mm_safe_error` (`Z/Zend/zend_alloc.c:417`): the fatal the
-    /// heap raised is rendered, and the limit holds again.
-    pub(crate) fn overflow_rendered(&mut self) {
-        self.overflow = false;
+    /// php's `EG(delayed_oom)`.
+    #[inline]
+    pub(crate) fn delayed(&self) -> &DelayedOom {
+        &self.delayed
     }
 
-    /// `zend_mm_safe_error`'s `heap->overflow = 1`
-    /// (`Z/Zend/zend_alloc.c:405`): the fatal, with the limit lifted
-    /// until it is rendered.
-    fn refuse(&mut self, fatal: Fatal) -> Fatal {
+    /// The request's interrupt, raised from here on as a delayed OOM is
+    /// recorded.
+    pub(crate) fn wake_on_oom(&mut self, wake: Wake) {
+        self.wake = Some(wake);
+    }
+
+    /// The site the engine read for a delayed OOM recorded and not yet
+    /// named, as php reads it in `zend_mm_delayed_verror`; one named
+    /// already keeps its own.
+    pub(crate) fn locate_oom(&mut self, file: &[u8], line: u32) {
+        if let DelayedOom::Pending(pending) = &mut self.delayed
+            && pending.site.is_none()
+        {
+            pending.site = Some((file.into(), line));
+        }
+    }
+
+    /// The opening of `zend_handle_delayed_oom` (`Z/Zend/zend_alloc.c:3891`):
+    /// a pending OOM taken out to be raised, the state `HANDLING` and the
+    /// limit's fatal being reported, `heap->overflow = 1`; `None` where
+    /// none is pending.
+    pub(crate) fn take_pending_oom(&mut self) -> Option<PendingOom> {
+        if !matches!(self.delayed, DelayedOom::Pending(_)) {
+            return None;
+        }
+        let DelayedOom::Pending(pending) =
+            std::mem::replace(&mut self.delayed, DelayedOom::Handling)
+        else {
+            return None;
+        };
         self.overflow = true;
-        fatal
+        Some(pending)
+    }
+
+    /// The close of `zend_handle_delayed_oom`: the fatal raised,
+    /// `heap->overflow = 0` and the state `HANDLED`.
+    pub(crate) fn oom_handled(&mut self) {
+        self.overflow = false;
+        self.delayed = DelayedOom::Handled;
+    }
+
+    /// `EG(delayed_oom).state = ZEND_OOM_STATE_NONE`, which
+    /// `php_request_shutdown` writes as it begins and again once the heap
+    /// is shut down (`Z/main/main.c:2000`, `:2095`).
+    pub(crate) fn reset_oom(&mut self) {
+        self.delayed = DelayedOom::None;
+    }
+
+    /// `zend_mm_check_limit` (`Z/Zend/zend_alloc.c:206` at 8.5.12), at the
+    /// three places a heap grows: a chunk, a huge block, a huge block's
+    /// tail. Past the soft limit the heap sweeps where `gc` says so;
+    /// past the hard limit an allocation that is not fallible ends the
+    /// process; still past the soft limit, the delayed OOM is recorded,
+    /// once, and the allocation is served, or refused where it is
+    /// fallible. Whether the sweep ran and freed anything is the answer,
+    /// for a chunk's growth to look in the cache again.
+    fn check_limit(&mut self, add: usize, gc: bool) -> Result<bool, Refused> {
+        if !self.past_limit(add) {
+            return Ok(false);
+        }
+        let did_gc = gc && self.gc_heap() != 0;
+        if self.fallible == Asks::Infallibly && add > self.hard_limit.saturating_sub(self.real_size)
+        {
+            return Err(Refused::Fatal(Fatal::hard_limit(self.hard_limit, add)));
+        }
+        if !gc || self.past_limit(add) {
+            self.delay(add);
+            if self.fallible == Asks::Fallibly {
+                return Err(Refused::Fallible);
+            }
+        }
+        Ok(did_gc)
+    }
+
+    /// Whether `add` more bytes would take the chunks past the soft
+    /// limit, or they are past it already.
+    fn past_limit(&self, add: usize) -> bool {
+        self.limit < self.real_size || add > self.limit - self.real_size
+    }
+
+    /// `zend_mm_delayed_error` over the limit's text, the limit and the
+    /// bytes asked for, where no delayed OOM stands.
+    #[cold]
+    fn delay(&mut self, add: usize) {
+        if self.delayed == DelayedOom::None {
+            let limit = self.limit;
+            self.delay_message(format!(
+                "Allowed memory size of {limit} bytes exhausted (tried to allocate {add} bytes)"
+            ));
+        }
+    }
+
+    /// `zend_mm_delayed_verror` (`Z/Zend/zend_alloc.c:409`): the delayed
+    /// OOM recorded with `message`, where none stands, and the request's
+    /// interrupt raised.
+    #[cold]
+    fn delay_message(&mut self, message: String) {
+        if self.delayed != DelayedOom::None {
+            return;
+        }
+        self.delayed = DelayedOom::Pending(PendingOom {
+            message,
+            site: None,
+        });
+        if let Some(wake) = &self.wake {
+            (**wake)
+                .as_ref()
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// A test's arming of the limit (`crate::refusals`): `after` more
+    /// allocations and reallocations served, and the one after them
+    /// refused as the hard limit refuses it. The heap's own arms of the
+    /// limit are reached only at chunk growth and a huge block, so a test
+    /// cannot fill a heap until exactly the `n`th ask of an operation is
+    /// refused; this refuses it where it is asked.
+    #[cfg(test)]
+    pub(crate) fn refuse_after(&mut self, after: usize) {
+        self.armed = Armed::After(after);
+    }
+
+    /// The arming taken off, and whether it refused the ask it was armed
+    /// for.
+    #[cfg(test)]
+    pub(crate) fn disarm(&mut self) -> bool {
+        std::mem::replace(&mut self.armed, Armed::Off) == Armed::Fired
+    }
+
+    /// One ask counted against the arming: whether it is the one refused.
+    #[cfg(test)]
+    fn counted_out(&mut self) -> bool {
+        match self.armed {
+            Armed::After(0) => {
+                self.armed = Armed::Fired;
+                true
+            }
+            Armed::After(n) => {
+                self.armed = Armed::After(n - 1);
+                false
+            }
+            Armed::Off | Armed::Fired => false,
+        }
+    }
+
+    /// `zend_mm_set_fallible` (`Z/Zend/zend_alloc.c:3696`): whether an
+    /// ask past the soft limit is refused from here on, its refusal the
+    /// [`FatalReason::Refused`] its caller reads as php's `NULL`, rather
+    /// than served; the fallibility it had is the answer, for the caller
+    /// to put back, as `ZEND_MM_FALLIBLE_FORWARD` puts it back.
+    ///
+    /// [`FatalReason::Refused`]: crate::FatalReason::Refused
+    pub(crate) fn set_fallible(&mut self, fallible: bool) -> bool {
+        std::mem::replace(&mut self.fallible, Asks::of(fallible)) == Asks::Fallibly
+    }
+
+    /// Whether a fallible ask was refused since this was last read.
+    pub(crate) fn take_refused(&mut self) -> bool {
+        std::mem::take(&mut self.refused)
+    }
+
+    /// What an ask the allocator refused hands its caller: a fallible
+    /// refusal noted and carried as [`FatalReason::Refused`], anything
+    /// else the request's end.
+    ///
+    /// [`FatalReason::Refused`]: crate::FatalReason::Refused
+    #[cold]
+    fn refusal(&mut self, refused: Refused) -> Fatal {
+        match refused {
+            Refused::Fatal(fatal) => fatal,
+            Refused::Fallible => {
+                self.refused = true;
+                Fatal::refused()
+            }
+        }
+    }
+
+    /// `ZEND_MM_SAFE_ADDRESS_GUARDED`'s overflow (`Z/Zend/zend_alloc.c:2960`
+    /// at 8.5.12), `message` its sentence: a fallible ask's refusal with
+    /// the delayed OOM recorded, and otherwise the request's end.
+    #[cold]
+    pub(crate) fn overflow_refusal(&mut self, message: String) -> Fatal {
+        if self.fallible == Asks::Fallibly {
+            self.delay_message(message);
+            return self.refusal(Refused::Fallible);
+        }
+        Fatal::error(message)
     }
 
     /// `_emalloc`: [`Mm::alloc_heap`], and the observers told of what it
     /// answered, where there are any ([`crate::observe`]).
     #[inline]
     pub(crate) fn alloc(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+        self.alloc_as(size).map_err(|refused| self.refusal(refused))
+    }
+
+    /// `_femalloc` (`Z/Zend/zend_alloc.c:3068`): [`Mm::alloc`] with the
+    /// heap fallible for the one call, `ZEND_MM_FALLIBLE_FORWARD`, so a
+    /// block the soft limit has no room for is `None` and leaves the
+    /// delayed OOM behind.
+    #[cfg(test)]
+    pub(crate) fn try_alloc(&mut self, size: usize) -> Result<Option<NonNull<u8>>, Fatal> {
+        let was = std::mem::replace(&mut self.fallible, Asks::Fallibly);
+        let answered = self.alloc_as(size);
+        self.fallible = was;
+        Refused::fallible(answered)
+    }
+
+    /// [`Mm::alloc`] as the heap's fallibility stands.
+    #[inline]
+    fn alloc_as(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
+        #[cfg(test)]
+        if self.counted_out() {
+            return Err(Refused::Fatal(Fatal::hard_limit(self.hard_limit, size)));
+        }
+        if self.entries != Entries::Zend {
+            return self.alloc_custom(size);
+        }
         let at = self.alloc_heap(size)?;
+        #[cfg(debug_assertions)]
+        self.trace(None, at);
+        Ok(at)
+    }
+
+    /// `_malloc_custom`: the tracked allocator's block or Zend's, and the
+    /// observers told of it.
+    #[cold]
+    #[inline(never)]
+    fn alloc_custom(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
+        let at = match self.allocator {
+            Allocator::Tracked(_) => self.tracked_malloc(size)?,
+            Allocator::Zend => self.alloc_heap(size)?,
+        };
         #[cfg(debug_assertions)]
         self.trace(None, at);
         if !self.observers.is_empty() {
@@ -457,7 +798,78 @@ impl Mm {
         size: usize,
     ) -> Result<NonNull<u8>, Fatal> {
         // SAFETY: the caller's contract, handed on.
+        unsafe { self.realloc_as(at, copy, size) }.map_err(|refused| self.refusal(refused))
+    }
+
+    /// `_ferealloc2` (`Z/Zend/zend_alloc.c:3084`): [`Mm::realloc`] with
+    /// the heap fallible for the one call, so a grow the soft limit has
+    /// no room for is `None`, the block left as it stood, php's "original
+    /// block is left untouched".
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::realloc_heap`]'s.
+    #[cfg(test)]
+    pub(crate) unsafe fn try_realloc(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<Option<NonNull<u8>>, Fatal> {
+        let was = std::mem::replace(&mut self.fallible, Asks::Fallibly);
+        // SAFETY: the caller's contract, handed on.
+        let answered = unsafe { self.realloc_as(at, copy, size) };
+        self.fallible = was;
+        Refused::fallible(answered)
+    }
+
+    /// [`Mm::realloc`] as the heap's fallibility stands.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::realloc_heap`]'s.
+    #[inline]
+    unsafe fn realloc_as(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Refused> {
+        #[cfg(test)]
+        if self.counted_out() {
+            return Err(Refused::Fatal(Fatal::hard_limit(self.hard_limit, size)));
+        }
+        if self.entries != Entries::Zend {
+            // SAFETY: the caller's contract, handed on.
+            return unsafe { self.realloc_custom(at, copy, size) };
+        }
+        // SAFETY: the caller's contract, handed on.
         let to = unsafe { self.realloc_heap(at, copy, size) }?;
+        #[cfg(debug_assertions)]
+        self.trace(Some(at), to);
+        Ok(to)
+    }
+
+    /// `_realloc_custom`: the tracked allocator's `realloc` or Zend's,
+    /// and the observers told of it.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::realloc_heap`]'s.
+    #[cold]
+    #[inline(never)]
+    unsafe fn realloc_custom(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Refused> {
+        let to = match self.allocator {
+            // SAFETY: the caller's contract, handed on.
+            Allocator::Tracked(_) => unsafe { self.tracked_realloc(at, size) }?,
+            // SAFETY: the caller's contract, handed on.
+            Allocator::Zend => unsafe { self.realloc_heap(at, copy, size) }?,
+        };
         #[cfg(debug_assertions)]
         self.trace(Some(at), to);
         if !self.observers.is_empty() {
@@ -469,7 +881,6 @@ impl Mm {
         }
         Ok(to)
     }
-
     /// `_efree`: [`Mm::free_heap`], and the observers told of it, where
     /// there are any.
     ///
@@ -478,8 +889,30 @@ impl Mm {
     /// As [`Mm::free_heap`]'s.
     #[inline]
     pub(crate) unsafe fn free(&mut self, at: NonNull<u8>) {
+        if self.entries != Entries::Zend {
+            // SAFETY: the caller's contract, handed on.
+            unsafe { self.free_custom(at) };
+            return;
+        }
         // SAFETY: the caller's contract, handed on.
         unsafe { self.free_heap(at) };
+        #[cfg(debug_assertions)]
+        if let Some(traces) = &mut self.traces {
+            traces.remove(&at.as_ptr().addr());
+        }
+    }
+
+    /// `_free_custom`: the block back to the tracked allocator or to
+    /// Zend's, and the observers told of it.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::free_heap`]'s.
+    #[cold]
+    #[inline(never)]
+    unsafe fn free_custom(&mut self, at: NonNull<u8>) {
+        // SAFETY: the caller's contract, handed on.
+        unsafe { self.free_block(at) };
         #[cfg(debug_assertions)]
         if let Some(traces) = &mut self.traces {
             traces.remove(&at.as_ptr().addr());
@@ -491,12 +924,28 @@ impl Mm {
         }
     }
 
+    /// The block at `at` given back to the allocator it came from.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::free_heap`]'s.
+    unsafe fn free_block(&mut self, at: NonNull<u8>) {
+        match self.allocator {
+            // SAFETY: the caller's contract, handed on.
+            Allocator::Tracked(_) => unsafe { self.tracked_free(at) },
+            // SAFETY: the caller's contract, handed on.
+            Allocator::Zend => unsafe { self.free_heap(at) },
+        }
+    }
+
     /// `_efree` as `memory_get_usage()` and the observers see it, the
     /// bytes kept: what a pinned block's destruction does at php's
     /// moment, so the request's counts fall where php's do while a pin
     /// still names the block (design §4.4, #2230). Its bytes go back
     /// with [`Mm::free_retired`]; a block retired already is left as it
     /// stands.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn retire(&mut self, at: NonNull<u8>) {
         if self.is_retired(at) {
             return;
@@ -504,7 +953,7 @@ impl Mm {
         // A block freed already is no block to retire: a debug build
         // names it as it names a second free ([`Mm::free_small`]).
         #[cfg(debug_assertions)]
-        if freed::is_freed(at) {
+        if matches!(self.allocator, Allocator::Zend) && freed::is_freed(at) {
             self.sensed.record(crate::sensed::Sensed::FreedTwice {
                 at: at.as_ptr().addr(),
                 size: self.accounted(at),
@@ -512,6 +961,11 @@ impl Mm {
             return;
         }
         self.size = self.size.saturating_sub(self.accounted(at));
+        // A tracked heap's two usages are one number, as php's
+        // `tracked_free` keeps them.
+        if matches!(self.allocator, Allocator::Tracked(_)) {
+            self.real_size = self.size;
+        }
         self.retired.push(at);
         if !self.observers.is_empty() {
             self.observers.tell(Allocation::Freed {
@@ -533,6 +987,8 @@ impl Mm {
     /// # Safety
     ///
     /// Where `at` is retired, nothing names it any more.
+    #[cold]
+    #[inline(never)]
     pub(crate) unsafe fn free_retired(&mut self, at: NonNull<u8>) {
         let Some(index) = self.retired.iter().position(|block| *block == at) else {
             return;
@@ -541,7 +997,7 @@ impl Mm {
         self.size += self.accounted(at);
         // SAFETY: the caller's contract: the block is this heap's, its
         // free was only counted, and nothing names it.
-        unsafe { self.free_heap(at) };
+        unsafe { self.free_block(at) };
         #[cfg(debug_assertions)]
         if let Some(traces) = &mut self.traces {
             traces.remove(&at.as_ptr().addr());
@@ -552,6 +1008,9 @@ impl Mm {
     /// block at `at`: its bin's size, its pages, or a huge block's bytes
     /// and the bin slot of its list node.
     fn accounted(&self, at: NonNull<u8>) -> usize {
+        if let Allocator::Tracked(tracked) = &self.allocator {
+            return tracked.size_of(at).unwrap_or(0);
+        }
         let offset = at.as_ptr().addr() & (CHUNK_SIZE - 1);
         if offset == 0 {
             return self
@@ -581,6 +1040,9 @@ impl Mm {
     /// memory at `at`. A slot the debug quarantine holds is still in its
     /// chunk, so it answers yes and its second free is sensed as one.
     pub(crate) fn owns(&self, at: NonNull<u8>) -> bool {
+        if let Allocator::Tracked(tracked) = &self.allocator {
+            return tracked.holds(at.as_ptr().addr());
+        }
         if at.as_ptr().addr() & (CHUNK_SIZE - 1) == 0 {
             return self.huge.iter().any(|block| block.at == at);
         }
@@ -594,6 +1056,9 @@ impl Mm {
     /// question it can answer. Unlike [`Mm::owns`] it asks of an
     /// address, not of a block the heap handed out.
     pub(crate) fn holds(&self, address: usize) -> bool {
+        if let Allocator::Tracked(tracked) = &self.allocator {
+            return tracked.holds(address);
+        }
         let within =
             |start: usize, size: usize| (start..start.saturating_add(size)).contains(&address);
         self.chunks
@@ -612,6 +1077,9 @@ impl Mm {
     ///
     /// `at` is live in this heap ([`Mm::owns`]).
     pub(crate) unsafe fn usable(&self, at: NonNull<u8>) -> usize {
+        if let Allocator::Tracked(tracked) = &self.allocator {
+            return tracked.size_of(at).unwrap_or(0);
+        }
         let offset = at.as_ptr().addr() & (CHUNK_SIZE - 1);
         if offset == 0 {
             return self
@@ -646,7 +1114,9 @@ impl Mm {
         &mut self,
         observer: Box<dyn ObserveAllocations>,
     ) -> AllocationObserverId {
-        self.observers.add(observer)
+        let at = self.observers.add(observer);
+        self.reckon_custom();
+        at
     }
 
     /// The observer at `at` taken out of this heap's list, where it is
@@ -655,13 +1125,25 @@ impl Mm {
         &mut self,
         at: AllocationObserverId,
     ) -> Option<Box<dyn ObserveAllocations>> {
-        self.observers.remove(at)
+        let removed = self.observers.remove(at);
+        self.reckon_custom();
+        removed
+    }
+
+    /// [`Mm::entries`] set again as the allocator and the observers stand.
+    fn reckon_custom(&mut self) {
+        let custom = matches!(self.allocator, Allocator::Tracked(_)) || !self.observers.is_empty();
+        self.entries = if custom {
+            Entries::Custom
+        } else {
+            Entries::Zend
+        };
     }
 
     /// `zend_mm_alloc_heap`: `size` usable bytes, from the bin its size
     /// falls in, sixteen at least as it raises it, from a `run` of pages,
     /// or from a huge block of its own.
-    fn alloc_heap(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+    fn alloc_heap(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         let size = size.max(MIN_USEABLE_BIN_SIZE);
         if size <= MAX_SMALL_SIZE {
             self.alloc_small(size_to_bin(size))
@@ -704,7 +1186,7 @@ impl Mm {
         at: NonNull<u8>,
         copy: usize,
         size: usize,
-    ) -> Result<NonNull<u8>, Fatal> {
+    ) -> Result<NonNull<u8>, Refused> {
         let offset = at.as_ptr().addr() & (CHUNK_SIZE - 1);
         if offset == 0 {
             // SAFETY: the caller's contract; a chunk-aligned pointer of
@@ -804,7 +1286,7 @@ impl Mm {
         at: NonNull<u8>,
         copy: usize,
         size: usize,
-    ) -> Result<NonNull<u8>, Fatal> {
+    ) -> Result<NonNull<u8>, Refused> {
         let peak = self.peak;
         let moved = self.alloc_heap(size)?;
         // SAFETY: `at` holds `copy` readable bytes and `moved` is a fresh
@@ -847,6 +1329,22 @@ impl Mm {
     /// bool(true)
     /// ```
     ///
+    /// A longer rounding the limit has no room for is held to it by the
+    /// difference alone, and grows: the delayed OOM names the difference,
+    /// the program runs on to its end, where the fatal is raised, and the
+    /// shutdown functions see the grown block.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '7M');
+    /// $s = str_repeat('x', 3000000);
+    /// register_shutdown_function(function () { echo "shutdown sees ", strlen($GLOBALS['s']), "\n"; });
+    /// $s .= $s;
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 7340032 bytes exhausted (tried to allocate 2998272 bytes) in %s on line 5
+    /// shutdown sees 6000000
+    /// ```
+    ///
     /// # Safety
     ///
     /// `at` is a huge block of this heap holding `copy` readable bytes.
@@ -855,9 +1353,9 @@ impl Mm {
         at: NonNull<u8>,
         copy: usize,
         size: usize,
-    ) -> Result<NonNull<u8>, Fatal> {
+    ) -> Result<NonNull<u8>, Refused> {
         let Some(index) = self.huge.iter().position(|block| block.at == at) else {
-            return Err(Fatal::error("zend_mm_heap corrupted"));
+            return Err(Refused::Fatal(Fatal::error("zend_mm_heap corrupted")));
         };
         let old_size = self.huge[index].size;
         if size > MAX_LARGE_SIZE {
@@ -874,11 +1372,7 @@ impl Mm {
                 }
             } else {
                 let more = new_size - old_size;
-                if more > self.limit - self.real_size.min(self.limit)
-                    && (self.gc_heap() == 0 || more > self.limit - self.real_size.min(self.limit))
-                {
-                    return Err(limit_exhausted(self.limit, size));
-                }
+                self.check_limit(more, true)?;
                 if huge_extend(at, old_size, new_size) {
                     self.huge[index].size = new_size;
                     self.real_size += more;
@@ -927,7 +1421,7 @@ impl Mm {
 
     /// `zend_mm_alloc_small` (`Z/Zend/zend_alloc.c:1392`): the head of the
     /// bin's free list, or a fresh `run` when the list is empty.
-    fn alloc_small(&mut self, bin_num: usize) -> Result<NonNull<u8>, Fatal> {
+    fn alloc_small(&mut self, bin_num: usize) -> Result<NonNull<u8>, Refused> {
         self.size += BIN_DATA_SIZE[bin_num];
         self.peak = self.peak.max(self.size);
         #[cfg(debug_assertions)]
@@ -955,7 +1449,7 @@ impl Mm {
     /// pages for this bin, threaded into a free list of its elements, and
     /// the first element returned. The accounting was done by the caller,
     /// as php's is, so a failure here undoes it.
-    fn alloc_small_slow(&mut self, bin_num: usize) -> Result<NonNull<u8>, Fatal> {
+    fn alloc_small_slow(&mut self, bin_num: usize) -> Result<NonNull<u8>, Refused> {
         let pages = BIN_PAGES[bin_num];
         let run = match self.alloc_pages(pages, PAGE_SIZE * pages as usize) {
             Ok(run) => run,
@@ -1042,7 +1536,7 @@ impl Mm {
     /// the number a message names: outside `ZEND_DEBUG` php hands
     /// `zend_mm_alloc_pages` the page count alone, so both messages it
     /// raises name `ZEND_MM_PAGE_SIZE * pages_count`.
-    fn alloc_large(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+    fn alloc_large(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         let pages_count = size.div_ceil(PAGE_SIZE) as u32;
         let at = self.alloc_pages(pages_count, PAGE_SIZE * pages_count as usize)?;
         self.size += pages_count as usize * PAGE_SIZE;
@@ -1059,7 +1553,7 @@ impl Mm {
     /// of `pages_count` free pages in the first chunk that has one, else a
     /// chunk from the cache, else a new chunk. `asked` is the number php
     /// names in the limit's message at this site.
-    fn alloc_pages(&mut self, pages_count: u32, asked: usize) -> Result<NonNull<u8>, Fatal> {
+    fn alloc_pages(&mut self, pages_count: u32, asked: usize) -> Result<NonNull<u8>, Refused> {
         let mut found = None;
         for (steps, chunk) in self.chunks.iter().copied().enumerate() {
             // SAFETY: every chunk on the list is one this heap mapped and
@@ -1102,22 +1596,19 @@ impl Mm {
 
     /// One more chunk on the list: the cache's newest if it has one, else
     /// a fresh mapping, which is where php holds a request to its
-    /// `memory_limit` (`Z/Zend/zend_alloc.c:1038-1076`). Both ways of
-    /// failing here sweep first: php's `goto get_chunk` is the loop, so a
-    /// sweep that emptied a chunk into the cache is taken from the cache
-    /// on the way round and the limit is never reached.
-    fn grow(&mut self, asked: usize) -> Result<NonNull<Chunk>, Fatal> {
+    /// `memory_limit` (`Z/Zend/zend_alloc.c:1175-1194` at 8.5.12), for the
+    /// chunk's whole 2 MiB, which is the number the limit's message names
+    /// here. A sweep that freed anything sends it round again, php's
+    /// `goto get_chunk`, so a chunk the sweep emptied into the cache is
+    /// taken from the cache; past the soft limit with nothing swept the
+    /// chunk is mapped all the same, the delayed OOM recorded.
+    fn grow(&mut self, asked: usize) -> Result<NonNull<Chunk>, Refused> {
         let chunk = loop {
             if let Some(chunk) = self.cached.pop() {
                 break chunk;
             }
-            if CHUNK_SIZE > self.limit - self.real_size.min(self.limit) {
-                if self.gc_heap() != 0 {
-                    continue;
-                }
-                if !self.overflow {
-                    return Err(self.refuse(limit_exhausted(self.limit, asked)));
-                }
+            if self.check_limit(CHUNK_SIZE, true)? {
+                continue;
             }
             let mapped = match chunk_alloc(CHUNK_SIZE) {
                 Some(chunk) => Some(chunk),
@@ -1125,7 +1616,7 @@ impl Mm {
                 None => None,
             };
             let Some(chunk) = mapped else {
-                return Err(self.refuse(out_of_memory(self.real_size, asked)));
+                return Err(Refused::Fatal(out_of_memory(self.real_size, asked)));
             };
             self.real_size += CHUNK_SIZE;
             self.real_peak = self.real_peak.max(self.real_size);
@@ -1245,6 +1736,11 @@ impl Mm {
     /// starts from zero. A debug build drains its [`Quarantine`] first,
     /// so the sweep counts every slot php's would count free.
     fn gc_heap(&mut self) -> usize {
+        // A custom heap's sweep is its handler's, and the tracked one
+        // names none (`Z/Zend/zend_alloc.c:2242`).
+        if let Allocator::Tracked(_) = self.allocator {
+            return 0;
+        }
         #[cfg(debug_assertions)]
         self.drain_quarantine();
         for (bin_num, &elements) in BIN_ELEMENTS.iter().enumerate() {
@@ -1344,43 +1840,47 @@ impl Mm {
         collected as usize * PAGE_SIZE
     }
 
-    /// `zend_mm_alloc_huge` (`Z/Zend/zend_alloc.c:1916`): a mapping of its
-    /// own, rounded up to the page the machine reports and not to the
-    /// chunk's own page, counted in both the bin accounting and the real
-    /// size. Between the mapping and the count, `zend_mm_add_huge_block`
-    /// (`Z/Zend/zend_alloc.c:1839`) takes the block's list node from the
-    /// 24-byte bin of the same heap, so the bin accounting moves by 24
-    /// and then by the rounded block, and the peak is the sum. A node
-    /// the bin cannot give ends php's request there; here the mapping
-    /// goes back and the fatal is the bin's. A size the rounding would
-    /// carry past the top of memory is php's `E_ERROR` before any of
-    /// that, the limit not consulted.
-    fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
+    /// `zend_mm_alloc_huge` (`Z/Zend/zend_alloc.c:2071` at 8.5.12): a
+    /// mapping of its own, rounded up to the page the machine reports and
+    /// not to the chunk's own page, counted in both the bin accounting
+    /// and the real size, and held to the limit for that rounding, the
+    /// number its message names. Between the mapping and the count,
+    /// `zend_mm_add_huge_block` takes the block's list node from the
+    /// 24-byte bin of the same heap, never fallibly, so the bin accounting
+    /// moves by 24 and then by the rounded block, and the peak is the sum.
+    /// A node the bin cannot give ends php's request there; here the
+    /// mapping goes back and the fatal is the bin's. A size the rounding
+    /// would carry past the top of memory is php's error before any of
+    /// that, the limit not consulted: a delayed OOM where the heap is
+    /// fallible, and the request's end where it is not.
+    fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
         let page = real_page_size();
         let Some(new_size) = size.checked_next_multiple_of(page) else {
-            return Err(Fatal::error(format!(
-                "Possible integer overflow in memory allocation ({size} + {page})"
-            )));
+            let message =
+                format!("Possible integer overflow in memory allocation ({size} + {page})");
+            if self.fallible == Asks::Fallibly {
+                self.delay_message(message);
+                return Err(Refused::Fallible);
+            }
+            return Err(Refused::Fatal(Fatal::error(message)));
         };
-        if new_size > self.limit - self.real_size.min(self.limit)
-            && (self.gc_heap() == 0 || new_size > self.limit - self.real_size.min(self.limit))
-            && !self.overflow
-        {
-            return Err(self.refuse(limit_exhausted(self.limit, size)));
-        }
+        self.check_limit(new_size, true)?;
         let mapped = match huge_map(new_size) {
             Some(at) => Some(at),
             None if self.gc_heap() != 0 => huge_map(new_size),
             None => None,
         };
         let Some(at) = mapped else {
-            return Err(self.refuse(out_of_memory(self.real_size, size)));
+            return Err(Refused::Fatal(out_of_memory(self.real_size, size)));
         };
-        let node = match self.alloc_small(size_to_bin(HUGE_LIST_SIZE)) {
+        let was = std::mem::replace(&mut self.fallible, Asks::Infallibly);
+        let node = self.alloc_small(size_to_bin(HUGE_LIST_SIZE));
+        self.fallible = was;
+        let node = match node {
             Ok(node) => node,
-            Err(fatal) => {
+            Err(refused) => {
                 huge_unmap(at, new_size);
-                return Err(fatal);
+                return Err(refused);
             }
         };
         self.huge.push(Huge {
@@ -1414,11 +1914,109 @@ impl Mm {
     }
 }
 
+impl Mm {
+    /// `tracked_malloc` (`Z/Zend/zend_alloc.c:3335`): the limit asked for
+    /// the bytes, with no sweep, then the system's block, the two usages
+    /// moved by exactly the bytes asked and the peaks left where they
+    /// stand, as php's `ZEND_MM_STAT` arm leaves them.
+    #[cold]
+    #[inline(never)]
+    fn tracked_malloc(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
+        self.check_limit(size, false)?;
+        let Allocator::Tracked(tracked) = &mut self.allocator else {
+            return Err(Refused::Fatal(Fatal::error("zend_mm_heap corrupted")));
+        };
+        let Some(at) = tracked.malloc(size) else {
+            return Err(Refused::Fatal(system_out_of_memory()));
+        };
+        self.size += size;
+        self.real_size = self.size;
+        Ok(at)
+    }
+
+    /// `tracked_realloc` (`Z/Zend/zend_alloc.c:3374`): a grow asks the
+    /// limit for the difference, its refusal leaving the block as it
+    /// stood; then the system's `realloc`, and the usages moved by the
+    /// difference.
+    ///
+    /// # Safety
+    ///
+    /// `at` is a live block of this heap that nothing reads or writes
+    /// during the call.
+    #[cold]
+    #[inline(never)]
+    unsafe fn tracked_realloc(
+        &mut self,
+        at: NonNull<u8>,
+        size: usize,
+    ) -> Result<NonNull<u8>, Refused> {
+        let old_size = match &self.allocator {
+            Allocator::Tracked(tracked) => tracked.size_of(at),
+            Allocator::Zend => None,
+        };
+        let Some(old_size) = old_size else {
+            return Err(Refused::Fatal(Fatal::error("zend_mm_heap corrupted")));
+        };
+        if size > old_size {
+            self.check_limit(size - old_size, false)?;
+        }
+        let Allocator::Tracked(tracked) = &mut self.allocator else {
+            return Err(Refused::Fatal(Fatal::error("zend_mm_heap corrupted")));
+        };
+        // SAFETY: the caller's contract: `at` is a live block of this
+        // heap's table and nothing touches it during the call.
+        let Some(to) = (unsafe { tracked.realloc(at, size) }) else {
+            return Err(Refused::Fatal(system_out_of_memory()));
+        };
+        self.size = self.size - old_size + size;
+        self.real_size = self.size;
+        Ok(to)
+    }
+
+    /// `tracked_free` (`Z/Zend/zend_alloc.c:3359`): the block back to the
+    /// system and the usages down by the bytes it was asked for.
+    ///
+    /// # Safety
+    ///
+    /// `at` is a live block of this heap that nothing names after the
+    /// call.
+    #[cold]
+    #[inline(never)]
+    unsafe fn tracked_free(&mut self, at: NonNull<u8>) {
+        let Allocator::Tracked(tracked) = &mut self.allocator else {
+            return;
+        };
+        // SAFETY: the caller's contract, handed on.
+        let freed = unsafe { tracked.free(at) };
+        // php asserts the block is the table's (`tracked_get_size_zv`); a
+        // debug build names the free of one it is not, a second free
+        // among them.
+        let Some(size) = freed else {
+            #[cfg(debug_assertions)]
+            self.sensed.record(crate::sensed::Sensed::FreedTwice {
+                at: at.as_ptr().addr(),
+                size: 0,
+            });
+            return;
+        };
+        self.size -= size;
+        self.real_size = self.size;
+    }
+}
+
+/// `zend_out_of_memory` (`Z/Zend/zend_alloc.c:3279`): the system's
+/// allocator had nothing to give a tracked heap.
+#[cold]
+fn system_out_of_memory() -> Fatal {
+    Fatal::error("Out of memory")
+}
+
 impl std::fmt::Debug for Mm {
     /// What php's `memory_get_usage()` answers, and the chunks behind
     /// it; the addresses are the machine's and say nothing.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Mm")
+            .field("tracked", &matches!(self.allocator, Allocator::Tracked(_)))
             .field("size", &self.size)
             .field("real_size", &self.real_size)
             .field("peak", &self.peak)
@@ -1769,12 +2367,55 @@ fn munmap(at: *mut u8, size: usize) {
     unsafe { libc::munmap(at.cast(), size) };
 }
 
-/// php's exact text when a chunk would take the request past its
-/// `memory_limit` (`Z/Zend/zend_alloc.c:1045`).
-fn limit_exhausted(limit: usize, size: usize) -> Fatal {
-    Fatal::error(format!(
-        "Allowed memory size of {limit} bytes exhausted (tried to allocate {size} bytes)"
-    ))
+/// php's `heap->fallible`: how the heap answers an ask past the soft
+/// limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Asks {
+    /// Served, the delayed OOM recorded, and held to the hard limit.
+    Infallibly,
+    /// Refused, php's `NULL`, with the delayed OOM recorded.
+    Fallibly,
+}
+
+impl Asks {
+    /// php's `bool`.
+    fn of(fallible: bool) -> Asks {
+        if fallible {
+            Asks::Fallibly
+        } else {
+            Asks::Infallibly
+        }
+    }
+}
+
+/// Why the allocator handed out no block.
+#[derive(Debug)]
+pub(crate) enum Refused {
+    /// A fallible ask past the soft limit, php's `NULL` from `_femalloc`,
+    /// with the delayed OOM left behind.
+    Fallible,
+    /// What ends the request: the hard limit, the system's own refusal,
+    /// or a size past the top of memory.
+    Fatal(Fatal),
+}
+
+impl Refused {
+    /// A fallible ask's answer: the block, `None` where the soft limit
+    /// refused it, or the request's end.
+    #[cfg(test)]
+    fn fallible<T>(answered: Result<T, Refused>) -> Result<Option<T>, Fatal> {
+        match answered {
+            Ok(at) => Ok(Some(at)),
+            Err(Refused::Fallible) => Ok(None),
+            Err(Refused::Fatal(fatal)) => Err(fatal),
+        }
+    }
+}
+
+impl From<Fatal> for Refused {
+    fn from(fatal: Fatal) -> Refused {
+        Refused::Fatal(fatal)
+    }
 }
 
 /// php's exact text when the system cannot give the mapping
@@ -2114,6 +2755,11 @@ pub(crate) mod freed {
     /// pointer, never one derived from a reference to its header, whose
     /// provenance ends at the header's eight bytes (#2414).
     pub(crate) fn is_freed(at: NonNull<u8>) -> bool {
+        // A tracked heap's blocks are the system's, which carry no mark
+        // and sit in no chunk ([`super::tracked`]).
+        if super::tracked::chosen() {
+            return false;
+        }
         let mark = mark_at(at);
         // SAFETY: `at` names a refcounted value whose count is about to
         // move: a block of this heap, live or freed into a bin or a `run`

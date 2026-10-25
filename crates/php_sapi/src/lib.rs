@@ -92,7 +92,7 @@ pub fn strerror(error: &std::io::Error) -> String {
 /// the native face, as an extension does ([`tier::frame`]; #1911).
 pub mod tier {
     pub use php_engine::tier::{
-        Argument, Aside, Called, Compiled, Evaluated, Flow, FrameRef, Hooked, Request,
+        Argument, Aside, Called, Compiled, Evaluated, Flow, FrameRef, Held, Hooked, Request,
         SafepointIdx, Site, Stepped, Tier, Under, begin, below, call, catches, compile, entry,
         evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin, sink, step,
         unwind,
@@ -358,7 +358,7 @@ pub fn exit(status: i32) -> ! {
 /// ```
 /// ```expect
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// 6000

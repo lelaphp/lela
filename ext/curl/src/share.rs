@@ -7,7 +7,7 @@ use php_ext::abi::{Instance, ObjectHandlers, Pool, Refusals};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::write_prop;
 use php_ext::coerce::{to_long, try_long, value_name};
-use php_ext::raising::{Thrown, argument_error, throw};
+use php_ext::raising::{Thrown, argument_error, throw, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
@@ -422,7 +422,7 @@ fn curl_share_init_persistent(
                     "Could not construct persistent cURL share handle: {}",
                     String::from_utf8_lossy(&share_strerror(code).unwrap_or_default())
                 );
-                return Err(throw(req, "Exception", &text));
+                return Err(throw_exception_ex(req, "Exception", &text));
             }
         }
         req.state::<State>().persistent.hold(id, share.clone());

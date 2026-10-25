@@ -1,5 +1,6 @@
-//! A debug build's sensing points (design §10): the engine's own sensor,
-//! a `TMP` written over an owner it still held, and the questions the
+//! A debug build's sensing points (design §10): the engine's own sensors,
+//! a `TMP` written over an owner it still held and a `TMP` read holding
+//! what no `TMP` holds, and the questions the
 //! loop and the request's end ask of it and of the heap's record
 //! ([`php_heap::Heap::take_sensed`]), which end the request in the
 //! `InternalError` naming what was found. What the request has made of
@@ -23,6 +24,10 @@ pub(super) enum Sensing {
     /// The first write of a `TMP` found over a slot that still held an
     /// owner, until the next sensing point takes it.
     Dirty(DirtyTemporary),
+    /// The first `TMP` an inline path that takes it untested found
+    /// holding what no `TMP` holds, until the next sensing point takes
+    /// it.
+    Unmovable(UnmovableTemporary),
     /// A sensed defect has ended the request. What a sensor finds after
     /// it is read through memory that defect has already made
     /// untrustworthy, so php's one fatal stands alone and nothing more
@@ -53,7 +58,48 @@ impl DirtyTemporary {
     }
 }
 
+/// A `TMP` a debug build found holding a reference, an `IS_INDIRECT`,
+/// nothing at all or another value no variable may hold, where the
+/// opline reading it takes it as php's `_TMP` handlers do, untested
+/// (`ZEND_ASSIGN_SPEC_CV_TMP`): the opcode, the temporary's slot, as the
+/// dump numbers it, and what it held.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct UnmovableTemporary {
+    opcode: Opcode,
+    number: u32,
+    held: php_heap::ZvalType,
+}
+
+impl UnmovableTemporary {
+    fn into_fatal(self) -> Fatal {
+        Fatal::error(format!(
+            "InternalError: {} reads its TMP #{} holding {:?}, which no TMP holds: the handler that wrote the slot left it so",
+            self.opcode.name(),
+            self.number,
+            self.held,
+        ))
+    }
+}
+
 impl Request {
+    /// A debug build's question where an inline path takes the `TMP`
+    /// `number` of `op` as php's `_TMP` handlers take it, untested: a
+    /// `held` no `TMP` holds is recorded, the first of them.
+    pub(crate) fn sense_unmovable_temporary(
+        &mut self,
+        op: &Opline,
+        number: u32,
+        held: php_heap::ZvalType,
+    ) {
+        if matches!(self.sensing, Sensing::Watching) {
+            self.sensing = Sensing::Unmovable(UnmovableTemporary {
+                opcode: op.opcode,
+                number,
+                held,
+            });
+        }
+    }
+
     /// A debug build's question at a write over a slot that held an
     /// owner of a `held`: whether the slot is the `TMP` of the opline
     /// `frame` stands at, which the handler that read it last should
@@ -112,6 +158,7 @@ impl Request {
         let sensed = match std::mem::replace(&mut self.sensing, Sensing::Ended) {
             Sensing::Ended => return None,
             Sensing::Dirty(dirty) => Some(dirty.into_fatal()),
+            Sensing::Unmovable(unmovable) => Some(unmovable.into_fatal()),
             Sensing::Watching => self.heap.take_sensed(),
         };
         if sensed.is_none() {
@@ -136,7 +183,11 @@ impl Request {
             php_heap::FatalReason::Error(message) => {
                 self.end_in_fatal_at(message, &code.filename.0, op.lineno);
             }
-            php_heap::FatalReason::OutOfMemory(_) => self.end_in(&sensed),
+            php_heap::FatalReason::OutOfMemory(_)
+            | php_heap::FatalReason::HardLimit { .. }
+            | php_heap::FatalReason::Refused => {
+                self.end_in(&sensed);
+            }
         }
         Err(sensed)
     }

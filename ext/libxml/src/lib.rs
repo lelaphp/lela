@@ -39,7 +39,7 @@ use php_ext::call::write_prop;
 use php_ext::coerce::value_name;
 use php_ext::raising::{Level, Thrown, arg_type_error, docref};
 use php_ext::request::{Request, StreamCtx};
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
+use php_ext::values::{Layout, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use ffi::{Raised, Route, sys};
 pub use mime_sniff::sniff_charset_from_stream;
@@ -844,13 +844,39 @@ fn libxml_get_last_error(
 /// array(0) {
 /// }
 /// ```
+///
+/// Since 8.5.12 the errors stop once the memory limit was met, the
+/// limit's fatal raised as the call returns:
+///
+/// ```php
+/// libxml_use_internal_errors(true);
+/// $d = new DOMDocument; $d->loadHTML('<p>' . str_repeat('<x/>', 40000));
+/// ini_set('memory_limit', '8M');
+/// $e = libxml_get_errors();
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 5
+/// ```
 #[php_function]
 fn libxml_get_errors(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let Some(list) = req.state::<State>().errors.clone() else {
         return Ok(Owner::take(req, PhpArray::empty()));
     };
-    let mut out = PhpArray::new(req)?;
+    // `array_init_size(return_value, zend_llist_count(...))` since
+    // 8.5.12, its table laid down at the first error's insert, and the
+    // errors stop once the memory limit was met.
+    let mut out = if list.is_empty() {
+        PhpArray::new(req)?
+    } else {
+        let size = u32::try_from(list.len()).unwrap_or(u32::MAX);
+        PhpArray::sized(req, size, Layout::Packed)?
+    };
     for error in &list {
+        if req.memory().has_oom() {
+            break;
+        }
         let object = error_object(req, error)?;
         out.append(req, object.into_value())?;
     }

@@ -355,6 +355,30 @@ impl Zval {
     /// Where php's `Z_TYPE_FLAGS` is, the byte that says whether the
     /// value is refcounted ([`Zval::TYPE_REFCOUNTED`]).
     pub const FLAGS_AT: usize = std::mem::offset_of!(Zval, info) + 1;
+    /// Where the block a refcounted zval's word points at keeps its count,
+    /// php's `GC_REFCOUNT`, a 32-bit word: what the compiled tier adds an
+    /// owner through, as php's code adds one with `GC_ADDREF` inline.
+    pub const COUNT_AT: usize = crate::gc::REFCOUNT_AT;
+    /// The bits of that word that are the count, beneath the pin a walk
+    /// sets; an owner added past them saturates, as the heap's own adds do.
+    pub const COUNT_BITS: u32 = crate::gc::COUNT;
+    /// Where that block keeps its type, flags and collector bits, php's
+    /// `GC_TYPE_INFO`, a 32-bit word past the count: what the compiled
+    /// tier tests [`Zval::LEAK_BITS`] in.
+    pub const GC_INFO_AT: usize = crate::gc::TYPE_INFO_AT;
+    /// The bits of that word of which a value the collector may take as
+    /// a possible root has none, php's `GC_MAY_LEAK`: in the root buffer
+    /// already, coloured, or not collectable, which a string, a
+    /// reference and a resource are. What the compiled tier tests
+    /// inline after an owner given up leaves owners, as php's
+    /// `jit_if_GC_MAY_NOT_LEAK` does, calling the collector only where
+    /// none is set.
+    pub const LEAK_BITS: u32 = crate::gc::LEAK_BITS;
+    /// Where php's `Z_FE_POS` is, the `u2` word past the type word that
+    /// a `foreach` over an array keeps its position in ([`Zval::fe_pos`]),
+    /// a 32-bit word: what the compiled tier reads and moves the position
+    /// through, as php's `zend_jit_fe_fetch` does inline.
+    pub const FE_POS_AT: usize = std::mem::offset_of!(Zval, info) + 4;
 
     /// The all-zero zval, `IS_UNDEF`.
     pub const UNDEF: Zval = Zval {
@@ -860,12 +884,29 @@ mod tests {
     }
 
     #[test]
+    fn the_foreach_position_is_the_word_at_fe_pos_at() {
+        let mut z = Zval::long(7);
+        z.set_fe_pos(0x0102_0304);
+        // SAFETY: `z` is a live sixteen-byte zval, read as bytes.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(std::ptr::from_ref(&z).cast::<u8>(), size_of::<Zval>())
+        };
+        let at = &bytes[Zval::FE_POS_AT..Zval::FE_POS_AT + 4];
+        assert_eq!(
+            u32::from_ne_bytes([at[0], at[1], at[2], at[3]]),
+            0x0102_0304
+        );
+        assert_eq!(z.fe_pos(), 0x0102_0304);
+        assert_eq!(z.as_long(), Some(7), "the position moves no value");
+    }
+
+    #[test]
     fn an_indirect_zval_names_a_slot_in_place() {
         let _alone = crate::serial::alone();
         let mut heap = crate::Heap::new();
         let mut stack = crate::VmStack::<()>::new();
         let pushed = stack
-            .push_frame(&mut heap, 2, 0, ())
+            .push_frame(&mut heap, 2, 0, || ())
             .expect("a frame of two slots fits the first page");
         let frame = stack.frame_mut(pushed).expect("the frame pushed");
         let at = frame

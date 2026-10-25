@@ -160,7 +160,7 @@ impl Tracked {
 /// an instrument's mechanics judges by, the rows it reads and no other.
 pub fn of_rows(rows: impl IntoIterator<Item = Crate>) -> Manifest {
     let mut manifest = Manifest::of(rows);
-    manifest.pin = pin();
+    manifest.pin = Some(pin());
     manifest
 }
 

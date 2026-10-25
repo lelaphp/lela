@@ -121,13 +121,20 @@ pub(crate) fn compiled(words: &[u32], exits: Vec<ExitSpec>) -> Compiled {
     Compiled {
         bytes: words.iter().flat_map(|w| w.to_le_bytes()).collect(),
         entry_offset: 0,
+        body_offset: 0,
         align: 4,
         exits: exits.into(),
         leaves: None,
+        checks_interrupt: false,
         stub: None,
         opens: None,
+        entry_stood: false,
         body: None,
         fuzzed: Fuzzed::default(),
+        slots: crate::lower::EntrySlots::default(),
+        landings: crate::lower::LandingSlots::default(),
+        calls: Box::new([]),
+        callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
         name: TraceName {
@@ -146,6 +153,7 @@ pub(crate) fn landing(opline: u32, landing: Landing) -> ExitSpec {
         stores: Vec::new(),
         known: Vec::new(),
         grows: Grows::Side,
+        layout: false,
         link: None,
     }
 }

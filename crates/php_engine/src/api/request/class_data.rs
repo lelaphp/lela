@@ -27,9 +27,14 @@ pub(super) struct ClassData {
     updated: bool,
     /// The constants of the class's own declaration that were
     /// evaluated, each held to its type, by name: `constants_table`'s
-    /// rows once `zend_update_class_constant` replaced their expression. Each
-    /// value's one owner is the row.
+    /// rows once `zend_update_class_constant` replaced their expression,
+    /// and the copies a class without `ZEND_ACC_IMMUTABLE` holds of what
+    /// it inherited from one with it ([`constant_holder`]).
+    /// Each value's one owner is the row.
     constants: Vec<(Box<[u8]>, Value)>,
+    /// Where the class's constants table stands against its mutable
+    /// data ([`Request::separate_constants`]).
+    separated: Separation,
     /// `default_properties_table`, slot by slot in
     /// [`Request::placed_properties`]' order, as far as it has been
     /// evaluated: `None` for a typed slot with no default, which
@@ -43,6 +48,29 @@ pub(super) struct ClassData {
     /// What `new` reads of the class ([`Made`]), resolved on its first
     /// object in the request.
     made: Option<Made>,
+}
+
+/// Where a class's constants table stands against the request's
+/// mutable data, as `zend_class_constants_table` reads it.
+#[derive(Default)]
+enum Separation {
+    /// Not yet read.
+    #[default]
+    Unread,
+    /// Read where nothing separates it: the class's own table, a class
+    /// with no expression among its constants, a mutable one, a native
+    /// one or an enum.
+    Own,
+    /// `mutable_data->constants_table`, separated: the table's data, its
+    /// rows standing for the class's constants, which a debug build's
+    /// teardown gives back and a release build leaves to the heap.
+    Laid(
+        #[cfg_attr(
+            not(debug_assertions),
+            expect(dead_code, reason = "given back in a debug build's teardown alone")
+        )]
+        php_heap::EmbeddedArr,
+    ),
 }
 
 /// What `object_init_ex` reads of a class to make an object of it, which
@@ -174,6 +202,16 @@ pub(super) struct ClassDataTables {
     beside: super::WordMap<u32, Vec<php_heap::Block>>,
 }
 
+impl ClassDataTables {
+    /// The value the request evaluated the constant `name` of `declaring`
+    /// to and keeps in its row, a view; none where it evaluated none.
+    pub(super) fn evaluated_constant(&self, declaring: ClassId, name: &[u8]) -> Option<Value> {
+        let data = self.rows.get(declaring)?;
+        let (_, value) = data.constants.iter().find(|(held, _)| **held == *name)?;
+        Some(*value)
+    }
+}
+
 impl Request {
     /// Each class's mutable data given up, a debug build's teardown, as
     /// `zend_cleanup_mutable_class_data` and the walk of
@@ -189,6 +227,13 @@ impl Request {
             }
             for value in data.defaults.into_iter().flatten() {
                 self.release(value);
+            }
+            if let Separation::Laid(table) = data.separated {
+                let rows = table.arr();
+                for at in 0..rows.num_used() {
+                    self.heap.array_take_at(rows, at);
+                }
+                table.free_data(&mut self.heap);
             }
         }
     }
@@ -235,6 +280,7 @@ impl Request {
     #[cold]
     fn resolve_made(&mut self, class: ClassId) -> Made {
         const ZEND_OBJECT: usize = 56;
+        const ZVAL: usize = size_of::<php_heap::Zval>();
         let (size, declared_by) = self
             .symbols()
             .lineage(class)
@@ -248,7 +294,7 @@ impl Request {
         let guards = if self.uses_guards(class) { 16 } else { 0 };
         let made = Made {
             slots: self.class_slots(class),
-            custom: size.saturating_sub(ZEND_OBJECT) + guards,
+            custom: size.saturating_sub(ZEND_OBJECT) + guards + ZVAL * self.redeclared_slots(class),
             declared_by,
             create: self.native_new_of(class),
             handlers: self.handlers_of(class),
@@ -263,6 +309,71 @@ impl Request {
         };
         self.class_data.rows.row(class).made = Some(made);
         made
+    }
+
+    /// The slots `do_inherit_property` leaves `IS_UNDEF` in `class`'s
+    /// `default_properties_table` ([`super::Placed::holes`]), one for each
+    /// property a class of its lineage redeclares over its parent's:
+    /// php's object keeps them, so `zend_object_alloc` counts them, where
+    /// this engine places the property in one slot alone. The first `new`
+    /// of a class that redeclares a property costs php's, hooks over a
+    /// backed property among them (the file under the recipe's
+    /// `TMPDIR`):
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3286-redeclared.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W { function __toString() { return ""; } }'); m('$q0 = 1;');
+    /// foreach ([
+    ///     'class R { const B = 1; }',
+    ///     'class K1 { public $p = 1; } class K2 extends K1 { public $p = 2; }',
+    ///     '$GLOBALS["k2"] = new K2;',
+    ///     'class K3 extends K2 { public $p = 3; protected $q = 4; }',
+    ///     '$GLOBALS["k3"] = new K3;',
+    ///     'class L1 { public $p = R::B; } class L2 extends L1 { public $q = 2; }',
+    ///     '$GLOBALS["l2"] = new L2;',
+    ///     'class P1 { private $p = 1; } class P2 extends P1 { public $p = 2; }',
+    ///     '$GLOBALS["p2"] = new P2;',
+    ///     'class N1 { public $p = 1; } class N2 extends N1 { public $q = R::B; }',
+    ///     '$GLOBALS["n2"] = new N2;',
+    ///     'class A6 { public $p = 1; } class B6 extends A6 { public $p { get => 5; } }',
+    ///     '$GLOBALS["b6"] = new B6;',
+    ///     'class A8 { public $p = 1; } class B8 extends A8 { public $p = 3 { get => 5; } }',
+    ///     '$GLOBALS["b8"] = new B8;',
+    /// ] as $c) echo m($c), "  ", $c, "\n";
+    /// var_dump($k3);
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 432  class R { const B = 1; }
+    /// 928  class K1 { public $p = 1; } class K2 extends K1 { public $p = 2; }
+    /// 624  $GLOBALS["k2"] = new K2;
+    /// 560  class K3 extends K2 { public $p = 3; protected $q = 4; }
+    /// 112  $GLOBALS["k3"] = new K3;
+    /// 928  class L1 { public $p = R::B; } class L2 extends L1 { public $q = 2; }
+    /// 112  $GLOBALS["l2"] = new L2;
+    /// 960  class P1 { private $p = 1; } class P2 extends P1 { public $p = 2; }
+    /// 112  $GLOBALS["p2"] = new P2;
+    /// 928  class N1 { public $p = 1; } class N2 extends N1 { public $q = R::B; }
+    /// 112  $GLOBALS["n2"] = new N2;
+    /// 1080  class A6 { public $p = 1; } class B6 extends A6 { public $p { get => 5; } }
+    /// 112  $GLOBALS["b6"] = new B6;
+    /// 1080  class A8 { public $p = 1; } class B8 extends A8 { public $p = 3 { get => 5; } }
+    /// 112  $GLOBALS["b8"] = new B8;
+    /// object(K3)#2 (2) {
+    ///   ["p"]=>
+    ///   int(3)
+    ///   ["q":protected]=>
+    ///   int(4)
+    /// }
+    /// ```
+    fn redeclared_slots(&self, class: ClassId) -> usize {
+        self.placement(class)
+            .map_or(0, |placed| placed.holes() as usize)
     }
 
     /// The `emalloc`s `create_object` makes beside a new `object`, each
@@ -331,12 +442,6 @@ impl Request {
     /// runs ([`Request::records_throw_site`]), then what its class lays
     /// down with it ([`crate::api::abi::ObjectHandlers::create_object`]);
     /// the object released where any fails.
-    pub(crate) fn object_created(&mut self, object: PhpObject) -> Result<(), Thrown> {
-        let made = self.made(object.class());
-        self.object_made(object, made)
-    }
-
-    /// [`Request::object_created`] with what `new` read of the class.
     pub(super) fn object_made(&mut self, object: PhpObject, made: Made) -> Result<(), Thrown> {
         if made.declared_by.is_some() {
             self.lay_beside(object)?;
@@ -440,6 +545,23 @@ impl Request {
     /// int(1)
     /// Undefined constant "UNRESOLVED"
     /// ```
+    ///
+    /// Each constant is evaluated in its place and nothing is handed back
+    /// ([`Request::evaluated_in`]), a backed enum's cases made in theirs
+    /// the same way, so the update offers nothing to the collector:
+    ///
+    /// ```php
+    /// final class E { const A = 'a.x'; }
+    /// class M { private const L = [E::A]; }
+    /// enum B: string { case X = 'x'; const C = [self::X]; }
+    /// new M;
+    /// $c = B::C;
+    /// var_dump(gc_status()['roots'], $c[0] === B::X);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// bool(true)
+    /// ```
     pub(crate) fn update_class_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
         if self
             .class_data
@@ -461,6 +583,7 @@ impl Request {
             self.update_class_constants(parent)?;
         }
         if !native && !updated_as_declared {
+            self.separate_constants(class)?;
             let constants: Vec<(ClassId, Box<[u8]>)> = self
                 .symbols()
                 .constants_in_order(class)
@@ -468,8 +591,8 @@ impl Request {
                 .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
                 .collect();
             for (declaring, name) in constants {
-                let value = self.evaluated_class_constant(declaring, &name)?;
-                self.release(value);
+                let holder = constant_holder(class, declaring);
+                self.evaluated_in(holder, declaring, &name)?;
             }
         }
         let statics: Vec<PropertyInfo> =
@@ -485,6 +608,9 @@ impl Request {
                         })
                         .collect()
                 });
+        if !updated_as_declared {
+            self.init_statics(class)?;
+        }
         for info in statics {
             self.lay_down_static(info)?;
         }
@@ -523,23 +649,28 @@ impl Request {
     /// `zend_update_class_constant` over the constant `name` that
     /// `declaring` declares: its value from the row where the request
     /// evaluated it before, and otherwise the expression it was written
-    /// as evaluated in `declaring`'s scope, held to its type, and kept.
-    /// One more owner is the caller's. A value its type refuses is given
-    /// up with the `TypeError`, as `zend_update_class_constant` gives up
-    /// `tmp` (`Z/Zend/zend_API.c:1504`), and nothing is kept.
-    pub(crate) fn evaluated_class_constant(
+    /// as evaluated in `declaring`'s scope, held to its type, and kept,
+    /// all in its place: what comes back is a view of the kept value, no
+    /// owner taken, as `zend_update_class_constant` evaluates into the
+    /// slot and hands nothing back, so a reader that hands the value on
+    /// takes its own owner (`ZVAL_COPY_OR_DUP`) and an update takes none.
+    /// A value its type refuses is given up with the `TypeError`, as
+    /// `zend_update_class_constant` gives up `tmp`
+    /// (`Z/Zend/zend_API.c:1504`), and nothing is kept.
+    ///
+    /// The row is read in the table of `holder` ([`constant_holder`]),
+    /// `declaring` itself for a constant read where it is declared: the
+    /// value kept in its row, else
+    /// `declaring`'s expression evaluated in `declaring`'s scope and kept
+    /// there; the expression's copy given back only where `holder` is
+    /// the declaring class.
+    pub(crate) fn evaluated_in(
         &mut self,
+        holder: ClassId,
         declaring: ClassId,
         name: &[u8],
     ) -> Result<Value, Thrown> {
-        if let Some((_, value)) = self
-            .class_data
-            .rows
-            .get(declaring)
-            .and_then(|data| data.constants.iter().find(|(held, _)| **held == *name))
-        {
-            let value = *value;
-            self.addref(&value);
+        if let Some(value) = self.class_data.evaluated_constant(holder, name) {
             return Ok(value);
         }
         let Some((expr, ty)) = self
@@ -572,19 +703,85 @@ impl Request {
             }
             _ => evaluated.hand_on(),
         };
-        self.addref(&value);
-        self.class_data
-            .rows
-            .row(declaring)
-            .constants
-            .push((name.into(), value));
+        let row = self.class_data.rows.row(holder);
+        row.constants.push((name.into(), value));
+        // `zend_update_class_constant` destroys the expression once its
+        // value stands in its place, and keeps it where the evaluation
+        // or the type refused.
+        if holder == declaring {
+            self.constant_evaluated(declaring, name);
+            if super::linking::is_literal(&expr) {
+                self.take_declaration_slot(value);
+            }
+        }
         Ok(value)
+    }
+
+    /// `CE_CONSTANTS_TABLE(ce)` (`zend_class_constants_table`) of `class`
+    /// where it is php's class with `ZEND_ACC_IMMUTABLE` and
+    /// `ZEND_ACC_HAS_AST_CONSTANTS`, a class of a file the cache keeps
+    /// with a constant still an expression or `#[\Deprecated]`: the
+    /// first read of any of its constants, or its update, separates its
+    /// table into the request's mutable data
+    /// (`zend_separate_class_constants_table`, `Z/Zend/zend_API.c:1443`),
+    /// `zend_hash_init` and `zend_hash_extend` at its count of constants
+    /// and a bucket each, the data on the request's heap; and the table
+    /// of each immutable class above it whose expression it inherited
+    /// (`CE_CONSTANTS_TABLE(c->ce)`). An enum's cases are no expression
+    /// a read separates here:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3259-separated.inc', '<?php class G8 { const K = 1; const L = LATE + 1; const M = 3; } class H8 extends G8 { const N = 4; } class I8 { const K = 1; } enum E8 { case A; }');
+    /// const LATE = 5;
+    /// include $f;
+    /// foreach (['G8::K', 'G8::L', 'H8::N', 'I8::K', 'E8::A'] as $c) { $m = memory_get_usage(); $v = constant($c); echo memory_get_usage() - $m, "  $c\n"; }
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 320  G8::K
+    /// 0  G8::L
+    /// 320  H8::N
+    /// 0  I8::K
+    /// 56  E8::A
+    /// ```
+    pub(super) fn separate_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
+        let read = (self.class_data.rows.get(class))
+            .is_some_and(|data| !matches!(data.separated, Separation::Unread));
+        let Some(decl) = self.symbols().class_decl(class).filter(|_| !read) else {
+            return Ok(());
+        };
+        let enumeration = decl.kind == ClassKind::Enum;
+        let constants = self.symbols().constants_in_order(class);
+        let expression = |constant: &php_unit::decl::ClassConstDecl| {
+            !super::linking::is_literal(&constant.value)
+        };
+        let ast = (constants.iter()).any(|(_, constant)| {
+            expression(constant) || crate::attributes::Flags::of(&constant.attributes).deprecated
+        });
+        if enumeration || !ast || self.native_class(class) || super::classes::mutable(class) {
+            self.class_data.rows.row(class).separated = Separation::Own;
+            return Ok(());
+        }
+        let above: Vec<ClassId> = (constants.iter())
+            .filter(|(declaring, constant)| *declaring != class && expression(constant))
+            .map(|(declaring, _)| *declaring)
+            .collect();
+        let count = constants.len();
+        let table = php_heap::EmbeddedArr::new(u32::try_from(count).unwrap_or(u32::MAX));
+        let rows = table.arr();
+        self.class_data.rows.row(class).separated = Separation::Laid(table);
+        super::declared_bytes::add_rows(self, rows, count)?;
+        for declaring in above {
+            self.separate_constants(declaring)?;
+        }
+        Ok(())
     }
 
     /// `zend_update_class_constant` over the constant `name` of `class`
     /// (`Z/Zend/zend_API.c:1504`), found as the constants table has it:
     /// the case's instance for an enum's case, and otherwise the value
-    /// [`Request::evaluated_class_constant`] keeps, with no access
+    /// [`Request::evaluated_in`] keeps, with no access
     /// checked. `Undefined constant` where the class has no such
     /// constant.
     pub(crate) fn updated_class_constant(
@@ -597,21 +794,15 @@ impl Request {
             .class_constant_of(class, name)
             .map(|(declaring, constant)| (declaring, constant.is_case))
         else {
-            let class_name = self.symbols().class_name(class);
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!(
-                    "Undefined constant {class_name}::{}",
-                    String::from_utf8_lossy(name)
-                ),
-            ));
+            return Err(self.undefined_class_constant(class, name));
         };
         self.update_enum_constants(declaring)?;
         if is_case {
             return self.enum_case(declaring, name).map(|case| case.as_value());
         }
-        self.evaluated_class_constant(declaring, name)
+        let value = self.evaluated_in(declaring, declaring, name)?;
+        self.addref(&value);
+        Ok(value)
     }
 
     /// `zend_get_class_constant_ex`'s update of the constant `name` that
@@ -619,7 +810,7 @@ impl Request {
     /// yet evaluated is marked while its expression is, and one found
     /// marked is php's `Cannot declare self-referencing constant`, the
     /// class named as the fetch was handed it; then
-    /// [`Request::evaluated_class_constant`]. The opline's fetch marks
+    /// [`Request::evaluated_in`]. The opline's fetch marks
     /// nothing, so a cycle entered through it is refused one constant
     /// further in.
     ///
@@ -637,18 +828,19 @@ impl Request {
     /// ```
     pub(crate) fn visited_class_constant(
         &mut self,
-        declaring: ClassId,
+        (holder, declaring): (ClassId, ClassId),
         name: &[u8],
         class_name: &str,
     ) -> Result<Value, Thrown> {
-        let data = self.class_data.rows.row(declaring);
-        if data.constants.iter().any(|(held, _)| **held == *name) {
-            return self.evaluated_class_constant(declaring, name);
+        if (self.class_data.evaluated_constant(holder, name)).is_some() {
+            let value = self.evaluated_in(holder, declaring, name)?;
+            self.addref(&value);
+            return Ok(value);
         }
+        let data = self.class_data.rows.row(declaring);
         if data.visiting.iter().any(|held| **held == *name) {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!(
                     "Cannot declare self-referencing constant {class_name}::{}",
                     String::from_utf8_lossy(name)
@@ -656,11 +848,13 @@ impl Request {
             ));
         }
         data.visiting.push(name.into());
-        let evaluated = self.evaluated_class_constant(declaring, name);
+        let evaluated = self.evaluated_in(holder, declaring, name);
         if let Some(data) = self.class_data.rows.get_mut(declaring) {
             data.visiting.retain(|held| **held != *name);
         }
-        evaluated
+        let value = evaluated?;
+        self.addref(&value);
+        Ok(value)
     }
 
     /// The default properties table of `class` once the class is
@@ -697,11 +891,11 @@ impl Request {
     /// ```
     ///
     /// An array the declaration wrote, every key and value folded, is
-    /// the unit's immutable array ([`ConstExpr::ImmutableArray`]), so a
-    /// slot, a `static` and a constant copied from it take no owner, as
-    /// opcache leaves php's table of defaults:
+    /// the unit's array ([`ConstExpr::UnitValue`]), immutable in a unit
+    /// the cache keeps, so a slot, a `static` and a constant copied from
+    /// it take no owner, as opcache leaves php's table of defaults:
     ///
-    /// [`ConstExpr::ImmutableArray`]: php_unit::decl::ConstExpr::ImmutableArray
+    /// [`ConstExpr::UnitValue`]: php_unit::decl::ConstExpr::UnitValue
     ///
     /// ```php
     /// class C { public $arr = ['x']; public $n = [[1], 'a']; public $q = [PHP_INT_SIZE]; public static $s = ['y', 'k' => 1]; const K = ['z']; }
@@ -748,6 +942,32 @@ impl Request {
     /// array(1) packed interned {
     ///   [0]=>
     ///   string(1) "x" interned
+    /// }
+    /// ```
+    ///
+    /// What `object_properties_init` lays from it: each declared instance property's slot
+    /// takes its default, `zend_update_class_constants` having evaluated
+    /// the expression it was written as in the scope of the class that
+    /// declared it (`ce->properties_info_table[i]->ce`); a property with
+    /// no default is `null` where it is untyped and stays uninitialised
+    /// where it is typed, as `zend_declare_typed_property` leaves it.
+    /// The slots are [`Request::placed_properties`]', so an inherited
+    /// property takes the parent's default in the parent's slot.
+    ///
+    /// The defaults are evaluated before the object is made, as
+    /// `zend_update_class_constants` runs inside `object_init_ex` before
+    /// `zend_objects_new`, so an object a default makes, an enum's case
+    /// among them, takes its number in the object store before the object being made does.
+    ///
+    /// ```php
+    /// class A { public $p = E::V; }
+    /// enum E { case V; }
+    /// var_dump(new A);
+    /// ```
+    /// ```expect
+    /// object(A)#2 (1) {
+    ///   ["p"]=>
+    ///   enum(E::V)
     /// }
     /// ```
     pub(super) fn default_properties(
@@ -813,12 +1033,19 @@ impl Request {
                 Some(expr) => {
                     let declaring = Some(info.declaring);
                     let value = crate::api::call::eval_declared_made(self, &expr, declaring)?;
-                    Some(self.strictly_held(value, info)?)
+                    let value = self.strictly_held(value, info)?;
+                    if info.declaring == class && super::linking::is_literal(&expr) {
+                        self.take_declaration_slot(value);
+                    }
+                    Some(value)
                 }
                 None if typed => None,
                 None => Some(Value::null()),
             };
             self.class_data.rows.row(class).defaults.push(value);
+            if info.declaring == class {
+                self.default_evaluated(info);
+            }
         }
         Ok(())
     }
@@ -880,5 +1107,23 @@ impl Symbols<&Request> {
             .filter(|data| data.updated)?;
         let (at, _, _) = self.0.placed_named(class, name)?;
         data.defaults.get(at).copied().flatten()
+    }
+}
+
+/// The class whose table holds the constant `name` that `declaring`
+/// declares as `class` reads it: `class` where it is php's class
+/// without `ZEND_ACC_IMMUTABLE` that inherits it from an immutable
+/// class, whose link copied the constant into a `zend_class_constant`
+/// of its own (`do_inherit_class_constant`), which
+/// `zend_update_class_constant` evaluates in place apart from the
+/// declaring class's; `declaring` otherwise, whose one constant every
+/// class reads. So a read through the declaring class leaves the
+/// copy unevaluated, and each evaluates its own value.
+pub(super) fn constant_holder(class: ClassId, declaring: ClassId) -> ClassId {
+    let copied = super::classes::mutable(class) && !super::classes::mutable(declaring);
+    if class != declaring && copied {
+        class
+    } else {
+        declaring
     }
 }

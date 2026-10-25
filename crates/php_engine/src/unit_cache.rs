@@ -13,6 +13,7 @@
 //! them is the request's face, [`crate::api::request::UnitCache`], which
 //! `opcache_*` answer from, over the files of the request's epoch.
 
+mod compact;
 mod disk;
 mod wire;
 
@@ -26,7 +27,7 @@ use php_compile::CompileError;
 use php_unit::{PublishedUnit, Unit};
 
 use crate::api::abi::{Cache, Validation};
-use crate::api::request::{CacheBudget, CacheStatus, CachedFile, Preloaded, Restart};
+use crate::api::request::{CacheBudget, CacheStatus, CachedFile, Preloaded, Restart, TierStatus};
 
 use disk::build_identity;
 pub(crate) use disk::{BUILD, Disk};
@@ -41,7 +42,7 @@ pub(crate) type Cached = Option<Result<PublishedUnit, CompileRefused>>;
 /// refusal, and what the compile had declared before it
 /// ([`php_compile::Declared`]) published for the request, which php's
 /// `zend_bailout` out of the compile leaves standing in its tables.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub(crate) struct CompileRefused {
     /// The refusal, what it declared taken into `declared`.
     pub(crate) error: CompileError,
@@ -125,11 +126,19 @@ pub(crate) fn full_path(path: &[u8], cwd: &Path) -> Vec<u8> {
     )
 }
 
-/// The `mtime` of the file at `path` in whole seconds, php's
-/// `zend_get_file_handle_timestamp`; none where nothing is there.
-pub(crate) fn stamp_seconds(path: &[u8]) -> Option<i64> {
-    Stamp::of(path).map(Stamp::seconds)
+/// Who stats a file the cache holds, `zend_get_file_handle_timestamp`'s
+/// caller: a request, which reaches a stream wrapper's `url_stat`
+/// (`crate::api::request::Request`'s), or no request, which stats a
+/// plain file alone.
+pub(crate) trait Stat {
+    /// The file at the full path `path` as it stands now; none where
+    /// nothing is there or nothing keeps a time for it.
+    fn stamp(&mut self, path: &[u8]) -> Option<Stamp> {
+        Stamp::of(path)
+    }
 }
+
+impl Stat for () {}
 
 /// What the system reported of a file as it was compiled, the
 /// `zend_stat_t` php's `validate_timestamps` reads: when it was last
@@ -141,7 +150,7 @@ pub(crate) struct Stamp {
 }
 
 impl Stamp {
-    /// The file at `path` as the system reports it now; none where
+    /// The plain file at `path` as the system reports it now; none where
     /// nothing is there or the system keeps no time for it.
     pub(crate) fn of(path: &[u8]) -> Option<Stamp> {
         let described = std::fs::metadata(String::from_utf8_lossy(path).as_ref()).ok()?;
@@ -152,20 +161,31 @@ impl Stamp {
         })
     }
 
+    /// What a wrapper's `url_stat` reported, laid out as `php_fstat`
+    /// lays a `zend_stat_t` out: its `st_mtime` in whole seconds and its
+    /// `st_size`.
+    pub(crate) fn stat(sb: [i64; 13]) -> Stamp {
+        Stamp {
+            modified: Duration::from_secs(u64::try_from(sb[9]).unwrap_or(0)),
+            size: u64::try_from(sb[7]).unwrap_or(0),
+        }
+    }
+
     /// `st_mtime`, the whole seconds php compares and never the size.
-    fn seconds(self) -> i64 {
+    pub(crate) fn seconds(self) -> i64 {
         i64::try_from(self.modified.as_secs()).unwrap_or(i64::MAX)
     }
 }
 
-/// One file the cache holds, php's `zend_persistent_script`: what it
-/// compiled to, the path it was compiled from and the stamp it was
-/// compiled at, and its `dynamic_members`, the hits since it was cached,
-/// when it was last served and when it is next validated. The unit is
+/// One file the cache holds, php's `zend_persistent_script`: the unit
+/// it compiled to, never a refusal, which php persists none of, the path
+/// it was compiled from and the stamp it was compiled at, and its
+/// `dynamic_members`, the hits since it was cached, when it was last
+/// served and when it is next validated. The unit is
 /// never changed; the members are atomics a racing request may write
 /// over, which costs at most one more stat.
 pub(crate) struct Held {
-    pub(crate) unit: Result<PublishedUnit, CompileError>,
+    pub(crate) unit: PublishedUnit,
     /// Its early-bound classes, published as it was held, which a
     /// request loading the unit declares by their numbers.
     pub(crate) early: EarlyBound,
@@ -177,7 +197,9 @@ pub(crate) struct Held {
     stamp: Option<Stamp>,
     /// The bytes it was compiled from.
     size: u64,
-    /// The order the cache took it in, which its status lists it by.
+    /// The order its full path entered the cache's names in, which its
+    /// place in its bucket's chain is ([`UnitCache::status`]): a recompile
+    /// in place of a discarded copy keeps the copy's.
     order: u64,
     hits: AtomicU64,
     last_used: AtomicI64,
@@ -191,10 +213,10 @@ pub(crate) struct Held {
 }
 
 /// What a file read from disk came to, for [`UnitCache::hold`]: the
-/// unit or the compiler's refusal, its early-bound classes published,
-/// the bytes it was read from and its stamp as observed.
+/// unit, its early-bound classes published, the bytes it was read from
+/// and its stamp as observed.
 struct Read {
-    unit: Result<PublishedUnit, CompileError>,
+    unit: PublishedUnit,
     early: EarlyBound,
     size: u64,
     observed: Option<Stamp>,
@@ -218,7 +240,7 @@ impl Held {
     /// before, `last_used` zero.
     pub(crate) fn preloaded(unit: PublishedUnit, path: Vec<u8>, size: u64, order: u64) -> Held {
         Held {
-            unit: Ok(unit),
+            unit,
             early: Arc::new([]),
             path,
             stamp: None,
@@ -264,17 +286,17 @@ impl Held {
     /// at `now` is served, the file as it stands stat'ed only where a
     /// hit is due, and the next revalidation time recorded where a
     /// window's stat finds the file unchanged.
-    pub(crate) fn validated(&self, validation: Validation, now: i64) -> bool {
+    pub(crate) fn validated(&self, validation: Validation, now: i64, stat: &mut dyn Stat) -> bool {
         match self.due(validation, now) {
             Due::Nothing => true,
             Due::Seconds { was, next } => {
-                let fresh = Stamp::of(&self.path).is_some_and(|stamp| stamp.seconds() == was);
+                let fresh = stat.stamp(&self.path).map(Stamp::seconds) == Some(was);
                 if fresh {
                     self.revalidate.store(next, Ordering::Relaxed);
                 }
                 fresh
             }
-            Due::Exact(held) => held.is_some() && Stamp::of(&self.path) == held,
+            Due::Exact(held) => held.is_some() && stat.stamp(&self.path) == held,
         }
     }
 }
@@ -313,6 +335,35 @@ pub(crate) struct UnitCache {
     /// The build's identity, php's `zend_system_id`, which every unit
     /// the second level keeps carries and is read back by ([`Disk`]).
     pub(crate) build: [u8; BUILD],
+    /// The engine's interned strings, which the names a held file is
+    /// filed under join as opcache's buffer takes them ([`UnitCache::hold`],
+    /// [`UnitCache::add_key`]).
+    interned: crate::arena::Interned,
+}
+
+/// The keys of a unit's `function_table` and `class_table`: the lowered
+/// name of each function its compile bound and of each class it bound
+/// early, php's `lcname` (`zend_begin_func_decl`,
+/// `zend_compile_class_decl`). A class a `DECLARE_CLASS` binds is held
+/// under its runtime definition key, a constant of the unit already.
+fn table_keys(unit: &Unit) -> Vec<Vec<u8>> {
+    let mut early = vec![true; unit.classes.len()];
+    for (_, keyed) in &unit.runtime_keys {
+        if let Some(bound) = usize::try_from(*keyed)
+            .ok()
+            .and_then(|at| early.get_mut(at))
+        {
+            *bound = false;
+        }
+    }
+    let functions = unit.functions.iter().map(|(decl, _)| &decl.name);
+    let classes = (unit.classes.iter().zip(early))
+        .filter(|(_, early)| *early)
+        .map(|(decl, _)| &decl.name);
+    functions
+        .chain(classes)
+        .map(|name| name.0.to_ascii_lowercase())
+        .collect()
 }
 
 /// The files one epoch of the cache holds (design §5.14), what an
@@ -433,15 +484,111 @@ pub(crate) enum Levels<'a> {
 /// `zend_compile_file` link handed down to compile in place of the
 /// file's own where one did, the path as written it is filed under too
 /// where given, how a hit is validated at the request time `now`, how
-/// new a file is kept, and where.
+/// new a file is kept, and where, and what opcache's optimizer makes of
+/// what it compiles; `opened` where the `zend_file_handle` holds the
+/// file's opened path, by which the file cache reads it.
 pub(crate) struct Asked<'a> {
     pub(crate) path: &'a [u8],
     pub(crate) source: Option<&'a [u8]>,
     pub(crate) written: Option<UnitKey>,
+    pub(crate) opened: bool,
     pub(crate) validation: Validation,
     pub(crate) protection: u32,
     pub(crate) now: i64,
     pub(crate) levels: Levels<'a>,
+    pub(crate) optimizer: Optimizer,
+}
+
+/// What opcache's optimizer makes of a unit it persists that a request
+/// reads, `zend_optimize_script` under `opcache.optimization_level`, which
+/// `cache_script_in_shared_memory` and `cache_script_in_file_cache` call
+/// on what they compiled (`Z/ext/opcache/ZendAccelerator.c:1581`,
+/// `:1563`) and `preload_optimize` on what the preload holds (`:4425`,
+/// `:4441`). The engine
+/// runs none of its passes over what executes (design §6.1); of pass 11,
+/// `zend_optimizer_compact_literals`, it keeps the runtime cache size the
+/// pass counts, as the room each op array's cache takes of a request's
+/// heap ([`php_unit::OpArray::cache_room`], [`compact`]). So where the
+/// accelerator holds a file, sites naming one function or one class
+/// share one slot, and so do the sites naming one constant, and one
+/// property or one method of `$this` where the op array is sure of it, a
+/// method's or a closure's written in one; a closure's own cache,
+/// `emalloc`ed at that size, reads one bin however many it holds. A file
+/// compiled without the accelerator keeps the compiler's slot per site.
+/// Under the plain recipe each closure below takes one site of each
+/// more than the one before:
+///
+/// ```php
+/// $src = '<?php class S { function closures() { return [';
+/// for ($n = 1; $n <= 4; $n++) { $src .= 'function () { ' . str_repeat('new stdClass; array_keys($x); FOO; $this->p; $this->m(); ', $n) . '}, '; }
+/// file_put_contents(__DIR__ . '/sites.inc', $src . ']; } } return (new S)->closures();'); touch(__DIR__ . '/sites.inc', time() - 10);
+/// class A {} $a = new A;
+/// foreach (include __DIR__ . '/sites.inc' as $f) { $m = memory_get_usage(); $b = Closure::bind($f, $a, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect
+/// 448 512 576 640
+/// ```
+/// ```php
+/// $src = '<?php class S { function closures() { return [';
+/// for ($n = 1; $n <= 4; $n++) { $src .= 'function () { ' . str_repeat('new stdClass; array_keys($x); FOO; $this->p; $this->m(); ', $n) . '}, '; }
+/// file_put_contents(__DIR__ . '/sites.inc', $src . ']; } } return (new S)->closures();'); touch(__DIR__ . '/sites.inc', time() - 10);
+/// class A {} $a = new A;
+/// foreach (include __DIR__ . '/sites.inc' as $f) { $m = memory_get_usage(); $b = Closure::bind($f, $a, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect regime=immutable-literals
+/// 448 448 448 448
+/// ```
+///
+/// The count starts past the op array extensions' slots, the tier's
+/// where it starts:
+///
+/// ```php
+/// $src = '<?php class S { function closures() { return [';
+/// for ($n = 1; $n <= 4; $n++) { $src .= 'function () { ' . str_repeat('new stdClass; array_keys($x); FOO; $this->p; $this->m(); ', $n) . '}, '; }
+/// file_put_contents(__DIR__ . '/sites.inc', $src . ']; } } return (new S)->closures();'); touch(__DIR__ . '/sites.inc', time() - 10);
+/// class A {} $a = new A;
+/// foreach (include __DIR__ . '/sites.inc' as $f) { $m = memory_get_usage(); $b = Closure::bind($f, $a, A::class); echo memory_get_usage() - $m, " "; unset($b); }
+/// ```
+/// ```expect regime=jit-off
+/// 464 464 464 464
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Optimizer {
+    /// No pass: `opcache.optimization_level` leaves pass 11 out.
+    Off,
+    /// Pass 11's count, from the first slot past the op array
+    /// extensions' (`zend_op_array_extension_handles * sizeof(void*)`).
+    CompactLiterals { first: u32 },
+}
+
+impl Optimizer {
+    /// `ZEND_OPTIMIZER_PASS_11` (`Z/Zend/Optimizer/zend_optimizer.h:38`).
+    pub(crate) const PASS_11: i64 = 1 << 10;
+
+    /// The passes on a miss `persistent_compile_file` compiled under
+    /// `validation`: these with the accelerator on (every validation but
+    /// `EveryHit`) where it optimizes what it compiled, `optimizing`,
+    /// which with a restart pending it does only where a file cache keeps
+    /// the file, as `file_cache_compile_file` does
+    /// (`Z/ext/opcache/ZendAccelerator.c:2156-2163`); none where it
+    /// compiled as php without the accelerator does.
+    pub(crate) fn on_miss(self, validation: Validation, optimizing: bool) -> Optimizer {
+        if validation == Validation::EveryHit || !optimizing {
+            return Optimizer::Off;
+        }
+        self
+    }
+
+    /// What the passes leave of `unit`'s op arrays' caches, before the
+    /// unit is published.
+    pub(crate) fn optimized(self, mut unit: Unit) -> Unit {
+        if let Optimizer::CompactLiterals { first } = self {
+            for code in crate::exec::op_arrays_mut(&mut unit) {
+                code.cache_room = compact::cache_size(code, first);
+            }
+        }
+        unit
+    }
 }
 
 /// The unit [`UnitCache::file`] answers with: one held, published for
@@ -455,6 +602,26 @@ pub(crate) enum Compiled {
     Alone(Box<Unit>),
 }
 
+/// Whom a compile's answer serves: every request that asks for the file,
+/// or the one that asked alone, whose `memory_limit` refused the compile
+/// (`crate::engine::CompileHeap`), which another request with room for
+/// it compiles again, as php compiles a file afresh where opcache cached
+/// nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Answers {
+    /// Any request: what a held unit answers.
+    Every,
+    /// The request that asked, and no other.
+    Asker,
+}
+
+/// A compile [`UnitCache::file`] ran: the unit or the refusal, and whom
+/// it answers.
+pub(crate) struct Fresh {
+    pub(crate) unit: Result<Unit, CompileError>,
+    pub(crate) answers: Answers,
+}
+
 /// What [`UnitCache::file`] answers: the unit, what it did with the
 /// file, and the classes a held unit's compiler bound early.
 pub(crate) type Answered = (
@@ -462,6 +629,96 @@ pub(crate) type Answered = (
     Filed,
     Option<EarlyBound>,
 );
+
+/// Whether `unit`, compiled under `validation`, takes the names a
+/// program reads from the request it was compiled for, as php without
+/// the cache names them: [`Validation::EveryHit`] stands for php
+/// compiling every include afresh, and an anonymous class's name is made
+/// on from that request's `CG(rtd_key_counter)`, which the next include
+/// or request has moved, so a unit declaring one is never held to be
+/// served again. A unit declaring none reads the same however often it
+/// is compiled, its keys binding named declarations alone, and is held;
+/// its hit counts the keys php's compile would have made
+/// ([`crate::api::request::Request::cached_source`]). Under opcache the
+/// held unit keeps its miss's names, as `zend_persistent_script` does.
+///
+/// ```php
+/// $inc = __DIR__ . '/anonymous.inc'; file_put_contents($inc, "<?php\nreturn new class {};\n"); touch($inc, time() - 10);
+/// $n = fn ($o) => strstr(get_class($o), '$');
+/// $a = include $inc;
+/// echo $n($a), ' ', $n(eval('return new class {};')), ' ', $n($b = include $inc), ' ', $n(eval('return new class {};')), "\n";
+/// var_dump($a instanceof $b);
+/// ```
+/// ```expect
+/// $0 $1 $2 $3
+/// bool(false)
+/// ```
+/// ```php
+/// $inc = __DIR__ . '/anonymous.inc'; file_put_contents($inc, "<?php\nreturn new class {};\n"); touch($inc, time() - 10);
+/// $n = fn ($o) => strstr(get_class($o), '$');
+/// $a = include $inc;
+/// echo $n($a), ' ', $n(eval('return new class {};')), ' ', $n($b = include $inc), ' ', $n(eval('return new class {};')), "\n";
+/// var_dump($a instanceof $b);
+/// ```
+/// ```expect regime=jit-off
+/// $0 $1 $0 $2
+/// bool(true)
+/// ```
+///
+/// A class declared in a block takes a key too, which the hit of a
+/// unit with no anonymous class counts without the cache, as the
+/// compile php makes of each include counts it, and counts nothing
+/// under opcache:
+///
+/// ```php
+/// $inc = __DIR__ . '/guarded.inc'; file_put_contents($inc, "<?php\nif (!class_exists('Guarded', false)) { class Guarded {} }\n"); touch($inc, time() - 10);
+/// include $inc; include $inc;
+/// echo strstr(get_class(eval('return new class {};')), '$'), "\n";
+/// ```
+/// ```expect
+/// $2
+/// ```
+/// ```php
+/// $inc = __DIR__ . '/guarded.inc'; file_put_contents($inc, "<?php\nif (!class_exists('Guarded', false)) { class Guarded {} }\n"); touch($inc, time() - 10);
+/// include $inc; include $inc;
+/// echo strstr(get_class(eval('return new class {};')), '$'), "\n";
+/// ```
+/// ```expect regime=jit-off
+/// $1
+/// ```
+pub(crate) fn named_by_request(validation: Validation, unit: &Result<Unit, CompileError>) -> bool {
+    validation == Validation::EveryHit
+        && unit
+            .as_ref()
+            .is_ok_and(|unit| unit.classes.iter().any(|class| class.flags.is_anonymous))
+}
+
+/// The runtime definition keys and anonymous class names `unit`'s
+/// compile made, which [`crate::api::request::Request::count_keys_made`]
+/// counts on for the request it was compiled for, saturating at
+/// `u32::MAX`.
+pub(crate) fn keys_of(unit: &Unit) -> u32 {
+    u32::try_from(unit.runtime_keys.len()).unwrap_or(u32::MAX)
+}
+
+/// The runtime definition keys a request counts for `unit` served as a
+/// hit under `validation`: none under opcache, whose hit compiles
+/// nothing; without it the keys php's compile of the include would
+/// have made, as [`named_by_request`] reads [`Validation::EveryHit`].
+pub(crate) fn hit_keys(validation: Validation, unit: &Unit) -> u32 {
+    if validation == Validation::EveryHit {
+        keys_of(unit)
+    } else {
+        0
+    }
+}
+
+/// The unit `held` holds, answered as `filed` with its early-bound
+/// classes.
+fn answered_by(held: &Held, filed: Filed) -> Answered {
+    let unit = Compiled::Published(held.unit.clone());
+    (Some(Ok(unit)), filed, Some(Arc::clone(&held.early)))
+}
 
 /// A unit held nowhere, answered as `filed`.
 fn alone(unit: Result<Unit, CompileError>, filed: Filed) -> Answered {
@@ -493,6 +750,11 @@ pub(crate) enum Filed {
     Hit,
     /// Compiled and held, `cache_script_in_shared_memory`.
     Held,
+    /// Compiled, and answered by the copy held under its full path
+    /// already, which `cache_script_in_shared_memory` prefers to what it
+    /// compiled (`Z/ext/opcache/ZendAccelerator.c:1588-1610`): neither a
+    /// hit nor held anew.
+    Existing,
     /// Held nowhere: read back from the file cache, or not read.
     Unheld,
     /// Compiled and kept in the file cache alone: under
@@ -504,6 +766,18 @@ pub(crate) enum Filed {
     /// Compiled and held nowhere, by `accelerator_orig_compile_file` as
     /// php without opcache compiles, whose classes bind early in place.
     Compiled,
+    /// Neither read nor compiled: left to the asker's own compile,
+    /// `accelerator_orig_compile_file`, a unit of its alone, as
+    /// `persistent_compile_file` leaves a file where no room is left and
+    /// `opcache_compile_file` one it does not keep.
+    Own,
+}
+
+/// What [`UnitCache::hold`] did with a compile: held it, or found the
+/// path's copy held already, which is kept.
+enum Holding {
+    Built(Arc<Held>),
+    Found(Arc<Held>),
 }
 
 /// `ZCSG(preload_script)`'s name in the cache, the one pseudo-file the
@@ -546,6 +820,7 @@ impl UnitCache {
         extended_info: bool,
         functions: &[php_unit::decl::FunctionDecl],
         classes: &[php_unit::decl::ClassDecl],
+        interned: crate::arena::Interned,
     ) -> UnitCache {
         let names = functions.iter().map(|decl| &*decl.name.0);
         let build = build_identity(
@@ -563,6 +838,7 @@ impl UnitCache {
             budget: OnceLock::new(),
             preloaded: OnceLock::new(),
             build,
+            interned,
         }
     }
 
@@ -592,24 +868,52 @@ impl UnitCache {
     }
 
     /// `zend_accel_add_key`: `key` filed beside the names `held` is held
-    /// under in `files`.
+    /// under in `files`, where it names nothing yet, a discarded copy
+    /// being something.
     pub(crate) fn add_key(&self, files: &Files, key: UnitKey, held: &Arc<Held>) {
-        if files
-            .held
-            .get(&key)
-            .is_some_and(|found| Arc::ptr_eq(&found, held))
-        {
-            return;
+        if files.held.get(&key).is_none() {
+            self.update_key(files, key, held);
         }
-        if self.hash_full(files) {
-            return;
+    }
+
+    /// `zend_accel_hash_update` of `key` to `held`'s entry: in place of
+    /// what it names, or filed anew where the names are not full.
+    fn update_key(&self, files: &Files, key: UnitKey, held: &Arc<Held>) {
+        match files.held.get(&key) {
+            Some(found) if Arc::ptr_eq(&found, held) => return,
+            None if self.hash_full(files) => return,
+            _ => {}
         }
+        // `accel_new_interned_key`: the name as written is one of the
+        // buffer's strings from here.
+        php_heap::Intern::intern(&mut *self.interned.strings(), &key.0).ok();
         files.held.alias(key, held);
+    }
+
+    /// The names `zend_accel_script_persist` interns beside the strings
+    /// of a unit it persists, once the unit is held under `path`: its
+    /// `filename`, the full path, and the keys of its `function_table`
+    /// and `class_table` ([`table_keys`]). A unit served without being
+    /// held is persisted by nothing, and names none.
+    pub(crate) fn persist_names(&self, path: &[u8], unit: &Unit) {
+        let mut strings = self.interned.strings();
+        php_heap::Intern::intern(&mut *strings, path).ok();
+        for key in table_keys(unit) {
+            php_heap::Intern::intern(&mut *strings, &key).ok();
+        }
     }
 
     /// The bounds the extension set, once: the first stands.
     pub(crate) fn set_budget(&self, budget: CacheBudget) {
         self.budget.set(budget).ok();
+    }
+
+    /// Whether the extension that bound the cache set the tier up in
+    /// its segment ([`crate::api::request::CacheBudget::tier`]), which
+    /// `zend_jit_check_support` may still refuse
+    /// ([`crate::engine::Shared::op_array_extensions`]).
+    pub(crate) fn tier_set_up(&self) -> bool {
+        self.budget.get().is_some_and(|budget| budget.tier)
     }
 
     /// `zend_accel_hash_is_full`, which marks the memory exhausted and
@@ -655,7 +959,7 @@ impl UnitCache {
     /// weight counted as wasted once however many requests discard it,
     /// and where the memory is exhausted a restart scheduled if enough is
     /// now wasted.
-    fn discard_held(&self, files: &Files, held: &Held) {
+    pub(crate) fn discard_held(&self, files: &Files, held: &Held) {
         if held.discarded.swap(true, Ordering::Relaxed) {
             return;
         }
@@ -686,51 +990,68 @@ impl UnitCache {
     /// path meanwhile, filed under
     /// `written` too where given, and kept in the file cache. A file
     /// whose stamp the validation or the `protection` needs and the
-    /// system does not give, and one written within `protection` seconds
-    /// of `now`, is compiled and held and kept nowhere, as php behaves
-    /// without the cache; any miss while a restart is pending is kept in
-    /// the file cache alone. [`Levels::Disk`] asks and keeps in the file
-    /// cache alone and counts nothing. Nothing where the file cannot be
+    /// system does not give, one written within `protection` seconds of
+    /// `now`, and a miss while a restart is pending or the memory is
+    /// exhausted with no file cache, is left to the caller's own compile
+    /// ([`Filed::Own`]), as php compiles it without the cache; a unit
+    /// [`named_by_request`] is held and kept nowhere; any other miss
+    /// while a restart is pending is kept in the file cache alone.
+    /// [`Levels::Disk`] asks and keeps in the file cache alone and counts
+    /// nothing. Nothing where the file cannot be
     /// read. What is `compile`d or `decode`d takes no map-pointer offset
     /// until it is held, `share`d as it is; one held nowhere is answered
-    /// [`Compiled::Alone`], its caller's own (GH-8646).
-    pub(crate) fn file(
+    /// [`Compiled::Alone`], its caller's own (GH-8646), and so is one
+    /// that answers the request that asked alone ([`Answers::Asker`]).
+    /// `compile` and `publish` are handed `caller`, the request the file
+    /// is compiled and its classes published for, or nothing.
+    #[allow(clippy::too_many_arguments)] // the table, the question, the caller and the four steps, each one fact
+    #[allow(clippy::too_many_lines)] // `persistent_compile_file` and its two levels, in php's order
+    pub(crate) fn file<A: Stat>(
         &self,
+        caller: &mut A,
         files: &Files,
         asked: Asked<'_>,
-        compile: impl FnOnce(&[u8]) -> Result<Unit, CompileError>,
+        compile: impl FnOnce(&mut A, &[u8]) -> Fresh,
         decode: impl FnOnce(&[u8]) -> Option<Unit>,
         share: impl FnOnce(Unit) -> PublishedUnit,
-        publish: impl FnOnce(&PublishedUnit) -> EarlyBound,
+        publish: impl FnOnce(&mut A, &PublishedUnit) -> EarlyBound,
     ) -> Answered {
         let Asked {
             path,
             source: handed,
             written,
+            opened,
             validation,
             protection,
             now,
             levels,
+            optimizer,
         } = asked;
         let (memory, disk) = match levels {
             Levels::Memory => (true, None),
             Levels::Both(disk) => (true, Some(disk)),
             Levels::Disk(disk) => (false, Some(disk)),
         };
-        if memory && let Some(hit) = self.held_hit(files, path, written.as_ref(), validation, now) {
-            return (
-                Some(hit.unit.clone().map(Compiled::Published)),
-                Filed::Hit,
-                Some(Arc::clone(&hit.early)),
-            );
+        // A key that names a discarded copy is a miss that looks no full
+        // path up, and a handle holding the path alone leaves no opened
+        // path for the file cache to read the file by, as
+        // `do_validate_timestamps` gives its resolved path back
+        // (`Z/ext/opcache/ZendAccelerator.c:1157-1160`, `zend_file_cache.c:1901`).
+        let keyed = (written.as_ref())
+            .is_some_and(|key| files.held.get(key).is_some_and(|held| held.discarded()));
+        if memory
+            && !keyed
+            && let Some(hit) = self.held_hit(caller, files, path, written.as_ref(), validation, now)
+        {
+            return answered_by(&hit, Filed::Hit);
         }
         let validated = validation != Validation::Never;
         let stamped = validated || protection > 0;
-        let observed = if stamped { Stamp::of(path) } else { None };
+        let observed = if stamped { caller.stamp(path) } else { None };
         // The second level, `zend_file_cache_script_load`: read back
         // where it keeps the file at the `mtime` it has now, where
         // timestamps are validated.
-        if let Some(disk) = &disk
+        if let Some(disk) = disk.as_ref().filter(|_| opened || !keyed)
             && (!validated || observed.is_some())
             && let Some(kept) = disk.load(path, observed.filter(|_| validated).map(Stamp::seconds))
             && let Some(unit) = decode(&kept.body)
@@ -747,65 +1068,134 @@ impl UnitCache {
             // Under its full path alone: `zend_file_cache_script_load`
             // files no key, which the next include adds after opening it.
             let unit = share(unit);
-            let early = publish(&unit);
+            let early = publish(caller, &unit);
             let read = Read {
-                unit: Ok(unit),
+                unit,
                 early,
                 size: kept.size,
                 observed,
             };
-            let held = self.hold(files, path, validation, now, read);
+            let (Holding::Built(held) | Holding::Found(held)) =
+                self.hold(files, path, validation, now, read);
             files.hit(&held, validation, now);
-            return (
-                Some(held.unit.clone().map(Compiled::Published)),
-                Filed::Hit,
-                Some(Arc::clone(&held.early)),
-            );
+            return answered_by(&held, Filed::Hit);
         }
-        if memory && validation != Validation::EveryHit {
+        let accelerated = memory && validation != Validation::EveryHit;
+        if accelerated {
             files.misses.fetch_add(1, Ordering::Relaxed);
         }
-        let Some(source) = source_or_read(handed, path) else {
-            return (None, Filed::Unheld, None);
-        };
-        let unit = compile(&source);
-        let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
+        // `accelerator_orig_compile_file`, the request's own compile, where
+        // there is no room and no file cache to keep it in, and for a file
+        // with no stamp or one written within `protection` seconds of
+        // `now`, which `opcache_compile_file` decides before it compiles.
+        let short = accelerated
+            && disk.is_none()
+            && (files.restart_pending() || files.exhausted.load(Ordering::Relaxed));
         let unheld = stamped
             && observed.is_none_or(|stamp| {
                 protection > 0 && now.saturating_sub(i64::from(protection)) < stamp.seconds()
             });
-        if unheld {
+        if short || unheld {
+            return (None, Filed::Own, None);
+        }
+        let Some(source) = source_or_read(handed, path) else {
+            return (None, Filed::Unheld, None);
+        };
+        let Fresh { unit, answers } = compile(caller, &source);
+        let size = u64::try_from(source.len()).unwrap_or(u64::MAX);
+        if answers == Answers::Asker || named_by_request(validation, &unit) {
             return alone(unit, Filed::Compiled);
         }
-        if let (Some(disk), Ok(compiled)) = (&disk, &unit)
-            && let Some(body) = wire::encode(compiled)
+        // php persists no refusal, so its corrupted copy stays filed.
+        let Ok(unit) = unit else {
+            return alone(unit, Filed::Compiled);
+        };
+        let optimizer = optimizer.on_miss(validation, disk.is_some() || !files.restart_pending());
+        let unit = optimizer.optimized(unit);
+        // `cache_script_in_shared_memory` looks for the path's copy before
+        // it asks for room or writes the file cache.
+        if memory
+            && !files.restart_pending()
+            && let Some(existing) = self.find(files, &UnitKey::full(path))
+        {
+            return self.existing(files, &existing, written, validation, observed, now);
+        }
+        if let Some(disk) = &disk
+            && let Some(body) = wire::encode(&unit)
         {
             let stamp = observed.filter(|_| validated).map_or(0, Stamp::seconds);
             disk.store(path, stamp, size, &body);
         }
         if !memory || files.restart_pending() || !self.room_for(files, size) {
-            return alone(unit, disk.map_or(Filed::Compiled, |_| Filed::Kept));
+            return alone(Ok(unit), disk.map_or(Filed::Compiled, |_| Filed::Kept));
         }
-        let unit = unit.map(share);
-        let early = match &unit {
-            Ok(compiled) => publish(compiled),
-            Err(_) => Arc::new([]),
-        };
+        let unit = share(unit);
+        let early = publish(caller, &unit);
         let read = Read {
             unit,
             early,
             size,
             observed,
         };
-        let held = self.hold(files, path, validation, now, read);
-        if let Some(written) = written {
-            self.add_key(files, written, &held);
+        let held = match self.hold(files, path, validation, now, read) {
+            Holding::Built(held) => held,
+            Holding::Found(existing) => {
+                return self.existing(files, &existing, written, validation, observed, now);
+            }
+        };
+        // Not a `phar://` name, which may hold an alias the archive
+        // keeps for the request alone (`ZendAccelerator.c:1669-1672`).
+        if let Some(written) = written.filter(|key| !key.0.starts_with(b"phar://")) {
+            self.update_key(files, written, &held);
         }
-        (
-            Some(held.unit.clone().map(Compiled::Published)),
-            Filed::Held,
-            Some(Arc::clone(&held.early)),
-        )
+        answered_by(&held, Filed::Held)
+    }
+
+    /// `cache_script_in_shared_memory`'s `existing_persistent_script`
+    /// (`Z/ext/opcache/ZendAccelerator.c:1588-1610`): `held`, the copy
+    /// the path's compile found held already, a preloaded one among them,
+    /// served at `now` in place of what was compiled, and filed under
+    /// `written` where that names nothing and `validation` reads no stamp
+    /// or the one `observed` as the compile's. It is looked for before
+    /// the cache is asked for room, so a key retargeted at a held file
+    /// leaves a cache filled to its last name as full as it was. Served by
+    /// the binary, since the child is `PHP_BINARY`:
+    ///
+    /// ```php
+    /// $d = realpath(sys_get_temp_dir()) . '/full' . getmypid(); @mkdir("$d/x", 0777, true); @mkdir("$d/y"); @mkdir("$d/n");
+    /// foreach (['x', 'y'] as $t) { file_put_contents("$d/$t/a.inc", "<?php return '$t';"); touch("$d/$t/a.inc", time() - 60); }
+    /// for ($i = 0; $i < 300; $i++) { file_put_contents("$d/n/$i.inc", '<?php return 0;'); touch("$d/n/$i.inc", time() - 60); }
+    /// symlink("$d/x", "$d/to");
+    /// $code = '$d = $argv[1]; $s = fn () => opcache_get_status(false); echo include "$d/to/a.inc", include "$d/y/a.inc";
+    /// for ($i = 0; $s()["opcache_statistics"]["num_cached_keys"] < $s()["opcache_statistics"]["max_cached_keys"]; $i++) include "$d/n/$i.inc";
+    /// var_dump($s()["cache_full"]); unlink("$d/to"); symlink("$d/y", "$d/to"); echo include "$d/to/a.inc", "\n"; var_dump($s()["cache_full"], $s()["restart_pending"]);';
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.revalidate_freq=0', '-d', 'opcache.max_accelerated_files=200', '-r', $code, $d], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off process
+    /// xybool(false)
+    /// y
+    /// bool(false)
+    /// bool(false)
+    /// ```
+    fn existing(
+        &self,
+        files: &Files,
+        held: &Arc<Held>,
+        written: Option<UnitKey>,
+        validation: Validation,
+        observed: Option<Stamp>,
+        now: i64,
+    ) -> Answered {
+        held.last_used.store(now, Ordering::Relaxed);
+        if let Some(written) = written
+            && (validation == Validation::Never
+                || held.stamp.map(Stamp::seconds) == observed.map(Stamp::seconds))
+        {
+            self.add_key(files, written, held);
+        }
+        answered_by(held, Filed::Existing)
     }
 
     /// The first level's hit on `path`: a file the preload saved,
@@ -815,6 +1205,7 @@ impl UnitCache {
     /// is discarded, and a discarded one is a miss.
     fn held_hit(
         &self,
+        stat: &mut dyn Stat,
         files: &Files,
         path: &[u8],
         written: Option<&UnitKey>,
@@ -837,7 +1228,7 @@ impl UnitCache {
             .held
             .get(&UnitKey::full(path))
             .filter(|held| !held.discarded())?;
-        if stale.validated(validation, now) {
+        if stale.validated(validation, now, stat) {
             files.hit(&stale, validation, now);
             if let Some(written) = written {
                 self.add_key(files, written.clone(), &stale);
@@ -851,8 +1242,8 @@ impl UnitCache {
     /// What `read` compiled from the file at `path`, held in `files`
     /// under its full path, in place of a discarded copy under every name
     /// that copy was filed under, as `cache_script_in_shared_memory`
-    /// updates the bucket every key of it points to; what another request
-    /// held for it meanwhile where it did.
+    /// updates the bucket every key of it points to; the copy another
+    /// request held for the path meanwhile where it did.
     fn hold(
         &self,
         files: &Files,
@@ -860,7 +1251,7 @@ impl UnitCache {
         validation: Validation,
         now: i64,
         read: Read,
-    ) -> Arc<Held> {
+    ) -> Holding {
         let Read {
             unit,
             early,
@@ -875,49 +1266,55 @@ impl UnitCache {
             Validation::Window { seconds } => now.saturating_add(i64::from(seconds)),
             Validation::Never | Validation::EveryHit => 0,
         };
-        let order = self.taken.fetch_add(1, Ordering::Relaxed);
-        let held = files.held.insert_over(
-            UnitKey::full(path),
-            Held::discarded,
-            Held {
-                unit,
-                early,
-                path: path.to_vec(),
-                stamp,
-                size,
-                order,
-                hits: AtomicU64::new(0),
-                last_used: AtomicI64::new(now),
-                revalidate: AtomicI64::new(revalidate),
-                discarded: AtomicBool::new(false),
-            },
-        );
-        if held.order == order {
-            files.used.fetch_add(size, Ordering::Relaxed);
-            if let Ok(unit) = &held.unit {
-                files.funcs.publish(unit);
-            }
+        let mut built = false;
+        let held = files
+            .held
+            .insert_over(UnitKey::full(path), Held::discarded, |replaced| {
+                built = true;
+                // `zend_accel_hash_update` puts the file in a discarded copy's
+                // entry, where that stands in its bucket's chain.
+                let next = || self.taken.fetch_add(1, Ordering::Relaxed);
+                Held {
+                    unit,
+                    early,
+                    path: path.to_vec(),
+                    stamp,
+                    size,
+                    order: replaced.map_or_else(next, |was| was.order),
+                    hits: AtomicU64::new(0),
+                    last_used: AtomicI64::new(now),
+                    revalidate: AtomicI64::new(revalidate),
+                    discarded: AtomicBool::new(false),
+                }
+            });
+        if !built {
+            return Holding::Found(held);
         }
-        held
+        files.used.fetch_add(size, Ordering::Relaxed);
+        files.funcs.publish(&held.unit);
+        self.persist_names(path, &held.unit);
+        Holding::Built(held)
     }
 
     /// `zend_accel_invalidate`'s discard of the file held under `key`:
     /// where `force`, and otherwise where it changed since,
     /// `do_validate_timestamps` finding it filed under another full path,
     /// held with no stamp, or written at another second. Whether a unit
-    /// was held under the name at all; a refusal is none, as php
-    /// persists none, and so is a copy discarded already.
-    pub(crate) fn discard(&self, files: &Files, key: &UnitKey, force: bool) -> bool {
+    /// was held under the name at all; a copy discarded already is none.
+    pub(crate) fn discard(
+        &self,
+        files: &Files,
+        key: &UnitKey,
+        force: bool,
+        stat: &mut dyn Stat,
+    ) -> bool {
         let Some(held) = files.held.get(key).filter(|held| !held.discarded()) else {
             return false;
         };
-        if held.unit.is_err() {
-            return false;
-        }
         let changed = force
             || key.0 != held.path
             || held.stamp.is_none_or(|was| {
-                Stamp::of(&held.path).is_none_or(|stamp| stamp.seconds() != was.seconds())
+                stat.stamp(&held.path).map(Stamp::seconds) != Some(was.seconds())
             });
         if changed {
             self.discard_held(files, &held);
@@ -971,11 +1368,78 @@ impl UnitCache {
 
     /// What `opcache_get_status()` reads in the epoch `files` are held
     /// in: the counters, the names held, and every file held under its
-    /// full path, in the order the cache took them; a refusal is none of
-    /// either.
-    pub(crate) fn status(&self, files: &Files, interned_strings: usize) -> CacheStatus {
+    /// full path, in `accelerator_get_scripts`' order
+    /// (`Z/ext/opcache/zend_accelerator_module.c:634-635`), bucket by
+    /// bucket of `ZCSG(hash)` and each bucket's chain newest first, a
+    /// name's bucket `(zend_string_hash_val(name) ^ ZCG(root_hash)) %
+    /// max_num_entries` (`Z/ext/opcache/zend_accelerator_hash.c:88-92`)
+    /// and the preload's names the first in.
+    ///
+    /// ```php
+    /// function bucket($s, $p) {
+    ///     $hi = 0; $lo = 5381;
+    ///     foreach (unpack('C*', $s) as $c) { $lo = $lo * 33 + $c; $hi = ($hi * 33 + ($lo >> 32)) & 0xffffffff; $lo &= 0xffffffff; }
+    ///     return ((($hi | 0x80000000) % $p) * ((1 << 32) % $p) + $lo) % $p;
+    /// }
+    /// $p = current(array_filter([5, 11, 19, 53, 107, 223, 463, 983, 1979, 3907, 7963, 16229, 32531, 65407, 130987, 262237, 524521, 1048793], fn ($q) => $q >= ini_get('opcache.max_accelerated_files')));
+    /// $d = realpath(__DIR__) . '/order' . getmypid(); @mkdir($d);
+    /// $seen = [];
+    /// for ($i = 0; ; $i++) {
+    ///     $b = bucket("$d/n$i.inc", $p);
+    ///     if ($b == $p - 1) continue;
+    ///     if (isset($seen[$b])) { [$a, $bb] = ["$d/n{$seen[$b]}.inc", "$d/n$i.inc"]; break; }
+    ///     $seen[$b] = $i;
+    /// }
+    /// for ($j = $i + 1; bucket("$d/n$j.inc", $p) <= $b; $j++);
+    /// $c = "$d/n$j.inc";
+    /// $name = [$a => 'A', $bb => 'B', $c => 'C'];
+    /// foreach ($name as $f => $_) { file_put_contents($f, '<?php return 1;'); touch($f, time() - 60); }
+    /// $listed = fn () => implode(' ', array_map(fn ($f) => $name[$f], array_values(array_filter(array_keys(opcache_get_status(true)['scripts']), fn ($f) => isset($name[$f])))));
+    /// include $c; include $a; include $bb;
+    /// echo $listed(), "\n";
+    /// var_dump(opcache_invalidate($a, true));
+    /// echo $listed(), "\n";
+    /// include $a;
+    /// echo $listed(), "\n";
+    /// array_map('unlink', array_keys($name)); rmdir($d);
+    /// ```
+    /// ```expect regime=jit-off
+    /// B A C
+    /// bool(true)
+    /// B A C
+    /// B A C
+    /// ```
+    ///
+    /// A discarded copy whose recompile is refused stays listed, its
+    /// timestamp zeroed, as php persists no refusal in its place, and each
+    /// include of the file is a miss:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/refused.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// include $f; include $f;
+    /// var_dump(opcache_invalidate($f, true));
+    /// file_put_contents($f, '<?php return ('); touch($f, time() - 30);
+    /// $s = fn () => array_values(array_intersect_key(opcache_get_status()['opcache_statistics'], ['hits' => 0, 'misses' => 0]));
+    /// [$h, $m] = $s();
+    /// foreach ([1, 2] as $_) { try { include $f; } catch (ParseError $e) { echo get_class($e), "\n"; } }
+    /// [$h2, $m2] = $s();
+    /// $listed = opcache_get_status(true)['scripts'][$f];
+    /// echo $h2 - $h, ' ', $m2 - $m, ' ', $listed['hits'], ' ', $listed['timestamp'], "\n";
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// ParseError
+    /// ParseError
+    /// 0 2 1 0
+    /// ```
+    pub(crate) fn status(
+        &self,
+        files: &Files,
+        interned_strings: usize,
+        tier: TierStatus,
+    ) -> CacheStatus {
         let mut held = files.held.held();
-        held.retain(|(_, held)| held.unit.is_ok());
         held.retain(|(_, held)| {
             self.preloaded()
                 .is_none_or(|preloaded| preloaded.script(&held.path).is_none())
@@ -1016,6 +1480,15 @@ impl UnitCache {
             u64::saturating_add,
         );
         listed_files.extend(held.into_iter().map(|(_, held)| listed(&held)));
+        // Each file's index here is the order its name entered the hash,
+        // which no budget told leaves as it is.
+        let mut listed_files: Vec<_> = listed_files.into_iter().enumerate().collect();
+        if let Some(&CacheBudget { keys, root, .. }) = self.budget.get() {
+            listed_files.sort_by_key(|(entered, file)| {
+                let bucket = (php_heap::Str::hash_of(&file.path) ^ root) % keys.max(1);
+                (bucket, std::cmp::Reverse(*entered))
+            });
+        }
         CacheStatus {
             restart_pending: files.restart_pending(),
             hits: files.hits.load(Ordering::Relaxed),
@@ -1031,10 +1504,11 @@ impl UnitCache {
             cache_full: files.exhausted.load(Ordering::Relaxed),
             interned_strings: u64::try_from(interned_strings).unwrap_or(u64::MAX),
             keys,
-            files: listed_files,
+            files: listed_files.into_iter().map(|(_, file)| file).collect(),
             preload: self
                 .preloaded()
                 .map(|preloaded| preloaded.statistics.clone()),
+            tier,
         }
     }
 }

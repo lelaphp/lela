@@ -22,6 +22,7 @@
 //! it, and until then the lane refuses the run naming it. These tests hand
 //! the pin the regime they hold the lane to, as the fixture-pin tests of
 //! the other lanes do, so the lane is measured before the pin moves.
+#![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -140,6 +141,8 @@ impl Scratch {
         let mut manifest = of_rows([Crate::named("php_compile")]);
         manifest
             .pin
+            .as_mut()
+            .unwrap()
             .regime
             .insert(compile_identity::REGIME.to_owned(), dump_regime());
         Scratch {
@@ -153,6 +156,8 @@ impl Scratch {
     fn dump_with_args(&mut self, args: &[&str]) {
         self.manifest
             .pin
+            .as_mut()
+            .unwrap()
             .regime
             .get_mut(compile_identity::REGIME)
             .unwrap()
@@ -456,7 +461,7 @@ fn a_difference_an_accepted_row_names_is_met() {
 fn an_absent_oracle_is_a_skip_and_not_a_pass() {
     let scratch = Scratch::new("absent");
     let mut manifest = scratch.manifest.clone();
-    manifest.pin.oracle.path = scratch.root.join("nowhere/php");
+    manifest.pin.as_mut().unwrap().oracle.path = scratch.root.join("nowhere/php");
     let ask = Ask {
         corpus: Some(scratch.corpus.clone()),
         engine: Some(scratch.binary("php", "exit 0")),
@@ -483,7 +488,7 @@ fn a_digest_that_is_not_the_pins_refuses_the_run() {
     }
     let scratch = Scratch::new("digest");
     let mut manifest = scratch.manifest.clone();
-    manifest.pin.oracle.md5 = "0".repeat(32);
+    manifest.pin.as_mut().unwrap().oracle.md5 = "0".repeat(32);
     let ask = Ask {
         corpus: Some(scratch.corpus.clone()),
         engine: Some(scratch.binary("php", "exit 0")),
@@ -502,7 +507,12 @@ fn a_digest_that_is_not_the_pins_refuses_the_run() {
 fn a_pin_without_the_dump_regime_refuses_the_run() {
     let scratch = Scratch::new("regime");
     let mut manifest = scratch.manifest.clone();
-    manifest.pin.regime.remove(compile_identity::REGIME);
+    manifest
+        .pin
+        .as_mut()
+        .unwrap()
+        .regime
+        .remove(compile_identity::REGIME);
     let ask = Ask {
         corpus: Some(scratch.corpus.clone()),
         ..Ask::default()
@@ -763,7 +773,14 @@ fn a_dump_past_the_limit_or_ended_by_a_signal_fails_that_file_and_the_rest_are_j
     };
     let mut scratch = Scratch::of("past-limit", &["identity.phpt", "plain.php"]);
     fs::write(scratch.corpus.join("zz.php"), "<?php\necho 1;\n").unwrap();
-    scratch.manifest.pin.recipe.limits.timeout_s = 1;
+    scratch
+        .manifest
+        .pin
+        .as_mut()
+        .unwrap()
+        .recipe
+        .limits
+        .timeout_s = 1;
     let engine = scratch.binary(
         "php",
         &format!(

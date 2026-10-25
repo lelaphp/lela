@@ -12,7 +12,7 @@ use anyhow::Result;
 
 use crate::git;
 use crate::key;
-use crate::layout;
+use crate::layout::HARNESS;
 use crate::lock;
 use crate::manifest::{AvoidFrom, Crate, Manifest};
 use crate::reading::{Reading, Status, Store, listed};
@@ -61,31 +61,31 @@ pub fn exists(root: &Path, krate: &Crate) -> bool {
     root.join(krate.path()).join("Cargo.toml").is_file()
 }
 
-/// Every crate directory on disk (each of [`layout::CRATE_DIRS`]' crates
-/// and `xtask`, by the presence of a `Cargo.toml`) that has no
-/// `[[crate]]` row, as its manifest name (`ext/<name>`, `sapi/<name>` or
-/// `<name>`).
+/// Every crate directory on disk (each directory of the manifest's
+/// [`Layout`](crate::layout::Layout) and `xtask`, by the presence of a
+/// `Cargo.toml`) that has no `[[crate]]` row, as its manifest name
+/// (`ext/<name>`, `sapi/<name>` or `<name>`).
 pub fn undeclared(root: &Path, manifest: &Manifest) -> Vec<String> {
     let mut out = Vec::new();
-    for dir in layout::CRATE_DIRS {
-        let mut names = crate::entries(&root.join(dir.dir)).unwrap_or_default();
-        names.sort();
-        for path in names {
+    let layout = manifest.layout();
+    for dir in layout.dirs() {
+        let mut paths = crate::entries(&root.join(dir)).unwrap_or_default();
+        paths.sort();
+        for path in paths {
             if !path.join("Cargo.toml").is_file() {
                 continue;
             }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            let Some(name) = layout.name_of_path(rel) else {
                 continue;
             };
-            let name = dir.name(name);
             if manifest.crate_named(&name).is_none() {
                 out.push(name);
             }
         }
     }
-    let harness = layout::HARNESS;
-    if root.join(harness).join("Cargo.toml").is_file() && manifest.crate_named(harness).is_none() {
-        out.push(harness.to_owned());
+    if root.join(HARNESS).join("Cargo.toml").is_file() && manifest.crate_named(HARNESS).is_none() {
+        out.push(HARNESS.to_owned());
     }
     out
 }
@@ -252,7 +252,7 @@ impl Standing {
         let trees = (scopes.iter())
             .map(|(scope, path)| Ok((scope.clone(), index.key(path)?)))
             .collect::<Result<BTreeMap<_, _>>>()?;
-        let mut standing = store.latest_over(instrument, &trees, manifest.pin.digest())?;
+        let mut standing = store.latest_over(instrument, &trees, manifest.pin_digest())?;
         standing.retain(|_, reading| reading.status == Status::Pass);
         if let Some(path) = harness
             && standing.remove("xtask").is_some()
@@ -417,8 +417,8 @@ mod tests {
         fs::create_dir_all(tree.join("xtask/src")).unwrap();
         fs::write(tree.join("xtask/Cargo.toml"), "[package]\n").unwrap();
         fs::write(tree.join("xtask/src/lib.rs"), "a\n").unwrap();
-        git(&tree, &["init", "-q", "-b", "main"], None).unwrap();
-        git(&tree, &["add", "--", "xtask"], None).unwrap();
+        git(&tree, &["init", "-q", "-b", "main"]).unwrap();
+        git(&tree, &["add", "--", "xtask"]).unwrap();
         committing(&tree, &["commit", "-q", "-m", "scratch"]);
         let store = Store::at(tree.join("target/harness"));
         (tree, Manifest::load(&built_root()).unwrap(), store)
@@ -428,7 +428,7 @@ mod tests {
     fn edit(tree: &Tree, text: &str, stage: bool) {
         fs::write(tree.join("xtask/src/lib.rs"), text).unwrap();
         if stage {
-            git(tree, &["add", "--", "xtask"], None).unwrap();
+            git(tree, &["add", "--", "xtask"]).unwrap();
         }
     }
 
@@ -480,7 +480,7 @@ mod tests {
         edit(&tree, "b\n", true);
         pass(&tree, &manifest, &store);
         fs::write(tree.join("AGENTS.md"), "").unwrap();
-        git(&tree, &["add", "--", "AGENTS.md"], None).unwrap();
+        git(&tree, &["add", "--", "AGENTS.md"]).unwrap();
         assert!(stands(&tree, &manifest, &store));
     }
 
@@ -490,12 +490,13 @@ mod tests {
         edit(&tree, "b\n", true);
         pass(&tree, &manifest, &store);
         fs::write(tree.join("seams.toml"), "").unwrap();
-        git(&tree, &["add", "--", "seams.toml"], None).unwrap();
+        git(&tree, &["add", "--", "seams.toml"]).unwrap();
         assert!(!stands(&tree, &manifest, &store));
     }
 
     /// A passing `clippy` reading over `php_heap` as it is on disk, the
     /// crate laid beside `xtask` and committed first.
+    #[cfg(tracked)]
     fn heap_passes(tree: &Tree, manifest: &Manifest, store: &Store) {
         fs::create_dir_all(tree.join("crates/php_heap/src")).unwrap();
         fs::write(tree.join("crates/php_heap/Cargo.toml"), "[package]\n").unwrap();
@@ -510,6 +511,7 @@ mod tests {
         store.record(&[reading]).unwrap();
     }
 
+    #[cfg(tracked)]
     fn standing_over(tree: &Tree, manifest: &Manifest, store: &Store) -> Vec<String> {
         let scopes = ["xtask".to_owned(), "php_heap".to_owned()];
         let standing = Standing::for_commit(tree, manifest, store, "clippy", &scopes).unwrap();
@@ -521,6 +523,7 @@ mod tests {
 
     /// A staged census is read by xtask's tests and by no build: xtask is
     /// measured again and every other crate's pass stands (#1312).
+    #[cfg(tracked)]
     #[test]
     fn a_staged_file_only_the_harness_reads_voids_xtasks_reading_alone() {
         let (tree, manifest, store) = repository("census");
@@ -529,12 +532,13 @@ mod tests {
         heap_passes(&tree, &manifest, &store);
         fs::create_dir_all(tree.join("data")).unwrap();
         fs::write(tree.join("data/port-map.v0.toml"), "").unwrap();
-        git(&tree, &["add", "--", "data"], None).unwrap();
+        git(&tree, &["add", "--", "data"]).unwrap();
         assert_eq!(standing_over(&tree, &manifest, &store), ["php_heap"]);
     }
 
     /// A staged lock voids the reading of a crate whose closure it moves,
     /// and leaves one whose closure it pins as before standing (#1312).
+    #[cfg(tracked)]
     #[test]
     fn a_staged_lock_voids_only_the_crates_whose_closure_it_moves() {
         let (tree, manifest, store) = repository("lock");
@@ -553,7 +557,7 @@ mod tests {
         );
         let bumped = lock.replace("checksum = \"aa\"", "checksum = \"bb\"");
         fs::write(tree.join("Cargo.lock"), bumped).unwrap();
-        git(&tree, &["add", "--", "Cargo.lock"], None).unwrap();
+        git(&tree, &["add", "--", "Cargo.lock"]).unwrap();
         assert_eq!(standing_over(&tree, &manifest, &store), ["php_heap"]);
     }
 
@@ -611,6 +615,7 @@ mod tests {
     /// (#1318, `xtask/fixtures/closure`): a staged change to `ext/ctype`
     /// alone leaves every other crate's pass standing, and one to
     /// `php_engine` leaves standing no crate built from it.
+    #[cfg(tracked)]
     #[test]
     fn a_staged_change_voids_the_readings_of_the_crates_built_from_it() {
         let tree = crate::key::fixture("standing");
@@ -643,7 +648,7 @@ mod tests {
             "pub fn ctype_digit() {}\n",
         )
         .unwrap();
-        git(&tree, &["add", "--", "ext/ctype"], None).unwrap();
+        git(&tree, &["add", "--", "ext/ctype"]).unwrap();
         assert_eq!(standing(), ["php_engine", "php_ext", "ext/reflection"]);
 
         fs::write(
@@ -651,7 +656,7 @@ mod tests {
             "pub fn execute() { }\n",
         )
         .unwrap();
-        git(&tree, &["add", "--", "crates/php_engine"], None).unwrap();
+        git(&tree, &["add", "--", "crates/php_engine"]).unwrap();
         assert!(standing().is_empty(), "{:?}", standing());
     }
 

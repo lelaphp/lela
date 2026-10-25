@@ -2,13 +2,20 @@
 //! under the destination by its name made relative, directories made as
 //! needed, the file's time set to the entry's.
 
+use std::ops::ControlFlow;
+
 use php_ext::abi::Union;
 use php_ext::raising::{Level, Thrown, docref};
-use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Resolve, Streams as _, WrapperOp};
-use php_ext::values::{Key, PhpArray, PhpObject, PhpString, ValueRef};
+use php_ext::request::{
+    MAXPATHLEN, OwnedStream as _, Request, Resolve, Stream, Streams as _, WrapperOp,
+};
+use php_ext::values::walk::{self, Hold};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, ValueRef};
 
 use crate::archive::FL_UNCHANGED;
-use crate::object::{Intern, basedir_refuses};
+use crate::holder::{self, ArchiveId};
+use crate::object::{archive_id, basedir_refuses, za};
+use crate::read::Reader;
 
 /// `php_zip_make_relative_path`: an absolute path less its root, a
 /// relative one from past its last `./`.
@@ -55,20 +62,32 @@ fn join(a: &[u8], b: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `php_zip_extract_file`: true past the read whatever it met, as php
-/// answers `n < 0` over `zip_fclose`'s `ZIP_ER_*` code, which is never
-/// negative.
+/// `php_zip_extract_file`: false where the read or the write fails,
+/// after php 8.5.12's warning for the entry's error, a CRC error among
+/// them.
 ///
 /// ```php
 /// $z = new ZipArchive; $z->open('extract-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
 /// $z->addFromString('a', str_repeat('x', 195000)); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->addFromString('b', 'bee'); $z->close();
 /// $z->open('extract-witness.zip'); $h = fopen('extract-witness.zip', 'r+'); ftruncate($h, 5000); fclose($h);
-/// @mkdir('extract-witness'); var_dump(@$z->extractTo('extract-witness', 'a')); echo filesize('extract-witness/a'), "\n";
-/// unlink('extract-witness/a'); rmdir('extract-witness'); $z->close(); unlink('extract-witness.zip');
+/// @mkdir('extract-witness'); var_dump($z->extractTo('extract-witness', 'a')); echo filesize('extract-witness/a'), "\n";
+/// $z->close(); $z->open('extract-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE); $z->addFromString('c', str_repeat('y', 70)); $z->setCompressionName('c', ZipArchive::CM_STORE); $z->close();
+/// $b = file_get_contents('extract-witness.zip'); $b[strpos($b, 'yyyy') + 2] = 'Z'; file_put_contents('extract-witness.zip', $b);
+/// $z->open('extract-witness.zip'); var_dump($z->extractTo('extract-witness', 'c'), filesize('extract-witness/c'), $z->extractTo('extract-witness', [5 => 'c']));
+/// unlink('extract-witness/a'); unlink('extract-witness/c'); rmdir('extract-witness'); $z->close(); unlink('extract-witness.zip');
 /// ```
 /// ```expect
-/// bool(true)
+///
+/// Warning: ZipArchive::extractTo(): Cannot extract "a": "Premature end of file" in %s on line %d
+/// bool(false)
 /// 4969
+///
+/// Warning: ZipArchive::extractTo(): Cannot extract "c": "CRC error" in %s on line %d
+///
+/// Warning: ZipArchive::extractTo(): Cannot extract "c": "CRC error" in %s on line %d
+/// bool(false)
+/// int(70)
+/// bool(false)
 /// ```
 fn extract_file(
     req: &mut Request,
@@ -78,10 +97,7 @@ fn extract_file(
     idx: Option<usize>,
 ) -> Result<bool, Thrown> {
     let file = php_ext::coerce::c_str(file);
-    let Some(archive) = object
-        .native_mut::<Intern>(req)
-        .and_then(|i| i.za.as_deref_mut())
-    else {
+    let Some(archive) = za(req, object) else {
         return Ok(false);
     };
     let idx = match idx {
@@ -100,10 +116,7 @@ fn extract_file(
     let Some(path) = make_relative(&cleaned).map(<[u8]>::to_vec) else {
         return Ok(false);
     };
-    let Some(archive) = object
-        .native_mut::<Intern>(req)
-        .and_then(|i| i.za.as_deref_mut())
-    else {
+    let Some(archive) = za(req, object) else {
         return Ok(false);
     };
     let Ok(st) = archive.stat_index(idx, 0) else {
@@ -161,22 +174,47 @@ fn extract_file(
     let Some(stream) = req.open_stream(&full, b"w+b", false)? else {
         return Ok(false);
     };
-    let id = object.native::<Intern>(req).map_or(0, |i| i.id);
-    loop {
-        let mut file = crate::object::file(req, id);
-        let chunk = zf.read_through(8192, &mut file);
-        crate::object::file_back(req, id, file);
-        match chunk {
-            Ok(chunk) if !chunk.is_empty() => {
-                stream.write(req, &chunk);
-            }
-            _ => break,
-        }
+    let Some(id) = archive_id(req, object) else {
+        stream.free(req);
+        return Ok(false);
+    };
+    if !copy(req, id, &mut zf, &stream, file) {
+        stream.free(req);
+        return Ok(false);
     }
     let touched = req.wrapper_op(&full, WrapperOp::Touch(Some((st.mtime, st.mtime))));
     stream.free(req);
     touched?;
     Ok(true)
+}
+
+/// `php_zip_extract_file`'s copy: the entry read into `stream` 8192
+/// bytes at a time to its end; false at a short write, and at a failed
+/// read after php 8.5.12's warning for the entry's error.
+fn copy(
+    req: &mut Request,
+    id: ArchiveId,
+    zf: &mut Reader,
+    stream: &Owner<Stream>,
+    file: &[u8],
+) -> bool {
+    loop {
+        match holder::read(req, id, zf, 8192) {
+            Ok(chunk) if chunk.is_empty() => return true,
+            Ok(chunk) => {
+                if stream.write(req, &chunk) != Some(chunk.len()) {
+                    return false;
+                }
+            }
+            Err(status) => {
+                let message = status.text(req);
+                let name = String::from_utf8_lossy(file);
+                let text = format!("Cannot extract \"{name}\": \"{message}\"");
+                docref(req, Level::Warning, &text);
+                return false;
+            }
+        }
+    }
 }
 
 /// `ZipArchive::extractTo`'s body past `ZIP_FROM_OBJECT`.
@@ -203,36 +241,28 @@ pub(crate) fn extract_to(
     match files {
         Some(Union::B(file)) => extract_file(req, object, pathto, file.as_bytes(), None),
         Some(Union::A(list)) => {
-            let n = list.len();
-            if n == 0 {
+            if list.is_empty() {
                 return Ok(false);
             }
-            for i in 0..n {
-                let Some(v) = list
-                    .get(&Key::Int(i64::try_from(i).unwrap_or(i64::MAX)))
-                    .map(|v| v.deref())
-                else {
-                    continue;
+            // `ZEND_HASH_FOREACH_VAL` (php 8.5.12): every name in the
+            // array's order whatever its key, no owner of the table taken.
+            let walked = walk::foreach(req, list, Hold::None, |req, row| -> walk::Step<()> {
+                let name = match row.value().deref().as_ref() {
+                    ValueRef::Str(s) => s.as_bytes().to_vec(),
+                    _ => return Ok(ControlFlow::Continue(())),
                 };
-                if let ValueRef::Str(s) = v.as_ref() {
-                    let name = s.as_bytes().to_vec();
-                    if !extract_file(req, object, pathto, &name, None)? {
-                        return Ok(false);
-                    }
+                if extract_file(req, object, pathto, &name, None)? {
+                    Ok(ControlFlow::Continue(()))
+                } else {
+                    Ok(ControlFlow::Break(()))
                 }
-            }
-            Ok(true)
+            })?;
+            Ok(walked.is_none())
         }
         None => {
-            let count = object
-                .native::<Intern>(req)
-                .and_then(|i| i.za.as_ref())
-                .map_or(0, |za| za.num_entries());
+            let count = za(req, object).map_or(0, |za| za.num_entries());
             for i in 0..count {
-                let name = object
-                    .native_mut::<Intern>(req)
-                    .and_then(|i| i.za.as_deref_mut())
-                    .and_then(|za| za.get_name(i, FL_UNCHANGED).ok());
+                let name = za(req, object).and_then(|za| za.get_name(i, FL_UNCHANGED).ok());
                 let Some(name) = name else {
                     return Ok(false);
                 };

@@ -1,7 +1,7 @@
 //! What libzip's algorithms and encryption sources do to an entry's data
 //! on the way out (`zip_algorithm_*.c`, `zip_source_compress.c`,
 //! `zip_source_pkware_encode.c`, `zip_source_winzip_aes_encode.c`), over
-//! the codecs and ciphers the zip crate reads with; and the ciphers'
+//! pure-Rust codecs and ciphers; and the ciphers'
 //! state on the way in, which [`crate::read`] decrypts with.
 
 use std::io::Write;

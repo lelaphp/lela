@@ -97,13 +97,20 @@ fn body(len: usize) -> Compiled {
     Compiled {
         bytes: vec![0xc3; len],
         entry_offset: 0,
+        body_offset: 0,
         align: 16,
         exits: Box::new([]),
         leaves: None,
+        checks_interrupt: false,
         stub: None,
         opens: None,
+        entry_stood: false,
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
+        slots: crate::lower::EntrySlots::default(),
+        landings: crate::lower::LandingSlots::default(),
+        calls: Box::new([]),
+        callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
         marks: Box::new([]),
         name: TraceName {
@@ -141,7 +148,7 @@ fn piped(
 ) -> (Outcome, State, String) {
     let shared = &engine.shared;
     let mut lines = Vec::new();
-    let compile = |ir: &TraceIr, name: TraceName| -> Result<Compiled, Abort> {
+    let compile = |ir: &TraceIr, name: TraceName, _| -> Result<Compiled, Abort> {
         match backend {
             Backend::Dump => {
                 let text = crate::lower::dump::render(ir);
@@ -370,8 +377,9 @@ fn four_threads_submit_and_every_word_settles_once() -> Result<(), String> {
         for share in shares {
             let engine = &engine;
             scope.spawn(move || {
+                let submitter = engine.compiler.submitter();
                 for job in share {
-                    let queued = engine.compiler.submit(&engine.shared, job, &mut Vec::new());
+                    let queued = submitter.submit(&engine.shared, job, &mut Vec::new());
                     assert!(queued.is_none(), "queued for the worker");
                 }
             });
@@ -433,7 +441,10 @@ fn inline_settles_on_the_request_and_off_runs_no_worker() -> Result<(), String> 
     );
     let (job, holder) = job(&[])?;
     let mut lines = Vec::new();
-    let outcome = engine.compiler.submit(&engine.shared, job, &mut lines);
+    let outcome = engine
+        .compiler
+        .submitter()
+        .submit(&engine.shared, job, &mut lines);
     assert_eq!(outcome, Some(Outcome::Published(trace(1))));
     assert_eq!(String::from_utf8_lossy(&lines), stopped(1, "compiled"));
     assert_eq!(policy::read(holder.word()), State::Compiled(trace(1)));

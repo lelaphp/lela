@@ -17,20 +17,21 @@
 //! the engine's interned strings it reads, and a [`Claim`], which holds
 //! its word's epoch, so a job outlives the request and the engine that
 //! made it. Dropping the [`Compiler`] drops the jobs still queued, each
-//! claim settling itself, and joins the one under way.
+//! claim settling itself, and the last hold on the worker, the engine's
+//! or a request's [`Submitter`], joins the one under way.
 
 use std::collections::VecDeque;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
-use php_engine::tier::{self, Parked};
+use php_engine::tier::{self, Epoch, Parked};
 
 use crate::Shared;
-use crate::lower::Compiled;
+use crate::lower::{Compiled, Linked};
 use crate::policy::{self, Claim, Compile, Mode, Outcome, State, TraceEvent};
-use crate::record::{Recorded, Start, Stop};
+use crate::record::{self, Recorded, Start, Stop};
 use crate::table::{self, Table, TraceName, Unpublished};
-use crate::types::{self, Abort, TraceIr};
+use crate::types::{self, Abort, End, TraceIr};
 
 #[cfg(test)]
 #[allow(
@@ -57,7 +58,7 @@ pub(crate) struct Compiler {
 }
 
 /// The engine's worker and the queue its body serves.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Threaded {
     worker: Arc<tier::Worker>,
     queue: Arc<Queue>,
@@ -104,21 +105,10 @@ impl Compiler {
         Compiler { worker }
     }
 
-    /// `job` through the [`pipeline`]: here, its lines added to `lines`,
-    /// and what it settled the claim with; or queued for the worker,
-    /// which writes no line (`Policy` compiles inline wherever a line is
-    /// asked), and none. Where the system refuses the worker a thread,
-    /// the queue is served here.
-    pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Option<Outcome> {
-        let Some(threaded) = &self.worker else {
-            return Some(pipeline(shared, job, lines));
-        };
-        threaded.queue.held().jobs.push_back(job);
-        threaded.queue.changed.notify_all();
-        if !threaded.worker.wake() {
-            threaded.queue.drain();
-        }
-        None
+    /// Where a request of the engine submits its jobs, laid with the
+    /// request's `JitRequest`: the engine's worker and its queue, shared.
+    pub(crate) fn submitter(&self) -> Submitter {
+        Submitter(self.worker.clone())
     }
 
     /// Every queued job served to completion, those this thread takes
@@ -129,6 +119,36 @@ impl Compiler {
         if let Some(worker) = &self.worker {
             worker.queue.drain();
         }
+    }
+}
+
+/// Where a request's recordings compile (`jit-design.md` §4.8): on the
+/// engine's worker, through its queue, under `jit.compile=thread`;
+/// otherwise on the request. A request holds its own, laid with it, so
+/// a recording that compiles reads no engine state (#3227).
+#[derive(Debug, Clone)]
+pub(crate) struct Submitter(Option<Threaded>);
+
+impl Submitter {
+    /// Jobs compiled on the request that submits them.
+    #[cfg(test)]
+    pub(crate) const INLINE: Submitter = Submitter(None);
+
+    /// `job` through the [`pipeline`]: here, its lines added to `lines`,
+    /// and what it settled the claim with; or queued for the worker,
+    /// which writes no line (`Policy` compiles inline wherever a line is
+    /// asked), and none. Where the system refuses the worker a thread,
+    /// the queue is served here.
+    pub(crate) fn submit(&self, shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Option<Outcome> {
+        let Some(threaded) = &self.0 else {
+            return Some(pipeline(shared, job, lines));
+        };
+        threaded.queue.held().jobs.push_back(job);
+        threaded.queue.changed.notify_all();
+        if !threaded.worker.wake() {
+            threaded.queue.drain();
+        }
+        None
     }
 }
 
@@ -242,8 +262,13 @@ impl Parked for Queue {
 /// php reports a compile that failed. The claim is settled once, here.
 pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcome {
     match &shared.backend {
-        Some(backend) => pipeline_with(shared, |ir, name| backend.compile(ir, name), job, lines),
-        None => pipeline_with(shared, |_, _| Err(no_backend()), job, lines),
+        Some(backend) => pipeline_with(
+            shared,
+            |ir, name, linked| backend.compile(ir, name, linked),
+            job,
+            lines,
+        ),
+        None => pipeline_with(shared, |_, _, _| Err(no_backend()), job, lines),
     }
 }
 
@@ -251,7 +276,7 @@ pub(crate) fn pipeline(shared: &Shared, job: Job, lines: &mut Vec<u8>) -> Outcom
 /// tests drive each stage's failure through.
 fn pipeline_with(
     shared: &Shared,
-    compile: impl Fn(&TraceIr, TraceName) -> Result<Compiled, Abort>,
+    compile: impl Fn(&TraceIr, TraceName, Option<Linked>) -> Result<Compiled, Abort>,
     job: Job,
     lines: &mut Vec<u8>,
 ) -> Outcome {
@@ -277,6 +302,10 @@ fn pipeline_with(
         Some(_) => failed(stop),
         None => failed(Stop::TooManyTraces),
     };
+    if matches!(outcome, Outcome::Published(_)) && shared.policy.threshold(Start::Return).is_some()
+    {
+        arm_landings(&recorded, claim.epoch());
+    }
     let start = claim.start();
     let settled = policy::settle(claim, &outcome);
     match (outcome, number) {
@@ -300,17 +329,39 @@ fn pipeline_with(
     outcome
 }
 
+/// The landings a published trace hands on to the interpreter at
+/// (`record::landings`) armed in `epoch`, as php's code generator arms
+/// them once the trace's code is generated, where
+/// `opcache.jit_hot_return` is not zero
+/// (`zend_jit_trace_setup_ret_counter`, `Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`;
+/// `jit-design.md` §2.2, #3036).
+fn arm_landings(recorded: &Recorded, epoch: &Epoch) {
+    for (func, at) in record::landings(&recorded.record, &recorded.view) {
+        if let Some(word) = epoch.lay_landing(func, at) {
+            policy::arm(word);
+        }
+    }
+}
+
 /// The pipeline's middle: the record built through its view, the trace
-/// compiled under `name`, and the code published into `table`, or the
-/// failure of the first stage that failed.
+/// compiled under `name`, its link a jump to the trace it links to where
+/// `table` holds that trace's code (`jit-design.md` §4.3), and the code
+/// published into `table`, or the failure of the first stage that failed.
 fn published(
     recorded: &Recorded,
     name: TraceName,
-    compile: &impl Fn(&TraceIr, TraceName) -> Result<Compiled, Abort>,
+    compile: &impl Fn(&TraceIr, TraceName, Option<Linked>) -> Result<Compiled, Abort>,
     table: &Table,
     start: Start,
 ) -> Outcome {
-    let compiled = types::build(&recorded.record, &recorded.view).and_then(|ir| compile(&ir, name));
+    let compiled = types::build(&recorded.record, &recorded.view).and_then(|ir| {
+        let link = match ir.end {
+            End::Leave(end) => ir.exits.get(usize::from(end.0)).and_then(|exit| exit.link),
+            End::Loop(_) | End::Return(_) => None,
+        };
+        let linked = link.and_then(|link| table.linked(link, start));
+        compile(&ir, name, linked)
+    });
     match compiled.map(|compiled| table.publish(compiled, start)) {
         Ok(Ok(trace)) => Outcome::Published(trace),
         Err(abort) => failed(abort.stop),

@@ -16,11 +16,11 @@ use anyhow::{Context, Result};
 use crate::generated;
 use crate::git;
 use crate::key::Snapshot;
-use crate::layout;
+use crate::layout::{HARNESS, Layout};
 use crate::lines;
 use crate::lock::CargoLock;
 use crate::manifest::{self, Budget, Crate, Generated, Manifest, OneOrMany};
-use crate::reading::{Reading, Status, Store, plural};
+use crate::reading::{Reading, Status, Store, joined, plural};
 use crate::sources::{self, Standing};
 
 /// The instrument whose readings this module writes.
@@ -239,12 +239,14 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
         budget.total,
         "workspace lines",
     )?;
-    ceiling(
-        numbers::BINDINGS,
-        total.bindings,
-        budget.bindings,
-        "ext/*/src/ffi/** lines",
-    )?;
+    if let Some(bindings) = budget.bindings {
+        ceiling(
+            numbers::BINDINGS,
+            total.bindings,
+            bindings,
+            "ext/*/src/ffi/** lines",
+        )?;
+    }
     ceiling(
         numbers::DOCS,
         docs(root)?,
@@ -270,12 +272,13 @@ fn workspace_reading(snapshot: &Snapshot, manifest: &Manifest, total: Count) -> 
             "{name} has no [[crate]] row in seams.toml, so no ceiling"
         ));
     }
-    for path in committed_generated(root, &manifest.generated_files())? {
+    let layout = manifest.layout();
+    for path in committed_generated(root, &layout, &manifest.generated_files())? {
         failures.push(format!(
             "{path} is committed generated code; generated code is generated in build.rs and never committed (design §10)"
         ));
     }
-    for path in build_rs_baking_their_dir(root)? {
+    for path in build_rs_baking_their_dir(root, &layout)? {
         failures.push(format!(
             "{path} reads {MANIFEST_DIR_AT_COMPILE} when it compiles; a build.rs reads std::env::var_os(\"CARGO_MANIFEST_DIR\") when it runs, since cargo runs one compiled build.rs for every checkout sharing a target directory (#2628)"
         ));
@@ -329,11 +332,7 @@ fn generated_readings(snapshot: &Snapshot, manifest: &Manifest) -> Result<Vec<Re
             let from = format!(
                 "rule{} {}",
                 plural(carried.len()),
-                carried
-                    .iter()
-                    .map(|r| r.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                joined(carried.iter().map(|r| r.id.as_str()), ", ")
             );
             let want = generated::render(root, manifest, file)?;
             let mut failures = match std::fs::read_to_string(root.join(file)) {
@@ -448,8 +447,8 @@ const MANIFEST_DIR_AT_COMPILE: &str = "env!(\"CARGO_MANIFEST_DIR\")";
 /// sharing a target directory with another checkout reads that checkout's
 /// files (#2628). The `build.rs` held is the one beside a `Cargo.toml`,
 /// which cargo runs when the package names no other.
-fn build_rs_baking_their_dir(root: &Path) -> Result<Vec<String>> {
-    let mut out = crate_tree_files(root)?;
+fn build_rs_baking_their_dir(root: &Path, layout: &Layout) -> Result<Vec<String>> {
+    let mut out = crate_tree_files(root, layout)?;
     out.retain(|path| {
         let file = Path::new(path);
         file.file_name() == Some("build.rs".as_ref())
@@ -465,8 +464,12 @@ fn build_rs_baking_their_dir(root: &Path) -> Result<Vec<String>> {
 /// Committed generated files under the crate trees: a `generated` path
 /// component, or an `@generated` marker in the first lines, outside the
 /// files the manifest declares as generated and committed.
-pub(crate) fn committed_generated(root: &Path, exceptions: &[&str]) -> Result<Vec<String>> {
-    let mut out = crate_tree_files(root)?;
+pub(crate) fn committed_generated(
+    root: &Path,
+    layout: &Layout,
+    exceptions: &[&str],
+) -> Result<Vec<String>> {
+    let mut out = crate_tree_files(root, layout)?;
     out.retain(|path| {
         !exceptions.contains(&path.as_str())
             && (path.split('/').any(|part| part == "generated")
@@ -479,10 +482,8 @@ pub(crate) fn committed_generated(root: &Path, exceptions: &[&str]) -> Result<Ve
 /// The files under the crate trees and the harness that git does not
 /// ignore, less the harness's own negative controls, which break the
 /// rules on purpose.
-fn crate_tree_files(root: &Path) -> Result<Vec<String>> {
-    let dirs: Vec<&str> = (layout::CRATE_DIRS.iter().map(|d| d.dir))
-        .chain([layout::HARNESS])
-        .collect();
+fn crate_tree_files(root: &Path, layout: &Layout) -> Result<Vec<String>> {
+    let dirs: Vec<&str> = layout.dirs().chain([HARNESS]).collect();
     let mut out = git::files_under(root, &dirs)?;
     out.retain(|path| !path.starts_with("xtask/fixtures/"));
     Ok(out)

@@ -34,15 +34,17 @@
 //! engine in ([`profile::featured`]), so the child it starts carries its
 //! own extension as the oracle's variant does, and the two lanes share
 //! one build (#2721). A `process` fence under a regime that sets the
-//! tier's `jit.mode` is served by `php` built with the tier's feature
-//! beside it, as the phpt lane's `--jit` builds it (#3053), so the lane
-//! the regime names runs on a binary that carries the tier (#2962).
+//! tier's `jit.mode`, or turns `opcache.jit` on, is served by `php`
+//! built with the tier's feature beside it, as the phpt lane's `--jit`
+//! builds it (#3053), so the lane the regime names runs on a binary that
+//! carries the tier (#2962), and so does a program that reads the tier
+//! (#3193).
 
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use anyhow::{Result, anyhow};
@@ -94,6 +96,7 @@ impl Binary {
     /// for `host`'s, so a test serves a fence or a host's line by a host
     /// whose bytes or failure it chooses.
     #[cfg(test)]
+    #[cfg(tracked)]
     pub(crate) fn standing(root: &Path, host: EngineHost, path: PathBuf) -> Binary {
         let binary = Binary::of(root);
         binary.stand(host, &[], path);
@@ -102,14 +105,16 @@ impl Binary {
 
     /// The same with `path` standing in for `php` built with `features`.
     #[cfg(test)]
+    #[cfg(tracked)]
     pub(crate) fn featuring(self, features: &[&str], path: PathBuf) -> Binary {
         self.stand(CLI, features, path);
         self
     }
 
     #[cfg(test)]
+    #[cfg(tracked)]
     fn stand(&self, host: EngineHost, features: &[&str], path: PathBuf) {
-        let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut built = crate::locked(&self.built);
         let key = (host.krate, owned(features));
         built.insert(key, Arc::new(OnceLock::from(Ok(path))));
     }
@@ -133,7 +138,7 @@ impl Binary {
         // The map's lock is held to find the build's slot alone, so one
         // host's build never waits on another's.
         let slot = {
-            let mut built = self.built.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut built = crate::locked(&self.built);
             let key = (host.krate, owned(features));
             Arc::clone(built.entry(key).or_default())
         };

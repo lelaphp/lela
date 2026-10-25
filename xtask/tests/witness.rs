@@ -12,6 +12,7 @@
 //! this machine, unless the machine promised it (#38); the rest, the
 //! coverage half and the readings of a run with nothing to run, run
 //! anywhere.
+#![cfg(tracked)]
 
 use std::fs;
 use std::io::Write;
@@ -246,7 +247,10 @@ fn bare(name: &str) -> String {
 /// `--file` and `--item` narrow the run and `--accept` to the fences they
 /// name (#1146): of two bare fences, one in each file of the crate, a
 /// narrowed accept pins the named one and leaves the other's line as it
-/// stood, and the run judges one witness and counts no coverage.
+/// stood, and the run judges one witness and counts no coverage. Each
+/// narrowed accept records the verdict it wrote in the crate's accepted
+/// scope, as a run over the crate does, which is what `permit` reads a
+/// captured status by ([`witness::record_accepted`]).
 #[test]
 fn file_and_item_narrow_the_run_and_accept_to_the_named_fences() {
     if oracle().is_none() {
@@ -271,6 +275,12 @@ fn file_and_item_narrow_the_run_and_accept_to_the_named_fences() {
         assert_eq!(count(&reading, "run"), 1, "{reading:#?}");
         assert_eq!(count(&reading, "accepted"), 1, "{reading:#?}");
         assert_eq!(count(&reading, "subjects"), 0, "{reading:#?}");
+        let record = Store::of_workspace(&root)
+            .read("witness", "ext/fixture@accepted")
+            .unwrap()
+            .expect("the narrowed accept records the verdict it wrote");
+        assert_eq!(record.status, Status::Pass, "{record:#?}");
+        assert!(!record.key().is_empty(), "{record:#?}");
     };
     let pinned = |file: &str| {
         !fs::read_to_string(root.join("ext/fixture/src").join(file))
@@ -562,7 +572,7 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
     let coverage = |name: &str| {
         let root = fixture_at("witness", name);
         let mut manifest = Manifest::load(&root).unwrap();
-        manifest.pin.oracle.path = root.join("no-php-here");
+        manifest.pin.as_mut().unwrap().oracle.path = root.join("no-php-here");
         let readings = witness::run(
             &root,
             &manifest,
@@ -610,7 +620,7 @@ fn the_attributes_declare_the_natives_and_a_fence_covers_only_what_it_ran() {
 fn an_anchored_crate_counts_its_kernels_beside_its_natives() {
     let root = fixture_at("witness", "anchor-kernel");
     let mut manifest = Manifest::load(&root).unwrap();
-    manifest.pin.oracle.path = root.join("no-php-here");
+    manifest.pin.as_mut().unwrap().oracle.path = root.join("no-php-here");
     let readings = witness::run(
         &root,
         &manifest,
@@ -643,9 +653,9 @@ fn an_anchored_crate_counts_its_kernels_beside_its_natives() {
 fn served_by_a_stand_in(name: &str, host: PathBuf) -> Reading {
     let root = fixture_at("witness", name);
     let mut manifest = Manifest::load(&root).unwrap();
-    let mut fpm = manifest.pin.sapi.fpm.clone().unwrap_or_default();
+    let mut fpm = manifest.pin().unwrap().sapi.fpm.clone().unwrap_or_default();
     fpm.path = host;
-    manifest.pin.sapi.fpm = Some(fpm);
+    manifest.pin.as_mut().unwrap().sapi.fpm = Some(fpm);
     let readings = witness::run(
         &root,
         &manifest,
@@ -734,7 +744,7 @@ fn a_request_fence_whose_server_fails_after_the_request_is_sent_is_a_failed_run(
 fn a_native_under_a_cfg_the_target_denies_is_no_subject() {
     let root = fixture_at("witness", "anchor-cfg");
     let mut manifest = Manifest::load(&root).unwrap();
-    manifest.pin.oracle.path = root.join("no-php-here");
+    manifest.pin.as_mut().unwrap().oracle.path = root.join("no-php-here");
     let readings = witness::run(
         &root,
         &manifest,
@@ -791,7 +801,7 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_fails_the_crate_and_names_it()
     for absent in [false, true] {
         let mut manifest = manifest.clone();
         if absent {
-            manifest.pin.oracle.path = root.join("no-php-here");
+            manifest.pin.as_mut().unwrap().oracle.path = root.join("no-php-here");
         } else if oracle().is_none() {
             continue;
         }
@@ -900,7 +910,7 @@ fn a_fence_a_trace_row_covers_records_the_oracle_and_the_one_it_does_not_fails_t
 fn a_crate_whose_witnesses_cannot_run_for_want_of_the_oracle_is_a_skip_never_a_pass() {
     let root = scratch("witness-absent", &block("/// ```expect\n/// 1\n/// ```\n"));
     let mut manifest = fixture_manifest();
-    manifest.pin.oracle.path = root.join("no-php-here");
+    manifest.pin.as_mut().unwrap().oracle.path = root.join("no-php-here");
     let readings = witness::run(
         &root,
         &manifest,
@@ -1162,7 +1172,7 @@ fn a_crate_with_no_witness_and_nothing_that_needs_one_passes_with_the_oracle() {
 fn a_crate_with_no_witness_and_the_oracle_absent_is_a_skip_that_says_so() {
     let root = scratch("nothing-absent", "pub fn native() {}\n");
     let mut manifest = fixture_manifest();
-    manifest.pin.oracle.path = root.join("no-php-here");
+    manifest.pin.as_mut().unwrap().oracle.path = root.join("no-php-here");
     let readings = witness::run(
         &root,
         &manifest,
@@ -1200,7 +1210,7 @@ fn a_crate_with_no_witness_under_a_drifted_oracle_refuses_the_run() {
     }
     let root = scratch("nothing-drifted", "pub fn native() {}\n");
     let mut manifest = fixture_manifest();
-    manifest.pin.oracle.md5 = "0".repeat(32);
+    manifest.pin.as_mut().unwrap().oracle.md5 = "0".repeat(32);
     let err = witness::run(
         &root,
         &manifest,
@@ -1373,7 +1383,7 @@ mod tracked {
         for absent in [false, true] {
             let mut manifest = manifest.clone();
             if absent {
-                manifest.pin.oracle.path = root.join("no-php-here");
+                manifest.pin.as_mut().unwrap().oracle.path = root.join("no-php-here");
             } else if oracle().is_none() {
                 continue;
             }
@@ -1426,7 +1436,7 @@ mod tracked {
         let root = scratch("uncovered-absent", "pub fn native() {}\n");
         let mut manifest = fixture_manifest();
         manifest.rules = tracked_manifest().rules;
-        manifest.pin.oracle.path = root.join("no-php-here");
+        manifest.pin.as_mut().unwrap().oracle.path = root.join("no-php-here");
         let rule = manifest
             .rule_checked_by("witness-coverage")
             .expect("the manifest carries the coverage rule")

@@ -176,8 +176,14 @@ pub(crate) const OPCACHE: [&str; 21] = [
 pub(crate) struct Lane;
 
 impl Tier for Lane {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
-        crate::dispatch::safepoint(req, frame, site)
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
+        crate::dispatch::safepoint(req, frame, site, held)
     }
 
     fn asked(started: &Started<'_>) -> bool {
@@ -191,7 +197,6 @@ impl Tier for Lane {
             ExtensionBuilder::default()
                 .ini(ini)
                 .engine_state(crate::JitEngine::new)
-                .request_state::<crate::JitRequest>()
                 .rinit(crate::JitEngine::request_started)
                 .build("jit"),
         )

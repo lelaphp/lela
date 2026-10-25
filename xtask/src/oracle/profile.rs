@@ -79,18 +79,20 @@ pub(crate) fn build(
     features: Option<&str>,
     into: Option<&Path>,
 ) -> Result<PathBuf> {
-    built(root, LANE, (package, binary), features, into)
+    built(root, LANE, (package, binary), features, (into, None))
 }
 
 /// The same in `release`, the bench lane's profile: what a bar's arm of
 /// the engine's own runs, never a correctness lane's build (#2351); under
 /// `into` as [`build`]'s, the engine with the tier's feature beside the
-/// lanes' build of it ([`featured`]).
+/// lanes' build of it ([`featured`]); and with `cfg` set where one is
+/// named, a cfg only a bench build sets, through `RUSTFLAGS`, which is why
+/// such a build goes into a directory of its own (#2946).
 pub(crate) fn released(
     root: &Path,
     (package, binary): (&str, &str),
     features: Option<&str>,
-    into: Option<&Path>,
+    into: (Option<&Path>, Option<&str>),
 ) -> Result<PathBuf> {
     built(root, Profile::Release, (package, binary), features, into)
 }
@@ -102,9 +104,14 @@ fn built(
     profile: Profile,
     (package, binary): (&str, &str),
     features: Option<&str>,
-    into: Option<&Path>,
+    (into, cfg): (Option<&Path>, Option<&str>),
 ) -> Result<PathBuf> {
-    let status = Command::new(cargo())
+    let mut cargo = Command::new(cargo());
+    if let Some(cfg) = cfg {
+        let inherited = std::env::var("RUSTFLAGS").unwrap_or_default();
+        cargo.env("RUSTFLAGS", format!("{inherited} --cfg {cfg}").trim_start());
+    }
+    let status = cargo
         .args([
             "build",
             "--quiet",
@@ -235,6 +242,7 @@ mod tests {
     /// comments are read past, so prose that cites a flag does not stand in
     /// for a command. Three commands build: the harness (`XTASK`), the
     /// hosts and the tree's test.
+    #[cfg(tracked)]
     #[test]
     fn the_oracle_job_builds_its_binaries_in_the_lanes_profile() {
         let text =

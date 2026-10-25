@@ -3,11 +3,12 @@
 //! scoped so that `Result` is not `result`. Every test here goes through the
 //! instrument, `check` in process or the binary, and reads the reading it
 //! writes; how the glossary itself is read is held beside the glossary.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 
 use xtask::manifest::{AvoidFrom, Manifest, Rule};
-use xtask::reading::{Number, Reading, Status, Store};
+use xtask::reading::{Number, Outcome, Reading, Status, Store};
 use xtask::scratch::Tree;
 use xtask::vocab;
 
@@ -275,6 +276,38 @@ fn a_section_holds_its_scope_to_that_sections_terms_and_a_fixture_under_the_crat
         Number::count(4),
         "the fixture's items are not counted"
     );
+}
+
+/// A manifest without an `avoid_from` rule has no glossary to read: each
+/// crate's reading is a skip that says so, and the run is met (#3182).
+#[test]
+fn a_manifest_without_an_avoid_from_rule_is_a_skip_per_crate() {
+    let dir = Tree::new("vocab-no-rule").unwrap();
+    let repo = Repo::init(&dir);
+    repo.write(
+        "crates/php_heap/Cargo.toml",
+        "[package]\nname = \"php_heap\"\n",
+    );
+    repo.write(
+        "crates/php_heap/src/lib.rs",
+        "/// A registry.\npub struct Registry;\n",
+    );
+    let manifest = Tracked::minimal()
+        .with_table("oracle", None)
+        .with_crate("php_heap", |_| ())
+        .write(&dir);
+    repo.commit("a crate");
+    let readings = vocab::hold(&dir, &manifest, &[]).unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Skip, "{reading:#?}");
+    assert!(
+        reading.message.contains("no rule with `avoid_from`"),
+        "{}",
+        reading.message
+    );
+    assert_eq!(Outcome::of(&readings), Outcome::Met);
 }
 
 /// Two `avoid_from` rules whose scopes cover one crate are refused by

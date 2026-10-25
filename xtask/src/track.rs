@@ -130,7 +130,7 @@ impl Track {
 
 /// The branch `HEAD` is on, or `None` when `HEAD` is detached.
 pub(crate) fn head_branch(root: &Path) -> Option<String> {
-    let name = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"], None).ok()?;
+    let name = git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
     let name = name.trim().to_owned();
     (!name.is_empty()).then_some(name)
 }
@@ -144,7 +144,7 @@ fn ticket_key(branch: &str) -> String {
 /// a record that is not a number is an error, not a branch with none.
 fn ticket_of(root: &Path, branch: &str) -> Result<Option<Ticket>> {
     let key = ticket_key(branch);
-    let Ok(text) = git(root, &["config", "--get", &key], None) else {
+    let Ok(text) = git(root, &["config", "--get", &key]) else {
         return Ok(None);
     };
     let text = text.trim();
@@ -169,7 +169,7 @@ pub(crate) fn head_ticket(root: &Path) -> Result<Option<Ticket>> {
 /// The ticket recorded on `branch`: the one write of the record.
 pub(crate) fn record_ticket(root: &Path, branch: &str, ticket: Ticket) -> Result<()> {
     let key = ticket_key(branch);
-    git(root, &["config", &key, &ticket.number().to_string()], None)
+    git(root, &["config", &key, &ticket.number().to_string()])
         .with_context(|| format!("cannot record {ticket} as {key}"))?;
     Ok(())
 }
@@ -186,12 +186,7 @@ pub(crate) fn branch_of_ticket(root: &Path, ticket: Ticket) -> Option<String> {
 /// not answering, as it does by exiting 1 when no branch records one, is
 /// no record at all.
 fn branch_records(root: &Path) -> Vec<(String, Ticket)> {
-    let found = git(
-        root,
-        &["config", "--get-regexp", r"^branch\..*\.ticket$"],
-        None,
-    )
-    .unwrap_or_default();
+    let found = git(root, &["config", "--get-regexp", r"^branch\..*\.ticket$"]).unwrap_or_default();
     found
         .lines()
         .filter_map(|line| {
@@ -249,7 +244,7 @@ fn ref_of(root: &Path, name: &str) -> Option<String> {
 pub(crate) fn merge_base(root: &Path, from: &str, other: &str) -> Result<String> {
     let at = ref_of(root, other);
     let name = at.as_deref().unwrap_or(other);
-    git(root, &["merge-base", from, name], None)
+    git(root, &["merge-base", from, name])
         .map(|id| id.trim().to_owned())
         .with_context(|| format!("no merge base of {from} with {other}"))
 }
@@ -274,7 +269,7 @@ pub(crate) fn main_worktree(root: &Path) -> Result<PathBuf> {
 /// each with the branch it is on, `None` for a detached `HEAD`: `git
 /// worktree list --porcelain`, one stanza per worktree.
 pub(crate) fn worktrees(root: &Path) -> Result<Vec<(PathBuf, Option<String>)>> {
-    let list = git(root, &["worktree", "list", "--porcelain"], None)?;
+    let list = git(root, &["worktree", "list", "--porcelain"])?;
     let mut found = Vec::new();
     for line in list.lines() {
         if let Some(path) = line.strip_prefix("worktree ") {

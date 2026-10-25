@@ -64,6 +64,18 @@ impl CacheAt {
         CacheAt(at | CacheAt::REQUEST)
     }
 
+    /// The `runtime_cache` offset this names an entry at, [`CacheAt::of`]
+    /// read back: the engine's for an entry of the engine's table, the
+    /// request's for one of its own.
+    pub(crate) fn offset(self) -> MapPtrOffset {
+        let at = self.0 & !CacheAt::REQUEST;
+        if self.0 & CacheAt::REQUEST == 0 {
+            MapPtrOffset::Engine(at)
+        } else {
+            MapPtrOffset::Request(at)
+        }
+    }
+
     /// The table and the entry, decoded.
     fn table(self) -> Table {
         let at = MapPtr::new(self.0 & !CacheAt::REQUEST);
@@ -201,7 +213,6 @@ impl RuntimeCaches {
     /// its two callers: an `eval` in a loop hands one number back each
     /// time (#3051).
     #[inline(always)]
-    #[allow(clippy::inline_always)]
     fn hand_back(&mut self, mut numbers: Vec<u32>) {
         // One push a number: an `eval`'s unit has one or a few, which a
         // push writes in place where `append` copies through `memcpy`.

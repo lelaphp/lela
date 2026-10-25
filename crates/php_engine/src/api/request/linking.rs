@@ -42,6 +42,13 @@ pub(crate) struct Links {
     held: Vec<PublishedUnit>,
 }
 
+impl Links {
+    /// Whether the cache served this request `unit`.
+    fn holds(&self, unit: &PublishedUnit) -> bool {
+        (self.held.iter()).any(|held| PublishedUnit::ptr_eq(held, unit))
+    }
+}
+
 /// What a link read of the table beside what it linked: each class a
 /// check looked up by name, under the name as the declaration wrote it,
 /// which is the key `track_class_dependency` files it under and the name
@@ -294,33 +301,15 @@ impl Request {
         if decl.traits.is_empty() {
             return Vec::new();
         }
-        let mut properties: Vec<(Box<[u8]>, Option<ConstExpr>)> = decl
-            .properties
-            .iter()
-            .map(|p| (p.name.0.clone(), p.default.clone()))
-            .collect();
-        let mut constants: Vec<(Box<[u8]>, ConstExpr)> = decl
-            .constants
-            .iter()
-            .map(|c| (c.name.0.clone(), c.value.clone()))
-            .collect();
-        for name in &decl.traits {
-            let Some(used) = self
-                .class_named(name.into())
-                .and_then(|c| self.symbols().class_decl(c))
-            else {
-                continue;
-            };
-            properties.extend(
-                used.properties
-                    .iter()
-                    .map(|p| (p.name.0.clone(), p.default.clone())),
-            );
-            constants.extend(
-                used.constants
-                    .iter()
-                    .map(|c| (c.name.0.clone(), c.value.clone())),
-            );
+        let mut properties: Vec<(Box<[u8]>, Option<ConstExpr>)> = Vec::new();
+        let mut constants: Vec<(Box<[u8]>, ConstExpr)> = Vec::new();
+        let used = (decl.traits.iter())
+            .filter_map(|name| self.class_named(name.into()))
+            .filter_map(|class| self.symbols().class_decl(class));
+        for class in std::iter::once(decl).chain(used) {
+            properties
+                .extend((class.properties.iter()).map(|p| (p.name.0.clone(), p.default.clone())));
+            constants.extend((class.constants.iter()).map(|c| (c.name.0.clone(), c.value.clone())));
         }
         // Each name declared more than once whose values are not all
         // literals has all of them evaluated, so the two sides compared
@@ -435,7 +424,7 @@ impl Request {
             if let Some(standing) = standing {
                 self.links.unlinked.remove(standing);
             }
-            self.bind_declared(unit, at, composed, record);
+            self.bind_declared(unit, at, composed, record)?;
             self.emit_recorded(recording);
             return Ok(());
         }
@@ -536,8 +525,7 @@ impl Request {
         if let Some(standing) = self.unlinked_named(Bare::resolved(name)) {
             self.links.unlinked.remove(standing);
         }
-        self.bind_declared(&unit, at, linking.composed, linking.record);
-        Ok(())
+        self.bind_declared(&unit, at, linking.composed, linking.record)
     }
 
     /// What a link refused, at its level and site, the request ended in
@@ -564,7 +552,7 @@ pub(super) fn is_literal(expr: &ConstExpr) -> bool {
             | ConstExpr::Long { .. }
             | ConstExpr::Double(_)
             | ConstExpr::Str(_)
-            | ConstExpr::ImmutableArray(_)
+            | ConstExpr::UnitValue(_)
     )
 }
 
@@ -603,12 +591,7 @@ pub(super) struct Fetched {
 impl Request {
     /// A unit the cache served this request from what it holds.
     pub(super) fn note_held(&mut self, unit: &PublishedUnit) {
-        if !self
-            .links
-            .held
-            .iter()
-            .any(|held| PublishedUnit::ptr_eq(held, unit))
-        {
+        if !self.links.holds(unit) {
             self.links.held.push(PublishedUnit::clone(unit));
         }
     }
@@ -619,13 +602,7 @@ impl Request {
     /// declaration is no held unit's, which php's is not immutable, or is
     /// an enum's, whose internal methods php will not cache.
     pub(super) fn fetched(&self, unit: &PublishedUnit, decl: &ClassDecl) -> Option<Fetched> {
-        if decl.kind == ClassKind::Enum
-            || !self
-                .links
-                .held
-                .iter()
-                .any(|held| PublishedUnit::ptr_eq(held, unit))
-        {
+        if decl.kind == ClassKind::Enum || !self.links.holds(unit) {
             return None;
         }
         let shared = |name: &Name| {

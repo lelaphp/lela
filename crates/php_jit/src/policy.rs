@@ -20,15 +20,15 @@
 use std::io::{self, Write};
 use std::sync::atomic::Ordering;
 
-use php_engine::api::request::Ini;
+use php_engine::api::request::{Ini, TierStatus};
 use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
-use php_unit::Opcode;
+use php_unit::{Opcode, OplineIdx};
 
 use crate::types::ExitId;
 use php_unit::decl::{IniDecl, Name};
 
 use crate::record::{Start, Stop};
-use crate::table::TraceId;
+use crate::table::{TraceId, code};
 
 /// The state bits of a word's second half.
 const STATE: u32 = 0b11;
@@ -112,6 +112,8 @@ impl JitDebug {
     pub(crate) const PERF: u32 = 1 << 4;
     /// A jitdump record per trace, where php writes one.
     pub(crate) const PERF_DUMP: u32 = 1 << 5;
+    /// The engine's end writes how many bytes its traces took.
+    pub(crate) const SIZE: u32 = 1 << 9;
     pub(crate) const TRACE_START: u32 = 1 << 12;
     pub(crate) const TRACE_STOP: u32 = 1 << 13;
     pub(crate) const TRACE_COMPILED: u32 = 1 << 14;
@@ -136,8 +138,10 @@ pub(crate) enum Setting {
     /// On, as php's four `CRTO` digits: `on` and `tracing` are 1254,
     /// `function` 1205.
     On { crto: u32 },
-    /// What php refuses with its warning, and runs with the tier off.
-    Invalid,
+    /// What php refuses with its warning, and runs with the tier off;
+    /// `crto` the digits php wrote to `JIT_G` before the one it refused,
+    /// the rest zero.
+    Invalid { crto: u32 },
 }
 
 impl Setting {
@@ -153,27 +157,71 @@ impl Setting {
                 .ok()
                 .map(|text| text.trim_start_matches(|c: char| c.is_ascii_whitespace()))
                 .and_then(|text| text.parse::<i64>().ok())
-                .map_or(Setting::Invalid, Setting::of_number),
+                .map_or(Setting::Invalid { crto: 0 }, Setting::of_number),
         }
     }
 
     /// `zend_jit_parse_config_num`: zero is off; otherwise each digit in
-    /// its range, `O` 1 to 5, `T` 0 to 5 but 4, `R` 0 to 2, `C` 0 or 1.
+    /// its range from the right, `O` 1 to 5, `T` 0 to 5 but 4, `R` 0 to
+    /// 2, `C` 0 or 1, and nothing past them. php writes each digit to
+    /// `JIT_G` as it passes it, so a refused number keeps those it
+    /// passed.
     fn of_number(jit: i64) -> Setting {
         if jit == 0 {
             return Setting::Off;
         }
-        let digit = |place: u32| (jit / 10_i64.pow(place)) % 10;
-        let valid = jit > 0
-            && (1..=5).contains(&digit(0))
-            && (0..=5).contains(&digit(1))
-            && digit(1) != 4
-            && (0..=2).contains(&digit(2))
-            && (0..=1).contains(&digit(3))
-            && jit / 10_000 == 0;
-        match u32::try_from(jit) {
-            Ok(crto) if valid => Setting::On { crto },
-            _ => Setting::Invalid,
+        if jit < 0 {
+            return Setting::Invalid { crto: 0 };
+        }
+        let ranges: [fn(i64) -> bool; 4] = [
+            |o| (1..=5).contains(&o),
+            |t| t <= 5 && t != 4,
+            |r| r <= 2,
+            |c| c <= 1,
+        ];
+        let (mut rest, mut crto, mut place) = (jit, 0, 1);
+        for valid in ranges {
+            let digit = rest % 10;
+            if !valid(digit) {
+                return Setting::Invalid { crto };
+            }
+            // A digit below ten, at a place below ten thousand.
+            crto += u32::try_from(digit).unwrap_or(0) * place;
+            (rest, place) = (rest / 10, place * 10);
+        }
+        if rest == 0 {
+            Setting::On { crto }
+        } else {
+            Setting::Invalid { crto }
+        }
+    }
+
+    /// `JIT_G` as `zend_jit_config` leaves it: `enabled` but under
+    /// `disable` and a refused setting, `on` where on, and the `CRTO`
+    /// digits php wrote, `ZEND_JIT_CPU_AVX` for a `C` of one. No buffer
+    /// yet: php's start lays it down ([`SetUp`]).
+    fn status(self) -> TierStatus {
+        let digits = |crto: u32| {
+            let digit = |place: u32| u8::try_from(crto / 10_u32.pow(place) % 10).unwrap_or(0);
+            TierStatus {
+                kind: digit(1),
+                opt_level: digit(0),
+                opt_flags: digit(2) | (digit(3) << 2),
+                ..TierStatus::default()
+            }
+        };
+        match self {
+            Setting::Disable => TierStatus::default(),
+            Setting::Off => TierStatus {
+                enabled: true,
+                ..TierStatus::default()
+            },
+            Setting::On { crto } => TierStatus {
+                enabled: true,
+                on: true,
+                ..digits(crto)
+            },
+            Setting::Invalid { crto } => digits(crto),
         }
     }
 }
@@ -268,7 +316,28 @@ pub(crate) enum Refused {
     /// An extension observes an opcode other than the two silence
     /// opcodes (design §7.1).
     ObservedOpcode,
+    /// `opcache.jit_buffer_size` is past what the target's code reaches,
+    /// [`REACH`].
+    BufferSize,
 }
+
+/// The largest `opcache.jit_buffer_size` `zend_jit_check_support` takes
+/// on the target, with php's warning past it
+/// (`Z/ext/opcache/jit/zend_jit.c:3759-3772`): 128 MiB on `aarch64`, 2 GiB
+/// on `x86_64`, and no bound on a target php checks none on.
+const REACH: (u64, &str) = if cfg!(target_arch = "aarch64") {
+    (
+        128 << 20,
+        "JIT on AArch64 doesn't support opcache.jit_buffer_size above 128M.",
+    )
+} else if cfg!(target_arch = "x86_64") {
+    (
+        2 << 30,
+        "JIT on x86_64 doesn't support opcache.jit_buffer_size above 2G.",
+    )
+} else {
+    (u64::MAX, "")
+};
 
 impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -276,6 +345,7 @@ impl std::fmt::Display for Refused {
             Refused::ObservedOpcode => f.write_str(
                 "JIT is incompatible with third party extensions that setup user opcode handlers. JIT disabled.",
             ),
+            Refused::BufferSize => f.write_str(REACH.1),
         }
     }
 }
@@ -335,6 +405,38 @@ pub(crate) struct Policy {
     /// host, which is where `zend_jit_check_support` runs and so where its
     /// refusal warns ([`Policy::check_support`]).
     set_up: SetUp,
+    /// What php's `zend_jit_status` reports once its start is over, no
+    /// code in the buffer ([`Policy::status`]).
+    started: TierStatus,
+}
+
+/// What `zend_jit_status` reports once php's start is over: `JIT_G` as
+/// `opcache.jit` set it ([`Setting::status`]), kept where php sets the
+/// tier up and its buffer down, `dasm_end - dasm_buf` the buffer
+/// ([`code::capacity`]) less the two pointers `zend_jit_startup` keeps at
+/// its end (`Z/ext/opcache/jit/zend_jit.c:3790`), all free; `enabled`
+/// and `on` dropped for a buffer of no bytes, as `accel_post_startup`
+/// drops them (`Z/ext/opcache/ZendAccelerator.c:3322-3325`).
+fn started(setting: Setting, set_up: SetUp, buffer_size: i64) -> TierStatus {
+    let status = setting.status();
+    match set_up {
+        SetUp::Yes => {
+            let buffer = code::capacity(u64::try_from(buffer_size).unwrap_or(0))
+                .saturating_sub(2 * size_of::<usize>());
+            let buffer = u64::try_from(buffer).unwrap_or(0);
+            TierStatus {
+                buffer_size: buffer,
+                buffer_free: buffer,
+                ..status
+            }
+        }
+        SetUp::Disabled => TierStatus {
+            enabled: false,
+            on: false,
+            ..status
+        },
+        SetUp::Unstarted | SetUp::Refused(_) => status,
+    }
 }
 
 /// The value the host set for `name`, none where it set none.
@@ -454,7 +556,7 @@ impl Policy {
         // lane gives way to (#3136's ruling); a zero buffer is the line
         // below's. `off` is not one: php may turn it on from a request.
         let disabled = value(ini, "opcache.jit").is_some()
-            && matches!(setting, Setting::Disable | Setting::Invalid);
+            && matches!(setting, Setting::Disable | Setting::Invalid { .. });
         let asked = match (lane, setting, set_up) {
             (Some(mode), ..) if !disabled => mode,
             (None, Setting::On { crto }, SetUp::Yes) => {
@@ -516,6 +618,7 @@ impl Policy {
             buffer_size: u64::try_from(buffer_size).unwrap_or(0),
             debug,
             set_up,
+            started: started(setting, set_up, buffer_size),
         };
         if mode == Mode::Off {
             policy.off();
@@ -543,16 +646,47 @@ impl Policy {
     /// runs as the directives say. At the
     /// two silence opcodes nothing is refused: compiled code serves them
     /// through the interpreter's handler, which tells their observers.
+    /// Past them, a tier php set up whose `opcache.jit_buffer_size` the
+    /// target's code cannot reach is refused too ([`Refused::BufferSize`],
+    /// `:3759-3772`). A refused tier reports neither enabled nor on, and
+    /// no buffer ([`Policy::status`]).
     pub(crate) fn check_support(&mut self, observes: impl Fn(Opcode) -> bool) {
         let beyond = (0..=u8::MAX)
             .filter_map(Opcode::from_u8)
             .filter(|opcode| !matches!(opcode, Opcode::BeginSilence | Opcode::EndSilence))
             .any(observes);
-        if beyond {
-            self.off();
-            if self.set_up == SetUp::Yes {
-                self.set_up = SetUp::Refused(Refused::ObservedOpcode);
-            }
+        let refused = if beyond {
+            Refused::ObservedOpcode
+        } else if self.set_up == SetUp::Yes && self.buffer_size > REACH.0 {
+            Refused::BufferSize
+        } else {
+            return;
+        };
+        self.off();
+        if self.set_up == SetUp::Yes {
+            self.set_up = SetUp::Refused(refused);
+            self.started = TierStatus {
+                enabled: false,
+                on: false,
+                buffer_size: 0,
+                buffer_free: 0,
+                ..self.started
+            };
+        }
+    }
+
+    /// `zend_jit_status` (`Z/ext/opcache/jit/zend_jit.c:825-842`): `JIT_G`
+    /// as php's start left it, and the buffer, of which the code of
+    /// `used` bytes is taken. php's stubs take some of it before any
+    /// trace; this tier has none, so a buffer no trace was published
+    /// into is free whole. `JIT_G` is the start's: php's
+    /// `ini_set('opcache.jit', ...)` from a request rewrites `on` and the digits, which
+    /// this tier does not read yet (#3139).
+    pub(crate) fn status(&self, used: usize) -> TierStatus {
+        let used = u64::try_from(used).unwrap_or(u64::MAX);
+        TierStatus {
+            buffer_free: self.started.buffer_free.saturating_sub(used),
+            ..self.started
         }
     }
 
@@ -837,6 +971,10 @@ pub(crate) enum Outcome {
     /// Blacklisted now, whatever the count: php's stops past
     /// `COMPILER_ERROR`, which no attempt recovers.
     Blacklist(Stop),
+    /// Blacklisted now, with no attempt and no stop: a loop php counts
+    /// no heat of (`record::counts`), whose header's handler php never
+    /// swaps, so the word is visited for nothing from now on.
+    Uncounted,
     /// Cold again with no attempt counted: the recording became the trace
     /// of another word, a loop php unrolled and rooted the trace at
     /// (`zend_jit_trace_subtrace`), and a root's heat starts again as
@@ -1036,14 +1174,21 @@ pub(crate) fn bump(word: &Word) -> u32 {
 
 /// Where a claimed word lives (`jit-design.md` §4.7), owned, so a claim
 /// can leave the thread that made it: a root's word by its op array and
-/// safepoint, an exit's by its trace and exit, each under the epoch it
-/// holds, which keeps the word, the op array's row or the trace table's.
+/// safepoint, a return root's by its op array and the landing opline
+/// past the call (§2.2, #3036), an exit's by its trace and exit, each
+/// under the epoch it holds, which keeps the word, the op array's row or
+/// the trace table's.
 #[derive(Debug, Clone)]
 pub(crate) enum Holder {
     Root {
         epoch: Epoch,
         func: FuncRef,
         at: SafepointIdx,
+    },
+    Landing {
+        epoch: Epoch,
+        func: FuncRef,
+        at: OplineIdx,
     },
     Exit {
         epoch: Epoch,
@@ -1054,10 +1199,12 @@ pub(crate) enum Holder {
 
 impl Holder {
     /// The word it holds: the sealed one for an exit the epoch's table
-    /// holds no trace for, which nothing claims.
+    /// holds no trace for, and for a landing no trace armed, which
+    /// nothing claims.
     pub(crate) fn word(&self) -> &Word {
         match self {
             Holder::Root { epoch, func, at } => epoch.word(*func, *at),
+            Holder::Landing { epoch, func, at } => epoch.landing(*func, *at),
             Holder::Exit { epoch, trace, exit } => crate::table::exit_word(epoch, *trace, *exit),
         }
     }
@@ -1065,9 +1212,42 @@ impl Holder {
     /// The epoch it holds.
     pub(crate) fn epoch(&self) -> &Epoch {
         match self {
-            Holder::Root { epoch, .. } | Holder::Exit { epoch, .. } => epoch,
+            Holder::Root { epoch, .. }
+            | Holder::Landing { epoch, .. }
+            | Holder::Exit { epoch, .. } => epoch,
         }
     }
+}
+
+/// Whether a landing word was armed (`jit-design.md` §2.2, #3036): any
+/// word whose state half is not the sealed word's all ones, which its op
+/// array's landings are laid down as, php's `trace_flags` of an opline
+/// `zend_jit_trace_setup_ret_counter` set. An armed landing that is
+/// blacklisted is armed: its state half keeps its attempts and the stop
+/// below the trace number's bits, so it is never all ones.
+#[inline(always)] // jit-design.md §4.9: one load where a return lands
+#[allow(clippy::inline_always)]
+pub(crate) fn armed(word: &Word) -> bool {
+    word.halves()[1].load(Ordering::Relaxed) != u32::MAX
+}
+
+/// Arm a landing word, php's `zend_jit_trace_setup_ret_counter`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`): a sealed word made
+/// cold, so the returns that land on it count toward
+/// `opcache.jit_hot_return`; one armed already, whatever its state, is
+/// left, as php arms an opline whose `trace_flags` are clear.
+pub(crate) fn arm(word: &Word) {
+    if armed(word) {
+        return;
+    }
+    // The heat first: a sealed word is never bumped, and a visit that
+    // finds the state cold finds no heat left over from the seal.
+    let [heat, state] = word.halves();
+    heat.store(0, Ordering::Relaxed);
+    // Another arming of the same landing may win; either leaves it cold.
+    state
+        .compare_exchange(u32::MAX, COLD, Ordering::Release, Ordering::Relaxed)
+        .ok();
 }
 
 /// A word in the recording state, owned until it is settled once
@@ -1129,7 +1309,7 @@ impl Claim {
                     (u32::from(stop.code()) << ID_SHIFT) | COLD
                 }
             }
-            Outcome::Blacklist(_) => BLACKLISTED,
+            Outcome::Blacklist(_) | Outcome::Uncounted => BLACKLISTED,
             Outcome::Released => {
                 // A root's count starts again; an exit's firing counts
                 // nothing, as php's exit count does not move for it.
@@ -1188,7 +1368,8 @@ pub(crate) fn claim(holder: Holder, policy: &Policy, start: Start) -> Option<Cla
 /// such an exit, for the interpreter to warn of, and the ninth firing
 /// blacklists it, `opcache.jit_hot_side_exit` plus
 /// `opcache.jit_blacklist_side_trace` under the recipe's thresholds; the
-/// thirteen after it write nothing:
+/// thirteen after it write nothing (the exit numbers are #3176's: php's
+/// inference types `$i` and holds no guard on it at entry):
 ///
 /// ```php
 /// function h($a) {
@@ -1222,7 +1403,7 @@ pub(crate) fn claim(holder: Holder, policy: &Policy, start: Start) -> Option<Cla
 ///      TRACE 1 exit %d h() %s:5
 /// ---- EXIT 1/%d blacklisted
 ///      TRACE 1 exit %d h() %s:7
-/// ---- TRACE 2 start (side trace 1/3) h() %s:7
+/// ---- TRACE 2 start (side trace 1/%d) h() %s:7
 /// ---- TRACE 2 stop (return)
 /// ---- TRACE 2 compiled
 ///

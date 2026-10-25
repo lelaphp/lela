@@ -66,6 +66,14 @@ impl Interrupt {
         &self.0.raised
     }
 
+    /// The word itself, for the heap to raise as it records a delayed
+    /// OOM ([`php_heap::Heap::wake_on_oom`]), as php's allocator stores
+    /// `EG(vm_interrupt)`: the one the loop and compiled code test, so
+    /// the delayed OOM costs no test of its own.
+    pub(crate) fn word(&self) -> Arc<dyn AsRef<AtomicBool> + Send + Sync> {
+        Arc::clone(&self.0) as Arc<dyn AsRef<AtomicBool> + Send + Sync>
+    }
+
     /// What the engine's execution timer raises it with,
     /// `max_execution_time` having elapsed: the seconds it was armed
     /// with, then the two words `zend_timeout_handler` stores
@@ -112,7 +120,7 @@ impl Interrupt {
 
     /// What a check that found it raised reads: it is cleared, and the
     /// seconds come back when the execution timer was what raised it,
-    /// both as php clears them (`Z/Zend/zend_vm_def.h:10526`, `:10537`).
+    /// both as php clears them (`Z/Zend/zend_vm_def.h:10537`, `:10551`).
     /// Clearing it acquires what the setter released, so the seconds the
     /// text names are the ones the timer was armed with; the loop's own
     /// test stays a relaxed load, because this is where the two threads
@@ -290,7 +298,8 @@ impl Request {
     /// A scope of the loop about to serve a frame php serves in the same
     /// `execute_ex` ([`StackLimit::nested`]): the limit moved below it
     /// by what the scope takes, until [`Self::stack_left`] puts it back;
-    /// none where the thread has no room for one.
+    /// none where the thread has no room for one, and on a fiber's
+    /// stack, whose limit cannot move.
     /// The charge is what a scope was measured to take, `first` before
     /// one was; the room left below it at least `room` and twice the
     /// charge, for what the scope's frames call, a native's call back
@@ -331,7 +340,7 @@ impl Request {
     /// `OnUpdateTimeout` at runtime. Whatever was armed is unset first,
     /// so the seconds count from here.
     pub(super) fn arm_timer(&mut self) {
-        let (seconds, hard) = (self.max_execution_time(), self.hard_timeout());
+        let (seconds, hard) = (self.max_execution_time(), self.ini().long(b"hard_timeout"));
         self.limits.deadlines.arm(seconds, hard);
     }
 
@@ -403,12 +412,6 @@ impl Request {
     /// armed for; zero, php's CLI default, arms none.
     pub(crate) fn max_execution_time(&self) -> i64 {
         i64::from(self.ini_number(b"max_execution_time", 0))
-    }
-
-    /// `EG(hard_timeout)`, `OnUpdateLong` over the startup ini: the
-    /// seconds past a timeout the timer gives the loop to take it.
-    fn hard_timeout(&self) -> i64 {
-        self.ini().long(b"hard_timeout")
     }
 }
 

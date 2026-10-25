@@ -10,7 +10,7 @@ use crate::string::Decimal;
 use php_ext::abi::{Ref, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{c_str, is_space};
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
@@ -418,7 +418,7 @@ pub(super) fn sscanf(
     format: PhpString,
     vars: Variadic<Ref<Value>>,
 ) -> Result<Option<Union<Owner<PhpArray>, i64>>, Thrown> {
-    let scanned = php_sscanf_internal(req, string.as_bytes(), format.as_bytes(), 3, vars.0.len())?;
+    let scanned = php_sscanf_internal(req, string.as_bytes(), format.as_bytes(), 3, vars.len())?;
     let answer = match scanned.as_ref() {
         ValueRef::Array(array) => Some(Union::A(Owner::take(req, array))),
         ValueRef::Int(n) => Some(Union::B(n)),
@@ -474,10 +474,10 @@ fn scan(
 ) -> Result<Owner<Value>, Thrown> {
     let total = match validate(format, num_vars) {
         Ok(total) => total,
-        Err(Invalid::Value(message)) => return Err(throw_error(req, "ValueError", message)),
+        Err(Invalid::Value(message)) => return Err(value_error(req, message)),
         Err(Invalid::BadChar(c)) => {
             let text = format!("Bad scan conversion character \"{}\"", char::from(c));
-            return Err(throw_error(req, "ValueError", &text));
+            return Err(value_error(req, &text));
         }
     };
     let mut target = if num_vars > 0 {

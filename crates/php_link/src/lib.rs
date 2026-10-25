@@ -1332,6 +1332,14 @@ fn is_variadic(function: &FunctionDecl) -> bool {
 /// ```expect exit=255
 /// Fatal error: Declaration of S::t() must be compatible with B::t($x = <expression>, $y = [...], $z = [], $w = [...]) in %s on line 3
 /// ```
+/// A string default as the signature prints it: its first ten bytes in
+/// single quotes, `...` after them where it is longer.
+fn quoted(bytes: &[u8]) -> String {
+    let shown = &bytes[..bytes.len().min(10)];
+    let more = if bytes.len() > 10 { "..." } else { "" };
+    format!("'{}{more}'", String::from_utf8_lossy(shown))
+}
+
 fn default_text(default: &ConstExpr) -> String {
     match default {
         ConstExpr::Null => String::from("null"),
@@ -1340,17 +1348,16 @@ fn default_text(default: &ConstExpr) -> String {
         ConstExpr::Long { value, radix } => radix.written(*value),
         // `smart_str_append_double(&str, d, EG(precision), false)`, at
         // php's default `precision` of 14.
-        ConstExpr::Double(d) => php_heap::double_to_string(*d, 14, php_heap::Exponent::Upper),
-        ConstExpr::Str(bytes) => {
-            let shown = &bytes[..bytes.len().min(10)];
-            let more = if bytes.len() > 10 { "..." } else { "" };
-            format!("'{}{more}'", String::from_utf8_lossy(shown))
-        }
+        ConstExpr::Double(d) => php_heap::double_to_string(*d, 14, php_heap::Exponent::Upper)
+            .as_str()
+            .to_owned(),
+        ConstExpr::Str(bytes) => quoted(bytes),
+        ConstExpr::UnitValue(value) if let Some(s) = value.value().as_str() => quoted(s.bytes()),
         // An array the compiler folded is a value, `[]` or `[...]`; one
         // still to evaluate is the `<expression>` below, as php prints
         // a `ZEND_AST_ARRAY`, and a native's empty one is its stub's `[]`.
-        ConstExpr::ImmutableArray(array) if array.is_empty() => String::from("[]"),
-        ConstExpr::ImmutableArray(_) => String::from("[...]"),
+        ConstExpr::UnitValue(held) if held.is_empty() => String::from("[]"),
+        ConstExpr::UnitValue(_) => String::from("[...]"),
         ConstExpr::Array { elements, .. } if elements.is_empty() => String::from("[]"),
         ConstExpr::Constant { name, .. } => text(&name.resolved().0),
         ConstExpr::ClassConstant { class, name, .. } => {

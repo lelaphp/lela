@@ -742,17 +742,19 @@ fn serialize_response_body(
         };
         if version == SOAP_1_1 {
             if let Some(code) = fault_str_of(fault, FaultSlot::Code) {
-                let str = php_ext_standard::escape_html_entities(req, &code, false, 0, None, true);
+                let str = php_ext_standard::escape_html_entities(req, &code, false, 0, None, true)
+                    .map_err(fail_thrown(doc))?;
                 if let Some(node) = Node::new_element(Some(doc), None, b"faultcode", None) {
                     param.add_child(node);
                     if let Some(fns) = &fault_ns {
                         let nsptr = encode_add_ns(req, node, fns);
                         let prefix = nsptr.and_then(Ns::prefix);
-                        node.set_content(&build_qname(&str, prefix.as_deref()));
+                        node.set_content(&build_qname(str.as_bytes(), prefix.as_deref()));
                     } else {
-                        node.set_content_len(&str);
+                        node.set_content_len(str.as_bytes());
                     }
                 }
+                str.give_up(req);
             }
             let fs = fault_slot(fault, FaultSlot::String);
             if fs.as_str_bytes().is_some() {
@@ -786,7 +788,8 @@ fn serialize_response_body(
             }
         } else {
             if let Some(code) = fault_str_of(fault, FaultSlot::Code) {
-                let str = php_ext_standard::escape_html_entities(req, &code, false, 0, None, true);
+                let str = php_ext_standard::escape_html_entities(req, &code, false, 0, None, true)
+                    .map_err(fail_thrown(doc))?;
                 if let Some(node) = param
                     .new_child(ns, b"Code", None)
                     .and_then(|c| c.new_child(ns, b"Value", None))
@@ -794,11 +797,12 @@ fn serialize_response_body(
                     if let Some(fns) = &fault_ns {
                         let nsptr = encode_add_ns(req, node, fns);
                         let prefix = nsptr.and_then(Ns::prefix);
-                        node.set_content(&build_qname(&str, prefix.as_deref()));
+                        node.set_content(&build_qname(str.as_bytes(), prefix.as_deref()));
                     } else {
-                        node.set_content_len(&str);
+                        node.set_content_len(str.as_bytes());
                     }
                 }
+                str.give_up(req);
             }
             let fs = fault_slot(fault, FaultSlot::String);
             if fs.as_str_bytes().is_some()
@@ -1515,9 +1519,8 @@ pub(crate) fn soap_create_typemap(
         let tmp = row.value().deref();
         let ValueRef::Array(entry) = tmp.as_ref() else {
             let given = php_ext::coerce::value_name(req, &tmp);
-            return Err(php_ext::raising::throw(
+            return Err(php_ext::raising::type_error(
                 req,
-                "TypeError",
                 &format!(
                     "SoapHeader::__construct(): \"typemap\" option must be of type array, {given} given"
                 ),

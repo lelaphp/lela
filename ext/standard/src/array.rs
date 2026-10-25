@@ -13,7 +13,7 @@ use php_ext::abi::{Callable, FromArgument, Instance, Raw, Ref, Union, Variadic};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::call;
 use php_ext::coerce::{compare, to_double, to_long, to_string, with_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, docref};
+use php_ext::raising::{Level, Thrown, arg_value_error, call_stack_end, call_stack_limit, docref};
 use php_ext::request::Request;
 use php_ext::values::walk::{self as rows, Hold};
 use php_ext::values::{Key, Owner, PhpArray, Value, ValueRef, zend_sort};
@@ -233,7 +233,6 @@ fn array_merge(
     req: &mut Request,
     arrays: Variadic<PhpArray>,
 ) -> Result<Owner<Raw<PhpArray>>, Thrown> {
-    let arrays = arrays.0;
     if arrays.is_empty() {
         return Ok(returned(Owner::take(req, Value::array(PhpArray::empty()))));
     }
@@ -758,13 +757,29 @@ fn count(
 /// holds itself is the warning `Recursion detected` and a zero where
 /// the walk meets itself again.
 ///
-/// The walk is held to the thread's floor, where php's runs to its end.
+/// Each level asks the stack limit first, php 8.5.12's
+/// `zend_call_stack_overflowed` (`Z/ext/standard/array.c:614`), so a
+/// nesting past it is the `Error` and no sibling is counted after it
+/// (`count_recursive_stack_limit.phpt`):
+///
+/// ```php
+/// $a = [];
+/// for ($i = 0; $i < 30000; $i++) { $a = [$a, []]; }
+/// try { count($a, COUNT_RECURSIVE); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// ```
+/// ```expect regime=small-stack
+/// Error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// NULL
+/// ```
 fn count_recursive(req: &mut Request, array: PhpArray) -> Result<i64, Thrown> {
+    call_stack_limit(req)?;
+    // The floor stands under it, where `-1` sets no limit and php
+    // would run to the thread's end.
+    call_stack_end(req)?;
     if array.is_recursive() {
         docref(req, Level::Warning, "Recursion detected");
         return Ok(0);
     }
-    call_stack_end(req)?;
     array.protect();
     let mut count = i64::try_from(array.len()).unwrap_or(i64::MAX);
     // `ZEND_HASH_FOREACH_VAL` under `GC_PROTECT_RECURSION`, holding

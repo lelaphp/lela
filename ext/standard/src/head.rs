@@ -15,10 +15,12 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, truthy, with_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, argument_count_error, argument_error, docref, value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value};
 
 /// `header(string $header, bool $replace = true, int $response_code = 0): void`
 /// (`Z/ext/standard/head.c:32`): `sapi_header_op` under `REPLACE` or
@@ -145,7 +147,7 @@ fn http_response_code(
             let message = match req.response().started_at() {
                 Some((file, line)) => format!(
                     "Cannot set response code - headers already sent (output started at {}:{line})",
-                    String::from_utf8_lossy(&file)
+                    String::from_utf8_lossy(file)
                 ),
                 None => String::from("Cannot set response code - headers already sent"),
             };
@@ -222,14 +224,20 @@ fn headers_sent(
     #[php(default = null)] filename: Ref<Untyped<Value>>,
     #[php(default = null)] line: Ref<Untyped<Value>>,
 ) -> Result<bool, Thrown> {
-    let sent = req.response().headers_sent();
-    let (file, at) = sent.clone().unwrap_or_default();
+    // `ZEND_TRY_ASSIGN_REF_STRING`: a string of its own, so the name is
+    // read out before the request is written.
+    let sent = req
+        .response()
+        .headers_sent()
+        .map(|(file, at)| (file.to_vec(), at));
+    let headers_sent = sent.is_some();
+    let (file, at) = sent.unwrap_or_default();
     line.set(req, Untyped(Value::int(i64::from(at))))?;
     if filename.is_given() {
         let file = PhpString::new(req, &file)?;
         filename.set(req, Untyped(file.into_value()))?;
     }
-    Ok(sent.is_some())
+    Ok(headers_sent)
 }
 
 /// `headers_list(): array` (`Z/ext/standard/head.c:360`): the list, one
@@ -321,7 +329,7 @@ fn php_setcookie(
     cookie: &Cookie,
     url_encode: bool,
 ) -> Result<bool, Thrown> {
-    let refuse = |req: &mut Request, text: String| Err(throw_error(req, "ValueError", &text));
+    let refuse = |req: &mut Request, text: String| Err(value_error(req, &text));
     let function = if url_encode {
         "setcookie"
     } else {
@@ -361,6 +369,9 @@ fn php_setcookie(
     }
     let mut line = b"Set-Cookie: ".to_vec();
     line.extend_from_slice(name);
+    // php's `smart_str buf`, on the request's heap, held until the
+    // header's own copy is made.
+    let mut buf = SmartStr::default();
     match value.filter(|v| !v.is_empty()) {
         None => {
             line.extend_from_slice(b"=deleted; expires=Thu, 01 Jan 1970 00:00:01 GMT; Max-Age=0");
@@ -371,6 +382,18 @@ fn php_setcookie(
                 crate::url::url_encode(value, true, &mut line);
             } else {
                 line.extend_from_slice(value);
+            }
+            // "The encoded value is up to three copies of the input":
+            // 8.5.12 appends it fallibly, and where the memory limit
+            // refuses it no header is set and the call answers false,
+            // the limit's fatal raised as it returns.
+            if req
+                .memory_mut()
+                .fallible(|req| buf.append(req, &line))?
+                .is_none()
+            {
+                buf.free(req);
+                return Ok(false);
             }
             if cookie.expires > 0 {
                 line.extend_from_slice(b"; expires=");
@@ -406,7 +429,9 @@ fn php_setcookie(
     if cookie.partitioned {
         line.extend_from_slice(b"; Partitioned");
     }
-    Ok(req.response_mut().header_add(&line, false, 0))
+    let added = req.response_mut().header_add(&line, false, 0);
+    buf.free(req);
+    Ok(added)
 }
 
 /// `php_head_parse_cookie_options_array` (`Z/ext/standard/head.c:205`).
@@ -425,7 +450,7 @@ fn cookie_options(
         let value = row.value().deref();
         let Key::Str(key) = key else {
             let text = format!("{function}(): option array cannot have numeric keys");
-            return Err(throw_error(req, "ValueError", &text));
+            return Err(value_error(req, &text));
         };
         let lower = key.as_bytes().to_ascii_lowercase();
         let string = |req: &mut Request| with_string(req, &value, <[u8]>::to_vec);
@@ -442,7 +467,7 @@ fn cookie_options(
                     "{function}(): option \"{}\" is invalid",
                     String::from_utf8_lossy(key.as_bytes())
                 );
-                return Err(throw_error(req, "ValueError", &text));
+                return Err(value_error(req, &text));
             }
         }
         Ok(ControlFlow::Continue(()))
@@ -486,7 +511,7 @@ fn setcookie_common(
                 let text = format!(
                     "{function}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array"
                 );
-                return Err(throw_error(req, "ArgumentCountError", &text));
+                return Err(argument_count_error(req, &text));
             }
             cookie_options(req, options, &mut cookie, function)?;
         }
@@ -519,6 +544,19 @@ fn setcookie_common(
 /// setcookie(): option "nope" is invalid
 /// setcookie(): option array cannot have numeric keys
 /// setcookie(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array
+/// ```
+///
+/// The value, encoded or not, is appended to the header's line fallibly
+/// since 8.5.12: past the memory limit it is refused, no header is set,
+/// and the limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(setcookie("c", str_repeat("\xff", 2 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 6307840 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn setcookie(

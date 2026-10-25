@@ -4,15 +4,16 @@
 //! list it takes, each held to the record it wrote and to `dump` then
 //! `parse`; and the text form as a property over generated records.
 
-use php_engine::tier::{self, FuncRef, Sample};
+use php_engine::tier::{self, FuncRef, SafepointIdx, Sample};
 use php_heap::ZvalType;
-use php_unit::{MapPtrOffset, Opcode, OplineIdx};
+use php_unit::{MapPtrOffset, Opcode, OperandKind, OplineIdx};
 
-use super::{Event, Start, Stop, TraceRecord};
+use super::{Began, Callee, Event, Start, Stop, TraceRecord};
 use crate::table::TraceId;
 use crate::testing;
 use crate::testing::records::{at, kept, recorded, trace};
 use crate::types::ExitId;
+use crate::types::Types;
 
 /// The record's events by name, an `Op` by its opline.
 fn events(record: &TraceRecord) -> Vec<String> {
@@ -21,7 +22,13 @@ fn events(record: &TraceRecord) -> Vec<String> {
         .iter()
         .map(|event| match event {
             Event::Op { opline, .. } => format!("op{}", opline.0),
-            Event::InitCall { .. } => "init".to_owned(),
+            Event::InitCall {
+                began: Began::Here, ..
+            } => "init".to_owned(),
+            Event::InitCall {
+                began: Began::Before,
+                ..
+            } => "fake-init".to_owned(),
             Event::Enter { .. } => "enter".to_owned(),
             Event::Back => "back".to_owned(),
         })
@@ -67,12 +74,13 @@ fn a_call_and_its_return_are_entered_and_left() -> Result<(), String> {
     Ok(())
 }
 
-/// A return trace: its first opline is the `RETURN` it started at, the
-/// first `Popped` roots it where it lands, and it goes on in the caller
-/// to the caller's own return.
+/// A return trace roots at its caller's landing (`jit-design.md` §2.2,
+/// #3036): its first opline is the one past `f`'s call to `g`, in `f`,
+/// and it goes on there to `f`'s own return, which, with no recursion
+/// below, ends it as php's "Return from function" does.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_return_trace_starts_at_its_return_and_goes_on_in_the_caller() -> Result<(), String> {
+fn a_return_trace_roots_at_its_callers_landing_and_goes_on_there() -> Result<(), String> {
     let (record, out) = recorded(
         &at("g", "return"),
         "function g($x) { return $x + 1; }
@@ -82,15 +90,69 @@ fn a_return_trace_starts_at_its_return_and_goes_on_in_the_caller() -> Result<(),
     assert_eq!(out, "4\n");
     assert_eq!((record.start, record.stop), (Start::Return, Stop::Return));
     assert_eq!(enters(&record), 0);
-    let Some(Event::Op { func: first, .. }) = record.events.first() else {
+    let Some(Event::Op {
+        func: first,
+        opline,
+        ..
+    }) = record.events.first()
+    else {
         return Err(format!("no first opline: {:?}", record.events));
     };
-    assert_eq!(*first, record.root, "the RETURN is g's");
-    let in_caller = record
-        .events
-        .iter()
-        .any(|event| matches!(event, Event::Op { func, .. } if *func != record.root));
-    assert!(in_caller, "the trace goes on in f: {:?}", record.events);
+    assert_eq!(*first, record.root, "the landing is f's");
+    assert!(opline.0 > 0, "past the call: {opline:?}");
+    let all_in_f = (record.events.iter())
+        .all(|event| matches!(event, Event::Op { func, .. } if *func == record.root));
+    assert!(all_in_f, "the trace stays in f: {:?}", record.events);
+    Ok(())
+}
+
+/// A return trace rooted inside the arguments of calls its frame began
+/// before it writes those calls down first, the outermost first, as php's
+/// fake inits (`zend_jit_trace_record_fake_init_call`, #3254): a user
+/// function's by its op array, a native's by none, and then the landing.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_trace_inside_arguments_begins_with_the_calls_under_way() -> Result<(), String> {
+    let (record, out) = recorded(
+        &at("c", "return"),
+        "function c($x) { return $x + 1; }
+        function k($a, $b) { return $a + $b; }
+        function g($v) { echo k(1, strcmp(\"a\", c($v))), \"\\n\"; }
+        g(5);",
+    )?;
+    assert_eq!(out, "44\n");
+    assert_eq!(record.start, Start::Return);
+    let named = events(&record);
+    assert_eq!(
+        named.get(..2),
+        Some(&["fake-init", "fake-init"].map(str::to_owned)[..]),
+        "{named:?}"
+    );
+    assert!(
+        named.get(2).is_some_and(|op| op.starts_with("op")),
+        "{named:?}"
+    );
+    let targets: Vec<bool> = (record.events.iter().take(2))
+        .map(|event| {
+            matches!(
+                event,
+                Event::InitCall {
+                    callee: Callee::User(_),
+                    ..
+                }
+            )
+        })
+        .collect();
+    assert_eq!(
+        targets,
+        [true, false],
+        "k's, then strcmp's: {:?}",
+        record.events
+    );
+    assert!(
+        named.iter().skip(2).all(|name| name != "fake-init"),
+        "{named:?}"
+    );
     Ok(())
 }
 
@@ -244,6 +306,187 @@ fn a_for_loop_roots_at_its_condition_as_php_does() -> Result<(), String> {
             [Opcode::IsSmaller, Opcode::Assign, Opcode::PreInc].as_slice()
         )
     );
+    Ok(())
+}
+
+/// A `while (true)`'s trace roots at its body, where its back edge
+/// lands, and not at its condition: php's optimizer makes the `JMPNZ` on
+/// `true` a `JMP` back to the body and threads the `JMP` into the loop
+/// onto the body, so php's CFG heads the loop there
+/// (`Z/Zend/Optimizer/pass1.c:315-333`, #3317). The back edge lands on
+/// the root, so nothing is stepped on to a condition or recorded from
+/// behind one ([`super::behind`]), and the condition is no header, so a
+/// trace arms a landing there ([`super::landings`]).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
+    let (recorded, out) = testing::records::recording(
+        &at("a", "loop"),
+        "function a($n) { $s = 0; while (true) { $s += $n; if ($s > 20) { break; } } return $s; }
+        echo a(5), \"\\n\";",
+    )?;
+    assert_eq!(out, "25\n");
+    let record = &recorded.record;
+    assert_eq!((record.start, record.stop), (Start::Loop, Stop::Loop));
+    let code = recorded
+        .view
+        .op_array(record.root)
+        .ok_or("the view holds a()")?;
+    // The `JMP` into the loop, the first, lands on the condition, whose
+    // `JMPNZ` on `true` goes back to the body past the `JMP`.
+    let (entry, condition) = (code.oplines.iter().enumerate())
+        .find_map(|(at, op)| (op.opcode == Opcode::Jmp).then(|| (at, op.jump_target())))
+        .and_then(|(at, to)| Some((u32::try_from(at).ok()?, to?)))
+        .ok_or("a() has no JMP")?;
+    let body = OplineIdx(entry + 1);
+    let jump = &code.oplines[condition.0 as usize];
+    assert_eq!(
+        (jump.opcode, jump.op1_type, jump.jump_target()),
+        (Opcode::Jmpnz, OperandKind::Const, Some(body))
+    );
+    assert_eq!(super::header_at(code, condition), None);
+    let header = super::header_at(code, body).ok_or("the body is no header")?;
+    assert_eq!(super::loop_root(code, header), Some(body));
+    let first = record.events.iter().find_map(|event| match event {
+        Event::Op { opline, .. } => Some(*opline),
+        _ => None,
+    });
+    assert_eq!(first, Some(body));
+    Ok(())
+}
+
+/// Whether php counts each loop of `a()` in `program`, in the order of
+/// their safepoints: whether [`super::header_at`] finds the loop at its
+/// root, which it does where the root is reached from the entry
+/// ([`super::reached`]), as php's CFG finds a header there
+/// (`zend_cfg_identify_loops`).
+fn counted(program: &str) -> Result<Vec<bool>, String> {
+    let (recorded, _) = testing::records::recording(&at("a", "enter"), program)?;
+    let code = recorded
+        .view
+        .op_array(recorded.record.root)
+        .ok_or("the view holds a()")?;
+    Ok((code.safepoints.iter().enumerate().skip(1))
+        .filter(|(number, site)| !super::is_return_site(code, **site, *number))
+        .map(|(number, _)| {
+            let header = SafepointIdx(u32::try_from(number).unwrap_or(u32::MAX));
+            super::loop_root(code, header)
+                .is_some_and(|root| super::header_at(code, root) == Some(header))
+        })
+        .collect())
+}
+
+/// A loop past each jump php's CFG draws an edge for is counted: the
+/// edges `reached` follows are each opline's `jump_targets`, the `JMP`'s,
+/// a conditional jump's and a short-circuit's, `JMP_SET`'s, `COALESCE`'s
+/// and `JMP_NULL`'s, `FE_RESET_*`'s past an empty array and
+/// `FE_FETCH_*`'s out of the loop, a table's cases and default, an
+/// `ASSERT_CHECK`'s, and a `FAST_CALL`'s into its `finally`, where the
+/// `try` that reaches it normally goes on past it (`ZEND_FAST_RET`'s
+/// block has no successor; the `FAST_CALL`'s next opline is one).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_past_each_jump_is_counted() -> Result<(), String> {
+    let past = |construct: &str| {
+        format!(
+            "class O {{ public $p = 1; }}
+            function a($n, $o, $u) {{ $s = 0; {construct}
+            for ($i = 0; $i < 2; $i++) {{ $s += $i; }} return $s; }}
+            echo a(1, new O, null), \"\\n\";"
+        )
+    };
+    for construct in [
+        "if ($n) { $s = 1; } else { $s = 2; }",
+        "$v = $n && $u; $w = $n || $u;",
+        "$v = $n ?: 1;",
+        "$v = $u ?? 1;",
+        "$v = $o?->p;",
+        "foreach ([] as $x) { $s += $x; }",
+        "switch ($n) { case 1: $s = 1; break; case 2: $s = 2; break; default: $s = 3; }",
+        "switch (\"$n\") { case 'a': $s = 1; break; case 'b': $s = 2; break; }",
+        "$s = match ($n) { 1 => 1, 2 => 2, default => 3 };",
+        // The program serves no `assert`, which `$n` keeps it from calling.
+        "$n || assert(false);",
+        "try { $s = 1; } finally { $s = 2; }",
+        "try { $s = 1; } catch (A $e) { $s = 2; } catch (B $e) { $s = 3; }",
+    ] {
+        let loops = counted(&past(construct))?;
+        assert_eq!(loops.last(), Some(&true), "past {construct}: {loops:?}");
+        assert!(
+            loops.iter().all(|counted| *counted),
+            "past {construct}: {loops:?}"
+        );
+    }
+    Ok(())
+}
+
+/// A loop reached through a `catch` alone is no loop php counts: one in
+/// the `catch`, and one past a `try` that always throws, where a `finally`
+/// the `try` reaches normally leaves the loops in it and past it counted
+/// (#3201).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_reached_through_a_catch_alone_is_not_counted() -> Result<(), String> {
+    let loops = counted(
+        "function a($n) {
+            try { if ($n) { throw new Exception('x'); } } catch (Exception $e) { for ($i = 0; $i < 2; $i++) {} }
+            try { $y = 1; } finally { for ($j = 0; $j < 2; $j++) {} }
+            for ($k = 0; $k < 2; $k++) {}
+            try { throw new Exception('y'); } catch (Exception $e) {}
+            for ($l = 0; $l < 2; $l++) {}
+            return 1;
+        }
+        echo a(0), \"\\n\";",
+    )?;
+    assert_eq!(loops, [false, true, true, false]);
+    Ok(())
+}
+
+/// A loop's root php counts is never a landing a trace arms, so a return
+/// that lands there reads the loop's word and no landing's
+/// (`dispatch::goes_on`, #3318), as php's `zend_jit_trace_setup_ret_counter`
+/// leaves an opline whose `trace_flags` are set
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:3404-3418`): a trace that hands
+/// on to the interpreter at a call whose landing is a `while`'s condition
+/// arms nothing, where it arms the landing past a call no loop is rooted
+/// at.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_counted_loops_root_is_never_an_armed_landing() -> Result<(), String> {
+    let (recorded, _) = testing::records::recording(
+        &at("a", "enter"),
+        "function g() { return 1; }
+        function a($n) { while ($n-- > 0) { g(); } g(); return $n; }
+        echo a(2), \"\\n\";",
+    )?;
+    let record = &recorded.record;
+    let code = recorded
+        .view
+        .op_array(record.root)
+        .ok_or("the view holds a()")?;
+    let calls: Vec<OplineIdx> = (code.oplines.iter().enumerate())
+        .filter(|(_, op)| op.opcode == Opcode::DoUcall)
+        .filter_map(|(at, _)| u32::try_from(at).ok().map(OplineIdx))
+        .collect();
+    let [inside, past] = calls[..] else {
+        return Err(format!("a() makes two calls: {calls:?}"));
+    };
+    let template = (record.events.iter())
+        .find(|event| matches!(event, Event::Op { .. }))
+        .ok_or("the record has an op")?;
+    let armed = |call: OplineIdx| {
+        let mut handed = record.clone();
+        let mut op = template.clone();
+        if let Event::Op { opline, .. } = &mut op {
+            *opline = call;
+        }
+        (handed.events, handed.stop) = (vec![op], Stop::Interpreter);
+        super::landings(&handed, &recorded.view)
+    };
+    let condition = OplineIdx(inside.0 + 1);
+    assert!(super::header_at(code, condition).is_some());
+    assert_eq!(armed(inside), []);
+    assert_eq!(armed(past), [(record.root, OplineIdx(past.0 + 1))]);
     Ok(())
 }
 
@@ -440,15 +683,19 @@ fn recursion_into_the_root_stops_as_a_recursive_call() -> Result<(), String> {
 
 /// A fatal a step raised ends the recording with no record, and the
 /// request records no more: the shutdown function the fatal leaves to
-/// serve is asked with the exclusion clear.
+/// serve is asked with the exclusion clear. The step is a function
+/// declared twice, whose `DECLARE_FUNCTION` raises its fatal where it
+/// stands; the memory limit's is no step's since php 8.5.12, which
+/// records it as a delayed OOM and raises it at the next safepoint
+/// (`zend_mm_delayed_error`, `zend_handle_delayed_oom`,
+/// `Z/Zend/zend_alloc.c`).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fatal_from_a_step_ends_the_recording_with_no_record() {
-    let mut ini = at("f", "enter");
-    ini.push(("memory_limit", "2M"));
+    let ini = at("f", "enter");
     let (kept, served) = kept(
         &ini,
-        "function f() { $s = 'xxxxxxxx'; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; return 1; }
+        "function f() { $s = 'xx'; $s .= $s; $s .= $s; if (true) { function g() {} } if (true) { function g() {} } return 1; }
         function down() { echo 'shut'; }
         register_shutdown_function('down');
         echo f();",
@@ -459,7 +706,7 @@ fn a_fatal_from_a_step_ends_the_recording_with_no_record() {
         kept.taken.first().map(|taken| taken.record.dump())
     );
     let fatal = served.fatal.clone().unwrap_or_default();
-    assert!(fatal.contains("Allowed memory size"), "{fatal}");
+    assert!(fatal.contains("Cannot redeclare function g()"), "{fatal}");
     assert!(
         testing::stdout(&served).ends_with("shut"),
         "{}",
@@ -585,7 +832,19 @@ impl Draw {
                     .flatten(),
             },
             1 => Event::InitCall {
-                target: (self.next(2) == 0).then(|| self.func()),
+                callee: if self.next(2) == 0 {
+                    Callee::User(self.func())
+                } else {
+                    Callee::Native(
+                        Types::of_bits(u16::try_from(self.next(1 << 13)).unwrap_or(0))
+                            .unwrap_or(Types::ANY),
+                    )
+                },
+                began: if self.next(2) == 0 {
+                    Began::Here
+                } else {
+                    Began::Before
+                },
             },
             2 => Event::Enter { func: self.func() },
             _ => Event::Back,
@@ -619,12 +878,19 @@ impl Draw {
                 .collect(),
             _ => Vec::new(),
         };
+        let landed = match start {
+            Start::Side { .. } if self.next(2) == 0 => super::Landed::Stood,
+            _ => super::Landed::Named,
+        };
+        let link_at = matches!(stop, Stop::Link(_)).then(|| (self.func(), OplineIdx(self.next(9))));
         TraceRecord {
             start,
             root: self.func(),
             entered,
+            landed,
             events,
             stop,
+            link_at,
         }
     }
 }

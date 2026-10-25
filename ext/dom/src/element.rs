@@ -15,17 +15,30 @@ use crate::node::DOMNode;
 use crate::object::{Code, Extra};
 use crate::private::{HTML_NS, html_in_html_document};
 use crate::{
-    check_qname, dom, dom_error, dom_mut, dom_throw, empty_string, fetch, get_ns, intern,
+    carried, check_qname, dom, dom_error, dom_mut, dom_throw, empty_string, fetch, get_ns, intern,
     invalidate, mark_ids_modified, node_list_unlink, nullable_object, object_for,
     resolve_prefix_conflict, returned, set_attribute_id, strict, string, validate_and_extract,
 };
 
 /// What a qualified name finds on an element for the legacy classes: an
-/// attribute, or a namespace declaration `xmlns[:p]` names.
+/// attribute, the default a DTD declares for one the element does not
+/// carry (`XML_ATTRIBUTE_DECL`, which `xmlHasNsProp` answers), or a
+/// namespace declaration `xmlns[:p]` names.
 #[derive(Clone, Copy)]
 enum Found {
     Attr(Node),
+    Default(Node),
     Decl(Ns),
+}
+
+impl Found {
+    /// What `xmlHasNsProp` answered, told apart by its kind ([`carried`]).
+    fn prop(node: Node) -> Found {
+        match carried(Some(node)) {
+            Some(attr) => Found::Attr(attr),
+            None => Found::Default(node),
+        }
+    }
 }
 
 /// `dom_get_attribute_or_nsdecl`: for the modern classes the attribute
@@ -51,7 +64,7 @@ fn attribute_or_decl(modern: bool, elem: Node, name: &[u8]) -> Option<Found> {
         if let Some(ns) = elem.search_ns(Some(prefix))
             && let Some(href) = ns.href()
         {
-            return elem.has_ns_prop(local, Some(&href)).map(Found::Attr);
+            return elem.has_ns_prop(local, Some(&href)).map(Found::prop);
         }
     } else if name == b"xmlns" {
         let mut ns = elem.ns_def();
@@ -63,7 +76,7 @@ fn attribute_or_decl(modern: bool, elem: Node, name: &[u8]) -> Option<Found> {
         }
         return None;
     }
-    elem.has_ns_prop(name, None).map(Found::Attr)
+    elem.has_ns_prop(name, None).map(Found::prop)
 }
 
 /// `dom_get_attribute_ns`: the value, and for the legacy classes a
@@ -106,8 +119,12 @@ fn namespace_node(
     elem: Node,
     ns: Ns,
 ) -> Result<Owner<Value>, Thrown> {
-    let Some(fake) = Node::fake_namespace_decl(elem, ns.href().as_deref(), ns.prefix().as_deref())
-    else {
+    let Some(fake) = Node::fake_namespace_decl(
+        Some(elem),
+        elem.doc(),
+        ns.href().as_deref(),
+        ns.prefix().as_deref(),
+    ) else {
         return Err(dom_throw(req, Code::InvalidState));
     };
     let value = object_for(req, fake, Some(this))?;
@@ -192,9 +209,37 @@ pub(crate) fn mapped_ns(
     Ok(ns.flatten())
 }
 
-/// `dom_remove_attribute`.
-fn remove_found(elem: Node, found: Found) {
+/// `dom_remove_attribute`: whether anything was removed, which a DTD's
+/// default never is (GH-22825); the element reads the default, and a
+/// write gives it an attribute of its own.
+///
+/// ```php
+/// foreach (['A CDATA #FIXED "d"', 'A CDATA "d"'] as $decl) {
+///     $el = fn() => (function () use ($decl) { $d = new DOMDocument; $d->loadXML("<!DOCTYPE r [<!ATTLIST r $decl>]><r/>"); return $d->documentElement; })();
+///     $e = $el(); var_dump($e->hasAttribute('A'), $e->getAttribute('A'), $e->removeAttribute('A'), $e->hasAttribute('A'));
+///     $e = $el(); var_dump($e->toggleAttribute('A', false), $e->toggleAttribute('A', true));
+///     $e = $el(); echo get_class($e->setAttribute('A', 'v')), ' ', $e->ownerDocument->saveXML($e), "\n";
+/// }
+/// ```
+/// ```expect
+/// bool(true)
+/// string(1) "d"
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// DOMAttr <r A="v"/>
+/// bool(true)
+/// string(1) "d"
+/// bool(false)
+/// bool(true)
+/// bool(true)
+/// bool(true)
+/// DOMAttr <r A="v"/>
+/// ```
+fn remove_found(elem: Node, found: Found) -> bool {
     match found {
+        Found::Default(_) => return false,
         Found::Attr(a) => {
             if a.object().is_none() {
                 node_list_unlink(a.children());
@@ -206,7 +251,7 @@ fn remove_found(elem: Node, found: Found) {
         }
         Found::Decl(ns) => {
             let Some(first) = elem.ns_def() else {
-                return;
+                return true;
             };
             if first == ns {
                 elem.set_ns_def(ns.next());
@@ -225,6 +270,7 @@ fn remove_found(elem: Node, found: Found) {
             deep_ns_redef(elem, ns);
         }
     }
+    true
 }
 
 /// `dom_deep_ns_redef`: every use of `removed` under `node` given a
@@ -284,10 +330,7 @@ fn set_attribute_ns_legacy(
             mark_ids_modified(req, this);
             match uri.filter(|u| !u.is_empty()) {
                 Some(uri) => {
-                    if let Some(existing) = elem
-                        .has_ns_prop(&local, Some(uri))
-                        .filter(|a| a.kind() != Kind::AttributeDecl)
-                    {
+                    if let Some(existing) = carried(elem.has_ns_prop(&local, Some(uri))) {
                         node_list_unlink(existing.children());
                     }
                     let is_xmlns = (prefix.as_deref() == Some(b"xmlns")
@@ -339,10 +382,7 @@ fn set_attribute_ns_legacy(
                 }
                 None => {
                     if Name::valid(&local) {
-                        if let Some(existing) = elem
-                            .has_prop(&local)
-                            .filter(|a| a.kind() != Kind::AttributeDecl)
-                        {
+                        if let Some(existing) = carried(elem.has_prop(&local)) {
                             node_list_unlink(existing.children());
                         }
                         elem.set_prop(&local, value);
@@ -362,7 +402,26 @@ fn set_attribute_ns_legacy(
 }
 
 /// `dom_set_attribute_ns_modern`: the name validated and split, its
-/// namespace the mapper's one declaration.
+/// namespace the mapper's one declaration; the children of the attribute
+/// it replaces that a wrapper names kept, detached.
+///
+/// ```php
+/// $d = Dom\XMLDocument::createFromString('<r xmlns:p="urn:x" p:a="old" b="old"/>');
+/// $r = $d->documentElement;
+/// $t = $r->getAttributeNodeNS('urn:x', 'a')->firstChild;
+/// $u = $r->getAttributeNode('b')->firstChild;
+/// $r->setAttributeNS('urn:x', 'p:a', 'new');
+/// $r->setAttributeNS(null, 'b', 'new');
+/// var_dump($t->parentNode, $t->data, $u->parentNode, $u->data, $r->getAttributeNS('urn:x', 'a'), $r->getAttribute('b'));
+/// ```
+/// ```expect
+/// NULL
+/// string(3) "old"
+/// NULL
+/// string(3) "old"
+/// string(3) "new"
+/// string(3) "new"
+/// ```
 fn set_attribute_ns_modern(
     req: &mut Request,
     this: PhpObject,
@@ -377,6 +436,11 @@ fn set_attribute_ns_modern(
         Err(code) => return Err(dom_throw(req, code)),
     };
     let ns = mapped_ns(req, this, elem.doc(), prefix.as_deref(), namespace)?;
+    // The attribute replaced keeps the children a wrapper names, detached,
+    // where `xmlSetNsProp` would free them (php 8.5.12).
+    if let Some(existing) = carried(elem.has_ns_prop(&local, ns.and_then(Ns::href).as_deref())) {
+        node_list_unlink(existing.children());
+    }
     match elem.set_ns_prop(ns, &local, value) {
         Some(attr) => {
             register_attribute_id(req, this, attr);
@@ -591,12 +655,12 @@ fn set_attribute(
         return Ok(Owner::null());
     }
     match attribute_or_decl(false, elem, name) {
-        Some(Found::Attr(a)) if a.kind() == Kind::Attribute => {
+        Some(Found::Attr(a)) => {
             crate::attr_value_will_change(req, this, a);
             node_list_unlink(a.children());
         }
         Some(Found::Decl(_)) => return Ok(Owner::bool(false)),
-        _ => {}
+        Some(Found::Default(_)) | None => {}
     }
     if name == b"xmlns" {
         return Ok(match elem.new_ns(value, None) {
@@ -612,7 +676,23 @@ fn set_attribute(
 
 /// `dom_element_set_attribute_node_common`: the modern classes refuse an
 /// attribute another element owns and adopt one of another document,
-/// where the legacy ones refuse it.
+/// where the legacy ones refuse it. An attribute in no namespace replaces
+/// the one of its name in none, never one in a namespace.
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createEmpty();
+/// $c = $d->appendChild($d->createElement('c'));
+/// [$a1, $a2, $a4] = [$d->createAttribute('m'), $d->createAttribute('m'), $d->createAttributeNS('urn:a', 'm')];
+/// $c->setAttributeNode($a1);
+/// $c->setAttributeNode($a4);
+/// var_dump($c->setAttributeNode($a2) === $a1, $c->setAttributeNode($a1) === $a2);
+/// echo $d->saveXml($c), "\n";
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// <c xmlns="http://www.w3.org/1999/xhtml" xmlns:ns1="urn:a" ns1:m="" m=""></c>
+/// ```
 fn set_attribute_node(
     req: &mut Request,
     this: PhpObject,
@@ -635,11 +715,13 @@ fn set_attribute_node(
         dom_error(req, Code::WrongDocument, strict)?;
         return Ok(Owner::bool(false));
     }
-    let existing = match attr.ns().and_then(Ns::href).filter(|_| use_ns) {
-        Some(href) => elem.has_ns_prop(&attr.name(), Some(&href)),
-        None => elem.has_prop(&attr.name()),
-    }
-    .filter(|a| a.kind() != Kind::AttributeDecl);
+    // An attribute in no namespace replaces one in none, never one of the
+    // name in a namespace (php 8.5.12, GH-22447).
+    let existing = carried(match (attr.ns().and_then(Ns::href), use_ns) {
+        (Some(href), true) => elem.has_ns_prop(&attr.name(), Some(&href)),
+        (None, _) => elem.has_ns_prop(&attr.name(), None),
+        (Some(_), false) => elem.has_prop(&attr.name()),
+    });
     if let Some(old) = existing {
         if old == attr {
             return Ok(Owner::null());
@@ -674,10 +756,7 @@ fn set_id_attribute_ns(
     is_id: bool,
 ) -> Result<(), Thrown> {
     let elem = fetch(req, this)?;
-    if let Some(a) = elem
-        .has_ns_prop(name, Some(uri))
-        .filter(|a| a.kind() != Kind::AttributeDecl)
-    {
+    if let Some(a) = carried(elem.has_ns_prop(name, Some(uri))) {
         set_attribute_id(req, this, a, is_id);
     } else {
         let strict = strict(req, this);
@@ -718,7 +797,7 @@ fn get_attribute_node(
         None if modern => Ok(Owner::null()),
         None => Ok(Owner::bool(false)),
         Some(Found::Decl(ns)) => namespace_node(req, this, elem, ns),
-        Some(Found::Attr(a)) => object_for(req, a, Some(this)),
+        Some(Found::Attr(a) | Found::Default(a)) => object_for(req, a, Some(this)),
     }
 }
 
@@ -943,9 +1022,10 @@ impl DOMElement {
         let elem = fetch(req, this)?;
         let modern = follows_spec(req, this);
         let value = match attribute_or_decl(modern, elem, qualifiedName.as_bytes()) {
-            Some(Found::Attr(a)) if a.kind() == Kind::Attribute => a.list_string(),
+            Some(Found::Attr(a)) => a.list_string(),
+            Some(Found::Default(d)) => d.attribute_decl_default(),
             Some(Found::Decl(ns)) => ns.href(),
-            _ => None,
+            None => None,
         };
         let value = match value {
             Some(v) => string(req, &v)?,
@@ -1194,10 +1274,7 @@ impl DOMElement {
         let modern = follows_spec(req, this);
         match attribute_or_decl(modern, elem, qualifiedName.as_bytes()) {
             None => Ok(false),
-            Some(found) => {
-                remove_found(elem, found);
-                Ok(true)
-            }
+            Some(found) => Ok(remove_found(elem, found)),
         }
     }
 
@@ -1272,7 +1349,7 @@ impl DOMElement {
                 return Ok(());
             }
         }
-        if let Some(a) = attr.filter(|a| a.kind() != Kind::AttributeDecl) {
+        if let Some(a) = carried(attr) {
             remove_found(elem, Found::Attr(a));
         }
         Ok(())
@@ -1474,10 +1551,7 @@ impl DOMElement {
     ) -> Result<(), Thrown> {
         let this = this.object();
         let elem = fetch(req, this)?;
-        if let Some(a) = elem
-            .has_ns_prop(qualifiedName.as_bytes(), None)
-            .filter(|a| a.kind() != Kind::AttributeDecl)
-        {
+        if let Some(a) = carried(elem.has_ns_prop(qualifiedName.as_bytes(), None)) {
             set_attribute_id(req, this, a, isId);
         } else {
             let strict = strict(req, this);
@@ -1608,8 +1682,7 @@ impl DOMElement {
             }
             Some(found) => {
                 if force != Some(true) {
-                    remove_found(elem, found);
-                    return Ok(false);
+                    return Ok(!remove_found(elem, found));
                 }
                 Ok(true)
             }
@@ -1627,7 +1700,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::before(req, this.object(), &nodes.0)
+        crate::parent::before(req, this.object(), &nodes)
     }
 
     /// `after(DOMNode|string ...$nodes): void`.
@@ -1636,7 +1709,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::after(req, this.object(), &nodes.0)
+        crate::parent::after(req, this.object(), &nodes)
     }
 
     /// `replaceWith(DOMNode|string ...$nodes): void`.
@@ -1645,7 +1718,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::replace_with(req, this.object(), &nodes.0)
+        crate::parent::replace_with(req, this.object(), &nodes)
     }
 
     /// `append(DOMNode|string ...$nodes): void`.
@@ -1654,7 +1727,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::append(req, this.object(), &nodes.0)
+        crate::parent::append(req, this.object(), &nodes)
     }
 
     /// `prepend(DOMNode|string ...$nodes): void`.
@@ -1663,7 +1736,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::prepend(req, this.object(), &nodes.0)
+        crate::parent::prepend(req, this.object(), &nodes)
     }
 
     /// `replaceChildren(DOMNode|string ...$nodes): void`.
@@ -1672,7 +1745,7 @@ impl DOMElement {
         this: This<Self>,
         nodes: Variadic<Untyped<Value>>,
     ) -> Result<(), Thrown> {
-        crate::parent::replace_children(req, this.object(), &nodes.0)
+        crate::parent::replace_children(req, this.object(), &nodes)
     }
 
     /// `DOMElement::insertAdjacentElement(string $where, DOMElement $element): ?DOMElement`.

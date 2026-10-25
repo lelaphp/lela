@@ -19,8 +19,10 @@
 //! type with what was followed to it and its class, `object#3`; a
 //! conditional jump is `taken` or `fell`; a side trace's start is
 //! `side <parent>/<exit>`, the slots its parent's exit knew the types of
-//! an `entered` line of `var:kind` after the root, and a link's stop
-//! `link <trace>`.
+//! an `entered` line of `var:kind` after the root, a `landed stood` line
+//! after it where the parent's exit names no opline, and a link's stop
+//! `link <trace>`, after a `link-at` line naming the op array and opline
+//! it hands on at.
 
 use std::fmt::Write as _;
 
@@ -28,9 +30,10 @@ use php_engine::tier::{self, FuncRef, Sample};
 use php_heap::ZvalType;
 use php_unit::{MapPtrOffset, OplineIdx};
 
-use super::{Entered, Event, Start, Stop, TraceRecord, func_name as func};
+use super::{Began, Callee, Entered, Event, Landed, Start, Stop, TraceRecord, func_name as func};
 use crate::table::TraceId;
 use crate::types::ExitId;
+use crate::types::Types;
 
 /// Why a text is no [`TraceRecord`]: the line, from one, and what it
 /// held where a field was due.
@@ -73,6 +76,9 @@ impl TraceRecord {
                 .collect();
             writeln!(text, "entered {}", slots.join(" ")).unwrap_or_default();
         }
+        if self.landed == Landed::Stood {
+            writeln!(text, "landed stood").unwrap_or_default();
+        }
         for event in &self.events {
             match event {
                 Event::Op {
@@ -96,13 +102,22 @@ impl TraceRecord {
                         Some(false) => "fell",
                     }
                 ),
-                Event::InitCall { target } => {
-                    writeln!(text, "init {}", target.map_or("-".to_owned(), func))
-                }
+                Event::InitCall { callee, began } => writeln!(
+                    text,
+                    "{} {}",
+                    began.word(),
+                    match callee {
+                        Callee::User(f) => func(*f),
+                        Callee::Native(returns) => format!("native:{:04x}", returns.bits()),
+                    }
+                ),
                 Event::Enter { func: f } => writeln!(text, "enter {}", func(*f)),
                 Event::Back => writeln!(text, "back"),
             }
             .unwrap_or_default();
+        }
+        if let Some((f, at)) = self.link_at {
+            writeln!(text, "link-at {} {}", func(f), at.0).unwrap_or_default();
         }
         writeln!(text, "stop {}", self.stop.written()).unwrap_or_default();
         text
@@ -123,6 +138,8 @@ impl TraceRecord {
             .ok_or_else(|| refused(at, line))?;
         let mut events = Vec::new();
         let mut entered = Vec::new();
+        let mut landed = Landed::Named;
+        let mut link_at = None;
         for (at, line) in lines {
             if let Some(stop) = line.strip_prefix("stop ") {
                 let stop = parse_stop(stop).ok_or_else(|| refused(at, line))?;
@@ -130,15 +147,34 @@ impl TraceRecord {
                     start,
                     root,
                     entered,
+                    landed,
                     events,
                     stop,
+                    link_at,
                 });
+            }
+            if let Some(place) = line.strip_prefix("link-at ")
+                && link_at.is_none()
+            {
+                let (f, opline) = place.split_once(' ').ok_or_else(|| refused(at, line))?;
+                let f = parse_func(f).ok_or_else(|| refused(at, line))?;
+                let opline = opline.parse().map_err(|_| refused(at, line))?;
+                link_at = Some((f, OplineIdx(opline)));
+                continue;
             }
             if let Some(slots) = line.strip_prefix("entered ")
                 && events.is_empty()
                 && entered.is_empty()
             {
                 entered = parse_entered(slots).ok_or_else(|| refused(at, line))?;
+                continue;
+            }
+            if line == "landed stood"
+                && start.grew().is_some()
+                && events.is_empty()
+                && landed == Landed::Named
+            {
+                landed = Landed::Stood;
                 continue;
             }
             events.push(parse_event(line).ok_or_else(|| refused(at, line))?);
@@ -285,10 +321,17 @@ fn parse_event(line: &str) -> Option<Event> {
                 _ => return None,
             },
         },
-        "init" => Event::InitCall {
-            target: match words.next()? {
-                "-" => None,
-                f => Some(parse_func(f)?),
+        word @ ("init" | "fake-init") => Event::InitCall {
+            callee: match words.next()? {
+                native if native.starts_with("native:") => Callee::Native(Types::of_bits(
+                    u16::from_str_radix(native.strip_prefix("native:")?, 16).ok()?,
+                )?),
+                f => Callee::User(parse_func(f)?),
+            },
+            began: if word == Began::Here.word() {
+                Began::Here
+            } else {
+                Began::Before
             },
         },
         "enter" => Event::Enter {

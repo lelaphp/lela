@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use php_heap::{Fatal, FrameRef, Heap, HeapHooks, Obj, Ref, Res, ResourceType, Zval, ZvalRef};
 use php_link::LinkedClass;
+use php_unit::PublishedUnit;
 use php_unit::decl::{ClassDecl, FunctionDecl, HookKind, Visibility};
-use php_unit::{PublishedUnit, Unit};
 
 use crate::api::abi::GcTable;
 use crate::api::call::Function;
@@ -38,7 +38,8 @@ pub use execution::Execution;
 /// it, its `base` and `max_size` ([`Limits::call_stack_bounds`]).
 pub use php_heap::CallStack;
 pub use unit_cache::{
-    CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, UnitCache,
+    CacheBudget, CacheStatus, CachedFile, Invalidation, PreloadStatistics, Restart, TierStatus,
+    UnitCache,
 };
 
 mod autoload;
@@ -57,7 +58,7 @@ pub(crate) use objects::placed_of;
 mod calls;
 pub use calls::Supplier;
 mod class_constants;
-pub(crate) use class_constants::ConstantFetch;
+pub(crate) use class_constants::{ByValue, ConstantFetch, ConstantRead};
 mod class_data;
 pub(crate) use class_data::PropertyNames;
 mod classes;
@@ -106,6 +107,7 @@ pub use limits::{Interrupt, TimeLimitSuspended};
 mod linking;
 mod load_file;
 mod memory;
+pub(crate) use memory::Pushed;
 pub use memory::{Allocation, AllocationObserverId, Memory, ObserveAllocations};
 pub use memory::{StandaloneHeap, ecalloc, efree, emalloc, erealloc};
 mod methods;
@@ -113,12 +115,13 @@ use methods::visibility_string;
 pub use methods::{MethodRow, PropertyInfoRow};
 mod objects;
 mod observing;
+mod oom;
 mod op_arrays;
 pub(crate) use observing::{ObservedChain, OpenCall};
 pub use op_arrays::{ConstIdx, OpArrayView, Opcode, Operand, OplineIdx, OplineView};
 pub(crate) mod paths;
 pub use paths::RealpathEntry;
-pub(crate) use paths::is_wrapper_url;
+pub(crate) use paths::{is_cacheable_stream_path, is_wrapper_url};
 mod pending;
 pub(crate) use pending::Leaving;
 pub use pending::Raised;
@@ -170,11 +173,11 @@ pub use variables::{BodyLimits, Input};
 pub use zone::Zone;
 
 pub(crate) use hooks::parent_hook_trampolines;
-pub(crate) use lazy::Strategy;
+pub(crate) use lazy::{RawWrite, Strategy};
 pub(crate) use preload::{Keyed, Named, Preloaded, Preloading};
 
 /// php's version, what `PHP_VERSION` and `phpversion()` say.
-pub const PHP_VERSION: &str = "8.5.9";
+pub const PHP_VERSION: &str = "8.5.12";
 
 /// A linked extension, by identity: its `module_number`, where its
 /// `zend_module_entry` stands in `module_registry`: `Core` zero, as
@@ -197,13 +200,6 @@ impl ExtensionId {
     #[cfg(debug_assertions)]
     pub(crate) fn origin(self) -> php_heap::Origin {
         php_heap::Origin::new(u16::try_from(self.0).unwrap_or(u16::MAX))
-    }
-
-    /// The extension a debug build's heap names by `origin`, the inverse
-    /// of [`ExtensionId::origin`].
-    #[cfg(debug_assertions)]
-    pub(crate) fn of_origin(origin: php_heap::Origin) -> ExtensionId {
-        ExtensionId(u32::from(origin.number()))
     }
 }
 
@@ -259,6 +255,15 @@ pub enum Unresolved {
 #[allow(clippy::struct_excessive_bools)] // php's EG and PG flags, each its own global, read alone
 pub struct Request {
     pub(crate) shared: Arc<Shared>,
+    /// The tier's state, laid with the request and never written again:
+    /// private to `api::request`, where the request is made, and read
+    /// elsewhere through [`Request::tier_state`] alone, so a `&mut` of the
+    /// field or a write over it anywhere else fails to compile; a write
+    /// over the whole request does not ([`crate::tier::TierState`]).
+    tier: crate::tier::TierState,
+    /// The units the loop's servings held, kept with their shares for the
+    /// next serving ([`crate::tier::UnitsLeft`]).
+    pub(crate) units_left: crate::tier::UnitsLeft,
     description: RequestDescription,
     /// The uncaught throwable kept for a host that renders it ([`inspect::Inspected`]).
     inspect: inspect::Inspected,
@@ -496,10 +501,10 @@ pub struct Request {
     /// constants and their names, held while each unit lives
     /// ([`unit_strings::UnitStrings`]).
     unit_strings: unit_strings::UnitStrings,
-    /// `CG(loop_var_stack)`'s elements and how many they hold, laid down
-    /// by the first compile of the request that pushed one and kept to
-    /// its end ([`Request::note_loop_vars`]).
-    loop_var_stack: Option<(php_heap::Block, u32)>,
+    /// `CG(loop_var_stack)`'s and `CG(delayed_oplines_stack)`'s elements,
+    /// laid down by the first compile of the request that pushed onto
+    /// one and kept to its end ([`Request::note_pushed`]).
+    compiler_stacks: memory::CompilerStacks,
     /// php's `EG(function_table)` past the natives, each function under
     /// its name: the preload's, published, in the order its table holds
     /// them, then each the request declared, in the order declared. A
@@ -638,12 +643,29 @@ pub(crate) struct UserFunction {
 }
 
 impl UserFunction {
-    /// The record of `body` of `unit` under `name`; none for a body
-    /// the unit has not.
-    pub(crate) fn record(unit: &Unit, body: exec::Body, name: &[u8]) -> crate::readable::Record {
-        exec::body_of(unit, body).map_or_else(crate::readable::Record::default, |code| {
-            crate::readable::Record::user(name, code)
-        })
+    /// The row of `body` of `unit`, declared as `decl`: its flags, its
+    /// frame's shape and its record read off the declaration and the op
+    /// array, where the unit has the body.
+    pub(crate) fn of(
+        unit: PublishedUnit,
+        body: exec::Body,
+        member: Option<Member>,
+        decl: &FunctionDecl,
+        observed: bool,
+    ) -> UserFunction {
+        let code = exec::body_of(&unit, body);
+        let shape = FrameShape::of(decl, code, observed);
+        let record = code.map_or_else(crate::readable::Record::default, |code| {
+            crate::readable::Record::user(&decl.name.0, code)
+        });
+        UserFunction {
+            flags: crate::attributes::Flags::of(&decl.attributes),
+            unit,
+            body,
+            member,
+            shape,
+            record,
+        }
     }
 
     /// Where the function's record stands, what a frame serving it
@@ -778,8 +800,8 @@ pub(crate) struct FrameShape {
     pub(crate) entry: u32,
     /// `ZEND_MAP_PTR(op_array->run_time_cache)`.
     pub(crate) cache: exec::CacheAt,
-    /// `op_array.cache_size`.
-    pub(crate) cache_size: u32,
+    /// `op_array.cache_size`, its slots and its room.
+    pub(crate) cache_size: exec::CacheSize,
     /// Whether a parameter, the variadic's included, takes its argument
     /// by reference: a call to a function none of whose parameters does
     /// sends every argument by value, which the `SEND_*_EX` oplines read
@@ -821,7 +843,7 @@ impl FrameShape {
             cache: code.map_or_else(exec::CacheAt::default, |code| {
                 exec::CacheAt::of(code.runtime_cache)
             }),
-            cache_size: code.map_or(0, |code| code.cache_size),
+            cache_size: code.map_or_else(exec::CacheSize::default, exec::CacheSize::of),
             by_ref: decl.parameters.iter().any(|p| p.by_ref),
             sent: exec::CallInfo::sent(|number| {
                 sent_parameter(decl, number).is_some_and(|parameter| parameter.by_ref)
@@ -922,12 +944,23 @@ pub(crate) struct Placed {
     /// `zend_property_info` its one find answers. Empty for a class with
     /// no record.
     rows: Box<[RowPlace]>,
+    /// The slots `do_inherit_property` leaves `IS_UNDEF` in
+    /// `default_properties_table` over the lineage, one for each property
+    /// a class redeclares over its parent's: php's object keeps them
+    /// though no property names one, and this engine places the property
+    /// in one slot alone ([`objects::placed_of`]).
+    holes: u32,
 }
 
 impl Placed {
     /// The declared instance properties in slot order.
     pub(crate) fn slots(&self) -> &[PropertyInfo] {
         &self.slots
+    }
+
+    /// [`Placed::holes`].
+    pub(crate) fn holes(&self) -> u32 {
+        self.holes
     }
 }
 
@@ -1015,39 +1048,48 @@ impl Declared {
 /// declared at its top level, or one a `DECLARE_FUNCTION` bound where
 /// it stood. None for a method, whose declaration is its class's.
 fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
-    match user.body {
-        exec::Body::Function(at) => user
-            .unit
-            .functions
-            .get(usize::try_from(at).ok()?)
-            .map(|(decl, _)| decl),
-        exec::Body::Dynamic(at) => user
-            .unit
-            .dynamic
-            .get(usize::try_from(at).ok()?)
-            .map(|(decl, _)| decl),
-        exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => None,
-    }
+    let (table, at) = match user.body {
+        exec::Body::Function(at) => (&user.unit.functions, at),
+        exec::Body::Dynamic(at) => (&user.unit.dynamic, at),
+        exec::Body::Main | exec::Body::Method(_) | exec::Body::Hook(_) => return None,
+    };
+    Some(&table.get(usize::try_from(at).ok()?)?.0)
 }
 
 impl Request {
+    /// The tier's state the request was laid with, shared: the one way to
+    /// it outside `api::request`, so nothing there borrows it mutably or
+    /// replaces it ([`crate::tier::state`]).
+    #[inline]
+    pub(crate) fn tier_state(&self) -> &crate::tier::TierState {
+        &self.tier
+    }
+
     /// A request no host lent a sink, which keeps what it writes in one
     /// of its own that no host reads: the engine's startup, its end where
     /// the host left no sink ([`EngineBuilder::ends_into`](crate::engine::EngineBuilder::ends_into)), and a unit
     /// test's.
-    pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Request {
+    pub(crate) fn new(shared: Arc<Shared>, description: RequestDescription) -> Box<Request> {
         Request::lent(shared, description, Box::new(response::Kept::default()))
     }
 
     /// A request the host lent `sink`, which every call reaches as the
     /// request makes it and which [`Request::release_sink`] hands back
     /// (design §4.3 seam 4).
+    ///
+    /// The request is boxed here, once, and held by its box wherever it
+    /// is served: php's request state is `EG()`, a global, so none of it
+    /// stands on the C stack its walks recurse down, and a `Request` held
+    /// by value put its ten kilobytes, and a copy, under every frame of
+    /// the request (#3209). A call of its own, so the value made in place
+    /// before it is boxed stands in this frame and no caller's.
     #[allow(clippy::too_many_lines)] // one line per field of the request
+    #[inline(never)]
     pub(crate) fn lent(
         shared: Arc<Shared>,
         description: RequestDescription,
         sink: Box<dyn OutputSink + Send>,
-    ) -> Request {
+    ) -> Box<Request> {
         let cwd = description.cwd.clone();
         let exit_status = description.exit_status;
         let output = Output::activate(description.web.as_ref());
@@ -1072,11 +1114,13 @@ impl Request {
             .arena
             .enter(|arena| shared.units.restart(&arena.files));
         let typed_ini = shared.typed_ini;
-        let mut req = Request {
+        let mut req = Box::new(Request {
             // Fields are made in the order written: the request stands
             // inside the engine before its deadlines are laid.
             _inside: crate::fork::Inside::enter(),
             limits: limits::LimitsState::new(&shared.timer),
+            tier: crate::tier::TierState::laid(&shared),
+            units_left: crate::tier::UnitsLeft::default(),
             shared,
             description,
             inspect: inspect::Inspected::default(),
@@ -1142,7 +1186,7 @@ impl Request {
             user_functions: PinnedRows::default(),
             named_callees: std::collections::HashMap::new(),
             unit_strings: unit_strings::UnitStrings::default(),
-            loop_var_stack: None,
+            compiler_stacks: memory::CompilerStacks::default(),
             functions: tables.functions,
             static_vars: static_vars::StaticVars::default(),
             preloading: None,
@@ -1154,7 +1198,11 @@ impl Request {
             hold: hold::Holding::default(),
             traces: traces::Scratch::default(),
             foreign: foreign::Table::default(),
-        };
+        });
+        // The word a delayed OOM raises, php's `EG(vm_interrupt)`, which
+        // `zend_mm_delayed_verror` stores (#3260).
+        let word = req.limits().interrupt().word();
+        req.heap.wake_on_oom(word);
         req.activate();
         req
     }
@@ -1197,15 +1245,16 @@ impl Request {
         &mut self.weakrefs
     }
 
-    /// `CG(rtd_key_counter)` over the units this request compiled for
-    /// itself: where the next compile counts its runtime definition keys
-    /// on from ([`crate::engine::Shared::compile_for`]).
+    /// `CG(rtd_key_counter)` over the compiles made for this request, its
+    /// own ([`crate::engine::Shared::compile_for`]) and the files the unit
+    /// cache compiled for it ([`crate::engine::Shared::compile_file`]):
+    /// where the next compile counts its runtime definition keys on from.
     pub(crate) fn keys_made(&self) -> u32 {
         self.keys_made
     }
 
-    /// The `made` runtime definition keys of a compile this request just
-    /// made for itself, counted on, saturating at `u32::MAX`.
+    /// The `made` runtime definition keys of a compile just made for this
+    /// request, counted on, saturating at `u32::MAX`.
     pub(crate) fn count_keys_made(&mut self, made: u32) {
         self.keys_made = self.keys_made.saturating_add(made);
     }
@@ -1585,6 +1634,66 @@ mod tests {
     use super::Request;
     use crate::engine::Engine;
 
+    /// A tier state laid for the test, so a lend has a state to lend.
+    struct Laying;
+
+    impl crate::tier::Tier for Laying {
+        type State = u32;
+
+        fn safepoint(
+            _: &mut Request,
+            _: php_heap::FrameRef,
+            _: crate::tier::Site,
+            _: crate::tier::Held<'_>,
+        ) -> crate::tier::Flow {
+            crate::tier::Flow::Continue
+        }
+
+        fn lay(_: &crate::tier::Started<'_>) -> Option<u32> {
+            Some(7)
+        }
+    }
+
+    /// The rule the lend of a request's tier state stands on (#3437,
+    /// `php_jit`'s `enter::lent`): `api::request`, the one place the
+    /// types leave able to, replacing the state while a tier lends it
+    /// fails the lend's debug assertion as the old state drops.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "while a tier lent it")]
+    fn a_tier_state_replaced_while_lent_fails_the_lends_assertion() {
+        let engine = Engine::cli_builder().tier::<Laying>().build();
+        let mut req = Request::new(
+            std::sync::Arc::clone(&engine.shared),
+            crate::engine::RequestDescription::default(),
+        );
+        assert_eq!(
+            crate::tier::state::<u32>(&req),
+            Some(&7),
+            "the state is laid"
+        );
+        let lending = crate::tier::lending(&req);
+        req.tier = crate::tier::TierState::laid(&req.shared);
+        drop(lending);
+    }
+
+    /// The same state, replaced once no lend stands: no assertion fails.
+    #[test]
+    fn a_tier_state_replaced_with_no_lend_standing_is_dropped_quietly() {
+        let engine = Engine::cli_builder().tier::<Laying>().build();
+        let mut req = Request::new(
+            std::sync::Arc::clone(&engine.shared),
+            crate::engine::RequestDescription::default(),
+        );
+        drop(crate::tier::lending(&req));
+        req.tier = crate::tier::TierState::laid(&req.shared);
+        assert_eq!(
+            crate::tier::state::<u32>(&req),
+            Some(&7),
+            "the state is laid again"
+        );
+    }
+
     /// A class declaring `__destruct`, as an extension declares one:
     /// what [`Request::destruct`] looks for on the class of the object
     /// it is handed. Its entry is never served, since the branch under
@@ -1630,11 +1739,7 @@ mod tests {
     fn never_served(
         req: &mut Request,
     ) -> Result<crate::api::values::Owner<crate::api::values::Value>, super::Thrown> {
-        Err(crate::api::raising::throw_error(
-            req,
-            "Error",
-            "the destructor was served",
-        ))
+        Err(crate::api::raising::error(req, "the destructor was served"))
     }
 
     /// The same entry, serving: what a native class's `__destruct` is,

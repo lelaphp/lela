@@ -10,7 +10,8 @@ use php_ext_mysqlnd::client::{
     Fetched, Field, FieldType, ResultSet, Stmt as Ps, StmtFetch, column,
 };
 use php_ext_pdo::connector::{
-    BindEvent, BindKind, Binding, Column, Executed, Failure, Orientation, SqlState, Statement,
+    BindEvent, BindKind, Binding, Column, CursorCloser, Executed, Failure, Orientation, Rowsets,
+    SqlState, Statement,
 };
 
 use crate::driver::{Einfo, H, error_of, handle, persistent};
@@ -538,6 +539,33 @@ impl Statement for Stmt {
         Ok(meta)
     }
 
+    /// `next_rowset`, `pdo_mysql_stmt_next_rowset`.
+    fn rowsets(&mut self) -> Option<&mut dyn Rowsets> {
+        Some(self)
+    }
+
+    /// `cursor_closer`, `pdo_mysql_stmt_cursor_closer`.
+    fn cursor_closer(&mut self) -> Option<&mut dyn CursorCloser> {
+        Some(self)
+    }
+
+    /// `pdo_mysql_stmt_dtor`.
+    fn close(&mut self, req: &mut Request) {
+        self.einfo.free(req);
+        self.free_rows(req).ok();
+        if let Some(ps) = self.ps.take() {
+            ps.close(req, false).ok();
+        }
+        if !self.done {
+            self.drain(req).ok();
+        }
+        if let Some(held) = self.held.take() {
+            held.free(req);
+        }
+    }
+}
+
+impl Rowsets for Stmt {
     /// `pdo_mysql_stmt_next_rowset`.
     fn next_rowset(&mut self, req: &mut Request) -> Result<Executed, Failure> {
         self.free_rows(req)?;
@@ -556,7 +584,9 @@ impl Statement for Stmt {
         }
         self.fill_from_result(req)
     }
+}
 
+impl CursorCloser for Stmt {
     /// `pdo_mysql_stmt_cursor_closer`.
     fn close_cursor(&mut self, req: &mut Request) -> Result<(), Failure> {
         self.done = true;
@@ -568,21 +598,6 @@ impl Statement for Stmt {
             return Err(self.error(req));
         }
         Ok(())
-    }
-
-    /// `pdo_mysql_stmt_dtor`.
-    fn close(&mut self, req: &mut Request) {
-        self.einfo.free(req);
-        self.free_rows(req).ok();
-        if let Some(ps) = self.ps.take() {
-            ps.close(req, false).ok();
-        }
-        if !self.done {
-            self.drain(req).ok();
-        }
-        if let Some(held) = self.held.take() {
-            held.free(req);
-        }
     }
 }
 

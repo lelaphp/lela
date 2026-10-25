@@ -71,6 +71,7 @@ mod reply;
 mod rust;
 pub mod scratch;
 mod seat;
+pub mod sha256;
 mod sources;
 pub mod status;
 pub mod steer;
@@ -196,6 +197,21 @@ pub(crate) fn remove(path: &Path) -> Result<()> {
 /// error naming it where it cannot be.
 pub(crate) fn make_dir(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))
+}
+
+/// The file at `path` opened to be locked, made where it is not there yet
+/// and left as it stands where it is.
+pub(crate) fn lock_file(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut options = std::fs::File::options();
+    options.read(true).write(true).create(true).truncate(false);
+    options.open(path)
+}
+
+/// The value under `lock`, a poisoned one included: a thread that panicked
+/// holding it leaves what it gathered as it was.
+pub(crate) fn locked<T>(lock: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// The directory the file at `path` goes in, made as [`make_dir`] makes
@@ -369,7 +385,8 @@ fn said(laid: Result<new_ext::Laid>) -> Result<()> {
 /// `steer`: one proposal judged against the harness's own file and
 /// applied where it only adds, as one reading.
 fn steer(root: &Path, store: &Store, file: &str, from: &Path, dry: bool) -> Result<()> {
-    record(store, &[steer::run(root, file, from, dry)?])
+    let manifest = steer::binding(root)?;
+    record(store, &[steer::run(root, &manifest, file, from, dry)?])
 }
 
 /// What every instrument ends with: each reading printed as one line and

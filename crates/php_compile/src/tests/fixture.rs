@@ -204,7 +204,10 @@ pub(super) fn bundled() -> Options<'static> {
     Options {
         functions: Indexed::new(&NATIVES, &NAMES),
         frameless: &FRAMELESS,
-        persistent: Indexed::new(&PERSISTENT, &CONSTANT_NAMES),
+        persistent: crate::Persistent {
+            declared: Indexed::new(&PERSISTENT, &CONSTANT_NAMES),
+            host: None,
+        },
         ..Options::default()
     }
 }
@@ -265,7 +268,7 @@ pub(super) fn oplines_of(source: &[u8]) -> String {
 
 /// The message one source refuses with, or nothing.
 pub(super) fn refused_message(source: &[u8]) -> Option<String> {
-    refused(source).map(|e| e.message.into_owned())
+    refused(source).map(|e| e.message.to_string())
 }
 
 /// The compile error one source refuses with, or nothing.

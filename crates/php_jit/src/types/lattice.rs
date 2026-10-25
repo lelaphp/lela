@@ -20,6 +20,18 @@ use super::Layout;
 pub(crate) struct Types(u16);
 
 impl Types {
+    /// The bits, as a recorded trace's text form writes a native's
+    /// declared return ([`Types::of_bits`]).
+    pub(crate) fn bits(self) -> u16 {
+        self.0
+    }
+
+    /// The types `bits` names; none for a bit no type has.
+    pub(crate) fn of_bits(bits: u16) -> Option<Types> {
+        let all = Types::UNKNOWN.0 | Types::LAYOUTS;
+        (bits & !all == 0).then_some(Types(bits))
+    }
+
     pub(crate) const NONE: Types = Types(0);
     pub(crate) const UNDEF: Types = Types(1 << 0);
     pub(crate) const NULL: Types = Types(1 << 1);
@@ -37,6 +49,9 @@ impl Types {
     pub(crate) const PACKED: Types = Types(1 << 11);
     /// An array that may be a hash, php's `MAY_BE_ARRAY_HASH`.
     pub(crate) const HASH: Types = Types(1 << 12);
+    /// php's `MAY_BE_INDIRECT`: the slot holds the address of a zval,
+    /// `IS_INDIRECT`, which a fetch for writing leaves in its `VAR`.
+    pub(crate) const INDIRECT: Types = Types(1 << 13);
 
     pub(crate) const BOOL: Types = Types(Types::FALSE.0 | Types::TRUE.0);
     pub(crate) const NUMBER: Types = Types(Types::LONG.0 | Types::DOUBLE.0);
@@ -225,7 +240,7 @@ impl std::fmt::Debug for Types {
     }
 }
 
-/// php's `zend_dump_type_info` words: `undef, ref, null, false, true,
+/// php's `zend_dump_type_info` words: `undef, ind, ref, null, false, true,
 /// long, double, string, array, object, resource`, `bool` for both
 /// booleans, `any` for every kind, and an array's layout before it,
 /// `packed array` or `hash array`, where it is one.
@@ -234,6 +249,9 @@ impl std::fmt::Display for Types {
         let mut words: Vec<&str> = Vec::new();
         if self.meets(Types::UNDEF) {
             words.push("undef");
+        }
+        if self.meets(Types::INDIRECT) {
+            words.push("ind");
         }
         if self.meets(Types::REF) {
             words.push("ref");

@@ -6,7 +6,7 @@
 //! by name and number that read them all. Which classes a load bound
 //! early is [`Classes`]'s, whose field no file but this one reads.
 
-use php_heap::{FrameRef, Intern};
+use php_heap::{FrameRef, Heap, Intern};
 use php_link::LinkedClass;
 use php_unit::decl::{Bare, ClassDecl, ClassFlags, ClassKind, FunctionDecl, HookKind};
 use php_unit::{Opcode, PublishedUnit, TopLevel, Unit};
@@ -18,8 +18,8 @@ use crate::engine::Shared;
 use crate::exec;
 
 use super::{
-    Bound, Declared, Deprecations, FrameShape, Keyed, Member, MemberAt, Named, Request,
-    UserFunction, preload, user_function_decl,
+    Bound, Declared, Deprecations, Keyed, Member, MemberAt, Named, Request, UserFunction, preload,
+    user_function_decl,
 };
 
 /// The request's symbols facet (design §4.4): the symbol tables:
@@ -39,6 +39,12 @@ impl Request {
     /// The symbols facet, to change.
     pub fn symbols_mut(&mut self) -> Symbols<&mut Request> {
         Symbols(self)
+    }
+
+    /// Whether `class` is linked and declared a `kind`: a trait, an
+    /// interface, an enum.
+    pub(crate) fn class_is(&self, class: ClassId, kind: ClassKind) -> bool {
+        (self.symbols().class_decl(class)).is_some_and(|decl| decl.kind == kind)
     }
 }
 
@@ -303,10 +309,7 @@ impl Request {
                     .map(|key| key.bytes().to_vec())
             })
             .collect();
-        let loaded = (self.accel_loaded.as_ref())
-            .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
-            .map(|(_, served)| *served);
-        let served = loaded.or_else(|| self.preloading.is_some().then_some(AccelServed::Hit));
+        let served = self.accel_served(unit);
         let early = (self.early_bound.take())
             .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
             .map(|(_, early)| early);
@@ -317,6 +320,23 @@ impl Request {
             tried: Vec::new(),
             next: 0,
         }
+    }
+
+    /// How opcache served `unit` to this request, `zend_accel_load_script`'s
+    /// load of it: from what it held, compiled by this request's miss, or
+    /// none where php compiles it without the cache; a unit preloading
+    /// declares is served as a hit.
+    pub(crate) fn accel_served(&self, unit: &PublishedUnit) -> Option<AccelServed> {
+        let loaded = (self.accel_loaded.as_ref())
+            .filter(|(loaded, _)| PublishedUnit::ptr_eq(loaded, unit))
+            .map(|(_, served)| *served);
+        loaded.or_else(|| self.preloading.is_some().then_some(AccelServed::Hit))
+    }
+
+    /// Whether opcache served `unit` from what it held
+    /// ([`Request::accel_served`]).
+    pub(crate) fn accel_hit(&self, unit: &PublishedUnit) -> bool {
+        self.accel_served(unit) == Some(AccelServed::Hit)
     }
 
     /// `unit`'s classes declared in their order up to and including the
@@ -389,7 +409,7 @@ impl Request {
         let at = u32::try_from(at).ok()?;
         match published {
             Some(class) => self.declare_published(unit, at, class, decl),
-            None => self.bind_declared(unit, at, None, None),
+            None => self.bind_declared(unit, at, None, None).ok()?,
         }
         Some(true)
     }
@@ -522,16 +542,12 @@ impl Request {
         self.link_declared(unit, at, decl, true).ok()
     }
 
-    /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7968`):
+    /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7973`):
     /// nothing where the unit's load bound the class under the opline's
     /// runtime definition key ([`Request::bind_at_load`]), and
     /// [`Request::bind_class`] where it did not, the key still standing.
     pub(crate) fn bind_delayed(&mut self, unit: &PublishedUnit, key: &[u8]) -> Result<(), Thrown> {
-        let at = unit
-            .runtime_keys
-            .iter()
-            .find(|(filed, _)| *filed.0 == *key)
-            .map(|(_, at)| *at);
+        let at = runtime_class(unit, key);
         if let Some(bound) = self
             .classes
             .bound_at_load
@@ -558,11 +574,7 @@ impl Request {
         if !crate::observer::classes_linked_observed(self) {
             return Ok(());
         }
-        let at = unit
-            .runtime_keys
-            .iter()
-            .find(|(filed, _)| *filed.0 == *key)
-            .and_then(|(_, at)| usize::try_from(*at).ok());
+        let at = runtime_class(unit, key).and_then(|at| usize::try_from(at).ok());
         // The opline of a class the preload holds is a `NOP`, which tells
         // nothing.
         let name = at
@@ -630,9 +642,9 @@ impl Request {
         at: u32,
         composed: Option<php_link::Composed>,
         record: Option<LinkedClass<ClassId>>,
-    ) {
+    ) -> Result<(), Thrown> {
         let Some(class) = ClassId::local(self.own_classes.len()) else {
-            return;
+            return Ok(());
         };
         let place = self.buckets.claim(unit, at);
         let row = Declared {
@@ -645,7 +657,7 @@ impl Request {
             self.declared.push(&decl.name.0, Named { place, class });
         }
         self.own_classes.push(row);
-        self.bind_members(class, record);
+        self.bind_members(class, record)
     }
 
     /// `zend_accel_class_hash_copy` for one class a held unit published
@@ -723,7 +735,11 @@ impl Request {
     ///   string(9) "Inherited"
     /// }
     /// ```
-    pub(super) fn bind_members(&mut self, class: ClassId, record: Option<LinkedClass<ClassId>>) {
+    pub(super) fn bind_members(
+        &mut self,
+        class: ClassId,
+        record: Option<LinkedClass<ClassId>>,
+    ) -> Result<(), Thrown> {
         let parent = self
             .symbols()
             .class_decl(class)
@@ -732,10 +748,10 @@ impl Request {
             .declared_row(class)
             .and_then(|row| self.members_of(row, class))
         else {
-            return;
+            return Ok(());
         };
         let Some((functions, members)) = self.place_own(class, members) else {
-            return;
+            return Ok(());
         };
         let record = record.or_else(|| self.record_at_bind(class));
         let placed = self
@@ -753,6 +769,7 @@ impl Request {
                 placed,
             };
         }
+        self.link_blocks(class)
     }
 
     /// The placed properties of `class`, declared by `decl`, over its
@@ -766,7 +783,10 @@ impl Request {
         record: Option<&LinkedClass<ClassId>>,
         parent: Option<ClassId>,
     ) -> super::Placed {
-        let above = parent.map_or(&[][..], |parent| self.placed_properties(parent));
+        let none = super::Placed::default();
+        let above = parent
+            .and_then(|parent| self.placement(parent))
+            .unwrap_or(&none);
         super::placed_of(class, decl, record, above, |info| self.property_decl(info))
     }
 
@@ -810,19 +830,9 @@ impl Request {
                 class,
                 at: MemberAt::Method(method),
             });
-            let flags = crate::attributes::Flags::of(&decl.function.attributes);
-            let shape = FrameShape::of(&decl.function, exec::body_of(&unit, body), observed);
-            let record = UserFunction::record(&unit, body, &decl.function.name.0);
             rows.push(MemberRow {
                 method: Some(method),
-                user: UserFunction {
-                    unit,
-                    body,
-                    member,
-                    flags,
-                    shape,
-                    record,
-                },
+                user: UserFunction::of(unit, body, member, &decl.function, observed),
                 cache,
             });
         }
@@ -840,19 +850,9 @@ impl Request {
                     class,
                     at: MemberAt::Hook { property, kind },
                 });
-                let flags = crate::attributes::Flags::of(&hook.function.attributes);
-                let shape = FrameShape::of(&hook.function, exec::body_of(&unit, body), observed);
-                let record = UserFunction::record(&unit, body, &hook.function.name.0);
                 rows.push(MemberRow {
                     method: None,
-                    user: UserFunction {
-                        unit,
-                        body,
-                        member,
-                        flags,
-                        shape,
-                        record,
-                    },
+                    user: UserFunction::of(unit, body, member, &hook.function, observed),
                     cache,
                 });
             }
@@ -926,12 +926,15 @@ impl Request {
 
     /// The row of a class the request declared, or the engine published
     /// into its arena, the preload's among them; none for an engine's
-    /// class.
+    /// class ([`ClassLookup::declared_row`]).
     pub(super) fn declared_row(&self, class: ClassId) -> Option<&Declared> {
-        match class.local_at() {
-            Some(at) => self.own_classes.get(at),
-            None => self.arena.class(class),
-        }
+        self.class_lookup().declared_row(class)
+    }
+
+    /// The tables a class's declaration and linked record are read off,
+    /// borrowed apart from the rest of the request ([`ClassLookup`]).
+    pub(super) fn class_lookup(&self) -> ClassLookup<'_> {
+        ClassLookup::of(&self.shared, &self.own_classes, &self.arena)
     }
 
     /// The row of a class the request declared, to bind; none for an
@@ -1304,12 +1307,7 @@ impl Request {
     /// Fatal error: Interface J cannot implement previously implemented interface I in %s on line 3
     /// ```
     pub(crate) fn bind_class(&mut self, unit: &PublishedUnit, key: &[u8]) -> Result<(), Thrown> {
-        let Some(at) = unit
-            .runtime_keys
-            .iter()
-            .find(|(filed, _)| *filed.0 == *key)
-            .and_then(|(_, at)| usize::try_from(*at).ok())
-        else {
+        let Some(at) = runtime_class(unit, key).and_then(|at| usize::try_from(at).ok()) else {
             return Err(crate::api::raising::fatal(
                 self,
                 "InternalError: a DECLARE_CLASS carries a key the unit files no class under",
@@ -1369,7 +1367,7 @@ impl Request {
                     String::from_utf8_lossy(name),
                     self.symbols().class_name(found)
                 );
-                let thrown = crate::api::raising::throw_error(self, "Error", &message);
+                let thrown = crate::api::raising::error(self, &message);
                 return Err(self.link_abandoned(name, thrown, false));
             }
             if let Err(thrown) = self.deprecated_trait(found, name) {
@@ -1399,11 +1397,8 @@ impl Request {
         unit: &PublishedUnit,
         key: &[u8],
     ) -> Result<ClassId, Thrown> {
-        let name = unit
-            .runtime_keys
-            .iter()
-            .find(|(filed, _)| *filed.0 == *key)
-            .and_then(|(_, at)| unit.classes.get(usize::try_from(*at).ok()?))
+        let name = runtime_class(unit, key)
+            .and_then(|at| unit.classes.get(usize::try_from(at).ok()?))
             .map(|decl| decl.name.0.to_vec());
         let Some(name) = name else {
             return Err(crate::api::raising::fatal(
@@ -1577,9 +1572,8 @@ impl Request {
     ) -> Result<ClassId, Thrown> {
         let found = crate::api::call::autoload(self, &name.0)?;
         found.ok_or_else(|| {
-            crate::api::raising::throw_error(
+            crate::api::raising::error(
                 self,
-                "Error",
                 &format!("{what} \"{}\" not found", String::from_utf8_lossy(&name.0)),
             )
         })
@@ -1631,15 +1625,15 @@ impl Request {
             return Err(crate::api::raising::fatal(self, &message));
         }
         let declared = Function::local(self.user_functions.len());
-        let (flags, shape) = dynamic_traits(unit, at, crate::observer::observing(self));
-        self.user_functions.push(UserFunction {
-            unit: PublishedUnit::clone(unit),
-            body: exec::Body::Dynamic(at),
-            member: None,
-            flags,
-            shape,
-            record: UserFunction::record(unit, exec::Body::Dynamic(at), &decl.name.0),
-        });
+        let observed = crate::observer::observing(self);
+        let unit_of = PublishedUnit::clone(unit);
+        (self.user_functions).push(UserFunction::of(
+            unit_of,
+            exec::Body::Dynamic(at),
+            None,
+            decl,
+            observed,
+        ));
         // `do_bind_function`'s `zend_observer_function_declared_notify`
         // (`Z/Zend/zend_compile.c:1300`).
         if let Some(declared) = declared {
@@ -1662,7 +1656,7 @@ impl Request {
     /// name is no entry of the function table under a callable name: a
     /// closure is reached through its object and never by name.
     pub(crate) fn closure_function(&mut self, unit: &PublishedUnit, at: u32) -> Option<Function> {
-        unit.dynamic.get(usize::try_from(at).ok()?)?;
+        let (decl, _) = unit.dynamic.get(usize::try_from(at).ok()?)?;
         let body = exec::Body::Dynamic(at);
         if let Some(position) = self
             .user_functions
@@ -1672,19 +1666,14 @@ impl Request {
             return Function::local(position);
         }
         let function = Function::local(self.user_functions.len())?;
-        let (flags, shape) = dynamic_traits(unit, at, crate::observer::observing(self));
-        let name = unit
-            .dynamic
-            .get(usize::try_from(at).ok()?)
-            .map_or(&[][..], |(decl, _)| &decl.name.0);
-        self.user_functions.push(UserFunction {
-            unit: PublishedUnit::clone(unit),
+        let observed = crate::observer::observing(self);
+        (self.user_functions).push(UserFunction::of(
+            PublishedUnit::clone(unit),
             body,
-            member: None,
-            flags,
-            shape,
-            record: UserFunction::record(unit, body, name),
-        });
+            None,
+            decl,
+            observed,
+        ));
         Some(function)
     }
 
@@ -1756,22 +1745,31 @@ impl Request {
             }
         } else {
             for declared in &unit.top_level {
-                let declared = match *declared {
-                    TopLevel::Function(at) => {
-                        self.declare_function_told(unit, usize::try_from(at).unwrap_or(usize::MAX))
-                    }
-                    TopLevel::Class(at) => self.declare_classes_through(
-                        unit,
-                        load,
-                        Some(usize::try_from(at).unwrap_or(usize::MAX)),
-                    ),
-                };
-                if !declared {
+                if !self.declare_top_level(unit, load, *declared) {
                     return false;
                 }
             }
         }
         self.declare_classes_through(unit, load, None) && self.declare_delayed(unit, load)
+    }
+
+    /// The declaration at `top` of `unit`'s top level declared: a
+    /// function, or each class through one. Whether it stood.
+    fn declare_top_level(
+        &mut self,
+        unit: &PublishedUnit,
+        load: &mut ClassLoad,
+        top: TopLevel,
+    ) -> bool {
+        match top {
+            TopLevel::Function(at) => {
+                self.declare_function_told(unit, usize::try_from(at).unwrap_or(usize::MAX))
+            }
+            TopLevel::Class(at) => {
+                let at = usize::try_from(at).unwrap_or(usize::MAX);
+                self.declare_classes_through(unit, load, Some(at))
+            }
+        }
     }
 
     /// Whether the function at `at` of `unit` names one the request
@@ -1809,7 +1807,7 @@ impl Request {
     ///
     /// The runtime definition keys the compile made stand counted in
     /// `CG(rtd_key_counter)` whatever it declared
-    /// ([`php_compile::CompileError::keys_made`]), and are counted here
+    /// ([`php_compile::Refused::keys_made`]), and are counted here
     /// for every refusal raised, the cache's among them, which php
     /// compiles again where opcache keeps no failed compile: an
     /// anonymous class the request compiles next is named on from them.
@@ -1903,19 +1901,10 @@ impl Request {
         let mut noted = 0;
         for (landed, before) in unit.top_level.iter().zip(&declared.raised_before) {
             for raised in raised.get(noted..*before).unwrap_or_default() {
-                self.note_error_in(raised.level, &raised.message, file, raised.line);
+                self.note_error_in(raised.level, raised.message.as_bytes(), file, raised.line);
             }
             noted = noted.max(*before);
-            let standing = match *landed {
-                TopLevel::Function(at) => {
-                    self.declare_function_told(unit, usize::try_from(at).unwrap_or(usize::MAX))
-                }
-                TopLevel::Class(at) => {
-                    let at = usize::try_from(at).unwrap_or(usize::MAX);
-                    self.declare_classes_through(unit, &mut load, Some(at))
-                }
-            };
-            if !standing {
+            if !self.declare_top_level(unit, &mut load, *landed) {
                 return None;
             }
         }
@@ -1977,18 +1966,14 @@ impl Request {
         let Some(declared) = Function::local(self.user_functions.len()) else {
             return Some(false);
         };
-        self.user_functions.push(UserFunction {
-            unit: PublishedUnit::clone(unit),
+        let observed = crate::observer::observing(self);
+        (self.user_functions).push(UserFunction::of(
+            PublishedUnit::clone(unit),
             body,
-            member: None,
-            flags: crate::attributes::Flags::of(&decl.attributes),
-            shape: FrameShape::of(
-                decl,
-                exec::body_of(unit, body),
-                crate::observer::observing(self),
-            ),
-            record: UserFunction::record(unit, body, &decl.name.0),
-        });
+            None,
+            decl,
+            observed,
+        ));
         self.functions.push(&decl.name.0, declared);
         Some(true)
     }
@@ -2001,31 +1986,69 @@ impl Request {
 
     /// The home the units it compiles for itself make their constant
     /// strings in ([`super::memory::RequestStrings`]), which the unit
-    /// keeps, beside its classes as the compiler asks after one
-    /// ([`php_compile::RequestClasses`]), the arena its compiles parse
-    /// into and its working directory, which `__DIR__` folds to, borrowed
-    /// apart so all four are handed to one compile.
+    /// keeps, beside its classes and its constants as the compiler asks
+    /// after one ([`php_compile::RequestClasses`],
+    /// [`php_compile::RequestConstants`]: such a unit is one no cache
+    /// keeps, which php compiles without
+    /// `ZEND_COMPILE_NO_CONSTANT_SUBSTITUTION`), the arena its compiles
+    /// parse into and its working directory, which `__DIR__` folds to,
+    /// borrowed apart so all five are handed to one compile.
     pub(crate) fn compiling<R>(
         &mut self,
         compile: impl FnOnce(
             &mut dyn Intern,
             php_compile::RequestClasses<'_>,
+            php_compile::RequestConstants<'_>,
             &mut php_compile::syntax::Arena,
             &std::path::Path,
         ) -> R,
     ) -> R {
         let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
         let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
+        let constants = &self.constants;
+        let defined = |name: &[u8]| constants.defined(name);
+        let tables = ClassLookup::of(shared, &self.own_classes, &self.arena);
+        let class_data = &self.class_data;
+        let (made, units) = self.unit_strings.compiling_beside();
+        let class_constants = |class: &[u8], name: &[u8]| {
+            let class = class_in(shared, declared, aliases, class)?;
+            defined_class_constant(tables, class_data, units, class, name)
+        };
+        let decls = Seen {
+            tables,
+            declared,
+            aliases,
+        };
         let mut strings = super::memory::RequestStrings {
             shared,
             hold: self.shared_hold,
             heap: &mut self.heap,
-            made: self.unit_strings.compiling_mut(),
+            made,
+            interning: true,
         };
         compile(
             &mut strings,
-            php_compile::RequestClasses::new(&holds),
+            php_compile::RequestClasses::new(&holds).seeing(&decls),
+            php_compile::RequestConstants::new(&defined, &class_constants),
             &mut self.compile_arena,
+            &self.cwd,
+        )
+    }
+
+    /// What a compile of a file bound for the cache is handed for this
+    /// request, which asked for it: the request's heap, which it is
+    /// charged to while it runs ([`crate::engine::CompileHeap`]), the
+    /// request's classes as the compiler asks after one, and its working
+    /// directory, borrowed apart so all three are handed to one compile.
+    pub(crate) fn compiling_for_cache<R>(
+        &mut self,
+        compile: impl FnOnce(&mut Heap, php_compile::RequestClasses<'_>, &std::path::Path) -> R,
+    ) -> R {
+        let (shared, declared, aliases) = (&self.shared, &self.declared, &self.aliases);
+        let holds = |name: &[u8]| class_in(shared, declared, aliases, name).is_some();
+        compile(
+            &mut self.heap,
+            php_compile::RequestClasses::new(&holds),
             &self.cwd,
         )
     }
@@ -2095,9 +2118,7 @@ impl Request {
     /// Where an engine's class stands among the engine's; none for any
     /// other class.
     pub(crate) fn native_class_at(&self, class: ClassId) -> Option<usize> {
-        usize::try_from(class.published_number()?)
-            .ok()
-            .filter(|at| *at < self.shared.classes.len())
+        self.class_lookup().native_class_at(class)
     }
 
     /// `ZEND_FLF_FUNC(opline)` and `ZEND_FLF_HANDLER(opline)`: the native
@@ -2223,10 +2244,7 @@ impl<'r> Symbols<&'r Request> {
     /// The declaration of a linked class.
     #[must_use]
     pub fn class_decl(self, class: ClassId) -> Option<&'r ClassDecl> {
-        if let Some(native) = self.0.native_class_at(class) {
-            return self.0.shared.classes.get(native);
-        }
-        self.0.declared_row(class)?.decl()
+        self.0.class_lookup().class_decl(class)
     }
 
     /// `ce->ce_flags` of a linked class: its declaration's flags with
@@ -2340,9 +2358,284 @@ impl Symbols<&mut Request> {
     /// table; a method is none either, being its class's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn defined_functions(self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.defined_functions_made();
-        adopted(made)
+        adopted(self.0.defined_functions_made())
     }
+}
+
+/// The tables `EG(class_table)`'s classes are read off: the engine's
+/// natives and their linked records, the rows the request declared and
+/// the engine's published arena. Borrowed apart from the rest of the
+/// request, so a compile that holds the request's heap can still read a
+/// class ([`Request::compiling`]); the request's own readers of a
+/// declaration, a linked record and a constant's row go through it.
+#[derive(Clone, Copy)]
+pub(super) struct ClassLookup<'r> {
+    shared: &'r Shared,
+    own_classes: &'r [Declared],
+    arena: &'r crate::arena::Arena,
+}
+
+impl<'r> ClassLookup<'r> {
+    /// The lookup over the request's fields, borrowed apart.
+    fn of(
+        shared: &'r Shared,
+        own_classes: &'r [Declared],
+        arena: &'r crate::arena::Arena,
+    ) -> ClassLookup<'r> {
+        ClassLookup {
+            shared,
+            own_classes,
+            arena,
+        }
+    }
+
+    /// Whether `class` is one a unit the request compiled for itself
+    /// declared, no cache keeping it, whose strings are the unit's
+    /// ([`Request::declared_for_the_request`]).
+    pub(super) fn declared_for_the_request(
+        self,
+        units: super::unit_strings::UnitsHeld<'_>,
+        class: ClassId,
+    ) -> bool {
+        (self.declared_row(class)).is_some_and(|row| units.holds(PublishedUnit::as_ptr(&row.unit)))
+    }
+
+    /// Where an engine's class stands among the engine's; none for any
+    /// other class.
+    pub(super) fn native_class_at(self, class: ClassId) -> Option<usize> {
+        usize::try_from(class.published_number()?)
+            .ok()
+            .filter(|at| *at < self.shared.classes.len())
+    }
+
+    /// The row of a class the request declared, or the engine published
+    /// into its arena; none for an engine's class.
+    pub(super) fn declared_row(self, class: ClassId) -> Option<&'r Declared> {
+        match class.local_at() {
+            Some(at) => self.own_classes.get(at),
+            None => self.arena.class(class),
+        }
+    }
+
+    /// The declaration of a linked class.
+    pub(super) fn class_decl(self, class: ClassId) -> Option<&'r ClassDecl> {
+        if let Some(native) = self.native_class_at(class) {
+            return self.shared.classes.get(native);
+        }
+        self.declared_row(class)?.decl()
+    }
+
+    /// The linked record of a class: a native class's as startup linked
+    /// it, a declared class's as it bound.
+    pub(super) fn linked_class(self, class: ClassId) -> Option<&'r LinkedClass<ClassId>> {
+        match self.native_class_at(class) {
+            Some(native) => self.shared.records.get(native),
+            None => self.declared_row(class)?.bound.record.as_ref(),
+        }
+    }
+
+    /// The constant a row of `class`'s constants table is, beside the
+    /// class that declared it.
+    pub(super) fn row_constant(
+        self,
+        class: ClassId,
+        row: php_link::Row<ClassId>,
+    ) -> Option<(ClassId, &'r php_unit::decl::ClassConstDecl)> {
+        let holder = row.holder_in(class);
+        let decl = self.class_decl(holder)?;
+        Some((holder, decl.constants.get(usize::try_from(row.at).ok()?)?))
+    }
+
+    /// `zend_hash_find_ptr(CE_CONSTANTS_TABLE(ce), name)`: the constant
+    /// `name` of `class`, beside the class that declared it.
+    pub(super) fn class_constant_of(
+        self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Option<(ClassId, &'r php_unit::decl::ClassConstDecl)> {
+        let row = self.linked_class(class)?.constants.find(name, |row| {
+            self.row_constant(class, *row)
+                .map_or(&[][..], |(_, constant)| &constant.name.0)
+        })?;
+        self.row_constant(class, *row)
+    }
+}
+
+/// The constant `name` of `class` as `zend_try_ct_eval_class_const`
+/// reads its `zend_class_constant` ([`php_compile::DefinedClassConstant`]):
+/// `c->value` where it holds a value, the class that declared it, its
+/// visibility and deprecation. A class of a unit the request compiled for
+/// itself is php's mutable class, whose constant `zend_update_class_constant`
+/// replaced by its value in place once evaluated, so the value the
+/// request evaluated is read first; any other class's constants table
+/// holds what its declaration was compiled to, a value written out or an
+/// expression, which no evaluation in the request replaces
+/// (`CE_CONSTANTS_TABLE` is the mutable data's copy, not the table the
+/// compiler reads). A string written out is the string the engine or the
+/// declaring unit holds for it; a request-only class's constant array is
+/// read only once evaluated. An enum's case is its object, never a value
+/// substituted.
+///
+/// php's mutable class is more than the request's own
+/// ([`mutable`]): a class of a file the cache keeps whose
+/// parent an `eval` declared is `zend_lazy_class_load`'s copy, its
+/// constant substituted once read, its trait's as its parent's; and an
+/// `eval`'d child of a cached class holds its own copy of an inherited
+/// constant, substituted once read through the child and not before, a
+/// read through the parent leaving the copy unevaluated and each
+/// evaluating a value of its own ([`super::class_data::constant_holder`]): `C4::L`
+/// and `P4::L` make a string each. Each line but the last two is a
+/// function naming the constant, compiled in an `eval` after what is
+/// read before it:
+///
+/// ```php
+/// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+/// $f = $put('w3276-cached.inc', '<?php class M1 extends E1 { const K = LATE1 + 1; } class P2 { const L = LATE2 + 1; } class M3 { use T3; const K = LATE1 + 3; } class P4 { const L = LATE2 . "abcdefghijklmnopqrstuvwxyz"; }');
+/// $g = $put('w3276-mutable.inc', <<<'PHP'
+/// <?php
+/// function m($code) { $m = memory_get_usage(); eval($code); return memory_get_usage() - $m; }
+/// m('class W {}'); m('$q0 = 1;');
+/// const LATE1 = 1; const LATE2 = 2;
+/// m('class E1 {} trait T3 {}');
+/// include sys_get_temp_dir() . '/w3276-cached.inc';
+/// m('class C2 extends P2 {} class C4 extends P4 {}');
+/// echo m('function f1() { return M1::K; }'), "\n";
+/// eval('$GLOBALS["ga"] = M1::K;');
+/// echo m('function f2() { return M1::K; }'), "\n";
+/// eval('$GLOBALS["gb"] = P2::L;');
+/// echo m('function f4() { return C2::L; }'), "\n";
+/// eval('$GLOBALS["gc"] = C2::L;');
+/// echo m('function f5() { return C2::L; }'), "\n";
+/// echo m('function f6() { return P2::L; }'), "\n";
+/// eval('$GLOBALS["gd"] = M3::K;');
+/// echo m('function f7() { return M3::K; }'), "\n";
+/// echo m('$GLOBALS["ge"] = C4::L;'), "\n";
+/// echo m('$GLOBALS["gf"] = P4::L;'), "\n";
+/// PHP);
+/// include $g;
+/// unlink($f);
+/// unlink($g);
+/// ```
+/// ```expect regime=jit-off
+/// 320
+/// 256
+/// 384
+/// 256
+/// 320
+/// 256
+/// 88
+/// 408
+/// ```
+///
+/// A request's class holds its constant's array from its declaration
+/// on ([`ConstExpr::UnitValue`]), so its first read lays nothing and a
+/// name in a later `eval` substitutes it, as php's
+/// `zend_try_ct_eval_class_const` copies it:
+///
+/// [`ConstExpr::UnitValue`]: php_unit::decl::ConstExpr::UnitValue
+///
+/// ```php
+/// $f = sys_get_temp_dir() . '/w3267-array-constant.inc';
+/// file_put_contents($f, <<<'PHP'
+/// <?php
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// m('class W {}'); m('$q0 = 1;');
+/// const EVALNAMED = 5;
+/// foreach ([
+///     'class S8 { const K = [5 => 1]; }',
+///     '$GLOBALS["a"] = S8::K;',
+///     'class B8 { const K = [EVALNAMED => 1]; }',
+///     '$GLOBALS["b"] = B8::K;',
+///     'class B9 { const A = [1, 2]; }',
+///     'function g() { return B9::A; }',
+/// ] as $c) echo m($c), "\n";
+/// echo json_encode([g(), $a, $b]), "\n";
+/// PHP);
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// 712
+/// 512
+/// 712
+/// 0
+/// 712
+/// 224
+/// [[1,2],{"5":1},{"5":1}]
+/// ```
+fn defined_class_constant(
+    tables: ClassLookup<'_>,
+    class_data: &super::class_data::ClassDataTables,
+    units: super::unit_strings::UnitsHeld<'_>,
+    class: ClassId,
+    name: &[u8],
+) -> Option<php_compile::DefinedClassConstant> {
+    use php_unit::decl::ConstExpr;
+    let (declaring, constant) = tables.class_constant_of(class, name)?;
+    if constant.is_case {
+        return None;
+    }
+    let mutable = mutable(declaring);
+    // A class that copied the constant from an immutable one holds a
+    // value of its own once evaluated through it (`do_inherit_class_constant`).
+    let evaluated = if declaring != class && !mutable && super::classes::mutable(class) {
+        class_data.evaluated_constant(class, name)
+    } else {
+        (class_data.evaluated_constant(declaring, name)).filter(|_| mutable)
+    };
+    let own_strings = tables.declared_for_the_request(units, declaring);
+    let value = match (evaluated, &constant.value) {
+        (Some(value), _) => value.to_zval(),
+        (None, ConstExpr::Null) => php_heap::Zval::null(),
+        (None, ConstExpr::Bool(b)) => php_heap::Zval::bool(*b),
+        (None, ConstExpr::Long { value: n, .. }) => php_heap::Zval::long(*n),
+        (None, ConstExpr::Double(d)) => php_heap::Zval::double(*d),
+        // The string the declaring unit's compile made, which its class
+        // holds: the request's for a class the request compiled, the
+        // engine's for one the cache keeps.
+        (None, ConstExpr::Str(bytes)) if own_strings => Value::string(units.find(bytes)?).to_zval(),
+        (None, ConstExpr::Str(bytes)) => {
+            php_heap::Zval::string(tables.shared.existing_interned(bytes)?)
+        }
+        (None, ConstExpr::UnitValue(held)) => held.value(),
+        (None, _) => return None,
+    };
+    Some(php_compile::DefinedClassConstant {
+        value,
+        visibility: constant.visibility,
+        deprecated: crate::attributes::Flags::of(&constant.attributes).deprecated,
+        in_trait: tables
+            .class_decl(declaring)
+            .is_some_and(|decl| decl.kind == ClassKind::Trait),
+    })
+}
+
+/// The request's classes as a compile php runs without
+/// `ZEND_COMPILE_IGNORE_OTHER_FILES` reads their declarations
+/// ([`php_compile::RequestClasses::seeing`]).
+struct Seen<'r> {
+    tables: ClassLookup<'r>,
+    declared: &'r Keyed<Named>,
+    aliases: &'r Keyed<preload::Alias>,
+}
+
+impl php_compile::DeclaredClasses for Seen<'_> {
+    fn declared(&self, name: &[u8]) -> Option<&ClassDecl> {
+        let class = class_in(self.tables.shared, self.declared, self.aliases, name)?;
+        self.tables.class_decl(class)
+    }
+}
+
+/// Whether `class` is php's class without `ZEND_ACC_IMMUTABLE`, whose
+/// constants `zend_update_class_constant` evaluates in place: one only
+/// this request declared, never published for every request
+/// (`ClassId::is_published`). That is a class the request compiled for
+/// itself, and one of a file the cache keeps whose link took such a
+/// class, its parent, a trait or an interface, which `UPDATE_IS_CACHEABLE`
+/// keeps out of the inheritance cache, so the class the request binds is
+/// `zend_lazy_class_load`'s copy (`Z/Zend/zend_inheritance.c:3618`).
+pub(super) fn mutable(class: ClassId) -> bool {
+    !class.is_published()
 }
 
 /// The class `EG(class_table)` holds under `name`, any case: an engine's
@@ -2366,22 +2659,6 @@ fn class_in(
     })
 }
 
-/// The flags and the arity of the function at `at` of a unit's
-/// `dynamic` table, one a `DECLARE_FUNCTION` binds or a closure is made
-/// of.
-fn dynamic_traits(unit: &Unit, at: u32, observed: bool) -> (crate::attributes::Flags, FrameShape) {
-    usize::try_from(at)
-        .ok()
-        .and_then(|at| unit.dynamic.get(at))
-        .map(|(decl, code)| {
-            (
-                crate::attributes::Flags::of(&decl.attributes),
-                FrameShape::of(decl, Some(code), observed),
-            )
-        })
-        .unwrap_or_default()
-}
-
 /// `zend_class_redeclaration_error_ex`'s two wordings over the earlier
 /// declaration: what it is, the name redeclared, and the earlier one's
 /// site when it was a user class. `zend_class_redeclaration_error` names
@@ -2397,4 +2674,12 @@ fn redeclaration(earlier: &ClassDecl, name: &[u8]) -> String {
         String::from_utf8_lossy(&earlier.file.0),
         earlier.line
     )
+}
+
+/// The class at its place in `unit`'s classes that the unit files under
+/// the runtime definition key `key` ([`Unit::runtime_keys`]).
+fn runtime_class(unit: &Unit, key: &[u8]) -> Option<u32> {
+    (unit.runtime_keys.iter())
+        .find(|(filed, _)| *filed.0 == *key)
+        .map(|(_, at)| *at)
 }

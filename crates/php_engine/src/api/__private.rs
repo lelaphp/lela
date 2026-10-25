@@ -87,6 +87,7 @@ pub fn attribute(name: &[u8], arguments: Vec<(Option<&[u8]>, ConstExpr)>) -> Att
             .collect(),
         line: 0,
         strict: false,
+        own_name: true,
     }
 }
 
@@ -115,7 +116,6 @@ pub fn attribute(name: &[u8], arguments: Vec<(Option<&[u8]>, ConstExpr)>) -> Att
 /// mt_srand() expects at most 2 arguments, 3 given
 /// ```
 #[inline(always)] // every native's entry reads its call here, once
-#[allow(clippy::inline_always)]
 pub fn arguments<const N: usize>(
     req: &mut Request,
     min: usize,

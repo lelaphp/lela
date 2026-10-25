@@ -555,7 +555,7 @@ impl<'r> Response<&'r Request> {
     /// Where the first byte reached the host, `php_output_get_start_filename`
     /// and `_lineno`, once one has.
     #[must_use]
-    pub fn started_at(self) -> Option<(Vec<u8>, u32)> {
+    pub fn started_at(self) -> Option<(&'r [u8], u32)> {
         self.0.response.output.started_at()
     }
 
@@ -629,7 +629,7 @@ impl<'r> Response<&'r Request> {
     /// `headers_sent()`: `SG(headers_sent)`, and where the body started
     /// when it was a body byte that sent them.
     #[must_use]
-    pub fn headers_sent(self) -> Option<(Vec<u8>, u32)> {
+    pub fn headers_sent(self) -> Option<(&'r [u8], u32)> {
         if self.0.response.output.headers_sent() {
             Some(self.0.response.output.started_at().unwrap_or_default())
         } else {
@@ -713,8 +713,7 @@ impl Response<&mut Request> {
     /// native being served.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn buffer_op(self, op: &OutputOp) -> Result<Owner<Value>, Thrown> {
-        let made = crate::output::buffer_op(self.0, op);
-        adopted(made)
+        adopted(crate::output::buffer_op(self.0, op))
     }
 
     /// `php_output_start_default`, what `body` writes through the stack,
@@ -813,8 +812,7 @@ impl Response<&mut Request> {
     /// passed over.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn response_headers(self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.response_headers_made();
-        adopted(made)
+        adopted(self.0.response_headers_made())
     }
 }
 

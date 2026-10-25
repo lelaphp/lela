@@ -882,6 +882,7 @@ fn sid_attributes() -> Vec<Attribute> {
         ],
         line: 0,
         strict: false,
+        own_name: true,
     }]
 }
 
@@ -950,7 +951,7 @@ fn now() -> i64 {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Expires: Thu, 19 Nov 1981 08:52:00 GMT
 /// Cache-Control: no-store, no-cache, must-revalidate
 /// Pragma: no-cache

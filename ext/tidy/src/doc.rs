@@ -10,8 +10,8 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_long, to_string};
 use php_ext::decl::FunctionDecl;
 use php_ext::raising::{
-    Level, Thrown, arg_null_deprecated, arg_type_error, argument_error, docref, fatal, throw,
-    throw_error, throwing_warnings,
+    Level, Thrown, arg_null_deprecated, arg_type_error, argument_error, docref, fatal, throw_error,
+    throwing_warnings, value_error,
 };
 use php_ext::request::{Opening, OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
@@ -598,7 +598,7 @@ fn tidy_parse_file(
         return Ok(OrFalse::False);
     };
     let answer = if too_long(contents.as_bytes()) {
-        Err(throw(req, "ValueError", "File content is too long"))
+        Err(value_error(req, "File content is too long"))
     } else {
         let encoding = encoding.as_ref().map(PhpString::as_bytes);
         parse_new(req, contents.as_bytes(), config, encoding)
@@ -1121,7 +1121,7 @@ pub(crate) mod class {
         PhpString, Request, Status, This, Thrown, argument_error, base_node, cannot_load,
         clean_repair, construct, diagnose, docref, ffi, file_to_mem, get_config, getopt,
         initialized_status, new_string, opt_doc, parse_with, php_class, repair_file, repair_string,
-        status, throw, tidyNode, too_long,
+        status, throw_error, tidyNode, too_long, value_error,
     };
 
     /// `class tidy`: one `PHPTidyObj` each, its document made with it,
@@ -1184,7 +1184,7 @@ pub(crate) mod class {
             let object = this.object();
             let Some(contents) = file_to_mem(req, filename.as_bytes(), useIncludePath)? else {
                 let text = cannot_load(filename.as_bytes(), useIncludePath);
-                return Err(throw(req, "Exception", &text));
+                return Err(throw_error(req, "Exception", &text));
             };
             let answer = construct(req, object, *contents, config, encoding.as_ref());
             contents.give_up(req);
@@ -1249,7 +1249,7 @@ pub(crate) mod class {
                 return Ok(false);
             };
             let answer = if too_long(contents.as_bytes()) {
-                Err(throw(req, "ValueError", "File content is too long"))
+                Err(value_error(req, "File content is too long"))
             } else {
                 parse_with(
                     req,
@@ -1535,7 +1535,7 @@ fn construct(
     encoding: Option<&PhpString>,
 ) -> Result<(), Thrown> {
     if too_long(contents.as_bytes()) {
-        return Err(throw(req, "ValueError", "File content is too long"));
+        return Err(value_error(req, "File content is too long"));
     }
     let id = doc_id(req, object)?;
     if !throwing_warnings(req, "Exception", |req| apply_config(req, id, config, 2))? {

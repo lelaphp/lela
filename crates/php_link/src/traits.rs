@@ -833,6 +833,11 @@ impl Composer<'_, '_> {
 fn same_value(a: &ConstExpr, b: &ConstExpr) -> bool {
     match (a, b) {
         (ConstExpr::Double(x), ConstExpr::Double(y)) => x == y,
+        // A string named by its bytes and one a request's unit holds.
+        (ConstExpr::Str(x), ConstExpr::UnitValue(y))
+        | (ConstExpr::UnitValue(y), ConstExpr::Str(x)) => {
+            y.value().as_str().is_some_and(|s| s.bytes() == &**x)
+        }
         (ConstExpr::Array { elements: x, .. }, ConstExpr::Array { elements: y, .. }) => {
             x.len() == y.len()
                 && x.iter().zip(y).all(|((kx, vx), (ky, vy))| {
@@ -923,7 +928,7 @@ fn unlined(expr: &ConstExpr) -> ConstExpr {
             | E::Long { .. }
             | E::Double(_)
             | E::Str(_)
-            | E::ImmutableArray(_)
+            | E::UnitValue(_)
             | E::Closure { .. }
             | E::ScopeClass => {}
         }

@@ -195,7 +195,10 @@ where
     }
 
     fn hold(&mut self, bytes: &[u8], size: usize) -> Result<Option<Held>, Thrown> {
-        let fresh = self.req.heap_mut().string_fresh(size);
+        let fresh = self
+            .req
+            .heap_mut()
+            .string_fresh(size, php_heap::Sizing::Alloc);
         let mut fresh = self.req.fatal_of(fresh)?;
         fresh.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
         fresh.set_len(bytes.len());

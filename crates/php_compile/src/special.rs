@@ -192,14 +192,13 @@ pub(crate) fn row(lowered: &[u8]) -> Option<Special> {
 impl Emit<'_> {
     /// `zend_try_ct_eval_const` for a name with no namespace in it: php's
     /// special constants, `true`, `false` and `null` in any case
-    /// (`zend_get_special_const`), then the persistent table.
-    fn ct_eval_const(&mut self, name: &[u8]) -> Result<Option<Zval>, CompileError> {
-        Ok(match name.to_ascii_lowercase().as_slice() {
-            b"true" => Some(Zval::bool(true)),
-            b"false" => Some(Zval::bool(false)),
-            b"null" => Some(Zval::null()),
-            _ => self.persistent(name)?,
-        })
+    /// (`zend_get_special_const`), then a constant the compile
+    /// substitutes ([`Emit::ct_substitutes`]).
+    fn ct_eval_const(&self, name: &[u8]) -> bool {
+        match name.to_ascii_lowercase().as_slice() {
+            b"true" | b"false" | b"null" => true,
+            _ => self.ct_substitutes(name),
+        }
     }
 
     /// `zend_try_compile_special_func`: where the value is once the call
@@ -374,8 +373,21 @@ impl Emit<'_> {
     }
 
     /// `zend_compile_func_strlen`: one argument, compiled, and a constant
-    /// string is its length; `ZEND_STRLEN` over anything else, a
-    /// constant that is not a string included (`strlen(1)`).
+    /// string is its length, the string given back as php's
+    /// `zval_ptr_dtor_str` destroys it; `ZEND_STRLEN` over anything else, a
+    /// constant that is not a string included (`strlen(1)`). So a constant
+    /// the request defined keeps no owner of the function's:
+    ///
+    /// ```php
+    /// define('S', str_repeat('q', count($argv) + 9));
+    /// eval('function g() { return strlen(S) + strlen("abcdefghij"); }');
+    /// debug_zval_dump(S);
+    /// var_dump(g());
+    /// ```
+    /// ```expect regime=jit-off
+    /// string(10) "qqqqqqqqqq" refcount(2)
+    /// int(20)
+    /// ```
     fn strlen(&mut self, arguments: &[Source]) -> Result<Option<Where>, CompileError> {
         let [argument] = arguments else {
             return Ok(None);
@@ -384,7 +396,14 @@ impl Emit<'_> {
         if let Where::Constant(constant) = value
             && let Some(s) = constant.as_str()
         {
-            return Ok(Some(Where::Constant(length(s.len()))));
+            // `zval_ptr_dtor_str` of the argument once its length stands:
+            // a string it alone held, a constant's copy among them, given
+            // back.
+            let length = length(s.len());
+            if let Some(argument) = argument.tree() {
+                self.side_folded(argument);
+            }
+            return Ok(Some(Where::Constant(length)));
         }
         Ok(Some(self.emit_unary(Opcode::Strlen, value, 0)))
     }
@@ -763,13 +782,14 @@ impl Emit<'_> {
         let Some(haystack) = haystack.tree() else {
             return Ok(None);
         };
-        let Some(keys) = self
-            .array_entries(haystack)?
-            .and_then(|entries| in_array_keys(&entries, strict))
-        else {
+        let Some(entries) = self.array_entries(haystack)? else {
             return Ok(None);
         };
-        let table = self.lay_array(&keys)?;
+        let Some(keys) = in_array_keys(&entries, strict) else {
+            return Ok(None);
+        };
+        // `zend_new_array(zend_hash_num_elements(src))`.
+        let table = self.lay_array(&keys, Vec::new(), entries.len())?.value();
         let needle = self.source(needle)?;
         Ok(Some(self.emit_binary(
             Opcode::InArray,
@@ -789,7 +809,7 @@ impl Emit<'_> {
             return Ok(None);
         };
         if let tree::Expr::NameRef(token) = self.peel(flag) {
-            return Ok(self.named_constant(token)?.map(truth));
+            return Ok(self.named_constant_truth(token));
         }
         Ok(self.written(flag)?.map(truth))
     }
@@ -840,7 +860,7 @@ impl Emit<'_> {
         let Some(bytes) = name.as_str() else {
             return Ok(None);
         };
-        if self.ct_eval_const(bytes.bytes())?.is_some() {
+        if self.ct_eval_const(bytes.bytes()) {
             return Ok(Some(Where::Constant(Zval::bool(true))));
         }
         let slot = self.cache_slot();
@@ -861,7 +881,9 @@ impl Emit<'_> {
         let Some(bytes) = name.as_str() else {
             return Ok(None);
         };
-        Ok(self.ct_eval_const(bytes.bytes())?.map(|_| Zval::bool(true)))
+        Ok(self
+            .ct_eval_const(bytes.bytes())
+            .then_some(Zval::bool(true)))
     }
 
     /// The name `zend_compile_func_defined` reads: the one argument
@@ -905,7 +927,7 @@ impl Emit<'_> {
                 if !self.is_written_value(expr) {
                     return Ok(None);
                 }
-                Ok(Some(self.constant_expr(expr)?))
+                self.constant_value(expr).map(Some)
             }
             tree::Expr::BinaryExpr(id) => {
                 let (lhs, op, rhs) = self.binary_of(id);
@@ -918,7 +940,7 @@ impl Emit<'_> {
                 let (Some(a), Some(b)) = (self.written(lhs)?, self.written(rhs)?) else {
                     return Ok(None);
                 };
-                self.concat_fold(a, b)
+                self.concat_fold(a, b, crate::emit::ConcatFold::Parser)
             }
             _ => Ok(None),
         }

@@ -24,6 +24,10 @@
 //! it; every other arm writes the position first, php's `SAVE_OPLINE()`
 //! (`crate::tier::Next`).
 //!
+//! The arms of the variants [`IN_THE_LOOP`] names call their handlers in
+//! the loop's body, and every other arm calls its handler out of line
+//! (#3285).
+//!
 //! Written to `OUT_DIR/dispatch.rs` and included, never committed (design
 //! §10).
 //!
@@ -225,6 +229,16 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          \x20       )))"
             .to_owned(),
     );
+    if let Some(stray) = IN_THE_LOOP.iter().find(|name| {
+        !calls.iter().any(|(call, variants)| {
+            !call.starts_with("Err(") && variants.iter().any(|variant| variant == *name)
+        })
+    }) {
+        return Err(format!(
+            "`{stray}` is in the loop's body by `IN_THE_LOOP` and is no variant a handler of {} serves",
+            bodies.display()
+        ));
+    }
     // `become` is refused by a stable parser even where a `cfg` leaves it
     // out, so the threaded calls are written only into the build that sets
     // the `cfg`, which cargo names to a build script in its environment.
@@ -271,7 +285,8 @@ fn generate(spec: &Path, bodies: &Path) -> Result<String, String> {
          // count is no bound on it. Every crate lints under `-D warnings`\n\
          // (harness §4.2), which reaches generated code too.\n\
          // Inlined into the loop, so that an opline costs one indirect\n\
-         // jump to its handler and no call of its own (design §5.8).\n\
+         // jump to its handler and no call of its own (design §5.8);\n\
+         // the arm of a variant outside `IN_THE_LOOP` is one call.\n\
          #[allow(clippy::too_many_lines, clippy::match_same_arms, clippy::inline_always, clippy::match_wildcard_for_single_variants)]\n\
          #[inline(always)]\n\
          pub(crate) fn dispatch<T: Tier>(\n\
@@ -364,6 +379,8 @@ fn tails(calls: &[(String, Vec<String>)]) -> String {
          use crate::tier::tail::{{Tail, Table, onward}};\n\
          use crate::tier::{{Next, Tier}};\n\
          \n\
+         use super::aside;\n\
+         \n\
          /// How many `php_unit::Handler`s there are, one entry of the table\n\
          /// each.\n\
          pub(crate) const HANDLERS: usize = {handlers};\n\
@@ -392,12 +409,26 @@ struct Variant {
     name: String,
     kinds: Option<Vec<String>>,
     branch: Option<&'static str>,
+    /// Whether the `out` operand is read, the type in `crate::operand` the
+    /// handler is served at, where the row says `RETVAL`.
+    retval: Option<&'static str>,
 }
+
+/// The two ways of a `RETVAL` opcode's `out`, each the part of the
+/// variant's name `php_unit` gives it and the type in `crate::operand`
+/// that serves it, which are one name.
+const RETVALS: [&str; 2] = ["RetvalUnused", "RetvalUsed"];
 
 /// The branches of a `SMART_BRANCH` comparison, each the part of the
 /// variant's name `php_unit` gives it and the type the handler is served
 /// at.
-const BRANCHES: [(&str, &str); 3] = [("", "Unfused"), ("Jmpz", "OnJmpz"), ("Jmpnz", "OnJmpnz")];
+const BRANCHES: [(&str, &str); 5] = [
+    ("", "Unfused"),
+    ("Jmpz", "OnJump<false, false>"),
+    ("Jmpnz", "OnJump<true, false>"),
+    ("JmpzBack", "OnJump<false, true>"),
+    ("JmpnzBack", "OnJump<true, true>"),
+];
 
 /// Every `php_unit::Handler` of one opcode, as `php_unit`'s `build.rs`
 /// names them from the same row, each with the kinds of `op1` and `op2`
@@ -412,11 +443,12 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         _ => None,
     };
     let ways: &[(&str, &str)] = if spec.smart { &BRANCHES } else { &[("", "")] };
-    let branched = |name: String, kinds: Option<Vec<String>>| {
+    let branched = |name: String, kinds: Option<Vec<String>>, retval: Option<&'static str>| {
         ways.iter().map(move |(part, ty)| Variant {
             name: format!("{name}{part}"),
             kinds: kinds.clone(),
             branch: (!ty.is_empty()).then_some(*ty),
+            retval,
         })
     };
     let [spec1, spec2] = spec.zval_shaped.map(|bit| spec.specialise && bit);
@@ -424,7 +456,7 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         let kinds = lone(&spec.op1)
             .zip(lone(&spec.op2))
             .map(|(a, b)| vec![a, b]);
-        return Ok(branched(spec.variant.clone(), kinds).collect());
+        return Ok(branched(spec.variant.clone(), kinds, None).collect());
     }
     let side = |listed: bool, kinds: &[String]| -> Result<Vec<(String, String)>, String> {
         if listed {
@@ -450,13 +482,23 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
             .collect(),
         None => vec![(String::new(), None)],
     };
+    // `SPEC(RETVAL)`: each kind's variant twice, its result unused and
+    // used, after the kinds' parts of the name, as `php_unit` names them.
+    let retvals: &[&str] = if spec.retval { &RETVALS } else { &[""] };
     let mut out = Vec::new();
     for (a, ka) in side(spec1, &spec.op1)? {
         for (b, kb) in side(spec2, &spec.op2)? {
             for (d, kd) in &data {
-                let mut kinds = vec![ka.clone(), kb.clone()];
-                kinds.extend(kd.clone());
-                out.extend(branched(format!("{}{a}{b}{d}", spec.variant), Some(kinds)));
+                for r in retvals {
+                    let mut kinds = vec![ka.clone(), kb.clone()];
+                    kinds.extend(kd.clone());
+                    let retval = (!r.is_empty()).then_some(*r);
+                    out.extend(branched(
+                        format!("{}{a}{b}{d}{r}", spec.variant),
+                        Some(kinds),
+                        retval,
+                    ));
+                }
             }
         }
     }
@@ -464,6 +506,7 @@ fn variants(spec: &Spec) -> Result<Vec<Variant>, String> {
         name: format!("{}Unlisted", spec.variant),
         kinds: None,
         branch: None,
+        retval: None,
     });
     Ok(out)
 }
@@ -497,24 +540,7 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
                 out.push((variant.name, unlisted.to_owned()));
                 continue;
             }
-            // A handler that takes the opline's place stands the frame
-            // there itself, where something outside the loop can read it.
-            let call = if handler.at {
-                format!(
-                    "crate::handlers::{}::<T{}>(req, frame, code, op, at)",
-                    handler.ident,
-                    branch(&variant)?
-                )
-            } else {
-                format!(
-                    "{{\n\
-                     \x20           req.vm_mut().stand(frame, at);\n\
-                     \x20           crate::handlers::{}::<T{}>(req, frame, code, op)\n\
-                     \x20       }}",
-                    handler.ident,
-                    branch(&variant)?
-                )
-            };
+            let call = call(handler, &variant.name, &branch(&variant)?);
             out.push((variant.name, call));
         }
         return Ok(out);
@@ -549,15 +575,197 @@ fn arms(handler: &Handler, spec: &Spec) -> Result<Vec<(String, String)>, String>
             write!(params, ", crate::operand::{ty}").ok();
         }
         params.push_str(&branch(&variant)?);
-        out.push((
-            variant.name,
-            format!(
-                "crate::handlers::{}::<T{params}>(req, frame, code, op, at)",
-                handler.ident
-            ),
-        ));
+        match (handler.retval, variant.retval) {
+            (false, _) => {}
+            (true, Some(ty)) => {
+                write!(params, ", crate::operand::{ty}").ok();
+            }
+            (true, None) => {
+                return Err(format!(
+                    "`fn {}` is generic over whether its `out` is read and ops.toml does not say `RETVAL` for the opcode",
+                    handler.ident
+                ));
+            }
+        }
+        let call = call(handler, &variant.name, &params);
+        out.push((variant.name, call));
     }
     Ok(out)
+}
+
+/// The variants whose arms are in the loop's body (design §5.8): every
+/// variant met in more than a quarter of a percent of the oplines
+/// dispatched by any program of `docs/perf/workloads`, by php-src's
+/// `Zend/micro_bench.php` or by the four counting loops of #3273, as
+/// a counting build of the loop told them over each (#3285). The arm of
+/// every other variant calls its handler out of line, through a call the
+/// optimiser reads as cold, so that the loop's body is the arms programs
+/// meet and the register allocator, which weighs every arm of the
+/// `match` alike, places the loop's values for them: with all 526
+/// generic and `#[inline(always)]` arms in its body, `serve_frame` was
+/// 270 KB and the arms programs meet paid for the ones they do not.
+/// A name that is no variant the dispatch serves is a build error.
+const IN_THE_LOOP: &[&str] = &[
+    "AddArrayElement",
+    "AddConstVar",
+    "AddCvConst",
+    "AddCvCv",
+    "AddTmpConst",
+    "AddTmpCv",
+    "AddTmpTmp",
+    "AddTmpVar",
+    "AddVarVar",
+    "ArrayKeyExists",
+    "AssignCvConstRetvalUnused",
+    "AssignCvCvRetvalUnused",
+    "AssignCvTmpRetvalUnused",
+    "AssignCvVarRetvalUnused",
+    "AssignDimCvConstOpDataTmp",
+    "AssignDimCvConstOpDataVar",
+    "AssignDimCvCvOpDataConst",
+    "AssignDimCvCvOpDataCv",
+    "AssignDimCvCvOpDataTmp",
+    "AssignDimCvTmpOpDataCv",
+    "AssignDimOpCvCv",
+    "AssignObjOp",
+    "AssignObjUnusedConstOpDataConst",
+    "AssignOpCvConst",
+    "AssignOpCvCv",
+    "AssignOpCvTmp",
+    "AssignOpCvVar",
+    "AssignStaticProp",
+    "Bool",
+    "BoolNot",
+    "Cast",
+    "CheckFuncArg",
+    "Coalesce",
+    "ConcatConstTmp",
+    "ConcatCvCv",
+    "ConcatTmpConst",
+    "ConcatTmpTmp",
+    "Div",
+    "DoFcall",
+    "DoFcallByName",
+    "DoIcall",
+    "DoUcall",
+    "Echo",
+    "FeFetchRVar",
+    "FeFree",
+    "FeResetR",
+    "FetchClass",
+    "FetchClassConstant",
+    "FetchConstant",
+    "FetchDimFuncArgCvConst",
+    "FetchDimIs",
+    "FetchDimRCvConst",
+    "FetchDimRCvCv",
+    "FetchDimRCvTmp",
+    "FetchDimRTmpCv",
+    "FetchDimRwCvCv",
+    "FetchObjRUnusedConst",
+    "FetchR",
+    "FetchStaticPropR",
+    "FetchThis",
+    "FramelessIcall1",
+    "FramelessIcall2",
+    "FramelessIcall3",
+    "Free",
+    "FuncNumArgs",
+    "InArray",
+    "InitArray",
+    "InitDynamicCall",
+    "InitFcallByName",
+    "InitFcallConst",
+    "InitMethodCall",
+    "InitStaticMethodCall",
+    "IsEqualCvConstJmpz",
+    "IsIdenticalCvConst",
+    "IsIdenticalCvCv",
+    "IsIdenticalTmpConst",
+    "IsNotIdentical",
+    "IssetIsemptyPropObj",
+    "IssetIsemptyStaticProp",
+    "IsSmallerConstCv",
+    "IsSmallerConstTmpJmpz",
+    "IsSmallerCvConst",
+    "IsSmallerCvConstJmpnzBack",
+    "IsSmallerCvConstJmpz",
+    "IsSmallerCvCvJmpnzBack",
+    "IsSmallerCvCvJmpz",
+    "IsSmallerCvTmpJmpz",
+    "IsSmallerOrEqualJmpnzBack",
+    "IsSmallerTmpConst",
+    "Jmp",
+    "JmpnzConst",
+    "JmpnzEx",
+    "JmpnzTmp",
+    "JmpSet",
+    "JmpzCv",
+    "JmpzEx",
+    "JmpzTmp",
+    "Mod",
+    "MulCvConst",
+    "MulCvCv",
+    "MulCvTmp",
+    "MulCvVar",
+    "MulTmpConst",
+    "MulTmpTmp",
+    "MulVarTmp",
+    "New",
+    "PreDecCvRetvalUnused",
+    "PreDecObj",
+    "PreDecVarRetvalUnused",
+    "PreIncCvRetvalUnused",
+    "PreIncObj",
+    "QmAssign",
+    "ReturnConst",
+    "ReturnCv",
+    "ReturnTmp",
+    "RopeAddTmpConst",
+    "RopeAddTmpCv",
+    "RopeEndTmpConst",
+    "RopeInitUnusedConst",
+    "SendFuncArg",
+    "SendRef",
+    "SendValConstUnused",
+    "SendValExConstUnused",
+    "SendValExTmpUnused",
+    "SendValTmpUnused",
+    "SendVarCvUnused",
+    "SendVarEx",
+    "Strlen",
+    "SubCvConst",
+    "SubCvCv",
+    "SubTmpConst",
+    "SubTmpTmp",
+    "TypeCheck",
+    "VerifyReturnType",
+];
+
+/// The call one arm makes to `handler` at `generics` for `variant`:
+/// in the loop's body for a variant [`IN_THE_LOOP`] names, and out of
+/// line through the dispatch's `aside` for every other. A handler that
+/// takes the opline's place stands the frame there itself, where
+/// something outside the loop can read it; every other is entered with
+/// the frame stood there, php's `SAVE_OPLINE()`.
+fn call(handler: &Handler, variant: &str, generics: &str) -> String {
+    let path = format!("crate::handlers::{}::<T{generics}>", handler.ident);
+    match (IN_THE_LOOP.contains(&variant), handler.at) {
+        (true, true) => format!("{path}(req, frame, code, op, at)"),
+        (true, false) => format!(
+            "{{\n\
+             \x20           req.vm_mut().stand(frame, at);\n\
+             \x20           {path}(req, frame, code, op)\n\
+             \x20       }}"
+        ),
+        (false, true) => format!("aside(req, frame, code, op, at, {path})"),
+        (false, false) => format!(
+            "aside(req, frame, code, op, at, |req, frame, code, op, at| {{\n\
+             \x20           req.vm_mut().stand(frame, at);\n\
+             \x20           {path}(req, frame, code, op)\n\
+             \x20       }})"
+        ),
+    }
 }
 
 /// The operand kind's type in `crate::operand`, as `ops.toml` names it.
@@ -625,6 +833,10 @@ struct Spec {
     /// The kinds of `SPEC(OP_DATA=...)` on an opcode the hot list
     /// specialises, which `php_unit` resolves the handler over too.
     op_data: Option<Vec<String>>,
+    /// `RETVAL` in the handler line's `SPEC(...)` on an opcode the hot
+    /// list specialises by kind, over which `php_unit` resolves each
+    /// kind's handler twice.
+    retval: bool,
 }
 
 /// php's opcode names against what the dispatch reads of their rows.
@@ -674,6 +886,17 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
             .get("specialise")
             .and_then(toml::Value::as_bool)
             .unwrap_or(false);
+        let zval_shaped = [specialised("op1_raw"), specialised("op2_raw")];
+        let op_data: Option<Vec<String>> = words
+            .iter()
+            .find_map(|word| word.strip_prefix("OP_DATA="))
+            .filter(|_| specialise)
+            .map(|kinds| kinds.split('|').map(str::to_owned).collect());
+        // `php_unit` resolves `RETVAL` where it resolves a kind of an
+        // operand or of the `OP_DATA` after it, and only there.
+        let retval = specialise
+            && words.contains(&"RETVAL")
+            && (zval_shaped.contains(&true) || op_data.is_some());
         out.insert(
             snake(name),
             Spec {
@@ -681,13 +904,10 @@ fn opcodes(path: &Path) -> Result<BTreeMap<String, Spec>, String> {
                 specialise,
                 op1: kinds("op1"),
                 op2: kinds("op2"),
-                zval_shaped: [specialised("op1_raw"), specialised("op2_raw")],
+                zval_shaped,
                 smart: words.contains(&"SMART_BRANCH"),
-                op_data: words
-                    .iter()
-                    .find_map(|word| word.strip_prefix("OP_DATA="))
-                    .filter(|_| specialise)
-                    .map(|kinds| kinds.split('|').map(str::to_owned).collect()),
+                op_data,
+                retval,
             },
         );
     }
@@ -705,6 +925,9 @@ struct Handler {
     /// Whether the handler is generic over its comparison's branch, the
     /// `S: Branch` after its kinds (`crate::handlers::branch`).
     branched: bool,
+    /// Whether the handler is generic over whether its `out` is read,
+    /// the `R: Retval` after its kinds (`crate::operand::Retval`).
+    retval: bool,
     /// Whether the handler takes the place of its opline, `at: u32`, and
     /// stands the frame there itself where something outside the loop
     /// reads it; a handler generic over operand kinds always takes it.
@@ -753,6 +976,7 @@ fn handlers(path: &Path) -> Result<Vec<Handler>, String> {
             ident: ident.to_owned(),
             operands: generics.matches(": Operand").count(),
             branched: generics.contains(": Branch"),
+            retval: generics.contains(": Retval"),
         });
     }
     Ok(out)

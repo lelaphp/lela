@@ -50,6 +50,7 @@ use syn::visit::Visit;
 use syn::{ImplItem, Item, TraitItem, Type, UseTree, Visibility};
 
 use super::workspace::{Crates, Present};
+use crate::reading::joined;
 use crate::rust::parse_file;
 
 /// One module of one crate: the crate's manifest name and the module path
@@ -207,10 +208,7 @@ impl<'a> Inventory<'a> {
             .crates
             .named(&id.krate)
             .map_or_else(|| id.krate.clone(), Present::ident);
-        std::iter::once(krate)
-            .chain(id.path.iter().cloned())
-            .collect::<Vec<_>>()
-            .join("::")
+        joined(std::iter::once(krate).chain(id.path.iter().cloned()), "::")
     }
 
     /// Whether every item of `krate` is a `pub use` or a module of them:

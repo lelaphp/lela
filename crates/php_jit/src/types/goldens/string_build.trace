@@ -1,0 +1,16 @@
+start loop
+root e1
+op e1 17 long long - taken
+op e1 5 - string - -
+op e1 6 string - - -
+op e1 7 undef string - -
+op e1 8 - - - -
+op e1 9 - long - -
+op e1 10 - - - -
+op e1 11 - string - -
+op e1 12 - - - -
+op e1 13 - string - -
+op e1 14 - - - -
+op e1 15 string string - -
+op e1 16 long - - -
+stop loop

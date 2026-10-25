@@ -133,7 +133,7 @@ The opaque two-atomic slot the engine allocates per safepoint of a function, and
 _Avoid_: feedback (the per-request `MapPtr<[Feedback]>` of `research/third-engine-design.r2.md` §5.14, which the next engine revision deletes), counter, flag
 
 **Interrupt**:
-The one flag on a request that the execution timer, signal delivery, an extension's periodic interrupt and a deferred FFI callback set, and nothing else touches. The loop tests it at a back-edge, at a frame's activation, after every `Resume` and after an internal call returns; compiled code tests it once per loop iteration and exits when it is set; the interrupt helper that runs at the check raises the timeout fatal, or dispatches the pending signals and serves every extension's interrupt hook.
+The one flag on a request that the execution timer, signal delivery, an extension's periodic interrupt and a deferred FFI callback set, and nothing else touches. The loop tests it at a back-edge, at a frame's activation, after every `Resume` and after an internal call returns; compiled code tests it once per loop iteration and hands the check to the loop, by an exit or, where php's trace takes its interrupt stub, by returning to it and entering the trace again; the interrupt helper that runs at the check raises the timeout fatal, or dispatches the pending signals and serves every extension's interrupt hook.
 _Avoid_: vm_interrupt (php's field), timeout flag, pending signal, tick (php's `register_tick_function`, `unregister_tick_function`)
 
 **Trace**:
@@ -208,4 +208,4 @@ _Avoid_: roadmap, board, a track's map (revision 22 settled the word on `AGENTS.
 
 **Divergence**:
 One accepted difference from the oracle, a row in `docs/divergence.toml` keyed by a witness hash, a phpt path, a compile-identity path, an extension's name, a trace site, a conformance suite's case or a test the production server answers otherwise by design, with a kind (the lane that reads it), a cause (whether it is parity debt: `debt` by default, while `php-ub`, `by-design` and `oracle-build` are counted apart from the day-30 target), a reason, a status and a date. The oracle module consults the registry on every comparison; a person writes the reason.
-_Avoid_: recorded difference, known disagreement, XFAIL, exception (php's `set_exception_handler`, `restore_exception_handler`; `Thrown::exception`), divergence-table row as a thing apart from the registry
+_Avoid_: recorded difference, known disagreement, XFAIL, exception (php's `set_exception_handler`, `restore_exception_handler`; `Thrown::exception`; `raising::throw_exception_ex`, php's `zend_throw_exception_ex`), divergence-table row as a thing apart from the registry

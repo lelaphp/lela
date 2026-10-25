@@ -18,8 +18,8 @@
 use php_unit::decl::{ClassKind, EnumBacking, Type};
 
 use crate::api::abi::{Entry, Refusals};
-use crate::api::raising::{Thrown, arity, throw_error};
-use crate::api::request::Request;
+use crate::api::raising::{Thrown, arity, error, value_error};
+use crate::api::request::{ByValue, Request};
 use crate::api::values::{ClassId, Owner, Value, adopted};
 
 /// Which of the three a function number of a program's enum serves.
@@ -84,18 +84,8 @@ pub(crate) static ENUM: Refusals = Refusals::NONE.cloning().comparison();
 fn called_enum(req: &mut Request) -> Result<ClassId, Thrown> {
     req.frames()
         .called_scope()
-        .filter(|class| {
-            req.symbols()
-                .class_decl(*class)
-                .is_some_and(|decl| decl.kind == ClassKind::Enum)
-        })
-        .ok_or_else(|| {
-            throw_error(
-                req,
-                "Error",
-                "InternalError: an enum method served on no enum",
-            )
-        })
+        .filter(|class| req.class_is(*class, ClassKind::Enum))
+        .ok_or_else(|| error(req, "InternalError: an enum method served on no enum"))
 }
 
 /// The names of an enum's cases in declaration order, the constants
@@ -161,14 +151,12 @@ fn cases(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 /// Level::from(): Argument #1 ($value) must be of type int, string given
 /// ```
 fn from(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let made = by_value(req, false);
-    adopted(made)
+    adopted(by_value(req, false))
 }
 
 /// `BackedEnum::tryFrom()`: `null` where `from` raises its `ValueError`.
 fn try_from(req: &mut Request) -> Result<Owner<Value>, Thrown> {
-    let made = by_value(req, true);
-    adopted(made)
+    adopted(by_value(req, true))
 }
 
 /// The key `zend_enum_from_base` parses the argument into, one owner
@@ -203,9 +191,7 @@ fn backing_key(req: &mut Request, given: &Value, backing: EnumBacking) -> Result
         }
     };
     if let Some(n) = long {
-        return Ok(Value::string(
-            req.string(crate::c_number::Long::of(n).as_bytes())?,
-        ));
+        return Ok(Value::string(crate::ops::long_to_str(req, n)?));
     }
     req.addref(given);
     Ok(*given)
@@ -238,17 +224,28 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         .map_or(EnumBacking::Pure, |decl| decl.backing);
     if backing == EnumBacking::Pure {
         let name = req.symbols().class_name(class);
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!("Enum {name} is not backed"),
-        ));
+        return Err(error(req, &format!("Enum {name} is not backed")));
     }
     let given = req.frames().argument(1).unwrap_or_default().deref();
     let wanted = backing_key(req, &given, backing)?;
     if let Err(thrown) = req.update_enum_constants(class) {
         req.release(wanted);
         return Err(thrown);
+    }
+    match req.backed_case_named(class, &wanted) {
+        ByValue::Named(spelled) => {
+            req.release(wanted);
+            let Some(name) = spelled.as_str_bytes() else {
+                return Err(crate::api::raising::fatal(
+                    req,
+                    "InternalError: a backed enum's table names a case by no string",
+                ));
+            };
+            return req.enum_case(class, name).map(|case| case.as_value());
+        }
+        ByValue::Missing => return not_backing(req, class, wanted, try_from),
+        // A native enum, whose table is the stub's: its cases read in turn.
+        ByValue::Unbuilt => {}
     }
     for name in case_names(req, class) {
         let case = match req.enum_case(class, &name) {
@@ -268,6 +265,17 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         }
         req.release(case.as_value());
     }
+    not_backing(req, class, wanted, try_from)
+}
+
+/// `zend_enum_get_case_by_value`'s `not_found`: `null` for `tryFrom`,
+/// and php's `ValueError` naming `wanted` for `from`, which is given up.
+fn not_backing(
+    req: &mut Request,
+    class: ClassId,
+    wanted: Value,
+    try_from: bool,
+) -> Result<Value, Thrown> {
     if try_from {
         req.release(wanted);
         return Ok(Value::null());
@@ -281,9 +289,8 @@ fn by_value(req: &mut Request, try_from: bool) -> Result<Value, Thrown> {
         ),
     };
     req.release(wanted);
-    Err(throw_error(
+    Err(value_error(
         req,
-        "ValueError",
         &format!("{shown} is not a valid backing value for enum {class_name}"),
     ))
 }

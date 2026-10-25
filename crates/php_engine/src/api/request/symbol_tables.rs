@@ -117,7 +117,7 @@ impl Request {
                 // The string the unit's compile made of the name
                 // ([`Request::frame_var_names`]), the table's owner of it
                 // taken; a refusal has ended the request.
-                let Ok(name) = self.declared_string(&name.0) else {
+                let Ok(name) = self.var_name(&unit, body, at, &name.0) else {
                     return;
                 };
                 self.table_add(table, *name, Zval::indirect(cv));
@@ -214,7 +214,7 @@ impl Request {
     /// eval('$outer = "o"; $main .= "2"; eval(\'$inner = "i"; $outer .= "!"; ini_set("memory_limit", "2M"); str_repeat("x", 4 << 20);\');');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 1
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 1
     /// string(1) "i"
     /// string(2) "o!"
     /// string(2) "m2"
@@ -436,7 +436,7 @@ impl Request {
     /// The names of the CVs of the op array `frame` serves, in the
     /// order the compiler numbered them, `op_array->vars`, one owner of
     /// each the caller's: the strings its unit's compile made of them
-    /// ([`php_compile::intern_declared`]), found where it made them, in
+    /// ([`php_compile::named`]), found where it made them, in
     /// the engine's table for a published unit and in the unit for one
     /// of the request's own ([`Request::declared_string`]), so a symbol
     /// table keys a variable by its CV's name, as php's
@@ -453,10 +453,29 @@ impl Request {
         let Some(code) = exec::body_of(&unit, body) else {
             return Ok(Vec::new());
         };
-        code.vars
-            .iter()
-            .map(|name| self.declared_string(&name.0))
+        (code.vars.iter().enumerate())
+            .map(|(at, name)| self.var_name(&unit, body, at, &name.0))
             .collect()
+    }
+
+    /// The name of the CV `cv`, named `bytes`, of the op array `body` of
+    /// `unit`, one owner the caller's: the string a request-only unit's
+    /// main op array names it by where it holds one of its own, as a
+    /// `static` first met at its binding is the scanner's string
+    /// (`lookup_cv`), else [`Request::declared_string`]'s.
+    fn var_name(
+        &mut self,
+        unit: &php_unit::PublishedUnit,
+        body: exec::Body,
+        cv: usize,
+        bytes: &[u8],
+    ) -> Result<Owner<PhpString>, Thrown> {
+        let main = (body == exec::Body::Main)
+            .then(|| (self.unit_strings).main_var(php_unit::PublishedUnit::as_ptr(unit), cv));
+        match main.flatten() {
+            Some(own) => Ok(Owner::take(self, own)),
+            None => self.declared_string(bytes),
+        }
     }
 
     /// The number of the CV named `name` in the op array `frame` serves,
@@ -601,7 +620,7 @@ impl Request {
     }
 
     /// `ZEND_BIND_GLOBAL`'s half over `EG(symbol_table)`
-    /// (`Z/Zend/zend_vm_def.h:8679`): the bucket `name` has, laid down
+    /// (`Z/Zend/zend_vm_def.h:8686`): the bucket `name` has, laid down
     /// holding `null` where the table has none (`zend_hash_lookup`), as
     /// [`Request::symbol_place`] finds it for a write, an `IS_INDIRECT`
     /// bucket followed to the CV of the frame attached to it; what stands
@@ -1033,8 +1052,7 @@ impl Request {
         let mut array = self.table_copy(copied.buckets, size)?;
         for (name, value) in copied.rows {
             let key = Key::from_string(self, Owner::take(self, name));
-            let value = self.dup_value(value, None);
-            let value = Owner::adopt(value);
+            let value = Owner::adopt(self.dup_value(value, None));
             array.set(self, key, value)?;
         }
         Ok(array)
@@ -1067,8 +1085,7 @@ impl Request {
         let mut array = self.table_copy(copied.buckets, size)?;
         for (name, value) in copied.rows {
             let key = Owner::take(self, name).into_key();
-            let value = self.dup_value(value, None);
-            let value = Owner::adopt(value);
+            let value = Owner::adopt(self.dup_value(value, None));
             array.set(self, key, value)?;
         }
         Ok(array)

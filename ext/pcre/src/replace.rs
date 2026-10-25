@@ -14,7 +14,7 @@ use php_ext::coerce::{callable_checked, to_string, with_string};
 use php_ext::raising::{Level, Thrown, arg_type_error, docref, raise_while_pending};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{FreshString, Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
 use crate::Either;
 use crate::constants::{PREG_INTERNAL_ERROR, PREG_NO_ERROR};
@@ -40,7 +40,7 @@ fn give_up(req: &mut Request, value: Replacement) {
 enum Replaced {
     /// Nothing matched: the subject itself, `zend_string_copy`.
     Same,
-    Built(Vec<u8>),
+    Built(Owner<PhpString>),
     /// The error code is set; the native answers `null` for it.
     Failed,
 }
@@ -132,7 +132,8 @@ fn replace_loop(
     };
     let len = subject.len();
     let mut searched = Subject::new(subject);
-    let mut out: Option<Vec<u8>> = None;
+    let mut out: Option<Built> = None;
+    let mut piece = Vec::new();
     let mut start;
     let mut last_end = 0;
     let mut rc = scratch.run(pattern, &mut searched, 0, 0, true);
@@ -146,24 +147,48 @@ fn replace_loop(
                 let (match_start, match_end) = scratch.group(0);
                 if match_end < match_start {
                     set_error(req, PREG_INTERNAL_ERROR);
-                    break 'search Replaced::Failed;
+                    break 'search Ok(Replaced::Failed);
                 }
                 *count += 1;
-                let buffer = out.get_or_insert_with(Vec::new);
-                buffer.extend_from_slice(subject.get(last_end..match_start).unwrap_or_default());
                 let n = usize::try_from(rc).unwrap_or(0);
-                match each(req, &scratch, n, buffer) {
+                piece.clear();
+                match each(req, &scratch, n, &mut piece) {
                     Ok(true) => {}
                     Ok(false) => {
                         set_error(req, PREG_INTERNAL_ERROR);
-                        break 'search Replaced::Failed;
+                        break 'search Ok(Replaced::Failed);
                     }
                     Err(thrown) => {
                         set_error(req, PREG_INTERNAL_ERROR);
                         scratch.give_back(req);
+                        if let Some(out) = out {
+                            out.free(req);
+                        }
                         return Err(thrown);
                     }
                 }
+                // The part before the match and the replacement, in a
+                // string grown to twice what it comes to where it reaches
+                // its size, fallibly since 8.5.12: `goto error` where the
+                // memory limit refused it.
+                let before = subject.get(last_end..match_start).unwrap_or_default();
+                let built = out.get_or_insert_with(Built::default);
+                match built.room(req, before.len() + piece.len()) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        exec_error(req, rc);
+                        break 'search Ok(Replaced::Failed);
+                    }
+                    Err(thrown) => {
+                        scratch.give_back(req);
+                        if let Some(out) = out {
+                            out.free(req);
+                        }
+                        return Err(thrown);
+                    }
+                }
+                built.push(before);
+                built.push(&piece);
                 limit -= 1;
                 start = match_end;
                 last_end = match_end;
@@ -175,50 +200,125 @@ fn replace_loop(
                         if start < len {
                             start += unit_length(pattern, subject, start);
                         } else {
-                            break 'search finished(out, subject, last_end);
+                            break 'search finished(req, out.take(), subject, last_end);
                         }
                     } else {
                         exec_error(req, rc);
-                        break 'search Replaced::Failed;
+                        break 'search Ok(Replaced::Failed);
                     }
                 }
                 break;
             }
         } else if rc == ffi::PCRE2_ERROR_NOMATCH || limit == 0 {
-            break finished(out, subject, last_end);
+            break finished(req, out.take(), subject, last_end);
         } else {
             exec_error(req, rc);
-            break Replaced::Failed;
+            break Ok(Replaced::Failed);
         }
         rc = scratch.run(pattern, &mut searched, start, 0, true);
     };
     scratch.give_back(req);
-    Ok(replaced)
+    // `zend_string_release_ex(result, 0)` where the subject failed.
+    if let Some(out) = out {
+        out.free(req);
+    }
+    replaced
 }
 
 /// `not_matched:` the subject itself where nothing was replaced, and
-/// otherwise the bytes built with the rest of the subject after them.
-fn finished(out: Option<Vec<u8>>, subject: &[u8], last_end: usize) -> Replaced {
+/// otherwise the string built with the rest of the subject after it.
+fn finished(
+    req: &mut Request,
+    out: Option<Built>,
+    subject: &[u8],
+    last_end: usize,
+) -> Result<Replaced, Thrown> {
     match out {
-        None => Replaced::Same,
-        Some(mut out) => {
-            out.extend_from_slice(subject.get(last_end..).unwrap_or_default());
-            Replaced::Built(out)
+        None => Ok(Replaced::Same),
+        Some(out) => out
+            .finish(req, subject.get(last_end..).unwrap_or_default())
+            .map(Replaced::Built),
+    }
+}
+
+/// php's `result`, `result_len` and `alloc_len`: the string a subject's
+/// replacement is built in on the request's heap, laid down at the first
+/// match and grown where what it would hold reaches its size.
+#[derive(Default)]
+struct Built {
+    string: Option<FreshString>,
+    len: usize,
+}
+
+impl Built {
+    /// Room for `more` bytes after what is held: where the length it
+    /// comes to reaches the allocation, `zend_string_falloc` or
+    /// `zend_string_fextend` of twice that length (`alloc_len =
+    /// zend_safe_address_guarded(2, new_len, ZSTR_MAX_OVERHEAD) -
+    /// ZSTR_MAX_OVERHEAD`), asked for fallibly since 8.5.12; `false`
+    /// where the memory limit refused it.
+    fn room(&mut self, req: &mut Request, more: usize) -> Result<bool, Thrown> {
+        let new_len = self.len.saturating_add(more);
+        if let Some(string) = &self.string
+            && new_len < string.len()
+        {
+            return Ok(true);
+        }
+        let alloc_len = new_len.saturating_mul(2);
+        let held = self.string.take();
+        let grown = req.memory_mut().fallible(|req| match held {
+            None => FreshString::new(req, alloc_len),
+            Some(string) => string.extend(req, alloc_len),
+        })?;
+        self.string = grown;
+        Ok(self.string.is_some())
+    }
+
+    /// `bytes` copied in after what is held, in the room [`Built::room`]
+    /// made.
+    fn push(&mut self, bytes: &[u8]) {
+        let end = self.len + bytes.len();
+        if let Some(room) = self
+            .string
+            .as_mut()
+            .and_then(|string| string.bytes_mut().get_mut(self.len..end))
+        {
+            room.copy_from_slice(bytes);
+            self.len = end;
+        }
+    }
+
+    /// "Now we know exactly how long it is": `zend_string_realloc` to
+    /// what is held and `rest`, and `rest` copied in after it.
+    fn finish(mut self, req: &mut Request, rest: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        let exact = self.len + rest.len();
+        let mut string = match self.string.take() {
+            None => FreshString::new(req, exact)?,
+            Some(string) if exact > string.len() => string.extend(req, exact)?,
+            Some(string) if exact < string.len() => string.truncate(req, exact)?,
+            Some(string) => string,
+        };
+        if let Some(room) = string.bytes_mut().get_mut(self.len..exact) {
+            room.copy_from_slice(rest);
+        }
+        Ok(string.finish())
+    }
+
+    /// `zend_string_release_ex(result, 0)`.
+    fn free(self, req: &mut Request) {
+        if let Some(string) = self.string {
+            string.free(req);
         }
     }
 }
 
 /// The subject a replacement came to, as a string the caller owns, or
 /// `None` for php's `NULL`.
-fn owned(
-    req: &mut Request,
-    subject: PhpString,
-    replaced: Replaced,
-) -> Result<Option<Owner<PhpString>>, Thrown> {
+fn owned(req: &mut Request, subject: PhpString, replaced: Replaced) -> Option<Owner<PhpString>> {
     match replaced {
-        Replaced::Same => Ok(Some(Owner::take(req, subject))),
-        Replaced::Built(bytes) => Ok(Some(PhpString::new(req, &bytes)?)),
-        Replaced::Failed => Ok(None),
+        Replaced::Same => Some(Owner::take(req, subject)),
+        Replaced::Built(string) => Some(string),
+        Replaced::Failed => None,
     }
 }
 
@@ -251,7 +351,7 @@ pub(super) fn replace_impl(
         expand(replacement, bytes, scratch, n, out);
         Ok(true)
     })?;
-    owned(req, subject, replaced)
+    Ok(owned(req, subject, replaced))
 }
 
 /// What a callback replacement runs under, php's `fci` and `fcc` with
@@ -299,7 +399,12 @@ fn replace_one_func(
                 return Ok(false);
             }
             let mut groups = PhpArray::new(req)?;
-            populate(req, &mut groups, &pattern, scratch, bytes, n, flags)?;
+            // `preg_do_repl_func`'s `NULL` where the memory limit was met
+            // filling the groups, since 8.5.12.
+            if !populate(req, &mut groups, &pattern, scratch, bytes, n, flags)? {
+                groups.give_up(req);
+                return Ok(false);
+            }
             let argument = groups.into_value();
             let returned = call(req, callback, &[*argument]);
             argument.give_up(req);
@@ -310,7 +415,7 @@ fn replace_one_func(
             Ok(true)
         },
     )?;
-    owned(req, subject, replaced)
+    Ok(owned(req, subject, replaced))
 }
 
 /// `php_replace_in_subject`: a pattern string, or each of an array's
@@ -660,6 +765,20 @@ fn over_array(
 /// NULL
 /// string(14) "Internal error"
 /// ```
+///
+/// Since 8.5.12 the replaced string is grown fallibly, to twice what it
+/// comes to: a growth the memory limit refuses fails the subject, and the
+/// limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $s = preg_replace('/a/', 'bbb', str_repeat('a', 1 << 20));
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 3145728 bytes) in %s on line 3
+/// ```
 #[php_function(frameless(3))]
 fn preg_replace(
     req: &mut Request,
@@ -835,6 +954,20 @@ fn func_impl(
 /// string(14) "Internal error"
 /// preg_replace_callback(): Argument #2 ($callback) must be a valid callback, function "no_such_function" not found or invalid function name
 /// string(8) "b<x><y>b"
+/// ```
+///
+/// Since 8.5.12 the replaced string is grown fallibly, as
+/// `preg_replace`'s is, and the groups handed to the callback stop once
+/// the memory limit was met.
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $s = preg_replace_callback('/./', fn ($m) => 'xyz', str_repeat('a', 1 << 20));
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn preg_replace_callback(

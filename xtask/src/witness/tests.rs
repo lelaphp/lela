@@ -35,7 +35,7 @@ fn manifest() -> Manifest {
 /// The tracked pin's binary, when it is on this machine; a failure where
 /// this machine promised the binary (#38).
 fn oracle() -> Option<PathBuf> {
-    let pin = manifest().pin;
+    let pin = manifest().pin.unwrap();
     Promise::Oracle
         .or_skip(pin.oracle.file().map(Path::to_path_buf))
         .unwrap()
@@ -82,7 +82,7 @@ fn judged(file: &Path, text: &str, registry: &Registry, accept: Accept) -> Tally
     };
     let manifest = manifest();
     let tally = judge(
-        &manifest.pin.oracle(),
+        &manifest.pin().unwrap().oracle(),
         &binary(),
         registry,
         &ask,
@@ -127,8 +127,8 @@ fn the_digest_is_asserted_once_over_a_run_of_three_witnesses() {
     let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &text);
     assert_eq!(found.witnesses.len(), 3, "{found:#?}");
     let manifest = manifest();
-    assert_eq!(manifest.pin.digests_asserted(), 0);
-    let oracle = manifest.pin.oracle();
+    assert_eq!(manifest.pin().unwrap().digests_asserted(), 0);
+    let oracle = manifest.pin().unwrap().oracle();
     let tally = judge(
         &oracle,
         &binary(),
@@ -147,7 +147,7 @@ fn the_digest_is_asserted_once_over_a_run_of_three_witnesses() {
             .all(|j| j.judgement == Judgement::Pass),
         "{tally:#?}"
     );
-    assert_eq!(manifest.pin.digests_asserted(), 1);
+    assert_eq!(manifest.pin().unwrap().digests_asserted(), 1);
 }
 
 /// Coverage first, the digest only before a snippet runs (#65): with no
@@ -164,8 +164,8 @@ fn an_absent_oracle_leaves_the_coverage_half_judged_and_the_witness_unrun() {
     assert_eq!(found.witnesses.len(), 1, "{found:#?}");
     assert_eq!(found.subjects.len(), 2, "{found:#?}");
     let mut manifest = manifest();
-    manifest.pin.oracle.path = PathBuf::from("/no-php-here");
-    let oracle = manifest.pin.oracle();
+    manifest.pin.as_mut().unwrap().oracle.path = PathBuf::from("/no-php-here");
+    let oracle = manifest.pin().unwrap().oracle();
     let tally = judge(
         &oracle,
         &binary(),
@@ -188,7 +188,7 @@ fn an_absent_oracle_leaves_the_coverage_half_judged_and_the_witness_unrun() {
         "{tally:#?}"
     );
     assert_eq!(
-        manifest.pin.digests_asserted(),
+        manifest.pin().unwrap().digests_asserted(),
         0,
         "nothing ran, so nothing hashed"
     );
@@ -204,9 +204,9 @@ fn a_digest_mismatch_refuses_the_run_and_is_not_a_bork_per_witness() {
         &block("/// ```expect\n/// 1\n/// ```\n"),
     );
     let mut manifest = manifest();
-    manifest.pin.oracle.md5 = "0".repeat(32);
+    manifest.pin.as_mut().unwrap().oracle.md5 = "0".repeat(32);
     let err = judge(
-        &manifest.pin.oracle(),
+        &manifest.pin().unwrap().oracle(),
         &binary(),
         &registry(""),
         &Ask::default(),
@@ -247,7 +247,7 @@ fn the_snippet_is_named_witness_php_as_the_recipe_names_it() {
     // compiles a served source under its name expanded, as php compiles
     // its primary file (#1569), so the name is the scratch path the
     // normaliser writes `%SCRATCH%` for, as the oracle's is.
-    let recipe = manifest().pin.recipe;
+    let recipe = manifest().pin.unwrap().recipe;
     let snippet = "ini_set('display_errors', 'stderr');\necho $u, 'to the first';";
     let served = crate::oracle::linked::serve(&recipe, None, snippet).unwrap();
     assert_eq!(
@@ -263,7 +263,7 @@ fn the_linked_snippet_is_served_in_the_tree_its_file_stands_in() {
     // `include` and the token the normaliser puts where the directory
     // was all read the one tree (#396). No oracle is asked: the run of
     // record is the linked engine's, and the token is the recipe's.
-    let recipe = manifest().pin.recipe;
+    let recipe = manifest().pin.unwrap().recipe;
     let served = crate::oracle::linked::serve(&recipe, None, "echo __DIR__;").unwrap();
     assert_eq!(
         String::from_utf8_lossy(&served.stdout),
@@ -289,7 +289,7 @@ fn the_linked_engine_runs_under_the_recipes_environment_alone() {
             .map(|(name, value)| (name.to_owned(), value.to_owned()))
             .collect::<std::collections::BTreeMap<_, _>>()
     };
-    let mut pin = manifest().pin;
+    let mut pin = manifest().pin.unwrap();
     for another in [false, true] {
         if another {
             pin.recipe
@@ -357,12 +357,12 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run
     let mut manifest = manifest();
     for absent in [false, true] {
         if absent {
-            manifest.pin.oracle.path = PathBuf::from("no-php-here");
+            manifest.pin.as_mut().unwrap().oracle.path = PathBuf::from("no-php-here");
         } else if oracle().is_none() {
             continue;
         }
         let tally = judge(
-            &manifest.pin.oracle(),
+            &manifest.pin().unwrap().oracle(),
             &binary(),
             &registry(""),
             &Ask::default(),
@@ -398,7 +398,7 @@ fn a_fence_naming_a_regime_the_pin_does_not_carry_is_a_block_the_lane_cannot_run
 /// such a line too, never a run under the recipe alone (#1932).
 #[test]
 fn a_fence_under_a_regime_of_args_is_served_where_they_reach_or_not_at_all() {
-    let mut pin = manifest().pin;
+    let mut pin = manifest().pin.unwrap();
     pin.regime.insert(
         "extended-info".to_owned(),
         crate::oracle::Regime {
@@ -543,7 +543,7 @@ fn held_over(
         registry("")
     };
     let judged = held(
-        &manifest().pin,
+        manifest().pin().unwrap(),
         &registry,
         witness,
         witness.exit,
@@ -598,7 +598,7 @@ fn the_fixture_whose_fence_the_oracle_does_not_meet_fails_naming_the_oracle() {
     let fixture = Manifest::load(&root).unwrap();
     let found = super::extract(&root, &fixture.crates[0], None, Target::built()).unwrap();
     let tally = judge(
-        &fixture.pin.oracle(),
+        &fixture.pin().unwrap().oracle(),
         &binary(),
         &registry(""),
         &Ask::default(),
@@ -626,7 +626,7 @@ fn a_fence_a_trace_row_covers_is_held_to_the_engine_alone_and_one_it_does_not_bo
     let found = super::extract(&root, &fixture.crates[0], None, Target::built()).unwrap();
     let rows = Registry::load(&root).unwrap();
     let tally = judge(
-        &fixture.pin.oracle(),
+        &fixture.pin().unwrap().oracle(),
         &binary(),
         &rows,
         &Ask::default(),
@@ -648,7 +648,7 @@ fn a_fence_a_trace_row_covers_is_held_to_the_engine_alone_and_one_it_does_not_bo
     assert!(bare.note.contains("ended on a signal"), "{}", bare.note);
 
     let without = judge(
-        &fixture.pin.oracle(),
+        &fixture.pin().unwrap().oracle(),
         &binary(),
         &registry(""),
         &Ask::default(),
@@ -718,7 +718,7 @@ fn a_capture_whose_two_runs_differ_names_the_line_and_captures_nothing() {
         ..Ask::default()
     };
     let tally = judge(
-        &fixture.pin.oracle(),
+        &fixture.pin().unwrap().oracle(),
         &binary(),
         &registry(""),
         &ask,
@@ -840,7 +840,7 @@ fn a_block_the_grammar_cannot_read_fails_the_crate_where_it_stands() {
         "/// ```php\n/// echo 1;\n/// ```\n/// prose\npub fn native() {}\n",
     );
     let tally = judge(
-        &manifest().pin.oracle(),
+        &manifest().pin().unwrap().oracle(),
         &binary(),
         &Registry::default(),
         &Ask::default(),
@@ -872,7 +872,7 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
     let found = fence::extract(Path::new("ext/fixture/src/lib.rs"), &marked);
     let witness = &found.witnesses[0];
     let manifest = manifest();
-    let oracle = manifest.pin.oracle();
+    let oracle = manifest.pin().unwrap().oracle();
     let (ran, entered) = super::judge::serve(&oracle, &binary(), witness, None).unwrap();
     assert_eq!(
         String::from_utf8_lossy(&ran.stdout).trim_end(),
@@ -904,9 +904,10 @@ fn a_process_fence_forks_in_the_binary_and_never_in_the_harness() {
 /// of a crate it carries by the binary under test (#2721); under a
 /// regime that sets the tier's `jit.mode`, by `php` built with the
 /// tier's feature beside the crate's, where the binary under test would
-/// serve it with no tier (#2962): in the fixture, `sapi/cli` turns
-/// `posix` on and not `zend_test`, and each stand-in prints its own
-/// name.
+/// serve it with no tier (#2962), and so under one that turns
+/// `opcache.jit` on, but not under one that sets it off (#3193): in the
+/// fixture, `sapi/cli` turns `posix` on and not `zend_test`, and each
+/// stand-in prints its own name.
 #[test]
 fn a_process_fence_is_served_by_a_php_carrying_its_crate_s_feature() {
     use std::os::unix::fs::PermissionsExt;
@@ -924,25 +925,33 @@ fn a_process_fence_is_served_by_a_php_carrying_its_crate_s_feature() {
         .featuring(&["zend_test"], stand_in("featured"))
         .featuring(&["zend_test", "jit"], stand_in("featured-tier"))
         .featuring(&["jit"], stand_in("tier"));
-    let force = manifest.pin.regime("jit-force").unwrap();
+    let pin = manifest.pin().unwrap();
     for (krate, served, under_force) in [
         ("ext/zend_test", "featured", "featured-tier"),
         ("ext/posix", "default", "tier"),
     ] {
-        let krate = manifest.crate_named(krate).unwrap();
-        let found = super::extract(&root, krate, None, Target::built()).unwrap();
+        let found = manifest.crate_named(krate).unwrap();
+        let found = super::extract(&root, found, None, Target::built()).unwrap();
         let [witness] = found.witnesses.as_slice() else {
             panic!("{found:#?}")
         };
-        let oracle = manifest.pin.oracle();
+        let oracle = pin.oracle();
         let (ran, _) = judge::serve(&oracle, &binary, witness, None).unwrap();
         assert_eq!(String::from_utf8_lossy(&ran.stdout).trim_end(), served);
-        let forced = super::fence::Witness {
-            regime: Some("jit-force".to_owned()),
-            ..witness.clone()
-        };
-        let (ran, _) = judge::serve(&oracle, &binary, &forced, Some(force)).unwrap();
-        assert_eq!(String::from_utf8_lossy(&ran.stdout).trim_end(), under_force);
+        for (regime, expected) in [
+            ("jit-force", under_force),
+            ("jit-tracing", under_force),
+            ("jit-off", served),
+        ] {
+            let under = super::fence::Witness {
+                regime: Some(regime.to_owned()),
+                ..witness.clone()
+            };
+            let named = pin.regime(regime).ok();
+            let (ran, _) = judge::serve(&oracle, &binary, &under, named).unwrap();
+            let stdout = String::from_utf8_lossy(&ran.stdout);
+            assert_eq!(stdout.trim_end(), expected, "{krate} under {regime}");
+        }
     }
 }
 
@@ -1001,8 +1010,8 @@ fn committed_xtask(name: &str) -> Tree {
     fs::create_dir_all(dir.join("xtask/src")).unwrap();
     fs::write(dir.join("xtask/Cargo.toml"), "[package]\n").unwrap();
     fs::write(dir.join("xtask/src/lib.rs"), "a\n").unwrap();
-    git(&dir, &["init", "-q"], None).unwrap();
-    git(&dir, &["add", "--", "xtask"], None).unwrap();
+    git(&dir, &["init", "-q"]).unwrap();
+    git(&dir, &["add", "--", "xtask"]).unwrap();
     let unhooked = [
         "-c",
         "user.name=x",
@@ -1016,7 +1025,7 @@ fn committed_xtask(name: &str) -> Tree {
         &["-c", "core.hooksPath=/var/empty", "commit", "-q", "-m", "x"],
     ]
     .concat();
-    git(&dir, &commit, None).unwrap();
+    git(&dir, &commit).unwrap();
     dir
 }
 
@@ -1048,7 +1057,7 @@ fn unmeasured_leaves_out_a_crate_with_a_pass_over_its_tree_now() {
         ["xtask"],
         "a witness reading that records no pin is taken under no recipe this run knows"
     );
-    let reading = reading.under(&manifest.pin);
+    let reading = reading.under(manifest.pin().unwrap());
     store.record(&[reading]).unwrap();
     assert!(
         super::unmeasured(&dir, &manifest, &store)
@@ -1085,7 +1094,7 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
     )
     .unwrap();
     reading.status = Status::Pass;
-    let reading = reading.under(&manifest.pin);
+    let reading = reading.under(manifest.pin().unwrap());
     store.record(std::slice::from_ref(&reading)).unwrap();
     assert!(
         super::unmeasured(&dir, &manifest, &store)
@@ -1098,7 +1107,7 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
     let commented = Pin::parse(&format!("# a person's note\n{tracked}")).unwrap();
     assert_eq!(
         commented.digest(),
-        manifest.pin.digest(),
+        manifest.pin().unwrap().digest(),
         "a comment is no value"
     );
     let entry = fs::read_to_string(workspace.join("fixtures/witness/recipe-env/env.toml")).unwrap();
@@ -1108,10 +1117,10 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
         .unwrap()
         .key(&krate.path())
         .unwrap();
-    manifest.pin = Pin::parse(&changed).unwrap();
+    manifest.pin = Some(Pin::parse(&changed).unwrap());
     assert!(reading.fresh_for(&tree, reading.recipe.as_deref().unwrap()));
     assert!(
-        !reading.fresh_for(&tree, manifest.pin.digest()),
+        !reading.fresh_for(&tree, manifest.pin().unwrap().digest()),
         "the store keeps a reading taken before the change fresh after it"
     );
     assert_eq!(
@@ -1131,7 +1140,7 @@ fn unmeasured_measures_a_crate_again_once_the_recipe_changes() {
 fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_missing() {
     let root = workspace().join("xtask/fixtures/witness/request-empty");
     let mut manifest = Manifest::load(&root).unwrap();
-    manifest.pin.oracle.path = root.join("no-php-here");
+    manifest.pin.as_mut().unwrap().oracle.path = root.join("no-php-here");
     let rule = super::coverage_rule(&manifest);
     let krate = manifest
         .crates
@@ -1141,7 +1150,7 @@ fn with_the_oracle_absent_a_fence_the_engine_did_not_serve_is_named_and_not_miss
     let found = super::extract(&root, krate, rule, Target::built()).unwrap();
     let binary = Binary::standing(&root, crate::oracle::hosts::FPM, root.join("php-fpm"));
     let tally = judge(
-        &manifest.pin.oracle(),
+        &manifest.pin().unwrap().oracle(),
         &binary,
         &Registry::default(),
         &Ask::default(),
@@ -1282,7 +1291,9 @@ fn unmeasured_measures_a_crate_again_once_a_crate_it_is_built_from_changes() {
             )
             .unwrap();
             reading.status = Status::Pass;
-            store.record(&[reading.under(&manifest.pin)]).unwrap();
+            store
+                .record(&[reading.under(manifest.pin().unwrap())])
+                .unwrap();
         }
     };
     pass_all();
@@ -1407,7 +1418,8 @@ fn the_fixture_whose_line_the_engine_s_host_answers_otherwise_fails() {
         );
     };
     if fixture
-        .pin
+        .pin()
+        .unwrap()
         .sapi
         .cgi
         .as_ref()
@@ -1415,7 +1427,7 @@ fn the_fixture_whose_line_the_engine_s_host_answers_otherwise_fails() {
     {
         read(&fixture);
     }
-    if let Some(cgi) = fixture.pin.sapi.cgi.as_mut() {
+    if let Some(cgi) = fixture.pin.as_mut().unwrap().sapi.cgi.as_mut() {
         cgi.path = hosts.join("absent");
     }
     read(&fixture);

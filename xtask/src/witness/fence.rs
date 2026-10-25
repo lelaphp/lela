@@ -703,7 +703,8 @@ fn item_of(line: &str) -> Option<Item> {
             _ => return None,
         }
     }
-    let name = identifier(&words.collect::<Vec<_>>().join(" ")).unwrap_or_default();
+    let words = words.collect::<Vec<_>>().join(" ");
+    let name = identifier(&words).unwrap_or_default().to_owned();
     let function = keyword? == "fn";
     let head = if function {
         format!("{}fn {name}", if visible { "pub " } else { "" })
@@ -720,13 +721,13 @@ fn item_of(line: &str) -> Option<Item> {
 /// The identifier at the start of `text`, if there is one; a raw one,
 /// `r#mod`, as it is written, since php's name for the kernel is a
 /// keyword here.
-fn identifier(text: &str) -> Option<String> {
+pub(super) fn identifier(text: &str) -> Option<&str> {
     let text = text.trim_start();
     let raw = text.strip_prefix("r#").map_or(0, |_| 2);
     let end = text[raw..]
         .find(|c: char| !(c.is_alphanumeric() || c == '_'))
         .map_or(text.len(), |at| raw + at);
-    (end > raw).then(|| text[..end].to_owned())
+    (end > raw).then(|| &text[..end])
 }
 
 /// The `expect` fence line with `status` pinned on it: the one thing
@@ -748,6 +749,37 @@ pub fn pinned(line: &str, status: i32) -> String {
         None => words.insert(1.min(words.len()), pin),
     }
     format!("{head}```{}", words.join(" "))
+}
+
+/// What a verdict `--accept` wrote is known by: the block from the `php`
+/// fence that opens it through the close of the `expect` fence at `line`
+/// (0-based), and of the `stderr` fence after it where one follows, each
+/// line's body as [`doc_of`] reads it, as a git blob id. The block is the
+/// verdict and the program it is of, and nothing else of the file, so prose
+/// edited around it, an indentation changed or a merge that moves the file
+/// on keep it; a status, a program or a stream typed differently is a block
+/// no `--accept` wrote. Nothing for a line that opens no `expect` fence
+/// under a `php` one.
+pub(crate) fn verdict(text: &str, line: usize) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    if first_word(info_at(&lines, line)?) != EXPECT {
+        return None;
+    }
+    let opens = (0..line)
+        .rev()
+        .take_while(|at| doc_of(lines[*at]).is_some())
+        .find(|at| info_at(&lines, *at).map(first_word) == Some(PHP))?;
+    let (_, mut end) = body_of(&lines, line)?;
+    if let Some(next) = next_fence(&lines, end)
+        && info_at(&lines, next).map(first_word) == Some(STDERR)
+    {
+        end = body_of(&lines, next)?.1;
+    }
+    let body: Vec<&str> = lines[opens..end]
+        .iter()
+        .map(|l| doc_of(l).map_or("", |(_, text)| text.trim_end()))
+        .collect();
+    Some(crate::git::blob_id(body.join("\n").as_bytes()))
 }
 
 /// The block's fences as `--accept --streams` writes them (#801): `head`,
@@ -1131,6 +1163,33 @@ mod tests {
             php("/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 2\n/// ```\npub fn b() {}\n");
         assert_eq!(one.witnesses[0].id(), two.witnesses[0].id());
         assert!(one.witnesses[0].id().starts_with("witness:"));
+    }
+
+    #[test]
+    fn a_verdict_is_known_by_its_block_and_by_nothing_else_of_the_file() {
+        let file = |prose: &str, indent: &str, status: &str, program: &str| {
+            format!(
+                "{indent}/// {prose}\n{indent}///\n{indent}/// ```php\n{indent}/// {program}\n{indent}/// ```\n{indent}/// ```expect {status}\n{indent}/// 1\n{indent}/// ```\n{indent}pub fn f() {{}}\n"
+            )
+        };
+        let at = 5;
+        let one = verdict(&file("Before.", "", "exit=3", "echo 1;"), at).unwrap();
+        assert_eq!(
+            verdict(&file("After.", "    ", "exit=3", "echo 1;"), at),
+            Some(one.clone())
+        );
+        assert_ne!(
+            verdict(&file("Before.", "", "exit=4", "echo 1;"), at),
+            Some(one.clone())
+        );
+        assert_ne!(
+            verdict(&file("Before.", "", "exit=3", "echo 2;"), at),
+            Some(one)
+        );
+        assert_eq!(verdict(&file("Before.", "", "exit=3", "echo 1;"), 2), None);
+        let with_stderr = "/// ```php\n/// x\n/// ```\n/// ```expect exit=1\n/// ```\n/// ```stderr\n/// a\n/// ```\n";
+        let other = with_stderr.replace("/// a\n", "/// b\n");
+        assert_ne!(verdict(with_stderr, 3), verdict(&other, 3));
     }
 
     #[test]

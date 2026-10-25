@@ -19,7 +19,9 @@ use php_ext::attr::php_class;
 use php_ext::call::{Function, autoload, call_method, instantiate, lookup_class, new_object};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type as DeclType;
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, throw, throw_error};
+use php_ext::raising::{
+    Thrown, arg_type_error, arg_value_error, throw, throw_error, throw_exception_ex, type_error,
+};
 use php_ext::request::{OwnedStream, Request, Stream, Streams as _, Whence};
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
 
@@ -528,7 +530,7 @@ impl SplFileInfo {
                     .map_or(text.as_str(), |(t, _)| t)
                     .to_owned();
                 let shown = String::from_utf8_lossy(&name).into_owned();
-                Err(throw(
+                Err(throw_exception_ex(
                     req,
                     "RuntimeException",
                     &format!("Unable to read link {shown}, error: {text}"),
@@ -628,7 +630,11 @@ impl SplFileInfo {
         let class = info_class(req, chosen)?;
         let (kind, entry) = fs(req, this, |it| (it.kind, it.entry.is_empty()))?;
         if kind == Type::Dir && entry {
-            return Err(throw(req, "RuntimeException", "Could not open file"));
+            return Err(throw_exception_ex(
+                req,
+                "RuntimeException",
+                "Could not open file",
+            ));
         }
         let name = file_name(req, this)?;
         create_info(req, &name, class).map(Owner::into_instance)
@@ -691,7 +697,11 @@ impl SplFileInfo {
         };
         let (kind, entry) = fs(req, this, |it| (it.kind, it.entry.is_empty()))?;
         if kind == Type::Dir && entry {
-            return Err(throw(req, "RuntimeException", "Could not open file"));
+            return Err(throw_exception_ex(
+                req,
+                "RuntimeException",
+                "Could not open file",
+            ));
         }
         let name = file_name(req, this)?;
         let name_value = crate::string_value(req, &name)?;
@@ -928,7 +938,7 @@ impl DirectoryIterator {
         }
         while fs(req, this, |it| it.index)? < pos {
             if !crate::valid(req, this)? {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "OutOfBoundsException",
                     &format!("Seek position {pos} is out of range"),
@@ -1704,7 +1714,7 @@ impl SplFileObject {
         read_line_counted(req, this, false, false)?;
         let line = fs(req, this, |it| it.line.clone())?.unwrap_or_default();
         let scanned =
-            php_ext_standard::php_sscanf_internal(req, &line, format.as_bytes(), 2, vars.0.len())?;
+            php_ext_standard::php_sscanf_internal(req, &line, format.as_bytes(), 2, vars.len())?;
         Ok(crate::answered(scanned))
     }
 
@@ -1777,7 +1787,7 @@ impl SplFileObject {
         let name =
             String::from_utf8_lossy(&fs(req, this, |it| it.file_name.clone())?.unwrap_or_default())
                 .into_owned();
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "LogicException",
             &format!("Can't truncate file {name}"),
@@ -2568,7 +2578,7 @@ fn dir_open(req: &mut Request, this: PhpObject, path: &[u8]) -> Result<(), Throw
     })?;
     let Some(dir) = opened else {
         let shown = String::from_utf8_lossy(path).into_owned();
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "UnexpectedValueException",
             &format!("Failed to open directory \"{shown}\""),
@@ -2628,7 +2638,7 @@ fn file_open(
         .found()
         .is_some_and(|s| s[2] & 0o170_000 == 0o040_000)
     {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "LogicException",
             "Cannot use SplFileObject with directories",
@@ -2639,7 +2649,7 @@ fn file_open(
     })?;
     let Some(stream) = opened.filter(|_| !name.is_empty()) else {
         let shown = String::from_utf8_lossy(name).into_owned();
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "RuntimeException",
             &format!("Cannot open file '{shown}'"),
@@ -2694,7 +2704,7 @@ fn cannot_read(req: &mut Request, this: PhpObject) -> Result<Thrown, Thrown> {
     let name =
         String::from_utf8_lossy(&fs(req, this, |it| it.file_name.clone())?.unwrap_or_default())
             .into_owned();
-    Ok(throw(
+    Ok(throw_exception_ex(
         req,
         "RuntimeException",
         &format!("Cannot read from file {name}"),
@@ -2805,6 +2815,11 @@ fn read_csv(
     let filled = match fields {
         None => parsed.append(req, Owner::null()),
         Some(fields) => fields.iter().try_for_each(|field| {
+            // php 8.5.12's `php_fgetcsv` takes no field once the memory
+            // limit was met (`ZEND_HAS_OOM()`).
+            if req.memory().has_oom() {
+                return Ok(());
+            }
             let value = crate::string_value(req, field)?;
             parsed.append(req, value)
         }),
@@ -2844,9 +2859,8 @@ fn read_line_ex(req: &mut Request, this: PhpObject, silent: bool) -> Result<bool
             let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
             let name = php_ext::coerce::value_name(req, &answered);
             answered.give_up(req);
-            return Err(throw_error(
+            return Err(type_error(
                 req,
-                "TypeError",
                 &format!(
                     "{class}::getCurrentLine(): Return value must be of type string, {name} returned"
                 ),
@@ -2887,7 +2901,7 @@ fn file_rewind_to_start(req: &mut Request, this: PhpObject) -> Result<(), Thrown
         let name =
             String::from_utf8_lossy(&fs(req, this, |it| it.file_name.clone())?.unwrap_or_default())
                 .into_owned();
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "RuntimeException",
             &format!("Cannot rewind file {name}"),

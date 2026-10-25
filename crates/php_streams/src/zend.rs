@@ -18,6 +18,7 @@ use crate::streams::{Located, OpenOptions, StreamLayer};
 pub const STREAM_HOOKS: StreamHooks = StreamHooks {
     open,
     resolve_path,
+    timestamp,
     spend,
     open_primary,
     close_primary,
@@ -67,7 +68,7 @@ fn open(req: &mut Request, path: &[u8]) -> Result<Option<IncludeSource>, Thrown>
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// array(1) {
@@ -91,6 +92,17 @@ fn open_primary(req: &mut Request, path: &[u8]) -> Result<Option<PhpString>, Thr
 fn close_primary(req: &mut Request) {
     if let Some(fh) = req.streams().primary.take() {
         fh.destroy(req);
+    }
+}
+
+/// [`StreamHooks::timestamp`]: `zend_get_stream_timestamp`, the
+/// wrapper's `url_stat` asked under `PHP_STREAM_URL_STAT_QUIET` with
+/// nothing cached, a wrapper with no `url_stat` stamped at one second.
+fn timestamp(req: &mut Request, path: &[u8]) -> Option<[i64; 13]> {
+    match req.wrapper_url_stat(path).ok()? {
+        UrlStat::Found(sb) => Some(sb),
+        UrlStat::Unsupported => Some(std::array::from_fn(|at| i64::from(at == 9))),
+        UrlStat::Failed | UrlStat::Refused => None,
     }
 }
 

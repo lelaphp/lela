@@ -173,6 +173,18 @@ mask = [['(?m)^.{24} \(\d+\): ', '<asctime> (<pid>): ']]
 [[line.then]]
 args = ["-n", "-d", "opcache.file_cache_only=1", "-F", "-y", "{dir}/php-fpm.conf"]
 
+# A numeric user or group ID out of `uid_t`'s or `gid_t`'s range, the
+# `(uid_t) -1` that means none among them, is refused by `-t` with the
+# pool's name and the ID as written (php 8.5.12's `fpm_unix_parse_uid` and
+# `_gid`, gh19320), where a `strtoul` once read it as some other user.
+[[line]]
+name = "a-user-or-group-id-out-of-range-is-refused"
+args = ["-n", "-t", "-y", "{dir}/group.conf"]
+files = { "group.conf" = "[global]\nerror_log = /dev/stderr\n[www]\nlisten = {dir}/fpm.sock\nuser = 1\ngroup = 18446744073709551615\npm = static\npm.max_children = 1\n", "owner.conf" = "[global]\nerror_log = /dev/stderr\n[www]\nlisten = {dir}/fpm.sock\nuser = 1\nlisten.owner = 4294967295\npm = static\npm.max_children = 1\n" }
+mask = [['\[\d\d-\w{3}-\d{4} \d\d:\d\d:\d\d[.\d]*\] ', '[<time>] ']]
+[[line.then]]
+args = ["-n", "-t", "-y", "{dir}/owner.conf"]
+
 # An extension whose engine start refuses, php's `MINIT` returning `FAILURE`
 # (ADR-0010): `ffi.preload` naming a header that is not there. php ends the
 # process from `php_error_cb`, `exit(-2)` for the `E_CORE_ERROR` of a failed

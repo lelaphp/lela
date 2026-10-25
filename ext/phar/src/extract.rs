@@ -7,7 +7,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 
 use php_ext::abi::Union;
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_exception_ex};
 use php_ext::request::{MAXPATHLEN, Opening, OwnedStream as _, Request, Resolve, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{PhpArray, PhpString};
@@ -223,21 +223,21 @@ pub(crate) fn extract_to(
         .unwrap_or_default();
     let shown = lossy(&fname).into_owned();
     if crate::archive::read_file(req, &fname, false)?.is_none() {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "InvalidArgumentException",
             &format!("Invalid argument, {shown} cannot be found"),
         ));
     }
     if dest.is_empty() {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "InvalidArgumentException",
             "Invalid argument, extraction path must be non-zero length",
         ));
     }
     if dest.len() >= MAXPATHLEN {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "InvalidArgumentException",
             &format!(
@@ -249,7 +249,7 @@ pub(crate) fn extract_to(
     match req.url_stat(dest, false, false)?.found() {
         None => {
             if !mkdir_all(req, dest, 0o777) {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "RuntimeException",
                     &format!("Unable to create path \"{}\" for extraction", lossy(dest)),
@@ -257,7 +257,7 @@ pub(crate) fn extract_to(
             }
         }
         Some(sb) if sb[2] & 0o040_000 == 0 => {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "RuntimeException",
                 &format!(
@@ -269,14 +269,14 @@ pub(crate) fn extract_to(
         Some(_) => {}
     }
     let fail = |req: &mut Request, error: String| {
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "PharException",
             &format!("Extraction from phar \"{shown}\" failed: {error}"),
         ))
     };
     let missing = |req: &mut Request, name: &[u8]| {
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "PharException",
             &format!(
@@ -297,7 +297,7 @@ pub(crate) fn extract_to(
             let walked = walk::foreach(req, list, Hold::None, |req, row| -> walk::Step<bool> {
                 let value = row.value().deref();
                 let Some(name) = value.deref().as_str_bytes().map(<[u8]>::to_vec) else {
-                    return Err(throw(
+                    return Err(throw_exception_ex(
                         req,
                         "InvalidArgumentException",
                         "Invalid argument, array of filenames to extract contains non-string value",

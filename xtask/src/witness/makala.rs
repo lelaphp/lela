@@ -187,7 +187,7 @@ pub(crate) struct Ports {
 
 /// The directory a program stands in, which a server serves, and its
 /// name, which a request that names no target asks for.
-fn placed(program: &Path) -> Result<(&Path, &str)> {
+pub(crate) fn placed(program: &Path) -> Result<(&Path, &str)> {
     let dir = program.parent().context("a program with no directory")?;
     let name = (program.file_name().and_then(|name| name.to_str()))
         .context("a program with no name of text")?;
@@ -430,7 +430,7 @@ impl Fpm {
         // waits for it and says why a master ended.
         let stream = match UnixStream::connect_addr(&self.address) {
             Ok(stream) => stream,
-            Err(_) => (self.pool.lock().unwrap_or_else(PoisonError::into_inner)).connect()?,
+            Err(_) => crate::locked(&self.pool).connect()?,
         };
         stream.set_read_timeout(Some(self.timeout))?;
         let pairs = (self.params.iter()).map(|(n, v)| (n.as_bytes(), v.as_slice()));
@@ -439,7 +439,7 @@ impl Fpm {
 
     /// The pool's master, whose children answer its requests.
     pub(crate) fn pid(&self) -> u32 {
-        (self.pool.lock().unwrap_or_else(PoisonError::into_inner)).pid()
+        crate::locked(&self.pool).pid()
     }
 
     /// Once the request last asked has ended in the pool's child, as well
@@ -569,6 +569,7 @@ fn rendered<'a>(code: &str, lines: impl Iterator<Item = &'a str>, body: &[u8]) -
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use std::fs;
 

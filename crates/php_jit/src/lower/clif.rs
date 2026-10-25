@@ -35,25 +35,40 @@ use std::mem::offset_of;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types::{F64, I8, I32, I64};
 use cranelift_codegen::ir::{
-    AbiParam, Block, Function, InstBuilder, MemFlagsData, SigRef, Signature, SourceLoc, StackSlot,
-    StackSlotData, StackSlotKind, Type, UserFuncName, Value,
+    AbiParam, Block, BlockArg, Function, InstBuilder, MemFlagsData, SigRef, Signature, SourceLoc,
+    StackSlot, StackSlotData, StackSlotKind, Type, UserFuncName, Value,
 };
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
-use php_engine::tier::FuncRef;
+use php_engine::tier::{FRAME, FuncRef, PlainCall};
 use php_heap::{Arr, ROOM_BYTES, Ref, Zval, ZvalType};
-use php_unit::{MapPtrOffset, Opcode, OplineIdx};
+use php_unit::{ConstIdx, Opcode, OplineIdx};
 
 use super::{
-    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, Stood, Symbols, UNWOUND,
-    located,
+    ABANDONED, DECLINED, ENTRY_AT, INTERRUPT_AT, INTERRUPTED, Kernel, ROOT_AT, STACK_AT, STOOD_AT,
+    Stood, Symbols, UNWOUND, located,
 };
-use crate::record::Stop;
+
+mod calls;
+mod dims;
+mod doors;
+mod objects;
+mod strings;
+use crate::record::{Began, Callee, Stop};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
-    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Repeat, Slot, Store, Stored, TraceIr,
-    Types, UnwindId, ValueId, cannot_raise,
+    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Pointee, Read, Repeat, Slot, Store,
+    Stored, TraceIr, Types, UnwindId, ValueId, cannot_raise,
 };
+
+/// Where an inline arithmetic that would raise goes instead
+/// ([`Emit::refuse_if`]): the opline's exit, for the interpreter to serve
+/// it again, or the block where its handler serves the write.
+#[derive(Debug, Clone, Copy)]
+enum Refuse {
+    Exit(ExitId),
+    To(Block),
+}
 
 /// A layout offset as the immediate a load or a store takes.
 const fn imm(at: usize) -> i32 {
@@ -72,14 +87,46 @@ const TYPE_AT: i32 = imm(Zval::TYPE_AT);
 /// `IS_TYPE_REFCOUNTED` in the type word: the flags byte follows the type
 /// byte, as php's `Z_TYPE_FLAGS_SHIFT` lays it.
 const COUNTED: i64 = (Zval::TYPE_REFCOUNTED as i64) << 8;
+/// The type byte in the type word, php's `Z_TYPE` of `Z_TYPE_INFO`.
+const KIND: i64 = 0xff;
 const _: () = assert!(Zval::FLAGS_AT == Zval::TYPE_AT + 1);
 /// A slot, `sizeof(zval)`.
 const SLOT: i64 = 16;
+/// A `foreach` iterator's position in its slot, php's `Z_FE_POS`.
+const FE_POS_AT: i32 = imm(Zval::FE_POS_AT);
 const _: () = assert!(size_of::<Zval>() == 16);
 const STOOD_FRAME: i32 = imm(offset_of!(Stood, frame));
 const STOOD_CALL: i32 = imm(offset_of!(Stood, call));
 const STOOD_FUNC: i32 = imm(offset_of!(Stood, func));
 const STOOD_OPLINE: i32 = imm(offset_of!(Stood, opline));
+const STOOD_ROOM: i32 = imm(offset_of!(Stood, room));
+const _: () = assert!(STOOD_OPLINE == STOOD_FUNC + 4 && size_of::<Stood>() == 32);
+
+/// Where compiled code finds the room of a call under way.
+#[derive(Debug, Clone, Copy)]
+enum CallRoom {
+    /// In this variable, read where the trace began the call.
+    Held(Variable),
+    /// Where the interpreter stands, `EX(call)`: a call its frame began
+    /// before the trace reached it, php's fake init, which is the
+    /// innermost under way wherever compiled code reaches it, since every
+    /// call the trace began after it is made by then and the last kernel
+    /// stood the frame, or `enter` did.
+    Stood,
+}
+
+/// Where the code goes where the interrupt test finds the interrupt
+/// raised ([`Emit::interrupt_test`]).
+#[derive(Debug, Clone, Copy)]
+enum Raised {
+    /// Through this exit, php's exit point at a loop's header.
+    Exit(ExitId),
+    /// To php's interrupt stub, [`INTERRUPTED`].
+    Stub,
+    /// To this block, which answers a link's exit: the root it links to
+    /// meets the interrupt at its own header.
+    Answer(Block),
+}
 
 /// The type byte of `tag`, as an immediate.
 fn tag(tag: ZvalType) -> i64 {
@@ -101,28 +148,69 @@ fn mismatch(why: &'static str) -> Abort {
     }
 }
 
-/// The function `ir` lowers to on the target `config` describes, calling
+/// The body `ir` lowers to on the target `config` describes, calling
 /// the kernels at `symbols`, and, under exit-fuzz, failing each guard
-/// once by its byte of `fuzz`; with how many such guards it holds.
+/// once by its byte of `fuzz`; jumping through its entry slots and its
+/// link as `joins` says; with how many such guards it holds.
 pub(super) fn lower(
     ir: &TraceIr,
     config: TargetFrontendConfig,
-    symbols: &Symbols,
-    fuzz: Option<Fuzz>,
+    (symbols, held): (&Symbols, &[PlainCall]),
+    (fuzz, joins): (Option<Fuzz>, Joins),
 ) -> Result<(Function, usize), Abort> {
-    let call_conv = config.default_call_conv;
-    let mut sig = Signature::new(call_conv);
-    sig.params.extend([AbiParam::new(I64), AbiParam::new(I64)]);
-    sig.returns.push(AbiParam::new(I32));
-    let mut func = Function::with_name_signature(UserFuncName::user(0, 0), sig);
+    let mut func = Function::with_name_signature(UserFuncName::user(0, 0), body_signature());
     let mut context = FunctionBuilderContext::new();
     let builder = FunctionBuilder::new(&mut func, &mut context);
-    let mut emit = Emit::new(ir, builder, call_conv, symbols);
+    let mut emit = Emit::new(ir, builder, config.default_call_conv, (symbols, held));
     emit.fuzz = fuzz;
+    emit.joins = joins;
     emit.trace()?;
     let sites = emit.fuzzed_sites;
     emit.b.finalize(config);
     Ok((func, sites))
+}
+
+/// A trace's body's signature: the `ExitCtx` and the room of the frame
+/// it enters on, the exit or the answer it leaves with, on Cranelift's
+/// tail convention, so a body hands on to another by a tail call.
+fn body_signature() -> Signature {
+    let mut sig = Signature::new(CallConv::Tail);
+    sig.params.extend([AbiParam::new(I64), AbiParam::new(I64)]);
+    sig.returns.push(AbiParam::new(I32));
+    sig
+}
+
+/// The trace prologue (`super::Backend`): on the host's convention, the
+/// `ExitCtx`, the room and the body's address, the body called on the
+/// tail convention and its answer answered.
+pub(super) fn prologue(config: TargetFrontendConfig) -> Function {
+    let mut sig = Signature::new(config.default_call_conv);
+    sig.params.extend([AbiParam::new(I64); 3]);
+    sig.returns.push(AbiParam::new(I32));
+    let mut func = Function::with_name_signature(UserFuncName::user(0, 1), sig);
+    let mut context = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut func, &mut context);
+    let entry = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    b.seal_block(entry);
+    let params = b.block_params(entry).to_vec();
+    let body = b.import_signature(body_signature());
+    let call = b.ins().call_indirect(body, params[2], &params[..2]);
+    let answer = b.inst_results(call).to_vec();
+    b.ins().return_(&answer);
+    b.finalize(config);
+    func
+}
+
+/// Where a body jumps besides its exits (#3229's ruling): the address of
+/// its first entry slot, one per exit, of its first landing slot, and the
+/// trace its link jumps to, where it links to one with code.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Joins {
+    pub(super) slots: usize,
+    pub(super) landings: usize,
+    pub(super) linked: Option<super::Linked>,
 }
 
 /// Exit-fuzz's bytes as the lowering hands them out (`jit.mode=exit-fuzz`):
@@ -220,25 +308,357 @@ fn leave_of(line: &Line) -> Option<Leave> {
     (line.exit.map(Leave::Exit)).or_else(|| line.unwind.map(Leave::Unwind))
 }
 
+/// Where an opline's handler goes on: in its own frame, this many
+/// oplines past it, one or two past an `OP_DATA`, having done nothing
+/// else to the frame chain but pop a native's call it made, or thrown
+/// there. What [`Kernel::Handle`] serves, as php's code calls the
+/// handler of each such opline it compiles no inline code for directly
+/// (`zend_jit_handler`, `Z/ext/opcache/jit/zend_jit_ir.c:4120-4157`) and
+/// goes on with no IP guard, which `zend_jit_trace_handler` takes only
+/// past an opline `zend_jit_trace_may_exit` names (`:17129-17236`;
+/// `Z/ext/opcache/jit/zend_jit_trace.c:261-330`). The kernel stands the
+/// frame at the opline before the handler runs, php's `SAVE_OPLINE()`,
+/// so what the handler raises, and the unwind of what it throws, see the
+/// frame where php's do, and compiled code writes where it stands past
+/// it, which the handler leaves no `Stood` of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Onward(u32);
+
+impl Onward {
+    /// Where `opcode`'s handler goes on, for the oplines whose handler
+    /// can neither leave its frame, push or replace one, enter the
+    /// loop with the frame unstood nor jump: building an array and
+    /// adding to it, a native's call, made and popped by its handler, a
+    /// concatenation and a rope's pieces, whose string arms the handler
+    /// holds as php's own functions over two strings hold them, an
+    /// assignment, a write to an element and a compound one, a send, a
+    /// frameless call to a native, a string's length, a cast to a
+    /// boolean, the free of a `foreach`'s array, a property's fetch,
+    /// write, compound write, increment and decrement, whose `__get` and
+    /// `__set` the handler serves through an `execute` of their own, as
+    /// php's helpers do, and whose typed property it coerces or refuses,
+    /// an element's fetch and `isset()`, whose `ArrayAccess` methods it
+    /// serves so, and an increment or a decrement, of a `VAR` an inline
+    /// fetch left indirect among them.
+    /// None for every other
+    /// opline: a jump and a comparison, whose handler may take the jump
+    /// fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
+    /// a return, an include or an `eval`, a generator's opcodes, a
+    /// `finally`'s `FAST_CALL` and `FAST_RET`, and the two silence
+    /// opcodes, whose observers a step tells. A property's `isset()` and
+    /// `empty()` is among them, as php's code calls its handler; fused to
+    /// the jump after it, its handler takes that jump, and its direction
+    /// guard has it stepped, as every opline that holds a guard within it
+    /// is ([`Emit::step_kernel`]).
+    ///
+    /// A property hook writes a variable through the reference the object
+    /// holds to it as the handler serves its `get` and `set`, which the
+    /// loop reads after; and `isset()` and `empty()` of a property served by
+    /// their handler, written to a variable and fused to a jump each way:
+    ///
+    /// ```php
+    /// class H { public $r; public int $v = 0 { get { $this->r = $this->r + 0.5; return $this->v; } set { $this->v = $value * 2; } } }
+    /// function f($n) { $x = 0; $h = new H; $h->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $h->v = $i; $t += $h->v; $t += $x; } return [$t, $x]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [117.5,5]
+    /// ```
+    ///
+    /// ```php
+    /// class H { public $r; public int $v = 0 { get { $this->r = $this->r + 0.5; return $this->v; } set { $this->v = $value * 2; } } }
+    /// function f($n) { $x = 0; $h = new H; $h->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $h->v = $i; $t += $h->v; $t += $x; } return [$t, $x]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [117.5,5]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $b = 0; public $n = null; public $z = "0"; function run($k) { $c = 0; for ($i = 0; $i < $k; $i++) { $x = isset($this->b); $y = empty($this->z); if (isset($this->n)) { $c += 100; } if (!empty($this->b)) { $c += 10; } $c += $x + $y; $this->b = $i % 2; $this->n = $i == 3 ? 1 : null; } return $c; } }
+    /// echo (new S)->run(8), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 146
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $b = 0; public $n = null; public $z = "0"; function run($k) { $c = 0; for ($i = 0; $i < $k; $i++) { $x = isset($this->b); $y = empty($this->z); if (isset($this->n)) { $c += 100; } if (!empty($this->b)) { $c += 10; } $c += $x + $y; $this->b = $i % 2; $this->n = $i == 3 ? 1 : null; } return $c; } }
+    /// echo (new S)->run(8), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 146
+    /// ```
+    ///
+    /// A `__get` the handler serves writes a variable through the
+    /// reference an object holds to it, which the loop reads after; a
+    /// `__set` writes one, and the object's declared property; a typed
+    /// property's coercion throws, caught in the loop: none of the three
+    /// oplines has the `call` effect, and the trace keeps no fact the user
+    /// code can change, a reference's inner type held at every read, as
+    /// revision 83's analysis has it (`jit-design.md` §4.2):
+    ///
+    /// ```php
+    /// class G { public $r; private $v = 3; function __get($n) { $this->r = $this->r + 0.5; return $this->v; } }
+    /// function f($n) { $x = 0; $o = new G; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->missing; $t += $x; $o->r = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [241,19]
+    /// ```
+    ///
+    /// ```php
+    /// class G { public $r; private $v = 3; function __get($n) { $this->r = $this->r + 0.5; return $this->v; } }
+    /// function f($n) { $x = 0; $o = new G; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->missing; $t += $x; $o->r = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [241,19]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $p = 0; public $r; function __set($n, $v) { $this->r = $v * 2.5; $this->p = $this->p + 1; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $o->missing = $i; $t += $x + $o->p; } return [$t, $x, $o->p]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [685,47.5,20]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $p = 0; public $r; function __set($n, $v) { $this->r = $v * 2.5; $this->p = $this->p + 1; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $o->missing = $i; $t += $x + $o->p; } return [$t, $x, $o->p]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [685,47.5,20]
+    /// ```
+    ///
+    /// ```php
+    /// class T { public int $n = 0; public float $f = 0.0; }
+    /// function f($n) { $o = new T; $c = 0; for ($i = 0; $i < $n; $i++) { try { $o->n = $i == 7 ? "x" : $i; $o->f = $i; $c += $o->n + $o->f; } catch (TypeError $e) { $c += 100; } } return [$c, $o->n, $o->f]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [466,19,19]
+    /// ```
+    ///
+    /// ```php
+    /// class T { public int $n = 0; public float $f = 0.0; }
+    /// function f($n) { $o = new T; $c = 0; for ($i = 0; $i < $n; $i++) { try { $o->n = $i == 7 ? "x" : $i; $o->f = $i; $c += $o->n + $o->f; } catch (TypeError $e) { $c += 100; } } return [$c, $o->n, $o->f]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [466,19,19]
+    /// ```
+    ///
+    /// An `ArrayAccess` object's `offsetGet`, `offsetExists` and
+    /// `offsetSet`, which the handlers of an element's fetch, `isset()`
+    /// and write serve, write a variable through the reference the object
+    /// holds to it, which the loop reads after:
+    ///
+    /// ```php
+    /// class A implements ArrayAccess { public $r; function offsetGet($k): mixed { $this->r = $this->r + 0.5; return 3; } function offsetExists($k): bool { $this->r = $this->r + 1; return $k == 'x'; } function offsetSet($k, $v): void { $this->r = $v; } function offsetUnset($k): void {} }
+    /// function f($n) { $x = 0; $o = new A; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o['k']; $t += $x; if (isset($o['x'])) { $t++; } $t += $x; $o['k'] = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [462,19]
+    /// ```
+    ///
+    /// ```php
+    /// class A implements ArrayAccess { public $r; function offsetGet($k): mixed { $this->r = $this->r + 0.5; return 3; } function offsetExists($k): bool { $this->r = $this->r + 1; return $k == 'x'; } function offsetSet($k, $v): void { $this->r = $v; } function offsetUnset($k): void {} }
+    /// function f($n) { $x = 0; $o = new A; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o['k']; $t += $x; if (isset($o['x'])) { $t++; } $t += $x; $o['k'] = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [462,19]
+    /// ```
+    ///
+    /// An array built per turn, and a key the build throws at, caught in
+    /// the frame:
+    ///
+    /// ```php
+    /// function pairs($n) { $s = 0; for ($i = 0; $i < $n; $i++) { $p = [$i, $i * 2, "k" => $i]; $s += $p[1] + $p["k"]; } return $s; }
+    /// function bad($n) { $c = 0; for ($i = 0; $i < $n; $i++) { try { $a = [$i => 1, ($i == 5 ? [] : $i + 1) => 2]; $c += count($a); } catch (TypeError $e) { $c += 100; } } return $c; }
+    /// echo pairs(20), " ", bad(8), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 570 114
+    /// ```
+    ///
+    /// A line of fields joined, split and normalised, each piece of it
+    /// served by its handler:
+    ///
+    /// ```php
+    /// function line($i) { $p = "/r/" . ($i % 7) . "-x"; $s = "  $i , $p ,  ok-$i "; $t = ""; $t .= $s; $t .= "|"; return $t; }
+    /// function munge($n) {
+    ///     $c = 0; $all = "";
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $f = explode(",", line($i)); $f[1] = trim($f[1]); $f[2] = str_replace("ok", "OK", $f[2]);
+    ///         $all .= strtoupper($f[1]) . substr($f[2], 0, 4); $c += strlen($f[0]) + (strpos($f[2], "OK") !== false);
+    ///     }
+    ///     return [$c, strlen($all), crc32($all)];
+    /// }
+    /// echo json_encode(munge(40)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [230,400,1340466966]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function line($i) { $p = "/r/" . ($i % 7) . "-x"; $s = "  $i , $p ,  ok-$i "; $t = ""; $t .= $s; $t .= "|"; return $t; }
+    /// function munge($n) {
+    ///     $c = 0; $all = "";
+    ///     for ($i = 0; $i < $n; $i++) {
+    ///         $f = explode(",", line($i)); $f[1] = trim($f[1]); $f[2] = str_replace("ok", "OK", $f[2]);
+    ///         $all .= strtoupper($f[1]) . substr($f[2], 0, 4); $c += strlen($f[0]) + (strpos($f[2], "OK") !== false);
+    ///     }
+    ///     return [$c, strlen($all), crc32($all)];
+    /// }
+    /// echo json_encode(munge(40)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [230,400,1340466966]
+    /// ```
+    ///
+    /// A handled concatenation that throws, an object no string converts,
+    /// caught in the loop, under force and where every guard fails once:
+    ///
+    /// ```php
+    /// function f($n) { $c = 0; $o = new stdClass; for ($i = 0; $i < $n; $i++) { try { $s = "x" . ($i == 3 ? $o : $i); $t = "<$s>"; $t .= $i; $c += strlen($t); } catch (Error $e) { $c += 100; } } return $c; }
+    /// echo f(8), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 135
+    /// ```
+    ///
+    /// ```php
+    /// function f($n) { $c = 0; $o = new stdClass; for ($i = 0; $i < $n; $i++) { try { $s = "x" . ($i == 3 ? $o : $i); $t = "<$s>"; $t .= $i; $c += strlen($t); } catch (Error $e) { $c += 100; } } return $c; }
+    /// echo f(8), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 135
+    /// ```
+    ///
+    /// A handled concatenation whose `__toString` writes a variable through
+    /// the reference an object holds to it, which the loop reads after:
+    /// the handler serves user code with no `call` effect, and the trace
+    /// keeps no fact that code can change, as revision 83's analysis has
+    /// it (`jit-design.md` §4.2), a reference's inner type held at every
+    /// read:
+    ///
+    /// ```php
+    /// class S { public $r; function __toString(): string { $this->r = $this->r + 1; return "s"; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $c = "a" . $o; $t += $x; } return [$t, $x, $c]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [55,10,"as"]
+    /// ```
+    ///
+    /// ```php
+    /// class S { public $r; function __toString(): string { $this->r = $this->r + 1; return "s"; } }
+    /// function f($n) { $x = 0; $o = new S; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $c = "a" . $o; $t += $x; } return [$t, $x, $c]; }
+    /// echo json_encode(f(10)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [55,10,"as"]
+    /// ```
+    fn of(opcode: Opcode) -> Option<Onward> {
+        match opcode {
+            Opcode::InitArray
+            | Opcode::AddArrayElement
+            | Opcode::DoIcall
+            | Opcode::Concat
+            | Opcode::FastConcat
+            | Opcode::RopeInit
+            | Opcode::RopeAdd
+            | Opcode::RopeEnd
+            | Opcode::Assign
+            | Opcode::AssignOp
+            | Opcode::SendVal
+            | Opcode::SendVar
+            | Opcode::FramelessIcall0
+            | Opcode::FramelessIcall1
+            | Opcode::FramelessIcall2
+            | Opcode::Strlen
+            | Opcode::Bool
+            | Opcode::FeFree
+            | Opcode::FetchObjR
+            | Opcode::FetchObjIs
+            | Opcode::FetchObjW
+            | Opcode::FetchObjRw
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj
+            | Opcode::IssetIsemptyPropObj
+            | Opcode::FetchDimR
+            | Opcode::FetchDimIs
+            | Opcode::FetchDimW
+            | Opcode::FetchDimRw
+            | Opcode::IssetIsemptyDimObj
+            | Opcode::PreInc
+            | Opcode::PreDec
+            | Opcode::PostInc
+            | Opcode::PostDec => Some(Onward(1)),
+            Opcode::AssignDim
+            | Opcode::AssignDimOp
+            | Opcode::AssignObj
+            | Opcode::AssignObjOp
+            | Opcode::FramelessIcall3 => Some(Onward(2)),
+            _ => None,
+        }
+    }
+}
+
+/// How a value given up is given up: as php's `zval_ptr_dtor`, which
+/// buffers a possible root where other owners stand, or as
+/// `zval_ptr_dtor_nogc`, a temporary's `FREE_OP`, which never does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dtor {
+    Gc,
+    Nogc,
+}
+
 /// One trace's function as it is built.
 struct Emit<'a> {
     ir: &'a TraceIr,
     b: FunctionBuilder<'a>,
     call_conv: CallConv,
     symbols: &'a Symbols,
+    /// The plain calls whose headers the code copies, where they live as
+    /// long as it ([`super::Compiled::calls`]).
+    held: &'a [PlainCall],
+    /// The request's VM stack, read once at entry by a trace that pushes,
+    /// makes or leaves a call in place.
+    stack: Option<Value>,
+    /// Per frame of the trace, its place on the stack, a `FrameRef`'s
+    /// number, kept where `stack` is.
+    refs: Vec<Variable>,
+    /// The place of the frame the last `RETURN` leaves to, which its
+    /// `Op::Back` names the frame it lands in by.
+    returned_to: Option<Variable>,
     /// The `ExitCtx`, the function's first parameter.
     cx: Option<Value>,
     /// The address of the request's interrupt byte, read once as a
-    /// looping trace enters.
+    /// looping trace whose header tests it enters.
     interrupt: Option<Value>,
     /// Where a kernel writes where the interpreter stands.
     stood: StackSlot,
+    /// Where a kernel that answers a word or a zval writes it, made where
+    /// one is first called.
+    answer: Option<StackSlot>,
     /// Per frame of the trace, the room it runs in.
     rooms: Vec<Variable>,
     /// Per value the trace keeps in a register, its variable.
     regs: Vec<Option<Variable>>,
-    /// The rooms of the calls under way, the innermost last.
-    calls: Vec<Variable>,
+    /// The rooms of the calls under way, the innermost last, each with
+    /// the plain call it is where compiled code pushed it in place.
+    calls: Vec<(CallRoom, Option<&'a PlainCall>)>,
     /// Per kernel, its signature once imported.
     sigs: [Option<SigRef>; Kernel::ALL.len()],
     /// Per exit, its block once a site branches to it.
@@ -247,6 +667,8 @@ struct Emit<'a> {
     unwinds: Vec<Option<Block>>,
     /// The block a kernel's refusal with no exit to take answers from.
     abandon: Option<Block>,
+    /// The block a return past the lowest frame escapes from.
+    escape: Option<Block>,
     /// The block the interrupt test answers [`INTERRUPTED`] from, where
     /// it takes php's stub.
     stub: Option<Block>,
@@ -258,6 +680,14 @@ struct Emit<'a> {
     fuzz: Option<Fuzz>,
     /// How many of them the guards met so far took.
     fuzzed_sites: usize,
+    /// Its entry slots and its link (`doors`).
+    joins: Joins,
+    /// Per exit, the block a failed guard leaves it through where the
+    /// exit may jump to its side trace, taking the call under way there.
+    doors: Vec<Option<Block>>,
+    /// Per exit, the block that answers its number and stores nothing,
+    /// where a jump finds no trace to enter.
+    answers: Vec<Option<Block>>,
 }
 
 impl<'a> Emit<'a> {
@@ -265,9 +695,10 @@ impl<'a> Emit<'a> {
         ir: &'a TraceIr,
         mut b: FunctionBuilder<'a>,
         call_conv: CallConv,
-        symbols: &'a Symbols,
+        (symbols, held): (&'a Symbols, &'a [PlainCall]),
     ) -> Emit<'a> {
         let rooms = ir.frames.iter().map(|_| b.declare_var(I64)).collect();
+        let refs = ir.frames.iter().map(|_| b.declare_var(I64)).collect();
         let stood = b.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             u32::try_from(size_of::<Stood>()).unwrap_or(u32::MAX),
@@ -278,9 +709,14 @@ impl<'a> Emit<'a> {
             b,
             call_conv,
             symbols,
+            held,
+            stack: None,
+            refs,
+            returned_to: None,
             cx: None,
             interrupt: None,
             stood,
+            answer: None,
             rooms,
             regs: vec![None; ir.values.len()],
             calls: Vec::new(),
@@ -288,11 +724,19 @@ impl<'a> Emit<'a> {
             exits: vec![None; ir.exits.len()],
             unwinds: vec![None; ir.unwinds.len()],
             abandon: None,
+            escape: None,
             stub: None,
             declined: None,
             running: Frame::ROOT,
             fuzz: None,
             fuzzed_sites: 0,
+            joins: Joins {
+                slots: 0,
+                landings: 0,
+                linked: None,
+            },
+            doors: vec![None; ir.exits.len()],
+            answers: vec![None; ir.exits.len()],
         }
     }
 
@@ -314,11 +758,20 @@ impl<'a> Emit<'a> {
         self.b.def_var(self.room_var(Frame::ROOT)?, room);
         let header = match self.ir.end {
             End::Loop(header) => Some(header),
-            End::Leave(_) => None,
+            End::Leave(_) | End::Return(_) => None,
         };
-        if header.is_some() {
+        if header.is_some_and(|header| header.interrupt.tested()) {
             self.interrupt = Some(self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT));
         }
+        // The stack and the entered frame's place on it, which calls made
+        // in place read, and a jump to another trace hands it.
+        self.stack = Some(self.b.ins().load(I64, trusted(), cx, STACK_AT));
+        let place = self.b.ins().load(I32, trusted(), cx, ROOT_AT);
+        let place = self.b.ins().uextend(I64, place);
+        self.b.def_var(self.ref_var(Frame::ROOT)?, place);
+        // Laid down before either way in: a guard at the body's entry
+        // reads it too.
+        self.stood_at_entry(cx);
         // A trace entered at its loop's body goes there; at its first op,
         // on.
         let body = match &self.ir.body {
@@ -337,8 +790,8 @@ impl<'a> Emit<'a> {
         }
         let split = header.map_or(self.ir.ops.len(), |header| header.at.index());
         self.ops(0..split, body)?;
-        match (self.ir.end, self.interrupt) {
-            (End::Loop(header), Some(interrupt)) => {
+        match self.ir.end {
+            End::Loop(header) => {
                 let phis = self.register_phis();
                 let entered = phis
                     .iter()
@@ -351,10 +804,12 @@ impl<'a> Emit<'a> {
                 self.b.ins().jump(head, &[]);
                 self.b.switch_to_block(head);
                 self.b.set_srcloc(located(header.at.index()));
-                let flag = self.b.ins().load(I8, trusted(), interrupt, 0);
+                // The interrupt test, one load and one branch (§4.3); a
+                // loop by recursive return takes none, as php's takes none.
                 match header.interrupt {
-                    Interrupt::Exit(exit) => self.leave_if(flag, exit)?,
-                    Interrupt::Stub(_) => self.stub_if(flag)?,
+                    Interrupt::Exit(exit) => self.interrupt_test(Raised::Exit(exit))?,
+                    Interrupt::Stub(_) => self.interrupt_test(Raised::Stub)?,
+                    Interrupt::None => {}
                 }
                 self.ops(split..self.ir.ops.len(), body)?;
                 let brought = phis
@@ -374,15 +829,17 @@ impl<'a> Emit<'a> {
                     };
                     let last = self.room(self.running)?;
                     self.b.def_var(self.room_var(looped)?, last);
+                    if self.stack.is_some() {
+                        let place = self.frame_ref(self.running)?;
+                        self.b.def_var(self.ref_var(looped)?, place);
+                    }
                 }
                 self.b.ins().jump(head, &[]);
                 self.b.seal_block(head);
             }
-            (End::Leave(exit), _) => {
-                let block = self.exit_block(exit)?;
-                self.b.ins().jump(block, &[]);
-            }
-            (End::Loop(_), None) => return Err(mismatch("a loop with no interrupt flag")),
+            End::Leave(exit) => self.leave_at_end(exit)?,
+            // The `RETURN` left in place went on to the escape or the exit.
+            End::Return(_) => {}
         }
         if let Some((entry, into, block)) = body {
             self.b.set_srcloc(SourceLoc::default());
@@ -392,6 +849,21 @@ impl<'a> Emit<'a> {
             self.b.seal_block(block);
         }
         self.exit_blocks()
+    }
+
+    /// Where the frame stands as the trace enters, which `enter` laid
+    /// down in `cx`, held as where the last kernel left it, for a trace
+    /// whose code reads it ([`super::stood_at_entry`]): its frame, its
+    /// call, in one word its op array and opline, and the stack's room,
+    /// laid out alike in both.
+    fn stood_at_entry(&mut self, cx: Value) {
+        if !super::stood_at_entry(self.ir) {
+            return;
+        }
+        for at in [STOOD_FRAME, STOOD_CALL, STOOD_FUNC, STOOD_ROOM] {
+            let word = self.b.ins().load(I64, trusted(), cx, STOOD_AT + at);
+            self.b.ins().stack_store(I64, word, self.stood, at);
+        }
     }
 
     /// The ops of `range`, the way in at the body (`body`: the entry, its
@@ -430,9 +902,20 @@ impl<'a> Emit<'a> {
                     let slot = self.value(value)?.slot;
                     self.decline_unless(slot, &[t], None)?;
                 }
-                Check::Layout { value, layout } => {
+                Check::Layout {
+                    value,
+                    layout,
+                    read: Read::InPlace,
+                } => {
                     let slot = self.value(value)?.slot;
                     self.decline_unless(slot, &[ZvalType::Array], Some(layout))?;
+                }
+                Check::Layout {
+                    read: Read::Through | Read::Indirect(_),
+                    ..
+                } => return Err(mismatch("a reference's layout held as a trace enters")),
+                Check::Indirect { .. } => {
+                    return Err(mismatch("an indirect `VAR` held as a trace enters"));
                 }
                 Check::Deref { value, tag: t } => {
                     let (room, at) = self.place(self.value(value)?.slot)?;
@@ -446,7 +929,14 @@ impl<'a> Emit<'a> {
                     let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
                     self.decline_if(other);
                 }
-                Check::Direction { .. } | Check::Stands { .. } => {
+                Check::Room { bytes } => {
+                    let short = self.short_of(bytes);
+                    self.decline_if(short);
+                }
+                Check::Direction { .. }
+                | Check::Stands { .. }
+                | Check::Arm { .. }
+                | Check::Class { .. } => {
                     return Err(mismatch("a body entry past a guard it cannot hold"));
                 }
             }
@@ -505,6 +995,15 @@ impl<'a> Emit<'a> {
             self.decline_if(other);
         }
         Ok(())
+    }
+
+    /// Whether the stack's top page has less room than `bytes` for
+    /// frames, where the last kernel, or `enter`, stood it.
+    fn short_of(&mut self, bytes: u32) -> Value {
+        let room = self.stood_word(I64, STOOD_ROOM);
+        self.b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThan, room, i64::from(bytes))
     }
 
     /// Answer [`DECLINED`] where `cond` is not zero.
@@ -574,28 +1073,53 @@ impl<'a> Emit<'a> {
                     Form::Inline => self.inline(id, line),
                 }
             }
-            Op::InitCall { .. } => {
+            Op::InitCall {
+                began: Began::Here,
+                plain,
+                ..
+            } => {
                 let call = self.stood_word(I64, STOOD_CALL);
                 let var = self.b.declare_var(I64);
                 self.b.def_var(var, call);
-                self.calls.push(var);
+                self.calls.push((CallRoom::Held(var), plain.as_ref()));
                 Ok(())
             }
-            Op::Enter { frame } => {
+            Op::InitCall {
+                began: Began::Before,
+                ..
+            } => {
+                self.calls.push((CallRoom::Stood, None));
+                Ok(())
+            }
+            Op::Enter { frame, stores } => {
+                for &value in stores {
+                    let held = self.register(value)?;
+                    self.store(self.value(value)?.slot, held)?;
+                }
                 let room = self.stood_word(I64, STOOD_FRAME);
                 self.b.def_var(self.room_var(*frame)?, room);
                 self.running = *frame;
+                if let Some(stack) = self.stack {
+                    // The frame entered is the stack's top record.
+                    let len = self.b.ins().load(I64, trusted(), stack, calls::FRAMES_LEN);
+                    let place = self.b.ins().iadd_imm_s(len, -1);
+                    self.b.def_var(self.ref_var(*frame)?, place);
+                }
                 Ok(())
             }
-            Op::Back { frame, .. } => {
+            Op::Back { frame, escapes, .. } => {
                 let room = self.stood_word(I64, STOOD_FRAME);
                 self.b.def_var(self.room_var(*frame)?, room);
                 self.running = *frame;
-                for guard in self.within(id) {
-                    let Check::Stands { func, opline } = guard.check else {
-                        return Err(mismatch("a return holds a guard of another kind"));
-                    };
-                    self.stands(func, opline, guard.exit)?;
+                if let Some(var) = self.returned_to.take() {
+                    let place = self.b.use_var(var);
+                    self.b.def_var(self.ref_var(*frame)?, place);
+                }
+                if let Some((func, opline)) = *escapes {
+                    self.escapes(func, opline)?;
+                }
+                if !self.within(id).is_empty() {
+                    return Err(mismatch("a return holds a guard"));
                 }
                 Ok(())
             }
@@ -616,8 +1140,8 @@ impl<'a> Emit<'a> {
 
     /// A guard held at entry or before an op: what it holds read from the
     /// value's slot, or from its register where a boolean is held to the
-    /// one the recording saw (#3076), leaving through its exit where it
-    /// does not hold.
+    /// one the recording saw (#3076), or at entry where the frame stands,
+    /// leaving through its exit where it does not hold.
     fn guard(&mut self, guard: Guard) -> Result<(), Abort> {
         match guard.check {
             Check::Type { value, tag: t } => {
@@ -661,10 +1185,40 @@ impl<'a> Emit<'a> {
                 let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
                 self.leave_if(other, guard.exit)?;
             }
-            Check::Layout { value, layout } => {
+            Check::Indirect {
+                value,
+                tag: t,
+                pointee,
+            } => {
                 let held = self.value(value)?;
                 let (room, at) = self.place(held.slot)?;
-                let array = self.b.ins().load(I64, trusted(), room, at);
+                if held.types != Types::INDIRECT {
+                    let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+                    let indirect = tag(ZvalType::Indirect);
+                    let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, indirect);
+                    self.leave_if(other, guard.exit)?;
+                }
+                let mut target = self.b.ins().load(I64, trusted(), room, at);
+                let mut value_at = 0;
+                if pointee == Pointee::Reference {
+                    let byte = self.b.ins().load(I8, trusted(), target, TYPE_AT);
+                    let reference = tag(ZvalType::Reference);
+                    let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, reference);
+                    self.leave_if(other, guard.exit)?;
+                    target = self.b.ins().load(I64, trusted(), target, 0);
+                    value_at = imm(Ref::VALUE_AT);
+                }
+                let byte = self.b.ins().load(I8, trusted(), target, value_at + TYPE_AT);
+                let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, tag(t));
+                self.leave_if(other, guard.exit)?;
+            }
+            Check::Layout {
+                value,
+                layout,
+                read,
+            } => {
+                let held = self.value(value)?;
+                let array = self.array_of(held.slot, read)?;
                 let flags = self.b.ins().load(I32, trusted(), array, imm(Arr::FLAGS_AT));
                 let packed = self.b.ins().band_imm_u(flags, i64::from(Arr::PACKED));
                 let cc = match layout {
@@ -674,7 +1228,20 @@ impl<'a> Emit<'a> {
                 let other = self.b.ins().icmp_imm_s(cc, packed, 0);
                 self.leave_if(other, guard.exit)?;
             }
-            Check::Direction { .. } | Check::Stands { .. } => {
+            // A side trace's IP guard, where its parent's exit left the
+            // frame where it stood: `trace` laid down where the frame
+            // stands as the last kernel's.
+            Check::Stands { func, opline } if guard.at == GuardAt::Entry => {
+                self.stands(func, opline, guard.exit)?;
+            }
+            // php's stack check (`zend_jit_stack_check`), on the room the
+            // last kernel, or `enter`, stood.
+            Check::Room { bytes } => {
+                let short = self.short_of(bytes);
+                self.leave_if(short, guard.exit)?;
+            }
+            Check::Class { object, class } => self.class_guard(object, class, guard.exit)?,
+            Check::Direction { .. } | Check::Stands { .. } | Check::Arm { .. } => {
                 return Err(mismatch("an op's own guard held before it"));
             }
         }
@@ -761,6 +1328,18 @@ impl<'a> Emit<'a> {
         Ok(self.b.ins().bor(cond, first))
     }
 
+    /// Where an inline arithmetic goes that would raise, as `refuse`
+    /// says: through its exit, or to the handler of the write it serves.
+    fn refuse_if(&mut self, cond: Value, refuse: Refuse) -> Result<(), Abort> {
+        match refuse {
+            Refuse::Exit(exit) => self.leave_if(cond, exit),
+            Refuse::To(handled) => {
+                self.divert_if(cond, handled);
+                Ok(())
+            }
+        }
+    }
+
     /// Leave through `exit` where `cond` is not zero, a guard's failure,
     /// and under exit-fuzz on the guard's first pass too, its exit being
     /// right whatever the guard holds; go on otherwise.
@@ -770,13 +1349,13 @@ impl<'a> Emit<'a> {
     }
 
     /// Leave through `exit` where `cond` is not zero and only there, never
-    /// failed by exit-fuzz: a jump's direction, whose exit lands where the
+    /// failed by exit-fuzz: a jump's direction or a table's arm, whose exit lands where the
     /// jump the guard did not expect went, and a refused call, whose exit
     /// is right only where nothing was pushed.
     fn leave_where(&mut self, cond: Value, exit: ExitId) -> Result<(), Abort> {
-        let to = self.exit_block(exit)?;
+        let (to, args) = self.guard_exit(exit)?;
         let on = self.b.create_block();
-        self.b.ins().brif(cond, to, &[], on, &[]);
+        self.b.ins().brif(cond, to, &args, on, &[]);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
         Ok(())
@@ -836,6 +1415,42 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
+    /// The request's interrupt tested, the one emitter of every test a
+    /// compiled loop makes of it (`jit-design.md` §4.3), php's
+    /// `vm_interrupt` test: at a loop's header (`zend_jit_trace_end_loop`),
+    /// and before a side trace's link to its own root where the root's
+    /// header tests it
+    /// (`zend_jit_check_timeout` in `zend_jit_trace_link_to_root`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:17418-17432`). The byte the
+    /// `ExitCtx`'s pointer names is loaded, and where it is not zero, or
+    /// under exit-fuzz on the test's first pass, the code goes where
+    /// `raised` says. The bench's untested build alone emits no test,
+    /// the header's nor the link's, to measure what it costs (#2960,
+    /// §10).
+    fn interrupt_test(&mut self, raised: Raised) -> Result<(), Abort> {
+        if cfg!(php_jit_untested_loops) {
+            return Ok(());
+        }
+        let pointer = if let Some(pointer) = self.interrupt {
+            pointer
+        } else {
+            let cx = self
+                .cx
+                .ok_or_else(|| mismatch("an interrupt test before the entry"))?;
+            self.b.ins().load(I64, trusted(), cx, INTERRUPT_AT)
+        };
+        let byte = self.b.ins().load(I8, trusted(), pointer, 0);
+        match raised {
+            Raised::Exit(exit) => self.leave_if(byte, exit),
+            Raised::Stub => self.stub_if(byte),
+            Raised::Answer(block) => {
+                let byte = self.fuzzed(byte)?;
+                self.divert_if(byte, block);
+                Ok(())
+            }
+        }
+    }
+
     /// The block a kernel's refusal answers [`ABANDONED`] from.
     fn abandoned(&mut self) -> Block {
         if let Some(block) = self.abandon {
@@ -868,6 +1483,17 @@ impl<'a> Emit<'a> {
             let number = self.b.ins().iconst(I32, i64::from(number));
             self.b.ins().return_(&[number]);
         }
+        self.door_blocks()?;
+        for at in 0..self.answers.len() {
+            let Some(block) = self.answers[at] else {
+                continue;
+            };
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let number = u32::try_from(at).map_err(|_| mismatch("too many exits"))?;
+            let number = self.b.ins().iconst(I32, i64::from(number));
+            self.b.ins().return_(&[number]);
+        }
         for at in 0..self.unwinds.len() {
             let Some(block) = self.unwinds[at] else {
                 continue;
@@ -887,6 +1513,9 @@ impl<'a> Emit<'a> {
             self.b.seal_block(block);
             let answer = self.b.ins().iconst(I32, i64::from(ABANDONED));
             self.b.ins().return_(&[answer]);
+        }
+        if let Some(block) = self.escape {
+            self.escaped(block)?;
         }
         if let Some(block) = self.stub {
             self.b.switch_to_block(block);
@@ -927,6 +1556,24 @@ impl<'a> Emit<'a> {
     /// status word tested, leaving as `leave` says where it is not zero, or
     /// answering [`ABANDONED`] where the opline names no way to leave.
     fn call(&mut self, kernel: Kernel, args: &[Value], leave: Option<Leave>) -> Result<(), Abort> {
+        let status = self.call_status(kernel, args)?;
+        self.left_unless(status, leave)
+    }
+
+    /// A kernel's `status` tested: on where it is `Continue`, leaving as
+    /// `leave` says otherwise ([`Emit::left_by`]).
+    fn left_unless(&mut self, status: Value, leave: Option<Leave>) -> Result<(), Abort> {
+        let to = self.left_by(leave)?;
+        let on = self.b.create_block();
+        self.b.ins().brif(status, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        Ok(())
+    }
+
+    /// `kernel`'s wrapper called at its address with the `ExitCtx` and
+    /// `args`, and its status word, an `i32`, for the caller to test.
+    fn call_status(&mut self, kernel: Kernel, args: &[Value]) -> Result<Value, Abort> {
         let sig = self.signature(kernel);
         let address = i64::try_from(self.symbols.address(kernel))
             .map_err(|_| mismatch("a kernel address past the host's"))?;
@@ -938,22 +1585,21 @@ impl<'a> Emit<'a> {
         all.push(cx);
         all.extend_from_slice(args);
         let inst = self.b.ins().call_indirect(sig, callee, &all);
-        let status = self
-            .b
+        self.b
             .inst_results(inst)
             .first()
             .copied()
-            .ok_or_else(|| mismatch("a kernel that answers nothing"))?;
-        let to = match leave {
+            .ok_or_else(|| mismatch("a kernel that answers nothing"))
+    }
+
+    /// The block a kernel's status other than `Continue` goes to: `leave`'s
+    /// exit or unwind, or [`ABANDONED`] where it names none.
+    fn left_by(&mut self, leave: Option<Leave>) -> Result<Block, Abort> {
+        Ok(match leave {
             Some(Leave::Exit(exit)) => self.exit_block(exit)?,
             Some(Leave::Unwind(unwind)) => self.unwind_block(unwind)?,
             None => self.abandoned(),
-        };
-        let on = self.b.create_block();
-        self.b.ins().brif(status, to, &[], on, &[]);
-        self.b.switch_to_block(on);
-        self.b.seal_block(on);
-        Ok(())
+        })
     }
 
     /// `kernel`'s signature, imported once.
@@ -964,10 +1610,16 @@ impl<'a> Emit<'a> {
         let mut sig = Signature::new(self.call_conv);
         // The `ExitCtx`, the frame's room and the opline come first.
         let params: &[Type] = match kernel {
-            Kernel::Step => &[I64, I64, I32, I64],
-            Kernel::PushCall => &[I64, I64, I32, I32, I64],
-            Kernel::Release => &[I64, I64, I32, I64, I32],
-            Kernel::Copy => &[I64, I64, I32, I64, I32, I64],
+            Kernel::Step => &[I64, I64, I32, I32, I64],
+            Kernel::Handle => &[I64, I64, I32, I32],
+            Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
+            Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
+            Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
+            Kernel::RopeInit | Kernel::Leave => &[I64, I64, I32, I64, I32, I64],
+            Kernel::RopeAdd | Kernel::AssignConcat => &[I64, I64, I32, I64, I64, I32],
+            Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
+            Kernel::Concat => &[I64, I64, I32, I64, I32, I64, I32, I32, I64],
+            Kernel::Find | Kernel::Lookup => &[I64, I64, I32, I64, I64, I32, I32, I64],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -985,6 +1637,29 @@ impl<'a> Emit<'a> {
         Ok([room, opline])
     }
 
+    /// The engine offset of the op array `frame` serves, which a step of
+    /// one of its oplines serves it from.
+    fn func_of(&mut self, frame: Frame) -> Result<Value, Abort> {
+        let func = self
+            .ir
+            .frames
+            .get(usize::from(frame.0))
+            .map(|info| info.func)
+            .ok_or_else(|| mismatch("a frame past the trace's"))?;
+        Ok(self.b.ins().iconst(I32, i64::from(engine_offset(func)?)))
+    }
+
+    /// Where a kernel that answers a word or a zval writes it.
+    fn answer(&mut self) -> StackSlot {
+        *self.answer.get_or_insert_with(|| {
+            self.b.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                u32::try_from(SLOT).unwrap_or(u32::MAX),
+                3,
+            ))
+        })
+    }
+
     /// A word of the [`Stood`] the last kernel wrote.
     fn stood_word(&mut self, ty: Type, at: i32) -> Value {
         self.b.ins().stack_load(I64, ty, self.stood, at)
@@ -994,6 +1669,44 @@ impl<'a> Emit<'a> {
     /// registers stored first, so the interpreter reads them in their
     /// slots, and the way a jump it served went held to its guards.
     fn stepped(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        if line.opcode == Opcode::Return {
+            self.returns_to(line)?;
+        }
+
+        self.step_kernel(at, line)?;
+        self.after_step(at, line)
+    }
+
+    /// The kernel that serves `line` whole, [`Kernel::Step`], or
+    /// [`Kernel::Call`] for a call the trace follows into its callee, its
+    /// operands held in registers stored to their slots first.
+    fn step_kernel(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        self.spill_operands(line)?;
+        let [room, opline] = self.served(line)?;
+        let func = self.func_of(line.frame)?;
+        let stood = self.b.ins().stack_addr(I64, self.stood, 0);
+        match self.entered_by(at, line) {
+            Some(callee) => {
+                let callee = self.func_of(callee)?;
+                self.call(
+                    Kernel::Call,
+                    &[room, opline, func, callee, stood],
+                    leave_of(line),
+                )?;
+            }
+            None if let Some(onward) = Onward::of(line.opcode)
+                && self.within(at).is_empty() =>
+            {
+                self.handled(line, onward, [room, opline, func])?;
+            }
+            None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
+        }
+        Ok(())
+    }
+
+    /// `line`'s operands held in registers stored to their slots, for a
+    /// kernel that serves it through its handler, which reads them there.
+    pub(super) fn spill_operands(&mut self, line: &Line) -> Result<(), Abort> {
         for operand in [line.op1, line.op2, line.data] {
             if let Operand::Value(value) = operand
                 && self.value(value)?.home == Home::Register
@@ -1002,9 +1715,89 @@ impl<'a> Emit<'a> {
                 self.store(self.value(value)?.slot, held)?;
             }
         }
-        let [room, opline] = self.served(line)?;
-        let stood = self.b.ins().stack_addr(I64, self.stood, 0);
-        self.call(Kernel::Step, &[room, opline, stood], leave_of(line))?;
+        Ok(())
+    }
+
+    /// `line` served by its handler through [`Kernel::Handle`], with no
+    /// step, and where the interpreter stands after it written: past it,
+    /// in its frame; for a native's `DO_ICALL`, which pops its call, the
+    /// call under way now read off the frame table, the record on top
+    /// where it is not the frame's own ([`Emit::call_left`]), as php's
+    /// `zend_jit_do_fcall` calls the native's handler directly and goes on
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10511-10600`). `sqrt` in a loop, a
+    /// native whose return is unused, one sent as another's argument, and
+    /// one that throws out of the loop:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $s = 0.0; $t = 0;
+    ///     for ($i = 1; $i <= $n; $i++) { $s += sqrt($i); abs($i); $t += strlen(str_repeat("a", $i % 4)); }
+    ///     return [round($s, 6), $t];
+    /// }
+    /// function g($n) { $t = 0; for ($i = 1; $i <= $n; $i++) { $t += strlen(str_repeat("b", 4 - $i)); } return $t; }
+    /// echo json_encode(f(30)), "\n";
+    /// try { g(10); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [112.082845,45]
+    /// str_repeat(): Argument #2 ($times) must be greater than or equal to 0
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function f($n) {
+    ///     $s = 0.0; $t = 0;
+    ///     for ($i = 1; $i <= $n; $i++) { $s += sqrt($i); abs($i); $t += strlen(str_repeat("a", $i % 4)); }
+    ///     return [round($s, 6), $t];
+    /// }
+    /// function g($n) { $t = 0; for ($i = 1; $i <= $n; $i++) { $t += strlen(str_repeat("b", 4 - $i)); } return $t; }
+    /// echo json_encode(f(30)), "\n";
+    /// try { g(10); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [112.082845,45]
+    /// str_repeat(): Argument #2 ($times) must be greater than or equal to 0
+    /// ```
+    ///
+    /// A native that calls back into user code which writes what the
+    /// trace holds, a reference its closure binds, read after the call:
+    ///
+    /// ```php
+    /// function h($n) {
+    ///     $r = 0; $t = 0;
+    ///     $w = function ($x) use (&$r) { if ($x == 5) { $r = 0.5; } return $x; };
+    ///     for ($i = 0; $i < $n; $i++) { $r = $i; array_map($w, [$i]); $t = $t + $r; }
+    ///     return $t;
+    /// }
+    /// var_dump(h(8));
+    /// ```
+    /// ```expect regime=jit-force process
+    /// float(23.5)
+    /// ```
+    fn handled(
+        &mut self,
+        line: &Line,
+        Onward(places): Onward,
+        [room, opline, func]: [Value; 3],
+    ) -> Result<(), Abort> {
+        self.call(Kernel::Handle, &[room, opline, func], leave_of(line))?;
+        let next = self.b.ins().iconst(I32, i64::from(line.opline.0 + places));
+        self.b.ins().stack_store(I64, func, self.stood, STOOD_FUNC);
+        self.b
+            .ins()
+            .stack_store(I64, next, self.stood, STOOD_OPLINE);
+        if line.opcode == Opcode::DoIcall {
+            let call = self.call_left(line.frame)?;
+            self.b.ins().stack_store(I64, call, self.stood, STOOD_CALL);
+        }
+        Ok(())
+    }
+
+    /// What follows a stepped `line`: a call it made off the calls under
+    /// way, and the way a jump it served went held to its guards, read off
+    /// the `Stood` the kernel, or the code that served it in place, wrote.
+    fn after_step(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         if matches!(
             line.opcode,
             Opcode::DoFcall | Opcode::DoIcall | Opcode::DoUcall | Opcode::DoFcallByName
@@ -1033,12 +1826,40 @@ impl<'a> Emit<'a> {
                     self.leave_where(other, guard.exit)?;
                 }
                 Check::Stands { func, opline } => self.stands(func, opline, guard.exit)?,
-                Check::Type { .. } | Check::Deref { .. } | Check::Layout { .. } => {
+                Check::Arm { opline } => {
+                    let went = self.stood_word(I32, STOOD_OPLINE);
+                    let there = self
+                        .b
+                        .ins()
+                        .icmp_imm_u(IntCC::Equal, went, i64::from(opline.0));
+                    self.leave_where(there, guard.exit)?;
+                }
+                Check::Type { .. }
+                | Check::Deref { .. }
+                | Check::Indirect { .. }
+                | Check::Layout { .. }
+                | Check::Room { .. }
+                | Check::Class { .. } => {
                     return Err(mismatch("a stepped opline holds a guard of another kind"));
                 }
             }
         }
         Ok(())
+    }
+
+    /// The frame a `DO_*CALL` at `at` enters, where the trace follows the
+    /// call into its callee: what [`Kernel::Call`] makes the call to.
+    fn entered_by(&self, at: OpId, line: &Line) -> Option<Frame> {
+        if !matches!(
+            line.opcode,
+            Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName
+        ) {
+            return None;
+        }
+        match self.ir.ops.get(at.index() + 1) {
+            Some(Op::Enter { frame, .. }) => Some(*frame),
+            _ => None,
+        }
     }
 
     /// php's IP guard: leave through `exit` unless the last kernel left
@@ -1057,6 +1878,49 @@ impl<'a> Emit<'a> {
             .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
         let other = self.b.ins().bor(other_func, other_opline);
         self.leave_if(other, exit)
+    }
+
+    /// php's IP guard past a trace's lowest frame (`zend_jit_leave_func`):
+    /// on unless the last kernel left the interpreter elsewhere than
+    /// `opline` of `func`, where the trace escapes ([`ESCAPED`](super::ESCAPED)) with
+    /// nothing to store, as php's `jit_stub_trace_escape` takes no exit.
+    /// Never failed by exit-fuzz, as it names no exit.
+    fn escapes(&mut self, func: FuncRef, opline: OplineIdx) -> Result<(), Abort> {
+        let landed = self.stood_word(I32, STOOD_FUNC);
+        let at = self.stood_word(I32, STOOD_OPLINE);
+        let other_func =
+            self.b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, landed, i64::from(engine_offset(func)?));
+        let other_opline = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, at, i64::from(opline.0));
+        let other = self.b.ins().bor(other_func, other_opline);
+        let to = self.escape_block();
+        let place = self.frame_ref(self.running)?;
+        let on = self.b.create_block();
+        self.b
+            .ins()
+            .brif(other, to, &[BlockArg::Value(place)], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+        Ok(())
+    }
+
+    /// The trace's one escape block, made the first time a return
+    /// branches to it with the place of the frame it returned into:
+    /// [`ESCAPED`](super::ESCAPED) answered, nothing stored, past the jump to the trace a
+    /// landing slot names ([`Emit::escaped`]).
+    fn escape_block(&mut self) -> Block {
+        if let Some(block) = self.escape {
+            return block;
+        }
+        let block = self.b.create_block();
+        self.b.set_cold_block(block);
+        self.b.append_block_param(block, I64);
+        self.escape = Some(block);
+        block
     }
 
     /// The opline the trace serves next in `frame` after the op at `at`,
@@ -1078,7 +1942,7 @@ impl<'a> Emit<'a> {
                 Some(Op::Line(line)) => Some(line),
                 _ => None,
             },
-            (None, End::Leave(_)) => None,
+            (None, End::Leave(_) | End::Return(_)) => None,
         };
         next.filter(|line| line.frame == frame)
             .map(|line| line.opline.0)
@@ -1131,6 +1995,7 @@ impl<'a> Emit<'a> {
             | Opcode::BwAnd
             | Opcode::BwOr
             | Opcode::BwXor => self.arithmetic(at, line, line.opcode),
+            Opcode::AssignOp if line.imm == Imm::Binary(Opcode::Concat) => self.assign_concat(line),
             Opcode::AssignOp => {
                 let Imm::Binary(binary) = line.imm else {
                     return Err(mismatch("an ASSIGN_OP with no operator"));
@@ -1142,15 +2007,46 @@ impl<'a> Emit<'a> {
                 self.increment(at, line)
             }
             Opcode::FetchDimR => self.fetch(at, line),
+            Opcode::IssetIsemptyDimObj => self.isset_dim(at, line),
+            Opcode::FetchDimIs => self.fetch_is(at, line),
+            Opcode::FetchObjR => self.fetch_obj(at, line),
+            Opcode::FetchObjW => self.fetch_obj_w(line),
+            Opcode::AssignObj => self.assign_obj(at, line),
+            Opcode::AssignObjOp
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj => self.compound_obj(at, line),
+            Opcode::FeResetR => self.fe_reset(line),
+            Opcode::FeFetchR => self.fe_fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
+            Opcode::FetchDimW | Opcode::FetchDimRw => self.fetch_dim_w(at, line),
+            Opcode::AssignDimOp => self.assign_dim_op(at, line),
+            Opcode::Strlen => self.strlen(line),
+            Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
+            Opcode::Concat | Opcode::FastConcat => self.concat(line),
+            Opcode::Bool | Opcode::BoolNot => self.bool(at, line),
+            Opcode::FeFree => self.free_temp(line, line.op1),
             Opcode::SendVal | Opcode::SendVar => self.send(at, line),
-            Opcode::SendValEx
-            | Opcode::DoUcall
-            | Opcode::DoFcall
-            | Opcode::DoFcallByName
-            | Opcode::Return => self.stepped(at, line),
+            Opcode::CheckFuncArg => self.check_func_arg(),
+            Opcode::TypeCheck => self.type_check(at, line),
+            // A send to a callee that takes the argument by value.
+            Opcode::SendValEx if matches!(line.imm, Imm::Arg(_)) => self.send(at, line),
+            Opcode::DoUcall | Opcode::DoFcall | Opcode::DoFcallByName => match line.imm {
+                Imm::Make { returns } => self.make_in_place(at, line, returns),
+                _ => self.stepped(at, line),
+            },
+            Opcode::Return if matches!(line.imm, Imm::Leave { .. }) => {
+                self.leave_in_place(at, line)
+            }
+            Opcode::SendValEx | Opcode::Return => self.stepped(at, line),
             Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName => {
-                self.push_call(at, line)
+                match self.ir.ops.get(at.index() + 1) {
+                    Some(Op::InitCall {
+                        plain: Some(plain), ..
+                    }) => self.push_in_place(line, plain),
+                    _ => self.push_call(at, line),
+                }
             }
             _ => Err(mismatch("an inline opline the lowering does not serve")),
         }
@@ -1174,6 +2070,11 @@ impl<'a> Emit<'a> {
     /// A comparison of two scalars: the boolean it writes, or, fused to
     /// the jump after it, the way that jump goes held.
     fn compare(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        if matches!(line.opcode, Opcode::IsIdentical | Opcode::IsNotIdentical)
+            && (self.is_string(at, line.op1) || self.is_string(at, line.op2))
+        {
+            return self.compare_strings(at, line);
+        }
         let a = self.scalar(at, line.op1)?;
         let b = self.scalar(at, line.op2)?;
         let result = self.comparison(line.opcode, a, b)?;
@@ -1198,10 +2099,9 @@ impl<'a> Emit<'a> {
         let raises = if cannot_raise(op, line.op2) {
             None
         } else {
-            Some(
-                line.exit
-                    .ok_or_else(|| mismatch("an arithmetic that cannot leave"))?,
-            )
+            Some(Refuse::Exit(line.exit.ok_or_else(|| {
+                mismatch("an arithmetic that cannot leave")
+            })?))
         };
         let num = self.binary(op, a, b, raises)?;
         let defs: Vec<ValueId> = [line.out, line.op1_def].into_iter().flatten().collect();
@@ -1267,14 +2167,46 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
-    /// An assignment of a scalar to a variable: the variable written, and
-    /// where what it held was counted, released after, as
+    /// An assignment to a variable, php's `zend_jit_assign` over
+    /// `zend_jit_assign_to_variable` (`Z/ext/opcache/jit/zend_jit_ir.c:5793-5950`):
+    /// a scalar written, or a value no scalar moved from a temporary,
+    /// copied from a variable with one owner more, or copied as it is from
+    /// a constant no reference counts ([`Emit::copy_operand`]); and where
+    /// what the variable held was counted, released after, as
     /// `zend_assign_to_variable` frees it, what its destructor throws
-    /// leaving through the opline's exit. A register's slot is written
+    /// leaving through the opline's unwind. A register's slot is written
     /// too where the old value was counted, so no slot names a value
-    /// freed.
+    /// freed. Strings, arrays and a constant assigned over strings and
+    /// arrays, an object's destructor among the releases:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// function f($n) {
+    ///     $s = ""; $a = [1]; $k = "k"; $o = new D;
+    ///     for ($i = 0; $i < $n; $i++) { $t = str_repeat("x", $i % 3); $s = $t; $b = $a; $a = [$i]; $k = "k"; if ($i == 1) { $o = $s; } }
+    ///     return [$s, $b, $a, $k, $o];
+    /// }
+    /// echo json_encode(f(5)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// d["x",[3],[4],"k","x"]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// function f($n) {
+    ///     $s = ""; $a = [1]; $k = "k"; $o = new D;
+    ///     for ($i = 0; $i < $n; $i++) { $t = str_repeat("x", $i % 3); $s = $t; $b = $a; $a = [$i]; $k = "k"; if ($i == 1) { $o = $s; } }
+    ///     return [$s, $b, $a, $k, $o];
+    /// }
+    /// echo json_encode(f(5)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// d["x",[3],[4],"k","x"]
+    /// ```
     fn assign(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let held = self.scalar(at, line.op2)?;
         let Operand::Value(target) = line.op1 else {
             return Err(mismatch("an assignment to no variable"));
         };
@@ -1288,93 +2220,100 @@ impl<'a> Emit<'a> {
             }
             None => None,
         };
-        if let Some(def) = line.op1_def {
-            self.define(def, held)?;
-            if old.is_some() && self.value(def)?.home == Home::Register {
-                self.store(slot, held)?;
+        if self.scalar_kind(line.op2)?.is_some() {
+            let held = self.scalar(at, line.op2)?;
+            if let Some(def) = line.op1_def {
+                self.define(def, held)?;
+                if old.is_some() && self.value(def)?.home == Home::Register {
+                    self.store(slot, held)?;
+                }
             }
-        }
-        if let Some(out) = line.out {
-            self.define(out, held)?;
+            if let Some(out) = line.out {
+                self.define(out, held)?;
+            }
+        } else {
+            let into = self.place(slot)?;
+            self.copy_operand(line.frame, line.op2, into)?;
         }
         if let Some((word, info)) = old {
-            let counted = self.b.ins().band_imm_u(info, COUNTED);
-            let [room, opline] = self.served(line)?;
-            self.when(counted, |emit| {
-                emit.call(
-                    Kernel::Release,
-                    &[room, opline, word, info],
-                    line.unwind.map(Leave::Unwind),
-                )
-            })?;
+            self.release(line, word, info, Dtor::Gc)?;
         }
         Ok(())
     }
 
-    /// A read of a packed array's element by a long key: past `nNumUsed`
-    /// or a hole leaves for the interpreter to serve it again; an element
-    /// that is a reference is read through it; one of the type the op's
-    /// guard holds is read, and one of another copied to the slot the
-    /// fetch writes as php's `ZVAL_COPY_DEREF` copies it, for the exit to
-    /// go on past the fetch. A temporary array the fetch read is freed
-    /// after, as its handler frees it, what a destructor throws leaving
-    /// through the exit `types` gives the free.
-    fn fetch(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let exit = line
-            .exit
-            .ok_or_else(|| mismatch("a fetch that cannot leave"))?;
-        let Operand::Value(array) = line.op1 else {
-            return Err(mismatch("a fetch from no array"));
-        };
-        let array_slot = self.value(array)?.slot;
-        let Scalar::Long(key) = self.scalar(at, line.op2)? else {
-            return Err(mismatch("a fetch by no long key"));
-        };
-        let out = line
-            .out
-            .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let (room, array_at) = self.place(array_slot)?;
-        let arr = self.b.ins().load(I64, trusted(), room, array_at);
-        let element = self.element(arr, key, exit)?;
-        let hole = self.b.ins().load(I8, trusted(), element, TYPE_AT);
-        let hole = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, hole, tag(ZvalType::Undef));
-        self.leave_if(hole, exit)?;
-        match self.within(at).as_slice() {
-            [] => {
-                let element = self.deref(element);
-                let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-                let out_slot = self.value(out)?.slot;
-                self.copy(line, element, info, out_slot)?;
+    /// Whether `operand` is a scalar compiled code holds as one kind: a
+    /// scalar constant, or a value of one kind of the scalar core; none
+    /// for a constant no scalar is and a value of no one scalar kind.
+    fn scalar_kind(&self, operand: Operand) -> Result<Option<Kind>, Abort> {
+        Ok(match operand {
+            Operand::Constant(Constant::Other(_)) | Operand::Unused => None,
+            Operand::Constant(Constant::Null) => Some(Kind::Null),
+            Operand::Constant(Constant::False) => Some(Kind::False),
+            Operand::Constant(Constant::True) => Some(Kind::True),
+            Operand::Constant(Constant::Long(_)) => Some(Kind::Long),
+            Operand::Constant(Constant::Double(_)) => Some(Kind::Double),
+            Operand::Value(value) => Kind::of(self.value(value)?.types),
+        })
+    }
+
+    /// The value no scalar `operand` names, of `frame`, written whole to
+    /// the zval at `base + at`: what a temporary holds moved with its
+    /// owner, its slot left `UNDEF` as the handler takes the operand,
+    /// php's `ZVAL_COPY_VALUE`; what a variable holds copied with one
+    /// owner more, `ZVAL_COPY`; a constant no reference counts copied as
+    /// it is from the op array's constants, `ZVAL_COPY_CONST`.
+    fn copy_operand(
+        &mut self,
+        frame: Frame,
+        operand: Operand,
+        (base, at): (Value, i32),
+    ) -> Result<(), Abort> {
+        match operand {
+            Operand::Value(value) => {
+                let from = self.value(value)?.slot;
+                let (room, from_at) = self.place(from)?;
+                let info = self.b.ins().load(I32, trusted(), room, from_at + TYPE_AT);
+                if self.is_temporary(from)? {
+                    let word = self.b.ins().load(I64, trusted(), room, from_at);
+                    self.b.ins().store(trusted(), word, base, at);
+                    self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+                    let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+                    self.b
+                        .ins()
+                        .store(trusted(), undef, room, from_at + TYPE_AT);
+                } else {
+                    let zval = self.b.ins().iadd_imm_s(room, i64::from(from_at));
+                    self.copy_at(zval, info, (base, at))?;
+                }
             }
-            [in_place, through] => self.held_element(line, [*in_place, *through], element, out)?,
-            _ => {
-                return Err(mismatch(
-                    "a fetch holds other guards than its element's two",
-                ));
+            Operand::Constant(Constant::Other(idx)) => {
+                let zval = self.constant_zval(frame, idx)?;
+                let word = self.b.ins().load(I64, trusted(), zval, 0);
+                let info = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
+                self.b.ins().store(trusted(), word, base, at);
+                self.b.ins().store(trusted(), info, base, at + TYPE_AT);
             }
-        }
-        if array_slot.var >= self.frame_cvs(array_slot.frame)? {
-            let [room_arg, opline] = self.served(line)?;
-            // `FREE_OP1`, as the interpreter takes it: the array out of its
-            // slot, which is left `UNDEF`, then its owner given up.
-            let info = self.b.ins().load(I32, trusted(), room, array_at + TYPE_AT);
-            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
-            self.b
-                .ins()
-                .store(trusted(), undef, room, array_at + TYPE_AT);
-            let counted = self.b.ins().band_imm_u(info, COUNTED);
-            self.when(counted, |emit| {
-                emit.call(
-                    Kernel::Release,
-                    &[room_arg, opline, arr, info],
-                    line.unwind.map(Leave::Unwind),
-                )
-            })?;
+            _ => return Err(mismatch("a value copied whole from a scalar")),
         }
         Ok(())
+    }
+
+    /// The address of constant `idx` of the op array `frame` serves, its
+    /// zval among the op array's constants, which the trace's epoch
+    /// holds, php's `RT_CONSTANT`.
+    fn constant_zval(&mut self, frame: Frame, idx: ConstIdx) -> Result<Value, Abort> {
+        let literals = self
+            .ir
+            .frames
+            .get(usize::from(frame.0))
+            .ok_or_else(|| mismatch("a constant of a frame the trace does not have"))?
+            .literals;
+        let address = (idx.0 as usize)
+            .checked_mul(size_of::<Zval>())
+            .and_then(|offset| literals.checked_add(offset))
+            .and_then(|address| i64::try_from(address).ok())
+            .ok_or_else(|| mismatch("a constant past the host's addresses"))?;
+        Ok(self.b.ins().iconst(I64, address))
     }
 
     /// A fetched element at `element` held to its type by its two guards,
@@ -1383,7 +2322,6 @@ impl<'a> Emit<'a> {
     /// hold it, then written to what the fetch writes.
     fn held_element(
         &mut self,
-        line: &Line,
         [in_place, through]: [Guard; 2],
         element: Value,
         out: ValueId,
@@ -1414,7 +2352,7 @@ impl<'a> Emit<'a> {
         self.b.ins().brif(is_ref, referred, &[], direct, &[]);
         self.b.switch_to_block(direct);
         self.b.seal_block(direct);
-        self.element_guard(line, in_place, element, out, out_slot)?;
+        self.element_guard(in_place, element, out, out_slot)?;
         self.b.ins().jump(read, &[element.into()]);
         self.b.switch_to_block(referred);
         self.b.seal_block(referred);
@@ -1423,7 +2361,7 @@ impl<'a> Emit<'a> {
             .b
             .ins()
             .iadd_imm_s(reference, i64::from(imm(Ref::VALUE_AT)));
-        self.element_guard(line, through, inner, out, out_slot)?;
+        self.element_guard(through, inner, out, out_slot)?;
         self.b.ins().jump(read, &[inner.into()]);
         self.b.switch_to_block(read);
         self.b.seal_block(read);
@@ -1432,7 +2370,7 @@ impl<'a> Emit<'a> {
             self.define(out, read)
         } else {
             let info = self.b.ins().load(I32, trusted(), held, TYPE_AT);
-            self.copy(line, held, info, out_slot)
+            self.copy(held, info, out_slot)
         }
     }
 
@@ -1442,7 +2380,6 @@ impl<'a> Emit<'a> {
     /// fetch; go on otherwise.
     fn element_guard(
         &mut self,
-        line: &Line,
         guard: Guard,
         element: Value,
         out: ValueId,
@@ -1452,7 +2389,7 @@ impl<'a> Emit<'a> {
             return Err(mismatch("a fetch holds a guard of another kind"));
         };
         let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        let kind = self.b.ins().band_imm_u(info, 0xff);
+        let kind = self.b.ins().band_imm_u(info, KIND);
         let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, kind, tag(t));
         let other = self.fuzzed(other)?;
         let goes_on = self
@@ -1464,7 +2401,6 @@ impl<'a> Emit<'a> {
                     .iter()
                     .any(|store| matches!(store.from, Stored::Copied { value, .. } if value == out))
             });
-        let to = self.exit_block(guard.exit)?;
         let failed = self.b.create_block();
         self.b.set_cold_block(failed);
         let on = self.b.create_block();
@@ -1473,73 +2409,217 @@ impl<'a> Emit<'a> {
         self.b.seal_block(failed);
         if goes_on {
             // The exit goes on past the fetch: the element is the slot's,
-            // copied as the fetch copies it.
-            self.copy(line, element, info, out_slot)?;
+            // copied as the fetch copies it, through the reference it may
+            // be.
+            let element = self.deref(element);
+            let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+            self.copy(element, info, out_slot)?;
         }
-        self.b.ins().jump(to, &[]);
+        let (to, args) = self.guard_exit(guard.exit)?;
+        self.b.ins().jump(to, &args);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
         Ok(())
     }
 
-    /// A write of a scalar to a packed array's element by a long key, in
-    /// place: it leaves for the interpreter unless the array is counted
-    /// and held once, so no other holder sees the write and no separation
-    /// is due, and the element is there and counts nothing, so nothing is
-    /// freed.
-    fn assign_dim(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let exit = line
-            .exit
-            .ok_or_else(|| mismatch("an element write that cannot leave"))?;
-        let Operand::Value(array) = line.op1 else {
-            return Err(mismatch("an element write to no array"));
-        };
-        let (room, array_at) = self.place(self.value(array)?.slot)?;
-        let info = self.b.ins().load(I32, trusted(), room, array_at + TYPE_AT);
-        let counted = self.b.ins().band_imm_u(info, COUNTED);
-        let immutable = self.b.ins().icmp_imm_s(IntCC::Equal, counted, 0);
-        self.leave_if(immutable, exit)?;
-        let arr = self.b.ins().load(I64, trusted(), room, array_at);
-        let count = self
+    /// The zval at `zval`, of type word `old`, written with `line`'s
+    /// value as `zend_jit_assign_to_variable` writes it, then on at
+    /// `done`: written over where it counts nothing, given up after where
+    /// it counts, through the release kernel where it is the last owner;
+    /// a reference to `handled`, whose handler writes through it.
+    fn written_over(
+        &mut self,
+        line: &Line,
+        (zval, old): (Value, Value),
+        value: Option<Scalar>,
+        (handled, done): (Block, Block),
+    ) -> Result<(), Abort> {
+        let (plain, owning) = (self.b.create_block(), self.b.create_block());
+        let counted = self.b.ins().band_imm_u(old, COUNTED);
+        self.b.ins().brif(counted, owning, &[], plain, &[]);
+        self.b.switch_to_block(plain);
+        self.b.seal_block(plain);
+        self.written(line, zval, value)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(owning);
+        self.b.seal_block(owning);
+        let kind = self.b.ins().band_imm_u(old, KIND);
+        let reference = self
             .b
             .ins()
-            .load(I32, trusted(), arr, imm(Arr::REFCOUNT_AT));
-        let shared = self.b.ins().icmp_imm_s(IntCC::NotEqual, count, 1);
-        self.leave_if(shared, exit)?;
-        let Scalar::Long(key) = self.scalar(at, line.op2)? else {
-            return Err(mismatch("an element write by no long key"));
-        };
-        let element = self.element(arr, key, exit)?;
-        let held = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        let kind = self.b.ins().band_imm_u(held, 0xff);
-        let hole = self
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        self.divert_if(reference, handled);
+        let word = self.b.ins().load(I64, trusted(), zval, 0);
+        self.written(line, zval, value)?;
+        self.release(line, word, old, Dtor::Gc)?;
+        self.b.ins().jump(done, &[]);
+        Ok(())
+    }
+
+    /// The `handled` block, `line` served by its handler, then on at
+    /// `done`, where an inline write and its handler meet.
+    fn handled_then(
+        &mut self,
+        at: OpId,
+        line: &Line,
+        (handled, done): (Block, Block),
+    ) -> Result<(), Abort> {
+        self.b.switch_to_block(handled);
+        self.b.seal_block(handled);
+        self.stepped(at, line)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
+    }
+
+    /// The number at `zval`, of type byte `kind`, written over with `op`
+    /// of it and `by` in place where php's `zend_jit_math_helper` and
+    /// `zend_jit_long_math_helper` serve it inline, then on at `done`: a
+    /// long or a double under `+`, `-`, `*` and `/`, a long overflowing
+    /// to a double as php's does, and a long under `%`, the shifts and
+    /// the bitwise operators; to `handled` where it is anything else, and
+    /// where `raises` and `by` is a divisor of zero or a negative shift,
+    /// whose throw is the handler's.
+    fn compound_at(
+        &mut self,
+        (zval, kind): (Value, Value),
+        (op, by, raises): (Opcode, Scalar, bool),
+        (handled, done): (Block, Block),
+    ) -> Result<(), Abort> {
+        let numbers = matches!(op, Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div);
+        let is_long = self
             .b
             .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
-        self.leave_if(hole, exit)?;
-        let counts = self.b.ins().band_imm_u(held, COUNTED);
-        self.leave_if(counts, exit)?;
-        let value = self.scalar(at, line.data)?;
-        self.write(element, 0, value);
-        if let Some(out) = line.out {
-            self.define(out, value)?;
+            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Long));
+        let long = self.b.create_block();
+        let not_long = self.b.create_block();
+        self.b.ins().brif(is_long, long, &[], not_long, &[]);
+        self.b.switch_to_block(not_long);
+        self.b.seal_block(not_long);
+        let mut kinds = vec![(long, Kind::Long)];
+        if numbers {
+            let is_double = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Double));
+            let double = self.b.create_block();
+            self.b.ins().brif(is_double, double, &[], handled, &[]);
+            kinds.push((double, Kind::Double));
+        } else {
+            self.b.ins().jump(handled, &[]);
+        }
+        let refuse = raises.then_some(Refuse::To(handled));
+        for (block, kind) in kinds {
+            self.b.switch_to_block(block);
+            self.b.seal_block(block);
+            let x = self.read(zval, 0, kind);
+            let num = self.binary(op, x, by, refuse)?;
+            self.write_num(zval, 0, num);
+            self.b.ins().jump(done, &[]);
         }
         Ok(())
     }
 
-    /// The address of the slot `key` names in the packed array `arr`,
-    /// leaving through `exit` where the key is past `nNumUsed`.
-    fn element(&mut self, arr: Value, key: Value, exit: ExitId) -> Result<Value, Abort> {
+    /// The element at `element` written with `line`'s value: the scalar
+    /// `value`, or the value no scalar its `OP_DATA` names, copied as an
+    /// assignment copies it ([`Emit::copy_operand`]).
+    fn written(&mut self, line: &Line, element: Value, value: Option<Scalar>) -> Result<(), Abort> {
+        match value {
+            Some(value) => {
+                self.write(element, 0, value);
+                Ok(())
+            }
+            None => self.copy_operand(line.frame, line.data, (element, 0)),
+        }
+    }
+
+    /// Go to `to` where `cond` is not zero, a block whose branches the
+    /// caller seals once every one is made; go on otherwise.
+    fn divert_if(&mut self, cond: Value, to: Block) {
+        let on = self.b.create_block();
+        self.b.ins().brif(cond, to, &[], on, &[]);
+        self.b.switch_to_block(on);
+        self.b.seal_block(on);
+    }
+
+    /// The array `slot` holds, in place or through the reference it holds,
+    /// as `read` says: php's `zend_jit_fetch_reference` past its guards (`Z/ext/opcache/jit/zend_jit_ir.c:16952-17010`).
+    /// A by-reference array read by a long key, made a hash, then an array
+    /// with a reference element, under the trace:
+    ///
+    /// ```php
+    /// function sum(array &$a, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $a[$i % 3]; if ($i == 5) { $a = ["x" => 1, 0 => 10, 1 => 20, 2 => 30]; } if ($i == 8) { $a = [7, 8, &$GLOBALS['r']]; } } return $s; }
+    /// $r = 100; $b = [1, 2, 3];
+    /// echo sum($b, 12), " ", json_encode($b), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 187 [7,8,100]
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function sum(array &$a, $n) { $s = 0; for ($i = 0; $i < $n; $i++) { $s += $a[$i % 3]; if ($i == 5) { $a = ["x" => 1, 0 => 10, 1 => 20, 2 => 30]; } if ($i == 8) { $a = [7, 8, &$GLOBALS['r']]; } } return $s; }
+    /// $r = 100; $b = [1, 2, 3];
+    /// echo sum($b, 12), " ", json_encode($b), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 187 [7,8,100]
+    /// ```
+    fn array_of(&mut self, slot: Slot, read: Read) -> Result<Value, Abort> {
+        let (base, at) = self.zval_of(slot, read)?;
+        Ok(self.b.ins().load(I64, trusted(), base, at))
+    }
+
+    /// Where the zval `slot` holds, read so, is: the slot itself, the
+    /// value of the reference it holds, the zval its indirect `VAR` points
+    /// at, or the value of the reference that zval is.
+    pub(super) fn zval_of(&mut self, slot: Slot, read: Read) -> Result<(Value, i32), Abort> {
+        let (room, at) = self.place(slot)?;
+        let mut to = || self.b.ins().load(I64, trusted(), room, at);
+        Ok(match read {
+            Read::InPlace => (room, at),
+            Read::Through => (to(), imm(Ref::VALUE_AT)),
+            Read::Indirect(Pointee::Value) => (to(), 0),
+            Read::Indirect(Pointee::Reference) => {
+                let pointee = to();
+                let reference = self.b.ins().load(I64, trusted(), pointee, 0);
+                (reference, imm(Ref::VALUE_AT))
+            }
+        })
+    }
+
+    /// How the op at `at` reads `value`: through the reference its slot
+    /// holds, or the address its indirect `VAR` holds, where a guard
+    /// before the op held one, in place otherwise.
+    fn read_of(&self, at: OpId, value: ValueId) -> Read {
+        (self.ir.guards.iter())
+            .filter(|g| g.at == GuardAt::Before(at))
+            .find_map(|g| match g.check {
+                Check::Deref { value: v, .. } if v == value => Some(Read::Through),
+                Check::Indirect {
+                    value: v, pointee, ..
+                } if v == value => Some(Read::Indirect(pointee)),
+                _ => None,
+            })
+            .unwrap_or(Read::InPlace)
+    }
+
+    /// Whether `key` is past the packed array `arr`'s `nNumUsed`.
+    fn past_used(&mut self, arr: Value, key: Value) -> Value {
         let used = self.b.ins().load(I32, trusted(), arr, imm(Arr::USED_AT));
         let used = self.b.ins().uextend(I64, used);
-        let past = self
-            .b
+        self.b
             .ins()
-            .icmp(IntCC::UnsignedGreaterThanOrEqual, key, used);
-        self.leave_if(past, exit)?;
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, key, used)
+    }
+
+    /// The address of the slot `key` names in the packed array `arr`.
+    fn slot_at(&mut self, arr: Value, key: Value) -> Value {
         let data = self.b.ins().load(I64, trusted(), arr, imm(Arr::DATA_AT));
         let offset = self.b.ins().imul_imm_s(key, SLOT);
-        Ok(self.b.ins().iadd(data, offset))
+        self.b.ins().iadd(data, offset)
     }
 
     /// The zval at `zval`, or, where it is a reference, the one the
@@ -1569,33 +2649,523 @@ impl<'a> Emit<'a> {
         at
     }
 
-    /// The zval at `zval`, of type word `info`, copied to `slot` by
-    /// [`Kernel::Copy`].
-    fn copy(&mut self, line: &Line, zval: Value, info: Value, slot: Slot) -> Result<(), Abort> {
-        let word = self.b.ins().load(I64, trusted(), zval, 0);
-        let (room, at) = self.place(slot)?;
-        let out = self.b.ins().iadd_imm_s(room, i64::from(at));
-        let [room, opline] = self.served(line)?;
-        self.call(Kernel::Copy, &[room, opline, word, info, out], None)
+    /// The zval at `zval`, no reference, of type word `info`, copied to
+    /// `slot` with one owner more where it is counted, php's `ZVAL_COPY`
+    /// with `GC_ADDREF` inline (`jit_ZVAL_COPY` and `jit_GC_ADDREF`,
+    /// `Z/ext/opcache/jit/zend_jit_ir.c:1610-1613`, `:1672-1719`); the count saturates
+    /// beneath the heap's pin, as the heap's own adds do. A string, an
+    /// array and the array a reference element holds, each read by a long
+    /// key and kept past the writes after:
+    ///
+    /// ```php
+    /// function pick($a, $n) { $s = []; for ($i = 0; $i < $n; $i++) { $s[] = $a[$i % 3]; } return $s; }
+    /// $r = [7]; $b = [str_repeat("ab", 2), [1, 2], &$r];
+    /// $out = pick($b, 6);
+    /// $b[1][] = 3; $r[] = 8; unset($b);
+    /// echo json_encode($out), " ", json_encode($r), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// ["abab",[1,2],[7],"abab",[1,2],[7]] [7,8]
+    /// ```
+    fn copy(&mut self, zval: Value, info: Value, slot: Slot) -> Result<(), Abort> {
+        let dest = self.place(slot)?;
+        self.copy_at(zval, info, dest)
     }
 
-    /// A send of a scalar: the call's slot for the argument written.
+    /// The zval at `zval`, no reference, of type word `info`, copied to
+    /// the zval at `base + at` with one owner more where it is counted, as
+    /// [`Emit::copy`] copies it to a slot.
+    fn copy_at(&mut self, zval: Value, info: Value, (base, at): (Value, i32)) -> Result<(), Abort> {
+        let word = self.b.ins().load(I64, trusted(), zval, 0);
+        self.b.ins().store(trusted(), word, base, at);
+        self.b.ins().store(trusted(), info, base, at + TYPE_AT);
+        self.addref(word, info)
+    }
+
+    /// One owner more of the value of type word `info` at `word` where it
+    /// is counted, `Z_TRY_ADDREF`, the count kept below the pin it may
+    /// carry.
+    fn addref(&mut self, word: Value, info: Value) -> Result<(), Abort> {
+        let counted = self.b.ins().band_imm_u(info, COUNTED);
+        self.when(counted, |emit| {
+            let count_at = imm(Zval::COUNT_AT);
+            let count = emit.b.ins().load(I32, trusted(), word, count_at);
+            let bits = emit.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+            let room = emit
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, bits, i64::from(Zval::COUNT_BITS));
+            let room = emit.b.ins().uextend(I32, room);
+            let count = emit.b.ins().iadd(count, room);
+            emit.b.ins().store(trusted(), count, word, count_at);
+            Ok(())
+        })
+    }
+
+    /// A `foreach`'s reset over an array, php's `zend_jit_fe_reset`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:13756-13775`): the array into
+    /// the iterator's slot, with one owner more where a variable holds it,
+    /// moved whole from a temporary, whose slot is left `UNDEF` as the
+    /// handler takes it, and the iterator's position, `Z_FE_POS`, zero,
+    /// the slot's own word and not the array's. An empty array goes on as
+    /// any other, as the handler's does, and the fetch after it finds the
+    /// end.
+    fn fe_reset(&mut self, line: &Line) -> Result<(), Abort> {
+        let Operand::Value(array) = line.op1 else {
+            return Err(mismatch("a reset of no array"));
+        };
+        let out = line
+            .out
+            .ok_or_else(|| mismatch("a reset that writes no iterator"))?;
+        let from = self.value(array)?.slot;
+        let to = self.value(out)?.slot;
+        let (room, at) = self.place(from)?;
+        let zval = self.b.ins().iadd_imm_s(room, i64::from(at));
+        let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
+        if self.is_temporary(from)? {
+            let word = self.b.ins().load(I64, trusted(), room, at);
+            let (dest, dest_at) = self.place(to)?;
+            self.b.ins().store(trusted(), word, dest, dest_at);
+            self.b.ins().store(trusted(), info, dest, dest_at + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
+        } else {
+            self.copy(zval, info, to)?;
+        }
+        let (dest, dest_at) = self.place(to)?;
+        let zero = self.b.ins().iconst(I32, 0);
+        self.b
+            .ins()
+            .store(trusted(), zero, dest, dest_at + FE_POS_AT);
+        Ok(())
+    }
+
+    /// A `foreach`'s fetch over a packed array into a variable, where the
+    /// loop goes on, php's `zend_jit_fe_fetch`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:13800-14120`): from the
+    /// iterator's position, the holes passed over, the end of the array
+    /// leaving through the direction's exit for the opline past the loop,
+    /// where the handler would jump; else the position moved past the
+    /// element, its position the key where one is written, and the
+    /// element, through the reference it may be, copied into the variable
+    /// with one owner more, what the variable held given up after, as
+    /// `zend_assign_to_variable` gives it up. A variable that holds a
+    /// reference is written through by the handler, which serves the
+    /// opline whole. Keys and values, a hole, a reference among the
+    /// elements and a variable bound to one:
+    ///
+    /// ```php
+    /// function sum($a) { $s = 0; $t = ""; foreach ($a as $k => $v) { $s += $k; $t .= is_array($v) ? "A" : $v; } return "$s:$t"; }
+    /// $r = "R"; $a = ["a", "b", [1], &$r, str_repeat("c", 2)]; unset($a[1]);
+    /// echo sum($a), " ", sum(["x", "y"]), " ", sum([]), "\n";
+    /// function bound($a) { $v = 0; $w = &$v; foreach ($a as $v) { $w .= "!"; } return $v; }
+    /// echo bound(["p", "q"]), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 9:aARcc 1:xy 0:
+    /// q!
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// function sum($a) { $s = 0; $t = ""; foreach ($a as $k => $v) { $s += $k; $t .= is_array($v) ? "A" : $v; } return "$s:$t"; }
+    /// $r = "R"; $a = ["a", "b", [1], &$r, str_repeat("c", 2)]; unset($a[1]);
+    /// echo sum($a), " ", sum(["x", "y"]), " ", sum([]), "\n";
+    /// function bound($a) { $v = 0; $w = &$v; foreach ($a as $v) { $w .= "!"; } return $v; }
+    /// echo bound(["p", "q"]), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 9:aARcc 1:xy 0:
+    /// q!
+    /// ```
+    fn fe_fetch(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let Operand::Value(iterator) = line.op1 else {
+            return Err(mismatch("a fetch from no iterator"));
+        };
+        let Operand::Value(old) = line.op2 else {
+            return Err(mismatch("a fetch into no variable"));
+        };
+        let target = self.value(old)?.slot;
+        let (room, iter_at) = self.place(self.value(iterator)?.slot)?;
+        let (var_room, var_at) = self.place(target)?;
+        let handled = self.b.create_block();
+        let done = self.b.create_block();
+        let old_word = self.b.ins().load(I64, trusted(), var_room, var_at);
+        let old_info = self
+            .b
+            .ins()
+            .load(I32, trusted(), var_room, var_at + TYPE_AT);
+        let kind = self.b.ins().band_imm_u(old_info, KIND);
+        let bound = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        self.divert_if(bound, handled);
+        let arr = self.b.ins().load(I64, trusted(), room, iter_at);
+        let first = self.b.ins().load(I32, trusted(), room, iter_at + FE_POS_AT);
+        let used = self.b.ins().load(I32, trusted(), arr, imm(Arr::USED_AT));
+        let data = self.b.ins().load(I64, trusted(), arr, imm(Arr::DATA_AT));
+        let walk = self.b.create_block();
+        let pos = self.b.append_block_param(walk, I32);
+        let found = self.b.create_block();
+        self.b.ins().jump(walk, &[first.into()]);
+        self.b.switch_to_block(walk);
+        let ended = self
+            .b
+            .ins()
+            .icmp(IntCC::UnsignedGreaterThanOrEqual, pos, used);
+        self.direction(at, ended)?;
+        let offset = self.b.ins().uextend(I64, pos);
+        let offset = self.b.ins().imul_imm_s(offset, SLOT);
+        let element = self.b.ins().iadd(data, offset);
+        let byte = self.b.ins().load(I8, trusted(), element, TYPE_AT);
+        let hole = self
+            .b
+            .ins()
+            .icmp_imm_s(IntCC::Equal, byte, tag(ZvalType::Undef));
+        let past = self.b.ins().iadd_imm_s(pos, 1);
+        self.b.ins().brif(hole, walk, &[past.into()], found, &[]);
+        self.b.seal_block(walk);
+        self.b.switch_to_block(found);
+        self.b.seal_block(found);
+        self.b
+            .ins()
+            .store(trusted(), past, room, iter_at + FE_POS_AT);
+        if let Some(key) = line.out {
+            let key_value = self.b.ins().uextend(I64, pos);
+            self.define(key, Scalar::Long(key_value))?;
+        }
+        let element = self.deref(element);
+        let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
+        self.copy(element, info, target)?;
+        self.release(line, old_word, old_info, Dtor::Gc)?;
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(handled);
+        self.b.seal_block(handled);
+        self.stepped(at, line)?;
+        if let Some(key) = line.out
+            && self.value(key)?.home == Home::Register
+        {
+            let held = self.load(self.value(key)?.slot, Kind::Long, false)?;
+            self.define(key, held)?;
+        }
+        self.b.ins().jump(done, &[]);
+        self.b.switch_to_block(done);
+        self.b.seal_block(done);
+        Ok(())
+    }
+
+    /// A cast of a scalar to a boolean, its truth, or its negation for
+    /// `!`, as php's `zend_jit_bool_jmpznz` writes it
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:7533-7800`).
+    fn bool(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let held = self.scalar(at, line.op1)?;
+        let truth = self.truth(held);
+        let truth = match line.opcode {
+            Opcode::BoolNot => self.b.ins().icmp_imm_s(IntCC::Equal, truth, 0),
+            _ => truth,
+        };
+        if let Some(out) = line.out {
+            self.define(out, Scalar::Bool(truth))?;
+        }
+        Ok(())
+    }
+
+    /// `FREE_OP` of `operand` where it is a temporary, as the handler
+    /// takes it: what it holds out of its slot, which is left `UNDEF`,
+    /// then its owner given up as [`Emit::release`] gives it up under
+    /// [`Dtor::Nogc`], as the handler's `FREE_OP` and php's `jit_FREE_OP`
+    /// give it up (`Z/ext/opcache/jit/zend_jit_ir.c:1905-1915`), what a
+    /// destructor throws leaving through the opline's unwind. A
+    /// `foreach`'s array freed at its loop's end is this, php's
+    /// `zend_jit_free` of `FE_FREE` over an array, which holds no iterator
+    /// to delete (`Z/ext/opcache/jit/zend_jit_ir.c:11543-11580`).
+    fn free_temp(&mut self, line: &Line, operand: Operand) -> Result<(), Abort> {
+        let Operand::Value(value) = operand else {
+            return Ok(());
+        };
+        let held = self.value(value)?;
+        if held.home == Home::Register || !self.is_temporary(held.slot)? {
+            return Ok(());
+        }
+        self.free_slot(line, held.slot)
+    }
+
+    /// The temporary `slot` freed as [`Emit::free_temp`] frees it.
+    fn free_slot(&mut self, line: &Line, slot: Slot) -> Result<(), Abort> {
+        let room = self.room(slot.frame)?;
+        let at = slot_offset(slot.var)?;
+        let info = self.b.ins().load(I32, trusted(), room, at + TYPE_AT);
+        let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+        self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
+        let word = self.b.ins().load(I64, trusted(), room, at);
+        self.release(line, word, info, Dtor::Nogc)
+    }
+
+    /// What a slot held, `word` and its type word `info`, given up after
+    /// an inline write over it or as a temporary is freed, as php's
+    /// `jit_ZVAL_PTR_DTOR` gives it up (`Z/ext/opcache/jit/zend_jit_ir.c:1819-1903`):
+    /// where it is counted, a `GC_DELREF` inline where another owner
+    /// stands and the collector holds the value already or never takes
+    /// it (`GC_MAY_LEAK`'s bits, [`Zval::LEAK_BITS`]), as a string's;
+    /// the last owner, a value the collector may take and a reference,
+    /// whose value it looks through to, through the release kernel, a
+    /// destructor's throw leaving through the opline's unwind; under
+    /// [`Dtor::Nogc`] the last owner alone, as `zval_ptr_dtor_nogc` buffers
+    /// no possible root. A string
+    /// two variables hold, one of them written over, and an object whose
+    /// last owner an assignment gives up, its destructor called there:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n; } }
+    /// function f($n) { $s = str_repeat("ab", 2); for ($i = 0; $i < $n; $i++) { $t = $s; $t = "c"; $o = new D($i); } return $s; }
+    /// echo f(6), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 012345abab
+    /// ```
+    ///
+    /// The same where every guard fails once:
+    ///
+    /// ```php
+    /// class D { function __construct(public $n) {} function __destruct() { echo $this->n; } }
+    /// function f($n) { $s = str_repeat("ab", 2); for ($i = 0; $i < $n; $i++) { $t = $s; $t = "c"; $o = new D($i); } return $s; }
+    /// echo f(6), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 012345abab
+    /// ```
+    fn release(&mut self, line: &Line, word: Value, info: Value, dtor: Dtor) -> Result<(), Abort> {
+        let counted = self.b.ins().band_imm_u(info, COUNTED);
+        let [room, opline] = self.served(line)?;
+        self.when(counted, |emit| {
+            let count_at = imm(Zval::COUNT_AT);
+            let count = emit.b.ins().load(I32, trusted(), word, count_at);
+            let called = emit.kernel_releases(word, info, count, dtor);
+            let (kernel, inline, done) = (
+                emit.b.create_block(),
+                emit.b.create_block(),
+                emit.b.create_block(),
+            );
+            emit.b.set_cold_block(kernel);
+            emit.b.ins().brif(called, kernel, &[], inline, &[]);
+            emit.b.switch_to_block(inline);
+            emit.b.seal_block(inline);
+            let fewer = emit.b.ins().iadd_imm_s(count, -1);
+            emit.b.ins().store(trusted(), fewer, word, count_at);
+            emit.b.ins().jump(done, &[]);
+            emit.b.switch_to_block(kernel);
+            emit.b.seal_block(kernel);
+            emit.call(
+                Kernel::Release,
+                &[room, opline, word, info],
+                line.unwind.map(Leave::Unwind),
+            )?;
+            emit.b.ins().jump(done, &[]);
+            emit.b.switch_to_block(done);
+            emit.b.seal_block(done);
+            Ok(())
+        })
+    }
+
+    /// Whether giving up one owner of the counted value at `word`, of type
+    /// word `info` and count word `count`, is the release kernel's, as
+    /// php's `jit_ZVAL_PTR_DTOR` calls out (`Z/ext/opcache/jit/zend_jit_ir.c:1819-1903`):
+    /// the last owner, or none, which the heap's own release reads with
+    /// its pin; a reference, whose value the collector looks through to;
+    /// and a value the collector may take as a possible root, whose
+    /// `GC_TYPE_INFO` holds no bit of php's `GC_MAY_LEAK` mask
+    /// ([`Zval::LEAK_BITS`]). Otherwise a `GC_DELREF` inline gives it up.
+    fn kernel_releases(&mut self, word: Value, info: Value, count: Value, dtor: Dtor) -> Value {
+        let owners = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
+        let last = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, owners, 1);
+        if dtor == Dtor::Nogc {
+            return last;
+        }
+        let kind = self.b.ins().band_imm_u(info, KIND);
+        let reference = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::Equal, kind, tag(ZvalType::Reference));
+        let gc = self
+            .b
+            .ins()
+            .load(I32, trusted(), word, imm(Zval::GC_INFO_AT));
+        let held = self.b.ins().band_imm_u(gc, i64::from(Zval::LEAK_BITS));
+        let leaks = self.b.ins().icmp_imm_u(IntCC::Equal, held, 0);
+        let called = self.b.ins().bor(last, reference);
+        self.b.ins().bor(called, leaks)
+    }
+
+    /// A send, php's `zend_jit_send_val` and `zend_jit_send_var`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:9466-9790`): the call's slot for
+    /// the argument written with a scalar, or with a value no scalar moved
+    /// from a temporary, copied from a variable with one owner more, or
+    /// copied as it is from a constant ([`Emit::copy_operand`]).
     fn send(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Imm::Arg(number) = line.imm else {
             return Err(mismatch("a send with no argument number"));
         };
-        let call = *self
-            .calls
-            .last()
-            .ok_or_else(|| mismatch("a send with no call under way"))?;
-        let held = self.scalar(at, line.op1)?;
-        let call = self.b.use_var(call);
-        let at = slot_offset(
+        let arg = slot_offset(
             number
                 .checked_sub(1)
                 .ok_or_else(|| mismatch("an argument numbered zero"))?,
         )?;
-        self.write(call, at, held);
+        if self.scalar_kind(line.op1)?.is_none() {
+            let call = self.call_room()?;
+            return self.copy_operand(line.frame, line.op1, (call, arg));
+        }
+        let held = self.scalar(at, line.op1)?;
+        let call = self.call_room()?;
+        self.write(call, arg, held);
+        Ok(())
+    }
+
+    /// A `TYPE_CHECK`, php's `zend_jit_type_check`
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:8162-8330`): whether the value's
+    /// type is one the mask names, `mask >> type & 1`, from the type the
+    /// trace knows where it knows one and the slot's type byte otherwise;
+    /// branched on where a jump is fused to it, written where not. A
+    /// temporary it reads is given up after, `FREE_OP1`, through the
+    /// release kernel where it is counted, as php's code calls
+    /// `zval_ptr_dtor` there; its slot is left `UNDEF`, as the
+    /// handler takes the operand. A node's element held to `null` and
+    /// the elements of a list held to their types:
+    ///
+    /// ```php
+    /// function leaves($node) {
+    ///     if ($node[0] === null) { return 1; }
+    ///     return leaves($node[0]) + leaves($node[1]);
+    /// }
+    /// function kinds($a) {
+    ///     $s = "";
+    ///     foreach ($a as $v) {
+    ///         $s .= is_int($v) ? "i" : (is_string($v) ? "s" : (is_array($v) ? "a" : (is_null($v) ? "n" : (is_bool($v) ? "b" : "?"))));
+    ///     }
+    ///     return $s;
+    /// }
+    /// $t = [[[null, null], [null, null]], [null, null]];
+    /// echo leaves($t), " ", kinds([1, "x", [2], null, true, 1.5, false, "y" . 3]), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 3 isanb?bs
+    /// ```
+    fn type_check(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
+        let Imm::Mask(mask) = line.imm else {
+            return Err(mismatch("a type check with no mask"));
+        };
+        let Operand::Value(value) = line.op1 else {
+            return Err(mismatch("a type check of no value"));
+        };
+        let asked = |tag: ZvalType| (mask >> u32::from(tag as u8)) & 1;
+        let answer = if Kind::of(self.value(value)?.types).is_some() {
+            if let Scalar::Bool(truth) = self.scalar(at, line.op1)? {
+                let (yes, no) = (asked(ZvalType::True), asked(ZvalType::False));
+                let truth = self.b.ins().icmp_imm_s(IntCC::NotEqual, truth, 0);
+                let yes = self.b.ins().iconst(I8, i64::from(yes));
+                let no = self.b.ins().iconst(I8, i64::from(no));
+                self.b.ins().select(truth, yes, no)
+            } else {
+                let tag = self
+                    .value(value)?
+                    .types
+                    .tag()
+                    .ok_or_else(|| mismatch("a scalar of no one type"))?;
+                self.b.ins().iconst(I8, i64::from(asked(tag)))
+            }
+        } else {
+            let (room, slot_at) = self.place(self.value(value)?.slot)?;
+            let byte = self.b.ins().load(I8, trusted(), room, slot_at + TYPE_AT);
+            let byte = self.b.ins().uextend(I32, byte);
+            let mask = self.b.ins().iconst(I32, i64::from(mask));
+            let shifted = self.b.ins().ushr(mask, byte);
+            let bit = self.b.ins().band_imm_u(shifted, 1);
+            self.b.ins().ireduce(I8, bit)
+        };
+        let slot = self.value(value)?.slot;
+        if self.is_temporary(slot)? && Kind::of(self.value(value)?.types).is_none() {
+            // `FREE_OP1`: the temporary out of its slot, then its owner
+            // given up.
+            let (room, slot_at) = self.place(slot)?;
+            let word = self.b.ins().load(I64, trusted(), room, slot_at);
+            let info = self.b.ins().load(I32, trusted(), room, slot_at + TYPE_AT);
+            let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
+            self.b
+                .ins()
+                .store(trusted(), undef, room, slot_at + TYPE_AT);
+            let counted = self.b.ins().band_imm_u(info, COUNTED);
+            let [room_arg, opline] = self.served(line)?;
+            self.when(counted, |emit| {
+                emit.call(
+                    Kernel::Release,
+                    &[room_arg, opline, word, info],
+                    line.unwind.map(Leave::Unwind),
+                )
+            })?;
+        }
+        let jumps = match line.fused {
+            Some(Fused::Jmpz) => self.b.ins().icmp_imm_s(IntCC::Equal, answer, 0),
+            Some(Fused::Jmpnz) => self.b.ins().icmp_imm_s(IntCC::NotEqual, answer, 0),
+            None => {
+                if let Some(out) = line.out {
+                    self.define(out, Scalar::Bool(answer))?;
+                }
+                answer
+            }
+        };
+        self.direction(at, jumps)
+    }
+
+    /// The room of the call under way, php's `EX(call)`: in a register
+    /// where compiled code pushed it, as the kernel that pushed it stood
+    /// it otherwise.
+    fn call_room(&mut self) -> Result<Value, Abort> {
+        let (call, _) = *self
+            .calls
+            .last()
+            .ok_or_else(|| mismatch("an argument with no call under way"))?;
+        Ok(match call {
+            CallRoom::Held(var) => self.b.use_var(var),
+            CallRoom::Stood => self.stood_word(I64, STOOD_CALL),
+        })
+    }
+
+    /// A `CHECK_FUNC_ARG` of an argument the callee takes by value:
+    /// the call's bit that says the argument after it is taken by
+    /// reference cleared, as `zend_jit_check_func_arg` clears
+    /// `ZEND_CALL_SEND_ARG_BY_REF` (`Z/ext/opcache/jit/zend_jit_ir.c:9925-9960`).
+    /// The `FETCH_DIM_FUNC_ARG` and the `SEND_FUNC_ARG` after it are then
+    /// a read and a send by value, compiled inline, and a `SEND_VAR_EX` to
+    /// a parameter taken by value is a `SEND_VAR`, which leaves its
+    /// variable as it was; a parameter taken by reference is still the
+    /// handlers', a write to the element:
+    ///
+    /// ```php
+    /// function count_nodes($node) {
+    ///     if ($node[0] === null) { return 1; }
+    ///     return 1 + count_nodes($node[0]) + count_nodes($node[1]);
+    /// }
+    /// function make($d) { if ($d === 0) { return [null, null]; } $e = $d - 1; return [make($e), make($e)]; }
+    /// function mark(&$x) { $x = 7; }
+    /// function marks($a, $n) { for ($i = 0; $i < $n; $i++) { mark($a[$i]); } return $a; }
+    /// echo count_nodes(make(8)), " ", implode(",", marks([1, 2, 3], 3)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 511 7,7,7
+    /// ```
+    fn check_func_arg(&mut self) -> Result<(), Abort> {
+        let call = self.call_room()?;
+        let info = imm(FRAME.info() as usize);
+        let flags = self.b.ins().load(I32, trusted(), call, info);
+        let flags = self
+            .b
+            .ins()
+            .band_imm_u(flags, i64::from(!FRAME.send_by_ref()));
+        self.b.ins().store(trusted(), flags, call, info);
         Ok(())
     }
 
@@ -1604,7 +3174,7 @@ impl<'a> Emit<'a> {
     /// before anything is pushed.
     fn push_call(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
         let Some(Op::InitCall {
-            target: Some(callee),
+            callee: Callee::User(callee),
             ..
         }) = self.ir.ops.get(at.index() + 1)
         else {
@@ -1615,10 +3185,11 @@ impl<'a> Emit<'a> {
             .ok_or_else(|| mismatch("an inline call that cannot leave"))?;
         let callee = self.b.ins().iconst(I32, i64::from(engine_offset(*callee)?));
         let [room, opline] = self.served(line)?;
+        let func = self.func_of(line.frame)?;
         let stood = self.b.ins().stack_addr(I64, self.stood, 0);
         self.call(
             Kernel::PushCall,
-            &[room, opline, callee, stood],
+            &[room, opline, func, callee, stood],
             Some(Leave::Exit(exit)),
         )?;
         let call = self.stood_word(I64, STOOD_CALL);
@@ -1657,7 +3228,7 @@ impl<'a> Emit<'a> {
         op: Opcode,
         a: Scalar,
         b: Scalar,
-        raises: Option<ExitId>,
+        raises: Option<Refuse>,
     ) -> Result<Num, Abort> {
         match (op, a, b) {
             (Opcode::Add | Opcode::Sub | Opcode::Mul, Scalar::Long(x), Scalar::Long(y)) => {
@@ -1679,9 +3250,9 @@ impl<'a> Emit<'a> {
                 Ok(Num::Double(self.float(op, rx, ry)))
             }
             (Opcode::Div, Scalar::Long(x), Scalar::Long(y)) => {
-                if let Some(exit) = raises {
+                if let Some(refuse) = raises {
                     let zero = self.b.ins().icmp_imm_s(IntCC::Equal, y, 0);
-                    self.leave_if(zero, exit)?;
+                    self.refuse_if(zero, refuse)?;
                 }
                 let minus_one = self.b.ins().icmp_imm_s(IntCC::Equal, y, -1);
                 let one = self.b.ins().iconst(I64, 1);
@@ -1704,17 +3275,17 @@ impl<'a> Emit<'a> {
             }
             (Opcode::Div, _, _) => {
                 let (rx, ry) = (self.real(a)?, self.real(b)?);
-                if let Some(exit) = raises {
+                if let Some(refuse) = raises {
                     let zero = self.b.ins().f64const(0.0);
                     let by_zero = self.b.ins().fcmp(FloatCC::Equal, ry, zero);
-                    self.leave_if(by_zero, exit)?;
+                    self.refuse_if(by_zero, refuse)?;
                 }
                 Ok(Num::Double(self.b.ins().fdiv(rx, ry)))
             }
             (Opcode::Mod, Scalar::Long(x), Scalar::Long(y)) => {
-                if let Some(exit) = raises {
+                if let Some(refuse) = raises {
                     let zero = self.b.ins().icmp_imm_s(IntCC::Equal, y, 0);
-                    self.leave_if(zero, exit)?;
+                    self.refuse_if(zero, refuse)?;
                 }
                 // php answers zero for `% -1` rather than overflow.
                 let minus_one = self.b.ins().icmp_imm_s(IntCC::Equal, y, -1);
@@ -1723,9 +3294,9 @@ impl<'a> Emit<'a> {
                 Ok(Num::Long(self.b.ins().srem(x, divisor)))
             }
             (Opcode::Sl | Opcode::Sr, Scalar::Long(x), Scalar::Long(y)) => {
-                if let Some(exit) = raises {
+                if let Some(refuse) = raises {
                     let negative = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, y, 0);
-                    self.leave_if(negative, exit)?;
+                    self.refuse_if(negative, refuse)?;
                 }
                 let wide = self
                     .b
@@ -1846,12 +3417,31 @@ impl<'a> Emit<'a> {
             .ok_or_else(|| mismatch("a frame past the trace's"))
     }
 
+    /// Whether `slot` is a temporary, numbered past its frame's variables.
+    fn is_temporary(&self, slot: Slot) -> Result<bool, Abort> {
+        Ok(slot.var >= self.frame_cvs(slot.frame)?)
+    }
+
     /// The variable of `frame`'s room.
     fn room_var(&self, frame: Frame) -> Result<Variable, Abort> {
         self.rooms
             .get(usize::from(frame.0))
             .copied()
             .ok_or_else(|| mismatch("a frame past the trace's"))
+    }
+
+    /// The variable of `frame`'s place on the stack.
+    fn ref_var(&self, frame: Frame) -> Result<Variable, Abort> {
+        self.refs
+            .get(usize::from(frame.0))
+            .copied()
+            .ok_or_else(|| mismatch("a frame past the trace's"))
+    }
+
+    /// `frame`'s place on the stack, a `FrameRef`'s number.
+    fn frame_ref(&mut self, frame: Frame) -> Result<Value, Abort> {
+        let var = self.ref_var(frame)?;
+        Ok(self.b.use_var(var))
     }
 
     /// `frame`'s room.
@@ -1906,6 +3496,17 @@ impl<'a> Emit<'a> {
         if held.home == Home::Register {
             return self.register(value);
         }
+        let slot = held.slot;
+        let (kind, through) = self.kind_at(at, value)?;
+        let kind =
+            kind.ok_or_else(|| mismatch("an inline opline reads a value of no scalar kind"))?;
+        self.load(slot, kind, through)
+    }
+
+    /// The scalar kind the op at `at` reads `value` as, and whether it
+    /// reads it through the reference it holds: the one a guard before
+    /// the op held, or its own types' otherwise.
+    fn kind_at(&self, at: OpId, value: ValueId) -> Result<(Option<Kind>, bool), Abort> {
         let guarded = self.ir.guards.iter().find_map(|g| match g.check {
             Check::Type { value: v, tag: t } if v == value && g.at == GuardAt::Before(at) => {
                 Some((t, false))
@@ -1915,13 +3516,18 @@ impl<'a> Emit<'a> {
             }
             _ => None,
         });
-        let (kind, through) = match guarded {
+        Ok(match guarded {
             Some((t, through)) => (Kind::of_tag(t), through),
-            None => (Kind::of(held.types), false),
-        };
-        let kind =
-            kind.ok_or_else(|| mismatch("an inline opline reads a value of no scalar kind"))?;
-        self.load(held.slot, kind, through)
+            None => (Kind::of(self.value(value)?.types), false),
+        })
+    }
+
+    /// Whether the op at `at` reads `operand` as a long.
+    fn long_at(&self, at: OpId, operand: Operand) -> Result<bool, Abort> {
+        Ok(match operand {
+            Operand::Value(value) => self.kind_at(at, value)?.0 == Some(Kind::Long),
+            operand => self.scalar_kind(operand)? == Some(Kind::Long),
+        })
     }
 
     /// An operand that is a constant or a value read as its own types say.
@@ -2034,24 +3640,36 @@ impl<'a> Emit<'a> {
         match num {
             Num::Long(x) => self.define(value, Scalar::Long(x)),
             Num::Double(x) => self.define(value, Scalar::Double(x)),
-            Num::Either {
-                overflowed,
-                long,
-                double,
-            } => {
+            Num::Either { .. } => {
                 let target = self.value(value)?;
                 if target.home == Home::Register {
                     return Err(mismatch("a register written with a number of either kind"));
                 }
                 let (room, at) = self.place(target.slot)?;
+                self.write_num(room, at, num);
+                Ok(())
+            }
+        }
+    }
+
+    /// `num` written to the zval at `base + at` with the type word it
+    /// turned out.
+    fn write_num(&mut self, base: Value, at: i32, num: Num) {
+        match num {
+            Num::Long(x) => self.write(base, at, Scalar::Long(x)),
+            Num::Double(x) => self.write(base, at, Scalar::Double(x)),
+            Num::Either {
+                overflowed,
+                long,
+                double,
+            } => {
                 let bits = self.b.ins().bitcast(I64, MemFlagsData::new(), double);
                 let word = self.b.ins().select(overflowed, bits, long);
                 let as_double = self.b.ins().iconst(I32, tag(ZvalType::Double));
                 let as_long = self.b.ins().iconst(I32, tag(ZvalType::Long));
                 let info = self.b.ins().select(overflowed, as_double, as_long);
-                self.b.ins().store(trusted(), word, room, at);
-                self.b.ins().store(trusted(), info, room, at + TYPE_AT);
-                Ok(())
+                self.b.ins().store(trusted(), word, base, at);
+                self.b.ins().store(trusted(), info, base, at + TYPE_AT);
             }
         }
     }
@@ -2070,8 +3688,5 @@ fn slot_offset(var: u32) -> Result<i32, Abort> {
 /// The engine offset that numbers an op array a trace holds; a
 /// request-scoped one is never held (`jit-design.md` §4.1).
 fn engine_offset(func: FuncRef) -> Result<u32, Abort> {
-    match func.offset() {
-        MapPtrOffset::Engine(n) => Ok(n),
-        MapPtrOffset::Request(_) => Err(mismatch("a request-scoped op array in a trace")),
-    }
+    super::engine_offset(func).ok_or_else(|| mismatch("a request-scoped op array in a trace"))
 }

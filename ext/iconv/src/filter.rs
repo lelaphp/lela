@@ -208,6 +208,21 @@ impl StreamFilter for Filter {
     /// Warning: stream_get_contents(): iconv stream filter ("UTF-8"=>"UTF-16LE"): invalid multibyte sequence in %s on line 7
     /// string(0) ""
     /// ```
+    ///
+    /// Since 8.5.12 no bucket is converted once the memory limit was met,
+    /// and the limit's fatal is raised as the read returns:
+    ///
+    /// ```php
+    /// $f = tempnam(sys_get_temp_dir(), 'ic'); file_put_contents($f, str_repeat("a", 4 << 20));
+    /// register_shutdown_function(fn () => unlink($f));
+    /// ini_set("memory_limit", "4M");
+    /// $fp = fopen($f, "rb"); stream_filter_append($fp, "convert.iconv.UTF-8/UTF-32", STREAM_FILTER_READ);
+    /// var_dump(stream_get_contents($fp), "unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 6
+    /// ```
     fn filter(
         &mut self,
         req: &mut Request,
@@ -219,6 +234,11 @@ impl StreamFilter for Filter {
     ) -> Result<FilterStatus, Thrown> {
         let mut count = 0;
         while let Some(bucket) = input.pop_front() {
+            // Since 8.5.12 a bucket is not converted once the memory limit
+            // was met, as the conversion may grow it several times over.
+            if req.memory().has_oom() {
+                continue;
+            }
             if let Err(failure) = self.append(Some(&bucket), output) {
                 self.warn(req, failure);
                 return Ok(FilterStatus::ErrFatal);

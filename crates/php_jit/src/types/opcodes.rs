@@ -6,17 +6,17 @@
 use php_engine::tier::Sample;
 use php_heap::ZvalType;
 use php_unit::decl::{Parameter, Type};
-use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline};
+use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
-use super::{Constant, Frame, Imm, Layout, Line, Slot};
+use super::{Constant, Frame, Imm, Layout, Line, Read, Slot};
 
 /// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
-const MAX_ARG_FLAG_NUM: u32 = 12;
+pub(super) const MAX_ARG_FLAG_NUM: u32 = 12;
 /// php's `ZEND_FETCH_LOCAL`: a fetch by name from the frame's variables.
 const FETCH_LOCAL: u32 = 1 << 2;
 /// php's `ZEND_ISEMPTY`.
-const ISEMPTY: u32 = 1 << 0;
+pub(super) const ISEMPTY: u32 = 1 << 0;
 /// php's `ZEND_BIND_REF` and `ZEND_ARRAY_ELEMENT_REF`.
 const BY_REF: u32 = 1 << 0;
 /// The functions that read their caller's variables by name, php's
@@ -198,7 +198,12 @@ pub(super) fn assigned(t: Types) -> Types {
 
 /// What an opline writes to its `out` slot, php's `zend_update_type_info`
 /// for the scalar core and anything past it.
-pub(super) fn out_types(op: &Opline, t1: Types, t2: Types, td: Types, code: &OpArray) -> Types {
+pub(super) fn out_types(
+    op: &Opline,
+    [t1, t2, td]: [Types; 3],
+    read1: Read,
+    code: &OpArray,
+) -> Types {
     match op.opcode {
         Opcode::Add
         | Opcode::Sub
@@ -248,7 +253,49 @@ pub(super) fn out_types(op: &Opline, t1: Types, t2: Types, td: Types, code: &OpA
         Opcode::InitArray | Opcode::AddArrayElement => Types::of_tag(ZvalType::Array),
         Opcode::VerifyReturnType => returned(code, t1),
         Opcode::Cast => cast(op.extended_value),
+        Opcode::FeFetchR | Opcode::FeFetchRw => fetched_key(t1),
+        // The element's address, which the handler lays down for any key
+        // the lookups take, warning of none, in a variable's array or the
+        // one an indirect `VAR` points at: php's `MAY_BE_INDIRECT`, its
+        // `indirect_reference`. A `VAR` that holds an array of its own
+        // takes a copy of the element, and a `FETCH_DIM_RW`'s warning may
+        // reach an error handler that frees the array, the `VAR` then an
+        // error.
+        Opcode::FetchDimW
+            if t1.tag() == Some(ZvalType::Array)
+                && keyed(op, t2)
+                && (op.op1_type == OperandKind::Cv || matches!(read1, Read::Indirect(_))) =>
+        {
+            Types::INDIRECT
+        }
         _ => Types::UNKNOWN.without(Types::UNDEF),
+    }
+}
+
+/// What a `FE_FETCH_R` or `FE_FETCH_RW` writes as its key, over an
+/// iterated `t`, as php's `zend_update_type_info` types it: a long from a
+/// packed array, whose keys are its positions, a long or a string from a
+/// hash, and anything from an object (`Z/Zend/Optimizer/zend_inference.c:3536-3548`).
+/// So a key read from a packed array holds no guard, as php's holds none.
+fn fetched_key(t: Types) -> Types {
+    let mut key = Types::NONE;
+    if t.meets(Types::OBJECT) {
+        key = key.or(Types::ANY);
+    }
+    if t.meets(Types::ARRAY) {
+        let packed = t.meets(Types::PACKED) || !t.meets(Types::HASH);
+        let hash = t.meets(Types::HASH) || !t.meets(Types::PACKED);
+        if packed {
+            key = key.or(Types::LONG);
+        }
+        if hash {
+            key = key.or(Types::LONG).or(Types::STRING);
+        }
+    }
+    if key == Types::NONE {
+        Types::UNKNOWN.without(Types::UNDEF)
+    } else {
+        key
     }
 }
 
@@ -297,7 +344,23 @@ pub(super) fn op1_types(
             t1
         }
         Opcode::AssignDim | Opcode::AssignDimOp => Types::of_tag(ZvalType::Array),
+        // An array fetched for writing stays an array, separated or not,
+        // as php's inference keeps it (`zend_update_type_info`'s
+        // `ZEND_FETCH_DIM_W` case, `Z/Zend/Optimizer/zend_inference.c:3562-3600`).
+        Opcode::FetchDimW | Opcode::FetchDimRw if t1.tag() == Some(ZvalType::Array) => {
+            Types::of_tag(ZvalType::Array)
+        }
         Opcode::VerifyReturnType => returned(code, t1),
+        // The object a property opline writes through stays the object
+        // it was, of the class it was (`zend_update_type_info`'s
+        // `ZEND_ASSIGN_OBJ` and `ZEND_PRE_INC_OBJ` cases,
+        // `Z/Zend/Optimizer/zend_inference.c:3028-3083`).
+        Opcode::AssignObj
+        | Opcode::AssignObjOp
+        | Opcode::PreIncObj
+        | Opcode::PreDecObj
+        | Opcode::PostIncObj
+        | Opcode::PostDecObj => t1.and(Types::OBJECT.or(Types::REF)),
         Opcode::UnsetCv => return Types::UNDEF,
         _ => Types::UNKNOWN,
     };
@@ -315,6 +378,14 @@ pub(super) struct Param {
     pub(super) cv: u32,
     pub(super) number: u32,
     pub(super) declared: Declared,
+    /// `RECV`, `RECV_INIT` or `RECV_VARIADIC`.
+    pub(super) opcode: Opcode,
+    /// Whether its declaration names a type, php's
+    /// `ZEND_TYPE_IS_SET(arg_info->type)`: where the view does not list
+    /// it, a `RECV`'s mask other than `MAY_BE_ANY`, which reads `mixed`
+    /// and a `RECV_INIT`'s or a `RECV_VARIADIC`'s type, which no mask
+    /// names, as none.
+    pub(super) typed: bool,
 }
 
 /// What a parameter's declaration says it holds, php's `arg_info` as
@@ -356,12 +427,40 @@ pub(super) fn params(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<Para
                     _ => Declared::Untyped,
                 },
             };
+            let typed = match parameter {
+                Some(p) => p.ty.is_some(),
+                None => op.opcode == Opcode::Recv && op.op2 != Type::MAY_BE_ANY,
+            };
             Some(Param {
                 cv: op.out,
                 number: op.op1,
                 declared,
+                opcode: op.opcode,
+                typed,
             })
         })
+        .collect()
+}
+
+/// The `RECV` oplines of `code`'s prologue at which php's `zend_jit_recv`
+/// takes a `ZEND_JIT_EXIT_TO_VM` exit for a root frame whose argument
+/// count the trace does not know (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10872`),
+/// in order: none unless a parameter has a type, php's
+/// `ZEND_ACC_HAS_TYPE_HINTS`, without which php's entry trace starts past
+/// the prologue (`zend_jit_setup_hot_trace_counters`,
+/// `Z/ext/opcache/jit/zend_jit_trace.c:8983-9001`); and then one per
+/// `RECV` whose parameter has a type ([`Param::typed`]) or that no `RECV`
+/// follows. A `RECV_INIT` and a `RECV_VARIADIC` take none.
+pub(super) fn recv_exits(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<OplineIdx> {
+    let params = params(code, declared);
+    if !params.iter().any(|param| param.typed) {
+        return Vec::new();
+    }
+    let recv = |param: Option<&Param>| param.is_some_and(|param| param.opcode == Opcode::Recv);
+    // `params` are the prologue's oplines from the first, one each.
+    (params.iter().enumerate())
+        .filter(|&(at, param)| recv(Some(param)) && (param.typed || !recv(params.get(at + 1))))
+        .filter_map(|(at, _)| u32::try_from(at).ok().map(OplineIdx))
         .collect()
 }
 
@@ -369,7 +468,7 @@ pub(super) fn params(code: &OpArray, declared: Option<&[Parameter]>) -> Vec<Para
 /// a class name, `object`, `static`, `self`, `parent` and an intersection
 /// an object, `iterable` an array or an object, `callable` a string, an
 /// array or an object; a variadic parameter is an array of them.
-fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
+pub(super) fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
     if variadic {
         return Types::of_tag(ZvalType::Array);
     }
@@ -402,6 +501,33 @@ fn of_type(ty: Option<&Type>, variadic: bool) -> Types {
             all.or(of_type(Some(member), false))
         }),
     }
+}
+
+/// The kinds a parameter's declared type `ty` holds as they are, which
+/// its `RECV` neither refuses nor coerces whatever the regime: the type
+/// byte's test php's `zend_jit_verify_arg_type` makes first, and skips
+/// where its stack map knows the argument of one of them
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:10766-10823`, the skip at
+/// `:10773-10781`). None for a type whose
+/// check reads more than the type byte, a class, `callable` or
+/// `iterable`, or `never`.
+pub(super) fn held_as_is(ty: &Type) -> Option<Types> {
+    Some(match ty {
+        Type::Mixed => Types::ANY.kinds(),
+        Type::Null => Types::NULL,
+        Type::Bool => Types::BOOL,
+        Type::False => Types::FALSE,
+        Type::True => Types::TRUE,
+        Type::Int => Types::LONG,
+        Type::Float => Types::DOUBLE,
+        Type::String => Types::STRING,
+        Type::Array => Types::of_tag(ZvalType::Array).kinds(),
+        Type::Nullable(inner) => held_as_is(inner)?.or(Types::NULL),
+        Type::Union(members) => members
+            .iter()
+            .try_fold(Types::NONE, |all, member| Some(all.or(held_as_is(member)?)))?,
+        _ => return None,
+    })
 }
 
 /// What a parameter holds once its `RECV` ran: what was sent where the
@@ -456,8 +582,36 @@ pub(super) fn referenced(code: &OpArray, var: u32) -> bool {
     })
 }
 
-/// Whether an opline past the leading `RECV` oplines writes variable `var`.
-pub(super) fn written_after_entry(code: &OpArray, var: u32) -> bool {
+/// Whether an opline past the leading `RECV` oplines writes variable
+/// `var`, which `holds` what it was passed: a `VERIFY_RETURN_TYPE` of it
+/// that leaves what it holds as it is, its declaration holding every kind
+/// `holds` may be, writes nothing it did not hold, as php's inference
+/// types that definition (`zend_update_type_info`'s `ZEND_VERIFY_RETURN_TYPE`):
+/// `return $n;` of `function f(int $n): int`. One that coerces it, an
+/// `int` returned as a `string`, writes a string the leave frees:
+///
+/// ```php
+/// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
+/// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
+/// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
+/// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
+/// ```
+/// ```expect regime=jit-force process
+/// 99 500 32
+/// ```
+///
+/// The same where every guard fails once:
+///
+/// ```php
+/// function s(int $n): string { if ($n < 0) { return "neg"; } return $n; }
+/// function f(int $n): int { if ($n < 2) { return $n; } $a = f($n - 1); return $a + 1; }
+/// function k($m) { $t = ""; $c = 0; for ($i = 0; $i < $m; $i++) { $t = s($i); $c += f(5); } return "$t $c"; }
+/// k(10); $u = memory_get_usage(); echo k(100), " ", memory_get_usage() - $u, "\n";
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// 99 500 32
+/// ```
+pub(super) fn written_after_entry(code: &OpArray, var: u32, holds: Types) -> bool {
     let start = code
         .oplines
         .iter()
@@ -470,7 +624,8 @@ pub(super) fn written_after_entry(code: &OpArray, var: u32) -> bool {
         .count();
     code.oplines.iter().enumerate().skip(start).any(|(at, op)| {
         let after = code.oplines.get(at + 1);
-        written(op, after).contains(&var)
+        let kept = op.opcode == Opcode::VerifyReturnType && returned(code, holds).within(holds);
+        !kept && written(op, after).contains(&var)
     })
 }
 
@@ -524,6 +679,24 @@ pub(super) fn may_exit(op: &Opline, after: Option<&Opline>) -> bool {
         }
         _ => false,
     }
+}
+
+/// php's unconditional branch (`Z/ext/opcache/jit/zend_jit_trace.c:5655-5691`):
+/// a `JMPZ`, `JMPNZ`, `JMPZ_EX` or `JMPNZ_EX` whose condition, once its
+/// guards held, is one kind no greater than `true` (`has_concrete_type`,
+/// `concrete_type(op1_info) <= IS_TRUE`) goes the way the record went
+/// and takes no exit for the way it did not. php's test ignores
+/// `MAY_BE_REF`; a condition that may be a reference has no one tag here,
+/// so it keeps its exit, one more than php's at worst and never the other
+/// way taken.
+pub(super) fn goes_one_way(opcode: Opcode, held: Types) -> bool {
+    matches!(
+        opcode,
+        Opcode::Jmpz | Opcode::Jmpnz | Opcode::JmpzEx | Opcode::JmpnzEx
+    ) && matches!(
+        held.tag(),
+        Some(ZvalType::Undef | ZvalType::Null | ZvalType::False | ZvalType::True)
+    )
 }
 
 /// The oplines whose handler leaves a temporary it reads alive: a
@@ -594,8 +767,11 @@ pub(super) fn is_call(opcode: Opcode) -> bool {
 /// shift by a negative number throws, where no constant divisor or shift
 /// rules it out as php's code generator rules it out
 /// ([`cannot_raise`](super::cannot_raise)), an element past a packed array is a hole, a
+/// property's slot nothing holds is `__get`'s or the warning's, a
 /// call's frame may not fit, a value sent where the callee takes a
-/// reference is refused, a parameter's check may fail.
+/// reference is refused. A `DO_*CALL` the trace follows is not among
+/// them: php's code takes no exit there, and what the call's kernel
+/// throws, a parameter's check among it, unwinds (#3203's measurement).
 pub(super) fn inline_may_leave(line: &Line) -> bool {
     let arithmetic = match (line.opcode, line.imm) {
         (Opcode::AssignOp, Imm::Binary(binary)) => Some(binary),
@@ -609,14 +785,12 @@ pub(super) fn inline_may_leave(line: &Line) -> bool {
         line.opcode,
         Opcode::AssignOp
             | Opcode::FetchDimR
-            | Opcode::AssignDim
+            | Opcode::FetchObjR
+            | Opcode::FetchObjW
             | Opcode::InitFcall
             | Opcode::InitFcallByName
             | Opcode::InitNsFcallByName
             | Opcode::SendValEx
-            | Opcode::DoUcall
-            | Opcode::DoFcall
-            | Opcode::DoFcallByName
     )
 }
 
@@ -856,14 +1030,75 @@ pub(super) fn check_sites(op: &Opline, samples: [Option<Sample>; 3]) -> Vec<Site
     }
 }
 
+/// Whether the key `op2` of a dimension opline, seen as `t2`, is one the
+/// lookups take inline: a long, or a string a constant or a variable
+/// holds, which the opline gives up nothing of.
+pub(super) fn keyed(op: &Opline, t2: Types) -> bool {
+    t2 == Types::LONG
+        || (t2 == Types::STRING && matches!(op.op2_type, OperandKind::Const | OperandKind::Cv))
+}
+
+/// Whether an `ASSIGN_DIM_OP` is compiled inline, as php compiles a
+/// compound write to an element over a variable's array, through the
+/// reference it may be or the `VAR` a fetch for writing left indirect
+/// (`t1` what it sees of it), by a key the lookups
+/// take ([`keyed`]), calling its helpers where the array is shared, a
+/// packed array short of the key, a key a hash has not got or an element
+/// of no kind the operator serves (`zend_jit_assign_dim_op`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:13528-13750`): its `out` slot unused,
+/// and its operator one `zend_jit_math_helper` serves over two numbers,
+/// `+`, `-`, `*` and `/`, one `zend_jit_long_math_helper` serves over two
+/// longs, `%`, the shifts and the bitwise operators, or `.` over two
+/// strings, `zend_jit_concat_helper`; php leaves `**` out of all three
+/// (`zend_jit_supported_binary_op`).
+pub(super) fn compound_in_place(op: &Opline, t1: Types, t2: Types, td: Types) -> bool {
+    let served = |binary| match binary {
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
+            td == Types::LONG || td == Types::DOUBLE
+        }
+        Opcode::Mod | Opcode::Sl | Opcode::Sr | Opcode::BwOr | Opcode::BwAnd | Opcode::BwXor => {
+            td == Types::LONG
+        }
+        Opcode::Concat => td == Types::STRING,
+        _ => false,
+    };
+    op.out_type == OperandKind::Unused
+        && t1.tag() == Some(ZvalType::Array)
+        && keyed(op, t2)
+        && lattice::binary_of(op.extended_value).is_some_and(served)
+}
+
+/// The oplines php follows an indirect `VAR` for, to the element they
+/// write, guarding the type of what it points at
+/// (`zend_jit_fetch_indirect_var`'s callers, `Z/ext/opcache/jit/zend_jit_trace.c:4749-4762`,
+/// `:5068-5083`, `:5906-5922`): a write, a compound write and a fetch for
+/// writing of an element.
+pub(super) fn written_through(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::AssignDim | Opcode::AssignDimOp | Opcode::FetchDimW | Opcode::FetchDimRw
+    )
+}
+
 /// php's packed guard over an array `op1` read or written by a long key
-/// (`MAY_BE_PACKED_GUARD`): the layout it holds, where php adds one.
+/// (`MAY_BE_PACKED_GUARD`): the layout it holds, where php adds one. An
+/// array recorded through a reference is held to its layout only where it
+/// is read, as php's code generator adds the guard to what
+/// `zend_jit_fetch_reference` left of it for a read alone, its trace SSA
+/// knowing no type of a reference (`Z/ext/opcache/jit/zend_jit_trace.c:5830-5880`).
 pub(super) fn packed_guard(
     op: &Opline,
     samples: [Option<Sample>; 3],
     code: &OpArray,
 ) -> Option<Layout> {
-    let first = samples[0].filter(|s| !s.reference && !s.indirect && s.kind == ZvalType::Array)?;
+    let first = samples[0].filter(|s| !s.indirect && s.kind == ZvalType::Array)?;
+    let reads = matches!(
+        op.opcode,
+        Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::FetchListR
+    );
+    if first.reference && !reads {
+        return None;
+    }
     let recorded = if first.packed {
         Layout::Packed
     } else {
@@ -916,7 +1151,105 @@ pub(super) fn within(opcode: Opcode, tag: ZvalType) -> Option<Within> {
         {
             Some(Within::Rerun)
         }
-        Opcode::FetchDimR => Some(Within::Fetched),
+        Opcode::FetchDimR | Opcode::FetchObjR => Some(Within::Fetched),
         _ => None,
     }
+}
+
+/// Whether php's tracing code generator has a case that compiles `opcode`
+/// inline where nothing about its operands breaks it to the handler
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:4436-6477`): the calls, the sends
+/// and the returns, the comparisons and jumps, the fetches and writes of
+/// elements and properties, and the rest its switch lists; `NOP` and
+/// `JMP` compile to nothing (`:6480`).
+pub(super) fn compiled_inline(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::Nop
+            | Opcode::Jmp
+            | Opcode::AssignDimOp
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj
+            | Opcode::AssignObjOp
+            | Opcode::AssignObj
+            | Opcode::AssignDim
+            | Opcode::QmAssign
+            | Opcode::InitFcall
+            | Opcode::InitFcallByName
+            | Opcode::InitNsFcallByName
+            | Opcode::SendVal
+            | Opcode::SendValEx
+            | Opcode::SendRef
+            | Opcode::SendVar
+            | Opcode::SendVarEx
+            | Opcode::SendVarNoRef
+            | Opcode::SendVarNoRefEx
+            | Opcode::SendFuncArg
+            | Opcode::CheckFuncArg
+            | Opcode::CheckUndefArgs
+            | Opcode::DoUcall
+            | Opcode::DoIcall
+            | Opcode::DoFcallByName
+            | Opcode::DoFcall
+            | Opcode::IsEqual
+            | Opcode::IsNotEqual
+            | Opcode::IsSmaller
+            | Opcode::IsSmallerOrEqual
+            | Opcode::Case
+            | Opcode::IsIdentical
+            | Opcode::IsNotIdentical
+            | Opcode::CaseStrict
+            | Opcode::Defined
+            | Opcode::Return
+            | Opcode::Bool
+            | Opcode::BoolNot
+            | Opcode::Jmpz
+            | Opcode::Jmpnz
+            | Opcode::JmpzEx
+            | Opcode::JmpnzEx
+            | Opcode::JmpFrameless
+            | Opcode::FetchDimFuncArg
+            | Opcode::FetchDimR
+            | Opcode::FetchDimIs
+            | Opcode::FetchListR
+            | Opcode::FetchDimW
+            | Opcode::FetchDimRw
+            | Opcode::FetchListW
+            | Opcode::IssetIsemptyDimObj
+            | Opcode::FetchObjFuncArg
+            | Opcode::FetchObjR
+            | Opcode::FetchObjIs
+            | Opcode::FetchObjW
+            | Opcode::FetchStaticPropFuncArg
+            | Opcode::FetchStaticPropR
+            | Opcode::FetchStaticPropIs
+            | Opcode::FetchStaticPropW
+            | Opcode::FetchStaticPropRw
+            | Opcode::FetchStaticPropUnset
+            | Opcode::BindGlobal
+            | Opcode::Recv
+            | Opcode::RecvInit
+            | Opcode::Free
+            | Opcode::FeFree
+            | Opcode::Echo
+            | Opcode::Strlen
+            | Opcode::Count
+            | Opcode::FetchThis
+            | Opcode::SwitchLong
+            | Opcode::SwitchString
+            | Opcode::Match
+            | Opcode::VerifyReturnType
+            | Opcode::FeResetR
+            | Opcode::FeFetchR
+            | Opcode::FetchConstant
+            | Opcode::InitMethodCall
+            | Opcode::InitStaticMethodCall
+            | Opcode::InitDynamicCall
+            | Opcode::FramelessIcall0
+            | Opcode::FramelessIcall1
+            | Opcode::FramelessIcall2
+            | Opcode::FramelessIcall3
+    )
 }

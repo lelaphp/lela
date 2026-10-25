@@ -25,7 +25,14 @@ fn reading_of(diff: Result<Diff, String>) -> Reading {
     .unwrap()
 }
 
+/// The crate directories of a manifest laying crates down in `crates`,
+/// `ext` and `sapi`.
+fn layout() -> Layout {
+    Layout::of(&["php_engine", "ext/fixture", "sapi/cli"].map(crate::manifest::Crate::named))
+}
+
 /// A tally of one test of `ext/ctype`, met: a run the engine keeps.
+#[cfg(tracked)]
 fn one_met() -> Tally {
     let id = "phpt:php-src/ext/ctype/tests/one.phpt";
     let judged = crate::phpt::Judged::new(id, "one.phpt", Judgement::Pass, "");
@@ -183,7 +190,10 @@ fn a_run_kept_in_a_linked_worktree_at_the_base_is_found_from_main() {
     assert_eq!(looked, [main.path(), &linked], "{looked:?}");
     assert_eq!(roots(&linked), [&linked, main.path()]);
 
-    let why = base.run(&looked, "ext/fixture", "").unwrap().unwrap_err();
+    let why = base
+        .run(&looked, &layout(), "ext/fixture", "")
+        .unwrap()
+        .unwrap_err();
     let main_named = format!("{}, ", main.display());
     assert_eq!(why.matches(&main_named).count(), 1, "{why}");
     assert_eq!(why.matches(linked_str).count(), 1, "{why}");
@@ -198,18 +208,21 @@ fn a_run_kept_in_a_linked_worktree_at_the_base_is_found_from_main() {
     let run = fixture("base.json");
     let unlisted = base
         .snapshot
-        .tracked_over(&BuiltFrom::Unlisted.keyed(&main));
+        .tracked_over(&BuiltFrom::Unlisted.keyed(&main, &layout()));
     let file = path(&linked, &unlisted.unwrap(), "ext/fixture");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     fs::write(&file, serde_json::to_string_pretty(&run).unwrap()).unwrap();
     let recipe = run.recipe.clone();
     assert_eq!(
-        base.run(&roots(&main), "ext/fixture", &recipe).unwrap(),
+        base.run(&roots(&main), &layout(), "ext/fixture", &recipe)
+            .unwrap(),
         Ok(run)
     );
     // Under another pin the run is stale, and the base's call takes it
     // again (#2725).
-    let stale = base.run(&looked, "ext/fixture", "moved").unwrap();
+    let stale = base
+        .run(&looked, &layout(), "ext/fixture", "moved")
+        .unwrap();
     assert_eq!(
         stale,
         Err(format!(
@@ -272,6 +285,7 @@ fn a_carried_run_replaces_an_older_one_under_another_pin_and_no_other() {
 /// nothing, however many subsets it runs (#2972); a source written while
 /// a subset ran is still the comparison's skip that says so, and a file
 /// touched and not written is asked of git once and then stands.
+#[cfg(tracked)]
 #[test]
 fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
     let tree = crate::key::fixture("against-after");
@@ -279,7 +293,9 @@ fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
     let manifest = Manifest::load(&crate::built_root()).unwrap();
     let runs = Runs::new(root, &manifest, Some("HEAD")).unwrap();
     let base = runs.base.as_ref().unwrap();
-    let unlisted = base.snapshot.tracked_over(&BuiltFrom::Unlisted.keyed(root));
+    let unlisted = base
+        .snapshot
+        .tracked_over(&BuiltFrom::Unlisted.keyed(root, &manifest.layout()));
     let file = path(root, &unlisted.unwrap(), "ext/ctype");
     fs::create_dir_all(file.parent().unwrap()).unwrap();
     let was = Run {
@@ -353,6 +369,7 @@ fn after_asks_git_nothing_while_the_engines_sources_stand_still() {
 /// `target/release-da/php` is built from, as the dep-info beside it says,
 /// and whose `php_jit`, generated clippy configuration, guide and manifest
 /// it is not; committed once.
+#[cfg(tracked)]
 fn workspace_with_a_binary(name: &str) -> (Tree, PathBuf) {
     let tree = Tree::new(name).unwrap();
     committing(&tree, &["init", "-q", "-b", "main"]);
@@ -387,6 +404,7 @@ fn workspace_with_a_binary(name: &str) -> (Tree, PathBuf) {
 }
 
 /// `files` written with new text at `root`, and committed.
+#[cfg(tracked)]
 fn commit_writing(root: &Path, files: &[&str]) {
     for file in files {
         let path = root.join(file);
@@ -405,19 +423,20 @@ fn commit_writing(root: &Path, files: &[&str]) {
 /// `origin/main`, as the next branch's base without a `--base` run
 /// (#3110); a commit that writes a source the binary is compiled from
 /// moves the key, and the kept run is refused, here and as the base.
+#[cfg(tracked)]
 #[test]
 fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not() {
     let (tree, binary) = workspace_with_a_binary("against-built-from");
     let root: &Path = &tree;
     let manifest = Manifest::load(&crate::built_root()).unwrap();
-    let pin = &manifest.pin;
+    let pin = manifest.pin().unwrap();
     let (scope, engine) = ("ext/ctype", Runner::Engine(binary));
     let runs = Runs::new(root, &manifest, None).unwrap();
     let subset = Reading::new(INSTRUMENT, scope);
     let held_as = Scope::of(scope);
     let kept = runs.after(&manifest, &held_as, (&one_met(), &engine), &subset, None);
     assert_eq!(kept.unwrap(), None);
-    assert!(kept_at(root, pin, "HEAD", scope).unwrap().is_ok());
+    assert!(kept_at(root, &manifest, "HEAD", scope).unwrap().is_ok());
 
     commit_writing(
         root,
@@ -431,11 +450,14 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
     );
     let now = Snapshot::disk(root).unwrap();
     assert!(
-        !kept_run(&now, scope).unwrap().exists(),
+        !kept_run(&now, &manifest.layout(), scope).unwrap().exists(),
         "the old key moved"
     );
-    assert!(kept_at(root, pin, "HEAD", scope).unwrap().is_ok());
-    assert_eq!(regressed(&now, "HEAD", pin, scope).unwrap(), Against::Held);
+    assert!(kept_at(root, &manifest, "HEAD", scope).unwrap().is_ok());
+    assert_eq!(
+        regressed(&now, &manifest.layout(), "HEAD", pin, scope).unwrap(),
+        Against::Held
+    );
     // Carried into another checkout of the repository, as `worktree retire`
     // carries a branch's runs into main's, the run and the set it was kept
     // under are found there by the commit alone.
@@ -446,17 +468,19 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
         &["clone", "-q", root.to_str().unwrap(), at.to_str().unwrap()],
     );
     assert!(
-        kept_at(&at, pin, "HEAD", scope).unwrap().is_err(),
+        kept_at(&at, &manifest, "HEAD", scope).unwrap().is_err(),
         "nothing kept there yet"
     );
     carry(root, &at).unwrap();
-    assert!(kept_at(&at, pin, "HEAD", scope).unwrap().is_ok());
+    assert!(kept_at(&at, &manifest, "HEAD", scope).unwrap().is_ok());
 
     commit_writing(root, &["crates/php_engine/src/lib.rs"]);
     let now = Snapshot::disk(root).unwrap();
-    let why = kept_at(root, pin, "HEAD", scope).unwrap().unwrap_err();
+    let why = kept_at(root, &manifest, "HEAD", scope)
+        .unwrap()
+        .unwrap_err();
     assert!(why.contains("no run of ext/ctype is kept at "), "{why}");
-    let unrun = regressed(&now, "HEAD", pin, scope).unwrap();
+    let unrun = regressed(&now, &manifest.layout(), "HEAD", pin, scope).unwrap();
     assert!(
         matches!(&unrun, Against::Unrun(why) if why.contains("no run of ext/ctype")),
         "{unrun:?}"
@@ -468,12 +492,13 @@ fn a_commit_that_leaves_the_binary_keeps_its_runs_and_one_that_moves_it_does_not
 /// corpus's `ext/ctype` at 37474a3, is read as no run, at the base and
 /// here. So `phpt --base` takes the base's run where only that one stands,
 /// and the run it carries in replaces it, after which `done` has a verdict.
+#[cfg(tracked)]
 #[test]
 fn a_run_of_no_test_is_no_run_and_the_bases_run_carried_in_replaces_it() {
     let (tree, binary) = workspace_with_a_binary("against-none");
     let root: &Path = &tree;
     let manifest = Manifest::load(&crate::built_root()).unwrap();
-    let pin = &manifest.pin;
+    let pin = manifest.pin().unwrap();
     let (scope, engine) = (Scope::of("ext/ctype"), Runner::Engine(binary));
     let runs = Runs::new(root, &manifest, None).unwrap();
     let after = |tally: &Tally| {
@@ -482,12 +507,12 @@ fn a_run_of_no_test_is_no_run_and_the_bases_run_carried_in_replaces_it() {
         assert_eq!(kept.unwrap(), None);
     };
     let unrun = |root: &Path| {
-        let why = kept_at(root, pin, "HEAD", "ext/ctype")
+        let why = kept_at(root, &manifest, "HEAD", "ext/ctype")
             .unwrap()
             .unwrap_err();
         assert!(why.contains("no run of ext/ctype is kept at "), "{why}");
         let now = Snapshot::disk(root).unwrap();
-        let here = regressed(&now, "HEAD", pin, "ext/ctype").unwrap();
+        let here = regressed(&now, &manifest.layout(), "HEAD", pin, "ext/ctype").unwrap();
         assert!(matches!(here, Against::Unrun(_)), "{here:?}");
     };
     let none = Tally::default();
@@ -513,7 +538,7 @@ fn a_run_of_no_test_is_no_run_and_the_bases_run_carried_in_replaces_it() {
     keep(&there, &run).unwrap();
     assert_eq!(carry(&base, root).unwrap().carried, 1);
     assert_eq!(
-        kept_at(root, pin, "HEAD", "ext/ctype").unwrap(),
+        kept_at(root, &manifest, "HEAD", "ext/ctype").unwrap(),
         Ok(run.clone())
     );
     // A run of none carried after it, under another pin, replaces nothing.
@@ -526,10 +551,13 @@ fn a_run_of_no_test_is_no_run_and_the_bases_run_carried_in_replaces_it() {
     };
     keep(&there, &moved).unwrap();
     assert_eq!(carry(&later, root).unwrap().carried, 0);
-    assert_eq!(kept_at(root, pin, "HEAD", "ext/ctype").unwrap(), Ok(run));
+    assert_eq!(
+        kept_at(root, &manifest, "HEAD", "ext/ctype").unwrap(),
+        Ok(run)
+    );
     let now = Snapshot::disk(root).unwrap();
     assert_eq!(
-        regressed(&now, "HEAD", pin, "ext/ctype").unwrap(),
+        regressed(&now, &manifest.layout(), "HEAD", pin, "ext/ctype").unwrap(),
         Against::Held
     );
 }

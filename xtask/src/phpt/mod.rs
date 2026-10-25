@@ -188,6 +188,7 @@ use crate::sources;
 use crate::sysv;
 use crate::tally::{self, Outcome};
 use adapter::Adapter;
+use file::Phpt;
 use target::{Measure, Target};
 
 /// The instrument's name, the reading's `instrument` field.
@@ -244,27 +245,51 @@ impl Lane {
     pub(crate) const FEATURE: &str = "jit";
 }
 
-/// One directory of the corpus: where it stands in the pinned tree, and
-/// where it stands on this machine.
+/// One directory of the corpus: where it stands in the pinned tree, where
+/// it stands on this machine, and the extension its tests must name to be
+/// the subset's, where only those are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Dir {
     /// The directory, relative to the pinned php-src tree.
     pub under: PathBuf,
     /// The same directory on this machine.
-    pub dir: PathBuf,
+    pub path: PathBuf,
+    /// The extension a test of the directory names in `--EXTENSIONS--`
+    /// to be the subset's: a row's `needed_in` (#3309). None holds all.
+    pub needs: Option<String>,
 }
 
 impl Dir {
     fn at(source: &Path, under: PathBuf) -> Dir {
         Dir {
-            dir: source.join(&under),
+            path: source.join(&under),
             under,
+            needs: None,
         }
+    }
+
+    /// The same directory of the tree at `root`.
+    fn moved(&self, root: &Path) -> Dir {
+        Dir {
+            needs: self.needs.clone(),
+            ..Dir::at(root, self.under.clone())
+        }
+    }
+
+    /// Whether the test at `path` is the subset's: every one, or one whose
+    /// `--EXTENSIONS--` names the extension as run-tests.php reads it
+    /// ([`Phpt::extensions`]), so only a binary that loads it runs it; a
+    /// file that does not parse names none.
+    fn admits(&self, path: &Path) -> bool {
+        let Some(needs) = &self.needs else {
+            return true;
+        };
+        Phpt::load(path).is_ok_and(|phpt| phpt.extensions().contains(needs))
     }
 
     /// Where the test stands inside this directory.
     fn inside<'a>(&self, test: &'a Path) -> &'a Path {
-        test.strip_prefix(&self.dir).unwrap_or(test)
+        test.strip_prefix(&self.path).unwrap_or(test)
     }
 }
 
@@ -423,18 +448,31 @@ impl Subset {
         bail!(
             "no subset {name:?}: the manifest has no crate {named} and no crate {as_crate}, and the pinned php-src at {} ({}) has no {named}",
             source.display(),
-            manifest.pin.source.tag
+            manifest.pin()?.source.tag
         )
     }
 
     /// Every `.phpt` of the directory `under` of the pinned tree at
     /// `source`, a subset of its own named by its place in the tree.
     fn whole(source: &Path, under: PathBuf) -> Subset {
+        let scope = under.to_string_lossy().into_owned();
+        Subset::over(scope, source, [under], Holds::Every)
+    }
+
+    /// The subset named `scope` of the directories `unders` of the tree
+    /// at `root`, run from there.
+    fn over(
+        scope: String,
+        root: &Path,
+        unders: impl IntoIterator<Item = PathBuf>,
+        holds: Holds,
+    ) -> Subset {
+        let dirs = unders.into_iter().map(|under| Dir::at(root, under));
         Subset {
-            scope: under.to_string_lossy().into_owned(),
-            dirs: vec![Dir::at(source, under)],
-            root: source.to_path_buf(),
-            holds: Holds::Every,
+            scope,
+            dirs: dirs.collect(),
+            root: root.to_path_buf(),
+            holds,
         }
     }
 
@@ -444,18 +482,20 @@ impl Subset {
     /// a reading that says so, since dropping it quietly would leave
     /// `done` asking a crate for a phpt reading nothing could write, which
     /// is the hole #18 closed.
+    ///
+    /// Beside them, the tests of each directory its row's `needed_in`
+    /// names that name the extension (#3309).
     pub(crate) fn of(source: &Path, krate: &Crate) -> Option<Subset> {
-        let dirs: Vec<Dir> = krate
-            .subsets()
-            .into_iter()
-            .map(|under| Dir::at(source, under))
-            .collect();
-        (!dirs.is_empty()).then(|| Subset {
-            scope: krate.name.clone(),
-            dirs,
-            root: source.to_path_buf(),
-            holds: Holds::Every,
-        })
+        let unders = krate.subsets();
+        let mut subset = (!unders.is_empty())
+            .then(|| Subset::over(krate.name.clone(), source, unders, Holds::Every))?;
+        if let Some(extension) = krate.extension() {
+            subset.dirs.extend(krate.needed_in.iter().map(|under| Dir {
+                needs: Some(extension.to_owned()),
+                ..Dir::at(source, PathBuf::from(under))
+            }));
+        }
+        Some(subset)
     }
 
     /// The same subset standing in the tree at `root`, a copy of the one
@@ -463,14 +503,9 @@ impl Subset {
     /// programs run from there.
     pub(crate) fn rooted(&self, root: &Path) -> Subset {
         Subset {
-            scope: self.scope.clone(),
-            dirs: self
-                .dirs
-                .iter()
-                .map(|place| Dir::at(root, place.under.clone()))
-                .collect(),
+            dirs: self.dirs.iter().map(|place| place.moved(root)).collect(),
             root: root.to_path_buf(),
-            holds: self.holds,
+            ..self.clone()
         }
     }
 
@@ -488,7 +523,7 @@ impl Subset {
     pub(crate) fn absent(&self) -> Vec<&Path> {
         self.dirs
             .iter()
-            .filter(|place| !place.dir.is_dir())
+            .filter(|place| !place.path.is_dir())
             .map(|place| place.under.as_path())
             .collect()
     }
@@ -533,7 +568,7 @@ impl Subset {
                 subset
                     .dirs
                     .iter()
-                    .any(|place| tally::any_file_under(&place.dir, is_phpt))
+                    .any(|place| tally::any_file_under(&place.path, is_phpt))
             })
             .collect()
     }
@@ -544,9 +579,9 @@ impl Subset {
         let mut all = Vec::new();
         for place in &self.dirs {
             let mut found = Vec::new();
-            tally::files_under(&place.dir, &mut found)
-                .with_context(|| format!("listing the subset at {}", place.dir.display()))?;
-            found.retain(|path| self.holds.admits(path));
+            tally::files_under(&place.path, &mut found)
+                .with_context(|| format!("listing the subset at {}", place.path.display()))?;
+            found.retain(|path| self.holds.admits(path) && place.admits(path));
             found.sort();
             all.append(&mut found);
         }
@@ -594,7 +629,7 @@ impl Subset {
 
     /// The directory of the subset the test was found under.
     fn found_in(&self, test: &Path) -> Option<&Dir> {
-        self.dirs.iter().find(|place| test.starts_with(&place.dir))
+        self.dirs.iter().find(|place| test.starts_with(&place.path))
     }
 
     /// The reading's scope: the subset's, and what the run was beside it,
@@ -656,6 +691,26 @@ impl Judgement {
         Judgement::Unsent,
     ];
 
+    /// The verdict's three spellings, the one place each is named.
+    fn spelled(self) -> Spelled {
+        let spelled = |kept, key, upstream| Spelled {
+            kept,
+            key,
+            upstream,
+        };
+        match self {
+            Judgement::Pass => spelled("pass", "passed", Some("PASS")),
+            Judgement::Fail => spelled("fail", "failed", Some("FAIL")),
+            Judgement::Skip => spelled("skip", "skipped", Some("SKIP")),
+            Judgement::Bork => spelled("bork", "borked", Some("BORK")),
+            Judgement::XFail => spelled("xfail", "xfailed", Some("XFAIL")),
+            Judgement::Warn => spelled("warn", "warned", Some("WARN")),
+            Judgement::Diverged => spelled("diverged", "diverged", Some("FAIL")),
+            Judgement::Unread => spelled("unread", "unread", None),
+            Judgement::Unsent => spelled("unsent", "unsent", None),
+        }
+    }
+
     /// Whether the test met its expectation with no registry row: a pass,
     /// or one its `--XFAIL--` warns of, which differ by the test's section
     /// and not by what ran.
@@ -673,18 +728,26 @@ impl Judgement {
     /// place it is named, for the run that writes the count and the
     /// rendering that reads it back (#1745).
     pub(crate) fn key(self) -> &'static str {
-        match self {
-            Judgement::Pass => "passed",
-            Judgement::Diverged => "diverged",
-            Judgement::Fail => "failed",
-            Judgement::Skip => "skipped",
-            Judgement::Bork => "borked",
-            Judgement::XFail => "xfailed",
-            Judgement::Warn => "warned",
-            Judgement::Unread => "unread",
-            Judgement::Unsent => "unsent",
-        }
+        self.spelled().key
     }
+
+    /// What `run-tests.php` calls the verdict: a difference a registry
+    /// row accepts is still its `FAIL`, and a test the compiler did not
+    /// read has none, since only the engine's compiler refuses one, nor
+    /// one the served lane left out, since only that lane sends HTTP.
+    pub(super) fn word(self) -> Option<&'static str> {
+        self.spelled().upstream
+    }
+}
+
+/// A verdict's spellings ([`Judgement::spelled`]).
+struct Spelled {
+    /// As a kept run spells it, [`tally::Judgement::as_str`].
+    kept: &'static str,
+    /// The key of a reading's `numbers` that counts it.
+    key: &'static str,
+    /// What `run-tests.php` calls it, where it calls it anything.
+    upstream: Option<&'static str>,
 }
 
 impl tally::Judgement for Judgement {
@@ -694,17 +757,7 @@ impl tally::Judgement for Judgement {
     const PASS: Judgement = Judgement::Pass;
 
     fn as_str(self) -> &'static str {
-        match self {
-            Judgement::Pass => "pass",
-            Judgement::Diverged => "diverged",
-            Judgement::Fail => "fail",
-            Judgement::Skip => "skip",
-            Judgement::Bork => "bork",
-            Judgement::XFail => "xfail",
-            Judgement::Warn => "warn",
-            Judgement::Unread => "unread",
-            Judgement::Unsent => "unsent",
-        }
+        self.spelled().kept
     }
 
     /// Whether the subset's reading fails on it.
@@ -804,7 +857,15 @@ pub(crate) fn reading(
     } else {
         tally.outcome(runner)
     };
-    let message = words(&scope, tally, &outcome, subset, uncreated, source, manifest);
+    let message = words(
+        &scope,
+        tally,
+        &outcome,
+        subset,
+        uncreated,
+        source,
+        &manifest.pin()?.source.tag,
+    );
     let message = match under.served {
         Some(version) => format!("{message}; served by MySQL {version}"),
         None => message,
@@ -820,7 +881,7 @@ pub(crate) fn reading(
     // Stamped through the manifest's scope mapping: the crate whose subset
     // it is, so `done` can tell a stale reading from a fresh one.
     let mut reading = tally.reading(
-        Reading::for_scope(INSTRUMENT, &scope, manifest, snapshot)?.under(&manifest.pin),
+        Reading::for_scope(INSTRUMENT, &scope, manifest, snapshot)?.under(manifest.pin()?),
         &outcome,
         message,
     )?;
@@ -933,7 +994,7 @@ fn words(
     subset: &Subset,
     uncreated: bool,
     source: &Path,
-    manifest: &Manifest,
+    tag: &str,
 ) -> String {
     let absent = subset.absent();
     // A derived subset the tree has but holds no `.phpt`: named as an
@@ -1009,7 +1070,7 @@ fn words(
             "{scope}: {whose} {}, and the pinned php-src at {} ({}) {has}{why}",
             listed(&named),
             source.display(),
-            manifest.pin.source.tag
+            tag
         )
     }
 }
@@ -1070,7 +1131,7 @@ pub enum Engine {
 /// Whether the subset `scope` names is testless in the pinned tree on this
 /// machine ([`Subset::testless`]); one that cannot be resolved is not.
 pub(crate) fn testless(manifest: &Manifest, scope: &str) -> bool {
-    let tree = manifest.pin.source.tree();
+    let tree = manifest.pin().and_then(|pin| pin.source.tree());
     let subset = tree.and_then(|tree| Subset::resolve(manifest, &tree, scope));
     subset
         .and_then(|subset| subset.testless(manifest))
@@ -1088,12 +1149,12 @@ pub fn run(
 ) -> Result<Vec<Reading>> {
     // Where the tree is on this machine is the oracle module's one answer;
     // an absent tree refuses the run naming both places it looked.
-    let source = manifest.pin.source.tree()?;
+    let source = manifest.pin()?.source.tree()?;
     let subsets = asked(root, manifest, &source, ask)?;
     // The main oracle, and one per variant a row names, whose crate's subset
     // runs under it (#1782); each digest asserted once a run (harness §4.3).
     let variants = manifest.variants();
-    let oracles = Oracles::new(&manifest.pin, &variants);
+    let oracles = Oracles::new(manifest.pin()?, &variants);
     let runners = Runners::resolve(root, manifest, &variants, ask, &subsets)?;
     let runner = &runners.main;
     let runs = against::Runs::new(root, manifest, ask.against.as_deref())?;
@@ -1401,11 +1462,12 @@ impl<'v> Runners<'v> {
             .map_err(|why| anyhow::anyhow!("{why}"))?;
         // The control is each oracle's own php, standing for the engine
         // under its own pin (#1970).
+        let layout = manifest.layout();
         let resolve = |pin: &Pin| match &ask.engine {
             Engine::Built => tiered
                 .clone()
-                .map_or_else(|| Runner::resolve(root, pin, None), Ok),
-            Engine::Named(path) => Runner::resolve(root, pin, Some(path)),
+                .map_or_else(|| Runner::resolve(root, &layout, pin, None), Ok),
+            Engine::Named(path) => Runner::resolve(root, &layout, pin, Some(path)),
             Engine::Control => Ok(Runner::Control(pin.oracle.path.clone())),
         };
         let mut resolved = BTreeMap::new();
@@ -1427,7 +1489,7 @@ impl<'v> Runners<'v> {
             crate::makala::makala(root)?;
         }
         Ok(Runners {
-            main: resolve(&manifest.pin)?,
+            main: resolve(manifest.pin()?)?,
             variants: resolved,
             featured,
         })
@@ -1623,7 +1685,7 @@ fn refused(
     why: &anyhow::Error,
 ) -> Result<Reading> {
     let mut reading =
-        Reading::for_scope(INSTRUMENT, scope, manifest, snapshot)?.under(&manifest.pin);
+        Reading::for_scope(INSTRUMENT, scope, manifest, snapshot)?.under(manifest.pin()?);
     if Full::of(why).is_some() {
         return Full::skipped(reading, scope, why);
     }
@@ -1913,10 +1975,7 @@ fn run_tests(
     let waited = Mutex::new(across::Waited::default());
     let tally = Tally::judge_apart(&held, jobs, batch, &apart, |(item, keys)| {
         let (_held, wait) = across::hold(locks, keys)?;
-        waited
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .add(wait);
+        crate::locked(&waited).add(wait);
         adapter.judge(subset, item)
     })?;
     let waited = waited.into_inner().unwrap_or_else(PoisonError::into_inner);
@@ -1924,4 +1983,5 @@ fn run_tests(
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests;

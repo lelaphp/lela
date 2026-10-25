@@ -12,7 +12,7 @@ use php_unit::decl::{Bare, ClassKind, Visibility};
 use crate::api::abi::{
     OrFalse, Passed, PropertiesFor, PropertyPurpose, PropertyTest, Raw, Union, Untyped,
 };
-use crate::api::raising::{Thrown, arg_type_error, deprecated, none_pending, throw_error, warning};
+use crate::api::raising::{Thrown, arg_type_error, deprecated, error, none_pending, warning};
 use crate::api::request::{HookedTable, PropertyInfo, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -21,7 +21,9 @@ use crate::natives::{Unmangled, unmangle_property_name};
 /// `zend_lookup_class_ex`: one leading `\` dropped, the table under
 /// the name whatever its case, and the autoloaders where the table has
 /// none and `autoload` asks for them, each handed the name past that
-/// one `\`, which a second `\` stays in:
+/// one `\`, which a second `\` stays in. A lone `\` names no class and
+/// asks no loader (`Z/Zend/zend_execute_API.c:1225-1228`, new at
+/// php-8.5.12), and neither does the empty name:
 ///
 /// ```php
 /// spl_autoload_register(function ($c) { echo "load [$c]\n"; });
@@ -35,7 +37,6 @@ use crate::natives::{Unmangled, unmangle_property_name};
 /// bool(true)
 /// bool(false)
 /// load [\Countable]
-/// load []
 /// bool(false)
 /// bool(false)
 /// bool(false)
@@ -104,9 +105,8 @@ fn class_name(req: &mut Request, class: ClassId) -> Result<Owner<PhpString>, Thr
 fn get_called_class(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
     match req.frames().called_scope() {
         Some(class) => class_name(req, class),
-        None => Err(throw_error(
+        None => Err(error(
             req,
-            "Error",
             "get_called_class() must be called from within a class",
         )),
     }
@@ -739,8 +739,7 @@ fn get_object_vars(req: &mut Request, object: PhpObject) -> Result<Owner<PhpArra
         let name = match key {
             Key::Int(n) => {
                 if !array.contains(&key) {
-                    let value = req.dup_value(value, None);
-                    let value = Owner::adopt(value);
+                    let value = Owner::adopt(req.dup_value(value, None));
                     array.add_new(req, Owner::index(n), value)?;
                 }
                 continue;
@@ -807,8 +806,7 @@ fn answered_vars(
         // properties, which no access rule holds (`zend_hash_index_add`).
         let name = match key {
             Key::Int(n) => {
-                let value = req.dup_value(value, None);
-                let value = Owner::adopt(value);
+                let value = Owner::adopt(req.dup_value(value, None));
                 array.set(req, Owner::index(n), value)?;
                 continue;
             }
@@ -1250,26 +1248,7 @@ fn reserved_class_name(lowered: &[u8]) -> bool {
         .iter()
         .rposition(|b| *b == b'\\')
         .map_or(lowered, |at| &lowered[at + 1..]);
-    [
-        &b"bool"[..],
-        b"false",
-        b"float",
-        b"int",
-        b"null",
-        b"parent",
-        b"self",
-        b"static",
-        b"string",
-        b"true",
-        b"void",
-        b"never",
-        b"iterable",
-        b"object",
-        b"mixed",
-        b"array",
-        b"callable",
-    ]
-    .contains(&unqualified)
+    php_compile::is_reserved_class_name(unqualified)
 }
 
 /// `class_alias(string $class, string $alias, bool $autoload = true):

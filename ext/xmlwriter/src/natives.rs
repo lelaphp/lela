@@ -4,7 +4,7 @@
 
 use php_ext::abi::{Instance, OrFalse, Path, Static, This, Union};
 use php_ext::attr::{php_class, php_function};
-use php_ext::raising::{Thrown, arg_value_error, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, throw_error, type_error};
 use php_ext::request::{Request, Stream};
 use php_ext::values::{Owner, PhpString, Resource, Value};
 use php_ext_libxml::Errors;
@@ -896,7 +896,7 @@ impl XMLWriter {
     fn toStream(req: &mut Request, stream: Resource) -> Result<Owner<Static>, Thrown> {
         let Some(stream) = Stream::from_value(req, &Value::resource(stream)) else {
             let message = "XMLWriter::toStream(): supplied resource is not a valid stream resource";
-            return Err(throw_error(req, "TypeError", message));
+            return Err(type_error(req, message));
         };
         let (made, raised, thrown) = Emitter::stream(req, stream);
         Errors::settle(req, raised, thrown)?;

@@ -601,3 +601,43 @@ stop = "SIGINT"
 http = "GET /run.php%00.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 [[line.serve.request]]
 http = "GET /a.txt%00.php HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+
+# Under opcache with its tier set up, `opcache.jit=off` (#3075), every op
+# array's runtime cache keeps a slot for `zend_jit_startup`'s op array
+# extension handle, so the program's own cache, which
+# `i_init_code_execute_data` `emalloc`s and its frame frees before the
+# shutdown functions, is one slot larger than without the tier: a closure
+# handed to `register_shutdown_function` and an anonymous class move it into
+# the next bin, a stored closure and a plain class do not. Each first line
+# reads php's.
+[[line]]
+name = "a-program-s-runtime-cache-keeps-the-tier-s-slot"
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "shutdown.php"]
+files = { "shutdown.php" = '<?php register_shutdown_function(function () { echo "s\n"; }); echo memory_get_usage(), "\n";', "anonymous.php" = '<?php $o = new class { function __destruct() { } }; echo memory_get_usage(), "\n";', "stored.php" = '<?php $f = function () { }; echo memory_get_usage(), "\n";', "plain.php" = '<?php class K {} echo memory_get_usage(), "\n";' }
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "anonymous.php"]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "stored.php"]
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "plain.php"]
+
+# Under opcache a held program's runtime cache is what
+# `zend_optimizer_compact_literals` counts (#3211): four calls of one
+# function share one slot, and four `new`s of one class one, so the
+# program of four of each, of one length with the program of one of each,
+# lays the same cache; it reads more for its frame's temporaries alone.
+# Each first line reads php's.
+[[line]]
+name = "a-program-s-runtime-cache-shares-one-slot-per-name"
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "one.php"]
+files = { "one.php" = '<?php array_keys($argv); new stdClass; /*                                                                                              */ echo memory_get_usage(), "\n";', "four.php" = '<?php array_keys($argv); array_keys($argv); array_keys($argv); array_keys($argv); new stdClass; new stdClass; new stdClass; new stdClass; echo memory_get_usage(), "\n";' }
+[[line.then]]
+args = ["-n", "-d", "opcache.enable_cli=1", "-d", "opcache.file_update_protection=0", "-d", "opcache.jit=off", "four.php"]
+
+# `php_request_shutdown` sets `EG_FLAGS_IN_SHUTDOWN` before it calls the
+# shutdown functions, under `-r` as for a file, so pcre's `add_offset_pair`
+# makes an unmatched group a pair of its own there where none is cached
+# yet, and hands out the one it cached while the program ran (#3347).
+[[line]]
+name = "a-shutdown-function-under-r-takes-pcre-s-in-shutdown-pair"
+args = ["-n", "-r", '''register_shutdown_function(function () { preg_match("/(a)?(b)?c/", "c", $n, PREG_OFFSET_CAPTURE | PREG_UNMATCHED_AS_NULL); gc_collect_cycles(); unset($n); $f = gc_status()["roots"]; preg_match("/(x)?(y)/", "y", $m, PREG_OFFSET_CAPTURE); gc_collect_cycles(); unset($m); var_dump($f, gc_status()["roots"]); }); preg_match("/(x)?(y)/", "y", $o, PREG_OFFSET_CAPTURE);''']

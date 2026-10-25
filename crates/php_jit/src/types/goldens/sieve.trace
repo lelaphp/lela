@@ -1,0 +1,6 @@
+start loop
+root e2
+op e2 16 long long - taken
+op e2 13 array.packed long - -
+op e2 15 long long - -
+stop loop

@@ -23,13 +23,14 @@
 
 use std::fmt::{self, Write as _};
 
+use php_engine::tier;
 use php_heap::ZvalType;
 
 use crate::record::func_name as func;
 use crate::types::{
-    Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Interrupt, Landing,
-    Layout, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Types, Unwind,
-    ValueId,
+    Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
+    Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Pointee, Read, Repeat, Returned,
+    Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -70,7 +71,7 @@ impl<'a> Dump<'a> {
         self.head(text)?;
         let header = match self.ir.end {
             End::Loop(header) => Some(header),
-            End::Leave(_) => None,
+            End::Leave(_) | End::Return(_) => None,
         };
         for (at, op) in (0u32..).map(OpId).zip(&self.ir.ops) {
             if let Some(header) = header.filter(|header| header.at == at) {
@@ -82,6 +83,7 @@ impl<'a> Dump<'a> {
                 let interrupt = match header.interrupt {
                     Interrupt::Exit(exit) => format!("exit {}", exit.0),
                     Interrupt::Stub(_) => "stub".to_owned(),
+                    Interrupt::None => "none".to_owned(),
                 };
                 writeln!(text, "loop at {}, {repeat}, interrupt {interrupt}", at.0)?;
                 for (id, value) in ids(self.ir) {
@@ -104,6 +106,7 @@ impl<'a> Dump<'a> {
         match self.ir.end {
             End::Loop(header) => writeln!(text, "end: back to {}", header.at.0)?,
             End::Leave(exit) => writeln!(text, "end: exit {}", exit.0)?,
+            End::Return(exit) => writeln!(text, "end: return in place, else exit {}", exit.0)?,
         }
         for (at, exit) in self.ir.exits.iter().enumerate() {
             self.exit(text, at, exit)?;
@@ -173,6 +176,7 @@ impl<'a> Dump<'a> {
                     Form::Step => "step",
                 };
                 write!(text, " {form}")?;
+                in_place(text, line.imm)?;
                 if let Some(map) = line.map_ptr {
                     write!(text, " map {map}")?;
                 }
@@ -184,22 +188,45 @@ impl<'a> Dump<'a> {
                 }
                 writeln!(text)
             }
-            Op::InitCall { frame, target } => {
-                let target = target.map_or("native".to_owned(), func);
-                writeln!(text, "     f{} init {target}", frame.0)
+            Op::InitCall {
+                frame,
+                callee,
+                began,
+                plain,
+            } => {
+                let target = callee.user().map_or("native".to_owned(), func);
+                let in_place = if plain.is_some() { " in-place" } else { "" };
+                writeln!(
+                    text,
+                    "     f{} {} {target}{in_place}",
+                    frame.0,
+                    began.word()
+                )
             }
-            Op::Enter { frame } => {
+            Op::Enter { frame, stores } => {
                 let named = self
                     .ir
                     .frames
                     .get(usize::from(frame.0))
                     .map_or("?".to_owned(), |info| func(info.func));
-                writeln!(text, "     f{} enter {named}", frame.0)
+                let mut listed = String::new();
+                for (at, value) in stores.iter().enumerate() {
+                    let lead = if at == 0 { " storing" } else { "" };
+                    write!(listed, "{lead} #{}", value.0)?;
+                }
+                writeln!(text, "     f{} enter {named}{listed}", frame.0)
             }
-            Op::Back { frame, out } => {
+            Op::Back {
+                frame,
+                out,
+                escapes,
+            } => {
                 write!(text, "     f{} back", frame.0)?;
                 if let Some(out) = out {
                     write!(text, " to #{}", out.0)?;
+                }
+                if let Some((at, opline)) = escapes {
+                    write!(text, " escapes unless {} {:04}", func(*at), opline.0)?;
                 }
                 writeln!(text)
             }
@@ -234,6 +261,9 @@ impl<'a> Dump<'a> {
         if exit.grows == Grows::Never {
             write!(text, " to vm")?;
         }
+        if exit.layout {
+            write!(text, " packed guard")?;
+        }
         if let Some(link) = exit.link {
             write!(text, " link {}", link.get())?;
         }
@@ -254,6 +284,12 @@ impl<'a> Dump<'a> {
                 Stored::Copied { value, read } => match read {
                     Read::InPlace => format!("copied #{}", value.0),
                     Read::Through => format!("copied #{} through a reference", value.0),
+                    Read::Indirect(Pointee::Value) => {
+                        format!("copied #{} through an indirect", value.0)
+                    }
+                    Read::Indirect(Pointee::Reference) => {
+                        format!("copied #{} through an indirect reference", value.0)
+                    }
                 },
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
@@ -310,14 +346,36 @@ fn operand(operand: Operand) -> Option<String> {
     })
 }
 
+/// How a guard names what an indirect `VAR` is read as.
+fn pointee_of(pointee: Pointee) -> &'static str {
+    match pointee {
+        Pointee::Value => "ind to ",
+        Pointee::Reference => "ind ref to ",
+    }
+}
+
 fn check(check: Check) -> String {
     let tag = |tag: ZvalType| Types::of_tag(tag).to_string();
     match check {
         Check::Type { value, tag: t } => format!("#{} {}", value.0, tag(t)),
         Check::Deref { value, tag: t } => format!("#{} ref to {}", value.0, tag(t)),
-        Check::Layout { value, layout } => format!(
-            "#{} {}",
+        Check::Indirect {
+            value,
+            tag: t,
+            pointee,
+        } => format!("#{} {}{}", value.0, pointee_of(pointee), tag(t)),
+        Check::Layout {
+            value,
+            layout,
+            read,
+        } => format!(
+            "#{} {}{}",
             value.0,
+            match read {
+                Read::InPlace => "",
+                Read::Through => "ref to ",
+                Read::Indirect(pointee) => pointee_of(pointee),
+            },
             match layout {
                 Layout::Packed => "packed",
                 Layout::Hash => "hash",
@@ -327,5 +385,47 @@ fn check(check: Check) -> String {
             format!("direction {}", if taken { "taken" } else { "fell" })
         }
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
+        Check::Arm { opline } => format!("arm {:04}", opline.0),
+        Check::Room { bytes } => format!("room {bytes}"),
+        Check::Class { object, class } => {
+            let of = match object {
+                Object::This(frame) => format!("f{}.this", frame.0),
+                Object::Value(value) => format!("#{}", value.0),
+            };
+            format!("{of} class {}", tier::class_number(class))
+        }
+    }
+}
+
+/// What compiled code makes or leaves in place at a line whose immediate
+/// is `imm`: a call made, and a leave's value, where it is no scalar, and
+/// the variables it frees.
+fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
+    let (value, owners) = match imm {
+        Imm::Make { .. } => return write!(text, " in-place"),
+        Imm::Property {
+            slot: Slotted::Declared(slot),
+            ..
+        } => return write!(text, " slot {slot}"),
+        Imm::Property {
+            slot: Slotted::Cached,
+            ..
+        } => return write!(text, " cached"),
+        Imm::Leave { value, owners } => (value, owners),
+        _ => return Ok(()),
+    };
+    match value {
+        Returned::Scalar => write!(text, " in-place")?,
+        Returned::Constant(_) => write!(text, " in-place constant")?,
+        Returned::Moved => write!(text, " in-place moved")?,
+    }
+    // The variables a leave frees, `zend_jit_free_cv`'s.
+    match owners {
+        Owners::Each(vars) => {
+            let vars: Vec<String> = vars.iter().map(|var| format!("CV{var}")).collect();
+            write!(text, " frees {}", vars.join(","))
+        }
+        Owners::Kernel => write!(text, " frees by kernel"),
+        Owners::Uncounted => Ok(()),
     }
 }

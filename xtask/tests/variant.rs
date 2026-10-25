@@ -12,6 +12,7 @@
 //! two negative controls are the fixtures under `xtask/fixtures/oracle/`: a
 //! row naming a variant the pin lacks, and a variant whose binary's md5 is
 //! not its pin's.
+#![cfg(tracked)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -376,7 +377,7 @@ fn witness_reads_a_crate_whose_row_names_a_variant_under_it() {
     let root = scratch("witness", lib);
     let run = |row: Crate, pin: &Pin| {
         let mut manifest = Manifest::of([row]);
-        manifest.pin = pin.clone();
+        manifest.pin = Some(pin.clone());
         let readings = witness::run(
             &root,
             &manifest,
@@ -433,10 +434,13 @@ fn witness_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it()
         "/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// 1\n/// ```\npub fn native() {}\n";
     let root = scratch("witness-unpinned", lib);
     let mut manifest = Manifest::of([Crate::named("ext/fixture").with_oracle("fixture-variant")]);
-    manifest.pin = Pin::parse(
-        &(tracked_text() + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),
-    )
-    .unwrap();
+    manifest.pin = Some(
+        Pin::parse(
+            &(tracked_text()
+                + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),
+        )
+        .unwrap(),
+    );
     let readings = witness::run(
         &root,
         &manifest,
@@ -486,7 +490,7 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
         ..crosscheck::Ask::default()
     };
     let mut manifest = Manifest::named("ext/ctype");
-    manifest.pin = pin;
+    manifest.pin = Some(pin);
     let run = |manifest: &Manifest| {
         crosscheck::run(&root, manifest, &Registry::default(), &store, &ask).unwrap()
     };
@@ -510,7 +514,13 @@ fn crosscheck_renders_an_extension_whose_row_names_a_variant_under_it() {
             reading.message
         );
     }
-    let md5 = varied.pin.variant("stand-in").unwrap().oracle.md5;
+    let md5 = varied
+        .pin()
+        .unwrap()
+        .variant("stand-in")
+        .unwrap()
+        .oracle
+        .md5;
     for column in [Column::Re, Column::Ri] {
         let kept = crosscheck::kept(&store, &md5, "ctype", column);
         assert!(
@@ -553,7 +563,7 @@ fn phpt_scratch(name: &str, md5: Option<&str>, varied: bool) -> Option<(Tree, Ma
         row
     };
     let mut manifest = Manifest::of([row]);
-    manifest.pin = pin.on_this_machine(Some(corpus));
+    manifest.pin = Some(pin.on_this_machine(Some(corpus)));
     Some((root, manifest, binary))
 }
 
@@ -583,11 +593,17 @@ fn phpt_runs_a_subset_whose_row_names_a_variant_under_it() {
     let reading = phpt_run(&root, &manifest, &binary);
     assert_eq!(reading.scope, "ext/fixture@control", "{reading:#?}");
     assert_eq!(count(&reading, "passed"), 1, "{reading:#?}");
-    let md5 = manifest.pin.variant("stand-in").unwrap().oracle.md5;
+    let md5 = manifest
+        .pin()
+        .unwrap()
+        .variant("stand-in")
+        .unwrap()
+        .oracle
+        .md5;
     assert!(
         reading.message.contains(&format!(
             "kept as the subset's target under pin-{}-{md5}",
-            manifest.pin.source.tag
+            manifest.pin().unwrap().source.tag
         )),
         "{}",
         reading.message
@@ -639,10 +655,16 @@ fn phpt_unkept_holds_a_variants_subset_to_the_target_kept_under_the_variants_pin
         1,
         "no target kept, so it runs: {readings:#?}"
     );
-    let md5 = manifest.pin.variant("stand-in").unwrap().oracle.md5;
+    let md5 = manifest
+        .pin()
+        .unwrap()
+        .variant("stand-in")
+        .unwrap()
+        .oracle
+        .md5;
     let kept = root.join(format!(
         "target/harness/phpt-runs/pin-{}-{md5}/ext/fixture.json",
-        manifest.pin.source.tag
+        manifest.pin().unwrap().source.tag
     ));
     assert!(
         kept.is_file(),
@@ -688,10 +710,16 @@ fn phpt_control_keeps_a_variants_target_under_its_own_pin_with_no_php_named() {
     };
     assert_eq!(reading.scope, "ext/fixture@control", "{reading:#?}");
     assert_eq!(count(reading, "passed"), 1, "{reading:#?}");
-    let md5 = manifest.pin.variant("stand-in").unwrap().oracle.md5;
+    let md5 = manifest
+        .pin()
+        .unwrap()
+        .variant("stand-in")
+        .unwrap()
+        .oracle
+        .md5;
     let kept = root.join(format!(
         "target/harness/phpt-runs/pin-{}-{md5}/ext/fixture.json",
-        manifest.pin.source.tag
+        manifest.pin().unwrap().source.tag
     ));
     assert!(kept.is_file(), "{}", kept.display());
     let readings = run(&manifest).unwrap();
@@ -885,10 +913,13 @@ fn crosscheck_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_i
     let root = Tree::new("variant-crosscheck-unpinned").unwrap();
     scratch_workspace(workspace(), &root);
     let mut manifest = Manifest::named("ext/ctype");
-    manifest.pin = Pin::parse(
-        &(tracked_text() + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),
-    )
-    .unwrap();
+    manifest.pin = Some(
+        Pin::parse(
+            &(tracked_text()
+                + &variant_table("fixture-variant", other, Path::new("/opt/php"), "0")),
+        )
+        .unwrap(),
+    );
     manifest
         .crates
         .iter_mut()
@@ -927,12 +958,13 @@ fn phpt_under_a_variant_with_no_build_for_this_platform_is_a_skip_naming_it() {
         return;
     };
     let (root, mut manifest, binary) = phpt_scratch("phpt-unpinned", None, true).unwrap();
-    let tree = manifest.pin.source.tree().unwrap();
+    let tree = manifest.pin().unwrap().source.tree().unwrap();
     manifest.pin = Pin::parse(
         &(tracked_text() + &variant_table("stand-in", other, Path::new("/opt/php"), "0")),
     )
     .unwrap()
-    .on_this_machine(Some(tree));
+    .on_this_machine(Some(tree))
+    .into();
     let reading = phpt_run(&root, &manifest, &binary);
     assert_eq!(reading.status, Status::Skip, "{reading:#?}");
     assert_eq!(count(&reading, "passed"), 0, "{reading:#?}");
@@ -990,13 +1022,8 @@ fn the_recipe_prints_the_closure_digest_the_tracked_macos_build_names() {
         .unwrap();
     assert!(out.status.success(), "{out:?}");
     let pin = Pin::parse(&tracked_text()).unwrap();
-    let named = (pin.variant.values()).filter_map(|variant| {
-        variant
-            .build(Platform::DarwinArm64)?
-            .provenance
-            .closure
-            .clone()
-    });
+    let named = (pin.variant.values())
+        .filter_map(|variant| variant.build(Platform::DarwinArm64)?.provenance.closure);
     let named: Vec<String> = named.map(|digest| digest.to_string()).collect();
     assert!(!named.is_empty(), "the tracked pin names a macOS build");
     for digest in named {

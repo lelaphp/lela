@@ -8,7 +8,9 @@
 //! which the engine copies on purpose. A `fixtures/` directory under a
 //! crate is not read either: what is under it is another crate's sources,
 //! laid there to fail some instrument on purpose. One reading per crate,
-//! of instrument `vocab`; a crate whose sources do not exist yet gets none.
+//! of instrument `vocab`; a crate whose sources do not exist yet gets none,
+//! and where the manifest has no `avoid_from` rule each crate's is a skip
+//! that says so (#3182).
 //!
 //! The scan is textual, not a parse. A public item is a line beginning
 //! `pub` followed by an item keyword and a name, a `pub` field, a variant of
@@ -29,7 +31,7 @@ use anyhow::{Context, Result, bail};
 use crate::glossary::{self, Avoided, Glossary};
 use crate::key::Snapshot;
 use crate::manifest::{Crate, Manifest, Rule};
-use crate::reading::{Outcome, Reading, Status, Store};
+use crate::reading::{Outcome, Reading, Status, Store, joined};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "vocab";
@@ -89,11 +91,7 @@ impl fmt::Display for Finding {
 }
 
 fn quoted(terms: &[String]) -> String {
-    terms
-        .iter()
-        .map(|t| format!("\"{t}\""))
-        .collect::<Vec<_>>()
-        .join(" or ")
+    joined(terms.iter().map(|t| format!("\"{t}\"")), " or ")
 }
 
 /// What one scan counted and found.
@@ -132,20 +130,24 @@ pub fn hold(root: &Path, manifest: &Manifest, only: &[String]) -> Result<Vec<Rea
             Ok((rule, glossary))
         })
         .collect::<Result<_>>()?;
-    if rules.is_empty() {
-        bail!("the manifest has no rule with `avoid_from`; nothing for vocab to read");
-    }
     let crates = manifest.crates_named(only)?;
     let snapshot = Snapshot::disk(root)?;
     let mut readings = Vec::new();
     for krate in crates {
-        let Some((rule, glossary)) = rule_over(&rules, krate)? else {
-            continue;
-        };
         let dir = root.join(krate.path());
-        if !dir.is_dir() {
+        let over = rule_over(&rules, krate)?;
+        if !dir.is_dir() || (over.is_none() && !rules.is_empty()) {
             continue;
         }
+        let Some((rule, glossary)) = over else {
+            let mut reading = Reading::for_crate(INSTRUMENT, krate, &snapshot)?;
+            reading.message = format!(
+                "{}: the manifest has no rule with `avoid_from`, so no glossary names a word to avoid",
+                krate.name
+            );
+            readings.push(reading);
+            continue;
+        };
         let scan = scan_crate(&dir, glossary)?;
         for finding in &scan.findings {
             println!("{}/{finding}", krate.path().display());
@@ -174,10 +176,7 @@ fn rule_over<'a>(
             "{} rules with `avoid_from` cover {} ({}); the store holds one vocab reading per crate, so one rule holds it",
             many.len(),
             path.display(),
-            many.iter()
-                .map(|(r, _)| r.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
+            joined(many.iter().map(|(r, _)| r.id.as_str()), ", ")
         ),
     }
 }
@@ -195,12 +194,7 @@ fn reading_of(scan: &Scan, snapshot: &Snapshot, rule: &Rule, krate: &Crate) -> R
     reading.message = if scan.findings.is_empty() {
         format!("{}: no avoided word", krate.name)
     } else {
-        let list = scan
-            .findings
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let list = joined(scan.findings.iter(), "\n");
         format!("{}: {}\n{list}", krate.name, rule.text)
     };
     Ok(reading)

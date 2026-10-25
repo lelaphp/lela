@@ -157,7 +157,7 @@ impl Emit<'_> {
             .ok()
             .and_then(|at| self.classes.get(at))
         else {
-            return Err(self.fatal("InternalError: a set hook of a class the unit has not"));
+            return Err(self.internal("a set hook of a class the unit has not"));
         };
         let lookup = |name: &[u8]| {
             self.bound_class(name).map(|decl| php_link::Held {
@@ -299,7 +299,12 @@ impl Emit<'_> {
             is_abstract,
             ..FnFlags::default()
         };
-        let saved = self.begin_body(&name, true, flags);
+        let at = crate::FunctionAt::Hook {
+            class: hooked.class as usize,
+            property: hooked.property as usize,
+            kind,
+        };
+        let saved = self.begin_body(super::ActiveFunction::at(&name, at), true, flags);
         self.active_property = Some(hooked.name.to_vec());
         self.active_hook = Some(kind);
         let outcome =
@@ -406,7 +411,7 @@ impl Emit<'_> {
             )));
         }
         let Some(value) = written.pop() else {
-            return Err(self.fatal("InternalError: a set hook's one parameter gone"));
+            return Err(self.internal("a set hook's one parameter gone"));
         };
         let named = String::from_utf8_lossy(&value.name).into_owned();
         let refused = |what: &str| {
@@ -587,15 +592,19 @@ impl Emit<'_> {
         value: php_syntax::tree::Expr,
     ) -> Result<(), CompileError> {
         let Some(property) = self.active_property.clone() else {
-            return Err(self.fatal("InternalError: a set hook's short form outside a hook"));
+            return Err(self.internal("a set hook's short form outside a hook"));
         };
         let line = self.line;
         let name = self.string(&property)?;
         let name_at = self.literal(name);
         let out = self.temporary();
         let slots = self.cache_slots(3);
+        // `zend_compile_assign`'s held-back `FETCH_OBJ_W` of
+        // `$this->prop`, laid down as the `ASSIGN_OBJ` after the value.
+        let held = self.held_back();
         let value = self.expr(value)?;
         let (data_type, data) = self.operand(value);
+        drop(held);
         self.line = line;
         self.push(Opline {
             opcode: Opcode::AssignObj,

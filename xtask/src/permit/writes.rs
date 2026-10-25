@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 
 use super::argv::{Argv, Line};
-use super::rules::placed;
+use super::rules::{Places, placed};
 
 /// The file asked about, where the call stands: the sensor's side of the
 /// question, which touches the disk so that this module does not.
@@ -111,7 +111,7 @@ const INTERPRETERS: [&str; 15] = [
 pub(super) fn can_write(line: &Line, place: &impl Place) -> bool {
     // Each directory a command of the line runs or reaches in, read from
     // where the call stands, as [`placed`] reads it.
-    let placed = placed(Path::new(""), line).into_iter();
+    let placed = placed(Path::new(""), line, Places::Every).into_iter();
     let dirs: Vec<PathBuf> = placed.map(|(_, dir)| dir).collect();
     // The word as the shell would find it: where the call stands, and in
     // each of those.

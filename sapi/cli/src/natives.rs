@@ -258,7 +258,7 @@ fn cli_get_process_title(req: &mut Request) -> Result<Option<Owner<PhpString>>, 
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// bool(false)

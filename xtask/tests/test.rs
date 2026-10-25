@@ -4,6 +4,7 @@
 //! fails; it is run through the instrument's library entry, through the
 //! binary, and then through `done` over a scratch repository, which is
 //! the reading the ticket is for: a crate with a failing test is not done.
+#![cfg(tracked)]
 
 use std::path::{Path, PathBuf};
 
@@ -137,10 +138,31 @@ fn scratch(name: &str) -> Tree {
         std::fs::copy(fixture.join(file), root.join(file)).unwrap();
     }
     // The fixture's pin is by a path relative to the fixture; here the
-    // pin stands beside the manifest.
-    Tracked::of(&root)
-        .with_pin(Path::new("oracle.toml"))
-        .write(&root);
+    // pin stands beside the manifest, and what `done` asks of a crate is
+    // the workspace's `[[owed]]` rows (#3206), those whose every pattern
+    // names `php_heap`, the one crate here, as the manifest's reader holds.
+    let text = std::fs::read_to_string(workspace().join("seams.toml")).unwrap();
+    let rows = text.parse::<toml::Table>().unwrap()["owed"].clone();
+    let heap = |pattern: &toml::Value| matches!(pattern.as_str(), Some("*" | "php_heap"));
+    let names_heap = |row: &&toml::Table| {
+        let patterns = |key: &str| match row.get(key) {
+            Some(toml::Value::Array(list)) => list.iter().all(heap),
+            Some(one) => heap(one),
+            None => true,
+        };
+        patterns("crates") && patterns("exempt")
+    };
+    let rows = rows
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row.as_table().unwrap());
+    let rows = rows.filter(names_heap);
+    let tracked = Tracked::of(&root).with_pin(Path::new("oracle.toml"));
+    rows.fold(tracked, |tracked, row| {
+        tracked.with_row("owed", row.clone())
+    })
+    .write(&root);
     root
 }
 
@@ -226,7 +248,8 @@ fn judged(root: &Path, manifest: &Manifest, store: &Store) -> done::Verdict {
 /// A fresh passing reading of `php_heap` for each instrument condition 1
 /// asks but `test`, so the test reading is the one `done` judges.
 fn fresh_but_test(root: &Path, manifest: &Manifest, store: &Store) {
-    for instrument in done::FRESH {
+    for row in &manifest.owed {
+        let instrument = row.instrument.name();
         if instrument == "test" || instrument == "phpt" || instrument == "port-map" {
             continue;
         }
@@ -234,7 +257,7 @@ fn fresh_but_test(root: &Path, manifest: &Manifest, store: &Store) {
         let mut reading =
             Reading::for_scope(instrument, "php_heap", manifest, &snapshot).expect("a reading");
         if xtask::reading::UNDER_RECIPE.contains(&instrument) {
-            reading = reading.under(&manifest.pin);
+            reading = reading.under(manifest.pin().unwrap());
         }
         reading.status = Status::Pass;
         reading.message = String::from("php_heap: measured");

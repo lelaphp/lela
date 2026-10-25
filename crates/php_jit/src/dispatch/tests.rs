@@ -151,6 +151,60 @@ fn visit_as_a_table_over_state_and_start() {
     assert_eq!(policy::read(&sealed), State::Blacklisted);
 }
 
+/// A loop root's word, visited where a return or an exit goes on at the
+/// root, is entered where compiled and otherwise neither bumped nor
+/// claimed, however hot: the loop's back edge counts its heat once a
+/// turn, as php's header counts each arrival once, so a body that ends in
+/// a call is not counted twice a turn (#3318).
+#[test]
+fn a_loop_roots_word_is_entered_from_a_landing_and_never_counted_there() {
+    let tracing = testing::policy(&[("opcache.jit", "tracing"), ("opcache.jit_hot_loop", "2")]);
+    let (epoch, func) = fixture();
+    let word = epoch.word(func, SafepointIdx(1));
+    for _ in 0..300 {
+        let visited = super::Goes::Header.visit(word, &tracing, true, || root(&epoch, func, 1));
+        assert_eq!(decided(visited), "continue");
+    }
+    assert_eq!((policy::read(word), heat(word)), (State::Cold, 0));
+    if let Some(claim) = root(&epoch, func, 1).and_then(|h| policy::claim(h, &tracing, Start::Loop))
+    {
+        policy::settle(claim, &Outcome::Published(trace(3)));
+    }
+    let visited = super::Goes::Header.visit(word, &tracing, true, || root(&epoch, func, 1));
+    assert_eq!(decided(visited), "enter 3");
+}
+
+/// A loop whose body ends in a call counts its heat once a turn, as one
+/// whose body does not: under `opcache.jit_hot_loop=8` neither roots in
+/// seven turns and each roots in eight, where a return landing on the
+/// condition that counted too rooted the first in four (#3318's review).
+/// php counts the `JMP` into the loop as an arrival as well and roots both
+/// in seven, which this engine, with no site at the condition (revision
+/// 70), does not see.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_whose_body_ends_in_a_call_counts_once_a_turn() {
+    let ini = [
+        ("opcache.jit", "tracing"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+        ("opcache.jit_hot_loop", "8"),
+        ("opcache.jit_hot_func", "255"),
+    ];
+    let scratch = testing::Scratch::new();
+    let rooted = |body: &str, turns: u32| {
+        let engine = testing::engine::<Lane>(&ini);
+        let program = format!("function g() {{}} $i = 0; while ($i < {turns}) {{ {body} }}");
+        let served = scratch.serve(&engine, &program);
+        (lines(&served).iter())
+            .filter(|line| line.contains("start (loop)"))
+            .count()
+    };
+    for body in ["$i++; g();", "g(); $i++;"] {
+        assert_eq!((rooted(body, 7), rooted(body, 8)), (0, 1), "{body}");
+    }
+}
+
 /// With the request recording, a visit that crosses the
 /// threshold answers `Continue` and leaves the word bumped and cold, as
 /// php's `zend_jit_loop_trace_counter_handler` bumps and returns while
@@ -186,25 +240,23 @@ fn a_request_claims_nothing_until_it_reaches_the_trace_it_submitted() {
     };
     let claim = policy::claim(holder.clone(), &policy, Start::Loop);
     assert_eq!(policy::read(word), State::Recording);
-    let mut state = crate::JitRequest {
-        submitted: Some(Submitted {
-            word: holder,
-            goes_on: GoesOn::Short,
-        }),
-        ..crate::JitRequest::default()
-    };
-    let at = |state: &mut crate::JitRequest, site| quieted(state, Some(site));
-    assert!(at(&mut state, Site::Entry), "under way");
-    assert!(at(&mut state, Site::Loop(SafepointIdx(1))), "under way");
+    let state = crate::JitRequest::recorder(&policy);
+    state.submitted.set(Some(Submitted {
+        word: holder,
+        goes_on: GoesOn::Short,
+    }));
+    let at = |state: &crate::JitRequest, site| quieted(state, Some(site));
+    assert!(at(&state, Site::Entry), "under way");
+    assert!(at(&state, Site::Loop(SafepointIdx(1))), "under way");
     if let Some(claim) = claim {
         policy::settle(claim, &Outcome::Published(trace(1)));
     }
     assert_eq!(policy::read(word), State::Compiled(trace(1)));
-    assert!(at(&mut state, Site::Entry), "short of the trace");
-    assert!(quieted(&mut state, None), "short of the trace");
-    assert!(!at(&mut state, Site::Return(SafepointIdx(0))), "reached");
-    assert!(state.submitted.is_none());
-    assert!(!at(&mut state, Site::Entry));
+    assert!(at(&state, Site::Entry), "short of the trace");
+    assert!(quieted(&state, None), "short of the trace");
+    assert!(!at(&state, Site::Return(SafepointIdx(0))), "reached");
+    assert!(state.submitted.take().is_none());
+    assert!(!at(&state, Site::Entry));
 }
 
 /// The trace-dump lanes' ini: `force`, inline, and php's `TRACE` lines.
@@ -228,10 +280,11 @@ fn lines(served: &php_engine::test::Served) -> Vec<String> {
 
 /// A destructor that runs a hot loop inside a recording: the loop is
 /// bumped and not recorded, so one `TRACE start` is written, the root's;
-/// the next request enters that root, which leaves where its call's
-/// cache slot, the request's, holds no callee yet, and records a side
-/// trace from that exit's word, which follows the call into `f` and goes on to the
-/// file's return, as php's `zend_jit_trace_hot_side` records one.
+/// the next request enters that root, which makes its call to `f` with no
+/// exit, as php's `INIT_FCALL` of a user function takes none (#3230), and
+/// the destructor's loop, hot where nothing records, roots a trace of its
+/// own, whose exit past the loop grows a side trace to the destructor's
+/// return, as php's `zend_jit_trace_hot_side` records one.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
@@ -257,10 +310,16 @@ fn a_destructors_hot_loop_inside_a_recording_starts_no_second_trace() {
     assert_eq!(
         lines(&second),
         [
-            "     TRACE 1 exit 0 $main() body.php:4",
-            "---- TRACE 2 start (side trace 1/0) $main() body.php:4",
-            "---- TRACE 2 stop (return)",
+            "---- TRACE 2 start (enter) D::__destruct() body.php:2",
+            "---- TRACE 2 abort (inner loop)",
+            "---- TRACE 2 start (loop) D::__destruct() body.php:2",
+            "---- TRACE 2 stop (loop)",
             "---- TRACE 2 compiled",
+            "",
+            "     TRACE 2 exit 2 D::__destruct() body.php:2",
+            "---- TRACE 3 start (side trace 2/2) D::__destruct() body.php:2",
+            "---- TRACE 3 stop (return)",
+            "---- TRACE 3 compiled",
             "",
         ]
     );
@@ -330,15 +389,23 @@ struct Unwound {
 struct Panics;
 
 impl Tier for Panics {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         if record::recording(req) {
             resume_unwind(Box::new("a kernel panicked under a recording"));
         }
         if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
             return Flow::Continue;
         }
-        let caught = catch_unwind(AssertUnwindSafe(|| super::safepoint(req, frame, site)));
-        let word = policy::read(tier::word(req, frame, SafepointIdx::ENTRY));
+        let caught = catch_unwind(AssertUnwindSafe(|| {
+            super::safepoint(req, frame, site, held)
+        }));
+        let word = policy::read(held.word(req, SafepointIdx::ENTRY));
         let after = record::recording(req);
         let trace = tier::trace_num(req);
         let unwound = req.state::<Unwound>();
@@ -388,11 +455,12 @@ fn the_exclusion_is_clear_after_a_recording_a_panic_unwound() {
 
 /// A fiber suspended inside a recording: the request records, as php's
 /// `JIT_G(tracing)` stays set while the fiber's recorder is suspended, so
-/// the resumer's hot `work()` records no root; destroying the fiber
-/// unwinds the recording and clears the exclusion, so the next hot
-/// `work()` is recorded (revision 30). The first request records
-/// `$main`, inside which nothing else roots; the second finds `$main`
-/// numbered and roots in the fiber, and its last `work()` enters the
+/// the resumer's hot `W::__toString()`, which the echo's cast serves from
+/// a native, outside `$main`'s compiled code, records no root; destroying
+/// the fiber unwinds the recording and clears the exclusion, so the next
+/// hot `W::__toString()` is recorded (revision 30). The first request
+/// records `$main`, inside which nothing else roots; the second finds
+/// `$main` numbered and roots in the fiber, and its last cast enters the
 /// trace the one before compiled, whose end writes no exit line, as php's
 /// return to the interpreter at a trace's end writes none.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
@@ -401,12 +469,12 @@ fn a_fiber_suspended_inside_a_recording_keeps_its_resumer_from_recording_until_d
     let scratch = testing::Scratch::new();
     let engine = testing::engine::<Lane>(&DUMPED);
     let program = "function body() { Fiber::suspend(1); echo \"never\\n\"; }
-        function work() { return 2; }
+        class W { function __toString(): string { return '2'; } }
         $f = new Fiber('body');
         $f->start();
-        echo work(), \"\\n\";
+        echo new W, \"\\n\";
         $f = null;
-        echo work(), \"\\n\";";
+        echo new W, \"\\n\";";
     let first = scratch.serve(&engine, program);
     assert_eq!(testing::stdout(&first), "2\n2\n", "{:?}", lines(&first));
     let second = scratch.serve(&engine, program);
@@ -417,7 +485,7 @@ fn a_fiber_suspended_inside_a_recording_keeps_its_resumer_from_recording_until_d
             "---- TRACE 2 start (enter) body() body.php:2",
             "---- TRACE 2 abort (exception)",
             "",
-            "---- TRACE 2 start (enter) work() body.php:3",
+            "---- TRACE 2 start (enter) W::__toString() body.php:3",
             "---- TRACE 2 stop (return)",
             "---- TRACE 2 compiled",
             "",
@@ -439,13 +507,19 @@ struct Spied {
 struct Spy;
 
 impl Tier for Spy {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         let halves = |req: &Request| {
-            let word = tier::word(req, frame, site.idx());
+            let word = held.word(req, site.idx());
             [0, 1].map(|half| word.halves()[half].load(Ordering::Relaxed))
         };
         let before = halves(req);
-        let flow = super::safepoint(req, frame, site);
+        let flow = super::safepoint(req, frame, site, held);
         let after = halves(req);
         let spied = req.state::<Spied>();
         spied.sites += 1;
@@ -502,13 +576,19 @@ struct Asked {
 struct Counted;
 
 impl Tier for Counted {
-    fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+    type State = crate::JitRequest;
+
+    fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+        crate::JitRequest::laid(*started)
+    }
+
+    fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: tier::Held<'_>) -> Flow {
         let halves = |req: &Request| {
-            let word = tier::word(req, frame, site.idx());
+            let word = held.word(req, site.idx());
             [0, 1].map(|half| word.halves()[half].load(Ordering::Relaxed))
         };
         let before = halves(req);
-        let flow = super::safepoint(req, frame, site);
+        let flow = super::safepoint(req, frame, site, held);
         let written = before != halves(req);
         let asked = req.state::<Asked>();
         match site {
@@ -580,19 +660,51 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
 }
 
 /// A loop in `$main` that no call activates is a root of its own: the
-/// entry's recording stops at the `eval`, whose code is no root, and the
-/// loop's header claims when its back-edge visits it, the recording
-/// handed back through the jump's `Resume`. php under the recipe writes
-/// the same `TRACE 2 start (loop) $main() …:4` line, after a return root
-/// at `$main`'s landing past the `eval` that aborts at the inner loop
-/// (`zend_jit_trace_setup_ret_counter`), which this tier does not root
-/// yet; its compiled loop leaves through php's `TRACE 2 exit 1 …:5`,
-/// the line past the loop the jump goes to, and grows php's side trace
-/// there, `TRACE 3 start (side trace 2/1) $main() …:5`, which goes on to
-/// the file's return.
+/// entry's recording aborts at the throwable `t()` throws, and the
+/// loop's header claims when its back edge visits it, the recording
+/// handed back through the jump's `Resume`, `TRACE 1 start (loop)`; its
+/// compiled loop leaves through php's `TRACE 1 exit 1 …:6`, the line past
+/// the loop the jump goes to, and grows php's side trace there, which
+/// goes on to the file's return. The pinned php under the recipe writes
+/// these lines, line for line.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
+    let engine = testing::engine::<Lane>(&DUMPED);
+    let program = "function t() { throw new Exception(\"x\"); }\ntry { t(); } catch (Exception $e) {}\n$s = 0;\nfor ($i = 0; $i < 3; $i++) { $s += $i; }\necho $s, \"\\n\";";
+    let served = testing::Scratch::new().serve(&engine, program);
+    assert_eq!(testing::stdout(&served), "3\n");
+    assert_eq!(
+        lines(&served),
+        [
+            "JIT: jit.mode=force",
+            "---- TRACE 1 start (enter) $main() body.php:3",
+            "---- TRACE 1 abort (exception)",
+            "",
+            "---- TRACE 1 start (loop) $main() body.php:5",
+            "---- TRACE 1 stop (loop)",
+            "---- TRACE 1 compiled",
+            "",
+            "     TRACE 1 exit 1 $main() body.php:6",
+            "---- TRACE 2 start (side trace 1/1) $main() body.php:6",
+            "---- TRACE 2 stop (return)",
+            "---- TRACE 2 compiled",
+            "",
+        ]
+    );
+}
+
+/// A return root is the caller's landing past the call, armed where a
+/// compiled trace hands on to the interpreter at that call (`jit-design.md`
+/// §2.2, #3036): the entry's trace stops at the `eval`, which arms
+/// `$main`'s landing past it, as php's `zend_jit_trace_setup_ret_counter`
+/// does, and the `eval`'d code's return lands there and roots `TRACE 2
+/// start (return) $main() …:3`, whose recording aborts at the loop php
+/// records next, `TRACE 2 start (loop) $main() …:4`. The pinned php under
+/// the recipe writes these lines, line for line.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_return_roots_at_the_landing_past_the_eval_its_trace_stopped_at() {
     let engine = testing::engine::<Lane>(&DUMPED);
     let program = "eval(\"\\$x = 1;\");\n$s = 0;\nfor ($i = 0; $i < 3; $i++) { $s += $i; }\necho $s, \"\\n\";";
     let served = testing::Scratch::new().serve(&engine, program);
@@ -605,6 +717,8 @@ fn a_main_loop_no_call_activates_is_a_root_at_its_header() {
             "---- TRACE 1 stop (exit to VM interpreter)",
             "---- TRACE 1 compiled",
             "",
+            "---- TRACE 2 start (return) $main() body.php:3",
+            "---- TRACE 2 abort (inner loop)",
             "---- TRACE 2 start (loop) $main() body.php:4",
             "---- TRACE 2 stop (loop)",
             "---- TRACE 2 compiled",
@@ -698,7 +812,7 @@ mod ran {
         self, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, Request, Site, Tier,
     };
 
-    use super::super::run;
+    use super::super::run_lent;
     use crate::enter::tests::entered::numbered;
     use crate::policy::{self, Holder, Outcome, State};
     use crate::record::Start;
@@ -731,7 +845,13 @@ mod ran {
     struct Running;
 
     impl Tier for Running {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        type State = crate::JitRequest;
+
+        fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+            crate::JitRequest::laid(*started)
+        }
+
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
                 return Flow::Continue;
             }
@@ -756,7 +876,7 @@ mod ran {
             let Ok(linking) = table.publish(compiled(&body(0), vec![linked]), Start::Enter) else {
                 return Flow::Bail(Fatal::error("the linking trace was not published"));
             };
-            let flow = run(req, frame, linking, &shared);
+            let flow = run_lent(req, frame, linking);
             let resumed = match flow {
                 Flow::Resume(at) => tier::frame(req, at).map(|view| (at == frame, view.opline().0)),
                 _ => None,
@@ -873,7 +993,7 @@ mod ran {
             return Flow::Bail(Fatal::error("the root's exit was not claimed"));
         };
         policy::settle(claim, &Outcome::Published(side));
-        let flow = run(req, frame, root, &shared);
+        let flow = run_lent(req, frame, root);
         let resumed = match flow {
             Flow::Resume(at) => tier::frame(req, at).map(|view| (at == frame, view.opline().0)),
             _ => None,
@@ -896,7 +1016,13 @@ mod ran {
     struct SideRuns<const PUBLISHED: bool>;
 
     impl<const PUBLISHED: bool> Tier for SideRuns<PUBLISHED> {
-        fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
+        type State = crate::JitRequest;
+
+        fn lay(started: &tier::Started<'_>) -> Option<crate::JitRequest> {
+            crate::JitRequest::laid(*started)
+        }
+
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
             if site != Site::Entry || function_of(req, frame).as_deref() != Some(b"f") {
                 return Flow::Continue;
             }

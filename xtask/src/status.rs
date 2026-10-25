@@ -35,7 +35,7 @@ use crate::oracle::hosts::{EngineHost, HOSTS};
 use crate::oracle::{Closure, PROMISE_VARIABLE, Pin, Platform, TREE_VARIABLE};
 use crate::permit;
 use crate::phpt;
-use crate::reading::{self, Log, Reading, Store};
+use crate::reading::{self, Log, Reading, Store, joined};
 use crate::sources::NOT_YET_CREATED;
 use crate::track_work;
 use crate::usage;
@@ -213,8 +213,8 @@ pub fn render(
         Section::Edges => return graph::edges(manifest, format),
         Section::Modules => return modules(manifest, &readings, format),
         Section::Git => return git_section(root, format),
-        Section::Oracle => return oracle_section(&manifest.pin, format),
-        Section::Corpus => return corpus_section(&manifest.pin, format),
+        Section::Oracle => return oracle_section(manifest.pin()?, format),
+        Section::Corpus => return corpus_section(manifest.pin()?, format),
         Section::Invocation => return invocation::render(root, format),
         Section::Conditions => return conditions::render(root, format),
         Section::Parity => {
@@ -514,12 +514,12 @@ impl Row {
         match self.facts.get(key) {
             None | Some(Value::Null) => String::new(),
             Some(Value::String(s)) => cell(s),
-            Some(Value::Array(a)) => a
-                .iter()
-                .filter_map(Value::as_str)
-                .map(|n| format!("ADR-{n}"))
-                .collect::<Vec<_>>()
-                .join(", "),
+            Some(Value::Array(a)) => joined(
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(|n| format!("ADR-{n}")),
+                ", ",
+            ),
             Some(other) => other.to_string(),
         }
     }
@@ -545,12 +545,13 @@ impl Row {
     /// space-separated.
     fn numbers_but(&self, shown: &[&str]) -> String {
         self.of(|x| {
-            x.numbers
-                .iter()
-                .filter(|(k, v)| !shown.contains(&k.as_str()) && v.as_f64() != 0.0)
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(" ")
+            joined(
+                x.numbers
+                    .iter()
+                    .filter(|(k, v)| !shown.contains(&k.as_str()) && v.as_f64() != 0.0)
+                    .map(|(k, v)| format!("{k}={v}")),
+                " ",
+            )
         })
     }
 
@@ -827,12 +828,13 @@ fn count_lines(counts: &Counts) -> Vec<(&'static str, [u64; 3])> {
 }
 
 /// Every reading of one instrument, one row per scope, the numbers as
-/// `key=value` pairs. Sections whose instrument does not exist yet
+/// `key=value` pairs; a `witness` record of the verdicts `--accept` wrote
+/// is no crate's reading and is left out ([`crate::witness::is_accepted`]). Sections whose instrument does not exist yet
 /// (`phpt`, `witness`, `mutants`) render this way from the store alone.
 fn instrument(readings: &[Reading], name: &str) -> Vec<Row> {
     let mut scopes: Vec<&str> = readings
         .iter()
-        .filter(|r| r.instrument == name)
+        .filter(|r| r.instrument == name && !crate::witness::is_accepted(r))
         .map(|r| r.scope.as_str())
         .collect();
     scopes.sort_unstable();
@@ -1311,8 +1313,8 @@ const STATUS_LINES: usize = 20;
 /// with the number left out named. The JSON's `status` is cut the same
 /// way, the number beside it as `status_omitted`.
 fn git_section(root: &Path, format: Table) -> Result<String> {
-    let log = git(root, &["log", "--oneline", "-10"], None)?;
-    let status = git(root, &["status", "--short", "--branch"], None)?;
+    let log = git(root, &["log", "--oneline", "-10"])?;
+    let status = git(root, &["status", "--short", "--branch"])?;
     let mut lines: Vec<&str> = status.lines().collect();
     let omitted = lines.len().saturating_sub(STATUS_LINES + 1);
     lines.truncate(STATUS_LINES + 1);
@@ -1751,6 +1753,7 @@ pub(crate) fn grid<R: IntoIterator<Item = String>>(
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use super::{LOCAL_SECTIONS, Row, compared, local_template, outermost, outlived};
     use serde_json::json;

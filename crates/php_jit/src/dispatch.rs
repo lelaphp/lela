@@ -14,36 +14,69 @@
 //! recording stopped; a stop at an inner loop records that loop at once,
 //! as php's `ZEND_JIT_TRACE_STOP_REPEAT` does.
 //!
-//! **Where a claim is taken.** At a frame's activation and at a loop
-//! header: each site takes a `Flow::Resume` and goes on in the frame the
-//! tier names, a back-edge's handler after the recording ran past the
-//! jump (`tier::resumed`), so a loop in `$main` that no call activates
-//! is a root of its own, as php's `opcache.jit_hot_loop` makes it. A
-//! return's handler takes a `Resume` too, but a visit there bumps and
-//! does not claim: php roots a return at the caller's landing past a
-//! call, armed only once a trace returned into it
-//! (`zend_jit_trace_setup_ret_counter`), where this tier's return word
-//! is the callee's `RETURN` and every one is armed (#3036).
+//! **Where a claim is taken.** At a frame's activation, at a loop
+//! header, and at a return's landing: each site takes a `Flow::Resume`
+//! and goes on in the frame the tier names, a back-edge's handler after
+//! the recording ran past the jump (`tier::resumed`), so a loop in
+//! `$main` that no call activates is a root of its own, as php's
+//! `opcache.jit_hot_loop` makes it. A return root is php's, the caller's
+//! landing past the call (`jit-design.md` §2.2, #3036): a return's site
+//! visits the word of the opline its caller lands on, which a compiled
+//! trace arms where it hands a caller with no trace of its own on to the
+//! interpreter ([`record::landings`], php's
+//! `zend_jit_trace_setup_ret_counter`), or, at a loop's root no trace
+//! armed, the loop's word ([`goes_on`]), and the callee's own `RETURN`
+//! word is neither read nor claimed. A trace that leaves for the
+//! interpreter at such an opline visits its word too, as php's
+//! interpreter runs the opline's handler ([`visit_landing`]).
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use php_engine::tier::Flow;
-use php_engine::tier::{self, Fatal, FrameRef, Request, SafepointIdx, Site, Word};
+use php_engine::tier::{
+    self, Epoch, Fatal, FrameRef, Held, Request, SafepointIdx, Site, Stepped, Word,
+};
 use php_unit::OplineIdx;
 
+use crate::Shared;
 use crate::compiler::{self, Job};
-use crate::enter::{self, At, Crossed as _, Exited, Left};
+use crate::enter::{self, Answered, At, Crossed as _, Exited, Left, Lent};
 use crate::policy::{
     self, Claim, Holder, JitDebug, Mode, Outcome, Place, Policy, State, TraceEvent,
 };
-use crate::record::{self, Bailed, Ended, Headed, Start, Stop};
+use crate::record::{self, Bailed, Ended, Headed, Landed, Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::types::Grows;
-use crate::{JitEngine, JitRequest, Shared};
 
 #[cfg(test)]
 mod tests;
+
+/// The tier's state on a request (`jit-design.md` §2.2, §4; #3144), as
+/// php's tracing tier keeps `JIT_G`: the engine's `Shared` and where its
+/// recordings compile, resolved once as the request is laid, so a visit
+/// reads the `Policy`, and a recording that compiles submits, with no
+/// lookup of the engine state; whether a recording is under way on the
+/// request, php's `JIT_G(tracing)`, which no fiber switch saves (§4.9,
+/// revision 30), set and cleared by `record`'s guard alone; and the trace
+/// it last submitted to the worker and has not reached yet, while which it
+/// claims nothing (`dispatch::Submitted`). `dispatch::quiet` reads the
+/// two. Each in a `Cell`, so a visit reads the whole state through the
+/// request it holds shared, once (`tier::state`).
+pub struct JitRequest {
+    pub(crate) shared: Arc<Shared>,
+    pub(crate) submitter: compiler::Submitter,
+    pub(crate) recording: Cell<bool>,
+    pub(crate) submitted: Cell<Option<Submitted>>,
+    /// The headers of the calls its traces push in place, the request's.
+    pub(crate) headers: enter::Headers,
+    /// The request's hold on the epoch it started in, taken once, which
+    /// every crossing borrows ([`enter::lent`]).
+    pub(crate) epoch: std::cell::OnceCell<Epoch>,
+    /// The trace table of that epoch, kept once a request of it made it.
+    pub(crate) table: std::cell::OnceCell<Arc<table::Table>>,
+}
 
 /// What a visit to a word decided.
 #[derive(Debug)]
@@ -91,28 +124,81 @@ pub(crate) fn visit(
 /// outlined, so the loop's site is one call. An engine whose tier runs
 /// `Off` binds `Nop`'s loop and never asks (`Jit::asked`); asked under
 /// `Off` all the same, it answers `Continue` before any word is read.
-/// Here, and only here, `Continue` means nothing happened. The engine
-/// state is looked up once, and its `Arc` is shared on only past a visit
-/// that entered or claimed, so the visit that bumps and goes on writes
-/// no count of the `Arc` the engine's threads share.
+/// Here, and only here, `Continue` means nothing happened. The tier's
+/// state is looked up once, and the request lends it, the engine's state
+/// and its hold on the epoch to what the visit goes on to ([`enter::lent`]),
+/// so a visit that bumps or enters writes no count of an `Arc` the
+/// engine's threads share; one that claims clones the hold for its
+/// holder, as [`hot`] takes its own. A return's word is
+/// its caller's landing ([`Site`]'s third arm visits no word of the
+/// callee's), which reads sealed, a word no visit acts on, until a
+/// compiled trace armed it.
+///
+/// A loop in `$main` that no call activates is a root at its header:
+/// the entry's recording aborts at the throwable `t()` throws, and the
+/// loop's back edge claims its word:
+///
+/// ```php
+/// function t() { throw new Exception("x"); }
+/// try { t(); } catch (Exception $e) {}
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += $i; }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (exception)
+///
+/// ---- TRACE 1 start (loop) $main() %s:5
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 $main() %s:6
+/// ---- TRACE 2 start (side trace 1/1) $main() %s:6
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ```
 #[inline(never)]
-pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow {
-    let at = site.idx();
-    let start = match site {
-        Site::Loop(_) => Start::Loop,
-        Site::Entry => Start::Enter,
-        Site::Return(_) => Start::Return,
-    };
-    let claims = !quiet(req, Some(site)) && start != Start::Return;
-    let (decided, shared) = {
+pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site, held: Held<'_>) -> Flow {
+    enter::lent(req, |req, lent| {
+        safepoint_lent(req, lent, (frame, site), held)
+    })
+    .unwrap_or(Flow::Continue)
+}
+
+/// [`safepoint`] under what the request lends.
+#[inline]
+fn safepoint_lent(
+    req: &mut Request,
+    lent: Lent<'_>,
+    (frame, site): (FrameRef, Site),
+    held: Held<'_>,
+) -> Flow {
+    let shared = lent.shared();
+    if shared.policy.mode() == Mode::Off {
+        return Flow::Continue;
+    }
+    let decided = {
         let req: &Request = req;
-        let Some(engine) = req.engine::<JitEngine>() else {
-            return Flow::Continue;
+        let claims = !quieted(lent.state, Some(site));
+        let (rooted, word) = match site {
+            Site::Loop(at) => (Rooted::Safepoint(at, Start::Loop), held.word(req, at)),
+            Site::Entry => {
+                let at = SafepointIdx::ENTRY;
+                (Rooted::Safepoint(at, Start::Enter), held.word(req, at))
+            }
+            Site::Return(_) => {
+                let Some((caller, at)) = landing_past(req, frame) else {
+                    return Flow::Continue;
+                };
+                let (goes, word) = goes_on(req, caller, at);
+                (Rooted::Goes(caller, goes), word)
+            }
         };
-        let shared = &engine.shared;
-        if shared.policy.mode() == Mode::Off {
-            return Flow::Continue;
-        }
         // A table a hot root found full stopped its counters, as php's
         // `zend_jit_stop_counter_handlers` does: no word is claimed more.
         let holder = || {
@@ -120,25 +206,284 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
             if table.stopped() {
                 return None;
             }
-            Some(Holder::Root {
-                epoch: tier::epoch(req),
-                func: tier::func(req, frame)?,
-                at,
-            })
+            match rooted {
+                Rooted::Safepoint(at, _) => Some(Holder::Root {
+                    epoch: lent.epoch.clone(),
+                    func: held.func(),
+                    at,
+                }),
+                Rooted::Goes(caller, goes) => goes.holder(req, caller),
+            }
         };
-        let word = tier::word(req, frame, at);
-        match visit(word, &shared.policy, start, claims, holder) {
-            Visited::Continue => return Flow::Continue,
-            decided => (decided, Arc::clone(shared)),
+        match rooted {
+            Rooted::Goes(_, goes) => goes.visit(word, &shared.policy, claims, holder),
+            Rooted::Safepoint(_, start) => visit(word, &shared.policy, start, claims, holder),
         }
     };
-    match decided {
+    match (site, decided) {
+        (_, Visited::Continue) => Flow::Continue,
+        (Site::Return(at), decided) => returned(req, lent, (frame, held), at, decided),
+        (Site::Loop(header), Visited::Enter(id)) => looped(req, lent, frame, header, id),
+        (Site::Entry, Visited::Enter(id)) => run(req, lent, frame, id),
+        (Site::Loop(_) | Site::Entry, Visited::Hot(claim)) => hot(req, frame, claim, shared),
+    }
+}
+
+/// Where a site's word stands: a safepoint of the frame's op array,
+/// with what a recording claimed there starts as, or, for a return,
+/// where its caller goes on past the call it stands at.
+#[derive(Debug, Clone, Copy)]
+enum Rooted {
+    Safepoint(SafepointIdx, Start),
+    Goes(FrameRef, Goes),
+}
+
+/// The word a frame reads where it goes on at an opline the loop did
+/// not reach by a site, past a return or a trace that left it there, as
+/// php's interpreter runs that opline's handler ([`goes_on`]).
+#[derive(Debug, Clone, Copy)]
+enum Goes {
+    /// The landing word of the opline, which a compiled trace arms past
+    /// a call (`record::landings`): a return root's.
+    Landing(OplineIdx),
+    /// The word of the loop rooted at the opline: php's handler there is
+    /// the loop's, its heat or the trace that replaced it (#3318).
+    Header,
+}
+
+impl Goes {
+    /// A visit of the word, `holder` the claim's where one is taken: a
+    /// landing's as a return root's, bumped toward
+    /// `opcache.jit_hot_return` and claimed there; a loop root's entered
+    /// where it is compiled and never bumped or claimed, since the loop's
+    /// back edge counts the loop's heat, one count a turn as php's
+    /// header handler counts one, and an arrival past a return or an exit
+    /// counted too would count a body that ends in a call twice a turn.
+    fn visit(
+        self,
+        word: &Word,
+        policy: &Policy,
+        claims: bool,
+        holder: impl FnOnce() -> Option<Holder>,
+    ) -> Visited {
+        match self {
+            Goes::Landing(_) => visit(word, policy, Start::Return, claims, holder),
+            Goes::Header => match policy::read(word) {
+                State::Compiled(id) => Visited::Enter(id),
+                State::Cold | State::Recording | State::Blacklisted => Visited::Continue,
+            },
+        }
+    }
+
+    /// The holder a claim of a landing's word in `frame` takes, under
+    /// the epoch `req` started in; none where the frame runs no op array
+    /// a row names, and for a loop root's word, which is not claimed here.
+    fn holder(self, req: &Request, frame: FrameRef) -> Option<Holder> {
+        match self {
+            Goes::Landing(at) => Some(Holder::Landing {
+                epoch: tier::epoch(req),
+                func: tier::running_func(req, frame)?,
+                at,
+            }),
+            Goes::Header => None,
+        }
+    }
+}
+
+/// The one rule for the word `frame` reads where it goes on at opline
+/// `at`, as php's interpreter runs the handler of the opline it goes on
+/// at: a landing word a compiled trace armed, which it arms at no loop
+/// php counts (`record::landings`); otherwise, at a loop's root, that
+/// loop's word, as php's handler there is the loop's, whose trace is
+/// entered from there ([`Goes::visit`]); the sealed landing word anywhere
+/// else. The op array is read only past a landing no trace armed.
+///
+/// A loop's trace entered from its root's word tests the interrupt at its
+/// header, as every loop's does but one by recursive return, which takes
+/// none (`types::Interrupt::None`): that is a return trace's, which
+/// `record` stops at a recursive return alone for a `Return` start, rooted
+/// at a landing a trace armed, which this reads first, so no loop's root
+/// word names one. A trace that leaves for the interpreter at its own
+/// root enters nothing there ([`visit_landing`]'s `left`), as php's
+/// `zend_jit_trace_exit` runs the opline's own handler.
+///
+/// A `while` whose condition php keeps is headed there, and `f`'s
+/// return lands on it: the loop's trace, which links to `f`'s, is
+/// entered there, so the interrupt the timer raises is met inside `f`
+/// and its fatal is raised at `f`'s line each time, as php's (#3318):
+///
+/// ```php
+/// set_time_limit(1);
+/// function f($n) { return $n ? f($n - 1) + 1 : 0; }
+/// const T = true;
+/// while (T) { f(50); }
+/// ```
+/// ```expect exit=255 regime=jit-inline process wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %s:5
+/// ---- TRACE 1 abort (deep recursion)
+///
+/// ---- TRACE 1 start (enter) f() %s:3
+/// ---- TRACE 1 stop (recursive call)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 f() %s:3
+/// ---- TRACE 2 start (side trace 1/1) f() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (return) f() %s:3
+/// ---- TRACE 3 stop (recursive return)
+/// ---- TRACE 3 compiled
+///
+/// ---- TRACE 4 start (loop) $main() %s:5
+/// ---- TRACE 4 stop (link to 1)
+/// ---- TRACE 4 compiled
+/// ```
+///
+/// The same over a variable's condition:
+///
+/// ```php
+/// set_time_limit(1);
+/// function f($n) { return $n ? f($n - 1) + 1 : 0; }
+/// $t = true;
+/// while ($t) { f(50); }
+/// ```
+/// ```expect exit=255 regime=jit-inline process wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %s:5
+/// ---- TRACE 1 abort (deep recursion)
+///
+/// ---- TRACE 1 start (enter) f() %s:3
+/// ---- TRACE 1 stop (recursive call)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 f() %s:3
+/// ---- TRACE 2 start (side trace 1/1) f() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (return) f() %s:3
+/// ---- TRACE 3 stop (recursive return)
+/// ---- TRACE 3 compiled
+///
+/// ---- TRACE 4 start (loop) $main() %s:5
+/// ---- TRACE 4 stop (link to 1)
+/// ---- TRACE 4 compiled
+/// ```
+fn goes_on(req: &Request, frame: FrameRef, at: OplineIdx) -> (Goes, &Word) {
+    let landing = tier::landing(req, frame, at);
+    if policy::armed(landing) {
+        return (Goes::Landing(at), landing);
+    }
+    let header =
+        tier::served(req, frame).and_then(|held| Some((held, record::loop_at(held.code(), at)?)));
+    match header {
+        Some((held, header)) => (Goes::Header, held.word(req, header)),
+        None => (Goes::Landing(at), landing),
+    }
+}
+
+/// The caller `frame` returns to and the opline it lands on there, the
+/// one past the call it stands at; none where no frame of this serving
+/// called it.
+fn landing_past(req: &Request, frame: FrameRef) -> Option<(FrameRef, OplineIdx)> {
+    let caller = tier::below(req, frame)?;
+    let call = tier::frame(req, caller)?.opline();
+    Some((caller, OplineIdx(call.0.checked_add(1)?)))
+}
+
+/// A return whose landing's word was compiled or claimed: php's
+/// interpreter has returned before the landing's handler runs, so the
+/// `RETURN` the safepoint `at` numbers is stepped first, its frame stood
+/// there, which a `RETURN`'s inline path has not stood it at, then the
+/// return trace is entered, or recorded from, at the landing in the
+/// caller it popped to; a throwable the return left pending, a
+/// destructor's, resumes where it was raised, the claim released.
+///
+/// The entry's trace stops at the `eval`, which it hands on to the
+/// interpreter, arming `$main`'s landing past it as php's
+/// `zend_jit_trace_setup_ret_counter` does; the `eval`'d code's return
+/// lands there and roots php's return trace, whose recording reaches the
+/// loop and records it next:
+///
+/// ```php
+/// eval("\$x = 1;");
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += $i; }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 stop (exit to VM interpreter)
+/// ---- TRACE 1 compiled
+///
+/// ---- TRACE 2 start (return) $main() %s:3
+/// ---- TRACE 2 abort (inner loop)
+/// ---- TRACE 2 start (loop) $main() %s:4
+/// ---- TRACE 2 stop (loop)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 2 exit 1 $main() %s:5
+/// ---- TRACE 3 start (side trace 2/1) $main() %s:5
+/// ---- TRACE 3 stop (return)
+/// ---- TRACE 3 compiled
+///
+/// ```
+fn returned(
+    req: &mut Request,
+    lent: Lent<'_>,
+    (frame, held): (FrameRef, Held<'_>),
+    at: SafepointIdx,
+    decided: Visited,
+) -> Flow {
+    // The epoch the landing's trace is taken from, which holds the
+    // returning frame's op array for the step.
+    let stepped = match held.safepoint_at(at) {
+        Some(stands) => {
+            tier::stand(req, frame, stands);
+            tier::step_held(req, frame, held, lent.epoch)
+        }
+        None => Err(Fatal::error(
+            "InternalError: a return site whose number names no RETURN",
+        )),
+    };
+    let caller = match stepped {
+        Ok(Stepped::Popped(caller)) => caller,
+        // Nothing was recorded: a claim is given back with nothing counted
+        // against the landing, as a recording's bailout gives one back.
+        gone => {
+            if let Visited::Hot(claim) = decided {
+                policy::settle(claim, &Outcome::Released);
+            }
+            return match gone {
+                Ok(Stepped::Threw(at)) => Flow::Resume(at),
+                Err(fatal) => Flow::Bail(fatal),
+                Ok(_) => Flow::Bail(Fatal::error(
+                    "InternalError: a return the tier stepped popped to no caller",
+                )),
+            };
+        }
+    };
+    let flow = match decided {
         Visited::Continue => Flow::Continue,
-        Visited::Enter(id) => match site {
-            Site::Loop(header) => looped(req, frame, header, id, &shared),
-            Site::Entry | Site::Return(_) => run(req, frame, id, &shared),
-        },
-        Visited::Hot(claim) => hot(req, frame, claim, at, &shared),
+        Visited::Enter(id) => run(req, lent, caller, id),
+        Visited::Hot(claim) => hot(req, caller, claim, lent.shared()),
+    };
+    match flow {
+        Flow::Continue => Flow::Resume(caller),
+        flow => flow,
     }
 }
 
@@ -152,17 +497,17 @@ pub(crate) fn safepoint(req: &mut Request, frame: FrameRef, site: Site) -> Flow 
 /// got there and entered nothing resumes there.
 fn looped(
     req: &mut Request,
+    lent: Lent<'_>,
     frame: FrameRef,
     header: SafepointIdx,
     id: TraceId,
-    shared: &Shared,
 ) -> Flow {
-    if let Some(flow) = run_at(req, frame, id, shared, At::Body) {
+    if let Some(flow) = run_at(req, lent, frame, id, At::Body) {
         return flow;
     }
     match record::headed(req, frame, header) {
-        Ok(Headed::Stands(at)) => run(req, at, id, shared),
-        Ok(Headed::Stepped(at)) => match run(req, at, id, shared) {
+        Ok(Headed::Stands(at)) => run(req, lent, at, id),
+        Ok(Headed::Stepped(at)) => match run(req, lent, at, id) {
             Flow::Continue => Flow::Resume(at),
             flow => flow,
         },
@@ -259,69 +604,148 @@ fn looped(
 /// ---- TRACE 3 stop (return)
 /// ---- TRACE 3 compiled
 /// ```
-#[inline(never)]
-pub(crate) fn run(req: &mut Request, frame: FrameRef, id: TraceId, shared: &Shared) -> Flow {
-    run_at(req, frame, id, shared, At::First).unwrap_or(Flow::Continue)
+#[inline]
+pub(crate) fn run(req: &mut Request, lent: Lent<'_>, frame: FrameRef, id: TraceId) -> Flow {
+    run_at(req, lent, frame, id, At::First).unwrap_or(Flow::Continue)
 }
 
 /// [`run`], its first trace entered `at` its first op or its loop's
-/// body, and each after it at its first op; none where the first, asked
-/// at its body, keeps no way in where the frame stands or declined the
-/// entry, with nothing done.
-fn run_at(
-    req: &mut Request,
-    frame: FrameRef,
-    id: TraceId,
-    shared: &Shared,
-    at: At,
-) -> Option<Flow> {
-    let epoch = table::holding(req, &shared.policy, &shared.perf);
-    let Some(table) = table::of_epoch(&epoch) else {
+/// body, and each after it at its first op, out of the epoch the request
+/// lends, whose table holds it; none where the first, asked at its body,
+/// keeps no way in where the frame stands or declined the entry, with
+/// nothing done.
+fn run_at(req: &mut Request, lent: Lent<'_>, frame: FrameRef, id: TraceId, at: At) -> Option<Flow> {
+    let epoch = lent.epoch;
+    // The table the request kept, or, where it kept none yet, the one a
+    // request of the epoch made since the lend began, whose trace the
+    // word names.
+    let Some(table) = lent.table.or_else(|| table::of_epoch(epoch)) else {
         return Some(Flow::Continue);
     };
     let Some(trace) = table.get(id) else {
         return Some(Flow::Continue);
     };
-    let stands = tier::frame(req, frame).map(|view| view.opline());
-    if at == At::Body && (trace.body.is_none() || trace.body != stands) {
+    if at == At::Body {
+        let stands = tier::frame(req, frame).map(|view| view.opline());
+        if trace.body.is_none() || trace.body != stands {
+            return None;
+        }
+    }
+    let entered = enter::enter(req, Some(lent.state), frame, (epoch, trace), at);
+    if matches!(
+        entered,
+        Ok(Answered {
+            left: Left::Declined,
+            ..
+        })
+    ) {
         return None;
     }
-    let entered = enter::enter(req, frame, trace, at);
-    if matches!(entered, Ok(Left::Declined)) {
-        return None;
-    }
-    Some(followed(req, shared, table, trace, entered))
+    Some(followed(req, lent, table, entered))
 }
 
 /// What `trace` left through, `entered`, followed from trace to trace
-/// as [`run`] says.
+/// as [`run`] says. A return past a trace's lowest frame that lands
+/// elsewhere than the trace goes on escapes, as php's
+/// `zend_jit_leave_func` escapes (`Z/ext/opcache/jit/zend_jit_ir.c:11188-11224`):
+/// no exit, no line and no word, the interpreter going on through the
+/// handler of the opline the return left the frame at, the landing's
+/// trace where one is compiled there ([`visit_landing`]). So fib's
+/// recursive return, landing past its second call, writes no exit line,
+/// as php writes none (the exit numbers are #1220's):
+///
+/// ```php
+/// function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
+/// echo fib(12), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 144
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (deep recursion)
+///
+/// ---- TRACE 1 start (enter) fib() %s:2
+/// ---- TRACE 1 stop (recursive call)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit %d fib() %s:2
+/// ---- TRACE 2 start (side trace 1/%d) fib() %s:2
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (return) fib() %s:2
+/// ---- TRACE 3 stop (recursive return)
+/// ---- TRACE 3 compiled
+///
+///      TRACE 3 exit %d fib() %s:2
+/// ---- TRACE 4 start (side trace 3/%d) fib() %s:2
+/// ---- TRACE 4 stop (link to 1)
+/// ---- TRACE 4 compiled
+///
+///      TRACE 1 exit 1 fib() %s:2
+/// ---- TRACE 5 start (side trace 1/1) fib() %s:2
+/// ---- TRACE 5 stop (return)
+/// ---- TRACE 5 compiled
+///
+/// ```
 fn followed<'t>(
     req: &mut Request,
-    shared: &Shared,
+    lending: Lent<'t>,
     table: &'t table::Table,
-    mut trace: &'t table::Trace,
-    mut entered: Result<Left, Fatal>,
+    mut entered: Result<Answered<'t>, Fatal>,
 ) -> Flow {
+    let (state, shared, epoch) = (lending.state, lending.shared(), lending.epoch);
     loop {
-        let exited = match entered {
-            Ok(Left::Exit(exited)) => exited,
-            Ok(Left::Unwound(frame)) => return Flow::Resume(frame),
+        // The trace that answered: the one entered, or one it jumped to.
+        let (left, mut trace) = match entered {
+            Ok(Answered { left, by }) => (left, by),
+            Err(fatal) => return Flow::Bail(fatal),
+        };
+        let exited = match left {
+            Left::Exit(exited) => exited,
+            Left::Unwound(frame) => return Flow::Resume(frame),
+            // php's `ZEND_VM_RETURN` past the serving's entry frame.
+            Left::Returned => return Flow::Returned,
+            // php's escape stub: no exit, no line and no word; the
+            // interpreter runs the handler of the opline the return left
+            // the frame at, a landing's trace where one is compiled there.
+            Left::Escaped(frame) => match visit_landing(req, shared, frame, None) {
+                Visited::Enter(id) => match table.get(id) {
+                    Some(next) => {
+                        // The escaping trace's code goes on into it from
+                        // now on, as php's escape goes on into the
+                        // landing's handler.
+                        enter::remembered(req, frame, trace, next);
+                        trace = next;
+                        entered = enter::enter(req, Some(state), frame, (epoch, trace), At::First);
+                        continue;
+                    }
+                    None => return Flow::Resume(frame),
+                },
+                Visited::Continue => return Flow::Resume(frame),
+                Visited::Hot(claim) => {
+                    return match hot(req, frame, claim, shared) {
+                        Flow::Continue => Flow::Resume(frame),
+                        flow => flow,
+                    };
+                }
+            },
             // php's interrupt stub: the interrupt handled, and the trace
             // entered again at its header, its handler.
-            Ok(Left::Interrupted(header)) => match tier::interrupted(req) {
+            Left::Interrupted(header) => match tier::interrupted(req) {
                 Ok(false) => {
-                    entered = enter::enter(req, header, trace, At::First);
+                    entered = enter::enter(req, Some(state), header, (epoch, trace), At::First);
                     continue;
                 }
                 Ok(true) => return Flow::Resume(header),
                 Err(fatal) => return Flow::Bail(fatal),
             },
-            Ok(Left::Declined) => {
+            Left::Declined => {
                 return Flow::Bail(Fatal::error(
                     "InternalError: a trace declined an entry at its first op",
                 ));
             }
-            Err(fatal) => return Flow::Bail(fatal),
         };
         let frame = exited.frame;
         let Some(exit) = trace.exits.get(usize::from(exited.exit.0)) else {
@@ -342,21 +766,81 @@ fn followed<'t>(
                 // A trace ran, so a recording that stepped nothing
                 // resumes the landed frame.
                 Visited::Hot(claim) => {
-                    return match hot(req, frame, claim, SafepointIdx::ENTRY, shared) {
+                    return match hot(req, frame, claim, shared) {
                         Flow::Continue => Flow::Resume(frame),
                         flow => flow,
                     };
                 }
             },
         };
-        match next.and_then(|next| table.get(next)) {
-            Some(next) => {
-                trace = next;
-                entered = enter::enter(req, frame, trace, At::First);
-            }
-            None => return Flow::Resume(frame),
-        }
+        let next = match next.and_then(|next| table.get(next)) {
+            Some(next) => next,
+            // Left for the interpreter, which runs the opline's handler:
+            // where a return lands, the landing's.
+            None => match visit_landing(req, shared, frame, Some(trace.id)) {
+                Visited::Enter(id) => match table.get(id) {
+                    Some(next) => next,
+                    None => return Flow::Resume(frame),
+                },
+                Visited::Continue => return Flow::Resume(frame),
+                Visited::Hot(claim) => {
+                    return match hot(req, frame, claim, shared) {
+                        Flow::Continue => Flow::Resume(frame),
+                        flow => flow,
+                    };
+                }
+            },
+        };
+        trace = next;
+        entered = enter::enter(req, Some(state), frame, (epoch, trace), At::First);
     }
+}
+
+/// The landing a trace or a recording left `frame` for the interpreter
+/// at, visited as php's interpreter runs the handler of the opline it
+/// goes on at (`zend_jit_trace_exit_stub`, `zend_jit_trace_return`), the
+/// word [`goes_on`] names: a trace compiled there is entered, and an
+/// armed landing's word bumped and claimed at `opcache.jit_hot_return`
+/// (`jit-design.md` §2.2, #3036), and a loop root's compiled trace
+/// entered (#3318). Nothing while the interrupt is raised or the request records,
+/// nor where the landing is the root of `left`, the trace that left the
+/// frame there, as php's `zend_jit_trace_exit` answers 1 at its own
+/// trace's first opline and the opline's own handler runs, not the trace
+/// again; a frame at an opline with a sealed word is left as it is.
+fn visit_landing(
+    req: &mut Request,
+    shared: &Shared,
+    frame: FrameRef,
+    left: Option<TraceId>,
+) -> Visited {
+    if req.limits().interrupt().raised().load(Ordering::Relaxed) {
+        return Visited::Continue;
+    }
+    let req: &Request = req;
+    let Some(state) = tier::state::<JitRequest>(req) else {
+        return Visited::Continue;
+    };
+    if state.recording.get() {
+        return Visited::Continue;
+    }
+    let claims = !quieted(state, None);
+    let Some(at) = tier::frame(req, frame).map(|view| view.opline()) else {
+        return Visited::Continue;
+    };
+    let (goes, word) = goes_on(req, frame, at);
+    if let Some(left) = left
+        && policy::read(word) == State::Compiled(left)
+    {
+        return Visited::Continue;
+    }
+    let holder = || {
+        let table = table::of(req, &shared.policy, &shared.perf)?;
+        if table.stopped() {
+            return None;
+        }
+        goes.holder(req, frame)
+    };
+    goes.visit(word, &shared.policy, claims, holder)
 }
 
 /// What an exit with no link goes on to (`jit-design.md` §4.9), php's
@@ -373,9 +857,12 @@ fn followed<'t>(
 /// ([`policy::spend`]): blacklisted at the firing that brings its heat to
 /// `opcache.jit_hot_side_exit` plus `opcache.jit_blacklist_side_trace`,
 /// with php's `---- EXIT m/k blacklisted` after its exit line, and left
-/// with no line from then on. One that names no opline is bumped and
-/// claimed by nothing, its side being one php holds to the opline it
-/// stands at with a guard this tier does not hold yet.
+/// with no line from then on. One that names no opline, a table's jump
+/// or a call that may be another's, leaves the frame where it stood: its
+/// side is recorded from there and holds that opline at its first op,
+/// php's IP guard (`zend_jit_trace_opline_guard`), whose own exit names
+/// none and grows a side of its own, so php's lines stop once the side
+/// is compiled ([`record::Landed`]).
 ///
 /// A `for` over lines leaves its trace through its test, `exit 3`, at the
 /// line past the loop, where a side trace of it starts, named by its
@@ -412,6 +899,38 @@ fn followed<'t>(
 ///
 /// ---- TRACE 3 start (enter) a() %s:3
 /// ---- TRACE 3 stop (link to 1)
+/// ---- TRACE 3 compiled
+/// ```
+///
+/// A `match` over strings jumps through a table, so its loop's trace
+/// takes an exit per opline the jump may go to but the one it went to,
+/// the default's and then each arm's, as php's `zend_jit_switch` takes
+/// them. The second arm's key leaves through that arm's own exit, 5, and
+/// the side trace grows from it, so the exit's line is written once, as
+/// php's, and not at every key (#3203):
+///
+/// ```php
+/// function f($keys) { $s = 0; foreach ($keys as $k) { $s += match ($k) { 'a' => 1, 'b' => 2 }; } return $s; }
+/// echo f(['a', 'a', 'a', 'b', 'b', 'b']), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 9
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) f() %s:2
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 5 f() %s:2
+/// ---- TRACE 2 start (side trace 1/5) f() %s:2
+/// ---- TRACE 2 stop (link to 1)
+/// ---- TRACE 2 compiled
+///
+///      TRACE 1 exit 3 f() %s:2
+/// ---- TRACE 3 start (side trace 1/3) f() %s:2
+/// ---- TRACE 3 stop (return)
 /// ---- TRACE 3 compiled
 /// ```
 fn sided(
@@ -455,7 +974,6 @@ fn sided(
         }
         return Visited::Continue;
     }
-    let claims = exit.opline.is_some();
     let req: &Request = req;
     let holder = || {
         Some(Holder::Exit {
@@ -464,7 +982,7 @@ fn sided(
             exit: exited.exit,
         })
     };
-    visit(&exit.word, &shared.policy, start, claims, holder)
+    visit(&exit.word, &shared.policy, start, true, holder)
 }
 
 /// The cold path (`jit-design.md` §4.9): the `TRACE start` line, the
@@ -494,23 +1012,58 @@ fn sided(
 /// ---- TRACE 1 compiled
 ///
 /// ```
+///
+/// #2999's program: the fiber `body()` runs inside `$main`'s recording,
+/// so its loop records nothing, and `work()`'s loop is a root at its
+/// header, recorded again at once where `$main`'s recording stops at it,
+/// whose exit grows a side trace at the line past the loop; php's
+/// optimizer numbers that exit otherwise (#1220):
+///
+/// ```php
+/// function body() { $s = 0; for ($i = 0; $i < 3; $i++) { if ($i == 1) { Fiber::suspend(1); } $s += $i; } echo "never\n"; }
+/// function work() { $s = 0; for ($i = 0; $i < 3; $i++) { $s += $i; } return $s; }
+/// $f = new Fiber("body"); $f->start(); echo work(), "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:4
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) work() %s:3
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit %d work() %s:3
+/// ---- TRACE 2 start (side trace 1/%d) work() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ```
 #[inline(never)]
 pub(crate) fn hot(
     req: &mut Request,
     mut frame: FrameRef,
     mut claim: Claim,
-    mut at: SafepointIdx,
     shared: &Shared,
 ) -> Flow {
     let mut stepped = false;
-    let (flow, stood) = loop {
+    let (flow, stood, activated) = loop {
         let start = claim.start();
-        let behind = match begins(req, frame, start, at) {
+        let behind = match begins(req, frame, start, claim.holder()) {
             Ok(Begins::Behind(condition)) => Some(condition),
             Ok(Begins::Stands) => None,
             Ok(Begins::Stepped(header)) => {
                 (frame, stepped) = (header, true);
                 None
+            }
+            // php's interpreter runs the header's own handler, which php
+            // never swapped, and writes no line: an inner loop's header,
+            // which a recording met, is always counted
+            // (`record::header_at`).
+            Ok(Begins::Uncounted) => {
+                policy::settle(claim, &Outcome::Uncounted);
+                return resumed(frame, stepped);
             }
             Err(flow) => {
                 policy::settle(claim, &Outcome::Released);
@@ -523,7 +1076,7 @@ pub(crate) fn hot(
         // A frame that shows no op array has no place to record from.
         let Some(name) = started(req, shared, frame, next, start, behind) else {
             policy::settle(claim, &Outcome::Released);
-            break (resumed(frame, stepped), None);
+            break (resumed(frame, stepped), None, false);
         };
         if let Some(refusal) = refused(table, start) {
             let recorded = record::refused(req, frame, start, refusal);
@@ -537,26 +1090,27 @@ pub(crate) fn hot(
                 },
                 GoesOn::Past,
             );
-            break (resumed(frame, stepped), None);
+            break (resumed(frame, stepped), None, false);
         }
-        let entered = side_entered(table, start);
-        let opening = record::Opening { entered, behind };
-        let (recorded, ended) = match record::run(req, frame, start, at, &shared.policy, opening) {
-            Ok(done) => done,
-            // php's bailout leaves the recorder with nothing written after
-            // the start line and nothing counted against the root.
-            Err(bailed) => {
-                policy::settle(claim, &Outcome::Released);
-                return match bailed {
-                    Bailed::Fatal(fatal) => Flow::Bail(fatal),
-                    Bailed::Unwinding(at) => Flow::Resume(at),
-                };
-            }
-        };
+        let opening = side_opened(table, start, behind);
+        let claimed = claim.holder();
+        let (recorded, ended) =
+            match record::run(req, frame, start, claimed, &shared.policy, opening) {
+                Ok(done) => done,
+                // php's bailout leaves the recorder with nothing written after
+                // the start line and nothing counted against the root.
+                Err(bailed) => {
+                    policy::settle(claim, &Outcome::Released);
+                    return match bailed {
+                        Bailed::Fatal(fatal) => Flow::Bail(fatal),
+                        Bailed::Unwinding(at) => Flow::Resume(at),
+                    };
+                }
+            };
         stepped |= ended.stepped;
         let stop = recorded.record.stop;
         let Some((rooted, name)) = rerooted(req, shared, claim, name, &ended) else {
-            break (resumed(ended.at, stepped), None);
+            break (resumed(ended.at, stepped), None, ended.activated);
         };
         let job = Job {
             recorded,
@@ -586,29 +1140,67 @@ pub(crate) fn hot(
         let Some(inner) = repeat else {
             // php's interpreter goes on at the opline the recording
             // stopped at, whose handler is the trace compiled there: the
-            // one just published at its loop's header, or the one the
-            // recording stopped at.
+            // one just published where it repeats, at its loop's header,
+            // its recursive call's entry or its recursive return's
+            // landing, or the one the recording stopped at.
             let stood = match (outcome, stop) {
-                (Some(Outcome::Published(id)), Stop::Loop) => Some(id),
+                (
+                    Some(Outcome::Published(id)),
+                    Stop::Loop | Stop::RecursiveCall | Stop::RecursiveRet,
+                ) => Some(id),
                 _ => ended.stood,
             };
-            break (resumed(ended.at, stepped), stood.map(|id| (ended.at, id)));
+            let stood = stood.map(|id| (ended.at, id));
+            break (resumed(ended.at, stepped), stood, ended.activated);
         };
         frame = ended.at;
         claim = inner;
-        at = match ended.inner {
-            Some((_, header)) => header,
-            None => at,
-        };
     };
     written(req, shared, &TraceEvent::Done);
-    match stood.filter(|(at, id)| opens(req, *at, *id, shared)) {
-        Some((at, id)) => match run(req, at, id, shared) {
-            Flow::Continue => flow,
-            ran => ran,
+    went_on(req, shared, flow, stood, activated)
+}
+
+/// Where a recording that answered `flow` stopped, php's interpreter
+/// goes on through the handler of the opline it stopped at: `stood`, the
+/// compiled trace whose root it stopped at, entered; otherwise, where it
+/// stopped at a call's activation, the entry's word visited as
+/// `Site::Entry` visits it, and where a return landed, the landing's.
+fn went_on(
+    req: &mut Request,
+    shared: &Shared,
+    flow: Flow,
+    stood: Option<(FrameRef, TraceId)>,
+    activated: bool,
+) -> Flow {
+    let ran = match (stood.filter(|(at, id)| opens(req, *at, *id, shared)), &flow) {
+        (Some((at, id)), _) => run_lent(req, at, id),
+        // The callee's op array, as the epoch holds it; one of the
+        // request's reads the sealed word, which nothing visits.
+        (None, Flow::Resume(at)) if activated => {
+            let epoch = tier::epoch(req);
+            match tier::func(req, *at).and_then(|f| epoch.held(f)) {
+                Some(held) => safepoint(req, *at, Site::Entry, held),
+                None => Flow::Continue,
+            }
+        }
+        (None, Flow::Resume(at)) => match visit_landing(req, shared, *at, None) {
+            Visited::Continue => Flow::Continue,
+            Visited::Enter(id) => run_lent(req, *at, id),
+            Visited::Hot(claim) => hot(req, *at, claim, shared),
         },
-        None => flow,
+        (None, _) => Flow::Continue,
+    };
+    match ran {
+        Flow::Continue => flow,
+        ran => ran,
     }
+}
+
+/// [`run`] under a lend of its own, which finds the table a claim just
+/// made where the lend its caller is under found none; nothing for a
+/// request the tier laid no state on.
+fn run_lent(req: &mut Request, frame: FrameRef, id: TraceId) -> Flow {
+    enter::lent(req, |req, lent| run(req, lent, frame, id)).unwrap_or(Flow::Continue)
 }
 
 /// `event`'s line, where `opcache.jit_debug` asks for it, written to the
@@ -631,20 +1223,28 @@ enum Begins {
     /// At a loop's condition the body was stepped on to
     /// (`record::headed`), in this frame.
     Stepped(FrameRef),
+    /// Nowhere: php counts no heat of the loop (`record::counts`), and
+    /// records it never.
+    Uncounted,
 }
 
 /// Where a loop's recording begins, where php's trace roots: its
 /// condition, behind the frame or past the body the back edge landed
-/// on; any other start's where the frame stands. A body that went
+/// on, the header `claimed` holds, or nowhere for a loop php counts no
+/// heat of; any other start's where the frame stands. A body that went
 /// another way on the way there is the flow to resume.
 fn begins(
     req: &mut Request,
     frame: FrameRef,
     start: Start,
-    at: SafepointIdx,
+    claimed: &Holder,
 ) -> Result<Begins, Flow> {
-    if start != Start::Loop {
+    let (Start::Loop, Holder::Root { at, .. }) = (start, claimed) else {
         return Ok(Begins::Stands);
+    };
+    let at = *at;
+    if !record::counts(req, frame, at) {
+        return Ok(Begins::Uncounted);
     }
     if let Some(condition) = record::behind(req, frame, at) {
         return Ok(Begins::Behind(condition));
@@ -690,33 +1290,51 @@ fn refused(table: Option<&table::Table>, start: Start) -> Option<Stop> {
         .map(|_| Stop::TooManyChildren)
 }
 
-/// What a side trace of `start` enters with: what its parent's exit knew
-/// of the slots of the frame it landed in; nothing for a root.
-fn side_entered(table: Option<&table::Table>, start: Start) -> Vec<record::Entered> {
-    let Some((parent, exit)) = start.grew() else {
-        return Vec::new();
+/// What a recording of `start` opens with, `behind` beside it: for a
+/// side trace, what its parent's exit knew of the slots of the frame it
+/// landed in, and whether the exit named the opline it landed at or left
+/// the frame where it stood; nothing of either for a root.
+fn side_opened(
+    table: Option<&table::Table>,
+    start: Start,
+    behind: Option<OplineIdx>,
+) -> record::Opening {
+    let exit = (start.grew())
+        .and_then(|(parent, exit)| Some((table?.get(parent)?, exit)))
+        .and_then(|(trace, exit)| trace.exits.get(usize::from(exit.0)));
+    let Some(exit) = exit else {
+        return record::Opening {
+            behind,
+            ..record::Opening::default()
+        };
     };
-    (table.and_then(|table| table.get(parent)))
-        .and_then(|trace| trace.exits.get(usize::from(exit.0)))
-        .map_or_else(Vec::new, |exit| exit.entered.to_vec())
+    record::Opening {
+        entered: exit.entered.to_vec(),
+        landed: if exit.opline.is_some() {
+            Landed::Named
+        } else {
+            Landed::Stood
+        },
+        behind,
+    }
 }
 
 /// `job` settled: a recording that stopped where a trace compiles
-/// submitted to the engine's compiler, which settles it here or on its
-/// worker; any other settled here at once as the attempt it failed, as
+/// submitted through the request's [`compiler::Submitter`], which
+/// settles it here or on the engine's worker; any other settled here at once as the attempt it failed, as
 /// php writes its abort before it records again. Its lines written;
 /// what it settled as, where it was settled here.
 fn settled(req: &mut Request, shared: &Shared, job: Job, goes_on: GoesOn) -> Option<Outcome> {
     let mut lines = Vec::new();
     let outcome = if job.recorded.record.stop.compiles() {
         let word = job.claim.holder().clone();
-        let engine = req.engine::<JitEngine>();
-        match engine.map(|engine| engine.compiler.submit(shared, job, &mut lines)) {
-            Some(None) => {
-                req.state::<JitRequest>().submitted = Some(Submitted { word, goes_on });
+        let state = tier::state::<JitRequest>(req);
+        match state.map(|state| (state, state.submitter.submit(shared, job, &mut lines))) {
+            Some((state, None)) => {
+                state.submitted.set(Some(Submitted { word, goes_on }));
                 None
             }
-            Some(settled) => settled,
+            Some((_, settled)) => settled,
             None => None,
         }
     } else {
@@ -766,23 +1384,23 @@ pub(crate) enum GoesOn {
 /// none, an exit's landing: a recording under way, or a trace it
 /// submitted it has not reached ([`Submitted`]); one it reached is
 /// forgotten here.
-fn quiet(req: &mut Request, site: Option<Site>) -> bool {
-    quieted(req.state::<JitRequest>(), site)
+fn quiet(req: &Request, site: Option<Site>) -> bool {
+    tier::state::<JitRequest>(req).is_some_and(|state| quieted(state, site))
 }
 
 /// [`quiet`] over the request's state.
-fn quieted(state: &mut JitRequest, site: Option<Site>) -> bool {
-    if state.recording {
+fn quieted(state: &JitRequest, site: Option<Site>) -> bool {
+    if state.recording.get() {
         return true;
     }
-    let Some(submitted) = &state.submitted else {
+    let Some(submitted) = state.submitted.take() else {
         return false;
     };
     let under_way = policy::read(submitted.word.word()) == State::Recording;
     let short = submitted.goes_on == GoesOn::Short
         && !matches!(site, Some(Site::Loop(_) | Site::Return(_)));
-    if !under_way && !short {
-        state.submitted = None;
+    if under_way || short {
+        state.submitted.set(Some(submitted));
     }
     under_way || short
 }

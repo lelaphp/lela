@@ -388,7 +388,7 @@ fn a_bailout_ends_every_open_frame_once_after_the_fatal() {
         &files,
         "<?php\nini_set('memory_limit', '2M');\n\
          function s() { echo 's'; }\nregister_shutdown_function('s');\n\
-         function b() { $s = '.'; while (true) { $s .= $s; } }\nfunction a() { return b(); }\na();\n",
+         function b() { $t = '.'; for ($i = 0; $i < 16; $i++) { $t .= $t; } $s = ''; while (true) { $s .= $t; } }\nfunction a() { return b(); }\na();\n",
     );
     rec.mark("user");
     serve_main(
@@ -568,7 +568,7 @@ fn probe() -> Extension {
 /// Natives are observed as php observes its internal functions: each
 /// asked of on its first call in the request, begun before its entry and
 /// ended after it with what it returned (`ZEND_DO_ICALL`,
-/// `Z/Zend/zend_vm_def.h:4125`, `:4140`); a native method named by its
+/// `Z/Zend/zend_vm_def.h:4126`, `:4141`); a native method named by its
 /// class; and the user function a native calls begun and ended inside
 /// it, here the error handler `trigger_error` calls.
 #[test]
@@ -620,7 +620,7 @@ fn natives_are_begun_before_their_entry_and_ended_after_it() {
 /// A native that throws is ended at once, before the unwind ends the
 /// frames it leaves, and is handed what the path that called it hands:
 /// no value from a call opcode (`EG(exception) ? NULL : ret`,
-/// `Z/Zend/zend_vm_def.h:4140`), also where what threw was the error
+/// `Z/Zend/zend_vm_def.h:4141`), also where what threw was the error
 /// handler the native's notice called, and the `null` its return value
 /// was laid down with from `zend_call_function`
 /// (`Z/Zend/zend_execute_API.c:1039`), here that error handler, a
@@ -848,7 +848,7 @@ fn pending_end(observed: &mut Observed<'_>, returned: Option<&Value>) {
 
 /// The throwable a native left stands pending while its end handlers
 /// are called, as it stands in `EG(exception)` at php's
-/// `ZEND_OBSERVER_FCALL_END` (`Z/Zend/zend_vm_def.h:4140`), and as it
+/// `ZEND_OBSERVER_FCALL_END` (`Z/Zend/zend_vm_def.h:4141`), and as it
 /// stands for the frames the unwind then ends; it is still the caller's
 /// to catch after.
 #[test]
@@ -1386,7 +1386,11 @@ fn current_at_switch(req: &mut Request, from: ObservedFiber, to: ObservedFiber) 
 /// the resumer's open frames are ended, as php's `zend_bailout()` raised
 /// again on the resumer leaves them to `zend_observer_fcall_end_all`. A
 /// fiber suspended meanwhile keeps its frames open, never ended, as php
-/// leaves a suspended fiber's at a fatal.
+/// leaves a suspended fiber's at a fatal. The fatal here is the memory
+/// limit's, which php 8.5.12 raises at the loop's next interrupt check
+/// and unwinds by the unwind exit (`zend_handle_delayed_oom`), so the
+/// fiber dies having thrown, as `zend_fiber_execute` marks a fiber not
+/// being destroyed that an unwind exit leaves (`Z/Zend/zend_fibers.c:616`).
 #[test]
 fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
     let (_, events) = observe(
@@ -1394,7 +1398,7 @@ fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
         "observer-fiber-fatal",
         "<?php\nfunction held() { Fiber::suspend(); }\n\
          $kept = new Fiber(function () { held(); });\n$kept->start();\n\
-         function deep() { $s = '.'; while (true) { $s .= $s; } }\n\
+         function deep() { $t = '.'; for ($i = 0; $i < 16; $i++) { $t .= $t; } $s = ''; while (true) { $s .= $t; } }\n\
          function resumer($f) { $f->resume(); }\n\
          $fiber = new Fiber(function () { Fiber::suspend(); deep(); });\n$fiber->start();\n\
          ini_set('memory_limit', '2M');\nresumer($fiber);\n",
@@ -1415,8 +1419,8 @@ fn a_fatal_in_a_fiber_ends_its_frames_then_its_resumers_and_no_other_fibers() {
         [
             end(0, "deep", None),
             end(0, &closure, None),
-            switch(0, &format!("{fiber} dead"), "main suspended"),
-            destroy(0, &format!("{fiber} dead")),
+            switch(0, &format!("{fiber} dead threw"), "main suspended"),
+            destroy(0, &format!("{fiber} dead threw")),
             end(0, "Fiber::resume", None),
             end(0, "resumer", None),
             end(0, MAIN, None),

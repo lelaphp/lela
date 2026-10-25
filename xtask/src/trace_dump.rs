@@ -1,30 +1,34 @@
 //! `xtask trace-dump`, the trace-dump diff (`jit-design.md` §4.1;
-//! harness §7): which roots the tier records and how each recording
-//! ends, held to php's. Each of the seven kernels ([`KERNELS`]) is run by
-//! the oracle under the recipe and `[regime.jit-inline]`, whose
-//! `opcache.jit_debug` asks php for its `TRACE` lines on the second
-//! stream, and by the engine built with the tier's feature, the build the
-//! phpt lane's `--jit` and the witness lane's jit fences run
-//! ([`Build`]), under the same invocation and `jit.mode=force` and
-//! `jit.compile=inline`, the engine-only directives php ignores. The
-//! oracle's lines are kept in the store under the kernel and the pin's
-//! digest, the engine's beside them, and the two are held through
-//! [`oracle::compare`] under the divergence key `trace:dump/<kernel>`,
-//! one reading per kernel.
+//! harness §7): which roots and side traces the tier records, how each
+//! recording ends, and which exits fire, held to php's. Each of the seven
+//! kernels ([`KERNELS`]) is run by the oracle under the recipe and
+//! `[regime.jit-inline]`, whose `opcache.jit_debug` asks php for its
+//! `TRACE` lines on the second stream, and by the engine built with the
+//! tier's feature, the build the phpt lane's `--jit` and the witness
+//! lane's jit fences run ([`Build`]), under the same invocation and
+//! `jit.mode=force` and `jit.compile=inline`, the engine-only directives
+//! php ignores. The oracle's lines are kept in the store under the kernel
+//! and the pin's digest, the engine's beside them, and the two are held
+//! through [`oracle::compare`] under the divergence key
+//! `trace:dump/<kernel>`, one reading per kernel. A row that accepts a
+//! kernel's difference pins both sides' lines by their [`Digests`], so
+//! one whose lines moved accepts nothing (#3291).
 //!
-//! **The lines held.** A `---- TRACE` line: a root's or a side trace's
+//! **The lines held.** What the regime's six bits print, as
+//! `opcache.jit_debug` pins them and with no mask of the instrument's
+//! own (#3155's ruling): a `---- TRACE` line, a root's or a side trace's
 //! `start`, its `stop` or `abort`, and `compiled` or `blacklisted`, the
 //! lines of `zend_jit_trace_hot_root` and `zend_jit_trace_hot_side`
-//! (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250` at the tag). The paths
-//! in them are the program's directory as the recipe's token, as every
-//! run's stream is. A `TRACE n exit m` line is php's on each pass through
-//! an exit that has no side trace: an engine that grows none yet (#2964)
-//! writes one per pass, millions on a kernel, so the run clears the exit
-//! bit from the regime's `opcache.jit_debug` on both sides and the
-//! diff holds what the regime's other five bits print, a side trace's
-//! exit number among them on its `start` line. Every other line of the
-//! stream, the engine's `JIT: jit.mode=force` among them, is not a trace
-//! line and is not held.
+//! (`Z/ext/opcache/jit/zend_jit_trace.c:8152-8250` at the tag); a
+//! `TRACE n exit m` line, php's on each pass through an exit that has no
+//! side trace yet (`:8814`, `ZEND_JIT_DEBUG_TRACE_EXIT`); and a
+//! `---- EXIT m/k blacklisted` line, an exit blacklisted where its side
+//! trace's recording aborted past its limit or where it grows no side
+//! and is spent (`:8641`, `:8884`). So an exit the engine places where php places none, or
+//! numbers otherwise, is a difference the diff shows. The paths in them
+//! are the program's directory as the recipe's token, as every run's
+//! stream is. Every other line of the stream, the engine's
+//! `JIT: jit.mode=force` among them, is not a trace line and is not held.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -33,12 +37,12 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 
 use crate::bench::kernels::{KERNELS, MEMORY};
 use crate::crosscheck::first_difference;
-use crate::divergence::{Kind, Registry};
+use crate::divergence::{DUMP_PREFIX, Digests, Registry, Side};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{self, Ended, Invocation, Observation, Oracle, Program, Regime, Verdict};
 use crate::phpt::{Build, Lane};
-use crate::reading::{Reading, Status, Store};
+use crate::reading::{Reading, Status, Store, joined};
 
 /// The instrument's name, the reading's `instrument` field.
 pub(crate) const INSTRUMENT: &str = "trace-dump";
@@ -46,12 +50,9 @@ pub(crate) const INSTRUMENT: &str = "trace-dump";
 /// The regime both sides run under.
 const REGIME: &str = "jit-inline";
 
-/// php's bit for a trace's exit line, `ZEND_JIT_DEBUG_TRACE_EXIT`
-/// (`Z/ext/opcache/jit/zend_jit.h:70` at the tag).
-const TRACE_EXIT: u64 = 1 << 15;
-
-/// What a line the diff holds starts with.
-const HELD: &[u8] = b"---- TRACE ";
+/// What a line the diff holds starts with: a trace's own line, an
+/// exit's, and an exit blacklisted.
+const HELD: [&[u8]; 3] = [b"---- TRACE ", b"     TRACE ", b"---- EXIT "];
 
 /// What one `xtask trace-dump` run was asked for.
 #[derive(Debug, Clone, Default, clap::Args)]
@@ -123,27 +124,7 @@ impl Ask {
 
 /// The divergence key of a program's lines.
 pub(crate) fn id_of(scope: &str) -> String {
-    format!("{}dump/{scope}", Kind::Trace.prefix())
-}
-
-/// The two sides a run keeps lines for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Side {
-    /// The pinned php's.
-    Oracle,
-    /// The engine's.
-    Engine,
-}
-
-impl Side {
-    /// The extension of the file the side's lines are kept in, and the
-    /// side's name in a reading's message.
-    pub fn name(self) -> &'static str {
-        match self {
-            Side::Oracle => "oracle",
-            Side::Engine => "engine",
-        }
-    }
+    format!("{DUMP_PREFIX}{scope}")
 }
 
 /// Where `side`'s lines for `scope` are kept: under the store, the
@@ -158,31 +139,27 @@ pub fn kept(store: &Store, digest: &str, scope: &str, side: Side) -> PathBuf {
 pub(crate) fn lines(stream: &[u8]) -> Vec<u8> {
     let held = stream
         .split(|b| *b == b'\n')
-        .filter(|l| l.starts_with(HELD));
+        .filter(|l| HELD.iter().any(|held| l.starts_with(held)));
     held.flat_map(|line| line.iter().chain(b"\n"))
         .copied()
         .collect()
 }
 
 /// The ini both sides run under after the recipe's and `regime`'s: the
-/// kernels' memory limit, the regime's `opcache.jit_debug` without
-/// [`TRACE_EXIT`], and the engine's two directives. The value is read as
-/// decimal or `0x` hexadecimal; any other spelling php's
-/// `zend_ini_parse_quantity` reads refuses the run rather than be misread.
+/// kernels' memory limit and the engine's two directives. The regime's
+/// `opcache.jit_debug` is what asks for the lines, so a regime that sets
+/// none refuses the run rather than hold two empty streams.
 fn ini(regime: &Regime) -> Result<Vec<String>> {
-    let debug = (regime.ini.iter().rev())
-        .find_map(|line| line.strip_prefix("opcache.jit_debug="))
-        .with_context(|| format!("[regime.{REGIME}] sets no opcache.jit_debug"))?;
-    let bits = match debug.strip_prefix("0x") {
-        Some(hex) => u64::from_str_radix(hex, 16),
-        None => debug.parse(),
-    }
-    .with_context(|| format!("[regime.{REGIME}]'s opcache.jit_debug={debug} is not a number"))?;
+    ensure!(
+        regime
+            .ini
+            .iter()
+            .any(|line| line.starts_with("opcache.jit_debug=")),
+        "[regime.{REGIME}] sets no opcache.jit_debug"
+    );
     let lane = format!("{}=force", Lane::DIRECTIVE);
-    let debug = format!("opcache.jit_debug={}", bits & !TRACE_EXIT);
     Ok(vec![
         MEMORY.to_owned(),
-        debug,
         lane,
         "jit.compile=inline".to_owned(),
     ])
@@ -214,7 +191,7 @@ pub fn run(
     store: &Store,
     ask: &Ask,
 ) -> Result<Vec<Reading>> {
-    let pin = &manifest.pin;
+    let pin = manifest.pin()?;
     let snapshot = Snapshot::disk(root)?;
     let ini = ini(pin.regime(REGIME)?)?;
     let oracle = pin.oracle();
@@ -306,10 +283,7 @@ impl Sides<'_> {
         let under = format!("under [regime.{REGIME}] and {}", self.ini.join(" "));
         let said = format!("{}: {under}: {verdict}", traced.scope);
         reading.status = status;
-        reading.message = std::iter::once(said)
-            .chain(notes)
-            .collect::<Vec<_>>()
-            .join("; ");
+        reading.message = joined(std::iter::once(said).chain(notes), "; ");
         Ok(())
     }
 }
@@ -322,17 +296,25 @@ fn judged(registry: &Registry, id: &str, expected: &[u8], actual: &[u8]) -> (Sta
             let n = String::from_utf8_lossy(expected).lines().count();
             (
                 Status::Pass,
-                format!("the engine's {n} TRACE lines are the oracle's"),
+                format!("the engine's {n} trace lines are the oracle's"),
             )
         }
         Verdict::Diverged(row) => {
             let accepts = format!("{} accepts it: {}", row.id, row.reason);
             (
                 Status::Pass,
-                format!("the engine's TRACE lines differ from the oracle's, and {accepts}"),
+                format!("the engine's trace lines differ from the oracle's, and {accepts}"),
             )
         }
-        Verdict::Differs(diff) => (Status::Fail, first_difference(&diff, "trace dump")),
+        Verdict::Moved(moved) => (Status::Fail, moved.to_string()),
+        Verdict::Differs(diff) => {
+            let first = first_difference(&diff, "trace dump");
+            let pins = Digests::of(expected, actual);
+            (
+                Status::Fail,
+                format!("{first}; a row accepting it pins {pins}"),
+            )
+        }
     }
 }
 
@@ -340,39 +322,36 @@ fn judged(registry: &Registry, id: &str, expected: &[u8], actual: &[u8]) -> (Sta
 mod tests {
     use super::*;
 
-    /// The diff holds a stream's `---- TRACE` lines and nothing else: no
-    /// exit line, no engine note and no blank line between roots.
+    /// The diff holds a stream's trace lines, a trace's, an exit's and an
+    /// exit blacklisted, and nothing else: no engine note, no blank line between
+    /// roots and no warning.
     #[test]
-    fn the_diff_holds_the_trace_lines_alone() {
-        let stream = b"JIT: jit.mode=force\n---- TRACE 1 start (loop) $main() a.php:3\n---- TRACE 1 stop (loop)\n\n     TRACE 1 exit 2 $main() a.php:6\nWarning: x";
-        let held = "---- TRACE 1 start (loop) $main() a.php:3\n---- TRACE 1 stop (loop)\n";
+    fn the_diff_holds_the_trace_and_exit_lines_alone() {
+        let stream = b"JIT: jit.mode=force\n---- TRACE 1 start (loop) $main() a.php:3\n---- TRACE 1 stop (loop)\n\n     TRACE 1 exit 2 $main() a.php:6\n---- EXIT 1/2 blacklisted\nWarning: x";
+        let held = "---- TRACE 1 start (loop) $main() a.php:3\n---- TRACE 1 stop (loop)\n     TRACE 1 exit 2 $main() a.php:6\n---- EXIT 1/2 blacklisted\n";
         assert_eq!(String::from_utf8(lines(stream)).unwrap(), held);
         assert!(lines(b"4950").is_empty());
     }
 
-    /// Both sides run the regime's `opcache.jit_debug` less the exit bit,
-    /// read as decimal or `0x` hexadecimal, after the memory limit and before
-    /// the engine's two directives; a regime with no `jit_debug` refuses
-    /// the run.
+    /// Both sides run the regime's `opcache.jit_debug` as it is pinned,
+    /// with nothing of the instrument's over it: the memory limit and the
+    /// engine's two directives follow the regime; a regime with no
+    /// `jit_debug` refuses the run.
     #[test]
-    fn both_sides_run_the_regimes_debug_bits_less_the_exit_line() {
-        let regime = |debug: &str| Regime {
+    fn both_sides_run_the_regimes_debug_bits_unmasked() {
+        let regime = Regime {
             ini: vec![
                 "opcache.jit=tracing".to_owned(),
-                format!("opcache.jit_debug={debug}"),
+                "opcache.jit_debug=258048".to_owned(),
             ],
             ..Regime::default()
         };
-        let ran = ini(&regime("258048")).unwrap();
-        let expected = [
-            MEMORY,
-            "opcache.jit_debug=225280",
-            "jit.mode=force",
-            "jit.compile=inline",
-        ];
-        assert_eq!(ran, expected);
-        assert_eq!(ini(&regime("0x3F000")).unwrap(), expected);
-        assert_eq!(ini(&regime("4096")).unwrap()[1], "opcache.jit_debug=4096");
+        let ran = ini(&regime).unwrap();
+        assert_eq!(ran, [MEMORY, "jit.mode=force", "jit.compile=inline"]);
+        assert!(
+            !ran.iter().any(|line| line.contains("jit_debug")),
+            "{ran:?}"
+        );
         let none = ini(&Regime::default()).unwrap_err().to_string();
         assert!(none.contains("sets no opcache.jit_debug"), "{none}");
     }
@@ -435,7 +414,69 @@ mod tests {
         let (status, said) = judged(&registry, "trace:dump/loop", &oracle, &oracle);
         assert_eq!(
             (status, said.as_str()),
-            (Status::Pass, "the engine's 8 TRACE lines are the oracle's")
+            (Status::Pass, "the engine's 9 trace lines are the oracle's")
         );
+        let pins = Digests::of(&oracle, &engine);
+        assert!(said_of(&registry, "trace:dump/loop", &engine).contains(&pins.to_string()));
+    }
+
+    /// What the verdict on the fixture's engine lines says under `registry`.
+    fn said_of(registry: &Registry, id: &str, engine: &[u8]) -> String {
+        let oracle = fs::read(crate::package_dir().join("fixtures/trace-dump/oracle.lines"));
+        judged(registry, id, &oracle.unwrap(), engine).1
+    }
+
+    /// #3291's negative control: the fixture's accepted `trace:dump/fib`
+    /// row pins an engine dump one exit line longer than the engine's now,
+    /// so the engine's lines fail naming the engine's side alone, and an
+    /// oracle's moved by a line fails naming the oracle's; against the
+    /// lines it pins, the row accepts the difference. A dump row that pins
+    /// nothing accepts nothing, as an open one, and a pinned one beside it
+    /// accepts its own.
+    #[test]
+    fn a_dump_row_accepts_only_the_lines_it_pins_and_names_the_side_that_moved() {
+        let fixtures = crate::package_dir().join("fixtures/trace-dump");
+        let read = |name: &str| fs::read_to_string(fixtures.join(name)).unwrap();
+        let (oracle, engine) = (read("oracle.lines"), read("engine.lines"));
+        let pinned = read("engine-pinned.lines");
+        let registry = Registry::parse(&read("fib-moved.toml")).unwrap();
+        let id = "trace:dump/fib";
+        let (status, said) = judged(&registry, id, oracle.as_bytes(), engine.as_bytes());
+        assert_eq!(status, Status::Fail, "{said}");
+        assert!(
+            said.contains("trace:dump/fib accepts the difference it was ruled on, and the engine's lines moved")
+                && !said.contains("oracle's lines moved"),
+            "{said}"
+        );
+        let (status, said) = judged(&registry, id, oracle.as_bytes(), pinned.as_bytes());
+        assert_eq!(status, Status::Pass, "{said}");
+        let bumped = oracle.replacen("loop.php:2", "loop.php:1", 1);
+        let (status, said) = judged(&registry, id, bumped.as_bytes(), pinned.as_bytes());
+        assert_eq!(status, Status::Fail, "{said}");
+        assert!(
+            said.contains("the oracle's lines moved") && !said.contains("engine's lines moved"),
+            "{said}"
+        );
+
+        let rules = crate::package_dir().join("fixtures/rules/divergence.reason");
+        let text = fs::read_to_string(rules.join("trace-dump-unpinned.toml")).unwrap();
+        let registry = Registry::parse(&text).unwrap();
+        let said = said_of(&registry, "trace:dump/fixture-unpinned", engine.as_bytes());
+        assert!(said.contains("at line 3"), "{said}");
+        let said = said_of(&registry, "trace:dump/fixture-in-order", engine.as_bytes());
+        assert!(
+            said.contains("trace:dump/fixture-in-order accepts it"),
+            "{said}"
+        );
+
+        // A cause row that covers a dump's id pins it as a dump row would,
+        // and accepts nothing while it pins nothing.
+        let cause = text.split("\n[[divergence]]").nth(1).unwrap().replace(
+            "id = \"trace:dump/fixture-unpinned\"",
+            "id = \"trace:fixture-cause\"\ncovers = [\"trace:dump/fib\"]",
+        );
+        let registry = Registry::parse(&format!("[[divergence]]{cause}")).unwrap();
+        assert!(said_of(&registry, id, engine.as_bytes()).contains("at line 3"));
+        assert_eq!(registry.refused().len(), 1);
     }
 }

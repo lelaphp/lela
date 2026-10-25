@@ -265,10 +265,13 @@ mod tests {
     struct Debugging;
 
     impl crate::tier::Tier for Debugging {
+        type State = ();
+
         fn safepoint(
             _: &mut crate::tier::Request,
             _: crate::tier::FrameRef,
             _: crate::tier::Site,
+            _: crate::tier::Held<'_>,
         ) -> crate::tier::Flow {
             crate::tier::Flow::Continue
         }

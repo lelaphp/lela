@@ -7,12 +7,10 @@
 //! and the constants being worded are [`ClassConstants`]'s, whose fields
 //! no file but this one reads.
 
-use php_link::Row;
-use php_unit::decl::{ClassConstDecl, ClassKind, ConstExpr, Visibility};
+use php_unit::decl::{ClassConstDecl, ClassKind, ConstExpr};
 
-use crate::api::call::write_prop;
 use crate::api::raising::Thrown;
-use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
+use crate::api::values::{ClassId, Key, Owner, PhpArray, PhpObject, TypeTag, Value};
 
 use super::Request;
 use super::Symbols;
@@ -29,12 +27,13 @@ pub(super) struct ClassConstants {
     /// and immutable and an object is neither, so the slot is the
     /// request's and the cases go with it.
     enum_cases: Vec<((ClassId, Vec<u8>), PhpObject)>,
-    /// The backed enums whose case values `zend_enum_build_backed_enum_table`
-    /// has held to their backing type and found no two alike, php's
-    /// `ZEND_ACC_CONSTANTS_UPDATED` on each, beside the owner its
-    /// `backed_enum_table` holds of each string value it is keyed by; a
-    /// check that failed is made again on the next read, as php's is.
-    enums_updated: Vec<(ClassId, Vec<PhpString>)>,
+    /// The backed enums a program declared whose constants
+    /// `zend_update_class_constants` has updated, php's
+    /// `ZEND_ACC_CONSTANTS_UPDATED` on each, beside the
+    /// `backed_enum_table` `zend_enum_build_backed_enum_table` built of
+    /// them on the request's heap, each case's name keyed by its value; a
+    /// build that failed is made again on the next read, as php's is.
+    enums_updated: Vec<(ClassId, PhpArray)>,
     /// `CONST_IS_RECURSIVE` over the constants a deprecation is being
     /// worded for, so an attribute naming the constant it marks reads it
     /// without raising again (GH-18463): the declaring class and the
@@ -51,26 +50,12 @@ impl Request {
     /// to the heap's mass release.
     #[cfg(debug_assertions)]
     pub(super) fn free_enum_cases(&mut self) {
-        for (_, keys) in std::mem::take(&mut self.class_constants.enums_updated) {
-            for key in keys {
-                self.release(Value::string(key));
-            }
+        for (_, table) in std::mem::take(&mut self.class_constants.enums_updated) {
+            self.release(Value::array(table));
         }
         for (_, case) in std::mem::take(&mut self.class_constants.enum_cases) {
             self.release(case.as_value());
         }
-    }
-
-    /// The constant a row of `class`'s constants table is, beside the
-    /// class that declared it.
-    fn row_constant(
-        &self,
-        class: ClassId,
-        row: Row<ClassId>,
-    ) -> Option<(ClassId, &ClassConstDecl)> {
-        let holder = row.holder_in(class);
-        let decl = self.symbols().class_decl(holder)?;
-        Some((holder, decl.constants.get(usize::try_from(row.at).ok()?)?))
     }
 
     /// `zend_fetch_class_constant`'s lookup (`Z/Zend/zend_constants.c:355`):
@@ -82,9 +67,20 @@ impl Request {
     /// (`zval_update_constant_ex`), one owner the caller's. The class
     /// is named in the error as the opline names it, `ce->name`.
     pub(crate) fn class_constant(&mut self, class: ClassId, name: &[u8]) -> Result<Value, Thrown> {
-        let class_name = self.symbols().class_name(class);
+        self.class_constant_fetched(class, name)
+            .map(ConstantRead::value)
+    }
+
+    /// [`Request::class_constant`] as `ZEND_FETCH_CLASS_CONSTANT` reads
+    /// it, which says whether the opline may keep the value in its
+    /// runtime cache ([`ConstantRead`]).
+    pub(crate) fn class_constant_fetched(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+    ) -> Result<ConstantRead, Thrown> {
         let scope = self.executed_scope();
-        self.class_constant_from(class, name, &class_name, scope, ConstantFetch::Opline)
+        self.read_class_constant(class, name, None, scope, ConstantFetch::Opline)
     }
 
     /// [`Request::class_constant`] with the class named in the error as
@@ -127,13 +123,31 @@ impl Request {
         scope: Option<ClassId>,
         fetch: ConstantFetch,
     ) -> Result<Value, Thrown> {
-        let shown = String::from_utf8_lossy(name).into_owned();
+        self.read_class_constant(class, name, Some(class_name), scope, fetch)
+            .map(ConstantRead::value)
+    }
+
+    /// The body of [`Request::class_constant_from`] and
+    /// [`Request::class_constant_fetched`]. The class is named in an error as
+    /// `class_name` spells it, or as the linked class's own where none is
+    /// given, which is worded only where an error is.
+    fn read_class_constant(
+        &mut self,
+        class: ClassId,
+        name: &[u8],
+        class_name: Option<&str>,
+        scope: Option<ClassId>,
+        fetch: ConstantFetch,
+    ) -> Result<ConstantRead, Thrown> {
+        let shown = |req: &Request| {
+            let class_name =
+                class_name.map_or_else(|| req.symbols().class_name(class), str::to_owned);
+            format!("{class_name}::{}", String::from_utf8_lossy(name))
+        };
+        self.separate_constants(class)?;
         let Some((declaring, constant)) = self.symbols().class_constant_of(class, name) else {
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!("Undefined constant {class_name}::{shown}"),
-            ));
+            let message = format!("Undefined constant {}", shown(self));
+            return Err(crate::api::raising::error(self, &message));
         };
         let (visibility, is_case) = (constant.visibility, constant.is_case);
         let deprecated = crate::attributes::Flags::of(&constant.attributes)
@@ -142,46 +156,56 @@ impl Request {
         let asked = class;
         let class = declaring;
         if !self.may_access_from(class, visibility, scope) {
-            let word = match visibility {
-                Visibility::Public => "public",
-                Visibility::Protected => "protected",
-                Visibility::Private => "private",
-            };
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!("Cannot access {word} constant {class_name}::{shown}"),
-            ));
+            let word = super::methods::visibility_string(visibility);
+            let message = format!("Cannot access {word} constant {}", shown(self));
+            return Err(crate::api::raising::error(self, &message));
         }
         // A constant a trait declares is the composing class's to hand
         // out, never the trait's own.
-        if self
-            .symbols()
-            .class_decl(asked)
-            .is_some_and(|decl| decl.kind == ClassKind::Trait)
-        {
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!("Cannot access trait constant {class_name}::{shown} directly"),
-            ));
+        if self.class_is(asked, ClassKind::Trait) {
+            let message = format!("Cannot access trait constant {} directly", shown(self));
+            return Err(crate::api::raising::error(self, &message));
         }
+        let kept = deprecated.is_none();
         if let Some(constant) = deprecated {
             self.deprecated_class_constant(class, name, &constant)?;
         }
         // `ZEND_FETCH_CLASS_CONSTANT` updates a backed enum's constants
-        // whole before it reads one (`zend_update_class_constants`), and
+        // whole before it reads one (`zend_update_class_constants`), where
+        // `zend_get_class_constant_ex` updates the one it reads, so an
+        // expression of the enum's that names one of its constants reads
+        // it without updating the enum again; and
         // `zend_fetch_class_constant`'s `ZEND_CLASS_CONST_IS_CASE` arm
         // hands out a case as the enum's instance for it and not as the
         // expression it was written with.
-        self.update_enum_constants(class)?;
-        if is_case {
-            return self.enum_case(class, name).map(|case| case.as_value());
+        if fetch == ConstantFetch::Opline {
+            self.update_enum_constants(class)?;
         }
-        match fetch {
-            ConstantFetch::Opline => self.evaluated_class_constant(class, name),
-            ConstantFetch::Lookup => self.visited_class_constant(class, name, class_name),
-        }
+        let holder = super::class_data::constant_holder(asked, class);
+        let value = if is_case {
+            self.enum_case(class, name).map(|case| case.as_value())
+        } else {
+            match fetch {
+                ConstantFetch::Opline => {
+                    let value = self.evaluated_in(holder, class, name);
+                    value.inspect(|value| self.addref(value))
+                }
+                ConstantFetch::Lookup => {
+                    let class_name = class_name.map_or_else(
+                        || std::borrow::Cow::Owned(self.symbols().class_name(class)),
+                        std::borrow::Cow::Borrowed,
+                    );
+                    self.visited_class_constant((holder, class), name, &class_name)
+                }
+            }
+        };
+        value.map(|value| {
+            if kept {
+                ConstantRead::Kept(value)
+            } else {
+                ConstantRead::Deprecated(value)
+            }
+        })
     }
 
     /// `zend_get_class_constant_ex` under `ZEND_FETCH_CLASS_SILENT`, as
@@ -189,10 +213,7 @@ impl Request {
     /// executed scope may reach, not through a trait, with nothing
     /// raised and nothing evaluated.
     pub(crate) fn class_constant_defined(&self, class: ClassId, name: &[u8]) -> bool {
-        let trait_asked = self
-            .symbols()
-            .class_decl(class)
-            .is_some_and(|decl| decl.kind == ClassKind::Trait);
+        let trait_asked = self.class_is(class, ClassKind::Trait);
         self.symbols()
             .class_constant_of(class, name)
             .is_some_and(|(declaring, constant)| {
@@ -287,6 +308,30 @@ impl Request {
     /// Enum case type string does not match enum backing type int
     /// Duplicate value in enum Dup for cases A and B
     /// ```
+    ///
+    /// Its constants are updated with its cases, so a constant that
+    /// refuses refuses the first opline's read of a case, `from()` and
+    /// `tryFrom()`, each time until it evaluates, where `constant()`,
+    /// `zend_get_class_constant_ex`, updates the one it names; a constant
+    /// naming one of the enum's own is read without updating the enum
+    /// again:
+    ///
+    /// ```php
+    /// enum S: string { case A = "a"; const K = Undef::X; }
+    /// foreach ([fn () => S::from("a"), fn () => S::A, fn () => S::tryFrom("b"), fn () => constant('S::A')] as $read) {
+    ///     try { var_dump($read()); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; }
+    /// }
+    /// enum T: int { case A = 1; const K = self::A; const L = T::K; }
+    /// var_dump(T::from(1), T::L);
+    /// ```
+    /// ```expect exit=0
+    /// Error: Class "Undef" not found
+    /// Error: Class "Undef" not found
+    /// Error: Class "Undef" not found
+    /// enum(S::A)
+    /// enum(T::A)
+    /// enum(T::A)
+    /// ```
     pub(crate) fn update_enum_constants(&mut self, class: ClassId) -> Result<(), Thrown> {
         if self
             .class_constants
@@ -338,27 +383,104 @@ impl Request {
             }
             return Err(thrown);
         }
-        let mut keys = Vec::new();
         for (name, made, value) in values {
-            let key = value
-                .as_php_string()
-                .filter(|key| !key.heap().is_interned());
             if made {
-                // The owner taken above is the table's, or given up.
-                if key.is_none() {
-                    self.release(value);
-                }
-            } else {
-                if key.is_some() {
-                    self.addref(&value);
-                }
-                let case = self.made_case(class, &name, Some(value))?;
-                self.release(case.as_value());
+                self.release(value);
+                continue;
             }
-            keys.extend(key);
+            // The update makes the case in its place and hands nothing
+            // back, as `zend_update_class_constants` does, so the owner
+            // `made_case` hands back is given up offering no root.
+            let case = self.made_case(class, &name, Some(value))?;
+            self.release_nogc(case.as_value());
         }
-        self.class_constants.enums_updated.push((class, keys));
+        // Its other constants with them, in the table's order, each
+        // expression's copy given back as it is evaluated.
+        let constants: Vec<(ClassId, Box<[u8]>)> = (self.symbols().constants_in_order(class))
+            .into_iter()
+            .filter(|(_, constant)| !constant.is_case)
+            .map(|(declaring, constant)| (declaring, constant.name.0.clone()))
+            .collect();
+        for (declaring, name) in constants {
+            self.evaluated_in(declaring, declaring, &name)?;
+        }
+        let table = self.backed_enum_table(class)?;
+        self.class_constants.enums_updated.push((class, table));
         Ok(())
+    }
+
+    /// `zend_enum_build_backed_enum_table` (`Z/Zend/zend_enum.c:197`)
+    /// over the cases of `class`, every one made: a table `emalloc`'d
+    /// and `zend_hash_init`ed empty, then each case's name, in the order
+    /// the constants table holds them, added at its value, an int as
+    /// `zend_hash_index_add_new` adds it and a string as
+    /// `zend_hash_add_new` does, its own owner of the key taken. The
+    /// table is the request's, as php's is the class's until the request
+    /// ends. An enum's first `from()` lays it down, beside each case
+    /// it makes, a cached file's and an `eval`'s alike, and an int
+    /// enum's values under eight lay a packed table where a string's
+    /// and a larger int's lay a hash:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('$q = 1;');
+    /// enum G: string { case A = "a"; case B = "b"; }
+    /// enum H: int { case A = 1; case B = 2; }
+    /// enum K: int { case A = 100; case B = 200; }
+    /// echo m('$GLOBALS["w"] = 1;'), "\n";
+    /// echo m('$GLOBALS["g"] = G::from("b");'), "\n";
+    /// echo m('$GLOBALS["h"] = H::from(2);'), "\n";
+    /// echo m('$GLOBALS["k"] = K::A;'), "\n";
+    /// ```
+    /// ```expect regime=jit-off
+    /// 512
+    /// 536
+    /// 376
+    /// 536
+    /// ```
+    fn backed_enum_table(&mut self, class: ClassId) -> Result<PhpArray, Thrown> {
+        let mut table = PhpArray::new(self)?.hand_on();
+        for name in crate::enums::case_names(self, class) {
+            let row = self.held_case(class, &name).and_then(|case| {
+                let (spelled, value) = (case.slot(CASE_NAME)?, case.slot(CASE_VALUE)?);
+                Some((spelled, backing_key(value)?))
+            });
+            let Some((spelled, key)) = row else {
+                self.release(Value::array(table));
+                return Err(crate::api::raising::fatal(
+                    self,
+                    "InternalError: a backed enum's table built over a case not made, or one whose value is no int or string",
+                ));
+            };
+            let key = match key {
+                Key::Int(n) => Owner::index(n),
+                Key::Str(s) => {
+                    self.addref(&Value::string(s));
+                    Owner::adopt(s).into_key()
+                }
+            };
+            self.addref(&spelled);
+            if let Err(thrown) = table.add_new(self, key, Owner::adopt(spelled)) {
+                self.release(Value::array(table));
+                return Err(thrown);
+            }
+        }
+        Ok(table)
+    }
+
+    /// The case of `class` whose value is `value`, read off the
+    /// `backed_enum_table` its constants' update built, as
+    /// `zend_enum_get_case_by_value` finds it.
+    pub(crate) fn backed_case_named(&self, class: ClassId, value: &Value) -> ByValue {
+        let Some((_, table)) =
+            (self.class_constants.enums_updated.iter()).find(|(held, _)| *held == class)
+        else {
+            return ByValue::Unbuilt;
+        };
+        let Some(key) = backing_key(*value) else {
+            return ByValue::Missing;
+        };
+        table.get(&key).map_or(ByValue::Missing, ByValue::Named)
     }
 
     /// `zend_enum_build_backed_enum_table`'s two refusals over the case
@@ -370,21 +492,15 @@ impl Request {
         backing: php_unit::decl::EnumBacking,
         values: &[(Vec<u8>, bool, Value)],
     ) -> Result<(), Thrown> {
-        let wanted = match backing {
-            php_unit::decl::EnumBacking::Int => TypeTag::Int,
-            _ => TypeTag::String,
+        let (wanted, want) = match backing {
+            php_unit::decl::EnumBacking::Int => (TypeTag::Int, "int"),
+            _ => (TypeTag::String, "string"),
         };
         for (at, (name, _, value)) in values.iter().enumerate() {
             if value.tag() != wanted {
                 let given = value.type_name();
-                let want = if wanted == TypeTag::Int {
-                    "int"
-                } else {
-                    "string"
-                };
-                return Err(crate::api::raising::throw_error(
+                return Err(crate::api::raising::type_error(
                     self,
-                    "TypeError",
                     &format!("Enum case type {given} does not match enum backing type {want}"),
                 ));
             }
@@ -394,9 +510,8 @@ impl Request {
             let earlier = values.get(..at).unwrap_or_default();
             if let Some((earlier, _, _)) = earlier.iter().find(|(_, _, held)| held == value) {
                 let enum_name = self.symbols().class_name(class);
-                return Err(crate::api::raising::throw_error(
+                return Err(crate::api::raising::error(
                     self,
-                    "Error",
                     &format!(
                         "Duplicate value in enum {enum_name} for cases {} and {}",
                         String::from_utf8_lossy(earlier),
@@ -432,7 +547,8 @@ impl Request {
     ///
     /// The first read costs the case's object, `zend_objects_new` at the
     /// enum's size, and nothing else: the case's constant expression is
-    /// the unit's and stays, as opcache's persisted one does, where php
+    /// the unit's and stays, as opcache's persisted one does (an `eval`'d
+    /// enum's goes, [`Request::constant_evaluated`]), where php
     /// -n frees the request's copy of it as it evaluates the case, 96
     /// bytes for a pure case, and so reads 40 bytes less than nothing
     /// (`trace:immutable-literal-arrays`):
@@ -459,7 +575,7 @@ impl Request {
             .map_or(php_unit::decl::EnumBacking::Pure, |decl| decl.backing);
         let value = if backing == php_unit::decl::EnumBacking::Pure {
             if self.symbols().class_constant_of(class, name).is_none() {
-                return Err(self.undefined_case(class, name));
+                return Err(self.undefined_class_constant(class, name));
             }
             None
         } else {
@@ -489,7 +605,7 @@ impl Request {
             .class_constant_of(class, name)
             .map(|(_, constant)| constant.value.clone())
         else {
-            return Err(self.undefined_case(class, name));
+            return Err(self.undefined_class_constant(class, name));
         };
         match &expr {
             ConstExpr::Str(bytes) if self.declared_for_the_request(class) => {
@@ -502,7 +618,27 @@ impl Request {
     /// `zend_enum_new`: the instance standing for the case `name`, its
     /// `name` the constant's interned name and its `value`, for a backed
     /// enum, `value`, whose owner it takes; kept in the request's slot,
-    /// with one more owner for the caller.
+    /// with one more owner for the caller. It is marked uncollectable, as
+    /// `zend_enum_new` marks it, so a case is never a possible root, a
+    /// case of an enum a cached file declares as well:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3335-enum-' . getmypid() . '.inc';
+    /// file_put_contents("$f.tmp", '<?php enum Suit: string { case H = "h"; case S = "s"; }');
+    /// touch("$f.tmp", time() - 10); rename("$f.tmp", $f);
+    /// include $f;
+    /// enum Local { case A; }
+    /// class Box { public $v; }
+    /// $b = new Box; $b->v = Suit::H; $c = $b->v; unset($c);
+    /// $l = new Box; $l->v = Local::A; $d = $l->v; unset($d);
+    /// $s = Suit::from('s'); $e = $s; unset($e);
+    /// var_dump(gc_status()['roots'], $s === Suit::S);
+    /// unlink($f);
+    /// ```
+    /// ```expect
+    /// int(0)
+    /// bool(true)
+    /// ```
     fn made_case(
         &mut self,
         class: ClassId,
@@ -512,32 +648,52 @@ impl Request {
         let case = match self.new_object(class) {
             Ok(case) => case,
             Err(thrown) => {
-                if let Some(value) = value {
-                    self.release(value);
-                }
+                self.release(value.unwrap_or_else(Value::null));
                 return Err(thrown);
             }
         };
+        // `GC_ADD_FLAGS(zobj, GC_NOT_COLLECTABLE)`: a case is part of no
+        // cycle, so no release offers it to the collector.
+        case.heap().set_uncollectable();
         // The case's name is the constant's, as `zend_enum_new` copies
-        // `case_name`.
-        let spelled = self.declared_string(name)?.into_value();
-        write_prop(self, &case, b"name", spelled)?;
-        if let Some(value) = value {
-            write_prop(self, &case, b"value", Owner::adopt(value))?;
+        // `case_name` into `OBJ_PROP_NUM(zobj, 0)` and the value into
+        // the slot after it, no property looked up by name.
+        let spelled = match self.declared_string(name) {
+            Ok(spelled) => spelled.into_value(),
+            Err(thrown) => {
+                self.release(value.unwrap_or_else(Value::null));
+                self.release(case.as_value());
+                return Err(thrown);
+            }
+        };
+        // A slot takes the value it is handed, written or given back; an
+        // error leaves the case, and a value not yet handed on, to go.
+        if let Err(thrown) = case.set_slot(self, CASE_NAME, spelled) {
+            self.release(value.unwrap_or_else(Value::null));
+            self.release(case.as_value());
+            return Err(thrown);
+        }
+        if let Some(value) = value
+            && let Err(thrown) = case.set_slot(self, CASE_VALUE, Owner::adopt(value))
+        {
+            self.release(case.as_value());
+            return Err(thrown);
         }
         self.class_constants
             .enum_cases
             .push(((class, name.to_vec()), case));
         self.addref(&case.as_value());
+        // `zval_update_constant_with_ctx` destroys the constant's
+        // expression once the case stands in its place.
+        self.constant_evaluated(class, name);
         Ok(case)
     }
 
     /// php's `Error` for a case `class` does not declare.
-    fn undefined_case(&mut self, class: ClassId, name: &[u8]) -> Thrown {
+    pub(super) fn undefined_class_constant(&mut self, class: ClassId, name: &[u8]) -> Thrown {
         let class = self.symbols().class_name(class);
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!(
                 "Undefined constant {class}::{}",
                 String::from_utf8_lossy(name)
@@ -584,12 +740,7 @@ impl<'r> Symbols<&'r Request> {
         class: ClassId,
         name: &[u8],
     ) -> Option<(ClassId, &'r ClassConstDecl)> {
-        let row = self.0.linked_class(class)?.constants.find(name, |row| {
-            self.0
-                .row_constant(class, *row)
-                .map_or(&[][..], |(_, constant)| &constant.name.0)
-        })?;
-        self.0.row_constant(class, *row)
+        self.0.class_lookup().class_constant_of(class, name)
     }
 
     /// `CE_CONSTANTS_TABLE(ce)` of a linked class in php's order, each
@@ -602,8 +753,48 @@ impl<'r> Symbols<&'r Request> {
             .constants
             .rows()
             .iter()
-            .filter_map(|row| self.0.row_constant(class, *row))
+            .filter_map(|row| self.0.class_lookup().row_constant(class, *row))
             .collect()
+    }
+}
+
+/// The slot of a case's object `zend_enum_new` writes its name into,
+/// `OBJ_PROP_NUM(zobj, 0)`.
+const CASE_NAME: u32 = 0;
+/// The slot it writes a backed case's value into, the one after.
+const CASE_VALUE: u32 = 1;
+
+/// What a backed enum's `backed_enum_table` answers for a value
+/// ([`Request::backed_case_named`]).
+pub(crate) enum ByValue {
+    /// The name of the case the value is, a view of the table's.
+    Named(Value),
+    /// No case has the value.
+    Missing,
+    /// The request built no table for the enum: a native one, whose
+    /// table is the stub's.
+    Unbuilt,
+}
+
+/// A class constant's value as `ZEND_FETCH_CLASS_CONSTANT` reads it, one
+/// owner the caller's, by whether the opline may keep it in its runtime
+/// cache (`if (OP2_TYPE == IS_CONST && !is_constant_deprecated)
+/// CACHE_POLYMORPHIC_PTR(...)`, `Z/Zend/zend_vm_def.h:6143`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ConstantRead {
+    /// A value the class's row, or the request's case of an enum, keeps
+    /// an owner of to request end, which a slot may name past this read.
+    Kept(Value),
+    /// A deprecated constant's, whose every read raises the deprecation.
+    Deprecated(Value),
+}
+
+impl ConstantRead {
+    /// The value read, whichever it is.
+    pub(crate) fn value(self) -> Value {
+        match self {
+            ConstantRead::Kept(value) | ConstantRead::Deprecated(value) => value,
+        }
     }
 }
 
@@ -620,4 +811,14 @@ pub(crate) enum ConstantFetch {
     /// while it is evaluated and refuses one it finds marked
     /// ([`Request::visited_class_constant`]).
     Lookup,
+}
+
+/// The key a backed case's value is filed under: an int as an int, a
+/// string as a string; none for any other value.
+fn backing_key(value: Value) -> Option<Key> {
+    match (value.as_int(), value.as_php_string()) {
+        (Some(n), _) => Some(Key::Int(n)),
+        (None, Some(s)) => Some(Key::Str(s)),
+        (None, None) => None,
+    }
 }

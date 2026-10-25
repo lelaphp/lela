@@ -8,11 +8,12 @@
 //! the source lists and the scope a write names are [`Properties`]'s,
 //! whose fields no file but this one reads.
 
+use crate::c_number::c_str;
 use php_heap::{Fatal, Heap, Obj, Ref, TableRow, Zval};
 use php_link::Row;
 use php_unit::decl::{PropertyDecl, Visibility};
 
-use crate::api::abi::{PropertyRead, PropertyTest};
+use crate::api::abi::{ObjectHandlers, PropertyAccess, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown, none_pending};
 use crate::api::values::walk::{self, ObjectTable, Table};
@@ -23,6 +24,7 @@ use crate::api::values::{
 use frames::Link;
 
 use super::Frames;
+use super::calls::Retval;
 use super::{DeclaredSlot, Hooks, PropertyInfo, Request, RowPlace, frames};
 
 /// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
@@ -153,6 +155,17 @@ pub(crate) struct TypedProperty {
     pub(crate) readonly: bool,
 }
 
+impl TypedProperty {
+    /// The property `p` that `declaring` declared, where it is typed.
+    fn of(declaring: ClassId, p: &PropertyDecl) -> Option<TypedProperty> {
+        Some(TypedProperty {
+            declaring,
+            ty: p.ty.clone()?,
+            readonly: p.is_readonly,
+        })
+    }
+}
+
 /// One row of an object's property table as [`Request::property_rows`]
 /// reads it: the name, the value, and for a declared slot the class
 /// that declared it and its visibility.
@@ -221,9 +234,12 @@ pub(super) struct Properties {
     /// after its declared properties; an object here carries what the
     /// heap lays down and nothing more, so the words are the request's,
     /// named by `spl_object_id()` and the property's name. A row is
-    /// dropped the moment its word empties, which is before the object
-    /// can die, so an index the store gives out again is never one an
-    /// old row still names.
+    /// dropped the moment its word empties, and every word is taken under
+    /// a hold of its object that is given up only after the word is
+    /// given back ([`Request::guarded`], [`LentGuard`](super::lazy::LentGuard)),
+    /// so no row outlives its object and an index the store gives out
+    /// again is never one an old row still names, as php's guards, which
+    /// live in the object, die with it.
     guards: Vec<((php_heap::ObjectId, Vec<u8>), u32)>,
     /// The recursion guards of objects whose class uses guards, one row
     /// per walk inside one object (`ZEND_GUARD_RECURSION_*` on the
@@ -262,6 +278,50 @@ impl Default for Properties {
 }
 
 impl Request {
+    /// php's warning for a read of the property `name` that an object
+    /// of `class` holds no value for, `Undefined property: %s::$%s`
+    /// (`Z/Zend/zend_object_handlers.c:1012`), the name read to its first
+    /// NUL, as php's `%s` reads it.
+    ///
+    /// ```php
+    /// $o = new stdClass; echo $o->{"foo\0bar"};
+    /// ```
+    /// ```expect
+    /// Warning: Undefined property: stdClass::$foo in %s on line 2
+    /// ```
+    pub(crate) fn undefined_property(&mut self, class: ClassId, name: &[u8]) {
+        let class = self.symbols().class_name(class);
+        let message = [
+            b"Undefined property: ",
+            class.as_bytes(),
+            b"::$",
+            c_str(name),
+        ]
+        .concat();
+        crate::api::raising::warning(self, &message);
+    }
+
+    /// The truth of `value`, an answer the caller holds, given up once
+    /// read.
+    pub(crate) fn truth_of(&mut self, value: Value) -> Result<bool, Thrown> {
+        let truth = crate::api::coerce::truthy(self, &value);
+        self.release(value);
+        truth
+    }
+
+    /// A write of `value` to the property `name` refused with `thrown`,
+    /// the two owners it was handed given up, the value's first.
+    pub(super) fn refused_write<T>(
+        &mut self,
+        name: Owner<PhpString>,
+        value: Owner<Value>,
+        thrown: Thrown,
+    ) -> Result<T, Thrown> {
+        value.give_up(self);
+        name.give_up(self);
+        Err(thrown)
+    }
+
     /// `EG(fake_scope) = scope` for the length of `f`, and the scope
     /// that stood put back after it, whatever `f` answers: the one form
     /// every save of php's fake scope takes, so `properties.fake_scope`
@@ -414,17 +474,86 @@ impl Request {
     /// 0
     /// 1
     /// ```
+    ///
+    /// An enum's `name` and `value` are cached as any class's, its table
+    /// serving properties as `Std` does: read in place, written through
+    /// the readonly slot's refusal, and a name it does not declare refused
+    /// on every pass, interpreted, under force and where every guard fails
+    /// once:
+    ///
+    /// ```php
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// function w($e) { foreach (['value', 'name', 'foo'] as $p) { try { $e->$p = 1; } catch (Error $x) { echo $x->getMessage(), "\n"; } } try { $e->value .= 'x'; } catch (Error $x) { echo $x->getMessage(), "\n"; } }
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n"; w(Suit::H); w(Suit::S);
+    /// ```
+    /// ```expect
+    /// hHhHhH sSsS
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// ```
+    ///
+    /// ```php
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// function w($e) { foreach (['value', 'name', 'foo'] as $p) { try { $e->$p = 1; } catch (Error $x) { echo $x->getMessage(), "\n"; } } try { $e->value .= 'x'; } catch (Error $x) { echo $x->getMessage(), "\n"; } }
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n"; w(Suit::H); w(Suit::S);
+    /// ```
+    /// ```expect regime=jit-force process
+    /// hHhHhH sSsS
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// ```
+    ///
+    /// ```php
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// function w($e) { foreach (['value', 'name', 'foo'] as $p) { try { $e->$p = 1; } catch (Error $x) { echo $x->getMessage(), "\n"; } } try { $e->value .= 'x'; } catch (Error $x) { echo $x->getMessage(), "\n"; } }
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n"; w(Suit::H); w(Suit::S);
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// hHhHhH sSsS
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// ```
     pub(crate) fn cacheable_offset(
         &self,
         object: PhpObject,
         name: &[u8],
     ) -> Option<crate::exec::PropertyOffset> {
         let class = object.class();
-        if self.own_handlers(class).is_some() {
+        let table = self.own_handlers(class).map(ObjectHandlers::properties);
+        if table == Some(PropertyAccess::Own) {
             return None;
         }
         let found = self.find_property_info(class, name);
-        self.offset_of(class, name, found, self.class_hooks(class))
+        let offset = self.offset_of(class, name, found, self.class_hooks(class));
+        // A table of its own that serves properties as `Std` does, an
+        // enum's (`zend_enum_object_handlers`, std's but for `clone_obj`
+        // and `compare`, `Z/Zend/zend_enum.c:168-170`), caches a name it
+        // declares; one it does not is placed on every pass.
+        if table.is_some() && offset == Some(crate::exec::PropertyOffset::Dynamic) {
+            return None;
+        }
+        offset
     }
 
     /// `zend_get_property_offset`'s answer a fetch may keep, from what
@@ -444,7 +573,6 @@ impl Request {
     /// has no hooks, with what a write from the scope is held to
     /// ([`Request::write_type`]). None for every other name.
     #[inline(always)] // its callers' fast arm: out of line it cost 37 instructions on a computed read
-    #[allow(clippy::inline_always)]
     fn offset_of(
         &self,
         class: ClassId,
@@ -921,13 +1049,7 @@ impl Request {
     fn property_root(&self, declaring: ClassId, name: &[u8]) -> ClassId {
         let mut root = declaring;
         for here in self.ancestors(declaring) {
-            let own = self.symbols().class_decl(here).and_then(|decl| {
-                decl.properties
-                    .iter()
-                    .find(|p| &*p.name.0 == name)
-                    .map(|p| p.visibility)
-            });
-            match own {
+            match self.declared_property(here, name).map(|p| p.visibility) {
                 Some(Visibility::Private) => break,
                 Some(_) => root = here,
                 None => {}
@@ -962,13 +1084,7 @@ impl Request {
         if placed.visibility == Visibility::Public {
             return true;
         }
-        let scope = scope();
-        match placed.visibility {
-            Visibility::Public => true,
-            _ if scope == Some(placed.declaring) => true,
-            Visibility::Private => false,
-            Visibility::Protected => self.check_protected(placed.root, scope),
-        }
+        self.reaches_member(placed.declaring, placed.root, placed.visibility, scope())
     }
 
     /// `zend_get_property_offset` where the row `ce->properties_info`
@@ -1020,17 +1136,8 @@ impl Request {
         if scope != Some(declaring) {
             // `ZEND_ACC_CHANGED`: the scope's own private `static` wins
             // where the row is a `static` too.
-            let own = scope.is_some_and(|scope| {
-                scope != class
-                    && self.symbols().instance_of(class, scope)
-                    && self.symbols().class_decl(scope).is_some_and(|decl| {
-                        decl.properties.iter().any(|p| {
-                            !p.is_instance
-                                && p.visibility == Visibility::Private
-                                && &*p.name.0 == name
-                        })
-                    })
-            });
+            let own =
+                scope.is_some_and(|scope| self.parent_declares_private(class, scope, name, false));
             match visibility {
                 _ if is_instance => return None,
                 _ if own => {}
@@ -1044,13 +1151,15 @@ impl Request {
         }
         if !silent {
             let shown = self.symbols().class_name(class);
-            crate::api::raising::notice(
-                self,
-                &format!(
-                    "Accessing static property {shown}::${} as non static",
-                    String::from_utf8_lossy(name)
-                ),
-            );
+            let message = [
+                b"Accessing static property ",
+                shown.as_bytes(),
+                b"::$",
+                c_str(name),
+                b" as non static",
+            ]
+            .concat();
+            crate::api::raising::notice(self, &message);
         }
         Some(Ok(()))
     }
@@ -1066,15 +1175,30 @@ impl Request {
             InfoFound::Absent => return None,
             InfoFound::Unrecorded => {}
         }
-        self.symbols().lineage(class).find_map(|here| {
-            let p = self
-                .symbols()
-                .class_decl(here)?
-                .properties
-                .iter()
-                .find(|p| &*p.name.0 == name)?;
-            Some((here, p))
-        })
+        (self.symbols().lineage(class))
+            .find_map(|here| Some((here, self.declared_property(here, name)?)))
+    }
+
+    /// The property `name` as `class` declares it itself; none for one
+    /// it inherits.
+    fn declared_property(&self, class: ClassId, name: &[u8]) -> Option<&PropertyDecl> {
+        (self.symbols().class_decl(class)?.properties.iter()).find(|p| &*p.name.0 == name)
+    }
+
+    /// Whether `scope` is a parent of `class` that declares `name` as a
+    /// private property of its own, an instance one where `instance`,
+    /// a `static` one where not.
+    fn parent_declares_private(
+        &self,
+        class: ClassId,
+        scope: ClassId,
+        name: &[u8],
+        instance: bool,
+    ) -> bool {
+        scope != class
+            && self.symbols().instance_of(class, scope)
+            && (self.declared_property(scope, name))
+                .is_some_and(|p| p.is_instance == instance && p.visibility == Visibility::Private)
     }
 
     /// `ZEND_WRONG_PROPERTY_OFFSET` for a name no instance row placed:
@@ -1141,15 +1265,8 @@ impl Request {
     /// is a parent of `class` that declares `name` as a private instance
     /// property of its own.
     pub(crate) fn parent_private(&self, class: ClassId, name: &[u8]) -> Option<ClassId> {
-        self.property_scope().filter(|&scope| {
-            scope != class
-                && self.symbols().instance_of(class, scope)
-                && self.symbols().class_decl(scope).is_some_and(|decl| {
-                    decl.properties.iter().any(|p| {
-                        p.is_instance && p.visibility == Visibility::Private && &*p.name.0 == name
-                    })
-                })
-        })
+        (self.property_scope())
+            .filter(|&scope| self.parent_declares_private(class, scope, name, true))
     }
 
     fn placed_row(&self, class: ClassId, name: &[u8]) -> Option<(usize, ClassId, &PropertyDecl)> {
@@ -1337,15 +1454,11 @@ impl Request {
             _ if readonly => "protected(set) readonly",
             _ => "protected(set)",
         };
-        let from = match self.executed_scope() {
-            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
-            None => String::from("global scope"),
-        };
+        let from = self.scope_phrase(self.executed_scope());
         let class = self.symbols().class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot {operation} {word} property {class}::${shown} from {from}"),
         )
     }
@@ -1366,11 +1479,24 @@ impl Request {
         visibility: Visibility,
         scope: Option<ClassId>,
     ) -> bool {
+        self.reaches_member(class, class, visibility, scope)
+    }
+
+    /// Whether `scope` reaches a member `declaring` declared as
+    /// `visibility`, a protected one measured against `root`, the class
+    /// that first declared it (`is_protected_compatible_scope`).
+    pub(super) fn reaches_member(
+        &self,
+        declaring: ClassId,
+        root: ClassId,
+        visibility: Visibility,
+        scope: Option<ClassId>,
+    ) -> bool {
         match visibility {
             Visibility::Public => true,
-            _ if scope == Some(class) => true,
+            _ if scope == Some(declaring) => true,
             Visibility::Private => false,
-            Visibility::Protected => self.check_protected(class, scope),
+            Visibility::Protected => self.check_protected(root, scope),
         }
     }
 
@@ -1646,9 +1772,8 @@ impl Request {
         }
         let class = self.symbols().class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name);
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!(
                 "Cannot access uninitialized non-nullable property {class}::${shown} by reference"
             ),
@@ -1664,13 +1789,7 @@ impl Request {
         slot: u32,
     ) -> Option<(TypedProperty, Vec<u8>)> {
         let (declaring, p) = self.placed_property(class, slot)?;
-        let name = p.name.0.to_vec();
-        let typed = TypedProperty {
-            declaring,
-            ty: p.ty.clone()?,
-            readonly: p.is_readonly,
-        };
-        Some((typed, name))
+        Some((TypedProperty::of(declaring, p)?, p.name.0.to_vec()))
     }
 
     /// `ZEND_REF_ADD_TYPE_SOURCE` over the property whose slot `slot` of
@@ -1715,11 +1834,44 @@ impl Request {
     /// `zend_assign_to_variable` does where `ZEND_REF_HAS_TYPE_SOURCES`
     /// reads false. The value is given up with the `TypeError` and what
     /// the cell held stands, as php gives up its copy.
+    ///
+    /// `handed` is the operand kind `zend_assign_to_typed_ref_ex` is told
+    /// the value came as: it copies the value in and, for a `Tmp` or a
+    /// `Var`, gives the operand's own owner up after with
+    /// `i_zval_ptr_dtor_noref`, which leaves what landed a possible root
+    /// of the cycle collector. A `Cv` and a `Const` keep their own owner,
+    /// and a native's value, which has no operand (`Unused`), moves in as
+    /// `zend_try_assign_typed_ref` moves it; neither is offered.
+    /// `zend_assign_to_typed_prop` and `zend_std_write_property` hand
+    /// their copy on as `IS_TMP_VAR` whatever the operand was:
+    ///
+    /// ```php
+    /// class P { public array $path = []; public $plain = []; }
+    /// function t() {
+    ///     $p = new P; $id = 'x'; $v = [$id];
+    ///     $r = &$p->path; $s = &$p->path; unset($s);
+    ///     gc_collect_cycles();
+    ///     $p->path = [$id]; $a = gc_status()['roots'];
+    ///     gc_collect_cycles();
+    ///     $r = $v; $b = gc_status()['roots'];
+    ///     $q = new P; $w = &$q->plain; gc_collect_cycles();
+    ///     $q->plain = [$id]; $c = gc_status()['roots'];
+    ///     var_dump($a, $b, $c, $p->path === $v);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// int(1)
+    /// int(0)
+    /// int(0)
+    /// bool(true)
+    /// ```
     pub(crate) fn assign_to_reference(
         &mut self,
         cell: Ref,
         value: Value,
         strict: bool,
+        handed: php_unit::OperandKind,
     ) -> Result<(), Thrown> {
         if cell.sources() == 0 {
             self.reference_set(cell, value);
@@ -1727,6 +1879,12 @@ impl Request {
         }
         let verdict = crate::ops::verify_ref_assignable(self, cell, &value, strict);
         let value = crate::ops::landed(self, value, verdict)?;
+        if matches!(
+            handed,
+            php_unit::OperandKind::Tmp | php_unit::OperandKind::Var
+        ) {
+            self.memory_mut().gc_possible_root(&value);
+        }
         self.reference_set(cell, value);
         Ok(())
     }
@@ -1762,6 +1920,16 @@ impl Request {
     ///   }
     /// }
     /// ```
+    ///
+    /// The name is printed with `%s`, to its first NUL:
+    ///
+    /// ```php
+    /// class G { function __get($n) { return [1]; } }
+    /// $g = new G; $g->{"f\0bar"}[] = 1;
+    /// ```
+    /// ```expect
+    /// Notice: Indirect modification of overloaded property G::$f has no effect in %s on line 3
+    /// ```
     fn overloaded_write_notice(
         &mut self,
         class: ClassId,
@@ -1774,13 +1942,15 @@ impl Request {
             && got.as_object().is_none()
         {
             let class = self.symbols().class_name(class);
-            let shown = String::from_utf8_lossy(name).into_owned();
-            crate::api::raising::notice(
-                self,
-                &format!(
-                    "Indirect modification of overloaded property {class}::${shown} has no effect"
-                ),
-            );
+            let message = [
+                b"Indirect modification of overloaded property ",
+                class.as_bytes(),
+                b"::$",
+                c_str(name),
+                b" has no effect",
+            ]
+            .concat();
+            crate::api::raising::notice(self, &message);
         }
     }
 
@@ -1877,9 +2047,7 @@ impl Request {
     ) -> Result<Option<Value>, Thrown> {
         if self.guard_word(object, name) & IN_ISSET == 0 {
             let answered = self.call_accessor(object, issetter, IN_ISSET, name, &[])?;
-            let truthy = crate::api::coerce::truthy(self, &answered);
-            self.release(answered);
-            if !truthy? {
+            if !self.truth_of(answered)? {
                 return Ok(Some(Value::null()));
             }
         }
@@ -1887,7 +2055,7 @@ impl Request {
             return Ok(None);
         };
         let class = object.class();
-        let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+        let got = self.call_accessor_into(Retval::Result, object, getter, IN_GET, name, &[])?;
         self.overloaded_write_notice(class, name, read, &got);
         self.hold_magic_get(class, name, getter, got).map(Some)
     }
@@ -2024,9 +2192,8 @@ impl Request {
         let class = self.symbols().class_name(declaring);
         let ty = php_unit::type_to_string(ty);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::type_error(
             self,
-            "TypeError",
             &format!(
                 "Value of type {given} returned from {class}::__get() must be compatible with unset property {class}::${shown} of type {ty}"
             ),
@@ -2073,9 +2240,8 @@ impl Request {
     ) -> Thrown {
         let class = self.symbols().class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot {operation} readonly property {class}::${shown}"),
         )
     }
@@ -2086,9 +2252,8 @@ impl Request {
     pub(crate) fn uninitialized_property(&mut self, declaring: ClassId, name: &[u8]) -> Thrown {
         let class = self.symbols().class_name(declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Typed property {class}::${shown} must not be accessed before initialization"),
         )
     }
@@ -2136,11 +2301,7 @@ impl Request {
     /// bool(false)
     /// ```
     pub(crate) fn bad_property_name_error(&mut self) -> Thrown {
-        crate::api::raising::throw_error(
-            self,
-            "Error",
-            "Cannot access property starting with \"\\0\"",
-        )
+        crate::api::raising::error(self, "Cannot access property starting with \"\\0\"")
     }
 
     /// `zend_wrong_offset`: the placement a magic accessor's guard
@@ -2169,16 +2330,11 @@ impl Request {
         visibility: Visibility,
         name: &[u8],
     ) -> Thrown {
-        let word = match visibility {
-            Visibility::Public => "public",
-            Visibility::Protected => "protected",
-            Visibility::Private => "private",
-        };
+        let word = super::methods::visibility_string(visibility);
         let class = self.symbols().class_name(class);
         let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot access {word} property {class}::${shown}"),
         )
     }
@@ -2318,8 +2474,13 @@ impl Request {
     }
 
     /// `(*guard) |= bit`, the row laid down by the first accessor to
-    /// take it.
+    /// take it, on an object the taker holds across the window
+    /// ([`Request::guarded`]).
     pub(super) fn guard_take(&mut self, object: PhpObject, name: &[u8], bit: u32) {
+        debug_assert!(
+            object.heap().refcount() >= 2,
+            "a property guard taken on an object nothing holds across it"
+        );
         let id = object.heap().id();
         if let Some((_, word)) = self
             .properties
@@ -2361,9 +2522,47 @@ impl Request {
     /// on the object with the property's name as its first argument and
     /// `arguments` after it, under `bit` in the property guard, which is
     /// taken before the call and given back after it whatever the call
-    /// did. The object is one more owner for the span of the call
-    /// (`GC_ADDREF`, `OBJ_RELEASE`), so an accessor that drops the last
-    /// other owner does not free the object under the handler.
+    /// did. The object is one more owner for the span of the guard
+    /// (`GC_ADDREF` before `(*guard) |= bit`, `OBJ_RELEASE` after
+    /// `(*guard) &= ~bit`, as `zend_std_read_property` and its kin order
+    /// them), so an accessor that drops the last other owner does not
+    /// free the object under the handler, its destructor is called with
+    /// the guard down, and no guard row outlives the object it names.
+    ///
+    /// Each accessor drops the last owner of the object it serves, which
+    /// the next `new` makes again, and the destructor reads through
+    /// `__get` and `__isset` again:
+    ///
+    /// ```php
+    /// class F {
+    ///     function __get($n) { if ($n === 'x') { $GLOBALS['o'] = null; } return 7; }
+    ///     function __set($n, $v) { $GLOBALS['o'] = null; }
+    ///     function __isset($n) { if ($n === 'q') { $GLOBALS['o'] = null; } return true; }
+    ///     function __unset($n) { $GLOBALS['o'] = null; }
+    ///     function __destruct() { echo '[', $this->x, isset($this->q) ? 'i' : '-', ']'; }
+    /// }
+    /// $f = 0; for ($i = 0; $i < 3; $i++) { $o = new F; $f += $o->x; }
+    /// echo "| "; $o = new F; $o->z = 1; echo "| "; $o = new F; var_dump(isset($o->q)); $o = new F; unset($o->u);
+    /// echo "\n", $f, "\n";
+    /// ```
+    /// ```expect
+    /// [7i][7i][7i]| [7i]| [7i]bool(true)
+    /// [7i]
+    /// 21
+    /// ```
+    ///
+    /// A destructor served inside one `__get`, and another object's last
+    /// owner dropped inside its own `__get` that the first reads:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// class G { public $keep; function __get($n) { $this->keep = null; return isset($GLOBALS['h']) ? $GLOBALS['h']->y : 2; } }
+    /// class H { function __get($n) { unset($GLOBALS['h']); return 3; } }
+    /// $g = new G; $g->keep = new D; echo $g->a, " "; $h = new H; echo $g->b, " "; $h = new H; echo $g->c, "\n";
+    /// ```
+    /// ```expect
+    /// d2 3 3
+    /// ```
     fn call_accessor(
         &mut self,
         object: PhpObject,
@@ -2372,18 +2571,52 @@ impl Request {
         name: &[u8],
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        self.call_accessor_into(Retval::Native, object, accessor, bit, name, arguments)
+    }
+
+    /// [`Request::call_accessor`] whose accessor's return, where its body
+    /// returned and then threw, goes where `retval` says: `__get`'s under
+    /// a read is the reading opline's `rv`.
+    fn call_accessor_into(
+        &mut self,
+        retval: Retval,
+        object: PhpObject,
+        accessor: Function,
+        bit: u32,
+        name: &[u8],
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        self.guarded(object, name, bit, |req| {
+            req.serve_accessor(retval, object, accessor, name, arguments)
+        })
+    }
+
+    /// `serve` under `bit` of `object`'s guard for `name`, the object held
+    /// across the window (`GC_ADDREF` before `(*guard) |= bit`,
+    /// `OBJ_RELEASE` after `(*guard) &= ~bit`), so the row is given back
+    /// before the object can die.
+    pub(super) fn guarded<T>(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        bit: u32,
+        serve: impl FnOnce(&mut Request) -> T,
+    ) -> T {
+        let held = Owner::take(self, object.as_value());
         self.guard_take(object, name, bit);
-        let served = self.serve_accessor(object, accessor, name, arguments);
+        let served = serve(self);
         self.guard_drop(object, name, bit);
+        held.give_up(self);
         served
     }
 
-    /// [`Request::call_accessor`] without the guard, for the one site
-    /// that holds a bit across two calls: `zend_std_has_property` keeps
-    /// `IN_ISSET` standing while it asks the `__get` that `empty` reads
-    /// the truth of.
+    /// [`Request::call_accessor`] without the guard and the hold, for the
+    /// one site that holds both across two calls: `zend_std_has_property`
+    /// keeps `IN_ISSET` standing, and the object, while it asks the
+    /// `__get` that `empty` reads the truth of.
     fn serve_accessor(
         &mut self,
+        retval: Retval,
         object: PhpObject,
         accessor: Function,
         name: &[u8],
@@ -2393,9 +2626,8 @@ impl Request {
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(*name));
         sent.extend_from_slice(arguments);
-        let held = Owner::take(self, object.as_value());
-        let served = self.serve_method_made(accessor, Some(object), object.class(), &sent, &[]);
-        held.give_up(self);
+        let served =
+            self.serve_method_into(retval, accessor, Some(object), object.class(), &sent, &[]);
         name.give_up(self);
         served
     }
@@ -2580,7 +2812,8 @@ impl Request {
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
-                let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                let got =
+                    self.call_accessor_into(Retval::Result, object, getter, IN_GET, name, &[])?;
                 self.overloaded_write_notice(class, name, read, &got);
                 let held = self.hold_magic_get(class, name, getter, got);
                 return adopted(held);
@@ -2599,17 +2832,14 @@ impl Request {
             let instance = self.lazy_init(object)?;
             let guarded = getter.is_some() || issetter.is_some();
             if guarded && self.guard_word(instance, name) & guard_bit == 0 {
-                self.guard_take(instance, name, guard_bit);
-                let read = self.read_property(instance, name, read);
-                self.guard_drop(instance, name, guard_bit);
-                return read;
+                return self.guarded(instance, name, guard_bit, |req| {
+                    req.read_property(instance, name, read)
+                });
             }
             return self.read_property(instance, name, read);
         }
         if !quiet {
-            let class = self.symbols().class_name(class);
-            let shown = String::from_utf8_lossy(name);
-            crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+            self.undefined_property(class, name);
         }
         Ok(Owner::null())
     }
@@ -2887,9 +3117,7 @@ impl Request {
         // `ZVAL_NULL(retval)` before the warning, so what an error handler
         // writes into the slot is what the fetch then reads.
         self.write_declared_slot(o, placed.slot, Value::null())?;
-        let class = self.symbols().class_name(class);
-        let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        self.undefined_property(class, name);
         Ok(())
     }
 
@@ -2932,11 +3160,7 @@ impl Request {
         name: &[u8],
     ) -> Option<TypedProperty> {
         let (_, declaring, p) = self.placed_row(class, name)?;
-        p.ty.clone().map(|ty| TypedProperty {
-            declaring,
-            ty,
-            readonly: p.is_readonly,
-        })
+        TypedProperty::of(declaring, p)
     }
 
     /// [`Request::declared_typed_property`] of the property in slot
@@ -2945,31 +3169,15 @@ impl Request {
     /// with no find of the name.
     pub(crate) fn typed_property_at(&self, class: ClassId, slot: u32) -> Option<TypedProperty> {
         let (declaring, p) = self.placed_property(class, slot)?;
-        p.ty.clone().map(|ty| TypedProperty {
-            declaring,
-            ty,
-            readonly: p.is_readonly,
-        })
+        TypedProperty::of(declaring, p)
     }
 
-    /// [`Request::declared_typed_property`] for a `static` property: the
-    /// `zend_property_info` `zend_fetch_static_property_address` hands on,
-    /// its type and the class that declared it, where the property is
-    /// typed.
-    pub(crate) fn declared_typed_static(
-        &self,
-        class: ClassId,
-        name: &[u8],
-    ) -> Option<TypedProperty> {
-        let (declaring, p) = self.property_info_of(class, name)?;
-        if p.is_instance {
-            return None;
-        }
-        p.ty.clone().map(|ty| TypedProperty {
-            declaring,
-            ty,
-            readonly: p.is_readonly,
-        })
+    /// [`Request::declared_typed_property`] for the `static` property
+    /// `info` names: the `zend_property_info`
+    /// `zend_fetch_static_property_address` hands on, its type and the
+    /// class that declared it, where the property is typed.
+    pub(crate) fn typed_static(&self, info: PropertyInfo) -> Option<TypedProperty> {
+        TypedProperty::of(info.declaring, self.property_decl(info)?)
     }
 
     /// `zend_verify_property_type` over a value about to land in a typed
@@ -3040,9 +3248,8 @@ impl Request {
         }
         let class = self.symbols().class_name(typed.declaring);
         let shown = String::from_utf8_lossy(name).into_owned();
-        let error = crate::api::raising::throw_error(
+        let error = crate::api::raising::error(
             self,
-            "Error",
             &format!("Object was released while assigning to property {class}::${shown}"),
         );
         held.let_go(self);
@@ -3102,13 +3309,13 @@ impl Request {
         o: Obj,
         i: u32,
         value: Value,
-        strict: bool,
+        (strict, handed): (bool, php_unit::OperandKind),
     ) -> Result<(Value, Value), Thrown> {
         if let Some(r) = o.slot(i).as_reference() {
             let cell = PhpRef::of(r);
             let garbage = cell.get();
             self.addref(&garbage);
-            if let Err(thrown) = self.assign_to_reference(r, value, strict) {
+            if let Err(thrown) = self.assign_to_reference(r, value, strict, handed) {
                 self.release(garbage);
                 return Err(thrown);
             }
@@ -3221,9 +3428,7 @@ impl Request {
             }
             if !self.serves_accessor(class, Accessor::Set) {
                 let thrown = self.inaccessible_property(class, hooked.visibility, name.as_bytes());
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
+                return self.refused_write(name, value, thrown);
             }
         }
         let placed = self.declared_slot(class, name.as_bytes());
@@ -3232,9 +3437,7 @@ impl Request {
         {
             if !o.slot(p.slot).is_undef() {
                 if let Some(thrown) = self.found_refusal(o, p, name.as_bytes()) {
-                    value.give_up(self);
-                    name.give_up(self);
-                    return Err(thrown);
+                    return self.refused_write(name, value, thrown);
                 }
                 return self.write_std_property(object, name, value);
             }
@@ -3256,16 +3459,12 @@ impl Request {
             && !self.serves_accessor(class, Accessor::Set)
         {
             let thrown = self.inaccessible_property(class, p.visibility, name.as_bytes());
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         let bad_name = placed.is_none() && Self::bad_property_name(name.as_bytes());
         if bad_name && !self.serves_accessor(class, Accessor::Set) {
             let thrown = self.bad_property_name_error();
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         let (name, value) = if placed.is_none() && !bad_name {
             match self.write_held_dynamic(o, name, value) {
@@ -3301,9 +3500,7 @@ impl Request {
         // `zend_wrong_offset`: the guard stands, so the placement is
         // made again and the `Error` it raises is the answer.
         if wrong && let Some(thrown) = self.wrong_offset(class, &bytes) {
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         if lazy {
             return self.lazy_write(object, name, value, true);
@@ -3314,9 +3511,7 @@ impl Request {
             && !placed.readonly
             && let Some(thrown) = self.set_refusal(&placed, &bytes, "modify")
         {
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         self.write_std_property(object, name, value)
     }
@@ -3335,18 +3530,13 @@ impl Request {
     ) -> Result<(), Thrown> {
         let instance = match self.lazy_init(object) {
             Ok(instance) => instance,
-            Err(thrown) => {
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
-            }
+            Err(thrown) => return self.refused_write(name, value, thrown),
         };
         let bytes = name.as_bytes().to_vec();
         if guarded && self.guard_word(instance, &bytes) & IN_SET == 0 {
-            self.guard_take(instance, &bytes, IN_SET);
-            let written = self.write_property(instance, name, value);
-            self.guard_drop(instance, &bytes, IN_SET);
-            return written;
+            return self.guarded(instance, &bytes, IN_SET, |req| {
+                req.write_property(instance, name, value)
+            });
         }
         self.write_property(instance, name, value)
     }
@@ -3460,7 +3650,10 @@ impl Request {
             } else {
                 value.hand_on()
             };
-            match self.assign_declared_slot(o, placed.slot, value, self.property_strict_types()) {
+            // `zend_std_write_property`'s `zend_assign_to_variable_ex(...,
+            // IS_TMP_VAR, ...)` over the owner it took of the value.
+            let regime = (self.property_strict_types(), php_unit::OperandKind::Tmp);
+            match self.assign_declared_slot(o, placed.slot, value, regime) {
                 Ok((_, garbage)) => self.release(garbage),
                 Err(thrown) => {
                     name.give_up(self);
@@ -3474,17 +3667,11 @@ impl Request {
             };
             let key = php_heap::Key::Str(name.heap());
             if let Err(thrown) = self.dynamic_property_creation(object, name.as_bytes()) {
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
+                return self.refused_write(name, value, thrown);
             }
             let table = match self.separated_properties(o) {
                 Ok(table) => table,
-                Err(thrown) => {
-                    value.give_up(self);
-                    name.give_up(self);
-                    return Err(thrown);
-                }
+                Err(thrown) => return self.refused_write(name, value, thrown),
             };
             let written = self.array_update(table, key, value.hand_on());
             name.give_up(self);
@@ -3574,7 +3761,12 @@ impl Request {
         let held = Value::of_slot(place.read());
         if let Some(cell) = held.as_php_ref() {
             let strict = self.property_strict_types();
-            return self.assign_to_reference(cell.heap(), value.hand_on().undef_as_null(), strict);
+            return self.assign_to_reference(
+                cell.heap(),
+                value.hand_on().undef_as_null(),
+                strict,
+                php_unit::OperandKind::Tmp,
+            );
         }
         place.write(value.hand_on().into_zval());
         self.release(held);
@@ -3616,21 +3808,13 @@ impl Request {
     ) -> Result<bool, Thrown> {
         let class = object.class();
         let bytes = key.as_bytes().to_vec();
-        let (mangled_class, name) = match bytes.strip_prefix(b"\0") {
-            Some(rest) => match rest.iter().position(|b| *b == 0) {
-                Some(end) => (Some(rest[..end].to_vec()), rest[end + 1..].to_vec()),
-                None => (None, bytes.clone()),
-            },
-            None => (None, bytes.clone()),
-        };
+        let (mangled_class, name) = mangled_parts(&bytes);
+        let (mangled_class, name) = (mangled_class.map(<[u8]>::to_vec), name.to_vec());
         let class_name = self.class_name_bytes(class);
         // `is_property_visibility_changed`'s `ZEND_ACC_VIRTUAL` arm: a
         // key the class's table holds a virtual property under has no
         // slot to take the value, and the whole unserialization fails.
-        let reaches = match &mangled_class {
-            None => true,
-            Some(c) => c.as_slice() == b"*" || c.eq_ignore_ascii_case(&class_name),
-        };
+        let reaches = reaches_mangled(mangled_class.as_deref(), &class_name);
         if reaches
             && let Some(hooked) = self.hooked(class, &name)
             && hooked.is_virtual
@@ -3688,13 +3872,7 @@ impl Request {
             return None;
         }
         let class = object.class();
-        let (mangled_class, name) = match key.strip_prefix(b"\0") {
-            Some(rest) => match rest.iter().position(|b| *b == 0) {
-                Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
-                None => (None, key),
-            },
-            None => (None, key),
-        };
+        let (mangled_class, name) = mangled_parts(key);
         let class_name = self.class_name_bytes(class);
         let exact = self.placed(class).rev().find(|(_, declaring, p)| {
             if *p.name.0 != *name {
@@ -3708,9 +3886,7 @@ impl Request {
             }
         });
         exact.map(|(slot, _, _)| slot).or_else(|| {
-            let reachable =
-                mangled_class.is_none_or(|c| c == b"*" || c.eq_ignore_ascii_case(&class_name));
-            if !reachable {
+            if !reaches_mangled(mangled_class, &class_name) {
                 return None;
             }
             // `ce->properties_info` holds a parent's private property
@@ -3858,6 +4034,15 @@ impl Request {
     /// Exception: Cannot create dynamic property class@anonymous::$y
     /// NULL
     /// ```
+    ///
+    /// The deprecation prints the name with `%s`, to its first NUL:
+    ///
+    /// ```php
+    /// class N {} $n = new N; $n->{"f\0bar"} = 1;
+    /// ```
+    /// ```expect
+    /// Deprecated: Creation of dynamic property N::$f is deprecated in %s on line 2
+    /// ```
     pub(crate) fn dynamic_property_creation(
         &mut self,
         object: PhpObject,
@@ -3874,33 +4059,31 @@ impl Request {
         }
         let shown = String::from_utf8_lossy(name).into_owned();
         let class_name = self.symbols().class_name(class);
+        let cannot = format!("Cannot create dynamic property {class_name}::${shown}");
         if carries == DynamicProperties::Forbidden {
-            return Err(crate::api::raising::throw_error(
-                self,
-                "Error",
-                &format!("Cannot create dynamic property {class_name}::${shown}"),
-            ));
+            return Err(crate::api::raising::error(self, &cannot));
         }
         let held = Owner::take(self, object.as_value());
-        crate::api::raising::deprecated(
-            self,
-            &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
-        );
-        if object.as_value().refcount() > 1 {
-            held.let_go(self);
+        let message = [
+            b"Creation of dynamic property ",
+            class_name.as_bytes(),
+            b"::$",
+            c_str(name),
+            b" is deprecated",
+        ]
+        .concat();
+        crate::api::raising::deprecated(self, &message);
+        let shared = object.as_value().refcount() > 1;
+        held.let_go(self);
+        if shared {
             return Ok(());
         }
-        held.let_go(self);
         none_pending(self)?;
-        Err(crate::api::raising::throw_error(
-            self,
-            "Error",
-            &format!("Cannot create dynamic property {class_name}::${shown}"),
-        ))
+        Err(crate::api::raising::error(self, &cannot))
     }
 
     /// `ZEND_FE_RESET_R`'s separation of a shared property table
-    /// (`Z/Zend/zend_vm_def.h:6903`): the loop walks the object's own
+    /// (`Z/Zend/zend_vm_def.h:6908`): the loop walks the object's own
     /// table, so one a cast shares is duplicated first and the object
     /// takes the copy, php's `zend_array_dup` under
     /// `GC_REFCOUNT(zobj->properties) > 1`. An object that has no table
@@ -3916,7 +4099,7 @@ impl Request {
 
     /// The start of a `foreach` over an object whose class has no
     /// `get_iterator`, the object arm `FE_RESET_R` and `FE_RESET_RW`
-    /// share (`Z/Zend/zend_vm_def.h:6903-6934`): the property table the
+    /// share (`Z/Zend/zend_vm_def.h:6908-6939`): the property table the
     /// walk goes over made the object's own, separated where a cast
     /// shares it and laid down where the object has none, which is php's
     /// `get_properties` materialising it; then, where the object has a
@@ -3961,7 +4144,7 @@ impl Request {
         Ok(Some(at))
     }
 
-    /// `zend_fe_fetch_object_helper` (`Z/Zend/zend_vm_def.h:7058`) over
+    /// `zend_fe_fetch_object_helper` (`Z/Zend/zend_vm_def.h:7063`) over
     /// an object whose class has no `get_iterator`, and the object arm
     /// of `FE_FETCH_RW`: the next property the executing scope may see
     /// from where iterator `idx` stands, with its key and where it sits,
@@ -4309,7 +4492,7 @@ impl Request {
     }
 
     /// `FE_FETCH_RW`'s bind over an object's property
-    /// (`Z/Zend/zend_vm_def.h:7331-7357`, `:7434-7439`): the cell the
+    /// (`Z/Zend/zend_vm_def.h:7336-7362`, `:7439-7444`): the cell the
     /// place holds, or one made there over the value it held
     /// (`ZVAL_NEW_EMPTY_REF`), the place keeping the owner it had. A
     /// declared `readonly` slot is php's `Error` and no cell; a typed
@@ -4470,9 +4653,7 @@ impl Request {
             return Err(thrown);
         }
         if read == PropertyRead::Warning {
-            let class = self.symbols().class_name(object.class());
-            let shown = String::from_utf8_lossy(name.as_bytes()).into_owned();
-            crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+            self.undefined_property(object.class(), name.as_bytes());
         }
         // `zend_hash_add(zobj->properties, name, &EG(uninitialized_zval))`
         // after the warning: the table as the handler the warning reached
@@ -4753,30 +4934,22 @@ impl Request {
         if issetter.is_some() && test == PropertyTest::Exists {
             return Ok(false);
         }
+        let issetter = issetter.filter(|_| self.guard_word(object, name) & IN_ISSET == 0);
         let Some(issetter) = issetter else {
             if initialises(self) {
                 return self.lazy_has(object, name, test);
             }
             return Ok(false);
         };
-        if self.guard_word(object, name) & IN_ISSET != 0 {
-            if initialises(self) {
-                return self.lazy_has(object, name, test);
-            }
-            return Ok(false);
-        }
         // php holds `IN_ISSET` across both calls, so the `__get` the
         // `empty` arm asks for runs with the `__isset`'s guard still
         // standing, and the object across both (`GC_ADDREF(zobj)`,
         // `OBJ_RELEASE` after the guard is down), so an `__isset` that
         // gives up every other owner does not free the object the
         // `__get` is served on.
-        self.guard_take(object, name, IN_ISSET);
-        let held = Owner::take(self, object.as_value());
-        let answered = self.isset_then_truth(object, name, test, issetter);
-        self.guard_drop(object, name, IN_ISSET);
-        held.give_up(self);
-        answered
+        self.guarded(object, name, IN_ISSET, |req| {
+            req.isset_then_truth(object, name, test, issetter)
+        })
     }
 
     /// `zend_std_has_property`'s `/* have issetter - try with it! */`
@@ -4808,10 +4981,8 @@ impl Request {
         test: PropertyTest,
         issetter: Function,
     ) -> Result<bool, Thrown> {
-        let answered = self.serve_accessor(object, issetter, name, &[])?;
-        let truthy = crate::api::coerce::truthy(self, &answered);
-        self.release(answered);
-        let truthy = truthy?;
+        let answered = self.serve_accessor(Retval::Native, object, issetter, name, &[])?;
+        let truthy = self.truth_of(answered)?;
         if test != PropertyTest::NotEmpty || !truthy {
             return Ok(truthy);
         }
@@ -4822,9 +4993,7 @@ impl Request {
             return Ok(false);
         };
         let answered = self.call_accessor(object, getter, IN_GET, name, &[])?;
-        let truthy = crate::api::coerce::truthy(self, &answered);
-        self.release(answered);
-        truthy
+        self.truth_of(answered)
     }
 
     /// `zend_std_has_property`'s `lazy_init:` arm: the object
@@ -4861,10 +5030,9 @@ impl Request {
         if self.serves_accessor(instance.class(), Accessor::Isset)
             && self.guard_word(instance, name) & IN_ISSET == 0
         {
-            self.guard_take(instance, name, IN_ISSET);
-            let held = self.has_property(instance, name, test);
-            self.guard_drop(instance, name, IN_ISSET);
-            return held;
+            return self.guarded(instance, name, IN_ISSET, |req| {
+                req.has_property(instance, name, test)
+            });
         }
         self.has_property(instance, name, test)
     }
@@ -5055,10 +5223,9 @@ impl Request {
         if o.laziness() != php_heap::Laziness::Eager {
             let instance = self.lazy_init(object)?;
             if unsetter.is_some() && self.guard_word(instance, name) & IN_UNSET == 0 {
-                self.guard_take(instance, name, IN_UNSET);
-                let unset = self.unset_property(instance, name);
-                self.guard_drop(instance, name, IN_UNSET);
-                return unset;
+                return self.guarded(instance, name, IN_UNSET, |req| {
+                    req.unset_property(instance, name)
+                });
             }
             return self.unset_property(instance, name);
         }
@@ -5078,4 +5245,23 @@ impl Frames<&mut Request> {
     pub fn with_fake_scope<R>(self, class: ClassId, f: impl FnOnce(&mut Request) -> R) -> R {
         self.0.in_fake_scope(Some(class), f)
     }
+}
+
+/// A serialized property key's parts: the class a `\0C\0p` or `\0*\0p`
+/// key names, none for a plain one, and the property's name.
+fn mangled_parts(key: &[u8]) -> (Option<&[u8]>, &[u8]) {
+    let Some(rest) = key.strip_prefix(b"\0") else {
+        return (None, key);
+    };
+    match rest.iter().position(|b| *b == 0) {
+        Some(end) => (Some(&rest[..end]), &rest[end + 1..]),
+        None => (None, key),
+    }
+}
+
+/// Whether a key that names `mangled_class` reaches a property of the
+/// class named `class_name`: a plain key, a protected one, or the
+/// class's own private one.
+fn reaches_mangled(mangled_class: Option<&[u8]>, class_name: &[u8]) -> bool {
+    mangled_class.is_none_or(|c| c == b"*" || c.eq_ignore_ascii_case(class_name))
 }

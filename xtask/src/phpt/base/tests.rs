@@ -24,7 +24,7 @@ fn repository(name: &str) -> (Tree, Tree) {
 
 /// Whether git lists a worktree at `dir`.
 fn listed(root: &Path, dir: &Path) -> bool {
-    let list = git(root, &["worktree", "list", "--porcelain"], None).unwrap();
+    let list = git(root, &["worktree", "list", "--porcelain"]).unwrap();
     list.lines().any(|line| {
         line.strip_prefix("worktree ")
             .is_some_and(|at| Path::new(at).ends_with(dir.file_name().unwrap()))

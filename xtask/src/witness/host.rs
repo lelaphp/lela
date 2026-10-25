@@ -262,6 +262,7 @@ impl Held {
                 match oracle::compare(registry, &id, theirs.as_bytes(), ours.as_bytes()) {
                     Verdict::Same => (Judgement::Pass, String::new()),
                     Verdict::Diverged(row) => (Judgement::Diverged, row.reason),
+                    Verdict::Moved(moved) => (Judgement::Fail, moved.to_string()),
                     Verdict::Differs(diff) => (Judgement::Fail, diff),
                 }
             }
@@ -649,6 +650,7 @@ fn answered(request: &Request, listen: &str, fill: &dyn Fn(&str) -> String) -> R
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

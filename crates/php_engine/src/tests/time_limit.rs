@@ -116,7 +116,7 @@ fn a_fatal_under_the_guard_resumes_the_limit() {
     let (served, _) = timed(
         &engine,
         &format!(
-            "<?php\nfunction bails() {{ $s = 'x'; for (;;) {{ $s .= $s; }} }}\n\
+            "<?php\nfunction bails() {{ $t = 'x'; for ($i = 0; $i < 16; $i++) {{ $t .= $t; }} $s = ''; for (;;) {{ $s .= $t; }} }}\n\
          function blocks() {{}}\n\
          register_shutdown_function(function () {{\n\
          {SPINS}\n}});\n\

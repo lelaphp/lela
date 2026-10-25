@@ -3,6 +3,7 @@
 //! their regions, `scripts/adr-index.sh` lists every ADR, the
 //! `SessionStart` hook is wired for the four matchers, and the two blocks
 //! the function hook hands the engine are each under its cap with room.
+#![cfg(tracked)]
 
 use std::fmt::Write;
 use std::path::Path;

@@ -34,9 +34,7 @@ use crate::api::abi::{
     Callable, Entry, Never, OrFalse, Passed, PropertyPurpose, Raw, Union, Variadic,
 };
 use crate::api::coerce::to_string;
-use crate::api::raising::{
-    Thrown, arg_type_error, argument_error, deprecated, throw_error, warning,
-};
+use crate::api::raising::{Thrown, arg_type_error, argument_error, deprecated, error, warning};
 use crate::api::request::Request;
 use crate::api::values::walk::{self, GiveUp, Hold, Unwritten};
 use crate::api::values::{
@@ -814,9 +812,8 @@ fn get_class(req: &mut Request, object: Passed<PhpObject>) -> Result<Owner<PhpSt
                 scope
             }
             None => {
-                return Err(throw_error(
+                return Err(error(
                     req,
-                    "Error",
                     "get_class() without arguments must be called from within a class",
                 ));
             }
@@ -958,7 +955,7 @@ fn strlen(string: PhpString) -> i64 {
 /// pk(function () { try { define('A::B', 1); } catch (ValueError $e) {} });
 /// ```
 /// ```expect
-/// 2920 32
+/// 2792 32
 /// ```
 ///
 /// The constant is listed under its name as given and found whatever
@@ -1445,7 +1442,7 @@ fn defined(req: &mut Request, constant_name: PhpString) -> Result<bool, Thrown> 
 /// ```
 #[php_function]
 fn var_dump(req: &mut Request, value: Value, values: Variadic<Value>) {
-    for (at, coerced) in (1u32..).zip(std::iter::once(value).chain(values.0)) {
+    for (at, coerced) in (1u32..).zip(std::iter::once(value).chain(values)) {
         let value = req
             .frames()
             .argument(at)
@@ -1529,29 +1526,41 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
 
 /// [`dump`] over a value that holds no other, a call of its own, so its
 /// texts are off the stack of a nest of objects or arrays dumped level
-/// by level (#3159).
+/// by level (#3159). A float is `%.*H` at `serialize_precision`, which
+/// writes a non-finite one whole however short the precision:
+///
+/// ```php
+/// ini_set('serialize_precision', 1);
+/// debug_zval_dump(INF, -INF, NAN, 1.5);
+/// ```
+/// ```expect
+/// float(INF)
+/// float(-INF)
+/// float(NAN)
+/// float(2)
+/// ```
 #[inline(never)]
 fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
-    if let Some(b) = value.as_bool() {
-        req.response_mut()
-            .write(format!("{common}bool({b})\n").as_bytes());
+    let line = if let Some(b) = value.as_bool() {
+        format!("{common}bool({b})\n")
     } else if let Some(n) = value.as_int() {
-        req.response_mut()
-            .write(format!("{common}int({n})\n").as_bytes());
+        format!("{common}int({n})\n")
     } else if let Some(f) = value.as_float() {
-        // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
-        let text = php_heap::double_to_string(
-            f,
-            req.ini().serialize_precision(),
-            php_heap::Exponent::Upper,
-        );
-        req.response_mut()
-            .write(format!("{common}float({text})\n").as_bytes());
+        // `php_var_dump` prints a float with `%.*H` at `serialize_precision`,
+        // which writes a non-finite one whole, as `zend_gcvt` does at -1.
+        let precision = if f.is_finite() {
+            req.ini().serialize_precision()
+        } else {
+            -1
+        };
+        let text = php_heap::double_to_string(f, precision, php_heap::Exponent::Upper);
+        format!("{common}float({text})\n")
     } else if let Some(s) = value.as_php_string() {
         req.response_mut()
             .write(format!("{common}string({}) \"", s.len()).as_bytes());
         req.response_mut().write(s.as_bytes());
         req.response_mut().write(b"\"\n");
+        return;
     } else if let Some(resource) = value.as_resource() {
         // `IS_RESOURCE`: the list's id and the type's name through
         // `zend_rsrc_list_get_rsrc_type`, which is `Unknown` once
@@ -1560,16 +1569,14 @@ fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
             || String::from("Unknown"),
             |name| String::from_utf8_lossy(name).into_owned(),
         );
-        req.response_mut()
-            .write(format!("{common}resource({}) of type ({name})\n", resource.id()).as_bytes());
+        format!("{common}resource({}) of type ({name})\n", resource.id())
     } else if value.tag() == crate::api::values::TypeTag::Undef {
         // `php_var_dump`'s `default:` arm.
-        req.response_mut()
-            .write(format!("{common}UNKNOWN:0\n").as_bytes());
+        format!("{common}UNKNOWN:0\n")
     } else {
-        req.response_mut()
-            .write(format!("{common}NULL\n").as_bytes());
-    }
+        format!("{common}NULL\n")
+    };
+    req.response_mut().write(line.as_bytes());
 }
 
 /// `php_var_dump`'s `IS_ARRAY` arm: `GC_IS_RECURSIVE`, then
@@ -1596,7 +1603,7 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
         .write(format!("{common}array({}) {{\n", array.len()).as_bytes());
     let held = Hold::Owner(GiveUp::Dtor);
     let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
-        if too_deep(req, level, req.stack_limit().exhausted()) {
+        if too_deep(req, level, req.stack_limit().refuses_a_level()) {
             return Ok(ControlFlow::Continue(()));
         }
         // `php_array_element_dump`.
@@ -1753,11 +1760,7 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
 fn dump_object(req: &mut Request, common: &str, object: PhpObject, level: usize) {
     // `php_var_dump`'s `ZEND_ACC_ENUM` arm, ahead of the recursion
     // guard as php has it.
-    if req
-        .symbols()
-        .class_decl(object.class())
-        .is_some_and(|decl| decl.kind == ClassKind::Enum)
-    {
+    if req.class_is(object.class(), ClassKind::Enum) {
         dump_enum(req, common, object);
         return;
     }
@@ -1847,7 +1850,7 @@ fn dump_object_header(req: &mut Request, common: &str, object: PhpObject, count:
 /// whether the value is still to be dumped.
 #[inline(never)]
 fn dump_property_head(req: &mut Request, level: usize, row: &walk::Row) -> bool {
-    if too_deep(req, level, req.stack_limit().overflowed()) {
+    if too_deep(req, level, req.stack_limit().refuses_a_level()) {
         return false;
     }
     match row.key() {
@@ -1925,11 +1928,9 @@ fn leave_chained(req: &mut Request, thrown: crate::api::raising::Thrown) {
 /// is pinned. The chain is taken apart a link at a time after, so its
 /// release is no deeper than the stack either.
 ///
-/// An array's element is the same refusal at the thread's floor rather
-/// than its limit: php's `php_array_element_dump` asks nothing and runs
-/// to the thread's end, so an array nested past the limit under a small
-/// `zend.max_allowed_stack_size` is dumped whole in both engines
-/// (`php_compile::StackLimit::exhausted`).
+/// An array's element is the same refusal at the same limit, php
+/// 8.5.12's `php_array_element_dump` (`Z/ext/standard/var.c:47`), which
+/// 8.5.9 left unguarded (`var_dump_stack_limit.phpt`).
 ///
 /// ```php
 /// $o = $first = new stdClass;
@@ -1938,8 +1939,15 @@ fn leave_chained(req: &mut Request, thrown: crate::api::raising::Thrown) {
 /// var_dump($first);
 /// ob_end_flush();
 /// while ($next = $first->next ?? null) { $first->next = $next->next ?? null; }
+/// $a = [];
+/// for ($i = 0; $i < 50000; $i++) { $a = [$a]; }
+/// ob_start(fn ($chunk) => str_contains($chunk, 'nesting level too deep') ? "nesting level too deep\n" : "the whole array\n");
+/// var_dump($a);
+/// ob_end_flush();
+/// while (is_array($a) && isset($a[0])) { $a = $a[0]; }
 /// ```
 /// ```expect regime=small-stack
+/// nesting level too deep
 /// nesting level too deep
 /// ```
 fn too_deep(req: &mut Request, level: usize, past: bool) -> bool {
@@ -2210,11 +2218,36 @@ fn extension_loaded(req: &mut Request, extension: PhpString) -> bool {
 /// string(2) "10"
 /// bool(false)
 /// ```
+///
+/// The value is handed back as `ZVAL_SET_INI_STR` hands it: the
+/// string the entry holds, the interned master value or the string a
+/// changed entry took, so a read allocates nothing:
+///
+/// ```php
+/// $m = memory_get_usage(); $x = ini_get('memory_limit'); echo memory_get_usage() - $m, "\n";
+/// $tz = 'Europe/' . str_repeat('Amsterdam', mt_rand(1, 1)); ini_set('date.timezone', $tz); unset($tz);
+/// $m = memory_get_usage(); $y = ini_get('date.timezone'); echo memory_get_usage() - $m, " $y\n";
+/// ```
+/// ```expect
+/// 0
+/// 0 Europe/Amsterdam
+/// ```
+///
+/// A value the host set for an entry whose `on_modify` takes it as the
+/// engine starts is interned with the rest, as
+/// `zend_register_ini_entries_ex` interns it:
+///
+/// ```php
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'date.timezone=Europe/Amsterdam', '-r', '$m = memory_get_usage(); $x = ini_get("date.timezone"); echo memory_get_usage() - $m, " $x\n";'], [1 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p);
+/// ```
+/// ```expect process
+/// 0 Europe/Amsterdam
+/// ```
 #[php_function]
 fn ini_get(req: &mut Request, option: PhpString) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
-    let value = req.ini().get(option.as_bytes()).map(<[u8]>::to_vec);
-    Ok(match value {
-        Some(value) => OrFalse::Value(PhpString::new(req, &value)?),
+    Ok(match req.ini_string(option.as_bytes())? {
+        Some(value) => OrFalse::Value(value),
         None => OrFalse::False,
     })
 }
@@ -2478,10 +2511,12 @@ fn register_shutdown_function(
     args: Variadic<Value>,
 ) -> Result<(), Thrown> {
     let callback = Owner::take(req, callback);
-    for value in &args.0 {
+    for value in args.iter() {
         req.addref(value);
     }
-    req.code_mut().register_shutdown_function(callback, args.0)
+    let arguments = args.into_iter().collect();
+    req.code_mut()
+        .register_shutdown_function(callback, arguments)
 }
 
 /// `php_call_shutdown_functions` (`Z/ext/standard/basic_functions.c:1650`),

@@ -222,8 +222,22 @@ impl PhpToken {
     /// $t = 1; var_dump($held, memory_get_usage() - $b);
     /// ```
     /// ```expect
-    /// int(1560)
+    /// int(1576)
     /// int(0)
+    /// ```
+    ///
+    /// A text is asked for before its token's object since 8.5.12, and
+    /// fallibly: past the memory limit it is refused, the tokens stop
+    /// there, and the limit's fatal is raised as the call returns.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $t = PhpToken::tokenize('<?php $a?>' . str_repeat('a', 4 << 20));
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 3
     /// ```
     fn tokenize(
         req: &mut Request,
@@ -251,20 +265,28 @@ impl PhpToken {
                 Some(id) => id,
                 None => i64::from(text.first().copied().unwrap_or(0)),
             };
+            // `make_str` before `zend_objects_new` since 8.5.12, and
+            // where the memory limit refused the text, `add_token`'s
+            // `false`: the tokens so far are returned.
+            let text = match texts.make_str(req, text) {
+                Ok(Some(text)) => text,
+                Ok(None) => return Ok(rows),
+                Err(thrown) => {
+                    rows.give_up(req);
+                    return Err(thrown);
+                }
+            };
             let object = match new_object(req, token_class) {
                 Ok(object) => object,
                 Err(thrown) => {
+                    text.give_up(req);
                     rows.give_up(req);
                     return Err(thrown);
                 }
             };
             let pos = i64::try_from(token.start).unwrap_or(i64::MAX);
             let line = i64::from(token.line);
-            let filled = match texts.make_str(req, text) {
-                Ok(text) => fill_token(req, *object, id, text, line, pos),
-                Err(thrown) => Err(thrown),
-            };
-            if let Err(thrown) = filled {
+            if let Err(thrown) = fill_token(req, *object, id, text, line, pos) {
                 object.give_up(req);
                 rows.give_up(req);
                 return Err(thrown);
@@ -545,7 +567,7 @@ impl PhpToken {
 /// $b = memory_get_usage(); $t = PhpToken::tokenize('<?php echo 1; echo 2;'); var_dump(memory_get_usage() - $b);
 /// ```
 /// ```expect
-/// int(1560)
+/// int(1576)
 /// ```
 fn fill_token(
     req: &mut Request,
@@ -956,11 +978,11 @@ fn value_name(req: &Request, value: &Value) -> String {
 /// $t = 1; var_dump($held, memory_get_usage() - $b);
 /// ```
 /// ```expect
-/// int(1176)
+/// int(1200)
 /// int(0)
-/// int(2168)
+/// int(2184)
 /// int(0)
-/// int(2200)
+/// int(2224)
 /// int(0)
 /// ```
 ///
@@ -1003,6 +1025,31 @@ fn value_name(req: &Request, value: &Value) -> String {
 /// token_get_all(): Argument #1 ($code) must be of type string, null given
 /// token_get_all(): Argument #2 ($flags) must be of type int, null given
 /// ```
+///
+/// A token's text past one byte is asked for fallibly since 8.5.12: past
+/// the memory limit it is refused, the tokens stop there, and the
+/// limit's fatal is raised as the call returns, with `TOKEN_PARSE` as
+/// without it.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $t = token_get_all(str_repeat('a', 4 << 20));
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 3
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $t = token_get_all('<?php echo 1;?>' . str_repeat('a', 4 << 20), TOKEN_PARSE);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn token_get_all(
     req: &mut Request,
@@ -1019,16 +1066,24 @@ fn token_get_all(
     let mut rows = PhpArray::new(req)?;
     for token in tokens {
         let text = code.as_bytes().get(token.start..token.end).unwrap_or(&[]);
-        let text = texts.make_str(req, text)?;
-        match token.name.and_then(names::id_of) {
-            Some(id) => {
-                let mut row = PhpArray::new(req)?;
-                row.append(req, Owner::int(id))?;
-                row.append(req, text)?;
-                row.append(req, Owner::int(i64::from(token.line)))?;
-                rows.append(req, row.into_value())?;
-            }
-            None => rows.append(req, text)?,
+        // Where the memory limit refused a text, `add_token`'s `false`
+        // since 8.5.12: the row in hand is given up and the tokens so far
+        // are returned, the limit's fatal raised as the call returns.
+        if let Some(id) = token.name.and_then(names::id_of) {
+            let mut row = PhpArray::new(req)?;
+            row.append(req, Owner::int(id))?;
+            let Some(text) = texts.make_str(req, text)? else {
+                row.give_up(req);
+                return Ok(rows);
+            };
+            row.append(req, text)?;
+            row.append(req, Owner::int(i64::from(token.line)))?;
+            rows.append(req, row.into_value())?;
+        } else {
+            let Some(text) = texts.make_str(req, text)? else {
+                return Ok(rows);
+            };
+            rows.append(req, text)?;
         }
     }
     Ok(rows)
@@ -1065,19 +1120,31 @@ impl<'a> Texts<'a> {
     /// `make_str`: the string a row or a property takes for `text`, one
     /// owner of it handed over, so a repeated text is [`Owner::take`] of
     /// the first call's string.
-    fn make_str(&mut self, req: &mut Request, text: &'a [u8]) -> Result<Owner<Value>, Thrown> {
-        let Texts::Shared(table) = self else {
-            return Ok(PhpString::new(req, text)?.into_value());
-        };
+    /// A text of one byte is the interned character, and any other
+    /// `zend_string_finit` (`Z/ext/tokenizer/tokenizer.c:274`, `:281`),
+    /// asked for fallibly since 8.5.12: `None` where the memory limit
+    /// refused it, php's `NULL`, and nothing remembered.
+    fn make_str(
+        &mut self,
+        req: &mut Request,
+        text: &'a [u8],
+    ) -> Result<Option<Owner<Value>>, Thrown> {
         if text.len() == 1 {
-            return Ok(PhpString::new(req, text)?.into_value());
+            return Ok(Some(PhpString::new(req, text)?.into_value()));
         }
+        let fresh =
+            |req: &mut Request| req.memory_mut().fallible(|req| PhpString::finit(req, text));
+        let Texts::Shared(table) = self else {
+            return Ok(fresh(req)?.map(Owner::into_value));
+        };
         if let Some(first) = table.get(text) {
-            return Ok(Owner::take(req, Value::string(*first)));
+            return Ok(Some(Owner::take(req, Value::string(*first))));
         }
-        let first = PhpString::new(req, text)?;
+        let Some(first) = fresh(req)? else {
+            return Ok(None);
+        };
         table.insert(text, *first);
-        Ok(first.into_value())
+        Ok(Some(first.into_value()))
     }
 }
 

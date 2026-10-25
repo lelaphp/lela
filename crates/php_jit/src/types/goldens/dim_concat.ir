@@ -1,0 +1,30 @@
+trace loop e13, stop loop
+frame f0 e13 root, 4 cvs 8 temps
+entry
+  #0 f0.CV1 [array]
+  #2 f0.CV3 [long]
+  #4 f0.CV0 [long]
+  #5 f0.CV2 [string]
+  guard #4 long -> exit 0
+  guard #0 array -> exit 1
+  guard #5 string -> exit 2
+  guard #2 long -> exit 3
+loop at 0, loop, interrupt exit 6
+  #1 f0.CV1 [array] = phi(#0, #6)
+  #3 f0.CV3 [long] reg = phi(#2, #7)
+0008 f0 IS_SMALLER #3, #4 fused inline
+  checks direction taken -> exit 4
+0005 f0 ASSIGN_DIM_OP #1, const#3, #5 inline unwinds -> unwind 0
+  -> #6 f0.CV1 [array]
+0007 f0 PRE_INC #3 inline
+  -> #7 f0.CV3 [long] reg
+  checks #7 long -> exit 5
+end: back to 0
+exit 0: f0 0008 plain
+exit 1: f0 0008 plain f0.CV0:long
+exit 2: f0 0008 plain f0.CV0:long f0.CV1:array
+exit 3: f0 0008 plain f0.CV0:long f0.CV1:array f0.CV2:string
+exit 4: f0 0010 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long
+exit 5: f0 0007 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long
+exit 6: f0 0008 plain f0.CV3=#3 f0.CV0:long f0.CV1:array f0.CV2:string f0.CV3:long to vm
+unwind 0: f0.CV3=#3

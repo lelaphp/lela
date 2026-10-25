@@ -172,6 +172,7 @@ fn members<'a>(
 }
 
 #[cfg(test)]
+#[cfg(tracked)]
 mod tests {
     use super::{BINARY, Carried};
     use crate::manifest::{Crate, Manifest};

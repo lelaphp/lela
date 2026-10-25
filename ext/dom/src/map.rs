@@ -9,7 +9,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::{numeric_string, to_long};
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, throw_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::ffi::{DtdTable, Kind, Node};
@@ -352,10 +352,14 @@ fn named(
     else {
         return Ok(Owner::null());
     };
+    let modern = crate::modern::follows_spec(req, base);
+    // An empty namespace is none to a document that follows the standard
+    // (php 8.5.12), and a DTD's default is no attribute of the element.
+    let ns = ns.filter(|uri| !(uri.is_empty() && modern));
     let found = match kind {
         Walk::Attributes => match ns {
-            Some(uri) => node.has_ns_prop(name, Some(uri)),
-            None if crate::modern::follows_spec(req, base) => attribute_node(node, name),
+            Some(uri) => crate::carried(node.has_ns_prop(name, Some(uri))),
+            None if modern => attribute_node(node, name),
             None => node.has_prop(name),
         },
         Walk::Table(DtdTable::Entities) => node
@@ -662,11 +666,7 @@ impl ObjectHandlers for MapHandlers {
             Ok(index) if is_list => item(req, object, index),
             Ok(index) => {
                 if !(0..=i64::from(i32::MAX)).contains(&index) {
-                    return Err(throw_error(
-                        req,
-                        "ValueError",
-                        "must be between 0 and 2147483647",
-                    ));
+                    return Err(value_error(req, "must be between 0 and 2147483647"));
                 }
                 item(req, object, index)
             }
@@ -1008,7 +1008,25 @@ impl DOMNamedNodeMap {
         crate::returned(found)
     }
 
-    /// `DOMNamedNodeMap::getNamedItemNS(?string $namespace, string $localName): ?DOMNode`.
+    /// `DOMNamedNodeMap::getNamedItemNS(?string $namespace, string $localName): ?DOMNode`:
+    /// an empty namespace is none to a document that follows the standard,
+    /// and a DTD's default is no attribute of the element.
+    ///
+    /// ```php
+    /// $x = '<!DOCTYPE r [<!ATTLIST r dflt CDATA "dtd">]><r xmlns:q="urn:q" bar="no-ns" q:bar="ns"/>';
+    /// foreach ([fn() => (function () use ($x) { $d = new DOMDocument; $d->loadXML($x); return $d; })(), fn() => Dom\XMLDocument::createFromString($x)] as $make) {
+    ///     $m = $make()->documentElement->attributes;
+    ///     var_dump($m->getNamedItemNS('', 'bar')?->nodeValue, $m->getNamedItemNS('urn:q', 'bar')?->nodeValue, $m->getNamedItemNS('', 'dflt')?->nodeValue);
+    /// }
+    /// ```
+    /// ```expect
+    /// NULL
+    /// string(2) "ns"
+    /// NULL
+    /// string(5) "no-ns"
+    /// string(2) "ns"
+    /// NULL
+    /// ```
     #[php(tentative)]
     fn getNamedItemNS(
         req: &mut Request,

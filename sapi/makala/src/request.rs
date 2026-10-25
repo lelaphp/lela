@@ -224,7 +224,7 @@ pub(crate) fn serving(engine: &Engine, root: &Arc<[u8]>) -> impl Fn(Job) + Clone
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// bool(true)
@@ -387,7 +387,7 @@ const ZLOG_BUFFER: usize = 2048;
 /// ```
 /// ```expect capture
 /// 404
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// File not found.
@@ -452,7 +452,7 @@ fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// HTTP_CONTENT_LENGTH=3
@@ -498,7 +498,7 @@ fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// SCRIPT_NAME=/witness.php
@@ -711,7 +711,7 @@ impl OutputSink for Sink {
     /// ```
     /// ```expect capture
     /// 200
-    /// x-powered-by: PHP/8.5.9
+    /// x-powered-by: PHP/8.5.12
     /// content-type: text/html; charset=UTF-8
     ///
     /// bool(false)
@@ -745,6 +745,34 @@ impl OutputSink for Sink {
     fn write_stderr(&mut self, bytes: &[u8]) {
         use std::io::Write;
         std::io::stderr().lock().write_all(bytes).ok();
+    }
+
+    /// `php://stdout` is makala's own fd 1, never the body, as php-fpm's
+    /// child writes it to its fd 1 (`dup(STDOUT_FILENO)` under a SAPI not
+    /// named `cli`, `Z/ext/standard/php_fopen_wrapper.c:260-272`), the
+    /// pipe its master logs or `/dev/null`.
+    ///
+    /// ```php
+    /// file_put_contents('php://stdout', "to stdout\n");
+    /// echo "body\n";
+    /// ```
+    /// ```request makala
+    /// --GET--
+    /// q=1
+    /// ```
+    /// ```expect
+    /// 200
+    /// x-powered-by: PHP/8.5.12
+    /// content-type: text/html; charset=UTF-8
+    ///
+    /// body
+    /// ```
+    fn write_stdout(&mut self, bytes: &[u8]) -> bool {
+        use std::io::Write;
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(bytes).ok();
+        stdout.flush().ok();
+        true
     }
 }
 

@@ -44,7 +44,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::coerce::{atoi, to_callable};
 use php_ext::raising::{Thrown, notice, warning};
 use php_ext::request::{
-    CacheStatus, Invalidation, PHP_VERSION, PreloadStatistics, Request, Restart,
+    CacheStatus, Invalidation, PHP_VERSION, PreloadStatistics, Request, Restart, TierStatus,
 };
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
@@ -510,8 +510,8 @@ pub(crate) fn now() -> i64 {
 /// engine keeping no shared segment to measure: a file held weighs what
 /// the file does, a file discarded is wasted at that weight until a
 /// restart, and the interned strings the engine's table holds are
-/// counted and weigh nothing. The `jit` row
-/// speaks for the compiled tier, and this engine's compiles nothing.
+/// counted and weigh nothing. The `jit` row speaks for the compiled
+/// tier ([`jit_status`]).
 ///
 /// ```php
 /// var_dump(opcache_get_status());
@@ -600,7 +600,7 @@ fn opcache_get_status(
         let listed = scripts(req, &status)?;
         put(req, &mut out, "scripts", listed.into_value())?;
     }
-    let jit = jit_status(req)?;
+    let jit = jit_status(req, status.tier)?;
     put(req, &mut out, "jit", jit.into_value())?;
     Ok(OrFalse::Value(out))
 }
@@ -767,18 +767,66 @@ fn scripts(req: &mut Request, status: &CacheStatus) -> Result<Owner<PhpArray>, T
     Ok(listed)
 }
 
-/// `zend_jit_status` for a tier that compiles nothing.
-fn jit_status(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
+/// `zend_jit_status` (`Z/ext/opcache/jit/zend_jit.c:825-842`): the
+/// engine's tier as it reports itself, `JIT_G` as php's start left it
+/// and the code buffer, of which `buffer_free` is what no trace's code
+/// takes; php's stubs take some of it before any trace, which this tier
+/// has none of. A build without the tier reports one that compiles
+/// nothing, every field zero.
+///
+/// ```php
+/// $jit = opcache_get_status(false)['jit'];
+/// var_dump(implode(' ', array_keys($jit)), $jit['enabled'], $jit['on'], $jit['kind'], $jit['opt_level'], $jit['opt_flags']);
+/// var_dump($jit['buffer_size'], is_int($jit['buffer_free']) && $jit['buffer_free'] <= $jit['buffer_size']);
+/// ```
+/// ```expect regime=jit-tracing process
+/// string(59) "enabled on kind opt_level opt_flags buffer_size buffer_free"
+/// bool(true)
+/// bool(true)
+/// int(5)
+/// int(4)
+/// int(6)
+/// int(67108848)
+/// bool(true)
+/// ```
+///
+/// A buffer of `opcache.jit_buffer_size=16K`, rounded to the page, less
+/// what a loop's trace took once it compiled:
+///
+/// ```php
+/// for ($i = 0, $s = 0; $i < 100; $i++) { $s += $i; }
+/// $jit = opcache_get_status(false)['jit'];
+/// var_dump($jit['buffer_size'], $jit['buffer_free'] < $jit['buffer_size'], $jit['buffer_free'] > 0);
+/// ```
+/// ```expect regime=jit-small-buffer process
+/// int(16368)
+/// bool(true)
+/// bool(true)
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %s:2
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 $main() %s:3
+/// ---- TRACE 2 start (side trace 1/1) $main() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+/// ```
+fn jit_status(req: &mut Request, tier: TierStatus) -> Result<Owner<PhpArray>, Thrown> {
+    let long = |n: u64| Value::int(i64::try_from(n).unwrap_or(i64::MAX));
     assoc(
         req,
         vec![
-            ("enabled", Value::bool(false)),
-            ("on", Value::bool(false)),
-            ("kind", Value::int(0)),
-            ("opt_level", Value::int(0)),
-            ("opt_flags", Value::int(0)),
-            ("buffer_size", Value::int(0)),
-            ("buffer_free", Value::int(0)),
+            ("enabled", Value::bool(tier.enabled)),
+            ("on", Value::bool(tier.on)),
+            ("kind", Value::int(tier.kind.into())),
+            ("opt_level", Value::int(tier.opt_level.into())),
+            ("opt_flags", Value::int(tier.opt_flags.into())),
+            ("buffer_size", long(tier.buffer_size)),
+            ("buffer_free", long(tier.buffer_free)),
         ],
     )
 }

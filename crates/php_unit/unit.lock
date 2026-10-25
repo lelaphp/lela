@@ -89,10 +89,6 @@ decl::FunctionDecl
 decl::HookKind
 decl::HookKind::ALL
 decl::HookKind::name
-decl::ImmutableArray
-decl::ImmutableArray::is_empty
-decl::ImmutableArray::new
-decl::ImmutableArray::value
 decl::IniDecl
 decl::MethodDecl
 decl::Name
@@ -112,6 +108,10 @@ decl::Type
 decl::Type::MAY_BE_ANY
 decl::Type::contains_code
 decl::Type::mask
+decl::UnitValue
+decl::UnitValue::is_empty
+decl::UnitValue::new
+decl::UnitValue::value
 decl::Visibility
 decl::class_attribute_refusal
 decl::hook_attribute_refusal
@@ -123,3 +123,4 @@ enum_methods
 frameless_table
 type_to_string
 type_to_string_called
+written_methods
