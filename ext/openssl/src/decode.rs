@@ -20,6 +20,7 @@ use php_ext::values::{Owner, PhpString, Value, ValueRef, View};
 use crate::csr::OpenSSLCertificateSigningRequest;
 use crate::ffi::x509::{CertStack, Csr, read_all_certs};
 use crate::ffi::{Bio, Certificate};
+use crate::throwables::Throwables;
 use crate::x509::OpenSSLCertificate;
 use crate::{State, store_errors};
 
@@ -188,7 +189,10 @@ pub(crate) fn check_path(
         Origin::Item(arg, None) => (arg, format!("array item {text}")),
     };
     if fatal {
-        let thrown = argument_error(req, "ValueError", arg.position, &tail);
+        let thrown = match Throwables::of(req) {
+            Ok(ce) => argument_error(req, ce.value_error, arg.position, &tail),
+            Err(fatal) => fatal,
+        };
         defer(req, thrown);
         return None;
     }

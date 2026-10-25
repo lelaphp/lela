@@ -19,6 +19,7 @@ use crate::entry::{self, Target};
 use crate::object::class_named;
 use crate::open::{has_bz2, has_zlib};
 use crate::path::{self, Create, Exec};
+use crate::throwables::Throwables;
 use crate::write;
 
 /// The extensions a name loses before the new one is put on, longest
@@ -56,18 +57,20 @@ pub(crate) fn convert(
     let format = match format {
         None | Some(9_021_976 | -1) => match current {
             Format::Phar if data => {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "UnexpectedValueException",
+                    ce.unexpected_value_exception,
                     "Cannot write out data phar archive, use Phar::TAR or Phar::ZIP",
                 ));
             }
             format => format,
         },
         Some(1) if data => {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Cannot write out data phar archive, use Phar::TAR or Phar::ZIP",
             ));
         }
@@ -80,11 +83,18 @@ pub(crate) fn convert(
             } else {
                 "Unknown file format specified, please pass one of Phar::PHAR, Phar::TAR or Phar::ZIP"
             };
-            return Err(throw_exception_ex(req, "BadMethodCallException", message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_exception_ex(
+                req,
+                ce.bad_method_call_exception,
+                message,
+            ));
         }
     };
-    let bad =
-        |req: &mut Request, m: &str| Err(throw_exception_ex(req, "BadMethodCallException", m));
+    let bad = |req: &mut Request, m: &str| {
+        let ce = Throwables::of(req)?;
+        Err(throw_exception_ex(req, ce.bad_method_call_exception, m))
+    };
     let flags = match compression {
         None | Some(9_021_976) => own_flags,
         Some(0) => 0,
@@ -199,9 +209,10 @@ pub(crate) fn to_other(
                     copy.free(req);
                     phar.release_all(req);
                     let error = failed?.err().unwrap_or_default();
+                    let ce = Throwables::of(req)?;
                     return Err(throw_exception_ex(
                         req,
-                        "UnexpectedValueException",
+                        ce.unexpected_value_exception,
                         &format!(
                             "Cannot convert phar archive \"{}\", unable to open entry \"{name}\" contents: {error}",
                             lossy(&fname)
@@ -283,8 +294,10 @@ fn rename(
         return Ok(None);
     };
     let (is_data, oldpath) = (a.is_data, a.fname.clone());
-    let bad =
-        |req: &mut Request, m: String| Err(throw_exception_ex(req, "BadMethodCallException", &m));
+    let bad = |req: &mut Request, m: String| {
+        let ce = Throwables::of(req)?;
+        Err(throw_exception_ex(req, ce.bad_method_call_exception, &m))
+    };
     let ext: Vec<u8> = match ext {
         None => default_ext(a).to_vec(),
         Some(ext) => {
@@ -412,7 +425,7 @@ fn rename(
     }
     let class = class_named(req, if is_data { b"PharData" } else { b"Phar" })?;
     let name = string(req, &fname)?;
-    let made = instantiate(req, class, &[*name]);
+    let made = instantiate(req, class, &[*name], &[]);
     name.give_up(req);
     Ok(Some(made?))
 }

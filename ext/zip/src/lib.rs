@@ -39,6 +39,7 @@ mod procedural;
 mod read;
 mod stream;
 mod strings;
+mod throwables;
 mod write;
 
 use php_ext::abi::{Dependency, DependencyKind, Extension, ExtensionBuilder};
@@ -147,6 +148,7 @@ pub fn extension() -> Extension {
             version: None,
         }])
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .rinit(rinit)
         .info(info)
         .version(VERSION)

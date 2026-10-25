@@ -16,6 +16,7 @@ use crate::node::DOMNode;
 use crate::object::{Code, Dom};
 use crate::parent::is_parent_invalid;
 use crate::private::Private;
+use crate::throwables::Throwables;
 use crate::{dom, dom_throw, fetch, invalidate, object_for, returned};
 
 /// `php_dom_follow_spec_intern`: whether the object's document hands out
@@ -123,9 +124,10 @@ fn xml_load_args(
         return Err(arg_value_error(req, 1, "not be empty"));
     }
     if i32::try_from(source.len()).is_err() {
+        let ce = Throwables::of(req)?;
         return Err(php_ext::raising::argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             1,
             "is too long",
         ));
@@ -138,9 +140,10 @@ fn xml_load_args(
         ));
     }
     if options & !XML_OPTIONS != 0 {
+        let ce = Throwables::of(req)?;
         return Err(php_ext::raising::argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             2,
             "contains invalid flags (allowed flags: LIBXML_RECOVER, LIBXML_NOENT, LIBXML_DTDLOAD, \
              LIBXML_DTDATTR, LIBXML_DTDVALID, LIBXML_NOERROR, LIBXML_NOWARNING, LIBXML_NOBLANKS, \
@@ -225,7 +228,8 @@ pub(crate) fn xml_load(
             if from_file {
                 // `zend_throw_exception_ex`'s `%s`: the bytes as given.
                 let message = [&b"Cannot open file '"[..], &source, b"'"].concat();
-                return Err(throw_exception_ex(req, "Exception", &message));
+                let ce = Throwables::of(req)?;
+                return Err(throw_exception_ex(req, ce.exception, &message));
             }
             return Err(dom_throw(req, Code::InvalidState));
         }
@@ -575,9 +579,10 @@ impl Node {
     #[php(private, final, arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let class = crate::class_name(req, this.object().class());
+        let ce = Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Cannot directly construct {class}, use document methods instead"),
         ))
     }

@@ -22,6 +22,7 @@ use crate::decode::{Arg, c_string, finish, raised};
 use crate::ffi::cipher::{CipherContext, cipher_names, md_names, open, pbkdf2, seal};
 use crate::ffi::{self, Cipher, Digest};
 use crate::key::{Half, check_int_len, key_from};
+use crate::throwables::Throwables;
 use crate::{hex, store_errors};
 
 /// `EVP_CTRL_AEAD_SET_IVLEN`, `EVP_CTRL_AEAD_GET_TAG` and
@@ -687,12 +688,14 @@ fn openssl_pbkdf2(
     check_int_len(req, password.as_bytes().len(), "password", 1)?;
     check_int_len(req, salt.as_bytes().len(), "salt", 2)?;
     let Ok(length) = c_int::try_from(key_length) else {
-        return Err(argument_error(req, "ValueError", 3, "key is too long"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 3, "key is too long"));
     };
     let Ok(iterations) = c_int::try_from(iterations) else {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             4,
             "iterations is too long",
         ));
@@ -755,7 +758,11 @@ fn openssl_random_pseudo_bytes(
         let bytes = ffi::rand_bytes(c_int::try_from(length).unwrap_or(0));
         bytes.ok_or_else(|| {
             store_errors(req);
-            throw(req, "Exception", "Error reading from source device")
+            let ce = match Throwables::of(req) {
+                Ok(ce) => ce,
+                Err(fatal) => return fatal,
+            };
+            throw(req, ce.exception, "Error reading from source device")
         })
     };
     let strong = bytes.is_ok();
@@ -813,9 +820,10 @@ fn openssl_seal(
             return Ok(OrFalse::False);
         };
         if !iv.is_given() && cipher.iv_length() > 0 {
+            let ce = Throwables::of(req)?;
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 6,
                 "cannot be null for the chosen cipher algorithm",
             ));
@@ -918,9 +926,10 @@ fn openssl_open(
         let iv_len = usize::try_from(cipher.iv_length()).unwrap_or(0);
         let iv = if iv_len > 0 {
             let Some(iv) = &iv else {
+                let ce = Throwables::of(req)?;
                 return Err(argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     6,
                     "cannot be null for the chosen cipher algorithm",
                 ));

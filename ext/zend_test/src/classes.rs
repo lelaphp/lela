@@ -18,6 +18,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
 use crate::functions::{dnf_type, lorem_ipsum};
+use crate::throwables::Throwables;
 
 /// The classes in `MINIT`'s order, the constants `register_test_symbols`
 /// registers between the trait and the attributes.
@@ -303,7 +304,8 @@ impl _ZendTestClass {
         this: This<Self>,
     ) -> Result<Instance<Throwable>, Thrown> {
         let _ = this;
-        Err(throw_error(req, "Error", "Dummy"))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, "Dummy"))
     }
 
     /// `static variadicTest(string|Iterator ...$elements): static`: each
@@ -365,9 +367,10 @@ impl _ZendTestClass {
 /// `object_init_ex(return_value, zend_get_called_scope(execute_data))`.
 fn called(req: &mut Request) -> Result<Owner<Static>, Thrown> {
     let Some(class) = req.frames().called_scope() else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot use \"static\" when no class scope is active",
         ));
     };
@@ -443,7 +446,8 @@ impl _ZendTestChildClass {
         this: This<Self>,
     ) -> Result<Instance<Exception>, Thrown> {
         let _ = this;
-        Err(throw_error(req, "Error", "Dummy"))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, "Dummy"))
     }
 }
 

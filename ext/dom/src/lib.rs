@@ -41,6 +41,7 @@ mod object;
 mod parent;
 mod private;
 mod props;
+mod throwables;
 mod token_list;
 mod xml_serializer;
 mod xpath;
@@ -177,6 +178,7 @@ pub fn extension() -> Extension {
             dependency("lexbor", DependencyKind::Required),
             dependency("domxml", DependencyKind::Conflicts),
         ])
+        .engine_state(throwables::Throwables::start)
         .class::<element::AdjacentPosition>()
         .class::<DOMException>()
         .class::<parent::DOMParentNode>()
@@ -393,13 +395,14 @@ fn import_simplexml_common(
     object: PhpObject,
     new_class: ClassType,
 ) -> Result<Owner<Value>, Thrown> {
+    let ce = throwables::Throwables::of(req)?;
     let exported = php_ext_libxml::import_node(req, object)
         .filter(|e| e.document().is_some())
         .filter(|e| matches!(e.node().kind(), Kind::Element | Kind::Attribute));
     let Some(exported) = exported else {
         return Err(argument_error(
             req,
-            "TypeError",
+            ce.type_error,
             1,
             "is not a valid node type",
         ));
@@ -412,7 +415,7 @@ fn import_simplexml_common(
             "a Dom\\Node"
         };
         let tail = format!("must not be already imported as {family}");
-        return Err(argument_error(req, "TypeError", 1, &tail));
+        return Err(argument_error(req, ce.type_error, 1, &tail));
     }
     exported.set_class_type(new_class);
     let node = exported.node();
@@ -423,7 +426,7 @@ fn import_simplexml_common(
         let n = node.kind().number();
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Unsupported node type: {n}"),
         ));
     };
@@ -590,7 +593,8 @@ fn dom_error_message(
     strict: bool,
 ) -> Result<(), Thrown> {
     if strict {
-        let exception = new_throwable(req, "DOMException", message)?;
+        let ce = throwables::Throwables::of(req)?;
+        let exception = new_throwable(req, ce.dom_exception, message)?;
         if let Some(object) = exception.as_object() {
             let code = Owner::int(code as i64);
             let set = php_ext::call::write_prop(req, &object, b"code", code);
@@ -636,7 +640,12 @@ fn fetch(req: &mut Request, object: PhpObject) -> Result<Node, Thrown> {
         return Ok(node);
     }
     let name = class_name(req, object.class());
-    Err(throw_error(req, "Error", &format!("Couldn't fetch {name}")))
+    let ce = throwables::Throwables::of(req)?;
+    Err(throw_error(
+        req,
+        ce.error,
+        &format!("Couldn't fetch {name}"),
+    ))
 }
 
 /// `DOM_GET_INTERN` of the receiver: php's "Couldn't fetch" where its
@@ -647,7 +656,12 @@ fn intern(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
         return Ok(this);
     }
     let name = class_name(req, this.class());
-    Err(throw_error(req, "Error", &format!("Couldn't fetch {name}")))
+    let ce = throwables::Throwables::of(req)?;
+    Err(throw_error(
+        req,
+        ce.error,
+        &format!("Couldn't fetch {name}"),
+    ))
 }
 
 /// php's `ZVAL_STRING`: a new string of `bytes`, one owner the
@@ -725,9 +739,10 @@ fn object_for(
     let modern = context.is_some_and(|c| modern::follows_spec(req, c));
     let Some(name) = class_for(node, modern) else {
         let n = node.kind().number();
+        let ce = throwables::Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Unsupported node type: {n}"),
         ));
     };
@@ -782,9 +797,10 @@ pub fn create_object_in(
     }
     let Some(name) = class_for(node, doc.class_type() == ClassType::Modern) else {
         let n = node.kind().number();
+        let ce = throwables::Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             &format!("Unsupported node type: {n}"),
         ));
     };
@@ -936,9 +952,10 @@ fn unset_property(req: &mut Request, object: PhpObject, name: &[u8]) -> Result<(
     }
     let class = class_name(req, object.class());
     let name = String::from_utf8_lossy(name);
+    let ce = throwables::Throwables::of(req)?;
     Err(throw_error(
         req,
-        "Error",
+        ce.error,
         &format!("Cannot unset {class}::${name}"),
     ))
 }
@@ -1628,7 +1645,8 @@ impl StackRefusal {
             StackRefusal::Normalize => "Maximum call stack size reached. Infinite recursion?",
             StackRefusal::Compare => "Maximum call stack size reached.",
         };
-        Err(throw_error(req, "Error", message))
+        let ce = throwables::Throwables::of(req)?;
+        Err(throw_error(req, ce.error, message))
     }
 }
 
@@ -2162,9 +2180,13 @@ fn reconcile_ns_list_internal(
 fn readonly_error(req: &mut Request, object: PhpObject, name: &[u8]) -> Thrown {
     let class = class_name(req, object.class());
     let name = String::from_utf8_lossy(name);
+    let ce = match throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         &format!("Cannot modify readonly property {class}::${name}"),
     )
 }

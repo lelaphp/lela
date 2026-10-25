@@ -16,6 +16,7 @@ use php_ext::values::{Emalloc, Key, Owner, PhpObject, PhpString, Value, ValueRef
 use php_ext_libxml::ffi::Node;
 
 use crate::object::{Code, Dom, Extra};
+use crate::throwables::Throwables;
 use crate::{dom_error_message, dom_mut, string};
 
 /// `ascii_whitespace`, infra's.
@@ -711,7 +712,12 @@ impl ObjectHandlers for TokenListHandlers {
         read: DimensionRead,
     ) -> Result<Owner<Value>, Thrown> {
         let Some(offset_value) = offset_value else {
-            return Err(throw_error(req, "Error", "Cannot append to Dom\\TokenList"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(
+                req,
+                ce.error,
+                "Cannot append to Dom\\TokenList",
+            ));
         };
         match offset(req, offset_value)? {
             Some(index) => item_value(req, object, index),
@@ -755,7 +761,8 @@ impl ObjectHandlers for TokenListHandlers {
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
             let message = "An iterator cannot be used with foreach by reference";
-            return Err(throw_error(req, "Error", message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, message));
         }
         let (pos, tag) =
             with_set(req, object, |set| (set.valid_from(0), set.tag)).unwrap_or_default();
@@ -971,9 +978,10 @@ impl TokenList {
     /// no supported tokens, so php's `TypeError`.
     fn supports(req: &mut Request, _this: This<Self>, token: Path) -> Result<bool, Thrown> {
         let _ = token;
+        let ce = Throwables::of(req)?;
         Err(throw_error(
             req,
-            "TypeError",
+            ce.type_error,
             "Attribute \"class\" does not define any supported tokens",
         ))
     }

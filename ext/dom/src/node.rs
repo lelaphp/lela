@@ -21,6 +21,7 @@ use crate::modern::follows_spec;
 use crate::object::{Code, Dom};
 use crate::parent::replace_validity;
 use crate::private::{Mapper, Private};
+use crate::throwables::Throwables;
 use crate::{
     StackGuard, StackRefusal, children_valid, class_name, clone_node, copy_document_ref, dom_error,
     dom_error_message, fetch, has_feature, hierarchy_ok, instance_of, invalidate, is_equal_attr,
@@ -651,9 +652,10 @@ fn c14n_query(
     };
     let Some(q) = query.as_str_bytes().map(<[u8]>::to_vec) else {
         let given = value_name(req, &query);
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "TypeError",
+            ce.type_error,
             3 + base,
             &format!("\"query\" option must be a string, {given} given"),
         ));
@@ -670,11 +672,12 @@ fn c14n_query(
     }
     let (found, raised) = XPath::c14n_query(doc, node, &q, &namespaces);
     Errors::route(req, raised);
+    let ce = Throwables::of(req)?;
     match found {
         Some(pair) if pair.1.is_node_set() => Ok(pair),
         _ => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "XPath query did not return a nodeset",
         )),
     }
@@ -842,9 +845,10 @@ fn canonicalization(
         None
     };
     let Some(doc) = node.doc() else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Node must be associated with a document",
         ));
     };
@@ -1066,16 +1070,15 @@ fn insert_before(
                 old.unlink();
                 old.free_resource(req);
             }
-            match refp.add_prev_sibling(child) {
-                Some(n) => Some(n),
-                None => {
-                    return Err(throw_error(
-                        req,
-                        "Error",
-                        "Cannot add newnode as the previous sibling of refnode",
-                    ));
-                }
-            }
+            let Some(n) = refp.add_prev_sibling(child) else {
+                let ce = Throwables::of(req)?;
+                return Err(throw_error(
+                    req,
+                    ce.error,
+                    "Cannot add newnode as the previous sibling of refnode",
+                ));
+            };
+            Some(n)
         } else if child.kind() == Kind::Fragment {
             let last = child.last();
             let first = insert_fragment(parent, refp.prev(), Some(refp), child);
@@ -1084,19 +1087,16 @@ fn insert_before(
             }
             first
         } else {
-            match refp.add_prev_sibling(child) {
-                Some(n) => {
-                    reconcile_ns(parent.doc(), n);
-                    Some(n)
-                }
-                None => {
-                    return Err(throw_error(
-                        req,
-                        "Error",
-                        "Cannot add newnode as the previous sibling of refnode",
-                    ));
-                }
-            }
+            let Some(n) = refp.add_prev_sibling(child) else {
+                let ce = Throwables::of(req)?;
+                return Err(throw_error(
+                    req,
+                    ce.error,
+                    "Cannot add newnode as the previous sibling of refnode",
+                ));
+            };
+            reconcile_ns(parent.doc(), n);
+            Some(n)
         }
     } else {
         if child.parent().is_some() {
@@ -1124,16 +1124,15 @@ fn insert_before(
                 old.unlink();
                 old.free_resource(req);
             }
-            match parent.add_child(child) {
-                Some(n) => Some(n),
-                None => {
-                    return Err(throw_error(
-                        req,
-                        "Error",
-                        "Cannot add newnode as the previous sibling of refnode",
-                    ));
-                }
-            }
+            let Some(n) = parent.add_child(child) else {
+                let ce = Throwables::of(req)?;
+                return Err(throw_error(
+                    req,
+                    ce.error,
+                    "Cannot add newnode as the previous sibling of refnode",
+                ));
+            };
+            Some(n)
         } else if child.kind() == Kind::Fragment {
             let last = child.last();
             let first = insert_fragment(parent, parent.last(), None, child);
@@ -1142,19 +1141,16 @@ fn insert_before(
             }
             first
         } else {
-            match parent.add_child(child) {
-                Some(n) => {
-                    reconcile_ns(parent.doc(), n);
-                    Some(n)
-                }
-                None => {
-                    return Err(throw_error(
-                        req,
-                        "Error",
-                        "Cannot add newnode as the previous sibling of refnode",
-                    ));
-                }
-            }
+            let Some(n) = parent.add_child(child) else {
+                let ce = Throwables::of(req)?;
+                return Err(throw_error(
+                    req,
+                    ce.error,
+                    "Cannot add newnode as the previous sibling of refnode",
+                ));
+            };
+            reconcile_ns(parent.doc(), n);
+            Some(n)
         }
     };
     nullable_object(req, new_child, Some(this))
@@ -2110,9 +2106,10 @@ impl DOMNode {
     /// ```
     fn __sleep(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let name = class_name(req, this.object().class());
+        let ce = Throwables::of(req)?;
         Err(throw_exception_ex(
             req,
-            "Exception",
+            ce.exception,
             &format!(
                 "Serialization of '{name}' is not allowed, unless serialization methods are implemented in a subclass"
             ),
@@ -2129,9 +2126,10 @@ impl DOMNode {
     /// ```
     fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let name = class_name(req, this.object().class());
+        let ce = Throwables::of(req)?;
         Err(throw_exception_ex(
             req,
-            "Exception",
+            ce.exception,
             &format!(
                 "Unserialization of '{name}' is not allowed, unless unserialization methods are implemented in a subclass"
             ),

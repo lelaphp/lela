@@ -23,6 +23,7 @@ use php_ext_libxml::ffi::{DocString, Kind, Node, NodeObject, Ns, Quirks};
 use crate::dom_throw;
 use crate::object::Code;
 use crate::private::{HTML_NS, Handed, MATHML_NS, Mapper, Private, SVG_NS, XLINK_NS};
+use crate::throwables::Throwables;
 
 /// `HTML_PARSE_NOERROR`, `XML_PARSE_NOERROR` under another name.
 const NOERROR: i64 = 1 << 5;
@@ -38,9 +39,10 @@ const BUFFER: usize = 4096;
 fn check_options(req: &mut Request, position: u32, options: i64) -> Result<(), Thrown> {
     let valid = NOERROR | COMPACT | NOIMPLIED | crate::modern_constants::HTML_NO_DEFAULT_NS;
     if options & !valid != 0 {
+        let ce = Throwables::of(req)?;
         return Err(php_ext::raising::argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             position,
             "contains invalid flags (allowed flags: LIBXML_NOERROR, LIBXML_COMPACT, \
              LIBXML_HTML_NOIMPLIED, Dom\\HTML_NO_DEFAULT_NS)",
@@ -1380,7 +1382,8 @@ pub(crate) fn create_from_file(
     let Some(stream) = req.open_stream(&path, b"rb", false)? else {
         // `zend_throw_exception_ex`'s `%s`: the name's bytes as they are.
         let message = [&b"Cannot open file '"[..], &path, b"'"].concat();
-        return Err(throw_exception_ex(req, "Exception", &message));
+        let ce = Throwables::of(req)?;
+        return Err(throw_exception_ex(req, ce.exception, &message));
     };
     // The MIME sniff: the charset of the http headers the stream carries,
     // where no encoding was given and lexbor knows the one named.

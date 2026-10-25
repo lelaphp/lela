@@ -37,6 +37,7 @@ mod sdl;
 mod server;
 mod shared;
 mod table;
+mod throwables;
 mod xml;
 
 use php_ext::abi::{
@@ -256,6 +257,7 @@ pub fn extension() -> Extension {
             dependency("libxml", DependencyKind::Required),
             dependency("session", DependencyKind::Optional),
         ])
+        .engine_state(throwables::Throwables::start)
         .request_state::<State>()
         .error(server::soap_error_handler)
         .info(soap_info)

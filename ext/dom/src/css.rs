@@ -23,6 +23,7 @@ use php_ext_libxml::ffi::{Kind, Node, Quirks};
 
 use crate::object::Code;
 use crate::private::{HTML_NS, html_in_html_document, ns_is};
+use crate::throwables::Throwables;
 use crate::{dom, fetch, object_for};
 
 /// `lxb_status_t` as the engine answers it.
@@ -1485,9 +1486,10 @@ fn quirks(req: &Request, object: PhpObject) -> bool {
 /// which the C throws from inside the match and this throws once it ends.
 fn raise(req: &mut Request, status: Status, blank: bool) -> Result<(), Thrown> {
     if status == Status::Error {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             1,
             "contains an unsupported selector",
         ));

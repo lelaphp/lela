@@ -25,6 +25,7 @@ use crate::archive::{
 use crate::entry::{self, Dir};
 use crate::open::{self, has_bz2, has_zlib, readonly};
 use crate::path::{self, Create, Exec};
+use crate::throwables::Throwables;
 use crate::write;
 
 /// Core's and spl's classes these extend and implement.
@@ -71,13 +72,15 @@ impl Other for Held {
 /// `BadMethodCallException` for one whose constructor never ran.
 pub(crate) fn held(req: &mut Request, this: PhpObject) -> Result<ArchiveId, Thrown> {
     let id = spl::other_mut::<Held>(req, this).map(|held| held.0);
-    match id.filter(|id| archives(req).get(*id).is_some()) {
-        Some(id) => Ok(id),
-        None => Err(throw_exception_ex(
+    if let Some(id) = id.filter(|id| archives(req).get(*id).is_some()) {
+        Ok(id)
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw_exception_ex(
             req,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Cannot call method on an uninitialized Phar object",
-        )),
+        ))
     }
 }
 
@@ -90,7 +93,12 @@ fn named(req: &mut Request, id: ArchiveId) -> (String, bool) {
 
 /// `PHAR_G(readonly) && !phar->is_data`: `class` thrown with `message`
 /// where writes are off for this archive.
-fn writes_off(req: &mut Request, id: ArchiveId, class: &str, message: &str) -> Result<(), Thrown> {
+fn writes_off(
+    req: &mut Request,
+    id: ArchiveId,
+    class: ClassId,
+    message: &str,
+) -> Result<(), Thrown> {
     let (_, is_data) = named(req, id);
     if readonly(req) && !is_data {
         return Err(throw_exception_ex(req, class, message));
@@ -101,7 +109,10 @@ fn writes_off(req: &mut Request, id: ArchiveId, class: &str, message: &str) -> R
 /// A flush's error as `PharException`.
 fn flushed(req: &mut Request, id: ArchiveId) -> Result<(), Thrown> {
     match write::flush(req, id)? {
-        Some(error) => Err(throw_exception_ex(req, "PharException", &error)),
+        Some(error) => {
+            let ce = Throwables::of(req)?;
+            Err(throw_exception_ex(req, ce.phar_exception, &error))
+        }
         None => Ok(()),
     }
 }
@@ -154,9 +165,10 @@ fn construct(
     let data_class = class_named(req, b"PharData")?;
     let is_data = this.instance_of(req, data_class);
     if spl::other_mut::<Held>(req, this).is_some() {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Cannot call constructor twice",
         ));
     }
@@ -174,9 +186,10 @@ fn construct(
         Ok(id) => id,
         Err(error) => {
             let message = error.unwrap_or_else(|| "Phar creation or opening failed".into());
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 &message,
             ));
         }
@@ -193,7 +206,12 @@ fn construct(
         } else {
             "Phar class can only be used for executable tar and zip archives"
         };
-        return Err(throw_exception_ex(req, "UnexpectedValueException", message));
+        let ce = Throwables::of(req)?;
+        return Err(throw_exception_ex(
+            req,
+            ce.unexpected_value_exception,
+            message,
+        ));
     }
     a.refcount += 1;
     let mut url = b"phar://".to_vec();
@@ -432,9 +450,10 @@ impl Phar {
         let id = held(req, this.object())?;
         let dir = directory.0.as_bytes().to_vec();
         if path::is_magic(&dir) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Cannot create a directory in magic \".phar\" directory",
             ));
         }
@@ -457,9 +476,10 @@ impl Phar {
                 .check_open_basedir(&file, true)
                 .is_err()
         {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 &format!(
                     "phar error: unable to open file \"{}\" to add to phar archive, open_basedir restrictions prevent this",
                     lossy(&file)
@@ -468,9 +488,10 @@ impl Phar {
         }
         let opening = php_ext::request::Opening::default();
         let Some(stream) = req.open_stream_with(&file, b"rb", opening)? else {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 &format!(
                     "phar error: unable to open file \"{}\" to add to phar archive",
                     lossy(&file)
@@ -506,10 +527,11 @@ impl Phar {
         #[php(default = "")] pattern: PhpString,
     ) -> Result<Owner<PhpArray>, Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "UnexpectedValueException",
+            ce.unexpected_value_exception,
             "Cannot write to archive - write operations restricted by INI setting",
         )?;
         crate::build::from_directory(req, id, directory.0, pattern)
@@ -525,10 +547,11 @@ impl Phar {
         #[php(default = null)] baseDirectory: Option<PhpString>,
     ) -> Result<Owner<PhpArray>, Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "UnexpectedValueException",
+            ce.unexpected_value_exception,
             "Cannot write out phar archive, phar is read-only",
         )?;
         let base = baseDirectory
@@ -542,41 +565,46 @@ impl Phar {
     #[php(tentative)]
     fn compressFiles(req: &mut Request, this: This<Self>, compression: i64) -> Result<(), Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Phar is readonly, cannot change compression",
         )?;
         let flags = match compression {
             0x1000 if !has_zlib(req) => {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "BadMethodCallException",
+                    ce.bad_method_call_exception,
                     "Cannot compress files within archive with gzip, enable ext/zlib in php.ini",
                 ));
             }
             0x2000 if !has_bz2(req) => {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "BadMethodCallException",
+                    ce.bad_method_call_exception,
                     "Cannot compress files within archive with bz2, enable ext/bz2 in php.ini",
                 ));
             }
             0x1000 => ENT_COMPRESSED_GZ,
             0x2000 => ENT_COMPRESSED_BZ2,
             _ => {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "BadMethodCallException",
+                    ce.bad_method_call_exception,
                     "Unknown compression specified, please pass one of Phar::GZ or Phar::BZ2",
                 ));
             }
         };
         if archives(req).get(id).is_some_and(archive::Archive::is_tar) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Cannot compress with Gzip compression, tar archives cannot compress individual files, use compress() to compress the whole archive",
             ));
         }
@@ -586,11 +614,23 @@ impl Phar {
             } else {
                 "Cannot compress all files as Bzip2, some are compressed as gzip and cannot be decompressed"
             };
-            return Err(throw_exception_ex(req, "BadMethodCallException", message));
+            let ce = Throwables::of(req)?;
+            return Err(throw_exception_ex(
+                req,
+                ce.bad_method_call_exception,
+                message,
+            ));
         }
         set_compression(req, id, flags);
         match write::flush(req, id)? {
-            Some(error) => Err(throw_exception_ex(req, "BadMethodCallException", &error)),
+            Some(error) => {
+                let ce = Throwables::of(req)?;
+                Err(throw_exception_ex(
+                    req,
+                    ce.bad_method_call_exception,
+                    &error,
+                ))
+            }
             None => Ok(()),
         }
     }
@@ -599,16 +639,18 @@ impl Phar {
     #[php(tentative)]
     fn decompressFiles(req: &mut Request, this: This<Self>) -> Result<True, Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Phar is readonly, cannot change compression",
         )?;
         if !can_decompress_all(req, id) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Cannot decompress all files, some are compressed as bzip2 or gzip and cannot be decompressed",
             ));
         }
@@ -617,7 +659,14 @@ impl Phar {
         }
         set_compression(req, id, 0);
         match write::flush(req, id)? {
-            Some(error) => Err(throw_exception_ex(req, "BadMethodCallException", &error)),
+            Some(error) => {
+                let ce = Throwables::of(req)?;
+                Err(throw_exception_ex(
+                    req,
+                    ce.bad_method_call_exception,
+                    &error,
+                ))
+            }
             None => Ok(True),
         }
     }
@@ -631,41 +680,46 @@ impl Phar {
         #[php(default = null)] extension: Option<PhpString>,
     ) -> Result<Option<Owner<php_ext::abi::Instance<Phar>>>, Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "UnexpectedValueException",
+            ce.unexpected_value_exception,
             "Cannot compress phar archive, phar is read-only",
         )?;
         if archives(req).get(id).is_some_and(archive::Archive::is_zip) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Cannot compress zip-based archives with whole-archive compression",
             ));
         }
         let flags = match compression {
             0 => 0,
             0x1000 if !has_zlib(req) => {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "BadMethodCallException",
+                    ce.bad_method_call_exception,
                     "Cannot compress entire archive with gzip, enable ext/zlib in php.ini",
                 ));
             }
             0x1000 => FILE_COMPRESSED_GZ,
             0x2000 if !has_bz2(req) => {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "BadMethodCallException",
+                    ce.bad_method_call_exception,
                     "Cannot compress entire archive with bz2, enable ext/bz2 in php.ini",
                 ));
             }
             0x2000 => FILE_COMPRESSED_BZ2,
             _ => {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "BadMethodCallException",
+                    ce.bad_method_call_exception,
                     "Unknown compression specified, please pass one of Phar::GZ or Phar::BZ2",
                 ));
             }
@@ -690,16 +744,18 @@ impl Phar {
         #[php(default = null)] extension: Option<PhpString>,
     ) -> Result<Option<Owner<php_ext::abi::Instance<Phar>>>, Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "UnexpectedValueException",
+            ce.unexpected_value_exception,
             "Cannot decompress phar archive, phar is read-only",
         )?;
         if archives(req).get(id).is_some_and(archive::Archive::is_zip) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Cannot decompress zip-based archives with whole-archive compression",
             ));
         }
@@ -724,9 +780,10 @@ impl Phar {
     ) -> Result<Option<Owner<php_ext::abi::Instance<Phar>>>, Thrown> {
         let id = held(req, this.object())?;
         if readonly(req) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Cannot write out executable phar archive, phar is read-only",
             ));
         }
@@ -785,10 +842,11 @@ impl Phar {
     #[php(tentative)]
     fn delete(req: &mut Request, this: This<Self>, localName: PathArg) -> Result<True, Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "UnexpectedValueException",
+            ce.unexpected_value_exception,
             "Cannot write out phar archive, phar is read-only",
         )?;
         let name = localName.0.as_bytes().to_vec();
@@ -803,9 +861,10 @@ impl Phar {
                 a.is_modified = true;
             }
             None => {
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "BadMethodCallException",
+                    ce.bad_method_call_exception,
                     &format!(
                         "Entry {} does not exist and cannot be deleted",
                         lossy(&name)
@@ -821,10 +880,11 @@ impl Phar {
     #[php(tentative)]
     fn delMetadata(req: &mut Request, this: This<Self>) -> Result<True, Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Write operations disabled by the php.ini setting phar.readonly",
         )?;
         let Some(a) = archives(req).get_mut(id) else {
@@ -988,11 +1048,14 @@ impl Phar {
             1 => Ok(current == Format::Phar),
             2 => Ok(current == Format::Tar),
             3 => Ok(current == Format::Zip),
-            _ => Err(throw_exception_ex(
-                req,
-                "PharException",
-                "Unknown file format specified",
-            )),
+            _ => {
+                let ce = Throwables::of(req)?;
+                Err(throw_exception_ex(
+                    req,
+                    ce.phar_exception,
+                    "Unknown file format specified",
+                ))
+            }
         }
     }
 
@@ -1054,35 +1117,39 @@ impl Phar {
             Ok(_) => {}
             Err(error) => {
                 let tail = error.map(|e| format!(", {e}")).unwrap_or_default();
+                let ce = Throwables::of(req)?;
                 return Err(throw_exception_ex(
                     req,
-                    "BadMethodCallException",
+                    ce.bad_method_call_exception,
                     &format!("Entry {} does not exist{tail}", lossy(&name)),
                 ));
             }
         }
         if name == b".phar/stub.php" {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 &format!(
                     "Cannot get stub \".phar/stub.php\" directly in phar \"{fname}\", use getStub"
                 ),
             ));
         }
         if name == b".phar/alias.txt" {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 &format!(
                     "Cannot get alias \".phar/alias.txt\" directly in phar \"{fname}\", use getAlias"
                 ),
             ));
         }
         if path::is_magic(&name) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Cannot directly get any files or directories in magic \".phar\" directory",
             ));
         }
@@ -1092,7 +1159,7 @@ impl Phar {
             None => class_named(req, b"SplFileInfo")?,
         };
         let url = string(req, &url)?;
-        let made = instantiate(req, class, &[*url]);
+        let made = instantiate(req, class, &[*url], &[]);
         url.give_up(req);
         Ok(made?.into_instance())
     }
@@ -1108,35 +1175,39 @@ impl Phar {
     ) -> Result<(), Thrown> {
         let (name, source) = zpp_name_and_value(req, localName.value(), value.value())?;
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Write operations disabled by the php.ini setting phar.readonly",
         )?;
         let fname = named(req, id).0;
         if name == b".phar/stub.php" {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 &format!(
                     "Cannot set stub \".phar/stub.php\" directly in phar \"{fname}\", use setStub"
                 ),
             ));
         }
         if name == b".phar/alias.txt" {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 &format!(
                     "Cannot set alias \".phar/alias.txt\" directly in phar \"{fname}\", use setAlias"
                 ),
             ));
         }
         if path::is_magic(&name) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "BadMethodCallException",
+                ce.bad_method_call_exception,
                 "Cannot set any files or directories in magic \".phar\" directory",
             ));
         }
@@ -1158,10 +1229,11 @@ impl Phar {
         localName: Untyped<PathArg>,
     ) -> Result<(), Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Write operations disabled by the php.ini setting phar.readonly",
         )?;
         let name = localName.0.0.as_bytes().to_vec();
@@ -1207,10 +1279,11 @@ impl Phar {
     #[php(tentative)]
     fn setMetadata(req: &mut Request, this: This<Self>, metadata: Value) -> Result<(), Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "BadMethodCallException",
+            ce.bad_method_call_exception,
             "Write operations disabled by the php.ini setting phar.readonly",
         )?;
         let Some(a) = archives(req).get_mut(id) else {
@@ -1239,10 +1312,11 @@ impl Phar {
         #[php(default = null)] privateKey: Option<PhpString>,
     ) -> Result<(), Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "UnexpectedValueException",
+            ce.unexpected_value_exception,
             "Cannot set signature algorithm, phar is read-only",
         )?;
         let Ok(
@@ -1250,9 +1324,10 @@ impl Phar {
             | SIG_OPENSSL_SHA512),
         ) = u32::try_from(algo)
         else {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Unknown signature algorithm specified",
             ));
         };
@@ -1293,10 +1368,11 @@ impl Phar {
     #[php(tentative)]
     fn stopBuffering(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let id = held(req, this.object())?;
+        let ce = Throwables::of(req)?;
         writes_off(
             req,
             id,
-            "UnexpectedValueException",
+            ce.unexpected_value_exception,
             "Cannot write out phar archive, phar is read-only",
         )?;
         if let Some(a) = archives(req).get_mut(id) {
@@ -1339,7 +1415,10 @@ impl Phar {
         let web = webIndex.map(|s| s.0.as_bytes().to_vec());
         match write::default_stub(index.as_deref(), web.as_deref()) {
             Ok(stub) => PhpString::new(req, &stub),
-            Err(error) => Err(throw_exception_ex(req, "PharException", &error)),
+            Err(error) => {
+                let ce = Throwables::of(req)?;
+                Err(throw_exception_ex(req, ce.phar_exception, &error))
+            }
         }
     }
 
@@ -1407,7 +1486,10 @@ impl Phar {
         let alias = alias.map(|a| a.as_bytes().to_vec());
         match open::open_from_filename(req, &name, alias.as_deref(), true)? {
             Ok(_) => Ok(true),
-            Err(Some(error)) => Err(throw_exception_ex(req, "PharException", &error)),
+            Err(Some(error)) => {
+                let ce = Throwables::of(req)?;
+                Err(throw_exception_ex(req, ce.phar_exception, &error))
+            }
             Err(None) => Ok(false),
         }
     }
@@ -1424,7 +1506,10 @@ impl Phar {
         let alias = alias.map(|a| a.as_bytes().to_vec());
         match open::open_executed(req, alias.as_deref())? {
             Ok(()) => Ok(true),
-            Err(Some(error)) => Err(throw_exception_ex(req, "PharException", &error)),
+            Err(Some(error)) => {
+                let ce = Throwables::of(req)?;
+                Err(throw_exception_ex(req, ce.phar_exception, &error))
+            }
             Err(None) => Ok(false),
         }
     }

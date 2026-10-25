@@ -9,6 +9,8 @@ use php_ext::raising::{Thrown, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, Value};
 
+use crate::throwables::Throwables;
+
 /// The class, `zend_test_iterators_init`.
 pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
     builder.class::<TraversableTest>()
@@ -101,9 +103,10 @@ impl ObjectHandlers for TraversableTestHandlers {
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "An iterator cannot be used with foreach by reference",
             ));
         }

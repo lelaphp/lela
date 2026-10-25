@@ -23,7 +23,9 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod ffi;
+mod throwables;
 
+use crate::throwables::Throwables;
 use php_ext::abi::{Extension, ExtensionBuilder, Instance, OrFalse, Ref, Refusals, Untyped};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
@@ -82,6 +84,7 @@ pub fn extension() -> Extension {
         ])
         .class::<SysvMessageQueue>()
         .info(sysvmsg_info)
+        .engine_state(throwables::Throwables::start)
         .build("sysvmsg")
 }
 
@@ -199,9 +202,10 @@ fn msg_get_queue(
         }
     };
     let Some(class) = lookup_class(req, b"SysvMessageQueue")? else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Class \"SysvMessageQueue\" not found",
         ));
     };

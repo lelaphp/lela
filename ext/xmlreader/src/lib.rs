@@ -24,6 +24,7 @@
 // The `expect` fence is read by `xtask witness`, not by rustdoc (design §8).
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
+mod throwables;
 mod trampoline;
 
 use php_ext::abi::{
@@ -41,6 +42,8 @@ use php_ext::values::{
 };
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{Expanded, Library, Raised, RelaxNg, TextReader};
+
+use throwables::Throwables;
 
 /// The extension value (design §7.1).
 ///
@@ -66,6 +69,7 @@ pub fn extension() -> Extension {
         .dependencies(vec![dependency("dom"), dependency("libxml")])
         .class::<XMLReader>()
         .class::<trampoline::XMLReader>()
+        .engine_state(Throwables::start)
         .info(|req| {
             req.extensions_mut()
                 .info_table(&[&["XMLReader", "enabled"]]);
@@ -146,7 +150,8 @@ impl ObjectHandlers for Handlers {
         value.give_up(req);
         let class = class_name(req, object.class());
         let message = format!("Cannot modify readonly property {class}::${shown}");
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     }
 
     fn get_property_ptr_ptr(
@@ -196,7 +201,8 @@ impl ObjectHandlers for Handlers {
         }
         let class = class_name(req, object.class());
         let message = format!("Cannot unset {class}::${}", String::from_utf8_lossy(name));
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     }
 
     /// `xmlreader_get_debug_info`: the object's own properties, then each
@@ -398,7 +404,7 @@ impl Target {
                 put(req, object, reader);
                 Ok(Owner::bool(true))
             }
-            Target::New(class) => match instantiate(req, class, &[]) {
+            Target::New(class) => match instantiate(req, class, &[], &[]) {
                 Ok(object) => {
                     put(req, *object, reader);
                     Ok(object.into_value())
@@ -420,7 +426,10 @@ fn refuse(req: &mut Request, failure: Failure, message: &str) -> Result<Owner<Va
             docref(req, Level::Warning, message);
             Ok(Owner::bool(false))
         }
-        Failure::Throw => Err(throw_error(req, "Error", message)),
+        Failure::Throw => {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(req, ce.error, message))
+        }
     }
 }
 
@@ -586,11 +595,14 @@ impl Property {
                 | Property::IsEmptyElement
         );
         match read {
-            Some(Read::Number(-1, _)) => Err(throw_error(
-                req,
-                "Error",
-                "Failed to read property because no XML data has been read yet",
-            )),
+            Some(Read::Number(-1, _)) => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Failed to read property because no XML data has been read yet",
+                ))
+            }
             Some(Read::Number(n, true)) => Ok(Some(Owner::bool(n != 0))),
             Some(Read::Number(n, false)) => Ok(Some(Owner::int(i64::from(n)))),
             Some(Read::Text(t)) => {
@@ -778,11 +790,14 @@ impl XMLReader {
         property: i64,
     ) -> Result<bool, Thrown> {
         match quiet(req, this.object(), |r| r.parser_prop(flags_int(property))) {
-            None => Err(throw_error(
-                req,
-                "Error",
-                "Cannot access parser properties before loading data",
-            )),
+            None => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Cannot access parser properties before loading data",
+                ))
+            }
             Some(-1) => Err(arg_value_error(req, 1, "be a valid parser property")),
             Some(n) => Ok(n != 0),
         }
@@ -881,11 +896,14 @@ impl XMLReader {
     #[php(tentative)]
     fn read(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         match with(req, this.object(), TextReader::read)? {
-            None => Err(throw_error(
-                req,
-                "Error",
-                "Data must be loaded before reading",
-            )),
+            None => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Data must be loaded before reading",
+                ))
+            }
             Some(n) => Ok(n == 1),
         }
     }
@@ -913,9 +931,10 @@ impl XMLReader {
     ) -> Result<bool, Thrown> {
         let object = this.object();
         let Some(mut n) = with(req, object, TextReader::next)? else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Data must be loaded before reading",
             ));
         };
@@ -1018,9 +1037,10 @@ impl XMLReader {
         let (made, raised, thrown) = TextReader::stream(req, stream, u, e, flags_int(flags));
         Errors::settle(req, raised, thrown)?;
         let Some(reader) = made else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Could not construct libxml reader",
             ));
         };
@@ -1071,11 +1091,14 @@ impl XMLReader {
         }
         let xsd = filename.as_ref().map(|f| f.0.as_bytes());
         match with(req, this.object(), |r, req| r.schema_validate(req, xsd))? {
-            None => Err(throw_error(
-                req,
-                "Error",
-                "Schema must be set prior to reading",
-            )),
+            None => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Schema must be set prior to reading",
+                ))
+            }
             Some(0) => Ok(true),
             Some(_) => {
                 docref(req, Level::Warning, "Schema contains errors");
@@ -1094,11 +1117,14 @@ impl XMLReader {
         match quiet(req, this.object(), |r| {
             r.set_parser_prop(flags_int(property), value)
         }) {
-            None => Err(throw_error(
-                req,
-                "Error",
-                "Cannot access parser properties before loading data",
-            )),
+            None => {
+                let ce = Throwables::of(req)?;
+                Err(throw_error(
+                    req,
+                    ce.error,
+                    "Cannot access parser properties before loading data",
+                ))
+            }
             Some(-1) => Err(arg_value_error(req, 1, "be a valid parser property")),
             Some(_) => Ok(true),
         }
@@ -1229,9 +1255,10 @@ impl XMLReader {
             doc = node.doc();
         }
         let Some(expanded) = with(req, this.object(), |r, req| r.expand(req, doc))? else {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Data must be loaded before expanding",
             ));
         };
@@ -1294,11 +1321,14 @@ fn relaxng(
         Some(Some(bytes)) => r.relaxng(req, Some(RelaxNg::Source(bytes))),
     })?;
     match answer {
-        None => Err(throw_error(
-            req,
-            "Error",
-            "Schema must be set prior to reading",
-        )),
+        None => {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(
+                req,
+                ce.error,
+                "Schema must be set prior to reading",
+            ))
+        }
         Some(0) => Ok(true),
         Some(_) => {
             docref(req, Level::Warning, "Schema contains errors");

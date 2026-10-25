@@ -45,6 +45,7 @@ use php_ext_standard::php_var_export_ex;
 
 use crate::Entry;
 use crate::Modifiable::{All, System};
+use crate::throwables::Throwables;
 
 /// `zend_test.observer.enabled`.
 const ENABLED: &[u8] = b"zend_test.observer.enabled";
@@ -105,7 +106,7 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
     builder
         .ini(ini())
         .on_modify(OBSERVE_FUNCTION_NAMES, on_update_function_names)
-        .engine_state(Switches::start)
+        .engine_state(Started::start)
         .observer_when(fcall_init, |start| started_on(start, ENABLED))
         .observer_when(execute_internal_init, |start| {
             started_on(start, b"zend_test.observer.execute_internal")
@@ -121,6 +122,24 @@ pub(crate) fn declared(builder: ExtensionBuilder) -> ExtensionBuilder {
 /// The table as the extension declares it.
 fn ini() -> Vec<IniDecl> {
     ENTRIES.iter().map(Entry::decl).collect()
+}
+
+/// The engine state: the switches and the classes the natives raise
+/// (`crate::throwables`), both as the engine started with them.
+#[derive(Clone, Copy)]
+pub(crate) struct Started {
+    switches: Switches,
+    pub(crate) throwables: Throwables,
+}
+
+impl Started {
+    /// The engine start: the switches read, the classes resolved.
+    fn start(start: &Start) -> Result<Started, Refusal> {
+        Ok(Started {
+            switches: Switches::start(start)?,
+            throwables: Throwables::start(start)?,
+        })
+    }
 }
 
 /// The `PHP_INI_SYSTEM` switches as the engine started with them,
@@ -179,7 +198,8 @@ impl Switches {
 
     /// The switches of the engine `req` is served by.
     fn of(req: &Request) -> Switches {
-        req.engine::<Switches>().copied().unwrap_or_default()
+        req.engine::<Started>()
+            .map_or_else(Switches::default, |state| state.switches)
     }
 }
 

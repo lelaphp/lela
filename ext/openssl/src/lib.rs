@@ -39,6 +39,7 @@ mod pkcs12;
 mod pkcs7;
 mod sign;
 mod spki;
+mod throwables;
 mod x509;
 mod xp_ssl;
 
@@ -423,6 +424,7 @@ pub fn extension() -> Extension {
         .on_modify(b"openssl.libctx", on_update_libctx)
         .process_state(|| Ok(initialize()))
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .rinit(rinit)
         .info(info)
         .build("openssl")

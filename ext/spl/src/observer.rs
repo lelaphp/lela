@@ -25,6 +25,7 @@ use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_standard::Serializer;
 
+use crate::throwables::Throwables;
 use crate::{ArrayAccess, Countable, Iterator, Record, SeekableIterator, Serializable};
 use table::Table;
 
@@ -617,13 +618,15 @@ impl SplObjectStorage {
     /// `current(): object`.
     #[php(tentative)]
     fn current(req: &mut Request, this: This<Self>) -> Result<PhpObject, Thrown> {
-        match with(req, this.object(), |s| s.here())? {
-            Some((object, _)) => Ok(object),
-            None => Err(throw(
+        if let Some((object, _)) = with(req, this.object(), |s| s.here())? {
+            Ok(object)
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Called current() on invalid iterator",
-            )),
+            ))
         }
     }
 
@@ -643,9 +646,10 @@ impl SplObjectStorage {
         let position = offset;
         let len = with(req, this, |s| s.len())?;
         if position < 0 || usize::try_from(position).is_ok_and(|p| p >= len) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "OutOfBoundsException",
+                ce.out_of_bounds_exception,
                 &format!("Seek position {position} is out of range"),
             ));
         }
@@ -812,13 +816,15 @@ impl SplObjectStorage {
                 .get(&key)
                 .and_then(|at| s.rows[*at].as_ref().map(|row| *row.2))
         })?;
-        match found {
-            Some(inf) => Ok(inf.deref()),
-            None => Err(throw_exception_ex(
+        if let Some(inf) = found {
+            Ok(inf.deref())
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw_exception_ex(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Object not found",
-            )),
+            ))
         }
     }
 
@@ -998,16 +1004,18 @@ impl SplObjectStorage {
         let members = data.get(&Key::Int(1)).map(|v| v.deref());
         let (Some(storage), Some(members)) = (storage, members.filter(|m| m.as_array().is_some()))
         else {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Incomplete or ill-typed serialization data",
             ));
         };
         if storage.len() % 2 != 0 {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Odd number of elements",
             ));
         }
@@ -1025,7 +1033,8 @@ impl SplObjectStorage {
             let target = object.as_object();
             object.give_up(req);
             let Some(target) = target else {
-                return Err(throw(req, "UnexpectedValueException", "Non-object key"));
+                let ce = Throwables::of(req)?;
+                return Err(throw(req, ce.unexpected_value_exception, "Non-object key"));
             };
             storage_attach(req, this, target, row.value().deref())?;
             Ok(ControlFlow::Continue(()))
@@ -1175,9 +1184,10 @@ impl MultipleIterator {
             let rows = with(req, this, |s| s.live())?;
             for (_, inf) in &rows {
                 if identical(req, inf, &info)? {
+                    let ce = Throwables::of(req)?;
                     return Err(throw(
                         req,
-                        "InvalidArgumentException",
+                        ce.invalid_argument_exception,
                         "Key duplication error",
                     ));
                 }
@@ -1625,11 +1635,14 @@ impl ObjectHandlers for Handlers {
                 match found {
                     Some(inf) => Ok(Owner::take(req, inf.deref())),
                     None if read == DimensionRead::Silent => Ok(Owner::null()),
-                    None => Err(throw_exception_ex(
-                        req,
-                        "UnexpectedValueException",
-                        "Object not found",
-                    )),
+                    None => {
+                        let ce = Throwables::of(req)?;
+                        Err(throw_exception_ex(
+                            req,
+                            ce.unexpected_value_exception,
+                            "Object not found",
+                        ))
+                    }
                 }
             }
             _ => Std.read_dimension(req, object, offset, read),
@@ -2068,9 +2081,10 @@ fn each(req: &mut Request, this: PhpObject, method: &[u8]) -> Result<(), Thrown>
 /// the flags read after each row's calls as php reads them.
 fn get_all(req: &mut Request, this: PhpObject, method: &str) -> Result<Owner<PhpArray>, Thrown> {
     if with(req, this, |s| s.len())? == 0 {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "RuntimeException",
+            ce.runtime_exception,
             &format!("Called {method}() on an invalid iterator"),
         ));
     }
@@ -2128,20 +2142,25 @@ fn get_one(
     // per method, which formats nothing.
     let value = if valid {
         crate::method(req, iterator, method.as_bytes()).map_err(|thrown| {
+            let ce = match Throwables::of(req) {
+                Ok(ce) => ce,
+                Err(fatal) => return fatal,
+            };
             php_ext::raising::throw_chained(
                 req,
                 thrown,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Failed to call sub iterator method",
             )
         })?
     } else if with(req, this, |s| s.flags)? & MultipleIterator::MIT_NEED_ALL != 0 {
         let message = format!("Called {method}() with non valid sub iterator");
+        let ce = Throwables::of(req)?;
         return Err(match pending {
             Some(thrown) => {
-                php_ext::raising::throw_chained(req, thrown, "RuntimeException", &message)
+                php_ext::raising::throw_chained(req, thrown, ce.runtime_exception, &message)
             }
-            None => throw(req, "RuntimeException", &message),
+            None => throw(req, ce.runtime_exception, &message),
         });
     } else if let Some(thrown) = pending {
         return Err(thrown);
@@ -2156,9 +2175,10 @@ fn get_one(
         ValueRef::Str(s) => Owner::take(req, Key::lookup(s)),
         _ => {
             value.give_up(req);
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "InvalidArgumentException",
+                ce.invalid_argument_exception,
                 "Sub-Iterator is associated with NULL",
             ));
         }

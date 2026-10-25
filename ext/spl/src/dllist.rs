@@ -21,6 +21,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
+use crate::throwables::Throwables;
 use crate::{ArrayAccess, Countable, Iterator, Record, Serializable};
 
 /// `SPL_DLLIST_IT_MASK`, the two bits `setIteratorMode()` sets.
@@ -357,28 +358,32 @@ impl SplDoublyLinkedList {
     /// ```
     #[php(tentative)]
     fn pop(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
-        match with(req, this.object(), |l| l.pop())? {
+        if let Some(value) = with(req, this.object(), |l| l.pop())? {
             // The list's owner of the element, the caller's now.
-            Some(value) => Ok(value),
-            None => Err(throw(
+            Ok(value)
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Can't pop from an empty datastructure",
-            )),
+            ))
         }
     }
 
     /// `shift(): mixed`; the witness is the class's.
     #[php(tentative)]
     fn shift(req: &mut Request, this: This<Self>) -> Result<Owner<Value>, Thrown> {
-        match with(req, this.object(), |l| l.shift())? {
+        if let Some(value) = with(req, this.object(), |l| l.shift())? {
             // The list's owner of the element, the caller's now.
-            Some(value) => Ok(value),
-            None => Err(throw(
+            Ok(value)
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Can't shift from an empty datastructure",
-            )),
+            ))
         }
     }
 
@@ -473,9 +478,10 @@ impl SplDoublyLinkedList {
         let this = this.object();
         let flags = with(req, this, |l| l.flags)?;
         if flags & IT_FIX != 0 && (flags & Self::IT_MODE_LIFO) != (mode & Self::IT_MODE_LIFO) {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "RuntimeException",
+                ce.runtime_exception,
                 "Iterators' LIFO/FIFO modes for SplStack/SplQueue objects are frozen",
             ));
         }
@@ -787,9 +793,10 @@ impl SplDoublyLinkedList {
         let storage = data.get(&Key::Int(1)).and_then(|s| s.deref().as_array());
         let members = data.get(&Key::Int(2)).and_then(|m| m.deref().as_array());
         let (Some(flags), Some(storage), Some(members)) = (flags, storage, members) else {
+            let ce = Throwables::of(req)?;
             return Err(throw(
                 req,
-                "UnexpectedValueException",
+                ce.unexpected_value_exception,
                 "Incomplete or ill-typed serialization data",
             ));
         };
@@ -888,7 +895,11 @@ fn with<R>(
 
 /// `zend_argument_error(spl_ce_OutOfRangeException, 1, ...)`.
 fn out_of_range(req: &mut Request, tail: &str) -> Thrown {
-    php_ext::raising::argument_error(req, "OutOfRangeException", 1, tail)
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    php_ext::raising::argument_error(req, ce.out_of_range_exception, 1, tail)
 }
 
 impl ObjectHandlers for Handlers {
@@ -968,9 +979,10 @@ impl ObjectHandlers for Handlers {
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
         if by_ref {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "An iterator cannot be used with foreach by reference",
             ));
         }
@@ -1065,13 +1077,15 @@ fn peek(req: &mut Request, this: PhpObject, tail: bool) -> Result<Value, Thrown>
         let at = if tail { l.tail } else { l.head };
         at.and_then(|at| l.nodes[at].data.as_deref().copied())
     })?;
-    match found {
-        Some(value) => Ok(value.deref()),
-        None => Err(throw(
+    if let Some(value) = found {
+        Ok(value.deref())
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw(
             req,
-            "RuntimeException",
+            ce.runtime_exception,
             "Can't peek at an empty datastructure",
-        )),
+        ))
     }
 }
 

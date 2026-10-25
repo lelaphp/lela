@@ -34,6 +34,7 @@ use crate::shared::{
     PARAM_DATA, PARAM_NAME, client_slot, fault_slot, instance_of, is_null, slot,
 };
 use crate::table::{Key, Table};
+use crate::throwables::Throwables;
 use crate::{Res, SOAP_1_1, SOAP_1_2, Typemap, TypemapEntry, soap_error};
 
 // ---- the description's lookups
@@ -600,6 +601,7 @@ fn serialize_response_body(
     headers: &[HeaderCall<'_>],
     version: i64,
 ) -> Res<(Node, Node, Option<Node>)> {
+    let ce = Throwables::of(req)?;
     let (doc, envelope, ns) = new_envelope(version)?;
     let fail = |e| {
         doc.free_document();
@@ -609,7 +611,7 @@ fn serialize_response_body(
     let mut head: Option<Node> = None;
     let ret = ret.deref();
     let fault_obj = match ret.as_ref() {
-        ValueRef::Object(o) if instance_of(req, o, "SoapFault") => Some(o),
+        ValueRef::Object(o) if o.instance_of(req, ce.soap_fault) => Some(o),
         _ => None,
     };
     let body;

@@ -24,6 +24,7 @@ use crate::modern::Node as ModernNode;
 use crate::node::DOMNode;
 use crate::object::{Code, Dom, Extra};
 use crate::props::Prop;
+use crate::throwables::Throwables;
 use crate::{Read, dom, dom_mut, fetch, object_for, string};
 
 /// `PHP_DOM_REG_FUNC_MODE_*`: how one namespace serves a call.
@@ -633,9 +634,10 @@ fn dispatch(
         Called::Php { .. } => {
             let mut operands = operands.into_iter();
             let Some(first) = operands.next() else {
+                let ce = Throwables::of(req)?;
                 return Err(throw_error(
                     req,
-                    "Error",
+                    ce.error,
                     "Function name must be passed as the first argument",
                 ));
             };
@@ -649,7 +651,10 @@ fn dispatch(
     let args = operand_values(req, proxy, operands)?;
     let callbacks = at.get(req).map(|callbacks| &*callbacks);
     let callable = match Lookup::of(callbacks, mode_ns.as_deref(), &name) {
-        Lookup::NoTable => Err(throw_error(req, "Error", "No callbacks were registered")),
+        Lookup::NoTable => {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(req, ce.error, "No callbacks were registered"))
+        }
         Lookup::Any => {
             // `fci.function_name`, released once `zend_call_function`
             // returns, after its refusal is thrown.
@@ -661,9 +666,10 @@ fn dispatch(
         Lookup::Named(Some(callable)) => Ok(callable),
         Lookup::Named(None) => {
             let shown = String::from_utf8_lossy(&name).into_owned();
+            let ce = Throwables::of(req)?;
             Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("No callback handler \"{shown}\" registered"),
             ))
         }
@@ -748,11 +754,13 @@ fn eval(
     };
     let modern = crate::modern::follows_spec(req, this);
     let Some(id) = state(req, this).map(|state| state.ctx.id()) else {
-        return Err(throw_error(req, "Error", "Invalid XPath Context"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Invalid XPath Context"));
     };
     let Some(doc) = req.memory_mut().foreign(id).and_then(|ctx| ctx.doc()) else {
         if modern {
-            return Err(throw_error(req, "Error", "Invalid XPath Document Pointer"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, "Invalid XPath Document Pointer"));
         }
         docref(req, Level::Warning, "Invalid XPath Document Pointer");
         return Ok(Owner::bool(false));
@@ -762,7 +770,8 @@ fn eval(
         None => doc.root(),
     };
     if node.is_some_and(|n| n.doc() != Some(doc)) {
-        return Err(throw_error(req, "Error", "Node from wrong document"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Node from wrong document"));
     }
     let in_scope = match node {
         Some(n) if register && modern => {
@@ -795,7 +804,8 @@ fn eval(
         in_scope.free(req);
     }
     let Some((answer, raised, thrown)) = evaluated else {
-        return Err(throw_error(req, "Error", "Invalid XPath Context"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Invalid XPath Context"));
     };
     let mut raised = raised;
     for error in &mut raised {
@@ -807,9 +817,10 @@ fn eval(
     }
     let Some(answer) = answer else {
         if modern {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Could not evaluate XPath expression",
             ));
         }
@@ -988,9 +999,10 @@ impl DOMXPath {
         let (this, doc_obj) = (this.object(), document.object());
         if state(req, this).is_some_and(|s| s.evaluation_depth > 0) {
             let class = crate::class_name(req, this.class());
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!(
                     "Cannot call {class}::__construct() while an XPath evaluation is in progress"
                 ),
@@ -1155,9 +1167,11 @@ impl DOMXPath {
         let took = id
             .and_then(|id| req.memory_mut().foreign(id))
             .map(|ctx| ctx.register_ns(prefix.as_bytes(), namespace.as_bytes()));
-        match took {
-            Some(ok) => Ok(ok),
-            None => Err(throw_error(req, "Error", "Invalid XPath Context")),
+        if let Some(ok) = took {
+            Ok(ok)
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(req, ce.error, "Invalid XPath Context"))
         }
     }
 
@@ -1239,9 +1253,11 @@ impl DOMXPath {
         let registered = registering(req, this, |req, callbacks| {
             callbacks.register_php(req, restrict)
         });
-        match registered {
-            Some(answered) => answered,
-            None => Err(throw_error(req, "Error", "Invalid XPath Context")),
+        if let Some(answered) = registered {
+            answered
+        } else {
+            let ce = Throwables::of(req)?;
+            Err(throw_error(req, ce.error, "Invalid XPath Context"))
         }
     }
 
@@ -1313,7 +1329,8 @@ impl DOMXPath {
         let Some(registered) = registering(req, this, |req, callbacks| {
             callbacks.register_ns(req, &ns, &name, &value)
         }) else {
-            return Err(throw_error(req, "Error", "Invalid XPath Context"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, "Invalid XPath Context"));
         };
         if registered.is_ok() {
             let id = state(req, this).map(|state| state.ctx.id());
