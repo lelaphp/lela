@@ -18,8 +18,8 @@ use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
-    HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE,
-    SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, OBJECT_THIS,
+    OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -90,8 +90,10 @@ fn constants_named(ir: &TraceIr, clif: &str) -> String {
         }
     }
     for (at, address) in seen.into_iter().enumerate() {
-        // CLIF prints a constant in groups of four hex digits.
+        // CLIF prints a constant in groups of four hex digits, the first
+        // group padded with zeros.
         let digits = format!("{address:x}");
+        let digits = format!("{}{digits}", "0".repeat((4 - digits.len() % 4) % 4));
         let mut grouped = String::new();
         for (i, digit) in digits.chars().enumerate() {
             if i > 0 && (digits.len() - i).is_multiple_of(4) {
@@ -993,7 +995,7 @@ fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), St
         (HASH_IS, &[(Kernel::Find, 3)]),
         (HASH_ISSET, &[(Kernel::Find, 3)]),
         (HASH_WRITE, &[(Kernel::Lookup, 3)]),
-        (HASH_FETCH_W, &[(Kernel::Lookup, 1), (Kernel::Find, 1)]),
+        (HASH_FETCH_W, &[(Kernel::Lookup, 2), (Kernel::Find, 1)]),
         (DIM_DIV, &[(Kernel::Find, 1)]),
         (DIM_MOD, &[(Kernel::Find, 2)]),
         (DIM_SL, &[(Kernel::Find, 2)]),
@@ -1002,6 +1004,57 @@ fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), St
         (DIM_OR, &[(Kernel::Find, 1)]),
         (DIM_XOR, &[(Kernel::Find, 1)]),
         (DIM_CONCAT, &[(Kernel::Find, 1), (Kernel::AssignConcat, 1)]),
+    ];
+    for (fixture, calls) in kernels {
+        lowered(fixture)?;
+        let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
+            .map_err(|e| e.to_string())?;
+        for (kernel, n) in calls {
+            assert_eq!(
+                calls_of(&clif, *kernel).len(),
+                *n,
+                "{}: {kernel:?}\n{clif}",
+                fixture.name
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The shapes the hash slice left to the handler lowered in place
+/// (#3370): `isset()`, `??` and a read over a fetch's temporary through
+/// the `find` kernel, the temporary freed after; a write, a compound write
+/// and a fetch for writing through the `VAR` a fetch for writing left
+/// indirect, and a write to the array a reference holds, through the
+/// lookup kernels, the handler called only where a write is not made in
+/// place and nothing stepped but the `COALESCE`, as php calls its handler.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
+-> Result<(), String> {
+    let kernels: [(Fixture, &[(Kernel, usize)]); 3] = [
+        (
+            NESTED_READ,
+            &[
+                (Kernel::Find, 5),
+                (Kernel::Release, 3),
+                (Kernel::Step, 1),
+                (Kernel::Handle, 0),
+            ],
+        ),
+        (
+            NESTED_WRITE,
+            &[
+                (Kernel::Lookup, 5),
+                (Kernel::Find, 2),
+                (Kernel::Handle, 7),
+                (Kernel::Step, 0),
+            ],
+        ),
+        (
+            REF_WRITE,
+            &[(Kernel::Lookup, 2), (Kernel::Handle, 2), (Kernel::Step, 0)],
+        ),
     ];
     for (fixture, calls) in kernels {
         lowered(fixture)?;

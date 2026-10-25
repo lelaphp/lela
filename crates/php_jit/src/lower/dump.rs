@@ -284,6 +284,7 @@ impl<'a> Dump<'a> {
                 Stored::Copied { value, read } => match read {
                     Read::InPlace => format!("copied #{}", value.0),
                     Read::Through => format!("copied #{} through a reference", value.0),
+                    Read::Indirect => format!("copied #{} through an indirect", value.0),
                 },
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
@@ -345,6 +346,7 @@ fn check(check: Check) -> String {
     match check {
         Check::Type { value, tag: t } => format!("#{} {}", value.0, tag(t)),
         Check::Deref { value, tag: t } => format!("#{} ref to {}", value.0, tag(t)),
+        Check::Indirect { value, tag: t } => format!("#{} ind to {}", value.0, tag(t)),
         Check::Layout {
             value,
             layout,
@@ -355,6 +357,7 @@ fn check(check: Check) -> String {
             match read {
                 Read::InPlace => "",
                 Read::Through => "ref to ",
+                Read::Indirect => "ind to ",
             },
             match layout {
                 Layout::Packed => "packed",

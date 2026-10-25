@@ -27,8 +27,9 @@ use crate::record::{Landed, Stop, TraceRecord};
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FANNKUCH, FIB, Fixture, HASH_FETCH_W, HASH_IS,
-    HASH_ISSET, HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, OBJECT_THIS, OBJECT_VALUE,
-    OWNING_LEAVE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held, traced as built,
+    HASH_ISSET, HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE,
+    OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD,
+    STRING_MATCH, held, traced as built,
 };
 use crate::testing::records::recording;
 
@@ -2180,6 +2181,43 @@ fn an_undefined_keys_warning_reloads_nothing() -> Result<(), String> {
     Ok(())
 }
 
+/// A read under `??` over a temporary array is inline and frees the
+/// temporary after, whose element's destructor writes the variable a
+/// reference reaches and a global array: the free is the release kernel
+/// over a temporary, which revision 83's analysis covers (`jit-design.md`
+/// §4.2), so the trace reads nothing again after it, and the reference's
+/// inner type is held at its next read. `Emit::fetch_is`'s witnesses
+/// serve it.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_temporarys_free_reloads_nothing() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "class D { function __construct(public $n) {} function __destruct() { global $g; $g = $this->n; $GLOBALS['l'][0] = $this->n; } }
+        function f(&$r, $n) {
+            global $l; $s = 0;
+            for ($i = 0; $i < $n; $i++) { $r = 0; $l = [1]; $s += [new D($i), 5][1] ?? 0; $s += $r + $l[0]; }
+            return $s;
+        }
+        $g = 0; $l = []; echo f($g, 3), \"\\n\";",
+    )?;
+    let rendered = dump::render(&ir);
+    let at = inline_at(&ir, Opcode::FetchDimIs)?;
+    assert!(
+        matches!(&ir.ops[at.index()], Op::Line(line) if line.unwind.is_some()),
+        "the free unwinds where a destructor throws: {rendered}"
+    );
+    assert_eq!(reloaded(&ir, at), Vec::<u32>::new(), "{rendered}");
+    let read = next_read(&ir, at, 0).ok_or("no read of $r after the free")?;
+    assert!(
+        ir.guards
+            .iter()
+            .any(|guard| matches!(guard.check, Check::Deref { value, .. } if value == read)),
+        "the reference's inner value is held again at its read: {rendered}"
+    );
+    Ok(())
+}
+
 /// A write to a shared hash is its handler's, which copies the array,
 /// and one over an object gives the object up, whose destructor writes
 /// the variables a reference reaches: `ASSIGN_DIM` has no `call` effect,
@@ -2204,14 +2242,38 @@ fn a_hashs_separation_and_a_destructor_reload_nothing() -> Result<(), String> {
     Ok(())
 }
 
-/// What the hash slice leaves to the handler, each stepped as it was
-/// (#3339's successor): `isset()` and `??` over a temporary a fetch made,
-/// a write through the `VAR` a fetch for writing left indirect, and a
-/// write to the array a reference holds. `fetch_dim_w`'s and `fetch_is`'s
-/// witnesses serve the first two, `assign_dim`'s the third.
+/// The fixtures of the shapes the hash slice left to its handler, and
+/// the oplines each holds inline (#3370).
+const NESTED_DIMS: [(Fixture, &[Opcode]); 3] = [
+    (
+        NESTED_READ,
+        &[
+            Opcode::IssetIsemptyDimObj,
+            Opcode::FetchDimIs,
+            Opcode::FetchDimR,
+        ],
+    ),
+    (
+        NESTED_WRITE,
+        &[Opcode::AssignDim, Opcode::AssignDimOp, Opcode::FetchDimW],
+    ),
+    (REF_WRITE, &[Opcode::AssignDim]),
+];
+
+/// What the hash slice left to the handler, inline as php's code
+/// generator compiles it (#3339's successor, #3370): `isset()`, `??` and a
+/// read over a temporary a fetch made, which each frees after
+/// (`zend_jit_isset_isempty_dim`'s `jit_FREE_OP`); a write, a compound
+/// write and a fetch for writing through the `VAR` a fetch for writing
+/// left indirect, under a guard on what it points at
+/// (`zend_jit_fetch_indirect_var`), which the inline fetch for writing
+/// left so the guard tests nothing of the `VAR` itself; and a write to the
+/// array a reference holds, through its inner type's guard
+/// (`zend_jit_prepare_array_update`). `fetch_dim_w`'s, `fetch_is`'s and
+/// `assign_dim`'s witnesses serve them.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_is_stepped() -> Result<(), String> {
+fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_is_inline() -> Result<(), String> {
     let ir = built(
         &IN_F,
         "function f(array &$r, int $n) {
@@ -2222,30 +2284,80 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_is_stepped() -> R
         $x = ['k' => 0]; echo f($x, 3), \"\\n\";",
     )?;
     let rendered = dump::render(&ir);
-    let forms = |opcode: Opcode, op1: &dyn Fn(&Line) -> bool| -> Vec<Form> {
-        (ir.ops.iter())
-            .filter_map(|op| match op {
-                Op::Line(line) if line.opcode == opcode && op1(line) => Some(line.form),
+    let lines = |opcode: Opcode| -> Vec<(OpId, &Line)> {
+        (ir.ops.iter().enumerate())
+            .filter_map(|(at, op)| match op {
+                Op::Line(line) if line.opcode == opcode => {
+                    Some((OpId(u32::try_from(at).ok()?), line))
+                }
                 _ => None,
             })
             .collect()
     };
-    // `f` has five variables; a slot past them is a temporary.
-    let temporary = |line: &Line| match line.op1 {
-        Operand::Value(value) => ir.values[value.0 as usize].slot.var >= 5,
-        _ => false,
+    let held = |at: OpId, of: Operand| {
+        (ir.guards.iter())
+            .filter(|guard| guard.at == GuardAt::Before(at))
+            .map(|guard| guard.check)
+            .find(|check| match (check, of) {
+                (
+                    Check::Deref { value, .. } | Check::Indirect { value, .. },
+                    Operand::Value(op1),
+                ) => *value == op1,
+                _ => false,
+            })
     };
-    assert_eq!(
-        forms(Opcode::IssetIsemptyDimObj, &temporary),
-        [Form::Step],
-        "{rendered}"
+    for opcode in [
+        Opcode::IssetIsemptyDimObj,
+        Opcode::AssignDim,
+        Opcode::FetchDimW,
+    ] {
+        for (_, line) in lines(opcode) {
+            assert_eq!(line.form, Form::Inline, "{opcode:?}: {rendered}");
+        }
+    }
+    let writes = lines(Opcode::AssignDim);
+    assert_eq!(writes.len(), 2, "{rendered}");
+    assert!(
+        matches!(
+            held(writes[0].0, writes[0].1.op1),
+            Some(Check::Indirect {
+                tag: ZvalType::Array,
+                ..
+            })
+        ),
+        "the write through the `VAR` is held to what it points at: {rendered}"
     );
-    let writes = forms(Opcode::AssignDim, &|_| true);
-    assert_eq!(writes, [Form::Step, Form::Step], "{rendered}");
-    assert_eq!(
-        forms(Opcode::FetchDimW, &|_| true),
-        [Form::Inline],
-        "{rendered}"
+    assert!(
+        matches!(
+            held(writes[1].0, writes[1].1.op1),
+            Some(Check::Deref {
+                tag: ZvalType::Array,
+                ..
+            })
+        ),
+        "the write through the reference is held to its inner type: {rendered}"
     );
+    for (fixture, opcodes) in NESTED_DIMS {
+        let ir = golden(fixture)?;
+        let rendered = dump::render(&ir);
+        for opcode in opcodes {
+            let forms: Vec<Form> = (ir.ops.iter())
+                .filter_map(|op| match op {
+                    Op::Line(line) if line.opcode == *opcode => Some(line.form),
+                    _ => None,
+                })
+                .collect();
+            assert!(
+                !forms.is_empty(),
+                "{}: no {opcode:?} in {rendered}",
+                fixture.name
+            );
+            assert!(
+                forms.iter().all(|form| *form == Form::Inline),
+                "{}: {opcode:?} in {rendered}",
+                fixture.name
+            );
+        }
+    }
     Ok(())
 }
