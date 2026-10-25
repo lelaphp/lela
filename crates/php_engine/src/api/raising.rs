@@ -862,7 +862,7 @@ fn throw_printed(
     };
     match printing {
         Printing::Twice => {
-            let first = match strpprintf(req, crate::c_number::c_str(message.as_bytes())) {
+            let first = match strpprintf(req, message.as_bytes()) {
                 Ok(first) => Owner::adopt(first),
                 Err(thrown) => return refused(req, previous, thrown),
             };
@@ -929,13 +929,32 @@ fn made_and_thrown(
 /// 2360 0
 /// 1720 0
 /// ```
+///
+/// The message is the bytes `zend_vstrpprintf` printed, whole: php-8.5.12
+/// prints a name with `%S`, which keeps a NUL (GH-22905), where `%s`
+/// reads an argument to its first NUL and goes on with the format, so
+/// cutting an argument is its caller's, as [`class_not_found`] and
+/// [`undefined_function`] cut theirs. Here Reflection's `%S` beside
+/// `zend_fetch_class`'s and `zend_undefined_function`'s `%s`:
+///
+/// ```php
+/// $n = "foo\0bar";
+/// try { new ReflectionClass($n); } catch (ReflectionException $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// try { new $n; } catch (Error $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// try { $n(); } catch (Error $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// ```
+/// ```expect
+/// 436c6173732022666f6f006261722220646f6573206e6f74206578697374
+/// 436c6173732022666f6f22206e6f7420666f756e64
+/// 43616c6c20746f20756e646566696e65642066756e6374696f6e20666f6f2829
+/// ```
 pub fn throw_exception_ex(
     req: &mut Request,
     class: &str,
     message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
     made_and_thrown(req, None, |req| {
-        formatted_throwable(req, class, crate::c_number::c_str(message.as_ref()))
+        formatted_throwable(req, class, message.as_ref())
     })
 }
 
@@ -1064,17 +1083,17 @@ pub(crate) fn cannot_add_element(req: &mut Request) -> Thrown {
 }
 
 /// `zend_undefined_function`: php's `Error` naming the function as the
-/// call wrote it.
+/// call wrote it, up to its first NUL, as php's `%s` reads it.
 pub(crate) fn undefined_function(req: &mut Request, name: &[u8]) -> Thrown {
     let message = format!(
         "Call to undefined function {}()",
-        String::from_utf8_lossy(name)
+        String::from_utf8_lossy(crate::c_number::c_str(name))
     );
     error(req, &message)
 }
 
 /// `zend_undefined_method`: php's `Error` naming the class as declared
-/// and the method as written.
+/// and the method as written, up to its first NUL (`%s`).
 pub(crate) fn undefined_method(
     req: &mut Request,
     class: crate::api::values::ClassId,
@@ -1083,7 +1102,7 @@ pub(crate) fn undefined_method(
     let class = req.symbols().class_name(class);
     let message = format!(
         "Call to undefined method {class}::{}()",
-        String::from_utf8_lossy(method)
+        String::from_utf8_lossy(crate::c_number::c_str(method))
     );
     error(req, &message)
 }
@@ -1100,9 +1119,10 @@ pub(crate) fn non_static_method_call(
 }
 
 /// `zend_fetch_class`'s refusal where no class answers the name, php's
-/// `Error` naming it as written.
+/// `Error` naming it as written, up to its first NUL (`%s`).
 pub(crate) fn class_not_found(req: &mut Request, name: &[u8]) -> Thrown {
-    let message = format!("Class \"{}\" not found", String::from_utf8_lossy(name));
+    let shown = String::from_utf8_lossy(crate::c_number::c_str(name));
+    let message = format!("Class \"{shown}\" not found");
     error(req, &message)
 }
 

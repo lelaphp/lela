@@ -2159,7 +2159,11 @@ fn global_constant(
     let Some((key, value)) = found else {
         return Err(error(
             req,
-            &format!("Undefined constant \"{}\"", String::from_utf8_lossy(name)),
+            // `%s`: the name up to its first NUL.
+            &format!(
+                "Undefined constant \"{}\"",
+                String::from_utf8_lossy(crate::c_number::c_str(name))
+            ),
         ));
     };
     crate::api::raising::deprecated_constant(req, &key)?;
