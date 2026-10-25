@@ -357,6 +357,21 @@ pub(crate) mod entered {
     mod doors;
     mod parity;
 
+    /// `trace` entered on `frame` as the dispatch enters it: under what the
+    /// request lends where the tier laid its state, as a stand-in's
+    /// otherwise.
+    fn crossed<'t>(
+        req: &mut Request,
+        frame: FrameRef,
+        (epoch, trace): (&'t tier::Epoch, &'t crate::table::Trace),
+        at: super::super::At,
+    ) -> Result<super::super::Answered<'t>, Fatal> {
+        super::super::lent(req, |req, lent| {
+            enter(req, Some(lent.state), frame, (epoch, trace), at)
+        })
+        .unwrap_or_else(|| enter(req, None, frame, (epoch, trace), at))
+    }
+
     /// What a test enters, by the function whose activation enters it.
     trait Plan: 'static {
         /// The trace entered at the activation of `frame`, which serves
@@ -403,7 +418,7 @@ pub(crate) mod entered {
             else {
                 return Flow::Bail(Fatal::error("the body was not published"));
             };
-            match enter(req, frame, (&epoch, trace), crate::enter::At::First)
+            match crossed(req, frame, (&epoch, trace), crate::enter::At::First)
                 .map(|answered| answered.left)
             {
                 Ok(crate::enter::Left::Exit(exited)) => {

@@ -400,6 +400,65 @@ impl<'a> Holding<'a> {
     }
 }
 
+/// What the request lends a crossing of its own state for as long as the
+/// crossing serves (`jit-design.md` §4.6, #3437): the tier's state, and
+/// through it the engine's `Shared`; the request's hold on the epoch it
+/// started in, which its traces are taken from and their kernels serve
+/// out of, taken once, at the request's first visit; and the epoch's
+/// trace table, kept from the first visit that finds it made. So an entry
+/// takes no hold and looks up no table of its own, as php's enters a
+/// trace through the handler its op array holds.
+#[derive(Clone, Copy)]
+pub(crate) struct Lent<'l> {
+    pub(crate) state: &'l crate::JitRequest,
+    pub(crate) epoch: &'l Epoch,
+    pub(crate) table: Option<&'l crate::table::Table>,
+}
+
+impl<'l> Lent<'l> {
+    /// The engine's state, which the request holds for as long as it serves.
+    pub(crate) fn shared(self) -> &'l crate::Shared {
+        &self.state.shared
+    }
+}
+
+/// `serve` given the request and what it lends of itself ([`Lent`]): the
+/// tier's state looked up once, its hold on the epoch taken the first
+/// time, and the epoch's table kept the first time it is made; none for
+/// a request the tier laid no state on, a stand-in's.
+#[inline]
+pub(crate) fn lent<T>(
+    req: &mut Request,
+    serve: impl FnOnce(&mut Request, Lent<'_>) -> T,
+) -> Option<T> {
+    let state = tier::state::<crate::JitRequest>(req)?;
+    state.epoch.get_or_init(|| tier::epoch(req));
+    let state = ptr::from_ref(state);
+    // SAFETY: the request lays its tier's state once, as it is made, in a
+    // box of its own that it never replaces, moves out of or borrows
+    // mutably (`tier::state`, the one way to it, lends it shared), and
+    // drops it only as the request ends; `serve` borrows the request for
+    // less than that. So the state stands where `tier::state` found it,
+    // written only through its cells, for as long as `serve` serves, and
+    // no `&mut` of it is made meanwhile: what the box holds is not the
+    // request's own memory, which `serve`'s borrow covers.
+    let state = unsafe { &*state };
+    let epoch = state.epoch.get()?;
+    let table = match state.table.get() {
+        Some(table) => Some(&**table),
+        None => crate::table::shared_of_epoch(epoch)
+            .map(|table| &**state.table.get_or_init(|| std::sync::Arc::clone(table))),
+    };
+    Some(serve(
+        req,
+        Lent {
+            state,
+            epoch,
+            table,
+        },
+    ))
+}
+
 /// One `extern "C"` wrapper per listed kernel (`jit-design.md` §4.6,
 /// §5.1), in a `mod` the invocation names, over the request type it
 /// names. A line `name(a: A) -> T = tier::item;` writes
@@ -980,7 +1039,9 @@ pub(crate) struct Answered<'t> {
 /// trace number, php's `EG(jit_trace_num)`, the trace's for the length of
 /// the call and the one before it again after. The trace's row is laid
 /// down in the request's rows ([`Rows`]) before it is called, so a jump
-/// from another trace finds it ready. A panic a wrapper caught
+/// from another trace finds it ready, out of `state`, the tier's state
+/// the request lends ([`lent`]), none for a stand-in's; an entry after
+/// the row settled reads it alone ([`Rows::settled`]). A panic a wrapper caught
 /// is resumed and a fatal returned, read before the exit; an unwind hands
 /// back the frame that stands, and an exit is landed ([`land`]), of the
 /// trace that answered, which is `trace` or one it jumped to, named in
@@ -1004,6 +1065,7 @@ pub(crate) struct Answered<'t> {
 /// ```
 pub(crate) fn enter<'t>(
     req: &mut Request,
+    state: Option<&crate::JitRequest>,
     frame: FrameRef,
     (epoch, trace): (&'t Epoch, &'t Trace),
     at: At,
@@ -1031,7 +1093,7 @@ pub(crate) fn enter<'t>(
     // this request, and whether they are made in place, laid down in the
     // trace's row for the jumps to it.
     let stack = tier::stack(req).as_ptr();
-    let (images, rows) = Images::of(req, (epoch, trace));
+    let (images, rows) = Images::of(req, state, (epoch, trace));
     let ready = images.ready();
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
@@ -1219,23 +1281,35 @@ impl Images {
     /// rows with the trace's laid down as they say, which a jump to the
     /// trace reads ([`Rows`]); a request that keeps no state of the tier's
     /// keeps no rows, and its rows are [`NO_ROWS`].
-    fn of(req: &Request, (epoch, trace): (&Epoch, &Trace)) -> (Images, *const usize) {
-        if let Some(state) = tier::state::<crate::JitRequest>(req) {
-            let images = if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
-                Images::None
-            } else {
-                (state.headers.entered(req, (epoch, trace))).map_or_else(
-                    || Images::own(req, (epoch, trace)),
-                    |(at, laid)| Images::Kept { at, laid },
-                )
-            };
+    fn of(
+        req: &Request,
+        state: Option<&crate::JitRequest>,
+        (epoch, trace): (&Epoch, &Trace),
+    ) -> (Images, *const usize) {
+        if let Some(state) = state {
             let rows = (state.headers).rows(|| {
                 crate::table::of_epoch(epoch).map_or(0, crate::table::TraceTable::segments)
             });
+            if let Some(at) = rows.settled(trace.id) {
+                return (Images::Kept { at, laid: true }, rows.base());
+            }
+            let (images, settled) = if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
+                (Images::None, true)
+            } else {
+                (state.headers.entered(req, (epoch, trace))).map_or_else(
+                    || (Images::own(req, (epoch, trace)), false),
+                    |(at, laid, settled)| (Images::Kept { at, laid }, settled),
+                )
+            };
             // A jump enters a trace only through the request's own addresses
             // for it, never those made for one entry alone.
             let kept = !matches!(images, Images::Own { .. });
-            rows.lay(trace.id, images.addresses(), images.ready() && kept);
+            rows.lay(
+                trace.id,
+                images.addresses(),
+                images.ready() && kept,
+                settled,
+            );
             return (images, rows.base());
         }
         if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
@@ -1326,18 +1400,30 @@ struct Entered {
     untouched: bool,
 }
 
+impl Entered {
+    /// Where its addresses are, whether its calls are made in place, and
+    /// whether that is settled: every call made in place and every slot
+    /// answered, so no entry after lays out or touches anything again.
+    fn found(&self) -> (*const usize, bool, bool) {
+        let settled = self.laid && !self.untouched;
+        (self.addresses.as_ptr(), self.laid, settled)
+    }
+}
+
 impl Headers {
     /// The addresses `trace`'s code reads in `req` ([`Images`]), laid out
     /// the first time the request enters it, the cache slots among them
     /// as the touch answers them ([`touched`]), and whether its calls are
     /// made in place; a header missing before is laid out once its
     /// function is the request's, and a slot whose cache was not laid
-    /// down is touched again, in place. None for a number no row holds.
+    /// down is touched again, in place; and whether nothing is left to lay
+    /// out or touch again, so the row it lays is settled ([`Rows::settled`]).
+    /// None for a number no row holds.
     fn entered(
         &self,
         req: &Request,
         (epoch, trace): (&Epoch, &Trace),
-    ) -> Option<(*const usize, bool)> {
+    ) -> Option<(*const usize, bool, bool)> {
         let mut kept = self.kept.borrow_mut();
         let row = usize::try_from(trace.id.get()).ok()?;
         let HeadersKept { calls, traces } = &mut *kept;
@@ -1367,7 +1453,7 @@ impl Headers {
                     }
                 }
             }
-            return Some((entered.addresses.as_ptr(), entered.laid));
+            return Some(entered.found());
         }
         let mut addresses = Vec::with_capacity(trace.calls.len() + trace.map_ptrs.len());
         for call in &trace.calls {
@@ -1385,7 +1471,7 @@ impl Headers {
             laid: !missing && callees_laid(req, trace),
             untouched: retouch,
         };
-        let found = (entered.addresses.as_ptr(), entered.laid);
+        let found = entered.found();
         if traces.len() <= row {
             traces.resize_with(row + 1, || None);
         }
@@ -1439,12 +1525,15 @@ struct Rows {
     firsts: Box<[std::cell::Cell<usize>]>,
 }
 
-/// One trace's row in a request's [`Rows`], as compiled code reads it.
+/// One trace's row in a request's [`Rows`], as compiled code reads it,
+/// its first two words; the third, whether the row is settled, is the
+/// crossing's alone ([`Rows::settled`]).
 #[repr(C)]
 #[derive(Debug, Default)]
 struct Row {
     images: std::cell::Cell<usize>,
     ready: std::cell::Cell<u32>,
+    settled: std::cell::Cell<bool>,
 }
 
 const _: () = assert!(
@@ -1470,9 +1559,10 @@ impl Rows {
     }
 
     /// The row of the trace `id` names: where the addresses its code reads
-    /// are, `images`, and whether its calls are `ready`; nothing for a
-    /// number past the segments.
-    fn lay(&self, id: crate::table::TraceId, images: *const usize, ready: bool) {
+    /// are, `images`, whether its calls are `ready`, and whether the row is
+    /// `settled`, its calls made in place and its slots answered, so that
+    /// no entry after lays it again; nothing for a number past the segments.
+    fn lay(&self, id: crate::table::TraceId, images: *const usize, ready: bool, settled: bool) {
         let (segment, at) = id.slot();
         let (Some(cell), Some(first)) = (self.segments.get(segment), self.firsts.get(segment))
         else {
@@ -1483,7 +1573,22 @@ impl Rows {
         if let Some(row) = rows.get(at) {
             row.images.set(images.expose_provenance());
             row.ready.set(u32::from(ready));
+            row.settled.set(settled);
         }
+    }
+
+    /// Where the addresses the code of the trace `id` names reads are, in
+    /// a row an entry laid settled ([`Rows::lay`]): what each entry after
+    /// it reads and nothing else, as php's enters a trace through the
+    /// handler its op array holds with nothing looked up. None for a row
+    /// not laid or not settled yet.
+    #[inline]
+    fn settled(&self, id: crate::table::TraceId) -> Option<*const usize> {
+        let (segment, at) = id.slot();
+        let row = self.segments.get(segment)?.get()?.get(at)?;
+        row.settled
+            .get()
+            .then(|| ptr::with_exposed_provenance(row.images.get()))
     }
 
     /// The first table's address, which compiled code reads past.

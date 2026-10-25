@@ -250,7 +250,11 @@ pub(crate) fn interpreted<T: Tier>() -> bool {
 
 /// Where a request keeps its tier's [`Tier::State`]
 /// (`jit-design.md` §2.2, #3144): laid once with the request, by the
-/// loop the engine bound ([`Loops::bound`]), and read by [`state`].
+/// loop the engine bound ([`Loops::bound`]), and read by [`state`]. Its
+/// box is never replaced, moved out of or borrowed mutably while the
+/// request lives, and [`state`] lends it only shared: a tier lends its
+/// state across the request's own borrow on that (`php_jit`'s
+/// `enter::lent`, #3437).
 pub(crate) struct TierState(Option<Box<dyn Any + Send>>);
 
 impl TierState {
