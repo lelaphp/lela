@@ -92,9 +92,10 @@ pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thro
     PhpString::new(req, crate::c_number::Long::of(n).as_bytes())
 }
 
-/// `zend_gcvt(f, precision, '.', exponent, buf)`, the one
+/// `zend_gcvt(f, precision ? precision : 1, '.', exponent, buf)`, as
+/// `smart_str_append_double` and `zend_double_to_str` call it, the one
 /// [`php_heap::double_to_string`] through the face: `precision`
-/// significant digits, or with `-1` the shortest text that reads back as
+/// significant digits, a `0` read as one, or with `-1` the shortest text that reads back as
 /// the same double, in the form php chooses, and not yet a string of the
 /// request's. The exponent character is the caller's, as it is at each
 /// of php's call sites: `Exponent::Upper` for `var_export`, `%G` and
@@ -147,6 +148,25 @@ pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thro
 #[must_use]
 pub fn float_format(f: f64, precision: i32, exponent: Exponent) -> String {
     php_heap::double_to_string(f, precision, exponent)
+}
+
+/// `zend_gcvt(f, ndigit, '.', exponent, buf)` with `ndigit` as its caller
+/// holds it, [`php_heap::gcvt`] through the face: the call `serialize`,
+/// `json_encode` and soap's `to_xml_double` make with the ini entry as
+/// it stands, where [`float_format`] reads a `0` as one. At `0` the one
+/// digit is written exponentially once the point stands past it, and a
+/// non-finite double is no text at all:
+///
+/// ```php
+/// ini_set('serialize_precision', 0); ini_set('precision', 0);
+/// echo serialize([10/3, INF]), "|", json_encode(10/3), "|", 10/3, "|", INF;
+/// ```
+/// ```expect
+/// a:2:{i:0;d:3.0E+0;i:1;d:;}|3.0e+0|3|I
+/// ```
+#[must_use]
+pub fn gcvt(f: f64, ndigit: i32, exponent: Exponent) -> String {
+    php_heap::gcvt(f, ndigit, exponent)
 }
 
 /// `zval_get_long`, the kernel [`crate::ops::get_long`] through the

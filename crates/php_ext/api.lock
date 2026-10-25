@@ -422,6 +422,7 @@ coerce::compare
 coerce::count
 coerce::float_format
 coerce::float_to_long
+coerce::gcvt
 coerce::identical
 coerce::int_to_string
 coerce::is_callable
