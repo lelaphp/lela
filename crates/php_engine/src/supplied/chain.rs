@@ -452,7 +452,6 @@ pub struct ErrorArgs<'a> {
     pub(crate) level: Level,
     pub(crate) bail: Bail,
     pub(crate) string: PhpString,
-    pub(crate) message: &'a str,
     pub(crate) file: &'a [u8],
     pub(crate) line: u32,
 }

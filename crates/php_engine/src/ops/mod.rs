@@ -31,6 +31,7 @@ use crate::api::values::walk::{self, Table};
 use crate::api::values::{
     Key, Layout, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
 };
+use crate::c_number::c_str;
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
 /// string php converts it to, which is what `ECHO`, `print`, `.` and
@@ -4749,15 +4750,37 @@ pub(crate) fn array_entry(
     if mode == DimRead::Silent {
         return Value::null();
     }
-    let message = match key {
-        php_heap::Key::Long(n) => format!("Undefined array key {n}"),
-        php_heap::Key::Str(s) => format!(
-            "Undefined array key \"{}\"",
-            String::from_utf8_lossy(s.bytes())
-        ),
-    };
-    warning(req, &message);
+    undefined_key(req, key);
     Value::null()
+}
+
+/// `zend_undefined_offset` and `zend_undefined_index`
+/// (`Z/Zend/zend_execute.c:2496-2505`): `Undefined array key %ld`, and
+/// `Undefined array key "%s"` with the key read to its first NUL, as
+/// php's `%s` reads it, and the rest of the sentence after it.
+///
+/// The key's bytes stand as the program wrote them, a byte no UTF-8
+/// reads among them:
+///
+/// ```php
+/// $a = []; echo $a["foo\0bar"], $a[7];
+/// set_error_handler(function ($no, $str) { echo bin2hex($str), "\n"; return true; });
+/// echo $a["\xff\0x"];
+/// ```
+/// ```expect
+/// Warning: Undefined array key "foo" in %s on line 2
+///
+/// Warning: Undefined array key 7 in %s on line 2
+/// 556e646566696e6564206172726179206b65792022ff22
+/// ```
+pub(crate) fn undefined_key(req: &mut Request, key: php_heap::Key) {
+    match key {
+        php_heap::Key::Long(n) => warning(req, &format!("Undefined array key {n}")),
+        php_heap::Key::Str(s) => warning(
+            req,
+            &[b"Undefined array key \"", c_str(s.bytes()), b"\""].concat(),
+        ),
+    }
 }
 
 /// `zend_check_string_offset` (`Z/Zend/zend_execute.c`), which
@@ -4813,10 +4836,7 @@ pub(crate) fn string_dim_offset(
                 if trailing {
                     warning(
                         req,
-                        &format!(
-                            "Illegal string offset \"{}\"",
-                            String::from_utf8_lossy(s.as_bytes())
-                        ),
+                        &[b"Illegal string offset \"", c_str(s.as_bytes()), b"\""].concat(),
                     );
                 }
                 Ok(Some(n))
@@ -5347,6 +5367,28 @@ fn php_type(value: &Value) -> ZvalType {
         ValueRef::Resource(_) => ZvalType::Resource,
         ValueRef::Reference(_) => ZvalType::Reference,
     }
+}
+
+/// `zend_wrong_property_read` (`Z/Zend/zend_API.c:111`): `Attempt to
+/// read property "%s" on %s`, the name read to its first NUL as php's
+/// `%s` reads it.
+///
+/// ```php
+/// $n = null; echo $n->{"foo\0bar"};
+/// ```
+/// ```expect
+/// Warning: Attempt to read property "foo" on null in %s on line 2
+/// ```
+pub(crate) fn property_read_on(req: &mut Request, name: &[u8], container: &Value) {
+    let shown = value_name(req, container);
+    let message = [
+        b"Attempt to read property \"",
+        c_str(name),
+        b"\" on ",
+        shown.as_bytes(),
+    ]
+    .concat();
+    warning(req, &message);
 }
 
 /// `zend_zval_value_name` (`Z/Zend/zend_API.c:157`): what a `TypeError`
@@ -5998,10 +6040,14 @@ fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown>
 /// The deprecation of a numeric string read as an int that is a float
 /// the int does not hold whole.
 fn float_string_loses_precision(req: &mut Request, s: &[u8]) {
-    let shown = String::from_utf8_lossy(s);
     deprecated(
         req,
-        &format!("Implicit conversion from float-string \"{shown}\" to int loses precision"),
+        &[
+            b"Implicit conversion from float-string \"",
+            c_str(s),
+            b"\" to int loses precision",
+        ]
+        .concat(),
     );
 }
 

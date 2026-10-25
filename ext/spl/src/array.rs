@@ -1727,7 +1727,10 @@ fn read(req: &mut Request, object: PhpObject, offset: &Value, warn: bool) -> Res
         Ok(value.deref())
     } else {
         if warn {
-            warning(req, &format!("Undefined array key {}", shown(&key)));
+            warning(
+                req,
+                &[b"Undefined array key ".as_slice(), &shown(&key)].concat(),
+            );
         }
         Ok(Value::null())
     }
@@ -1770,7 +1773,10 @@ fn place(
         match read {
             DimensionRead::Unset => return Ok(None),
             DimensionRead::ReadWrite => {
-                warning(req, &format!("Undefined array key {}", shown(&key)));
+                warning(
+                    req,
+                    &[b"Undefined array key ".as_slice(), &shown(&key)].concat(),
+                );
             }
             _ => {}
         }
@@ -1872,11 +1878,20 @@ fn refuse_readonly(req: &mut Request, backing: PhpObject, key: &Key) -> Result<(
 }
 
 /// A key as php's `Undefined array key` warning shows it, a string
-/// quoted.
-fn shown(key: &Key) -> String {
+/// quoted and read to its first NUL, as `spl_array_get_dimension_ptr`'s
+/// `%s` reads it (`Z/ext/spl/spl_array.c:354`).
+///
+/// ```php
+/// $o = new ArrayObject([]); echo $o["foo\0bar"];
+/// ```
+/// ```expect
+/// Warning: Undefined array key "foo" in %s on line 2
+/// ```
+fn shown(key: &Key) -> Vec<u8> {
     match key {
-        Key::Int(n) => n.to_string(),
-        Key::Str(s) => format!("\"{}\"", String::from_utf8_lossy(s.as_bytes())),
+        Key::Int(n) => n.to_string().into_bytes(),
+        // `"%s"`: the key to its first NUL, its bytes as they stand.
+        Key::Str(s) => [b"\"", php_ext::coerce::c_str(s.as_bytes()), b"\""].concat(),
     }
 }
 
@@ -2271,7 +2286,10 @@ impl ObjectHandlers for Handlers {
         let table = table(req, object)?;
         if table.get(req, &key)?.is_none() {
             if fetch == DimensionRead::ReadWrite {
-                warning(req, &format!("Undefined array key {}", shown(&key)));
+                warning(
+                    req,
+                    &[b"Undefined array key ".as_slice(), &shown(&key)].concat(),
+                );
             }
             table.set(req, &key, Owner::null())?;
         }

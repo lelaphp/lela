@@ -7839,7 +7839,15 @@ pub(crate) fn fetch_constant<T: Tier>(
 
 /// [`fetch_constant`] where its slot holds nothing: the lookup, by the
 /// name and then, for an unqualified name in a namespace, the global one,
-/// and the slot written for a constant that is not deprecated.
+/// and the slot written for a constant that is not deprecated. A name
+/// none answers is `Undefined constant "%s"`, its bytes as written:
+///
+/// ```php
+/// try { eval("echo N\xe9;"); } catch (Error $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// ```
+/// ```expect
+/// 556e646566696e656420636f6e7374616e7420224ee922
+/// ```
 #[inline(never)]
 fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     if op.op2_type != OperandKind::Const {
@@ -7855,12 +7863,15 @@ fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
         found = req.constant_found(&key);
     }
     let Some((at, value, deprecated)) = found else {
-        let written = String::from_utf8_lossy(&named(code, op.op2)).into_owned();
-        let thrown = crate::api::raising::throw_error(
-            req,
-            "Error",
-            &format!("Undefined constant \"{written}\""),
-        );
+        // `%s`: the name to its first NUL, its bytes as written.
+        let written = named(code, op.op2);
+        let message = [
+            b"Undefined constant \"",
+            crate::c_number::c_str(&written),
+            b"\"",
+        ]
+        .concat();
+        let thrown = crate::api::raising::throw_error(req, "Error", &message);
         return threw(req, frame, &thrown);
     };
     req.addref(&value);
@@ -8984,14 +8995,7 @@ fn fetch_obj(
     } else if fetch == PropertyRead::Warning {
         name.name(req, frame, code, op).map(|name| {
             let name = name.as_str_bytes().unwrap_or_default();
-            crate::api::raising::warning(
-                req,
-                &format!(
-                    "Attempt to read property \"{}\" on {}",
-                    String::from_utf8_lossy(name),
-                    crate::ops::value_name(req, &container)
-                ),
-            );
+            crate::ops::property_read_on(req, name, &container);
             Value::null()
         })
     } else {
@@ -16508,14 +16512,7 @@ fn undefined_key_write(
         php_heap::Key::Str(s) => Some(Owner::take(req, Value::of_slot(php_heap::Zval::string(s)))),
         php_heap::Key::Long(_) => None,
     };
-    let message = match key {
-        php_heap::Key::Long(n) => format!("Undefined array key {n}"),
-        php_heap::Key::Str(s) => format!(
-            "Undefined array key \"{}\"",
-            String::from_utf8_lossy(s.bytes())
-        ),
-    };
-    crate::api::raising::warning(req, &message);
+    crate::ops::undefined_key(req, key);
     let left = held.let_go(req);
     let landing = if req.is_pending() {
         Err(Thrown::of(None))
@@ -17666,12 +17663,10 @@ fn unwritten_step_slot(
     if typed {
         return Err(req.uninitialized_property(object.class(), bytes));
     }
-    let shown = String::from_utf8_lossy(bytes).into_owned();
     if req.overloaded_place(object, bytes) {
         return Ok(PropertyPtr::Served(WriteBack::Property));
     }
-    let class = req.symbols().class_name(object.class());
-    crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
+    req.undefined_property(object.class(), bytes);
     Ok(PropertyPtr::Slot(slot, typed))
 }
 

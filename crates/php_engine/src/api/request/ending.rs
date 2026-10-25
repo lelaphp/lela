@@ -147,7 +147,7 @@ impl Request {
         if self.bailout {
             return;
         }
-        self.note_error_in(Level::CoreError, message, b"Unknown", 0);
+        self.note_error_in(Level::CoreError, message.as_bytes(), b"Unknown", 0);
         self.bail_out();
     }
 
@@ -195,8 +195,7 @@ impl Request {
                 string.as_bytes(),
                 crate::observer::Told::Uncaught,
             );
-            let text = String::from_utf8_lossy(message);
-            self.zend_error_cb(level, Bail::DontBail, string, &text, file, line);
+            self.zend_error_cb(level, Bail::DontBail, string, file, line);
             self.release(Value::string(string));
         }
     }
@@ -286,10 +285,9 @@ impl Request {
         let ErrorArgs {
             level,
             bail,
-            message,
+            string,
             file,
             line,
-            ..
         } = error;
         if !diagnostics::fatal_errors(level) {
             return;
@@ -317,7 +315,8 @@ impl Request {
         self.ending = Some(match level {
             Level::Parse => Ending::Parse,
             _ => Ending::Fatal(format!(
-                "PHP Fatal error:  {message} in {} on line {line}{}",
+                "PHP Fatal error:  {} in {} on line {line}{}",
+                String::from_utf8_lossy(string.as_bytes()),
                 String::from_utf8_lossy(file),
                 self.stack_trace_after_the_site()
             )),
@@ -346,7 +345,7 @@ impl Request {
             self.end_in_uncaught(level, message.as_bytes(), file, line);
             return;
         }
-        self.note_error_in(level, message, file, line);
+        self.note_error_in(level, message.as_bytes(), file, line);
         self.bail_out();
     }
 

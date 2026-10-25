@@ -100,9 +100,26 @@ pub enum Cause<'a> {
     Fatal,
 }
 
-/// Raise a diagnostic at `level` with php's message text.
-pub fn raise(req: &mut Request, level: Level, message: &str) {
-    req.note_error(level, message);
+/// Raise a diagnostic at `level` with php's message text, its bytes as
+/// given: what `zend_vstrpprintf` printed. A NUL among them stands, as it
+/// stands in a message php prints with `%S` or is handed whole, and so
+/// does a byte no UTF-8 reads; a `%s` argument is read to its first NUL
+/// by the caller that prints it ([`crate::c_number::c_str`]), the rest of
+/// the sentence after it.
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { echo bin2hex($str), "\n"; return true; });
+/// echo ${"v\0w"};
+/// trigger_error("x\0\xff tail", E_USER_WARNING);
+/// $a = []; echo $a["k\0z"];
+/// ```
+/// ```expect
+/// 556e646566696e6564207661726961626c652024760077
+/// 7800ff207461696c
+/// 556e646566696e6564206172726179206b657920226b22
+/// ```
+pub fn raise(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Sized)) {
+    req.note_error(level, message.as_ref());
 }
 
 /// `zend_error_at`: the same diagnostic at a file and line of its own
@@ -112,8 +129,14 @@ pub fn raise(req: &mut Request, level: Level, message: &str) {
 /// `TOKEN_PARSE` raises for an octal escape overflow is the witness, in
 /// `ext/tokenizer`: the file is the empty one `tokenize_parse` scans
 /// under, so php prints `in  on line 1`.
-pub fn raise_at(req: &mut Request, level: Level, message: &str, file: &[u8], line: u32) {
-    req.note_error_in(level, message, file, line);
+pub fn raise_at(
+    req: &mut Request,
+    level: Level,
+    message: &(impl AsRef<[u8]> + ?Sized),
+    file: &[u8],
+    line: u32,
+) {
+    req.note_error_in(level, message.as_ref(), file, line);
 }
 
 /// `zend_exception_error(ex, severity)` over the throwable `thrown`
@@ -166,7 +189,12 @@ pub fn uncaught_at(req: &mut Request, thrown: Thrown, severity: Level) -> Result
 /// nothing. `pending` is the native's still, to hand on. The overloaded
 /// element's notice after a throwing `offsetGet` is the witness, in
 /// `ext/spl`.
-pub fn raise_while_pending(req: &mut Request, pending: &Thrown, level: Level, message: &str) {
+pub fn raise_while_pending(
+    req: &mut Request,
+    pending: &Thrown,
+    level: Level,
+    message: &(impl AsRef<[u8]> + ?Sized),
+) {
     req.while_pending(pending, |req| raise(req, level, message));
 }
 
@@ -219,17 +247,17 @@ pub fn startup(req: &mut Request, level: Level, message: &str) {
 }
 
 /// `E_WARNING`.
-pub fn warning(req: &mut Request, message: &str) {
+pub fn warning(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) {
     raise(req, Level::Warning, message);
 }
 
 /// `E_NOTICE`.
-pub fn notice(req: &mut Request, message: &str) {
+pub fn notice(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) {
     raise(req, Level::Notice, message);
 }
 
 /// `E_DEPRECATED`.
-pub fn deprecated(req: &mut Request, message: &str) {
+pub fn deprecated(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) {
     raise(req, Level::Deprecated, message);
 }
 
@@ -825,8 +853,12 @@ pub fn throw(req: &mut Request, class: &str, message: &(impl AsRef<[u8]> + ?Size
 /// 1768 0
 /// 2312 0
 /// ```
-pub fn throw_error(req: &mut Request, class: &str, message: &str) -> Thrown {
-    throw_printed(req, Printing::Twice, None, class, message)
+pub fn throw_error(
+    req: &mut Request,
+    class: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
+) -> Thrown {
+    throw_printed(req, Printing::Twice, None, class, message.as_ref())
 }
 
 /// How php prints the sentence of a throwable it makes from a format,
@@ -854,7 +886,7 @@ fn throw_printed(
     printing: Printing,
     previous: Option<Thrown>,
     class: &str,
-    message: &str,
+    message: &[u8],
 ) -> Thrown {
     let refused = |req: &mut Request, previous: Option<Thrown>, thrown: Thrown| match previous {
         Some(previous) => previous.chain(req, thrown),
@@ -862,7 +894,7 @@ fn throw_printed(
     };
     match printing {
         Printing::Twice => {
-            let first = match strpprintf(req, message.as_bytes()) {
+            let first = match strpprintf(req, message) {
                 Ok(first) => Owner::adopt(first),
                 Err(thrown) => return refused(req, previous, thrown),
             };
@@ -961,8 +993,8 @@ pub fn throw_exception_ex(
 /// `zend_type_error` (`Z/Zend/zend.c:1880`): php's `TypeError` with
 /// `message`, printed as [`Printing::Buffered`] says. The `TypeError` row
 /// of [`throw_error`]'s witness is `unserialize`'s.
-pub fn type_error(req: &mut Request, message: &str) -> Thrown {
-    throw_printed(req, Printing::Buffered, None, "TypeError", message)
+pub fn type_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+    throw_printed(req, Printing::Buffered, None, "TypeError", message.as_ref())
 }
 
 /// `zend_value_error` (`Z/Zend/zend.c:1905`): php's `ValueError` with
@@ -978,19 +1010,31 @@ pub fn type_error(req: &mut Request, message: &str) -> Thrown {
 /// 2648 32
 /// 2760 0
 /// ```
-pub fn value_error(req: &mut Request, message: &str) -> Thrown {
-    throw_printed(req, Printing::Buffered, None, "ValueError", message)
+pub fn value_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+    throw_printed(
+        req,
+        Printing::Buffered,
+        None,
+        "ValueError",
+        message.as_ref(),
+    )
 }
 
 /// `zend_argument_count_error` (`Z/Zend/zend.c:1892`): php's
 /// `ArgumentCountError` with `message`, printed as
 /// [`Printing::Buffered`] says.
-pub fn argument_count_error(req: &mut Request, message: &str) -> Thrown {
-    throw_printed(req, Printing::Buffered, None, "ArgumentCountError", message)
+pub fn argument_count_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+    throw_printed(
+        req,
+        Printing::Buffered,
+        None,
+        "ArgumentCountError",
+        message.as_ref(),
+    )
 }
 
 /// `zend_throw_error(NULL, …)`: [`throw_error`] of php's `Error`.
-pub(crate) fn error(req: &mut Request, message: &str) -> Thrown {
+pub(crate) fn error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
     throw_error(req, "Error", message)
 }
 
@@ -1085,10 +1129,12 @@ pub(crate) fn cannot_add_element(req: &mut Request) -> Thrown {
 /// `zend_undefined_function`: php's `Error` naming the function as the
 /// call wrote it, up to its first NUL, as php's `%s` reads it.
 pub(crate) fn undefined_function(req: &mut Request, name: &[u8]) -> Thrown {
-    let message = format!(
-        "Call to undefined function {}()",
-        String::from_utf8_lossy(crate::c_number::c_str(name))
-    );
+    let message = [
+        b"Call to undefined function ",
+        crate::c_number::c_str(name),
+        b"()",
+    ]
+    .concat();
     error(req, &message)
 }
 
@@ -1100,10 +1146,14 @@ pub(crate) fn undefined_method(
     method: &[u8],
 ) -> Thrown {
     let class = req.symbols().class_name(class);
-    let message = format!(
-        "Call to undefined method {class}::{}()",
-        String::from_utf8_lossy(crate::c_number::c_str(method))
-    );
+    let message = [
+        b"Call to undefined method ",
+        class.as_bytes(),
+        b"::",
+        crate::c_number::c_str(method),
+        b"()",
+    ]
+    .concat();
     error(req, &message)
 }
 
@@ -1121,8 +1171,7 @@ pub(crate) fn non_static_method_call(
 /// `zend_fetch_class`'s refusal where no class answers the name, php's
 /// `Error` naming it as written, up to its first NUL (`%s`).
 pub(crate) fn class_not_found(req: &mut Request, name: &[u8]) -> Thrown {
-    let shown = String::from_utf8_lossy(crate::c_number::c_str(name));
-    let message = format!("Class \"{shown}\" not found");
+    let message = [b"Class \"", crate::c_number::c_str(name), b"\" not found"].concat();
     error(req, &message)
 }
 
@@ -1223,9 +1272,15 @@ pub fn throw_error_chained(
     req: &mut Request,
     previous: Thrown,
     class: &str,
-    message: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
-    throw_printed(req, Printing::Twice, Some(previous), class, message)
+    throw_printed(
+        req,
+        Printing::Twice,
+        Some(previous),
+        class,
+        message.as_ref(),
+    )
 }
 
 /// A printed throw where `EG(exception)` may already be set, as after a
@@ -1238,8 +1293,9 @@ pub(crate) fn throw_over_pending(
     req: &mut Request,
     printing: Printing,
     class: &str,
-    message: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
+    let message = message.as_ref();
     match req.take_pending_view() {
         Some(earlier) => throw_printed(
             req,

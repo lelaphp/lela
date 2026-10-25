@@ -8,6 +8,7 @@
 //! the source lists and the scope a write names are [`Properties`]'s,
 //! whose fields no file but this one reads.
 
+use crate::c_number::c_str;
 use php_heap::{Fatal, Heap, Obj, Ref, TableRow, Zval};
 use php_link::Row;
 use php_unit::decl::{PropertyDecl, Visibility};
@@ -274,11 +275,26 @@ impl Default for Properties {
 
 impl Request {
     /// php's warning for a read of the property `name` that an object
-    /// of `class` holds no value for.
+    /// of `class` holds no value for, `Undefined property: %s::$%s`
+    /// (`Z/Zend/zend_object_handlers.c:1012`), the name read to its first
+    /// NUL, as php's `%s` reads it.
+    ///
+    /// ```php
+    /// $o = new stdClass; echo $o->{"foo\0bar"};
+    /// ```
+    /// ```expect
+    /// Warning: Undefined property: stdClass::$foo in %s on line 2
+    /// ```
     pub(crate) fn undefined_property(&mut self, class: ClassId, name: &[u8]) {
         let class = self.symbols().class_name(class);
-        let shown = String::from_utf8_lossy(name);
-        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        let message = [
+            b"Undefined property: ",
+            class.as_bytes(),
+            b"::$",
+            c_str(name),
+        ]
+        .concat();
+        crate::api::raising::warning(self, &message);
     }
 
     /// The truth of `value`, an answer the caller holds, given up once
@@ -1062,13 +1078,15 @@ impl Request {
         }
         if !silent {
             let shown = self.symbols().class_name(class);
-            crate::api::raising::notice(
-                self,
-                &format!(
-                    "Accessing static property {shown}::${} as non static",
-                    String::from_utf8_lossy(name)
-                ),
-            );
+            let message = [
+                b"Accessing static property ",
+                shown.as_bytes(),
+                b"::$",
+                c_str(name),
+                b" as non static",
+            ]
+            .concat();
+            crate::api::raising::notice(self, &message);
         }
         Some(Ok(()))
     }
@@ -1841,13 +1859,15 @@ impl Request {
             && got.as_object().is_none()
         {
             let class = self.symbols().class_name(class);
-            let shown = String::from_utf8_lossy(name).into_owned();
-            crate::api::raising::notice(
-                self,
-                &format!(
-                    "Indirect modification of overloaded property {class}::${shown} has no effect"
-                ),
-            );
+            let message = [
+                b"Indirect modification of overloaded property ",
+                class.as_bytes(),
+                b"::$",
+                c_str(name),
+                b" has no effect",
+            ]
+            .concat();
+            crate::api::raising::notice(self, &message);
         }
     }
 
@@ -3877,10 +3897,15 @@ impl Request {
             return Err(crate::api::raising::error(self, &cannot));
         }
         let held = Owner::take(self, object.as_value());
-        crate::api::raising::deprecated(
-            self,
-            &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
-        );
+        let message = [
+            b"Creation of dynamic property ",
+            class_name.as_bytes(),
+            b"::$",
+            c_str(name),
+            b" is deprecated",
+        ]
+        .concat();
+        crate::api::raising::deprecated(self, &message);
         let shared = object.as_value().refcount() > 1;
         held.let_go(self);
         if shared {

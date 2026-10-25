@@ -1319,7 +1319,7 @@ impl Request {
         if !error.bailed() {
             if matches!(kind, SourceKind::Eval(_)) {
                 for raised in raised.clone() {
-                    self.note_error_in(raised.level, &raised.message, path, raised.line);
+                    self.note_error_in(raised.level, raised.message.as_bytes(), path, raised.line);
                 }
             }
             let class = if error.level == Level::Parse {
@@ -1332,7 +1332,12 @@ impl Request {
             if kind == SourceKind::File {
                 self.while_pending(&thrown, |req| {
                     for raised in raised {
-                        req.note_error_in(raised.level, &raised.message, path, raised.line);
+                        req.note_error_in(
+                            raised.level,
+                            raised.message.as_bytes(),
+                            path,
+                            raised.line,
+                        );
                     }
                 });
             }
@@ -1346,7 +1351,7 @@ impl Request {
         let recording = (kind == SourceKind::File).then(|| self.begin_recording());
         if let Some(noted) = self.declare_refused(refused, path) {
             for raised in error.raised.get(noted..).unwrap_or_default() {
-                self.note_error_in(raised.level, &raised.message, path, raised.line);
+                self.note_error_in(raised.level, raised.message.as_bytes(), path, raised.line);
             }
             self.end_in_compile_time(error.level, &error.message, path, error.line);
         }

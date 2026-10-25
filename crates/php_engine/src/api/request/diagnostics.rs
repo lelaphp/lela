@@ -83,11 +83,11 @@ type FormatDateFn = fn(&mut Request, &[u8], i64, bool) -> Result<Vec<u8>, Thrown
 pub struct Syslog(pub fn(&mut Request, i32, &[u8]));
 
 impl Message<'_> {
-    /// What the display and the log write.
-    fn text(&self) -> std::borrow::Cow<'_, str> {
+    /// What the display and the log write, its bytes as raised.
+    fn text(&self) -> &[u8] {
         match self {
-            Message::Text(text) => String::from_utf8_lossy(text),
-            Message::String(s) => String::from_utf8_lossy(s.as_bytes()),
+            Message::Text(text) => text,
+            Message::String(s) => s.as_bytes(),
         }
     }
 }
@@ -346,7 +346,11 @@ impl Request {
     /// ([`Request::note_error_in`]); the message-id table and `EH_THROW`
     /// are the rest of that branch and are not read yet. `true` says the
     /// built-in handler served it.
-    pub(crate) fn note_error(&mut self, level: Level, message: &str) -> bool {
+    pub(crate) fn note_error(
+        &mut self,
+        level: Level,
+        message: &(impl AsRef<[u8]> + ?Sized),
+    ) -> bool {
         let (file, line) = self.executed_site();
         self.note_error_in(level, message, &file, line)
     }
@@ -544,11 +548,11 @@ impl Request {
     pub(crate) fn note_error_in(
         &mut self,
         level: Level,
-        message: &str,
+        message: &(impl AsRef<[u8]> + ?Sized),
         file: &[u8],
         line: u32,
     ) -> bool {
-        self.note_message_in(level, Message::Text(message.as_bytes()), file, line)
+        self.note_message_in(level, Message::Text(message.as_ref()), file, line)
     }
 
     /// [`Request::note_error`] over a string of the request's raised as
@@ -579,8 +583,8 @@ impl Request {
             held.push((level, bytes));
             return false;
         }
-        let text = raised.text().into_owned();
-        let message = text.as_str();
+        let text = raised.text().to_vec();
+        let message = text.as_slice();
         if self.recorded(level, message, file, line) {
             return false;
         }
@@ -601,7 +605,7 @@ impl Request {
                 level,
                 file,
                 line,
-                message.as_bytes(),
+                message,
                 crate::observer::Told::Raised,
             );
             if self.raised.is_none() && self.diagnostics.error_handling_thrown.is_none() {
@@ -651,7 +655,7 @@ impl Request {
         );
         let served = !self.user_error_handler(level, string, file, line);
         if served {
-            self.zend_error_cb(level, Bail::Out, string, message, file, line);
+            self.zend_error_cb(level, Bail::Out, string, file, line);
         }
         if made {
             self.release(Value::string(string));
@@ -670,7 +674,6 @@ impl Request {
         level: Level,
         bail: Bail,
         string: PhpString,
-        message: &str,
         file: &[u8],
         line: u32,
     ) {
@@ -679,7 +682,6 @@ impl Request {
             level,
             bail,
             string,
-            message,
             file,
             line,
         };

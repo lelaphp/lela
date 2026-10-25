@@ -6228,7 +6228,7 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
     for raised in unit.diagnostics.iter().filter(|_| replayed) {
         req.note_error_in(
             raised.level,
-            &raised.message,
+            raised.message.as_bytes(),
             &unit.main.filename.0,
             raised.line,
         );
@@ -6299,7 +6299,7 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileRefused, file:
     };
     let error = &refused.error;
     for raised in error.raised.get(noted..).unwrap_or_default() {
-        req.note_error_in(raised.level, &raised.message, file, raised.line);
+        req.note_error_in(raised.level, raised.message.as_bytes(), file, raised.line);
     }
     refusal_raised(req, error, file);
 }
