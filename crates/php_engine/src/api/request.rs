@@ -57,6 +57,7 @@ pub(crate) use hooks::{HookedBuild, HookedDeclared, HookedRows};
 pub(crate) use objects::placed_of;
 mod calls;
 pub use calls::Supplier;
+pub(crate) use calls::{Callee, Family, Retval};
 mod class_constants;
 pub(crate) use class_constants::{ByValue, ConstantFetch, ConstantRead};
 mod class_data;
