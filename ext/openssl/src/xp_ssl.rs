@@ -38,18 +38,33 @@ use crate::x509::object_of;
 /// `STREAM_CRYPTO_IS_CLIENT`, the low bit of a crypto method.
 const IS_CLIENT: i64 = 1;
 
-/// The protocol bits of `STREAM_CRYPTO_METHOD_*`, lowest first, as this
-/// OpenSSL 3 build has them: no `SSLv2` or `SSLv3` (`OPENSSL_NO_SSL3`), so
-/// `PHP_OPENSSL_MIN_PROTO_VERSION` is TLS 1.0.
+/// The protocol bits of `STREAM_CRYPTO_METHOD_*`, lowest first. `SSLv2`
+/// is never built.
+const SSL3: i64 = 1 << 2;
 const TLS1_0: i64 = 1 << 3;
 const TLS1_1: i64 = 1 << 4;
 const TLS1_2: i64 = 1 << 5;
 const TLS1_3: i64 = 1 << 6;
 
+/// `HAVE_SSL3`: the headers this build compiled against leave
+/// `OPENSSL_NO_SSL3` undefined, as OpenSSL 4's do and OpenSSL 3's do not.
+const HAVE_SSL3: bool = crate::header::HAVE_SSL3;
+
+/// The protocols from `PHP_OPENSSL_MIN_PROTO_VERSION` to
+/// `PHP_OPENSSL_MAX_PROTO_VERSION`, lowest first: `SSLv3` first where the
+/// build has it, else TLS 1.0.
+const PROTOCOLS: &[i64] = if HAVE_SSL3 {
+    &[SSL3, TLS1_0, TLS1_1, TLS1_2, TLS1_3]
+} else {
+    &[TLS1_0, TLS1_1, TLS1_2, TLS1_3]
+};
+
 /// `STREAM_CRYPTO_METHOD_TLS_ANY_CLIENT`.
 const TLS_ANY_CLIENT: i64 = TLS1_0 | TLS1_1 | TLS1_2 | TLS1_3 | IS_CLIENT;
 
-/// `TLS1_VERSION` to `TLS1_3_VERSION`, what `SSL_version` answers.
+/// `SSL3_VERSION` and `TLS1_VERSION` to `TLS1_3_VERSION`, what
+/// `SSL_version` answers.
+const SSL3_VERSION: c_int = 0x300;
 const TLS1_VERSION: c_int = 0x301;
 const TLS1_1_VERSION: c_int = 0x302;
 const TLS1_2_VERSION: c_int = 0x303;
@@ -100,8 +115,8 @@ const DEFAULT_RENEG_LIMIT: i64 = 2;
 const DEFAULT_RENEG_WINDOW: i64 = 300;
 
 /// The `transports` openssl's `MINIT` registers, in its order: `ssl`,
-/// `tls`, `tlsv1.0` to `tlsv1.3`, then `tcp` over `standard`'s, each
-/// labelled as `php_openssl_socket_ops` is.
+/// `sslv3` where the build has it, `tls`, `tlsv1.0` to `tlsv1.3`, then
+/// `tcp` over `standard`'s, each labelled as `php_openssl_socket_ops` is.
 ///
 /// ```php
 /// echo implode(',', stream_get_transports()), "\n";
@@ -111,22 +126,23 @@ const DEFAULT_RENEG_WINDOW: i64 = 300;
 /// var_dump(stream_socket_client('udp://127.0.0.1:9') !== false);
 /// ```
 /// ```expect
-/// tcp,udp,unix,udg,ssl,tls,tlsv1.0,tlsv1.1,tlsv1.2,tlsv1.3
+/// tcp,udp,unix,udg,ssl,sslv3,tls,tlsv1.0,tlsv1.1,tlsv1.2,tlsv1.3
 /// string(14) "tcp_socket/ssl"
 /// bool(false)
 /// bool(true)
 /// ```
 pub(crate) fn transports() -> Vec<XportFactory> {
-    [
-        "ssl", "tls", "tlsv1.0", "tlsv1.1", "tlsv1.2", "tlsv1.3", "tcp",
-    ]
-    .into_iter()
-    .map(|name| XportFactory {
-        name,
-        label: "tcp_socket/ssl",
-        layer: factory,
-    })
-    .collect()
+    let ssl3: &[&'static str] = if HAVE_SSL3 { &["sslv3"] } else { &[] };
+    let tls = ["tls", "tlsv1.0", "tlsv1.1", "tlsv1.2", "tlsv1.3", "tcp"];
+    std::iter::once("ssl")
+        .chain(ssl3.iter().copied())
+        .chain(tls)
+        .map(|name| XportFactory {
+            name,
+            label: "tcp_socket/ssl",
+            layer: factory,
+        })
+        .collect()
 }
 
 /// A crypto method, `php_stream_xport_crypt_method_t` decoded: whether
@@ -164,7 +180,7 @@ impl CryptoMethod {
             max
         };
         let mut flags = self.protocols;
-        for version in [TLS1_0, TLS1_1, TLS1_2, TLS1_3] {
+        for &version in PROTOCOLS {
             if version >= min && version <= max {
                 flags |= version;
             } else {
@@ -177,16 +193,19 @@ impl CryptoMethod {
 
 /// `php_openssl_get_min_proto_version_flag`.
 fn min_flag(flags: i64) -> i64 {
-    [TLS1_0, TLS1_1, TLS1_2, TLS1_3]
-        .into_iter()
+    PROTOCOLS
+        .iter()
+        .copied()
         .find(|v| flags & v != 0)
         .unwrap_or(TLS1_3)
 }
 
 /// `php_openssl_get_max_proto_version_flag`.
 fn max_flag(flags: i64) -> i64 {
-    [TLS1_3, TLS1_2, TLS1_1, TLS1_0]
-        .into_iter()
+    PROTOCOLS
+        .iter()
+        .rev()
+        .copied()
         .find(|v| flags & v != 0)
         .unwrap_or(TLS1_3)
 }
@@ -197,6 +216,7 @@ fn proto_version(flag: i64) -> c_int {
         TLS1_3 => TLS1_3_VERSION,
         TLS1_1 => TLS1_1_VERSION,
         TLS1_0 => TLS1_VERSION,
+        SSL3 if HAVE_SSL3 => SSL3_VERSION,
         _ => TLS1_2_VERSION,
     }
 }
@@ -219,11 +239,39 @@ pub(crate) struct Cipher {
 }
 
 /// One name of a certificate's subjectAltName extension as
-/// `php_openssl_matches_san_list` reads it: a DNS name, or an IP
-/// address's bytes.
+/// `php_openssl_matches_san_list` reads it: a DNS name, one that does not
+/// read as UTF-8 or holds a NUL, an IP address's bytes, a URI, or an
+/// SRV-ID otherName.
 pub(crate) enum San {
     Dns(Vec<u8>),
+    DnsUnreadable,
     Ip(Vec<u8>),
+    Uri,
+    Srv,
+}
+
+impl San {
+    /// Whether the name is one of the identifiers RFC 6125 §6.4.4 puts
+    /// before the CN, php's `has_service_id`: a DNS name, read or not, a
+    /// URI or an SRV-ID; a certificate that presents one is never matched
+    /// by its CN (php 8.5.11, GHSA-vvx9-73fr-5jjx).
+    fn is_service_id(&self) -> bool {
+        match self {
+            San::Dns(_) | San::DnsUnreadable | San::Uri | San::Srv => true,
+            San::Ip(_) => false,
+        }
+    }
+}
+
+/// What `php_openssl_matches_san_list` found for a peer name: a name of
+/// the list that matched it; no match, with an identifier the CN gives
+/// way to in the list ([`San::is_service_id`]), so the CN is not read; or
+/// neither, so the CN is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SanMatch {
+    Matched,
+    Missed,
+    NoServiceId,
 }
 
 /// The renegotiation bucket, `php_openssl_handshake_bucket_t`: when the
@@ -563,6 +611,7 @@ fn factory(
 ) -> Result<Box<dyn Crypto>, Thrown> {
     let on_connect = match proto {
         "ssl" | "tls" => Some(crypto_method(req, context, TLS_ANY_CLIENT)?),
+        "sslv3" => Some(SSL3 | IS_CLIENT),
         "tlsv1.0" => Some(TLS1_0 | IS_CLIENT),
         "tlsv1.1" => Some(TLS1_1 | IS_CLIENT),
         "tlsv1.2" => Some(TLS1_2 | IS_CLIENT),
@@ -728,9 +777,17 @@ fn error_reason(code: std::ffi::c_ulong) -> c_int {
     c_int::try_from(reason).unwrap_or(0)
 }
 
+/// `php_openssl_set_blocking(sslsock, blocked)` at the handshake's end:
+/// the socket blocks again where it blocked before.
+fn restore_blocking(socket: &mut CryptoSocket<'_>, blocked: bool) {
+    if socket.blocked != blocked {
+        socket.set_blocking(blocked);
+    }
+}
+
 /// `php_openssl_matches_wildcard_name`: the names equal, ignoring case,
 /// or the certificate's name with one `*` in its left-most label that
-/// covers no dot of the subject.
+/// covers no dot of the subject, its prefix and suffix not overlapping.
 pub(crate) fn matches_wildcard_name(subject: &[u8], cert: &[u8]) -> bool {
     if subject.eq_ignore_ascii_case(cert) {
         return true;
@@ -748,15 +805,16 @@ pub(crate) fn matches_wildcard_name(subject: &[u8], cert: &[u8]) -> bool {
     {
         return false;
     }
+    // php 8.5.12 (GHSA-xr7j-rvgx-xq5p): the prefix and the suffix both
+    // fit in the subject, side by side, or nothing matches.
     let suffix = &cert[star + 1..];
-    if suffix.len() > subject.len() {
+    let Some(middle_end) = subject.len().checked_sub(suffix.len()) else {
         return false;
-    }
-    let tail = &subject[subject.len() - suffix.len()..];
-    let middle = subject
-        .get(star..subject.len() - suffix.len())
-        .unwrap_or(&[]);
-    tail.eq_ignore_ascii_case(suffix) && !middle.contains(&b'.')
+    };
+    let Some(middle) = subject.get(star..middle_end) else {
+        return false;
+    };
+    subject[middle_end..].eq_ignore_ascii_case(suffix) && !middle.contains(&b'.')
 }
 
 /// `EXPAND_IPV6_ADDRESS`: eight groups in upper-case hex, no leading
@@ -773,39 +831,83 @@ fn expand_ipv6(bytes: &[u8]) -> String {
         .join(":")
 }
 
-/// `php_openssl_matches_san_list`.
-fn matches_san_list(cert: &Certificate, subject: &[u8]) -> bool {
+/// `php_openssl_matches_san_list`, with what its `has_service_id` says.
+/// A wildcard's prefix and suffix must both fit in the name asked for
+/// (GHSA-xr7j-rvgx-xq5p), and a certificate whose list holds a DNS name,
+/// a URI or an SRV-ID is never matched by its CN (GHSA-vvx9-73fr-5jjx),
+/// while one whose list holds only addresses still is:
+///
+/// ```php
+/// function served(string $san, array $names): void {
+///     $f = tempnam(sys_get_temp_dir(), 'san');
+///     file_put_contents($f, "[req]\ndistinguished_name = dn\n[dn]\n[ext]\nsubjectAltName = $san\n");
+///     $o = ['config' => $f, 'private_key_bits' => 2048, 'digest_alg' => 'sha256', 'req_extensions' => 'ext', 'x509_extensions' => 'ext'];
+///     $k = openssl_pkey_new($o);
+///     $x = openssl_csr_sign(openssl_csr_new(['commonName' => 'cn.example.org'], $k, $o), null, $k, 1, $o);
+///     openssl_x509_export($x, $pem); openssl_pkey_export($k, $key, null, $o);
+///     file_put_contents($f, $pem . $key);
+///     $s = stream_socket_server('ssl://127.0.0.1:0', $e, $m, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, stream_context_create(['ssl' => ['local_cert' => $f]]));
+///     if (!pcntl_fork()) { foreach ($names as $_) { @stream_socket_accept($s, 5); } exit; }
+///     $addr = stream_socket_get_name($s, false);
+///     foreach ($names as $name) {
+///         $said = null;
+///         set_error_handler(function ($no, $text) use (&$said) { $said ??= $text; return true; });
+///         $c = stream_socket_client("ssl://$addr", $e, $m, 5, STREAM_CLIENT_CONNECT, stream_context_create(['ssl' => ['verify_peer' => false, 'peer_name' => $name]]));
+///         restore_error_handler();
+///         echo $name, ': ', $c ? 'connected' : $said, "\n";
+///     }
+///     pcntl_wait($status);
+///     unlink($f);
+/// }
+/// served('DNS:a*aaaa, DNS:w*www.example.org', ['aaaa', 'www.example.org', 'cn.example.org', 'axaaaa']);
+/// served('IP:127.0.0.1', ['cn.example.org', 'other']);
+/// ```
+/// ```expect process
+/// aaaa: stream_socket_client(): Peer certificate subjectAltName did not match expected name `aaaa'
+/// www.example.org: stream_socket_client(): Peer certificate subjectAltName did not match expected name `www.example.org'
+/// cn.example.org: stream_socket_client(): Peer certificate subjectAltName did not match expected name `cn.example.org'
+/// axaaaa: connected
+/// cn.example.org: connected
+/// other: stream_socket_client(): Peer certificate CN=`cn.example.org' did not match expected CN=`other'
+/// ```
+fn matches_san_list(cert: &Certificate, subject: &[u8]) -> SanMatch {
     let subject_v6 = std::str::from_utf8(subject)
         .ok()
         .and_then(|s| s.parse::<std::net::Ipv6Addr>().ok())
         .map(|ip| expand_ipv6(&ip.octets()));
+    let mut has_service_id = false;
     for san in ffi::ssl::san_names(cert) {
+        has_service_id |= san.is_service_id();
         match san {
             San::Dns(mut name) => {
                 if name.last() == Some(&b'.') {
                     name.pop();
                 }
                 if matches_wildcard_name(subject, &name) {
-                    return true;
+                    return SanMatch::Matched;
                 }
             }
             San::Ip(bytes) if bytes.len() == 4 => {
                 let text = format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3]);
                 if subject.eq_ignore_ascii_case(text.as_bytes()) {
-                    return true;
+                    return SanMatch::Matched;
                 }
             }
             San::Ip(bytes) if bytes.len() == 16 => {
                 if let Some(expanded) = &subject_v6
                     && expanded.eq_ignore_ascii_case(&expand_ipv6(&bytes))
                 {
-                    return true;
+                    return SanMatch::Matched;
                 }
             }
-            San::Ip(_) => {}
+            San::Ip(_) | San::DnsUnreadable | San::Uri | San::Srv => {}
         }
     }
-    false
+    if has_service_id {
+        SanMatch::Missed
+    } else {
+        SanMatch::NoServiceId
+    }
 }
 
 /// `php_openssl_matches_common_name`, with its warnings.
@@ -1071,7 +1173,29 @@ impl Layer {
 
     /// The cipher list, the default where none is given, the security
     /// level and the ALPN protocols of `php_openssl_setup_crypto`; `false`
-    /// where the list or the protocols are refused.
+    /// where the list or the protocols are refused. A client's list with
+    /// an empty name is refused by the library, and php 8.5.10 says so
+    /// before the handshake starts:
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0');
+    /// $addr = stream_socket_get_name($s, false);
+    /// foreach (['', ',h2', 'h2,,http/1.1'] as $protocols) {
+    ///     $c = stream_socket_client("tcp://$addr", $e, $m, 1, STREAM_CLIENT_CONNECT, stream_context_create(['ssl' => ['alpn_protocols' => $protocols]]));
+    ///     var_dump(stream_socket_enable_crypto($c, true, STREAM_CRYPTO_METHOD_TLS_CLIENT));
+    /// }
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: stream_socket_enable_crypto(): Failed setting TLS ALPN protocols, protocol names must not be empty in %s on line 6
+    /// bool(false)
+    ///
+    /// Warning: stream_socket_enable_crypto(): Failed setting TLS ALPN protocols, protocol names must not be empty in %s on line 6
+    /// bool(false)
+    ///
+    /// Warning: stream_socket_enable_crypto(): Failed setting TLS ALPN protocols, protocol names must not be empty in %s on line 6
+    /// bool(false)
+    /// ```
     fn set_ciphers(&self, req: &mut Request, setup: &mut Setup) -> bool {
         let ciphers = self.options.ciphers.clone().unwrap_or_else(|| {
             crate::constants::OPENSSL_DEFAULT_STREAM_CIPHERS
@@ -1098,7 +1222,14 @@ impl Layer {
                 return false;
             };
             if self.is_client {
-                setup.ctx().alpn_protos(&wire);
+                // php 8.5.10 reads the library's answer.
+                if !setup.ctx().alpn_protos(&wire) {
+                    warn(
+                        req,
+                        "Failed setting TLS ALPN protocols, protocol names must not be empty",
+                    );
+                    return false;
+                }
             } else {
                 setup.hooks().alpn = wire;
                 setup.alpn_select_callback();
@@ -1306,7 +1437,21 @@ impl Layer {
             let Some(name) = name else {
                 return false;
             };
-            return matches_san_list(peer, &name) || matches_common_name(req, peer, &name);
+            return match matches_san_list(peer, &name) {
+                SanMatch::Matched => true,
+                // The CN is never read beside a DNS name, URI or SRV-ID.
+                SanMatch::Missed => {
+                    let shown = c_str(&name);
+                    warn(
+                        req,
+                        &format!(
+                            "Peer certificate subjectAltName did not match expected name `{shown}'"
+                        ),
+                    );
+                    false
+                }
+                SanMatch::NoServiceId => matches_common_name(req, peer, &name),
+            };
         }
         true
     }
@@ -1338,7 +1483,22 @@ impl Layer {
         Ok(Handshake::Failed)
     }
 
-    /// The handshake half of [`Layer::enable_crypto`].
+    /// The handshake half of [`Layer::enable_crypto`]. A handshake that
+    /// runs out of time blocks again where the socket blocked before, as php
+    /// 8.5.12 does, where 8.5.9 left it non-blocking:
+    ///
+    /// ```php
+    /// $s = stream_socket_server('tcp://127.0.0.1:0');
+    /// $c = stream_socket_client('tcp://' . stream_socket_get_name($s, false), $e, $m, 0.2);
+    /// var_dump(stream_get_meta_data($c)['blocked'], stream_socket_enable_crypto($c, true, STREAM_CRYPTO_METHOD_TLS_CLIENT), stream_get_meta_data($c)['blocked']);
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: stream_socket_enable_crypto(): SSL: Handshake timed out in %s on line 4
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// ```
     fn handshake(
         &mut self,
         req: &mut Request,
@@ -1371,6 +1531,9 @@ impl Layer {
             if let Some(limit) = limit
                 && elapsed > limit
             {
+                // php 8.5.12 makes the socket block again where it did
+                // before the warning, which may run PHP code.
+                restore_blocking(socket, blocked);
                 warn(req, "SSL: Handshake timed out");
                 return Ok(Handshake::Failed);
             }
@@ -1389,9 +1552,7 @@ impl Layer {
             };
             let _ready = socket.wait(want, limit.map(|l| l.saturating_sub(elapsed)));
         };
-        if socket.blocked != blocked {
-            socket.set_blocking(blocked);
-        }
+        restore_blocking(socket, blocked);
         let peer = tls.peer_certificate();
         if io.ret == 1 {
             if let (Some(peer), Some(context)) = (&peer, socket.ctx) {
@@ -1847,6 +2008,7 @@ impl Crypto for Layer {
             TLS1_2_VERSION => b"TLSv1.2",
             TLS1_1_VERSION => b"TLSv1.1",
             TLS1_VERSION => b"TLSv1",
+            SSL3_VERSION if HAVE_SSL3 => b"SSLv3",
             _ => b"UNKNOWN",
         };
         let mut array = PhpArray::new(req)?;

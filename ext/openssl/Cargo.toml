@@ -18,8 +18,8 @@ php_ext = { path = "../../crates/php_ext" }
 # again as `https` and `ftps`, and the stream context's options and URI
 # parser `xp_ssl.c` reads (design §4.10).
 php_ext_standard = { path = "../standard" }
-# libcrypto is the platform's OpenSSL 3, the major version the oracle
-# links, found by openssl-sys through pkg-config and bound in `src/ffi/`
+# libcrypto is the platform's OpenSSL of the major version the oracle
+# links, 4 since php 8.5.12 (#3381), found by openssl-sys through pkg-config and bound in `src/ffi/`
 # alone (`unsafe.homes`; design §7.2).
 openssl-sys = { workspace = true }
 
