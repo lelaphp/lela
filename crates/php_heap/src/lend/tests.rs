@@ -3,7 +3,9 @@
 
 use std::ffi::{CStr, c_void};
 
-use super::{ecalloc, efree, emalloc, erealloc, estrdup, estrndup};
+use super::{
+    ecalloc, efree, emalloc, erealloc, estrdup, estrndup, php_heap_lend_standing, safe_ferealloc,
+};
 use crate::Heap;
 use crate::hooks::{Fatal, FatalReason};
 use crate::serial::alone;
@@ -165,4 +167,49 @@ fn a_heap_made_while_a_lend_stands_is_sensed() {
         assert_eq!(sensed, None);
     }
     assert_eq!(Heap::new().take_sensed(), None);
+}
+
+/// `_safe_ferealloc` under a lend: a growth the soft limit has no room
+/// for is refused, null with the block standing and its bytes kept and
+/// the delayed OOM recorded, and the refusal is the call's alone; one
+/// with room is served; a product past the address space is refused too.
+/// Outside a lend it is the system's, and the slot says whether one
+/// stands.
+#[test]
+fn a_fallible_growth_under_a_lend_is_refused_past_the_soft_limit_and_the_block_stands() {
+    let _alone = alone();
+    let mut heap = Heap::new();
+    assert!(heap.set_memory_limit(4 << 20));
+    let at = heap.lend(|| emalloc(64)).expect("the lend");
+    // SAFETY: a fresh block of 64 bytes.
+    unsafe { at.cast::<u8>().write_bytes(0x5a, 64) };
+    let before = heap.memory_usage(false);
+    // SAFETY: a live block of this heap, under a lend of it.
+    let refused = heap.lend(|| unsafe { safe_ferealloc(at, 1, 8 << 20, 0) });
+    assert_eq!(refused.ok(), Some(std::ptr::null_mut()));
+    assert!(heap.has_oom(), "the delayed OOM");
+    assert!(!heap.mm.take_refused(), "the refusal is the call's alone");
+    assert_eq!(heap.memory_usage(false), before, "the block stands");
+    // SAFETY: the block still holds the 64 bytes written.
+    let kept = unsafe { std::slice::from_raw_parts(at.cast::<u8>(), 64) };
+    assert!(kept.iter().all(|&b| b == 0x5a));
+    // SAFETY: as above.
+    let overflow = heap.lend(|| unsafe { safe_ferealloc(at, usize::MAX, 2, 0) });
+    assert_eq!(overflow.ok(), Some(std::ptr::null_mut()));
+    // SAFETY: as above, a growth inside its run.
+    let grown = heap
+        .lend(|| unsafe { safe_ferealloc(at, 2, 64, 0) })
+        .expect("the lend");
+    assert!(!grown.is_null());
+    // SAFETY: the grown block, freed once under a lend.
+    let freed = heap.lend(|| unsafe { efree(grown) });
+    assert!(freed.is_ok());
+    assert!(heap.lend(|| php_heap_lend_standing()).expect("the lend"));
+    assert!(!php_heap_lend_standing());
+    // SAFETY: null asks the system allocator for a block outside a lend.
+    let system = unsafe { safe_ferealloc(std::ptr::null_mut(), 4, 8, 0) };
+    assert!(!system.is_null());
+    // SAFETY: the system's block, freed under a lend, which hands it back.
+    let freed = heap.lend(|| unsafe { efree(system) });
+    assert!(freed.is_ok());
 }

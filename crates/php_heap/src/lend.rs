@@ -279,6 +279,70 @@ pub unsafe extern "C" fn erealloc(at: *mut c_void, size: usize) -> *mut c_void {
     }
 }
 
+/// `_safe_ferealloc(ptr, nmemb, size, offset)`, php 8.5.12's
+/// `safe_ferealloc(..., true)` (`Z/Zend/zend_alloc.c:3100`): [`erealloc`]
+/// of `nmemb * size + offset` bytes with the heap fallible for the one
+/// call, `ZEND_MM_FALLIBLE_FORWARD`. Under a lend a size the soft limit
+/// has no room for is refused: the answer is null, the block stands as
+/// it was and the delayed OOM is recorded, for the library to answer as
+/// it answers any NULL; a product past the address space is php's
+/// `Possible integer overflow` refusal. Outside a fallible scope of its
+/// own the refusal is this call's alone, as php's forward is, so nothing
+/// is left for a later scope to read. Outside a lend it is the system's
+/// `realloc`.
+///
+/// # Safety
+///
+/// As [`erealloc`]'s.
+#[unsafe(export_name = "_safe_ferealloc")]
+pub unsafe extern "C" fn safe_ferealloc(
+    at: *mut c_void,
+    nmemb: usize,
+    size: usize,
+    offset: usize,
+) -> *mut c_void {
+    let total = nmemb.checked_mul(size).and_then(|n| n.checked_add(offset));
+    let Some(lending) = lending() else {
+        let Some(total) = total else {
+            return std::ptr::null_mut();
+        };
+        // SAFETY: a block the system allocator answered, or null, by the
+        // contract.
+        return unsafe { libc::realloc(at, total.max(1)) };
+    };
+    let was = lending.mm().set_fallible(true);
+    let answered = match (total, NonNull::new(at.cast::<u8>())) {
+        (None, _) => {
+            let message = format!(
+                "Possible integer overflow in memory allocation ({nmemb} * {size} + {offset})"
+            );
+            drop(lending.mm().overflow_refusal(message));
+            std::ptr::null_mut()
+        }
+        (Some(total), None) => lending.alloc(total),
+        // SAFETY: the heap owns the block, live by the caller's contract.
+        (Some(total), Some(block)) if lending.owns(block) => unsafe {
+            lending.realloc(block, total)
+        },
+        // SAFETY: a block the system allocator answered, by the contract.
+        (Some(total), Some(_)) => unsafe { libc::realloc(at, total.max(1)) },
+    };
+    lending.mm().set_fallible(was);
+    if !was {
+        lending.mm().take_refused();
+    }
+    answered
+}
+
+/// Whether a lend stands on this thread: what a library that also runs
+/// outside a request (libmbfl, which the engine's multibyte scanner
+/// calls with no request) asks before it frees, since outside a lend
+/// [`efree`] frees nothing and its own blocks are the system allocator's.
+#[unsafe(no_mangle)]
+pub extern "C" fn php_heap_lend_standing() -> bool {
+    LENT.get().is_some()
+}
+
 /// `estrdup(s)`: the string and its terminator in an [`emalloc`] block.
 ///
 /// # Safety
