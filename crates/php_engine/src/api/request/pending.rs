@@ -37,17 +37,15 @@ impl Request {
         std::mem::take(&mut self.returned)
     }
 
-    /// What a call returned, or an opline was to write, given up because
-    /// a throwable or an exit is pending: php's one rule for a value
-    /// written under `EG(exception)`, its `zval_ptr_dtor`.
-    /// `ZEND_HANDLE_EXCEPTION` frees the throwing opline's `result`
-    /// before the frame's live ranges, and the native that served a user
-    /// call is handed no value with its `Err`, its `retval` given up as
-    /// php gives up an internal call's under `EG(exception)`
-    /// (`zend_call_function`). So the value's destructor runs before the
-    /// `catch` that takes the throwable, with the throwable still pending.
-    /// The loop's unwinder and [`Request::serve_user`] both call this; it
-    /// is out of line, since neither reaches it but on a throw.
+    /// What an opline was to write, given up because a throwable or an
+    /// exit is pending: php's rule for a value written under
+    /// `EG(exception)`, its `zval_ptr_dtor` at `ZEND_HANDLE_EXCEPTION`,
+    /// which frees the throwing opline's `result` before the frame's live
+    /// ranges and after the opline's own operands. A property read's
+    /// `get` hook or `__get` that returned and then threw left its value
+    /// there, the read's `rv` (`Retval::Result`), so its destructor runs
+    /// after the receiver's and before the `catch`. Out of line, since
+    /// nothing reaches it but a throw.
     #[cold]
     #[inline(never)]
     pub(crate) fn release_thrown_value(&mut self, value: Value) {

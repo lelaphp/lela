@@ -24,6 +24,7 @@ use crate::api::values::{
 use frames::Link;
 
 use super::Frames;
+use super::calls::Retval;
 use super::{DeclaredSlot, Hooks, PropertyInfo, Request, RowPlace, frames};
 
 /// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
@@ -2051,7 +2052,7 @@ impl Request {
             return Ok(None);
         };
         let class = object.class();
-        let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+        let got = self.call_accessor_into(Retval::Result, object, getter, IN_GET, name, &[])?;
         self.overloaded_write_notice(class, name, read, &got);
         self.hold_magic_get(class, name, getter, got).map(Some)
     }
@@ -2524,8 +2525,23 @@ impl Request {
         name: &[u8],
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        self.call_accessor_into(Retval::Native, object, accessor, bit, name, arguments)
+    }
+
+    /// [`Request::call_accessor`] whose accessor's return, where its body
+    /// returned and then threw, goes where `retval` says: `__get`'s under
+    /// a read is the reading opline's `rv`.
+    fn call_accessor_into(
+        &mut self,
+        retval: Retval,
+        object: PhpObject,
+        accessor: Function,
+        bit: u32,
+        name: &[u8],
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
         self.guard_take(object, name, bit);
-        let served = self.serve_accessor(object, accessor, name, arguments);
+        let served = self.serve_accessor(retval, object, accessor, name, arguments);
         self.guard_drop(object, name, bit);
         served
     }
@@ -2536,6 +2552,7 @@ impl Request {
     /// the truth of.
     fn serve_accessor(
         &mut self,
+        retval: Retval,
         object: PhpObject,
         accessor: Function,
         name: &[u8],
@@ -2546,7 +2563,8 @@ impl Request {
         sent.push(Value::string(*name));
         sent.extend_from_slice(arguments);
         let held = Owner::take(self, object.as_value());
-        let served = self.serve_method_made(accessor, Some(object), object.class(), &sent, &[]);
+        let class = object.class();
+        let served = self.serve_method_into(retval, accessor, Some(object), class, &sent, &[]);
         held.give_up(self);
         name.give_up(self);
         served
@@ -2732,7 +2750,8 @@ impl Request {
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
-                let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                let got =
+                    self.call_accessor_into(Retval::Result, object, getter, IN_GET, name, &[])?;
                 self.overloaded_write_notice(class, name, read, &got);
                 let held = self.hold_magic_get(class, name, getter, got);
                 return adopted(held);
@@ -4905,7 +4924,7 @@ impl Request {
         test: PropertyTest,
         issetter: Function,
     ) -> Result<bool, Thrown> {
-        let answered = self.serve_accessor(object, issetter, name, &[])?;
+        let answered = self.serve_accessor(Retval::Native, object, issetter, name, &[])?;
         let truthy = self.truth_of(answered)?;
         if test != PropertyTest::NotEmpty || !truthy {
             return Ok(truthy);

@@ -25799,10 +25799,10 @@ fn fast_call_var(code: &OpArray, element: php_unit::TryCatch) -> Option<u32> {
 /// whose `result` is a class rather than a value to nobody; a smart
 /// branch may never have written its temporary, which reads `UNDEF`
 /// here and is nobody's either. A call whose body returned and then
-/// threw, from a local's destructor at its end, wrote its temporary:
-/// that is given up here, as [`Request::release_thrown_value`] gives up
-/// every value written under a pending throwable, so its destructor runs
-/// before the `catch`.
+/// threw, from a local's destructor at its end, wrote its temporary,
+/// and so did a property read whose `get` hook or `__get` did, its `rv`:
+/// that is given up here ([`Request::release_thrown_value`]), after the
+/// opline's operands, so its destructor runs before the `catch`.
 ///
 /// ```php
 /// class V { function __destruct() { echo "V::__destruct\n"; } }
