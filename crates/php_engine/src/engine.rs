@@ -5941,8 +5941,10 @@ impl Engine {
         let exit_code = req.diagnostics().exit_status();
         // The block reached the sink at the commit, which the output
         // layer's deactivation makes if nothing had; one it refused, for
-        // the memory limit, is handed over now.
-        if !req.output().headers_sent() {
+        // the memory limit, is handed over now. A request ended at the
+        // hard memory limit hands none: php's process `_exit`ed there,
+        // and a one-request host writes no head after it (#3435).
+        if !req.output().headers_sent() && !req.terminated() {
             req.send_header_block();
         }
         let sink = req.release_sink();

@@ -17,7 +17,7 @@
 //! (a control character) from the end of a well-formed one.
 
 use php_ext::call;
-use php_ext::raising::Thrown;
+use php_ext::raising::{Thrown, fatal};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
@@ -53,11 +53,36 @@ enum Token {
     Int(i64),
     Double(f64),
     /// `PHP_JSON_T_STRING` and `PHP_JSON_T_ESTRING`, which the grammar
-    /// accepts in the same two places.
-    Str(Vec<u8>),
+    /// accepts in the same two places, with the string the scanner made.
+    Str(Text),
     Eoi,
-    /// `PHP_JSON_T_ERROR`: the scanner has written its code.
+    /// `PHP_JSON_T_ERROR`: the scanner has written its code, or none
+    /// where the memory limit refused a string, which the grammar's
+    /// `yyerror` makes the syntax error.
     Error,
+}
+
+/// A string token's `s->value` as `php_json_yylex` hands it to the
+/// grammar: the string the scanner made, or nothing under the
+/// validating methods, whose `yylex` gives each string up as it is
+/// scanned and hands on `UNDEF`.
+type Text = Option<Owner<PhpString>>;
+
+/// The string `text` holds given up, where it holds one.
+fn give_up_text(req: &mut Request, text: Text) {
+    if let Some(string) = text {
+        string.give_up(req);
+    }
+}
+
+impl Token {
+    /// The token discarded, bison's `%destructor` over its value: the
+    /// string a string token holds given up.
+    fn give_up(self, req: &mut Request) {
+        if let Token::Str(text) = self {
+            give_up_text(req, text);
+        }
+    }
 }
 
 /// `php_json_scanner`: the cursor, the options and the code the last
@@ -96,8 +121,11 @@ impl Scanner<'_> {
     }
 
     /// `php_json_scan` in condition `JS`: the whitespace of `NL|WS`
-    /// skipped, then the longest rule that matches at the cursor.
-    fn scan(&mut self) -> Token {
+    /// skipped, then the longest rule that matches at the cursor. A
+    /// string token's string is made here, as php's scanner makes it
+    /// into `s->value`; the `Err` is the memory limit's fatal where the
+    /// string is made infallibly.
+    fn scan(&mut self, req: &mut Request) -> Result<Token, Thrown> {
         while matches!(self.byte(self.cursor), b' ' | b'\t' | b'\r' | b'\n') {
             self.cursor += 1;
         }
@@ -114,52 +142,52 @@ impl Scanner<'_> {
         };
         if let Some(token) = punctuation {
             self.cursor += 1;
-            return token;
+            return Ok(token);
         }
         if c == b'"' {
             self.cursor += 1;
-            return self.scan_string();
+            return self.scan_string(req);
         }
         if c == 0 {
             // `<JS>EOI`: the terminator past the last byte is the end of
             // input, and a zero byte within it a control character.
             self.cursor += 1;
-            return if self.cursor > self.input.len() {
+            return Ok(if self.cursor > self.input.len() {
                 Token::Eoi
             } else {
                 self.refuse(JSON_ERROR_CTRL_CHAR)
-            };
+            });
         }
         if self.keyword(b"null") {
-            return Token::Null;
+            return Ok(Token::Null);
         }
         if self.keyword(b"true") {
-            return Token::True;
+            return Ok(Token::True);
         }
         if self.keyword(b"false") {
-            return Token::False;
+            return Ok(Token::False);
         }
-        if let Some(token) = self.scan_number() {
-            return token;
+        if let Some(token) = self.scan_number(req)? {
+            return Ok(token);
         }
         if c <= 0x1f {
-            return self.refuse(JSON_ERROR_CTRL_CHAR);
+            return Ok(self.refuse(JSON_ERROR_CTRL_CHAR));
         }
         // `<JS>UTF8` is a syntax error and `<JS>ANY`, the byte no UTF-8
         // sequence begins, is the malformed one.
         if utf8_length(self.input, start).is_some() {
             self.cursor += 1;
-            return self.refuse(JSON_ERROR_SYNTAX);
+            return Ok(self.refuse(JSON_ERROR_SYNTAX));
         }
         self.cursor += 1;
-        self.refuse(JSON_ERROR_UTF8)
+        Ok(self.refuse(JSON_ERROR_UTF8))
     }
 
     /// `<JS>INT` and `<JS>FLOAT|EXP`, longest match: the integer alone,
     /// the integer with a fraction, or either with an exponent. `None`
     /// where no number stands at the cursor, which leaves the byte to
     /// the conditions below it.
-    fn scan_number(&mut self) -> Option<Token> {
+    fn scan_number(&mut self, req: &mut Request) -> Result<Option<Token>, Thrown> {
         let start = self.cursor;
         let mut at = start;
         let negative = self.byte(at) == b'-';
@@ -174,7 +202,7 @@ impl Scanner<'_> {
                     at += 1;
                 }
             }
-            _ => return None,
+            _ => return Ok(None),
         }
         let digits = at - digits_at;
         let mut end = at;
@@ -202,59 +230,78 @@ impl Scanner<'_> {
         self.cursor = end;
         let text = self.input.get(start..end).unwrap_or_default();
         if double {
-            return Some(Token::Double(strtod(text)));
+            return Ok(Some(Token::Double(strtod(text))));
         }
-        Some(self.integer(
-            text,
-            self.input.get(digits_at..at).unwrap_or_default(),
-            digits,
-            negative,
-        ))
+        let digits_of = self.input.get(digits_at..at).unwrap_or_default();
+        self.integer(req, text, digits_of, digits, negative)
+            .map(Some)
     }
 
     /// `<JS>INT`'s body: the number as a `zend_long` while it fits,
     /// and as the string itself or a double once it does not, which is
-    /// what `JSON_BIGINT_AS_STRING` chooses between.
-    fn integer(&self, text: &[u8], digits_of: &[u8], digits: usize, negative: bool) -> Token {
+    /// what `JSON_BIGINT_AS_STRING` chooses between. The string is
+    /// `ZVAL_STRINGL`, `zend_string_init` asked for infallibly
+    /// (`Z/ext/json/json_scanner.re:187`), where a string token's is
+    /// fallible ([`Scanner::string`]): one past the memory limit is the
+    /// limit's fatal where it is asked for, and never a refused parse.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '16M');
+    /// $n = 10 * 1024 * 1024; $json = str_repeat('9', $n); $json[0] = '['; $json[$n - 1] = ']';
+    /// try { var_dump(json_decode($json, false, 512, JSON_BIGINT_AS_STRING | JSON_THROW_ON_ERROR)); } catch (JsonException $e) { echo "caught\n"; }
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 10502144 bytes) in %s on line 4
+    /// ```
+    fn integer(
+        &self,
+        req: &mut Request,
+        text: &[u8],
+        digits_of: &[u8],
+        digits: usize,
+        negative: bool,
+    ) -> Result<Token, Thrown> {
         let bigint = digits > INT_MAX_LENGTH
             || (digits == INT_MAX_LENGTH && {
                 let cmp = digits_of.cmp(LONG_MIN_DIGITS);
                 !(cmp.is_lt() || (cmp.is_eq() && negative))
             });
         if !bigint {
-            return Token::Int(
+            return Ok(Token::Int(
                 std::str::from_utf8(text)
                     .ok()
                     .and_then(|t| t.parse().ok())
                     .unwrap_or(0),
-            );
+            ));
         }
         if self.options & JSON_BIGINT_AS_STRING != 0 {
-            return Token::Str(text.to_vec());
+            return Ok(Token::Str(Some(PhpString::new(req, text)?)));
         }
-        Token::Double(strtod(text))
+        Ok(Token::Double(strtod(text)))
     }
 
     /// Conditions `STR_P1` and `STR_P2` as one walk: php sizes the
     /// string in the first and writes it in the second, over the same
     /// bytes in the same order, so the first refusal is the same one.
     /// The cursor stands past the opening quote.
-    fn scan_string(&mut self) -> Token {
+    fn scan_string(&mut self, req: &mut Request) -> Result<Token, Thrown> {
         let mut out: Vec<u8> = Vec::new();
         loop {
             let c = self.byte(self.cursor);
             if c == b'"' {
                 self.cursor += 1;
-                return Token::Str(out);
+                return Scanner::string(req, &out);
             }
             if c <= 0x1f {
                 // `<STR_P1>CTRL`, the NUL terminator of an unterminated
                 // string among them.
-                return self.refuse(JSON_ERROR_CTRL_CHAR);
+                return Ok(self.refuse(JSON_ERROR_CTRL_CHAR));
             }
             if c == b'\\' {
                 if let Some(code) = self.scan_escape(&mut out) {
-                    return self.refuse(code);
+                    return Ok(self.refuse(code));
                 }
                 continue;
             }
@@ -269,7 +316,7 @@ impl Scanner<'_> {
                 if self.options & JSON_INVALID_UTF8_SUBSTITUTE != 0 {
                     out.extend_from_slice("\u{fffd}".as_bytes());
                 } else if self.options & JSON_INVALID_UTF8_IGNORE == 0 {
-                    return self.refuse(JSON_ERROR_UTF8);
+                    return Ok(self.refuse(JSON_ERROR_UTF8));
                 }
                 self.cursor += 1;
                 continue;
@@ -278,6 +325,53 @@ impl Scanner<'_> {
             out.extend_from_slice(taken.unwrap_or_default());
             self.cursor += len;
         }
+    }
+
+    /// `<STR_P1>["]`: the string token's string, made as the scanner
+    /// meets the closing quote and before the grammar sees the token.
+    /// The empty string is `ZVAL_EMPTY_STRING`, php's interned one, and
+    /// any other `zend_string_falloc` (`Z/ext/json/json_scanner.re:267`),
+    /// a string of the request's own even at one byte, and asked for
+    /// fallibly since 8.5.12: `PHP_JSON_T_ERROR`, with no code of its
+    /// own, where the memory limit refused it, the parse refused with it
+    /// and the limit's fatal raised as the call returns rather than the
+    /// hard limit met:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '16M');
+    /// $n = 10 * 1024 * 1024; $json = str_repeat("\x80", $n); $json[0] = '"'; $json[$n - 1] = '"';
+    /// var_dump(json_decode($json, false, 512, JSON_INVALID_UTF8_SUBSTITUTE), "unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 31473664 bytes) in %s on line 4
+    /// ```
+    ///
+    /// A string of one byte takes its bin where a native's would be the
+    /// interned character, and a key keeps its string in the table it is
+    /// written to:
+    ///
+    /// ```php
+    /// foreach (['"a"', '"ab"', '""', '["a","b","c"]', '{"a":1}', '{"ab":1}'] as $j) {
+    ///     $m = memory_get_usage(); $x = json_decode($j, true); echo $j, ' ', memory_get_usage() - $m, "\n"; $x = null;
+    /// }
+    /// ```
+    /// ```expect
+    /// "a" 64
+    /// "ab" 32
+    /// "" 0
+    /// ["a","b","c"] 312
+    /// {"a":1} 408
+    /// {"ab":1} 408
+    /// ```
+    fn string(req: &mut Request, bytes: &[u8]) -> Result<Token, Thrown> {
+        if bytes.is_empty() {
+            return Ok(Token::Str(Some(PhpString::new(req, bytes)?)));
+        }
+        let made = req
+            .memory_mut()
+            .fallible(|req| PhpString::filled(req, bytes.len(), |to| to.copy_from_slice(bytes)))?;
+        Ok(made.map_or(Token::Error, |string| Token::Str(Some(string))))
     }
 
     /// One escape at the cursor, which stands on the backslash: the
@@ -400,7 +494,7 @@ enum Open {
     Object {
         at: usize,
         holder: Holder,
-        key: Vec<u8>,
+        key: Text,
     },
 }
 
@@ -425,14 +519,18 @@ enum Attached {
 }
 
 impl Open {
-    /// What the bracket became, `null` where nothing was built.
-    fn into_value(self) -> Owner<Value> {
+    /// What the bracket became, `null` where nothing was built, and a
+    /// key an object still holds given up.
+    fn into_value(self, req: &mut Request) -> Owner<Value> {
         match self {
             Open::Array { array, .. } => match array {
                 Some(array) => array.into_value(),
                 None => Owner::null(),
             },
-            Open::Object { holder, .. } => holder.into_value(),
+            Open::Object { holder, key, .. } => {
+                give_up_text(req, key);
+                holder.into_value()
+            }
         }
     }
 
@@ -444,7 +542,10 @@ impl Open {
                     array.give_up(req);
                 }
             }
-            Open::Object { holder, .. } => holder.give_up(req),
+            Open::Object { holder, key, .. } => {
+                give_up_text(req, key);
+                holder.give_up(req);
+            }
         }
     }
 }
@@ -461,8 +562,9 @@ struct Parser<'a> {
     /// beside the descent so it stops where php's parser does
     /// ([`Parser::push`]).
     stack: usize,
-    /// `php_json_get_validate_methods`: nothing is built and the
-    /// scanner's strings are dropped, which is what `json_validate` runs.
+    /// `php_json_get_validate_methods`: nothing is built and each string
+    /// the scanner makes is given up as it is scanned, which is what
+    /// `json_validate` runs.
     validating: bool,
 }
 
@@ -473,9 +575,19 @@ struct Parser<'a> {
 const YYMAXDEPTH: usize = 10000;
 
 impl Parser<'_> {
-    /// `php_json_yylex`.
-    fn advance(&mut self) {
-        self.token = self.scanner.scan();
+    /// `php_json_yylex`: the next token, its string given up at once
+    /// under the validating methods, and the lookahead it replaces
+    /// discarded.
+    fn advance(&mut self, req: &mut Request) -> Result<(), Thrown> {
+        let mut token = self.scanner.scan(req)?;
+        if self.validating
+            && let Token::Str(text) = &mut token
+            && let Some(string) = text.take()
+        {
+            string.give_up(req);
+        }
+        std::mem::replace(&mut self.token, token).give_up(req);
+        Ok(())
     }
 
     /// One state pushed on bison's stack, a shift or a goto, and
@@ -560,7 +672,7 @@ impl Parser<'_> {
                 let Some(frame) = open.pop() else {
                     return Ok(None);
                 };
-                let Some(closed) = self.close(frame, req) else {
+                let Some(closed) = self.close(frame, req)? else {
                     return Ok(None);
                 };
                 done = closed;
@@ -572,22 +684,8 @@ impl Parser<'_> {
     /// opened, `'[' $@2` and `'{' $@1` with the midrule's depth test
     /// between the shift and the goto. An empty pair is the value
     /// whole; one with something inside is left open on `open`, its
-    /// first value next.
-    ///
-    /// A string is asked for fallibly since 8.5.12, the scanner's
-    /// `zend_string_falloc` at its closing quote, so one past the memory
-    /// limit is refused, the parse with it, and the limit's fatal is raised
-    /// as the call returns rather than the hard limit met:
-    ///
-    /// ```php
-    /// ini_set('memory_limit', '16M');
-    /// $n = 10 * 1024 * 1024; $json = str_repeat("\x80", $n); $json[0] = '"'; $json[$n - 1] = '"';
-    /// var_dump(json_decode($json, false, 512, JSON_INVALID_UTF8_SUBSTITUTE), "unreached");
-    /// ```
-    /// ```expect exit=255
-    ///
-    /// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 31473664 bytes) in %s on line 4
-    /// ```
+    /// first value next. A string token's string was made as it was
+    /// scanned ([`Scanner::string`]), and is the value as it stands.
     fn begin(&mut self, req: &mut Request, open: &mut Vec<Open>) -> Result<Begun, Thrown> {
         let token = std::mem::replace(&mut self.token, Token::Eoi);
         let bracket = matches!(token, Token::ArrayOpen | Token::ObjectOpen);
@@ -610,6 +708,7 @@ impl Parser<'_> {
         }
         let at = self.stack;
         if !self.push() || bracket && (!self.deeper() || !self.push()) {
+            token.give_up(req);
             return Ok(Begun::Refused);
         }
         let built = match token {
@@ -617,48 +716,63 @@ impl Parser<'_> {
             Token::False => Owner::bool(false),
             Token::Int(n) => Owner::int(n),
             Token::Double(d) => Owner::float(d),
-            Token::Str(bytes) if !self.validating => {
-                let Some(string) = token_string(req, &bytes)? else {
-                    self.syntax();
-                    return Ok(Begun::Refused);
-                };
-                string.into_value()
-            }
+            Token::Str(Some(string)) => string.into_value(),
             Token::ArrayOpen => {
-                self.advance();
-                let array = if self.validating {
-                    None
-                } else {
-                    // `array_finit` since 8.5.12: `YYERROR` where the
-                    // memory limit refused it.
-                    let Some(array) = req.memory_mut().fallible(PhpArray::new)? else {
-                        self.syntax();
-                        return Ok(Begun::Refused);
-                    };
-                    Some(array)
-                };
-                let frame = Open::Array { at, array };
+                self.advance(req)?;
+                // The array is made where its rule reduces, at its first
+                // element ([`Parser::attach`]) or as the empty pair.
+                let frame = Open::Array { at, array: None };
                 return self.opened(req, frame, open);
             }
             Token::ObjectOpen => {
-                self.advance();
+                self.advance(req)?;
                 let frame = Open::Object {
                     at,
                     holder: Holder::Nothing,
-                    key: Vec::new(),
+                    key: None,
                 };
                 return self.opened(req, frame, open);
             }
             _ => Owner::null(),
         };
-        self.advance();
+        if let Err(thrown) = self.advance(req) {
+            built.give_up(req);
+            return Err(thrown);
+        }
         Ok(Begun::Value(built))
     }
 
     /// A bracket just opened: `elements: %empty` or `members: %empty`
-    /// where the next token closes it, the latter building the holder,
-    /// and the pair closed; else the first member's key read and the
-    /// bracket left open.
+    /// where the next token closes it, and the pair closed; else the
+    /// first member's key read and the bracket left open. Under the
+    /// default methods an empty pair that decodes to an array is
+    /// `ZVAL_EMPTY_ARRAY`, the immutable empty array, which costs
+    /// nothing, and `{}` decoding to an object is `object_create`'s
+    /// `stdClass`; the validating methods build `null` for either.
+    /// An array with elements is made at the first, `element: value`'s
+    /// `array_create`, after that value is built:
+    ///
+    /// ```php
+    /// foreach (['[]', '[[]]', '{}', '[{}]', '{"a":[]}', '[[1]]'] as $j) {
+    ///     foreach ([true, false] as $assoc) {
+    ///         $m = memory_get_usage(); $x = json_decode($j, $assoc); echo $j, ' ', (int) $assoc, ' ', memory_get_usage() - $m, "\n"; $x = null;
+    ///     }
+    /// }
+    /// ```
+    /// ```expect
+    /// [] 1 32
+    /// [] 0 0
+    /// [[]] 1 216
+    /// [[]] 0 216
+    /// {} 1 0
+    /// {} 0 40
+    /// [{}] 1 216
+    /// [{}] 0 256
+    /// {"a":[]} 1 408
+    /// {"a":[]} 0 448
+    /// [[1]] 1 432
+    /// [[1]] 0 432
+    /// ```
     fn opened(
         &mut self,
         req: &mut Request,
@@ -670,45 +784,83 @@ impl Parser<'_> {
                 frame.give_up(req);
                 return Ok(Begun::Refused);
             }
-            if let Open::Object { holder, .. } = &mut frame {
-                let Some(made) = self.holder(req)? else {
-                    frame.give_up(req);
-                    return Ok(Begun::Refused);
+            let as_array = !self.validating
+                && match &frame {
+                    Open::Array { .. } => true,
+                    Open::Object { .. } => self.scanner.options & JSON_OBJECT_AS_ARRAY != 0,
                 };
-                *holder = made;
+            match &mut frame {
+                Open::Array { array, .. } if as_array => {
+                    *array = Some(Owner::take(req, PhpArray::empty()));
+                }
+                Open::Object { holder, .. } if as_array => {
+                    *holder = Holder::Array(Owner::take(req, PhpArray::empty()));
+                }
+                Open::Object { holder, .. } => match self.holder(req) {
+                    Ok(Some(made)) => *holder = made,
+                    made => {
+                        frame.give_up(req);
+                        return made.map(|_| Begun::Refused);
+                    }
+                },
+                Open::Array { .. } => {}
             }
-            return Ok(self.close(frame, req).map_or(Begun::Refused, Begun::Value));
+            return Ok(self.close(frame, req)?.map_or(Begun::Refused, Begun::Value));
         }
         if let Open::Object { key, .. } = &mut frame {
-            let Some(read) = self.key() else {
-                frame.give_up(req);
-                return Ok(Begun::Refused);
-            };
-            *key = read;
+            match self.key(req) {
+                Ok(Some(read)) => *key = read,
+                Ok(None) => {
+                    frame.give_up(req);
+                    return Ok(Begun::Refused);
+                }
+                Err(thrown) => {
+                    frame.give_up(req);
+                    return Err(thrown);
+                }
+            }
         }
         open.push(frame);
         Ok(Begun::Opened)
     }
 
-    /// `key ':'` of a `member`, both shifted, the key's bytes answered.
-    fn key(&mut self) -> Option<Vec<u8>> {
-        let Token::Str(key) = std::mem::replace(&mut self.token, Token::Eoi) else {
-            self.syntax();
-            return None;
+    /// `key ':'` of a `member`, both shifted, the key's string answered
+    /// as the scanner made it; `None` where the parse was refused, the
+    /// key given up.
+    fn key(&mut self, req: &mut Request) -> Result<Option<Text>, Thrown> {
+        let key = match std::mem::replace(&mut self.token, Token::Eoi) {
+            Token::Str(key) => key,
+            other => {
+                self.token = other;
+                self.syntax();
+                return Ok(None);
+            }
         };
-        if !self.push() {
-            return None;
+        match self.colon(req) {
+            Ok(true) => Ok(Some(key)),
+            shifted => {
+                give_up_text(req, key);
+                shifted.map(|_| None)
+            }
         }
-        self.advance();
+    }
+
+    /// The key shifted and then `':'`, and the token past it read;
+    /// `false` where the parse was refused.
+    fn colon(&mut self, req: &mut Request) -> Result<bool, Thrown> {
+        if !self.push() {
+            return Ok(false);
+        }
+        self.advance(req)?;
         if !matches!(self.token, Token::Colon) {
             self.syntax();
-            return None;
+            return Ok(false);
         }
         if !self.push() {
-            return None;
+            return Ok(false);
         }
-        self.advance();
-        Some(key)
+        self.advance(req)?;
+        Ok(true)
     }
 
     /// `value` handed to the bracket it closes: appended as an `element`,
@@ -723,6 +875,23 @@ impl Parser<'_> {
     ) -> Result<Attached, Thrown> {
         let at = match frame {
             Open::Array { at, array } => {
+                if array.is_none() && !self.validating {
+                    // `element: value`'s `array_create`, `array_finit`
+                    // since 8.5.12: `YYERROR` where the memory limit
+                    // refused it.
+                    match req.memory_mut().fallible(PhpArray::new) {
+                        Ok(Some(made)) => *array = Some(made),
+                        Ok(None) => {
+                            value.give_up(req);
+                            self.syntax();
+                            return Ok(Attached::Refused);
+                        }
+                        Err(thrown) => {
+                            value.give_up(req);
+                            return Err(thrown);
+                        }
+                    }
+                }
                 match array.as_mut() {
                     // `zend_hash_next_index_finsert` since 8.5.12:
                     // `YYERROR` where the memory limit refused the table's
@@ -755,20 +924,9 @@ impl Parser<'_> {
                         }
                     };
                 }
-                match holder {
-                    Holder::Array(array) => {
-                        let name = match token_string(req, key) {
-                            Ok(Some(name)) => Key::from_string(req, name),
-                            Ok(None) => {
-                                value.give_up(req);
-                                self.syntax();
-                                return Ok(Attached::Refused);
-                            }
-                            Err(thrown) => {
-                                value.give_up(req);
-                                return Err(thrown);
-                            }
-                        };
+                match (holder, key.take()) {
+                    (Holder::Array(array), Some(name)) => {
+                        let name = Key::from_string(req, name);
                         // `zend_symtable_fupdate` since 8.5.12.
                         if req
                             .memory_mut()
@@ -779,27 +937,16 @@ impl Parser<'_> {
                             return Ok(Attached::Refused);
                         }
                     }
-                    Holder::Object(object) => {
-                        if key.first() == Some(&0) {
+                    (Holder::Object(object), Some(name)) => {
+                        if name.as_bytes().first() == Some(&0) {
                             // A name php mangles a private or protected
                             // property into; `zend_std_write_property`
                             // may not be handed one.
                             self.scanner.errcode = JSON_ERROR_INVALID_PROPERTY_NAME;
+                            name.give_up(req);
                             value.give_up(req);
                             return Ok(Attached::Refused);
                         }
-                        let name = match token_string(req, key) {
-                            Ok(Some(name)) => name,
-                            Ok(None) => {
-                                value.give_up(req);
-                                self.syntax();
-                                return Ok(Attached::Refused);
-                            }
-                            Err(thrown) => {
-                                value.give_up(req);
-                                return Err(thrown);
-                            }
-                        };
                         object.set_prop(req, name, value)?;
                         // `FAILURE` once the memory limit was met, since
                         // 8.5.12.
@@ -808,7 +955,17 @@ impl Parser<'_> {
                             return Ok(Attached::Refused);
                         }
                     }
-                    Holder::Nothing => value.give_up(req),
+                    (Holder::Nothing, name) => {
+                        give_up_text(req, name);
+                        value.give_up(req);
+                    }
+                    (Holder::Array(_) | Holder::Object(_), None) => {
+                        value.give_up(req);
+                        return Err(fatal(
+                            req,
+                            "InternalError: a JSON member's key was not made while its object was built",
+                        ));
+                    }
                 }
                 *at
             }
@@ -821,9 +978,9 @@ impl Parser<'_> {
         if !self.push() {
             return Ok(Attached::Refused);
         }
-        self.advance();
+        self.advance(req)?;
         if let Open::Object { key, .. } = frame {
-            let Some(read) = self.key() else {
+            let Some(read) = self.key(req)? else {
                 return Ok(Attached::Refused);
             };
             *key = read;
@@ -834,7 +991,7 @@ impl Parser<'_> {
     /// `array_end` or `object_end` shifted and the rule reduced to the
     /// one `value` it is: the other bracket is the state mismatch and
     /// anything else a syntax error, the bracket given up on either.
-    fn close(&mut self, frame: Open, req: &mut Request) -> Option<Owner<Value>> {
+    fn close(&mut self, frame: Open, req: &mut Request) -> Result<Option<Owner<Value>>, Thrown> {
         let (at, closes, other) = match &frame {
             Open::Array { at, .. } => (*at, Token::ArrayClose, Token::ObjectClose),
             Open::Object { at, .. } => (*at, Token::ObjectClose, Token::ArrayClose),
@@ -853,12 +1010,16 @@ impl Parser<'_> {
         };
         if refused {
             frame.give_up(req);
-            return None;
+            return Ok(None);
         }
-        self.advance();
+        let value = frame.into_value(req);
+        if let Err(thrown) = self.advance(req) {
+            value.give_up(req);
+            return Err(thrown);
+        }
         self.depth -= 1;
         self.stack = at + 1;
-        Some(frame.into_value())
+        Ok(Some(value))
     }
 
     /// `PHP_JSON_DEPTH_INC`: one level deeper, or the depth refusal.
@@ -940,10 +1101,14 @@ fn parse(
         stack: 1,
         validating,
     };
-    parser.advance();
-    let parsed = parser.value(req)?;
-    match parsed {
-        Some(value) if matches!(parser.token, Token::Eoi) => Ok(Ok(value)),
+    let parsed = parser.advance(req).and_then(|()| parser.value(req));
+    // The lookahead the parse stopped at, discarded as bison's cleanup
+    // discards it.
+    let lookahead = std::mem::replace(&mut parser.token, Token::Eoi);
+    let ended = matches!(lookahead, Token::Eoi);
+    lookahead.give_up(req);
+    match parsed? {
+        Some(value) if ended => Ok(Ok(value)),
         Some(value) => {
             parser.syntax();
             value.give_up(req);
@@ -968,7 +1133,26 @@ pub(super) fn decode(
 }
 
 /// `php_json_validate_ex`: the scanner and the grammar with the
-/// validating methods under them, which build nothing.
+/// validating methods under them, which build nothing. The scanner
+/// still makes each string token's string, fallibly, and `yylex` gives
+/// it up before the next token is scanned, so a string past the memory
+/// limit is refused and the limit's fatal raised as the call returns,
+/// while two strings that fit only one at a time validate:
+///
+/// ```php
+/// ini_set('memory_limit', '18M');
+/// $n = 10 * 1024 * 1024; $h = $n >> 1; $json = str_repeat('a', $n);
+/// $json[0] = '['; $json[1] = '"'; $json[$h - 1] = '"'; $json[$h] = ','; $json[$h + 1] = '"'; $json[$n - 2] = '"'; $json[$n - 1] = ']';
+/// var_dump(json_validate($json), json_last_error_msg());
+/// $json = null; $json = str_repeat('a', $n); $json[0] = '"'; $json[$n - 1] = '"';
+/// var_dump(json_validate($json), "unreached");
+/// ```
+/// ```expect exit=255
+/// bool(true)
+/// string(8) "No error"
+///
+/// Fatal error: Allowed memory size of 18874368 bytes exhausted (tried to allocate 10502144 bytes) in %s on line 7
+/// ```
 pub(super) fn validate(
     req: &mut Request,
     text: &[u8],
@@ -976,12 +1160,4 @@ pub(super) fn validate(
     depth: i64,
 ) -> Result<Result<Owner<Value>, i64>, Thrown> {
     parse(req, text, options, depth, true)
-}
-
-/// The string a scanned token is made into, php 8.5.12's
-/// `zend_string_falloc` at the token's closing quote
-/// (`Z/ext/json/json_scanner.re:267`): `None` where the memory limit
-/// refused it, the delayed OOM recorded for the call's return.
-fn token_string(req: &mut Request, bytes: &[u8]) -> Result<Option<Owner<PhpString>>, Thrown> {
-    req.memory_mut().fallible(|req| PhpString::new(req, bytes))
 }
