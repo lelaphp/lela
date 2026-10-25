@@ -518,7 +518,9 @@ pub fn judge(
 
 /// Condition 10: on a diff that changes a file of [`key::BUILT_UNDER`],
 /// the `fold` reading of `sapi/cli`, fresh over its key now and passing.
-/// Where the caller says `fold` did not run, a missing reading is a note.
+/// A skip, the reading of a host that is not `aarch64`, is met and a note
+/// naming why, and where the caller says `fold` did not run, a missing
+/// reading is a note.
 fn folded(
     asking: &Asking,
     paths: &[&str],
@@ -546,6 +548,12 @@ fn folded(
     }
     match reading {
         Some(reading) if reading.status == Status::Pass => {}
+        // The sensor reads `aarch64` alone: a host it cannot read has
+        // nothing to hold, and says so.
+        Some(reading) if reading.status == Status::Skip => notes.push(format!(
+            "{instrument}: {scope} not held on this host: {}",
+            reading.message
+        )),
         Some(reading) => unmet.push(format!(
             "{instrument}: {scope} {}: {}",
             reading.status.as_str(),
@@ -555,7 +563,7 @@ fn folded(
             "{instrument} did not run in this run, so condition 10 judged no reading of it"
         )),
         None => unmet.push(format!(
-            "{instrument}: no reading for {scope} over the tree now, and {changed} changed; `cargo xtask fold` takes it"
+            "{instrument}: no reading for {scope} over the tree now, and {changed} changed; `cargo xtask fold` takes it, building the release {scope} first (minutes)"
         )),
     }
     Ok(())

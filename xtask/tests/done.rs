@@ -432,8 +432,9 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
 /// Condition 10 (#3372): a diff that changes `.cargo/config.toml` asks for
 /// a fresh passing `fold` reading of `sapi/cli`, and one taken before the
 /// file changed is stale, since `sapi/cli`'s key covers the files rustc is
-/// built under; a failing one is unmet with its message, and a diff that
-/// changes none of those files asks for no reading.
+/// built under; a failing one is unmet with its message, a skip, a host
+/// the sensor cannot read, is met and a note, and a diff that changes none
+/// of those files asks for no reading.
 #[test]
 fn a_change_to_what_rustc_is_built_under_asks_for_a_fold_reading() {
     let root = scratch("fold");
@@ -458,9 +459,17 @@ fn a_change_to_what_rustc_is_built_under_asks_for_a_fold_reading() {
     assert_eq!(
         asked(&judge(&root)),
         [
-            "fold: no reading for sapi/cli over the tree now, and .cargo/config.toml changed; `cargo xtask fold` takes it"
+            "fold: no reading for sapi/cli over the tree now, and .cargo/config.toml changed; `cargo xtask fold` takes it, building the release sapi/cli first (minutes)"
         ]
     );
+    let mut skipped = fresh(&root, "fold", "sapi/cli");
+    skipped.status = Status::Skip;
+    skipped.message = "sapi/cli: not held; this host is x86_64".into();
+    store.record(&[skipped]).unwrap();
+    let verdict = judge(&root);
+    assert_eq!(asked(&verdict), Vec::<String>::new());
+    let note = "fold: sapi/cli not held on this host: sapi/cli: not held; this host is x86_64";
+    assert!(verdict.notes.contains(&note.to_owned()), "{verdict:#?}");
     let mut failing = fresh(&root, "fold", "sapi/cli");
     failing.status = Status::Fail;
     failing.message = "sapi/cli: hoisted".into();
