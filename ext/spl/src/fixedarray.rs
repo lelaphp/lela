@@ -58,6 +58,16 @@ pub(crate) struct RowState {
     resizing: Option<usize>,
 }
 
+impl RowState {
+    /// Whether the row was never laid down: empty, and no resize under
+    /// way, php 8.5.12's `!spl_fixedarray_resize_in_progress` beside its
+    /// emptiness, since a clear empties the row before it gives the
+    /// elements up and a destructor that runs then would lay it anew.
+    fn unlaid(&self) -> bool {
+        self.elements.is_empty() && self.resizing.is_none()
+    }
+}
+
 /// The payload: `spl_fixedarray_object`'s fields, boxed, inside the `sizeof` php
 /// allocates (design §5.13).
 pub(crate) type Row = Box<RowState>;
@@ -83,6 +93,26 @@ pub(crate) type Row = Box<RowState>;
 /// dtor 3
 /// log 3
 /// int(3)
+/// ```
+///
+/// A destructor the clear serves finds the row under way, not unlaid, so
+/// `__construct()` and `__unserialize()` lay nothing over it, and a
+/// `setSize()` it asks is served after
+/// (`SplFixedArray_setSize_destruct_reinit_during_clear.phpt`):
+///
+/// ```php
+/// class R { public static $fn; function __destruct() { if ($f = self::$fn) { self::$fn = null; $f(); } } }
+/// foreach ([fn ($a) => $a->__construct(5), fn ($a) => $a->setSize(3), fn ($a) => $a->__unserialize(["a", "b", "c"])] as $act) {
+///     $a = new SplFixedArray(2); $a[0] = new R; $a[1] = "tail";
+///     R::$fn = fn () => $act($a);
+///     $a->setSize(0);
+///     echo $a->getSize(), "\n";
+/// }
+/// ```
+/// ```expect
+/// 0
+/// 3
+/// 0
 /// ```
 fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Thrown> {
     let (len, under_way) = with(req, object, |a| (a.elements.len(), a.resizing.is_some()))?;
@@ -214,7 +244,7 @@ impl SplFixedArray {
         if size < 0 {
             return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
         }
-        if !with(req, this, |a| a.elements.is_empty())? {
+        if !with(req, this, |a| a.unlaid())? {
             return Ok(());
         }
         let size = usize::try_from(size).unwrap_or(0);
@@ -234,7 +264,7 @@ impl SplFixedArray {
     )]
     fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let this = this.object();
-        if with(req, this, |a| a.elements.is_empty())? {
+        if with(req, this, |a| a.unlaid())? {
             let table = Std.get_properties(req, this)?;
             let props: Vec<(Key, Value)> = walk::rows(req, table).collect();
             let mut elements = Vec::with_capacity(props.len());
@@ -302,7 +332,7 @@ impl SplFixedArray {
     /// ```
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let this = this.object();
-        if !with(req, this, |a| a.elements.is_empty())? {
+        if !with(req, this, |a| a.unlaid())? {
             return Ok(());
         }
         let mut elements = Vec::new();
