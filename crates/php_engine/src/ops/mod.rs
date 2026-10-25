@@ -3821,6 +3821,13 @@ fn compare_held(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Or
 /// larger than php's budget and as a fiber's always is, reaching the
 /// floor is reaching php's limit, and the `Error` is php's; the floor's
 /// own is for a limit below it or none.
+///
+/// How deep a nest reaches the limit is each engine's frame, php's C
+/// frames there and this engine's here, so neither depth is php's to
+/// match; this engine's level is the smaller (2,001 levels of `==` under
+/// 256K where php's is 871, #3261), which errs on the side the design
+/// asks: a nest php compares whole is compared whole here too (§5.6,
+/// #3142).
 #[inline]
 fn compare_stack(req: &mut Request) -> Result<(), Thrown> {
     let stack = req.stack_limit();
