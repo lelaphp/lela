@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use php_compile::values::Holder;
 use php_compile::{Named, SourceKind};
-use php_heap::{Str, Zval};
+use php_heap::{Sizing, Str, Zval};
 use php_link::NameHasher;
 use php_unit::decl::TraitAdaptation;
 use php_unit::{OperandKind, PublishedUnit, Unit, WeakUnit};
@@ -1220,15 +1220,15 @@ impl Request {
             if made {
                 // A closure's, a hook's and an anonymous class's name are
                 // `zend_strpprintf`'s, trimmed to `zend_string_finit`'s
-                // size (`Named::printed`).
+                // size (`Named::sizing`).
                 let owner = named.holder();
-                if named.printed(unit, &name) {
-                    self.hold_made(at, &name, Request::string_finit, |held, made| {
-                        held.names_of(owner).push(made);
-                    })?;
-                } else {
-                    self.hold_name(at, owner, &name)?;
-                }
+                let lay = match named.sizing(unit, &name) {
+                    Sizing::Alloc => Request::string,
+                    Sizing::Finit => Request::string_finit,
+                };
+                self.hold_made(at, &name, lay, |held, made| {
+                    held.names_of(owner).push(made);
+                })?;
             }
         }
         if let Some(held) = self.unit_strings.units.get_mut(at) {

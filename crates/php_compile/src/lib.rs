@@ -66,7 +66,7 @@ pub mod syntax {
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use php_heap::{Fatal, FatalReason, Intern};
+use php_heap::{Fatal, FatalReason, Intern, Sizing};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::{Arena, Parsed};
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, HookKind, Visibility};
@@ -994,14 +994,10 @@ impl<'u> Parts<'u> {
         for (named, bytes) in self.walk() {
             let made = match (own.get(&named), making, named) {
                 (Some(own), ..) => Some(*own),
-                (None, Making::All, Named::Function(_) | Named::Class(_))
-                    if named.printed_among(self.classes, &bytes) =>
-                {
-                    Some(strings.intern_reallocated(&bytes, false)?)
-                }
                 (None, Making::All | Making::Read, Named::Read(_))
                 | (None, Making::All, Named::File | Named::Function(_) | Named::Class(_)) => {
-                    Some(strings.intern(&bytes)?)
+                    let sizing = named.sizing_among(self.classes, &bytes);
+                    Some(strings.intern_marked(&bytes, false, sizing)?)
                 }
                 (None, ..) => None,
             };
@@ -1220,42 +1216,59 @@ pub enum FunctionAt {
 }
 
 impl FunctionAt {
-    /// Whether php names the function here, called `name`, with
-    /// `zend_strpprintf`, whose `smart_str_extract` php-8.5.12 trims to
-    /// `zend_string_finit`'s size: a closure's `{closure:…}`
+    /// The size php lays the name of the function here, called `name`,
+    /// at: `zend_string_finit`'s ([`Sizing::Finit`]) for a name php
+    /// prints with `zend_strpprintf`, whose `smart_str_extract`
+    /// php-8.5.12 trims to it, a closure's `{closure:…}`
     /// (`zend_begin_func_decl`, `Z/Zend/zend_compile.c:8379`), which no
     /// written name can begin as, and a property hook's `$name::get`
-    /// (`zend_compile_property_hooks`, `:8782`). Every other is the
-    /// scanner's string.
+    /// (`zend_compile_property_hooks`, `:8782`); the scanner's,
+    /// `zend_string_init`'s, for every other.
     #[must_use]
-    pub fn printed(self, name: &[u8]) -> bool {
+    pub fn sizing(self, name: &[u8]) -> Sizing {
         match self {
-            FunctionAt::Hook { .. } => true,
-            FunctionAt::Dynamic(_) => name.starts_with(b"{"),
-            FunctionAt::Top(_) | FunctionAt::Method { .. } => false,
+            FunctionAt::Hook { .. } => Sizing::Finit,
+            FunctionAt::Dynamic(_) if name.starts_with(b"{") => Sizing::Finit,
+            FunctionAt::Dynamic(_) | FunctionAt::Top(_) | FunctionAt::Method { .. } => {
+                Sizing::Alloc
+            }
         }
     }
 }
 
 impl Named {
-    /// Whether the name is one php prints with `zend_strpprintf`, called
-    /// `name` in `unit`: a closure's or a hook's
-    /// ([`FunctionAt::printed`]), and an anonymous class's
-    /// `class@anonymous…` (`zend_generate_anon_class_name`, `:9219`).
+    /// The size php lays the name at, called `name` in `unit`: a
+    /// function's as [`FunctionAt::sizing`] says, an anonymous class's
+    /// `class@anonymous…` at `zend_strpprintf`'s
+    /// (`zend_generate_anon_class_name`, `:9219`), and every other at
+    /// `zend_string_init`'s.
     #[must_use]
-    pub fn printed(self, unit: &Unit, name: &[u8]) -> bool {
-        self.printed_among(&unit.classes, name)
+    pub fn sizing(self, unit: &Unit, name: &[u8]) -> Sizing {
+        self.sizing_among(&unit.classes, name)
     }
 
-    /// [`Named::printed`] of a unit whose classes are `classes`.
-    fn printed_among(self, classes: &[ClassDecl], name: &[u8]) -> bool {
+    /// [`Named::sizing`] of a unit whose classes are `classes`.
+    fn sizing_among(self, classes: &[ClassDecl], name: &[u8]) -> Sizing {
         match self {
-            Named::Function(at) => at.printed(name),
-            Named::Class(at) => classes
-                .get(at)
-                .is_some_and(|class| class.flags.is_anonymous),
-            _ => false,
+            Named::Function(at) => at.sizing(name),
+            Named::Class(at) => class_sizing(
+                classes
+                    .get(at)
+                    .is_some_and(|class| class.flags.is_anonymous),
+            ),
+            _ => Sizing::Alloc,
         }
+    }
+}
+
+/// The size php lays a class's name at: an anonymous one's at
+/// `zend_strpprintf`'s, `zend_string_finit`'s, and a written one's at the
+/// scanner's.
+pub(crate) fn class_sizing(anonymous: bool) -> Sizing {
+    if anonymous {
+        Sizing::Finit
+    } else {
+        Sizing::Alloc
     }
 }
 

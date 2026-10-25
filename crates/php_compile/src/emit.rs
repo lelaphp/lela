@@ -102,8 +102,8 @@ use php_syntax::tree::{self, Block, Node, NodeId, Stmt, StmtList, TokenId};
 use php_syntax::{Arena, ArenaVec, Holder, Parsed, SyntaxKind, TokenValue};
 
 use php_heap::{
-    Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Str, Zval, ZvalType, constant_truth,
-    double_to_string, numeric_prefix,
+    Arr, Exponent, Fatal, Intern, Key, Made, Number, Scalar, Sizing, Str, Zval, ZvalType,
+    constant_truth, double_to_string, numeric_prefix,
 };
 use php_link::Indexed;
 use php_unit::decl::{
@@ -119,7 +119,7 @@ use php_unit::{
 
 use php_syntax::magic_const_name;
 
-use crate::{CompileError, MAXPATHLEN, Options, Refused, SourceKind, StackLimit};
+use crate::{CompileError, MAXPATHLEN, Options, Refused, SourceKind, StackLimit, class_sizing};
 use args::{Args, Callee, Plan};
 use attributes::InternalAttribute;
 use by_name::Symbols;
@@ -2270,23 +2270,12 @@ impl<'a> Emit<'a> {
     /// [`Self::string`] of a declaration's own name or lowered key, one
     /// string this compile makes for it, which php copies where the
     /// compile asks for it again and which the declaration owns once the
-    /// unit is whole ([`Self::own_names`]).
-    fn own_string(&mut self, bytes: &[u8]) -> Result<Zval, CompileError> {
-        match self.strings.intern_made(bytes, false) {
+    /// unit is whole ([`Self::own_names`]), laid at `sizing`'s size: a
+    /// name php prints with `zend_strpprintf` at `zend_string_finit`'s
+    /// ([`crate::Named::sizing`]), every other at `zend_string_init`'s.
+    fn own_string(&mut self, bytes: &[u8], sizing: Sizing) -> Result<Zval, CompileError> {
+        match self.strings.intern_made(bytes, false, sizing) {
             Ok(made) => Ok(made.value()),
-            Err(fatal) => Err(self.fatal_of(fatal)),
-        }
-    }
-
-    /// [`Self::own_string`] of a name php prints with `zend_strpprintf`
-    /// ([`crate::Named::printed`]) where `printed` says so, trimmed to
-    /// `zend_string_finit`'s size ([`Intern::intern_reallocated`]).
-    fn own_printed(&mut self, bytes: &[u8], printed: bool) -> Result<Zval, CompileError> {
-        if !printed {
-            return self.own_string(bytes);
-        }
-        match self.strings.intern_reallocated(bytes, false) {
-            Ok(s) => Ok(Zval::string(s)),
             Err(fatal) => Err(self.fatal_of(fatal)),
         }
     }
@@ -2309,7 +2298,7 @@ impl<'a> Emit<'a> {
         {
             return Ok(own);
         }
-        let key = self.own_string(lowered)?;
+        let key = self.own_string(lowered, Sizing::Alloc)?;
         if let Some(key) = key.as_str() {
             self.own_names.push((crate::Named::ClassKey(at), key));
         }
@@ -2353,7 +2342,7 @@ impl<'a> Emit<'a> {
         if let Some(made) = own.and_then(|own| self.strings.hold_made(Zval::string(own))) {
             return Ok(made);
         }
-        self.string_made(&name, false)
+        self.string_made(&name, false, Sizing::Alloc)
     }
 
     /// `CG(active_op_array)->function_name` as the claim of the one who
@@ -2385,19 +2374,19 @@ impl<'a> Emit<'a> {
     /// ```
     fn function_name_made(&mut self) -> Result<Made, CompileError> {
         let Some(function) = &self.active_function else {
-            return self.string_made(b"", false);
+            return self.string_made(b"", false, Sizing::Alloc);
         };
         if let Some(made) = (function.own).and_then(|own| self.strings.hold_made(Zval::string(own)))
         {
             return Ok(made);
         }
         let name = function.name.clone();
-        let own = self.own_printed(&name, function.at.printed(&name))?;
+        let own = self.own_string(&name, function.at.sizing(&name))?;
         let made = self.strings.hold_made(own);
         if let Some(function) = &mut self.active_function {
             function.own = own.as_str();
         }
-        made.map_or_else(|| self.string_made(&name, false), Ok)
+        made.map_or_else(|| self.string_made(&name, false, Sizing::Alloc), Ok)
     }
 
     /// `CG(compiled_filename)` as the claim of the one who asked: one
@@ -2446,24 +2435,23 @@ impl<'a> Emit<'a> {
             self.file_own = Some(own);
             self.own_names.push((crate::Named::File, own));
         }
-        made.map_or_else(|| self.string_made(filename, false), Ok)
+        made.map_or_else(|| self.string_made(filename, false, Sizing::Alloc), Ok)
     }
 
     /// [`Self::string`] as a claim the one who asked holds alone
     /// ([`Intern::intern_made`]), of bytes known to be valid UTF-8 where
     /// `utf8` says so ([`Intern::intern_marked`]): a number's text, a fold
-    /// of two marked strings.
-    fn string_made(&mut self, bytes: &[u8], utf8: bool) -> Result<Made, CompileError> {
+    /// of two marked strings; laid at `sizing`'s size, the parser's fold
+    /// at `zend_string_finit`'s ([`Self::concat_made`]) and every other
+    /// at `zend_string_init`'s.
+    fn string_made(
+        &mut self,
+        bytes: &[u8],
+        utf8: bool,
+        sizing: Sizing,
+    ) -> Result<Made, CompileError> {
         self.strings
-            .intern_made(bytes, utf8)
-            .map_err(|fatal| self.fatal_of(fatal))
-    }
-
-    /// [`Self::string_made`] of a string php reallocated to its length
-    /// where it stands ([`Intern::intern_made_reallocated`]).
-    fn string_made_reallocated(&mut self, bytes: &[u8], utf8: bool) -> Result<Made, CompileError> {
-        self.strings
-            .intern_made_reallocated(bytes, utf8)
+            .intern_made(bytes, utf8, sizing)
             .map_err(|fatal| self.fatal_of(fatal))
     }
 
@@ -4227,7 +4215,7 @@ impl<'a> Emit<'a> {
         // `zend_string_tolower(op_array->function_name)`, which is that
         // string where lowering changes nothing.
         let lowercase = self.arena.lowercase(name);
-        let lowered = self.own_string(lowercase)?;
+        let lowered = self.own_string(lowercase, Sizing::Alloc)?;
         let mut active = ActiveFunction::at(name, crate::FunctionAt::Dynamic(at as usize));
         if let Some(key) = lowered.as_str() {
             if lowercase == name {
@@ -6312,7 +6300,7 @@ impl<'a> Emit<'a> {
             object_beside: Box::default(),
             attribute_validator: None,
         };
-        let own = self.own_printed(&name, anonymous)?.as_str();
+        let own = self.own_string(&name, class_sizing(anonymous))?.as_str();
         (self.own_names).extend(own.map(|own| (crate::Named::Class(at), own)));
         self.active_class = Some(ActiveClass::entered(&name, class.kind, at, anonymous, own));
         self.active_parent.clone_from(&parent);
@@ -8999,7 +8987,9 @@ impl<'a> Emit<'a> {
             ConstExpr::Bool(b) => Operated::Kept(Zval::bool(*b)),
             ConstExpr::Long { value, .. } => Operated::Kept(Zval::long(*value)),
             ConstExpr::Double(d) => Operated::Kept(Zval::double(*d)),
-            ConstExpr::Str(bytes) => Operated::Made(self.string_made(bytes, false)?),
+            ConstExpr::Str(bytes) => {
+                Operated::Made(self.string_made(bytes, false, Sizing::Alloc)?)
+            }
             ConstExpr::UnitValue(held) => Operated::Kept(held.value()),
             _ => return Ok(None),
         }))
@@ -15577,7 +15567,11 @@ impl<'a> Emit<'a> {
         }
         if let (Some(a), Some(b)) = (left.as_str(), right.as_str()) {
             let folded = bitwise_bytes(op, a.bytes(), b.bytes());
-            return Ok(Some(Operated::Made(self.string_made(&folded, false)?)));
+            return Ok(Some(Operated::Made(self.string_made(
+                &folded,
+                false,
+                Sizing::Alloc,
+            )?)));
         }
         let (Some(a), Some(b)) = (number(left), number(right)) else {
             return Ok(None);
@@ -15771,16 +15765,15 @@ impl<'a> Emit<'a> {
                     // already holds as it is.
                     let utf8 = a.is_valid_utf8() && b.is_valid_utf8();
                     let joined = [a.bytes(), b.bytes()].concat();
-                    Some(
-                        if fold == ConcatFold::Parser
-                            && a.bytes().len() > 1
-                            && !b.bytes().is_empty()
-                        {
-                            self.string_made_reallocated(&joined, utf8)
-                        } else {
-                            self.string_made(&joined, utf8)
-                        },
-                    )
+                    let sizing = if fold == ConcatFold::Parser
+                        && a.bytes().len() > 1
+                        && !b.bytes().is_empty()
+                    {
+                        Sizing::Finit
+                    } else {
+                        Sizing::Alloc
+                    };
+                    Some(self.string_made(&joined, utf8, sizing))
                 }
                 _ => None,
             },
@@ -15872,12 +15865,12 @@ impl<'a> Emit<'a> {
     fn stringified_made(&mut self, value: Zval) -> Result<Option<Operated>, CompileError> {
         // `zend_long_to_str` and `zend_double_to_str` mark their text.
         if let Some(n) = value.as_long() {
-            let text = self.string_made(n.to_string().as_bytes(), true)?;
+            let text = self.string_made(n.to_string().as_bytes(), true, Sizing::Alloc)?;
             return Ok(Some(Operated::Made(text)));
         }
         if let Some(d) = value.as_double() {
             let text = double_to_string(d, self.precision, Exponent::Upper);
-            let text = self.string_made(text.as_bytes(), true)?;
+            let text = self.string_made(text.as_bytes(), true, Sizing::Alloc)?;
             if d.is_nan() {
                 self.raise(Level::Warning, "unexpected NAN value was coerced to string");
             }
@@ -16030,7 +16023,7 @@ impl<'a> Emit<'a> {
         if let Some(s) = value.as_str() {
             let negated: Vec<u8> = s.bytes().iter().map(|b| !b).collect();
             return self
-                .string_made(&negated, false)
+                .string_made(&negated, false, Sizing::Alloc)
                 .map(|made| Some(Operated::Made(made)));
         }
         if let Some(n) = value.as_long() {
@@ -16539,7 +16532,7 @@ impl<'a> Emit<'a> {
         ] = pieces
         {
             self.line = *text_line;
-            let made = self.string_made(bytes, false)?;
+            let made = self.string_made(bytes, false, Sizing::Alloc)?;
             return Ok(Where::Constant(self.claimed(node, Operated::Made(made))));
         }
         let mut last_const: Option<Zval> = None;
@@ -17009,7 +17002,7 @@ impl<'a> Emit<'a> {
             // The string php's scanner made, which `zend_ast_destroy`
             // frees once a fold over it stands.
             Some(TokenValue::Bytes(bytes)) => {
-                let made = self.string_made(&bytes, false)?;
+                let made = self.string_made(&bytes, false, Sizing::Alloc)?;
                 Ok(self.claimed(tree::Expr::LiteralExpr(id), Operated::Made(made)))
             }
             None => Err(self.unread("a literal").into()),
@@ -17027,7 +17020,7 @@ impl<'a> Emit<'a> {
                 bytes.extend(text);
             }
         }
-        let made = self.string_made(&bytes, false)?;
+        let made = self.string_made(&bytes, false, Sizing::Alloc)?;
         Ok(self.claimed(tree::Expr::NowdocExpr(id), Operated::Made(made)))
     }
 
@@ -17075,7 +17068,7 @@ impl<'a> Emit<'a> {
         }
         // The one string the parser made of it, which `zend_ast_destroy`
         // frees once a fold over it stands.
-        let made = self.string_made(&bytes, false)?;
+        let made = self.string_made(&bytes, false, Sizing::Alloc)?;
         Ok(self.claimed(expr, Operated::Made(made)))
     }
 

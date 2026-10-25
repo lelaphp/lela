@@ -256,9 +256,7 @@ Intern::hold_made
 Intern::intern
 Intern::intern_in
 Intern::intern_made
-Intern::intern_made_reallocated
 Intern::intern_marked
-Intern::intern_reallocated
 Intern::interning
 Key
 Laziness
@@ -351,6 +349,7 @@ ResourceType
 Scalar
 Scalar::is_true
 Scalar::of
+Sizing
 Slot
 SortEntry
 StackLayout

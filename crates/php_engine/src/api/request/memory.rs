@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// the request's is allocated from (`zend_test_gh18756`).
 pub use php_heap::StandaloneHeap;
 pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
-use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, SortEntry, Str, Zval, ZvalRef};
+use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, Sizing, SortEntry, Str, Zval, ZvalRef};
 pub use php_heap::{ecalloc, efree, emalloc, erealloc};
 
 use crate::api::abi::{Beneath, chain};
@@ -130,15 +130,17 @@ impl RequestStrings<'_> {
     fn asks_table(&self) -> bool {
         self.interning && self.hold == SharedHold::Taken
     }
+}
 
-    /// The string for `bytes`: the frozen one of no byte or one, the
-    /// engine's where the table is asked and holds it, else one laid by
-    /// `lay` on the request's heap, which the unit takes.
-    fn laid(
+impl Intern for RequestStrings<'_> {
+    /// The frozen string of no byte or one, the engine's where the table
+    /// is asked and holds it, else one laid on the request's heap at
+    /// `sizing`'s size, which the unit takes.
+    fn intern_marked(
         &mut self,
         bytes: &[u8],
         valid_utf8: bool,
-        lay: fn(&mut Heap, &[u8]) -> Result<Str, Fatal>,
+        sizing: Sizing,
     ) -> Result<Str, Fatal> {
         if bytes.len() <= 1
             && let Some(frozen) = self.shared.permanent(bytes)
@@ -150,24 +152,15 @@ impl RequestStrings<'_> {
         {
             return Ok(held);
         }
-        let s = lay(self.heap, bytes)?;
+        let s = match sizing {
+            Sizing::Alloc => self.heap.string(bytes),
+            Sizing::Finit => self.heap.string_finit(bytes),
+        }?;
         if valid_utf8 {
             s.mark_valid_utf8();
         }
         self.made.add(Zval::string(s));
         Ok(s)
-    }
-}
-
-impl Intern for RequestStrings<'_> {
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
-        self.laid(bytes, valid_utf8, Heap::string)
-    }
-
-    /// `zend_string_finit`'s size, which a string php reallocated where
-    /// it stands has in 8.5.12 ([`Heap::string_finit`]).
-    fn intern_reallocated(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
-        self.laid(bytes, valid_utf8, Heap::string_finit)
     }
 
     /// `zend_string_init` of `room` bytes cut to `bytes`, and
