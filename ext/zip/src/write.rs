@@ -589,13 +589,15 @@ enum Route {
 }
 
 /// What `add_data`'s `zip_source_stat` of its final source says once the
-/// data is written, and the attributes that source gives.
+/// data is written, the attributes that source gives, and what the data's
+/// end found.
 struct Settled {
     method: u16,
     crc: u32,
     size: u64,
     comp_size: u64,
     attributes: Attributes,
+    end: Result<(), Status>,
 }
 
 impl Settled {
@@ -727,7 +729,9 @@ impl Archive {
 
     /// What follows entry `i`'s data, `written` at `at`, made of its
     /// dirent as the callbacks during the data left it, as libzip's `de` is
-    /// `entry->changes`: an added entry's dirent settled on its data, its
+    /// `entry->changes`: the error the end of an added entry's data found,
+    /// as libzip finds it past the data's last progress point, then the
+    /// entry's dirent settled on its data, its
     /// local header written again where `add_data`'s `dirent_changed`
     /// holds, then the `write_data_descriptor` record where the dirent's
     /// bits ask for one. `ZIP_WANT_TORRENTZIP` is read past the data's
@@ -774,6 +778,13 @@ impl Archive {
         at: u64,
         out: &mut Out,
     ) -> Result<(), Status> {
+        if let Route::Add(Settled {
+            end: Err(status), ..
+        }) = &written.route
+        {
+            self.error = *status;
+            return Err(*status);
+        }
         let torrentzip = self.want_torrentzip();
         let Some(de) = self.entries.get_mut(i).and_then(|e| e.changes.as_mut()) else {
             self.error.set(Er::Internal);
@@ -969,6 +980,12 @@ impl Archive {
     /// ```
     fn add_data(&mut self, i: usize, de: &mut Dirent, torrentzip: bool) -> Result<Written, Status> {
         let (data, before) = self.source_data(i)?;
+        // What the end of an unchanged entry's data finds, past its last
+        // progress point.
+        let end = match &self.entries[i].orig {
+            Some(o) if self.entries[i].source.is_none() => data_end(o, &data),
+            _ => Ok(()),
+        };
         // The preliminary dirent, written before the data: what the stat
         // knows, a stored entry's compressed size its size, and what it
         // does not know as the dirent held it.
@@ -1047,6 +1064,7 @@ impl Archive {
                 size,
                 comp_size: data.len() as u64,
                 attributes,
+                end,
             }),
             data,
         })
@@ -1107,6 +1125,54 @@ struct Before {
 enum Time {
     Dos(DosTime),
     Mtime(i64),
+}
+
+/// What the end of an unchanged entry's data, `data` as it decoded,
+/// finds as `add_data` copies it: `ZIP_ER_DATA_LENGTH` for stored data
+/// whose size is not its compressed size, from the stat of its CRC layer
+/// after the copy, which no decompressor below has given the size it
+/// made; otherwise `ZIP_ER_CRC` from `zip_source_zip_file_create`'s CRC
+/// layer at the end of the data, where the entry has a CRC to hold it to.
+///
+/// ```php
+/// function crafted($f, $method, $comp, $size, $crc) {
+///     $local = "PK\3\4" . pack('vvvvvVVVvv', 20, 0, $method, 0, 0x21, $crc, strlen($comp), $size, 1, 0) . 'c' . $comp;
+///     $cd = "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, 0, $method, 0, 0x21, $crc, strlen($comp), $size, 1, 0, 0, 0, 0, 0x81a40000, 0) . 'c';
+///     file_put_contents($f, $local . $cd . "PK\5\6" . pack('vvvvVVv', 0, 0, 1, 1, strlen($cd), strlen($local), 0));
+/// }
+/// $cases = [
+///     'stored, its CRC wrong' => [0, 'hello', 5, 1234],
+///     'deflated, its CRC wrong' => [8, gzdeflate('hello'), 5, 1234],
+///     'stored, its size long' => [0, 'hello', 6, crc32('hello')],
+///     'stored, its size short and its CRC wrong' => [0, 'hello', 4, 1234],
+///     'deflated, its size long' => [8, gzdeflate('hello'), 6, crc32('hello')],
+///     'deflated, its size long and its CRC wrong' => [8, gzdeflate('hello'), 6, 1234],
+/// ];
+/// foreach ($cases as $name => [$m, $comp, $size, $crc]) {
+///     crafted('end-witness.zip', $m, $comp, $size, $crc); $z = new ZipArchive; $z->open('end-witness.zip');
+///     $z->setCompressionName('c', $m ? ZipArchive::CM_STORE : ZipArchive::CM_DEFLATE); $r = @$z->close();
+///     echo "$name: ", var_export($r, true), " $z->status ", $z->getStatusString(), "\n";
+///     if ($r) { $z->open('end-witness.zip'); echo '  ', $z->statIndex(0)['size'], ' ', $z->getFromIndex(0), "\n"; $z->close(); }
+/// }
+/// unlink('end-witness.zip');
+/// ```
+/// ```expect capture
+/// stored, its CRC wrong: false 7 CRC error
+/// deflated, its CRC wrong: false 7 CRC error
+/// stored, its size long: false 33 Unexpected length of data
+/// stored, its size short and its CRC wrong: false 33 Unexpected length of data
+/// deflated, its size long: true 0 No error
+///   5 hello
+/// deflated, its size long and its CRC wrong: false 7 CRC error
+/// ```
+fn data_end(orig: &Dirent, data: &[u8]) -> Result<(), Status> {
+    if actual(orig.comp_method) == 0 && orig.uncomp_size != orig.comp_size {
+        return Err(Status::new(Er::DataLength));
+    }
+    if orig.crc_valid && crc32fast::hash(data) != orig.crc {
+        return Err(Status::new(Er::Crc));
+    }
+    Ok(())
 }
 
 /// `_zip_dirent_merge`: what the changes did not change, from the
