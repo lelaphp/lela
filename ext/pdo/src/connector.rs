@@ -438,16 +438,19 @@ pub trait Connection: Any + Send {
     /// `doer`: `sql` served for its effect, the rows it changed.
     fn exec(&mut self, req: &mut Request, sql: &[u8]) -> Result<i64, Failure>;
 
-    /// `quoter`: `text` quoted as a string of the connector's SQL.
-    /// `raises` is the connection's error handling, which a quoter that raises
-    /// by itself reads, as `sqlite_handle_quoter` does.
+    /// `quoter`: `text` quoted as a string of the connector's SQL, made
+    /// on the request's heap as the connector's quoter makes it, so
+    /// `PDO::quote()` hands it out and the emulated parser holds it as php
+    /// holds `plc->quoted`. `raises` is the connection's error handling,
+    /// which a quoter that raises by itself reads, as
+    /// `sqlite_handle_quoter` does.
     fn quote(
         &mut self,
         req: &mut Request,
         text: &[u8],
         ty: BindType,
         raises: OnError,
-    ) -> Result<Vec<u8>, Failure> {
+    ) -> Result<Owner<PhpString>, Failure> {
         let _ = (req, text, ty, raises);
         Err(Failure::unsupported())
     }

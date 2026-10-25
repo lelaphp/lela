@@ -466,15 +466,38 @@ impl Connection for Handle {
         Ok(self.db_or(req)?.changes(req))
     }
 
-    /// `sqlite_handle_quoter`: `'...'` with each `'` doubled, `%q`; a
-    /// NUL byte refused under the error handling.
+    /// `sqlite_handle_quoter`: `'...'` with each `'` doubled, `%q`, a NUL
+    /// byte refused under the error handling. php prints it into
+    /// `safe_emalloc(2, len, 3)` with `sqlite3_snprintf`, makes the string
+    /// with `zend_string_init` and frees the buffer
+    /// (`ext/pdo_sqlite/sqlite_driver.c:246-251` at php-8.5.12), so the
+    /// buffer and the string are held together for a moment. After the
+    /// loop's first pass:
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:');
+    /// foreach (['', '', 'a', "it's", str_repeat('x', 100)] as $v) {
+    ///     $v .= '';
+    ///     memory_reset_peak_usage(); $m = memory_get_usage();
+    ///     $x = $db->quote($v);
+    ///     echo strlen($x), ' ', memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n";
+    ///     unset($x);
+    /// }
+    /// ```
+    /// ```expect
+    /// 2 64 104
+    /// 2 32 64
+    /// 3 32 64
+    /// 7 32 64
+    /// 102 128 352
+    /// ```
     fn quote(
         &mut self,
         req: &mut Request,
         text: &[u8],
         ty: BindType,
         raises: OnError,
-    ) -> Result<Vec<u8>, Failure> {
+    ) -> Result<Owner<PhpString>, Failure> {
         let _ = ty;
         if text.len() > (i32::MAX as usize - 3) / 2 {
             return Err(Failure::silent());
@@ -494,16 +517,25 @@ impl Connection for Handle {
                 OnError::Silent => Err(Failure::silent()),
             };
         }
-        let mut quoted = Vec::with_capacity(text.len() + 2);
-        quoted.push(b'\'');
+        // The length check above keeps `2 * len + 3` in range.
+        let mut buffer = Emalloc::new(req, 2 * text.len() + 3)?;
+        let printed = buffer.bytes_mut();
+        let mut len = 0;
+        let mut put = |b: u8| {
+            printed[len] = b;
+            len += 1;
+        };
+        put(b'\'');
         for &b in text {
-            quoted.push(b);
+            put(b);
             if b == b'\'' {
-                quoted.push(b);
+                put(b);
             }
         }
-        quoted.push(b'\'');
-        Ok(quoted)
+        put(b'\'');
+        let quoted = PhpString::new(req, &buffer.bytes()[..len]);
+        buffer.free(req);
+        Ok(quoted?)
     }
 
     /// `sqlite_handle_begin`.
