@@ -13,8 +13,8 @@ use crate::archive::{
     AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, AFL_IS_TORRENTZIP, Archive, CM_BZIP2, CM_DEFAULT,
     CM_DEFLATE, CM_LZMA, D_ATTRIBUTES, D_COMMENT, D_COMP_METHOD, D_ENCRYPTION_METHOD,
     D_EXTRA_FIELD, D_FILENAME, D_LAST_MOD, D_PASSWORD, Dirent, EM_AES_128, EM_AES_192, EM_AES_256,
-    EM_NONE, EM_TRAD_PKWARE, GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, Source,
-    TRUNCATE, actual, is_default,
+    EM_NONE, EM_TRAD_PKWARE, GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, TRUNCATE,
+    actual, is_default,
 };
 use crate::codec;
 use crate::dostime::TORRENTZIP;
@@ -658,27 +658,30 @@ impl Archive {
 
     /// `add_data`: the entry's data from its source or its old self,
     /// decrypted, decompressed, compressed and encrypted as its dirent
-    /// asks, the dirent written before it. A method that differs from the
-    /// stored one is a recompression, so stored data is compressed where
-    /// there is nothing to decompress (`needs_recompress`):
+    /// asks, the dirent written before it. An unchanged entry is read as
+    /// libzip's zip source reads it, decrypted and decompressed, so any
+    /// method but store compresses it again, at the level its dirent asks:
     ///
     /// ```php
+    /// $d = ''; for ($i = 0; $i < 4000; $i++) $d .= md5((string) ($i % 97)) . ' ';
     /// $z = new ZipArchive; $z->open('rc-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
-    /// $z->addFromString('a', str_repeat('a', 999)); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->close();
-    /// $z->open('rc-witness.zip'); var_dump($z->setCompressionName('a', ZipArchive::CM_DEFLATE)); $z->close();
-    /// $z->open('rc-witness.zip'); $s = $z->statName('a'); var_dump($s['comp_method'], $s['comp_size'], strlen($z->getFromName('a')));
+    /// $z->addFromString('s', str_repeat('a', 999)); $z->setCompressionName('s', ZipArchive::CM_STORE);
+    /// $z->addFromString('l', $d); $z->setCompressionName('l', ZipArchive::CM_DEFLATE, 9);
+    /// $z->addFromString('e', $d); $z->setCompressionName('e', ZipArchive::CM_DEFLATE, 1); $z->close();
+    /// $z->open('rc-witness.zip'); $z->setCompressionName('s', ZipArchive::CM_DEFLATE);
+    /// $z->setCompressionName('l', ZipArchive::CM_DEFLATE, 1); $z->setEncryptionName('e', ZipArchive::EM_TRAD_PKWARE, 'pw'); $z->close();
+    /// $z->open('rc-witness.zip'); $z->setPassword('pw');
+    /// foreach (['s', 'l', 'e'] as $n) { $s = $z->statName($n); echo "$n {$s['comp_method']} {$s['comp_size']} ", strlen($z->getFromName($n)), "\n"; }
     /// $z->close(); unlink('rc-witness.zip');
     /// ```
     /// ```expect
-    /// bool(true)
-    /// int(8)
-    /// int(11)
-    /// int(999)
+    /// s 8 11 999
+    /// l 8 3071 132000
+    /// e 8 2837 132000
     /// ```
     #[expect(
-        clippy::too_many_lines,
         clippy::cast_precision_loss,
-        reason = "add_data's one body, and its progress as libzip's doubles"
+        reason = "add_data's progress as libzip's doubles"
     )]
     fn add_data(
         &mut self,
@@ -688,83 +691,45 @@ impl Archive {
         progress: &mut Progress<'_>,
         torrentzip: bool,
     ) -> Result<(), Status> {
-        let has_source = self.entries[i].source.is_some();
-        let (st_method, st_enc, st_crc, st_mtime, st_dostime, st_attr) = if has_source {
-            let Some(s) = &self.entries[i].source else {
-                return Err(Status::of(Er::Internal, 0));
-            };
-            let st = s.stat();
-            (0u16, EM_NONE, None, st.mtime, None, s.attributes())
+        // The data as `add_data`'s source gives it: a new source's bytes,
+        // or the unchanged entry through `zip_source_zip_file_create(za, i,
+        // ZIP_FL_UNCHANGED, ...)`, decrypted with the default password,
+        // decompressed and its CRC checked. Either stats as stored and
+        // unencrypted.
+        let (data, st_mtime, st_dostime, st_attr) = if let Some(s) = &mut self.entries[i].source {
+            let (mtime, attr) = (s.stat().mtime, s.attributes());
+            let data = s.read_all().inspect_err(|s| self.error = *s)?;
+            (data, mtime, None, attr)
         } else {
-            let Some(o) = &self.entries[i].orig else {
+            let Some(last_mod) = self.entries[i].orig.as_ref().map(|o| o.last_mod) else {
                 return Err(Status::of(Er::Internal, 0));
             };
-            let crc = o.crc_valid.then_some(o.crc);
-            (
-                actual(o.comp_method.max(0)),
-                o.encryption_method,
-                crc,
-                0,
-                Some(o.last_mod),
-                None,
-            )
-        };
-        de.bitflags &= !GPBF_DATA_DESCRIPTOR;
-        if de.changed & D_COMP_METHOD == 0 && st_method != 0 {
-            de.comp_method = i32::from(st_method);
-        }
-        if de.changed & D_LAST_MOD == 0 {
-            de.last_mod = st_dostime.unwrap_or_else(|| self.zone.u2d(st_mtime));
-        }
-        let recompress = torrentzip || st_method != actual(de.comp_method);
-        let decompress = recompress && st_method != 0;
-        let reencrypt =
-            recompress || de.changed & D_PASSWORD != 0 || de.encryption_method != st_enc;
-        let decrypt = reencrypt && st_enc != EM_NONE;
-        let encrypt = reencrypt && de.encryption_method != EM_NONE;
-        if !decrypt && st_enc == EM_TRAD_PKWARE && de.changed & D_LAST_MOD != 0 {
-            de.changed &= !D_LAST_MOD;
-        }
-        // The data and the method it is in, with its CRC where known.
-        let (mut data, mut method, crc, size): (Vec<u8>, u16, u32, u64) = if has_source {
-            let read = self.entries[i].source.as_mut().map(Source::read_all);
-            let data = match read {
-                Some(Ok(d)) => d,
-                Some(Err(s)) => {
-                    self.error = s;
-                    return Err(s);
-                }
-                None => return Err(Status::of(Er::Internal, 0)),
-            };
-            let crc = crc32fast::hash(&data);
-            let size = data.len() as u64;
-            (data, 0u16, crc, size)
-        } else if decrypt || decompress {
             let password = self.default_password.clone();
             let (data, fault) = self
-                .decoded(i, if decrypt { password.as_deref() } else { None })
+                .decoded(i, password.as_deref())
                 .inspect_err(|s| self.error = *s)?;
             if let Some(fault) = fault {
                 self.error = fault;
                 return Err(fault);
             }
-            let crc = crc32fast::hash(&data);
-            let size = data.len() as u64;
-            if !decompress && st_method != 0 {
-                // Decrypted only: compressed again in the method it was in.
-                de.comp_method = i32::from(st_method);
-            }
-            (data, 0, crc, size)
-        } else {
-            let raw = self.raw_data(i).inspect_err(|s| self.error = *s)?;
-            let size = self.entries[i].orig.as_ref().map_or(0, |o| o.uncomp_size);
-            (raw, st_method, st_crc.unwrap_or(0), size)
+            (data, 0, Some(last_mod), None)
         };
+        de.bitflags &= !GPBF_DATA_DESCRIPTOR;
+        if de.changed & D_LAST_MOD == 0 {
+            de.last_mod = st_dostime.unwrap_or_else(|| self.zone.u2d(st_mtime));
+        }
+        // `needs_compress`: what is stored needs no decompression, and a
+        // method other than store is a recompression (`needs_recompress`).
+        let compress = actual(de.comp_method) != 0;
+        let encrypt = de.encryption_method != EM_NONE;
+        let crc = crc32fast::hash(&data);
+        let size = data.len() as u64;
+        let (mut data, mut method) = (data, 0u16);
         let mut attrs = Attributes {
             host: st_attr,
             ..Attributes::default()
         };
-        if method == 0 && (recompress || has_source || decrypt) && actual(de.comp_method) != 0 {
+        if compress {
             let c = codec::compress(
                 &data,
                 actual(de.comp_method),
