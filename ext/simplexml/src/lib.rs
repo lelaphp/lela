@@ -1040,9 +1040,31 @@ impl SimpleXMLElement {
     /// string(1) "x"
     /// string(0) ""
     /// ```
+    ///
+    /// The string is asked for fallibly since 8.5.12, and the limit's fatal
+    /// is raised as the call returns where it is refused:
+    ///
+    /// ```php
+    /// $x = simplexml_load_string('<r>' . str_repeat('x', 3 << 20) . '</r>', null, LIBXML_PARSEHUGE);
+    /// ini_set('memory_limit', '2M');
+    /// $s = $x->__toString(); var_dump(strlen($s));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 4
+    /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let text = sxe::cast_text(req, this.object())?.unwrap_or_default();
-        PhpString::new(req, &text)
+        // `cast_object`'s `ZVAL_FSTRINGL` since 8.5.12: where the memory
+        // limit refused it the cast fails and the answer is the empty
+        // string.
+        match req
+            .memory_mut()
+            .fallible(|req| PhpString::new(req, &text))?
+        {
+            Some(text) => Ok(text),
+            None => PhpString::new(req, b""),
+        }
     }
 
     /// `__debugInfo(): ?array`: what `var_dump` shows, the attributes under
@@ -1157,10 +1179,32 @@ impl SimpleXMLElement {
     /// Iterator not initialized or already consumed
     /// string(1) "a"
     /// ```
+    ///
+    /// The string is asked for fallibly since 8.5.12, and the limit's fatal
+    /// is raised as the call returns where it is refused:
+    ///
+    /// ```php
+    /// $x = new SimpleXMLIterator('<r><' . str_repeat('a', 3 << 20) . '/></r>', LIBXML_PARSEHUGE);
+    /// $x->rewind();
+    /// ini_set('memory_limit', '2M');
+    /// $k = $x->key(); var_dump(strlen($k));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 5
+    /// ```
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         match sxe::current_name(req, this.object()) {
-            Some(name) => PhpString::new(req, &name),
+            // `RETURN_FSTRINGL` since 8.5.12: `RETURN_OOM()` where the
+            // memory limit refused it.
+            Some(name) => match req
+                .memory_mut()
+                .fallible(|req| PhpString::new(req, &name))?
+            {
+                Some(name) => Ok(name),
+                None => PhpString::new(req, b""), // RETURN_OOM()
+            },
             None => Err(throw_error(
                 req,
                 "Error",
