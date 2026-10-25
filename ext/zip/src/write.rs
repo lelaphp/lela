@@ -36,30 +36,33 @@ pub(crate) trait Program {
     /// `open_count > 1` at `zip_source_commit_write`: whether a
     /// `zip_file_t` besides the close's own reads the archive's file.
     fn in_use(&mut self) -> bool;
-}
 
-/// The archive under its close, or `ZIP_ER_INTERNAL` where it has none.
-fn live(program: &mut dyn Program) -> Result<&mut Archive, Status> {
-    program.archive().ok_or(Status::new(Er::Internal))
-}
+    /// The archive under its close, or `ZIP_ER_INTERNAL` where it has
+    /// none.
+    fn live(&mut self) -> Result<&mut Archive, Status> {
+        self.archive().ok_or(Status::new(Er::Internal))
+    }
 
-/// What the archive has registered, read at each point as libzip reads
-/// `za->progress`: the progress callback's precision, and whether a
-/// cancel callback is there.
-fn registered(program: &mut dyn Program) -> (Option<f64>, bool) {
-    program
-        .archive()
-        .map_or((None, false), |za| (za.progress, za.cancel))
-}
+    /// The registered progress callback's precision, read at each point
+    /// as libzip reads `za->progress`; `None` where none is registered.
+    fn precision(&mut self) -> Option<f64> {
+        self.archive().and_then(|za| za.progress)
+    }
 
-/// `ZIP_ER_CANCELLED` set on the archive, and what it holds then.
-fn cancelled(program: &mut dyn Program) -> Status {
-    match program.archive() {
-        Some(za) => {
-            za.error.set(Er::Cancelled);
-            za.error
+    /// Whether a cancel callback is registered, read at each point.
+    fn may_cancel(&mut self) -> bool {
+        self.archive().is_some_and(|za| za.cancel)
+    }
+
+    /// `ZIP_ER_CANCELLED` set on the archive, and what it holds then.
+    fn cancelled(&mut self) -> Status {
+        match self.archive() {
+            Some(za) => {
+                za.error.set(Er::Cancelled);
+                za.error
+            }
+            None => Status::new(Er::Cancelled),
         }
-        None => Status::new(Er::Cancelled),
     }
 }
 
@@ -74,11 +77,11 @@ struct Progress {
 impl Progress {
     /// `_zip_progress_start`: `true` where the program cancelled.
     fn start(&mut self, program: &mut dyn Program) -> bool {
-        if registered(program).0.is_some() {
+        if program.precision().is_some() {
             self.last = 0.0;
             program.progress(0.0);
         }
-        registered(program).1 && program.cancel()
+        program.may_cancel() && program.cancel()
     }
 
     /// `_zip_progress_subrange`.
@@ -90,14 +93,14 @@ impl Progress {
 
     /// `_zip_progress_update`.
     fn update(&mut self, program: &mut dyn Program, sub: f64) -> bool {
-        if let Some(precision) = registered(program).0 {
+        if let Some(precision) = program.precision() {
             let current = sub.clamp(0.0, 1.0) * (self.end - self.start) + self.start;
             if current - self.last > precision || (self.last < 1.0 && current >= 1.0) {
                 program.progress(current);
                 self.last = current;
             }
         }
-        registered(program).1 && program.cancel()
+        program.may_cancel() && program.cancel()
     }
 }
 
@@ -118,6 +121,19 @@ impl Out {
             crc.update(bytes);
         }
         self.pos += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// `bytes` written again at `at`, before where the file stands, then
+    /// the file back where it stood, as `add_data`'s
+    /// `zip_source_seek_write` there and back writes a header again.
+    fn rewrite(&mut self, at: u64, bytes: &[u8]) -> Result<(), Status> {
+        let seek = |e: std::io::Error| Status::os(Er::Seek, &e);
+        self.file.seek(SeekFrom::Start(at)).map_err(seek)?;
+        self.file
+            .write_all(bytes)
+            .map_err(|e| Status::os(Er::Write, &e))?;
+        self.file.seek(SeekFrom::Start(self.pos)).map_err(seek)?;
         Ok(())
     }
 }
@@ -462,9 +478,7 @@ pub(crate) fn close(program: &mut dyn Program, umask: u32) -> Done {
         return Ok(());
     };
     std::fs::remove_file(&tmp).ok();
-    if status != Status::default()
-        && let Some(za) = program.archive()
-    {
+    if let Some(za) = program.archive() {
         za.error = status;
     }
     Err(Failed)
@@ -479,7 +493,7 @@ fn commit(program: &mut dyn Program, mut out: Out, tmp: &Path) -> Result<(), Sta
     }
     out.file.flush().map_err(|e| Status::os(Er::Write, &e))?;
     drop(out);
-    let path = live(program)?.path.clone();
+    let path = program.live()?.path.clone();
     std::fs::rename(tmp, &path).map_err(|e| Status::os(Er::Rename, &e))
 }
 
@@ -498,7 +512,7 @@ fn write_all(
     torrentzip: bool,
 ) -> Result<(), Status> {
     if unchanged > 0
-        && let Some(d) = &mut live(program)?.data
+        && let Some(d) = &mut program.live()?.data
     {
         let sys = |e: std::io::Error| Status::os(Er::Read, &e);
         d.file.seek(SeekFrom::Start(0)).map_err(sys)?;
@@ -513,14 +527,15 @@ fn write_all(
         out.write(&prefix)?;
     }
     if progress.start(program) {
-        return Err(cancelled(program));
+        return Err(program.cancelled());
     }
     let survivors = list.len() as f64;
     for (j, (i, _)) in list.iter().enumerate() {
         if progress.subrange(program, j as f64 / survivors, (j + 1) as f64 / survivors) {
-            return Err(cancelled(program));
+            return Err(program.cancelled());
         }
-        let Some(entry) = live(program)?.entry(*i, out.pos, unchanged, torrentzip)? else {
+        let at = out.pos;
+        let Some(entry) = program.live()?.entry(*i, at, unchanged, torrentzip)? else {
             continue;
         };
         out.write(&entry.header)?;
@@ -537,23 +552,20 @@ fn write_all(
                 }
             };
             if at.is_some_and(|at| progress.update(program, at)) {
-                return Err(cancelled(program));
+                return Err(program.cancelled());
             }
         }
-        if let Some(descriptor) = &entry.descriptor {
-            out.write(descriptor)?;
-        }
+        program.live()?.finish(*i, &entry, at, out, torrentzip)?;
     }
-    live(program)?.write_cdir(out, list, torrentzip)
+    program.live()?.write_cdir(out, list, torrentzip)
 }
 
-/// One surviving entry as `zip_close`'s loop writes it: its local header,
-/// its data and the `write_data_descriptor` record after them.
+/// One surviving entry as `zip_close`'s loop writes it before its data's
+/// progress points: its local header and its data.
 struct Written {
     header: Vec<u8>,
     data: Vec<u8>,
     pace: Pace,
-    descriptor: Option<Vec<u8>>,
 }
 
 /// When the progress callback hears of an entry's data written.
@@ -634,8 +646,48 @@ impl Archive {
             header,
             data,
             pace: Pace::Copy,
-            descriptor: (de.bitflags & GPBF_DATA_DESCRIPTOR != 0).then(|| data_descriptor(de)),
         })
+    }
+
+    /// What follows entry `i`'s data, `written` at `at`, made of its
+    /// dirent as the callbacks during the data left it, as libzip's `de` is
+    /// `entry->changes`: an added entry's local header written again where
+    /// it changed, as `add_data` writes it again, then the
+    /// `write_data_descriptor` record where the dirent's bits ask for one.
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('finish-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// $z->addFromString('a', str_repeat('a', 40000)); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->setMtimeName('a', 315532800);
+    /// $z->registerProgressCallback(0.1, function ($r) use ($z) { static $d; if ($r > 0.1 && !$d) { $d = 1; $z->setMtimeName('a', 946684800); } });
+    /// var_dump($z->close()); $b = file_get_contents('finish-witness.zip');
+    /// echo bin2hex(substr($b, 10, 4)), ' ', bin2hex(substr($b, strpos($b, "PK\1\2") + 12, 4)), "\n"; unlink('finish-witness.zip');
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// 00002128 00002128
+    /// ```
+    fn finish(
+        &mut self,
+        i: usize,
+        written: &Written,
+        at: u64,
+        out: &mut Out,
+        torrentzip: bool,
+    ) -> Result<(), Status> {
+        let Some(de) = self.entries.get_mut(i).and_then(|e| e.changes.as_mut()) else {
+            self.error.set(Er::Internal);
+            return Err(self.error);
+        };
+        if let Pace::Add { .. } = written.pace {
+            let header = dirent_bytes(de, Kind::Local, torrentzip)?;
+            if header != written.header {
+                out.rewrite(at, &header)?;
+            }
+        }
+        if de.bitflags & GPBF_DATA_DESCRIPTOR != 0 {
+            out.write(&data_descriptor(de))?;
+        }
+        Ok(())
     }
 
     /// `write_cdir`: the central directory, then the Zip64 end records
@@ -901,7 +953,6 @@ impl Archive {
             pace: Pace::Add {
                 size: size.max(1) as f64,
             },
-            descriptor: (de.bitflags & GPBF_DATA_DESCRIPTOR != 0).then(|| data_descriptor(de)),
         })
     }
 }

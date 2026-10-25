@@ -131,7 +131,7 @@ impl Hold {
     /// released.
     pub(crate) fn let_go(self, req: &mut Request) {
         if let Some(h) = get(req, self.id) {
-            h.readers -= u32::from(self.reads_file && h.readers > 0);
+            h.readers = h.readers.saturating_sub(u32::from(self.reads_file));
         }
         release(req, self.id);
     }
@@ -262,11 +262,10 @@ pub(crate) fn close(req: &mut Request, id: ArchiveId, on_failure: OnFailure) -> 
     };
     let done = write::close(&mut serving, umask);
     let thrown = serving.thrown;
-    let Some(h) = get(req, id) else {
-        let error = Some(Status::new(Er::Internal));
-        return Some(Closed { error, thrown });
-    };
-    let Za::Closing(mut za) = std::mem::replace(&mut h.za, Za::Closed) else {
+    // The archive the close left in its holder, taken out to be closed
+    // or kept.
+    let taken = get(req, id).map(|h| (std::mem::replace(&mut h.za, Za::Closed), h));
+    let Some((Za::Closing(mut za), h)) = taken else {
         let error = Some(Status::new(Er::Internal));
         return Some(Closed { error, thrown });
     };
