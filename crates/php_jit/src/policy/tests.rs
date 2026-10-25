@@ -234,7 +234,10 @@ fn the_status_follows_the_requests_setting_where_the_tier_is_set_up() {
 /// `JIT_G(on)`: a unit's words count where the request publishing it has
 /// the setting on, whatever the start's was, and a lane counts every
 /// unit; a tier that runs `Off` counts none. With no request, the
-/// start's setting says.
+/// start's setting says. Counting words start cold where the tier was on
+/// at the start, which fills php's pool of counters at each request
+/// start, and primed where it was set up and off, whose pool nothing
+/// fills, so each roots at its first arrival (#3363).
 #[test]
 fn a_units_words_are_laid_as_its_request_has_the_tier() {
     let laid = |entries: &[(&str, &str)], setting: Option<&[u8]>| {
@@ -245,8 +248,8 @@ fn a_units_words_are_laid_as_its_request_has_the_tier() {
     let tracing = [("opcache.jit", "tracing")];
     assert_eq!(laid(&off, Some(b"off")), Laid::Sealed);
     assert_eq!(laid(&off, None), Laid::Sealed);
-    assert_eq!(laid(&off, Some(b"tracing")), Laid::COLD);
-    assert_eq!(laid(&off, Some(b"1205")), Laid::COLD);
+    assert_eq!(laid(&off, Some(b"tracing")), super::PRIMED);
+    assert_eq!(laid(&off, Some(b"1205")), super::PRIMED);
     assert_eq!(laid(&tracing, Some(b"tracing")), Laid::COLD);
     assert_eq!(laid(&tracing, Some(b"off")), Laid::Sealed);
     assert_eq!(laid(&tracing, None), Laid::COLD);
@@ -258,6 +261,32 @@ fn a_units_words_are_laid_as_its_request_has_the_tier() {
     );
     let zero = [("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")];
     assert_eq!(laid(&zero, Some(b"tracing")), Laid::Sealed);
+}
+
+/// A word laid primed reads cold and reaches every threshold php's
+/// directives allow at its first visit's bump, the heat saturating there.
+#[test]
+fn a_primed_word_reaches_any_threshold_at_its_first_visit() {
+    let Laid::Counting([heat, state]) = super::PRIMED else {
+        panic!("primed words count");
+    };
+    let word = Word::default();
+    word.halves()[0].store(heat, Ordering::Relaxed);
+    word.halves()[1].store(state, Ordering::Relaxed);
+    assert_eq!(read(&word), State::Cold);
+    let most = read_ini(&[
+        ("opcache.jit_hot_loop", "255"),
+        ("opcache.jit_hot_func", "255"),
+    ])
+    .0;
+    let reached = bump(&word);
+    for start in [Start::Loop, Start::Enter] {
+        assert!(
+            most.threshold(start).is_some_and(|hot| reached >= hot),
+            "{start:?}"
+        );
+    }
+    assert_eq!(bump(&word), u32::MAX, "the heat saturates");
 }
 
 /// `zend_jit_check_support` refuses a buffer the target's code cannot

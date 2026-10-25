@@ -30,6 +30,13 @@ use php_unit::decl::{IniDecl, Name};
 use crate::record::{Start, Stop};
 use crate::table::{TraceId, code};
 
+/// How a unit's words are laid where php hands it counters out of a
+/// pool no request start filled ([`Policy::laid`]): cold, with the heat
+/// at its top, so the first visit's bump reaches any threshold and
+/// claims, and an abort or a release starts the count again from zero
+/// as php's slot of the pool starts again from `ZEND_JIT_COUNTER_INIT`.
+const PRIMED: Laid = Laid::Counting([u32::MAX, COLD]);
+
 /// The state bits of a word's second half.
 const STATE: u32 = 0b11;
 const COLD: u32 = 0;
@@ -709,6 +716,59 @@ impl Policy {
     /// where a lane counts every unit. A unit whose words do not count
     /// is never traced, whatever a later request sets, as php's op array
     /// keeps the handlers it was persisted with.
+    ///
+    /// Counting words start cold where the tier was on at the start,
+    /// since php's `zend_jit_activate` fills its pool of counters at
+    /// every request start where `JIT_G(on)` holds then
+    /// (`Z/ext/opcache/jit/zend_jit.c:3906-3912`). Where the tier is set
+    /// up and off, nothing ever fills that pool, which starts at zero
+    /// (`zend_jit.c:78`), so each slot php hands a unit persisted after
+    /// `ini_set('opcache.jit', ...)` fires at its first arrival, as
+    /// `0 - cost <= 0` (`Z/ext/opcache/jit/zend_jit_vm_helpers.c:470`), and
+    /// starts again at `ZEND_JIT_COUNTER_INIT` as it fires: such a unit's
+    /// words are laid [`PRIMED`], so each roots at its first arrival and
+    /// counts php's thresholds after (#3363). The pool's counters are
+    /// php's per process and these words the engine's (ADR-0006), as
+    /// the `trace:hot-counter-pool` row of `docs/divergence.toml` says.
+    ///
+    /// Under `opcache.jit=off` with a buffer and php's thresholds, a file
+    /// included after `ini_set('opcache.jit', 'tracing')` roots its entry
+    /// and its loop of three turns at their first arrivals:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/jit-first-' . getmypid(); mkdir($dir);
+    /// file_put_contents("$dir/main.php", '<?php ini_set("opcache.jit", "tracing"); include __DIR__ . "/loop.php";');
+    /// file_put_contents("$dir/loop.php", '<?php function g() {} $i = 0; while ($i < 3) { $i++; g(); } echo "loop done\n";');
+    /// touch("$dir/main.php", time() - 60); touch("$dir/loop.php", time() - 60);
+    /// $cmd = [PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.jit_debug=12288', "$dir/main.php"];
+    /// $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]), str_replace($dir, 'DIR', stream_get_contents($pipes[2]));
+    /// proc_close($p); unlink("$dir/main.php"); unlink("$dir/loop.php"); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// loop done
+    /// ---- TRACE 1 start (enter) $main() DIR/loop.php:1
+    /// ---- TRACE 1 start (loop) $main() DIR/loop.php:1
+    /// ---- TRACE 1 stop (loop)
+    /// ```
+    ///
+    /// and the same program under a startup `opcache.jit=tracing`, whose
+    /// request starts with the tier on, keeps php's thresholds, so the
+    /// loop of three turns roots nothing:
+    ///
+    /// ```php
+    /// $dir = realpath(sys_get_temp_dir()) . '/jit-first-' . getmypid(); mkdir($dir);
+    /// file_put_contents("$dir/main.php", '<?php ini_set("opcache.jit", "tracing"); include __DIR__ . "/loop.php";');
+    /// file_put_contents("$dir/loop.php", '<?php function g() {} $i = 0; while ($i < 3) { $i++; g(); } echo "loop done\n";');
+    /// touch("$dir/main.php", time() - 60); touch("$dir/loop.php", time() - 60);
+    /// $cmd = [PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=tracing', '-d', 'opcache.jit_debug=12288', "$dir/main.php"];
+    /// $p = proc_open($cmd, [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]), str_replace($dir, 'DIR', stream_get_contents($pipes[2]));
+    /// proc_close($p); unlink("$dir/main.php"); unlink("$dir/loop.php"); rmdir($dir);
+    /// ```
+    /// ```expect process
+    /// loop done
+    /// ```
     pub(crate) fn laid(&self, jit_g: Option<Setting>) -> Laid {
         let on = match jit_g {
             _ if self.mode == Mode::Off => false,
@@ -716,7 +776,11 @@ impl Policy {
             None => self.started.on,
             Some(setting) => matches!(setting, Setting::On { .. }),
         };
-        if on { Laid::COLD } else { Laid::Sealed }
+        match (on, self.started.on) {
+            (false, _) => Laid::Sealed,
+            (true, true) => Laid::COLD,
+            (true, false) => PRIMED,
+        }
     }
 
     /// How the engine binds the tier, for a host whose `Backend` was

@@ -668,7 +668,8 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
 /// site; one that turns the tier on and includes a file publishes it
 /// with counting words, and its loop hands the included frame to the
 /// tier's at the activation's check, where the file's entry and loop
-/// are asked. On from the start, a unit's words
+/// are asked, its primed words claimed at their first arrivals however
+/// high the threshold (#3363). On from the start, a unit's words
 /// count from cold, each back edge bumping its heat, and a unit
 /// published after a request turns the tier off is sealed, asked at
 /// every back edge and never written.
@@ -696,6 +697,10 @@ fn a_unit_counts_as_its_request_had_the_tier_when_it_was_published() {
         "Nop's loop throughout"
     );
     let switched = serve("off", Some("tracing"));
+    // The included file's primed entry roots at its first arrival, and
+    // its recording roots `g`'s loop as it aborts there, so no visit the
+    // loop asks writes the loop's word (the `TRACE` lines are
+    // `Policy::laid`'s witness).
     assert!(
         switched.entries > 0 && switched.loops > 0,
         "handed to the tier's loop: {switched:?}"
