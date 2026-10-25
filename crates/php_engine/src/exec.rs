@@ -395,11 +395,17 @@ struct Named {
 }
 
 impl ExtraNamed {
-    /// `rows` with the table laid to hold them ([`ExtraNamed::lay`]).
+    /// `rows` with the table laid to hold them ([`ExtraNamed::lay`]);
+    /// none where there are none, as `zend_call_function` leaves
+    /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS` clear, so a callback a native
+    /// serves boxes nothing and lays no annex for them.
     pub(crate) fn laid(
         req: &mut Request,
         rows: Vec<(PhpString, Value)>,
     ) -> Result<ExtraNamed, Thrown> {
+        if rows.is_empty() {
+            return Ok(ExtraNamed::default());
+        }
         let mut named = ExtraNamed(Some(Box::new(Named { rows, table: None })));
         named.lay(req)?;
         Ok(named)

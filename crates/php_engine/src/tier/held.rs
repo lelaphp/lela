@@ -83,6 +83,42 @@ pub(super) struct Units {
     took: Cell<bool>,
 }
 
+/// How many [`Units`] a request keeps for its next servings
+/// ([`Spare`]): one per serving standing at once, up to this, which a
+/// native calling back into PHP from inside a callback nests.
+const SPARE: usize = 16;
+
+/// The [`Units`] a request's servings left, each laid down once and
+/// taken up again by the next serving, as php's `execute_ex` lays
+/// nothing down to serve a callback a native makes
+/// (`zend_call_function`): a serving takes one with its blocks already
+/// laid and the shares it held still held ([`Spare::take`],
+/// [`Units::leave`]) and hands it back after ([`Spare::put`]), so a
+/// callback's serving allocates nothing and takes no share of a unit
+/// held before.
+#[derive(Default)]
+pub(crate) struct Spare(Vec<Units>);
+
+impl Spare {
+    /// The [`Units`] a serving left, where one is kept; an empty one
+    /// otherwise, moved onto the serving's own stack, where the loop
+    /// reads it as it read a [`Units`] it laid itself.
+    #[inline]
+    pub(super) fn take(&mut self) -> Units {
+        self.0.pop().unwrap_or_default()
+    }
+
+    /// `units`, left by its serving ([`Units::leave`]), kept for the next
+    /// serving while fewer than [`SPARE`] are; past that its shares go
+    /// with it.
+    #[inline]
+    pub(super) fn put(&mut self, units: Units) {
+        if self.0.len() < SPARE {
+            self.0.push(units);
+        }
+    }
+}
+
 /// A frame the loop enters afresh, as [`Units::enter`] found it: its op
 /// array, out of a held unit or the scope's own; a share of a file's
 /// unit the request compiled for itself, which the frame is served in a
@@ -318,6 +354,18 @@ impl Units {
             }
         }
         self.took.set(false);
+    }
+
+    /// The serving over: where a unit the request compiled for itself is
+    /// among the units held, every share given back
+    /// ([`Units::give_back`]); otherwise each share kept for the next
+    /// serving, since a function's unit and a cached file's are held by
+    /// the request as long as it runs, so the next callback a native
+    /// serves finds its unit held and takes no share of it.
+    pub(super) fn leave(&mut self, req: &mut Request) {
+        if self.took.get() {
+            self.give_back(req);
+        }
     }
 
     /// The unit held at `at`.
