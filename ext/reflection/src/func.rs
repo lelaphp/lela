@@ -1448,7 +1448,7 @@ impl ReflectionFunction {
             }
             Union::B(name) => name.as_bytes().to_vec(),
         };
-        let Some(function) = lookup_function(req, &name) else {
+        let Some(function) = php_ext::call::fetch_function(req, &name)? else {
             return Err(throw(
                 req,
                 "ReflectionException",

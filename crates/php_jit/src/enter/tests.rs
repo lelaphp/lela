@@ -252,7 +252,7 @@ mod touched {
                 ..raw
             };
             for raw in [raw, call] {
-                if let Ok(Some(slot)) = tier::touch(req, &epoch, raw) {
+                if let Some(slot) = tier::touch(req, &epoch, raw) {
                     req.state::<Seen>().reads.push(read(slot.address()));
                 }
             }

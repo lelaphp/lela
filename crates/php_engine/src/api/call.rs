@@ -1866,6 +1866,32 @@ pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
     req.function_named(Bare::of(name))
 }
 
+/// `zend_fetch_function` (`Z/Zend/zend_execute.c:4468`): the function
+/// [`lookup_function`] finds, its runtime cache laid down where the
+/// request has not yet, as php lays it for a reflector made over the
+/// function by name (`ReflectionFunction::__construct`,
+/// `ReflectionParameter::__construct`), so a closure made from it
+/// shares the cache, as one made by `g(...)` does:
+///
+/// ```php
+/// function g($o) { return $o->a . $o->b . $o->c . $o->d; }
+/// $m = memory_get_usage(); $c = (new ReflectionFunction('g'))->getClosure();
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 384
+/// ```
+///
+/// The `Err` is the memory limit's fatal.
+pub fn fetch_function(req: &mut Request, name: &[u8]) -> Result<Option<Function>, Thrown> {
+    let Some(function) = req.function_named(Bare::of(name)) else {
+        return Ok(None);
+    };
+    let laid = req.init_func_run_time_cache(function);
+    req.fatal_of(laid)?;
+    Ok(Some(function))
+}
+
 /// The `static` variables of what `callable` names, name and value in the
 /// order the op array's table holds them, as
 /// `ReflectionFunctionAbstract::getStaticVariables` copies
@@ -3176,6 +3202,10 @@ fn function_callable(
     let Some(function) = found else {
         return Err(undefined_function(req, &name.0));
     };
+    // `zend_fetch_function` (`Z/Zend/zend_ast.c:1074`) lays the function's
+    // runtime cache down as it finds it.
+    let laid = req.init_func_run_time_cache(function);
+    req.fatal_of(laid)?;
     req.keep_callable(unit, at, function);
     let frame = crate::classes::CallFrame::Callee {
         function,

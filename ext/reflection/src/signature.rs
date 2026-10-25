@@ -557,7 +557,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
         }
         ValueRef::Str(_) => {
             let name = first.as_str_bytes().unwrap_or_default().to_vec();
-            let Some(found) = lookup_function(req, &name) else {
+            let Some(found) = php_ext::call::fetch_function(req, &name)? else {
                 return Err(throw(
                     req,
                     "ReflectionException",

@@ -1534,10 +1534,13 @@ impl CacheSize {
     }
 }
 
-/// `zend_init_func_run_time_cache` over a function's cache pointer and
-/// size ([`FrameShape`](crate::api::request::FrameShape)): laid down on
-/// the function's first activation in the request, found laid down by
-/// every one after, and its room carved from the
+/// `init_func_run_time_cache` over a function's cache pointer and size
+/// ([`FrameShape`](crate::api::request::FrameShape)): laid down where php
+/// lays it, the first `INIT_*` that pushes a call of the function in the
+/// request, or the first lookup of it by name for a callable or a
+/// reflector (`zend_fetch_function`, `Z/Zend/zend_execute.c:4468`), and
+/// found laid down by every one after, a test of one word as php's
+/// `RUN_TIME_CACHE()` is, with the lay out of line; its room carved from the
 /// compiler's arena as `init_func_run_time_cache_i` carves them
 /// (`Z/Zend/zend_execute.c:4455`). The arena's blocks are 64 KiB, so a
 /// cache moves nothing until the newest block has not the room for it,
@@ -1567,10 +1570,23 @@ pub(crate) fn lay_runtime_cache(
     at: CacheAt,
     size: CacheSize,
 ) -> Result<(), Fatal> {
-    if !map.laid(at) {
-        heap.carve(size.room as usize)?;
-        map.map(at).lay_down(size.slots);
+    if map.laid(at) {
+        return Ok(());
     }
+    lay_down_cache(map, heap, at, size)
+}
+
+/// [`lay_runtime_cache`]'s lay, once per op array in a request.
+#[cold]
+#[inline(never)]
+fn lay_down_cache(
+    map: &mut RuntimeCaches,
+    heap: &mut php_heap::Heap,
+    at: CacheAt,
+    size: CacheSize,
+) -> Result<(), Fatal> {
+    heap.carve(size.room as usize)?;
+    map.map(at).lay_down(size.slots);
     Ok(())
 }
 
