@@ -86,7 +86,7 @@ pub(crate) fn scan(sql: &[u8], at: usize) -> Option<(Token, usize)> {
 /// `sizeof(struct placeholder)` (`ext/pdo/pdo_sql_parser.re:47`): the
 /// position, the length, the quoted string, the number and the link, each
 /// a word.
-const PLACEHOLDER: usize = 40;
+const PLACEHOLDER_SIZE: usize = 40;
 
 /// One placeholder: where it stands, its text, its number, and the
 /// string it is replaced by, `plc->quoted`, which holds one owner until
@@ -200,7 +200,7 @@ fn parse_into(
                 len: end - at,
                 bindno,
                 quoted: None,
-                block: Emalloc::new(req, PLACEHOLDER)?,
+                block: Emalloc::new(req, PLACEHOLDER_SIZE)?,
             });
             bindno += 1;
         }
@@ -327,7 +327,10 @@ type Seen = (BoundKey, BindType, Value);
 /// quoter failed, its state copied onto the statement. The string a
 /// value converts to (`zval_try_get_string`) or a stream's contents
 /// (`php_stream_copy_to_mem`) is held while the quoter runs and released
-/// after it, as php releases `buf`.
+/// after it, as php releases `buf`. Where the quoter fails, php's `goto
+/// clean_up` skips that release (`ext/pdo/pdo_sql_parser.re:303-307`),
+/// which leaks `buf` until the request ends. No bundled connector that
+/// emulates prepares has a quoter that fails, and the engine releases it.
 fn quote(
     req: &mut Request,
     object: PhpObject,
