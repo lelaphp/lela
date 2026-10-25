@@ -349,6 +349,43 @@ fn depth_within(req: &mut Request, depth: i64, position: u32) -> Result<(), Thro
 /// 288 32
 /// 4312 640
 /// ```
+///
+/// Since 8.5.12 a string's room is asked for fallibly, and the encoder
+/// stops at its next value or escaped byte once the memory limit was
+/// met, so a buffer the limit refused, or one an escaped string, a value
+/// or a key has grown past it, ends the call with the limit's fatal as it
+/// returns rather than growing on to the hard limit:
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $a = [str_repeat('a', 1200000), str_repeat('b', 1200000), str_repeat('c', 1200000)];
+/// $j = json_encode($a);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $j = json_encode(str_repeat("\0", 2 << 20));
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16384 bytes) in %s on line 3
+/// ```
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $j = json_encode([str_repeat("\x01", 2 << 20) => 1]);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16384 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn json_encode(
     req: &mut Request,
