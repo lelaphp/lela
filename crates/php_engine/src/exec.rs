@@ -1599,11 +1599,23 @@ pub(crate) struct FastCall {
 /// and `ZEND_JMP_FL_HIT = 2` (`Z/Zend/zend_frameless_function.h:126`).
 /// Zero is what the fresh cache holds, so the first pass of any of them
 /// finds `Unprimed` and looks the table up once.
+///
+/// The enum has a primitive representation, a `u32` tag first and each
+/// variant's fields after it as a `#[repr(C)]` struct lays them (RFC
+/// 2195), so compiled code reads a slot the interpreter wrote: it tests
+/// the tag for [`PROPERTY`] before it reads the [`PropertyPlace`] at
+/// [`Cached::PLACE_AT`] (`jit-design.md` §4.3, `tier::PLACE`). The size
+/// and the niche are what they were without it, which the asserts below
+/// hold. The tag is a word, not a byte, because the handler then reads
+/// the tag and the class a property was placed on with one load and one
+/// compare, as it did before the representation was named: a `u8` tag
+/// cost the property handlers an instruction a pass.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[repr(u32)]
 pub(crate) enum Cached {
     /// Nothing written yet: the table is looked up on this pass.
     #[default]
-    Unprimed,
+    Unprimed = UNPRIMED,
     /// The constant a `FETCH_CONSTANT` found on its first pass, where it
     /// is not deprecated (`zend_quick_get_constant`'s `CACHE_PTR`).
     Constant(crate::api::request::ConstantAt),
@@ -1688,12 +1700,7 @@ pub(crate) enum Cached {
     /// slot is read back only from a frame of the same function, which
     /// fixes the scope, and for a frame of no function, an included or
     /// evaluated file's, only where its scope is `scope` too.
-    Property {
-        class: ClassId,
-        function: Option<Function>,
-        scope: Option<ClassId>,
-        offset: PropertyOffset,
-    },
+    Property(PropertyPlace) = PROPERTY,
     /// `ZEND_JMP_FL_MISS`: the table has the name in the namespace, so
     /// the jump is not taken and the call by name after it runs.
     Miss,
@@ -1701,6 +1708,85 @@ pub(crate) enum Cached {
     /// so the jump lands on the frameless call over the global one.
     Hit,
 }
+
+/// [`Cached::Unprimed`]'s tag, what a slot compiled code reads holds
+/// before the handler's first pass.
+pub(crate) const UNPRIMED: u32 = 0;
+
+/// [`Cached::Property`]'s tag, which compiled code tests before it reads
+/// the place.
+pub(crate) const PROPERTY: u32 = 7;
+
+/// [`Cached::Property`]'s fields, the place a property opline found on
+/// objects of one class: what compiled code reads, the class and the
+/// offset at fixed offsets, and what the interpreter reads beside them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(C)]
+pub(crate) struct PropertyPlace {
+    pub(crate) class: ClassId,
+    pub(crate) offset: PropertyOffset,
+    pub(crate) function: Option<Function>,
+    pub(crate) scope: Option<ClassId>,
+}
+
+/// [`Cached::Property`] as RFC 2195 lays a variant of a `#[repr(u32)]`
+/// enum out: its tag, then its fields as a `#[repr(C)]` struct.
+#[repr(C)]
+struct PropertyRepr {
+    tag: u32,
+    place: PropertyPlace,
+}
+
+/// [`PropertyOffset::Declared`] as RFC 2195 lays it out.
+#[repr(C)]
+struct DeclaredRepr {
+    tag: u8,
+    ty: SlotType,
+    slot: u32,
+}
+
+impl Cached {
+    /// Where a slot's tag stands.
+    pub(crate) const TAG_AT: usize = std::mem::offset_of!(PropertyRepr, tag);
+    /// Where [`Cached::Property`]'s place stands in a slot.
+    pub(crate) const PLACE_AT: usize = std::mem::offset_of!(PropertyRepr, place);
+}
+
+impl PropertyPlace {
+    /// Where the class stands in the place, its number as `Obj::CLASS_AT`
+    /// holds it.
+    pub(crate) const CLASS_AT: usize = std::mem::offset_of!(PropertyPlace, class);
+    /// Where the offset stands in the place.
+    pub(crate) const OFFSET_AT: usize = std::mem::offset_of!(PropertyPlace, offset);
+}
+
+impl PropertyOffset {
+    /// [`PropertyOffset::Declared`]'s tag.
+    pub(crate) const DECLARED: u8 = 0;
+    /// Where the offset's tag stands.
+    pub(crate) const TAG_AT: usize = std::mem::offset_of!(DeclaredRepr, tag);
+    /// Where a declared slot's type stands.
+    pub(crate) const TY_AT: usize = std::mem::offset_of!(DeclaredRepr, ty);
+    /// Where a declared slot's number stands.
+    pub(crate) const SLOT_AT: usize = std::mem::offset_of!(DeclaredRepr, slot);
+}
+
+// The slot keeps its size and its niche under its primitive
+// representation, and each mirror is the layout RFC 2195 gives the variant
+// it stands for: a number a class and a slot are held as, and a mirror no
+// wider or more aligned than what it mirrors.
+const _: () = {
+    assert!(size_of::<Cached>() == 40 && size_of::<Option<Cached>>() == 40);
+    assert!(size_of::<PropertyRepr>() <= size_of::<Cached>());
+    assert!(align_of::<PropertyRepr>() <= align_of::<Cached>());
+    assert!(Cached::TAG_AT == 0 && Cached::PLACE_AT == 4);
+    assert!(size_of::<ClassId>() == 4 && size_of::<SlotType>() == 2);
+    assert!(size_of::<DeclaredRepr>() == size_of::<PropertyOffset>());
+    assert!(size_of::<PropertyOffset>() == 8 && align_of::<PropertyOffset>() == 4);
+    assert!(PropertyPlace::CLASS_AT == 0 && PropertyPlace::OFFSET_AT == 4);
+    assert!(PropertyOffset::TAG_AT == 0);
+    assert!(PropertyOffset::TY_AT == 2 && PropertyOffset::SLOT_AT == 4);
+};
 
 impl Cached {
     /// The frame a slot whose answer the access rule decides was primed
@@ -1746,11 +1832,16 @@ pub(crate) struct PrimedFrom {
 /// in `CACHE_ADDR(cache_slot + 1)`: a declared slot, or
 /// `ZEND_DYNAMIC_PROPERTY_OFFSET`, a name the object's dynamic table holds
 /// if anything does.
+///
+/// It has the primitive representation, so compiled code reads a declared
+/// slot's number and type where the interpreter wrote them
+/// ([`PropertyOffset::SLOT_AT`], [`PropertyOffset::TY_AT`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub(crate) enum PropertyOffset {
     /// `OBJ_PROP(zobj, prop_offset)`: the declared slot, and what a
     /// write to it is held to, php's `prop_info` in the third slot.
-    Declared { slot: u32, ty: SlotType },
+    Declared { ty: SlotType, slot: u32 } = PropertyOffset::DECLARED,
     /// `IS_DYNAMIC_PROPERTY_OFFSET`: `zend_hash_find_known_hash` on
     /// `zobj->properties`.
     Dynamic,
@@ -1775,7 +1866,7 @@ pub(crate) struct SlotType(u16);
 impl SlotType {
     /// The bit of a property with no type; php lets only a typed
     /// property be `readonly` or of a set visibility.
-    const NO_TYPE: u16 = 1 << 15;
+    pub(crate) const NO_TYPE: u16 = 1 << 15;
     /// The bit of a `readonly` property.
     const READONLY: u16 = 1 << 14;
     /// The bit of a property of a set visibility, which a placement
