@@ -205,40 +205,61 @@ mod tests {
 
     use crate::manifest::Manifest;
     use crate::oracle::stand_in::macho;
-    use crate::reading::Status;
+    use crate::reading::{Reading, Status};
     use crate::scratch::{Tree, repository};
 
+    /// `xtask/fixtures/api-check/binding` laid at a scratch tree, its
+    /// `.cargo/config.toml` binding ext/openssl's openssl-sys to openssl@4.
+    fn fixture(name: &str) -> Tree {
+        let fixture = crate::package_dir().join("fixtures/api-check/binding");
+        let tree = Tree::new(&format!("api-check-binding-{name}")).unwrap();
+        repository(&fixture, tree.path(), &["."]).unwrap();
+        tree
+    }
+
+    /// The load command that names libssl in the fixture's keg of `major`.
+    fn libssl(major: &str) -> String {
+        let full = if major == "4" { "4.0.3" } else { "5.0.0" };
+        format!("@loader_path/../../../openssl@{major}/{full}/lib/libssl.{major}.dylib")
+    }
+
+    /// ext/openssl's reading where the pinned php is a stand-in build at
+    /// `version` in the tree's Cellar naming `loads`.
+    fn reading(tree: &Tree, version: &str, loads: &[&str]) -> Reading {
+        let bin = tree.path().join(format!("brew/Cellar/php/{version}/bin"));
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("php"), macho(loads)).unwrap();
+        let mut manifest = Manifest::load(crate::package_dir().parent().unwrap()).unwrap();
+        manifest.pin.as_mut().unwrap().oracle.path = bin.join("php");
+        let readings = super::super::hold(&manifest, tree.path(), false).unwrap();
+        (readings.into_iter())
+            .find(|r| r.scope == "ext/openssl")
+            .unwrap()
+    }
+
+    /// The fixture's tree with its `[env]` binding of openssl-sys written
+    /// as `binding`, none for no line.
+    fn bound(tree: &Tree, binding: Option<&str>) {
+        let other =
+            "POWERPC64_IBM_AIX_OPENSSL_DIR = { value = \"/nowhere/openssl@9\", force = true }";
+        let line = binding.map_or_else(String::new, |b| format!("OPENSSL_DIR = {b}\n"));
+        let config = format!("[env]\n{line}{other}\n");
+        fs::write(tree.path().join(".cargo/config.toml"), config).unwrap();
+    }
+
     /// A crate's binding is the keg the pinned php loads its library from
-    /// (#3458): `xtask/fixtures/api-check/binding` binds ext/openssl's
-    /// openssl-sys to openssl@4, and of two stand-in php builds laid in
-    /// its Cellar, 1.0 loads libssl from openssl@4 and holds it, and
-    /// 2.0, a pin that moved OpenSSL's major, loads it from openssl@5
-    /// and fails naming both.
+    /// (#3458): the fixture binds ext/openssl's openssl-sys to openssl@4,
+    /// and of two stand-in php builds laid in its Cellar, 1.0 loads libssl
+    /// from openssl@4 and holds it, and 2.0, a pin that moved OpenSSL's
+    /// major, loads it from openssl@5 and fails naming both.
     #[test]
     fn a_binding_to_another_major_than_the_pinned_php_loads_fails_naming_both() {
-        let fixture = crate::package_dir().join("fixtures/api-check/binding");
-        let tree = Tree::new("api-check-binding").unwrap();
-        repository(&fixture, tree.path(), &["."]).unwrap();
-        let openssl = |version: &str, major: &str| {
-            let bin = tree.path().join(format!("brew/Cellar/php/{version}/bin"));
-            fs::create_dir_all(&bin).unwrap();
-            let full = if major == "4" { "4.0.3" } else { "5.0.0" };
-            let libssl =
-                format!("@loader_path/../../../openssl@{major}/{full}/lib/libssl.{major}.dylib");
-            fs::write(bin.join("php"), macho(&[&libssl])).unwrap();
-            let mut manifest = Manifest::load(crate::package_dir().parent().unwrap()).unwrap();
-            manifest.pin.as_mut().unwrap().oracle.path = bin.join("php");
-            let readings = super::super::hold(&manifest, tree.path(), false).unwrap();
-            readings
-                .into_iter()
-                .find(|r| r.scope == "ext/openssl")
-                .unwrap()
-        };
-        let held = openssl("1.0", "4");
+        let tree = fixture("major");
+        let held = reading(&tree, "1.0", &[&libssl("4")]);
         assert_eq!(held.status, Status::Pass, "{}", held.message);
         let note = "openssl-sys bound to openssl@4, the keg the pinned php loads libssl from";
         assert!(held.message.ends_with(note), "{}", held.message);
-        let moved = openssl("2.0", "5");
+        let moved = reading(&tree, "2.0", &[&libssl("5")]);
         assert_eq!(moved.status, Status::Fail, "{}", moved.message);
         assert!(
             moved.message.starts_with(
@@ -247,6 +268,50 @@ mod tests {
             ),
             "{}",
             moved.message
+        );
+    }
+
+    /// Each binding the pinned php cannot hold fails the crate's reading
+    /// saying why (#3458): no `[env]` line naming openssl-sys's variable,
+    /// so its build links the first libssl a search finds; a binding to a
+    /// directory in no keg of the php's Homebrew; a php that loads no
+    /// libssl of its own; and a php whose loads cannot be read, a name
+    /// under `@executable_path/` the walk refuses to place.
+    #[test]
+    fn a_binding_the_pinned_php_cannot_hold_fails_saying_why() {
+        let tree = fixture("refused");
+        let fails = |loads: &[&str], why: &str| {
+            let reading = reading(&tree, "1.0", loads);
+            assert_eq!(reading.status, Status::Fail, "{why}: {}", reading.message);
+            assert!(reading.message.contains(why), "{why}: {}", reading.message);
+        };
+        let ssl = libssl("4");
+        bound(&tree, None);
+        fails(
+            &[&ssl],
+            "ext/openssl links openssl-sys, and no cargo configuration's [env] names its OPENSSL_DIR, \
+             so its build links the first libssl a search finds where the pinned php loads openssl@4's",
+        );
+        bound(
+            &tree,
+            Some("{ value = \"ext/openssl\", relative = true, force = true }"),
+        );
+        fails(
+            &[&ssl],
+            "/ext/openssl, no keg of the pinned php's Homebrew, and the pinned php loads libssl from openssl@4",
+        );
+        bound(
+            &tree,
+            Some("{ value = \"brew/Cellar/openssl@4/4.0.3\", relative = true, force = true }"),
+        );
+        assert_eq!(reading(&tree, "1.0", &[&ssl]).status, Status::Pass);
+        fails(
+            &[],
+            "ext/openssl links openssl-sys, and the pinned php loads no libssl of its own, so no keg holds the binding",
+        );
+        fails(
+            &["@executable_path/../lib/libssl.4.dylib"],
+            "ext/openssl links openssl-sys, whose binding is held to the libraries the pinned php loads, and those are unread: ",
         );
     }
 }
