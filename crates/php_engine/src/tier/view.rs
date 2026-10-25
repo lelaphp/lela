@@ -373,30 +373,41 @@ impl CachedSlot {
 
 /// The touch (`jit-design.md` §4.6, #2957's note): where slot `raw` of
 /// the runtime cache of the op array `epoch` holds at its offset stands
-/// in `req`, its cache laid down first where the request has not, as the
-/// op array's first activation lays it (`zend_init_func_run_time_cache`,
-/// `Z/Zend/zend_execute.c:4497`)
-/// and every activation after finds it. A function's cache stands where
-/// it was laid for as long as the request runs, so compiled code that
-/// was handed the slot reads it for as long as it may. None for a file's
-/// own code, whose every activation lays a fresh cache, for an op array
-/// the epoch holds no row for, and for a slot past its cache. The `Err`
-/// is the memory limit's fatal, with nothing laid down.
-pub fn touch(
-    req: &mut Request,
-    epoch: &Epoch,
-    raw: MapPtrRaw,
-) -> Result<Option<CachedSlot>, php_heap::Fatal> {
-    let Some(code) = (epoch.func(FuncRef(MapPtrOffset::Engine(raw.offset))))
+/// in `req`, where the request has laid that cache down. php lays a
+/// function's cache at the first `INIT_*` that pushes its call in the
+/// request (`init_func_run_time_cache`, `Z/Zend/zend_vm_def.h:4072`),
+/// and so does the engine's `push_call`, so a
+/// trace entered before its inlined callee's first call finds none, and
+/// the touch lays nothing down: the slot is answered none, its opline is
+/// its handler's until the call's `INIT_*` lays the cache, and a later
+/// entry touches it again. A function's cache stands where it was laid
+/// for as long as the request is served, so compiled code that was handed
+/// the slot reads it for as long as it may. None also for a file's own
+/// code, whose every activation lays a fresh cache, for an op array the
+/// epoch holds no row for, and for a slot past its cache.
+#[must_use]
+pub fn touch(req: &Request, epoch: &Epoch, raw: MapPtrRaw) -> Option<CachedSlot> {
+    let code = touched_code(epoch, raw)?;
+    let at = crate::exec::CacheAt::of(code.runtime_cache);
+    let slot = req.touch_cache(at, CacheSlot(raw.slot))?;
+    Some(CachedSlot(slot.cast()))
+}
+
+/// Whether [`touch`] can ever answer slot `raw` in a request: not for a
+/// file's own code, an op array the epoch holds no row for, or a slot past
+/// its cache, which no call lays down.
+#[must_use]
+pub fn touchable(epoch: &Epoch, raw: MapPtrRaw) -> bool {
+    touched_code(epoch, raw)
+        .is_some_and(|code| crate::exec::CacheSize::of(code).holds(CacheSlot(raw.slot)))
+}
+
+/// The op array of a function's whose cache slot `raw` names, which the
+/// touch reads.
+fn touched_code(epoch: &Epoch, raw: MapPtrRaw) -> Option<&OpArray> {
+    (epoch.func(FuncRef(MapPtrOffset::Engine(raw.offset))))
         .filter(|func| !func.is_main())
         .and_then(|func| func.op_array())
-    else {
-        return Ok(None);
-    };
-    let at = crate::exec::CacheAt::of(code.runtime_cache);
-    let size = crate::exec::CacheSize::of(code);
-    let slot = req.touch_cache(at, size, CacheSlot(raw.slot))?;
-    Ok(slot.map(|slot| CachedSlot(slot.cast())))
 }
 
 /// Where a property opline over a constant name finds the property on an

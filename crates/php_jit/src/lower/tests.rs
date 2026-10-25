@@ -985,14 +985,14 @@ fn a_class_the_next_request_declares_fails_the_class_guard() {
 
 /// A trace over a request-scoped class's properties, entered on a request
 /// that has not yet called the function whose property oplines it inlines:
-/// the touch lays that function's cache down as the trace enters, so its
-/// code reads the slot where the function's first call will find it, and
-/// the read leaves for the interpreter once, where the slot is not primed
-/// yet, and reads its place in place on every turn after (#3346, #2957's
-/// note).
+/// the touch finds that function's cache not laid down, as php lays it at
+/// the call's `INIT_*` and no sooner, so the read leaves for the
+/// interpreter, the call lays the cache, and the next entry touches the
+/// slot and reads its place in place on every turn after (#3421, #3346,
+/// #2957's note).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
-fn a_trace_entered_before_its_callee_ran_reads_the_slot_the_touch_laid() {
+fn a_trace_entered_before_its_callee_ran_reads_the_slot_its_call_laid() {
     let scratch = testing::Scratch::new();
     let engine = testing::engine::<Lane>(&[
         ("jit.mode", "force"),

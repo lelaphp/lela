@@ -383,6 +383,7 @@ call::constant
 call::eval_const_expr
 call::eval_declared
 call::fetch_constant
+call::fetch_function
 call::initialize_lazy
 call::instantiate
 call::instantiate_named

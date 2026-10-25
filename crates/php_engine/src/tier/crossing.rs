@@ -109,6 +109,21 @@ pub fn primed(req: &Request, frame: FrameRef, held: Held<'_>, at: OplineIdx) -> 
     Some(FuncRef::at(body.runtime_cache))
 }
 
+/// The serving's entry frame `frame` returned `zval`, which compiled code
+/// hands over with its owner, as `RETURN`'s handler leaves a frame
+/// `zend_call_function` served (`ZEND_CALL_TOP`), through the handler's
+/// own entry return: the observer told, and the value the serving's
+/// return value, which its caller takes once the serving is over, the
+/// frame popped there. Nothing for a frame that is not the serving's
+/// entry ([`entry`](super::entry)), whose `false` says so.
+pub fn return_entry(req: &mut Request, frame: FrameRef, zval: Zval) -> bool {
+    if req.stack().entry() != frame {
+        return false;
+    }
+    req.entry_returned(frame, Value::of_slot(zval));
+    true
+}
+
 /// php's `zval_ptr_dtor` of `zval`, a counted value compiled code gives
 /// up: a destructor it runs may leave a throwable pending.
 pub fn release(req: &mut Request, zval: Zval) {
