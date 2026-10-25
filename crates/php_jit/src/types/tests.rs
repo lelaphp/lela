@@ -19,9 +19,9 @@ use php_heap::ZvalType;
 use php_unit::{Opcode, OplineIdx};
 
 use super::{
-    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Imm, Interrupt, Landing, Line, Op,
-    OpId, Operand, Pointee, Repeat, Slot, Slotted, TraceIr, Types, ValueId, build,
-    on_declared_slot,
+    Check, Def, End, ExitId, Form, Frame, Frees, Grows, GuardAt, Home, Imm, Interrupt, Landing,
+    Line, Op, OpId, Operand, Pointee, Repeat, Slot, Slotted, Stored, TraceIr, Types, ValueId,
+    build, on_declared_slot,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
@@ -897,6 +897,53 @@ fn an_element_writes_guards_are_held_in_phps_order() -> Result<(), String> {
     Ok(())
 }
 
+/// A fetched element's guards leave past the fetch with the element it
+/// copied, a call under way or none, as php's
+/// `zend_jit_guard_fetch_result_type` takes them for the opline after it
+/// and `zend_jit_trace_get_exit_point` restores the call
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:8067-8085`,
+/// `Z/ext/opcache/jit/zend_jit_trace.c:144-147`): the pinned php's trace
+/// of `strtoupper($a[1])` in a loop takes `exit_5` and `exit_6`,
+/// `0007/.../CALL` with `X4` copied, at the fetch, where this tier left
+/// for the fetch again through the exit of its array's guard, and
+/// `binary_trees`' `check_tree` takes php's `exit_6` to `exit_9`, two
+/// per level it inlines (#3438).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_fetched_elements_guard_leaves_past_the_fetch_under_a_call() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f(array $a, int $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strcmp($a[1], 'b'); } return $t; }
+        echo f(['a', 'bc'], 10), \"\\n\";",
+    )?;
+    let at = inline_at(&ir, Opcode::FetchDimR)?;
+    let Some(Op::Line(fetch)) = ir.ops.get(at.index()) else {
+        return Err("no FETCH_DIM_R".to_owned());
+    };
+    let elements: Vec<ExitId> = (ir.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Within(at))
+        .map(|guard| guard.exit)
+        .collect();
+    assert_eq!(elements.len(), 2, "{}", dump::render(&ir));
+    let past = OplineIdx(fetch.opline.0 + 1);
+    for exit in &elements {
+        let spec = &ir.exits[usize::from(exit.0)];
+        assert_eq!(
+            (spec.opline, spec.landing),
+            (Some(past), Landing::RESTORE_CALL),
+            "{}",
+            dump::render(&ir)
+        );
+        assert!(
+            (spec.stores.iter()).any(|store| matches!(store.from, Stored::Copied { .. })),
+            "{}",
+            dump::render(&ir)
+        );
+    }
+    assert_ne!(elements[0], elements[1], "{}", dump::render(&ir));
+    Ok(())
+}
+
 /// `FE_FETCH_R` takes the exit the way out of the loop leaves through
 /// before its array's packed guard, as php's code generator takes it
 /// before `zend_jit_fe_fetch`, whose packed guard follows
@@ -1282,7 +1329,7 @@ fn a_link_leaves_through_the_exit_that_names_its_trace() -> Result<(), String> {
 
 /// A fetched element's guard leaves past the fetch with the element
 /// stored, and frees the temporary array the fetch read, which compiled
-/// code has not freed: `Landing::FreeTemps`.
+/// code has not freed: its landing's `frees`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> {
@@ -1297,8 +1344,8 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
         echo f(3), \"\\n\";",
     )?;
     assert!(
-        ir.exits.iter().any(|exit| exit.landing
-            == Landing::FreeTemps {
+        ir.exits.iter().any(|exit| exit.landing.frees
+            == Frees {
                 op1: true,
                 op2: false
             }),

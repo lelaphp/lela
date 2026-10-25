@@ -21,7 +21,7 @@ use super::opcodes::{
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
-    Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
+    Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
     LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Slotted,
     Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
@@ -2648,7 +2648,7 @@ impl<'a> Builder<'a> {
                 }
                 Source::Interrupt(repeat) => {
                     let exit = match interrupt_reuses {
-                        Some(first) if spec.stores.is_empty() && spec.landing == Landing::Plain => {
+                        Some(first) if spec.stores.is_empty() && spec.landing == Landing::PLAIN => {
                             first
                         }
                         _ => exits.take(spec, level.clone())?,
@@ -2706,7 +2706,7 @@ impl<'a> Builder<'a> {
         let reserved = ExitSpec {
             frame: Frame::ROOT,
             opline: Some(entry),
-            landing: Landing::Plain,
+            landing: Landing::PLAIN,
             stores: Vec::new(),
             known: Vec::new(),
             grows: Grows::Never,
@@ -3247,20 +3247,23 @@ impl<'a> Builder<'a> {
                 out,
                 read,
             } => {
-                if calls {
-                    (Some(fetch), Landing::RestoreCall)
-                } else {
-                    extra = Some(Store {
-                        slot: self.val(out).slot,
-                        from: Stored::Copied { value: out, read },
-                    });
-                    let landing = if op1 || op2 {
-                        Landing::FreeTemps { op1, op2 }
-                    } else {
-                        Landing::Plain
-                    };
-                    (Some(OplineIdx(fetch.0 + 1)), landing)
-                }
+                // Past the fetch, with the element it copied, as php's
+                // guard on a fetched element leaves for the opline after
+                // it with the copy in its stack map
+                // (`zend_jit_guard_fetch_result_type`,
+                // `Z/ext/opcache/jit/zend_jit_ir.c:8067-8085`), and with a
+                // call under way restored, as `zend_jit_trace_get_exit_point`
+                // adds `ZEND_JIT_EXIT_RESTORE_CALL` to any exit taken while
+                // one is (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
+                extra = Some(Store {
+                    slot: self.val(out).slot,
+                    from: Stored::Copied { value: out, read },
+                });
+                let landing = Landing {
+                    frees: Frees { op1, op2 },
+                    restores_call: calls,
+                };
+                (Some(OplineIdx(fetch.0 + 1)), landing)
             }
         };
         // A caller's register value is in its slot from the call into the
@@ -3888,8 +3891,8 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
 
 fn restored(calls: bool) -> Landing {
     if calls {
-        Landing::RestoreCall
+        Landing::RESTORE_CALL
     } else {
-        Landing::Plain
+        Landing::PLAIN
     }
 }

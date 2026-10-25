@@ -703,18 +703,46 @@ impl Read {
 }
 
 /// What the trampoline does at an exit before the interpreter goes on
-/// (the glossary's Landing).
+/// (the glossary's Landing), beside standing the frame at its opline:
+/// two things apart, as php's exit frees an opline's operands and
+/// restores a call under way each on its own (`ZEND_JIT_EXIT_FREE_OP1`,
+/// `ZEND_JIT_EXIT_FREE_OP2`, `ZEND_JIT_EXIT_RESTORE_CALL`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Landing {
-    Plain,
-    /// The opline before the exit's read these temporaries, and compiled
-    /// code has not freed them yet.
-    FreeTemps {
-        op1: bool,
-        op2: bool,
-    },
-    /// A call an `INIT_*` began is under way, and is restored.
-    RestoreCall,
+pub(crate) struct Landing {
+    /// The temporaries the opline before the exit's read, which compiled
+    /// code has not freed yet.
+    pub(crate) frees: Frees,
+    /// Whether a call an `INIT_*` began is under way, and is restored.
+    pub(crate) restores_call: bool,
+}
+
+impl Landing {
+    /// A landing that stands the frame and does nothing else.
+    pub(crate) const PLAIN: Landing = Landing {
+        frees: Frees::NONE,
+        restores_call: false,
+    };
+
+    /// A landing that restores the call under way and frees nothing.
+    pub(crate) const RESTORE_CALL: Landing = Landing {
+        frees: Frees::NONE,
+        restores_call: true,
+    };
+}
+
+/// Which of the temporaries an opline read a landing frees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Frees {
+    pub(crate) op1: bool,
+    pub(crate) op2: bool,
+}
+
+impl Frees {
+    /// None of them.
+    pub(crate) const NONE: Frees = Frees {
+        op1: false,
+        op2: false,
+    };
 }
 
 /// How the trace ends.
