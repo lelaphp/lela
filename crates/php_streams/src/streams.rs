@@ -35,7 +35,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use crate::api::values::{Emalloc, Owner, ResourceType};
 
 use crate::api::layer::{Face as _, TemporaryGuard};
-use crate::api::raising::{Level, Thrown, raise, value_error, warning};
+use crate::api::raising::{Level, Thrown, docref, raise, value_error, warning};
 use crate::api::request::{
     Cast, Closer, DirListing, EngineWrapper, FdStream, FilterChain as Chain, FilterFlags, HostPath,
     Ini, Notification, OptionAnswer, OwnedStream, Request, Standard, Stream, StreamCtx,
@@ -2405,6 +2405,9 @@ struct Temp {
     /// `ts->meta`, what the `data:` wrapper read from its URL, and nothing
     /// for `php://temp`.
     meta: Vec<(Vec<u8>, MetaValue)>,
+    /// `ts->tmpdir`, where the spill's file is made: `upload_tmp_dir` for
+    /// a request's body, and the system's directory for `php://temp`.
+    tmpdir: Option<Vec<u8>>,
 }
 
 impl Temp {
@@ -2449,12 +2452,12 @@ impl Temp {
         {
             return Ok(true);
         }
-        let Some(file) = temporary_file(req, None, b"php")? else {
-            let text = format!(
-                "{}(): Unable to create temporary file, Check permissions in temporary files directory.",
-                req.frames().active_function_name()
+        let Some(file) = temporary_file(req, self.tmpdir.as_deref(), b"php")? else {
+            docref(
+                req,
+                Level::Warning,
+                "Unable to create temporary file, Check permissions in temporary files directory.",
             );
-            warning(req, &text);
             return Ok(false);
         };
         let at = *file;
@@ -3771,18 +3774,36 @@ fn host_label(req: &Request, standard: Standard) -> &'static str {
 /// temp stream registered first, then the memory stream it encloses, so
 /// the two ids come out in php's order.
 fn temp(req: &mut Request, mode: TempMode, smax: usize) -> Result<Owner<Stream>, Thrown> {
-    temp_stream(req, mode, smax, "TEMP", Vec::new())
+    temp_stream(req, mode, smax, "TEMP", Vec::new(), None)
 }
 
-/// [`temp`] under a label of its own and with the meta data
+/// `php_stream_temp_create_ex(TEMP_STREAM_DEFAULT, SAPI_POST_BLOCK_SIZE,
+/// PG(upload_tmp_dir))`: the stream a request's body is buffered in
+/// (`Z/main/SAPI.c:264`), spilling into `tmpdir`.
+pub(crate) fn body_stream(
+    req: &mut Request,
+    tmpdir: Option<&[u8]>,
+) -> Result<Owner<Stream>, Thrown> {
+    temp_stream(
+        req,
+        TempMode::Default,
+        0x4000,
+        "TEMP",
+        Vec::new(),
+        tmpdir.map(<[u8]>::to_vec),
+    )
+}
+
+/// [`temp`] under a label of its own, with the meta data
 /// `stream_get_meta_data` starts with, which is what the `data:` wrapper
-/// makes of one.
+/// makes of one, and the directory its spill is made in.
 fn temp_stream(
     req: &mut Request,
     mode: TempMode,
     smax: usize,
     label: &'static str,
     meta: Vec<(Vec<u8>, MetaValue)>,
+    tmpdir: Option<Vec<u8>>,
 ) -> Result<Owner<Stream>, Thrown> {
     let kind = Temp {
         inner: None,
@@ -3790,6 +3811,7 @@ fn temp_stream(
         smax,
         label,
         meta,
+        tmpdir,
     };
     let mut outer = PhpStream::new(Box::new(kind), mode.as_mode());
     outer.flags.no_buffer = true;

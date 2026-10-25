@@ -19,8 +19,7 @@ use super::Variables;
 use super::variables::BodyLimits;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown, docref, throw_error};
-use crate::api::request::temporary::TemporaryGuard;
-use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, adopted};
+use crate::api::values::{Emalloc, Key, Owner, PhpArray, PhpString, Resource, Value, adopted};
 use crate::engine::{Body, Method, WebRequest};
 use crate::exec::TableId;
 use php_unit::AutoGlobal;
@@ -94,8 +93,11 @@ pub(crate) struct Post {
     /// `SG(request_info).post_entry`.
     entry: Option<PostEntry>,
     /// `SG(request_info).content_type_dup`: the content type with what
-    /// came before its first `;`, `,` or space lowered.
-    content_type: Option<Vec<u8>>,
+    /// came before its first `;`, `,` or space lowered, `estrndup`'d onto
+    /// the request's heap with its terminator; freed once the content
+    /// type's handler has read the body, and otherwise at the request's
+    /// end.
+    content_type: Option<Emalloc>,
     /// `SG(read_post_bytes)`: how much of the body the host has handed
     /// out.
     read: usize,
@@ -103,7 +105,7 @@ pub(crate) struct Post {
     done: bool,
     /// `SG(request_info).request_body`: what the form reader buffered,
     /// and what `php://input` read after it.
-    request_body: Option<Vec<u8>>,
+    request_body: Option<RequestBody>,
     /// `SG(rfc1867_uploaded_files)`: the table the multipart handler lays
     /// on the request's heap, `ALLOC_HASHTABLE` and `zend_hash_init`, each
     /// file an upload wrote a row of it until it is moved or the request
@@ -114,6 +116,23 @@ pub(crate) struct Post {
     /// multipart handler refuses is thrown and not warned of, under
     /// `request_parse_body()`.
     pub(crate) throwing: bool,
+}
+
+/// `SG(request_info).request_body`: the stream layer's temp stream a
+/// body is buffered in, one of the request's resources, as php's is; or,
+/// where an engine is built with no stream layer, the bytes themselves.
+enum RequestBody {
+    Stream(Resource),
+    Bytes(Vec<u8>),
+}
+
+impl std::fmt::Debug for RequestBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestBody::Stream(_) => f.write_str("Stream"),
+            RequestBody::Bytes(bytes) => f.debug_tuple("Bytes").field(&bytes.len()).finish(),
+        }
+    }
 }
 
 /// `sapi_module.read_post` (`Z/main/SAPI.h`): what hands a request its
@@ -172,7 +191,11 @@ impl Request {
         dup.extend_from_slice(&content_type[end..]);
         let entry = PostEntry::of(&content_type);
         self.post.entry = entry;
-        self.post.content_type = Some(dup);
+        self.free_content_type();
+        self.post.content_type = Emalloc::new(self, dup.len() + 1).ok().map(|mut block| {
+            block.bytes_mut()[..dup.len()].copy_from_slice(&dup);
+            block
+        });
         if entry == Some(PostEntry::Form) {
             self.read_standard_form_data(limits);
         }
@@ -214,36 +237,22 @@ impl Request {
             );
             return;
         }
-        let mut body = Vec::new();
-        let mut spilled = false;
+        let Ok(mut body) = self.open_request_body() else {
+            return;
+        };
         loop {
             let block = self.read_post_block(POST_BLOCK_SIZE);
-            // `php_stream_temp_write`: the body's memory stream holds fewer
-            // than `SAPI_POST_BLOCK_SIZE` bytes, and the write that would
-            // reach it moves it to a temporary file in `upload_tmp_dir`;
-            // one that cannot be made loses the whole body.
-            if !spilled && !block.is_empty() && body.len() + block.len() >= POST_BLOCK_SIZE {
-                let dir = self.ini().get(b"upload_tmp_dir").map(<[u8]>::to_vec);
-                let Some((_, path)) =
-                    self.open_temporary_fd(dir.as_deref(), b"php", TemporaryGuard::Never)
-                else {
-                    docref(
-                        self,
-                        Level::Warning,
-                        "Unable to create temporary file, Check permissions in temporary files directory.",
-                    );
-                    docref(
-                        self,
-                        Level::Warning,
-                        "POST data can't be buffered; all data discarded",
-                    );
-                    body.clear();
-                    break;
-                };
-                spilled = true;
-                std::fs::remove_file(path).ok();
+            // A body the stream did not take whole is lost whole, the
+            // stream emptied; a spill into `upload_tmp_dir` that could not
+            // be made has warned of it already.
+            if !block.is_empty() && !self.append_request_body(&mut body, &block) {
+                docref(
+                    self,
+                    Level::Warning,
+                    "POST data can't be buffered; all data discarded",
+                );
+                break;
             }
-            body.extend_from_slice(&block);
             if post_max_size > 0
                 && i64::try_from(self.post.read).unwrap_or(i64::MAX) > post_max_size
             {
@@ -310,19 +319,30 @@ impl Request {
         array: PhpArray,
         limits: &BodyLimits,
     ) -> Result<(), Thrown> {
-        let Some(content_type) = self.post.content_type.take() else {
+        let Some(entry) = self.post.entry else {
             return Ok(());
         };
-        let handled = match self.post.entry {
-            Some(PostEntry::Form) => {
-                let body = self.post.request_body.clone().unwrap_or_default();
+        let Some(block) = self.post.content_type.take() else {
+            return Ok(());
+        };
+        let content_type = block.bytes()[..block.len() - 1].to_vec();
+        let handled = match entry {
+            PostEntry::Form => {
+                let body = match self.post.request_body.take() {
+                    Some(stream) => {
+                        let bytes = self.request_body_bytes(&stream);
+                        self.post.request_body = Some(stream);
+                        bytes
+                    }
+                    None => Vec::new(),
+                };
                 self.add_post_vars(array, &body, limits)
             }
-            Some(PostEntry::Multipart) => {
+            PostEntry::Multipart => {
                 crate::rfc1867::post_handler(self, &content_type, array, limits)
             }
-            None => return Ok(()),
         };
+        block.free(self);
         // `if (ZEND_HAS_OOM()) zend_handle_delayed_oom();` (`Z/main/SAPI.c:168`
         // at 8.5.12): a body that took the request past its memory limit
         // ends it in the limit's fatal before the script runs.
@@ -344,12 +364,24 @@ impl Request {
     /// is read no further.
     pub(crate) fn input_bytes(&mut self) -> Vec<u8> {
         const CHUNK: usize = 8192;
-        let mut body = self.post.request_body.take().unwrap_or_default();
+        // `php_stream_url_wrap_php`'s `input`: the form reader's stream,
+        // or one made for the body where no reader made one.
+        let mut stream = match self.post.request_body.take() {
+            Some(stream) => stream,
+            None => match self.open_request_body() {
+                Ok(stream) => stream,
+                Err(_) => return Vec::new(),
+            },
+        };
+        let mut body = self.request_body_bytes(&stream);
         let mut out = Vec::new();
         loop {
             let position = out.len();
             if !self.post.done && self.post.read < position + CHUNK {
                 let block = self.read_post_block(CHUNK);
+                if !block.is_empty() {
+                    self.append_request_body(&mut stream, &block);
+                }
                 body.extend_from_slice(&block);
             }
             let end = (position + CHUNK).min(body.len());
@@ -358,8 +390,46 @@ impl Request {
             }
             out.extend_from_slice(&body[position..end]);
         }
-        self.post.request_body = Some(body);
+        self.post.request_body = Some(stream);
         out
+    }
+
+    /// `SG(request_info).request_body` made: the stream layer's temp
+    /// stream ([`StreamHooks::body_open`](crate::layer::StreamHooks::body_open)),
+    /// spilling into `upload_tmp_dir`, or bytes where no stream layer is
+    /// supplied.
+    fn open_request_body(&mut self) -> Result<RequestBody, Thrown> {
+        let Some(hooks) = self.stream_hooks() else {
+            return Ok(RequestBody::Bytes(Vec::new()));
+        };
+        let dir = self.ini().get(b"upload_tmp_dir").map(<[u8]>::to_vec);
+        (hooks.body_open)(self, dir.as_deref()).map(RequestBody::Stream)
+    }
+
+    /// A block written at the end of the request's body; `false`, and the
+    /// body emptied, where the stream did not take it whole.
+    fn append_request_body(&mut self, body: &mut RequestBody, block: &[u8]) -> bool {
+        match body {
+            RequestBody::Bytes(bytes) => {
+                bytes.extend_from_slice(block);
+                true
+            }
+            RequestBody::Stream(stream) => match self.stream_hooks() {
+                Some(hooks) => (hooks.body_append)(self, *stream, block),
+                None => false,
+            },
+        }
+    }
+
+    /// What the request's body holds.
+    fn request_body_bytes(&mut self, body: &RequestBody) -> Vec<u8> {
+        match body {
+            RequestBody::Bytes(bytes) => bytes.clone(),
+            RequestBody::Stream(stream) => self
+                .stream_hooks()
+                .map(|hooks| (hooks.body_read)(self, *stream))
+                .unwrap_or_default(),
+        }
     }
 
     /// What [`parse_body`](Self::parse_body) makes, the two owners not
@@ -443,6 +513,7 @@ impl Request {
             .try_for_each(|global| self.publish_track(global));
         // The request body the default reader kept closed, and the
         // request's own description put back.
+        self.free_content_type();
         let parsed = std::mem::replace(&mut self.post, kept);
         self.post.uploaded = parsed.uploaded;
         if described {
@@ -468,6 +539,22 @@ impl Request {
         self.symbol_update(TableId::GLOBAL, *name, value);
         name.give_up(self);
         Ok(())
+    }
+
+    /// `SG(request_info).content_type_dup` freed where it stands.
+    fn free_content_type(&mut self) {
+        if let Some(block) = self.post.content_type.take() {
+            block.free(self);
+        }
+    }
+
+    /// `sapi_deactivate_module`'s and `sapi_deactivate_destroy`'s part
+    /// of the post state (`Z/main/SAPI.c:502-560`): the content type's
+    /// copy a handler did not free, then every uploaded file no
+    /// `move_uploaded_file()` moved.
+    pub(crate) fn deactivate_post(&mut self) {
+        self.free_content_type();
+        self.destroy_uploaded_files();
     }
 
     /// `destroy_uploaded_files_hash` (`Z/main/rfc1867.c:170`), at

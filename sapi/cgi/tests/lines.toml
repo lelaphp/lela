@@ -393,3 +393,44 @@ shut = true
 params = [["SCRIPT_FILENAME", "{dir}/p.php"], ["REQUEST_METHOD", "POST"], ["CONTENT_TYPE", "multipart/form-data; boundary=b"], ["CONTENT_LENGTH", "-1"]]
 body = "--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nhello\r\n--b--\r\n"
 shut = true
+
+# What a body costs the program's `memory_get_usage()` at its first line,
+# as php-cgi 8.5.12 counts it (#3439): the form reader buffers the body in
+# a temp stream, `php_stream_temp_create_ex(TEMP_STREAM_DEFAULT,
+# SAPI_POST_BLOCK_SIZE, PG(upload_tmp_dir))` (`Z/main/SAPI.c:264`), two
+# streams and two resources on the request's heap until its end, so the
+# program's first `fopen()` is resource 5 where a `GET`'s is 3, and its
+# memory stream's string holds the body; the content type's copy
+# (`content_type_dup`) stands until a handler frees it, so a type no
+# handler takes keeps it to the request's end; and a multipart body's
+# field is registered as `php_register_variable_ex` registers it. Each
+# runs under the witness runner's environment, which `$_SERVER` and
+# `$_ENV` would register, and with the program cached however new its file
+# is, the regime the engine's unit cache copies.
+[[line]]
+name = "an-urlencoded-field-costs-what-php-cgi-counts"
+args = ["-n", "-d", "opcache.file_update_protection=0"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "POST", SCRIPT_FILENAME = "{dir}/m.php", CONTENT_TYPE = "application/x-www-form-urlencoded", CONTENT_LENGTH = "7" }
+files = { "m.php" = "<?php echo memory_get_usage(), \"\\n\"; var_dump(fopen('php://memory', 'r'));\n" }
+stdin = "x=hello"
+
+[[line]]
+name = "a-multipart-field-costs-what-php-cgi-counts"
+args = ["-n", "-d", "opcache.file_update_protection=0"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "POST", SCRIPT_FILENAME = "{dir}/m.php", CONTENT_TYPE = "multipart/form-data; boundary=b", CONTENT_LENGTH = "63" }
+files = { "m.php" = "<?php echo memory_get_usage(), \"\\n\";\n" }
+stdin = "--b\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nhello\r\n--b--\r\n"
+
+[[line]]
+name = "a-multipart-closing-boundary-costs-what-php-cgi-counts"
+args = ["-n", "-d", "opcache.file_update_protection=0"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "POST", SCRIPT_FILENAME = "{dir}/m.php", CONTENT_TYPE = "multipart/form-data; boundary=b", CONTENT_LENGTH = "5" }
+files = { "m.php" = "<?php echo memory_get_usage(), \"\\n\";\n" }
+stdin = "--b--"
+
+[[line]]
+name = "a-body-no-handler-takes-keeps-its-content-type-s-copy"
+args = ["-n", "-d", "opcache.file_update_protection=0"]
+env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "POST", SCRIPT_FILENAME = "{dir}/m.php", CONTENT_TYPE = "application/json; charset=utf-8", CONTENT_LENGTH = "7" }
+files = { "m.php" = "<?php echo memory_get_usage(), \"\\n\";\n" }
+stdin = "x=hello"

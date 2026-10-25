@@ -5902,7 +5902,7 @@ impl Engine {
         req.catch_bailout();
         req.free_shutdown_functions();
         req.destroy_http_globals();
-        req.destroy_uploaded_files();
+        req.deactivate_post();
         // `zend_deactivate` reaches `shutdown_executor`, whose
         // `zend_stream_shutdown` closes the files the scanner listed
         // first; then each extension's `deactivate`, in reverse, before
