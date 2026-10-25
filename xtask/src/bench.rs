@@ -464,8 +464,8 @@ pub(crate) enum Held {
     /// ([`Shown::tolerance`]), G1's (design §9.2, #2947, #3130), row by
     /// row and never by a set's geomean, as Mitchell ruled on #3280: a
     /// fail where any row resolves slower (§4.3) with its ratio beyond one
-    /// plus the tolerance, or measured no ratio, and a pass otherwise, or
-    /// where the bar has no row. A `NOISE-SWAMPED` row is never a
+    /// plus the tolerance, or with no finite ratio, and a pass otherwise,
+    /// or where the bar has no `[[bench]]` row. A `NOISE-SWAMPED` row is never a
     /// regression (protocol §1.2) and holds nothing; the geomean, signed,
     /// `mixed` or unsigned, is published and holds nothing (§10), since it
     /// averages away a regression concentrated on one row.
@@ -476,13 +476,12 @@ impl Held {
     /// The reading's status for what a bar `took`: a control fails at
     /// [`Took::fails_at`] resolved rows, a bound where any row's first arm
     /// resolves behind its second by more than `tolerance` percent, in
-    /// time or in rate ([`Measured::behind`]), or a row's ratio is no
-    /// number; a series is held to no bound.
+    /// time or in rate ([`Measured::behind`]), or where it measured no
+    /// row; a series is held to no bound.
     fn status(self, took: &Took, tolerance: Option<f64>) -> Status {
         let beyond = |pct| {
-            (took.rows.iter()).any(|(_, row)| {
-                row.ratio().is_nan() || row.behind().is_some_and(|behind| behind > pct)
-            })
+            took.rows.is_empty()
+                || (took.rows.iter()).any(|(_, row)| row.behind().is_some_and(|b| b > pct))
         };
         let resolved: usize = took.each_way().iter().sum();
         match self {
@@ -630,11 +629,12 @@ impl Measured {
     }
 
     /// How far this row's first arm stands behind its second, where it
-    /// resolved slower: what a bound holds each row to (#3280).
+    /// resolved slower: what a bound holds each row to (#3280). A row
+    /// resolved slower whose ratio is no finite number, its second arm
+    /// measuring nothing, is behind by more than any tolerance.
     fn behind(&self) -> Option<f64> {
         (self.sign() == Sign::Slower)
-            .then(|| lost(self.ratio(), self.unit))
-            .flatten()
+            .then(|| lost(self.ratio(), self.unit).unwrap_or(f64::INFINITY))
     }
 }
 
@@ -1595,8 +1595,8 @@ mod tests {
     /// fails, and still beside a swamped row; six at −3% beside one at
     /// +0.2% pass, `mixed` as their geomean is. A swamped row holds
     /// nothing however far its median, a row at the bound passes, a rate
-    /// is behind where it answers fewer requests a second, and a row that
-    /// measured no ratio fails.
+    /// is behind where it answers fewer requests a second, and a row
+    /// resolved slower with no finite ratio fails, as a bar of no row does.
     #[test]
     fn a_bound_holds_each_row_and_never_the_geomean() {
         let bound = |rows: Vec<Measured>, pct| Held::Bound.status(&took(rows, true), Some(pct));
@@ -1645,7 +1645,20 @@ mod tests {
         let more = vec![row(Rps, &BEHIND, 10.0), row(Rps, &BEHIND, 10.0)];
         assert_eq!(bound(more, 2.0), Status::Pass);
         let unmeasured = vec![row(Ms, &STRADDLES, f64::NAN), row(Ms, &AHEAD, -1.0)];
-        assert_eq!(bound(unmeasured, 2.0), Status::Fail, "no ratio");
+        assert_eq!(
+            bound(unmeasured, 2.0),
+            Status::Pass,
+            "a swamped row with no ratio"
+        );
+        let unmeasured = vec![row(Ms, &BEHIND, f64::NAN), row(Ms, &AHEAD, -1.0)];
+        assert_eq!(
+            bound(unmeasured, 2.0),
+            Status::Fail,
+            "slower, with no ratio"
+        );
+        let infinite = vec![row(Ms, &BEHIND, f64::INFINITY)];
+        assert_eq!(bound(infinite, 2.0), Status::Fail, "slower, past any ratio");
+        assert_eq!(bound(Vec::new(), 2.0), Status::Fail, "nothing measured");
         assert_eq!(
             Held::Series.status(&took(concentrated(), true), Some(2.0)),
             Status::Pass
