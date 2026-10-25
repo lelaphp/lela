@@ -2157,16 +2157,7 @@ fn global_constant(
         unqualified_constant(req, name)
     };
     let Some((key, value)) = found else {
-        return Err(error(
-            req,
-            // `%s`: the name up to its first NUL, its bytes as written.
-            &[
-                b"Undefined constant \"",
-                crate::c_number::c_str(name),
-                b"\"",
-            ]
-            .concat(),
-        ));
+        return Err(crate::api::raising::undefined_constant(req, name));
     };
     crate::api::raising::deprecated_constant(req, &key)?;
     req.addref(&value);

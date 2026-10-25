@@ -4823,6 +4823,16 @@ pub(crate) fn undefined_key(req: &mut Request, key: php_heap::Key) {
 /// Cannot access offset of type ArrayObject on string
 /// Cannot access offset of type array on string
 /// ```
+///
+/// The offset's text is printed with `%s`, to its first NUL:
+///
+/// ```php
+/// $s = "abc"; echo $s["1\0x"], "\n";
+/// ```
+/// ```expect
+/// Warning: Illegal string offset "1" in %s on line 2
+/// b
+/// ```
 pub(crate) fn string_dim_offset(
     req: &mut Request,
     dim: &Value,
@@ -6038,7 +6048,17 @@ fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown>
 }
 
 /// The deprecation of a numeric string read as an int that is a float
-/// the int does not hold whole.
+/// the int does not hold whole, the string printed with `%s`, to its
+/// first NUL:
+///
+/// ```php
+/// $i = "1.5\0x" | 0;
+/// ```
+/// ```expect
+/// Warning: A non-numeric value encountered in %s on line 2
+///
+/// Deprecated: Implicit conversion from float-string "1.5" to int loses precision in %s on line 2
+/// ```
 fn float_string_loses_precision(req: &mut Request, s: &[u8]) {
     deprecated(
         req,

@@ -1916,6 +1916,16 @@ impl Request {
     ///   }
     /// }
     /// ```
+    ///
+    /// The name is printed with `%s`, to its first NUL:
+    ///
+    /// ```php
+    /// class G { function __get($n) { return [1]; } }
+    /// $g = new G; $g->{"f\0bar"}[] = 1;
+    /// ```
+    /// ```expect
+    /// Notice: Indirect modification of overloaded property G::$f has no effect in %s on line 3
+    /// ```
     fn overloaded_write_notice(
         &mut self,
         class: ClassId,
@@ -3944,6 +3954,15 @@ impl Request {
     /// Err: Creation of dynamic property class@anonymous::$y is deprecated
     /// Exception: Cannot create dynamic property class@anonymous::$y
     /// NULL
+    /// ```
+    ///
+    /// The deprecation prints the name with `%s`, to its first NUL:
+    ///
+    /// ```php
+    /// class N {} $n = new N; $n->{"f\0bar"} = 1;
+    /// ```
+    /// ```expect
+    /// Deprecated: Creation of dynamic property N::$f is deprecated in %s on line 2
     /// ```
     pub(crate) fn dynamic_property_creation(
         &mut self,

@@ -7863,15 +7863,7 @@ fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
         found = req.constant_found(&key);
     }
     let Some((at, value, deprecated)) = found else {
-        // `%s`: the name to its first NUL, its bytes as written.
-        let written = named(code, op.op2);
-        let message = [
-            b"Undefined constant \"",
-            crate::c_number::c_str(&written),
-            b"\"",
-        ]
-        .concat();
-        let thrown = crate::api::raising::throw_error(req, "Error", &message);
+        let thrown = crate::api::raising::undefined_constant(req, &named(code, op.op2));
         return threw(req, frame, &thrown);
     };
     req.addref(&value);

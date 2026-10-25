@@ -1168,6 +1168,19 @@ pub(crate) fn non_static_method_call(
     error(req, &message)
 }
 
+/// `zend_get_constant_ex`'s and `ZEND_FETCH_CONSTANT`'s refusal where no
+/// constant answers the name, php's `Error` `Undefined constant "%s"`,
+/// the name as written to its first NUL, its bytes as they are.
+pub(crate) fn undefined_constant(req: &mut Request, name: &[u8]) -> Thrown {
+    let message = [
+        b"Undefined constant \"",
+        crate::c_number::c_str(name),
+        b"\"",
+    ]
+    .concat();
+    error(req, &message)
+}
+
 /// `zend_fetch_class`'s refusal where no class answers the name, php's
 /// `Error` naming it as written, up to its first NUL (`%s`).
 pub(crate) fn class_not_found(req: &mut Request, name: &[u8]) -> Thrown {
