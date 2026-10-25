@@ -312,8 +312,9 @@ pub(super) fn rinit_without_start(req: &mut Request) -> bool {
 }
 
 /// `php_rinit_session_globals`.
-fn rinit_globals(req: &mut Request) {
+pub(super) fn rinit_globals(req: &mut Request) {
     let state = req.state::<State>();
+    state.in_rfc1867_update = false;
     state.id = None;
     state.status = Status::None;
     state.in_save_handler = false;
@@ -348,6 +349,7 @@ pub(super) fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
 /// startup rules are the engine's to serve, over the host's values, as
 /// the engine starts (`ZEND_INI_STAGE_STARTUP`), before this runs.
 pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    req.state::<State>().activated = true;
     if !rinit_without_start(req) {
         return Ok(());
     }

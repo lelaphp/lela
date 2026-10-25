@@ -165,6 +165,14 @@ struct State {
     thrown: Option<Thrown>,
     /// `PS(rfc1867_progress)`: an upload's progress while its body is read.
     progress: Option<progress::Progress>,
+    /// `PS(in_rfc1867_update)` (8.5.12): the upload progress is reading
+    /// and writing the session, before `RINIT`, when no user code may be
+    /// served, so the serializers keep every object incomplete.
+    in_rfc1867_update: bool,
+    /// `PG(modules_activated)` as the session sees it: its `RINIT` was
+    /// served, so a body read now is `request_parse_body()`'s, which the
+    /// upload progress leaves alone.
+    activated: bool,
     /// The strings `session_set_cookie_params` made for a key its array
     /// gave twice and overwrote with the second, which php's leaves held
     /// to the request's end (`memory_get_usage()` reads them), given up
