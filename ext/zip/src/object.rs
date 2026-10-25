@@ -114,8 +114,8 @@ impl Prop {
         let status = za.as_ref().map_or(err, |za| za.error);
         let scalar = match self {
             Prop::LastId => Value::int(last_id),
-            Prop::Status => Value::int(i64::from(status.zip)),
-            Prop::StatusSys => Value::int(i64::from(status.sys)),
+            Prop::Status => Value::int(status.er.code()),
+            Prop::StatusSys => Value::int(status.sys_code()),
             Prop::NumFiles => {
                 let n = za.map_or(0, |za| za.num_entries());
                 Value::int(i64::try_from(n).unwrap_or(i64::MAX))
@@ -512,7 +512,7 @@ fn add_file(
         Ok(Some(s)) => s,
         Ok(None) => return Ok(false),
         Err(er) => {
-            za.error.set(er, 0);
+            za.error.set(er);
             return Ok(false);
         }
     };
@@ -522,7 +522,7 @@ fn add_file(
         }));
     };
     if index(idx) >= za.num_entries() {
-        za.error.set(Er::Inval, 0);
+        za.error.set(Er::Inval);
         return Ok(false);
     }
     let done = za
@@ -855,14 +855,14 @@ impl ZipArchive {
         }
         let opened = match u32::try_from(flags) {
             Ok(flags) => Archive::open(host(&resolved), flags),
-            Err(_) => Err(Status::of(Er::Inval, 0)),
+            Err(_) => Err(Status::new(Er::Inval)),
         };
         // What the old archive's callbacks threw is raised as the open
         // returns, the new archive opened as php opens it meanwhile.
         let raise = |r: Union<bool, i64>| pending.map_or(Ok(r), Err);
         let archive = match opened {
             Ok(archive) => archive,
-            Err(status) => return raise(Union::B(i64::from(status.zip))),
+            Err(status) => return raise(Union::B(status.er.code())),
         };
         let id = holder::create(req, archive);
         if let Some(i) = object.native_mut::<Intern>(req) {

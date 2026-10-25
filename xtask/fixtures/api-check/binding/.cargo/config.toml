@@ -1,0 +1,5 @@
+# The fixture's binding (#3458): ext/openssl's openssl-sys pointed at
+# openssl@4, as the workspace's own configuration points it, the path
+# relative to this fixture as cargo reads `relative = true`.
+[env]
+AARCH64_APPLE_DARWIN_OPENSSL_DIR = { value = "brew/Cellar/openssl@4/4.0.3", relative = true, force = true }

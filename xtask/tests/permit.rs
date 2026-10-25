@@ -1829,6 +1829,42 @@ fn a_verdict_an_item_run_accepted_is_captured_and_one_typed_over_it_is_not() {
     assert!(ran.stdout.contains(EXIT_AUTHORED), "{ran}");
 }
 
+/// Each verdict is captured by whichever evidence covers it, not by one
+/// kind of evidence covering every verdict of the file (#3441): the old
+/// verdict stands in a commit `witness` measured, the new one in the
+/// record `--accept --item` wrote, and neither kind covers both, so the
+/// file is permitted only where the hits are read one by one, as
+/// `Request::debug_info`'s three new fences beside the file's carried ones
+/// were not on t3260 at eee22a4e0. The control: the new verdict's status
+/// typed over by hand is a block no record names and no commit carries,
+/// and is still denied.
+#[test]
+fn a_file_of_carried_verdicts_and_one_an_item_run_accepted_is_captured_and_a_typed_one_is_not() {
+    let root = scratch("carried-and-accepted");
+    let repo = Repo::at(&root);
+    let both = fixture_text("carried-and-accepted.json");
+    let carried = both.replace("exit=3", "exit");
+    lay_down(&root, &carried.replace("exit=255", "exit"));
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the fences"]);
+    write(&root, FILE, &carried);
+    repo.git(&["commit", "-q", "-am", "the crate's accept"]);
+    witness_reading(&root);
+
+    write(&root, FILE, &both);
+    repo.git(&["add", "--", FILE]);
+    let line = pinned_at(&both, "exit=3");
+    witness::record_accepted(&root, CRATE, &[(Path::new(FILE), line)]).unwrap();
+    let out = xtask(&root, &["permit", "--diff"]).ok();
+    assert!(!out.contains("deny "), "{out}");
+
+    write(&root, FILE, &both.replace("exit=3", "exit=4"));
+    repo.git(&["add", "--", FILE]);
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(ran.stdout.contains(EXIT_AUTHORED), "{ran}");
+}
+
 /// A captured verdict outlives an edit of the prose around it and the
 /// merge that brings both to main: the branch's run over the crate
 /// captured the status and was measured over the branch's commit, a
