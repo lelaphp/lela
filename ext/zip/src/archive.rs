@@ -8,9 +8,9 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
-use crate::cdir;
+use crate::cdir::{self, Local};
 use crate::dostime::{DosTime, TORRENTZIP, Zone};
-use crate::error::{Detail, Done, Er, Failed, Status};
+use crate::error::{Done, Er, Failed, Status};
 use crate::read::{Layers, Reader, Stdio, Window};
 use crate::strings::{self, Enc, FL_ENC_RAW, FL_ENC_STRICT, FL_ENC_UTF_8, ZStr};
 
@@ -44,6 +44,65 @@ pub(crate) const EM_AES_128: u16 = 0x0101;
 pub(crate) const EM_AES_192: u16 = 0x0102;
 pub(crate) const EM_AES_256: u16 = 0x0103;
 pub(crate) const EM_UNKNOWN: u16 = 0xffff;
+
+/// What an encryption method does to an entry's data, the one place its
+/// number is read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Encryption {
+    None,
+    /// PKWARE's traditional encryption, a 12-byte header before the data.
+    Pkware,
+    /// `WinZip` AES at a strength of 1, 2 or 3, for 128, 192 and 256 bits.
+    Aes(u8),
+    /// A method libzip does not know.
+    Unknown,
+}
+
+impl Encryption {
+    pub(crate) fn of(method: u16) -> Encryption {
+        match method {
+            EM_NONE => Encryption::None,
+            EM_TRAD_PKWARE => Encryption::Pkware,
+            EM_AES_128 => Encryption::Aes(1),
+            EM_AES_192 => Encryption::Aes(2),
+            EM_AES_256 => Encryption::Aes(3),
+            _ => Encryption::Unknown,
+        }
+    }
+
+    /// The bytes the method adds to the data: PKWARE's header, or
+    /// `WinZip` AES's salt of `4 * strength + 4` bytes, its 2-byte
+    /// password check and 10-byte code; `None` for a method not known.
+    pub(crate) fn overhead(self) -> Option<u64> {
+        match self {
+            Encryption::None => Some(0),
+            Encryption::Pkware => Some(12),
+            Encryption::Aes(strength) => Some(4 * u64::from(strength) + 16),
+            Encryption::Unknown => None,
+        }
+    }
+
+    /// The method's number, `ZIP_EM_*`.
+    pub(crate) fn method(self) -> Option<u16> {
+        match self {
+            Encryption::None => Some(EM_NONE),
+            Encryption::Pkware => Some(EM_TRAD_PKWARE),
+            Encryption::Aes(1) => Some(EM_AES_128),
+            Encryption::Aes(2) => Some(EM_AES_192),
+            Encryption::Aes(3) => Some(EM_AES_256),
+            Encryption::Aes(_) | Encryption::Unknown => None,
+        }
+    }
+
+    /// The `WinZip` AES strength, for an AES method.
+    pub(crate) fn aes(self) -> Option<u8> {
+        match self {
+            Encryption::Aes(strength) => Some(strength),
+            Encryption::None | Encryption::Pkware | Encryption::Unknown => None,
+        }
+    }
+}
+
 // `ZIP_DIRENT_*`: what a changed entry changed.
 pub(crate) const D_COMP_METHOD: u32 = 0x01;
 pub(crate) const D_FILENAME: u32 = 0x02;
@@ -263,12 +322,11 @@ impl Source {
                 len,
                 ..
             } => {
-                let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
                 let f = match file {
                     Some(f) => f.try_clone(),
                     None => File::open(path),
                 }
-                .map_err(|e| Status::of(Er::Open, sys(&e)))?;
+                .map_err(|e| Status::os(Er::Open, &e))?;
                 let f = Stdio::new(f);
                 Ok(Reader::window(Window::new(f, *start, *len, false), None))
             }
@@ -286,22 +344,21 @@ impl Source {
                 len,
                 ..
             } => {
-                let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
                 let mut opened;
                 let f = if let Some(f) = file {
                     f
                 } else {
-                    opened = File::open(&*path).map_err(|e| Status::of(Er::Open, sys(&e)))?;
+                    opened = File::open(&*path).map_err(|e| Status::os(Er::Open, &e))?;
                     &mut opened
                 };
                 f.seek(SeekFrom::Start(*start))
-                    .map_err(|e| Status::of(Er::Seek, sys(&e)))?;
+                    .map_err(|e| Status::os(Er::Seek, &e))?;
                 let mut out = Vec::new();
                 f.take(*len)
                     .read_to_end(&mut out)
-                    .map_err(|e| Status::of(Er::Read, sys(&e)))?;
+                    .map_err(|e| Status::os(Er::Read, &e))?;
                 if (out.len() as u64) < *len {
-                    return Err(Status::of(Er::DataLength, 0));
+                    return Err(Status::new(Er::DataLength));
                 }
                 Ok(out)
             }
@@ -415,27 +472,26 @@ impl Archive {
     /// `errno` it failed with.
     pub(crate) fn open(path: PathBuf, flags: u32) -> Result<Archive, Status> {
         use std::os::unix::fs::PermissionsExt;
-        let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
         if flags & (RDONLY | TRUNCATE) == RDONLY | TRUNCATE {
-            return Err(Status::of(Er::Rdonly, 0));
+            return Err(Status::new(Er::Rdonly));
         }
         let meta = match std::fs::metadata(&path) {
             Ok(meta) => meta,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 if flags & CREATE == 0 {
-                    return Err(Status::of(Er::Noent, 0));
+                    return Err(Status::new(Er::Noent));
                 }
                 return Ok(Archive::new(path, flags));
             }
-            Err(e) => return Err(Status::of(Er::Read, sys(&e))),
+            Err(e) => return Err(Status::os(Er::Read, &e)),
         };
         if !meta.is_file() {
-            return Err(Status::of(Er::Opnotsupp, 0));
+            return Err(Status::new(Er::Opnotsupp));
         }
         if flags & EXCL != 0 {
-            return Err(Status::of(Er::Exists, 0));
+            return Err(Status::new(Er::Exists));
         }
-        let file = File::open(&path).map_err(|e| Status::of(Er::Open, sys(&e)))?;
+        let file = File::open(&path).map_err(|e| Status::os(Er::Open, &e))?;
         let mut za = Archive::new(path, flags);
         if flags & TRUNCATE != 0 {
             return Ok(za);
@@ -461,12 +517,12 @@ impl Archive {
     fn read_cdir(&mut self, mut file: File, len: u64, mode: u32) -> Result<(), Status> {
         let cd = cdir::find(&mut file, len, self.open_flags).map_err(|e| {
             let mut head = [0u8; 4];
-            let truncated = e.zip == Er::Nozip as i32
+            let truncated = e.er == Er::Nozip
                 && file.seek(SeekFrom::Start(0)).is_ok()
                 && file.read_exact(&mut head).is_ok()
                 && head == *b"PK\x03\x04";
             if truncated {
-                Status::of(Er::TruncatedZip, 0)
+                Status::new(Er::TruncatedZip)
             } else {
                 e
             }
@@ -562,7 +618,7 @@ impl Archive {
             let name =
                 strings::get(e.orig.as_ref().and_then(|d| d.filename.as_ref()), 0).into_owned();
             if !seen.insert(name) {
-                return Err(Status::of(Er::Exists, 0));
+                return Err(Status::new(Er::Exists));
             }
         }
         Ok(())
@@ -574,7 +630,7 @@ impl Archive {
     }
 
     pub(crate) fn fail<T>(&mut self, er: Er) -> Done<T> {
-        self.error.set(er, 0);
+        self.error.set(er);
         Err(Failed)
     }
 
@@ -1205,28 +1261,20 @@ impl Archive {
         (changed, survivors)
     }
 
-    /// The local header of entry `idx`: where its data starts, and its
-    /// extra fields with libzip's own taken out, read through the
-    /// archive's `FILE`.
-    pub(crate) fn local_header(&mut self, idx: usize) -> Result<(u64, Vec<u8>), ()> {
-        let offset = self.entries[idx].orig.as_ref().ok_or(())?.offset;
-        let data = self.data.as_mut().ok_or(())?;
-        data.through(|f| {
-            let mut head = [0u8; 30];
-            f.seek(offset);
-            if f.read(&mut head).ok() != Some(30) || head[..4] != *b"PK\x03\x04" {
-                return Err(());
-            }
-            let nlen = u64::from(u16::from_le_bytes([head[26], head[27]]));
-            let elen = usize::from(u16::from_le_bytes([head[28], head[29]]));
-            let mut extra = vec![0u8; elen];
-            f.seek(offset + 30 + nlen);
-            if f.read(&mut extra).ok() != Some(elen) {
-                return Err(());
-            }
-            Ok((offset + 30 + nlen + elen as u64, strip_internal(&extra)))
-        })
-        .ok_or(())?
+    /// `_zip_file_get_offset`: where entry `idx`'s data starts, past its
+    /// local header as `_zip_dirent_size` reads it through the archive's
+    /// `FILE`.
+    pub(crate) fn data_offset(&mut self, idx: usize) -> Result<u64, Status> {
+        let offset = self.entries[idx]
+            .orig
+            .as_ref()
+            .ok_or(Status::new(Er::Internal))?
+            .offset;
+        let data = self.data.as_mut().ok_or(Status::new(Er::Internal))?;
+        let size = data
+            .through(|f| Local::at(f, offset).size())
+            .unwrap_or(Err(Status::new(Er::Open)))?;
+        Ok(offset + size)
     }
 
     /// `_zip_read_local_ef`: the local header's extra fields, read from
@@ -1256,29 +1304,7 @@ impl Archive {
         let Some(data) = self.data.as_mut() else {
             return self.fail(Er::Internal);
         };
-        let read = data.through(|f| {
-            let mut lens = [0u8; 4];
-            f.seek(offset + 26);
-            if f.read(&mut lens)
-                .map_err(|e| Status::of(Er::Read, e.raw_os_error().unwrap_or(0)))?
-                != 4
-            {
-                return Err(Status::of(Er::Eof, 0));
-            }
-            let nlen = u64::from(u16::from_le_bytes([lens[0], lens[1]]));
-            let mut ef = vec![0u8; usize::from(u16::from_le_bytes([lens[2], lens[3]]))];
-            if !ef.is_empty() {
-                f.seek(offset + 30 + nlen);
-                if f.read(&mut ef)
-                    .map_err(|e| Status::of(Er::Read, e.raw_os_error().unwrap_or(0)))?
-                    != ef.len()
-                {
-                    return Err(Status::of(Er::Eof, 0));
-                }
-                cdir::check_extra_fields(&ef)?;
-            }
-            Ok(strip_internal(&ef))
-        });
+        let read = data.through(|f| Local::at(f, offset).extra_fields());
         let extra = match read {
             Some(Ok(extra)) => extra,
             Some(Err(status)) => {
@@ -1322,10 +1348,8 @@ impl Archive {
     /// ```
     pub(crate) fn raw_data(&mut self, idx: usize) -> Result<Vec<u8>, Status> {
         let size = self.entries[idx].orig.as_ref().map_or(0, |o| o.comp_size);
-        let (start, _) = self
-            .local_header(idx)
-            .map_err(|()| Status::bare(Detail::CdirEntryInvalid))?;
-        let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
+        let start = self.data_offset(idx)?;
+        let data = self.data.as_mut().ok_or(Status::new(Er::Internal))?;
         data.through(|f| {
             f.seek(start);
             let mut out = Vec::new();
@@ -1335,13 +1359,13 @@ impl Archive {
                 out.resize(at + n, 0);
                 match f.read(&mut out[at..]) {
                     Ok(k) if k == n => {}
-                    Ok(_) => return Err(Status::of(Er::Eof, 0)),
-                    Err(e) => return Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
+                    Ok(_) => return Err(Status::new(Er::Eof)),
+                    Err(e) => return Err(Status::os(Er::Read, &e)),
                 }
             }
             Ok(out)
         })
-        .unwrap_or(Err(Status::of(Er::Open, 0)))
+        .unwrap_or(Err(Status::new(Er::Open)))
     }
 
     /// The window on the archive's file that entry `idx`'s data is, past
@@ -1378,36 +1402,21 @@ impl Archive {
         let orig = self.entries[idx]
             .orig
             .as_ref()
-            .ok_or(Status::of(Er::Internal, 0))?;
+            .ok_or(Status::new(Er::Internal))?;
         let (offset, size) = (orig.offset, orig.comp_size);
-        let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
+        let data = self.data.as_mut().ok_or(Status::new(Er::Internal))?;
         // `_zip_source_window_new` (libzip 1.12): data past the archive's
         // size at its open is refused as the window is made.
         if size > data.size {
-            return Err(Status::of(Er::Inval, 0));
+            return Err(Status::new(Er::Inval));
         }
         let mut own = data
             .file
             .try_clone()
             .map(Stdio::new)
-            .map_err(|e| Status::of(Er::Open, e.raw_os_error().unwrap_or(0)))?;
+            .map_err(|e| Status::os(Er::Open, &e))?;
         let f = data.stdio.as_mut().unwrap_or(&mut own);
-        // `_zip_dirent_size` (libzip 1.12): the whole local header read and
-        // its magic held, where 1.11.4 read the two lengths alone.
-        let mut head = [0u8; 30];
-        f.seek(offset);
-        match f.read(&mut head) {
-            Ok(30) => {}
-            Ok(_) => return Err(Status::of(Er::Eof, 0)),
-            Err(e) => return Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
-        }
-        if head[..4] != *b"PK\x03\x04" {
-            return Err(Status::bare(Detail::CdirEntryInvalid));
-        }
-        let start = offset
-            + 30
-            + u64::from(u16::from_le_bytes([head[26], head[27]]))
-            + u64::from(u16::from_le_bytes([head[28], head[29]]));
+        let start = offset + Local::at(f, offset).size()?;
         Ok(Window::new(own, start, size, true))
     }
 
@@ -1422,7 +1431,7 @@ impl Archive {
         st: &Stat,
         check_crc: bool,
     ) -> Result<Reader, Status> {
-        let de = self.dirent(idx, flags).map_err(|e| Status::of(e, 0))?;
+        let de = self.dirent(idx, flags).map_err(Status::new)?;
         let (dostime, bitflags) = (de.last_mod.time, de.bitflags);
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
         let layers = Layers {
@@ -1467,9 +1476,9 @@ impl Archive {
     ) -> Result<(Vec<u8>, Option<Status>), Status> {
         let st = self
             .stat_index(idx, FL_UNCHANGED)
-            .map_err(|Failed| Status::of(Er::Internal, 0))?;
+            .map_err(|Failed| Status::new(Er::Internal))?;
         if st.encryption_method != EM_NONE && password.is_none() {
-            return Err(Status::of(Er::Nopasswd, 0));
+            return Err(Status::new(Er::Nopasswd));
         }
         let mut reader = self.decoder(idx, FL_UNCHANGED, password, &st, false)?;
         Ok(match &mut self.data {
@@ -1542,7 +1551,7 @@ impl Archive {
         let crc_valid = self.entries[idx].orig.as_ref().is_some_and(|o| o.crc_valid);
         let opened = if changed_data {
             let opened = self.entries[idx].source.as_ref().map(Source::reader);
-            opened.unwrap_or(Err(Status::of(Er::Internal, 0)))
+            opened.unwrap_or(Err(Status::new(Er::Internal)))
         } else if flags & FL_COMPRESSED != 0 {
             let crc = (st.comp_method == 0 && crc_valid).then_some((st.crc, st.size));
             self.window(idx).map(|w| Reader::window(w, crc))

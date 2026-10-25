@@ -11,7 +11,7 @@ use php_ext::request::{
 use php_ext::values::Owner;
 
 use crate::archive::{Archive, CREATE, FL_NOCASE};
-use crate::holder::{self, ArchiveId};
+use crate::holder::{self, ArchiveId, Hold};
 use crate::object::{basedir_refuses, expand, host};
 use crate::read::{Reader, Stdio};
 
@@ -23,7 +23,7 @@ struct ZipStream {
     path: Option<Vec<u8>>,
     /// The archive a `getStream` stream reads, one count of it held
     /// (`self->archive`).
-    archive: Option<ArchiveId>,
+    archive: Option<Hold>,
     /// The `FILE` of the archive the wrapper opened, which the stream
     /// keeps (`self->za`).
     file: Option<Stdio>,
@@ -75,8 +75,8 @@ impl StreamOps for ZipStream {
     /// int(0)
     /// ```
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        let got = match self.archive {
-            Some(id) => holder::read(req, id, &mut self.zf, buf.len()),
+        let got = match &self.archive {
+            Some(hold) => holder::read(req, hold.id, &mut self.zf, buf.len()),
             None => self.zf.read_through(buf.len(), &mut self.file),
         };
         match got {
@@ -100,8 +100,8 @@ impl StreamOps for ZipStream {
     /// `php_zip_ops_close`: the stream's count of its archive released,
     /// which closes the archive where the stream held it last.
     fn close(&mut self, req: &mut Request) {
-        if let Some(id) = self.archive.take() {
-            holder::release(req, id);
+        if let Some(hold) = self.archive.take() {
+            hold.let_go(req);
         }
     }
 
@@ -215,7 +215,7 @@ impl StreamOps for ZipStream {
 /// where `$mode` does not start with `r`.
 pub(crate) fn open_entry(
     req: &mut Request,
-    zf: Reader,
+    mut zf: Reader,
     orig: Option<(&[u8], ArchiveId)>,
     mode: &[u8],
     path: Option<Vec<u8>>,
@@ -224,16 +224,17 @@ pub(crate) fn open_entry(
     if mode.first() != Some(&b'r') {
         return Ok(None);
     }
-    let archive = orig.map(|(_, id)| id);
+    let reads_file = zf.reads_archive();
+    let id = orig.map(|(_, id)| id);
     let kind = ZipStream {
         zf,
         path: path.or_else(|| orig.map(|(name, _)| name.to_vec())),
-        archive,
+        archive: id.map(|id| Hold::new(id, reads_file)),
         file,
     };
     let stream = req.new_stream(Box::new(kind), mode)?;
-    if let Some(id) = archive {
-        holder::addref(req, id);
+    if let Some(id) = id {
+        holder::hold(req, id, reads_file);
     }
     if let Some((name, _)) = orig
         && let Err(thrown) = stream.set_orig_path(req, name)

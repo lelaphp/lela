@@ -78,7 +78,7 @@ pub(crate) fn compress(
     level: u32,
     can_store: bool,
 ) -> Result<Compressed, Status> {
-    let fail = |_| Status::of(Er::Internal, 0);
+    let fail = |_| Status::new(Er::Internal);
     let (out, bitflags, version_needed) = match method {
         8 => {
             // `zip_algorithm_deflate.c`'s `allocate`: level 0 or past 9
@@ -98,7 +98,7 @@ pub(crate) fn compress(
                 0
             };
             let Some(out) = crate::ffi::deflate(data, level.cast_signed(), mem_level) else {
-                return Err(Status::of(Er::Zlib, 0));
+                return Err(Status::new(Er::Zlib));
             };
             (out, bits, 20)
         }
@@ -133,7 +133,7 @@ pub(crate) fn compress(
             );
             (out, 0, 63)
         }
-        _ => return Err(Status::of(Er::Compnotsupp, 0)),
+        _ => return Err(Status::new(Er::Compnotsupp)),
     };
     if can_store && data.len() <= BUFSIZE && data.len() <= out.len() {
         return Ok(Compressed {
@@ -207,7 +207,7 @@ impl Keys {
 
 /// Random bytes, `zip_secure_random`.
 fn random(buf: &mut [u8]) -> Result<(), Status> {
-    getrandom::fill(buf).map_err(|_| Status::of(Er::Internal, 0))
+    getrandom::fill(buf).map_err(|_| Status::new(Er::Internal))
 }
 
 /// `zip_source_pkware_encode`: a header of eleven random bytes and the
@@ -276,7 +276,7 @@ impl WinzipAes {
         pbkdf2::pbkdf2_hmac::<sha1::Sha1>(password, salt, 1000, &mut keys);
         let (enc_key, rest) = keys.split_at(key_len);
         let (mac_key, verifier) = rest.split_at(key_len);
-        let fail = |_| Status::of(Er::Internal, 0);
+        let fail = |_| Status::new(Er::Internal);
         let cipher = match strength {
             1 => Cipher::A128(aes::Aes128::new_from_slice(enc_key).map_err(fail)?),
             2 => Cipher::A192(aes::Aes192::new_from_slice(enc_key).map_err(fail)?),
