@@ -15,8 +15,8 @@ use php_ext::request::Request;
 use php_ext::values::PhpArray;
 
 use crate::{
-    Format, Module, State, Status, absorb, bind_vars, files, headers_sent, ini, ini_bool, pending,
-    sent_error, serializers, session_array, shown, started_error, throw_error, user,
+    Format, Module, Phase, State, Status, absorb, bind_vars, files, headers_sent, ini, ini_bool,
+    pending, sent_error, serializers, session_array, shown, started_error, throw_error, user,
 };
 
 /// `PS_MAX_SID_LENGTH`.
@@ -314,7 +314,10 @@ pub(super) fn rinit_without_start(req: &mut Request) -> bool {
 /// `php_rinit_session_globals`.
 pub(super) fn rinit_globals(req: &mut Request) {
     let state = req.state::<State>();
-    state.in_rfc1867_update = false;
+    // `PS(in_rfc1867_update) = false`.
+    if state.phase == Phase::ProgressUpdate {
+        state.phase = Phase::Startup;
+    }
     state.id = None;
     state.status = Status::None;
     state.in_save_handler = false;
@@ -349,7 +352,7 @@ pub(super) fn rshutdown_globals(req: &mut Request) -> Result<(), Thrown> {
 /// startup rules are the engine's to serve, over the host's values, as
 /// the engine starts (`ZEND_INI_STAGE_STARTUP`), before this runs.
 pub(super) fn rinit(req: &mut Request) -> Result<(), Thrown> {
-    req.state::<State>().activated = true;
+    req.state::<State>().phase = Phase::Activated;
     if !rinit_without_start(req) {
         return Ok(());
     }

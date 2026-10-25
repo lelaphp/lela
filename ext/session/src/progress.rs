@@ -15,7 +15,9 @@ use php_ext::raising::Thrown;
 use php_ext::request::{Input, Request, Upload};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 
-use crate::{State, Status, absorb, ini, ini_bool, session, session_array_mut, string_value};
+use crate::{
+    Phase, State, Status, absorb, ini, ini_bool, session, session_array_mut, string_value,
+};
 
 /// `php_session_rfc1867_progress`: what one body's reading keeps.
 #[derive(Debug, Default)]
@@ -81,7 +83,7 @@ fn step(req: &mut Request, event: &Upload<'_>) -> Result<bool, Thrown> {
         return Ok(true);
     }
     // "request_parse_body(). Do not run here as it corrupts the session."
-    if req.state::<State>().activated {
+    if req.state::<State>().phase == Phase::Activated {
         return Ok(true);
     }
     match *event {
@@ -336,7 +338,7 @@ fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
 }
 
 /// What `php_session_rfc1867_update` and `php_session_rfc1867_cleanup`
-/// share since 8.5.12: `PS(in_rfc1867_update)` set while the session is
+/// share since 8.5.12: `PS(in_rfc1867_update)`, [`Phase::ProgressUpdate`], set while the session is
 /// started, `change` made to its variables and the session written and
 /// closed; a start that failed, or left the session other than active
 /// (a decode refused destroys it), ends there, with nothing written.
@@ -388,18 +390,25 @@ fn updating(
     req: &mut Request,
     change: impl FnOnce(&mut Request) -> Result<(), Thrown>,
 ) -> Result<(), Thrown> {
-    req.state::<State>().in_rfc1867_update = true;
-    let done = (|| {
-        let initialized = session::initialize(req);
-        let started = absorb(req, initialized)?.unwrap_or(false);
-        if !started || req.state::<State>().status != Status::Active {
-            return Ok(());
-        }
-        change(req)?;
-        session::flush(req, true).map(|_| ())
-    })();
-    req.state::<State>().in_rfc1867_update = false;
+    req.state::<State>().phase = Phase::ProgressUpdate;
+    let done = update_started(req, change);
+    req.state::<State>().phase = Phase::Startup;
     done
+}
+
+/// [`updating`]'s body: the session started, and where it stands
+/// active, `change` made and the session written and closed.
+fn update_started(
+    req: &mut Request,
+    change: impl FnOnce(&mut Request) -> Result<(), Thrown>,
+) -> Result<(), Thrown> {
+    let initialized = session::initialize(req);
+    let started = absorb(req, initialized)?.unwrap_or(false);
+    if !started || req.state::<State>().status != Status::Active {
+        return Ok(());
+    }
+    change(req)?;
+    session::flush(req, true).map(|_| ())
 }
 
 /// `php_check_cancel_upload`: the progress array the session holds under
