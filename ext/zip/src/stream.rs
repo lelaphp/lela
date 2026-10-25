@@ -187,22 +187,8 @@ impl StreamOps for ZipStream {
     /// ```
     fn stat(&mut self, req: &mut Request) -> Option<[i64; 13]> {
         let path = php_ext::coerce::c_str(self.path.as_deref()?);
-        let hash = path.iter().position(|b| *b == b'#')?;
-        let fragment_len = path.len() - hash;
-        let path = if path.len() >= 6 && path[..6].eq_ignore_ascii_case(b"zip://") {
-            &path[6..]
-        } else {
-            path
-        };
-        if path.len() >= MAXPATHLEN || path.len() < fragment_len {
-            return None;
-        }
-        let dirname = &path[..path.len() - fragment_len];
-        let fragment = &path[path.len() - fragment_len + 1..];
-        if basedir_refuses(req, dirname) {
-            return None;
-        }
-        let mut za = Archive::open(host(&expand(req, dirname)?), CREATE).ok()?;
+        let (dirname, fragment) = split(path)?;
+        let mut za = open_archive(req, dirname)?;
         let idx = za.name_locate(fragment, FL_NOCASE).ok()?;
         let st = za.stat_index(idx, FL_NOCASE).ok()?;
         let dir = path.last() == Some(&b'/');
@@ -258,6 +244,36 @@ pub(crate) fn open_entry(
     Ok(Some(stream))
 }
 
+/// `zip://archive#entry` taken apart as `php_stream_zip_opener` and
+/// `php_zip_ops_stat` take it: the archive's path past `zip://` and the
+/// entry's name past the `#`; `None` for a path with no `#` or one of
+/// `MAXPATHLEN` or longer.
+fn split(path: &[u8]) -> Option<(&[u8], &[u8])> {
+    let hash = path.iter().position(|b| *b == b'#')?;
+    let fragment_len = path.len() - hash;
+    let path = if path.len() >= 6 && path[..6].eq_ignore_ascii_case(b"zip://") {
+        &path[6..]
+    } else {
+        path
+    };
+    if path.len() >= MAXPATHLEN || path.len() < fragment_len {
+        return None;
+    }
+    let at = path.len() - fragment_len;
+    Some((&path[..at], &path[at + 1..]))
+}
+
+/// `zip_open(file_dirname, ZIP_CREATE, &err)` past php's `open_basedir`
+/// check. The path is resolved against the request's directory, which
+/// is where php's process stands when `zip_open` reads a relative one.
+fn open_archive(req: &mut Request, dirname: &[u8]) -> Option<Archive> {
+    if basedir_refuses(req, dirname) {
+        return None;
+    }
+    let resolved = expand(req, dirname)?;
+    Archive::open(host(&resolved), CREATE).ok()
+}
+
 /// `php_stream_zip_opener`: `zip://archive#entry`, the archive opened
 /// as `ZIP_CREATE` opens it and the entry by its exact name.
 fn open(
@@ -266,28 +282,13 @@ fn open(
     mode: &[u8],
     _opening: Opening,
 ) -> Result<Option<Owner<Stream>>, Thrown> {
-    let Some(hash) = path.iter().position(|b| *b == b'#') else {
+    let Some((dirname, fragment)) = split(path) else {
         return Ok(None);
     };
-    let orig_path = path.to_vec();
-    let fragment_len = path.len() - hash;
-    let path = if path.len() >= 6 && path[..6].eq_ignore_ascii_case(b"zip://") {
-        &path[6..]
-    } else {
-        path
-    };
-    if path.len() >= MAXPATHLEN || mode.first() != Some(&b'r') || path.len() < fragment_len {
+    if mode.first() != Some(&b'r') {
         return Ok(None);
     }
-    let dirname = &path[..path.len() - fragment_len];
-    let fragment = &path[path.len() - fragment_len + 1..];
-    if basedir_refuses(req, dirname) {
-        return Ok(None);
-    }
-    let Some(resolved) = expand(req, dirname) else {
-        return Ok(None);
-    };
-    let Ok(mut archive) = Archive::open(host(&resolved), CREATE) else {
+    let Some(mut archive) = open_archive(req, dirname) else {
         return Ok(None);
     };
     if let Some(context) = req.stream_ctx()
@@ -309,7 +310,7 @@ fn open(
         return Ok(None);
     };
     let file = archive.data.as_mut().and_then(|d| d.stdio.take());
-    open_entry(req, zf, None, mode, Some(orig_path), file)
+    open_entry(req, zf, None, mode, Some(path.to_vec()), file)
 }
 
 /// `php_stream_zip_wrapper`, `zip wrapper`: an opener and nothing else.

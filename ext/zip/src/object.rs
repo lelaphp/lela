@@ -10,9 +10,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::coerce::truthy;
-use php_ext::raising::{
-    Level, Thrown, arg_value_error, docref, throw_error, value_error, while_pending,
-};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, value_error};
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::walk;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
@@ -20,7 +18,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Valu
 use crate::archive::{self as za, Archive, Source};
 use crate::c;
 use crate::error::{Done, Er, Status};
-use crate::holder::{self, ArchiveId};
+use crate::holder::{self, ArchiveId, Callback, OnFailure};
 
 /// `ze_zip_object.last_id`, `-1` until an add.
 pub(crate) struct LastId(pub(crate) i64);
@@ -50,7 +48,7 @@ pub(crate) fn archive_id(req: &mut Request, object: PhpObject) -> Option<Archive
 /// `php_zip_object_za`: the archive the object has open.
 pub(crate) fn za(req: &mut Request, object: PhpObject) -> Option<&mut Archive> {
     let id = archive_id(req, object)?;
-    holder::get(req, id)?.za.as_deref_mut()
+    holder::archive(req, id)
 }
 
 /// `op` on the object's archive with the archive's `FILE` lent to it.
@@ -385,10 +383,15 @@ fn refresh(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// `zend_throw_error(NULL, "Already being closed")`: a close or an open
-/// from a callback the archive's close serves.
-fn already_closing(req: &mut Request) -> Thrown {
-    throw_error(req, "Error", "Already being closed")
+/// php's `close` member read: `zend_throw_error(NULL, "Already being
+/// closed")` for a close or an open from a callback the close of the
+/// object's archive serves. php reads it past `ZIP_FROM_OBJECT`, which
+/// finds the archive under its close, so it comes first here.
+fn refuse_closing(req: &mut Request, id: Option<ArchiveId>) -> Result<(), Thrown> {
+    if id.is_some_and(|id| holder::closing(req, id)) {
+        return Err(throw_error(req, "Error", "Already being closed"));
+    }
+    Ok(())
 }
 
 /// `zend_value_error("Invalid or uninitialized Zip object")`.
@@ -824,47 +827,39 @@ impl ZipArchive {
         };
         let object = this.object();
         let mut pending = None;
-        if let Some(id) = archive_id(req, object) {
-            if holder::get(req, id).is_some_and(|h| h.closing) {
-                return Err(already_closing(req));
+        let id = archive_id(req, object);
+        refuse_closing(req, id)?;
+        if let Some(id) = id
+            && let Some(closed) = holder::close(req, id, OnFailure::Keep)
+        {
+            if closed.error.is_some() {
+                let thrown = closed.thrown;
+                let text = "Empty string as source";
+                holder::diagnose(req, thrown.as_ref(), Level::Warning, text);
+                return thrown.map_or(Ok(Union::A(false)), Err);
             }
-            if let Some(mut old) = holder::get(req, id).and_then(|h| h.za.take()) {
-                let (result, thrown) = holder::close(req, id, &mut old);
-                if result.is_err() {
-                    // php keeps the archive its close failed to write.
-                    docref(req, Level::Warning, "Empty string as source");
-                    if let Some(h) = holder::get(req, id) {
-                        h.za = Some(old);
-                    }
-                    return thrown.map_or(Ok(Union::A(false)), Err);
-                }
-                drop(old);
-                if let Some(i) = object.native_mut::<Intern>(req) {
-                    i.archive = None;
-                }
-                holder::detach(req, id);
-                pending = thrown;
+            if let Some(i) = object.native_mut::<Intern>(req) {
+                i.archive = None;
             }
+            holder::release(req, id);
+            pending = closed.thrown;
         }
         if let Some(i) = object.native_mut::<Intern>(req) {
             i.filename = None;
         }
-        // What the old archive's callbacks threw is raised as the open
-        // returns, the new archive opened as php opens it meanwhile.
-        let raise = |r: Union<bool, i64>| pending.map_or(Ok(r), Err);
         let mut flags = flags;
         if flags & 0x18 == 0 && std::fs::metadata(host(&resolved)).is_ok_and(|m| m.len() == 0) {
-            docref(
-                req,
-                Level::Deprecated,
-                "Using empty file as ZipArchive is deprecated",
-            );
+            let text = "Using empty file as ZipArchive is deprecated";
+            holder::diagnose(req, pending.as_ref(), Level::Deprecated, text);
             flags |= 8;
         }
         let opened = match u32::try_from(flags) {
             Ok(flags) => Archive::open(host(&resolved), flags),
             Err(_) => Err(Status::of(Er::Inval, 0)),
         };
+        // What the old archive's callbacks threw is raised as the open
+        // returns, the new archive opened as php opens it meanwhile.
+        let raise = |r: Union<bool, i64>| pending.map_or(Ok(r), Err);
         let archive = match opened {
             Ok(archive) => archive,
             Err(status) => return raise(Union::B(i64::from(status.zip))),
@@ -974,38 +969,26 @@ impl ZipArchive {
     fn close(req: &mut Rq, this: Z) -> R<bool> {
         let object = this.object();
         let id = archive_id(req, object);
-        if let Some(id) = id
-            && holder::get(req, id).is_some_and(|h| h.closing)
-        {
-            return Err(already_closing(req));
-        }
-        let Some((id, mut za)) = id.and_then(|id| Some((id, holder::get(req, id)?.za.take()?)))
+        refuse_closing(req, id)?;
+        let Some((id, closed)) =
+            id.and_then(|id| Some((id, holder::close(req, id, OnFailure::Discard)?)))
         else {
             return Err(invalid(req));
         };
-        let (result, thrown) = holder::close(req, id, &mut za);
-        let mut err = Status::default();
-        if result.is_err() {
-            let text = za.error.text(req);
-            match &thrown {
-                Some(t) => {
-                    while_pending(req, t, |req| docref(req, Level::Warning, &text));
-                }
-                None => docref(req, Level::Warning, &text),
-            }
-            err = za.error;
+        if let Some(error) = closed.error {
+            let text = error.text(req);
+            holder::diagnose(req, closed.thrown.as_ref(), Level::Warning, &text);
         }
-        drop(za);
         req.clear_stat_cache();
         if let Some(i) = object.native_mut::<Intern>(req) {
-            i.err = err;
+            i.err = closed.error.unwrap_or_default();
             i.filename = None;
             i.archive = None;
         }
-        holder::detach(req, id);
-        match thrown {
+        holder::release(req, id);
+        match closed.thrown {
             Some(t) => Err(t),
-            None => Ok(result.is_ok()),
+            None => Ok(closed.error.is_none()),
         }
     }
 
@@ -2413,8 +2396,8 @@ impl ZipArchive {
     fn registerProgressCallback(req: &mut Rq, this: Z, rate: f64, callback: Callable) -> R<bool> {
         archive!(req, this).progress = Some(rate);
         let kept = Box::new(Owner::take(req, callback));
-        let old = match archive_id(req, this.object()).and_then(|id| holder::get(req, id)) {
-            Some(h) => h.progress.replace(kept),
+        let old = match archive_id(req, this.object()) {
+            Some(id) => holder::keep(req, id, Callback::Progress, kept),
             None => Some(kept),
         };
         if let Some(old) = old {
@@ -2445,8 +2428,8 @@ impl ZipArchive {
     fn registerCancelCallback(req: &mut Rq, this: Z, callback: Callable) -> R<bool> {
         archive!(req, this).cancel = true;
         let kept = Box::new(Owner::take(req, callback));
-        let old = match archive_id(req, this.object()).and_then(|id| holder::get(req, id)) {
-            Some(h) => h.cancel.replace(kept),
+        let old = match archive_id(req, this.object()) {
+            Some(id) => holder::keep(req, id, Callback::Cancel, kept),
             None => Some(kept),
         };
         if let Some(old) = old {

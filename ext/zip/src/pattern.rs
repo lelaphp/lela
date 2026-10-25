@@ -9,6 +9,7 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error, value
 use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
+use crate::archive::FL_OVERWRITE;
 use crate::object::{Intern, basedir_refuses, za};
 
 /// `PHP_GLOB_ONLYDIR`.
@@ -43,7 +44,7 @@ impl Default for Options {
             remove_all_path: false,
             remove_path: None,
             add_path: None,
-            flags: 8192,
+            flags: i64::from(FL_OVERWRITE),
             comp_method: -1,
             comp_flags: 0,
             enc_method: -1,
