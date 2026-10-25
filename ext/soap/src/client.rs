@@ -542,6 +542,83 @@ impl SoapClient {
     /// NULL
     /// SoapFault
     /// ```
+    ///
+    /// Since 8.5.12 a chunk's size is unsigned and its room asked for
+    /// fallibly, so a size of `FFFFFFFF` past the memory limit is refused
+    /// and the limit's fatal is raised as the call returns:
+    ///
+    /// ```php
+    /// $srv = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; $c = stream_socket_accept($s, 10); $n = 0;'
+    ///     . ' while (($l = fgets($c)) !== false && rtrim($l) !== "") if (preg_match("/^Content-Length: (\d+)/i", $l, $m)) $n = (int) $m[1];'
+    ///     . ' if ($n) fread($c, $n); fwrite($c, $argv[1]); for ($i = 0; $i < (int) $argv[3]; $i++) if (@fwrite($c, $argv[2]) === false) break; fclose($c);';
+    /// $p = proc_open([PHP_BINARY, '-n', '-r', $srv, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nFFFFFFFF\r\n", "", "0"], [1 => ['pipe', 'w']], $pipes);
+    /// $uri = 'http://' . trim(fgets($pipes[1]));
+    /// $c = new SoapClient(null, ['location' => $uri, 'uri' => 'u']);
+    /// $c->__doRequest('<E/>', $uri, 'f', SOAP_1_1);
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect process exit=255
+    ///
+    /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 4294983680 bytes) in %s on line 8
+    /// ```
+    ///
+    /// The room of a `Content-Length` is asked for fallibly since 8.5.12,
+    /// and one of `INT_MAX` is no longer refused before it:
+    ///
+    /// ```php
+    /// $srv = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; $c = stream_socket_accept($s, 10); $n = 0;'
+    ///     . ' while (($l = fgets($c)) !== false && rtrim($l) !== "") if (preg_match("/^Content-Length: (\d+)/i", $l, $m)) $n = (int) $m[1];'
+    ///     . ' if ($n) fread($c, $n); fwrite($c, $argv[1]); for ($i = 0; $i < (int) $argv[3]; $i++) if (@fwrite($c, $argv[2]) === false) break; fclose($c);';
+    /// $p = proc_open([PHP_BINARY, '-n', '-r', $srv, "HTTP/1.1 200 OK\r\nContent-Length: 2147483647\r\n\r\n", "", "0"], [1 => ['pipe', 'w']], $pipes);
+    /// $uri = 'http://' . trim(fgets($pipes[1]));
+    /// $c = new SoapClient(null, ['location' => $uri, 'uri' => 'u']);
+    /// $c->__doRequest('<E/>', $uri, 'f', SOAP_1_1);
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect process exit=255
+    ///
+    /// Fatal error: Allowed memory size of 134217728 bytes exhausted (tried to allocate 2147500032 bytes) in %s on line 8
+    /// ```
+    ///
+    /// A body read to the connection's close grows 4096 bytes at a time,
+    /// each growth after the first asked for fallibly since 8.5.12. The
+    /// figure is a huge block's growth, in place or moved as the address
+    /// space allows, so it varies between runs:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $srv = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; $c = stream_socket_accept($s, 10); $n = 0;'
+    ///     . ' while (($l = fgets($c)) !== false && rtrim($l) !== "") if (preg_match("/^Content-Length: (\d+)/i", $l, $m)) $n = (int) $m[1];'
+    ///     . ' if ($n) fread($c, $n); fwrite($c, $argv[1]); for ($i = 0; $i < (int) $argv[3]; $i++) if (@fwrite($c, $argv[2]) === false) break; fclose($c);';
+    /// $p = proc_open([PHP_BINARY, '-n', '-r', $srv, "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n", str_repeat("x", 32), "1048576"], [1 => ['pipe', 'w']], $pipes);
+    /// $uri = 'http://' . trim(fgets($pipes[1]));
+    /// $c = new SoapClient(null, ['location' => $uri, 'uri' => 'u']);
+    /// $c->__doRequest('<E/>', $uri, 'f', SOAP_1_1);
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect process exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate %d bytes) in %s on line 9
+    /// ```
+    ///
+    /// Since 8.5.12 the head stops once the memory limit was met after a
+    /// line; the figure varies as the body's does:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $srv = '$s = stream_socket_server("tcp://127.0.0.1:0"); echo stream_socket_get_name($s, false), "\n"; $c = stream_socket_accept($s, 10); $n = 0;'
+    ///     . ' while (($l = fgets($c)) !== false && rtrim($l) !== "") if (preg_match("/^Content-Length: (\d+)/i", $l, $m)) $n = (int) $m[1];'
+    ///     . ' if ($n) fread($c, $n); fwrite($c, $argv[1]); for ($i = 0; $i < (int) $argv[3]; $i++) if (@fwrite($c, $argv[2]) === false) break; fclose($c);';
+    /// $p = proc_open([PHP_BINARY, '-n', '-r', $srv, "HTTP/1.1 200 OK\r\n", "X-Pad: " . str_repeat("a", 4000) . "\r\n", "8192"], [1 => ['pipe', 'w']], $pipes);
+    /// $uri = 'http://' . trim(fgets($pipes[1]));
+    /// $c = new SoapClient(null, ['location' => $uri, 'uri' => 'u']);
+    /// $c->__doRequest('<E/>', $uri, 'f', SOAP_1_1);
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect process exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate %d bytes) in %s on line 9
+    /// ```
     #[php(tentative)]
     fn __doRequest(
         req: &mut Request,
