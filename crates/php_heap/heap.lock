@@ -54,6 +54,7 @@ ChunkCache
 ChunkCache::new
 DeclaredRows
 Direction
+DoubleText
 EmbeddedArr
 EmbeddedArr::arr
 EmbeddedArr::free_data
@@ -261,6 +262,8 @@ Intern::intern_marked
 Intern::interning
 Key
 Laziness
+LongText
+LongText::long
 Made
 Made::value
 MapPtr
@@ -274,6 +277,9 @@ MapTable::new
 Number
 Number::compare
 Number::double
+NumberText
+NumberText::as_bytes
+NumberText::as_str
 Obj
 Obj::CLASS_AT
 Obj::SLOTS_AT

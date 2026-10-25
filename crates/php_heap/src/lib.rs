@@ -81,7 +81,8 @@ pub use lend::{ecalloc, efree, emalloc, erealloc};
 pub use map::{MapPtr, MapTable};
 pub use mm::ChunkCache;
 pub use numeric::{
-    Exponent, Number, double_to_string, gcvt, numeric_prefix, power, shift_left, shift_right,
+    DoubleText, Exponent, LongText, Number, NumberText, double_to_string, gcvt, numeric_prefix,
+    power, shift_left, shift_right,
 };
 pub use object::{Laziness, Obj, ObjectId};
 pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};

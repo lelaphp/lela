@@ -2603,9 +2603,11 @@ fn constant_text(constants: &[ConstDecl], name: &[u8], precision: i32) -> Option
         ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
         ConstExpr::Bool(true) => Some(b"1".to_vec()),
         ConstExpr::Long { value: n, .. } => Some(n.to_string().into_bytes()),
-        ConstExpr::Double(d) => {
-            Some(php_heap::double_to_string(*d, precision, php_heap::Exponent::Upper).into_bytes())
-        }
+        ConstExpr::Double(d) => Some(
+            php_heap::double_to_string(*d, precision, php_heap::Exponent::Upper)
+                .as_bytes()
+                .to_vec(),
+        ),
         ConstExpr::Str(s) => Some(s.to_vec()),
         _ => None,
     }
@@ -2631,7 +2633,9 @@ impl crate::ini_syntax::Host for Configure<'_> {
     }
 
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
-        Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper).into_bytes())
+        Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper)
+            .as_bytes()
+            .to_vec())
     }
 
     fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {
@@ -2657,7 +2661,9 @@ impl crate::ini_syntax::Host for Startup<'_> {
     /// `zend_double_to_str` before any ini entry is registered, when
     /// `EG(precision)` is still zero and `zend_gcvt` is handed one digit.
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
-        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper).into_bytes())
+        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper)
+            .as_bytes()
+            .to_vec())
     }
 
     fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {

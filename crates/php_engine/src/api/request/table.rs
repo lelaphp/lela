@@ -578,7 +578,7 @@ impl Request {
             for (key, value) in rows {
                 let key = match key {
                     Key::Int(n) => {
-                        PhpString::new(self, crate::c_number::Long::of(n).as_bytes())?.into_key()
+                        PhpString::new(self, php_heap::LongText::long(n).as_bytes())?.into_key()
                     }
                     Key::Str(_) => Owner::take(self, key),
                 };

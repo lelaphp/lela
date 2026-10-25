@@ -8,7 +8,7 @@
 //! [`QUICK_MAX`] digits, the exact division of a small integer, and the
 //! big-integer quotients otherwise, with Steele and White's stopping rule
 //! for the shortest digits. The digits are written once, into the
-//! caller's buffer, with no text formatted and read back.
+//! caller's [`DoubleText`], with no text formatted and read back.
 //!
 //! php keeps its big integers on a free list every thread shares; here each is
 //! a fixed array on the stack, [`WORDS`] words, which no double's
@@ -24,6 +24,8 @@
     clippy::cast_possible_wrap,
     reason = "zend_dtoa's own conversions between its word, long and int types"
 )]
+
+use super::DoubleText;
 
 /// Which digits `zend_dtoa` is asked for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,19 +336,19 @@ fn dshift(s: &Big, p2: i32) -> i32 {
 /// The `bump_up` and `roundoff` labels: add one to the last digit
 /// written past `s0`, a string of nines carrying into the digit before it,
 /// and all nines becoming a one with the point moved, `k++`.
-fn round_up(s: &mut Vec<u8>, s0: usize, k: &mut i32) {
+fn round_up(s: &mut DoubleText, s0: usize, k: &mut i32) {
     loop {
-        let first = s.len() == s0 + 1;
-        let Some(digit) = s.last_mut() else {
+        let first = s.end() == s0 + 1;
+        let Some(digit) = s.last() else {
             return;
         };
-        if *digit != b'9' {
-            *digit += 1;
+        if digit != b'9' {
+            s.set_last(digit + 1);
             return;
         }
         if first {
             *k += 1;
-            *digit = b'1';
+            s.set_last(b'1');
             return;
         }
         s.pop();
@@ -355,15 +357,15 @@ fn round_up(s: &mut Vec<u8>, s0: usize, k: &mut i32) {
 
 /// The `round_9_up` label: a nine that rounds up is written and carried
 /// into the digits before it; the answer is the point it leaves.
-fn round_nine_up(s: &mut Vec<u8>, s0: usize, mut k: i32) -> i32 {
+fn round_nine_up(s: &mut DoubleText, s0: usize, mut k: i32) -> i32 {
     s.push(b'9');
     round_up(s, s0, &mut k);
     k + 1
 }
 
 /// The trailing zeros `zend_dtoa` suppresses, past `s0`.
-fn trim_zeros(s: &mut Vec<u8>, s0: usize) {
-    while s.len() > s0 + 1 && s.last() == Some(&b'0') {
+fn trim_zeros(s: &mut DoubleText, s0: usize) {
+    while s.end() > s0 + 1 && s.last() == Some(b'0') {
         s.pop();
     }
 }
@@ -381,12 +383,12 @@ fn trim_zeros(s: &mut Vec<u8>, s0: usize) {
     reason = "zend_dtoa as php writes it: its names, its one body, its constants to the digits it \
               spells them with, and its exact comparisons of doubles it knows to be exact"
 )]
-pub(super) fn dtoa(d: f64, asked: Digits, s: &mut Vec<u8>) -> i32 {
+pub(super) fn dtoa(d: f64, asked: Digits, s: &mut DoubleText) -> i32 {
     if d == 0.0 {
         s.push(b'0');
         return 1;
     }
-    let s0 = s.len();
+    let s0 = s.end();
     let bits = d.to_bits();
     let word0 = (bits >> 32) as u32;
     let word1 = bits as u32;
@@ -762,9 +764,9 @@ mod tests {
                 &[-1, 0, 1, 2, 3, 6, 14, 15, 16, 17, 18, 25, 40]
             };
             for &ndigit in counts {
-                let mut out = Vec::new();
+                let mut out = DoubleText::at(0);
                 let point = dtoa(value, Digits::at(ndigit), &mut out);
-                let mut digits = String::from_utf8(out).unwrap();
+                let mut digits = out.as_str().to_owned();
                 while digits.len() > 1 && digits.ends_with('0') {
                     digits.pop();
                 }
@@ -793,9 +795,9 @@ mod tests {
             &[5e-324, 2.225_073_858_507_201e-308, f64::MAX]
         };
         for &value in widest {
-            let mut out = Vec::new();
+            let mut out = DoubleText::at(0);
             let point = dtoa(value, Digits::Significant(800), &mut out);
-            let digits = String::from_utf8(out).unwrap();
+            let digits = out.as_str().to_owned();
             assert_eq!((digits, point), expansion(value, 800), "{value:e} at 800");
         }
     }

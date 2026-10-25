@@ -60,7 +60,7 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
         // `zend_long_to_str` and `zend_double_to_str` mark what they
         // make valid UTF-8, the digits being ASCII.
         ValueRef::Int(n) => req
-            .string(crate::c_number::Long::of(n).as_bytes())
+            .string(php_heap::LongText::long(n).as_bytes())
             .inspect(PhpString::mark_valid_utf8),
         ValueRef::Float(f) => {
             // `zend_double_to_str`: the text, then the warning php raises
@@ -5735,8 +5735,8 @@ fn dval_to_lval_cap(d: f64) -> i64 {
 /// A double as php's `%H` renders it in a message: `zend_gcvt` at the
 /// shortest digits, which is [`double_to_string`] under
 /// `serialize_precision`'s -1.
-fn rendered(d: f64) -> String {
-    String::from_utf8_lossy(double_to_string(d, -1, Exponent::Upper).as_bytes()).into_owned()
+fn rendered(d: f64) -> php_heap::DoubleText {
+    double_to_string(d, -1, Exponent::Upper)
 }
 
 /// `ZEND_DOUBLE_FITS_LONG` on a 64-bit long: `(double) ZEND_LONG_MAX`

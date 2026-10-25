@@ -13,6 +13,9 @@
 use std::cmp::Ordering;
 
 mod dtoa;
+mod text;
+
+pub use text::{DoubleText, LongText, NumberText};
 
 /// One operand of php's arithmetic: `IS_LONG` or `IS_DOUBLE`, the two
 /// types `add_function` and its kin switch on, and the two a numeric
@@ -236,7 +239,9 @@ impl Exponent {
 /// when it is not negative, and the shortest text that reads back as the
 /// same double when it is, which is what `var_export` at its
 /// `serialize_precision = -1` asks for, with the exponent character the
-/// caller passes, as php's callers each pass their own.
+/// caller passes, as php's callers each pass their own. The text is laid
+/// on the stack, as php's `char buf[ZEND_DOUBLE_MAX_LENGTH]` is
+/// ([`DoubleText`]), for the caller to copy where it goes.
 ///
 /// ```php
 /// echo 2.5, "|", 1.0, "|", 0.1 + 0.2, "|", 1e25, "|", 0.00001, "|", 1/3, "|", -0.0, "|", INF, "|", -INF, "|", 5e-324, "|", 0.001;
@@ -314,7 +319,7 @@ impl Exponent {
 /// [0]
 /// ```
 #[must_use]
-pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> String {
+pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> DoubleText {
     gcvt(value, if precision == 0 { 1 } else { precision }, exponent)
 }
 
@@ -409,73 +414,74 @@ pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> Strin
 /// 1.00E+3 1.00E+4 2.00E+3
 /// ```
 #[must_use]
-pub fn gcvt(value: f64, ndigit: i32, exponent: Exponent) -> String {
+pub fn gcvt(value: f64, ndigit: i32, exponent: Exponent) -> DoubleText {
     // `zend_gcvt` asks `zend_dtoa` for the shortest digits when `ndigit`
     // is negative, and reads `ndigit` as 17 for the form it then chooses,
     // whatever those digits came to.
     let form_ndigit = if ndigit < 0 { 17 } else { ndigit };
     if !value.is_finite() {
-        let word = if value.is_nan() {
-            "NAN"
+        let word: &[u8] = if value.is_nan() {
+            b"NAN"
         } else if value > 0.0 {
-            "INF"
+            b"INF"
         } else {
-            "-INF"
+            b"-INF"
         };
         let kept = usize::try_from(form_ndigit).unwrap_or(0).min(word.len());
-        return word[..kept].to_owned();
+        return DoubleText::of(&word[..kept]);
     }
-    // A sign, seventeen digits, the point and an exponent such as `E-308`:
-    // what every shortest form and every default precision writes.
-    let mut out = Vec::with_capacity(24);
-    if value.is_sign_negative() {
-        out.push(b'-');
-    }
-    let start = out.len();
-    let point = dtoa::dtoa(value.abs(), dtoa::Digits::at(ndigit), &mut out);
-    let digits = out.len() - start;
+    // The digits are written after room for what goes before them: the
+    // sign, and `0.` with three zeros, the most the fixed form puts before
+    // its first digit. Each form then lays its point and zeros where the
+    // digits stand, as `zend_gcvt` copies them into its `buf`.
+    let mut text = DoubleText::at(6);
+    let point = dtoa::dtoa(value.abs(), dtoa::Digits::at(ndigit), &mut text);
+    let digits = text.len();
     if (point >= 0 && point > form_ndigit) || point < -3 {
         // E-style: one digit, the point, the rest or a zero, the
         // exponent character, and the exponent with its sign and no
         // padding.
-        out.insert(start + 1, b'.');
+        text.open_point(1);
         if digits == 1 {
-            out.push(b'0');
+            text.push(b'0');
         }
-        out.push(exponent.byte());
+        text.push(exponent.byte());
         let power = point - 1;
-        out.push(if power < 0 { b'-' } else { b'+' });
+        text.push(if power < 0 { b'-' } else { b'+' });
         let power = power.unsigned_abs();
         let mut place = 1;
         while place * 10 <= power {
             place *= 10;
         }
         while place > 0 {
-            out.push(b'0' + u8::try_from(power / place % 10).unwrap_or(0));
+            text.push(b'0' + u8::try_from(power / place % 10).unwrap_or(0));
             place /= 10;
         }
     } else if point < 0 {
         // A point before every digit, with a zero before it.
-        let zeros = usize::try_from(point.unsigned_abs()).unwrap_or(0);
-        out.splice(
-            start..start,
-            [b'0', b'.']
-                .into_iter()
-                .chain(std::iter::repeat_n(b'0', zeros)),
-        );
+        for _ in point..0 {
+            text.push_front(b'0');
+        }
+        text.push_front(b'.');
+        text.push_front(b'0');
     } else {
         // The point among the digits, or past them, padded with zeros.
         let at = usize::try_from(point).unwrap_or(0);
         if at >= digits {
-            out.resize(start + at, b'0');
+            for _ in digits..at {
+                text.push(b'0');
+            }
         } else if at == 0 {
-            out.splice(start..start, [b'0', b'.']);
+            text.push_front(b'.');
+            text.push_front(b'0');
         } else {
-            out.insert(start + at, b'.');
+            text.open_point(at);
         }
     }
-    // Every byte written is ASCII.
-    String::from_utf8(out).unwrap_or_default()
+    if value.is_sign_negative() {
+        text.push_front(b'-');
+    }
+    text
 }
 
 /// `pow_function_base`'s long arm for an exponent that is not negative

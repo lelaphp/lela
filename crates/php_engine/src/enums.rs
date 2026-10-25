@@ -192,7 +192,7 @@ fn backing_key(req: &mut Request, given: &Value, backing: EnumBacking) -> Result
     };
     if let Some(n) = long {
         return Ok(Value::string(
-            req.string(crate::c_number::Long::of(n).as_bytes())?,
+            req.string(php_heap::LongText::long(n).as_bytes())?,
         ));
     }
     req.addref(given);

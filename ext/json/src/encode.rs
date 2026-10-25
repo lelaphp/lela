@@ -197,11 +197,12 @@ fn encode_double(
     options: i64,
     precision: i32,
 ) -> Result<(), Thrown> {
-    let mut text = gcvt(value, precision, Exponent::Lower);
+    let text = gcvt(value, precision, Exponent::Lower);
+    buf.append(req, text.as_bytes())?;
     if options & JSON_PRESERVE_ZERO_FRACTION != 0 && !text.contains('.') {
-        text.push_str(".0");
+        buf.append(req, b".0")?;
     }
-    buf.append(req, text.as_bytes())
+    Ok(())
 }
 
 /// The `null` written in a failed value's place under
