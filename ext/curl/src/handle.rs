@@ -425,10 +425,12 @@ pub(crate) fn easy_of(req: &mut Request, object: PhpObject) -> Result<EasyId, Th
 /// `curl_copy_handle` returns too.
 fn copied(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let copy = made(req, b"CurlHandle")?;
-    let ce = Throwables::of(req)?;
     let failed = |req: &mut Request, copy: Owner<PhpObject>| {
         copy.give_up(req);
-        throw(req, ce.exception, "Failed to clone CurlHandle")
+        match Throwables::of(req) {
+            Ok(ce) => throw(req, ce.exception, "Failed to clone CurlHandle"),
+            Err(fatal) => fatal,
+        }
     };
     let source = match easy_of(req, object) {
         Ok(source) => source,

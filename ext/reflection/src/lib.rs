@@ -4620,20 +4620,22 @@ impl ObjectHandlers for ReflectorHandlers {
         name: Owner<PhpString>,
         value: Owner<Value>,
     ) -> Result<(), Thrown> {
-        let ce = crate::throwables::Throwables::of(req)?;
         let held = name.as_bytes().to_vec();
         if read_only(req, object, &held) {
             value.give_up(req);
             name.give_up(req);
+            let ce = crate::throwables::Throwables::of(req)?;
             let class = class_name_of(req, object.class());
             return Err(throw_exception_ex(
                 req,
                 ce.reflection_exception,
-                &format!(
-                    "Cannot set read-only property {}::${}",
-                    String::from_utf8_lossy(&class),
-                    String::from_utf8_lossy(&held)
-                ),
+                &[
+                    &b"Cannot set read-only property "[..],
+                    &class,
+                    b"::$",
+                    &held,
+                ]
+                .concat(),
             ));
         }
         Std.write_property(req, object, name, value)

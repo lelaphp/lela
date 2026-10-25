@@ -1105,8 +1105,10 @@ fn clone_context(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject
     // `CLONE` handler frees the object php's clone returns.
     let copy = new_object(req, object.class())?;
     let Some((Some(algo), Some(state), flags, key)) = forked else {
-        let ce = Throwables::of(req)?;
-        let thrown = throw(req, ce.value_error, "Cannot clone a finalized HashContext");
+        let thrown = match Throwables::of(req) {
+            Ok(ce) => throw(req, ce.value_error, "Cannot clone a finalized HashContext"),
+            Err(fatal) => fatal,
+        };
         copy.give_up(req);
         return Err(thrown);
     };
