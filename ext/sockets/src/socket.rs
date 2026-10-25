@@ -360,7 +360,8 @@ pub(crate) fn new_socket(req: &mut Request, sock: Sock) -> Result<Owner<Instance
 pub(crate) fn made(req: &mut Request, class: &[u8]) -> Result<Owner<PhpObject>, Thrown> {
     let Some(id) = lookup_class(req, class)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(class));
-        return Err(throw_error(req, "Error", &text));
+        let ce = crate::throwables::Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, &text));
     };
     new_object(req, id)
 }
@@ -386,7 +387,11 @@ pub(crate) fn valid_at(
 /// `ENSURE_SOCKET_VALID`'s `Error` for the socket at argument
 /// `position`.
 pub(crate) fn closed(req: &mut Request, position: u32) -> Thrown {
-    argument_error(req, "Error", position, "has already been closed")
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    argument_error(req, ce.error, position, "has already been closed")
 }
 
 /// [`valid_at`] for the first argument, where every native but

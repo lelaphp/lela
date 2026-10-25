@@ -84,12 +84,13 @@ pub(super) fn new_lazy(
     initializer: &Callable,
     options: i64,
 ) -> Result<Owner<PhpObject>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let class = this_class(req, this)?;
     held_options(req, 2, options)?;
     if options & SKIP_DESTRUCTOR != 0 {
         return Err(argument_error(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             2,
             "does not accept ReflectionClass::SKIP_DESTRUCTOR",
         ));
@@ -110,13 +111,14 @@ pub(super) fn reset_as_lazy(
     initializer: &Callable,
     options: i64,
 ) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let class = this_class(req, this)?;
     let object = object_of(req, object, class, 1)?;
     held_options(req, 3, options)?;
     if object.is_lazy() {
         return Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             "Object is already lazy",
         ));
     }
@@ -129,12 +131,13 @@ pub(super) fn reset_as_lazy(
 /// `$options` held to `ZEND_LAZY_OBJECT_USER_MASK`, the argument at
 /// `position`.
 fn held_options(req: &mut Request, position: u32, options: i64) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if options & !(SKIP_INITIALIZATION_ON_SERIALIZE | SKIP_DESTRUCTOR) == 0 {
         return Ok(());
     }
     Err(argument_error(
         req,
-        "ReflectionException",
+        ce.reflection_exception,
         position,
         "contains invalid flags",
     ))
@@ -150,12 +153,13 @@ pub(super) fn lazy_compatible(
     object: PhpObject,
     method: &str,
 ) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let shown = String::from_utf8_lossy(name).into_owned();
     let Some((class, declared)) = prop else {
         let of = String::from_utf8_lossy(&class_name_of(req, asked)).into_owned();
         return Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             &format!("Can not use {method} on dynamic property {of}::${shown}"),
         ));
     };
@@ -164,7 +168,7 @@ pub(super) fn lazy_compatible(
         let of = String::from_utf8_lossy(&class_name_of(req, class)).into_owned();
         return Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             &format!("Can not use {method} on static property {of}::${shown}"),
         ));
     }
@@ -173,7 +177,7 @@ pub(super) fn lazy_compatible(
         let of = String::from_utf8_lossy(&class_name_of(req, class)).into_owned();
         return Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             &format!("Can not use {method} on virtual property {of}::${shown}"),
         ));
     }
@@ -187,7 +191,7 @@ pub(super) fn lazy_compatible(
         let of = String::from_utf8_lossy(&class_name_of(req, object.class())).into_owned();
         return Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             &format!("Can not use {method} on internal class {of}"),
         ));
     }

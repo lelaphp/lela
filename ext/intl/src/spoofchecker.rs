@@ -62,6 +62,7 @@ fn with<T>(
     object: PhpObject,
     f: impl FnOnce(&mut Checker, Option<&mut CheckResult>) -> T,
 ) -> Answer<T> {
+    let ce = crate::throwables::Throwables::of(req)?;
     match object.native_mut::<SpoofObject>(req) {
         Some(SpoofObject {
             uspoof: Some(checker),
@@ -69,7 +70,7 @@ fn with<T>(
         }) => Ok(f(checker, result.as_mut())),
         _ => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed Spoofchecker",
         )),
     }
@@ -105,6 +106,7 @@ impl ObjectHandlers for Handlers {
 /// `spoofchecker_clone_obj`: `uspoof_clone` of the checker, its
 /// `USpoofCheckResult` left behind, or php's `Error` once the copy is made.
 fn clone_checker(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject>> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let mut status = Code::ZERO;
     let copy = object
         .native::<SpoofObject>(req)
@@ -124,7 +126,7 @@ fn clone_checker(req: &mut Request, object: PhpObject) -> Answer<Owner<PhpObject
         return Ok(new);
     };
     new.give_up(req);
-    Err(throw_error(req, "Error", refusal))
+    Err(throw_error(req, ce.error, refusal))
 }
 
 /// `class Spoofchecker`: ICU's spoof checker, which tells whether a
@@ -212,18 +214,19 @@ impl Spoofchecker {
     /// `USpoofCheckResult` beside it; php's `IntlException` where ICU opened none.
     #[php(before_args = error::reset)]
     fn __construct(req: &mut Request, this: This<Self>) -> Answer<()> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let object = this.object();
         if object
             .native::<SpoofObject>(req)
             .is_some_and(|o| o.uspoof.is_some())
         {
             let message = "Spoofchecker object is already constructed";
-            return Err(throw_error(req, "Error", message));
+            return Err(throw_error(req, ce.error, message));
         }
         let mut status = Code::ZERO;
         let Some(mut checker) = Checker::open(&mut status) else {
             let message = "Spoofchecker::__construct(): unable to open ICU Spoof Checker";
-            return Err(throw(req, "IntlException", message));
+            return Err(throw(req, ce.intl_exception, message));
         };
         checker.set_restriction_level(crate::truncated(Spoofchecker::HIGHLY_RESTRICTIVE));
         let result = CheckResult::open(&mut status);
@@ -324,6 +327,7 @@ impl Spoofchecker {
         pattern: PhpString,
         #[php(default = 0)] patternOptions: i64,
     ) -> Answer<()> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let object = this.object();
         constructed(req, object)?;
         let pattern = pattern.as_bytes();
@@ -343,7 +347,7 @@ impl Spoofchecker {
                     code.0,
                     code.name()
                 );
-                return Err(argument_error(req, "ValueError", 1, &message));
+                return Err(argument_error(req, ce.value_error, 1, &message));
             }
         };
         if !PATTERN_OPTIONS.contains(&patternOptions) {
@@ -352,7 +356,7 @@ impl Spoofchecker {
         }
         let mut status = Code::ZERO;
         let Some(mut set) = Set::empty() else {
-            return Err(throw_error(req, "Error", "Out of memory opening a USet"));
+            return Err(throw_error(req, ce.error, "Out of memory opening a USet"));
         };
         let options = u32::try_from(patternOptions).unwrap_or(0);
         set.apply_pattern(&units, options, &mut status);

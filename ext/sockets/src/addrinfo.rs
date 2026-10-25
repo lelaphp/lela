@@ -184,7 +184,8 @@ fn socket_addrinfo_lookup(
     #[php(default = [])] hints: PhpArray,
 ) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
     if !hints.is_empty() && hints.is_list() {
-        return Err(argument_error(req, "ValueError", 3, HINT_KEYS));
+        let ce = crate::throwables::Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 3, HINT_KEYS));
     }
     let want = match hints_wanted(req, hints) {
         Ok(want) => want,
@@ -261,21 +262,25 @@ enum Refused {
 impl Refused {
     /// php's refusal of argument 3.
     fn raise(self, req: &mut Request) -> Thrown {
+        let ce = match crate::throwables::Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
         match self {
-            Refused::Keys => argument_error(req, "ValueError", 3, HINT_KEYS),
+            Refused::Keys => argument_error(req, ce.value_error, 3, HINT_KEYS),
             Refused::NotInt { name, given } => {
                 let tail = format!("\"{name}\" key must be of type int, {given} given");
-                argument_error(req, "TypeError", 3, &tail)
+                argument_error(req, ce.type_error, 3, &tail)
             }
             Refused::Family => argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 3,
                 "\"ai_family\" key must be AF_INET or AF_INET6",
             ),
             Refused::Range { name } => {
                 let tail = format!("\"{name}\" key must be between 0 and {}", i32::MAX);
-                argument_error(req, "ValueError", 3, &tail)
+                argument_error(req, ce.value_error, 3, &tail)
             }
         }
     }

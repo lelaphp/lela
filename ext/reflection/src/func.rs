@@ -65,6 +65,7 @@ fn this_method(
     req: &mut Request,
     this: PhpObject,
 ) -> Result<(ClassId, MethodDecl, ClassId), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if let Some(held) = kept_method(req, this)
         && let Some(method) = super::LinkedMethod::of_held(req, held)
     {
@@ -79,7 +80,7 @@ fn this_method(
     else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Typed property ReflectionMethod::$class must not be accessed before initialization",
         ));
     };
@@ -92,7 +93,7 @@ fn this_method(
         let named = class_name_of(req, class);
         return Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             &format!(
                 "Method {}::{}() does not exist",
                 String::from_utf8_lossy(&named),
@@ -300,10 +301,14 @@ fn invoke_method(
 
 /// php's `ReflectionException` for a call that named no callee.
 fn invocation_failed(req: &mut Request, function: &FunctionRef) -> Thrown {
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     let what = invocation_of(req, function);
     throw_exception_ex(
         req,
-        "ReflectionException",
+        ce.reflection_exception,
         &format!("Invocation of {what} failed"),
     )
 }
@@ -348,6 +353,7 @@ fn receiver(
     scope: ClassId,
     given: Raw<Option<PhpObject>>,
 ) -> Result<Option<PhpObject>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let given = given.hold(req)?;
     if !decl.is_instance {
         return Ok(None);
@@ -356,7 +362,7 @@ fn receiver(
         let class = class_name_of(req, scope);
         return Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             &format!(
                 "Trying to invoke non static method {}::{}() without an object",
                 String::from_utf8_lossy(&class),
@@ -367,7 +373,7 @@ fn receiver(
     if !object.instance_of(req, scope) {
         return Err(throw(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             "Given object is not an instance of the class this method was declared in",
         ));
     }
@@ -377,13 +383,14 @@ fn receiver(
 /// php's first refusal in `reflection_method_invoke`, before the
 /// parameters are read at all: an abstract method has no body to enter.
 fn abstract_refused(req: &mut Request, decl: &MethodDecl, scope: ClassId) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if !decl.is_abstract {
         return Ok(());
     }
     let class = class_name_of(req, scope);
     Err(throw_exception_ex(
         req,
-        "ReflectionException",
+        ce.reflection_exception,
         &format!(
             "Trying to invoke abstract method {}::{}()",
             String::from_utf8_lossy(&class),
@@ -421,9 +428,10 @@ impl ReflectionFunctionAbstract {
     /// ```
     #[php(private, arity = manual)]
     fn __clone(req: &mut Request, _: This<Self>) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             "Cannot clone object using __clone()",
         ))
     }
@@ -1430,6 +1438,7 @@ impl ReflectionFunction {
         this: This<Self>,
         function: Union<Instance<crate::Closure>, PhpString>,
     ) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let name = match function {
             Union::A(closure) => {
                 let object = closure.object();
@@ -1452,7 +1461,7 @@ impl ReflectionFunction {
         let Some(function) = php_ext::call::fetch_function(req, &name)? else {
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Function {}() does not exist",
                     String::from_utf8_lossy(&name)
@@ -1485,6 +1494,7 @@ impl ReflectionFunction {
     /// }
     /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let name = this_name(req, this.object(), "ReflectionFunction")?;
         if let Some(closure) = kept_closure(req, this.object()) {
             let text = closure_string(req, closure, "")?;
@@ -1493,7 +1503,7 @@ impl ReflectionFunction {
         let Some(function) = lookup_function(req, &name) else {
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Function {}() does not exist",
                     String::from_utf8_lossy(&name)
@@ -1656,12 +1666,13 @@ fn fake_closure(
 /// The object a `ReflectionGenerator` or a `ReflectionFiber` keeps,
 /// `intern->obj`, and its execution where it stands.
 fn kept_execution(req: &mut Request, this: PhpObject) -> Result<(PhpObject, Execution), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let execution =
         kept_object(req, this).and_then(|kept| Some((kept, req.frames_mut().execution(kept)?)));
     execution.ok_or_else(|| {
         throw_error(
             req,
-            "Error",
+            ce.error,
             "Internal error: Failed to retrieve the reflection object",
         )
     })
@@ -1673,11 +1684,12 @@ fn standing_generator(
     req: &mut Request,
     this: PhpObject,
 ) -> Result<(PhpObject, Execution), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let (kept, execution) = kept_execution(req, this)?;
     if execution.executing.is_none() {
         return Err(throw(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             "Cannot fetch information from a closed Generator",
         ));
     }
@@ -1687,11 +1699,12 @@ fn standing_generator(
 /// `REFLECTION_CHECK_VALID_FIBER`: the execution of a fiber that is
 /// running or suspended, and php's `Error` for one not started or dead.
 fn standing_fiber(req: &mut Request, this: PhpObject) -> Result<(PhpObject, Execution), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let (kept, execution) = kept_execution(req, this)?;
     if execution.executing.is_none() {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot fetch information from a fiber that has not been started or is terminated",
         ));
     }
@@ -2095,6 +2108,7 @@ impl ReflectionMethod {
         objectOrMethod: Raw<Union<PhpObject, PhpString>>,
         #[php(default = null)] method: Raw<Option<PhpString>>,
     ) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let count = req.frames().argument_count();
         if count == 0 {
             return Err(arg_count_error(req, "at least 1 argument, 0 given"));
@@ -2115,7 +2129,7 @@ impl ReflectionMethod {
             (Union::A(_), None) => {
                 return Err(argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     2,
                     "cannot be null when argument #1 ($objectOrMethod) is an object",
                 ));
@@ -2126,7 +2140,7 @@ impl ReflectionMethod {
                 let Some(at) = given.windows(2).position(|pair| pair == b"::") else {
                     return Err(argument_error(
                         req,
-                        "ReflectionException",
+                        ce.reflection_exception,
                         1,
                         "must be a valid method name",
                     ));
@@ -2150,7 +2164,7 @@ impl ReflectionMethod {
             let class = class_name_of(req, class);
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Method {}::{}() does not exist",
                     String::from_utf8_lossy(&class),
@@ -2199,11 +2213,12 @@ impl ReflectionMethod {
     ///   thrown in %s on line 2
     /// ```
     fn createFromMethodName(req: &mut Request, method: PhpString) -> Result<Owner<Static>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let given = method.as_bytes();
         let Some(at) = given.windows(2).position(|pair| pair == b"::") else {
             return Err(argument_error(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 1,
                 "must be a valid method name",
             ));
@@ -2215,7 +2230,7 @@ impl ReflectionMethod {
             let named = class_name_of(req, class);
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Method {}::{}() does not exist",
                     String::from_utf8_lossy(&named),
@@ -2321,6 +2336,7 @@ impl ReflectionMethod {
     /// }
     /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let name = this_name(req, this.object(), "ReflectionMethod")?;
         let Some(class) = this
             .object()
@@ -2329,7 +2345,7 @@ impl ReflectionMethod {
         else {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Typed property ReflectionMethod::$class must not be accessed before initialization",
             ));
         };
@@ -2350,7 +2366,7 @@ impl ReflectionMethod {
             let class = class_name_of(req, class);
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Method {}::{}() does not exist",
                     String::from_utf8_lossy(&class),
@@ -2497,6 +2513,7 @@ impl ReflectionMethod {
         this: This<Self>,
         #[php(default = null)] object: Option<PhpObject>,
     ) -> Result<Owner<Instance<crate::Closure>>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let (_, decl, scope) = this_method(req, this.object())?;
         let name = decl.function.name.clone();
         if !decl.is_instance {
@@ -2505,7 +2522,7 @@ impl ReflectionMethod {
         let Some(object) = object else {
             return Err(argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 1,
                 "cannot be null for non-static methods",
             ));
@@ -2513,7 +2530,7 @@ impl ReflectionMethod {
         if !object.instance_of(req, scope) {
             return Err(throw(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 "Given object is not an instance of the class this method was declared in",
             ));
         }
@@ -2710,13 +2727,14 @@ impl ReflectionMethod {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Owner<Instance<ReflectionMethod>>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let name = this_name(req, this.object(), "ReflectionMethod")?;
         let Some(prototype) = prototype_of(req, this.object(), &name)? else {
             let (class, _, _) = this_method(req, this.object())?;
             let class = class_name_of(req, class);
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Method {}::{} does not have a prototype",
                     String::from_utf8_lossy(&class),
@@ -2890,11 +2908,12 @@ impl ReflectionFiber {
     /// string(6) "strlen"
     /// ```
     fn getCallable(req: &mut Request, this: This<Self>) -> Result<Callable, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let (_, execution) = kept_execution(req, this.object())?;
         execution.callable.ok_or_else(|| {
             throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot fetch the callable from a fiber that has terminated",
             )
         })

@@ -43,6 +43,7 @@ fn this_enum(req: &mut Request, this: PhpObject) -> Result<ClassId, Thrown> {
 /// `ReflectionEnum::__construct`'s own refusal, after
 /// `reflection_class_object_ctor` has done its half.
 fn held_to_enum(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if req
         .symbols()
         .class_decl(class)
@@ -53,7 +54,7 @@ fn held_to_enum(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
     let name = class_name_of(req, class);
     Err(throw_exception_ex(
         req,
-        "ReflectionException",
+        ce.reflection_exception,
         &format!(
             "Class \"{}\" is not an enum",
             String::from_utf8_lossy(&name)
@@ -99,6 +100,7 @@ fn case_factory(
 /// The enum and the case a `ReflectionEnumUnitCase` names, php's
 /// `GET_REFLECTION_OBJECT_PTR(ref)` over `intern->ptr`.
 fn this_case(req: &mut Request, this: PhpObject) -> Result<(ClassId, Vec<u8>), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let name = this_name(req, this, "ReflectionEnumUnitCase")?;
     let Some(class) = this
         .prop(req, b"class")
@@ -106,7 +108,7 @@ fn this_case(req: &mut Request, this: PhpObject) -> Result<(ClassId, Vec<u8>), T
     else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Typed property ReflectionClassConstant::$class must not be accessed before initialization",
         ));
     };
@@ -203,6 +205,7 @@ impl ReflectionEnum {
         this: This<Self>,
         name: PhpString,
     ) -> Result<Owner<Instance<ReflectionEnumUnitCase>>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let name = name.as_bytes().to_vec();
         let class = this_enum(req, this.object())?;
         if !case_names(req, class).contains(&name) {
@@ -217,7 +220,7 @@ impl ReflectionEnum {
             let message = format
                 .replacen("{}", &String::from_utf8_lossy(&held), 1)
                 .replacen("{}", &String::from_utf8_lossy(&name), 1);
-            return Err(throw_exception_ex(req, "ReflectionException", &message));
+            return Err(throw_exception_ex(req, ce.reflection_exception, &message));
         }
         let object = case_factory(req, class, &name)?;
         Ok(object.into_instance())
@@ -343,6 +346,7 @@ impl ReflectionEnumUnitCase {
         class: Union<PhpObject, PhpString>,
         constant: PhpString,
     ) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let (class, _) = class_of(req, class)?;
         let name = constant.as_bytes().to_vec();
         held_to_enum(req, class)?;
@@ -352,7 +356,7 @@ impl ReflectionEnumUnitCase {
             let held = class_name_of(req, class);
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Constant {}::{} does not exist",
                     String::from_utf8_lossy(&held),
@@ -372,7 +376,7 @@ impl ReflectionEnumUnitCase {
         if !case_names(req, class).contains(&name) {
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!("Constant {shown} is not a case"),
             ));
         }
@@ -382,7 +386,7 @@ impl ReflectionEnumUnitCase {
         if backed_reflector && backing_of(req, class).is_none() {
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!("Enum case {shown} is not a backed case"),
             ));
         }

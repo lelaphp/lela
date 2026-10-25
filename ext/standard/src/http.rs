@@ -52,6 +52,7 @@ use php_ext::values::{
 };
 
 use crate::string::Decimal;
+use crate::throwables::Throwables;
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
 
 /// The limits `$options` may name, `REQUEST_PARSE_BODY_OPTION_*`, each
@@ -319,9 +320,10 @@ impl Query<'_> {
             return Ok(());
         }
         if req.limits().stack_overflowed() {
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Maximum call stack size reached.",
             ));
         }

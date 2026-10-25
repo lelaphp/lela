@@ -18,6 +18,7 @@ use php_ext::request::Request;
 
 use crate::ffi::{self, Library};
 use crate::parse::{Parser, Scope, SymbolKind, TagKind};
+use crate::throwables::Throwables;
 use crate::types::{TypeId, Types, attr};
 use crate::{PRELOAD, State, types};
 
@@ -312,6 +313,8 @@ pub(crate) struct Preloads {
     types: Arc<Types>,
     startup: Vec<(Vec<u8>, Arc<Scope>)>,
     registered: Cache<Vec<u8>, Option<(Types, Scope)>>,
+    /// The classes the natives raise, resolved at this same start.
+    pub(crate) throwables: Throwables,
 }
 
 /// `zend_ffi_preload(FFI_G(preload))` at startup (`MINIT`): each path of
@@ -325,6 +328,7 @@ pub(crate) struct Preloads {
 /// The test `a_failed_preload_refuses_startup` holds a missing file and
 /// a redeclaration to the oracle's bytes.
 pub(crate) fn engine_state(start: &Start) -> Result<Preloads, Refusal> {
+    let throwables = Throwables::start(start)?;
     let mut types = Types::default();
     let mut scopes: Vec<(Vec<u8>, Scope)> = Vec::new();
     let list = start
@@ -370,6 +374,7 @@ pub(crate) fn engine_state(start: &Start) -> Result<Preloads, Refusal> {
             .map(|(name, scope)| (name, Arc::new(scope)))
             .collect(),
         registered: Cache::new(1024),
+        throwables,
     })
 }
 

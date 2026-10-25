@@ -156,6 +156,7 @@ fn reflector_class(
     given: Union<Instance<ReflectionClass>, PhpString>,
     what: &str,
 ) -> Result<ClassId, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let name = match given {
         Union::A(reflector) => {
             let Some(name) = reflector
@@ -165,7 +166,7 @@ fn reflector_class(
             else {
                 return Err(throw_error(
                     req,
-                    "Error",
+                    ce.error,
                     "Internal error: Failed to retrieve the argument's reflection object",
                 ));
             };
@@ -177,7 +178,7 @@ fn reflector_class(
         Some(class) => Ok(class),
         None => Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             &format!(
                 "{what} \"{}\" does not exist",
                 String::from_utf8_lossy(&name)
@@ -257,6 +258,7 @@ fn new_instance(
     class: ClassId,
     arguments: ConstructorArguments<'_>,
 ) -> Result<Owner<PhpObject>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let object = new_object(req, class)?;
     let asked = req.frames_mut().with_fake_scope(class, |req| {
         object.handlers(req).get_constructor(req, *object)
@@ -282,7 +284,7 @@ fn new_instance(
         object.give_up(req);
         let name = class_name_of(req, class);
         let message = refusal.replace("{}", &String::from_utf8_lossy(&name));
-        return Err(throw_exception_ex(req, "ReflectionException", &message));
+        return Err(throw_exception_ex(req, ce.reflection_exception, &message));
     }
     let Some(callable) = constructor
         .and_then(|(decl, _)| known_method(req, class, &decl.function.name, Some(*object)))
@@ -342,6 +344,7 @@ impl Unpacked {
     /// The array split, or php's `Error` for an integer key after a
     /// string one.
     fn of(req: &mut Request, args: PhpArray) -> Result<Unpacked, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let mut unpacked = Unpacked {
             positional: Vec::new(),
             named: Vec::new(),
@@ -360,7 +363,7 @@ impl Unpacked {
         if misplaced {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Cannot use positional argument after named argument",
             ));
         }
@@ -1079,6 +1082,7 @@ impl ReflectionClass {
         this: This<Self>,
         name: PhpString,
     ) -> Result<Owner<Instance<crate::func::ReflectionMethod>>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let name = name.as_bytes().to_vec();
         let class = this_class(req, this.object())?;
         let kept = kept_closure(req, this.object());
@@ -1086,7 +1090,7 @@ impl ReflectionClass {
             let named = class_name_of(req, class);
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Method {}::{}() does not exist",
                     String::from_utf8_lossy(&named),
@@ -1247,6 +1251,7 @@ impl ReflectionClass {
         this: This<Self>,
         name: PhpString,
     ) -> Result<Owner<Instance<crate::member::ReflectionProperty>>, Thrown> {
+        let throwables = crate::throwables::Throwables::of(req)?;
         let name = name.as_bytes().to_vec();
         let class = this_class(req, this.object())?;
         if let Some((scope, _)) = property_named(req, class, &name) {
@@ -1267,7 +1272,7 @@ impl ReflectionClass {
                 let (base, named) = (class_name_of(req, base), class_name_of(req, class));
                 return Err(throw_exception_ex(
                     req,
-                    "ReflectionException",
+                    throwables.reflection_exception,
                     &format!(
                         "Fully qualified property name {}::${} does not specify a base class of {}",
                         String::from_utf8_lossy(&base),
@@ -1284,7 +1289,7 @@ impl ReflectionClass {
         let named = class_name_of(req, ce);
         Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            throwables.reflection_exception,
             &format!(
                 "Property {}::${} does not exist",
                 String::from_utf8_lossy(&named),
@@ -1931,6 +1936,7 @@ impl ReflectionClass {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Owner<PhpObject>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let class = this_class(req, this.object())?;
         let final_name = req
             .symbols()
@@ -1943,7 +1949,7 @@ impl ReflectionClass {
         {
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Class {name} is an internal class marked as final that cannot be instantiated without invoking its constructor"
                 ),
@@ -2514,6 +2520,7 @@ impl ReflectionClass {
         name: PhpString,
         default: Passed<Value>,
     ) -> Result<Owner<Value>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let name = name.as_bytes().to_vec();
         let class = this_class(req, this.object())?;
         update_class_constants(req, class)?;
@@ -2534,7 +2541,7 @@ impl ReflectionClass {
         if held {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!(
                     "Typed property {shown}::${name} must not be accessed before initialization"
                 ),
@@ -2542,7 +2549,7 @@ impl ReflectionClass {
         }
         Err(throw_exception_ex(
             req,
-            "ReflectionException",
+            ce.reflection_exception,
             &format!("Property {shown}::${name} does not exist"),
         ))
     }
@@ -2634,6 +2641,7 @@ impl ReflectionClass {
         name: PhpString,
         value: Value,
     ) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let name = name.as_bytes().to_vec();
         let class = this_class(req, this.object())?;
         update_class_constants(req, class)?;
@@ -2642,7 +2650,7 @@ impl ReflectionClass {
             let shown = class_name_of(req, class);
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!(
                     "Class {} does not have a property named {}",
                     String::from_utf8_lossy(&shown),
@@ -2777,12 +2785,13 @@ impl ReflectionClass {
         this: This<Self>,
         interface: Union<Instance<ReflectionClass>, PhpString>,
     ) -> Result<bool, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let interface = reflector_class(req, interface, "Interface")?;
         if kind_of(req, interface) != ClassKind::Interface {
             let name = class_name_of(req, interface);
             return Err(throw_exception_ex(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 &format!("{} is not an interface", String::from_utf8_lossy(&name)),
             ));
         }

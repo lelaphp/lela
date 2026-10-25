@@ -16,6 +16,7 @@ use php_ext::values::walk::{self};
 use php_ext::values::{Key, Owner, PhpArray, PhpRef, Value};
 
 use super::copied;
+use crate::throwables::Throwables;
 
 /// The array a by-reference argument holds, as `Z_PARAM_ARRAY_EX(array,
 /// 0, 1)` separates it, with the cell to write a rebuilt table into; an
@@ -711,9 +712,10 @@ fn array_splice(
             if let Some(removed) = removed {
                 removed.give_up(req);
             }
+            let ce = Throwables::of(req)?;
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Array was modified during array_splice operation",
             ));
         }
@@ -991,9 +993,13 @@ fn array_slice(
 /// php's `Error` for an append past `ZEND_LONG_MAX`.
 #[allow(dead_code)]
 fn occupied(req: &mut Request) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         "Cannot add element to the array as the next element is already occupied",
     )
 }

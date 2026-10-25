@@ -33,6 +33,7 @@ mod engine_xoshiro256starstar;
 mod gammasection;
 mod randomizer;
 mod rng;
+mod throwables;
 
 use std::any::Any;
 use std::marker::PhantomData;
@@ -55,6 +56,7 @@ use engine_pcgoneseq128xslrr64::{EnginePcgOneseq128XslRr64, PcgOneseq128XslRr64}
 use engine_secure::{Secure, StateSecure};
 use engine_xoshiro256starstar::{EngineXoshiro256StarStar, Xoshiro256StarStar};
 use randomizer::{IntervalBoundary, Randomizer};
+use throwables::Throwables;
 
 /// `PHP_MT_RAND_MAX`, `(1 << 31) - 1`.
 pub(crate) const MT_RAND_MAX: i64 = 0x7FFF_FFFF;
@@ -87,16 +89,23 @@ pub(crate) enum Failure {
 impl Failure {
     /// The throwable, as php would have left it pending.
     pub(crate) fn raise(self, req: &mut Request) -> Thrown {
+        if let Failure::Thrown(thrown) = self {
+            return thrown;
+        }
+        let ce = match Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
         match self {
             Failure::Thrown(thrown) => thrown,
             Failure::Broken => throw_error(
                 req,
-                "Random\\BrokenRandomEngineError",
+                ce.broken_random_engine_error,
                 &format!(
                     "Failed to generate an acceptable random number in {RANGE_ATTEMPTS} attempts"
                 ),
             ),
-            Failure::Csprng(why) => throw(req, "Random\\RandomException", &why),
+            Failure::Csprng(why) => throw(req, ce.random_exception, &why),
         }
     }
 
@@ -104,11 +113,10 @@ impl Failure {
     /// throw, `Failed to generate a random seed`, over the first.
     pub(crate) fn seed_failure(self, req: &mut Request) -> Thrown {
         match self {
-            Failure::Csprng(_) => throw(
-                req,
-                "Random\\RandomException",
-                "Failed to generate a random seed",
-            ),
+            Failure::Csprng(_) => match Throwables::of(req) {
+                Ok(ce) => throw(req, ce.random_exception, "Failed to generate a random seed"),
+                Err(fatal) => fatal,
+            },
             other => other.raise(req),
         }
     }
@@ -411,6 +419,7 @@ fn fields(req: &mut Request, fields: &[Field]) -> Result<Owner<PhpArray>, Thrown
 /// property, the load stopping at the first refusal.
 fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> Result<(), Thrown> {
     let class = class_name(req, object);
+    let ce = Throwables::of(req)?;
     let declared: Vec<(Vec<u8>, bool)> = req
         .symbols()
         .class_decl(object.class())
@@ -434,7 +443,7 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
             };
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!("Cannot create dynamic property {class}::${h}"),
             ));
         };
@@ -450,7 +459,7 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
         else {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!(
                     "Cannot create dynamic property {class}::${}",
                     String::from_utf8_lossy(plain)
@@ -460,7 +469,7 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
         if *readonly && object.prop(req, name).is_some() {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 &format!(
                     "Cannot modify readonly property {class}::${}",
                     String::from_utf8_lossy(name)
@@ -480,9 +489,13 @@ fn properties_load(req: &mut Request, object: PhpObject, members: PhpArray) -> R
 /// `zend_throw_exception_internal` chains it ([`throw_chained`]).
 fn invalid_data(req: &mut Request, class: &str, pending: Option<Thrown>) -> Thrown {
     let message = format!("Invalid serialization data for {class} object");
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     match pending {
-        None => throw(req, "Exception", &message),
-        Some(thrown) => throw_chained(req, thrown, "Exception", &message),
+        None => throw(req, ce.exception, &message),
+        Some(thrown) => throw_chained(req, thrown, ce.exception, &message),
     }
 }
 
@@ -640,6 +653,7 @@ pub fn extension() -> Extension {
             random_int::declared(),
         ])
         .request_state::<Globals>()
+        .engine_state(throwables::Throwables::start)
         .build("random")
 }
 

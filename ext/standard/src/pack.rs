@@ -8,6 +8,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use crate::string::Decimal;
+use crate::throwables::Throwables;
 use php_ext::abi::{OrFalse, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{atoi, to_double, to_long, to_string, with_string};
@@ -631,9 +632,10 @@ fn unpack(
                 b'h' | b'H' => {
                     if size > INT_MAX / 2 {
                         array.give_up(req);
+                        let ce = Throwables::of(req)?;
                         return Err(argument_error(
                             req,
-                            "ValueError",
+                            ce.value_error,
                             1,
                             &format!("repeater must be less than or equal to {}", INT_MAX / 2),
                         ));

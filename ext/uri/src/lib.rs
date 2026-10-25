@@ -26,6 +26,7 @@
 
 mod ffi;
 mod rfc3986;
+mod throwables;
 mod whatwg;
 
 use std::marker::PhantomData;
@@ -39,6 +40,8 @@ use php_ext::call::{clone_with, lookup_class, new_object};
 use php_ext::raising::{Thrown, fatal, throw_chained, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
+
+use throwables::Throwables;
 
 /// `php_uri_component_read_mode`: how a component is read, as it was
 /// written or normalized.
@@ -351,9 +354,10 @@ fn with_uri<P: UriParser, R>(
         // A clone whose copy the memory limit refused: a throwable, which
         // the check after the call gives up for the limit's fatal.
         if req.memory().has_oom() {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "Uri\\UriError",
+                ce.uri_error,
                 "The URI could not be copied",
             ));
         }
@@ -450,9 +454,13 @@ fn instantiate<P: UriParser>(
 
 /// "Cannot modify readonly object of class ..."
 fn readonly(req: &mut Request, class: &str) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         &format!("Cannot modify readonly object of class {class}"),
     )
 }
@@ -543,13 +551,15 @@ fn component<P: UriParser, T>(
     mode: ReadAs,
     f: impl FnOnce(&mut Request, &mut P) -> Result<Read<T>, Thrown>,
 ) -> Result<T, Thrown> {
-    match read::<P, _>(req, this, mode, f)? {
-        Ok(value) => Ok(value),
-        Err(Unreadable) => Err(throw_exception_ex(
+    if let Ok(value) = read::<P, _>(req, this, mode, f)? {
+        Ok(value)
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw_exception_ex(
             req,
-            "Uri\\UriError",
+            ce.uri_error,
             &format!("The {name} component cannot be retrieved"),
-        )),
+        ))
     }
 }
 
@@ -609,9 +619,13 @@ fn write_bytes<P: UriParser>(
 
 /// `throw_cannot_recompose_uri_to_string`.
 fn cannot_recompose(req: &mut Request, class: &str) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_exception_ex(
         req,
-        "Uri\\UriError",
+        ce.uri_error,
         &format!("Cannot recompose {class} to a string"),
     )
 }
@@ -674,18 +688,19 @@ fn unserialize<P: UriParser>(
     data: PhpArray,
 ) -> Result<(), Thrown> {
     let invalid = format!("Invalid serialization data for {} object", P::CLASS);
+    let ce = Throwables::of(req)?;
     if is_set::<P>(req, this) {
         let first = readonly(req, P::CLASS);
         // `zend_throw_exception_ex`, whose `zend_vstrpprintf` string is
         // the message itself, so nothing stands across the throw.
-        return Err(throw_chained(req, first, "Exception", &invalid));
+        return Err(throw_chained(req, first, ce.exception, &invalid));
     }
     let Some(text) = serialized_uri(data) else {
-        return Err(throw_exception_ex(req, "Exception", &invalid));
+        return Err(throw_exception_ex(req, ce.exception, &invalid));
     };
     let parsed = P::parse(req, &text, None, false, true)?;
     let Some(uri) = parsed.uri else {
-        return Err(throw_exception_ex(req, "Exception", &invalid));
+        return Err(throw_exception_ex(req, ce.exception, &invalid));
     };
     if let Some(slot) = this.native_mut::<Slot<P>>(req) {
         slot.0 = Some(uri);
@@ -697,7 +712,7 @@ fn unserialize<P: UriParser>(
     if no_properties {
         Ok(())
     } else {
-        Err(throw_exception_ex(req, "Exception", &invalid))
+        Err(throw_exception_ex(req, ce.exception, &invalid))
     }
 }
 
@@ -905,6 +920,7 @@ pub fn extension() -> Extension {
         .class::<whatwg::UrlValidationError>()
         .class::<whatwg::UrlValidationErrorType>()
         .request_state::<whatwg::State>()
+        .engine_state(throwables::Throwables::start)
         .rinit(whatwg::rinit)
         .post_deactivate(whatwg::post_deactivate)
         .info(uri_info)

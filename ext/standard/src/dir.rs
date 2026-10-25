@@ -70,6 +70,7 @@ use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 use crate::file::set_default_dir;
 use crate::streamsfuncs::{NullContext, context_of};
 use crate::string::locale::collate;
+use crate::throwables::Throwables;
 use crate::{State, ffi};
 
 mod glob_wrapper;
@@ -330,9 +331,10 @@ fn this_stream(req: &mut Request, this: This<Directory>, method: &str) -> Result
     let handle = handle.map(|value| value.deref());
     let Some(handle) = handle.filter(|value| matches!(value.as_ref(), ValueRef::Resource(_)))
     else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Internal directory stream has been altered",
         ));
     };
@@ -345,9 +347,10 @@ fn this_stream(req: &mut Request, this: This<Directory>, method: &str) -> Result
         ));
     };
     if !stream.is_dir(req) {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Internal directory stream has been altered",
         ));
     }

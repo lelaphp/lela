@@ -165,6 +165,7 @@ fn fetch(
     fallback: bool,
     arg: u32,
 ) -> Result<Element, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset(req);
     error::reset_object::<BundleObject>(req, object);
     let mut status = Code::ZERO;
@@ -183,7 +184,7 @@ fn fetch(
             let Ok(index) = i32::try_from(n) else {
                 let range = format!("between {} and {}", i32::MIN, i32::MAX);
                 return Err(if arg > 0 {
-                    argument_error(req, "ValueError", arg, &format!("index must be {range}"))
+                    argument_error(req, ce.value_error, arg, &format!("index must be {range}"))
                 } else {
                     value_error(req, &format!("Index must be {range}"))
                 });
@@ -248,9 +249,10 @@ struct Given {
 /// `resourcebundle_ctor`: `Ok(false)` for php's `FAILURE` where nothing
 /// was thrown.
 fn construct(req: &mut Request, object: PhpObject, given: &Given) -> Result<bool, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     if bundle(req, object).is_some() {
         let message = "ResourceBundle object is already constructed";
-        return Err(throw_error(req, "Error", message));
+        return Err(throw_error(req, ce.error, message));
     }
     let locale = given.locale.as_ref().map(PhpString::as_bytes);
     if locale_too_long(req, locale.map_or(0, <[u8]>::len))? {
@@ -259,7 +261,7 @@ fn construct(req: &mut Request, object: PhpObject, given: &Given) -> Result<bool
     let locale = locale.map_or_else(|| crate::default_locale(req), <[u8]>::to_vec);
     let name = given.bundle.as_ref().map(PhpString::as_bytes);
     if name.is_some_and(|name| name.len() >= MAXPATHLEN) {
-        return Err(argument_error(req, "ValueError", 2, "is too long"));
+        return Err(argument_error(req, ce.value_error, 2, "is too long"));
     }
     let package = name.map(c_string);
     // ICU writes the object's code, which a constructor that failed
@@ -342,11 +344,12 @@ fn create(req: &mut Request, given: &Given) -> Result<Option<Owner<Bundles>>, Th
 /// (`RESOURCEBUNDLE_METHOD_INIT_VARS`, `before_args`), and php's `Error`
 /// where no constructor opened a bundle.
 fn fetch_object(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     error::reset_object::<BundleObject>(req, object);
     if bundle(req, object).is_none() {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Found unconstructed ResourceBundle",
         ));
     }
@@ -362,9 +365,10 @@ fn count(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
 /// `resourcebundle_locales`: the locales a bundle's package holds, ICU's
 /// own for an empty name.
 fn locales(req: &mut Request, name: PhpString) -> Result<OrFalse<Owner<PhpArray>>, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let name = name.as_bytes();
     if name.len() >= MAXPATHLEN {
-        return Err(argument_error(req, "ValueError", 1, "is too long"));
+        return Err(argument_error(req, ce.value_error, 1, "is too long"));
     }
     let package = (!name.is_empty()).then(|| c_string(name));
     let mut status = Code::ZERO;
@@ -419,9 +423,10 @@ impl ObjectHandlers for Handlers {
         offset: Option<&Value>,
         read: DimensionRead,
     ) -> Result<Owner<Value>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let Some(offset) = offset.map(Value::deref) else {
             let message = "Cannot apply [] to ResourceBundle object";
-            return Err(throw_error(req, "Error", message));
+            return Err(throw_error(req, ce.error, message));
         };
         let element = match offset.as_ref() {
             ValueRef::Int(n) => fetch(req, object, &Offset::Index(n), true, 0)?,
@@ -449,9 +454,10 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         by_ref: bool,
     ) -> Result<Option<Box<dyn ClassIterator>>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         if by_ref {
             let message = "An iterator cannot be used with foreach by reference";
-            return Err(throw_error(req, "Error", message));
+            return Err(throw_error(req, ce.error, message));
         }
         let (table, length) =
             bundle(req, object).map_or((false, 0), |me| (me.kind() == Kind::Table, me.size()));

@@ -614,7 +614,8 @@ fn ushort_key(req: &mut Request, table: PhpArray, name: &str, shown: &str) -> Re
     let n = to_long(req, &value)?;
     if !(0..=65535).contains(&n) {
         let tail = format!("\"{shown}\" must be between 0 and 65535");
-        return Err(argument_error(req, "ValueError", 4, &tail));
+        let ce = crate::throwables::Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 4, &tail));
     }
     Ok(n)
 }

@@ -724,9 +724,13 @@ pub(crate) fn write_value(
 
 /// `zend_bad_array_access`: `Error`, the class named.
 fn bad_array_access(req: &mut Request) -> Thrown {
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_error(
         req,
-        "Error",
+        ce.error,
         "Cannot use object of type FFI\\CData as array",
     )
 }
@@ -851,9 +855,10 @@ fn element_of(
 impl ObjectHandlers for Handlers {
     /// `zend_fake_get_constructor`.
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Instantiation of FFI\\CData is not allowed",
         ))
     }
@@ -1131,9 +1136,10 @@ impl ObjectHandlers for Handlers {
         _: PhpObject,
         _: &[u8],
     ) -> Result<Option<Function>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Object of type FFI\\CData does not support method calls",
         ))
     }

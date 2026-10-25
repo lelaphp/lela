@@ -11,6 +11,7 @@
 use std::ops::ControlFlow;
 use std::os::unix::ffi::OsStrExt;
 
+use crate::throwables::Throwables;
 use php_ext::abi::{Callable, NamedVariadic, OrFalse, Path, Ref, True, Union, Untyped, Variadic};
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
@@ -2054,12 +2055,12 @@ fn php_strip_whitespace(req: &mut Request, filename: Path) -> Result<Owner<PhpSt
 /// `php_output_discard` ([`Response::captured`]), and php's `Error`
 /// where the handler could not start.
 fn captured(req: &mut Request, printed: &[u8]) -> Result<Owner<PhpString>, Thrown> {
-    match req
-        .response_mut()
-        .captured(|req| req.response_mut().write(printed))?
-    {
-        Some(captured) => Ok(captured),
-        None => Err(throw_error(req, "Error", "Unable to start output handler")),
+    let captured = (req.response_mut()).captured(|req| req.response_mut().write(printed))?;
+    if let Some(captured) = captured {
+        Ok(captured)
+    } else {
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, "Unable to start output handler"))
     }
 }
 
@@ -2429,9 +2430,10 @@ fn forward_static_call(
     args: Variadic<Value>,
 ) -> Result<Owner<Value>, Thrown> {
     if req.frames().scope().is_none() {
+        let ce = Throwables::of(req)?;
         return Err(php_ext::raising::throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot call forward_static_call() when no class scope is active",
         ));
     }

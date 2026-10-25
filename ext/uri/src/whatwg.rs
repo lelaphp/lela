@@ -12,6 +12,8 @@ use php_ext::values::{Owner, PhpArray, PhpString, Value, walk};
 use php_ext_lexbor::ffi::url::{self as lxb, ErrorKind, Host, Url as LxbUrl, ValidationError};
 use php_ext_lexbor::ffi::{self as lexbor, Lent, Owned};
 
+use crate::throwables::Throwables;
+
 use crate::{
     Handlers, InvalidUriException, Parsed, Read, ReadAs, Recomposition, Slot, UriComparisonMode,
     UriParser,
@@ -128,7 +130,11 @@ fn throw_invalid(
         Some(reason) => format!("{message} ({reason})"),
         None => message.to_owned(),
     };
-    let throwable = match new_throwable(req, "Uri\\WhatWg\\InvalidUrlException", &message) {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    let throwable = match new_throwable(req, ce.invalid_url_exception, &message) {
         Ok(throwable) => throwable,
         Err(thrown) => return thrown,
     };
@@ -535,9 +541,13 @@ fn case_owner(req: &mut Request, kind: UrlValidationErrorType) -> Result<Owner<V
 
 /// `zend_readonly_property_modification_error`.
 fn readonly_property(req: &mut Request, class: &str, name: &str) -> Thrown {
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     php_ext::raising::throw_error(
         req,
-        "Error",
+        ce.error,
         &format!("Cannot modify readonly property {class}::${name}"),
     )
 }

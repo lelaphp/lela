@@ -909,11 +909,12 @@ fn load_read(
                 // '%s'", ...)` over the parser's pending throw, its
                 // `zend_vspprintf` buffer standing across the throw.
                 Fail::Parse(message) => {
+                    let ce = crate::throwables::Throwables::of(req)?;
                     let thrown = parser_error(req, &message);
                     return Err(throw_error_chained(
                         req,
                         thrown,
-                        "FFI\\Exception",
+                        ce.exception,
                         &format!("Failed loading '{shown}'"),
                     ));
                 }
@@ -1269,7 +1270,11 @@ pub(crate) struct Handlers;
 
 /// `zend_bad_array_access` over `FFI`.
 fn bad_array_access(req: &mut Request) -> Thrown {
-    throw_error(req, "Error", "Cannot use object of type FFI as array")
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_error(req, ce.error, "Cannot use object of type FFI as array")
 }
 
 /// What the table refuses: cloning.
@@ -1282,9 +1287,10 @@ impl ObjectHandlers for Handlers {
 
     /// `zend_fake_get_constructor`.
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Instantiation of FFI is not allowed",
         ))
     }

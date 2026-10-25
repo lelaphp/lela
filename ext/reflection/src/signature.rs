@@ -189,11 +189,12 @@ pub(super) fn type_factory(
 
 /// `GET_REFLECTION_OBJECT_PTR` for a type reflector.
 fn this_type(req: &mut Request, this: PhpObject) -> Result<TypeRef, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     match super::kept_type(req, this) {
         Some(reference) => Ok(reference),
         None => Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Internal error: Failed to retrieve the reflection object",
         )),
     }
@@ -374,24 +375,25 @@ fn this_parameter(
     req: &mut Request,
     this: PhpObject,
 ) -> Result<(ParameterRef, FunctionDecl, Parameter), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let Some(reference) = super::kept_parameter(req, this) else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Internal error: Failed to retrieve the reflection object",
         ));
     };
     let Some(decl) = function_decl_of(req, &reference.function) else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Internal error: Failed to retrieve the reflection object",
         ));
     };
     let Some(parameter) = decl.parameters.get(reference.offset).cloned() else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Internal error: Failed to retrieve the reflection object",
         ));
     };
@@ -490,6 +492,7 @@ fn this_parameter(
 /// Parameter #0 [ <required> $a ]
 /// ```
 fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let function = match first.as_ref() {
         ValueRef::Array(array) => {
             let class = array.get(&Key::Int(0));
@@ -497,7 +500,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
             let (Some(class), Some(method)) = (class, method) else {
                 return Err(throw(
                     req,
-                    "ReflectionException",
+                    ce.reflection_exception,
                     "Expected array($object, $method) or array($classname, $method)",
                 ));
             };
@@ -521,7 +524,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
                 let class = class_name_of(req, class);
                 return Err(throw_exception_ex(
                     req,
-                    "ReflectionException",
+                    ce.reflection_exception,
                     &format!(
                         "Method {}::{}() does not exist",
                         String::from_utf8_lossy(&class),
@@ -547,7 +550,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
                 let class = class_name_of(req, object.class());
                 return Err(throw_exception_ex(
                     req,
-                    "ReflectionException",
+                    ce.reflection_exception,
                     &format!(
                         "Method {}::__invoke() does not exist",
                         String::from_utf8_lossy(&class)
@@ -560,7 +563,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
             let Some(found) = php_ext::call::fetch_function(req, &name)? else {
                 return Err(throw_exception_ex(
                     req,
-                    "ReflectionException",
+                    ce.reflection_exception,
                     &format!(
                         "Function {}() does not exist",
                         String::from_utf8_lossy(&name)
@@ -580,7 +583,7 @@ fn construct_function(req: &mut Request, first: Value) -> Result<FunctionRef, Th
             let given = value_name(req, &first);
             return Err(php_ext::raising::argument_error(
                 req,
-                "ReflectionException",
+                ce.reflection_exception,
                 1,
                 &format!(
                     "must be a string, an array(class, method), or a callable object, {given} given"
@@ -599,6 +602,7 @@ fn construct_offset(
     decl: &FunctionDecl,
     param: Union<i64, PhpString>,
 ) -> Result<usize, Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let offset = match param {
         Union::B(wanted) => {
             let found = decl
@@ -610,7 +614,7 @@ fn construct_offset(
                 None => {
                     return Err(throw(
                         req,
-                        "ReflectionException",
+                        ce.reflection_exception,
                         "The parameter specified by its name could not be found",
                     ));
                 }
@@ -620,7 +624,7 @@ fn construct_offset(
             if position < 0 {
                 return Err(php_ext::raising::argument_error(
                     req,
-                    "ValueError",
+                    ce.value_error,
                     2,
                     "must be greater than or equal to 0",
                 ));
@@ -629,7 +633,7 @@ fn construct_offset(
             if position >= decl.parameters.len() {
                 return Err(throw(
                     req,
-                    "ReflectionException",
+                    ce.reflection_exception,
                     "The parameter specified by its offset could not be found",
                 ));
             }
@@ -649,9 +653,13 @@ fn parameter_default(parameter: &Parameter) -> Option<&ConstExpr> {
 /// php's `reflection_exception` for a parameter whose default
 /// `get_parameter_default` could not read.
 fn no_default(req: &mut Request) -> Thrown {
+    let ce = match crate::throwables::Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
     throw_exception_ex(
         req,
-        "ReflectionException",
+        ce.reflection_exception,
         "Internal error: Failed to retrieve the default value",
     )
 }
@@ -699,6 +707,7 @@ pub(super) fn this_function(
     req: &mut Request,
     this: PhpObject,
 ) -> Result<(FunctionRef, FunctionDecl), Thrown> {
+    let ce = crate::throwables::Throwables::of(req)?;
     let name = this_name(req, this, "ReflectionFunctionAbstract")?;
     let scope = this
         .prop(req, b"class")
@@ -749,7 +758,7 @@ pub(super) fn this_function(
                 let class = class_name_of(req, class);
                 return Err(throw_exception_ex(
                     req,
-                    "ReflectionException",
+                    ce.reflection_exception,
                     &format!(
                         "Method {}::{}() does not exist",
                         String::from_utf8_lossy(&class),
@@ -768,7 +777,7 @@ pub(super) fn this_function(
             if lookup_function(req, &name).is_none() {
                 return Err(throw_exception_ex(
                     req,
-                    "ReflectionException",
+                    ce.reflection_exception,
                     &format!(
                         "Function {}() does not exist",
                         String::from_utf8_lossy(&name)
@@ -781,7 +790,7 @@ pub(super) fn this_function(
     let Some(decl) = function_decl_of(req, &function) else {
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Internal error: Failed to retrieve the reflection object",
         ));
     };
@@ -853,11 +862,12 @@ impl ReflectionParameter {
         function: Untyped<Value>,
         param: Union<i64, PhpString>,
     ) -> Result<(), Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let function = construct_function(req, function.0)?;
         let Some(decl) = function_decl_of(req, &function) else {
             return Err(throw_error(
                 req,
-                "Error",
+                ce.error,
                 "Internal error: Failed to retrieve the reflection object",
             ));
         };
@@ -1139,6 +1149,7 @@ impl ReflectionParameter {
         req: &mut Request,
         this: This<Self>,
     ) -> Result<Option<Owner<Instance<crate::class::ReflectionClass>>>, Thrown> {
+        let ce = crate::throwables::Throwables::of(req)?;
         let (reference, _, parameter) = this_parameter(req, this.object())?;
         let Some(name) = parameter.ty.as_ref().and_then(one_name) else {
             return Ok(None);
@@ -1168,7 +1179,7 @@ impl ReflectionParameter {
         };
         match class {
             Ok(class) => Ok(Some(reflection_class_factory(req, class)?.into_instance())),
-            Err(message) => Err(throw_exception_ex(req, "ReflectionException", &message)),
+            Err(message) => Err(throw_exception_ex(req, ce.reflection_exception, &message)),
         }
     }
 

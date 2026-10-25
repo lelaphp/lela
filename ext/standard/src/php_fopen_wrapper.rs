@@ -16,6 +16,7 @@ use php_ext::request::{
 };
 use php_ext::values::Owner;
 
+use crate::throwables::Throwables;
 use crate::r#type::strtol;
 use crate::url::php_url_decode;
 
@@ -261,7 +262,8 @@ fn filter(
     opening: Opening,
 ) -> Result<Option<Owner<Stream>>, Thrown> {
     let Some(at) = path.windows(10).position(|w| w == b"/resource=") else {
-        return Err(throw_error(req, "Error", "No URL resource specified"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "No URL resource specified"));
     };
     // `php_stream_open_wrapper_ex(p + 10, mode, options, opened_path,
     // context)`: the options and the `*opened_path` handed on, so an

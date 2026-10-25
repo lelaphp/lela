@@ -25,6 +25,7 @@ use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, TypeTag, Value, V
 use super::sort::key_value;
 use super::{copied, give_up_rows, returned};
 use crate::string::KeyBytes;
+use crate::throwables::Throwables;
 
 /// The comparison a search makes: `fast_is_identical_function` under
 /// `$strict`, `fast_equal_check_function` otherwise, the element's
@@ -651,12 +652,14 @@ fn array_fill(
         return Ok(Owner::take(req, PhpArray::empty()));
     }
     if count > i64::from(i32::MAX) {
-        return Err(argument_error(req, "ValueError", 2, "is too large"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 2, "is too large"));
     }
     if start > i64::MAX - count + 1 {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot add element to the array as the next element is already occupied",
         ));
     }
@@ -1103,9 +1106,10 @@ fn array_combine(
     values: PhpArray,
 ) -> Result<Owner<PhpArray>, Thrown> {
     if keys.len() != values.len() {
+        let ce = Throwables::of(req)?;
         return Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             1,
             "and argument #2 ($values) must have the same number of elements",
         ));

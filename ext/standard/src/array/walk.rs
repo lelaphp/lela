@@ -21,6 +21,7 @@ use super::constants::{ARRAY_FILTER_USE_BOTH, ARRAY_FILTER_USE_KEY};
 use super::copied;
 use super::pointer::ArrayOrObject;
 use super::sort::key_value;
+use crate::throwables::Throwables;
 
 /// `array_walk(array|object &$array, callable $callback, mixed $arg = UNKNOWN): true`,
 /// php's `php_array_walk` (`Z/ext/standard/array.c:1438`):
@@ -433,7 +434,8 @@ fn visit(req: &mut Request, reference: PhpRef, key: &Key, walk: &Walk) -> Result
             return Ok(());
         };
         if nested.is_recursive() {
-            return Err(throw_error(req, "Error", "Recursion detected"));
+            let ce = Throwables::of(req)?;
+            return Err(throw_error(req, ce.error, "Recursion detected"));
         }
         nested.protect();
         let walked = walk_level(req, reference, walk);
