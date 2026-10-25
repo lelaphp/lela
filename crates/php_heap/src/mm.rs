@@ -380,7 +380,12 @@ impl Mm {
         Mm::of(allocator, cache)
     }
 
-    /// A tracked heap, whatever the process chose, for the tests.
+    /// A tracked heap, whatever the process chose, for the tests. Its
+    /// blocks are asked for raw: the debug build's freed-block mark and
+    /// owner table read the process's choice ([`tracked::chosen`]), not
+    /// the heap's, since they reach a block with no heap in hand, so a
+    /// counted value laid on this heap in a process that chose Zend's
+    /// would be read as a chunk's.
     #[cfg(test)]
     pub(crate) fn tracked() -> Mm {
         Mm::of(Allocator::Tracked(Box::default()), None)
@@ -954,6 +959,11 @@ impl Mm {
             return;
         }
         self.size = self.size.saturating_sub(self.accounted(at));
+        // A tracked heap's two usages are one number, as php's
+        // `tracked_free` keeps them.
+        if matches!(self.allocator, Allocator::Tracked(_)) {
+            self.real_size = self.size;
+        }
         self.retired.push(at);
         if !self.observers.is_empty() {
             self.observers.tell(Allocation::Freed {
@@ -1973,10 +1983,20 @@ impl Mm {
             return;
         };
         // SAFETY: the caller's contract, handed on.
-        if let Some(size) = unsafe { tracked.free(at) } {
-            self.size -= size;
-            self.real_size = self.size;
-        }
+        let freed = unsafe { tracked.free(at) };
+        // php asserts the block is the table's (`tracked_get_size_zv`); a
+        // debug build names the free of one it is not, a second free
+        // among them.
+        let Some(size) = freed else {
+            #[cfg(debug_assertions)]
+            self.sensed.record(crate::sensed::Sensed::FreedTwice {
+                at: at.as_ptr().addr(),
+                size: 0,
+            });
+            return;
+        };
+        self.size -= size;
+        self.real_size = self.size;
     }
 }
 
