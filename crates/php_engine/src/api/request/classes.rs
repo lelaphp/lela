@@ -542,7 +542,7 @@ impl Request {
         self.link_declared(unit, at, decl, true).ok()
     }
 
-    /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7968`):
+    /// `ZEND_DECLARE_CLASS_DELAYED` (`Z/Zend/zend_vm_def.h:7973`):
     /// nothing where the unit's load bound the class under the opline's
     /// runtime definition key ([`Request::bind_at_load`]), and
     /// [`Request::bind_class`] where it did not, the key still standing.
@@ -1901,7 +1901,7 @@ impl Request {
         let mut noted = 0;
         for (landed, before) in unit.top_level.iter().zip(&declared.raised_before) {
             for raised in raised.get(noted..*before).unwrap_or_default() {
-                self.note_error_in(raised.level, &raised.message, file, raised.line);
+                self.note_error_in(raised.level, raised.message.as_bytes(), file, raised.line);
             }
             noted = noted.max(*before);
             if !self.declare_top_level(unit, &mut load, *landed) {

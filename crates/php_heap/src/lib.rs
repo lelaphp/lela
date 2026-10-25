@@ -79,9 +79,10 @@ pub use fiber::{FiberStack, Host, StackRefused, Suspensions, Switched, suspend};
 pub use hooks::{Fatal, FatalReason, GcTable, HeapHooks};
 pub use lend::{ecalloc, efree, emalloc, erealloc};
 pub use map::{MapPtr, MapTable};
-pub use mm::ChunkCache;
+pub use mm::{ChunkCache, DelayedOom, PendingOom};
 pub use numeric::{
-    Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
+    DoubleText, Exponent, LongText, Number, NumberText, double_to_string, gcvt, numeric_prefix,
+    power, shift_left, shift_right,
 };
 pub use object::{Laziness, Obj, ObjectId};
 pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
@@ -96,7 +97,7 @@ pub use stack::{
     HeaderImage, ROOM_BYTES, Slot, StackLayout, VmStack,
 };
 pub use standalone::StandaloneHeap;
-pub use string::{FreshStr, Intern, Made, Pending, Str, Strings};
+pub use string::{FreshStr, Intern, Made, Pending, Sizing, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
 use gc::Counted;
@@ -174,7 +175,7 @@ impl Heap {
     /// var_dump(memory_get_usage());
     /// ```
     /// ```expect exit=0
-    /// int(464552)
+    /// int(464680)
     /// ```
     ///
     /// A name a class holds costs nothing to read, and no table is laid
@@ -211,7 +212,7 @@ impl Heap {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// 2097152 2097152 128M
@@ -299,12 +300,116 @@ impl Heap {
         self.mm.limit()
     }
 
-    /// Hold the request to `limit` bytes, `zend_set_memory_limit`: the
-    /// limit is met on chunk growth, with php's exact message as the
-    /// [`Fatal`]. A limit under what the chunks hold is `false` unless
-    /// giving back cached chunks brings them under it.
+    /// Hold the request to `limit` bytes, `zend_set_memory_limit`, and to
+    /// the hard limit that follows from it: the limit is met on chunk
+    /// growth and at a huge block, where an allocation past it is served
+    /// and leaves a [`DelayedOom`] behind, and one past the hard limit is
+    /// the [`FatalReason::HardLimit`] that ends the process. A limit
+    /// under what the chunks hold is `false` unless giving back cached
+    /// chunks brings them under it.
     pub fn set_memory_limit(&mut self, limit: usize) -> bool {
         self.mm.set_limit(limit)
+    }
+
+    /// `zend_set_memory_hard_limit_percent`, what
+    /// `memory_hard_limit_percent` sets: the hard limit at `percent` of
+    /// the soft one, or php's `-1`, twice the soft limit up to 1 GiB and
+    /// the soft limit and 1 GiB above it; `false` for any other percent
+    /// under 100 and while the soft limit is exceeded.
+    pub fn set_memory_hard_limit_percent(&mut self, percent: i64) -> bool {
+        self.mm.set_hard_limit_percent(percent)
+    }
+
+    /// `zend_mm_set_fallible`: whether an allocation past the soft limit
+    /// is refused from here on, as php's `_femalloc` refuses one, rather
+    /// than served, and the fallibility the heap had, for the caller to
+    /// put back once its one ask is answered. A refusal is the `Err` of
+    /// the ask, [`FatalReason::Refused`], with the delayed OOM recorded,
+    /// and [`Heap::take_refused`] reads it after; no fallible ask is held
+    /// to the hard limit.
+    pub fn set_fallible(&mut self, fallible: bool) -> bool {
+        self.mm.set_fallible(fallible)
+    }
+
+    /// Whether a fallible ask was refused since this was last read.
+    pub fn take_refused(&mut self) -> bool {
+        self.mm.take_refused()
+    }
+
+    /// php's `EG(delayed_oom)`: whether the memory limit was met and
+    /// where its fatal stands. Anything but [`DelayedOom::None`] is
+    /// `ZEND_HAS_OOM()`.
+    #[must_use]
+    #[inline]
+    pub fn delayed_oom(&self) -> &DelayedOom {
+        self.mm.delayed()
+    }
+
+    /// `ZEND_HAS_OOM()` (`Z/Zend/zend_alloc.h:63`): the limit was met in
+    /// this request and `php_request_shutdown` has not begun.
+    #[must_use]
+    #[inline]
+    pub fn has_oom(&self) -> bool {
+        !matches!(self.mm.delayed(), DelayedOom::None)
+    }
+
+    /// The word the heap raises as it records a delayed OOM, php's
+    /// `EG(vm_interrupt)`: the request's interrupt, so the next safepoint
+    /// raises the limit's fatal.
+    pub fn wake_on_oom(
+        &mut self,
+        word: std::sync::Arc<dyn AsRef<std::sync::atomic::AtomicBool> + Send + Sync>,
+    ) {
+        self.mm.wake_on_oom(word);
+    }
+
+    /// The site of a delayed OOM recorded and not yet named, the
+    /// executed file and line php reads as it records one: the engine
+    /// names it where it first stands after the allocation, and a site
+    /// named already keeps its own.
+    pub fn locate_oom(&mut self, file: &[u8], line: u32) {
+        self.mm.locate_oom(file, line);
+    }
+
+    /// The pending OOM taken out to be raised, `zend_handle_delayed_oom`:
+    /// the state [`DelayedOom::Handling`] and the limit's fatal being
+    /// reported ([`Heap::in_memory_limit_error`]) until
+    /// [`Heap::oom_handled`]; `None` where none is pending.
+    ///
+    /// While the fatal is raised the soft limit records nothing more and
+    /// refuses nothing, so the rendering, its backtrace among it, is
+    /// served up to the hard limit. The backtrace of a delayed OOM stops
+    /// at its first frame, php's `zend_fetch_debug_backtrace` under
+    /// `ZEND_HAS_OOM()`:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// ini_set('fatal_error_backtraces', '1');
+    /// function f() { f(); }
+    /// f();
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
+    /// Stack trace:
+    /// #0 %s(4): f()
+    /// #1 {main}
+    /// ```
+    pub fn take_pending_oom(&mut self) -> Option<PendingOom> {
+        self.mm.take_pending_oom()
+    }
+
+    /// The limit's fatal raised: the state [`DelayedOom::Handled`] until
+    /// the request shuts down, and the limit no longer being reported.
+    pub fn oom_handled(&mut self) {
+        self.mm.oom_handled();
+    }
+
+    /// `EG(delayed_oom).state = ZEND_OOM_STATE_NONE`, which
+    /// `php_request_shutdown` writes as it begins: the shutdown functions
+    /// and the destructors after them are served as if the limit had not
+    /// been met.
+    pub fn reset_oom(&mut self) {
+        self.mm.reset_oom();
     }
 
     /// `observer` told of every allocation, reallocation and free this
@@ -337,39 +442,26 @@ impl Heap {
         self.mm.overflowed()
     }
 
-    /// The fatal the heap raised when it refused an allocation is
-    /// rendered: php's `heap->overflow = 0` in `zend_mm_safe_error`. From
-    /// that refusal until here the limit refuses nothing, so the
-    /// rendering, a backtrace of every frame of a recursion the limit
-    /// stopped among it, is not refused by the limit it reports; from
-    /// here the limit holds again, for the shutdown functions and the
-    /// destructors after.
-    ///
-    /// ```php
-    /// ini_set('memory_limit', '8M');
-    /// ini_set('fatal_error_backtraces', '1');
-    /// function f() { f(); }
-    /// f();
-    /// ```
-    /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 262144 bytes) in %s on line 4
-    /// Stack trace:
-    /// #0 %s(4): f()
-    /// %a
-    /// #%d %s(5): f()
-    /// #%d {main}
-    /// ```
-    pub fn overflow_rendered(&mut self) {
-        self.mm.overflow_rendered();
-    }
-
     /// A request-scoped string of `bytes`, php's `zend_string_init`:
     /// one allocation out of this heap, one owner, and the bytes as
     /// given.
+    #[inline] // `zend_string_init` is `zend_always_inline`
     pub fn string(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
         let at = self.mm.alloc(Str::allocation_size(bytes.len()))?;
-        // SAFETY: the allocation is exactly the size `init` asks for and
-        // nothing else holds it.
+        // SAFETY: the allocation is exactly the header, the bytes and the
+        // NUL `init` writes, and nothing else holds it.
+        Ok(unsafe { Str::init(at, bytes, 0) })
+    }
+
+    /// A request-scoped string of `bytes` laid at `sizing`'s size
+    /// ([`Sizing::bytes`]): [`Heap::string`] is [`Sizing::Alloc`]'s and
+    /// [`Heap::string_finit`] [`Sizing::Finit`]'s. A sum that overflows is
+    /// php's fatal, raised before anything is asked for.
+    pub fn string_sized(&mut self, bytes: &[u8], sizing: Sizing) -> Result<Str, Fatal> {
+        let at = self.mm.alloc(sizing.bytes(bytes.len())?)?;
+        // SAFETY: every sizing asks for at least the header, the bytes and
+        // the NUL, which is what `init` writes, and nothing else holds the
+        // allocation.
         Ok(unsafe { Str::init(at, bytes, 0) })
     }
 
@@ -387,11 +479,18 @@ impl Heap {
         Ok(unsafe { Str::init_with(at, len, 0, fill) })
     }
 
-    /// `zend_string_alloc(len, 0)`: a string of `len` zero bytes the
-    /// caller writes in place and cuts down before handing it out
-    /// ([`FreshStr`]); the limit is met before it exists.
-    pub fn string_fresh(&mut self, len: usize) -> Result<FreshStr, Fatal> {
-        self.string_with(len, |_| {}).map(FreshStr)
+    /// `zend_string_alloc(len, 0)` at [`Sizing::Alloc`], or the
+    /// constructor `sizing` names, such as `zend_string_safe_alloc` at
+    /// [`Sizing::SafeAlloc`]: a string of `len` zero bytes the caller
+    /// writes in place and cuts down before handing it out ([`FreshStr`]).
+    /// The limit, and the overflow fatal of a sum that overflows, are met
+    /// before it exists.
+    pub fn string_fresh(&mut self, len: usize, sizing: Sizing) -> Result<FreshStr, Fatal> {
+        let at = self.mm.alloc(sizing.bytes(len)?)?;
+        // SAFETY: every sizing asks for at least the header, `len` bytes
+        // and the NUL, which is what `init_with` writes, and nothing else
+        // holds the allocation.
+        Ok(FreshStr(unsafe { Str::init_with(at, len, 0, |_| {}) }))
     }
 
     /// `zend_string_truncate(s, len, 0)`: the fresh string cut to `len`
@@ -437,15 +536,19 @@ impl Heap {
         fill: impl FnOnce(&mut [u8]),
     ) -> Result<Str, Fatal> {
         let header = Str::allocation_size(l);
-        let Some(size) = n.checked_mul(m).and_then(|bytes| bytes.checked_add(header)) else {
-            return Err(Fatal::error(format!(
+        let Some(len) = n
+            .checked_mul(m)
+            .and_then(|bytes| bytes.checked_add(header))
+            .map(|size| size - header + l)
+        else {
+            return Err(self.mm.overflow_refusal(format!(
                 "Possible integer overflow in memory allocation ({n} * {m} + {header})"
             )));
         };
-        let at = self.mm.alloc(size)?;
+        let at = self.mm.alloc(Sizing::SafeAlloc { n, m }.bytes(len)?)?;
         // SAFETY: the allocation holds the header and `n * m + l` bytes
         // with the NUL after them, and nothing else holds it.
-        Ok(unsafe { Str::init_with(at, size - header + l, 0, fill) })
+        Ok(unsafe { Str::init_with(at, len, 0, fill) })
     }
 
     /// `zend_string_release`: one owner fewer, and the string is freed
@@ -1053,99 +1156,106 @@ mod tests {
     }
 
     /// `zend_string_extend` over a string of one owner grows it where it
-    /// stands while the bin holds it, and over a shared one copies it and
-    /// leaves the other holder's bytes as they were.
+    /// stands while the bin holds php-8.5.12's size for it, `len` past
+    /// the empty string's aligned header (`Str::reallocation_size`), and
+    /// over a shared one copies it and leaves the other holder's bytes as
+    /// they were.
     #[test]
     fn an_append_extends_the_one_owner_s_string_and_copies_a_shared_one() {
         let _alone = alone();
         let mut nothing = Recorder { heap: Heap::new() };
-        let s = nothing.heap.string(b"abc").expect("the string \"abc\"");
-        let tail = nothing.heap.string(b"de").expect("the string \"de\"");
+        let s = nothing.heap.string(&[b'a'; 40]).expect("forty bytes");
+        let tail = nothing.heap.string(&[b'b'; 8]).expect("eight bytes");
         let start = nothing.heap.memory_usage(false);
-        // 24 + 3 + 1 and 24 + 5 + 1 both round into the 32-byte bin.
+        // 24 + 40 + 1 rounds into the 80-byte bin, and 32 + 48 fills it.
         let grown = nothing.heap.string_append(s, tail).expect("an append");
         assert!(
             grown.is_same(s),
             "a string with one owner moved within its bin"
         );
-        assert_eq!(grown.bytes(), b"abcde");
+        assert_eq!(grown.bytes().len(), 48);
         assert_eq!(nothing.heap.memory_usage(false), start);
-        // Ten bytes are the 40-byte bin: the slot moves up, once.
+        // 32 + 96 is the 128-byte bin: the slot moves up, once.
         let twice = nothing.heap.string_append(grown, grown).expect("an append");
-        assert_eq!(twice.bytes(), b"abcdeabcde");
-        assert_eq!(nothing.heap.memory_usage(false), start - 32 + 40);
+        assert_eq!(twice.bytes().len(), 96);
+        assert_eq!(nothing.heap.memory_usage(false), start - 80 + 128);
         twice.addref();
         let copy = nothing.heap.string_append(twice, tail).expect("an append");
         assert!(!copy.is_same(twice), "a shared string was written into");
-        assert_eq!(twice.bytes(), b"abcdeabcde");
+        assert_eq!(twice.bytes().len(), 96);
         assert_eq!(twice.refcount(), 1);
-        assert_eq!(copy.bytes(), b"abcdeabcdede");
+        assert_eq!(copy.bytes().len(), 104);
+        assert!(copy.bytes().ends_with(&[b'b'; 8]));
         for z in [twice, copy, tail] {
             Heap::release(&mut nothing, Zval::string(z));
         }
-        assert_eq!(nothing.heap.memory_usage(false), start - 32 - 32);
+        assert_eq!(nothing.heap.memory_usage(false), start - 80 - 40);
     }
 
-    /// The limit is met on chunk growth, with php's own text.
+    /// Strings of `len` bytes made until one meets the limit, that one
+    /// served and held with the rest: php 8.5.12 serves the allocation
+    /// that meets the soft limit and records the delayed OOM.
+    fn filled_until_the_limit(heap: &mut Heap, len: usize) -> (Vec<Str>, String) {
+        let mut held = Vec::new();
+        while !heap.has_oom() {
+            held.push(
+                heap.string(&vec![b'x'; len])
+                    .expect("served under the hard limit"),
+            );
+        }
+        let DelayedOom::Pending(pending) = heap.delayed_oom() else {
+            panic!("no delayed OOM: {:?}", heap.delayed_oom());
+        };
+        (held, pending.message.clone())
+    }
+
+    /// The limit is met on chunk growth, with php's own text, which names
+    /// the chunk's 2 MiB, `zend_mm_check_limit(heap, ZEND_MM_CHUNK_SIZE)`
+    /// at 8.5.12, and the allocation is served from the chunk it maps.
     #[test]
     fn the_memory_limit_is_php_s_message() {
         let _alone = alone();
         let mut heap = Heap::new();
         heap.set_memory_limit(mm::CHUNK_SIZE);
-        let mut held = Vec::new();
-        let mut fatal = None;
-        for _ in 0..4096 {
-            match heap.string(&[b'x'; 3000]) {
-                Ok(s) => held.push(s),
-                Err(f) => {
-                    fatal = Some(f);
-                    break;
-                }
-            }
-        }
+        let (held, message) = filled_until_the_limit(&mut heap, 3000);
         assert_eq!(
-            fatal,
-            Some(Fatal::error(
-                "Allowed memory size of 2097152 bytes exhausted (tried to allocate 12288 bytes)"
-                    .to_string()
-            ))
+            message,
+            "Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes)"
         );
+        assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
+        // A second ask past the limit records nothing more.
+        let more = heap.string(&[b'y'; 3000]).expect("served");
+        assert!(matches!(heap.delayed_oom(), DelayedOom::Pending(p) if p.message == message));
+        for s in held.into_iter().chain([more]) {
+            heap.release_string(s);
+        }
     }
 
-    /// An allocation of the large range names the pages php names and
-    /// not the bytes asked for: outside `ZEND_DEBUG` php hands
-    /// `zend_mm_alloc_pages` the page count alone, so a string of 5000
-    /// bytes, 5032 with its header, meets the limit naming the two pages
-    /// it was about to take and not the 5032.
+    /// An allocation of the large range meets the limit where it needs a
+    /// chunk, and names the chunk as a bin's does: a string of 5000
+    /// bytes, two pages, is the 247th to fit beside the compiler's arena
+    /// and the object store's table, and is served.
     #[test]
-    fn the_limit_on_a_large_allocation_names_the_pages_php_names() {
+    fn the_limit_on_a_large_allocation_names_the_chunk() {
         let _alone = alone();
         let mut heap = Heap::new();
         heap.set_memory_limit(mm::CHUNK_SIZE);
-        let mut held = Vec::new();
-        let fatal = loop {
-            match heap.string(&[b'x'; 5000]) {
-                Ok(s) => held.push(s),
-                Err(f) => break f,
-            }
-        };
-        // 511 free pages to a chunk, sixteen of them the compiler's
-        // arena and two the object store's table, two to an allocation.
-        assert_eq!(held.len(), 246);
+        let (held, message) = filled_until_the_limit(&mut heap, 5000);
+        assert_eq!(held.len(), 247);
         assert_eq!(
-            fatal,
-            Fatal::error(
-                "Allowed memory size of 2097152 bytes exhausted (tried to allocate 8192 bytes)"
-                    .to_string()
-            )
+            message,
+            "Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes)"
         );
+        for s in held {
+            heap.release_string(s);
+        }
     }
 
     /// php sweeps the wholly free bin `runs` before it declares the
     /// limit reached (`zend_mm_gc`), so the limit is met where php's is
-    /// met and not before: a request holding every slot it took is
-    /// stopped, and the same request having given them back goes on,
-    /// out of the pages the sweep handed back and with no chunk more.
+    /// met and not before: a request holding every slot it took meets it,
+    /// and the same request having given them back goes on, out of the
+    /// pages the sweep handed back and with no chunk more.
     #[test]
     fn the_limit_is_met_after_the_sweep_of_free_bin_runs_and_not_before() {
         let _alone = alone();
@@ -1154,54 +1264,73 @@ mod tests {
         // A string of 3000 bytes is the 3072-byte bin, four slots to a
         // `run` of three pages, so two chunks, less the sixteen pages of
         // the compiler's arena and the two of the object store's table,
-        // hold 334 `runs` and the next one meets the limit.
+        // hold 334 `runs`.
         let mut held = Vec::new();
-        let fatal = loop {
-            match heap.string(&[b'x'; 3000]) {
-                Ok(s) => held.push(s),
-                Err(f) => break f,
-            }
-        };
-        assert_eq!(held.len(), 334 * 4);
+        for _ in 0..334 * 4 {
+            held.push(heap.string(&[b'x'; 3000]).expect("under the limit"));
+        }
+        assert!(!heap.has_oom());
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
-        assert_eq!(
-            fatal,
-            Fatal::error(
-                "Allowed memory size of 4194304 bytes exhausted (tried to allocate 12288 bytes)"
-                    .to_string()
-            )
-        );
-        // The fatal is rendered, as the engine says after each, so the
-        // limit holds for the next ask.
-        heap.overflow_rendered();
-        // A 1760-byte string is the 1792-byte bin, a `run` of seven
-        // pages, which neither chunk has free. Nothing is on a free
-        // list, so the sweep collects nothing and the limit stands.
-        assert_eq!(
-            heap.string(&[b'x'; 1760]).err(),
-            Some(Fatal::error(
-                "Allowed memory size of 4194304 bytes exhausted (tried to allocate 28672 bytes)"
-                    .to_string()
-            ))
-        );
-        heap.overflow_rendered();
         // Every slot back on its bin's free list. The pages are still
-        // the request's until the sweep walks them, so the same
-        // allocation still finds no seven free pages anywhere.
+        // the request's until the sweep walks them, so a 1760-byte
+        // string, the 1792-byte bin's `run` of seven pages, finds none
+        // free anywhere and the sweep gives the runs back.
         for s in held.drain(..) {
             heap.release_string(s);
         }
         assert_eq!(heap.memory_usage(false), STARTED);
-        assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
-        let swept = heap.string(&[b'x'; 1760]);
-        assert!(swept.is_ok(), "the sweep did not give the free runs back");
+        let swept = heap.string(&[b'x'; 1760]).expect("served");
         // The 1002 pages of the 334 `runs`, and the chunk the sweep
-        // emptied kept against the next growth, as php keeps one.
+        // emptied kept against the next growth, as php keeps one, and
+        // taken from the cache. php's check of the limit after its sweep
+        // reads the cached chunk as held, so it records the delayed OOM
+        // all the same (`Z/Zend/zend_alloc.c:221` at 8.5.12).
+        assert!(heap.has_oom());
+        heap.reset_oom();
         assert_eq!(heap.memory_usage(true), 2 * mm::CHUNK_SIZE);
         assert_eq!(heap.memory_usage(false), STARTED + 1792);
-        if let Ok(s) = swept {
+        heap.release_string(swept);
+        // Held, the strings meet the limit again where a chunk is needed.
+        let (held, message) = filled_until_the_limit(&mut heap, 3000);
+        assert_eq!(
+            message,
+            "Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes)"
+        );
+        for s in held {
             heap.release_string(s);
         }
+    }
+
+    /// Past the hard limit, twice the soft one by php's default, an
+    /// allocation is the fatal that ends the process, naming the hard
+    /// limit and the bytes, and it is refused before the chunk is
+    /// mapped; `memory_hard_limit_percent` moves it, and is refused
+    /// under 100 and while the soft limit is exceeded.
+    #[test]
+    fn the_hard_limit_ends_what_the_soft_limit_served() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        heap.set_memory_limit(mm::CHUNK_SIZE);
+        let refused = heap.block(3 * mm::CHUNK_SIZE).err();
+        assert_eq!(
+            refused.map(Fatal::into_reason),
+            Some(FatalReason::HardLimit {
+                limit: 2 * mm::CHUNK_SIZE,
+                asked: 3 * mm::CHUNK_SIZE
+            })
+        );
+        assert_eq!(heap.memory_usage(true), mm::CHUNK_SIZE);
+        assert!(!heap.set_memory_hard_limit_percent(99));
+        assert!(heap.set_memory_hard_limit_percent(400));
+        let served = heap
+            .block(3 * mm::CHUNK_SIZE)
+            .expect("under four times the limit");
+        assert!(heap.has_oom());
+        assert!(
+            !heap.set_memory_hard_limit_percent(-1),
+            "the soft limit is exceeded"
+        );
+        heap.free_block(served);
     }
 
     /// A size the page rounding carries past the top of memory is php's
@@ -1712,68 +1841,64 @@ mod tests {
         }
     }
 
-    /// php's `heap->overflow`: the allocation the limit refuses raises
-    /// the fatal and lifts the limit, so what renders the fatal is not
-    /// refused, and the limit holds again once the engine says the
-    /// fatal is rendered.
+    /// `zend_handle_delayed_oom`'s window: while the limit's fatal is
+    /// raised the heap reports it, records nothing more and refuses
+    /// nothing short of the hard limit; once it is raised the state is
+    /// `HANDLED` until the request shuts down.
     #[test]
-    fn the_limit_is_lifted_while_its_fatal_is_rendered() {
+    fn the_limit_is_reported_while_its_fatal_is_raised() {
         let _alone = alone();
         let mut heap = Heap::new();
         heap.set_memory_limit(4 * 1024 * 1024);
-        let bytes = vec![b'x'; 1024 * 1024];
-        let mut held = Vec::new();
-        let refused = loop {
-            match heap.string(&bytes) {
-                Ok(s) => held.push(s),
-                Err(fatal) => break fatal,
-            }
-        };
-        assert!(
-            matches!(refused.reason(), FatalReason::Error(m) if m.starts_with("Allowed memory size of 4194304 bytes exhausted"))
+        let (mut held, message) = filled_until_the_limit(&mut heap, 1024 * 1024);
+        heap.locate_oom(b"a.php", 3);
+        heap.locate_oom(b"b.php", 9);
+        let pending = heap.take_pending_oom().expect("pending");
+        assert_eq!(pending.message, message);
+        assert_eq!(pending.site, Some((Box::from(&b"a.php"[..]), 3)));
+        assert_eq!(*heap.delayed_oom(), DelayedOom::Handling);
+        assert!(heap.in_memory_limit_error());
+        held.push(
+            heap.string(&vec![b'x'; 1024 * 1024])
+                .expect("the rendering is served"),
         );
-        let rendering = heap.string(&bytes);
-        assert!(rendering.is_ok(), "the rendering is not refused");
-        assert!(heap.memory_usage(true) > 4 * 1024 * 1024);
-        held.extend(rendering);
-        heap.overflow_rendered();
-        let after = (0..4).map(|_| heap.string(&bytes)).find_map(Result::err);
-        assert!(after.is_some(), "the limit holds again");
+        assert!(heap.take_pending_oom().is_none());
+        heap.oom_handled();
+        assert!(!heap.in_memory_limit_error());
+        assert_eq!(*heap.delayed_oom(), DelayedOom::Handled);
+        assert!(heap.has_oom());
+        heap.reset_oom();
+        assert!(!heap.has_oom());
         for s in held {
             heap.release_string(s);
         }
     }
 
-    /// `zend_mm_realloc_huge`'s limit (`Z/Zend/zend_alloc.c:1640-1651`):
-    /// a huge string grown past the limit by the difference is refused
-    /// through `zend_mm_safe_error`, which lifts the limit until the fatal
-    /// is rendered, the string standing as it was; while the limit is
-    /// lifted a grow is served, as php's `heap->overflow == 0` lets it
-    /// through; once the fatal is rendered the limit holds again.
+    /// `zend_mm_realloc_huge`'s limit (`Z/Zend/zend_alloc.c:1783` at
+    /// 8.5.12): a huge string grown past the limit is held to it by the
+    /// difference alone, and grows, the delayed OOM naming the difference.
     #[test]
-    fn a_huge_string_grown_past_the_limit_lifts_it_until_the_fatal_is_rendered() {
+    fn a_huge_string_grown_past_the_limit_names_the_difference() {
         let _alone = alone();
         let mut heap = Heap::new();
         let s = heap
             .string_with(3_000_000, |bytes| bytes.fill(b'k'))
             .unwrap_or_else(|f| panic!("{f:?}"));
+        let t = heap
+            .string_with(1_000_000, |bytes| bytes.fill(b'l'))
+            .unwrap_or_else(|f| panic!("{f:?}"));
         assert!(heap.set_memory_limit(heap.memory_usage(true)));
-        let refused = heap.string_append(s, s);
+        let grown = heap.string_append(s, t).unwrap_or_else(|f| panic!("{f:?}"));
+        assert_eq!(grown.len(), 4_000_000);
+        let page = mm::real_page_size();
+        let more = 4_000_032usize.next_multiple_of(page) - 3_000_032usize.next_multiple_of(page);
         assert!(
-            matches!(refused.as_ref().map_err(Fatal::reason), Err(FatalReason::Error(m)) if m.starts_with("Allowed memory size of")),
-            "{refused:?}"
+            matches!(heap.delayed_oom(), DelayedOom::Pending(p) if p.message.ends_with(&format!("(tried to allocate {more} bytes)"))),
+            "{:?}",
+            heap.delayed_oom()
         );
-        assert!(heap.in_memory_limit_error(), "the limit lifted");
-        assert_eq!((s.len(), s.bytes().last()), (3_000_000, Some(&b'k')));
-        let grown = heap
-            .string_append(s, s)
-            .unwrap_or_else(|f| panic!("the grow while the fatal renders: {f:?}"));
-        assert_eq!(grown.len(), 6_000_000);
-        heap.overflow_rendered();
-        let after = heap.string_append(grown, grown);
-        assert!(after.is_err(), "the limit holds again");
-        heap.overflow_rendered();
         heap.release_string(grown);
+        heap.release_string(t);
     }
 
     /// What the heap's tests pass where a request would serve a

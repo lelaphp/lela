@@ -781,7 +781,9 @@ fn string_of(parsed: &Parsed, value: tree::Expr, precision: i32) -> Vec<u8> {
             {
                 Some(TokenValue::Int(n)) => n.to_string().into_bytes(),
                 Some(TokenValue::Float(f)) => {
-                    php_heap::double_to_string(f, precision, php_heap::Exponent::Upper).into_bytes()
+                    php_heap::double_to_string(f, precision, php_heap::Exponent::Upper)
+                        .as_bytes()
+                        .to_vec()
                 }
                 Some(TokenValue::Bytes(bytes)) => bytes,
                 None => Vec::new(),

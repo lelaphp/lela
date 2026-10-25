@@ -26,10 +26,11 @@ use php_ext::abi::{
     OrFalse, Path, PropertyPlace, PropertyRead, Raw, Refusals, Std, This, True, Union,
 };
 use php_ext::attr::{php_class, php_const};
-use php_ext::call::{autoload, new_object};
+use php_ext::call::{autoload, clone, new_object};
 use php_ext::coerce::{truthy, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, pending, throw_error,
+    value_error,
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -145,16 +146,40 @@ fn class_name(req: &Request, class: ClassId) -> String {
 // ---- the object
 
 /// `xsl_object`: the stylesheet, its parameters by key in insertion
-/// order, the security preferences, dom's table of php functions and
-/// the profile's path.
+/// order, the security preferences, dom's table of php functions, the
+/// profile's path and how many transformations are running on it.
 #[derive(Default)]
 pub(crate) struct Intern {
-    sheet: Option<ffi::Sheet>,
+    sheet: Option<Imported>,
+    /// `transform_depth`: the transformations in progress, nested where
+    /// a callback transforms again, during which `importStylesheet` is
+    /// refused (php 8.5.12, GH-23730).
+    transform_depth: u32,
     has_keys: bool,
     params: Vec<(Vec<u8>, Vec<u8>)>,
     security: i64,
     callbacks: XPathCallbacks,
     profiling: Option<Box<[u8]>>,
+}
+
+/// `intern->ptr` and `intern->sheet_ref_obj`, set, replaced and freed
+/// together: the compiled sheet, and one count of the document reference
+/// of the clone it was compiled from, whose tree the sheet owns, kept so
+/// the namespace mappings a modern document's nodes name live as long as
+/// the sheet.
+pub(crate) struct Imported {
+    sheet: ffi::Sheet,
+    doc_ref: NodeObject,
+}
+
+impl Imported {
+    /// `xsl_free_sheet`, then `php_libxml_decrement_doc_ref_directly` on
+    /// the clone's reference, `xsl_objects_free_storage`'s order.
+    fn close(self, req: &mut Request) {
+        let Imported { sheet, mut doc_ref } = self;
+        sheet.close(req);
+        doc_ref.decrement_doc_ref(req);
+    }
 }
 
 fn intern(req: &mut Request, object: PhpObject) -> Option<&mut Intern> {
@@ -209,11 +234,11 @@ impl ObjectHandlers for Handlers {
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         Std.free_obj(req, object);
         if let Some(i) = intern(req, object) {
-            let (sheet, callbacks) = (i.sheet.take(), std::mem::take(&mut i.callbacks));
-            if let Some(sheet) = sheet {
-                sheet.close(req);
-            }
+            let (imported, callbacks) = (i.sheet.take(), std::mem::take(&mut i.callbacks));
             callbacks.release(req);
+            if let Some(imported) = imported {
+                imported.close(req);
+            }
         }
     }
 
@@ -275,7 +300,7 @@ impl ObjectHandlers for Handlers {
             Std.write_property(req, object, again, Owner::int(old))?;
             let class = class_name(req, object.class());
             let message = format!("{class}::${shown} must be greater than or equal to 0");
-            return Err(throw_error(req, "ValueError", &message));
+            return Err(value_error(req, &message));
         }
         again.give_up(req);
         Ok(())
@@ -328,34 +353,33 @@ impl ObjectHandlers for Handlers {
 
 // ---- the stylesheet
 
-/// `xsl_add_ns_defs` over the copy of a modern document, read off the
-/// original as the copy mirrors it: each `xmlns` attribute made a
-/// declaration of its element, which libxslt reads the stylesheet's
-/// prefixes from, and the attribute kept in the `xmlns` namespace that
-/// `xmlCopyDoc` could not find in the tree, as php's clone keeps it,
-/// the declaration the copy's to free (`oldNs`).
-fn add_ns_defs(source: Node, copy: Node, doc: Node) {
-    let (mut s, mut c) = (source.children(), copy.children());
-    while let (Some(sn), Some(cn)) = (s, c) {
-        if sn.kind() == Kind::Element {
-            let (mut sa, mut ca) = (sn.properties(), cn.properties());
-            while let (Some(a), Some(b)) = (sa, ca) {
+/// `xsl_add_ns_defs` (`Z/ext/xsl/xsltprocessor.c:126-158`): every element
+/// under `node`, in tree order, given a declaration of its own in front
+/// of its others for each `xmlns` attribute a modern document keeps as an
+/// attribute, its href the attribute's value and its prefix the
+/// attribute's name where the attribute has one, so libxslt finds the
+/// namespaces a modern document leaves to its mapper.
+fn add_ns_defs(node: Node) {
+    let mut at = node.children();
+    while let Some(n) = at {
+        if n.kind() == Kind::Element {
+            let mut attr = n.properties();
+            while let Some(a) = attr {
                 let ns = a
                     .ns()
                     .filter(|ns| ns.href().as_deref() == Some(b"http://www.w3.org/2000/xmlns/"));
                 if let Some(ns) = ns {
                     let prefix = ns.prefix().map(|_| a.name());
-                    cn.new_ns(&a.attr_value(), prefix.as_deref());
-                    if let Some(kept) = Ns::owned(ns.href().as_deref(), ns.prefix().as_deref()) {
-                        kept.move_to_old(Some(doc));
-                        b.set_ns(Some(kept));
+                    if let Some(def) = Ns::owned(Some(&a.attr_value()), prefix.as_deref()) {
+                        def.set_next(n.ns_def());
+                        n.set_ns_def(Some(def));
                     }
                 }
-                (sa, ca) = (a.next(), b.next());
+                attr = a.next();
             }
         }
-        add_ns_defs(sn, cn, doc);
-        (s, c) = (sn.next(), cn.next());
+        add_ns_defs(n);
+        at = n.next();
     }
 }
 
@@ -391,8 +415,8 @@ fn routed(mut raised: Vec<Raised>) -> Vec<Raised> {
 /// the caller's, or `None` where libxslt made none, and the stylesheet
 /// to save it with. The stylesheet stays on the object and is held for
 /// the whole span (ADR-0013), so a callback's nested transformation runs
-/// with it and one that imports another leaves the old one's free to
-/// the end of this one, saving included (#2319).
+/// with it; an import meanwhile is refused (`transform_depth`, GH-23730),
+/// counted from before the profile's path is checked, as php counts it.
 fn apply<R>(
     req: &mut Request,
     this: PhpObject,
@@ -405,7 +429,7 @@ fn apply<R>(
         return Err(arg_type_error(req, 1, "be a valid XML node"));
     };
     let held = intern(req, this).and_then(|i| {
-        let id = i.sheet.as_ref()?.id();
+        let id = i.sheet.as_ref()?.sheet.id();
         let read = (
             i.has_keys,
             i.params.clone(),
@@ -420,8 +444,12 @@ fn apply<R>(
         );
         return Err(throw_error(req, "Error", &message));
     };
-    let profile = profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
     let answer = id.held(req, |req, sheet| {
+        if let Some(i) = intern(req, this) {
+            i.transform_depth += 1;
+        }
+        let profile =
+            profiling.filter(|p| req.environment_mut().check_open_basedir(p, true).is_ok());
         let mut holder = NodeObject::default();
         let doc = if has_keys {
             let copy = doc.copy_doc(true).unwrap_or(doc);
@@ -441,6 +469,9 @@ fn apply<R>(
         let made = transform(req, this, sheet, &state);
         at(this).clean_node_list(req);
         holder.decrement_doc_ref(req);
+        if let Some(i) = intern(req, this) {
+            i.transform_depth = i.transform_depth.saturating_sub(1);
+        }
         finish(req, sheet, made?)
     });
     answer.unwrap_or_else(|| {
@@ -606,9 +637,9 @@ impl XSLTProcessor {
     #[php(property)]
     const maxTemplateVars: i64;
 
-    /// `importStylesheet`: a copy of the stylesheet's document compiled,
-    /// as php compiles the clone it detaches, and `false` where it is no
-    /// stylesheet.
+    /// `importStylesheet`: the clone of the stylesheet's document object
+    /// compiled, its tree detached from the clone and handed to the sheet
+    /// as php hands it, and `false` where it is no stylesheet.
     ///
     /// ```php
     /// $x = new XSLTProcessor;
@@ -630,6 +661,66 @@ impl XSLTProcessor {
     /// bool(false)
     /// XSLTProcessor::importStylesheet(): Argument #1 ($stylesheet) must be a valid XML node
     /// ```
+    ///
+    /// A stylesheet imported while the processor transforms, from a
+    /// callback or from a destructor the transformation's node list runs
+    /// as it is torn down, is refused, as php 8.5.12 refuses it
+    /// (GH-23730); once the transformation ends, an import is taken:
+    ///
+    /// ```php
+    /// class E extends DOMElement { function __destruct() { imp('destructor'); } }
+    /// function imp($from) { try { $GLOBALS['p']->importStylesheet($GLOBALS['o']); echo "$from: imported\n"; } catch (Error $e) { echo "$from: ", $e->getMessage(), "\n"; } }
+    /// function cb($n) { imp('callback'); return $n[0]; }
+    /// $d = new DOMDocument; $d->registerNodeClass('DOMElement', 'E'); $d->loadXML('<r><i>a</i></r>');
+    /// $s = new DOMDocument; $s->loadXML('<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform" xmlns:php="http://php.net/xsl"><xsl:output method="text"/><xsl:template match="/"><xsl:value-of select="php:function(\'cb\', //i)"/></xsl:template></xsl:stylesheet>');
+    /// $o = new DOMDocument; $o->loadXML('<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/">B</xsl:template></xsl:stylesheet>');
+    /// $p = new XSLTProcessor; $p->registerPHPFunctions(); $p->importStylesheet($s);
+    /// var_dump($p->transformToXml($d));
+    /// imp('after');
+    /// var_dump($p->transformToXml($d));
+    /// ```
+    /// ```expect
+    /// callback: Cannot call XSLTProcessor::importStylesheet() while a transformation is in progress
+    /// destructor: Cannot call XSLTProcessor::importStylesheet() while a transformation is in progress
+    /// string(1) "a"
+    /// after: imported
+    /// string(1) "B"
+    /// ```
+    ///
+    /// The copy compiled is the document object's clone, `__clone` served
+    /// on it first, so what `__clone` changes is what is compiled; a copy
+    /// `__clone` keeps a name of is refused and left to whoever kept it
+    /// (php 8.5.12). A modern document's copy keeps its namespaces
+    /// for as long as the sheet compiled from it:
+    ///
+    /// ```php
+    /// class Keeps extends DOMDocument { function __clone(): void { $GLOBALS['kept'] = $this; } }
+    /// class Marks extends DOMDocument { function __clone(): void { echo "cloned\n"; $this->documentElement->lastChild->textContent = 'marked'; } }
+    /// $src = '<xsl:stylesheet version="1.0" xmlns:xsl="http://www.w3.org/1999/XSL/Transform"><xsl:output method="text"/><xsl:template match="/">ok</xsl:template></xsl:stylesheet>';
+    /// $d = new DOMDocument; $d->loadXML('<r/>');
+    /// $p = new XSLTProcessor;
+    /// $m = new Marks; $m->loadXML($src);
+    /// var_dump($p->importStylesheet($m->documentElement), $p->transformToXml($d), $m->documentElement->lastChild->textContent);
+    /// $k = new Keeps; $k->loadXML($src);
+    /// try { $p->importStylesheet($k); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+    /// echo get_class($kept), ' ', $kept->documentElement->nodeName, "\n";
+    /// $x = Dom\XMLDocument::createFromString('<s:stylesheet version="1.0" xmlns:s="http://www.w3.org/1999/XSL/Transform" xmlns:o="urn:o"><s:output method="xml"/><s:template match="/"><o:out>modern</o:out></s:template></s:stylesheet>');
+    /// var_dump($p->importStylesheet($x));
+    /// unset($x);
+    /// var_dump($p->transformToXml($d));
+    /// ```
+    /// ```expect
+    /// cloned
+    /// bool(true)
+    /// string(6) "marked"
+    /// string(2) "ok"
+    /// XSLTProcessor::importStylesheet(): Argument #1 ($stylesheet) must not have its clone retained by __clone()
+    /// Keeps xsl:stylesheet
+    /// bool(true)
+    /// string(60) "<?xml version="1.0"?>
+    /// <o:out xmlns:o="urn:o">modern</o:out>
+    /// "
+    /// ```
     #[php(tentative)]
     fn importStylesheet(
         req: &mut Request,
@@ -637,47 +728,104 @@ impl XSLTProcessor {
         stylesheet: PhpObject,
     ) -> Result<bool, Thrown> {
         let this = this.object();
+        if intern(req, this).is_some_and(|i| i.transform_depth > 0) {
+            let message = "Cannot call XSLTProcessor::importStylesheet() while a transformation is in progress";
+            return Err(throw_error(req, "Error", message));
+        }
         let Some(exported) = import_node(req, stylesheet) else {
             return Err(arg_type_error(req, 1, "be a valid XML node"));
         };
+        // A node that is no document stands for its owner document, whose
+        // object is cloned in its place, as `xsltParseStylesheetProcess`
+        // may free nodes of the tree it compiles.
         let node = exported.node();
-        let doc = if node.kind().is_document() {
-            Some(node)
+        let owner = if node.kind().is_document() {
+            None
         } else {
-            node.doc()
+            let Some(doc) = node.doc() else {
+                return Err(arg_value_error(req, 1, "be part of a document"));
+            };
+            match php_ext_dom::create_object(req, doc, Some(stylesheet))?.into_object() {
+                Ok(owner) => Some(owner),
+                Err(value) => {
+                    value.give_up(req);
+                    return Err(arg_type_error(req, 1, "be a valid XML node"));
+                }
+            }
         };
-        let Some(doc) = doc else {
-            return Err(arg_value_error(req, 1, "be part of a document"));
-        };
-        let Some(copy) = doc.copy_doc(true) else {
+        // libxslt writes `_private` on the tree it compiles, so it is
+        // given a copy: the object's own `clone_obj`, `__clone` and all.
+        let cloned = clone(req, owner.as_deref().unwrap_or(&stylesheet));
+        if let Some(owner) = owner {
+            owner.give_up(req);
+        }
+        let copy = cloned?;
+        // The clone's libxml half, `Z_LIBXML_NODE_P(&clone_zv)`, and the
+        // document reference it counts, which every dom document has.
+        let found = import_node(req, *copy).and_then(|e| e.node().doc());
+        let half = php_ext_libxml::node_object(req, *copy);
+        let (Some(newdoc), Some(mut half)) = (found, half) else {
+            copy.give_up(req);
             return Err(arg_type_error(req, 1, "be a valid XML node"));
         };
-        if exported.class_type() == ClassType::Modern {
-            add_ns_defs(doc, copy, copy);
+        let Some(shared) = half.shared_doc() else {
+            copy.give_up(req);
+            return Err(arg_type_error(req, 1, "be a valid XML node"));
+        };
+        // A copy `__clone` kept a name of, the object or a node of its
+        // document, would see its tree compiled from under it.
+        if Value::object(*copy).refcount() > 1 || half.doc_refcount() > 1 {
+            copy.give_up(req);
+            return Err(arg_value_error(
+                req,
+                1,
+                "not have its clone retained by __clone()",
+            ));
         }
-        let (sheet, raised, thrown) = ffi::Stylesheet::parse(req, copy);
+        if half.class_type() == ClassType::Modern {
+            add_ns_defs(newdoc);
+        }
+        let (sheet, raised, thrown) = ffi::Stylesheet::parse(req, newdoc);
         let settled = Errors::settle(req, routed(raised), thrown);
         let Some(sheet) = sheet else {
-            copy.free_document();
+            copy.give_up(req);
             settled?;
             return Ok(false);
         };
-        settled?;
-        let clone = Std.read_property(req, this, b"cloneDocument", PropertyRead::Warning)?;
-        let cloned = truthy(req, &clone);
-        clone.give_up(req);
-        let has_keys = cloned? || sheet.doc().is_some_and(declares_keys);
-        let sheet = ffi::Sheet::adopt(req, sheet);
+        // The tree is the sheet's now: the copy's reference lets go of it
+        // and is counted once more, for the mappings its nodes name.
+        let mut doc_ref = NodeObject::default();
+        doc_ref.share(req, Some(shared), newdoc);
+        half.detach_document();
+        copy.give_up(req);
+        // `cloneDocument`, or an `xsl:key` at the stylesheet's top level,
+        // makes every transformation copy its document first; php only
+        // ever sets `hasKeys`, so a later import does not clear it.
+        let cloned = match Std.read_property(req, this, b"cloneDocument", PropertyRead::Warning) {
+            Ok(value) => {
+                let cloned = truthy(req, &value);
+                value.give_up(req);
+                cloned
+            }
+            Err(thrown) => Err(thrown),
+        };
+        let has_keys = matches!(cloned, Ok(true)) || sheet.doc().is_some_and(declares_keys);
+        let imported = Imported {
+            sheet: ffi::Sheet::adopt(req, sheet),
+            doc_ref,
+        };
         let replaced = match intern(req, this) {
             Some(i) => {
-                i.has_keys = has_keys;
-                i.sheet.replace(sheet)
+                i.has_keys |= has_keys;
+                i.sheet.replace(imported)
             }
-            None => Some(sheet),
+            None => Some(imported),
         };
         if let Some(old) = replaced {
             old.close(req);
         }
+        settled?;
+        cloned?;
         Ok(true)
     }
 
@@ -1041,7 +1189,10 @@ impl XSLTProcessor {
         true
     }
 
-    /// `registerPHPFunctions`: every php function, or the ones named.
+    /// `registerPHPFunctions`: every php function, or the ones named. A
+    /// list naming a function that does not exist is refused whole, and
+    /// the namespace serves no call after, as php 8.5.12 lays a refused
+    /// registration down (GH-23897):
     ///
     /// ```php
     /// $s = new DOMDocument;
@@ -1057,13 +1208,13 @@ impl XSLTProcessor {
     /// $y = new XSLTProcessor;
     /// $y->importStylesheet($s);
     /// try { $y->registerPHPFunctions(['strtoupper', 'no_such_function']); } catch (TypeError $e) { echo get_class($e), "\n"; }
-    /// var_dump($y->transformToXml($d));
+    /// try { var_dump($y->transformToXml($d)); } catch (Error $e) { echo $e->getMessage(), "\n"; }
     /// ```
     /// ```expect
     /// string(1) "T"
     /// XSLTProcessor::registerPHPFunctions(): Argument #1 ($functions) must be a valid callback name
     /// TypeError
-    /// string(1) "T"
+    /// No callbacks were registered
     /// ```
     #[php(tentative)]
     fn registerPHPFunctions(

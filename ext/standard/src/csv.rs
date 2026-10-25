@@ -379,6 +379,20 @@ pub fn fgetcsv(
 ///   string(8) "955c2c78"
 /// }
 /// ```
+///
+/// php 8.5.12's `php_fgetcsv` takes no field once the memory limit was
+/// met (`ZEND_HAS_OOM()`), "each field costs a zval plus a `zend_string`",
+/// so a million fields under an eight megabyte limit raise the soft
+/// limit's fatal after the call, short of the hard one:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(str_getcsv(str_repeat('a,', 1 << 20), ',', '"', '')));
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[php_function]
 pub(super) fn str_getcsv(
     req: &mut Request,
@@ -403,6 +417,12 @@ pub(super) fn str_getcsv(
         None => array.append(req, Owner::null())?,
         Some(fields) => {
             for field in fields {
+                // php 8.5.12's `php_fgetcsv` stops once the memory limit
+                // was met (`ZEND_HAS_OOM()`): each field costs a zval
+                // and a string.
+                if req.memory().has_oom() {
+                    break;
+                }
                 let value = PhpString::new(req, &field)?.into_value();
                 array.append(req, value)?;
             }

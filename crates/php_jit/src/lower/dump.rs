@@ -29,8 +29,8 @@ use php_heap::ZvalType;
 use crate::record::func_name as func;
 use crate::types::{
     Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
-    Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store,
-    Stored, TraceIr, Types, Unwind, ValueId,
+    Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Pointee, Read, Repeat, Returned,
+    Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -237,16 +237,19 @@ impl<'a> Dump<'a> {
         let opline = exit
             .opline
             .map_or("where it stands".to_owned(), |at| format!("{:04}", at.0));
-        let landing = match exit.landing {
-            Landing::Plain => "plain".to_owned(),
-            Landing::RestoreCall => "restore call".to_owned(),
-            Landing::FreeTemps { op1, op2 } => {
-                let freed: Vec<&str> = [(op1, "op1"), (op2, "op2")]
-                    .into_iter()
-                    .filter_map(|(on, name)| on.then_some(name))
-                    .collect();
-                format!("free {}", freed.join(" "))
-            }
+        let Landing {
+            frees,
+            restores_call,
+        } = exit.landing;
+        let freed: Vec<&str> = [(frees.op1, "op1"), (frees.op2, "op2")]
+            .into_iter()
+            .filter_map(|(on, name)| on.then_some(name))
+            .collect();
+        let landing = match (restores_call, freed.is_empty()) {
+            (false, true) => "plain".to_owned(),
+            (true, true) => "restore call".to_owned(),
+            (false, false) => format!("free {}", freed.join(" ")),
+            (true, false) => format!("restore call free {}", freed.join(" ")),
         };
         write!(text, "exit {at}: f{} {opline} {landing}", exit.frame.0)?;
         self.stores(text, &exit.stores)?;
@@ -284,6 +287,12 @@ impl<'a> Dump<'a> {
                 Stored::Copied { value, read } => match read {
                     Read::InPlace => format!("copied #{}", value.0),
                     Read::Through => format!("copied #{} through a reference", value.0),
+                    Read::Indirect(Pointee::Value) => {
+                        format!("copied #{} through an indirect", value.0)
+                    }
+                    Read::Indirect(Pointee::Reference) => {
+                        format!("copied #{} through an indirect reference", value.0)
+                    }
                 },
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
@@ -340,11 +349,24 @@ fn operand(operand: Operand) -> Option<String> {
     })
 }
 
+/// How a guard names what an indirect `VAR` is read as.
+fn pointee_of(pointee: Pointee) -> &'static str {
+    match pointee {
+        Pointee::Value => "ind to ",
+        Pointee::Reference => "ind ref to ",
+    }
+}
+
 fn check(check: Check) -> String {
     let tag = |tag: ZvalType| Types::of_tag(tag).to_string();
     match check {
         Check::Type { value, tag: t } => format!("#{} {}", value.0, tag(t)),
         Check::Deref { value, tag: t } => format!("#{} ref to {}", value.0, tag(t)),
+        Check::Indirect {
+            value,
+            tag: t,
+            pointee,
+        } => format!("#{} {}{}", value.0, pointee_of(pointee), tag(t)),
         Check::Layout {
             value,
             layout,
@@ -355,6 +377,7 @@ fn check(check: Check) -> String {
             match read {
                 Read::InPlace => "",
                 Read::Through => "ref to ",
+                Read::Indirect(pointee) => pointee_of(pointee),
             },
             match layout {
                 Layout::Packed => "packed",
@@ -383,7 +406,14 @@ fn check(check: Check) -> String {
 fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
     let (value, owners) = match imm {
         Imm::Make { .. } => return write!(text, " in-place"),
-        Imm::Property { slot, .. } => return write!(text, " slot {slot}"),
+        Imm::Property {
+            slot: Slotted::Declared(slot),
+            ..
+        } => return write!(text, " slot {slot}"),
+        Imm::Property {
+            slot: Slotted::Cached,
+            ..
+        } => return write!(text, " cached"),
         Imm::Leave { value, owners } => (value, owners),
         _ => return Ok(()),
     };

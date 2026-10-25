@@ -6,14 +6,13 @@
 use php_ext::abi::{Callable, GcTable, Instance, Passed, Path, Raw, Refusals, Std, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, with_string};
+use php_ext::coerce::{callable_checked, to_callable, with_string};
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, docref, pending, throw_error,
-    throw_error_chained,
+    Level, Thrown, arg_type_error, arg_value_error, docref, throw_error, type_error,
 };
 use php_ext::request::{Foreign, Request};
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, SmartStr, Value, ValueRef};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{
     self, Answer, Called, Item, Name, Node, Operand, Returned, Route, Scope,
@@ -28,15 +27,15 @@ use crate::props::Prop;
 use crate::{Read, dom, dom_mut, fetch, object_for, string};
 
 /// `PHP_DOM_REG_FUNC_MODE_*`: how one namespace serves a call.
-///
-/// php lays a namespace down at `PHP_DOM_REG_FUNC_MODE_NONE`, which its
-/// dispatch serves as `SET` (the `ZEND_ASSERT` that tells them apart is
-/// gone from a release build): a refused registration leaves the
-/// namespace there, and a call looks the table up all the same.
 #[derive(Default)]
 enum Mode {
-    /// A call is served from the table, by name.
+    /// `PHP_DOM_REG_FUNC_MODE_NONE`: the namespace was laid down by a
+    /// registration that was refused, and serves no call; php 8.5.12's
+    /// dispatch refuses it as it refuses a namespace with no table
+    /// (GH-23897).
     #[default]
+    Refused,
+    /// A call is served from the table, by name.
     Set,
     /// `registerPhpFunctions()` with no argument: any function by name,
     /// the table kept for a later set.
@@ -160,6 +159,10 @@ pub(crate) struct XPathState {
     ctx: Foreign<ffi::XPath>,
     register_node_ns: bool,
     callbacks: XPathCallbacks,
+    /// `evaluation_depth`: the evaluations in progress on the object, one
+    /// inside another where a function an expression calls evaluates
+    /// again; the constructor is refused while any is (GH-23729).
+    evaluation_depth: u32,
 }
 
 /// `php_dom_xpath_callbacks`, as `xpath_callbacks.h` exports it
@@ -454,8 +457,12 @@ fn item_object(
                 }
             };
             let parent_obj = *parent_value;
-            let Some(fake) = Node::fake_namespace_decl(parent, href.as_deref(), prefix.as_deref())
-            else {
+            let Some(fake) = Node::fake_namespace_decl(
+                Some(parent),
+                parent.doc(),
+                href.as_deref(),
+                prefix.as_deref(),
+            ) else {
                 parent_value.give_up(req);
                 return Err(crate::dom_throw(req, Code::InvalidState));
             };
@@ -538,7 +545,8 @@ const NOT_A_NAME: &str = "Handler name must be a string";
 
 /// What a namespace's table answers for one name.
 enum Lookup {
-    /// No table for the namespace: no registration made one.
+    /// No table for the namespace: no registration made one, or the one
+    /// that would have was refused.
     NoTable,
     /// `PHP_DOM_REG_FUNC_MODE_ALL`: any function by name.
     Any,
@@ -560,32 +568,58 @@ impl Lookup {
                 .map(|(_, namespace)| namespace),
         };
         match namespace {
-            None => Lookup::NoTable,
+            None
+            | Some(Namespace {
+                mode: Mode::Refused,
+                ..
+            }) => Lookup::NoTable,
             Some(Namespace {
                 mode: Mode::All, ..
             }) => Lookup::Any,
-            Some(namespace) => Lookup::Named(namespace.find(name).cloned()),
+            Some(
+                namespace @ Namespace {
+                    mode: Mode::Set, ..
+                },
+            ) => Lookup::Named(namespace.find(name).cloned()),
         }
     }
 }
 
-/// `php_dom_xpath_callback_dispatch`. The table is read where the call
+/// `php_dom_xpath_callback_dispatch`. A namespace a refused registration
+/// laid down serves no call:
+///
+/// ```php
+/// $d = new DOMDocument; $d->loadXML('<r/>'); $x = new DOMXPath($d);
+/// $x->registerNamespace('php', 'http://php.net/xpath');
+/// try { $x->registerPhpFunctions('nope'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $x->evaluate('php:function("nope")'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be a callable, function "nope" not found or invalid function name
+/// No callbacks were registered
+/// ```
+///
+/// The table is read where the call
 /// is made and again where it keeps what the call handed out, since the
 /// function called can register, replace or free it in between. A name
-/// no callable answers to is `zend_call_function`'s refusal, chained
-/// over what an autoloader threw:
+/// no callable answers to is `zend_call_function`'s refusal, and where an
+/// autoloader threw while the name was looked up, what it threw is all
+/// there is (php 8.5.12's `zend_call_function`):
 ///
 /// ```php
 /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, "\n"; }
-/// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
 /// $d = new DOMDocument; $d->loadXML('<a/>'); $xp = new DOMXPath($d);
 /// $xp->registerNamespace('php', 'http://php.net/xpath'); $xp->registerPhpFunctions();
-/// pk(function () use ($xp) { try { $xp->evaluate("php:function('Foo::bar')"); } catch (Error $e) {} });
-/// try { $xp->evaluate("php:function('Foo::bar')"); } catch (Error $e) { echo $e->getMessage(), " / ", $e->getPrevious()->getMessage(), "\n"; }
+/// $show = function ($expr) use ($xp) { try { $xp->evaluate($expr); } catch (Throwable $e) { echo get_class($e), ': ', $e->getMessage(), ' / ', var_export($e->getPrevious()?->getMessage(), true), "\n"; } };
+/// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
+/// pk(function () use ($xp) { try { $xp->evaluate("php:function('Foo::bar')"); } catch (Throwable $e) {} });
+/// $show("php:function('Foo::bar')");
+/// $show("php:function('no_such_function')");
 /// ```
 /// ```expect
-/// 5552
-/// Invalid callback Foo::bar, class "Foo" not found / boom
+/// 3008
+/// RuntimeException: boom / NULL
+/// Error: Invalid callback no_such_function, function "no_such_function" not found or invalid function name / NULL
 /// ```
 fn dispatch(
     req: &mut Request,
@@ -606,7 +640,7 @@ fn dispatch(
                 ));
             };
             let Operand::Str(name) = first else {
-                return Err(throw_error(req, "TypeError", NOT_A_NAME));
+                return Err(type_error(req, NOT_A_NAME));
             };
             (None, name, operands.collect::<Vec<_>>())
         }
@@ -620,26 +654,7 @@ fn dispatch(
             // `fci.function_name`, released once `zend_call_function`
             // returns, after its refusal is thrown.
             let name_value = string(req, &name)?;
-            let found = callable_checked(req, &name_value).map_err(|why| {
-                let shown = String::from_utf8_lossy(&name).into_owned();
-                let message = format!("Invalid callback {shown}, {why}");
-                // `zend_is_callable_ex`'s `error`, `zend_spprintf`'s
-                // buffer, which `zend_call_function` frees after its throw.
-                let error = match Emalloc::printf_buffer(req, why.len()) {
-                    Ok(error) => error,
-                    Err(refused) => return refused,
-                };
-                // An autoloader's throw is the refusal's previous, as
-                // `zend_call_function`'s `zend_throw_error` chains onto
-                // `EG(exception)`, its `zend_vspprintf` buffer standing
-                // across the throw.
-                let thrown = match pending(req) {
-                    Err(previous) => throw_error_chained(req, previous, "Error", &message),
-                    Ok(()) => throw_error(req, "Error", &message),
-                };
-                error.free(req);
-                thrown
-            });
+            let found = to_callable(req, &name_value);
             name_value.give_up(req);
             found
         }
@@ -686,9 +701,8 @@ fn dispatch(
         ValueRef::Bool(b) => Ok(Returned::Bool(b)),
         ValueRef::Object(_) => {
             answer.give_up(req);
-            return Err(throw_error(
+            return Err(type_error(
                 req,
-                "TypeError",
                 "Only objects that are instances of DOM nodes can be converted to an XPath expression",
             ));
         }
@@ -699,7 +713,25 @@ fn dispatch(
 }
 
 /// `php_xpath_eval`: `query` forces a node set, `evaluate` answers what
-/// the expression does.
+/// the expression does. An evaluation a function makes on the same
+/// object leaves the outer one the node it evaluates at and its
+/// declarations.
+///
+/// ```php
+/// $d = new DOMDocument;
+/// $d->loadXML('<r xmlns:p="urn:p"><a><x/><p:y/></a><a><x/></a><b><x/><x/></b></r>');
+/// $x = new DOMXPath($d);
+/// $x->registerNamespace('php', 'http://php.net/xpath');
+/// $x->registerPhpFunctions();
+/// $b = $d->documentElement->lastElementChild;
+/// function inner() { global $x, $b; $x->query('x[2]', $b); return true; }
+/// var_dump($x->evaluate('count(a[php:function("inner") and x])', $d->documentElement));
+/// var_dump($x->query('a[php:function("inner") and p:y]', $d->documentElement)->length);
+/// ```
+/// ```expect
+/// float(2)
+/// int(1)
+/// ```
 fn eval(
     req: &mut Request,
     this: PhpObject,
@@ -752,7 +784,13 @@ fn eval(
     let mut handler = |req: &mut Request, called: Called, operands: Vec<Operand>| {
         XPathCallbacks::call(req, at, called, operands, modern, &mut proxy)
     };
+    if let Some(state) = state(req, this) {
+        state.evaluation_depth += 1;
+    }
     let evaluated = ffi::XPath::eval_held(req, id, expr, node, scope, &mut handler);
+    if let Some(state) = state(req, this) {
+        state.evaluation_depth = state.evaluation_depth.saturating_sub(1);
+    }
     if let Some(in_scope) = in_scope {
         in_scope.free(req);
     }
@@ -795,6 +833,23 @@ fn eval(
 /// per node, and the process's empty array under the list for a set with
 /// no node (`ZVAL_EMPTY_ARRAY`, `Z/ext/dom/xpath.c:385`). A modern
 /// document refuses the namespace axis.
+///
+/// Since 8.5.12 the list stops once the memory limit was met: `null`,
+/// `RETURN_OOM()`, the limit's fatal raised as the call returns. The
+/// allocation that meets the limit is the table's growth in php and a
+/// chunk in the engine, whose node objects are charged at other sizes, so
+/// its figure is `%d`:
+///
+/// ```php
+/// $d = new DOMDocument; $d->loadXML('<r>' . str_repeat('<a/>', 100000) . '</r>');
+/// ini_set('memory_limit', '4M');
+/// $l = (new DOMXPath($d))->query('//a');
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate %d bytes) in %s on line 4
+/// ```
 fn node_list(
     req: &mut Request,
     this: PhpObject,
@@ -828,6 +883,13 @@ fn node_list(
             }
         };
         array.append(req, v)?;
+        // `goto oom_nodeset` once the memory limit was met, since 8.5.12:
+        // `null`, `RETURN_OOM()`, the limit's fatal raised as the call
+        // returns.
+        if req.memory().has_oom() {
+            array.give_up(req);
+            return Ok(Owner::null());
+        }
     }
     let class = if modern {
         "Dom\\NodeList"
@@ -894,7 +956,29 @@ impl DOMXPath {
     #[php(property, virtual)]
     const registerNodeNamespaces: bool;
 
-    /// `DOMXPath::__construct(DOMDocument $document, bool $registerNodeNS = true)`.
+    /// `DOMXPath::__construct(DOMDocument $document, bool $registerNodeNS = true)`:
+    /// refused while an evaluation on the object is in progress, so a
+    /// function an expression calls cannot free the evaluator it runs on
+    /// (GH-23729).
+    ///
+    /// ```php
+    /// class X extends DOMXPath {}
+    /// $d = new DOMDocument; $d->loadXML('<r><a>1</a></r>');
+    /// $o = new DOMDocument; $o->loadXML('<o/>');
+    /// $x = new X($d);
+    /// $x->registerNamespace('php', 'http://php.net/xpath');
+    /// $x->registerPhpFunctions();
+    /// function again() { global $x, $o; try { $x->__construct($o); } catch (Error $e) { echo $e->getMessage(), "\n"; } return 'r'; }
+    /// var_dump($x->evaluate('string(php:function("again"))'), $x->evaluate('string(/r/a)'));
+    /// $x->__construct($o);
+    /// var_dump($x->document === $o);
+    /// ```
+    /// ```expect
+    /// Cannot call X::__construct() while an XPath evaluation is in progress
+    /// string(1) "r"
+    /// string(1) "1"
+    /// bool(true)
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -902,6 +986,16 @@ impl DOMXPath {
         #[php(default = true)] registerNodeNS: bool,
     ) -> Result<(), Thrown> {
         let (this, doc_obj) = (this.object(), document.object());
+        if state(req, this).is_some_and(|s| s.evaluation_depth > 0) {
+            let class = crate::class_name(req, this.class());
+            return Err(throw_error(
+                req,
+                "Error",
+                &format!(
+                    "Cannot call {class}::__construct() while an XPath evaluation is in progress"
+                ),
+            ));
+        }
         let doc = fetch(req, doc_obj)?;
         let Some(ctx) = ffi::XPath::new(doc) else {
             return Err(crate::dom_throw(req, Code::InvalidState));
@@ -916,6 +1010,7 @@ impl DOMXPath {
             ctx: req.memory_mut().adopt(ctx),
             register_node_ns: registerNodeNS,
             callbacks: XPathCallbacks::default(),
+            evaluation_depth: 0,
         };
         match dom_mut(req, this) {
             Some(d) => d.extra = Extra::XPath(Box::new(state)),
@@ -1088,44 +1183,47 @@ impl DOMXPath {
     /// ```
     ///
     /// The namespace's table is filled as the array is walked, so a
-    /// refused entry leaves the ones before it registered, and a refusal
-    /// lays the namespace down; a call with no argument lets any function
-    /// be called and keeps the table, which a later set calls by name
-    /// again.
+    /// refused entry leaves the ones before it in the table; a refusal lays
+    /// the namespace down, and it serves no call until a registration on
+    /// it succeeds (php 8.5.12, GH-23897), after which the entries the
+    /// refused one kept are called by name too. A call with no argument
+    /// lets any function be called and keeps the table, which a later set
+    /// calls by name again.
     ///
     /// ```php
     /// $d = new DOMDocument;
     /// $d->loadXML('<r><a>x</a></r>');
     /// $x = new DOMXPath($d);
     /// $x->registerNamespace('php', 'http://php.net/xpath');
-    /// try { $x->registerPhpFunctions(['f' => fn($s) => "f$s", 'g' => 'no_such_function']); } catch (TypeError $e) { echo get_class($e), "\n"; }
-    /// var_dump($x->evaluate('php:functionString("f", //a)'));
-    /// try { $x->evaluate('php:functionString("g", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
-    /// $y = new DOMXPath($d);
-    /// $y->registerNamespace('php', 'http://php.net/xpath');
-    /// try { $y->registerPhpFunctions('no_such_function'); } catch (TypeError $e) { echo get_class($e), "\n"; }
-    /// try { $y->evaluate('php:functionString("g", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $try = function ($f) { try { var_dump($f()); } catch (Error $e) { echo get_class($e), ': ', $e->getMessage(), "\n"; } };
+    /// $try(fn() => $x->registerPhpFunctions(['f' => fn($s) => "f$s", 'g' => 'no_such_function']));
+    /// $try(fn() => $x->evaluate('php:functionString("f", //a)'));
     /// $x->registerPhpFunctions(['up' => fn($s) => "U$s"]);
+    /// $try(fn() => $x->evaluate('php:functionString("f", //a)'));
+    /// $try(fn() => $x->evaluate('php:functionString("g", //a)'));
     /// $x->registerPhpFunctions();
-    /// var_dump($x->evaluate('php:functionString("strtoupper", //a)'));
-    /// try { $x->evaluate('php:functionString("up", //a)'); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $try(fn() => $x->evaluate('php:functionString("strtoupper", //a)'));
+    /// $try(fn() => $x->evaluate('php:functionString("up", //a)'));
     /// $x->registerPhpFunctions(['rev' => 'strrev']);
-    /// var_dump($x->evaluate('php:functionString("up", //a)'), $x->evaluate('php:functionString("f", //a)'));
-    /// try { $x->registerPhpFunctions(['' => 'no_such_function']); } catch (TypeError $e) { echo get_class($e), "\n"; }
-    /// try { $x->registerPhpFunctions(['' => 'strlen']); } catch (ValueError $e) { echo get_class($e), "\n"; }
+    /// $try(fn() => [$x->evaluate('php:functionString("up", //a)'), $x->evaluate('php:functionString("f", //a)')]);
+    /// $try(fn() => $x->registerPhpFunctions(['' => 'no_such_function']));
+    /// $try(fn() => $x->registerPhpFunctions(['' => 'strlen']));
     /// ```
     /// ```expect
-    /// TypeError
+    /// TypeError: DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be an array with valid callbacks as values, function "no_such_function" not found or invalid function name
+    /// Error: No callbacks were registered
     /// string(2) "fx"
-    /// No callback handler "g" registered
-    /// TypeError
-    /// No callback handler "g" registered
+    /// Error: No callback handler "g" registered
     /// string(1) "X"
-    /// Invalid callback up, function "up" not found or invalid function name
-    /// string(2) "Ux"
-    /// string(2) "fx"
-    /// TypeError
-    /// ValueError
+    /// Error: Invalid callback up, function "up" not found or invalid function name
+    /// array(2) {
+    ///   [0]=>
+    ///   string(2) "Ux"
+    ///   [1]=>
+    ///   string(2) "fx"
+    /// }
+    /// TypeError: DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be an array with valid callbacks as values, function "no_such_function" not found or invalid function name
+    /// ValueError: DOMXPath::registerPhpFunctions(): Argument #1 ($restrict) must be an array containing valid callback names
     /// ```
     #[php(tentative)]
     fn registerPhpFunctions(
@@ -1234,15 +1332,52 @@ impl DOMXPath {
     /// ```expect
     /// 'a' "it's" concat("'",'""')
     /// ```
+    ///
+    /// Since 8.5.12 the quoted string is asked for fallibly, and the
+    /// `concat()` form stops once the memory limit was met, `RETURN_OOM()`:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $q = DOMXPath::quote(str_repeat('a', 5 << 20));
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 5259264 bytes) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $q = DOMXPath::quote(str_repeat('\'"', 2 << 20));
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+    /// ```
     fn quote(req: &mut Request, str: Path) -> Result<Owner<PhpString>, Thrown> {
         let input = str.0.as_bytes();
+        // `zend_string_safe_falloc(1, input_len, 2, ..., fallible: true)`
+        // since 8.5.12, `RETURN_OOM()` where the memory limit refused it.
+        let quoted = |req: &mut Request, q: &[u8]| {
+            let made = req
+                .memory_mut()
+                .fallible(|req| PhpString::new(req, &[q, input, q].concat()))?;
+            match made {
+                Some(made) => Ok(made),
+                None => PhpString::new(req, b""), // RETURN_OOM()
+            }
+        };
         if !input.contains(&b'\'') {
-            return PhpString::new(req, &[b"'".as_slice(), input, b"'"].concat());
+            return quoted(req, b"'");
         }
         if !input.contains(&b'"') {
-            return PhpString::new(req, &[b"\"".as_slice(), input, b"\""].concat());
+            return quoted(req, b"\"");
         }
-        let mut out = b"concat(".to_vec();
+        // A `smart_str`, which stops once the memory limit was met since
+        // 8.5.12.
+        let mut out = SmartStr::default();
+        out.append(req, b"concat(")?;
         let mut at = 0;
         while at < input.len() {
             let rest = &input[at..];
@@ -1250,16 +1385,21 @@ impl DOMXPath {
             let to_double = rest.iter().position(|b| *b == b'"').unwrap_or(rest.len());
             let take = to_single.max(to_double);
             let q = if to_single > to_double { b'\'' } else { b'"' };
-            out.push(q);
-            out.extend_from_slice(&rest[..take]);
-            out.push(q);
-            out.push(b',');
+            out.append(req, &[q])?;
+            out.append(req, &rest[..take])?;
+            out.append(req, &[q])?;
+            out.append(req, b",")?;
             at += take;
+            if req.memory().has_oom() {
+                out.free(req);
+                return PhpString::new(req, b""); // RETURN_OOM()
+            }
         }
-        if let Some(last) = out.last_mut() {
-            *last = b')';
-        }
-        PhpString::new(req, &out)
+        // The last `,` becomes `)`.
+        let len = out.as_bytes().len();
+        out.remove(len.saturating_sub(1)..len);
+        out.append(req, b")")?;
+        out.extract(req)
     }
 }
 

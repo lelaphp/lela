@@ -32,7 +32,9 @@ pub(crate) mod profile;
 mod variant;
 
 use built_from::BuiltFrom;
-pub(crate) use closure::Closure;
+#[cfg(test)]
+pub(crate) use closure::stand_in;
+pub(crate) use closure::{Closure, Own};
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub use variant::{Build, Oracles, Platform, Provenance, Variant};
 

@@ -149,15 +149,66 @@ pub struct PhpString(Str);
 
 impl PhpString {
     /// A string of these bytes out of the request's heap, which is where
-    /// every string a native returns comes from (design §5.13). php's
-    /// `ZVAL_STRINGL_FAST`: the empty string and a string of one byte are
-    /// the process's interned ones and allocate nothing, and anything
-    /// longer is `zend_string_init`, one allocation counted against the
-    /// request. The `Err` is the memory limit, recorded on the request as
-    /// php's fatal and ending the native as `zend_mm` bails out.
+    /// every string a native returns comes from (design §5.13): the
+    /// empty string and a string of one byte are the process's interned
+    /// ones and allocate nothing, and anything longer is
+    /// `zend_string_init`, one allocation counted against the request.
+    /// Where php's native makes its string with `zend_string_init_fast`
+    /// (`ZVAL_STRINGL_FAST`), whose allocation php-8.5.12 sizes apart, it
+    /// is [`PhpString::fast`]. The `Err` is the memory limit, recorded on
+    /// the request as php's fatal and ending the native as `zend_mm`
+    /// bails out.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn new(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
         adopted(req.string(bytes))
+    }
+
+    /// php-8.5.12's `zend_string_init_fast`, `ZVAL_STRINGL_FAST`: the
+    /// interned string for the empty string and one byte, as
+    /// [`PhpString::new`], and otherwise `zend_string_finit`, whose allocation is the bytes past the
+    /// aligned header of the empty string (`Z/Zend/zend_string.h:215-238`),
+    /// so `substr`'s string can take a bin more than `strrev`'s, which is
+    /// `zend_string_alloc`, takes for the same length; the program writes
+    /// its first line before it measures:
+    ///
+    /// ```php
+    /// echo "substr strrev\n"; $big = str_repeat('0123456789', 100);
+    /// foreach ([2, 7, 8, 100] as $l) { $m = memory_get_usage(); $s = substr($big, 1, $l); $a = memory_get_usage() - $m; $t = strrev($s); echo $l, ' ', $a, ' ', memory_get_usage() - $m - $a, "\n"; $s = $t = null; }
+    /// ```
+    /// ```expect
+    /// substr strrev
+    /// 2 40 32
+    /// 7 40 32
+    /// 8 40 40
+    /// 100 160 128
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn fast(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        adopted(req.string_fast(bytes))
+    }
+
+    /// php-8.5.12's `zend_string_finit`: a string of the request's own
+    /// whatever its length, even the empty string and one byte, which
+    /// [`PhpString::new`] and [`PhpString::fast`] hand out interned, and
+    /// asking the bytes past the aligned header of the empty string, as
+    /// [`PhpString::fast`] does past one byte (`Z/Zend/zend_string.h:215`).
+    /// It is where php copies a buffer it already has, as `wordwrap`'s
+    /// single-byte break does its subject, so one byte takes the 40-byte
+    /// bin where `substr`'s is the interned character:
+    ///
+    /// ```php
+    /// echo "wordwrap substr\n";
+    /// foreach (['a', 'abcdefg', str_repeat('x', 100)] as $t) { $m = memory_get_usage(); $s = wordwrap($t, 75, "\n"); $a = memory_get_usage() - $m; $r = substr("_$t", 1); echo strlen($t), ' ', $a, ' ', memory_get_usage() - $m - $a, "\n"; $s = $r = null; }
+    /// ```
+    /// ```expect
+    /// wordwrap substr
+    /// 1 40 0
+    /// 7 40 40
+    /// 100 160 160
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn finit(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        adopted(req.string_finit(bytes))
     }
 
     /// The string a declaration holds for these bytes, with one owner for
@@ -203,7 +254,7 @@ impl PhpString {
     /// `accel_init_interned_string_for_php`: the engine's string for these
     /// bytes, a name or a constant the engine's startup or a published
     /// unit holds, which costs nothing, once the request has compiled a
-    /// file; a string of the request's own otherwise, `zend_string_init`
+    /// file; a string of the request's own otherwise, `zend_string_finit`
     /// whatever its length, and never one kept to be found again. What
     /// php's unserializer makes of an array's or an object's key. The
     /// `Err` is the memory limit.
@@ -413,7 +464,7 @@ impl Key {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn to_prop_name(&self, req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
         match self {
-            Key::Int(n) => PhpString::new(req, crate::c_number::Long::of(*n).as_bytes()),
+            Key::Int(n) => crate::ops::long_to_str(req, *n).map(Owner::adopt),
             Key::Str(s) => Ok(Owner::take(req, *s)),
         }
     }
@@ -1642,7 +1693,7 @@ impl PhpObject {
     /// echo '[', http_build_query(new DateTime('2020-01-01 UTC')), "]\n";
     /// ```
     /// ```expect
-    /// 408
+    /// 416
     /// b=1&c=2
     /// []
     /// ```
@@ -1678,7 +1729,7 @@ impl PhpObject {
     /// $l = new K; $m = memory_get_usage(); $s = serialize($l); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect
-    /// 32
+    /// 40
     /// 56
     /// ```
     pub fn slots_without_table(&self, req: &mut Request) -> Result<Option<walk::Table>, Thrown> {
@@ -2415,11 +2466,12 @@ impl PhpObject {
     }
 
     /// `Z_PROP_FLAG_P(OBJ_PROP(obj, offset)) & IS_PROP_LAZY` for the
-    /// declared property `name`, on the object the initialised proxies
-    /// lead to: whether it still waits for the initializer.
+    /// property `name` that `declaring` declares, on the object the
+    /// initialised proxies lead to: whether it still waits for the
+    /// initializer.
     #[must_use]
-    pub fn is_lazy_prop(&self, req: &Request, name: &[u8]) -> bool {
-        req.lazy_property(*self, name)
+    pub fn is_lazy_prop(&self, req: &Request, declaring: ClassId, name: &[u8]) -> bool {
+        req.lazy_property(*self, declaring, name)
     }
 
     /// `zend_lazy_object_get_initializer_zv`: the initializer of a lazy
@@ -2639,6 +2691,12 @@ pub use php_link::NameHasher;
 /// instance, or neither, which a dumper reads to print `lazy ghost ` or
 /// `lazy proxy ` before `object(` ([`PhpObject::laziness`]).
 pub use php_heap::Laziness;
+
+/// Which of php's string constructors a string is laid as, for its size:
+/// `zend_string_alloc`'s ([`Sizing::Alloc`]), `zend_string_finit`'s
+/// ([`Sizing::Finit`]) or `zend_string_safe_alloc`'s
+/// ([`Sizing::SafeAlloc`]), what [`FreshString::sized`] is given.
+pub use php_heap::Sizing;
 
 /// What an object's property table holds of its declared properties
 /// (design §5.4): the slots standing for them, or copies of them the

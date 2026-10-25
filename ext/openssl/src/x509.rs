@@ -576,12 +576,10 @@ fn time_t(req: &mut Request, time: &Asn1String) -> i64 {
 ///   [2]=>
 ///   string(9) "sslclient"
 /// }
-/// array(3) {
+/// array(2) {
 ///   [0]=>
 ///   string(20) "subjectKeyIdentifier"
 ///   [1]=>
-///   string(22) "authorityKeyIdentifier"
-///   [2]=>
 ///   string(16) "basicConstraints"
 /// }
 /// string(1) "a"

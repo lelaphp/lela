@@ -13,13 +13,13 @@ loop at 0, recursive call, interrupt stub
 0002 f0 TYPE_CHECK #2 fused inline unwinds -> unwind 0
   checks direction taken -> exit 3
   guard room 224 -> exit 4
-0005 f0 INIT_FCALL_BY_NAME const#2 inline map 0
+0005 f0 INIT_FCALL_BY_NAME const#2 inline
      f0 init e2 in-place
 0006 f0 CHECK_FUNC_ARG inline
 0007 f0 FETCH_DIM_R #1, int(0) inline leaves -> exit 5
   -> #3 f0.T2 [array]
   checks #3 array -> exit 6
-  checks #3 ref to array -> exit 6
+  checks #3 ref to array -> exit 7
 0008 f0 SEND_VAR #3 inline
 0009 f0 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 0
      f1 enter e2
@@ -30,13 +30,13 @@ loop at 0, recursive call, interrupt stub
 0002 f1 TYPE_CHECK #5 fused inline unwinds -> unwind 0
   checks direction taken -> exit 3
   guard room 224 -> exit 4
-0005 f1 INIT_FCALL_BY_NAME const#2 inline map 0
+0005 f1 INIT_FCALL_BY_NAME const#2 inline
      f1 init e2 in-place
 0006 f1 CHECK_FUNC_ARG inline
 0007 f1 FETCH_DIM_R #4, int(0) inline leaves -> exit 5
   -> #6 f1.T2 [array]
-  checks #6 array -> exit 6
-  checks #6 ref to array -> exit 6
+  checks #6 array -> exit 8
+  checks #6 ref to array -> exit 9
 0008 f1 SEND_VAR #6 inline
 0009 f1 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 0
      f2 enter e2
@@ -48,6 +48,8 @@ exit 2: f0 0001 plain f0.CV0:array packed guard
 exit 3: f0 0004 plain f0.CV0:array
 exit 4: f0 0005 plain f0.CV0:array to vm
 exit 5: f0 0007 restore call f0.CV0:array to vm
-exit 6: f0 0007 restore call f0.CV0:array
+exit 6: f0 0008 restore call f0.T2=copied #3 f0.CV0:array
+exit 7: f0 0008 restore call f0.T2=copied #3 through a reference f0.CV0:array
+exit 8: f1 0008 restore call f1.T2=copied #6 f1.CV0:array
+exit 9: f1 0008 restore call f1.T2=copied #6 through a reference f1.CV0:array
 unwind 0:
-map 0: offset 2 slot 0

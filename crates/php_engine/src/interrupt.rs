@@ -53,7 +53,7 @@ pub(crate) fn raised(req: &Request) -> bool {
 }
 
 /// What a check that found the interrupt raised does
-/// (`Z/Zend/zend_vm_def.h:10526`): it clears the interrupt and then
+/// (`Z/Zend/zend_vm_def.h:10537`): it clears the interrupt and then
 /// either raises php's timeout fatal, when the execution timer was what
 /// raised it, or serves each extension's interrupt hook from the top of
 /// php's `zend_interrupt_function` chain, the last `MINIT` to set it
@@ -75,12 +75,53 @@ pub(crate) fn raised(req: &Request) -> bool {
 /// ```expect exit=255 wall=1s
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 2
 /// ```
+///
+/// The delayed OOM of the memory limit is raised here wherever a check
+/// stands: after a frameless call, `implode`'s here, whose string php
+/// 8.5.12 asks for fallibly, so the call's own function goes no further
+/// and no `finally` is served,
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $a = array_fill(0, 100, str_repeat('x', 30000));
+/// function f($a) { $s = implode(',', $a); echo "after implode\n"; return $s; }
+/// try { f($a); } finally { echo "finally\n"; }
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 4
+/// ```
+///
+/// and after a native a callback called, as `zend_call_function` checks
+/// at 8.5.12, so the caller calls no further callback:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $r = array_map(function ($n) { echo "cb $n\n"; return str_repeat('x', $n << 20); }, [1, 10, 2]);
+/// echo "unreached\n";
+/// ```
+/// ```expect exit=255
+/// cb 1
+/// cb 10
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 10502144 bytes) in %s on line 3
+/// ```
+#[cold]
+#[inline(never)]
 pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
     if let Some(seconds) = req.limits().interrupt().taken() {
         return Err(Fatal::error(format!(
             "Maximum execution time of {seconds} second{} exceeded",
             if seconds == 1 { "" } else { "s" }
         )));
+    }
+    // `else if (ZEND_HAS_OOM()) { zend_handle_delayed_oom(); HANDLE_EXCEPTION(); }`
+    // (`Z/Zend/zend_vm_def.h:10548` at 8.5.12): the heap raised the
+    // interrupt as it recorded the delayed OOM, so the memory limit's
+    // fatal costs the loop no test of its own.
+    if req.has_oom() {
+        req.handle_delayed_oom();
+        return Ok(req.is_pending());
     }
     req.serve_interrupt_hooks();
     Ok(req.is_pending())
@@ -1646,7 +1687,7 @@ mod tests {
         assert_eq!(interrupt.taken(), Some(1));
     }
 
-    /// The two arms of `Z/Zend/zend_vm_def.h:10526`: the timer's fatal,
+    /// The two arms of `Z/Zend/zend_vm_def.h:10537`: the timer's fatal,
     /// and the interrupt cleared with nothing raised when signal
     /// delivery was what raised it and no PHP handler is installed.
     #[test]

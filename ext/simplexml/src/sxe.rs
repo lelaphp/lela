@@ -10,7 +10,7 @@ use php_ext::abi::{
 };
 use php_ext::call::{call_method, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name, with_string};
-use php_ext::raising::{Level, Thrown, docref, throw_error, throw_error_chained};
+use php_ext::raising::{Level, Thrown, docref, throw_error, type_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
@@ -167,7 +167,9 @@ impl View {
     }
 
     /// `sxe_get_element_by_offset`: the element at `offset` of the walk
-    /// from `node`, and how many came before where it stopped.
+    /// from `node`, and how many came before where it stopped. A negative
+    /// offset names none and counts them all, as php 8.5.12 walks it,
+    /// rather than the first.
     fn by_offset(&self, offset: i64, node: Option<Node>) -> (Option<Node>, i64) {
         if self.walk == Walk::Node {
             return (if offset == 0 { node } else { None }, 0);
@@ -175,7 +177,7 @@ impl View {
         let mut at = node;
         let mut index = 0;
         while let Some(n) = at {
-            if index > offset {
+            if offset >= 0 && index > offset {
                 break;
             }
             if n.kind() == Kind::Element && self.matches_ns(n) {
@@ -404,7 +406,38 @@ enum Fetch {
     Write,
 }
 
-/// `sxe_prop_dim_read`.
+/// `sxe_prop_dim_read`: a negative offset names no element of a list,
+/// and an offset other than 0 none of a single node; neither is made by
+/// a write through it.
+///
+/// ```php
+/// $x = simplexml_load_string('<r><i>a</i><i>b</i></r>');
+/// var_dump(isset($x->i[-1]), $x->i[-1], $x->i[0][3]);
+/// $x->i[-1] = 'Z';
+/// $x->i[0][-1] = 'Y';
+/// $x->i[0][2] = 'W';
+/// try { $x->i[-1]->k = 'K'; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// unset($x->i[-1]);
+/// echo $x->asXML();
+/// ```
+/// ```expect
+/// bool(false)
+/// NULL
+/// NULL
+///
+/// Warning: main(): Cannot add element i number -1 when only 2 such elements exist in %s on line 4
+///
+/// Warning: main(): Cannot add element i number -1 when only 0 such elements exist in %s on line 5
+///
+/// Warning: main(): Cannot add element i number 2 when only 0 such elements exist in %s on line 6
+///
+/// Warning: main(): Cannot add element i number -1 when only 2 such elements exist in %s on line 7
+///
+/// Notice: Indirect modification of overloaded element of SimpleXMLElement has no effect in %s on line 7
+/// Attempt to assign property "k" on null
+/// <?xml version="1.0"?>
+/// <r><i>a</i><i>b</i></r>
+/// ```
 fn prop_dim_read(
     req: &mut Request,
     object: PhpObject,
@@ -465,17 +498,18 @@ fn prop_dim_read(
             } else {
                 Some(node)
             };
-            let (found, count) = match member {
-                _ if view.walk == Walk::Node => {
-                    if let Member::Index(i) = member
-                        && i > 0
-                    {
-                        past_the_end(req, mine, i, 0);
-                    }
-                    (from, 0)
+            // A node is no list: its offset other than 0 names nothing, and
+            // nothing is made for it (`appendable`).
+            let (found, count, appendable) = match member {
+                _ if view.walk == Walk::Node => match member {
+                    Member::Index(i) if i != 0 => (None, 0, false),
+                    _ => (from, 0, true),
+                },
+                Member::Index(i) => {
+                    let (found, count) = view.by_offset(i, from);
+                    (found, count, true)
                 }
-                Member::Index(i) => view.by_offset(i, from),
-                Member::Append | Member::Name(_) => (None, 0),
+                Member::Append | Member::Name(_) => (None, 0, true),
             };
             if let Some(n) = found {
                 return Ok(wrap(req, object, n, Walk::Node, view.ns.clone())?.into_value());
@@ -483,10 +517,11 @@ fn prop_dim_read(
             if fetch != Fetch::Write {
                 return Ok(Owner::null());
             }
-            if let Member::Index(i) = member
-                && count < i
-            {
-                past_the_end(req, mine, i, count);
+            if let Member::Index(i) = member {
+                warn_past_the_end(req, mine, i, count);
+            }
+            if !appendable || matches!(member, Member::Index(i) if i < 0) {
+                return Ok(Owner::null());
             }
             let made = mine
                 .parent()
@@ -503,7 +538,7 @@ fn prop_dim_read(
 /// `value_str`, or php's `TypeError` for a value with none.
 fn text_of(req: &mut Request, value: &Value, access: Access) -> Result<Vec<u8>, Thrown> {
     match complex(req, value, access) {
-        Some(message) => Err(throw_error(req, "TypeError", &message)),
+        Some(message) => Err(type_error(req, &message)),
         None => plain_text(req, value),
     }
 }
@@ -550,6 +585,14 @@ fn plain_text(req: &mut Request, value: &Value) -> Result<Vec<u8>, Thrown> {
     with_string(req, &value, <[u8]>::to_vec)
 }
 
+/// php's warning for an element written past the `count` there are, or
+/// at a negative offset, which names none.
+fn warn_past_the_end(req: &mut Request, node: Node, index: i64, count: i64) {
+    if index < 0 || count < index {
+        past_the_end(req, node, index, count);
+    }
+}
+
 /// php's warning for an element written past the ones there are.
 fn past_the_end(req: &mut Request, node: Node, index: i64, count: i64) {
     let name = String::from_utf8_lossy(&node.name()).into_owned();
@@ -568,8 +611,16 @@ struct Hits {
     seen: i64,
 }
 
+/// What `sxe_prop_dim_write`'s search answers: what it found, or that the
+/// write is refused, its warning given (`goto out`).
+enum Search {
+    Hits(Hits),
+    Refused,
+}
+
 /// `sxe_prop_dim_write`'s search: the attribute or the element `member`
-/// names under `mine`, `attr` the attributes the walk reads.
+/// names under `mine`, `attr` the attributes the walk reads; refused, its
+/// warning given, for an offset other than 0 of a node, which is no list.
 fn hits(
     req: &mut Request,
     view: &View,
@@ -577,7 +628,7 @@ fn hits(
     access: Access,
     mine: Node,
     attr: Option<Node>,
-) -> Result<Hits, Thrown> {
+) -> Result<Search, Thrown> {
     let mut hits = Hits {
         found: None,
         count: 0,
@@ -602,9 +653,10 @@ fn hits(
             match member {
                 _ if view.walk == Walk::Node => {
                     if let Member::Index(i) = member
-                        && *i > 0
+                        && *i != 0
                     {
                         past_the_end(req, mine, *i, 0);
+                        return Ok(Search::Refused);
                     }
                     Some(mine)
                 }
@@ -625,14 +677,14 @@ fn hits(
                 }
                 at = n.next();
             }
-            return Ok(hits);
+            return Ok(Search::Hits(hits));
         }
     };
     if hit.is_some() {
         hits.found = hit;
         hits.count = 1;
     }
-    Ok(hits)
+    Ok(Search::Hits(hits))
 }
 
 /// The access a write through `member` makes, php's `access_mode` after
@@ -658,9 +710,8 @@ fn write_access(
                 Access::Attributes => "attribute",
                 Access::Elements => "element",
             };
-            Err(throw_error(
+            Err(value_error(
                 req,
-                "ValueError",
                 &format!("Cannot create {what} with an empty name"),
             ))
         }
@@ -680,6 +731,21 @@ fn write_access(
 /// 3576
 /// It's not possible to assign a complex type to properties, array given / SimpleXMLElement is not properly initialized
 /// ```
+///
+/// An attribute list writes onto the element it is of, which makes an
+/// attribute there where it has none of the name:
+///
+/// ```php
+/// $x = simplexml_load_string('<r/>');
+/// $x->attributes()['a'] = '1';
+/// $x->attributes()->b = '2';
+/// $x->attributes()['a'] = '3';
+/// echo $x->asXML();
+/// ```
+/// ```expect
+/// <?xml version="1.0"?>
+/// <r a="3" b="2"/>
+/// ```
 fn prop_dim_write(
     req: &mut Request,
     object: PhpObject,
@@ -696,7 +762,10 @@ fn prop_dim_write(
         // buffer standing across the throw) then chains it as its previous.
         Err(uninitialised) => {
             return Err(match value.and_then(|v| complex(req, v, access)) {
-                Some(message) => throw_error_chained(req, uninitialised, "TypeError", &message),
+                Some(message) => {
+                    let now = type_error(req, &message);
+                    uninitialised.chain(req, now)
+                }
                 None => uninitialised,
             });
         }
@@ -705,20 +774,19 @@ fn prop_dim_write(
     let mut attr = None;
     if let Some((first, first_attr)) = view.attrs(base) {
         attr = first_attr;
-        node = first;
         if matches!(view.walk, Walk::Attributes(_)) {
+            // php 8.5.12 keeps the element an attribute list is of, so a
+            // new attribute is made on it, with or without attributes
+            // there already.
             access = Access::Attributes;
         } else {
+            node = first;
             if matches!(member, Member::Append)
                 && first
                     .and_then(Node::parent)
                     .is_some_and(|p| p.kind() == Kind::Document)
             {
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    "Cannot append to an attribute list",
-                ));
+                return Err(value_error(req, "Cannot append to an attribute list"));
             }
             if let (Access::Attributes, None, Walk::Elements(name)) = (access, first, &view.walk) {
                 node = base.new_child(base.ns(), name, None);
@@ -731,7 +799,10 @@ fn prop_dim_write(
         return Ok(None);
     };
     mine.invalidate_document_lists();
-    let hits = hits(req, &view, member, access, mine, attr)?;
+    let hits = match hits(req, &view, member, access, mine, attr)? {
+        Search::Hits(hits) => hits,
+        Search::Refused => return Ok(None),
+    };
     if hits.count == 1 {
         if let (Some(n), Some(text)) = (hits.found, &text) {
             while let Some(child) = n.children() {
@@ -753,10 +824,11 @@ fn prop_dim_write(
     Ok(match (access, member) {
         (Access::Elements, Member::Name(name)) => mine.new_text_child(None, name, text),
         (Access::Elements, Member::Append | Member::Index(_)) => {
-            if let Member::Index(i) = member
-                && hits.seen < *i
-            {
-                past_the_end(req, mine, *i, hits.seen);
+            if let Member::Index(i) = member {
+                warn_past_the_end(req, mine, *i, hits.seen);
+                if *i < 0 {
+                    return Ok(None);
+                }
             }
             mine.parent()
                 .and_then(|p| p.new_text_child(mine.ns(), &mine.name(), text))
@@ -959,70 +1031,114 @@ pub(crate) fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Th
     Ok(PhpString::new(req, bytes)?.into_value())
 }
 
+/// `sxe_xmlNodeListGetString`'s string of a node list's text
+/// (`Z/ext/simplexml/simplexml.c:910`): `zend_string_finit` of what
+/// libxml gave back, whatever its length, asked for fallibly since 8.5.12
+/// and `None` where the memory limit refused it, and the empty string
+/// where libxml gave back nothing.
+fn list_value(req: &mut Request, text: Option<Vec<u8>>) -> Result<Option<Owner<Value>>, Thrown> {
+    let made = match text {
+        Some(text) => req
+            .memory_mut()
+            .fallible(|req| PhpString::finit(req, &text))?,
+        None => Some(PhpString::new(req, b"")?),
+    };
+    Ok(made.map(Owner::into_value))
+}
+
 /// `get_base_node_value`: a node's text where its first child is text that
-/// is not blank, an object standing for it otherwise.
+/// is not blank, an object standing for it otherwise; `None` where the
+/// memory limit refused the text, php's `false` since 8.5.12.
 fn base_value(
     req: &mut Request,
     of: PhpObject,
     node: Node,
     ns: Option<&Ns>,
-) -> Result<Owner<Value>, Thrown> {
+) -> Result<Option<Owner<Value>>, Thrown> {
     if let Some(c) = node.children()
         && c.kind() == Kind::Text
         && !c.is_blank()
     {
-        return string(req, &node.list_string().unwrap_or_default());
+        return list_value(req, node.list_string());
     }
-    Ok(wrap(req, of, node, Walk::Node, ns.cloned())?.into_value())
+    Ok(Some(
+        wrap(req, of, node, Walk::Node, ns.cloned())?.into_value(),
+    ))
 }
 
 /// `sxe_get_prop_hash`: the object's attributes under `@attributes`, then
 /// its children by name, or its text, as `var_dump` (`debug`) and the
 /// property readers see them.
+///
+/// Since 8.5.12 a text is asked for fallibly, and where the memory limit
+/// refused one or was met adding a row the table is emptied (`goto oom`,
+/// `zend_hash_clean(rv)`), the limit's fatal raised at the next check,
+/// the reader seeing the empty table until then:
+///
+/// ```php
+/// $x = simplexml_load_string('<r><a>' . str_repeat('x', 3 << 20) . '</a></r>', null, LIBXML_PARSEHUGE);
+/// ini_set('memory_limit', '2M');
+/// $p = get_object_vars($x);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 4
+/// ```
+///
+/// ```php
+/// $x = simplexml_load_string('<r a="' . str_repeat('x', 3 << 20) . '"/>', null, LIBXML_PARSEHUGE);
+/// ini_set('memory_limit', '2M');
+/// $p = (array) $x; var_dump(count($p));
+/// ```
+/// ```expect exit=255
+/// int(0)
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 4
+/// ```
 fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Row>, Thrown> {
-    let view = View::of(req, object);
     let mut rows = Vec::new();
-    let base = view.node(req)?;
-    if debug || view.walk != Walk::Children {
-        let node = match view.walk {
-            Walk::Elements(_) => view.first(base),
-            Walk::Node | Walk::Children | Walk::Attributes(_) => Some(base),
-        };
-        if let Some(node) = node.filter(|n| n.kind() != Kind::EntityDecl) {
-            let mut attrs = Vec::new();
-            let mut at = node.properties();
-            while let Some(a) = at {
-                let named = match &view.walk {
-                    Walk::Attributes(Some(name)) => a.name() == *name,
-                    Walk::Attributes(None) | Walk::Node | Walk::Elements(_) | Walk::Children => {
-                        true
-                    }
-                };
-                if named && view.matches_ns(a) {
-                    attrs.push((a.name(), a.list_string().unwrap_or_default()));
+    if prop_rows(req, object, debug, &mut rows)? {
+        return Ok(rows);
+    }
+    for row in rows {
+        match row {
+            Row::Named(_, values) => {
+                for value in values {
+                    value.give_up(req);
                 }
-                at = a.next();
             }
-            if !attrs.is_empty() {
-                let mut list = PhpArray::new(req)?;
-                for (name, value) in attrs {
-                    let value = string(req, &value)?;
-                    list.set_str(req, &name, value)?;
-                }
-                add_row(&mut rows, b"@attributes", list.into_value());
-            }
+            Row::Next(value) => value.give_up(req),
         }
     }
+    Ok(Vec::new())
+}
+
+/// [`prop_hash`]'s rows into `rows`: `false` where the memory limit
+/// refused a text or was met adding a row.
+fn prop_rows(
+    req: &mut Request,
+    object: PhpObject,
+    debug: bool,
+    rows: &mut Vec<Row>,
+) -> Result<bool, Thrown> {
+    let view = View::of(req, object);
+    let base = view.node(req)?;
+    if (debug || view.walk != Walk::Children) && !attribute_rows(req, &view, base, rows)? {
+        return Ok(false);
+    }
     let Some(node) = view.first(base) else {
-        return Ok(rows);
+        return Ok(true);
     };
     if matches!(view.walk, Walk::Attributes(_)) {
-        return Ok(rows);
+        return Ok(true);
     }
     if node.kind() == Kind::Attribute {
-        let text = node.list_string().unwrap_or_default();
-        rows.push(Row::Next(string(req, &text)?));
-        return Ok(rows);
+        let Some(value) = list_value(req, node.list_string())? else {
+            return Ok(false);
+        };
+        rows.push(Row::Next(value));
+        return Ok(true);
     }
     let mut use_iter = false;
     let mut at = if view.walk == Walk::Children {
@@ -1046,19 +1162,29 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
                 n.kind() != Kind::Text
             } else if n.kind() == Kind::Text {
                 if n.content().is_some_and(|c| !c.is_empty()) {
-                    let text = n.content().unwrap_or_default();
-                    rows.push(Row::Next(string(req, &text)?));
+                    let Some(value) = list_value(req, n.content())? else {
+                        return Ok(false);
+                    };
+                    rows.push(Row::Next(value));
+                    if req.memory().has_oom() {
+                        return Ok(false);
+                    }
                 }
                 false
             } else {
                 true
             };
         if taken && (n.kind() != Kind::Element || view.matches_ns(n)) && n.has_name() {
-            let value = base_value(req, object, n, view.ns.as_ref())?;
+            let Some(value) = base_value(req, object, n, view.ns.as_ref())? else {
+                return Ok(false);
+            };
             if use_iter {
                 rows.push(Row::Next(value));
             } else {
-                add_row(&mut rows, &n.name(), value);
+                add_row(rows, &n.name(), value);
+            }
+            if req.memory().has_oom() {
+                return Ok(false);
             }
         }
         if n.kind() == Kind::EntityDecl {
@@ -1070,7 +1196,51 @@ fn prop_hash(req: &mut Request, object: PhpObject, debug: bool) -> Result<Vec<Ro
             n.next()
         };
     }
-    Ok(rows)
+    Ok(true)
+}
+
+/// [`prop_rows`]' `@attributes` row: `false` where the memory limit
+/// refused a value or was met adding one.
+fn attribute_rows(
+    req: &mut Request,
+    view: &View,
+    base: Node,
+    rows: &mut Vec<Row>,
+) -> Result<bool, Thrown> {
+    let node = match view.walk {
+        Walk::Elements(_) => view.first(base),
+        Walk::Node | Walk::Children | Walk::Attributes(_) => Some(base),
+    };
+    if let Some(node) = node.filter(|n| n.kind() != Kind::EntityDecl) {
+        let mut attrs = Vec::new();
+        let mut at = node.properties();
+        while let Some(a) = at {
+            let named = match &view.walk {
+                Walk::Attributes(Some(name)) => a.name() == *name,
+                Walk::Attributes(None) | Walk::Node | Walk::Elements(_) | Walk::Children => true,
+            };
+            if named && view.matches_ns(a) {
+                attrs.push((a.name(), a.list_string()));
+            }
+            at = a.next();
+        }
+        if !attrs.is_empty() {
+            let mut list = PhpArray::new(req)?;
+            for (name, value) in attrs {
+                let Some(value) = list_value(req, value)? else {
+                    list.give_up(req);
+                    return Ok(false);
+                };
+                list.set_str(req, &name, value)?;
+                if req.memory().has_oom() {
+                    list.give_up(req);
+                    return Ok(false);
+                }
+            }
+            add_row(rows, b"@attributes", list.into_value());
+        }
+    }
+    Ok(true)
 }
 
 /// `sxe_prop_is_empty`: whether the object has no attribute and no child
@@ -1621,6 +1791,22 @@ impl ObjectHandlers for Handlers {
         count(req, object).map(Some)
     }
 
+    /// `sxe_objects_compare`: two elements are equal where they are the
+    /// same node, two documents where they are the same document, and two
+    /// objects nothing initialised never.
+    ///
+    /// ```php
+    /// class S extends SimpleXMLElement { function __construct() {} }
+    /// $a = new S; $b = new S; $x = simplexml_load_string('<r><c/></r>');
+    /// var_dump($a == $a, $a == $b, $a == $x, $x->c == $x->c, $x == $x->c);
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(false)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// ```
     fn compare(
         &self,
         req: &mut Request,
@@ -1641,7 +1827,11 @@ impl ObjectHandlers for Handlers {
         };
         Ok(match nodes {
             (Some(a), Some(b)) => (a == b).then_some(std::cmp::Ordering::Equal),
-            (None, None) => (docs.0 == docs.1).then_some(std::cmp::Ordering::Equal),
+            // Two objects nothing initialised share no document, so they
+            // are not equal (php 8.5.12).
+            (None, None) => {
+                (docs.0.is_some() && docs.0 == docs.1).then_some(std::cmp::Ordering::Equal)
+            }
             _ => None,
         })
     }

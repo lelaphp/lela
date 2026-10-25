@@ -32,9 +32,36 @@ impl Request {
         self.returned = value;
     }
 
+    /// The serving's entry frame `frame` returned `returned`, as `RETURN`
+    /// leaves a frame `zend_call_function` served (`ZEND_CALL_TOP`): the
+    /// observer told, and the value the serving's return value, which its
+    /// caller takes once the serving is over, the frame popped there. The
+    /// interpreter's `RETURN` and the compiled tier's (`tier::return_entry`)
+    /// both end here.
+    #[inline(always)] // in RETURN's entry arm, as it was written there
+    pub(crate) fn entry_returned(&mut self, frame: php_heap::FrameRef, returned: Value) {
+        crate::observer::returned(self, frame, Some(&returned));
+        self.returned = returned;
+    }
+
     /// What the entry frame last returned, taken, `null` left in its place.
     pub(crate) fn take_returned(&mut self) -> Value {
         std::mem::take(&mut self.returned)
+    }
+
+    /// What an opline was to write, given up because a throwable or an
+    /// exit is pending: php's rule for a value written under
+    /// `EG(exception)`, its `zval_ptr_dtor` at `ZEND_HANDLE_EXCEPTION`,
+    /// which frees the throwing opline's `result` before the frame's live
+    /// ranges and after the opline's own operands. A property read's
+    /// `get` hook or `__get` that returned and then threw left its value
+    /// there, the read's `rv` (`Retval::Result`), so its destructor runs
+    /// after the receiver's and before the `catch`. Out of line, since
+    /// nothing reaches it but a throw.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn release_thrown_value(&mut self, value: Value) {
+        self.release(value);
     }
 
     /// Leave what a raise made pending where the loop reads it, php's

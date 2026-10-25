@@ -1348,7 +1348,9 @@ fn default_text(default: &ConstExpr) -> String {
         ConstExpr::Long { value, radix } => radix.written(*value),
         // `smart_str_append_double(&str, d, EG(precision), false)`, at
         // php's default `precision` of 14.
-        ConstExpr::Double(d) => php_heap::double_to_string(*d, 14, php_heap::Exponent::Upper),
+        ConstExpr::Double(d) => php_heap::double_to_string(*d, 14, php_heap::Exponent::Upper)
+            .as_str()
+            .to_owned(),
         ConstExpr::Str(bytes) => quoted(bytes),
         ConstExpr::UnitValue(value) if let Some(s) = value.value().as_str() => quoted(s.bytes()),
         // An array the compiler folded is a value, `[]` or `[...]`; one

@@ -9,7 +9,7 @@ use php_unit::decl::{Parameter, Type};
 use php_unit::{ConstIdx, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
-use super::{Constant, Frame, Imm, Layout, Line, Slot};
+use super::{Constant, Frame, Imm, Layout, Line, Read, Slot};
 
 /// php's `MAX_ARG_FLAG_NUM`: past it, how a send passes is read late.
 pub(super) const MAX_ARG_FLAG_NUM: u32 = 12;
@@ -198,7 +198,12 @@ pub(super) fn assigned(t: Types) -> Types {
 
 /// What an opline writes to its `out` slot, php's `zend_update_type_info`
 /// for the scalar core and anything past it.
-pub(super) fn out_types(op: &Opline, t1: Types, t2: Types, td: Types, code: &OpArray) -> Types {
+pub(super) fn out_types(
+    op: &Opline,
+    [t1, t2, td]: [Types; 3],
+    read1: Read,
+    code: &OpArray,
+) -> Types {
     match op.opcode {
         Opcode::Add
         | Opcode::Sub
@@ -249,6 +254,20 @@ pub(super) fn out_types(op: &Opline, t1: Types, t2: Types, td: Types, code: &OpA
         Opcode::VerifyReturnType => returned(code, t1),
         Opcode::Cast => cast(op.extended_value),
         Opcode::FeFetchR | Opcode::FeFetchRw => fetched_key(t1),
+        // The element's address, which the handler lays down for any key
+        // the lookups take, warning of none, in a variable's array or the
+        // one an indirect `VAR` points at: php's `MAY_BE_INDIRECT`, its
+        // `indirect_reference`. A `VAR` that holds an array of its own
+        // takes a copy of the element, and a `FETCH_DIM_RW`'s warning may
+        // reach an error handler that frees the array, the `VAR` then an
+        // error.
+        Opcode::FetchDimW
+            if t1.tag() == Some(ZvalType::Array)
+                && keyed(op, t2)
+                && (op.op1_type == OperandKind::Cv || matches!(read1, Read::Indirect(_))) =>
+        {
+            Types::INDIRECT
+        }
         _ => Types::UNKNOWN.without(Types::UNDEF),
     }
 }
@@ -325,6 +344,12 @@ pub(super) fn op1_types(
             t1
         }
         Opcode::AssignDim | Opcode::AssignDimOp => Types::of_tag(ZvalType::Array),
+        // An array fetched for writing stays an array, separated or not,
+        // as php's inference keeps it (`zend_update_type_info`'s
+        // `ZEND_FETCH_DIM_W` case, `Z/Zend/Optimizer/zend_inference.c:3562-3600`).
+        Opcode::FetchDimW | Opcode::FetchDimRw if t1.tag() == Some(ZvalType::Array) => {
+            Types::of_tag(ZvalType::Array)
+        }
         Opcode::VerifyReturnType => returned(code, t1),
         // The object a property opline writes through stays the object
         // it was, of the class it was (`zend_update_type_info`'s
@@ -797,7 +822,8 @@ fn named(op: &Opline, code: &OpArray) -> bool {
 
 /// The operands php's switch in `zend_jit_trace_build_tssa` adds a guard
 /// for (`ADD_OP1_TRACE_GUARD`, `ADD_OP2_TRACE_GUARD`,
-/// `ADD_OP1_DATA_TRACE_GUARD`), in its order.
+/// `ADD_OP1_DATA_TRACE_GUARD`), in its order, which marks them; the code
+/// generator holds them in [`checked_order`].
 ///
 /// Where php types an operand from its inference over the whole
 /// function, which this tier does not keep (`jit-design.md` §4.2,
@@ -980,6 +1006,21 @@ pub(super) fn guard_sites(
     }
 }
 
+/// The order php's code generator holds an opline's operands' types in,
+/// as each case of `zend_jit_trace`'s switch calls `CHECK_OP1_TRACE_TYPE`,
+/// `CHECK_OP2_TRACE_TYPE` and `CHECK_OP1_DATA_TRACE_TYPE`
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:4380-6500`): an `ASSIGN`'s value
+/// before its variable (`:5130-5150`), and every other opline's `op1`,
+/// then its `op2`, then its `OP_DATA`'s. Their exits are taken in this
+/// order, each knowing the types the guards before it held, so it is the
+/// order they are numbered in, where [`guard_sites`] says which are held.
+pub(super) fn checked_order(opcode: Opcode) -> [Site; 3] {
+    match opcode {
+        Opcode::Assign => [Site::Op2, Site::Op1, Site::Data],
+        _ => [Site::Op1, Site::Op2, Site::Data],
+    }
+}
+
 /// The operands php's code generator holds the recorded type of where its
 /// inference adds no guard (`CHECK_OP_TRACE_TYPE` in
 /// `zend_jit_trace.c`'s cases): a concatenation's two, a rope part's, and
@@ -1005,21 +1046,54 @@ pub(super) fn check_sites(op: &Opline, samples: [Option<Sample>; 3]) -> Vec<Site
     }
 }
 
+/// Whether the key `op2` of a dimension opline, seen as `t2`, is one the
+/// lookups take inline: a long, or a string a constant or a variable
+/// holds, which the opline gives up nothing of.
+pub(super) fn keyed(op: &Opline, t2: Types) -> bool {
+    t2 == Types::LONG
+        || (t2 == Types::STRING && matches!(op.op2_type, OperandKind::Const | OperandKind::Cv))
+}
+
 /// Whether an `ASSIGN_DIM_OP` is compiled inline, as php compiles a
 /// compound write to an element over a variable's array, through the
-/// reference it may be (`t1` what it sees of it), by a long key and with
-/// a number, calling its helpers where the array is shared, a hash or
-/// short of the key, or the element is no number (`zend_jit_assign_dim_op`,
-/// `Z/ext/opcache/jit/zend_jit_ir.c:13528-13750`): its `out` slot unused and
-/// its operator one `zend_jit_math_helper` serves over two numbers.
+/// reference it may be or the `VAR` a fetch for writing left indirect
+/// (`t1` what it sees of it), by a key the lookups
+/// take ([`keyed`]), calling its helpers where the array is shared, a
+/// packed array short of the key, a key a hash has not got or an element
+/// of no kind the operator serves (`zend_jit_assign_dim_op`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:13528-13750`): its `out` slot unused,
+/// and its operator one `zend_jit_math_helper` serves over two numbers,
+/// `+`, `-`, `*` and `/`, one `zend_jit_long_math_helper` serves over two
+/// longs, `%`, the shifts and the bitwise operators, or `.` over two
+/// strings, `zend_jit_concat_helper`; php leaves `**` out of all three
+/// (`zend_jit_supported_binary_op`).
 pub(super) fn compound_in_place(op: &Opline, t1: Types, t2: Types, td: Types) -> bool {
-    op.op1_type == OperandKind::Cv
-        && op.out_type == OperandKind::Unused
+    let served = |binary| match binary {
+        Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div => {
+            td == Types::LONG || td == Types::DOUBLE
+        }
+        Opcode::Mod | Opcode::Sl | Opcode::Sr | Opcode::BwOr | Opcode::BwAnd | Opcode::BwXor => {
+            td == Types::LONG
+        }
+        Opcode::Concat => td == Types::STRING,
+        _ => false,
+    };
+    op.out_type == OperandKind::Unused
         && t1.tag() == Some(ZvalType::Array)
-        && t2 == Types::LONG
-        && (td == Types::LONG || td == Types::DOUBLE)
-        && lattice::binary_of(op.extended_value)
-            .is_some_and(|binary| matches!(binary, Opcode::Add | Opcode::Sub | Opcode::Mul))
+        && keyed(op, t2)
+        && lattice::binary_of(op.extended_value).is_some_and(served)
+}
+
+/// The oplines php follows an indirect `VAR` for, to the element they
+/// write, guarding the type of what it points at
+/// (`zend_jit_fetch_indirect_var`'s callers, `Z/ext/opcache/jit/zend_jit_trace.c:4749-4762`,
+/// `:5068-5083`, `:5906-5922`): a write, a compound write and a fetch for
+/// writing of an element.
+pub(super) fn written_through(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::AssignDim | Opcode::AssignDimOp | Opcode::FetchDimW | Opcode::FetchDimRw
+    )
 }
 
 /// php's packed guard over an array `op1` read or written by a long key

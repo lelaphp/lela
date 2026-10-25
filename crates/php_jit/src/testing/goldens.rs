@@ -197,6 +197,212 @@ pub(crate) const BINARY_TREES_MAKE: Fixture = Fixture {
     plan: &[("record.function", "make_tree"), ("record.start", "return")],
 };
 
+/// A hash read by a constant string, a variable's string and a long, each through the `find` kernel (#3339).
+pub(crate) const HASH_READ: Fixture = Fixture {
+    name: "hash_read",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "read"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `isset()` of a hash's elements, fused to its jump and written (#3339).
+pub(crate) const HASH_ISSET: Fixture = Fixture {
+    name: "hash_isset",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "tested"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A hash read by `??`, `FETCH_DIM_IS`, a key it has not got `null`
+/// (#3339).
+pub(crate) const HASH_IS: Fixture = Fixture {
+    name: "hash_is",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "coalesced"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A hash written by a constant string, a variable's string and a long, each through the `lookup` kernel (#3339).
+pub(crate) const HASH_WRITE: Fixture = Fixture {
+    name: "hash_write",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "written"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A hash's elements fetched for writing, `FETCH_DIM_W` under a nested write and `FETCH_DIM_RW` under an increment (#3339).
+pub(crate) const HASH_FETCH_W: Fixture = Fixture {
+    name: "hash_fetch_w",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "fetched"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `/=` of a hash's element (#3339).
+pub(crate) const DIM_DIV: Fixture = Fixture {
+    name: "dim_div",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "divided"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `%=` of a hash's element (#3339).
+pub(crate) const DIM_MOD: Fixture = Fixture {
+    name: "dim_mod",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "modulo"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `<<=` of a hash's element (#3339).
+pub(crate) const DIM_SL: Fixture = Fixture {
+    name: "dim_sl",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "shifted_left"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `>>=` of a hash's element (#3339).
+pub(crate) const DIM_SR: Fixture = Fixture {
+    name: "dim_sr",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "shifted_right"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `&=` of a hash's element (#3339).
+pub(crate) const DIM_AND: Fixture = Fixture {
+    name: "dim_and",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "anded"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `|=` of a hash's element (#3339).
+pub(crate) const DIM_OR: Fixture = Fixture {
+    name: "dim_or",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "ored"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `^=` of a hash's element (#3339).
+pub(crate) const DIM_XOR: Fixture = Fixture {
+    name: "dim_xor",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "xored"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `.=` of a hash's element, a string, through the `assign_concat` kernel (#3339).
+pub(crate) const DIM_CONCAT: Fixture = Fixture {
+    name: "dim_concat",
+    program: "hash_dims",
+    plan: &[
+        ("record.function", "joined"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// `isset()`, `??` and a read over the temporary a fetch made, each
+/// temporary freed after (#3370).
+pub(crate) const NESTED_READ: Fixture = Fixture {
+    name: "nested_read",
+    program: "nested_dims",
+    plan: &[
+        ("record.function", "nested_read"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A write, a compound write and a fetch for writing through the `VAR` a
+/// fetch for writing left indirect, under a guard on what it points at
+/// (#3370).
+pub(crate) const NESTED_WRITE: Fixture = Fixture {
+    name: "nested_write",
+    program: "nested_dims",
+    plan: &[
+        ("record.function", "nested_write"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A write to the array a reference holds, by a string and a long (#3370).
+pub(crate) const REF_WRITE: Fixture = Fixture {
+    name: "ref_write",
+    program: "nested_dims",
+    plan: &[
+        ("record.function", "ref_write"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// A write, a compound write and a fetch for writing through a `VAR` that
+/// points at a reference, under a guard on the reference's inner type
+/// (#3410).
+pub(crate) const INDIRECT_REF_WRITE: Fixture = Fixture {
+    name: "indirect_ref_write",
+    program: "nested_dims",
+    plan: &[
+        ("record.function", "indirect_ref_write"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
+/// The property oplines of a request-scoped class, `zend_lazy_class_load`'s
+/// copy of a class linked over one the request declared, compiled in place
+/// under the guard on the request's own cache slot (#3346).
+pub(crate) const OBJECT_SCOPED: Fixture = Fixture {
+    name: "object_scoped",
+    program: "scoped_objects",
+    plan: &[
+        ("record.function", "scoped"),
+        ("record.start", "loop"),
+        ("record.headers", "0"),
+    ],
+};
+
 /// Where `types`' goldens are, the programs and their records among them.
 pub(crate) fn types() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/types/goldens")

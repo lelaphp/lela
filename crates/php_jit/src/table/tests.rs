@@ -46,7 +46,7 @@ fn exit(link: Option<TraceId>) -> ExitSpec {
     ExitSpec {
         frame: Frame::ROOT,
         opline: Some(OplineIdx(1)),
-        landing: Landing::Plain,
+        landing: Landing::PLAIN,
         stores: Vec::new(),
         known: Vec::new(),
         grows: Grows::Side,
@@ -147,7 +147,7 @@ fn a_published_trace_is_got_by_its_id_with_its_exits() -> Result<(), String> {
     let first = &got.exits[1];
     assert_eq!(
         (first.opline, first.landing),
-        (Some(OplineIdx(1)), Landing::Plain)
+        (Some(OplineIdx(1)), Landing::PLAIN)
     );
     assert_eq!(got.kind, super::Kind::Trace);
     assert!(got.map_ptrs.is_empty() && got.marks.is_empty());

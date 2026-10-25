@@ -716,11 +716,13 @@ impl<H> VmStack<H> {
     /// room, and never lays it out anywhere else first. A frame the top
     /// page cannot hold takes a page of its own from `heap`, the stack's
     /// page size or, for a frame larger than that, the page size it
-    /// rounds up to; a heap that cannot give it refuses the push with
-    /// the fatal php raises.
+    /// rounds up to; a heap past its hard limit refuses the push with
+    /// the fatal that ends the process.
     ///
-    /// So a recursion without end is refused where php's is, asking for
-    /// a page, and not after the machine's memory is gone:
+    /// So a recursion without end meets the limit where php's does,
+    /// asking for a page, here the chunk the page needs, and not after
+    /// the machine's memory is gone; its fatal is raised as the frame the
+    /// page holds is entered:
     ///
     /// ```php
     /// ini_set('memory_limit', '8M');
@@ -728,7 +730,7 @@ impl<H> VmStack<H> {
     /// f();
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 262144 bytes) in %s on line 3
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
     /// ```
     ///
     /// And a deep call chain moves `memory_get_usage()` by the pages it
@@ -938,7 +940,7 @@ impl<H> VmStack<H> {
     /// before them: in a room off the pages and off `heap` ([`Loose`]), the
     /// one the last such frame gave back where it stands spare. php's
     /// `ZEND_FRAMELESS_ICALL_*` pushes no frame unless an observer
-    /// watches the function (`Z/Zend/zend_vm_def.h:9775`), so this one
+    /// watches the function (`Z/Zend/zend_vm_def.h:9782`), so this one
     /// opens no page where the top page has no room for it, reads in
     /// neither `memory_get_usage()` nor its peak, and leaves the pages
     /// as they stood for what the native pushes while it is served.
@@ -1168,7 +1170,7 @@ impl<H> VmStack<H> {
     /// keeps its own `execute_data`. The first time, the frame, its
     /// header and extra arguments with it, is copied into an allocation
     /// of its own, `emalloc(used_stack)` and the `memcpy` beside it
-    /// (`Z/Zend/zend_vm_def.h:4674-4682`), and its room on the page is
+    /// (`Z/Zend/zend_vm_def.h:4675-4683`), and its room on the page is
     /// given back; after that the slots are one allocation that moves
     /// with the frame and not through it, so a `ZvalRef` into one names
     /// the same zval while the frame is off the stack, and a frame
@@ -1767,22 +1769,35 @@ mod tests {
     }
 
     /// The limit meets a page as it meets any allocation: at the chunk
-    /// the heap would have to grow by, with php's message and the page's
-    /// 262144 bytes in it.
+    /// the heap would have to grow by, the page served and the delayed
+    /// OOM naming the chunk; pushed on past it, the stack meets the hard
+    /// limit, twice the soft one, which refuses the page.
     #[test]
     fn a_stack_past_the_memory_limit_is_refused_with_php_s_fatal() {
         let _alone = alone();
         let mut heap = Heap::new();
         heap.set_memory_limit(4 * 1024 * 1024);
         let mut stack = VmStack::<Head>::new();
-        let refused = (0..100_000)
+        let mut pushed = 0;
+        while !heap.has_oom() {
+            assert!(stack.push_frame(&mut heap, 10, 0, Head::default).is_ok());
+            pushed += 1;
+        }
+        assert!(
+            matches!(heap.delayed_oom(), crate::DelayedOom::Pending(p) if p.message == "Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes)"),
+            "{:?}",
+            heap.delayed_oom()
+        );
+        let refused = (0..1_000_000)
             .map(|_| stack.push_frame(&mut heap, 10, 0, Head::default))
             .find_map(Result::err);
+        assert!(pushed > 0);
         assert_eq!(
-            refused,
-            Some(Fatal::error(
-                "Allowed memory size of 4194304 bytes exhausted (tried to allocate 262144 bytes)"
-            ))
+            refused.map(Fatal::into_reason),
+            Some(crate::FatalReason::HardLimit {
+                limit: 8 * 1024 * 1024,
+                asked: 2 * 1024 * 1024
+            })
         );
         drop(stack.close(&mut heap));
     }

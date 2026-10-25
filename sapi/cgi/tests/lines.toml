@@ -333,3 +333,14 @@ args = ["-n", "-d", "opcache.file_update_protection=0", "-f", "{dir}/end.php"]
 [[line.then]]
 args = ["-n", "-d", "opcache.file_update_protection=0"]
 env = { REDIRECT_STATUS = "200", GATEWAY_INTERFACE = "CGI/1.1", REQUEST_METHOD = "GET", SCRIPT_FILENAME = "{dir}/end.php" }
+
+# php's `zend_mm_hard_limit_error` writes its line to stderr and
+# `_exit(137)`s (`Z/Zend/zend_alloc.c:519`), so nothing of
+# `php_request_shutdown` runs: a head not yet sent is never sent, and what a
+# buffer held is dropped. The engine ends the request there
+# (`Ending::Terminated`) and a one-request host writes no head after it
+# (#3435, trace:hard-limit-ends-request).
+[[line]]
+name = "hard-limit-sends-no-head"
+args = ["-n", "-d", "memory_limit=128M", "{dir}/t.php"]
+files = { "t.php" = "<?php\nob_start();\nheader('X-A: 1');\necho \"body\\n\";\nhash_pbkdf2('md5', 'p', 's', 1, PHP_INT_MAX);\n" }

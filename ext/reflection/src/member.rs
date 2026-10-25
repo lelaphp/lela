@@ -17,7 +17,9 @@ use php_ext::call::{
 use php_ext::decl::{
     ClassConstDecl, ClassKind, HookKind, MethodDecl, PropertyDecl, Type, Visibility,
 };
-use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw, throw_error};
+use php_ext::raising::{
+    Thrown, arg_count_error, arg_type_error, deprecated, throw, throw_error, throw_exception_ex,
+};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -204,7 +206,7 @@ fn this_constant(
     let class = class_named(req, &class)?;
     let Some((scope, decl)) = class_constant_named(req, class, &name) else {
         let named = class_name_of(req, class);
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!(
@@ -246,9 +248,11 @@ fn constant_extension_name(req: &mut Request, this: PhpObject) -> Result<Option<
         .map(str::to_owned))
 }
 
-/// `reflection_property_set_raw_value`: `value`, the caller's to give
-/// up, written past the effective property's `set` hook where it has
-/// one, and otherwise through `write_property` under `EG(fake_scope)`,
+/// `reflection_property_set_raw_value`: `value`, a view of the
+/// caller's, written past the effective property's `set` hook where it
+/// has one, by calling the hook's trampoline on the object as php does
+/// ([`php_ext::call::write_raw_property`]), and otherwise through
+/// `write_property` under `EG(fake_scope)`,
 /// the class the reflector was asked about, so a parent's private
 /// property the object's class redeclares is the parent's slot.
 ///
@@ -270,8 +274,14 @@ fn set_raw_value(
     prop: Option<&(ClassId, PropertyDecl)>,
     object: PhpObject,
     name: &[u8],
-    value: Owner<Value>,
+    value: Value,
 ) -> Result<(), Thrown> {
+    if let Some((at, _)) =
+        prop.filter(|(at, _)| property_hook(req, *at, name, HookKind::Set).is_some())
+    {
+        return php_ext::call::write_raw_property(req, &object, *at, name, value);
+    }
+    let value = Owner::take(req, value);
     let key = match PhpString::new(req, name) {
         Ok(key) => key,
         Err(thrown) => {
@@ -279,9 +289,6 @@ fn set_raw_value(
             return Err(thrown);
         }
     };
-    if prop.is_some_and(|(at, _)| property_hook(req, *at, name, HookKind::Set).is_some()) {
-        return php_ext::call::write_raw_property(req, &object, key, value);
-    }
     let handlers = object.handlers(req);
     req.frames_mut().with_fake_scope(asked, |req| {
         handlers.write_property(req, object, key, value)
@@ -462,7 +469,7 @@ impl ReflectionProperty {
             }
             None => {
                 let class = class_name_of(req, class);
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "ReflectionException",
                     &format!(
@@ -952,8 +959,10 @@ impl ReflectionProperty {
                 "May not use getRawValue on static properties",
             ));
         }
-        if prop.is_some_and(|(at, _)| property_hook(req, at, &name, HookKind::Get).is_some()) {
-            return php_ext::call::read_raw_property(req, &object, &name);
+        if let Some((at, _)) =
+            prop.filter(|(at, _)| property_hook(req, *at, &name, HookKind::Get).is_some())
+        {
+            return php_ext::call::read_raw_property(req, &object, at, &name);
         }
         // `read_property` under `EG(fake_scope)`, the class the reflector
         // was asked about.
@@ -1001,14 +1010,14 @@ impl ReflectionProperty {
                 "May not use setRawValue on static properties",
             ));
         }
-        let value = Owner::take(req, value);
         set_raw_value(req, asked, prop.as_ref(), object, &name, value)
     }
 
     /// `ReflectionProperty::setRawValueWithoutLazyInitialization(object $object, mixed $value): void`:
-    /// the value written into the property past `__set` and hooks, on the
-    /// object the initialised proxies lead to, and the property no longer
-    /// waiting; the object is no longer lazy once none waits.
+    /// the value written into the property as `setRawValue` writes it, a
+    /// `set` hook's trampoline or `write_property` with no `__set`, on the
+    /// object the initialised proxies lead to, while the property does not
+    /// wait; the object is no longer lazy once none waits.
     ///
     /// ```php
     /// class C { public $a = 1; public int $b = 2; public static $s; public function __set($n, $v) { echo "set $n\n"; } }
@@ -1038,6 +1047,53 @@ impl ReflectionProperty {
     /// Can not use setRawValueWithoutLazyInitialization on static property C::$s
     /// Can not use setRawValueWithoutLazyInitialization on dynamic property stdClass::$dyn
     /// ```
+    ///
+    /// Over a property with a `set` hook the hook's trampoline is called,
+    /// so a throw has its row and the value it hands back is given up as a
+    /// possible root:
+    ///
+    /// ```php
+    /// class B {}
+    /// class C { public int $n { set { $this->n = $value; } } public B $b { set { $this->b = $value; } } }
+    /// $r = new ReflectionClass(C::class);
+    /// $g = $r->newLazyGhost(function () { echo "init\n"; });
+    /// try { $r->getProperty('n')->setRawValueWithoutLazyInitialization($g, 'x'); } catch (TypeError $e) { echo $e->getTraceAsString(), "\n"; }
+    /// var_dump($r->getProperty('n')->isLazy($g));
+    /// function t($r) { $g = $r->newLazyGhost(function () {}); $v = new B; gc_collect_cycles(); $r->getProperty('b')->setRawValueWithoutLazyInitialization($g, $v); echo gc_status()['roots'], "\n"; }
+    /// t($r);
+    /// ```
+    /// ```expect
+    /// #0 [internal function]: C->$n::set('x')
+    /// #1 %s(6): ReflectionProperty->setRawValueWithoutLazyInitialization(Object(C), 'x')
+    /// #2 {main}
+    /// bool(true)
+    /// 2
+    /// ```
+    ///
+    /// The slot is the effective property's, `OBJ_PROP(object, prop->offset)`:
+    /// a parent's private property reflected through the parent is that
+    /// slot and not the child's of the same name, which still waits, as
+    /// it does under `skipLazyInitialization`:
+    ///
+    /// ```php
+    /// class P { private $p = 'P'; public $q = 1; }
+    /// class Q extends P { private $p = 'Q'; }
+    /// $r = new ReflectionClass(Q::class); $pp = new ReflectionProperty(P::class, 'p'); $qp = new ReflectionProperty(Q::class, 'p');
+    /// $g = $r->newLazyGhost(function () { echo "init\n"; });
+    /// $pp->setRawValueWithoutLazyInitialization($g, 'X');
+    /// var_dump($pp->isLazy($g), $qp->isLazy($g), $r->isUninitializedLazyObject($g));
+    /// $h = $r->newLazyGhost(function () { echo "init\n"; });
+    /// $pp->skipLazyInitialization($h);
+    /// var_dump($pp->isLazy($h), $qp->isLazy($h), $r->isUninitializedLazyObject($h));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// ```
     fn setRawValueWithoutLazyInitialization(
         req: &mut Request,
         this: This<Self>,
@@ -1053,12 +1109,15 @@ impl ReflectionProperty {
         let method = "setRawValueWithoutLazyInitialization";
         lazy_compatible(req, asked, prop.as_ref(), &name, object, method)?;
         if !object.is_lazy() {
-            let value = Owner::take(req, value);
             return set_raw_value(req, asked, prop.as_ref(), object, &name, value);
         }
-        let value = Owner::take(req, value);
-        skip_lazy_initialization(req, &object, &name, Some(value))?;
-        Ok(())
+        // `IS_PROP_LAZY` cleared around `reflection_property_set_raw_value`,
+        // the write `setRawValue` makes.
+        let declaring = prop.as_ref().map_or(class, |(at, _)| *at);
+        let mut write = |req: &mut Request, object: PhpObject| {
+            set_raw_value(req, asked, prop.as_ref(), object, &name, value)
+        };
+        skip_lazy_initialization(req, &object, declaring, &name, Some(&mut write))
     }
 
     /// `ReflectionProperty::skipLazyInitialization(object $object): void`:
@@ -1093,10 +1152,13 @@ impl ReflectionProperty {
         let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         let object = object_of(req, object, asked, 1)?;
+        let object = object.lazy_real(req).unwrap_or(object);
         let reflected = declared.map(|decl| (class, decl));
+        let prop = effective_prop(req, asked, object, reflected, &name);
         let method = "skipLazyInitialization";
-        lazy_compatible(req, asked, reflected.as_ref(), &name, object, method)?;
-        skip_lazy_initialization(req, &object, &name, None)?;
+        lazy_compatible(req, asked, prop.as_ref(), &name, object, method)?;
+        let declaring = prop.as_ref().map_or(class, |(at, _)| *at);
+        skip_lazy_initialization(req, &object, declaring, &name, None)?;
         Ok(())
     }
 
@@ -1125,10 +1187,17 @@ impl ReflectionProperty {
         let (class, name, declared) = this_property(req, this.object())?;
         let asked = asked_class(req, this.object(), class);
         let object = object_of(req, object, asked, 1)?;
-        if !declared.is_some_and(|decl| decl.is_instance) {
+        let object = object.lazy_real(req).unwrap_or(object);
+        let reflected = declared.map(|decl| (class, decl));
+        // `reflection_property_get_effective_prop`, then `false` for a
+        // static or a virtual property, which has no slot.
+        let Some((declaring, decl)) = effective_prop(req, asked, object, reflected, &name) else {
+            return Ok(false);
+        };
+        if !decl.is_instance || php_ext::call::property_is_virtual(req, declaring, &name) {
             return Ok(false);
         }
-        Ok(object.is_lazy_prop(req, &name))
+        Ok(object.is_lazy_prop(req, declaring, &name))
     }
 
     /// `ReflectionProperty::isInitialized(?object $object = null)`: for a
@@ -1887,7 +1956,7 @@ impl ReflectionClassConstant {
         let name = constant.as_bytes().to_vec();
         let Some((declaring, _)) = class_constant_named(req, class, &name) else {
             let class = class_name_of(req, class);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -2263,7 +2332,7 @@ impl ReflectionConstant {
         let name = name.as_bytes().to_vec();
         let lowered = constant_key(&name);
         if constant(req, &lowered)?.is_none() {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(

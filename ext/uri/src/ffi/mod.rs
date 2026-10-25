@@ -142,7 +142,12 @@ impl Uri {
     /// `call` over the URI with php's memory manager and `req`'s heap
     /// lent for its length (ADR-0014), so what uriparser allocates and
     /// frees is the request's; the `Err` is the memory limit's fatal an
-    /// allocation met.
+    /// allocation met. The lend is made inside a fallible scope, as php
+    /// 8.5.12's manager asks with `femalloc`, `fecalloc` and
+    /// `safe_ferealloc` (`Z/ext/uri/uri_parser_rfc3986.c:31-50`): past
+    /// the soft limit an allocation answers null, which uriparser answers
+    /// with `URI_ERROR_MALLOC`, and the native's error is given up for the
+    /// limit's fatal at the check after the call.
     fn call(
         &mut self,
         req: &mut Request,
@@ -158,7 +163,10 @@ impl Uri {
         };
         let uri = &raw mut *self.uri;
         let manager = (&raw mut manager).cast();
-        req.memory_mut().lend_heap(|| call(uri, manager))
+        let lent = req
+            .memory_mut()
+            .fallible(|req| req.memory_mut().lend_heap(|| call(uri, manager)))?;
+        Ok(lent.unwrap_or(sys::URI_ERROR_MALLOC))
     }
 
     /// `uriFreeUriMembersMmA`: the members given back to the request's

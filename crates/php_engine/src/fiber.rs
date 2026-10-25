@@ -49,7 +49,7 @@ use crate::api::abi::{
     Callable, DtorObj, GcTable, Instance, NamedVariadic, ObjectHandlers, Refusals, This,
 };
 use crate::api::call::call_named_made;
-use crate::api::raising::{Thrown, error, throw, throw_error};
+use crate::api::raising::{Thrown, error, throw_error, throw_exception_ex};
 use crate::api::request::{ObservedChain, Raised, Request};
 use crate::api::values::{Owner, PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
@@ -283,6 +283,13 @@ pub(crate) struct Execution {
     /// a coroutine below it comes back to the fiber that stack's resumer
     /// had active, and not to the `Fiber` it passed through.
     pub(crate) active: Option<PhpObject>,
+    /// What the innermost serving on this stack has returned, the
+    /// `retval` of its `zend_call_function`, which is a local of the
+    /// stack it was called on: a serving on a fiber's stack that ends
+    /// while another stack runs, as a suspended fiber destroyed in its
+    /// resumer's leave unwinds, puts back that stack's, not the one
+    /// running.
+    pub(crate) returned: Value,
 }
 
 /// One coroutine that is running: the object holding it, a `Fiber` or an
@@ -2201,7 +2208,7 @@ fn lay_down<P: HoldsCoroutine>(
     let stack = match stack {
         Ok(stack) => stack,
         Err(StackRefused::TooSmall(least)) => {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("Fiber stack size is too small, it needs to be at least {least} bytes"),
@@ -2214,7 +2221,7 @@ fn lay_down<P: HoldsCoroutine>(
                 .strip_suffix(&format!(" (os error {errno})"))
                 .unwrap_or(&text)
                 .to_string();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("Fiber stack allocate failed: mmap failed: {text} ({errno})"),
@@ -2231,6 +2238,7 @@ fn lay_down<P: HoldsCoroutine>(
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
         // Taken from the first resume ([`switch_into`]).
         active: None,
+        returned: Value::null(),
     };
     let record = req.heap_mut().block(STACK_RECORD);
     let record = req.fatal_of(record)?;

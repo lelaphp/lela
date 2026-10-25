@@ -55,6 +55,13 @@ void mbs_buf_append(mb_convert_buf *buf, const unsigned char *bytes, size_t len)
 void mbs_string_free(zend_string *str)
 {
 	if (str != zend_empty_string) {
-		free(str);
+		efree(str);
 	}
+}
+
+/* `efree` for a block libmbfl answered the binding, under the lend, or
+ * outside one, it was made in. */
+void mbs_free(void *ptr)
+{
+	efree(ptr);
 }

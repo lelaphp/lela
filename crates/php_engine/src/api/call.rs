@@ -424,6 +424,23 @@ pub(crate) fn call_made(
     serve(req, callable.target(), arguments, &[])
 }
 
+/// [`call_made`] where php calls the callee's C directly rather than
+/// through `zend_call_function`: a native function served past the
+/// memory limit's refusal of every call once it was met
+/// ([`Request::serve_function_from_c`]); any other callee as
+/// [`call_made`] serves it.
+pub(crate) fn call_made_from_c(
+    req: &mut Request,
+    callable: &Callable,
+    arguments: &[Value],
+) -> Result<Value, Thrown> {
+    let served = match callable.target() {
+        Target::Function(function) => req.serve_function_from_c(function, arguments),
+        target => return serve(req, target, arguments, &[]),
+    };
+    without_frame(req, served)
+}
+
 /// `zend_call_function` with named arguments after the positional ones,
 /// as its walk of `fci->named_params` places them
 /// (`Z/Zend/zend_execute_API.c:894`): each one at the offset the callee
@@ -1129,32 +1146,86 @@ pub fn property_is_virtual(req: &Request, class: ClassId, name: &[u8]) -> bool {
     req.property_virtual(class, name)
 }
 
-/// A hooked property's backing value, read past its hooks as the
-/// `get` hook itself reads it, which is what
-/// `ReflectionProperty::getRawValue` reaches through
-/// `zend_get_property_hook_trampoline`: a virtual property has none,
-/// php's `Error`; a typed one nothing wrote is the uninitialised-access
-/// `Error`. One more owner of the value, the caller's.
+/// A hooked property's backing value, read past its hooks as
+/// `ReflectionProperty::getRawValue` reads it: the `get` trampoline of
+/// the property `scope` declares, `prop_info->ce`, called on `object`
+/// with `zend_call_known_instance_method_with_0_params`, whose
+/// `read_property` finds it running. A virtual property has none,
+/// php's `Error`, and a typed one nothing wrote is the
+/// uninitialised-access `Error`, each thrown under the trampoline's
+/// frame. One more owner of the value, the caller's.
+///
+/// ```php
+/// class R { public int $a { get => $this->a + 1; } public $v { get => 5; set { } } }
+/// $r = new R;
+/// foreach (['a', 'v'] as $n) {
+///     try { (new ReflectionProperty(R::class, $n))->getRawValue($r); }
+///     catch (Error $e) { echo $e->getMessage(), "\n", $e->getTraceAsString(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Typed property R::$a must not be accessed before initialization
+/// #0 [internal function]: R->$a::get()
+/// #1 %s(5): ReflectionProperty->getRawValue(Object(R))
+/// #2 {main}
+/// Must not read from virtual property R::$v
+/// #0 [internal function]: R->$v::get()
+/// #1 %s(5): ReflectionProperty->getRawValue(Object(R))
+/// #2 {main}
+/// ```
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn read_raw_property(
     req: &mut Request,
     object: &PhpObject,
+    scope: ClassId,
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
-    adopted(req.read_raw(*object, name))
+    adopted(req.serve_hook_trampoline(*object, scope, name, HookKind::Get, &[]))
 }
 
-/// A hooked property's backing value written past its hooks, as the
-/// `set` hook itself writes it, `ReflectionProperty::setRawValue`'s
-/// trampoline: a virtual property has none, php's `Error`. A sink of
-/// both owners, given up whatever arm runs.
+/// A hooked property's backing value written past its hooks as
+/// `ReflectionProperty::setRawValue` writes it,
+/// `zend_call_known_instance_method_with_1_params(func, object, NULL,
+/// value)` over the `set` trampoline of the property `scope` declares:
+/// the call takes an owner of `value` of its own, and the trampoline
+/// returns the value it wrote, which the call gives up with
+/// `zval_ptr_dtor` as `zend_call_known_function` gives up a return
+/// nobody asked for, so a refcounted one is a possible root.
+///
+/// ```php
+/// class B {}
+/// class R { public B $a { set { echo "hook\n"; $this->a = $value; } } public B $plain; public int $n { set { $this->n = $value; } } }
+/// function t() {
+///     $r = new R; $p = new ReflectionProperty(R::class, 'a'); $v = new B; $w = new B;
+///     gc_collect_cycles(); $p->setRawValue($r, $v); echo "hooked uninit ", gc_status()['roots'], "\n";
+///     gc_collect_cycles(); $p->setRawValue($r, $w); echo "hooked over ", gc_status()['roots'], "\n";
+///     $q = new ReflectionProperty(R::class, 'plain'); gc_collect_cycles(); $q->setRawValue($r, $v); echo "plain ", gc_status()['roots'], "\n";
+///     try { (new ReflectionProperty(R::class, 'n'))->setRawValue($r, 'x'); }
+///     catch (TypeError $e) { echo $e->getMessage(), "\n", $e->getTraceAsString(), "\n"; }
+/// }
+/// t();
+/// ```
+/// ```expect
+/// hooked uninit 2
+/// hooked over 3
+/// plain 1
+/// Cannot assign string to property R::$n of type int
+/// #0 [internal function]: R->$n::set('x')
+/// #1 %s(9): ReflectionProperty->setRawValue(Object(R), 'x')
+/// #2 %s(12): t()
+/// #3 {main}
+/// ```
 pub fn write_raw_property(
     req: &mut Request,
     object: &PhpObject,
-    name: Owner<PhpString>,
-    value: Owner<Value>,
+    scope: ClassId,
+    name: &[u8],
+    value: Value,
 ) -> Result<(), Thrown> {
-    req.write_raw(*object, name, value)
+    let arguments = [value];
+    let returned = req.serve_hook_trampoline(*object, scope, name, HookKind::Set, &arguments)?;
+    req.release(returned);
+    Ok(())
 }
 
 /// `new $class(...$arguments)`: [`new_object`] and then the
@@ -1812,6 +1883,28 @@ pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
     req.function_named(Bare::of(name))
 }
 
+/// `zend_fetch_function` (`Z/Zend/zend_execute.c:4468`): the function
+/// [`lookup_function`] finds, its runtime cache laid down where the
+/// request has not yet, as php lays it for a reflector made over the
+/// function by name (`ReflectionFunction::__construct`,
+/// `ReflectionParameter::__construct`), so a closure made from it
+/// shares the cache, as one made by `g(...)` does:
+///
+/// ```php
+/// function g($o) { return $o->a . $o->b . $o->c . $o->d; }
+/// $m = memory_get_usage(); $c = (new ReflectionFunction('g'))->getClosure();
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 384
+/// ```
+///
+/// The `Err` is the memory limit's fatal.
+pub fn fetch_function(req: &mut Request, name: &[u8]) -> Result<Option<Function>, Thrown> {
+    let fetched = req.fetch_function(Bare::of(name));
+    req.fatal_of(fetched)
+}
+
 /// The `static` variables of what `callable` names, name and value in the
 /// order the op array's table holds them, as
 /// `ReflectionFunctionAbstract::getStaticVariables` copies
@@ -1942,7 +2035,9 @@ pub(crate) fn autoload_keyed(req: &mut Request, name: &[u8]) -> Result<Option<Cl
 
 /// [`autoload`], `keyed` where the caller holds the lowered name.
 fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<ClassId>, Thrown> {
-    if name.is_empty() {
+    // The empty name, and a lone namespace separator, which names no
+    // class (`Z/Zend/zend_execute_API.c:1225-1228`), before the table.
+    if name.is_empty() || (!keyed && name == b"\\") {
         return Ok(None);
     }
     let key = Bare::of(name);
@@ -2101,10 +2196,7 @@ fn global_constant(
         unqualified_constant(req, name)
     };
     let Some((key, value)) = found else {
-        return Err(error(
-            req,
-            &format!("Undefined constant \"{}\"", String::from_utf8_lossy(name)),
-        ));
+        return Err(crate::api::raising::undefined_constant(req, name));
     };
     crate::api::raising::deprecated_constant(req, &key)?;
     req.addref(&value);
@@ -2886,14 +2978,7 @@ fn prop_link(
 /// [`prop_link`]'s read of `name` off `object`.
 fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, Thrown> {
     let Some(instance) = object.as_object() else {
-        let shown = crate::ops::value_name(req, &object.undef_as_null());
-        crate::api::raising::warning(
-            req,
-            &format!(
-                "Attempt to read property \"{}\" on {shown}",
-                String::from_utf8_lossy(name)
-            ),
-        );
+        crate::ops::property_read_on(req, name, &object.undef_as_null());
         return Ok(Chained {
             value: Value::null(),
             short: false,
@@ -3110,14 +3195,18 @@ fn function_callable(
         };
         return crate::classes::closure_from_frame(req, frame).map(|made| made.as_value());
     }
-    let found = req.function_named(name.into()).or_else(|| {
-        if name_kind == php_unit::decl::NameKind::FullyQualified {
-            return None;
-        }
-        let at = name.0.iter().rposition(|b| *b == b'\\')?;
-        req.function_named(Bare::resolved(name.0.get(at + 1..)?))
-    });
-    let Some(function) = found else {
+    // `zend_fetch_function` (`Z/Zend/zend_ast.c:1074`), which lays the
+    // function's runtime cache down as it finds it, by the name and then,
+    // unqualified, by its last segment.
+    let mut found = req.fetch_function(name.into());
+    if matches!(found, Ok(None))
+        && name_kind != php_unit::decl::NameKind::FullyQualified
+        && let Some(tail) =
+            (name.0.iter().rposition(|b| *b == b'\\')).and_then(|at| name.0.get(at + 1..))
+    {
+        found = req.fetch_function(Bare::resolved(tail));
+    }
+    let Some(function) = req.fatal_of(found)? else {
         return Err(undefined_function(req, &name.0));
     };
     req.keep_callable(unit, at, function);
@@ -3558,17 +3647,19 @@ pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<Ph
 
 /// `ReflectionProperty::skipLazyInitialization` under `None` and
 /// `ReflectionProperty::setRawValueWithoutLazyInitialization` under
-/// `Some`: the declared property `name`, on the object the initialised
+/// `Some`: the property `name` that `declaring` declares, the effective
+/// property's slot (`prop->offset`), on the object the initialised
 /// proxies lead to, stops waiting for the initializer, holding its
-/// default or `value` written past `__set` and hooks; the object stops
-/// being lazy once no property waits. `value` is a sink's, the object's
-/// from here. The checks on the property php makes first are the
-/// caller's.
+/// default, or with its `IS_PROP_LAZY` cleared while `write`, the
+/// caller's `reflection_property_set_raw_value`, writes it on that object;
+/// the object stops being lazy once no property waits. The checks on the
+/// property php makes first are the caller's.
 pub fn skip_lazy_initialization(
     req: &mut Request,
     object: &PhpObject,
+    declaring: ClassId,
     name: &[u8],
-    value: Option<Owner<Value>>,
+    write: Option<crate::api::request::RawWrite<'_>>,
 ) -> Result<(), Thrown> {
-    req.lazy_skip(*object, name, value)
+    req.lazy_skip(*object, declaring, name, write)
 }

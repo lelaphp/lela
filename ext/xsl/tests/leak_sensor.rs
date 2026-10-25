@@ -46,13 +46,12 @@ fn a_callback_transforms_and_registers_on_its_own_processor() {
 }
 
 /// `importStylesheet()` from inside a callback of the transformation
-/// using the stylesheet it replaces: the transformation runs to its end
-/// with the old one, held until then, and the next uses the new one.
-/// php frees the stylesheet libxslt is transforming with
-/// (`xsltFreeStylesheet` in `XSLTProcessor::importStylesheet`) and dies
-/// on SIGSEGV after the nested transformation's `nested: 'deep'`
-/// (`trace:xsl-stylesheet-replaced-in-callback` in
-/// `docs/divergence.toml`, #2319, #2511).
+/// using the stylesheet it would replace: refused with php 8.5.12's
+/// `Error` (GH-23730), so the transformation runs to its end with the
+/// stylesheet it started with, and so does the next. php 8.5.9 freed the
+/// stylesheet libxslt was transforming with and died on SIGSEGV
+/// (`trace:xsl-stylesheet-replaced-in-callback` in `docs/divergence.toml`,
+/// #2319, #2511); 8.5.12 refuses the import as the engine now does.
 #[test]
 fn a_stylesheet_replaced_in_its_own_callback_transforms_to_its_end() {
     let one = sheet("<xsl:value-of select=\"php:function(\\'inner\\', string(/r))\"/>");
@@ -64,9 +63,9 @@ fn a_stylesheet_replaced_in_its_own_callback_transforms_to_its_end() {
              $doc = new DOMDocument; $doc->loadXML('<r>x</r>');\n\
              $p = new XSLTProcessor; $p->registerPHPFunctions(); $p->importStylesheet($xsl);\n\
              $depth = 0;\n\
-             function inner($s) {{ global $p, $doc, $xsl2, $depth; if ($depth++) return 'deep'; $r = $p->transformToXml($doc); echo 'nested: ', var_export($r, true), \"\\n\"; $p->importStylesheet($xsl2); return \"in:$s\"; }}\n\
+             function inner($s) {{ global $p, $doc, $xsl2, $depth; if ($depth++) return 'deep'; $r = $p->transformToXml($doc); echo 'nested: ', var_export($r, true), \"\\n\"; try {{ $p->importStylesheet($xsl2); }} catch (Error $e) {{ echo $e->getMessage(), \"\\n\"; }} return \"in:$s\"; }}\n\
              var_dump($p->transformToXml($doc), $p->transformToXml($doc));\n"
         ),
-        "nested: 'deep'\nstring(4) \"in:x\"\nstring(5) \"two:x\"\n",
+        "nested: 'deep'\nCannot call XSLTProcessor::importStylesheet() while a transformation is in progress\nstring(4) \"in:x\"\nstring(4) \"deep\"\n",
     );
 }

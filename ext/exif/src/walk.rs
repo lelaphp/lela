@@ -7,6 +7,7 @@
 use php_ext::coerce::c_str;
 use php_ext::raising::{Level, Thrown, raise};
 use php_ext::request::{Request, Stream, Whence};
+use php_ext::values::Emalloc;
 
 use crate::image::{
     FileType, Format, Found, Image, Order, Section, TAG_COMPUTED, TAG_NONE, c_hex, c_int,
@@ -130,6 +131,10 @@ pub(crate) struct Reader<'r> {
     /// What a read threw, the memory limit's fatal: the native's answer,
     /// after which the reader reads nothing and raises nothing.
     pub(crate) thrown: Option<Thrown>,
+    /// `exif_process_IFD_TAG_impl`'s `outside`, the buffer of each tag
+    /// in progress whose value lies outside the directory, freed as its
+    /// tag ends.
+    outside: Vec<Emalloc>,
 }
 
 impl<'r> Reader<'r> {
@@ -139,7 +144,34 @@ impl<'r> Reader<'r> {
             img,
             stream,
             thrown: None,
+            outside: Vec::new(),
         }
+    }
+
+    /// `exif_discard_imageinfo`'s frees of what php's image held on the
+    /// request's heap.
+    pub(crate) fn discard(&mut self) {
+        self.img.held.free(self.req);
+        for block in std::mem::take(&mut self.outside) {
+            block.free(self.req);
+        }
+    }
+
+    /// What an ask of the heap answered, its `Err`, the memory limit's
+    /// end, kept as the reader's answer.
+    pub(crate) fn hold<T>(&mut self, asked: Result<T, Thrown>) -> Option<T> {
+        match asked {
+            Ok(value) => Some(value),
+            Err(thrown) => {
+                self.thrown.get_or_insert(thrown);
+                None
+            }
+        }
+    }
+
+    /// `ZEND_HAS_OOM()`, or a read that already ended.
+    fn oom(&self) -> bool {
+        self.thrown.is_some() || self.req.memory().has_oom()
     }
 
     /// `php_stream_seek(infile, to, SEEK_SET)` succeeded.
@@ -172,7 +204,11 @@ impl<'r> Reader<'r> {
             return out;
         };
         while self.thrown.is_none() && (out.len() as u64) < count {
-            let want = usize::try_from(count - out.len() as u64).unwrap_or(usize::MAX);
+            // php reads into its own buffer; the engine's chunks are each
+            // a string of the heap, so they are kept to a stream chunk.
+            let want = usize::try_from(count - out.len() as u64)
+                .unwrap_or(usize::MAX)
+                .min(8192);
             match stream.read(self.req, want) {
                 Ok(Some(chunk)) if !chunk.is_empty() => {
                     out.extend_from_slice(chunk.as_bytes());
@@ -191,9 +227,10 @@ impl<'r> Reader<'r> {
 
     /// `exif_error_docref`: the message behind the native and the file
     /// name, the eleventh and later swallowed after one note that they
-    /// are.
+    /// are. Nothing is raised once the memory limit was met, as php
+    /// 8.5.12's `php_verror` raises nothing under `ZEND_HAS_OOM()`.
     pub(crate) fn error(&mut self, level: Level, message: &str) {
-        if self.thrown.is_some() {
+        if self.oom() {
             return;
         }
         self.img.num_errors += 1;
@@ -282,6 +319,11 @@ impl<'r> Reader<'r> {
         let mut last = marker::PSEUDO;
         let mut comment_correction = 1;
         loop {
+            // "Every section is retained, so stop once over the limit",
+            // since 8.5.12.
+            if self.oom() {
+                return false;
+            }
             // Some software does not count the length bytes of a COM
             // section; php accepts that.
             if last == marker::COM && comment_correction != 0 {
@@ -328,6 +370,12 @@ impl<'r> Reader<'r> {
             let itemlen = u64::from(u16::from_be_bytes([lh, ll]));
             if itemlen < 2 {
                 self.warn(CORRUPT);
+                return false;
+            }
+            // `exif_file_sections_add(ImageInfo, marker, itemlen, NULL)`.
+            let size = usize::try_from(itemlen).unwrap_or(usize::MAX);
+            let held = self.img.held.section(self.req, size);
+            if self.hold(held).is_none() {
                 return false;
             }
             let mut data = vec![lh, ll];
@@ -543,8 +591,17 @@ impl<'r> Reader<'r> {
             self.warn("corrupt EXIF header: maximum directory nesting level reached");
             return false;
         }
+        // "Each tag may retain up to FileSize bytes, so stop once over
+        // the limit", since 8.5.12.
+        if self.oom() {
+            return false;
+        }
         self.img.ifd_nesting_level += 1;
+        let outside = self.outside.len();
         let result = self.ifd_tag_impl(entry, info, displacement, section, read_next, table);
+        for block in self.outside.split_off(outside) {
+            block.free(self.req);
+        }
         self.img.ifd_nesting_level -= 1;
         result
     }
@@ -611,6 +668,18 @@ impl<'r> Reader<'r> {
                         "Process tag(x{tag:04X}={name}): Illegal pointer offset(x{o:04X} + x{b:04X} = x{e:04X} > x{s:04X})"
                     ));
                     return false;
+                }
+                // `outside`, a buffer for a value past `cbuf`'s 32 bytes,
+                // asked for fallibly since 8.5.12.
+                if byte_count > 32 {
+                    let asked = self
+                        .req
+                        .memory_mut()
+                        .fallible(|req| Emalloc::new(req, count));
+                    match self.hold(asked) {
+                        Some(Some(block)) => self.outside.push(block),
+                        _ => return false,
+                    }
                 }
                 let fpos = self.tell();
                 let target = displacement + offset;
@@ -782,10 +851,10 @@ impl<'r> Reader<'r> {
         length: usize,
         value: &[u8],
     ) {
-        if let Some(warning) = self
+        let added = self
             .img
-            .add_value(section, name, tag, format, length, Some(value))
-        {
+            .add_value(self.req, section, name, tag, format, length, Some(value));
+        if let Some(Some(warning)) = self.hold(added) {
             self.warn(&warning);
         }
     }
@@ -981,6 +1050,12 @@ impl<'r> Reader<'r> {
             self.warn(THUMB_EOF);
             return;
         };
+        // `estrndup(thumbnail, size)`.
+        let len = bytes.len() + 1;
+        let held = self.img.held.thumbnail(self.req, len);
+        if self.hold(held).is_none() {
+            return;
+        }
         self.img.thumbnail.data = Some(bytes.to_vec());
         self.thumbnail_build();
     }
@@ -994,16 +1069,20 @@ impl<'r> Reader<'r> {
         reason = "php's `WORD` tags and `DWORD` lengths and offsets"
     )]
     fn thumbnail_build(&mut self) {
-        let img = &mut self.img;
+        let img = &self.img;
         let thumb = &img.thumbnail;
-        if !img.read_thumbnail || thumb.offset == 0 || thumb.size == 0 || !thumb.filetype.is_tiff()
-        {
+        if !img.read_thumbnail || thumb.offset == 0 || thumb.size == 0 {
             return;
         }
+        // "new_size below sums the accumulated tag values, so stop once
+        // over the limit", since 8.5.12.
+        if self.oom() || !self.img.thumbnail.filetype.is_tiff() {
+            return;
+        }
+        let img = &mut self.img;
         let Some(old) = img.thumbnail.data.take() else {
             return;
         };
-        let order = img.order();
         let entries = &img.sections[Section::Thumbnail.index()];
         let byte_count = |e: &crate::image::Entry| e.format.size() * e.length;
         let mut new_value = 8 + 2 + entries.len() * 12 + 4;
@@ -1013,6 +1092,17 @@ impl<'r> Reader<'r> {
                 .map(byte_count)
                 .filter(|&n| n > 4)
                 .sum::<usize>();
+        // `safe_erealloc(Thumbnail.data, 1, Thumbnail.size, new_size)`.
+        let grown = usize::try_from(img.thumbnail.size)
+            .unwrap_or(usize::MAX)
+            .saturating_add(new_move);
+        let resized = img.held.thumbnail_resize(self.req, grown);
+        if self.hold(resized).is_none() {
+            return;
+        }
+        let img = &mut self.img;
+        let order = img.order();
+        let entries = &img.sections[Section::Thumbnail.index()];
         let mut out = old.clone();
         out.resize(new_move + old.len(), 0);
         out[new_move..].copy_from_slice(&old);
@@ -1063,6 +1153,9 @@ impl<'r> Reader<'r> {
         if count > MAX_IFD_TAGS || self.img.ifd_nesting_level > MAX_IFD_NESTING_LEVEL {
             return false;
         }
+        if self.oom() {
+            return false;
+        }
         self.img.ifd_nesting_level += 1;
         let result = self.ifd_in_tiff_impl(dir_offset, section);
         self.img.ifd_nesting_level -= 1;
@@ -1085,6 +1178,11 @@ impl<'r> Reader<'r> {
             ));
             return false;
         }
+        // `exif_file_sections_add(ImageInfo, M_PSEUDO, 2, NULL)`.
+        let held = self.img.held.section(self.req, 2);
+        let Some(sn) = self.hold(held) else {
+            return false;
+        };
         self.seek(dir_offset);
         let mut dir = self.read(2);
         if dir.len() != 2 {
@@ -1097,6 +1195,11 @@ impl<'r> Reader<'r> {
             self.warn(&format!(
                 "Error in TIFF: filesize(x{s:04X}) less than size of IFD dir(x{at:04X})"
             ));
+            return false;
+        }
+        // `exif_file_sections_realloc(ImageInfo, sn, dir_size)`, fallible
+        // since 8.5.12.
+        if !self.section_resized(sn, dir_size) {
             return false;
         }
         let rest = self.read(dir_size - 2);
@@ -1166,6 +1269,9 @@ impl<'r> Reader<'r> {
                 ));
                 return false;
             }
+            if !self.section_resized(sn, ifd_size) {
+                return false;
+            }
             let values = self.read(ifd_size - dir_size);
             dir.extend_from_slice(&values);
             dir.resize(usize::try_from(ifd_size).unwrap_or(0), 0);
@@ -1202,8 +1308,9 @@ impl<'r> Reader<'r> {
                 && thumb.offset != 0
                 && self.img.read_thumbnail
                 && thumb.data.is_none()
+                && !self.thumbnail_from_file()
             {
-                self.thumbnail_from_file();
+                return false;
             }
         }
         if next_offset != 0 && section != Section::Thumbnail {
@@ -1213,16 +1320,31 @@ impl<'r> Reader<'r> {
                 && thumb.offset != 0
                 && thumb.size != 0
                 && self.img.read_thumbnail
+                && !self.thumbnail_from_file()
             {
-                self.thumbnail_from_file();
+                return false;
             }
         }
         true
     }
 
-    /// A TIFF thumbnail's bytes, read where its offset points.
-    fn thumbnail_from_file(&mut self) {
+    /// A TIFF thumbnail's bytes, read where its offset points: since
+    /// 8.5.12 only one whose bytes lie in the file
+    /// (`exif_thumbnail_in_file`), into a buffer asked for fallibly,
+    /// `false` where the memory limit refused it.
+    fn thumbnail_from_file(&mut self) -> bool {
         let (offset, size) = (self.img.thumbnail.offset, self.img.thumbnail.size);
+        let file_size = self.img.file_size;
+        if size > file_size || offset > file_size - size {
+            self.warn(THUMB_EOF);
+            return true;
+        }
+        let len = usize::try_from(size).unwrap_or(usize::MAX);
+        let held = self.img.held.thumbnail_fallibly(self.req, len);
+        match self.hold(held) {
+            Some(true) => {}
+            _ => return false,
+        }
         self.seek(offset);
         let data = self.read(size);
         if data.len() as u64 == size {
@@ -1230,7 +1352,17 @@ impl<'r> Reader<'r> {
             self.thumbnail_build();
         } else {
             self.warn(THUMB_EOF);
+            self.img.held.thumbnail_free(self.req);
         }
+        true
+    }
+
+    /// [`Held::section_resized`] over the reader's request, `false`
+    /// where it was refused or the request ended.
+    fn section_resized(&mut self, sn: usize, size: u64) -> bool {
+        let size = usize::try_from(size).unwrap_or(usize::MAX);
+        let resized = self.img.held.section_resized(self.req, sn, size);
+        self.hold(resized).unwrap_or(false)
     }
 
     /// `exif_scan_HEIF_header`: the `meta` box's `Exif` item, read as
@@ -1254,9 +1386,17 @@ impl<'r> Reader<'r> {
             }
             if &kind == b"meta" {
                 let limit = box_size - header;
-                if limit < 36 {
+                // Bounded by the file since 8.5.12.
+                if limit < 36 || limit > size {
                     return false;
                 }
+                // `data = emalloc(limit)`, held while the box is read.
+                let asked = Emalloc::new(self.req, usize::try_from(limit).unwrap_or(usize::MAX));
+                let Some(block) = self.hold(asked) else {
+                    return false;
+                };
+                let first = self.outside.len();
+                self.outside.push(block);
                 let mut data = buf
                     .get(usize::try_from(header).unwrap_or(16)..)
                     .unwrap_or_default()
@@ -1269,14 +1409,29 @@ impl<'r> Reader<'r> {
                     pos = parse_meta(&data);
                 }
                 let (at, len) = (u64::from(pos.0), u64::from(pos.1));
+                let mut found = false;
                 if len >= 2 && len < size && size - len >= at && self.seek(at + 2) {
+                    // A longer item is read into a buffer of its own.
+                    if len - 2 > limit {
+                        if let Some(block) = self.outside.pop() {
+                            block.free(self.req);
+                        }
+                        let asked =
+                            Emalloc::new(self.req, usize::try_from(len - 2).unwrap_or(usize::MAX));
+                        if let Some(block) = self.hold(asked) {
+                            self.outside.push(block);
+                        }
+                    }
                     let item = self.read(len - 2);
-                    if item.len() as u64 == len - 2 {
+                    if self.thrown.is_none() && item.len() as u64 == len - 2 {
                         self.app1(&item, at + 2);
-                        return true;
+                        found = true;
                     }
                 }
-                return false;
+                for block in self.outside.split_off(first.min(self.outside.len())) {
+                    block.free(self.req);
+                }
+                return found;
             }
             match offset.checked_add(box_size) {
                 Some(next) => offset = next,

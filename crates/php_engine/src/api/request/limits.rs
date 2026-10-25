@@ -66,6 +66,14 @@ impl Interrupt {
         &self.0.raised
     }
 
+    /// The word itself, for the heap to raise as it records a delayed
+    /// OOM ([`php_heap::Heap::wake_on_oom`]), as php's allocator stores
+    /// `EG(vm_interrupt)`: the one the loop and compiled code test, so
+    /// the delayed OOM costs no test of its own.
+    pub(crate) fn word(&self) -> Arc<dyn AsRef<AtomicBool> + Send + Sync> {
+        Arc::clone(&self.0) as Arc<dyn AsRef<AtomicBool> + Send + Sync>
+    }
+
     /// What the engine's execution timer raises it with,
     /// `max_execution_time` having elapsed: the seconds it was armed
     /// with, then the two words `zend_timeout_handler` stores
@@ -112,7 +120,7 @@ impl Interrupt {
 
     /// What a check that found it raised reads: it is cleared, and the
     /// seconds come back when the execution timer was what raised it,
-    /// both as php clears them (`Z/Zend/zend_vm_def.h:10526`, `:10537`).
+    /// both as php clears them (`Z/Zend/zend_vm_def.h:10537`, `:10551`).
     /// Clearing it acquires what the setter released, so the seconds the
     /// text names are the ones the timer was armed with; the loop's own
     /// test stays a relaxed load, because this is where the two threads

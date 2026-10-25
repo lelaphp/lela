@@ -300,6 +300,7 @@ echo "not reached\n";
 
 /// The variable that runs a test's body in the child process its parent
 /// starts, rather than starting one.
+#[cfg(target_os = "macos")]
 const CHILD: &str = "PHP_EXT_FFI_THREADS_CHILD";
 
 /// The thread calls back after the request ended on a fatal, before the

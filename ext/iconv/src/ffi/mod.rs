@@ -17,6 +17,8 @@
 
 use std::ffi::CString;
 
+pub(crate) mod heap;
+
 /// `errno` as `iconv_open` and `iconv` leave it, decoded once, here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Errno {

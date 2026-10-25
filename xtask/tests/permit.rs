@@ -1780,6 +1780,157 @@ fn a_verdict_a_branch_captured_stands_on_main_after_the_merge_and_a_typed_one_do
     );
 }
 
+/// The content of one of the rule's `Write` fixtures, the file whole.
+fn fixture_text(name: &str) -> String {
+    call(&fixtures().join("rules/witness.exit-authored").join(name))
+        .tool_input
+        .content
+        .expect("a Write carries the whole file")
+}
+
+/// The 1-based line of the first `expect` fence that pins `status` in
+/// `text`.
+fn pinned_at(text: &str, status: &str) -> usize {
+    text.lines()
+        .position(|l| l.contains(&format!("```expect {status}")))
+        .expect("the fixture pins the status")
+        + 1
+}
+
+/// A verdict `witness --accept --item` wrote is captured as one a run over
+/// the crate wrote: the narrowed run writes no reading of the crate, and
+/// the record of the verdict it wrote ([`witness::record_accepted`]) is
+/// what `permit --diff` reads it by. The control: without the record the
+/// same diff is denied, as it was before the record existed, and the
+/// status changed by hand on the recorded fence is denied with it.
+#[test]
+fn a_verdict_an_item_run_accepted_is_captured_and_one_typed_over_it_is_not() {
+    let root = scratch("item-accepted");
+    let repo = Repo::at(&root);
+    let accepted = fixture_text("item-accepted.json");
+    lay_down(&root, &accepted.replace("exit=255", "exit"));
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the fence"]);
+    write(&root, FILE, &accepted);
+    repo.git(&["add", "--", FILE]);
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "no reading and no record: {ran}");
+    assert!(ran.stdout.contains(EXIT_AUTHORED), "{ran}");
+
+    let line = pinned_at(&accepted, "exit=255");
+    witness::record_accepted(&root, CRATE, &[(Path::new(FILE), line)]).unwrap();
+    let out = xtask(&root, &["permit", "--diff"]).ok();
+    assert!(!out.contains("deny "), "{out}");
+
+    write(&root, FILE, &accepted.replace("exit=255", "exit=254"));
+    repo.git(&["add", "--", FILE]);
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(ran.stdout.contains(EXIT_AUTHORED), "{ran}");
+}
+
+/// Each verdict is captured by whichever evidence covers it, not by one
+/// kind of evidence covering every verdict of the file (#3441): the old
+/// verdict stands in a commit `witness` measured, the new one in the
+/// record `--accept --item` wrote, and neither kind covers both, so the
+/// file is permitted only where the hits are read one by one, as
+/// `Request::debug_info`'s three new fences beside the file's carried ones
+/// were not on t3260 at eee22a4e0. The control, `carried-and-typed.json`:
+/// the new verdict's status typed over by hand is a block no record names
+/// and no commit carries, and is still denied.
+#[test]
+fn a_file_of_carried_verdicts_and_one_an_item_run_accepted_is_captured_and_a_typed_one_is_not() {
+    let root = scratch("carried-and-accepted");
+    let repo = Repo::at(&root);
+    let both = fixture_text("carried-and-accepted.json");
+    let carried = both.replace("exit=3", "exit");
+    lay_down(&root, &carried.replace("exit=255", "exit"));
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the fences"]);
+    write(&root, FILE, &carried);
+    repo.git(&["commit", "-q", "-am", "the crate's accept"]);
+    witness_reading(&root);
+
+    write(&root, FILE, &both);
+    repo.git(&["add", "--", FILE]);
+    let line = pinned_at(&both, "exit=3");
+    witness::record_accepted(&root, CRATE, &[(Path::new(FILE), line)]).unwrap();
+    let out = xtask(&root, &["permit", "--diff"]).ok();
+    assert!(!out.contains("deny "), "{out}");
+
+    write(&root, FILE, &fixture_text("carried-and-typed.json"));
+    repo.git(&["add", "--", FILE]);
+    let ran = xtask(&root, &["permit", "--diff"]);
+    assert_eq!(ran.code(), 1, "{ran}");
+    assert!(ran.stdout.contains(EXIT_AUTHORED), "{ran}");
+}
+
+/// A captured verdict outlives an edit of the prose around it and the
+/// merge that brings both to main: the branch's run over the crate
+/// captured the status and was measured over the branch's commit, a
+/// later commit edited only the rustdoc above the fence, and `done` over
+/// the merge reads the verdict by its record, the block the record names
+/// standing as `--accept` wrote it ([`witness::record_accepted`]). The
+/// control: the commits alone carry the block with the prose it was
+/// measured beside, which is no longer the file's, so without the record
+/// the verdict is reported.
+#[test]
+fn a_verdict_captured_before_a_prose_edit_stands_on_main_after_the_merge() {
+    let root = scratch("prose-after-accept");
+    let repo = Repo::at(&root);
+    let head = || repo.git(&["rev-parse", "HEAD"]);
+    let reported = |base: &str| {
+        let ran = xtask(&root, &["done", "--base", base]);
+        let said = ran.stdout + &ran.stderr;
+        said.lines()
+            .filter(|l| l.contains(EXIT_AUTHORED))
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    let edited = fixture_text("prose-after-accept.json");
+    let prose = "a fatal. The prose above the fence was edited after `--accept` wrote the\n/// status, and the verdict below it is as `--accept` wrote it.";
+    assert!(edited.contains(prose), "the fixture's prose: {edited}");
+    let captured = edited.replace(prose, "a fatal.");
+    lay_down(&root, &captured.replace("exit=255", "exit"));
+    repo.git(&["add", "--", CRATE]);
+    repo.git(&["commit", "-q", "-m", "the fence"]);
+    let base = head();
+
+    repo.git(&["checkout", "-q", "-b", "branch"]);
+    write(&root, FILE, &captured);
+    repo.git(&["commit", "-q", "-am", "the branch's accept"]);
+    witness_reading(&root);
+    let line = pinned_at(&captured, "exit=255");
+    write(&root, FILE, &edited);
+    repo.git(&["commit", "-q", "-am", "the prose above the fence"]);
+    repo.git(&["checkout", "-q", "-"]);
+    write(
+        &root,
+        FILE,
+        &format!(
+            "{}pub fn mains() {{}}\n",
+            captured.replace("exit=255", "exit")
+        ),
+    );
+    repo.git(&["commit", "-q", "-am", "main moves the crate on"]);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "merge the branch", "branch"]);
+    let merged = std::fs::read_to_string(root.join(FILE)).unwrap();
+    assert!(
+        merged.contains(prose) && merged.contains("mains"),
+        "{merged}"
+    );
+    let lines = reported(&base);
+    assert!(
+        lines.iter().any(|l| l.contains(FILE)),
+        "the commits alone do not carry it: {lines:?}"
+    );
+
+    std::fs::write(root.join(FILE), &captured).unwrap();
+    witness::record_accepted(&root, CRATE, &[(Path::new(FILE), line)]).unwrap();
+    std::fs::write(root.join(FILE), &merged).unwrap();
+    assert_eq!(reported(&base), Vec::<String>::new());
+}
+
 // ------------------------------------------ `where` and `unless_pattern`
 
 /// A scratch checkout whose branch records `ticket` as `xtask worktree
@@ -1804,6 +1955,57 @@ fn operating(name: &str) -> Tree {
     let git_dir = PathBuf::from(Repo::at(&dir).git(&["rev-parse", "--absolute-git-dir"]));
     std::fs::write(git_dir.join("MERGE_HEAD"), "0".repeat(40) + "\n").unwrap();
     dir
+}
+
+/// One line that starts a second merge, cherry-pick, revert or rebase in
+/// a checkout after the first is refused under `git.operation` though no
+/// operation stands yet (#3261): the hook can record the first start's
+/// base, `HEAD` as the line begins, and never the second's, so the second
+/// would stand foreign to its own starter, its commit and its `--abort`
+/// refused. The fixture is the line main's checkout ran; the control, one
+/// start on a line, is admitted in the same quiet checkout, and so is a
+/// second start in another checkout.
+#[test]
+fn a_line_that_starts_a_second_operation_in_one_checkout_is_refused() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let quiet = checkout("two-starts", None);
+    let dir = fixtures().join("rules/git.operation");
+    let judged = judge(
+        &manifest,
+        quiet.path(),
+        &call(&dir.join("deny-two-starts.json")),
+    )
+    .unwrap();
+    let denial = judged
+        .denial()
+        .unwrap_or_else(|| panic!("two starts on one line: {judged:?}"));
+    assert_eq!(denial.rule, "git.operation", "{denial:?}");
+    assert!(
+        denial.reason().contains("one operation per line"),
+        "{}",
+        denial.reason()
+    );
+
+    for line in [
+        "git merge --no-commit t3261w && git commit -q -F /var/empty/m.txt",
+        "git merge --abort && git merge --no-commit t3370",
+    ] {
+        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
+        assert!(
+            judged.findings.iter().all(|f| f.rule != "git.operation"),
+            "{line}: {judged:?}"
+        );
+    }
+    let other = checkout("two-starts-other", None);
+    let line = format!(
+        "git merge --no-commit a && git -C {} merge --no-commit b",
+        other.path().display()
+    );
+    let judged = judge(&manifest, quiet.path(), &bash(&line)).unwrap();
+    assert!(
+        judged.findings.iter().all(|f| f.rule != "git.operation"),
+        "{line}: {judged:?}"
+    );
 }
 
 /// A `Bash` rule denying `xtask phpt`, with its qualifiers set by `with`.

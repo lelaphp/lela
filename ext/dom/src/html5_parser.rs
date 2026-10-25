@@ -5,7 +5,7 @@
 //! each element in the namespace the mapper hands out and each template's
 //! contents a fragment of its own.
 
-use php_ext::raising::{Thrown, arg_value_error, throw};
+use php_ext::raising::{Thrown, arg_value_error, throw_exception_ex};
 use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpObject, PhpString, Value};
 use php_ext_lexbor::ffi::array::ArrayObj;
@@ -629,7 +629,7 @@ fn parse(
 /// int(1172688)
 /// int(31525256)
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 36864 bytes) in %SCRATCH%/witness.php on line 10
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %SCRATCH%/witness.php on line 10
 /// ```
 fn with_document<R>(
     req: &mut Request,
@@ -707,6 +707,29 @@ struct AttrNs {
 /// text child, its namespace the mapper's, and an HTML `id` an ID; the
 /// bridge's status where a length overflows or libxml refused a node, and
 /// the `Err` is the memory limit, met where the mapper makes a declaration.
+/// Only a prefixed attribute takes the `XLink`, XML or XMLNS namespace, and
+/// any `id` in no namespace is an ID.
+///
+/// ```php
+/// $d = Dom\HTMLDocument::createFromString('<!DOCTYPE html><svg id="s" xlink:href="#a" xml:lang="en" xmlns:xlink="urn:x"/><math id="m"></math>', LIBXML_NOERROR);
+/// var_dump($d->getElementById('s')?->tagName, $d->getElementById('m')?->tagName);
+/// foreach ($d->getElementById('s')->attributes as $a) { echo $a->name, ' => ', var_export($a->namespaceURI, true), "\n"; }
+/// $f = Dom\HTMLDocument::createEmpty();
+/// $c = $f->appendChild($f->createElementNS('http://www.w3.org/1999/xlink', 'z'));
+/// $c->innerHTML = '<z id="q" xlink:href="#a"></z>';
+/// echo $c->innerHTML, "\n";
+/// var_dump($f->getElementById('q')?->tagName);
+/// ```
+/// ```expect
+/// string(3) "svg"
+/// string(4) "math"
+/// id => NULL
+/// xlink:href => 'http://www.w3.org/1999/xlink'
+/// xml:lang => 'http://www.w3.org/XML/1998/namespace'
+/// xmlns:xlink => 'http://www.w3.org/2000/xmlns/'
+/// <z id="q" xlink:href="#a"></z>
+/// string(1) "Z"
+/// ```
 fn convert_attributes(
     req: &mut Request,
     mapper: &mut Mapper,
@@ -736,9 +759,13 @@ fn convert_attributes(
         };
         lattr.add_child(text);
         lattr.set_parent(Some(element));
+        // Only a prefixed attribute is in the XLink, XML or XMLNS namespace,
+        // `xmlns` itself aside: an unprefixed one in foreign content is in
+        // none (php 8.5.12), whatever namespace lexbor's context gave it.
+        let prefixed = attr.has_prefix();
         let ns = match attr.namespace() {
             Namespace::Xmlns if local == b"xmlns" => mapper.prefixless_xmlns(req, Some(doc))?,
-            Namespace::Xmlns => {
+            Namespace::Xmlns if prefixed => {
                 if attr_ns.prefixed_xmlns.is_none() {
                     attr_ns.prefixed_xmlns = mapper.get_raw(
                         req,
@@ -749,14 +776,14 @@ fn convert_attributes(
                 }
                 attr_ns.prefixed_xmlns
             }
-            Namespace::XLink => {
+            Namespace::XLink if prefixed => {
                 if attr_ns.xlink.is_none() {
                     attr_ns.xlink =
                         mapper.get_raw(req, Some(doc), Some(b"xlink"), Some(XLINK_NS))?;
                 }
                 attr_ns.xlink
             }
-            Namespace::Xml => {
+            Namespace::Xml if prefixed => {
                 if attr_ns.xml.is_none() {
                     attr_ns.xml = mapper.get_raw(
                         req,
@@ -778,7 +805,8 @@ fn convert_attributes(
             }
         }
         last = Some(lattr);
-        if local == b"id" && attr.namespace() == Namespace::Html && !lattr.add_id(doc, value) {
+        // Any `id` in no namespace is an ID, an SVG or MathML element's too.
+        if local == b"id" && ns.is_none() && !lattr.add_id(doc, value) {
             lattr.set_atype(php_ext_libxml::ffi::XML_ATTRIBUTE_ID);
         }
     }
@@ -1352,7 +1380,7 @@ pub(crate) fn create_from_file(
     let Some(stream) = req.open_stream(&path, b"rb", false)? else {
         // `zend_throw_exception_ex`'s `%s`: the name's bytes as they are.
         let message = [&b"Cannot open file '"[..], &path, b"'"].concat();
-        return Err(throw(req, "Exception", &message));
+        return Err(throw_exception_ex(req, "Exception", &message));
     };
     // The MIME sniff: the charset of the http headers the stream carries,
     // where no encoding was given and lexbor knows the one named.

@@ -66,7 +66,7 @@ pub mod syntax {
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use php_heap::{Fatal, FatalReason, Intern};
+use php_heap::{Fatal, FatalReason, Intern, Sizing};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::{Arena, Parsed};
 use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, HookKind, Visibility};
@@ -559,6 +559,7 @@ impl Refused {
     pub fn bailed(&self) -> bool {
         match self.raise {
             Raise::Fatal => self.level != Level::Parse,
+            Raise::HardLimit { .. } => true,
             Raise::Thrown | Raise::Unread => false,
         }
     }
@@ -586,6 +587,15 @@ pub enum Raise {
     /// for the compile to read or refuse, as it leaves a node that is no
     /// constant.
     Unread,
+    /// The heap met php 8.5.12's hard limit as the compile asked for
+    /// memory (`zend_mm_hard_limit_error`): the process ends where it
+    /// stands, which no `try` and no shutdown sees.
+    HardLimit {
+        /// `heap->hard_limit`.
+        limit: usize,
+        /// The bytes asked for past what the chunks held.
+        asked: usize,
+    },
 }
 
 /// What php's compile of a source had added to `CG(function_table)` and
@@ -996,7 +1006,8 @@ impl<'u> Parts<'u> {
                 (Some(own), ..) => Some(*own),
                 (None, Making::All | Making::Read, Named::Read(_))
                 | (None, Making::All, Named::File | Named::Function(_) | Named::Class(_)) => {
-                    Some(strings.intern(&bytes)?)
+                    let sizing = named.sizing_among(self.classes, &bytes);
+                    Some(strings.intern_marked(&bytes, false, sizing)?)
                 }
                 (None, ..) => None,
             };
@@ -1214,6 +1225,63 @@ pub enum FunctionAt {
     },
 }
 
+impl FunctionAt {
+    /// The size php lays the name of the function here, called `name`,
+    /// at: `zend_string_finit`'s ([`Sizing::Finit`]) for a name php
+    /// prints with `zend_strpprintf`, whose `smart_str_extract`
+    /// php-8.5.12 trims to it, a closure's `{closure:…}`
+    /// (`zend_begin_func_decl`, `Z/Zend/zend_compile.c:8379`), which no
+    /// written name can begin as, and a property hook's `$name::get`
+    /// (`zend_compile_property_hooks`, `:8782`); the scanner's,
+    /// `zend_string_init`'s, for every other.
+    #[must_use]
+    pub fn sizing(self, name: &[u8]) -> Sizing {
+        match self {
+            FunctionAt::Hook { .. } => Sizing::Finit,
+            FunctionAt::Dynamic(_) if name.starts_with(b"{") => Sizing::Finit,
+            FunctionAt::Dynamic(_) | FunctionAt::Top(_) | FunctionAt::Method { .. } => {
+                Sizing::Alloc
+            }
+        }
+    }
+}
+
+impl Named {
+    /// The size php lays the name at, called `name` in `unit`: a
+    /// function's as [`FunctionAt::sizing`] says, an anonymous class's
+    /// `class@anonymous…` at `zend_strpprintf`'s
+    /// (`zend_generate_anon_class_name`, `:9219`), and every other at
+    /// `zend_string_init`'s.
+    #[must_use]
+    pub fn sizing(self, unit: &Unit, name: &[u8]) -> Sizing {
+        self.sizing_among(&unit.classes, name)
+    }
+
+    /// [`Named::sizing`] of a unit whose classes are `classes`.
+    fn sizing_among(self, classes: &[ClassDecl], name: &[u8]) -> Sizing {
+        match self {
+            Named::Function(at) => at.sizing(name),
+            Named::Class(at) => class_sizing(
+                classes
+                    .get(at)
+                    .is_some_and(|class| class.flags.is_anonymous),
+            ),
+            _ => Sizing::Alloc,
+        }
+    }
+}
+
+/// The size php lays a class's name at: an anonymous one's at
+/// `zend_strpprintf`'s, `zend_string_finit`'s, and a written one's at the
+/// scanner's.
+pub(crate) fn class_sizing(anonymous: bool) -> Sizing {
+    if anonymous {
+        Sizing::Finit
+    } else {
+        Sizing::Alloc
+    }
+}
+
 /// The names a file's op arrays carry interned into `strings`, the home
 /// its constant strings went to: its file's, `op_array->filename`, and
 /// each function's, method's, hook's and closure's, `function_name`,
@@ -1315,12 +1383,20 @@ fn level_of(level: php_syntax::Level) -> Level {
     }
 }
 
-/// The sentence a compile ends in where the heap refused it a fatal:
-/// the fatal's own message, and php's `Out of memory` for the limit.
-pub(crate) fn fatal_message(fatal: Fatal) -> String {
+/// How a compile the heap refused ends, and its sentence: the fatal's
+/// own message, php's `Out of memory` for the system's refusal, and the
+/// hard limit's end of the process, whose line the request writes.
+pub(crate) fn fatal_refusal(fatal: Fatal) -> (Raise, String) {
     match fatal.into_reason() {
-        FatalReason::Error(message) => message,
-        FatalReason::OutOfMemory(_) => String::from("Out of memory"),
+        FatalReason::Error(message) => (Raise::Fatal, message),
+        FatalReason::OutOfMemory(_) => (Raise::Fatal, String::from("Out of memory")),
+        FatalReason::Refused => (
+            Raise::Fatal,
+            String::from("InternalError: a fallible refusal reached the compiler"),
+        ),
+        FatalReason::HardLimit { limit, asked } => {
+            (Raise::HardLimit { limit, asked }, String::new())
+        }
     }
 }
 

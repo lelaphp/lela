@@ -11,7 +11,8 @@ use php_ext::call::{autoload, call, call_array, known_method, lookup_class, new_
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name, with_string};
 use php_ext::decl::Name;
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, argument_error, docref, throw_error, while_pending,
+    Level, Thrown, arg_count_error, argument_error, docref, throw_error, type_error, value_error,
+    while_pending,
 };
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::{
@@ -307,14 +308,13 @@ pub(super) fn value(
 ) -> Result<Owner<Value>, Thrown> {
     let count = stmt::read(req, object, |s| s.column_count).unwrap_or(0);
     let Ok(at) = usize::try_from(column) else {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "Column index must be greater than or equal to 0",
         ));
     };
     if at >= count {
-        return Err(throw_error(req, "ValueError", "Invalid column index"));
+        return Err(value_error(req, "Invalid column index"));
     }
     let got = stmt::with_driver(req, object, |req, driver| driver.value(req, at, ty))?;
     let mut value = match got {
@@ -1042,14 +1042,13 @@ fn column_row(
         column
     };
     if colno < 0 {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "Column index must be greater than or equal to 0",
         ));
     }
     if usize::try_from(colno).is_ok_and(|c| c >= count) {
-        return Err(throw_error(req, "ValueError", "Invalid column index"));
+        return Err(value_error(req, "Invalid column index"));
     }
     let read_at = if flags.is(Flag::Group) && column == -1 {
         1
@@ -1154,7 +1153,45 @@ fn key_pair(
 /// `pdo_stmt_setup_fetch_mode`: the default style and its target set from
 /// `mode` and the arguments after it, held to php's counts and types;
 /// `mode_arg` is the argument `mode` was, `1` for `setFetchMode()` and
-/// `2` for `PDO::query()`.
+/// `2` for `PDO::query()`. As php 8.5.12 sets it, atomically: the style
+/// verified against the connection's default and the target made, the
+/// class's autoloader called, before the statement changes, so a refusal
+/// leaves the style before it standing, and the target replaced released
+/// only once the new one stands, whatever PHP code the lookup called in
+/// between; `PDO::FETCH_DEFAULT` stores the connection's default.
+///
+/// ```php
+/// class C { public $a; function __construct(public $m) {} }
+/// $db = new PDO('sqlite::memory:');
+/// $s = $db->query('SELECT 1 AS a');
+/// $s->setFetchMode(PDO::FETCH_CLASS, 'C', ['kept']);
+/// try { $s->setFetchMode(PDO::FETCH_CLASS); } catch (ArgumentCountError $e) { echo $e->getMessage(), "\n"; }
+/// try { $s->setFetchMode(PDO::FETCH_INTO, 'x'); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// $r = $s->fetch(); echo get_class($r), ' ', $r->m, ' ', $r->a, "\n";
+/// $db->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_NUM);
+/// $s = $db->query('SELECT 2 AS a');
+/// $s->setFetchMode(PDO::FETCH_ASSOC);
+/// $s->setFetchMode(PDO::FETCH_DEFAULT);
+/// var_dump($s->fetch());
+/// $o = new stdClass;
+/// $s = $db->query('SELECT 3 AS a UNION ALL SELECT 4');
+/// $s->setFetchMode(PDO::FETCH_INTO, $o);
+/// spl_autoload_register(function ($c) use ($s) { var_dump($s->fetch()->a); eval("class $c { public \$a; }"); });
+/// $s->setFetchMode(PDO::FETCH_CLASS, 'Late');
+/// var_dump($o->a, get_class($s->fetch()));
+/// ```
+/// ```expect
+/// PDOStatement::setFetchMode() expects at least 2 arguments for the fetch mode provided, 1 given
+/// PDOStatement::setFetchMode(): Argument #2 must be of type object, string given
+/// C kept 1
+/// array(1) {
+///   [0]=>
+///   int(2)
+/// }
+/// int(3)
+/// int(3)
+/// string(4) "Late"
+/// ```
 pub(super) fn setup_mode(
     req: &mut Request,
     object: PhpObject,
@@ -1162,13 +1199,11 @@ pub(super) fn setup_mode(
     mode_arg: u32,
     args: &[Value],
 ) -> Result<(), Thrown> {
-    let old = stmt::write(req, object, |s| {
-        s.default_fetch = 4;
-        std::mem::take(&mut s.target)
-    })
-    .unwrap_or_default();
-    old.release(req);
-    verify(req, 4, mode, mode_arg, false)?;
+    let dbh_default = stmt::dbh_of(req, object)
+        .and_then(|dbh| crate::dbh::state(req, dbh).map(|d| i64::from(d.default_fetch)))
+        .unwrap_or(4);
+    verify(req, dbh_default, mode, mode_arg, false)?;
+    let kind = Kind::of(mode);
     let flags = Flags::of(mode);
     let given = u32::try_from(args.len()).unwrap_or(u32::MAX);
     let total = mode_arg + given;
@@ -1179,7 +1214,7 @@ pub(super) fn setup_mode(
             &format!("{how} {n} arguments for the fetch mode provided, {total} given"),
         )
     };
-    let target = match Kind::of(mode) {
+    let target = match kind {
         Some(
             Kind::Default
             | Kind::Lazy
@@ -1250,14 +1285,19 @@ pub(super) fn setup_mode(
             ));
         }
     };
-    let target = match object.native_mut::<stmt::Stmt>(req) {
+    let stored = if kind == Some(Kind::Default) {
+        dbh_default
+    } else {
+        mode
+    };
+    let old = match object.native_mut::<stmt::Stmt>(req) {
         Some(s) => {
-            s.default_fetch = mode;
+            s.default_fetch = stored;
             std::mem::replace(&mut s.target, target)
         }
         None => target,
     };
-    target.release(req);
+    old.release(req);
     Ok(())
 }
 
@@ -1587,7 +1627,7 @@ fn all_arguments(
             };
             with.func = match callable_checked(req, &callback) {
                 Ok(callable) => Some(callable),
-                Err(error) => return Err(throw_error(req, "TypeError", &error)),
+                Err(error) => return Err(type_error(req, &error)),
             };
         }
         Some(Kind::Column) => {

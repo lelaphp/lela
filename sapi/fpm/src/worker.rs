@@ -131,7 +131,7 @@ impl OutputSink for Response {
     /// ```
     /// ```expect
     /// Status: 200 OK
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// x
@@ -151,7 +151,7 @@ impl OutputSink for Response {
     /// ```
     /// ```expect
     /// HTTP/1.1 404 Not Found
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// x

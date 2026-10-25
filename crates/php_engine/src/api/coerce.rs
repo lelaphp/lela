@@ -85,20 +85,23 @@ pub fn float_to_long(f: f64) -> i64 {
     }
 }
 
-/// `zend_long_to_str`: the digits as a string of the request's, which
-/// for one digit is the process's interned one, as php's `ZSTR_CHAR` is.
-#[cfg_attr(debug_assertions, track_caller)]
+/// `zend_long_to_str`, [`crate::ops::long_to_str`] through the face: the
+/// digits as a string of the request's, which for one digit is the
+/// process's interned one, as php's `ZSTR_CHAR` is.
 pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thrown> {
-    PhpString::new(req, crate::c_number::Long::of(n).as_bytes())
+    crate::ops::long_to_str(req, n).map(Owner::adopt)
 }
 
-/// `zend_gcvt(f, precision, '.', exponent, buf)`, the one
+/// `zend_gcvt(f, precision ? precision : 1, '.', exponent, buf)`, as
+/// `smart_str_append_double` and `zend_double_to_str` call it, the one
 /// [`php_heap::double_to_string`] through the face: `precision`
-/// significant digits, or with `-1` the shortest text that reads back as
-/// the same double, in the form php chooses, and not yet a string of the
-/// request's. The exponent character is the caller's, as it is at each
-/// of php's call sites: `Exponent::Upper` for `var_export`, `%G` and
-/// `%H`, `Exponent::Lower` for `json_encode`, `%g` and `%h`. A
+/// significant digits, a `0` read as one, or with `-1` the shortest
+/// text that reads back as the same double, in the form php chooses,
+/// laid on the stack as php's `buf` is ([`php_heap::DoubleText`], read
+/// as the `str` it holds) and not yet a string of the request's. The
+/// exponent character is the caller's, as it is at each of php's call
+/// sites: `Exponent::Upper` for
+/// `var_export`, `%G` and `%H`, `Exponent::Lower` for `%g` and `%h`. A
 /// `zero_fraction` such as `smart_str_append_double` takes is the
 /// caller's too, since only `var_export` and `json_encode` ask for it.
 ///
@@ -145,8 +148,27 @@ pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thro
 /// [1.5,1.0e+20,-0]
 /// ```
 #[must_use]
-pub fn float_format(f: f64, precision: i32, exponent: Exponent) -> String {
+pub fn float_format(f: f64, precision: i32, exponent: Exponent) -> php_heap::DoubleText {
     php_heap::double_to_string(f, precision, exponent)
+}
+
+/// `zend_gcvt(f, ndigit, '.', exponent, buf)` with `ndigit` as its caller
+/// holds it, [`php_heap::gcvt`] through the face: the call `serialize`,
+/// `json_encode` and soap's `to_xml_double` make with the ini entry as
+/// it stands, where [`float_format`] reads a `0` as one. At `0` the one
+/// digit is written exponentially once the point stands past it, and a
+/// non-finite double is no text at all:
+///
+/// ```php
+/// ini_set('serialize_precision', 0); ini_set('precision', 0);
+/// echo serialize([10/3, INF]), "|", json_encode(10/3), "|", 10/3, "|", INF;
+/// ```
+/// ```expect
+/// a:2:{i:0;d:3.0E+0;i:1;d:;}|3.0e+0|3|I
+/// ```
+#[must_use]
+pub fn gcvt(f: f64, ndigit: i32, exponent: Exponent) -> php_heap::DoubleText {
+    php_heap::gcvt(f, ndigit, exponent)
 }
 
 /// `zval_get_long`, the kernel [`crate::ops::get_long`] through the
@@ -322,6 +344,20 @@ pub fn callable_name(req: &mut Request, value: &Value) -> Result<Owner<PhpString
 /// Deprecated: ini_set(): assert.callback INI setting is deprecated in %s on line 2
 /// AssertionError: assert(false) / Invalid callback nope, function "nope" not found or invalid function name
 /// ```
+///
+/// Where the check failed with a throwable pending, an autoloader's
+/// thrown while the class half was looked up, that throwable is handed on
+/// alone, the resolver's sentence freed and no refusal thrown over it, as
+/// php 8.5.12's `zend_call_function` returns (`Z/Zend/zend_execute_API.c:859-865`).
+///
+/// ```php
+/// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
+/// @ini_set("assert.callback", "Foo::bar");
+/// try { assert(false); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), " / ", $e->getPrevious()?->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// AssertionError: assert(false) / boom
+/// ```
 pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown> {
     match req.callable_checked(value) {
         Ok(_) if req.is_pending() => Err(Thrown::of(req.take_pending_view())),
@@ -330,6 +366,9 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
         // sentence, made for an array or an object and the string's own
         // for a string.
         Err(refusal) => Err(refusal.across(req, |req| {
+            if req.is_pending() {
+                return Thrown::of(req.take_pending_view());
+            }
             let name = req.callable_name(value);
             let message = format!("Invalid callback {name}, {refusal}");
             let made = match value.deref().as_ref() {
@@ -341,7 +380,7 @@ pub fn to_callable(req: &mut Request, value: &Value) -> Result<Callable, Thrown>
                 }
                 _ => None,
             };
-            let thrown = crate::api::raising::throw_over_pending(req, "Error", &message);
+            let thrown = crate::api::raising::throw_error(req, "Error", &message);
             if let Some(made) = made {
                 made.give_up(req);
             }

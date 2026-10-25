@@ -8,7 +8,7 @@
 use php_ext::abi::{Instance, OrFalse, Ref, This, True, Union, Variadic};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_count_error, docref, fatal};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpObject, PhpString, Value};
@@ -65,16 +65,15 @@ impl MyStmt {
     }
 
     /// `mysqli_stmt_close(stmt->stmt, implicit)`, then
-    /// `php_clear_stmt_bind`'s `efree(stmt->query)` and `efree(stmt)`, which
-    /// an implicit close that failed skips as php returns before them.
+    /// `php_clear_stmt_bind`'s `efree(stmt->query)` and `efree(stmt)`,
+    /// whether or not the close was taken (php 8.5.12 no longer returns
+    /// before them).
     fn close(self, req: &mut Request, implicit: bool) -> Result<bool, Thrown> {
         let closed = self.stmt.close(req, implicit);
-        if !implicit || matches!(closed, Ok(true)) {
-            if let Some(query) = self.query {
-                query.free(req);
-            }
-            self.held.free(req);
+        if let Some(query) = self.query {
+            query.free(req);
         }
+        self.held.free(req);
         closed
     }
 }
@@ -260,16 +259,14 @@ pub(crate) fn bind_param(
             return Err(arg_value_error(req, on.at(2), "not be empty"));
         }
         if types.len() != vars.len() {
-            return Err(throw_error(
+            return Err(argument_count_error(
                 req,
-                "ArgumentCountError",
                 "The number of elements in the type definition string must match the number of bind variables",
             ));
         }
         if types.len() != s.stmt.parameter_count() as usize {
-            return Err(throw_error(
+            return Err(argument_count_error(
                 req,
-                "ArgumentCountError",
                 "The number of variables must match the number of parameters in the prepared statement",
             ));
         }
@@ -297,9 +294,8 @@ pub(crate) fn bind_param(
 pub(crate) fn bind_result(req: &mut Request, on: On, vars: &[Ref<Value>]) -> Result<bool, Thrown> {
     with_stmt(req, on.object, Need::Open, |req, s| {
         if vars.len() != s.stmt.field_count() as usize {
-            return Err(throw_error(
+            return Err(argument_count_error(
                 req,
-                "ArgumentCountError",
                 "Number of bind variables doesn't match number of fields in prepared statement",
             ));
         }
@@ -428,7 +424,31 @@ pub(crate) fn execute_query(
 }
 
 /// `mysqli_stmt_fetch`: `true` for a row, `null` past the last, `false`
-/// on a failure, reported.
+/// on a failure, reported. A bound temporal or zero-filled column's value
+/// is the string mysqlnd's `zend_strpprintf` makes, at
+/// `zend_string_finit`'s size under php-8.5.12:
+///
+/// ```php
+/// $m = new mysqli('127.0.0.1', 'root', '', 'test');
+/// $m->query('CREATE TEMPORARY TABLE tz (d DATE, t TIME(3), dt DATETIME, z SMALLINT(7) UNSIGNED ZEROFILL)');
+/// $m->query("INSERT INTO tz VALUES ('2026-10-24', '12:34:56.5', '2026-10-24 12:34:56', 42)");
+/// foreach (['d', 't', 'dt', 'z'] as $c) {
+///     $s = $m->prepare("SELECT $c FROM tz");
+///     $s->execute();
+///     $s->bind_result($v);
+///     $before = memory_get_usage();
+///     $s->fetch();
+///     $used = memory_get_usage() - $before;
+///     echo $c, ' ', $v, ' ', $used, "\n";
+///     $s->close();
+/// }
+/// ```
+/// ```expect mysql
+/// d 2026-10-24 816
+/// t 12:34:56.500 768
+/// dt 2026-10-24 12:34:56 776
+/// z 0000042 752
+/// ```
 pub(crate) fn fetch(req: &mut Request, on: On) -> Result<Option<bool>, Thrown> {
     with_stmt(req, on.object, Need::Open, |req, s| {
         match s.stmt.fetch(req)? {

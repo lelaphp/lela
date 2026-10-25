@@ -299,9 +299,11 @@ fn unarmed_a_forgotten_block_is_released_by_the_request_s_end() {
     }
 }
 
-/// A block or a string the limit refuses ends the request in the
-/// limit's fatal, after the block made before it is freed, and the
-/// engine serves the next request.
+/// A block or a string past the hard limit, twice the soft one, ends
+/// the request where it is asked for, as php 8.5.12's `_exit(137)` ends
+/// php's process: the hard limit's line on the error stream and the
+/// status, nothing after it served; and the engine serves the next
+/// request.
 #[test]
 fn a_refused_allocation_ends_the_request_in_the_limit_s_fatal() {
     let engine = engine(LeakSensor::Armed, Some("2M"));
@@ -312,11 +314,11 @@ fn a_refused_allocation_ends_the_request_in_the_limit_s_fatal() {
     ] {
         let served = engine.serve_capture(src, Capture::default());
         assert!(!served.stdout_text().contains("unreached"));
-        let fatal = served.fatal.expect("the limit's fatal");
-        assert_eq!(served.exit_code, 255, "{src}");
+        assert_eq!(served.exit_code, 137, "{src}");
+        let stderr = String::from_utf8_lossy(&served.stderr);
         assert!(
-            fatal.contains("Allowed memory size of 2097152 bytes exhausted"),
-            "{src}: {fatal}"
+            stderr.starts_with("Hard memory limit of 4194304 bytes exhausted"),
+            "{src}: {stderr}"
         );
     }
     let after = engine.serve_capture("<?php echo block_held(24);", Capture::default());
@@ -332,12 +334,13 @@ fn a_fresh_string_grows_on_erealloc_s_schedule() {
 }
 
 /// A length set in place keeps the grown allocation; a truncate moves
-/// the string to the bin its length needs.
+/// the string to the bin php-8.5.12's truncate asks for, its length past
+/// the empty string's aligned header.
 #[test]
 fn a_set_length_keeps_its_allocation_and_a_truncate_does_not() {
     assert_eq!(
         clean("<?php echo string_cut(false), \"\\n\", string_cut(true);"),
-        "4096 4096 true 0\n4096 32 true 0"
+        "4096 4096 true 0\n4096 40 true 0"
     );
 }
 

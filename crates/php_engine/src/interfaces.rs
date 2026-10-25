@@ -27,7 +27,7 @@ use crate::api::abi::{
     ClassIterator, CurrentPlace, DtorObj, ExtensionBuilder, GcTable, Instance, IteratorElement,
     ObjectHandlers, Refusals, This, Untyped,
 };
-use crate::api::raising::{Thrown, error, throw};
+use crate::api::raising::{Thrown, error, throw_exception_ex};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
 
@@ -724,7 +724,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         _ => {
             answered.give_up(req);
             let name = req.symbols().class_name(object.class());
-            Err(throw(
+            Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!(
@@ -799,7 +799,7 @@ fn walked(req: &Request, wrapper: PhpObject) -> Option<(Funcs, PhpObject)> {
 }
 
 /// The iterator arm of `zend_fe_fetch_object_helper`
-/// (`Z/Zend/zend_vm_def.h:7117`) and of `ZEND_FE_FETCH_RW`: past the
+/// (`Z/Zend/zend_vm_def.h:7122`) and of `ZEND_FE_FETCH_RW`: past the
 /// first fetch `funcs->move_forward` and `funcs->valid`; then
 /// `funcs->get_current_data`, by reference under `by_ref`
 /// ([`Funcs::current`]), and `funcs->get_current_key` where the opline

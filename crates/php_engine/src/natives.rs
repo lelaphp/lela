@@ -955,7 +955,7 @@ fn strlen(string: PhpString) -> i64 {
 /// pk(function () { try { define('A::B', 1); } catch (ValueError $e) {} });
 /// ```
 /// ```expect
-/// 2920 32
+/// 2792 32
 /// ```
 ///
 /// The constant is listed under its name as given and found whatever
@@ -1526,7 +1526,19 @@ fn dump(req: &mut Request, value: &Value, level: usize) {
 
 /// [`dump`] over a value that holds no other, a call of its own, so its
 /// texts are off the stack of a nest of objects or arrays dumped level
-/// by level (#3159).
+/// by level (#3159). A float is `%.*H` at `serialize_precision`, which
+/// writes a non-finite one whole however short the precision:
+///
+/// ```php
+/// ini_set('serialize_precision', 1);
+/// debug_zval_dump(INF, -INF, NAN, 1.5);
+/// ```
+/// ```expect
+/// float(INF)
+/// float(-INF)
+/// float(NAN)
+/// float(2)
+/// ```
 #[inline(never)]
 fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
     let line = if let Some(b) = value.as_bool() {
@@ -1534,8 +1546,13 @@ fn dump_scalar(req: &mut Request, common: &str, value: &Value) {
     } else if let Some(n) = value.as_int() {
         format!("{common}int({n})\n")
     } else if let Some(f) = value.as_float() {
-        // `php_var_dump` prints a float with `%.*H` at `serialize_precision`.
-        let precision = req.ini().serialize_precision();
+        // `php_var_dump` prints a float with `%.*H` at `serialize_precision`,
+        // which writes a non-finite one whole, as `zend_gcvt` does at -1.
+        let precision = if f.is_finite() {
+            req.ini().serialize_precision()
+        } else {
+            -1
+        };
         let text = php_heap::double_to_string(f, precision, php_heap::Exponent::Upper);
         format!("{common}float({text})\n")
     } else if let Some(s) = value.as_php_string() {
@@ -1586,7 +1603,7 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
         .write(format!("{common}array({}) {{\n", array.len()).as_bytes());
     let held = Hold::Owner(GiveUp::Dtor);
     let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
-        if too_deep(req, level, req.stack_limit().exhausted()) {
+        if too_deep(req, level, req.stack_limit().refuses_a_level()) {
             return Ok(ControlFlow::Continue(()));
         }
         // `php_array_element_dump`.
@@ -1833,7 +1850,7 @@ fn dump_object_header(req: &mut Request, common: &str, object: PhpObject, count:
 /// whether the value is still to be dumped.
 #[inline(never)]
 fn dump_property_head(req: &mut Request, level: usize, row: &walk::Row) -> bool {
-    if too_deep(req, level, req.stack_limit().overflowed()) {
+    if too_deep(req, level, req.stack_limit().refuses_a_level()) {
         return false;
     }
     match row.key() {
@@ -1911,11 +1928,9 @@ fn leave_chained(req: &mut Request, thrown: crate::api::raising::Thrown) {
 /// is pinned. The chain is taken apart a link at a time after, so its
 /// release is no deeper than the stack either.
 ///
-/// An array's element is the same refusal at the thread's floor rather
-/// than its limit: php's `php_array_element_dump` asks nothing and runs
-/// to the thread's end, so an array nested past the limit under a small
-/// `zend.max_allowed_stack_size` is dumped whole in both engines
-/// (`php_compile::StackLimit::exhausted`).
+/// An array's element is the same refusal at the same limit, php
+/// 8.5.12's `php_array_element_dump` (`Z/ext/standard/var.c:47`), which
+/// 8.5.9 left unguarded (`var_dump_stack_limit.phpt`).
 ///
 /// ```php
 /// $o = $first = new stdClass;
@@ -1924,8 +1939,15 @@ fn leave_chained(req: &mut Request, thrown: crate::api::raising::Thrown) {
 /// var_dump($first);
 /// ob_end_flush();
 /// while ($next = $first->next ?? null) { $first->next = $next->next ?? null; }
+/// $a = [];
+/// for ($i = 0; $i < 50000; $i++) { $a = [$a]; }
+/// ob_start(fn ($chunk) => str_contains($chunk, 'nesting level too deep') ? "nesting level too deep\n" : "the whole array\n");
+/// var_dump($a);
+/// ob_end_flush();
+/// while (is_array($a) && isset($a[0])) { $a = $a[0]; }
 /// ```
 /// ```expect regime=small-stack
+/// nesting level too deep
 /// nesting level too deep
 /// ```
 fn too_deep(req: &mut Request, level: usize, past: bool) -> bool {

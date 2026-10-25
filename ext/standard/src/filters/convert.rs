@@ -411,7 +411,23 @@ impl QprintDecode {
     /// `php_conv_qprint_decode_convert` (`Z/ext/standard/filters.c:873`):
     /// `=` and two hex digits a byte, `=` before a line break a soft
     /// break dropped, and anything else after `=` php's invalid
-    /// sequence; how many bytes it read.
+    /// sequence; how many bytes it read. A hex digit is either case, as
+    /// 8.5.12 reads a lowercase one:
+    ///
+    /// ```php
+    /// foreach (['=cd', '=0a', '=da', '=CD', '=aB'] as $in) {
+    ///     $m = fopen('php://memory', 'w+'); fwrite($m, $in); rewind($m);
+    ///     stream_filter_append($m, 'convert.quoted-printable-decode', STREAM_FILTER_READ);
+    ///     echo $in, ' => ', bin2hex(stream_get_contents($m)), "\n";
+    /// }
+    /// ```
+    /// ```expect
+    /// =cd => cd
+    /// =0a => 0a
+    /// =da => da
+    /// =CD => cd
+    /// =aB => ab
+    /// ```
     #[allow(clippy::too_many_lines)] // one function in php, ported as one
     fn convert(&mut self, input: &[u8], out: &mut Vec<u8>) -> (usize, Result<(), ConvErr>) {
         let lbchars = self.lbchars.clone().unwrap_or_default();
@@ -467,7 +483,9 @@ impl QprintDecode {
                             err = Err(ConvErr::InvalidSeq);
                             break 'scan;
                         }
-                        let digit = if c >= b'A' {
+                        let digit = if c >= b'a' {
+                            u32::from(c).wrapping_sub(0x57)
+                        } else if c >= b'A' {
                             u32::from(c).wrapping_sub(0x37)
                         } else {
                             u32::from(c).wrapping_sub(0x30)
@@ -691,7 +709,7 @@ const QPRINT_DECODE: usize = 56;
 
 impl Conv {
     /// `sizeof` the converter php `pemalloc`s, and the line break it
-    /// `pestrdup`s where it keeps one.
+    /// `pestrndup`s where it keeps one, all of its bytes.
     fn allocated(&self) -> (usize, Option<&[u8]>) {
         match self {
             Conv::Base64Encode(c) => (BASE64_ENCODE, c.lbchars.as_deref()),
@@ -705,7 +723,7 @@ impl Conv {
 /// `php_convert_filter`: the converter and the name the filter was asked
 /// for, which its warnings print, and what php allocates for the two,
 /// with the stream's persistence: the `php_convert_filter`, the
-/// `pestrdup`'d name, the converter and its line break, given back in
+/// `pestrdup`'d name, the converter and its `pestrndup`'d line break, given back in
 /// its `dtor`.
 pub(super) struct ConvertFilter {
     cd: Conv,

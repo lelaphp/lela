@@ -421,22 +421,47 @@ impl Emit<'_> {
         let Operand::Value(target) = line.op1 else {
             return Err(mismatch("a .= onto no variable"));
         };
-        let var = self.value(target)?.slot.var;
-        let (word, info) = self.zval_words(line.frame, line.op2)?;
-        let [room, opline] = self.served(line)?;
-        let var = self.b.ins().iconst(I32, i64::from(var));
-        self.call_freeing(Kernel::AssignConcat, &[room, opline, var, word, info], line)
+        let (base, at) = self.place(self.value(target)?.slot)?;
+        let place = self.b.ins().iadd_imm_s(base, i64::from(at));
+        self.concat_onto(line, place)
     }
 
-    /// `kernel` called with `args`, then `line`'s `op2` given up where a
-    /// temporary holds it, `FREE_OP2`, before the kernel's status is
+    /// `.=` of `line`'s string onto the zval at `place`, which holds a
+    /// string, through [`Kernel::AssignConcat`]: php's
+    /// `zend_jit_fast_assign_concat_helper` over a variable
+    /// (`zend_jit_assign_op`) or an array's element (`zend_jit_assign_dim_op`
+    /// past its `zend_jit_concat_helper`, `Z/ext/opcache/jit/zend_jit_ir.c:13706-13712`),
+    /// whose right side is `line`'s `op2` or its `OP_DATA`'s.
+    pub(super) fn concat_onto(&mut self, line: &Line, place: Value) -> Result<(), Abort> {
+        let right = if line.opcode == Opcode::AssignDimOp {
+            line.data
+        } else {
+            line.op2
+        };
+        let (word, info) = self.zval_words(line.frame, right)?;
+        let [room, opline] = self.served(line)?;
+        self.call_freeing(
+            Kernel::AssignConcat,
+            &[room, opline, place, word, info],
+            (line, right),
+        )
+    }
+
+    /// `kernel` called with `args`, then `line`'s `freed`, its `op2` or
+    /// its `OP_DATA`'s, given up where a temporary holds it, `FREE_OP2`
+    /// and `FREE_OP_DATA`, before the kernel's status is
     /// tested, so a throw leaves no temporary behind, as the handler
     /// frees the operand before it raises and php's code before
     /// `zend_jit_check_exception`; then the status tested, leaving through
     /// `line`'s unwind.
-    fn call_freeing(&mut self, kernel: Kernel, args: &[Value], line: &Line) -> Result<(), Abort> {
+    fn call_freeing(
+        &mut self,
+        kernel: Kernel,
+        args: &[Value],
+        (line, freed): (&Line, Operand),
+    ) -> Result<(), Abort> {
         let status = self.call_status(kernel, args)?;
-        self.free_temp(line, line.op2)?;
+        self.free_temp(line, freed)?;
         self.left_unless(status, line.unwind.map(Leave::Unwind))
     }
 
@@ -512,7 +537,7 @@ impl Emit<'_> {
         self.call_freeing(
             Kernel::Concat,
             &[room, opline, a, a_info, b, b_info, kinds, answer],
-            line,
+            (line, line.op2),
         )?;
         let out = line
             .out

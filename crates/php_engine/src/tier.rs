@@ -54,6 +54,7 @@ pub use php_compile::Hooked;
 pub use php_heap::{Fatal, FrameRef};
 
 mod crossing;
+mod dims;
 mod frames;
 mod held;
 mod layout;
@@ -64,22 +65,27 @@ mod strings;
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, laid, primed, release, room, stack, stack_room, stand,
+    at_room, current, free_cv, free_operands, laid, primed, release, return_entry, room, stack,
+    stack_room, stand,
 };
+pub use dims::{dim_key, lookup_element};
 pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
+pub(crate) use held::UnitsLeft;
 use held::{Entered, Kept, Scope, Units};
-pub use layout::{Activation, FRAME, FrameLayout, PlainCall, call_image, plain_call};
+pub use layout::{
+    Activation, FRAME, FrameLayout, PLACE, PlaceLayout, PlainCall, call_image, plain_call,
+};
 pub use sampled::{
     Building, Sample, building, building_call, class_number, native_returns, numbered_class,
     on_heap, sample, this_class, under_way,
 };
 pub use strings::{assign_concat, concat, rope_end, rope_open, rope_push};
 pub use view::{
-    Epoch, FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch, epoch_state, frame_cache, func,
-    jump_targets, landing, running_func, served,
+    CachedSlot, Epoch, FuncRef, Held, MapPtrRaw, PropertySlot, UnitView, epoch, epoch_state,
+    frame_cache, func, jump_targets, landing, running_func, served, touch, touchable,
 };
 
 pub use crate::api::values::ClassId;
@@ -248,7 +254,23 @@ pub(crate) fn interpreted<T: Tier>() -> bool {
 /// Where a request keeps its tier's [`Tier::State`]
 /// (`jit-design.md` §2.2, #3144): laid once with the request, by the
 /// loop the engine bound ([`Loops::bound`]), and read by [`state`].
-pub(crate) struct TierState(Option<Box<dyn Any + Send>>);
+/// Its box is never replaced, moved out of or borrowed mutably while
+/// the request lives, and the types hold that outside `api::request`,
+/// where the request is made: the box is this type's private field,
+/// with no `&mut` method, and the request's field holding it is private
+/// to `api::request`, which hands it out only shared
+/// ([`Request::tier_state`]). A tier lends its state across the
+/// request's own borrow on that (`php_jit`'s `enter::lent`, #3437),
+/// holding a [`Lending`] for as long as the lend stands, so where
+/// `api::request` drops or replaces the state while one is held, a debug
+/// assertion fails as it drops.
+pub(crate) struct TierState {
+    state: Option<Box<dyn Any + Send>>,
+    /// How many [`Lending`]s stand, counted under `debug_assertions`
+    /// alone.
+    #[cfg(debug_assertions)]
+    lends: std::sync::Arc<AtomicU32>,
+}
 
 impl TierState {
     /// The tier state of a request of the engine `shared`, as the loop it
@@ -259,7 +281,57 @@ impl TierState {
 
     /// `T`'s state for a request of the engine `started`.
     fn of<T: Tier>(started: Started<'_>) -> TierState {
-        TierState(T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>))
+        TierState {
+            state: T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>),
+            #[cfg(debug_assertions)]
+            lends: std::sync::Arc::default(),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+impl Drop for TierState {
+    fn drop(&mut self) {
+        let lends = self.lends.load(std::sync::atomic::Ordering::Relaxed);
+        debug_assert!(
+            lends == 0 || std::thread::panicking(),
+            "a request's tier state was dropped or replaced while a tier lent it ({lends} lends stand)"
+        );
+    }
+}
+
+/// A tier's lend of its request's state across the request's own
+/// borrow (`php_jit`'s `enter::lent`, #3437), held for as long as the
+/// lend stands: the state dropped or replaced meanwhile fails a debug
+/// assertion as it drops ([`TierState`]). Nothing at all where debug
+/// assertions are off, so the lend costs nothing there.
+#[must_use]
+pub struct Lending {
+    #[cfg(debug_assertions)]
+    lends: std::sync::Arc<AtomicU32>,
+}
+
+#[cfg(debug_assertions)]
+impl Drop for Lending {
+    fn drop(&mut self) {
+        self.lends
+            .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// A [`Lending`] of `req`'s tier state, for as long as a tier lends it.
+#[inline]
+pub fn lending(req: &Request) -> Lending {
+    #[cfg(debug_assertions)]
+    {
+        let lends = std::sync::Arc::clone(&req.tier_state().lends);
+        lends.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Lending { lends }
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = req;
+        Lending {}
     }
 }
 
@@ -268,7 +340,7 @@ impl TierState {
 /// the engine binds a loop that lays none, `Nop`'s.
 #[must_use]
 pub fn state<S: Any>(req: &Request) -> Option<&S> {
-    req.tier.0.as_deref()?.downcast_ref()
+    req.tier_state().state.as_deref()?.downcast_ref()
 }
 
 /// One safepoint's word (`jit-design.md` §3.2): two atomics, zero at
@@ -846,6 +918,12 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
         T::safepoint(req, entry, Site::Entry, Held::of(code))
     };
     let first = answered(req, flow, entry)?;
+    // A tier that served the entry frame to its end, `Flow::Returned`, left
+    // the loop nothing to serve, as php's `execute_ex` returns at once
+    // where the entry's compiled code returned `ZEND_VM_RETURN`.
+    if first == Stepped::Done {
+        return Ok(());
+    }
     serve_frame::<T, D>(req, first)
 }
 
@@ -927,13 +1005,16 @@ fn refused_at_entry(req: &mut Request) -> bool {
 /// its own units go for it.
 fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
     let mut stepped = first;
-    let mut units = Units::default();
+    let mut units = req.units_left.take();
     loop {
         let served = serve_held::<T, D>(req, stepped, &units, Scope::Whole)?;
-        units.give_back(req);
-        match served {
-            Some(again) => stepped = again,
-            None => return Ok(()),
+        if let Some(again) = served {
+            units.give_back(req);
+            stepped = again;
+        } else {
+            units.leave(req);
+            req.units_left.put(units);
+            return Ok(());
         }
     }
 }

@@ -50,15 +50,25 @@ use super::{
 };
 
 mod calls;
+mod dims;
 mod doors;
 mod objects;
 mod strings;
 use crate::record::{Began, Callee, Stop};
 use crate::types::{
     Abort, BodyEntry, Check, Constant, Def, End, ExitId, Form, Frame, Fused, Guard, GuardAt, Home,
-    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Read, Repeat, Slot, Store, Stored,
-    TraceIr, Types, UnwindId, ValueId, cannot_raise,
+    Imm, Interrupt, Layout, Leave, Line, Op, OpId, Operand, Pointee, Read, Repeat, Slot, Store,
+    Stored, TraceIr, Types, UnwindId, ValueId, cannot_raise,
 };
+
+/// Where an inline arithmetic that would raise goes instead
+/// ([`Emit::refuse_if`]): the opline's exit, for the interpreter to serve
+/// it again, or the block where its handler serves the write.
+#[derive(Debug, Clone, Copy)]
+enum Refuse {
+    Exit(ExitId),
+    To(Block),
+}
 
 /// A layout offset as the immediate a load or a store takes.
 const fn imm(at: usize) -> i32 {
@@ -323,10 +333,13 @@ impl Onward {
     /// holds as php's own functions over two strings hold them, an
     /// assignment, a write to an element and a compound one, a send, a
     /// frameless call to a native, a string's length, a cast to a
-    /// boolean, the free of a `foreach`'s array, and a property's fetch,
+    /// boolean, the free of a `foreach`'s array, a property's fetch,
     /// write, compound write, increment and decrement, whose `__get` and
     /// `__set` the handler serves through an `execute` of their own, as
-    /// php's helpers do, and whose typed property it coerces or refuses.
+    /// php's helpers do, and whose typed property it coerces or refuses,
+    /// an element's fetch and `isset()`, whose `ArrayAccess` methods it
+    /// serves so, and an increment or a decrement, of a `VAR` an inline
+    /// fetch left indirect among them.
     /// None for every other
     /// opline: a jump and a comparison, whose handler may take the jump
     /// fused to it, a call's `INIT_*` and its `DO_*CALL` into user code,
@@ -437,6 +450,29 @@ impl Onward {
     /// ```
     /// ```expect regime=jit-exit-fuzz process
     /// [466,19,19]
+    /// ```
+    ///
+    /// An `ArrayAccess` object's `offsetGet`, `offsetExists` and
+    /// `offsetSet`, which the handlers of an element's fetch, `isset()`
+    /// and write serve, write a variable through the reference the object
+    /// holds to it, which the loop reads after:
+    ///
+    /// ```php
+    /// class A implements ArrayAccess { public $r; function offsetGet($k): mixed { $this->r = $this->r + 0.5; return 3; } function offsetExists($k): bool { $this->r = $this->r + 1; return $k == 'x'; } function offsetSet($k, $v): void { $this->r = $v; } function offsetUnset($k): void {} }
+    /// function f($n) { $x = 0; $o = new A; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o['k']; $t += $x; if (isset($o['x'])) { $t++; } $t += $x; $o['k'] = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// [462,19]
+    /// ```
+    ///
+    /// ```php
+    /// class A implements ArrayAccess { public $r; function offsetGet($k): mixed { $this->r = $this->r + 0.5; return 3; } function offsetExists($k): bool { $this->r = $this->r + 1; return $k == 'x'; } function offsetSet($k, $v): void { $this->r = $v; } function offsetUnset($k): void {} }
+    /// function f($n) { $x = 0; $o = new A; $o->r = &$x; $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o['k']; $t += $x; if (isset($o['x'])) { $t++; } $t += $x; $o['k'] = $i; } return [$t, $x]; }
+    /// echo json_encode(f(20)), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// [462,19]
     /// ```
     ///
     /// An array built per turn, and a key the build throws at, caught in
@@ -559,7 +595,16 @@ impl Onward {
             | Opcode::PreDecObj
             | Opcode::PostIncObj
             | Opcode::PostDecObj
-            | Opcode::IssetIsemptyPropObj => Some(Onward(1)),
+            | Opcode::IssetIsemptyPropObj
+            | Opcode::FetchDimR
+            | Opcode::FetchDimIs
+            | Opcode::FetchDimW
+            | Opcode::FetchDimRw
+            | Opcode::IssetIsemptyDimObj
+            | Opcode::PreInc
+            | Opcode::PreDec
+            | Opcode::PostInc
+            | Opcode::PostDec => Some(Onward(1)),
             Opcode::AssignDim
             | Opcode::AssignDimOp
             | Opcode::AssignObj
@@ -568,6 +613,15 @@ impl Onward {
             _ => None,
         }
     }
+}
+
+/// How a value given up is given up: as php's `zval_ptr_dtor`, which
+/// buffers a possible root where other owners stand, or as
+/// `zval_ptr_dtor_nogc`, a temporary's `FREE_OP`, which never does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dtor {
+    Gc,
+    Nogc,
 }
 
 /// One trace's function as it is built.
@@ -857,9 +911,12 @@ impl<'a> Emit<'a> {
                     self.decline_unless(slot, &[ZvalType::Array], Some(layout))?;
                 }
                 Check::Layout {
-                    read: Read::Through,
+                    read: Read::Through | Read::Indirect(_),
                     ..
                 } => return Err(mismatch("a reference's layout held as a trace enters")),
+                Check::Indirect { .. } => {
+                    return Err(mismatch("an indirect `VAR` held as a trace enters"));
+                }
                 Check::Deref { value, tag: t } => {
                     let (room, at) = self.place(self.value(value)?.slot)?;
                     let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
@@ -1128,6 +1185,33 @@ impl<'a> Emit<'a> {
                 let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, inner, tag(t));
                 self.leave_if(other, guard.exit)?;
             }
+            Check::Indirect {
+                value,
+                tag: t,
+                pointee,
+            } => {
+                let held = self.value(value)?;
+                let (room, at) = self.place(held.slot)?;
+                if held.types != Types::INDIRECT {
+                    let byte = self.b.ins().load(I8, trusted(), room, at + TYPE_AT);
+                    let indirect = tag(ZvalType::Indirect);
+                    let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, indirect);
+                    self.leave_if(other, guard.exit)?;
+                }
+                let mut target = self.b.ins().load(I64, trusted(), room, at);
+                let mut value_at = 0;
+                if pointee == Pointee::Reference {
+                    let byte = self.b.ins().load(I8, trusted(), target, TYPE_AT);
+                    let reference = tag(ZvalType::Reference);
+                    let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, reference);
+                    self.leave_if(other, guard.exit)?;
+                    target = self.b.ins().load(I64, trusted(), target, 0);
+                    value_at = imm(Ref::VALUE_AT);
+                }
+                let byte = self.b.ins().load(I8, trusted(), target, value_at + TYPE_AT);
+                let other = self.b.ins().icmp_imm_s(IntCC::NotEqual, byte, tag(t));
+                self.leave_if(other, guard.exit)?;
+            }
             Check::Layout {
                 value,
                 layout,
@@ -1242,6 +1326,18 @@ impl<'a> Emit<'a> {
         self.b.ins().store(trusted(), one, byte, 0);
         let first = self.b.ins().icmp_imm_s(IntCC::Equal, failed, 0);
         Ok(self.b.ins().bor(cond, first))
+    }
+
+    /// Where an inline arithmetic goes that would raise, as `refuse`
+    /// says: through its exit, or to the handler of the write it serves.
+    fn refuse_if(&mut self, cond: Value, refuse: Refuse) -> Result<(), Abort> {
+        match refuse {
+            Refuse::Exit(exit) => self.leave_if(cond, exit),
+            Refuse::To(handled) => {
+                self.divert_if(cond, handled);
+                Ok(())
+            }
+        }
     }
 
     /// Leave through `exit` where `cond` is not zero, a guard's failure,
@@ -1519,11 +1615,11 @@ impl<'a> Emit<'a> {
             Kernel::PushCall | Kernel::Call => &[I64, I64, I32, I32, I32, I64],
             Kernel::Release | Kernel::FreeCv => &[I64, I64, I32, I64, I32],
             Kernel::Identical => &[I64, I64, I32, I64, I32, I64, I32, I64],
-            Kernel::RopeInit => &[I64, I64, I32, I64, I32, I64],
-            Kernel::RopeAdd => &[I64, I64, I32, I64, I64, I32],
+            Kernel::RopeInit | Kernel::Leave => &[I64, I64, I32, I64, I32, I64],
+            Kernel::RopeAdd | Kernel::AssignConcat => &[I64, I64, I32, I64, I64, I32],
             Kernel::RopeEnd => &[I64, I64, I32, I64, I64, I32, I64],
-            Kernel::AssignConcat => &[I64, I64, I32, I32, I64, I32],
             Kernel::Concat => &[I64, I64, I32, I64, I32, I64, I32, I32, I64],
+            Kernel::Find | Kernel::Lookup => &[I64, I64, I32, I64, I64, I32, I32, I64],
         };
         sig.params
             .extend(params.iter().map(|ty| AbiParam::new(*ty)));
@@ -1585,14 +1681,7 @@ impl<'a> Emit<'a> {
     /// [`Kernel::Call`] for a call the trace follows into its callee, its
     /// operands held in registers stored to their slots first.
     fn step_kernel(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        for operand in [line.op1, line.op2, line.data] {
-            if let Operand::Value(value) = operand
-                && self.value(value)?.home == Home::Register
-            {
-                let held = self.register(value)?;
-                self.store(self.value(value)?.slot, held)?;
-            }
-        }
+        self.spill_operands(line)?;
         let [room, opline] = self.served(line)?;
         let func = self.func_of(line.frame)?;
         let stood = self.b.ins().stack_addr(I64, self.stood, 0);
@@ -1611,6 +1700,20 @@ impl<'a> Emit<'a> {
                 self.handled(line, onward, [room, opline, func])?;
             }
             None => self.call(Kernel::Step, &[room, opline, func, stood], leave_of(line))?,
+        }
+        Ok(())
+    }
+
+    /// `line`'s operands held in registers stored to their slots, for a
+    /// kernel that serves it through its handler, which reads them there.
+    pub(super) fn spill_operands(&mut self, line: &Line) -> Result<(), Abort> {
+        for operand in [line.op1, line.op2, line.data] {
+            if let Operand::Value(value) = operand
+                && self.value(value)?.home == Home::Register
+            {
+                let held = self.register(value)?;
+                self.store(self.value(value)?.slot, held)?;
+            }
         }
         Ok(())
     }
@@ -1733,6 +1836,7 @@ impl<'a> Emit<'a> {
                 }
                 Check::Type { .. }
                 | Check::Deref { .. }
+                | Check::Indirect { .. }
                 | Check::Layout { .. }
                 | Check::Room { .. }
                 | Check::Class { .. } => {
@@ -1903,6 +2007,8 @@ impl<'a> Emit<'a> {
                 self.increment(at, line)
             }
             Opcode::FetchDimR => self.fetch(at, line),
+            Opcode::IssetIsemptyDimObj => self.isset_dim(at, line),
+            Opcode::FetchDimIs => self.fetch_is(at, line),
             Opcode::FetchObjR => self.fetch_obj(at, line),
             Opcode::FetchObjW => self.fetch_obj_w(line),
             Opcode::AssignObj => self.assign_obj(at, line),
@@ -1914,6 +2020,7 @@ impl<'a> Emit<'a> {
             Opcode::FeResetR => self.fe_reset(line),
             Opcode::FeFetchR => self.fe_fetch(at, line),
             Opcode::AssignDim => self.assign_dim(at, line),
+            Opcode::FetchDimW | Opcode::FetchDimRw => self.fetch_dim_w(at, line),
             Opcode::AssignDimOp => self.assign_dim_op(at, line),
             Opcode::Strlen => self.strlen(line),
             Opcode::RopeInit | Opcode::RopeAdd | Opcode::RopeEnd => self.rope(line),
@@ -1992,10 +2099,9 @@ impl<'a> Emit<'a> {
         let raises = if cannot_raise(op, line.op2) {
             None
         } else {
-            Some(
-                line.exit
-                    .ok_or_else(|| mismatch("an arithmetic that cannot leave"))?,
-            )
+            Some(Refuse::Exit(line.exit.ok_or_else(|| {
+                mismatch("an arithmetic that cannot leave")
+            })?))
         };
         let num = self.binary(op, a, b, raises)?;
         let defs: Vec<ValueId> = [line.out, line.op1_def].into_iter().flatten().collect();
@@ -2130,7 +2236,7 @@ impl<'a> Emit<'a> {
             self.copy_operand(line.frame, line.op2, into)?;
         }
         if let Some((word, info)) = old {
-            self.release(line, word, info)?;
+            self.release(line, word, info, Dtor::Gc)?;
         }
         Ok(())
     }
@@ -2208,54 +2314,6 @@ impl<'a> Emit<'a> {
             .and_then(|address| i64::try_from(address).ok())
             .ok_or_else(|| mismatch("a constant past the host's addresses"))?;
         Ok(self.b.ins().iconst(I64, address))
-    }
-
-    /// A read of a packed array's element by a long key: past `nNumUsed`
-    /// or a hole leaves for the interpreter to serve it again; an element
-    /// that is a reference is read through it; one of the type the op's
-    /// guard holds is read, and one of another copied to the slot the
-    /// fetch writes as php's `ZVAL_COPY_DEREF` copies it, for the exit to
-    /// go on past the fetch. A temporary array the fetch read is freed
-    /// after, as its handler frees it, what a destructor throws leaving
-    /// through the exit `types` gives the free.
-    fn fetch(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let exit = line
-            .exit
-            .ok_or_else(|| mismatch("a fetch that cannot leave"))?;
-        let Operand::Value(array) = line.op1 else {
-            return Err(mismatch("a fetch from no array"));
-        };
-        let array_slot = self.value(array)?.slot;
-        let Scalar::Long(key) = self.scalar(at, line.op2)? else {
-            return Err(mismatch("a fetch by no long key"));
-        };
-        let out = line
-            .out
-            .ok_or_else(|| mismatch("a fetch that writes nothing"))?;
-        let arr = self.array_of(array_slot, self.read_of(at, array))?;
-        let element = self.element(arr, key, exit)?;
-        let hole = self.b.ins().load(I8, trusted(), element, TYPE_AT);
-        let hole = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, hole, tag(ZvalType::Undef));
-        self.leave_if(hole, exit)?;
-        match self.within(at).as_slice() {
-            [] => {
-                let element = self.deref(element);
-                let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-                let out_slot = self.value(out)?.slot;
-                self.copy(element, info, out_slot)?;
-            }
-            [in_place, through] => self.held_element([*in_place, *through], element, out)?,
-            _ => {
-                return Err(mismatch(
-                    "a fetch holds other guards than its element's two",
-                ));
-            }
-        }
-        // `FREE_OP1`, as the interpreter takes it.
-        self.free_temp(line, line.op1)
     }
 
     /// A fetched element at `element` held to its type by its two guards,
@@ -2364,167 +2422,6 @@ impl<'a> Emit<'a> {
         Ok(())
     }
 
-    /// A write to an array's element by a long key, php's
-    /// `zend_jit_assign_dim` (`Z/ext/opcache/jit/zend_jit_ir.c:13352-13526`):
-    /// in place where the array is counted and held once, so php's
-    /// `SEPARATE_ARRAY` has nothing to do, packed, and the key below
-    /// `nNumUsed` and the element there
-    /// (`zend_jit_fetch_dimension_address_inner`'s `BP_VAR_W` path,
-    /// `:11953-12276`), as `zend_jit_assign_to_variable` writes it
-    /// (`:5793-5950`): a scalar, or a value no scalar moved from a
-    /// temporary, copied from a variable with one owner more or copied
-    /// from a constant ([`Emit::copy_operand`]), and what the element held
-    /// given up after ([`Emit::release`]), a destructor's throw leaving
-    /// through the opline's unwind; through the handler otherwise, where
-    /// php's code calls its helpers, the array's copy and the hash's
-    /// lookup or insert, so the write takes no exit.
-    ///
-    /// An immutable array, one shared, a key past `nNumUsed`, a hole, an
-    /// element that is a reference and an array turned hash are each served
-    /// by the handler, in place of the write, and a counted element given
-    /// up in place, its destructor called there, and the loop goes on in
-    /// the trace:
-    ///
-    /// ```php
-    /// class D { function __destruct() { echo "freed\n"; } }
-    /// function w($n) {
-    ///     $a = [0, 0, 0, 0]; $b = null;
-    ///     for ($i = 0; $i < $n; $i++) {
-    ///         if ($i == 50) { $b = $a; }
-    ///         if ($i == 60) { $a[1] = new D; }
-    ///         if ($i == 70) { unset($a[2]); }
-    ///         if ($i == 80) { $a[1000] = -1; }
-    ///         $a[$i % 6] = $i;
-    ///     }
-    ///     foreach ($a as $k => $v) { echo "$k=$v "; }
-    ///     echo count($b), "\n";
-    /// }
-    /// w(100);
-    /// ```
-    /// ```expect regime=jit-force process
-    /// freed
-    /// 0=96 1=97 3=99 4=94 5=95 2=98 1000=-1 6
-    /// ```
-    ///
-    /// The same where every guard fails once, the destructor of the
-    /// element written over served where the write gives it up:
-    ///
-    /// ```php
-    /// class D { function __destruct() { echo "freed\n"; } }
-    /// function w($n) {
-    ///     $a = [0, 0, 0, 0]; $b = null;
-    ///     for ($i = 0; $i < $n; $i++) {
-    ///         if ($i == 50) { $b = $a; }
-    ///         if ($i == 60) { $a[1] = new D; }
-    ///         if ($i == 70) { unset($a[2]); }
-    ///         if ($i == 80) { $a[1000] = -1; }
-    ///         $a[$i % 6] = $i;
-    ///     }
-    ///     foreach ($a as $k => $v) { echo "$k=$v "; }
-    ///     echo count($b), "\n";
-    /// }
-    /// w(100);
-    /// ```
-    /// ```expect regime=jit-exit-fuzz process
-    /// freed
-    /// 0=96 1=97 3=99 4=94 5=95 2=98 1000=-1 6
-    /// ```
-    ///
-    /// Under exit-fuzz the handler serves the write once in each trace, in
-    /// place of an exit:
-    ///
-    /// ```php
-    /// function s($n) {
-    ///     $a = []; for ($i = 0; $i < $n; $i++) { $a[] = true; }
-    ///     for ($i = 2; $i < $n; $i++) {
-    ///         if ($a[$i]) { for ($j = $i + $i; $j < $n; $j += $i) { $a[$j] = false; } }
-    ///     }
-    ///     $c = 0; foreach ($a as $p) { if ($p) { $c++; } }
-    ///     return $c;
-    /// }
-    /// echo s(1000), "\n";
-    /// ```
-    /// ```expect regime=jit-exit-fuzz process
-    /// 170
-    /// ```
-    ///
-    /// An element bound by reference to a variable is written through
-    /// the reference, which the variable reads, its string and a long
-    /// alike, under force and where every guard fails once:
-    ///
-    /// ```php
-    /// function f($n) { $a = [1, 2, 3]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 3] = $i; $t += $r; } return [$a, $r, $t]; }
-    /// function g($n) { $a = ["x", "y"]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 2] = str_repeat("s", $i % 5); $t += strlen($r); } return [$a, $r, $t]; }
-    /// echo json_encode(f(3000)), json_encode(g(3000)), "\n";
-    /// ```
-    /// ```expect regime=jit-force process
-    /// [[2997,2998,2999],2998,4495504][["sss","ssss"],"ssss",5997]
-    /// ```
-    ///
-    /// ```php
-    /// function f($n) { $a = [1, 2, 3]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 3] = $i; $t += $r; } return [$a, $r, $t]; }
-    /// function g($n) { $a = ["x", "y"]; $r = &$a[1]; $t = 0; for ($i = 0; $i < $n; $i++) { $a[$i % 2] = str_repeat("s", $i % 5); $t += strlen($r); } return [$a, $r, $t]; }
-    /// echo json_encode(f(3000)), json_encode(g(3000)), "\n";
-    /// ```
-    /// ```expect regime=jit-exit-fuzz process
-    /// [[2997,2998,2999],2998,4495504][["sss","ssss"],"ssss",5997]
-    /// ```
-    ///
-    /// Fields of a line split, each trimmed back into its place, one
-    /// uppercased and one a constant, the strings they held given up, under
-    /// force and where every guard fails once:
-    ///
-    /// ```php
-    /// function f($lines) { $t = 0; foreach ($lines as $line) { $f = explode(",", $line); foreach ($f as $k => $v) { $f[$k] = trim($v); } $f[1] = strtoupper($f[1]); $f[2] = "c"; $t += strlen(implode("|", $f)); } return [$t, $f]; }
-    /// echo json_encode(f([" a , b ,x, d ", "e,f,g"])), "\n";
-    /// ```
-    /// ```expect regime=jit-force process
-    /// [12,["e","F","c"]]
-    /// ```
-    ///
-    /// ```php
-    /// function f($lines) { $t = 0; foreach ($lines as $line) { $f = explode(",", $line); foreach ($f as $k => $v) { $f[$k] = trim($v); } $f[1] = strtoupper($f[1]); $f[2] = "c"; $t += strlen(implode("|", $f)); } return [$t, $f]; }
-    /// echo json_encode(f([" a , b ,x, d ", "e,f,g"])), "\n";
-    /// ```
-    /// ```expect regime=jit-exit-fuzz process
-    /// [12,["e","F","c"]]
-    /// ```
-    fn assign_dim(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let Operand::Value(array) = line.op1 else {
-            return Err(mismatch("an element write to no array"));
-        };
-        let Scalar::Long(key) = self.scalar(at, line.op2)? else {
-            return Err(mismatch("an element write by no long key"));
-        };
-        let value = match self.scalar_kind(line.data)? {
-            Some(_) => Some(self.scalar(at, line.data)?),
-            None => None,
-        };
-        let held = self.value(array)?;
-        let handled = self.b.create_block();
-        let done = self.b.create_block();
-        let (room, array_at) = self.place(held.slot)?;
-        let hash = held.types.meets(Types::HASH);
-        let (element, old) = self.written_in_place((room, array_at), key, hash, handled);
-        // Where every guard fails once, the handler serves the write.
-        let never = self.b.ins().iconst(I8, 0);
-        let fuzzed = self.fuzzed(never)?;
-        self.divert_if(fuzzed, handled);
-        // An element that counts nothing is written over; one that counts
-        // is given up after, but a reference is written through, which
-        // `zend_jit_assign_to_variable` does past its `ZVAL_DEREF` and the
-        // handler does here.
-        self.written_over(line, (element, old), value, (handled, done))?;
-        self.handled_then(at, line, (handled, done))?;
-        match (line.out, value) {
-            (Some(out), Some(value)) => self.define(out, value),
-            (Some(_), None) => Err(mismatch(
-                "an element write of a value no scalar, its result used",
-            )),
-            (None, _) => Ok(()),
-        }
-    }
-
     /// The zval at `zval`, of type word `old`, written with `line`'s
     /// value as `zend_jit_assign_to_variable` writes it, then on at
     /// `done`: written over where it counts nothing, given up after where
@@ -2554,7 +2451,7 @@ impl<'a> Emit<'a> {
         self.divert_if(reference, handled);
         let word = self.b.ins().load(I64, trusted(), zval, 0);
         self.written(line, zval, value)?;
-        self.release(line, word, old)?;
+        self.release(line, word, old, Dtor::Gc)?;
         self.b.ins().jump(done, &[]);
         Ok(())
     }
@@ -2577,36 +2474,47 @@ impl<'a> Emit<'a> {
     }
 
     /// The number at `zval`, of type byte `kind`, written over with `op`
-    /// of it and `by` in place where it is a long or a double, which php's
-    /// `zend_jit_math_helper` serves inline, a long overflowing to a
-    /// double as php's does, then on at `done`; to `handled` where it is
-    /// anything else.
+    /// of it and `by` in place where php's `zend_jit_math_helper` and
+    /// `zend_jit_long_math_helper` serve it inline, then on at `done`: a
+    /// long or a double under `+`, `-`, `*` and `/`, a long overflowing
+    /// to a double as php's does, and a long under `%`, the shifts and
+    /// the bitwise operators; to `handled` where it is anything else, and
+    /// where `raises` and `by` is a divisor of zero or a negative shift,
+    /// whose throw is the handler's.
     fn compound_at(
         &mut self,
         (zval, kind): (Value, Value),
-        (op, by): (Opcode, Scalar),
+        (op, by, raises): (Opcode, Scalar, bool),
         (handled, done): (Block, Block),
     ) -> Result<(), Abort> {
+        let numbers = matches!(op, Opcode::Add | Opcode::Sub | Opcode::Mul | Opcode::Div);
         let is_long = self
             .b
             .ins()
             .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Long));
-        let is_double = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Double));
         let long = self.b.create_block();
         let not_long = self.b.create_block();
         self.b.ins().brif(is_long, long, &[], not_long, &[]);
         self.b.switch_to_block(not_long);
         self.b.seal_block(not_long);
-        let double = self.b.create_block();
-        self.b.ins().brif(is_double, double, &[], handled, &[]);
-        for (block, kind) in [(long, Kind::Long), (double, Kind::Double)] {
+        let mut kinds = vec![(long, Kind::Long)];
+        if numbers {
+            let is_double = self
+                .b
+                .ins()
+                .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Double));
+            let double = self.b.create_block();
+            self.b.ins().brif(is_double, double, &[], handled, &[]);
+            kinds.push((double, Kind::Double));
+        } else {
+            self.b.ins().jump(handled, &[]);
+        }
+        let refuse = raises.then_some(Refuse::To(handled));
+        for (block, kind) in kinds {
             self.b.switch_to_block(block);
             self.b.seal_block(block);
             let x = self.read(zval, 0, kind);
-            let num = self.binary(op, x, by, None)?;
+            let num = self.binary(op, x, by, refuse)?;
             self.write_num(zval, 0, num);
             self.b.ins().jump(done, &[]);
         }
@@ -2626,180 +2534,6 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// The element `key` names of the array the zval at `base + at`
-    /// holds, and the element's type word, where php's code writes it in
-    /// place: the array counted and held once, so `SEPARATE_ARRAY` has
-    /// nothing to do, packed where it may be a hash (`hash`), the key below
-    /// `nNumUsed` and the element there (`zend_jit_fetch_dimension_address_inner`'s
-    /// `BP_VAR_W` and `BP_VAR_RW` paths, `Z/ext/opcache/jit/zend_jit_ir.c:11953-12276`);
-    /// to `handled` otherwise, where php's code calls its helpers.
-    fn written_in_place(
-        &mut self,
-        (base, at): (Value, i32),
-        key: Value,
-        hash: bool,
-        handled: Block,
-    ) -> (Value, Value) {
-        let info = self.b.ins().load(I32, trusted(), base, at + TYPE_AT);
-        let counted = self.b.ins().band_imm_u(info, COUNTED);
-        let immutable = self.b.ins().icmp_imm_s(IntCC::Equal, counted, 0);
-        self.divert_if(immutable, handled);
-        let arr = self.b.ins().load(I64, trusted(), base, at);
-        let count = self
-            .b
-            .ins()
-            .load(I32, trusted(), arr, imm(Arr::REFCOUNT_AT));
-        let shared = self.b.ins().icmp_imm_s(IntCC::NotEqual, count, 1);
-        self.divert_if(shared, handled);
-        if hash {
-            let flags = self.b.ins().load(I32, trusted(), arr, imm(Arr::FLAGS_AT));
-            let packed = self.b.ins().band_imm_u(flags, i64::from(Arr::PACKED));
-            let hash = self.b.ins().icmp_imm_s(IntCC::Equal, packed, 0);
-            self.divert_if(hash, handled);
-        }
-        let past = self.past_used(arr, key);
-        self.divert_if(past, handled);
-        let element = self.slot_at(arr, key);
-        let old = self.b.ins().load(I32, trusted(), element, TYPE_AT);
-        let kind = self.b.ins().band_imm_u(old, KIND);
-        let hole = self
-            .b
-            .ins()
-            .icmp_imm_s(IntCC::Equal, kind, tag(ZvalType::Undef));
-        self.divert_if(hole, handled);
-        (element, old)
-    }
-
-    /// A compound write of a number to an array's element by a long key,
-    /// the array a variable's or the one the reference it holds refers
-    /// to, php's `zend_jit_assign_dim_op` (`Z/ext/opcache/jit/zend_jit_ir.c:13528-13750`):
-    /// in place where the array can be written in place
-    /// ([`Emit::written_in_place`]) and the element is a long or a
-    /// double, which php's `zend_jit_math_helper` serves inline, a long
-    /// overflowing to a double as php's does; through the handler
-    /// otherwise, where php's code calls its helpers (the array's copy, the
-    /// hash's lookup, `zend_binary_op` over anything else), so the write
-    /// takes no exit, as php's takes none where the record holds no type
-    /// of the element.
-    ///
-    /// By-reference arrays of floats updated in a loop, as nbody updates
-    /// them, an element a long that overflows, one a string, a shared
-    /// array, a hole and an array turned hash each served by the handler
-    /// in turn:
-    ///
-    /// ```php
-    /// function step(array &$v, array &$w, $n) {
-    ///     for ($i = 0; $i < $n; $i++) {
-    ///         $k = $i % 4;
-    ///         $v[$k] -= 0.5 * $k; $w[$k] += $k; $w[$k] *= 3;
-    ///     }
-    /// }
-    /// $v = [1.0, 2.0, 3.0, 4.0]; $w = [0, 1, PHP_INT_MAX, 3];
-    /// step($v, $w, 8);
-    /// $w[1] = "7"; $copy = $v; step($v, $w, 8);
-    /// unset($v[2]); step($v, $w, 4);
-    /// $v["x"] = 1; step($v, $w, 4);
-    /// var_dump($v, $w, $copy[1]);
-    /// ```
-    /// ```expect regime=jit-force process
-    /// Warning: Undefined array key 2 in %s on line 5
-    /// array(5) {
-    ///   [0]=>
-    ///   float(1)
-    ///   [1]=>
-    ///   float(-1)
-    ///   [3]=>
-    ///   float(-5)
-    ///   [2]=>
-    ///   float(-2)
-    ///   ["x"]=>
-    ///   int(1)
-    /// }
-    /// array(4) {
-    ///   [0]=>
-    ///   int(0)
-    ///   [1]=>
-    ///   int(687)
-    ///   [2]=>
-    ///   float(6.723838214867132E+21)
-    ///   [3]=>
-    ///   int(5463)
-    /// }
-    /// float(1)
-    /// ```
-    ///
-    /// The same where every guard fails once:
-    ///
-    /// ```php
-    /// function step(array &$v, array &$w, $n) {
-    ///     for ($i = 0; $i < $n; $i++) {
-    ///         $k = $i % 4;
-    ///         $v[$k] -= 0.5 * $k; $w[$k] += $k; $w[$k] *= 3;
-    ///     }
-    /// }
-    /// $v = [1.0, 2.0, 3.0, 4.0]; $w = [0, 1, PHP_INT_MAX, 3];
-    /// step($v, $w, 8);
-    /// $w[1] = "7"; $copy = $v; step($v, $w, 8);
-    /// unset($v[2]); step($v, $w, 4);
-    /// $v["x"] = 1; step($v, $w, 4);
-    /// var_dump($v, $w, $copy[1]);
-    /// ```
-    /// ```expect regime=jit-exit-fuzz process
-    /// Warning: Undefined array key 2 in %s on line 5
-    /// array(5) {
-    ///   [0]=>
-    ///   float(1)
-    ///   [1]=>
-    ///   float(-1)
-    ///   [3]=>
-    ///   float(-5)
-    ///   [2]=>
-    ///   float(-2)
-    ///   ["x"]=>
-    ///   int(1)
-    /// }
-    /// array(4) {
-    ///   [0]=>
-    ///   int(0)
-    ///   [1]=>
-    ///   int(687)
-    ///   [2]=>
-    ///   float(6.723838214867132E+21)
-    ///   [3]=>
-    ///   int(5463)
-    /// }
-    /// float(1)
-    /// ```
-    fn assign_dim_op(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let Operand::Value(array) = line.op1 else {
-            return Err(mismatch("an element's compound write to no array"));
-        };
-        let Imm::Binary(binary) = line.imm else {
-            return Err(mismatch("an ASSIGN_DIM_OP with no operator"));
-        };
-        let Scalar::Long(key) = self.scalar(at, line.op2)? else {
-            return Err(mismatch("an element's compound write by no long key"));
-        };
-        let value = self.scalar(at, line.data)?;
-        let held = self.value(array)?;
-        let handled = self.b.create_block();
-        let done = self.b.create_block();
-        let (room, array_at) = self.place(held.slot)?;
-        // What a reference holds is of either layout; a variable's array is
-        // of the one its layout guard held, where one did.
-        let (zval, hash) = match self.read_of(at, array) {
-            Read::InPlace => ((room, array_at), held.types.meets(Types::HASH)),
-            Read::Through => {
-                let reference = self.b.ins().load(I64, trusted(), room, array_at);
-                ((reference, imm(Ref::VALUE_AT)), true)
-            }
-        };
-        let (element, old) = self.written_in_place(zval, key, hash, handled);
-        let kind = self.b.ins().band_imm_u(old, KIND);
-        self.compound_at((element, kind), (binary, value), (handled, done))?;
-        self.handled_then(at, line, (handled, done))
-    }
-
     /// Go to `to` where `cond` is not zero, a block whose branches the
     /// caller seals once every one is made; go on otherwise.
     fn divert_if(&mut self, cond: Value, to: Block) {
@@ -2807,14 +2541,6 @@ impl<'a> Emit<'a> {
         self.b.ins().brif(cond, to, &[], on, &[]);
         self.b.switch_to_block(on);
         self.b.seal_block(on);
-    }
-
-    /// The address of the slot `key` names in the packed array `arr`,
-    /// leaving through `exit` where the key is past `nNumUsed`.
-    fn element(&mut self, arr: Value, key: Value, exit: ExitId) -> Result<Value, Abort> {
-        let past = self.past_used(arr, key);
-        self.leave_if(past, exit)?;
-        Ok(self.slot_at(arr, key))
     }
 
     /// The array `slot` holds, in place or through the reference it holds,
@@ -2842,26 +2568,42 @@ impl<'a> Emit<'a> {
     /// 187 [7,8,100]
     /// ```
     fn array_of(&mut self, slot: Slot, read: Read) -> Result<Value, Abort> {
+        let (base, at) = self.zval_of(slot, read)?;
+        Ok(self.b.ins().load(I64, trusted(), base, at))
+    }
+
+    /// Where the zval `slot` holds, read so, is: the slot itself, the
+    /// value of the reference it holds, the zval its indirect `VAR` points
+    /// at, or the value of the reference that zval is.
+    pub(super) fn zval_of(&mut self, slot: Slot, read: Read) -> Result<(Value, i32), Abort> {
         let (room, at) = self.place(slot)?;
-        let held = self.b.ins().load(I64, trusted(), room, at);
+        let mut to = || self.b.ins().load(I64, trusted(), room, at);
         Ok(match read {
-            Read::InPlace => held,
-            Read::Through => self.b.ins().load(I64, trusted(), held, imm(Ref::VALUE_AT)),
+            Read::InPlace => (room, at),
+            Read::Through => (to(), imm(Ref::VALUE_AT)),
+            Read::Indirect(Pointee::Value) => (to(), 0),
+            Read::Indirect(Pointee::Reference) => {
+                let pointee = to();
+                let reference = self.b.ins().load(I64, trusted(), pointee, 0);
+                (reference, imm(Ref::VALUE_AT))
+            }
         })
     }
 
     /// How the op at `at` reads `value`: through the reference its slot
-    /// holds where a guard before the op held one, in place otherwise.
+    /// holds, or the address its indirect `VAR` holds, where a guard
+    /// before the op held one, in place otherwise.
     fn read_of(&self, at: OpId, value: ValueId) -> Read {
-        let through = self.ir.guards.iter().any(|g| {
-            g.at == GuardAt::Before(at)
-                && matches!(g.check, Check::Deref { value: v, .. } if v == value)
-        });
-        if through {
-            Read::Through
-        } else {
-            Read::InPlace
-        }
+        (self.ir.guards.iter())
+            .filter(|g| g.at == GuardAt::Before(at))
+            .find_map(|g| match g.check {
+                Check::Deref { value: v, .. } if v == value => Some(Read::Through),
+                Check::Indirect {
+                    value: v, pointee, ..
+                } if v == value => Some(Read::Indirect(pointee)),
+                _ => None,
+            })
+            .unwrap_or(Read::InPlace)
     }
 
     /// Whether `key` is past the packed array `arr`'s `nNumUsed`.
@@ -3097,7 +2839,7 @@ impl<'a> Emit<'a> {
         let element = self.deref(element);
         let info = self.b.ins().load(I32, trusted(), element, TYPE_AT);
         self.copy(element, info, target)?;
-        self.release(line, old_word, old_info)?;
+        self.release(line, old_word, old_info, Dtor::Gc)?;
         self.b.ins().jump(done, &[]);
         self.b.switch_to_block(handled);
         self.b.seal_block(handled);
@@ -3132,7 +2874,9 @@ impl<'a> Emit<'a> {
 
     /// `FREE_OP` of `operand` where it is a temporary, as the handler
     /// takes it: what it holds out of its slot, which is left `UNDEF`,
-    /// then its owner given up as [`Emit::release`] gives it up, what a
+    /// then its owner given up as [`Emit::release`] gives it up under
+    /// [`Dtor::Nogc`], as the handler's `FREE_OP` and php's `jit_FREE_OP`
+    /// give it up (`Z/ext/opcache/jit/zend_jit_ir.c:1905-1915`), what a
     /// destructor throws leaving through the opline's unwind. A
     /// `foreach`'s array freed at its loop's end is this, php's
     /// `zend_jit_free` of `FE_FREE` over an array, which holds no iterator
@@ -3156,7 +2900,7 @@ impl<'a> Emit<'a> {
         let undef = self.b.ins().iconst(I32, tag(ZvalType::Undef));
         self.b.ins().store(trusted(), undef, room, at + TYPE_AT);
         let word = self.b.ins().load(I64, trusted(), room, at);
-        self.release(line, word, info)
+        self.release(line, word, info, Dtor::Nogc)
     }
 
     /// What a slot held, `word` and its type word `info`, given up after
@@ -3167,7 +2911,9 @@ impl<'a> Emit<'a> {
     /// it (`GC_MAY_LEAK`'s bits, [`Zval::LEAK_BITS`]), as a string's;
     /// the last owner, a value the collector may take and a reference,
     /// whose value it looks through to, through the release kernel, a
-    /// destructor's throw leaving through the opline's unwind. A string
+    /// destructor's throw leaving through the opline's unwind; under
+    /// [`Dtor::Nogc`] the last owner alone, as `zval_ptr_dtor_nogc` buffers
+    /// no possible root. A string
     /// two variables hold, one of them written over, and an object whose
     /// last owner an assignment gives up, its destructor called there:
     ///
@@ -3190,13 +2936,13 @@ impl<'a> Emit<'a> {
     /// ```expect regime=jit-exit-fuzz process
     /// 012345abab
     /// ```
-    fn release(&mut self, line: &Line, word: Value, info: Value) -> Result<(), Abort> {
+    fn release(&mut self, line: &Line, word: Value, info: Value, dtor: Dtor) -> Result<(), Abort> {
         let counted = self.b.ins().band_imm_u(info, COUNTED);
         let [room, opline] = self.served(line)?;
         self.when(counted, |emit| {
             let count_at = imm(Zval::COUNT_AT);
             let count = emit.b.ins().load(I32, trusted(), word, count_at);
-            let called = emit.kernel_releases(word, info, count);
+            let called = emit.kernel_releases(word, info, count, dtor);
             let (kernel, inline, done) = (
                 emit.b.create_block(),
                 emit.b.create_block(),
@@ -3231,12 +2977,15 @@ impl<'a> Emit<'a> {
     /// and a value the collector may take as a possible root, whose
     /// `GC_TYPE_INFO` holds no bit of php's `GC_MAY_LEAK` mask
     /// ([`Zval::LEAK_BITS`]). Otherwise a `GC_DELREF` inline gives it up.
-    fn kernel_releases(&mut self, word: Value, info: Value, count: Value) -> Value {
+    fn kernel_releases(&mut self, word: Value, info: Value, count: Value, dtor: Dtor) -> Value {
         let owners = self.b.ins().band_imm_u(count, i64::from(Zval::COUNT_BITS));
         let last = self
             .b
             .ins()
             .icmp_imm_u(IntCC::UnsignedLessThanOrEqual, owners, 1);
+        if dtor == Dtor::Nogc {
+            return last;
+        }
         let kind = self.b.ins().band_imm_u(info, KIND);
         let reference = self
             .b
@@ -3479,7 +3228,7 @@ impl<'a> Emit<'a> {
         op: Opcode,
         a: Scalar,
         b: Scalar,
-        raises: Option<ExitId>,
+        raises: Option<Refuse>,
     ) -> Result<Num, Abort> {
         match (op, a, b) {
             (Opcode::Add | Opcode::Sub | Opcode::Mul, Scalar::Long(x), Scalar::Long(y)) => {
@@ -3501,9 +3250,9 @@ impl<'a> Emit<'a> {
                 Ok(Num::Double(self.float(op, rx, ry)))
             }
             (Opcode::Div, Scalar::Long(x), Scalar::Long(y)) => {
-                if let Some(exit) = raises {
+                if let Some(refuse) = raises {
                     let zero = self.b.ins().icmp_imm_s(IntCC::Equal, y, 0);
-                    self.leave_if(zero, exit)?;
+                    self.refuse_if(zero, refuse)?;
                 }
                 let minus_one = self.b.ins().icmp_imm_s(IntCC::Equal, y, -1);
                 let one = self.b.ins().iconst(I64, 1);
@@ -3526,17 +3275,17 @@ impl<'a> Emit<'a> {
             }
             (Opcode::Div, _, _) => {
                 let (rx, ry) = (self.real(a)?, self.real(b)?);
-                if let Some(exit) = raises {
+                if let Some(refuse) = raises {
                     let zero = self.b.ins().f64const(0.0);
                     let by_zero = self.b.ins().fcmp(FloatCC::Equal, ry, zero);
-                    self.leave_if(by_zero, exit)?;
+                    self.refuse_if(by_zero, refuse)?;
                 }
                 Ok(Num::Double(self.b.ins().fdiv(rx, ry)))
             }
             (Opcode::Mod, Scalar::Long(x), Scalar::Long(y)) => {
-                if let Some(exit) = raises {
+                if let Some(refuse) = raises {
                     let zero = self.b.ins().icmp_imm_s(IntCC::Equal, y, 0);
-                    self.leave_if(zero, exit)?;
+                    self.refuse_if(zero, refuse)?;
                 }
                 // php answers zero for `% -1` rather than overflow.
                 let minus_one = self.b.ins().icmp_imm_s(IntCC::Equal, y, -1);
@@ -3545,9 +3294,9 @@ impl<'a> Emit<'a> {
                 Ok(Num::Long(self.b.ins().srem(x, divisor)))
             }
             (Opcode::Sl | Opcode::Sr, Scalar::Long(x), Scalar::Long(y)) => {
-                if let Some(exit) = raises {
+                if let Some(refuse) = raises {
                     let negative = self.b.ins().icmp_imm_s(IntCC::SignedLessThan, y, 0);
-                    self.leave_if(negative, exit)?;
+                    self.refuse_if(negative, refuse)?;
                 }
                 let wide = self
                     .b
@@ -3747,6 +3496,17 @@ impl<'a> Emit<'a> {
         if held.home == Home::Register {
             return self.register(value);
         }
+        let slot = held.slot;
+        let (kind, through) = self.kind_at(at, value)?;
+        let kind =
+            kind.ok_or_else(|| mismatch("an inline opline reads a value of no scalar kind"))?;
+        self.load(slot, kind, through)
+    }
+
+    /// The scalar kind the op at `at` reads `value` as, and whether it
+    /// reads it through the reference it holds: the one a guard before
+    /// the op held, or its own types' otherwise.
+    fn kind_at(&self, at: OpId, value: ValueId) -> Result<(Option<Kind>, bool), Abort> {
         let guarded = self.ir.guards.iter().find_map(|g| match g.check {
             Check::Type { value: v, tag: t } if v == value && g.at == GuardAt::Before(at) => {
                 Some((t, false))
@@ -3756,13 +3516,18 @@ impl<'a> Emit<'a> {
             }
             _ => None,
         });
-        let (kind, through) = match guarded {
+        Ok(match guarded {
             Some((t, through)) => (Kind::of_tag(t), through),
-            None => (Kind::of(held.types), false),
-        };
-        let kind =
-            kind.ok_or_else(|| mismatch("an inline opline reads a value of no scalar kind"))?;
-        self.load(held.slot, kind, through)
+            None => (Kind::of(self.value(value)?.types), false),
+        })
+    }
+
+    /// Whether the op at `at` reads `operand` as a long.
+    fn long_at(&self, at: OpId, operand: Operand) -> Result<bool, Abort> {
+        Ok(match operand {
+            Operand::Value(value) => self.kind_at(at, value)?.0 == Some(Kind::Long),
+            operand => self.scalar_kind(operand)? == Some(Kind::Long),
+        })
     }
 
     /// An operand that is a constant or a value read as its own types say.

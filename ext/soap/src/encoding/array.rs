@@ -818,7 +818,12 @@ pub(super) fn to_zval_array(
     }
     let ret = PhpArray::new(req)?;
     match fill_array(req, cx, *ret, shape.found, data, &dims, &mut pos) {
-        Ok(()) => Ok(ret.into_value()),
+        Ok(true) => Ok(ret.into_value()),
+        // `ZVAL_NULL(ret)` once the memory limit was met, since 8.5.12.
+        Ok(false) => {
+            ret.give_up(req);
+            Ok(Owner::null())
+        }
         Err(err) => {
             ret.give_up(req);
             Err(err)
@@ -826,7 +831,9 @@ pub(super) fn to_zval_array(
     }
 }
 
-/// `to_zval_array`'s walk of the elements, each placed at its position.
+/// `to_zval_array`'s walk of the elements, each placed at its position;
+/// `false` where, since 8.5.12, the memory limit was met making the
+/// intermediate arrays of a multidimensional one.
 fn fill_array(
     req: &mut Request,
     cx: &mut Cx,
@@ -835,7 +842,7 @@ fn fill_array(
     data: Node,
     dims: &[i32],
     pos: &mut [i32],
-) -> Res<()> {
+) -> Res<bool> {
     let dimension = dims.len();
     for trav in crate::xml::children(data) {
         if trav.kind() != Kind::Element {
@@ -865,6 +872,10 @@ fn fill_array(
                     ar = view;
                 }
             }
+            if req.memory().has_oom() {
+                tmp.give_up(req);
+                return Ok(false);
+            }
         }
         ar.set(req, Owner::index(i64::from(pos[dimension - 1])), tmp)?;
         let mut i = dimension;
@@ -882,7 +893,7 @@ fn fill_array(
             }
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 // ---- the Apache map

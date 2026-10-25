@@ -2249,7 +2249,7 @@ impl Shared {
 /// echo implode(' ', array_keys((new ReflectionExtension('Core'))->getINIEntries())), "\n";
 /// ```
 /// ```expect
-/// highlight.comment highlight.default highlight.html highlight.keyword highlight.string display_errors display_startup_errors enable_dl expose_php docref_root docref_ext html_errors xmlrpc_errors xmlrpc_error_number max_input_time ignore_user_abort implicit_flush log_errors ignore_repeated_errors ignore_repeated_source report_memleaks report_zend_debug output_buffering output_handler register_argc_argv auto_globals_jit short_open_tag unserialize_callback_func serialize_precision arg_separator.output arg_separator.input auto_append_file auto_prepend_file doc_root default_charset default_mimetype internal_encoding input_encoding output_encoding error_log error_log_mode extension_dir sys_temp_dir include_path max_execution_time open_basedir file_uploads upload_max_filesize post_max_size upload_tmp_dir max_input_nesting_level max_input_vars user_dir variables_order request_order error_append_string error_prepend_string SMTP smtp_port mail.add_x_header mail.mixed_lf_and_crlf mail.cr_lf_mode mail.log browscap max_memory_limit memory_limit precision sendmail_from sendmail_path mail.force_extra_parameters disable_functions max_file_uploads max_multipart_body_parts allow_url_fopen allow_url_include enable_post_data_reading realpath_cache_size realpath_cache_ttl user_ini.filename user_ini.cache_ttl hard_timeout syslog.facility syslog.ident syslog.filter error_reporting fatal_error_backtraces zend.assertions zend.enable_gc zend.multibyte zend.script_encoding zend.detect_unicode zend.signal_check zend.exception_ignore_args zend.exception_string_param_max_len fiber.stack_size zend.max_allowed_stack_size zend.reserved_stack_size
+/// highlight.comment highlight.default highlight.html highlight.keyword highlight.string display_errors display_startup_errors enable_dl expose_php docref_root docref_ext html_errors xmlrpc_errors xmlrpc_error_number max_input_time ignore_user_abort implicit_flush log_errors ignore_repeated_errors ignore_repeated_source report_memleaks report_zend_debug output_buffering output_handler register_argc_argv auto_globals_jit short_open_tag unserialize_callback_func serialize_precision arg_separator.output arg_separator.input auto_append_file auto_prepend_file doc_root default_charset default_mimetype internal_encoding input_encoding output_encoding error_log error_log_mode extension_dir sys_temp_dir include_path max_execution_time open_basedir file_uploads upload_max_filesize post_max_size upload_tmp_dir max_input_nesting_level max_input_vars user_dir variables_order request_order error_append_string error_prepend_string SMTP smtp_port mail.add_x_header mail.mixed_lf_and_crlf mail.cr_lf_mode mail.log browscap max_memory_limit memory_limit memory_hard_limit_percent precision sendmail_from sendmail_path mail.force_extra_parameters disable_functions max_file_uploads max_multipart_body_parts allow_url_fopen allow_url_include enable_post_data_reading realpath_cache_size realpath_cache_ttl user_ini.filename user_ini.cache_ttl hard_timeout syslog.facility syslog.ident syslog.filter error_reporting fatal_error_backtraces zend.assertions zend.enable_gc zend.multibyte zend.script_encoding zend.detect_unicode zend.signal_check zend.exception_ignore_args zend.exception_string_param_max_len fiber.stack_size zend.max_allowed_stack_size zend.reserved_stack_size
 /// ```
 ///
 /// An entry php registers with no value, `NULL`, has `None`: `ini_get()`
@@ -2387,6 +2387,10 @@ const CORE_INI: &[(&str, Option<&str>)] = &[
     // (`Z/main/main.c:865-866`).
     ("max_memory_limit", Some("-1")),
     ("memory_limit", Some("128M")),
+    // `memory_hard_limit_percent`, `PHP_INI_ALL` (`Z/main/main.c:891` at
+    // 8.5.12): the hard limit as a percent of `memory_limit`, `NULL` its
+    // default, php's `-1`.
+    ("memory_hard_limit_percent", None),
     ("precision", Some("14")),
     ("sendmail_from", None),
     ("sendmail_path", Some("/usr/sbin/sendmail -t -i")),
@@ -2603,9 +2607,11 @@ fn constant_text(constants: &[ConstDecl], name: &[u8], precision: i32) -> Option
         ConstExpr::Null | ConstExpr::Bool(false) => Some(Vec::new()),
         ConstExpr::Bool(true) => Some(b"1".to_vec()),
         ConstExpr::Long { value: n, .. } => Some(n.to_string().into_bytes()),
-        ConstExpr::Double(d) => {
-            Some(php_heap::double_to_string(*d, precision, php_heap::Exponent::Upper).into_bytes())
-        }
+        ConstExpr::Double(d) => Some(
+            php_heap::double_to_string(*d, precision, php_heap::Exponent::Upper)
+                .as_bytes()
+                .to_vec(),
+        ),
         ConstExpr::Str(s) => Some(s.to_vec()),
         _ => None,
     }
@@ -2631,7 +2637,9 @@ impl crate::ini_syntax::Host for Configure<'_> {
     }
 
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
-        Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper).into_bytes())
+        Ok(php_heap::double_to_string(d, 14, php_heap::Exponent::Upper)
+            .as_bytes()
+            .to_vec())
     }
 
     fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {
@@ -2657,7 +2665,9 @@ impl crate::ini_syntax::Host for Startup<'_> {
     /// `zend_double_to_str` before any ini entry is registered, when
     /// `EG(precision)` is still zero and `zend_gcvt` is handed one digit.
     fn double(&mut self, d: f64) -> Result<Vec<u8>, Self::Error> {
-        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper).into_bytes())
+        Ok(php_heap::double_to_string(d, 1, php_heap::Exponent::Upper)
+            .as_bytes()
+            .to_vec())
     }
 
     fn event(&mut self, event: IniEvent<crate::ini_syntax::Val>) -> Result<(), Self::Error> {
@@ -2947,6 +2957,16 @@ fn core_startup(req: &mut Request) -> Vec<(Vec<u8>, Option<Vec<u8>>)> {
                 let message = "Directive 'report_memleaks' is deprecated";
                 crate::api::raising::docref(req, Level::Deprecated, message);
             }
+            // `OnChangeMemoryHardLimitPercent` at startup: a refused
+            // percent warned about and the default, `NULL`, kept.
+            b"memory_hard_limit_percent" => {
+                let value = req.ini().get(name).map(<[u8]>::to_vec);
+                if let Some(value) = value.filter(|v| !v.is_empty())
+                    && !req.memory_hard_limit_percent_taken(Some(&value))
+                {
+                    taken.push((name.to_vec(), None));
+                }
+            }
             b"memory_limit" => {
                 let limit = req.ini().get(name).map(<[u8]>::to_vec).unwrap_or_default();
                 let held = match req.memory_limit_verdict(&limit) {
@@ -2982,7 +3002,7 @@ fn core_default(name: &[u8]) -> Option<Vec<u8>> {
 /// $tried = '/^Warning: (.+) \(tried: (\S+) \(.+?\), (\/\S+) \(.+\)\) in Unknown on line 0$/m';
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/nope', '-d', 'extension=x', '-v'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// $out = stream_get_contents($pipes[1]); echo stream_get_contents($pipes[2]), proc_close($p), "\n";
-/// preg_match($tried, $out, $m); echo "$m[1]: $m[2], $m[3]\n", str_contains($out, "\nPHP 8.5.9 (cli)") ? "version\n" : $out;
+/// preg_match($tried, $out, $m); echo "$m[1]: $m[2], $m[3]\n", str_contains($out, "\nPHP 8.5.12 (cli)") ? "version\n" : $out;
 /// $p = proc_open([PHP_BINARY, '-n', '-d', 'extension_dir=/z/', '-d', 'extension=/a/q.so', '-d', 'zend_extension=y', '-d', 'zend_extension=/a/z.so', '-r', 'echo "ran\n";'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
 /// $out = stream_get_contents($pipes[1]); echo strstr(stream_get_contents($pipes[2]), ':  ', true), "\n", proc_close($p), "\n";
 /// preg_match_all($tried, $out, $m, PREG_SET_ORDER); foreach ($m as $w) { echo "$w[1]: $w[2], $w[3]\n"; } echo substr($out, strrpos(rtrim($out), "\n") + 1);
@@ -4036,20 +4056,25 @@ impl<'a> PermanentStrings<'a> {
     }
 
     /// The string php's compile makes of `bytes` on the asking request's
-    /// heap (`zend_string_init`, the string `concat_function` makes),
+    /// heap at `sizing`'s size (`zend_string_init`, the string
+    /// `concat_function` makes, or a name `zend_strpprintf` prints),
     /// asked of that heap before the table is: none where the compile is
     /// the engine's, the empty string and one byte being the process's
     /// (`ZSTR_CHAR`). The `Err` is the memory limit, and with it the
     /// answer is the asking request's alone, which no cache holds; the
     /// table is left as it stood.
-    fn charge(&mut self, bytes: &[u8]) -> Result<Option<php_heap::Str>, php_heap::Fatal> {
+    fn charge(
+        &mut self,
+        bytes: &[u8],
+        sizing: php_heap::Sizing,
+    ) -> Result<Option<php_heap::Str>, php_heap::Fatal> {
         let CompileHeap::Request(heap) = &mut self.heap else {
             return Ok(None);
         };
         if bytes.len() <= 1 {
             return Ok(None);
         }
-        heap.string(bytes).map(Some).inspect_err(|_| {
+        heap.string_sized(bytes, sizing).map(Some).inspect_err(|_| {
             self.answers = Answers::Asker;
         })
     }
@@ -4108,8 +4133,9 @@ impl Intern for PermanentStrings<'_> {
         &mut self,
         bytes: &[u8],
         valid_utf8: bool,
+        sizing: php_heap::Sizing,
     ) -> Result<php_heap::Str, php_heap::Fatal> {
-        let copy = self.charge(bytes)?;
+        let copy = self.charge(bytes, sizing)?;
         if let Some(held) = self.names.find(bytes) {
             self.stand(copy, None);
             return Ok(held);
@@ -5819,7 +5845,19 @@ impl Engine {
         // them.
         // Each step is its own `zend_try`, so a fatal's bailout leaves
         // the step it was raised in and the next is served.
+        // php's `_exit(137)` at the hard memory limit runs none of
+        // `php_request_shutdown`: what the program would still run is not
+        // run, and its output buffers are dropped unflushed, as the output
+        // layer's deactivation drops them.
+        if req.terminated() {
+            req.unset_timer();
+            return;
+        }
         req.program_ended(); // `EG(flags) |= EG_FLAGS_IN_SHUTDOWN`
+        // `EG(delayed_oom).state = ZEND_OOM_STATE_NONE` (`Z/main/main.c:2000`
+        // at 8.5.12): the shutdown functions and destructors run as if the
+        // memory limit had not been met.
+        req.heap_mut().reset_oom();
         req.enter_phase(crate::api::request::Phase::Shutdown);
         req.catch_bailout();
         crate::observer::end_all(req);
@@ -5845,7 +5883,9 @@ impl Engine {
         // as a release one does.
         #[cfg(debug_assertions)]
         let report_memleaks = req.ini_flag(b"report_memleaks");
-        end_phase(&self.shared.extensions, req, |e| e.rshutdown);
+        if !req.terminated() {
+            end_phase(&self.shared.extensions, req, |e| e.rshutdown);
+        }
         crate::output::deactivate(req);
         req.catch_bailout();
         req.free_shutdown_functions();
@@ -5901,8 +5941,10 @@ impl Engine {
         let exit_code = req.diagnostics().exit_status();
         // The block reached the sink at the commit, which the output
         // layer's deactivation makes if nothing had; one it refused, for
-        // the memory limit, is handed over now.
-        if !req.output().headers_sent() {
+        // the memory limit, is handed over now. A request ended at the
+        // hard memory limit hands none: php's process `_exit`ed there,
+        // and a one-request host writes no head after it (#3435).
+        if !req.output().headers_sent() && !req.terminated() {
             req.send_header_block();
         }
         let sink = req.release_sink();
@@ -6218,7 +6260,7 @@ pub(crate) fn note_compiled(req: &mut Request, unit: &PublishedUnit, kind: Sourc
     for raised in unit.diagnostics.iter().filter(|_| replayed) {
         req.note_error_in(
             raised.level,
-            &raised.message,
+            raised.message.as_bytes(),
             &unit.main.filename.0,
             raised.line,
         );
@@ -6289,7 +6331,7 @@ pub(crate) fn refused_program(req: &mut Request, refused: &CompileRefused, file:
     };
     let error = &refused.error;
     for raised in error.raised.get(noted..).unwrap_or_default() {
-        req.note_error_in(raised.level, &raised.message, file, raised.line);
+        req.note_error_in(raised.level, raised.message.as_bytes(), file, raised.line);
     }
     refusal_raised(req, error, file);
 }
@@ -6313,6 +6355,9 @@ pub(crate) fn refusal_raised(req: &mut Request, refused: &CompileError, file: &[
         }
         (php_compile::Stage::Compiling, php_compile::Raise::Fatal | php_compile::Raise::Unread) => {
             req.end_in_compile_time(refused.level, &refused.message, file, refused.line);
+        }
+        (php_compile::Stage::Compiling, php_compile::Raise::HardLimit { limit, asked }) => {
+            req.terminate_at_hard_limit(limit, asked);
         }
     }
 }
@@ -6421,6 +6466,12 @@ pub(crate) fn serve_unit(req: &mut Request, unit: &PublishedUnit, entry: Loop) -
         req.end_in(&fatal);
     }
     req.leave_code(standing, frame);
+    // `zend_execute_scripts` at 8.5.12: a delayed OOM no safepoint raised
+    // is raised once the file has run, with nothing executing, so its
+    // bailout ends the request.
+    if req.has_oom() {
+        req.handle_delayed_oom();
+    }
     let exited = req.unwind_exit();
     // What the loop left pending for the user exception handler, served
     // with the main frame left (`zend_execute_scripts`).

@@ -158,6 +158,17 @@ pub(super) fn compiled_under(
 /// Everything `pcre_get_compiled_regex_cache_ex` does after the cache
 /// missed, as a value: the pattern, or the warning. `tables` is `None`
 /// in the C locale and `Some` of what `pcre2_maketables` built otherwise.
+/// The `u` modifier compiles with `PCRE2_NEVER_BACKSLASH_C`, so a `\C`
+/// under it is refused in php's words (gh21134):
+///
+/// ```php
+/// var_dump(preg_match_all("/(.*)\\C/u", "\u{e0}", $m), $m);
+/// ```
+/// ```expect
+/// Warning: preg_match_all(): Compilation failed: using \C is incompatible with the 'u' modifier at offset 6 in %s on line 2
+/// bool(false)
+/// NULL
+/// ```
 fn compile(
     regex: &[u8],
     tables: Option<Built>,
@@ -181,7 +192,9 @@ fn compile(
             b'S' | b'X' | b' ' | b'\n' | b'\r' => {}
             b'U' => options |= ffi::PCRE2_UNGREEDY,
             b'u' => {
-                options |= ffi::PCRE2_UTF | ffi::PCRE2_UCP;
+                // php 8.5.12: "The \C escape sequence is unsafe in
+                // PCRE2_UTF mode" (gh21134).
+                options |= ffi::PCRE2_UTF | ffi::PCRE2_UCP | ffi::PCRE2_NEVER_BACKSLASH_C;
                 utf = true;
             }
             b'J' => options |= ffi::PCRE2_DUPNAMES,
@@ -195,11 +208,14 @@ fn compile(
         None => None,
     };
     let mut code = Code::compile(body, options, extra, tables).map_err(|error| {
-        format!(
-            "Compilation failed: {} at offset {}",
-            ffi::error_message(error.number),
-            error.offset
-        )
+        // php's own words for the `\C` the `u` modifier refuses.
+        let said =
+            if u32::try_from(error.number) == Ok(ffi::PCRE2_ERROR_BACKSLASH_C_CALLER_DISABLED) {
+                "using \\C is incompatible with the 'u' modifier".to_owned()
+            } else {
+                ffi::error_message(error.number)
+            };
+        format!("Compilation failed: {said} at offset {}", error.offset)
     })?;
     if jit && let Err(rc) = code.jit() {
         *jit_failure = Some(format!(

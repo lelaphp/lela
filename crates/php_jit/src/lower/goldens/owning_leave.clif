@@ -363,17 +363,17 @@ function u0:0(i64, i64) -> i32 tail {
 @0009                               brif v193, block29(v194, v173, v176), block30  ; v194 = 0
 
                                 block30:
-@0009                               v198 = iconst.i64 0
-@0009                               v199 = load.i64 notrap aligned v173+80
-@0009                               v200 = load.i32 notrap aligned v199+24
+@0009                               v198 = load.i64 notrap aligned v173+80
+@0009                               v199 = iconst.i64 0
+@0009                               v200 = load.i32 notrap aligned v198+24
 @0009                               v201 = uextend.i64 v200
-@0009                               v202 = icmp uge v198, v201  ; v198 = 0
+@0009                               v202 = icmp uge v199, v201  ; v199 = 0
 @0009                               brif v202, block31, block32
 
                                 block32:
-@0009                               v203 = load.i64 notrap aligned v199+16
+@0009                               v203 = load.i64 notrap aligned v198+16
 @0009                               v204 = iconst.i64 16
-@0009                               v205 = imul.i64 v198, v204  ; v198 = 0, v204 = 16
+@0009                               v205 = imul.i64 v199, v204  ; v199 = 0, v204 = 16
 @0009                               v206 = iadd v203, v205
 @0009                               v207 = load.i8 notrap aligned v206+8
 @0009                               v208 = iconst.i8 0

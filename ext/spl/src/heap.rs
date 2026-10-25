@@ -14,7 +14,7 @@ use php_ext::abi::{CloneObj, ExtensionBuilder, GcTable, ObjectHandlers, Std, Thi
 use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with};
 use php_ext::coerce::{compare, to_long};
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, Value};
@@ -1048,7 +1048,7 @@ fn unserialize(req: &mut Request, this: PhpObject, data: PhpArray) -> Result<(),
     }
     let invalid = |req: &mut Request| -> Thrown {
         let class = String::from_utf8_lossy(&crate::class_name(req, this.class())).into_owned();
-        throw(
+        throw_exception_ex(
             req,
             "Exception",
             &format!("Invalid serialization data for {class} object"),

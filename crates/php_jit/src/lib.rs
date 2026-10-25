@@ -162,6 +162,8 @@ impl JitRequest {
             recording: Cell::new(false),
             submitted: Cell::new(None),
             headers: crate::enter::Headers::default(),
+            epoch: std::cell::OnceCell::new(),
+            table: std::cell::OnceCell::new(),
         }
     }
 }

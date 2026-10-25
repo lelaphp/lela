@@ -167,7 +167,12 @@ impl Request {
     ) -> Result<Option<Result<PublishedUnit, CompileRefused>>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let top = Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), args);
-        Ok(top.serve(self)?.map(|compiled| compiled.0))
+        let compiled = top.serve(self);
+        // A delayed OOM the compile recorded is named at the site that
+        // was executing as it compiled, the `include` php reads, before
+        // the included file's frame stands above it.
+        self.locate_oom();
+        Ok(compiled?.map(|compiled| compiled.0))
     }
 
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
@@ -411,7 +416,7 @@ impl Request {
                     self.addref(&Value::string(opened_path));
                     Ok(opened_path)
                 }
-                None => self.interned(&script).map(Owner::hand_on),
+                None => self.new_interned(&script).map(Owner::hand_on),
             };
             held.and_then(|held| self.note_included_held(held)).ok();
         } else {
@@ -1016,7 +1021,7 @@ impl Request {
     /// ([`Request::name_unit`]). The `Err` is the memory limit.
     fn eval_name(&mut self, file: &[u8], line: u32) -> Result<PhpString, Thrown> {
         const TAIL: &[u8] = b") : eval()'d code";
-        let line = crate::c_number::Long::of(i64::from(line));
+        let line = php_heap::LongText::long(i64::from(line));
         let parts = [file, b"(", line.as_bytes(), TAIL];
         let len = parts.iter().map(|part| part.len()).sum();
         self.string_with(len, |mut into| {
@@ -1050,7 +1055,9 @@ impl Request {
         let args = StringArgs::new(code, name, position);
         let top =
             Beneath::<chain::CompileString>::top(shared.supplied.compile_string.links(), args);
-        Ok(top.serve(self)?.0)
+        let compiled = top.serve(self);
+        self.locate_oom();
+        Ok(compiled?.0)
     }
 
     /// `f` over a string the host evaluates of its own, `-r`'s code, the
@@ -1315,11 +1322,18 @@ impl Request {
             self.end_in_compile_time(error.level, &error.message, &file, line);
             return Thrown::of(None);
         }
+        // The compile met php 8.5.12's hard memory limit: `_exit(137)`
+        // where it asked, so nothing it declared stands and nothing it
+        // raised is rendered.
+        if let php_compile::Raise::HardLimit { limit, asked } = error.raise {
+            self.terminate_at_hard_limit(limit, asked);
+            return Thrown::of(None);
+        }
         let raised = error.raised.iter();
         if !error.bailed() {
             if matches!(kind, SourceKind::Eval(_)) {
                 for raised in raised.clone() {
-                    self.note_error_in(raised.level, &raised.message, path, raised.line);
+                    self.note_error_in(raised.level, raised.message.as_bytes(), path, raised.line);
                 }
             }
             let class = if error.level == Level::Parse {
@@ -1332,7 +1346,12 @@ impl Request {
             if kind == SourceKind::File {
                 self.while_pending(&thrown, |req| {
                     for raised in raised {
-                        req.note_error_in(raised.level, &raised.message, path, raised.line);
+                        req.note_error_in(
+                            raised.level,
+                            raised.message.as_bytes(),
+                            path,
+                            raised.line,
+                        );
                     }
                 });
             }
@@ -1346,7 +1365,7 @@ impl Request {
         let recording = (kind == SourceKind::File).then(|| self.begin_recording());
         if let Some(noted) = self.declare_refused(refused, path) {
             for raised in error.raised.get(noted..).unwrap_or_default() {
-                self.note_error_in(raised.level, &raised.message, path, raised.line);
+                self.note_error_in(raised.level, raised.message.as_bytes(), path, raised.line);
             }
             self.end_in_compile_time(error.level, &error.message, path, error.line);
         }

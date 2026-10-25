@@ -24,7 +24,7 @@ pub use crate::result::{Field, Row};
 pub const CLIENT_INFO: &str = crate::VERSION;
 
 /// `mysqlnd_get_client_version`, `MYSQLND_VERSION_ID`.
-pub const CLIENT_VERSION: u64 = 80509;
+pub const CLIENT_VERSION: u64 = 80512;
 
 /// `MYSQLND *`: one connection, a number into the request's table that
 /// every owner copies and counts.

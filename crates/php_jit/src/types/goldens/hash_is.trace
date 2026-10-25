@@ -1,0 +1,16 @@
+start loop
+root e3
+op e3 20 long long - taken
+op e3 6 array - - -
+op e3 7 long - - taken
+op e3 9 array string - -
+op e3 10 long - - taken
+op e3 12 long long - -
+op e3 13 long - - -
+op e3 14 array long - -
+op e3 15 null - - fell
+op e3 16 - - - -
+op e3 17 long long - -
+op e3 18 long long - -
+op e3 19 long - - -
+stop loop

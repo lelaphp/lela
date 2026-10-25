@@ -20,7 +20,7 @@ use crate::consts::{
     client, cr,
 };
 use crate::error::{OLD_PASSWD, SERVER_GONE};
-use crate::wire::store_length;
+use crate::wire::{Read, store_length};
 
 /// One of the plugins php registers, by the name the server asks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -362,25 +362,29 @@ impl ConnData {
                 Err(switch) => return Ok((false, switch)),
             }
         }
-        let Some(response) = self.read_auth_response(req)? else {
-            return Ok((false, None));
-        };
-        if response.response_code == 0xFE {
-            return match response.new_auth_protocol {
-                None => {
-                    self.error.client(req, cr::UNKNOWN_ERROR, OLD_PASSWD)?;
-                    Ok((false, None))
+        // `FAIL == PACKET_READ(...) || response_code >= 0xFE`: a parse
+        // that failed past a switch request's code still reads as one.
+        let response = match self.read_auth_response(req)? {
+            Read::Passed(response) if response.response_code < 0xFE => response,
+            Read::Passed(response) | Read::Failed(response) => {
+                if response.response_code == 0xFE {
+                    return match response.new_auth_protocol {
+                        None => {
+                            self.error.client(req, cr::UNKNOWN_ERROR, OLD_PASSWD)?;
+                            Ok((false, None))
+                        }
+                        Some(protocol) => {
+                            Ok((false, Some((protocol, response.new_auth_protocol_data))))
+                        }
+                    };
                 }
-                Some(protocol) => Ok((false, Some((protocol, response.new_auth_protocol_data)))),
-            };
-        }
-        if response.response_code == 0xFF {
-            if let Some(e) = response.error {
-                self.error
-                    .set(req, e.errno, crate::consts::UNKNOWN_SQLSTATE, &e.error)?;
+                if let Some(e) = response.error {
+                    self.error
+                        .set(req, e.errno, crate::consts::UNKNOWN_SQLSTATE, &e.error)?;
+                }
+                return Ok((false, None));
             }
-            return Ok((false, None));
-        }
+        };
         self.set_last_message(req, response.message.as_deref())?;
         Ok((true, None))
     }
@@ -424,21 +428,24 @@ impl ConnData {
                 Err(switch) => return Ok((false, switch)),
             }
         }
-        let response = self.read_change_user_response(req)?;
-        let mut ok = response.is_some();
+        // `COPY_CLIENT_ERROR` and the switch request are read off the
+        // packet whether its parse passed or not, an empty error clearing
+        // the connection's.
+        let (response, mut ok) = match self.read_change_user_response(req)? {
+            Read::Passed(response) => (response, true),
+            Read::Failed(response) => (response, false),
+        };
         let mut switch = None;
-        let asked_323 = response.as_ref().is_some_and(|r| r.asked_323);
-        if let Some(response) = response {
-            match &response.error {
-                Some(e) => e.set_on(req, &mut self.error)?,
-                None => self.error.reset(req),
-            }
-            if response.response_code == 0xFE {
-                ok = false;
-                match response.new_auth_protocol {
-                    None => self.error.client(req, cr::UNKNOWN_ERROR, OLD_PASSWD)?,
-                    Some(protocol) => switch = Some((protocol, response.new_auth_protocol_data)),
-                }
+        let asked_323 = response.asked_323;
+        match &response.error {
+            Some(e) => e.set_on(req, &mut self.error)?,
+            None => self.error.reset(req),
+        }
+        if response.response_code == 0xFE {
+            ok = false;
+            match response.new_auth_protocol {
+                None => self.error.client(req, cr::UNKNOWN_ERROR, OLD_PASSWD)?,
+                Some(protocol) => switch = Some((protocol, response.new_auth_protocol_data)),
             }
         }
         if self.error.errno != 0 {

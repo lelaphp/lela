@@ -423,6 +423,25 @@ impl Emit<'_> {
     /// Fatal error: Type declaration 'int' must be unqualified in %s on line 2
     /// ```
     ///
+    /// `static` is among the type names php looks up by name since
+    /// 8.5.12 (`builtin_types`, `Z/Zend/zend_compile.c:275`), so a
+    /// qualified one is refused as the others are, before any class
+    /// scope is asked for:
+    ///
+    /// ```php
+    /// function f($i): \static {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type declaration 'static' must be unqualified in %s on line 2
+    /// ```
+    ///
+    /// ```php
+    /// function f($i): namespace\static {}
+    /// ```
+    /// ```expect exit=255
+    /// Fatal error: Type declaration 'static' must be unqualified in %s on line 2
+    /// ```
+    ///
     /// `self` and `parent` are the class's name in a known scope, and
     /// stay as written in an anonymous class's (GH-18373):
     ///
@@ -735,6 +754,7 @@ fn builtin_type(lowered: &[u8]) -> Option<Type> {
         b"iterable" => Type::Iterable,
         b"object" => Type::Object,
         b"mixed" => Type::Mixed,
+        b"static" => Type::CalledClass,
         _ => return None,
     })
 }

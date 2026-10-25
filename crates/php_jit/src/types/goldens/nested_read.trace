@@ -1,0 +1,16 @@
+start loop
+root e1
+op e1 19 long long - taken
+op e1 5 long - - -
+op e1 6 array - - -
+op e1 7 array.packed long - fell
+op e1 9 long - - -
+op e1 10 array - - -
+op e1 11 array - - -
+op e1 12 long - - taken
+op e1 14 long long - -
+op e1 15 array - - -
+op e1 16 array - - -
+op e1 17 long long - -
+op e1 18 long - - -
+stop loop

@@ -986,10 +986,10 @@ fn mysqli_get_charset(req: &mut Request, mysql: Link) -> Answer<Option<Owner<Php
 /// var_dump(mysqli_get_client_info(mysqli_init()));
 /// ```
 /// ```expect
-/// string(13) "mysqlnd 8.5.9"
+/// string(14) "mysqlnd 8.5.12"
 ///
 /// Deprecated: mysqli_get_client_info(): Passing connection object as an argument is deprecated in %s on line 3
-/// string(13) "mysqlnd 8.5.9"
+/// string(14) "mysqlnd 8.5.12"
 /// ```
 #[php_function]
 fn mysqli_get_client_info(
@@ -1013,7 +1013,7 @@ fn mysqli_get_client_info(
 /// var_dump(mysqli_get_client_version());
 /// ```
 /// ```expect
-/// int(80509)
+/// int(80512)
 /// ```
 #[php_function]
 fn mysqli_get_client_version() -> i64 {

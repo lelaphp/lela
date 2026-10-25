@@ -9,21 +9,21 @@ use std::collections::{HashMap, HashSet};
 use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample, UnitView};
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
-use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
+use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, compiled_inline,
-    compound_in_place, constant, constant_types, goes_one_way, guard_sites, held_as_is,
-    inline_may_leave, is_call, keeps_temporaries, may_exit, op1_types, out_types, packed_guard,
-    param_types, params, reads, reads_by_name, recv_exits, referenced, slot_of, within, writes,
-    written, written_after_entry,
+    Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, checked_order,
+    compiled_inline, compound_in_place, constant, constant_types, goes_one_way, guard_sites,
+    held_as_is, inline_may_leave, is_call, keeps_temporaries, keyed, may_exit, op1_types,
+    out_types, packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced,
+    slot_of, within, writes, written, written_after_entry, written_through,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
-    Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
-    LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store,
-    Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
+    Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
+    LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Slotted,
+    Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -102,12 +102,11 @@ enum At {
     /// The frame stands where it goes on.
     Stands,
     /// After a fetch whose element's type a guard holds: the opline past
-    /// it with the element, read as `read` says, stored and its
-    /// temporaries freed, or, while a call is under way, the fetch again.
+    /// it with the element, read as `read` says, stored, the temporaries
+    /// it read freed, and a call under way restored.
     Fetched {
         fetch: OplineIdx,
-        op1: bool,
-        op2: bool,
+        frees: Frees,
         out: ValueId,
         read: Read,
     },
@@ -130,7 +129,10 @@ struct Draft {
 #[derive(Clone, Copy)]
 struct Seen {
     types: [Types; 3],
-    referenced: [bool; 3],
+    /// How the opline reads each operand, where a guard held it: in
+    /// place, through the reference it holds, or through the indirect
+    /// `VAR` a fetch for writing left.
+    read: [Read; 3],
     /// The seen types of a value no symbol table reaches, and the value's
     /// own of one a symbol table reaches, which a guard narrows for its
     /// opline alone, as php's `CHECK_OP_TRACE_TYPE` narrows `op1_info`
@@ -659,14 +661,19 @@ impl<'a> Builder<'a> {
             (opcode, None) if on_declared_slot(opcode) => Form::Step,
             _ => form,
         };
-        if let (Form::Inline, Some(property)) = (form, property) {
+        if let (Form::Inline, Some(property)) = (form, property)
+            && property.slot.cached().is_none()
+        {
             self.class_guard(idx, frame, at, property);
         }
         let in_place = (form == Form::Inline)
             .then(|| self.in_place(frame, &op, next))
             .flatten();
         self.sampled.insert(idx, samples);
-        let map_ptr = self.map_ptr(func, &op, form);
+        let map_ptr = match property.and_then(|property| property.slot.cached()) {
+            Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
+            _ => None,
+        };
         self.record_send(frame, &op, op1);
         if !keeps_temporaries(op.opcode) {
             // The opline frees every temporary it reads, as its handler
@@ -725,7 +732,10 @@ impl<'a> Builder<'a> {
                 },
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
                     Imm::Property {
-                        slot: property.slot.slot(),
+                        slot: match property.slot.cached() {
+                            Some(_) => Slotted::Cached,
+                            None => Slotted::Declared(property.slot.slot()),
+                        },
                         binary: (op.opcode == Opcode::AssignObjOp)
                             .then(|| lattice::binary_of(op.extended_value))
                             .flatten(),
@@ -797,17 +807,23 @@ impl<'a> Builder<'a> {
         let pushes = form == Form::Inline && is_call(op.opcode);
         // A native's call returns what its declaration says, as php's
         // trace TSSA types a `DO_ICALL`'s result by the `func` its record
-        // names (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`).
-        // Only a `DO_ICALL`'s callee is fixed where the opline is
-        // compiled: a call by name, a method's or a dynamic one may serve
+        // names (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`), and a
+        // frameless call's by the native its opline names, through the
+        // call map (`zend_get_func_info`).
+        // Only those two callees are fixed where the opline is compiled:
+        // a call by name, a method's or a dynamic one may serve
         // another function than the one recorded, which php's trace holds
         // with a guard on the callee this tier does not take.
-        let returns = (op.opcode == Opcode::DoIcall)
-            .then(|| self.calls.last().and_then(|call| call.returns))
-            .flatten();
+        let returns = if op.opcode.is_frameless_icall() {
+            (self.view.frameless_returns(op.extended_value)).map(super::declared)
+        } else if op.opcode == Opcode::DoIcall {
+            self.calls.last().and_then(|call| call.returns)
+        } else {
+            None
+        };
         let out = match slot {
             Some(slot) if !pushes && !fused => {
-                let types = out_types(op, t1, t2, td, code);
+                let types = out_types(op, [t1, t2, td], seen.read[0], code);
                 let types = returns.map_or(types, |returns| types.and(returns));
                 Some(self.define(slot, types, idx, form))
             }
@@ -817,7 +833,7 @@ impl<'a> Builder<'a> {
             Some(slot) if writes.op1 => {
                 let types = op1_types(op, t1, t2, sample1, code);
                 // A write through a reference leaves the slot one.
-                let types = if seen.referenced[0] {
+                let types = if seen.read[0] == Read::Through {
                     types.or(Types::REF)
                 } else {
                     types
@@ -978,8 +994,9 @@ impl<'a> Builder<'a> {
     /// one cannot finish, before it does anything, which the interpreter
     /// runs again; through an unwind where a kernel it calls throws, a
     /// stepped one that may, an inline assignment over a counted value,
-    /// whose destructor may, an inline fetch from a temporary array,
-    /// which frees it once its element is read, and an inline element
+    /// whose destructor may, an inline fetch or test of an element of a
+    /// temporary array, which frees it once its element is read, and an
+    /// inline element
     /// write, which its handler serves where it cannot write in place.
     fn own_exit(
         &mut self,
@@ -1021,7 +1038,10 @@ impl<'a> Builder<'a> {
         let throws = match form {
             Form::Inline => {
                 (op.opcode == Opcode::Assign && !old.within(UNCOUNTED))
-                    || (op.opcode == Opcode::FetchDimR && self.is_temp(op1))
+                    || (matches!(
+                        op.opcode,
+                        Opcode::FetchDimR | Opcode::FetchDimIs | Opcode::IssetIsemptyDimObj
+                    ) && self.is_temp(op1))
                     // The temporary it reads is given up, and a destructor
                     // may throw.
                     || (op.opcode == Opcode::TypeCheck
@@ -1043,7 +1063,13 @@ impl<'a> Builder<'a> {
                     )
                     || (op.opcode == Opcode::AssignOp
                         && lattice::binary_of(op.extended_value) == Some(Opcode::Concat))
-                    || matches!(op.opcode, Opcode::AssignDim | Opcode::AssignDimOp)
+                    || matches!(
+                        op.opcode,
+                        Opcode::AssignDim
+                            | Opcode::AssignDimOp
+                            | Opcode::FetchDimW
+                            | Opcode::FetchDimRw
+                    )
                     // What a property held is given up, or its handler
                     // serves what the inline form does not, and either
                     // may throw.
@@ -1430,7 +1456,7 @@ impl<'a> Builder<'a> {
     /// A kernel with no `call` effect may call user code too: `INIT_ARRAY`'s
     /// and `ADD_ARRAY_ELEMENT`'s handler raise a null key's deprecation
     /// through the error handler and release a duplicate key's value
-    /// (`Z/Zend/zend_vm_def.h:6278-6291`), and the release kernel compiled
+    /// (`Z/Zend/zend_vm_def.h:6279-6292`), and the release kernel compiled
     /// code calls for a temporary runs a destructor. None clobbers, as
     /// none has to: what that code can write is a variable a symbol table
     /// reaches, whose every write [`Builder::define`] types as anything
@@ -1800,11 +1826,16 @@ impl<'a> Builder<'a> {
         samples: [Option<Sample>; 3],
     ) -> Seen {
         let t1 = self.types_of(frame, operands[0]);
-        let mut held: [Option<(Types, bool)>; 3] = [None; 3];
+        let mut held: [Option<(Types, Read)>; 3] = [None; 3];
         let sites = guard_sites(op, data_line, samples, t1, self.meta(frame).code);
-        for site in &sites {
+        for site in checked_order(op.opcode)
+            .iter()
+            .filter(|site| sites.contains(site))
+        {
             let at = *site as usize;
-            if let Some(guarded) = self.guard_use(idx, here, operands[at], samples[at]) {
+            // php follows an indirect `VAR` for the element writes alone.
+            let sample = samples[at].filter(|s| !s.indirect || written_through(op.opcode));
+            if let Some(guarded) = self.guard_use(idx, here, operands[at], sample) {
                 held[at] = Some(guarded);
             }
         }
@@ -1816,12 +1847,12 @@ impl<'a> Builder<'a> {
         }
         let mut seen = Seen {
             types: [Types::NONE; 3],
-            referenced: [false; 3],
+            read: [Read::InPlace; 3],
             inferred: [Types::NONE; 3],
         };
         for (at, operand) in operands.into_iter().enumerate() {
             let types = self.types_of(frame, operand);
-            (seen.types[at], seen.referenced[at]) = held[at].unwrap_or((types, false));
+            (seen.types[at], seen.read[at]) = held[at].unwrap_or((types, Read::InPlace));
             seen.inferred[at] = match operand {
                 Operand::Value(value) if self.aliased(self.val(value).slot) => types,
                 _ => seen.types[at],
@@ -1832,7 +1863,7 @@ impl<'a> Builder<'a> {
         {
             let types = self.val(value).types;
             let slot = self.val(value).slot;
-            if seen.referenced[0] {
+            if seen.read[0] == Read::Through {
                 // An array read through a reference, held to its layout at
                 // this read and narrowed for this opline alone, as its type
                 // is (`zend_jit_fetch_reference`, `Z/ext/opcache/jit/zend_jit_ir.c:16952-17010`).
@@ -1888,9 +1919,13 @@ impl<'a> Builder<'a> {
     /// a type guard where the recorded type is narrower than the value's,
     /// narrowing the value unless a symbol table reaches it or a register
     /// holds it; a reference's inner type at every read, which php's code
-    /// generator holds where its TSSA adds nothing. What the opline sees
-    /// of the operand after it, where a guard is held, and whether it sees
-    /// it through a reference, which a write to the slot writes through.
+    /// generator holds where its TSSA adds nothing; and the type of what
+    /// an indirect `VAR` points at, at the element write that reads it,
+    /// as php's `zend_jit_fetch_indirect_var` holds it (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`),
+    /// leaving at the opline. What the opline sees of the operand after
+    /// it, where a guard is held, and how it reads it: in place, through
+    /// a reference, which a write to the slot writes through, or through
+    /// the `VAR`.
     ///
     /// A register holds what its op computed, a boolean either way where
     /// the recording saw `true` or `false`, so the guard is tested on the
@@ -1913,13 +1948,10 @@ impl<'a> Builder<'a> {
         here: OplineIdx,
         operand: Operand,
         sample: Option<Sample>,
-    ) -> Option<(Types, bool)> {
+    ) -> Option<(Types, Read)> {
         let (Operand::Value(value), Some(sample)) = (operand, sample) else {
             return None;
         };
-        if sample.indirect {
-            return None;
-        }
         let slot = self.val(value).slot;
         let tag = sample.kind;
         let before = Placed {
@@ -1927,15 +1959,26 @@ impl<'a> Builder<'a> {
             check: Check::Type { value, tag },
             exit: draft(Point::Before(idx), slot.frame, At::Opline(here)),
         };
-        if sample.reference {
-            if slot.var >= self.meta(slot.frame).code.num_cvs {
-                return None;
-            }
-            self.guards.push(Placed {
-                check: Check::Deref { value, tag },
-                ..before
-            });
-            return Some((Types::of_tag(tag), true));
+        let temporary = slot.var >= self.meta(slot.frame).code.num_cvs;
+        // An indirect `VAR` is followed to what it points at, as php's
+        // `zend_jit_fetch_indirect_var` follows it, and on to what that
+        // refers to where it is a reference, as `zend_jit_fetch_reference`
+        // follows it, and a variable's reference to what it refers to; a
+        // temporary that is a reference is the handler's.
+        let read = Read::sampled(sample);
+        let check = match (read, temporary) {
+            (Read::InPlace, _) => None,
+            (Read::Indirect(pointee), true) => Some(Check::Indirect {
+                value,
+                tag,
+                pointee,
+            }),
+            (Read::Through, false) => Some(Check::Deref { value, tag }),
+            (Read::Indirect(_) | Read::Through, _) => return None,
+        };
+        if let Some(check) = check {
+            self.guards.push(Placed { check, ..before });
+            return Some((Types::of_tag(tag), read));
         }
         let held = *self.val(value);
         let types = held.types;
@@ -1944,11 +1987,11 @@ impl<'a> Builder<'a> {
         }
         if self.aliased(slot) || held.home == Home::Register {
             self.guards.push(before);
-            return Some((types.narrowed(tag), false));
+            return Some((types.narrowed(tag), Read::InPlace));
         }
         self.val_mut(value).types = types.narrowed(tag);
         self.place(idx, here, value, Check::Type { value, tag }, Some(tag));
-        Some((types.narrowed(tag), false))
+        Some((types.narrowed(tag), Read::InPlace))
     }
 
     /// php's code generator's guard on an operand its inference does not
@@ -2026,8 +2069,10 @@ impl<'a> Builder<'a> {
             (_, Some((def, frame, opline, kind, op1, op2))) => {
                 let fetched = |read| At::Fetched {
                     fetch: opline,
-                    op1: self.is_temp(op1),
-                    op2: self.is_temp(op2),
+                    frees: Frees {
+                        op1: self.is_temp(op1),
+                        op2: self.is_temp(op2),
+                    },
                     out: value,
                     read,
                 };
@@ -2128,14 +2173,12 @@ impl<'a> Builder<'a> {
         seen: Seen,
         (next, branch): (Option<&Event>, Option<bool>),
     ) -> Form {
-        let [t1, t2, td] = seen.types;
+        let [t1, t2, _] = seen.types;
         // An opline that writes its variable `op1` writes through what it
         // sees through a reference, which only its handler does.
-        let cv1 = op.op1_type == OperandKind::Cv && !seen.referenced[0];
+        let cv1 = op.op1_type == OperandKind::Cv && seen.read[0] == Read::InPlace;
         let number = |t: Types| t == Types::LONG || t == Types::DOUBLE;
-        let long = |t: Types| t == Types::LONG;
         let scalar = |t: Types| t.scalar();
-        let packed = Types::ARRAY.laid_out(Layout::Packed);
         let code = self.meta(frame).code;
         let copied = |kind, field, t| copied_whole(kind, field, t, code);
         if let Some(form) = strung(op, seen) {
@@ -2179,10 +2222,14 @@ impl<'a> Builder<'a> {
             Opcode::PreInc | Opcode::PreDec | Opcode::PostInc | Opcode::PostDec => {
                 cv1 && number(t1)
             }
-            Opcode::FetchDimR => op.op1_type != OperandKind::Const && t1 == packed && long(t2),
-            Opcode::AssignDim => cv1 && element_written(op, data, seen.types, code),
-            Opcode::AssignDimOp => compound_in_place(op, t1, t2, td),
-            Opcode::FeResetR | Opcode::FeFetchR => iterated(op, t1, seen.referenced[0], branch),
+            Opcode::FetchDimR
+            | Opcode::FetchDimIs
+            | Opcode::IssetIsemptyDimObj
+            | Opcode::AssignDim
+            | Opcode::AssignDimOp
+            | Opcode::FetchDimW
+            | Opcode::FetchDimRw => dim_inline((op, data), seen.types, seen.read[0], code),
+            Opcode::FeResetR | Opcode::FeFetchR => iterated(op, t1, seen.read[0], branch),
             // php's `zend_jit_send_val` and `zend_jit_send_var`, a value
             // no scalar moved into the call's slot from a temporary, copied
             // with an owner more from a variable, or as it is from a
@@ -2191,7 +2238,7 @@ impl<'a> Builder<'a> {
                 op.op2_type == OperandKind::Unused
                     && (scalar(t1) || copied(op.op1_type, op.op1, t1))
             }
-            Opcode::TypeCheck => type_checked(op, t1, seen.referenced[0]),
+            Opcode::TypeCheck => type_checked(op, t1, seen.read[0]),
             // A check of an argument the trace knows the callee takes by
             // value, php's `zend_jit_check_func_arg` (`:9925-9960`).
             Opcode::CheckFuncArg => {
@@ -2232,7 +2279,7 @@ impl<'a> Builder<'a> {
                 // Seen through a reference, the slot keeps the reference,
                 // which the inline form would write over with its value.
                 op.op1_type != OperandKind::Unused
-                    && !seen.referenced[0]
+                    && seen.read[0] == Read::InPlace
                     && t1.kinds() != Types::NONE
                     && t1.within(declared)
             }
@@ -2273,7 +2320,7 @@ impl<'a> Builder<'a> {
         let object = match (op.op1_type, op1) {
             (OperandKind::Unused, _) => Object::This(frame),
             (OperandKind::Cv, Operand::Value(value))
-                if seen.types[0] == Types::OBJECT && !seen.referenced[0] =>
+                if seen.types[0] == Types::OBJECT && seen.read[0] == Read::InPlace =>
             {
                 Object::Value(value)
             }
@@ -2372,23 +2419,14 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The runtime cache slot an inline call's `INIT_*` reads its callee
-    /// from, `result.num`.
-    fn map_ptr(&mut self, func: FuncRef, op: &Opline, form: Form) -> Option<usize> {
-        if form != Form::Inline
-            || !matches!(
-                op.opcode,
-                Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName
-            )
-        {
-            return None;
-        }
-        let raw = self.view.cache_slot(func, CacheSlot(op.out))?;
+    /// The slot of [`TraceIr::map_ptrs`] that holds `raw`, taken where
+    /// none does.
+    fn map_ptr_of(&mut self, raw: MapPtrRaw) -> usize {
         if let Some(at) = self.map_ptrs.iter().position(|held| *held == raw) {
-            return Some(at);
+            return at;
         }
         self.map_ptrs.push(raw);
-        Some(self.map_ptrs.len() - 1)
+        self.map_ptrs.len() - 1
     }
 
     // ------------------------------------------------------------ the end
@@ -2611,7 +2649,7 @@ impl<'a> Builder<'a> {
                 }
                 Source::Interrupt(repeat) => {
                     let exit = match interrupt_reuses {
-                        Some(first) if spec.stores.is_empty() && spec.landing == Landing::Plain => {
+                        Some(first) if spec.stores.is_empty() && spec.landing == Landing::PLAIN => {
                             first
                         }
                         _ => exits.take(spec, level.clone())?,
@@ -2669,7 +2707,7 @@ impl<'a> Builder<'a> {
         let reserved = ExitSpec {
             frame: Frame::ROOT,
             opline: Some(entry),
-            landing: Landing::Plain,
+            landing: Landing::PLAIN,
             stores: Vec::new(),
             known: Vec::new(),
             grows: Grows::Never,
@@ -2718,6 +2756,7 @@ impl<'a> Builder<'a> {
                 (GuardAt::Before(op), Check::Layout { .. }) => Order::At(op, Stage::Inside),
                 (GuardAt::Before(op), Check::Room { .. }) => Order::At(op, Stage::Pushes),
                 (GuardAt::Before(op), _) => Order::At(op, Stage::Before),
+                (GuardAt::Within(op), Check::Direction { .. }) => Order::At(op, Stage::Branches),
                 (GuardAt::Within(op), _) => Order::At(op, Stage::Within),
             };
             order.push((key, Source::Guard(at)));
@@ -2748,6 +2787,7 @@ impl<'a> Builder<'a> {
         match check {
             Check::Type { value, .. }
             | Check::Deref { value, .. }
+            | Check::Indirect { value, .. }
             | Check::Layout { value, .. }
             | Check::Class {
                 object: Object::Value(value),
@@ -3203,25 +3243,27 @@ impl<'a> Builder<'a> {
             At::Stands => (None, restored(calls)),
             At::Fetched {
                 fetch,
-                op1,
-                op2,
+                frees,
                 out,
                 read,
             } => {
-                if calls {
-                    (Some(fetch), Landing::RestoreCall)
-                } else {
-                    extra = Some(Store {
-                        slot: self.val(out).slot,
-                        from: Stored::Copied { value: out, read },
-                    });
-                    let landing = if op1 || op2 {
-                        Landing::FreeTemps { op1, op2 }
-                    } else {
-                        Landing::Plain
-                    };
-                    (Some(OplineIdx(fetch.0 + 1)), landing)
-                }
+                // Past the fetch, with the element it copied, as php's
+                // guard on a fetched element leaves for the opline after
+                // it with the copy in its stack map
+                // (`zend_jit_guard_fetch_result_type`,
+                // `Z/ext/opcache/jit/zend_jit_ir.c:8067-8085`), and with a
+                // call under way restored, as `zend_jit_trace_get_exit_point`
+                // adds `ZEND_JIT_EXIT_RESTORE_CALL` to any exit taken while
+                // one is (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
+                extra = Some(Store {
+                    slot: self.val(out).slot,
+                    from: Stored::Copied { value: out, read },
+                });
+                let landing = Landing {
+                    frees,
+                    restores_call: calls,
+                };
+                (Some(OplineIdx(fetch.0 + 1)), landing)
             }
         };
         // A caller's register value is in its slot from the call into the
@@ -3350,7 +3392,7 @@ struct Branched {
 /// `:6120-6290`). Stepped otherwise.
 fn strung(op: &Opline, seen: Seen) -> Option<Form> {
     let [t1, t2, _] = seen.types;
-    let string = |t: Types, at: usize| t == Types::STRING && !seen.referenced[at];
+    let string = |t: Types, at: usize| t == Types::STRING && seen.read[at] == Read::InPlace;
     let inline = match op.opcode {
         Opcode::IsIdentical | Opcode::IsNotIdentical => {
             (t1.scalar() && t2.scalar())
@@ -3398,16 +3440,18 @@ fn sent_by_value(params: &[Parameter], n: u32) -> bool {
 /// Whether a `TYPE_CHECK` is compiled inline, php's `zend_jit_type_check`
 /// (`Z/ext/opcache/jit/zend_jit_ir.c:8162-8330`), over a value the trace
 /// reads as it stands: a temporary, which is never a reference, or a
-/// variable that is neither a reference, `referenced` or of a type that
+/// variable that is neither a reference, read in place by `read1`, nor of a type that
 /// may be one, nor unset, which would warn. `is_resource()`, which asks
 /// whether the resource is closed, is the handler's, as php's code
 /// generator leaves it to it (`Z/ext/opcache/jit/zend_jit_trace.c:5536-5540`).
-fn type_checked(op: &Opline, t1: Types, referenced: bool) -> bool {
+fn type_checked(op: &Opline, t1: Types, read1: Read) -> bool {
     op.extended_value & MAY_BE_RESOURCE == 0
         && match op.op1_type {
             OperandKind::Tmp => true,
             OperandKind::Cv | OperandKind::Var => {
-                !referenced && t1.kinds() != Types::NONE && !t1.meets(Types::REF.or(Types::UNDEF))
+                read1 == Read::InPlace
+                    && t1.kinds() != Types::NONE
+                    && !t1.meets(Types::REF.or(Types::UNDEF))
             }
             OperandKind::Const | OperandKind::Unused => false,
         }
@@ -3415,8 +3459,8 @@ fn type_checked(op: &Opline, t1: Types, referenced: bool) -> bool {
 
 /// Whether an `ASSIGN_DIM` over a variable's array is compiled inline over
 /// what it sees of the array, the key and the value, `[t1, t2, td]`, its
-/// `OP_DATA` `data`: an array that may be packed, which the write tests,
-/// by a long key, of a scalar, or of a value no scalar moved or copied
+/// `OP_DATA` `data`: an array of either layout, which the write tests
+/// where it may be both, by a key the lookups take ([`keyed`]), of a scalar, or of a value no scalar moved or copied
 /// whole into the element where its `out` slot is unused and the
 /// value is not the array itself, as php's `zend_jit_assign_dim` writes
 /// through `zend_jit_assign_to_variable`
@@ -3435,10 +3479,55 @@ fn element_written(
             && !(data.op1_type == OperandKind::Cv && data.op1 == op.op1)
             && copied_whole(data.op1_type, data.op1, td, code)
     };
-    t1.tag() == Some(ZvalType::Array)
-        && t1.meets(Types::PACKED)
-        && t2 == Types::LONG
-        && (td.scalar() || data.is_some_and(whole))
+    t1.tag() == Some(ZvalType::Array) && keyed(op, t2) && (td.scalar() || data.is_some_and(whole))
+}
+
+/// Whether a dimension opline is compiled inline over what it sees of
+/// the array, the key and the value, `[t1, t2, td]`, and how it reads
+/// `op1`, `read1`: a read ([`fetched_inline`]), a read under `BP_VAR_IS`
+/// and `isset()` alone, as php's `zend_jit_isset_isempty_dim` serves
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:13157-13350`), each over a
+/// variable's array or a temporary's, which it frees after, as php
+/// compiles them over a `TMP` or a `VAR` (`Z/ext/opcache/jit/zend_jit_trace.c:5847-5880`,
+/// `:5954-6030`); and a write ([`element_written`]), a compound write
+/// ([`compound_in_place`]) and a fetch for writing, php's
+/// `zend_jit_fetch_dim`, over a variable's array, the one the reference
+/// it holds refers to, or the one the `VAR` a fetch for writing left
+/// indirect points at, which php follows through
+/// `zend_jit_fetch_indirect_var` (`:5068-5083`, `:5893-5900`).
+fn dim_inline(
+    (op, data): (&Opline, Option<&Opline>),
+    [t1, t2, td]: [Types; 3],
+    read1: Read,
+    code: &OpArray,
+) -> bool {
+    let array = t1.tag() == Some(ZvalType::Array);
+    let written = op.op1_type == OperandKind::Cv || matches!(read1, Read::Indirect(_));
+    match op.opcode {
+        Opcode::FetchDimR | Opcode::FetchDimIs => fetched_inline(op, t1, t2),
+        Opcode::IssetIsemptyDimObj => {
+            op.extended_value & ISEMPTY == 0 && fetched_inline(op, t1, t2)
+        }
+        Opcode::AssignDim => written && element_written(op, data, [t1, t2, td], code),
+        Opcode::AssignDimOp => written && compound_in_place(op, t1, t2, td),
+        Opcode::FetchDimW | Opcode::FetchDimRw => {
+            written && op.out_type == OperandKind::Var && array && keyed(op, t2)
+        }
+        _ => false,
+    }
+}
+
+/// Whether a `FETCH_DIM_R` is compiled inline over what it sees of the
+/// array and the key, `t1` and `t2`, as php's `zend_jit_fetch_dim_read`
+/// compiles a read of an array no constant holds by a long or a string
+/// key (`Z/ext/opcache/jit/zend_jit_ir.c:12513-12700`): a packed array's
+/// slot by a long key in place, and every other element through the
+/// table's lookup, `zend_hash_find_known_hash`, `zend_jit_symtable_find`
+/// or `_zend_hash_index_find` (`:11917-12511`). A key no constant is is
+/// a variable's or a long, which the read gives up nothing of; php's
+/// code frees a temporary string, which this form leaves to the handler.
+fn fetched_inline(op: &Opline, t1: Types, t2: Types) -> bool {
+    op.op1_type != OperandKind::Const && t1.tag() == Some(ZvalType::Array) && keyed(op, t2)
 }
 
 /// Whether an inline form moves or copies an operand of `kind`, at
@@ -3459,7 +3548,7 @@ fn copied_whole(kind: OperandKind, field: u32, t: Types, code: &OpArray) -> bool
 }
 
 /// Whether a `foreach`'s reset or fetch is compiled inline over `t1`,
-/// what it sees of its array, `referenced` where it sees it through a
+/// what it sees of its array, read in place by `read1` or through a
 /// reference, the record having gone `branch`: php's `zend_jit_fe_reset`
 /// over an array no constant holds, which goes on whether the array holds
 /// anything or not, as the handler does
@@ -3468,10 +3557,12 @@ fn copied_whole(kind: OperandKind, field: u32, t: Types, code: &OpArray) -> bool
 /// variable, where the loop goes on, the end its exit (`:13800-14120`).
 /// Where the record ended the loop, php serves the fetch as it is, and so
 /// does the step.
-fn iterated(op: &Opline, t1: Types, referenced: bool, branch: Option<bool>) -> bool {
+fn iterated(op: &Opline, t1: Types, read1: Read, branch: Option<bool>) -> bool {
     match op.opcode {
         Opcode::FeResetR => {
-            op.op1_type != OperandKind::Const && t1.tag() == Some(ZvalType::Array) && !referenced
+            op.op1_type != OperandKind::Const
+                && t1.tag() == Some(ZvalType::Array)
+                && read1 == Read::InPlace
         }
         Opcode::FeFetchR => {
             op.op1_type == OperandKind::Var
@@ -3702,7 +3793,13 @@ enum Order {
 }
 
 /// What happens at an op, in the order php's code generator takes its
-/// exits: the guards before it on its operands' types; the exit an
+/// exits: the guards before it on its operands' types; the exit the way
+/// the trace did not go leaves through, which php takes before it emits
+/// the op's code, its smart branch's or `FE_FETCH_R`'s
+/// (`Z/ext/opcache/jit/zend_jit_trace.c`'s `zend_jit_trace_get_exit_point`
+/// before `zend_jit_cmp`, `zend_jit_isset_isempty_dim` or
+/// `zend_jit_fe_fetch`, whose packed guard follows it,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:13839-13843`); the exit an
 /// inline fetch opens its code with, php's `ZEND_JIT_EXIT_TO_VM` that
 /// `zend_jit_fetch_dim_read` takes first (`Z/ext/opcache/jit/zend_jit_ir.c:12540-12547`);
 /// the layout guard php takes inside the op's code, after it
@@ -3715,6 +3812,7 @@ enum Order {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Stage {
     Before,
+    Branches,
     Opens,
     Inside,
     Within,
@@ -3766,8 +3864,9 @@ impl Narrowed {
 
 /// The type a guard's exit and every exit after it know its slot holds,
 /// php's `SET_STACK_TYPE` past a guard: a type's, an array's held in place;
-/// none for a reference, whose type no stack map keeps, as php's
-/// `zend_jit_fetch_reference` sets none, nor for a guard on no slot.
+/// none for a reference or an indirect `VAR`, whose type no stack map
+/// keeps, as php's `zend_jit_fetch_reference` and
+/// `zend_jit_fetch_indirect_var` set none, nor for a guard on no slot.
 fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
     match check {
         Check::Type { value, tag } => Some((value, tag)),
@@ -3777,10 +3876,11 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
             ..
         } => Some((value, ZvalType::Array)),
         Check::Layout {
-            read: Read::Through,
+            read: Read::Through | Read::Indirect(_),
             ..
         }
         | Check::Deref { .. }
+        | Check::Indirect { .. }
         | Check::Class { .. }
         | Check::Direction { .. }
         | Check::Stands { .. }
@@ -3791,8 +3891,8 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
 
 fn restored(calls: bool) -> Landing {
     if calls {
-        Landing::RestoreCall
+        Landing::RESTORE_CALL
     } else {
-        Landing::Plain
+        Landing::PLAIN
     }
 }

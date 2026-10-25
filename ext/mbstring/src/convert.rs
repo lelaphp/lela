@@ -13,7 +13,7 @@ use crate::tables::{
     MBFL_ZEN2HAN_HIRAGANA, MBFL_ZEN2HAN_KATAKANA, MBFL_ZEN2HAN_NUMERIC, MBFL_ZENKAKU_HIRA2KATA,
     MBFL_ZENKAKU_KATA2HIRA, RARE_CODEPOINT_BITVEC,
 };
-use crate::text::{decode_runs, new_string, substitute, value_error};
+use crate::text::{decode_runs, new_string, on_heap, substitute, value_error};
 use php_ext::abi::{OrFalse, Passed, Ref, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, call_stack_end, docref, fatal, pending};
@@ -38,11 +38,11 @@ pub(crate) fn convert_counted(
     input: &[u8],
     from: Encoding,
     to: Encoding,
-) -> Vec<u8> {
+) -> Result<Vec<u8>, Thrown> {
     let sub = substitute(req);
-    let (out, errors) = convert(input, from, to, sub);
+    let (out, errors) = on_heap(req, || convert(input, from, to, sub))?;
     req.state::<State>().illegal_chars += u64::from(errors);
-    out
+    Ok(out)
 }
 
 /// `php_mb_convert_encoding`: one source, or the one detection picks,
@@ -52,18 +52,18 @@ fn convert_from(
     input: &[u8],
     to: Encoding,
     from: &[Encoding],
-) -> Option<Vec<u8>> {
+) -> Result<Option<Vec<u8>>, Thrown> {
     let from = if let [one] = from {
         *one
     } else {
         let strict = settings(req).strict_detection;
         let Some(from) = guess(&[input], from, strict, true) else {
             docref(req, Level::Warning, "Unable to detect character encoding");
-            return None;
+            return Ok(None);
         };
         from
     };
-    Some(convert_counted(req, input, from, to))
+    convert_counted(req, input, from, to).map(Some)
 }
 
 /// `php_mb_convert_encoding_recursive`: keys and strings converted,
@@ -112,7 +112,7 @@ fn convert_array(
         let key = row.key().clone();
         let value = row.value().deref();
         let key = match key {
-            Key::Str(name) => match convert_from(req, name.as_bytes(), to, from) {
+            Key::Str(name) => match convert_from(req, name.as_bytes(), to, from)? {
                 Some(name) => new_string(req, &name)?.into_key(),
                 None => return Ok(ControlFlow::Continue(())),
             },
@@ -120,7 +120,7 @@ fn convert_array(
         };
         let value = value.deref();
         let converted = match value.as_ref() {
-            ValueRef::Str(s) => match convert_from(req, s.as_bytes(), to, from) {
+            ValueRef::Str(s) => match convert_from(req, s.as_bytes(), to, from)? {
                 Some(s) => new_string(req, &s).map(|s| Some(s.into_value())),
                 None => Ok(None),
             },
@@ -290,8 +290,38 @@ fn convert_array(
 /// reentered
 /// 2
 /// ```
+///
+/// A surrogate codepoint, from UCS-2, UCS-4 or a numeric entity, is not
+/// UTF-8: libmbfl's `mb_wchar_to_utf8` writes the substitute for it as
+/// php 8.5.12's does, and only a search's internal UTF-8 keeps it, so
+/// two surrogates stay apart there.
+///
+/// ```php
+/// echo bin2hex(mb_convert_encoding("\x00\x00\x00A\x00\x00\xD8\x00", 'UTF-8', 'UCS-4')), ' ', bin2hex(mb_convert_encoding('&#xD800;', 'UTF-8', 'HTML-ENTITIES')), "\n";
+/// mb_substitute_character('long');
+/// echo bin2hex(mb_convert_encoding("\xDF\xFF", 'UTF-8', 'UCS-2')), "\n";
+/// var_dump(mb_strpos("\xD8\x3D\xDE\x00\xD8\x3D\xDE\x01", "\xD8\x3D\xDE\x01", 0, 'UCS-2'));
+/// ```
+/// ```expect
+/// 413f 3f
+/// 552b44464646
+/// int(2)
+/// ```
 #[php_function]
 // The declared `array|string|false`, each fresh value an owner.
+///
+/// Since 8.5.12 the conversion's buffer grows fallibly, so a conversion past
+/// the memory limit is refused its growth and the limit's fatal is raised as
+/// the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_convert_encoding(str_repeat("a", 400000), "UTF-32", "ISO-8859-1")), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[allow(clippy::type_complexity)]
 fn mb_convert_encoding(
     req: &mut Request,
@@ -311,7 +341,7 @@ fn mb_convert_encoding(
         return Err(value_error(req, 3, "must specify at least one encoding"));
     }
     match string {
-        Union::B(s) => match convert_from(req, s.as_bytes(), to, &from) {
+        Union::B(s) => match convert_from(req, s.as_bytes(), to, &from)? {
             Some(out) => Ok(OrFalse::Value(Union::B(new_string(req, &out)?))),
             None => Ok(OrFalse::False),
         },
@@ -878,7 +908,7 @@ fn mb_convert_kana(
     }
     let enc = self::encoding(req, encoding, 3)?;
     let sub = substitute(req);
-    let out = kana_convert(string.as_bytes(), enc, opt, sub);
+    let out = on_heap(req, || kana_convert(string.as_bytes(), enc, opt, sub))?;
     new_string(req, &out)
 }
 
@@ -945,6 +975,9 @@ enum Walk {
     /// The slot takes this value, a string in place of the reference
     /// that held one, as php's `ZVAL_STR(orig_var, ..)` puts it.
     Replace(Owner<Value>),
+    /// Since 8.5.12, a string converted once the memory limit was met:
+    /// the slot takes it, and the walk stops (`ZEND_HAS_OOM()`).
+    ReplaceLast(Owner<Value>),
 }
 
 /// `mb_recursive_convert_variable` over a slot's value: a string
@@ -999,8 +1032,12 @@ fn convert_value(
             }
         }
         ValueRef::Str(s) => {
-            let out = convert_counted(req, s.as_bytes(), from, to);
-            Ok(Walk::Replace(new_string(req, &out)?.into_value()))
+            let out = convert_counted(req, s.as_bytes(), from, to)?;
+            let new = new_string(req, &out)?.into_value();
+            if req.memory().has_oom() {
+                return Ok(Walk::ReplaceLast(new));
+            }
+            Ok(Walk::Replace(new))
         }
         ValueRef::Array(array) => {
             let original = array;
@@ -1044,6 +1081,10 @@ fn convert_value(
                     Walk::Stopped => return Ok(ControlFlow::Break(())),
                     Walk::Kept => {}
                     Walk::Replace(new) => object.set_row(req, row.key(), new)?,
+                    Walk::ReplaceLast(new) => {
+                        object.set_row(req, row.key(), new)?;
+                        return Ok(ControlFlow::Break(()));
+                    }
                 }
                 Ok(ControlFlow::Continue(()))
             })?;
@@ -1082,17 +1123,28 @@ fn convert_array_in(
             Walk::Kept => {}
             Walk::Replace(new) => {
                 if !array.replace(req, row.key(), new)? {
-                    return Err(fatal(
-                        req,
-                        "InternalError: mb_convert_variables lost a key of the array it converts",
-                    ));
+                    return Err(lost_key(req));
                 }
+            }
+            Walk::ReplaceLast(new) => {
+                if !array.replace(req, row.key(), new)? {
+                    return Err(lost_key(req));
+                }
+                return Ok(ControlFlow::Break(true));
             }
         }
         Ok(ControlFlow::Continue(()))
     });
     array.unprotect();
     Ok(walked?.unwrap_or(false))
+}
+
+/// What a walk that lost a key of the array it converts raises.
+fn lost_key(req: &mut Request) -> Thrown {
+    fatal(
+        req,
+        "InternalError: mb_convert_variables lost a key of the array it converts",
+    )
 }
 
 /// `mb_convert_variables(string $to_encoding, array|string $from_encoding, mixed &$var, mixed &...$vars): string|false`.
@@ -1168,6 +1220,19 @@ fn convert_array_in(
 /// string(5) "UTF-8"
 /// string(6) "UTF-16"
 /// ```
+///
+/// Since 8.5.12 a string converted once the memory limit was met stops the
+/// conversion, and the limit's fatal is raised as the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// $v = str_repeat("a", 400000);
+/// var_dump(mb_convert_variables("UTF-32", "ISO-8859-1", $v), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
+/// ```
 #[php_function]
 fn mb_convert_variables(
     req: &mut Request,
@@ -1215,14 +1280,22 @@ fn mb_convert_variables(
     };
     for r in &refs {
         let Some(cell) = r.reference() else { continue };
-        match convert_value(req, &Value::reference(cell), from, to)? {
-            Walk::Stopped => {
-                pending(req)?;
-                docref(req, Level::Warning, "Cannot handle recursive references");
-                return Ok(OrFalse::False);
+        let stopped = match convert_value(req, &Value::reference(cell), from, to)? {
+            Walk::Stopped => true,
+            Walk::Kept => false,
+            Walk::Replace(new) => {
+                cell.set(req, new)?;
+                false
             }
-            Walk::Kept => {}
-            Walk::Replace(new) => cell.set(req, new)?,
+            Walk::ReplaceLast(new) => {
+                cell.set(req, new)?;
+                true
+            }
+        };
+        if stopped {
+            pending(req)?;
+            docref(req, Level::Warning, "Cannot handle recursive references");
+            return Ok(OrFalse::False);
         }
     }
     Ok(OrFalse::Value(new_string(req, from.name())?))
@@ -1307,6 +1380,19 @@ fn entity_encode(input: &[u8], enc: Encoding, map: &[u32], hex: bool, sub: Subst
 /// string(15) "a&#xF1;&#x20AC;"
 /// mb_encode_numericentity(): Argument #2 ($map) must have a multiple of 4 elements
 /// ```
+///
+/// Since 8.5.12 the conversion's buffer grows fallibly, so entities past the
+/// memory limit are refused their room and the limit's fatal is raised as the
+/// call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_encode_numericentity(str_repeat("a", 400000), [0x0, 0x10FFFF, 0, 0xFFFFFF], "UTF-8", true)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn mb_encode_numericentity(
     req: &mut Request,
@@ -1318,7 +1404,9 @@ fn mb_encode_numericentity(
     let enc = self::encoding(req, encoding, 3)?;
     let map = conversion_map(req, map)?;
     let sub = substitute(req);
-    let out = entity_encode(string.as_bytes(), enc, &map, hex, sub);
+    let out = on_heap(req, || {
+        entity_encode(string.as_bytes(), enc, &map, hex, sub)
+    })?;
     new_string(req, &out)
 }
 
@@ -1483,6 +1571,6 @@ fn mb_decode_numericentity(
     let enc = self::encoding(req, encoding, 3)?;
     let map = conversion_map(req, map)?;
     let sub = substitute(req);
-    let out = entity_decode(string.as_bytes(), enc, &map, sub);
+    let out = on_heap(req, || entity_decode(string.as_bytes(), enc, &map, sub))?;
     new_string(req, &out)
 }

@@ -29,6 +29,7 @@ ffi::Db::errmsg
 ffi::Db::exec
 ffi::Db::extended_codes
 ffi::Db::extended_errcode
+ffi::Db::in_callback
 ffi::Db::last_insert_rowid
 ffi::Db::load_extension
 ffi::Db::of

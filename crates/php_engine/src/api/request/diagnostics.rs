@@ -83,11 +83,11 @@ type FormatDateFn = fn(&mut Request, &[u8], i64, bool) -> Result<Vec<u8>, Thrown
 pub struct Syslog(pub fn(&mut Request, i32, &[u8]));
 
 impl Message<'_> {
-    /// What the display and the log write.
-    fn text(&self) -> std::borrow::Cow<'_, str> {
+    /// What the display and the log write, its bytes as raised.
+    fn text(&self) -> &[u8] {
         match self {
-            Message::Text(text) => String::from_utf8_lossy(text),
-            Message::String(s) => String::from_utf8_lossy(s.as_bytes()),
+            Message::Text(text) => text,
+            Message::String(s) => s.as_bytes(),
         }
     }
 }
@@ -234,7 +234,10 @@ impl Request {
     /// ```
     ///
     /// phpdbg's prompt inside a fatal's log is inside the guard, so the
-    /// warnings what `ev` serves there raises are not logged:
+    /// warnings what `ev` serves there raises are not logged. The fatal is
+    /// the memory limit's, which php 8.5.12 raises after `str_repeat`
+    /// refused its string fallibly, so `$s` is the empty string and the
+    /// program runs on once phpdbg is told to continue:
     ///
     /// ```php
     /// ini_set("log_errors", "1"); ini_set("display_errors", "0"); ini_set("memory_limit", "2M");
@@ -250,12 +253,12 @@ impl Request {
     /// ```
     /// ```expect exit=255
     /// [Successful compilation of %SCRATCH%/witness.php]
-    /// prompt> [PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %SCRATCH%/witness.php on line 3]
+    /// prompt> [PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %SCRATCH%/witness.php on line 3]
     /// >00003: $s = str_repeat("x", 4 << 20);
     ///  00004: echo "after\n";
-    /// prompt>%s
-    /// prompt>%s
-    /// prompt> [Script ended normally]
+    /// prompt> prompt>%s
+    /// prompt> after
+    /// [Script ended normally]
     /// prompt>
     /// ```
     fn log_err(&mut self, entry: &[u8], priority: i32) -> bool {
@@ -346,7 +349,11 @@ impl Request {
     /// ([`Request::note_error_in`]); the message-id table and `EH_THROW`
     /// are the rest of that branch and are not read yet. `true` says the
     /// built-in handler served it.
-    pub(crate) fn note_error(&mut self, level: Level, message: &str) -> bool {
+    pub(crate) fn note_error(
+        &mut self,
+        level: Level,
+        message: &(impl AsRef<[u8]> + ?Sized),
+    ) -> bool {
         let (file, line) = self.executed_site();
         self.note_error_in(level, message, &file, line)
     }
@@ -544,11 +551,11 @@ impl Request {
     pub(crate) fn note_error_in(
         &mut self,
         level: Level,
-        message: &str,
+        message: &(impl AsRef<[u8]> + ?Sized),
         file: &[u8],
         line: u32,
     ) -> bool {
-        self.note_message_in(level, Message::Text(message.as_bytes()), file, line)
+        self.note_message_in(level, Message::Text(message.as_ref()), file, line)
     }
 
     /// [`Request::note_error`] over a string of the request's raised as
@@ -579,8 +586,8 @@ impl Request {
             held.push((level, bytes));
             return false;
         }
-        let text = raised.text().into_owned();
-        let message = text.as_str();
+        let text = raised.text().to_vec();
+        let message = text.as_slice();
         if self.recorded(level, message, file, line) {
             return false;
         }
@@ -601,7 +608,7 @@ impl Request {
                 level,
                 file,
                 line,
-                message.as_bytes(),
+                message,
                 crate::observer::Told::Raised,
             );
             if self.raised.is_none() && self.diagnostics.error_handling_thrown.is_none() {
@@ -617,6 +624,10 @@ impl Request {
         // trace is fetched for the fatal (`Z/Zend/zend.c:1503-1526`). An
         // object in the slot that is no `Throwable`, which no PHP code
         // leaves there, stays where it is.
+        // The unwind exit `zend_handle_delayed_oom` threw stands as php's
+        // `EG(exception)` while the limit's fatal is raised, and is no
+        // throwable to report (`Z/Zend/zend.c:1513` at 8.5.12).
+        let handling = *self.heap.delayed_oom() == php_heap::DelayedOom::Handling;
         if let Some(Raised::Throwable(pending)) = self.raised {
             let throwable = self
                 .class_named(Bare::resolved(b"Throwable"))
@@ -624,7 +635,10 @@ impl Request {
             if throwable && fatal_errors(level) {
                 self.exception_error(Level::Warning).ok();
             }
-        } else if self.raised.is_none() && self.fatal_error_backtraces() && fatal_errors(level) {
+        } else if (self.raised.is_none() || handling)
+            && self.fatal_error_backtraces()
+            && fatal_errors(level)
+        {
             self.diagnostics.last_fatal_error_backtrace = Some(self.trace_as_string());
         }
         // The string the native raised is its caller's; the one made of
@@ -651,7 +665,7 @@ impl Request {
         );
         let served = !self.user_error_handler(level, string, file, line);
         if served {
-            self.zend_error_cb(level, Bail::Out, string, message, file, line);
+            self.zend_error_cb(level, Bail::Out, string, file, line);
         }
         if made {
             self.release(Value::string(string));
@@ -670,7 +684,6 @@ impl Request {
         level: Level,
         bail: Bail,
         string: PhpString,
-        message: &str,
         file: &[u8],
         line: u32,
     ) {
@@ -679,7 +692,6 @@ impl Request {
             level,
             bail,
             string,
-            message,
             file,
             line,
         };
@@ -709,7 +721,7 @@ impl Request {
     /// ```
     /// ```expect
     /// Warning: Undefined variable $w in %s on line 2
-    /// 328
+    /// 320
     /// 160
     /// 0
     /// 160
@@ -734,7 +746,18 @@ impl Request {
     }
 
     /// `php_error_cb` up to its last arm: the diagnostic stored unless it
-    /// repeats, then logged and displayed unless masked.
+    /// repeats, then logged and displayed unless masked. The html form of
+    /// an `E_ERROR` prints the escaped message with `%s`, so a NUL in it
+    /// ends it there, where the plain form keeps every byte:
+    ///
+    /// ```php
+    /// ini_set('html_errors', '1');
+    /// throw new Exception("before\0after");
+    /// ```
+    /// ```expect exit=255
+    /// <br />
+    /// <b>Fatal error</b>:  Uncaught Exception: before in <b>%s</b> on line <b>3</b><br />
+    /// ```
     fn stored_and_shown(&mut self, level: Level, string: PhpString, file: &[u8], line: u32) {
         if !self.displayed(string, file, line) {
             return;
@@ -769,13 +792,21 @@ impl Request {
         }
         let name = level_name(level);
         let trace = self.stack_trace_after_the_site();
-        // What is written is the message's string, its bytes as raised.
-        let said = |before: String, after: &str| -> Vec<u8> {
-            [before.as_bytes(), string.as_bytes(), after.as_bytes()].concat()
+        // What is written is the message's string, its bytes as raised,
+        // where php prints it `%S`: the plain form, the stderr form and
+        // the html form of a level that is no `E_ERROR` or `E_PARSE`. The
+        // log line, the xml fault and the html form of those two print
+        // `ZSTR_VAL(message)` with `%s`, to its first NUL
+        // (`Z/main/main.c:1493`, `:1499`, `:1507`).
+        let whole = string.as_bytes();
+        let to_nul = crate::c_number::c_str(whole);
+        let said_as = |message: &[u8], before: String, after: &str| -> Vec<u8> {
+            [before.as_bytes(), message, after.as_bytes()].concat()
         };
+        let said = |before: String, after: &str| said_as(whole, before, after);
         let site = format!(" in {named} on line {line}{trace}");
         if self.log_errors() {
-            let text = said(format!("PHP {name}:  "), &site);
+            let text = said_as(to_nul, format!("PHP {name}:  "), &site);
             // `spprintf(&log_buffer, …)`, freed once it is logged.
             let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) else {
                 return;
@@ -815,7 +846,8 @@ impl Request {
             // `xmlrpc_error_number` as its code and the diagnostic as
             // its string, the message unescaped and no space after the
             // colon; neither string stands around it.
-            let text = said(
+            let text = said_as(
+                to_nul,
                 format!(
                     "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:",
                     self.ini().long(b"xmlrpc_error_number")
@@ -835,7 +867,7 @@ impl Request {
             if let Level::Error | Level::Parse = level {
                 self.printed_escaped(
                     &format!("{prepend}<br />\n<b>{name}</b>:  "),
-                    string.as_bytes(),
+                    to_nul,
                     &format!(" in <b>{named}</b> on line <b>{line}</b><br />\n{append}"),
                 );
             } else {

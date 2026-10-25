@@ -25,20 +25,23 @@ const PSHEADER: &[u8; 28] = b"\xFF\xED\0\0Photoshop 3.0\x008BIM\x04\x04\0\0\0\0"
 /// The file `iptcembed` reads and where its bytes go: `spool` above zero
 /// writes each to the `output`, and below two keeps them in `buf`, whose
 /// room is php's `spoolbuf`, a byte past which ends the copy.
-struct Embedding {
+struct Embedding<'r> {
+    req: &'r mut Request,
     data: Vec<u8>,
     at: usize,
     spool: i64,
-    out: Vec<u8>,
     buf: Option<Vec<u8>>,
     room: usize,
 }
 
-impl Embedding {
-    /// `php_iptc_put1`: `false` for php's `EOF`, a full buffer.
+impl Embedding<'_> {
+    /// `php_iptc_put1`: `false` for php's `EOF`, a full buffer. A byte
+    /// spooled to the body is written there at once, `PUTC(c)`, so an
+    /// `ob_start` handler with a chunk size runs between two bytes, and
+    /// may embed again (`iptcembed_reentrant.phpt`).
     fn put1(&mut self, spooled: bool, c: u8) -> bool {
         if spooled && self.spool > 0 {
-            self.out.push(c);
+            self.req.response_mut().write(&[c]);
         }
         if spooled && let Some(buf) = &mut self.buf {
             if buf.len() >= self.room {
@@ -144,6 +147,30 @@ impl Embedding {
 /// int(0)
 /// ```
 ///
+/// A copy spooled to the body is written a byte at a time, so an
+/// `ob_start` handler of chunk size 1 runs inside the copy and may embed
+/// again, each call with its own header (`iptcembed_reentrant.phpt`):
+///
+/// ```php
+/// $file = __DIR__ . '/reentrant.jpg';
+/// file_put_contents($file, "\xff\xd8\xff\xe0\x00\x02\xff\xda\x00\x02");
+/// $output = ''; $nested = false;
+/// ob_start(function ($chunk) use (&$output, &$nested, $file) {
+///     $output .= $chunk;
+///     if (!$nested && str_ends_with($output, "\xff\xed")) { $nested = true; iptcembed(str_repeat('B', 256), $file, 0); }
+///     return '';
+/// }, 1);
+/// iptcembed('AA', $file, 2);
+/// ob_end_flush();
+/// $start = strpos($output, "\xff\xed");
+/// var_dump($nested, unpack('n', substr($output, $start + 2, 2))[1], substr($output, $start + 30, 2));
+/// ```
+/// ```expect
+/// bool(true)
+/// int(30)
+/// string(2) "AA"
+/// ```
+///
 /// ```php
 /// echo new ReflectionFunction('iptcembed');
 /// ```
@@ -195,21 +222,19 @@ fn iptcembed(
     let st_size = usize::try_from(st_size).unwrap_or(usize::MAX);
     let room = (data.len() + PSHEADER.len() + 1 + 1024 + 1).saturating_add(st_size);
     let mut s = Embedding {
+        req,
         data: bytes,
         at: 0,
         spool,
-        out: Vec::new(),
         buf: (spool < 2).then(Vec::new),
         room,
     };
     let embedded = embed(&mut s, &data);
-    if !s.out.is_empty() {
-        req.response_mut().write(&s.out);
-    }
+    let buf = s.buf;
     if !embedded {
         return Ok(Union::B(false));
     }
-    match s.buf {
+    match buf {
         Some(buf) => PhpString::new(req, &buf).map(Union::A),
         None => Ok(Union::B(true)),
     }
@@ -217,7 +242,7 @@ fn iptcembed(
 
 /// The copy loop of `PHP_FUNCTION(iptcembed)`: `false` where php
 /// answers `false`.
-fn embed(s: &mut Embedding, data: &[u8]) -> bool {
+fn embed(s: &mut Embedding<'_>, data: &[u8]) -> bool {
     if s.get1(true) != Some(0xff) || s.get1(true) != Some(0xd8) {
         return false;
     }

@@ -83,7 +83,7 @@ use php_ext::decl::{
     ClassConstDecl, ClassDecl, ClassKind, ConstExpr, EnumBacking, FunctionDecl, HookKind,
     MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl, Type, Visibility,
 };
-use php_ext::raising::{Thrown, arg_count_error, throw, throw_error};
+use php_ext::raising::{Thrown, arg_count_error, throw, throw_error, throw_exception_ex};
 use php_ext::request::{ExtensionId, MethodRow, Request};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
@@ -115,7 +115,7 @@ struct State {
 /// echo new ReflectionExtension('reflection');
 /// ```
 /// ```expect
-/// Extension [ <persistent> extension #%N% Reflection version 8.5.9 ] {
+/// Extension [ <persistent> extension #%N% Reflection version 8.5.12 ] {
 ///
 ///   - Classes [26] {
 ///     Class [ <internal:Reflection> class ReflectionException extends Exception implements Throwable, Stringable ] {
@@ -4623,7 +4623,7 @@ impl ObjectHandlers for ReflectorHandlers {
             value.give_up(req);
             name.give_up(req);
             let class = class_name_of(req, object.class());
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -4957,7 +4957,7 @@ fn class_of(
 fn class_named(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
     match autoload(req, name)? {
         Some(class) => Ok(class),
-        None => Err(throw(
+        None => Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!("Class \"{}\" does not exist", String::from_utf8_lossy(name)),
@@ -5036,7 +5036,7 @@ fn this_extension(req: &mut Request, this: PhpObject) -> Result<ExtensionId, Thr
     let name = this_name(req, this, "ReflectionExtension")?;
     match req.extensions().named(&name) {
         Some(extension) => Ok(extension),
-        None => Err(throw(
+        None => Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!(
@@ -5580,7 +5580,9 @@ fn value_string(req: &mut Request, value: &Value) -> String {
     match value.deref().as_ref() {
         ValueRef::Array(_) => String::from("Array"),
         ValueRef::Object(_) => String::from("Object"),
-        ValueRef::Float(number) => float_format(number, req.ini().precision(), Exponent::Upper),
+        ValueRef::Float(number) => float_format(number, req.ini().precision(), Exponent::Upper)
+            .as_str()
+            .to_owned(),
         _ => php_ext::coerce::with_string(req, value, |s| String::from_utf8_lossy(s).into_owned())
             .unwrap_or_default(),
     }
@@ -7019,6 +7021,25 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
 ///   - Return [ string ]
 /// }
 /// ```
+///
+/// A closure written in a class's method has the class for its scope, so
+/// it is a `public method`, and `static` before it where it is one:
+///
+/// ```php
+/// class K { function m() { return function () {}; } static function s() { return static fn () => 1; } }
+/// echo new ReflectionFunction((new K)->m()), new ReflectionFunction(K::s()), new ReflectionFunction(Closure::bind(function () {}, null, K::class));
+/// ```
+/// ```expect
+/// Closure [ <user> public method {closure:K::m():2} ] {
+///   @@ %s 2 - 2
+/// }
+/// Closure [ <user> static public method {closure:K::s():2} ] {
+///   @@ %s 2 - 2
+/// }
+/// Closure [ <user> public method {closure:%s:3} ] {
+///   @@ %s 3 - 3
+/// }
+/// ```
 fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result<String, Thrown> {
     let Some(decl) = signature::closure_decl(req, closure) else {
         return Ok(String::new());
@@ -7028,13 +7049,20 @@ fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result
         bound.push(name.as_bytes().to_vec());
         name.give_up(req);
     }
-    let module = closure
-        .closure(req)
+    let info = closure.closure(req);
+    let module = info
+        .as_ref()
         .and_then(|info| req.extensions().function_extension(info.function))
         .and_then(|e| req.extensions().name(e))
         .map(str::to_owned);
+    let header = Header::Closure {
+        is_static: info
+            .as_ref()
+            .is_some_and(|info| req.symbols().closure_refuses_receiver(info)),
+        scoped: info.as_ref().is_some_and(|info| info.scope.is_some()),
+    };
     let mut out = String::new();
-    function_header(&mut out, &decl, module.as_deref(), Header::Closure, indent);
+    function_header(&mut out, &decl, module.as_deref(), header, indent);
     let arg_info = ArgInfo::of(&decl);
     function_body(req, &mut out, &decl, false, arg_info, &bound, indent);
     Ok(out)
@@ -7150,7 +7178,14 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
 #[derive(Clone, Copy)]
 enum Header<'a> {
     Function,
-    Closure,
+    /// A closure: whether it is `static` (`ZEND_ACC_STATIC`) and
+    /// whether its function has a scope, the class it was made or bound
+    /// in (`fptr->common.scope`), which `_function_string` prints as a
+    /// `public method`, every closure being public.
+    Closure {
+        is_static: bool,
+        scoped: bool,
+    },
     Method(&'a MethodDecl, &'a [String]),
 }
 
@@ -7168,7 +7203,7 @@ fn function_header(
 ) {
     let method = match header {
         Header::Method(method, words) => Some((method, words)),
-        Header::Function | Header::Closure => None,
+        Header::Function | Header::Closure { .. } => None,
     };
     if let Some(doc) = &decl.doc_comment {
         out.push_str(indent);
@@ -7181,7 +7216,7 @@ fn function_header(
     // (`Z/ext/reflection/php_reflection.c:905`).
     out.push_str(match header {
         Header::Method(..) => "Method [ ",
-        Header::Closure => "Closure [ ",
+        Header::Closure { .. } => "Closure [ ",
         Header::Function => "Function [ ",
     });
     let internal = decl.file.0.is_empty();
@@ -7213,6 +7248,17 @@ fn function_header(
             out.push_str("static ");
         }
         write!(out, "{} method ", visibility_word(method.visibility)).ok();
+    } else if let Header::Closure { is_static, scoped } = header {
+        // `ZEND_ACC_STATIC`, then `fptr->common.scope`'s `public method`
+        // (`Z/ext/reflection/php_reflection.c:941-962`).
+        if is_static {
+            out.push_str("static ");
+        }
+        out.push_str(if scoped {
+            "public method "
+        } else {
+            "function "
+        });
     } else {
         out.push_str("function ");
     }
@@ -7609,7 +7655,7 @@ impl ReflectionExtension {
     fn __construct(req: &mut Request, this: This<Self>, name: PhpString) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
         let Some(extension) = req.extensions().named(&name) else {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -7641,7 +7687,7 @@ impl ReflectionExtension {
     /// echo new ReflectionExtension('ctype');
     /// ```
     /// ```expect
-    /// Extension [ <persistent> extension #%N% ctype version 8.5.9 ] {
+    /// Extension [ <persistent> extension #%N% ctype version 8.5.12 ] {
     ///
     ///   - Functions {
     ///     Function [ <internal:ctype> function ctype_alnum ] {
@@ -7729,7 +7775,7 @@ impl ReflectionExtension {
     /// echo new ReflectionExtension('tokenizer');
     /// ```
     /// ```expect
-    /// Extension [ <persistent> extension #%N% tokenizer version 8.5.9 ] {
+    /// Extension [ <persistent> extension #%N% tokenizer version 8.5.12 ] {
     ///
     ///   - Constants [154] {
     ///     Constant [ <persistent> int T_LNUMBER ] { 260 }
@@ -8014,7 +8060,7 @@ impl ReflectionExtension {
     /// echo preg_replace('/#\d+/', '#N', strstr(new ReflectionExtension('dom'), "\n", true)), "\n";
     /// ```
     /// ```expect
-    /// string(5) "8.5.9"
+    /// string(6) "8.5.12"
     /// string(8) "20031129"
     /// Extension [ <persistent> extension #N dom version 20031129 ] {
     /// ```
@@ -8367,7 +8413,7 @@ impl ReflectionZendExtension {
     fn __construct(req: &mut Request, this: This<Self>, name: PhpString) -> Result<(), Thrown> {
         let name = name.as_bytes().to_vec();
         if zend_extension_named(req, &name).is_none() {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(

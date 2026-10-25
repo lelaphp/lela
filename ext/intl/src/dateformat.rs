@@ -88,18 +88,26 @@ impl ObjectHandlers for Handlers {
 }
 
 /// `IntlDateFormatter_object_clone`: a fresh object's members, the
-/// styles and the calendar type left at their defaults as php leaves
-/// them, and `udat_clone`; php's `Error` once the copy is made.
+/// styles, the calendar type and the requested locale copied, as php
+/// 8.5.12 copies them, and `udat_clone`; php's `Error` once the copy is
+/// made.
 fn clone_formatter(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let mut status = Code::ZERO;
-    let copy = object
-        .native::<DateFormatObject>(req)
-        .and_then(|o| o.udatf.as_ref())
-        .map(|udatf| udatf.try_clone(&mut status));
-    let held = copy.is_some();
-    let payload = DateFormatObject {
-        udatf: copy.flatten(),
-        ..DateFormatObject::default()
+    let mut held = false;
+    let payload = match object.native::<DateFormatObject>(req) {
+        Some(o) => {
+            let copy = o.udatf.as_ref().map(|udatf| udatf.try_clone(&mut status));
+            held = copy.is_some();
+            DateFormatObject {
+                error: IntlError::default(),
+                udatf: copy.flatten(),
+                date_type: o.date_type,
+                time_type: o.time_type,
+                calendar: o.calendar,
+                requested_locale: o.requested_locale.clone(),
+            }
+        }
+        None => DateFormatObject::default(),
     };
     let new = clone_with(req, &object, payload)?;
     let message = match held {
@@ -1055,8 +1063,30 @@ fn parse_text(
         return or_false(Err(stop));
     }
     let units = converted.unwrap_or_default();
+    let mut position = position;
+    // ICU reads and writes the offset in code units, the caller's in
+    // bytes (php 8.5.12); one inside a character is refused, unchanged.
+    if let Some(at) = position.as_deref_mut() {
+        match ffi::utf8_offset_to_utf16(text, *at) {
+            Ok(code_units) => *at = code_units,
+            Err(code) => {
+                let stop = check(req, object, code, "Invalid UTF-8 offset")
+                    .err()
+                    .flatten();
+                return or_false(Err(stop));
+            }
+        }
+    }
     let mut status = Code::ZERO;
-    let mut millis = udatf.parse(&units, position, how != Parse::Instant, &mut status);
+    let mut millis = udatf.parse(
+        &units,
+        position.as_deref_mut(),
+        how != Parse::Instant,
+        &mut status,
+    );
+    if let Some(at) = position {
+        *at = ffi::utf16_offset_to_utf8(&units, *at);
+    }
     if how == Parse::Calendar {
         if let Err(stop) = check(req, object, status, "Calendar parsing failed") {
             return or_false(Err(stop));
@@ -1143,7 +1173,7 @@ fn fields(parsed: OrFalse<Parsed>) -> OrFalse<Owner<PhpArray>> {
 }
 
 /// `class IntlDateFormatter`: one `UDateFormat` each, cloned with the
-/// object without the styles php leaves behind; one `new` without a
+/// object and its styles and calendar type; one `new` without a
 /// constructor has none.
 ///
 /// ```php
@@ -1168,8 +1198,8 @@ fn fields(parsed: OrFalse<Parsed>) -> OrFalse<Owner<PhpArray>> {
 /// int(3)
 /// int(1)
 /// string(29) "January 1, 1970 at 12:00 AM"
-/// int(0)
-/// bool(false)
+/// int(1)
+/// int(1)
 /// Cannot clone uninitialized IntlDateFormatter
 /// Found unconstructed IntlDateFormatter
 /// IntlDateFormatter::__construct(): cannot call constructor twice
@@ -1745,6 +1775,35 @@ fn datefmt_format_object(
 /// bool(true)
 /// int(10)
 /// string(10) "Asia/Tokyo"
+/// ```
+///
+/// The offset is in bytes of the UTF-8 text, read into ICU's code units
+/// and written back from them, a match ending inside a surrogate pair
+/// moved to the pair's start; one inside a character is refused and
+/// left as given (php 8.5.12).
+///
+/// ```php
+/// $f = new IntlDateFormatter('en_US', IntlDateFormatter::NONE, IntlDateFormatter::NONE, 'UTC', IntlDateFormatter::GREGORIAN, 'yyyy-MM-dd');
+/// $at = 4;
+/// var_dump(gmdate('Y-m-d', $f->parse("😀2017-10-12 tail", $at)), $at);
+/// $at = 1;
+/// var_dump($f->parse("😀2017-10-12", $at), $at, intl_get_error_message());
+/// $f = new IntlDateFormatter('en_US', IntlDateFormatter::NONE, IntlDateFormatter::NONE, 'UTC', IntlDateFormatter::GREGORIAN, "yyyy-MM-dd\u{1F600}");
+/// $at = 0;
+/// $f->localtime("2017-10-12\u{1F601}", $at);
+/// var_dump($at);
+/// $at = 0;
+/// $f->parseToCalendar("2017-10-12\u{1F601}", $at);
+/// var_dump($at);
+/// ```
+/// ```expect
+/// string(10) "2017-10-12"
+/// int(14)
+/// bool(false)
+/// int(1)
+/// string(70) "IntlDateFormatter::parse(): Invalid UTF-8 offset: U_INVALID_CHAR_FOUND"
+/// int(10)
+/// int(10)
 /// ```
 #[php_function(before_args = error::reset)]
 fn datefmt_parse(

@@ -358,7 +358,7 @@ fn a_loop_on_a_constant_condition_roots_at_its_body() -> Result<(), String> {
 /// Whether php counts each loop of `a()` in `program`, in the order of
 /// their safepoints: whether [`super::header_at`] finds the loop at its
 /// root, which it does where the root is reached from the entry
-/// ([`super::reached`]), as php's CFG finds a header there
+/// ([`super::found`]), as php's CFG finds a header there
 /// (`zend_cfg_identify_loops`).
 fn counted(program: &str) -> Result<Vec<bool>, String> {
     let (recorded, _) = testing::records::recording(&at("a", "enter"), program)?;
@@ -683,15 +683,19 @@ fn recursion_into_the_root_stops_as_a_recursive_call() -> Result<(), String> {
 
 /// A fatal a step raised ends the recording with no record, and the
 /// request records no more: the shutdown function the fatal leaves to
-/// serve is asked with the exclusion clear.
+/// serve is asked with the exclusion clear. The step is a function
+/// declared twice, whose `DECLARE_FUNCTION` raises its fatal where it
+/// stands; the memory limit's is no step's since php 8.5.12, which
+/// records it as a delayed OOM and raises it at the next safepoint
+/// (`zend_mm_delayed_error`, `zend_handle_delayed_oom`,
+/// `Z/Zend/zend_alloc.c`).
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fatal_from_a_step_ends_the_recording_with_no_record() {
-    let mut ini = at("f", "enter");
-    ini.push(("memory_limit", "2M"));
+    let ini = at("f", "enter");
     let (kept, served) = kept(
         &ini,
-        "function f() { $s = 'xxxxxxxx'; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; $s .= $s; return 1; }
+        "function f() { $s = 'xx'; $s .= $s; $s .= $s; if (true) { function g() {} } if (true) { function g() {} } return 1; }
         function down() { echo 'shut'; }
         register_shutdown_function('down');
         echo f();",
@@ -702,7 +706,7 @@ fn a_fatal_from_a_step_ends_the_recording_with_no_record() {
         kept.taken.first().map(|taken| taken.record.dump())
     );
     let fatal = served.fatal.clone().unwrap_or_default();
-    assert!(fatal.contains("Allowed memory size"), "{fatal}");
+    assert!(fatal.contains("Cannot redeclare function g()"), "{fatal}");
     assert!(
         testing::stdout(&served).ends_with("shut"),
         "{}",

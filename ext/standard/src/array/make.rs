@@ -8,10 +8,13 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Passed, Raw, Ref, True, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{numeric_string, to_array};
-use php_ext::raising::{Level, Thrown, argument_error, call_stack_end, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, argument_error, call_stack_end, call_stack_limit, docref, throw_error,
+    value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_random::Rng;
 
 use super::sort::key_value;
@@ -384,12 +387,26 @@ fn replace_flat(
     Ok(())
 }
 
-/// `php_array_replace_recursive`: `src` written over `dest`.
+/// `php_array_replace_recursive`: `src` written over `dest`, each level
+/// asking the stack limit first, as php 8.5.12 asks it
+/// (`Z/ext/standard/array.c:4205`, gh23113):
+///
+/// ```php
+/// $a = [];
+/// for ($i = 0; $i < 30000; $i++) { $a = ['k' => $a]; }
+/// try { array_replace_recursive($a, $a); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect regime=small-stack
+/// Error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
 fn replace_recursive(
     req: &mut Request,
     dest: &mut Owner<PhpArray>,
     src: PhpArray,
 ) -> Result<(), Thrown> {
+    call_stack_limit(req)?;
+    // The floor stands under it, where `-1` sets no limit and php
+    // would run to the thread's end.
     call_stack_end(req)?;
     // `ZEND_HASH_FOREACH_KEY_VAL(src, num_key, string_key, src_entry)`
     // (`Z/ext/standard/array.c:4148`), no owner of the table taken: the
@@ -600,6 +617,30 @@ fn finite(req: &mut Request, position: u32, d: f64) -> Result<f64, Thrown> {
 ///   float(0)
 /// }
 /// ```
+///
+/// Since 8.5.12 the table is laid down for every element and asked for
+/// fallibly: past the memory limit it is refused, and the limit's fatal is
+/// raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(range(1, 1 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 3
+/// ```
+///
+/// A float range, the same:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(range(0.5, 1 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 33570816 bytes) in %s on line 3
+/// ```
 // php's body is one function with its gotos; the arms stay together.
 #[allow(clippy::too_many_lines)]
 #[php_function]
@@ -799,9 +840,8 @@ fn double_range(
     let size = |req: &mut Request, high: f64, low: f64| -> Result<u32, Thrown> {
         let calc = ((high - low) / step) + 1.0;
         if calc >= limit {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 &format!(
                     "The supplied range exceeds the maximum array size by {:.1} elements: start={low:.1}, end={high:.1}, step={step:.1}. Max size: {limit:.0}",
                     calc - limit
@@ -828,7 +868,10 @@ fn double_range(
     } else {
         (1, false)
     };
-    PhpArray::filled(req, |req, out| {
+    let Some(out) = finit_packed(req, size, start > end || end > start)? else {
+        return Ok(Owner::take(req, PhpArray::empty()));
+    };
+    filling(req, out, |req, out| {
         let mut i = 0u32;
         let mut element = start;
         while i < size && if down { element >= end } else { element <= end } {
@@ -847,6 +890,40 @@ fn double_range(
 
 /// `RANGE_CHECK_LONG_INIT_ARRAY` and the fill, over unsigned
 /// arithmetic as php's is.
+/// The array `RANGE_CHECK_DOUBLE_INIT_ARRAY` and
+/// `RANGE_CHECK_LONG_INIT_ARRAY` lay down for a range of `size`:
+/// `array_init_size` and, since 8.5.12, `zend_hash_real_finit_packed`
+/// fallibly, `None` where the memory limit refused the table, which the
+/// native ends on as `RETURN_OOM()` does; a range of one element, where
+/// `ranged` is false, is `array_init`'s.
+fn finit_packed(
+    req: &mut Request,
+    size: u32,
+    ranged: bool,
+) -> Result<Option<Owner<PhpArray>>, Thrown> {
+    if !ranged {
+        return PhpArray::new(req).map(Some);
+    }
+    req.memory_mut()
+        .fallible(|req| PhpArray::sized(req, size, Layout::Packed))
+}
+
+/// `out` as `fill` writes it, given up where a step throws, as
+/// [`PhpArray::filled`] gives up the array it makes.
+fn filling(
+    req: &mut Request,
+    mut out: Owner<PhpArray>,
+    fill: impl FnOnce(&mut Request, &mut Owner<PhpArray>) -> Result<(), Thrown>,
+) -> Result<Owner<PhpArray>, Thrown> {
+    match fill(req, &mut out) {
+        Ok(()) => Ok(out),
+        Err(thrown) => {
+            out.give_up(req);
+            Err(thrown)
+        }
+    }
+}
+
 #[allow(clippy::comparison_chain)]
 fn long_range(
     req: &mut Request,
@@ -858,9 +935,8 @@ fn long_range(
     let size = |req: &mut Request, high: i64, low: i64| -> Result<u64, Thrown> {
         let calc = high.wrapping_sub(low).cast_unsigned() / step;
         if calc >= HT_MAX_SIZE - 1 {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 &format!(
                     "The supplied range exceeds the maximum array size by {} elements: start={low}, end={high}, step={step}. Calculated size: {calc}. Maximum size: {HT_MAX_SIZE}.",
                     calc - (HT_MAX_SIZE - 1)
@@ -886,7 +962,11 @@ fn long_range(
     } else {
         (1, false)
     };
-    PhpArray::filled(req, |req, out| {
+    let laid = u32::try_from(size).unwrap_or(u32::MAX);
+    let Some(out) = finit_packed(req, laid, start != end)? else {
+        return Ok(Owner::take(req, PhpArray::empty()));
+    };
+    filling(req, out, |req, out| {
         for i in 0..size {
             let distance = i.wrapping_mul(step).cast_signed();
             let element = if down {

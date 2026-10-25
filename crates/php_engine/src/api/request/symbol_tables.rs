@@ -214,7 +214,7 @@ impl Request {
     /// eval('$outer = "o"; $main .= "2"; eval(\'$inner = "i"; $outer .= "!"; ini_set("memory_limit", "2M"); str_repeat("x", 4 << 20);\');');
     /// ```
     /// ```expect exit=255
-    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 1
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 1
     /// string(1) "i"
     /// string(2) "o!"
     /// string(2) "m2"
@@ -620,7 +620,7 @@ impl Request {
     }
 
     /// `ZEND_BIND_GLOBAL`'s half over `EG(symbol_table)`
-    /// (`Z/Zend/zend_vm_def.h:8679`): the bucket `name` has, laid down
+    /// (`Z/Zend/zend_vm_def.h:8686`): the bucket `name` has, laid down
     /// holding `null` where the table has none (`zend_hash_lookup`), as
     /// [`Request::symbol_place`] finds it for a write, an `IS_INDIRECT`
     /// bucket followed to the CV of the frame attached to it; what stands

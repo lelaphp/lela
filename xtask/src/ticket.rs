@@ -80,8 +80,10 @@
 //! `--opens <n>` for each ticket filed, repeatable, or `--opens-nothing`,
 //! and a close that names neither is refused before the tracker is asked
 //! anything ([`Successors::named`]). Each successor is fetched and must be
-//! open; one that is closed, missing or unreadable refuses the close with
-//! nothing changed. Whose the successor is is not held, `for-a-person`
+//! open, or closed and filed after the ticket it succeeds, since what the
+//! work filed stays its successor however it ended (#3390); one closed and
+//! filed before, missing or unreadable refuses the close with nothing
+//! changed. Whose the successor is is not held, `for-a-person`
 //! as good as `ready-for-agent`: the bar is that it was filed. Which
 //! track's it is, is held (#141): a ticket carrying no `track:` label is
 //! `main`'s (ADR-0009, CONTEXT.md, Track), so a close of a ticket whose
@@ -118,7 +120,10 @@
 //! every close, so `status --section ticket` tells the two closes apart
 //! from the store alone, and carries the reason in its message; the
 //! closing comment opens with `Withdrawn by` and carries it too, which is
-//! where a person reads it. A withdrawal names what it opened as a close
+//! where a person reads it, and where a later `read` of the closed ticket
+//! reads it back: such a read passes carrying `withdrawn` and the comment,
+//! so a branch that withdrew its own ticket and then landed other work
+//! renews the reading `done` holds it to (#3476). A withdrawal names what it opened as a close
 //! of work does, `--opens` or `--opens-nothing`, since the measurement
 //! may have found the real defect elsewhere, as #167's found #169.
 //!
@@ -400,9 +405,12 @@ impl Successors {
         }
     }
 
-    /// Each successor exists at the tracker, is open, and shares one of
-    /// the tracks of `closed`, the ticket that opens it, where those are
-    /// not `main`'s; the first that is not is the refusal.
+    /// Each successor exists at the tracker, is open or was filed after
+    /// `closed`, the ticket that opens it, and shares one of its tracks,
+    /// where those are not `main`'s; the first that is not is the refusal.
+    /// A successor the work filed stays one however it ended (#3390): the
+    /// tracker numbers issues as it files them, so one closed since and
+    /// numbered after `closed` was filed after it.
     fn held(&self, gh: &Gh, root: &Path, closed: &Issue) -> Result<()> {
         let tracks = &tracks_of(closed.labels.iter().map(|l| l.name.as_str()))[..];
         if let Successors::Tickets(tickets) = self
@@ -421,8 +429,11 @@ impl Successors {
             let issue = gh
                 .view(root, successor)
                 .with_context(|| format!("opens {successor}"))?;
-            if issue.state == State::Closed {
-                bail!("opens {successor}, which is closed; a successor is an open ticket");
+            let succeeds = Ticket::new(closed.number);
+            if issue.state == State::Closed && successor < succeeds {
+                bail!(
+                    "opens {successor}, which is closed and was filed before {succeeds}; a closed successor is one filed after the ticket it succeeds"
+                );
             }
             let Some(first) = first else { continue };
             let its = tracks_of(issue.labels.iter().map(|l| l.name.as_str()));
@@ -1029,6 +1040,34 @@ impl Gh {
             .with_context(|| format!("{ticket} is a pull request, not a ticket"))
     }
 
+    /// What the instrument's withdrawal of `ticket` said after
+    /// [`WITHDRAWN_BY`], the commit, the reason and the boxes, read from
+    /// the last comment of the ticket's that opens with it; none where no
+    /// comment does.
+    fn withdrawal(&self, root: &Path, ticket: Ticket) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct Commented {
+            #[serde(default)]
+            comments: Vec<Comment>,
+        }
+        #[derive(Deserialize)]
+        struct Comment {
+            body: String,
+        }
+        let number = ticket.number().to_string();
+        let text = self
+            .read(root, &["issue", "view", &number, "--json", "comments"])
+            .with_context(|| format!("{ticket}'s comments could not be read from the tracker"))?;
+        let read: Commented = serde_json::from_str(&text)
+            .with_context(|| format!("{ticket}: gh's answer carries no comments"))?;
+        let said = read
+            .comments
+            .into_iter()
+            .rev()
+            .find_map(|comment| Some(comment.body.strip_prefix(WITHDRAWN_BY)?.to_owned()));
+        Ok(said)
+    }
+
     /// What `gh issue view <n>` answers: the issue, or none where `#n` is
     /// a merged pull request, which `gh` answers as well (#3244).
     fn answer(&self, root: &Path, ticket: Ticket) -> Result<Option<Issue>> {
@@ -1324,6 +1363,25 @@ fn judged(
         rows.iter().partition(|row| row.sanctioned.is_none());
     let mut reading = stamped(snapshot, &scope(ticket), session_id)?;
     counted(&mut reading, &criteria, &denied, steered.len(), &act)?;
+    // A read of a ticket the instrument withdrew carries the withdrawal,
+    // read back from the closing comment the close wrote (#3476): its
+    // boxes are unticked by construction, and a reading of them alone
+    // would hold the branch it was withdrawn on once the tree moved on,
+    // with no withdrawal left to take again.
+    if matches!(act, Act::Read)
+        && issue.state == State::Closed
+        && criteria.ticked.is_empty()
+        && let Some(said) = gh.withdrawal(root, ticket)?
+    {
+        reading.count(WITHDRAWN, 1)?;
+        reading.status = Status::Pass;
+        reading.message = format!(
+            "{ticket}: {} of {} criteria ticked; withdrawn at {said}",
+            criteria.ticked.len(),
+            criteria.count()
+        );
+        return Ok(reading);
+    }
     let names = named(&criteria.unticked);
     let boxes = format!(
         "{} of {} criteria ticked",
@@ -1360,10 +1418,7 @@ fn judged(
             format!("{ticket}: {boxes}; closed already, nothing changed at the tracker"),
         ),
         Act::Close(Verdict::Withdrawn(reason), successors, _) => {
-            let comment = format!(
-                "Withdrawn by `xtask ticket close` at {}: {reason}; {boxes}",
-                reading.commit
-            );
+            let comment = format!("{WITHDRAWN_BY}{}: {reason}; {boxes}", reading.commit);
             closing(&successors, &comment, &format!("withdrawn: {reason}; "))
         }
         _ if !criteria.found => (
@@ -1453,9 +1508,13 @@ fn counted(
 
 /// The successors a ready record or a close names, counted.
 const OPENS: &str = "opens";
-/// Whether a close was a withdrawal, 1 or 0: counted on a close alone,
-/// which is how a close's reading is told from a ready record's.
+/// Whether a close was a withdrawal, 1 or 0: counted on a close, which is
+/// how a close's reading is told from a ready record's, and as 1 on a read
+/// of a ticket a close withdrew (#3476).
 const WITHDRAWN: &str = "withdrawn";
+/// How the comment a withdrawal closes its ticket with opens, the commit
+/// it was measured at following: what a later read knows it by.
+const WITHDRAWN_BY: &str = "Withdrawn by `xtask ticket close` at ";
 
 /// A close as its reading says it, read back from the store: what it
 /// opened and whether it withdrew the ticket (#1157).

@@ -14,6 +14,7 @@ use php_unit::decl::{
     Bare, ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility, native_function, parameter,
 };
 
+use super::calls::Retval;
 use super::{Link, Member, MemberAt, Request};
 use crate::api::abi::{
     Entry, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
@@ -304,17 +305,29 @@ impl Request {
         .unwrap_or(Function::PASS)
     }
 
-    /// The property a parent hook trampoline being served names, php's
-    /// `internal_function.reserved[0]`: the call's name `$name::get`
-    /// less its `$` and its hook, beside the property's class, the
-    /// call's scope.
+    /// The property a hook trampoline being served reads or writes,
+    /// php's `internal_function.reserved[0]`, beside the property's
+    /// class, the call's scope.
     fn trampoline_property(&self) -> Option<(Vec<u8>, Option<ClassId>)> {
         let call = self.serving_call()?;
-        let written = call.annex()?.name?;
-        let bytes = written.as_bytes();
-        let name = bytes.strip_prefix(b"$")?;
-        let end = name.iter().rposition(|b| *b == b':')?.checked_sub(1)?;
-        Some((name.get(..end)?.to_vec(), call.called_scope()))
+        let trampoline = call.annex()?.trampoline.as_ref()?;
+        Some((trampoline.property.to_vec(), call.called_scope()))
+    }
+
+    /// `zend_get_property_hook_trampoline(prop_info, kind, name)`'s
+    /// record of `property`: the name the trampoline of `kind` is called
+    /// by, `$name::get` or `$name::set`, made on the request's heap as
+    /// php's `zend_string_concat3` makes it.
+    pub(crate) fn hook_trampoline(
+        &mut self,
+        property: &[u8],
+        kind: HookKind,
+    ) -> Result<crate::exec::HookTrampoline, Thrown> {
+        let name = [b"$", property, b"::", kind.name().as_bytes()].concat();
+        Ok(crate::exec::HookTrampoline {
+            property: property.into(),
+            name: self.string(&name)?,
+        })
     }
 
     /// `zend_is_in_hook`: whether the function running is a hook of the
@@ -377,8 +390,22 @@ impl Request {
         hook: Function,
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        self.call_hook_into(Retval::Native, object, hook, arguments)
+    }
+
+    /// [`Request::call_hook`] whose hook's return, where its body
+    /// returned and then threw, goes where `retval` says: a read's is
+    /// the reading opline's `rv`.
+    fn call_hook_into(
+        &mut self,
+        retval: Retval,
+        object: PhpObject,
+        hook: Function,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
         let held = Owner::take(self, object);
-        let served = self.serve_method_made(hook, Some(object), object.class(), arguments, &[]);
+        let class = object.class();
+        let served = self.serve_method_into(retval, hook, Some(object), class, arguments, &[]);
         held.give_up(self);
         served
     }
@@ -466,7 +493,7 @@ impl Request {
             }
             return self.read_backing(object, name, read);
         }
-        let value = self.call_hook(object, get, &[])?;
+        let value = self.call_hook_into(Retval::Result, object, get, &[])?;
         self.refuse_indirect(object, name, value, read)
     }
 
@@ -876,7 +903,7 @@ fn trampoline_call(
             if wanted == 1 { "" } else { "s" }
         );
         return Err(crate::api::raising::under_name(req, Some(&member), |req| {
-            crate::api::raising::throw_error(req, "ArgumentCountError", &message)
+            crate::api::raising::argument_count_error(req, &message)
         }));
     }
     let Some(this) = req.frames().this() else {
@@ -1620,38 +1647,5 @@ impl Request {
             HookKind::Get => hooked.get,
             HookKind::Set => hooked.set,
         }
-    }
-
-    /// [`crate::api::call::read_raw_property`].
-    pub(crate) fn read_raw(&mut self, object: PhpObject, name: &[u8]) -> Result<Value, Thrown> {
-        match self.row_hooked(object.class(), name) {
-            Some(hooked) if hooked.is_virtual => Err(self.hooked_error(object, name, READ_VIRTUAL)),
-            _ => self.read_backing(object, name, PropertyRead::Warning),
-        }
-    }
-
-    /// [`crate::api::call::write_raw_property`].
-    pub(crate) fn write_raw(
-        &mut self,
-        object: PhpObject,
-        name: Owner<PhpString>,
-        value: Owner<Value>,
-    ) -> Result<(), Thrown> {
-        let Some(hooked) = self.row_hooked(object.class(), name.as_bytes()) else {
-            return self.write_property(object, name, value);
-        };
-        if hooked.is_virtual {
-            let bytes = name.as_bytes().to_vec();
-            value.give_up(self);
-            name.give_up(self);
-            return Err(self.hooked_error(object, &bytes, WRITE_VIRTUAL));
-        }
-        if let Some(placed) = self.declared_slot(object.class(), name.as_bytes())
-            && object.heap().slot(placed.slot).is_undef()
-            && self.lazy_slot(object.heap(), placed.slot)
-        {
-            return self.lazy_write(object, name, value, false);
-        }
-        self.write_std_property(object, name, value)
     }
 }

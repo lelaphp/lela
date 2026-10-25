@@ -96,6 +96,30 @@ impl Heap {
         Ok(block)
     }
 
+    /// `ferealloc(block, len)` and its kin, php 8.5.12's `_ferealloc`
+    /// (`Z/Zend/zend_alloc.c:3086`), where php keeps the block a refused
+    /// growth leaves ("original block is left untouched", 1899): as
+    /// [`Heap::block_resize`], and on the `Err`, the memory limit's
+    /// refusal or its fatal, the block handed back as it stood, for the
+    /// caller to keep or free.
+    #[allow(clippy::needless_pass_by_value, clippy::result_large_err)]
+    pub fn block_try_resize(&mut self, block: Block, len: usize) -> Result<Block, (Block, Fatal)> {
+        let Block { at, len: old } = block;
+        // SAFETY: `at` came from this heap's `block` for `old` bytes and
+        // `block` was its only name, given up above; a reallocation that
+        // fails frees nothing, so `at` still names the `old` bytes then.
+        match unsafe { self.mm.realloc(at, old, len) } {
+            Ok(at) => {
+                let mut block = Block { at, len };
+                if len > old {
+                    block.bytes_mut()[old..].fill(0);
+                }
+                Ok(block)
+            }
+            Err(fatal) => Err((Block { at, len: old }, fatal)),
+        }
+    }
+
     /// `efree(block)`: the bytes back to the bin they came from.
     // Taken by value for the reason `block_resize` is.
     #[allow(clippy::needless_pass_by_value)]
@@ -143,6 +167,31 @@ mod tests {
         let block = heap.block_resize(block, 10).expect("a resized block");
         assert_eq!(&block.bytes()[..4], b"abc\0");
         assert_eq!(heap.memory_usage(false) - start, 16);
+        heap.free_block(block);
+        assert_eq!(heap.memory_usage(false), start);
+    }
+
+    /// A growth the soft limit refuses while the heap is fallible hands
+    /// the block back with its bytes, still counted, and freeing it
+    /// reads back where the heap started.
+    #[test]
+    fn a_refused_growth_hands_the_block_back_as_it_stood() {
+        let _alone = alone();
+        let mut heap = Heap::new();
+        assert!(heap.set_memory_limit(4 << 20));
+        let start = heap.memory_usage(false);
+        let mut block = heap.block(100).expect("a block");
+        block.bytes_mut()[..3].copy_from_slice(b"abc");
+        let was = heap.set_fallible(true);
+        let refused = heap.block_try_resize(block, 64 << 20);
+        heap.set_fallible(was);
+        let Err((block, _)) = refused else {
+            panic!("a growth past the limit was served");
+        };
+        assert!(heap.take_refused());
+        assert_eq!(block.len(), 100);
+        assert_eq!(&block.bytes()[..4], b"abc\0");
+        assert_eq!(heap.memory_usage(false) - start, 112);
         heap.free_block(block);
         assert_eq!(heap.memory_usage(false), start);
     }

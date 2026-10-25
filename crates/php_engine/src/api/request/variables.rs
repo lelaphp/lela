@@ -19,7 +19,7 @@ use php_unit::AutoGlobal;
 
 use super::{Overwrite, Request};
 use crate::api::raising::{Level, Thrown, docref};
-use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, walk};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value, walk};
 use crate::c_number::is_space;
 use crate::engine::Known;
 use crate::exec::TableId;
@@ -301,7 +301,9 @@ impl Request {
                             .is_some_and(|method| method.name().eq_ignore_ascii_case(b"POST"))
                     }) =>
             {
-                let array = PhpArray::new(self)?;
+                // `php_default_treat_data`'s `PARSE_POST`,
+                // `array_init_singleton` (`Z/main/php_variables.c:502`).
+                let array = self.array_singleton()?;
                 self.handle_post(*array, &BodyLimits::default())?;
                 array
             }
@@ -357,7 +359,7 @@ impl Request {
     /// a=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// [{"a":"1"},[],""]
@@ -593,7 +595,8 @@ impl Request {
                 continue;
             }
             let name = self.registered_key(&name)?;
-            let value = match PhpString::new(self, &value) {
+            // `ZVAL_STRINGL_FAST` (`Z/main/php_variables.c:647`).
+            let value = match PhpString::fast(self, &value) {
                 Ok(value) => value,
                 Err(thrown) => {
                     name.give_up(self);
@@ -824,7 +827,7 @@ impl Variables<&mut Request> {
 }
 
 impl Request {
-    /// `php_default_treat_data` (`Z/main/php_variables.c:455`) for the
+    /// `php_default_treat_data` (`Z/main/php_variables.c:487`) for the
     /// query string and the cookie header: a fresh array, and each
     /// variable of `source` registered into it.
     pub(crate) fn treat_data(
@@ -832,7 +835,8 @@ impl Request {
         input: Input,
         source: Option<&[u8]>,
     ) -> Result<Owner<PhpArray>, Thrown> {
-        let array = PhpArray::new(self)?;
+        // `array_init_singleton` (`Z/main/php_variables.c:502`).
+        let array = self.array_singleton()?;
         self.treat_into(input, source, *array, &BodyLimits::default())?;
         Ok(array)
     }
@@ -937,27 +941,106 @@ impl Request {
         let max_input_vars = limits
             .max_input_vars
             .unwrap_or_else(|| self.ini().long(b"max_input_vars"));
-        let mut rest = body;
-        let mut count = 0i64;
-        while !rest.is_empty() {
-            let end = rest.iter().position(|b| *b == b'&').unwrap_or(rest.len());
-            let var = &rest[..end];
-            rest = rest.get(end + 1..).unwrap_or_default();
-            let (name, value) = match var.iter().position(|b| *b == b'=') {
-                Some(eq) => (&var[..eq], url_decode(&var[eq + 1..], true)),
-                None => (var, Vec::new()),
-            };
-            let name = url_decode(name, true);
-            if let Some(value) = self.filter_input(Input::Post, &name, &value)? {
-                self.register_in(into, &name, value, false)?;
+        // `php_std_post_handler` at 8.5.12 (`Z/main/php_variables.c:436`):
+        // the body read `BUFSIZ` at a time into a smart_str on the
+        // request's heap, the variables complete in it registered after
+        // each read and the rest kept for the next, the last one at the
+        // end; once the memory limit is met nothing more is registered.
+        let mut held = SmartStr::default();
+        let mut vars = PostVars {
+            count: 0,
+            max_input_vars,
+        };
+        let step = usize::try_from(crate::layer::BUFSIZ).unwrap_or(8192);
+        let parsed = (|| {
+            let mut appended = false;
+            for chunk in body.chunks(step) {
+                held.append(self, chunk)?;
+                appended = true;
+                if self.has_oom() || !self.add_post_vars_held(into, &mut held, &mut vars, false)? {
+                    return Ok(());
+                }
+                if chunk.len() != step {
+                    break;
+                }
             }
-            count += 1;
-            if count > max_input_vars {
-                too_many_vars(self, max_input_vars);
+            if appended {
+                self.add_post_vars_held(into, &mut held, &mut vars, true)?;
+            }
+            Ok(())
+        })();
+        held.free(self);
+        parsed
+    }
+
+    /// `add_post_vars` (`Z/main/php_variables.c:415` at 8.5.12) over what
+    /// the handler holds: each variable an `&` ends registered by
+    /// `add_post_var`, the one the body ends with too at `eof`, and what
+    /// is left kept at the front for the next read; `false`, php's
+    /// `FAILURE`, past `max_input_vars` or once the memory limit was met.
+    fn add_post_vars_held(
+        &mut self,
+        into: PhpArray,
+        held: &mut SmartStr,
+        vars: &mut PostVars,
+        eof: bool,
+    ) -> Result<bool, Thrown> {
+        let mut at = 0;
+        loop {
+            let bytes = held.as_bytes();
+            if at >= bytes.len() {
                 break;
             }
+            let end = match bytes[at..].iter().position(|b| *b == b'&') {
+                Some(amp) => at + amp,
+                None if eof => bytes.len(),
+                None => break,
+            };
+            let var = bytes[at..end].to_vec();
+            at = end + usize::from(end != bytes.len());
+            if !self.add_post_var(into, &var)? {
+                return Ok(false);
+            }
+            vars.count += 1;
+            if vars.count > vars.max_input_vars {
+                too_many_vars(self, vars.max_input_vars);
+                return Ok(false);
+            }
+            if self.has_oom() {
+                return Ok(false);
+            }
         }
-        Ok(())
+        if self.has_oom() {
+            return Ok(false);
+        }
+        if !eof {
+            held.remove(0..at);
+        }
+        Ok(true)
+    }
+
+    /// `add_post_var`'s one variable: the name and the value each
+    /// `php_url_decode`d, handed to the input filter and registered;
+    /// `false` once the memory limit was met, at the value's own copy on
+    /// the heap (`val = estrndup(...)`) or after it was registered.
+    fn add_post_var(&mut self, into: PhpArray, var: &[u8]) -> Result<bool, Thrown> {
+        let (name, raw) = match var.iter().position(|b| *b == b'=') {
+            Some(eq) => (&var[..eq], &var[eq + 1..]),
+            None => (var, &[][..]),
+        };
+        let name = url_decode(name, true);
+        let copy = PhpString::new(self, raw)?;
+        if self.has_oom() {
+            copy.give_up(self);
+            return Ok(false);
+        }
+        let value = url_decode(raw, true);
+        let filtered = self.filter_input(Input::Post, &name, &value);
+        copy.give_up(self);
+        if let Some(value) = filtered? {
+            self.register_in(into, &name, value, false)?;
+        }
+        Ok(!self.has_oom())
     }
 
     /// `sapi_module.treat_data` where an extension registered one
@@ -1000,7 +1083,9 @@ impl Request {
         let shared = std::sync::Arc::clone(&self.shared);
         match shared.supplied.input_filter.entry() {
             Some((by, hook)) => self.serve_for(by, |req| hook(req, input, name, value)),
-            None => Ok(Some(PhpString::new(self, value)?.into_value())),
+            // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`
+            // (`Z/main/php_variables.c:47`).
+            None => Ok(Some(PhpString::fast(self, value)?.into_value())),
         }
     }
 
@@ -1033,24 +1118,28 @@ impl Request {
     /// array's from here, and so is each key the walk makes.
     ///
     /// A plain name is `php_register_variable_quick`'s, and a bracketed
-    /// name's containers are `zend_symtable_str_update_ind`'s, each a
-    /// string of its own whatever its length:
+    /// name's containers are `zend_symtable_str_update_ind`'s, each key a
+    /// string of its own whatever its length, and each container an
+    /// `array_init_singleton`, room for one element that doubles as it
+    /// fills:
     ///
     /// ```php
-    /// foreach (['x=1', 'xy=1', 'x[a]=1', 'xy[a]=1', 'x[ab]=1', 'xy[ab]=1', 'x[a][b]=1', '1[a]=1', 'x[1]=1'] as $q) {
+    /// foreach (['x=1', 'xy=1', 'x[a]=1', 'xy[a]=1', 'x[ab]=1', 'xy[ab]=1', 'x[a][b]=1', '1[a]=1', 'x[1]=1', 'x[]=1&x[]=2&x[]=3', 'x[a]=1&x[b]=2&x[c]=3'] as $q) {
     ///     $m = memory_get_usage(); parse_str($q, $r); $n = memory_get_usage() - $m; unset($r); echo $q, " ", $n, "\n";
     /// }
     /// ```
     /// ```expect regime=jit-off
     /// x=1 408
-    /// xy=1 440
-    /// x[a]=1 816
-    /// xy[a]=1 816
-    /// x[ab]=1 848
-    /// xy[ab]=1 848
-    /// x[a][b]=1 1224
-    /// 1[a]=1 624
-    /// x[1]=1 656
+    /// xy=1 448
+    /// x[a]=1 536
+    /// xy[a]=1 536
+    /// x[ab]=1 576
+    /// xy[ab]=1 576
+    /// x[a][b]=1 664
+    /// 1[a]=1 344
+    /// x[1]=1 536
+    /// x[]=1&x[]=2&x[]=3 576
+    /// x[a]=1&x[b]=2&x[c]=3 656
     /// ```
     pub(crate) fn register_in(
         &mut self,
@@ -1150,6 +1239,11 @@ impl Request {
                 unset?;
                 return Ok(Walked::TooDeep(max_nesting));
             }
+            // Each level holds an array, so the walk stops once the memory
+            // limit was met (`Z/main/php_variables.c:222` at 8.5.12).
+            if self.has_oom() {
+                return Ok(Walked::Dropped);
+            }
             ip += 1;
             let index_s = ip;
             if var.get(ip).is_some_and(|c| is_space(*c)) {
@@ -1208,8 +1302,10 @@ impl Request {
         key: Option<Owner<Key>>,
     ) -> Result<Option<Owner<Key>>, Thrown> {
         let mut parent = descend(track, path);
+        // Each container `array_init_singleton`'s
+        // (`Z/main/php_variables.c:260`, `:277`, `:285`).
         let Some(key) = key else {
-            let fresh = PhpArray::new(self)?;
+            let fresh = self.array_singleton()?;
             if !parent.try_append(self, fresh.into_value())? {
                 return Ok(None);
             }
@@ -1217,7 +1313,7 @@ impl Request {
             return Ok(last.map(|key| Owner::take(self, key)));
         };
         if parent.get(&key).is_none_or(|v| v.as_array().is_none()) {
-            let fresh = match PhpArray::new(self) {
+            let fresh = match self.array_singleton() {
                 Ok(fresh) => fresh,
                 Err(thrown) => {
                     key.give_up(self);
@@ -1275,7 +1371,8 @@ enum Walked {
     /// Written at this index of the last container entered, appended
     /// for `None`.
     At(Option<Vec<u8>>),
-    /// Dropped: a forbidden name, or a next index already taken.
+    /// Dropped: a forbidden name, a next index already taken, or a level
+    /// entered once the memory limit was met.
     Dropped,
     /// Nested past `max_input_nesting_level`, the top-level name unset.
     TooDeep(i64),
@@ -1376,6 +1473,13 @@ impl HttpGlobals {
             AutoGlobal::Request | AutoGlobal::Session => None,
         }
     }
+}
+
+/// What `add_post_vars` counts across the handler's reads, php's
+/// `post_var_data_t.cnt`, and the most it lets through.
+struct PostVars {
+    count: i64,
+    max_input_vars: i64,
 }
 
 /// php's warning where a request's input holds more variables than

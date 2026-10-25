@@ -13,13 +13,15 @@ use std::sync::atomic::Ordering;
 use crate::api::call::{ClassNative, Function};
 use crate::api::raising::Thrown;
 use crate::api::values::{
-    ClassId, ClosureInfo, Owner, PhpObject, PhpString, Value, ValueRef, adopted,
+    ClassId, ClosureInfo, Owner, PhpObject, PhpRef, PhpString, Value, ValueRef, adopted,
 };
 use crate::engine::{MethodAt, NativeMethod};
 use crate::exec;
 use crate::observer::OnThrow;
 use crate::trampoline::CallTrampoline;
 use php_heap::FrameRef;
+use php_unit::decl::HookKind;
+use php_unit::{Opcode, OperandKind};
 
 use super::Code;
 use super::Symbols;
@@ -51,6 +53,44 @@ pub(super) struct Calls {
     trace: Option<Vec<crate::trace::Entered>>,
 }
 
+/// What a call carries beyond its function and arguments, never two of
+/// them at once: the closure it serves (`ZEND_CALL_CLOSURE`), or the
+/// property a hook trampoline reads or writes, of the hook of `kind`
+/// (`zend_get_property_hook_trampoline`'s `reserved[0]`).
+#[derive(Clone, Copy)]
+enum Carried<'a> {
+    Nothing,
+    Closure(PhpObject),
+    HookTrampoline(&'a [u8], HookKind),
+}
+
+/// The function a call serves, the object it runs on and the class
+/// `static` names in it: `zend_fcall_info_cache`'s `function_handler`,
+/// `object` and `called_scope`.
+#[derive(Clone, Copy)]
+struct Callee {
+    function: Function,
+    this: Option<PhpObject>,
+    called_scope: Option<ClassId>,
+}
+
+/// Where a user callee's return goes when its body returned and then
+/// threw, from a local's destructor at its end: php's `retval` pointer,
+/// which `zend_call_function` writes and its caller frees.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Retval {
+    /// A buffer of the caller's own, `zval retval` on a native's stack,
+    /// which the native gives up as it meets `EG(exception)`: given up
+    /// with the `Err`.
+    Native,
+    /// The `result` temporary of the opline the calling frame stands at,
+    /// `zend_std_read_property`'s `rv`, which is `FETCH_OBJ_R`'s and
+    /// `FETCH_OBJ_IS`'s `EX_VAR(opline->result.var)`: written there, for
+    /// `ZEND_HANDLE_EXCEPTION` to free after the opline's operands
+    /// (`free_throwing_result`).
+    Result,
+}
+
 impl Request {
     /// `zend_call_function` over a native method: the call frame pushed
     /// as `INIT_METHOD_CALL` and the `SEND_*` oplines would push it, the
@@ -80,14 +120,80 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
-        self.serve_call(
+        self.serve_method_into(
+            Retval::Native,
             function,
             this,
-            Some(called_scope),
-            None,
+            called_scope,
             arguments,
             extra_named,
         )
+    }
+
+    /// [`Request::serve_method_made`] whose callee's return, where its
+    /// body returned and then threw, goes where `retval` says: a property
+    /// read's `get` hook and `__get` write it to the reading opline's
+    /// `result` temporary, as `zend_std_read_property` hands them `rv`.
+    pub(crate) fn serve_method_into(
+        &mut self,
+        retval: Retval,
+        function: Function,
+        this: Option<PhpObject>,
+        called_scope: ClassId,
+        arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
+    ) -> Result<Value, Thrown> {
+        self.serve_call(
+            Callee {
+                function,
+                this,
+                called_scope: Some(called_scope),
+            },
+            Carried::Nothing,
+            retval,
+            arguments,
+            extra_named,
+        )
+    }
+
+    /// `zend_call_known_instance_method` over
+    /// `zend_get_property_hook_trampoline(prop_info, kind, name)`, which
+    /// `ReflectionProperty::getRawValue` and `setRawValue` call over a
+    /// property with a hook of `kind`: the trampoline named `$name::get`
+    /// or `$name::set` and scoped to `scope`, `prop_info->ce`, served on
+    /// `object` with no hold of the call's own, so the read or write it
+    /// makes finds it running and reaches the backing store, and what
+    /// it throws has the trampoline's frame on its trace.
+    pub(crate) fn serve_hook_trampoline(
+        &mut self,
+        object: PhpObject,
+        scope: ClassId,
+        name: &[u8],
+        kind: HookKind,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        let function = self.parent_hook_trampoline(kind);
+        let carried = Carried::HookTrampoline(name, kind);
+        self.serve_call(
+            Callee {
+                function,
+                this: Some(object),
+                called_scope: Some(scope),
+            },
+            carried,
+            Retval::Native,
+            arguments,
+            &[],
+        )
+    }
+
+    /// The trampoline's record on `call`, given up where the call has no
+    /// annex to hold it.
+    pub(crate) fn carry_trampoline(&mut self, call: FrameRef, built: exec::HookTrampoline) {
+        match self.annex_mut(call) {
+            Some(annex) => annex.trampoline = Some(built),
+            None => self.release(Value::string(built.name)),
+        }
     }
 
     /// `zend_call_known_fcc` over a `Closure`, which is what
@@ -128,10 +234,13 @@ impl Request {
             ));
         };
         self.serve_call(
-            closure.function,
-            closure.this,
-            closure.called_scope,
-            Some(object),
+            Callee {
+                function: closure.function,
+                this: closure.this,
+                called_scope: closure.called_scope,
+            },
+            Carried::Closure(object),
+            Retval::Native,
             arguments,
             extra_named,
         )
@@ -181,10 +290,13 @@ impl Request {
             (payload.info.scope.replace(scope), cache)
         });
         let served = self.serve_call(
-            closure.function,
-            Some(this),
-            Some(scope),
-            Some(object),
+            Callee {
+                function: closure.function,
+                this: Some(this),
+                called_scope: Some(scope),
+            },
+            Carried::Closure(object),
+            Retval::Native,
             arguments,
             extra_named,
         );
@@ -280,7 +392,17 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
-        self.serve_call(function, None, None, None, arguments, extra_named)
+        self.serve_call(
+            Callee {
+                function,
+                this: None,
+                called_scope: None,
+            },
+            Carried::Nothing,
+            Retval::Native,
+            arguments,
+            extra_named,
+        )
     }
 
     /// `zend_call_function` (`Z/Zend/zend_execute_API.c:806`), which every
@@ -300,38 +422,65 @@ impl Request {
     /// ```
     fn serve_call(
         &mut self,
-        function: Function,
-        this: Option<PhpObject>,
-        called_scope: Option<ClassId>,
-        closure: Option<PhpObject>,
+        target: Callee,
+        carried: Carried<'_>,
+        retval: Retval,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        // `if (ZEND_HAS_OOM()) { zend_handle_delayed_oom(); return FAILURE; }`
+        // (`Z/Zend/zend_execute_API.c:838` at 8.5.12): no call once the
+        // memory limit was met, its fatal raised here if no safepoint has.
+        if self.has_oom() {
+            self.handle_delayed_oom();
+            return Ok(Value::null());
+        }
         // `EG(fake_scope) = NULL` for the call and put back after it: a
         // destructor or a `__toString` a scoped write serves stands in its
         // own scope.
         self.in_fake_scope(None, |req| {
-            req.serve_call_body(
+            req.serve_call_body(target, carried, retval, arguments, extra_named)
+        })
+    }
+
+    /// A native function served where php calls its C directly rather
+    /// than through `zend_call_function`, as phpdbg's `ev` calls
+    /// `zend_print_zval_r`: [`Request::serve_function`] past the memory
+    /// limit's refusal of every call once it was met, so what such a
+    /// call renders is rendered for the rest of the request.
+    pub(crate) fn serve_function_from_c(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        self.in_fake_scope(None, |req| {
+            let target = Callee {
                 function,
-                this,
-                called_scope,
-                closure,
-                arguments,
-                extra_named,
-            )
+                this: None,
+                called_scope: None,
+            };
+            req.serve_call_body(target, Carried::Nothing, Retval::Native, arguments, &[])
         })
     }
 
     /// [`Request::serve_call`] with no scope a write named standing.
     fn serve_call_body(
         &mut self,
-        function: Function,
-        this: Option<PhpObject>,
-        called_scope: Option<ClassId>,
-        closure: Option<PhpObject>,
+        target: Callee,
+        carried: Carried<'_>,
+        retval: Retval,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        let Callee {
+            function,
+            this,
+            called_scope,
+        } = target;
+        let closure = match carried {
+            Carried::Closure(closure) => Some(closure),
+            Carried::Nothing | Carried::HookTrampoline(..) => None,
+        };
         // `if (EG(exception)) return SUCCESS;`: no call while one is pending.
         if self.pending().is_some() {
             return Ok(Value::null());
@@ -341,34 +490,21 @@ impl Request {
         let caller = self
             .current_user_frame()
             .map_or(exec::Caller::Outside, exec::Caller::Loop);
-        // `zend_call_function`: the deprecation before the arguments
-        // are placed, and no call where a handler threw.
+        // `zend_call_function`: the deprecation before the arguments are
+        // placed, and no call where a handler threw. php raises it with
+        // the call pushed but not yet `EG(current_execute_data)`, so a
+        // handler's backtrace and its file and line are the caller's;
+        // here a pushed call is on the chain a backtrace reads, so the
+        // deprecation and the warnings below are raised before the push.
         if self.function_flags(function).deprecated {
             crate::attributes::deprecated_function(self, function)?;
         }
-        let wrapped = self.values_for_references(function, arguments)?;
-        let via_trampoline = self.via_trampoline(function);
-        let mut sent = arguments.to_vec();
-        for (at, argument) in sent.iter_mut().enumerate() {
-            // A reference handed to a parameter taking a value is
-            // followed, "don't separate references for __call" but for a
-            // trampoline, which takes it as it is.
-            if !via_trampoline
-                && argument.as_php_ref().is_some()
-                && !self
-                    .arg_send_mode(function, u32::try_from(at + 1).unwrap_or(u32::MAX))
-                    .0
-            {
-                *argument = argument.deref();
-            }
-            self.addref(argument);
-            if wrapped.contains(&at) {
-                // `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`: the
-                // owner just taken is the new cell's, and the frame
-                // holds the cell.
-                *argument = self.reference(*argument)?.as_value();
-            }
-        }
+        let wrapped = self.wrapped_positions(function, arguments);
+        let prepared = if wrapped.is_empty() {
+            None
+        } else {
+            Some(self.prepare_arguments(function, arguments, &wrapped)?)
+        };
         for (extra, value) in extra_named {
             self.addref(&Value::string(*extra));
             self.addref(value);
@@ -377,13 +513,14 @@ impl Request {
         // `ZEND_CALL_RELEASE_THIS`, the caller keeping the object.
         let receiver = this.map(exec::Receiver::lent);
         // `ZEND_CALL_MAY_HAVE_UNDEF`: a named argument skipped a slot.
-        let may_have_undef = sent
+        let may_have_undef = arguments
             .iter()
             .any(|argument| matches!(argument.as_ref(), ValueRef::Undef));
         // `zend_call_function` names the callee by
         // `func->common.function_name`, which the function carries; no
-        // constant spelled it, so the call carries no name of its own
-        // and interns none into the request's memory.
+        // constant spelled it, so the call interns no name into the
+        // request's memory. A hook trampoline's name is the one php builds
+        // with the trampoline, laid below once the call stands.
         let extra_named = exec::ExtraNamed::laid(self, extra_named.to_vec())?;
         // `GC_ADDREF(ZEND_CLOSURE_OBJECT(func))` with `ZEND_CALL_CLOSURE`,
         // once the arguments are placed: the call's own owner of the
@@ -391,11 +528,11 @@ impl Request {
         if let Some(closure) = closure {
             self.addref(&closure.as_value());
         }
-        // `zend_vm_stack_push_call_frame`, the arguments copied into its
-        // slots, the call served from here (`EG(current_execute_data)`
-        // is it while an undefined argument's default is found).
+        // `zend_vm_stack_push_call_frame`, the call served from here
+        // (`EG(current_execute_data)` is it while an undefined argument's
+        // default is found).
         let mut header =
-            exec::Header::call(function, u32::try_from(sent.len()).unwrap_or(u32::MAX));
+            exec::Header::call(function, u32::try_from(arguments.len()).unwrap_or(u32::MAX));
         header.set_receiver(receiver);
         header.set_called_scope(called_scope);
         header.closure = closure;
@@ -403,42 +540,53 @@ impl Request {
         let call = match self.push_call(header) {
             Ok(call) => call,
             Err(fatal) => {
-                for argument in sent {
+                for argument in prepared.into_iter().flatten() {
                     self.release(argument);
                 }
-                self.release_named(extra_named);
-                if let Some(receiver) = receiver {
-                    self.give_up_receiver(receiver);
-                }
-                if let Some(closure) = closure {
-                    self.release(closure.as_value());
-                }
+                self.give_up_unpushed(extra_named, receiver, closure);
                 return self.fatal_of(Err(fatal));
             }
         };
-        if let Some(frame) = self.vm.stack.frame_mut(call) {
-            for (slot, argument) in frame.slots_mut().iter_mut().zip(sent) {
-                *slot = argument.to_zval();
-            }
-        }
         if extra_named.carries_any()
             && let Some(annex) = self.annex_mut(call)
         {
             annex.extra_named = extra_named;
         }
+        self.place_arguments(call, function, arguments, prepared);
+        // The trampoline's record, made once its call stands, where php
+        // makes it before the call (`zend_get_property_hook_trampoline`):
+        // only the memory limit could tell the two orders apart, and its
+        // fatal ends the request either way.
+        if let Carried::HookTrampoline(property, kind) = carried {
+            match self.hook_trampoline(property, kind) {
+                Ok(built) => self.carry_trampoline(call, built),
+                Err(thrown) => {
+                    self.pop_call();
+                    return Err(thrown);
+                }
+            }
+        }
         if may_have_undef && let Err(thrown) = crate::api::call::handle_undef_args(self, call) {
             self.pop_call();
             return Err(thrown);
         }
-        let function = match crate::trampoline::hand_to_magic(self, function) {
-            Ok(function) => function,
-            Err(thrown) => {
-                self.pop_call();
-                return Err(thrown);
+        // A user function is no trampoline, so it is served as itself;
+        // a trampoline hands its call to the magic method it stands for.
+        let user = self.user_function(function).is_some();
+        let function = if user {
+            function
+        } else {
+            match crate::trampoline::hand_to_magic(self, function) {
+                Ok(function) => function,
+                Err(thrown) => {
+                    self.pop_call();
+                    return Err(thrown);
+                }
             }
         };
-        if self.user_function(function).is_some() {
-            return self.serve_user(call, caller);
+        if user || self.user_function(function).is_some() {
+            let served = self.serve_user(call, caller, retval);
+            return self.checked_after_call(served);
         }
         // `zend_call_function` ends an observed native with `fci->retval`
         // whether it threw or not (`Z/Zend/zend_execute_API.c:1039`).
@@ -447,11 +595,170 @@ impl Request {
         self.checked_after_call(served)
     }
 
-    /// `zend_call_function`'s check after a native returns
-    /// (`Z/Zend/zend_execute_API.c:1051-1059`): php tests the interrupt
+    /// `zend_call_function`'s walk of `fci->params`
+    /// (`Z/Zend/zend_execute_API.c:898-944`) where an argument is to be
+    /// wrapped: each argument in turn followed where its parameter takes
+    /// a value ("don't separate references for __call" but for a
+    /// trampoline), one owner taken, and each position of `wrapped`
+    /// warned of (`zend_param_must_be_ref`) and given a reference of its
+    /// own, `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`, before the
+    /// next is reached. So the second argument's warning is raised with
+    /// the first one's cell made, 32 bytes, as php raises it:
+    ///
+    /// ```php
+    /// function f(&$a, &$b) { return 'f'; }
+    /// $seen = array_fill(0, 2, 0); $i = 0;
+    /// set_error_handler(function () use (&$seen, &$i) { $seen[$i++] = memory_get_usage(); return true; });
+    /// array_map('f', [1], [2]);
+    /// echo $seen[1] - $seen[0], "\n";
+    /// ```
+    /// ```expect
+    /// 32
+    /// ```
+    ///
+    /// A warning a handler turned into a throw stops the walk there, as
+    /// php's `cleanup_args` does, and a cell the memory limit refuses is
+    /// the fatal, each with what was taken before it given up.
+    fn prepare_arguments(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+        wrapped: &[usize],
+    ) -> Result<Vec<Value>, Thrown> {
+        let mut prepared = Vec::with_capacity(arguments.len());
+        let walked = self.walk_wrapped(function, arguments, wrapped, &mut prepared);
+        if walked.is_err() {
+            for argument in prepared.drain(..) {
+                self.release(argument);
+            }
+        }
+        walked.map(|()| prepared)
+    }
+
+    /// [`Request::prepare_arguments`]'s walk, each argument it took pushed
+    /// onto `prepared`.
+    fn walk_wrapped(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+        wrapped: &[usize],
+        prepared: &mut Vec<Value>,
+    ) -> Result<(), Thrown> {
+        for (at, argument) in arguments.iter().enumerate() {
+            let mut argument = self.followed(function, at, *argument);
+            let wrap = wrapped.contains(&at);
+            if wrap {
+                self.param_must_be_ref(function, u32::try_from(at + 1).unwrap_or(u32::MAX));
+                if self.is_pending() {
+                    return Err(Thrown::of(self.take_pending_view()));
+                }
+            }
+            self.addref(&argument);
+            if wrap {
+                // The owner just taken is the new cell's, and the call
+                // holds the cell.
+                match self.heap.reference(argument.into_zval()) {
+                    Ok(made) => argument = PhpRef::of(made).as_value(),
+                    Err(fatal) => {
+                        self.release(argument);
+                        return self.fatal_of(Err(fatal));
+                    }
+                }
+            }
+            prepared.push(argument);
+        }
+        Ok(())
+    }
+
+    /// `argument` at `at` as `zend_call_function` copies it: followed
+    /// where it is a reference handed to a parameter taking a value,
+    /// "don't separate references for __call" but for a trampoline,
+    /// which takes it as it is.
+    fn followed(&self, function: Function, at: usize, argument: Value) -> Value {
+        if !self.via_trampoline(function)
+            && argument.as_php_ref().is_some()
+            && !self
+                .arg_send_mode(function, u32::try_from(at + 1).unwrap_or(u32::MAX))
+                .0
+        {
+            return argument.deref();
+        }
+        argument
+    }
+
+    /// The arguments copied into the slots of the call `call`, which
+    /// stands: those [`Request::prepare_arguments`] made, moved, where an
+    /// argument was wrapped; otherwise each followed ([`Request::followed`])
+    /// and copied, `ZVAL_COPY(param, arg)`. The slots are the frame's, so
+    /// a callback's arguments are copied once and no list of them is made
+    /// beside it; a user function that takes nothing by reference, the
+    /// callback nearly every native serves, finds the frame's slots once.
+    fn place_arguments(
+        &mut self,
+        call: FrameRef,
+        function: Function,
+        arguments: &[Value],
+        prepared: Option<Vec<Value>>,
+    ) {
+        if let Some(prepared) = prepared {
+            if let Some(frame) = self.vm.stack.frame_mut(call) {
+                for (slot, argument) in frame.slots_mut().iter_mut().zip(prepared) {
+                    *slot = argument.into_zval();
+                }
+            }
+            return;
+        }
+        if self.takes_nothing_by_ref(function) {
+            let heap = &self.heap;
+            if let Some(frame) = self.vm.stack.frame_mut(call) {
+                for (slot, argument) in frame.slots_mut().iter_mut().zip(arguments) {
+                    let argument = argument.deref().to_zval();
+                    heap.addref(argument);
+                    *slot = argument;
+                }
+            }
+            return;
+        }
+        for (at, argument) in arguments.iter().enumerate() {
+            let argument = self.followed(function, at, *argument);
+            self.addref(&argument);
+            let slot =
+                (self.vm.stack.frame_mut(call)).and_then(|frame| frame.slots_mut().get_mut(at));
+            if let Some(slot) = slot {
+                *slot = argument.to_zval();
+            }
+        }
+    }
+
+    /// What [`Request::serve_call_body`] took for a call whose frame
+    /// `zend_vm_stack_push_call_frame` refused, given back: the extra
+    /// named arguments, the receiver and the closure; the arguments a
+    /// wrap prepared are given up by the caller, and the others are
+    /// placed only once the call stands ([`Request::place_arguments`]).
+    fn give_up_unpushed(
+        &mut self,
+        extra_named: exec::ExtraNamed,
+        receiver: Option<exec::Receiver>,
+        closure: Option<PhpObject>,
+    ) {
+        self.release_named(extra_named);
+        if let Some(receiver) = receiver {
+            self.give_up_receiver(receiver);
+        }
+        if let Some(closure) = closure {
+            self.release(closure.as_value());
+        }
+    }
+
+    /// `zend_call_function`'s check after its callee returns, a native
+    /// or, from php-8.5.12, a user function
+    /// (`Z/Zend/zend_execute_API.c:1081-1091`): php tests the interrupt
     /// while running user code but not inside a native, so a native a
     /// native called (`array_map('time_nanosleep', ..)`) is where an
-    /// interrupt raised during it is taken. The timer's is the fatal;
+    /// interrupt raised during it is taken, and a user callback's
+    /// `return` is no site of its own, so an interrupt raised after the
+    /// callback's last check is taken here, before the native that
+    /// called it goes on. The timer's is the fatal;
     /// otherwise the extensions' hooks, and what they throw is what the
     /// call hands back. A native that threw leaves the interrupt for the
     /// next site, as the loop's own check after a call does.
@@ -482,13 +789,45 @@ impl Request {
     /// ```expect process
     /// thrown by the handler
     /// ```
+    ///
+    /// Here pcntl blocks signals while it serves `SIGUSR1`, so the
+    /// `SIGUSR2` its handler sends lands as that dispatch ends, after the
+    /// callback's last check; the check after the callback returns serves
+    /// it before `usort` raises its deprecation for the `bool` the
+    /// callback gave back:
+    ///
+    /// ```php
+    /// pcntl_async_signals(true);
+    /// pcntl_signal(SIGUSR1, function () { echo "usr1\n"; posix_kill(posix_getpid(), SIGUSR2); });
+    /// pcntl_signal(SIGUSR2, function () { echo "usr2\n"; });
+    /// $a = [2, 1];
+    /// usort($a, function ($x, $y) { posix_kill(posix_getpid(), SIGUSR1); return $x > $y; });
+    /// echo "after\n";
+    /// ```
+    /// ```expect
+    /// usr1
+    /// usr2
+    ///
+    /// Deprecated: usort(): Returning bool from comparison function is deprecated, return an integer less than, equal to, or greater than zero in %s on line 6
+    /// after
+    /// ```
+    #[inline(always)] // one load and a branch on every callback's return
     fn checked_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
+        if !self.limits().interrupt().raised().load(Ordering::Relaxed) {
+            return served;
+        }
+        self.interrupted_after_call(served)
+    }
+
+    /// [`Request::checked_after_call`] past its load, where the interrupt
+    /// is raised: what the callee served handed on as it stands where it
+    /// threw, and otherwise the check's answer over it.
+    #[cold]
+    #[inline(never)]
+    fn interrupted_after_call(&mut self, served: Result<Value, Thrown>) -> Result<Value, Thrown> {
         let Ok(value) = served else {
             return served;
         };
-        if !self.limits().interrupt().raised().load(Ordering::Relaxed) {
-            return Ok(value);
-        }
         match crate::interrupt::interrupted(self) {
             Ok(false) => Ok(value),
             Ok(true) => {
@@ -502,17 +841,17 @@ impl Request {
         }
     }
 
-    /// `zend_call_function`'s walk of `fci->params`
-    /// (`Z/Zend/zend_execute_API.c:883-902`) over the by-reference
-    /// parameters: an argument that is no reference, handed to a
-    /// parameter `ARG_SHOULD_BE_SENT_BY_REF` and not
-    /// `ARG_MAY_BE_SENT_BY_REF`, is `zend_param_must_be_ref`'s warning,
-    /// and the call goes on with the value wrapped in a reference of its
-    /// own, so what the callee writes through it is lost. The positions
-    /// to wrap come back; a warning a handler turned into a throw stops
-    /// the call before it is made, as php's `cleanup_args` does, and is
-    /// the `Err`. The parameter is named where it is one of the declared
-    /// ones, `get_function_arg_name`, and a variadic's is not.
+    /// The positions of `arguments` that `zend_call_function`'s walk of
+    /// `fci->params` (`Z/Zend/zend_execute_API.c:898-944`) wraps in a
+    /// reference of their own: an argument that is no reference, handed
+    /// to a parameter `ARG_SHOULD_BE_SENT_BY_REF` and not
+    /// `ARG_MAY_BE_SENT_BY_REF`, which is `zend_param_must_be_ref`'s
+    /// warning as the walk reaches it ([`Request::place_arguments`]), and
+    /// the call goes on with the value wrapped, so what the callee writes
+    /// through it is lost; a warning a handler turned into a throw stops
+    /// the call there, as php's `cleanup_args` does. The parameter is
+    /// named where it is one of the declared ones,
+    /// `get_function_arg_name`, and a variadic's is not.
     ///
     /// ```php
     /// function f(&$v) { $v = 1; return 'f'; }
@@ -534,16 +873,15 @@ impl Request {
     /// }
     /// string(1) "m"
     /// ```
-    fn values_for_references(
-        &mut self,
-        function: Function,
-        arguments: &[Value],
-    ) -> Result<Vec<usize>, Thrown> {
+    fn wrapped_positions(&self, function: Function, arguments: &[Value]) -> Vec<usize> {
+        if self.takes_nothing_by_ref(function) {
+            return Vec::new();
+        }
         let Some(decl) = self.symbols().function_decl(function) else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
         let variadic = decl.parameters.last().filter(|last| last.variadic);
-        let wrapped: Vec<usize> = arguments
+        arguments
             .iter()
             .enumerate()
             .filter(|(_, argument)| {
@@ -556,14 +894,7 @@ impl Request {
                     .is_some_and(|parameter| parameter.by_ref && !parameter.prefer_ref)
             })
             .map(|(at, _)| at)
-            .collect();
-        for at in &wrapped {
-            self.param_must_be_ref(function, u32::try_from(*at + 1).unwrap_or(u32::MAX));
-            if self.is_pending() {
-                return Err(Thrown::of(self.take_pending_view()));
-            }
-        }
-        Ok(wrapped)
+            .collect()
     }
 
     /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over
@@ -574,13 +905,20 @@ impl Request {
     /// handlers that ask it, and the declaration is read out of line.
     #[inline(always)] // once per `SEND_*_EX`, in the loop's arms
     pub(crate) fn arg_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
-        if self
-            .user_function(function)
-            .is_some_and(|user| !user.shape.by_ref)
-        {
+        if self.takes_nothing_by_ref(function) {
             return (false, false);
         }
         self.declared_send_mode(function, number)
+    }
+
+    /// Whether `function` is a user function none of whose parameters
+    /// takes its argument by reference, as its shape says without its
+    /// declaration read: no argument of a call to it is wrapped or
+    /// followed but by value.
+    #[inline(always)] // in the `SEND_*_EX` arms, as `arg_send_mode`
+    fn takes_nothing_by_ref(&self, function: Function) -> bool {
+        self.user_function(function)
+            .is_some_and(|user| !user.shape.by_ref)
     }
 
     /// [`Request::arg_send_mode`] read off the declaration.
@@ -630,7 +968,56 @@ impl Request {
     /// What the body returned is the caller's, one owner; what it left
     /// pending is the `Err`, the throwable's one owner with it, so a
     /// native reads a callback's raise the way it reads its own
-    /// ([`Request::leave_pending`] puts it back).
+    /// ([`Request::leave_pending`] puts it back). A body that returned
+    /// and then threw, from a local's destructor at its end, has its
+    /// value held ([`Request::hold_thrown_return`]) and given up where
+    /// the opline that called the native unwinds, after that opline's
+    /// operands, as php's caller holds the `retval`: so that value's
+    /// destructor runs after the receiver's and before the `catch`, a
+    /// property hook's and a callback's alike.
+    ///
+    /// ```php
+    /// class V { function __destruct() { echo "V::__destruct\n"; } }
+    /// class T { function __destruct() { throw new Exception("t"); } }
+    /// class C { public $h { get { $l = new T; return new V; } } function __destruct() { echo "C::__destruct\n"; } }
+    /// class M { function __get($n) { $l = new T; return new V; } function __destruct() { echo "M::__destruct\n"; } }
+    /// function f() { $l = new T; return new V; }
+    /// try { $x = (new C)->h; } catch (Exception $e) { echo "caught\n"; }
+    /// try { $x = (new M)->m; } catch (Exception $e) { echo "caught\n"; }
+    /// try { array_map('f', [1]); } catch (Exception $e) { echo "caught\n"; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// C::__destruct
+    /// V::__destruct
+    /// caught
+    /// M::__destruct
+    /// V::__destruct
+    /// caught
+    /// V::__destruct
+    /// caught
+    /// done
+    /// ```
+    ///
+    /// What the body returned is its own while a destructor its leave
+    /// serves runs a body of its own, which returns too: each serving has
+    /// its own `retval`, as each `zend_call_function` has.
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "D\n"; } }
+    /// function f($x) { $l = new D; return [$x * 2]; }
+    /// var_dump(array_map('f', [1]));
+    /// ```
+    /// ```expect
+    /// D
+    /// array(1) {
+    ///   [0]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// ```
     ///
     /// A callback with a declared parameter type is held to it here as
     /// it is held to it under `DO_UCALL`, since one
@@ -682,10 +1069,24 @@ impl Request {
     /// returns, the `zend_bailout()` php's catch blocks end with. The
     /// session's decode is the witness, in `ext/session`: its handler's
     /// `destroy` is served after the fatal a class declaration raised.
-    fn serve_user(&mut self, call: FrameRef, caller: exec::Caller) -> Result<Value, Thrown> {
+    fn serve_user(
+        &mut self,
+        call: FrameRef,
+        caller: exec::Caller,
+        retval: Retval,
+    ) -> Result<Value, Thrown> {
         let caught = self.bailout;
         self.catch_bailout();
-        let served = self.serve_user_uncaught(call, caller);
+        // What an outer serving's entry frame returned stands while this
+        // one runs, a destructor its leave serves among them, and is its
+        // own again after: `returned` is one per serving, as each
+        // `zend_call_function` has its own `retval`.
+        let outer = self.take_returned();
+        let served = self.serve_user_uncaught(call, caller, retval);
+        let left = std::mem::replace(&mut self.returned, outer);
+        if left.is_refcounted() && !self.bailout {
+            self.release_thrown_value(left);
+        }
         if caught {
             self.set_bailing_out(true);
         }
@@ -696,6 +1097,7 @@ impl Request {
         &mut self,
         call: FrameRef,
         caller: exec::Caller,
+        retval: Retval,
     ) -> Result<Value, Thrown> {
         let standing = call.0 as usize;
         let shape = self.call_shape(call).unwrap_or_default();
@@ -742,6 +1144,13 @@ impl Request {
         let served = self.fatal_of(served);
         self.pop_frames_to(standing);
         served?;
+        if self.raised.is_some() {
+            // The body returned and then threw or exited, from a local's
+            // destructor at its end: what it returned is php's `retval`,
+            // where `retval` says it is.
+            let returned = self.take_returned();
+            self.thrown_return(caller, retval, returned);
+        }
         match self.take_pending_view() {
             Some(pending) => Err(Thrown::of(Some(pending))),
             // The callback exited: what the native reads is php's
@@ -751,6 +1160,32 @@ impl Request {
             // native as it left the callback.
             None if self.is_pending() => Err(Thrown::of(None)),
             None => Ok(std::mem::take(&mut self.returned)),
+        }
+    }
+
+    /// What a user callee returned before it threw, put where php's
+    /// `retval` is ([`Retval`]): the `result` temporary of the opline the calling
+    /// frame stands at where that is a property read's, `FETCH_OBJ_R`'s
+    /// or `FETCH_OBJ_IS`'s, the read's `rv`, so `free_throwing_result`
+    /// frees it after the opline's operands; given up at once otherwise,
+    /// as a native gives up its own `retval` on `EG(exception)`. Out of
+    /// line, since nothing reaches it but a throw.
+    #[cold]
+    #[inline(never)]
+    fn thrown_return(&mut self, caller: exec::Caller, retval: Retval, value: Value) {
+        let result = caller
+            .frame()
+            .filter(|_| retval == Retval::Result)
+            .and_then(|frame| {
+                let at = self.frame_at(frame)?;
+                let op = exec::opline_at(at.code()?, at.opline())?;
+                let reads = matches!(op.opcode, Opcode::FetchObjR | Opcode::FetchObjIs)
+                    && matches!(op.out_type, OperandKind::Tmp | OperandKind::Var);
+                reads.then_some((frame, op.out))
+            });
+        match result {
+            Some((frame, out)) => self.replace_slot(frame, out, value),
+            None => self.release(value),
         }
     }
 
@@ -868,10 +1303,11 @@ impl Request {
     /// what the callee's declaration raised where it was linked, none
     /// for an enum's own method and the pass function.
     pub(crate) fn function_flags(&self, function: Function) -> crate::attributes::Flags {
-        let function = self.served_native(function);
+        // A user function is no class native, so it serves as itself.
         if let Some(user) = self.user_function(function) {
             return user.flags;
         }
+        let function = self.served_native(function);
         if let Some(method) = self.native_method(function) {
             return method.flags;
         }

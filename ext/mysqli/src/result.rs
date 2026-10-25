@@ -320,8 +320,8 @@ pub(crate) fn fetch_object(
 /// var_dump($c);
 /// ```
 /// ```expect mysql
-/// 480
-/// 480
+/// 496
+/// 496
 /// object(R)#6 (2) {
 ///   ["7"]=>
 ///   string(2) "ab"

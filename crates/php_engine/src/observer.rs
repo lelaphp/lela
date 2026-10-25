@@ -11,12 +11,12 @@
 //!
 //! - [`call`], where a frame is pushed and before its `RECV` prologue
 //!   runs, as `ZEND_OBSERVER_FCALL_BEGIN` stands in `ZEND_DO_UCALL`
-//!   (`Z/Zend/zend_vm_def.h:4189`), in `zend_call_function`
+//!   (`Z/Zend/zend_vm_def.h:4190`), in `zend_call_function`
 //!   (`Z/Zend/zend_execute_API.c:1009`), in `ZEND_INCLUDE_OR_EVAL`
-//!   (`Z/Zend/zend_vm_def.h:6603`) and in `zend_execute`
+//!   (`Z/Zend/zend_vm_def.h:6604`) and in `zend_execute`
 //!   (`Z/Zend/zend_vm_execute.skl:79`);
 //! - [`returned`], where a frame is left by its `RETURN` with what it
-//!   returned (`ZEND_OBSERVER_FCALL_END`, `Z/Zend/zend_vm_def.h:4581`),
+//!   returned (`ZEND_OBSERVER_FCALL_END`, `Z/Zend/zend_vm_def.h:4582`),
 //!   and by an unwind with nothing, in the uncaught arm of
 //!   `zend_dispatch_try_catch_finally_helper` (`:8157-8161`), which is
 //!   `handlers::unwind_from`;
@@ -24,12 +24,12 @@
 //!   `Request::serve_native`, which every call of a native reaches: the
 //!   call opcodes, as `ZEND_DO_ICALL` begins the call before
 //!   `fbc->internal_function.handler` and ends it after
-//!   (`Z/Zend/zend_vm_def.h:4125`, `:4140`), a native a native calls, as
+//!   (`Z/Zend/zend_vm_def.h:4126`, `:4141`), a native a native calls, as
 //!   `zend_call_function` does (`Z/Zend/zend_execute_API.c:1020`,
 //!   `:1039`), and a frameless call. php's frameless handler tests the
 //!   callee's slot and, unless it reads none-observed, falls back to a
 //!   full call, `zend_frameless_observed_call`
-//!   (`Z/Zend/zend_vm_def.h:9775`, `Z/Zend/zend_execute.c:1577-1613`),
+//!   (`Z/Zend/zend_vm_def.h:9782`, `Z/Zend/zend_execute.c:1577-1613`),
 //!   as design §4.3 says a caller of seam 9 must know; here the
 //!   frameless handlers lay a frameless call down as a full call already,
 //!   so it is observed as one with no test of its own.
@@ -90,7 +90,7 @@
 //! (`zend_observer_generator_resume`, `Z/Zend/zend_generators.c:847`),
 //! and ended at each suspension with the value it yielded,
 //! [`generator_yielded`] (`:851`), and at its `return` with what it
-//! returned (`ZEND_GENERATOR_RETURN`, `Z/Zend/zend_vm_def.h:4766`), so
+//! returned (`ZEND_GENERATOR_RETURN`, `Z/Zend/zend_vm_def.h:4767`), so
 //! each resumption is a begin and an end of its own.
 //!
 //! A fiber runs on a stack of its own, so the chain of open frames is
@@ -198,7 +198,7 @@ pub(crate) struct NativeCall {
 /// which php decides by the path that called it: the call opcodes hand
 /// `NULL` while `EG(exception)` holds one, whether the native threw it or
 /// a handler it called did, `EG(exception) ? NULL : ret`
-/// (`Z/Zend/zend_vm_def.h:4140`), while `zend_call_function`
+/// (`Z/Zend/zend_vm_def.h:4141`), while `zend_call_function`
 /// (`Z/Zend/zend_execute_API.c:1039`) and an observed frameless call
 /// (`Z/Zend/zend_execute.c:1597`) hand the return value whatever stands,
 /// which holds the `null` it was laid down with where the native threw.
@@ -528,7 +528,7 @@ pub(crate) fn observing(req: &Request) -> bool {
 /// Whether a frameless call of `function` is served as a full call, a
 /// frame pushed for the observers to see: php's `ZEND_OBSERVER_ENABLED
 /// && !zend_observer_handler_is_unobserved(...)` before
-/// `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9775`), which
+/// `zend_frameless_observed_call` (`Z/Zend/zend_vm_def.h:9782`), which
 /// is every call while the function's slot is unresolved and none once
 /// the observers declined it. One load and one compare while no
 /// observer is declared.
@@ -558,7 +558,7 @@ pub(crate) fn returned(req: &mut Request, frame: FrameRef, value: Option<&Value>
 
 /// The call home of a native: `function`'s call on top of the call stack
 /// and about to be served, `ZEND_OBSERVER_FCALL_BEGIN(call)` before
-/// `fbc->internal_function.handler` (`Z/Zend/zend_vm_def.h:4125`). The
+/// `fbc->internal_function.handler` (`Z/Zend/zend_vm_def.h:4126`). The
 /// call begun with an end handler is what [`native_returned`] is handed;
 /// none where no observer is declared, after one load and one compare,
 /// or where nothing observes the call's end.
@@ -576,7 +576,7 @@ pub(crate) fn native_call(req: &mut Request, function: Function) -> Option<Nativ
 /// `deferred` the throwable a stream raised while it ran, handed what
 /// the native returned, or, where a throwable stands, what `on_throw`
 /// says the path that called it hands (`ZEND_OBSERVER_FCALL_END`,
-/// `Z/Zend/zend_vm_def.h:4140`). One branch on what [`native_call`]
+/// `Z/Zend/zend_vm_def.h:4141`). One branch on what [`native_call`]
 /// answered, and no load.
 #[inline(always)] // as `call`
 pub(crate) fn native_returned(

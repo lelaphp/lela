@@ -11,7 +11,7 @@ use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::raising::{Level, Thrown, clear, docref, throw, throw_error};
 use php_ext::request::{Request, Stream};
-use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value};
+use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, SmartStr, TypeTag, Value};
 
 use crate::State;
 use crate::ffi::{Easy, EasyId, Hook};
@@ -98,6 +98,95 @@ impl<M: Copy> Channel<M> {
     }
 }
 
+/// `handlers.write->buf`, the body `PHP_CURL_RETURN` keeps: a
+/// `smart_str` on the request's heap, grown as the body is written, and
+/// once `curl_exec` or `curl_multi_getcontent` handed its string out
+/// (`RETURN_STR_COPY`), that string, of which the `CurlHandle` keeps one owner
+/// until `smart_str_free` gives it up.
+pub(crate) enum Body {
+    /// `buf.s` as `smart_str_appendl` grows it, nothing allocated while
+    /// nothing was written.
+    Growing(SmartStr),
+    /// `buf.s` with a second owner handed out.
+    Handed(Owner<PhpString>),
+}
+
+/// `curl_write`'s `PHP_CURL_RETURN`: `data` after the body `object` kept,
+/// `smart_str_fappendl_ex(..., fallible: true)` since 8.5.12, and `false`
+/// where the memory limit refused the room, which the transfer is told
+/// as `CURL_WRITEFUNC_ERROR`. A refused growth leaves its block to the
+/// request's end, the body kept from there being empty.
+pub(crate) fn keep(req: &mut Request, object: PhpObject, data: &[u8]) -> Result<bool, Thrown> {
+    let Some(curl) = object.native_mut::<Curl>(req) else {
+        return Ok(true);
+    };
+    let (mut buf, handed) = match std::mem::take(&mut curl.returned) {
+        Body::Growing(buf) => (buf, None),
+        Body::Handed(string) => (SmartStr::default(), Some(string)),
+    };
+    let appended = req.memory_mut().fallible(|req| {
+        if let Some(string) = &handed {
+            buf.append(req, string.as_bytes())?;
+        }
+        buf.append(req, data)
+    });
+    if let Some(string) = handed {
+        string.give_up(req);
+    }
+    let appended = appended?.is_some();
+    if !appended {
+        buf = SmartStr::default();
+    }
+    match object.native_mut::<Curl>(req) {
+        Some(curl) => curl.returned = Body::Growing(buf),
+        None => buf.free(req),
+    }
+    Ok(appended)
+}
+
+/// `smart_str_0(&buf)` and `RETURN_STR_COPY(buf.s)`: the body `object`
+/// kept, the `CurlHandle` keeping one owner of it; the empty string where
+/// nothing was written (`!buf.s`).
+pub(crate) fn hand_out(req: &mut Request, object: PhpObject) -> Result<Owner<PhpString>, Thrown> {
+    let Some(curl) = object.native_mut::<Curl>(req) else {
+        return PhpString::new(req, b"");
+    };
+    let string = match std::mem::take(&mut curl.returned) {
+        Body::Growing(buf) if buf.as_bytes().is_empty() => return PhpString::new(req, b""),
+        Body::Growing(buf) => buf.finish(req)?,
+        Body::Handed(string) => string,
+    };
+    let out = Owner::take(req, *string);
+    match object.native_mut::<Curl>(req) {
+        Some(curl) => curl.returned = Body::Handed(string),
+        None => string.give_up(req),
+    }
+    Ok(out)
+}
+
+/// `smart_str_free(&ch->handlers.write->buf)`.
+pub(crate) fn free_body(req: &mut Request, object: PhpObject) {
+    if let Some(curl) = object.native_mut::<Curl>(req) {
+        let body = std::mem::take(&mut curl.returned);
+        body.free(req);
+    }
+}
+
+impl Default for Body {
+    fn default() -> Body {
+        Body::Growing(SmartStr::default())
+    }
+}
+
+impl Body {
+    fn free(self, req: &mut Request) {
+        match self {
+            Body::Growing(mut buf) => buf.free(req),
+            Body::Handed(string) => string.give_up(req),
+        }
+    }
+}
+
 /// `php_curl` less its `zend_object`.
 #[derive(Default)]
 pub(crate) struct Curl {
@@ -108,7 +197,7 @@ pub(crate) struct Curl {
     pub(crate) header: Channel<HeaderTo>,
     pub(crate) read: Channel<ReadFrom>,
     /// `handlers.write->buf`, what `PHP_CURL_RETURN` kept.
-    pub(crate) returned: Vec<u8>,
+    pub(crate) returned: Body,
     /// `handlers.std_err`, the `CURLOPT_STDERR` stream.
     pub(crate) stderr: Option<Owner<Value>>,
     /// The six callables [`Hook`] names.
@@ -165,6 +254,7 @@ impl Curl {
         if let Some(share) = self.share {
             share.give_up(req);
         }
+        self.returned.free(req);
     }
 }
 
@@ -489,12 +579,13 @@ pub(crate) fn cleanup_handle(req: &mut Request, object: PhpObject) {
     let Some(curl) = object.native_mut::<Curl>(req) else {
         return;
     };
-    curl.returned.clear();
+    let body = std::mem::take(&mut curl.returned);
     curl.header_out = None;
     curl.err = 0;
     if let Some(easy) = curl.easy.as_ref().map(Easy::id) {
         easy.clear_error(req);
     }
+    body.free(req);
 }
 
 /// `curl_init(?string $url = null): CurlHandle|false`.
@@ -746,6 +837,28 @@ fn curl_reset(req: &mut Request, handle: Instance<CurlHandle>) -> Result<(), Thr
 /// "
 /// bool(false)
 /// ```
+///
+/// The body is kept on the request's heap and grown fallibly since
+/// 8.5.12: past the memory limit the growth is refused, the transfer
+/// ends in a write error, and the limit's fatal is raised as the call
+/// returns. The figure is the growth of a huge block, which the address
+/// space lets grow in place or not, so it varies between runs.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $f = tempnam(sys_get_temp_dir(), 'curl');
+/// $h = fopen($f, 'w');
+/// for ($i = 0; $i < 10; $i++) fwrite($h, str_repeat('a', 1 << 20));
+/// fclose($h);
+/// register_shutdown_function(fn() => unlink($f));
+/// $c = curl_init("file://$f");
+/// curl_setopt($c, CURLOPT_RETURNTRANSFER, true);
+/// var_dump(curl_exec($c), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate %d bytes) in %s on line 10
+/// ```
 #[php_function]
 fn curl_exec(
     req: &mut Request,
@@ -756,16 +869,15 @@ fn curl_exec(
     cleanup_handle(req, object);
     let easy = easy_of(req, object)?;
     let (code, thrown) = easy.perform(req);
-    let curl = curl(req, handle)?;
-    curl.err = i64::from(code);
+    curl(req, handle)?.err = i64::from(code);
     if let Some(thrown) = thrown {
         if code != 0 {
-            curl.returned.clear();
+            free_body(req, object);
         }
         return Err(thrown);
     }
     if code != 0 {
-        curl.returned.clear();
+        free_body(req, object);
         return Ok(Union::B(false));
     }
     easy.flush_stderr(req);
@@ -779,12 +891,7 @@ fn finished(req: &mut Request, object: PhpObject) -> Result<Union<Owner<PhpStrin
         return Ok(Union::B(true));
     };
     if curl.write.to == WriteTo::Return {
-        let body = std::mem::take(&mut curl.returned);
-        let string = PhpString::new(req, &body)?;
-        if let Some(curl) = object.native_mut::<Curl>(req) {
-            curl.returned = body;
-        }
-        return Ok(Union::A(string));
+        return hand_out(req, object).map(Union::A);
     }
     let streams: Vec<Value> = [
         (curl.write.to == WriteTo::File)

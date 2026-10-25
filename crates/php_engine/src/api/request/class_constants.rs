@@ -779,7 +779,7 @@ pub(crate) enum ByValue {
 /// A class constant's value as `ZEND_FETCH_CLASS_CONSTANT` reads it, one
 /// owner the caller's, by whether the opline may keep it in its runtime
 /// cache (`if (OP2_TYPE == IS_CONST && !is_constant_deprecated)
-/// CACHE_POLYMORPHIC_PTR(...)`, `Z/Zend/zend_vm_def.h:6142`).
+/// CACHE_POLYMORPHIC_PTR(...)`, `Z/Zend/zend_vm_def.h:6143`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum ConstantRead {
     /// A value the class's row, or the request's case of an enum, keeps

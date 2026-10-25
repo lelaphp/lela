@@ -299,7 +299,7 @@ impl CoreQuantity {
     /// order (`Z/main/main.c:807-885`), then `zend.c`'s, which
     /// `zend_register_standard_ini_entries` registers after them
     /// (`Z/Zend/zend.c:262-279`).
-    pub(crate) const ENTRIES: [CoreQuantityEntry; 18] = [
+    pub(crate) const ENTRIES: [CoreQuantityEntry; 19] = [
         (
             b"xmlrpc_error_number",
             CoreQuantity::Signed(LongHandler::Any),
@@ -322,6 +322,10 @@ impl CoreQuantity {
         ),
         (b"max_memory_limit", CoreQuantity::Unsigned),
         (b"memory_limit", CoreQuantity::Unsigned),
+        (
+            b"memory_hard_limit_percent",
+            CoreQuantity::Signed(LongHandler::Any),
+        ),
         (
             b"realpath_cache_size",
             CoreQuantity::Signed(LongHandler::Any),
@@ -477,6 +481,10 @@ impl Request {
         } else {
             value
         };
+        if name == b"memory_hard_limit_percent" && !self.memory_hard_limit_percent_taken(new_value)
+        {
+            return Ok(None);
+        }
         if name == b"report_memleaks" && !Ini::parse_bool(value) {
             let message = "Directive 'report_memleaks' is deprecated";
             crate::api::raising::docref(self, Level::Deprecated, message);
@@ -1868,6 +1876,7 @@ impl Ini<&mut Request> {
     /// max_input_vars => 1000 => 1000
     /// max_memory_limit => -1 => -1
     /// max_multipart_body_parts => -1 => -1
+    /// memory_hard_limit_percent => no value => no value
     /// memory_limit => 128M => 128M
     /// open_basedir => no value => no value
     /// output_buffering => no value => no value
@@ -1924,7 +1933,7 @@ impl Ini<&mut Request> {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// PHP Core</h2>
@@ -1985,6 +1994,7 @@ impl Ini<&mut Request> {
     /// <tr><td class="e">max_input_vars</td><td class="v">1000</td><td class="v">1000</td></tr>
     /// <tr><td class="e">max_memory_limit</td><td class="v">-1</td><td class="v">-1</td></tr>
     /// <tr><td class="e">max_multipart_body_parts</td><td class="v">-1</td><td class="v">-1</td></tr>
+    /// <tr><td class="e">memory_hard_limit_percent</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">memory_limit</td><td class="v">128M</td><td class="v">128M</td></tr>
     /// <tr><td class="e">open_basedir</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
     /// <tr><td class="e">output_buffering</td><td class="v"><i>no value</i></td><td class="v"><i>no value</i></td></tr>
@@ -2064,7 +2074,7 @@ impl Ini<&mut Request> {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// <h2><a name="module_iconv" href="#module_iconv">iconv</a></h2>

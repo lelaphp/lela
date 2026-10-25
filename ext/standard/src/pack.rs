@@ -11,7 +11,7 @@ use crate::string::Decimal;
 use php_ext::abi::{OrFalse, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{atoi, to_double, to_long, to_string, with_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
@@ -149,9 +149,8 @@ fn packed(
             }
             b'a' | b'A' | b'Z' | b'h' | b'H' => {
                 if currentarg >= num_args {
-                    return Err(throw_error(
+                    return Err(value_error(
                         req,
-                        "ValueError",
                         &format!("Type {ch}: not enough arguments"),
                     ));
                 }
@@ -175,20 +174,12 @@ fn packed(
                 }
                 let current = i64::try_from(currentarg).unwrap_or(INT_MAX);
                 if current > INT_MAX - arg || current + arg > i64::try_from(num_args).unwrap_or(0) {
-                    return Err(throw_error(
-                        req,
-                        "ValueError",
-                        &format!("Type {ch}: too few arguments"),
-                    ));
+                    return Err(value_error(req, &format!("Type {ch}: too few arguments")));
                 }
                 currentarg += usize::try_from(arg).unwrap_or(0);
             }
             _ => {
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    &format!("Type {ch}: unknown format code"),
-                ));
+                return Err(value_error(req, &format!("Type {ch}: unknown format code")));
             }
         }
         codes.push((code, arg));
@@ -378,9 +369,8 @@ fn packed(
 
 /// `INC_OUTPUTPOS`'s refusal.
 fn overflow(req: &mut Request, code: char) -> Thrown {
-    throw_error(
+    value_error(
         req,
-        "ValueError",
         &format!("Type {code}: integer overflow in format string"),
     )
 }
@@ -482,6 +472,19 @@ fn overflow(req: &mut Request, code: char) -> Thrown {
 /// Invalid format type y
 /// unpack(): Argument #3 ($offset) must be contained in argument #2 ($data)
 /// ```
+///
+/// Since 8.5.12 a repetition is unpacked only while the memory limit has
+/// not been met: past it the call returns and the limit's fatal is
+/// raised.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(unpack('C*', str_repeat('a', 1 << 20))), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[allow(clippy::too_many_lines)]
 #[php_function]
 fn unpack(
@@ -568,15 +571,17 @@ fn unpack(
             b'q' | b'Q' | b'J' | b'P' | b'd' | b'e' | b'E' => 8,
             _ => {
                 array.give_up(req);
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    &format!("Invalid format type {ch}"),
-                ));
+                return Err(value_error(req, &format!("Invalid format type {ch}")));
             }
         };
         let mut i: i64 = 0;
         while i != repetitions {
+            // "Each repetition costs a name and a value, so stop once over
+            // the limit" (8.5.12): `RETURN_OOM()`, the array as far as it
+            // was filled.
+            if req.memory().has_oom() {
+                return Ok(OrFalse::Value(array));
+            }
             if size != 0 && size != -1 && INT_MAX - size + 1 < inputpos {
                 docref(req, Level::Warning, &format!("Type {ch}: integer overflow"));
                 array.give_up(req);
@@ -739,7 +744,8 @@ fn unpack(
                 let key = if name.is_empty() {
                     Owner::index(i + 1)
                 } else if repetitions == 1 {
-                    let name = PhpString::new(req, &name)?;
+                    // `zend_string_init_fast` (`Z/ext/standard/pack.c:871`).
+                    let name = PhpString::fast(req, &name)?;
                     Key::from_string(req, name)
                 } else {
                     let mut numbered = name.clone();

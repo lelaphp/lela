@@ -11,7 +11,7 @@ use php_ext::abi::{Instance, OrFalse, Ref, This};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_string, with_string};
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, fatal, throw_error};
+use php_ext::raising::{Thrown, arg_type_error, arg_value_error, fatal, throw_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -34,8 +34,8 @@ use crate::{On, Resource, State, VERSION_ID, string};
 /// var_dump($d);
 /// ```
 /// ```expect
-/// string(13) "mysqlnd 8.5.9"
-/// int(80509)
+/// string(14) "mysqlnd 8.5.12"
+/// int(80512)
 /// int(3)
 ///
 /// Deprecated: The driver_version property is deprecated in %s on line 4
@@ -44,9 +44,9 @@ use crate::{On, Resource, State, VERSION_ID, string};
 /// Cannot write read-only property mysqli_driver::$client_info
 /// object(mysqli_driver)#1 (3) {
 ///   ["client_info"]=>
-///   string(13) "mysqlnd 8.5.9"
+///   string(14) "mysqlnd 8.5.12"
 ///   ["client_version"]=>
-///   int(80509)
+///   int(80512)
 ///   ["report_mode"]=>
 ///   int(0)
 /// }
@@ -354,9 +354,9 @@ fn read_warning(req: &mut Request, set: &mut ResultSet) -> Result<Option<Warning
 /// echo memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect mysql
-/// 400
-/// 432
-/// 72
+/// 424
+/// 456
+/// 80
 /// 32
 /// ```
 fn warnings(
@@ -512,11 +512,7 @@ pub(crate) fn poll(
     let read_in = read.get().copied().flatten();
     let error_in = error.get().copied().flatten();
     if read_in.is_none() && error_in.is_none() {
-        return Err(throw_error(
-            req,
-            "ValueError",
-            "No stream arrays were passed",
-        ));
+        return Err(value_error(req, "No stream arrays were passed"));
     }
     let read_links = match read_in {
         Some(array) => Some(links_of(req, array)?),

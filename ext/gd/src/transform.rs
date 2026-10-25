@@ -10,7 +10,8 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{coerce_param, to_double, to_long};
 use php_ext::decl::Type;
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, argument_error, arity, docref, throw_error,
+    Level, Thrown, arg_type_error, arg_value_error, argument_count_error, argument_error, arity,
+    docref, value_error,
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
@@ -264,9 +265,8 @@ fn imagefilter(
 ) -> Result<bool, Thrown> {
     let count = req.frames().argument_count();
     if !(2..=6).contains(&count) {
-        return Err(throw_error(
+        return Err(argument_count_error(
             req,
-            "ArgumentCountError",
             "Wrong parameter count for imagefilter()",
         ));
     }
@@ -626,9 +626,8 @@ fn imagescale(
     let im = im(req, image)?;
     let (mut w, mut h) = (width, height);
     if h < 0 && w < 0 {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "Argument #2 ($width) and argument #3 ($height) cannot be both negative",
         ));
     }

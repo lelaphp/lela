@@ -62,8 +62,8 @@ impl Refusal {
     /// pk(function () { try { call_user_func(1); } catch (TypeError $e) {} });
     /// ```
     /// ```expect
-    /// 3240 32
-    /// 3272 0
+    /// 3144 32
+    /// 3176 0
     /// 2952 0
     /// 2392 0
     /// 2648 0
@@ -774,11 +774,12 @@ impl Request {
         deprecations: Deprecations,
     ) -> Result<(), Refusal> {
         let ce_org = fcc.calling.take();
-        if ce_org.is_none()
-            && let Some(function) = self.function_named(Bare::of(callable))
-        {
-            fcc.function = Some(Callee::Function(function));
-            return Ok(());
+        if ce_org.is_none() {
+            let fetched = self.fetch_function(Bare::of(callable));
+            if let Some(function) = self.fatal_of(fetched).map_err(|_| Refusal::Unsaid)? {
+                fcc.function = Some(Callee::Function(function));
+                return Ok(());
+            }
         }
         let split = compound_split(callable);
         let method: Vec<u8> = match split {
@@ -810,11 +811,15 @@ impl Request {
                         )));
                     }
                     if deprecations == Deprecations::Raised {
-                        let form = format!(
-                            "Callables of the form [\"{}\", \"{}\"] are deprecated",
-                            self.symbols().class_name(org),
-                            shown(callable)
-                        );
+                        let class = self.symbols().class_name(org);
+                        let form = [
+                            b"Callables of the form [\"",
+                            class.as_bytes(),
+                            b"\", \"",
+                            php_unit::decl::shown_bytes(callable),
+                            b"\"] are deprecated",
+                        ]
+                        .concat();
                         crate::api::raising::deprecated(self, &form);
                     }
                 }

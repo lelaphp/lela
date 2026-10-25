@@ -56,6 +56,13 @@
 //! side. A start no command hook judges, its every candidate failing to
 //! run, is handed on unrecorded and is refused to its own starter.
 //!
+//! One line starts one operation in a checkout: a second start after
+//! the first, `git merge --no-commit a && git commit && git merge
+//! --no-commit b`, is refused as an operation the session did not start
+//! ([`second_start`]), since the hook records the first start's base and
+//! cannot know the second's, which would leave the second foreign to its
+//! own starter (#3261).
+//!
 //! A git command past a directory change the line makes after its first
 //! command is read where that change took the shell, never where it
 //! started (#2720, [`placed`]): a sibling agent's `cat f; cd <its
@@ -197,10 +204,21 @@ const STARTING: [&str; 5] = [
 pub(crate) struct Foreign {
     pub(crate) operation: Operation,
     pub(crate) checkout: PathBuf,
+    /// Whether the line itself starts it after another in the same
+    /// checkout ([`second_start`]), rather than finding it standing.
+    pub(crate) second: bool,
 }
 
 impl fmt::Display for Foreign {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.second {
+            return write!(
+                f,
+                "This line starts {} in {} after another operation it starts there: one operation per line, since the base of the second is not known when the line is judged, and so it could not be recorded as this session's.",
+                self.operation,
+                self.checkout.display()
+            );
+        }
         write!(
             f,
             "{} is in progress in {} and this session did not start it.",
@@ -267,6 +285,11 @@ pub(crate) fn foreign(
     call: &Call,
     fires: impl Fn(&Argv) -> bool,
 ) -> Option<Foreign> {
+    if let Some(line) = line
+        && let Some(second) = second_start(root, line)
+    {
+        return Some(second);
+    }
     let checkouts = match line {
         Some(line) => fired_in(root, line, Places::Repositories, fires),
         None => vec![root.to_path_buf()],
@@ -283,8 +306,42 @@ pub(crate) fn foreign(
         (!ours).then_some(Foreign {
             operation,
             checkout,
+            second: false,
         })
     })
+}
+
+/// The second operation `line` starts in a checkout where it starts one
+/// already, by the command that starts it ([`STARTING`]): what [`record`]
+/// cannot take for the session, since only the first start's base is
+/// `HEAD` when the hook runs, and which permit therefore refuses as it
+/// refuses an operation the session did not start. A line that runs two
+/// merges, `git merge --no-commit a && git commit && git merge
+/// --no-commit b`, recorded the first alone and left the second foreign
+/// to its own starter, its commit and its `--abort` refused (#3261).
+fn second_start(root: &Path, line: &Line) -> Option<Foreign> {
+    let mut started: Vec<PathBuf> = Vec::new();
+    for (git, place) in placed(root, line, Places::Repositories) {
+        let Some(phrase) = STARTING.iter().find(|phrase| starts(git, phrase)) else {
+            continue;
+        };
+        let checkout = checkout_at(place);
+        if started.contains(&checkout) {
+            let operation = match *phrase {
+                "git cherry-pick" => Operation::CherryPick,
+                "git revert" => Operation::Revert,
+                "git rebase" => Operation::Rebase,
+                _ => Operation::Merge,
+            };
+            return Some(Foreign {
+                operation,
+                checkout,
+                second: true,
+            });
+        }
+        started.push(checkout);
+    }
+    None
 }
 
 /// The checkout a place git reads its repository in stands for: itself,

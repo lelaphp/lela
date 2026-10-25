@@ -30,7 +30,7 @@ use std::collections::HashMap;
 
 use php_compile::values::Holder;
 use php_compile::{Named, SourceKind};
-use php_heap::{Str, Zval};
+use php_heap::{Sizing, Str, Zval};
 use php_link::NameHasher;
 use php_unit::decl::TraitAdaptation;
 use php_unit::{OperandKind, PublishedUnit, Unit, WeakUnit};
@@ -813,7 +813,7 @@ impl Request {
     /// 416
     /// 800
     /// 896
-    /// 496
+    /// 528
     /// ```
     ///
     /// Each is given to what it names by its place in the compile's walk
@@ -842,12 +842,12 @@ impl Request {
     /// unlink($f);
     /// ```
     /// ```expect regime=jit-off
-    /// 1488
+    /// 1520
     /// 496
     /// 664
     /// 528
     /// 288
-    /// -712
+    /// -744
     /// [2,1,3,{"abcdefgk":1,"\u0000*\u0000Abcdefgk":2},4,5,{}]
     /// ```
     pub(crate) fn hold_compiled(&mut self, unit: &PublishedUnit) {
@@ -1218,7 +1218,20 @@ impl Request {
                 Named::DefinitionKey(_) | Named::Read(_) => false,
             };
             if made {
-                self.hold_name(at, named.holder(), &name)?;
+                // A closure's, a hook's and an anonymous class's name are
+                // `zend_strpprintf`'s, trimmed to `zend_string_finit`'s
+                // size (`Named::sizing`).
+                let owner = named.holder();
+                let sizing = named.sizing(unit, &name);
+                // At `zend_string_init`'s size the empty string and one
+                // byte are the process's interned strings.
+                let lay = move |req: &mut Request, bytes: &[u8]| match sizing {
+                    Sizing::Alloc => req.string(bytes),
+                    sizing => req.string_sized(bytes, sizing),
+                };
+                self.hold_made(at, &name, lay, |held, made| {
+                    held.names_of(owner).push(made);
+                })?;
             }
         }
         if let Some(held) = self.unit_strings.units.get_mut(at) {
@@ -1294,24 +1307,29 @@ impl Request {
     /// `at` with its names, or with the names of its op array `owner`
     /// names.
     fn hold_name(&mut self, at: usize, owner: Holder, name: &[u8]) -> Result<(), Thrown> {
-        self.hold_made(at, name, |held, made| held.names_of(owner).push(made))
+        self.hold_made(at, name, Request::string, |held, made| {
+            held.names_of(owner).push(made);
+        })
     }
 
     /// `name` made as a string of the request's, the name of the CV `cv`
     /// of the main op array of the unit at `at` ([`Held::found_main`]).
     fn hold_main_var(&mut self, at: usize, cv: usize, name: &[u8]) -> Result<(), Thrown> {
-        self.hold_made(at, name, |held, made| held.name_main_var(cv, made))
+        self.hold_made(at, name, Request::string, |held, made| {
+            held.name_main_var(cv, made);
+        })
     }
 
-    /// `name` made as a string of the request's and given to the unit at
-    /// `at` by `give`.
+    /// `name` laid as a string of the request's by `lay` and given to
+    /// the unit at `at` by `give`.
     fn hold_made(
         &mut self,
         at: usize,
         name: &[u8],
+        lay: impl FnOnce(&mut Request, &[u8]) -> Result<PhpString, Thrown>,
         give: impl FnOnce(&mut Held, PhpString),
     ) -> Result<(), Thrown> {
-        let made = self.string(name)?;
+        let made = lay(self, name)?;
         point(&mut self.unit_strings.by_bytes, made);
         if let Some(held) = self.unit_strings.units.get_mut(at) {
             give(held, made);
@@ -1408,9 +1426,9 @@ impl Request {
     /// $m = memory_get_usage(); unset($i); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect regime=jit-off
-    /// -936
+    /// -952
     /// -1536
-    /// -640
+    /// -656
     /// -720
     /// ```
     pub(crate) fn uncount_closure(&mut self, function: crate::api::call::Function) {
@@ -1480,7 +1498,7 @@ impl Request {
     /// ```
     /// ```expect regime=jit-off
     /// 384
-    /// 704
+    /// 720
     /// 192
     /// 160
     /// ```
