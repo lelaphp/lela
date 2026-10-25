@@ -642,17 +642,20 @@ pub trait Statement: Any + Send {
         Err(Failure::unsupported())
     }
 
-    /// `next_rowset`: the next rowset's column count, and its row count
-    /// where the connector sets `stmt->row_count`.
-    fn next_rowset(&mut self, req: &mut Request) -> Result<Executed, Failure> {
-        let _ = req;
-        Err(Failure::unsupported())
+    /// `stmt->methods->next_rowset`, a slot php tests for `NULL` before
+    /// PDO acts on the statement (`nextRowset()` refuses with `IM001`
+    /// before it resets the columns, and `closeCursor()`'s emulation stops
+    /// after the first rowset). A connector with the slot answers itself.
+    fn rowsets(&mut self) -> Option<&mut dyn Rowsets> {
+        None
     }
 
-    /// `cursor_closer`.
-    fn close_cursor(&mut self, req: &mut Request) -> Result<(), Failure> {
-        let _ = req;
-        Err(Failure::unsupported())
+    /// `stmt->methods->cursor_closer`, a slot php tests for `NULL` before
+    /// PDO acts (`closeCursor()` clears the error only where there is one,
+    /// and emulates it by fetching every row of every rowset where there
+    /// is none). A connector with the slot answers itself.
+    fn cursor_closer(&mut self) -> Option<&mut dyn CursorCloser> {
+        None
     }
 
     /// `dtor`: what the statement holds of the request's or of its
@@ -660,6 +663,21 @@ pub trait Statement: Any + Send {
     fn close(&mut self, req: &mut Request) {
         let _ = req;
     }
+}
+
+/// `next_rowset`, the slot [`Statement::rowsets`] answers.
+pub trait Rowsets {
+    /// `next_rowset`: the next rowset's column count, and its row count
+    /// where the connector sets `stmt->row_count`; the `Err` where there is
+    /// none or the connector failed.
+    fn next_rowset(&mut self, req: &mut Request) -> Result<Executed, Failure>;
+}
+
+/// `cursor_closer`, the slot [`Statement::cursor_closer`] answers.
+pub trait CursorCloser {
+    /// `cursor_closer`: the rows of the start before given back, so the
+    /// statement can start again.
+    fn close_cursor(&mut self, req: &mut Request) -> Result<(), Failure>;
 }
 
 /// `enum pdo_error_mode`: what PDO does with an error.

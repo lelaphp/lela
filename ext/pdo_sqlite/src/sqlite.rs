@@ -9,8 +9,8 @@ use php_ext::raising::{Level, Thrown, docref, throw_exception_ex, type_error, va
 use php_ext::request::{Foreign, Request, Stream};
 use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value, ValueRef};
 use php_ext_pdo::connector::{
-    BindEvent, BindKind, BindType, Binding, Column, Connection, Connector, Executed, Failure,
-    NativeError, OnError, Orientation, Placeholders, Prepared, Source, SqlError, SqlState,
+    BindEvent, BindKind, BindType, Binding, Column, Connection, Connector, CursorCloser, Executed,
+    Failure, NativeError, OnError, Orientation, Placeholders, Prepared, Source, SqlError, SqlState,
     Statement, long_attribute, option_long,
 };
 
@@ -1080,10 +1080,10 @@ impl Statement for Stmt {
         Ok(out)
     }
 
-    /// `pdo_sqlite_stmt_cursor_closer`.
-    fn close_cursor(&mut self, req: &mut Request) -> Result<(), Failure> {
-        self.executed = false;
-        self.reset(req)
+    /// `cursor_closer`, `pdo_sqlite_stmt_cursor_closer`; `pdo_sqlite` has
+    /// no `next_rowset`.
+    fn cursor_closer(&mut self) -> Option<&mut dyn CursorCloser> {
+        Some(self)
     }
 
     /// `pdo_sqlite_stmt_dtor`'s `efree(S)`; the statement is finalized
@@ -1092,6 +1092,14 @@ impl Statement for Stmt {
         if let Some(held) = self.held.take() {
             held.free(req);
         }
+    }
+}
+
+impl CursorCloser for Stmt {
+    /// `pdo_sqlite_stmt_cursor_closer`.
+    fn close_cursor(&mut self, req: &mut Request) -> Result<(), Failure> {
+        self.executed = false;
+        self.reset(req)
     }
 }
 
