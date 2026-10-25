@@ -441,6 +441,10 @@ pub(crate) fn close(program: &mut dyn Program, umask: u32) -> Done {
     if !changed && survivors > 0 {
         return Ok(());
     }
+    // The order and the kept part of the old file are fixed here, before
+    // the first callback, as `zip_close` fixes them before
+    // `_zip_progress_start`; each later point reads `ZIP_WANT_TORRENTZIP`
+    // afresh, so a callback that sets it torrentzips what follows.
     let torrentzip = za.want_torrentzip();
     let mut list: Vec<(usize, Option<Vec<u8>>)> = Vec::new();
     for i in 0..za.entries.len() {
@@ -468,14 +472,7 @@ pub(crate) fn close(program: &mut dyn Program, umask: u32) -> Done {
         start: 0.0,
         end: 1.0,
     };
-    let committed = match write_all(
-        program,
-        &mut out,
-        &list,
-        unchanged,
-        &mut progress,
-        torrentzip,
-    ) {
+    let committed = match write_all(program, &mut out, &list, unchanged, &mut progress) {
         Ok(()) => {
             let committed = commit(program, out, &tmp);
             // `_zip_progress_end`, past the commit whether it took or not.
@@ -522,7 +519,6 @@ fn write_all(
     list: &[(usize, Option<Vec<u8>>)],
     unchanged: u64,
     progress: &mut Progress,
-    torrentzip: bool,
 ) -> Result<(), Status> {
     if unchanged > 0
         && let Some(d) = &mut program.live()?.data
@@ -548,7 +544,7 @@ fn write_all(
             return Err(program.cancelled());
         }
         let at = out.pos;
-        let Some(entry) = program.live()?.entry(*i, at, unchanged, torrentzip)? else {
+        let Some(entry) = program.live()?.entry(*i, at, unchanged)? else {
             continue;
         };
         out.write(&entry.header)?;
@@ -567,9 +563,9 @@ fn write_all(
                 return Err(program.cancelled());
             }
         }
-        program.live()?.finish(*i, &entry, at, out, torrentzip)?;
+        program.live()?.finish(*i, &entry, at, out)?;
     }
-    program.live()?.write_cdir(out, list, torrentzip)
+    program.live()?.write_cdir(out, list)
 }
 
 /// One surviving entry as `zip_close`'s loop writes it before its data's
@@ -625,13 +621,52 @@ impl Archive {
     /// changes before its data is written, so a callback that changes the
     /// entry meanwhile changes what the central directory says of it;
     /// `None` for an entry the kept part of the old file holds.
-    fn entry(
-        &mut self,
-        i: usize,
-        offset: u64,
-        unchanged: u64,
-        torrentzip: bool,
-    ) -> Result<Option<Written>, Status> {
+    /// `ZIP_WANT_TORRENTZIP` is read as the turn starts, past the callbacks
+    /// before it, and stands until its data's first progress point.
+    /// A progress callback that asks for torrentzip from the close's first
+    /// point torrentzips every entry, in the order the close fixed before
+    /// it; one that asks during an entry's data leaves that entry's
+    /// method, level and attributes as they were and writes its local
+    /// header again under torrentzip's time:
+    ///
+    /// ```php
+    /// $d = ''; for ($i = 0; $i < 3000; $i++) $d .= md5((string) $i);
+    /// foreach ([0.0, 0.3] as $when) {
+    ///     $z = new ZipArchive; $z->open('tz-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    ///     $z->addFromString('b', $d); $z->setCompressionName('b', ZipArchive::CM_STORE); $z->addFromString('a', 'world'); $z->setMtimeName('b', 315532800); $z->setMtimeName('a', 315532800);
+    ///     $z->registerProgressCallback(0.01, function ($r) use ($z, $when) { static $done; if (!$done && $r >= $when) { $done = 1; echo "set at ", $r > 0 ? 'data' : 'start', "\n"; $z->setArchiveFlag(ZipArchive::AFL_WANT_TORRENTZIP, 1); } });
+    ///     var_dump($z->close()); $b = file_get_contents('tz-witness.zip');
+    ///     for ($at = 0; ($at = strpos($b, "PK\3\4", $at)) !== false; $at += 4) echo 'L ', bin2hex(substr($b, $at + 4, 26)), "\n";
+    ///     for ($at = 0; ($at = strpos($b, "PK\1\2", $at)) !== false; $at += 4) echo 'C ', bin2hex(substr($b, $at + 4, 42)), "\n";
+    ///     echo substr($b, -22), "\n";
+    ///     $z->open('tz-witness.zip'); var_dump($z->getArchiveFlag(ZipArchive::AFL_IS_TORRENTZIP), strlen($z->getFromName('b')), $z->getFromName('a')); $z->close();
+    /// }
+    /// unlink('tz-witness.zip');
+    /// ```
+    /// ```expect capture
+    /// set at start
+    /// bool(true)
+    /// L 14000200080000bc982130c2a217b1d700000077010001000000
+    /// L 14000200080000bc98214311773a070000000500000001000000
+    /// C 000014000200080000bc982130c2a217b1d7000000770100010000000000000000000000000000000000
+    /// C 000014000200080000bc98214311773a07000000050000000100000000000000000000000000d0d70000
+    /// TORRENTZIPPED-1D9BC27F
+    /// int(1)
+    /// int(96000)
+    /// string(5) "world"
+    /// set at data
+    /// bool(true)
+    /// L 0a000000000000bc982130c2a217007701000077010001000000
+    /// L 14000200080000bc98214311773a070000000500000001000000
+    /// C 3f030a000000000000bc982130c2a2170077010000770100010000000000000000000000b68100000000
+    /// C 000014000200080000bc98214311773a070000000500000001000000000000000000000000001f770100
+    /// TORRENTZIPPED-FEA2E01B
+    /// int(1)
+    /// int(96000)
+    /// string(5) "world"
+    /// ```
+    fn entry(&mut self, i: usize, offset: u64, unchanged: u64) -> Result<Option<Written>, Status> {
+        let torrentzip = self.want_torrentzip();
         let Some(entry) = self.entries.get(i) else {
             self.error.set(Er::Internal);
             return Err(self.error);
@@ -695,7 +730,8 @@ impl Archive {
     /// `entry->changes`: an added entry's dirent settled on its data, its
     /// local header written again where `add_data`'s `dirent_changed`
     /// holds, then the `write_data_descriptor` record where the dirent's
-    /// bits ask for one.
+    /// bits ask for one. `ZIP_WANT_TORRENTZIP` is read past the data's
+    /// callbacks, as `add_data` reads it there.
     ///
     /// A buffer's source knows no CRC, so the preliminary header is
     /// written again, with the time a callback set:
@@ -737,8 +773,8 @@ impl Archive {
         written: &Written,
         at: u64,
         out: &mut Out,
-        torrentzip: bool,
     ) -> Result<(), Status> {
+        let torrentzip = self.want_torrentzip();
         let Some(de) = self.entries.get_mut(i).and_then(|e| e.changes.as_mut()) else {
             self.error.set(Er::Internal);
             return Err(self.error);
@@ -764,13 +800,14 @@ impl Archive {
 
     /// `write_cdir`: the central directory, then the Zip64 end records
     /// where they are needed, then the end record with the comment, or
-    /// torrentzip's in its place.
+    /// torrentzip's in its place, `ZIP_WANT_TORRENTZIP` read past the last
+    /// callback.
     fn write_cdir(
         &mut self,
         out: &mut Out,
         list: &[(usize, Option<Vec<u8>>)],
-        torrentzip: bool,
     ) -> Result<(), Status> {
+        let torrentzip = self.want_torrentzip();
         let offset = out.pos;
         if torrentzip {
             out.crc = Some(crc32fast::Hasher::new());
