@@ -122,21 +122,14 @@ fn built(
     if let Some(cfg) = cfg {
         added = added.with_cfg(cfg);
     }
-    added.onto(&mut cargo);
-    let status = cargo
+    cargo
         .args(features.into_iter().flat_map(|names| ["--features", names]))
         .args(
             into.into_iter()
                 .flat_map(|dir| ["--target-dir".as_ref(), dir.as_os_str()]),
-        )
-        .current_dir(root)
-        .status()
-        .with_context(|| format!("running cargo to build {binary}"))?;
-    if !status.success() {
-        bail!(
-            "cargo could not build {binary} ({status}); its errors are on the harness's second stream"
         );
-    }
+    let what = format!("{binary}; its errors are on the harness's second stream");
+    run(root, &mut cargo, &added, &what)?;
     let target = into.map_or_else(
         || {
             std::env::var_os("CARGO_TARGET_DIR")
@@ -182,16 +175,20 @@ pub(crate) fn hosts() -> Vec<String> {
 pub(crate) fn build_hosts(root: &Path) -> Result<()> {
     let mut cargo = Command::new(cargo());
     cargo.args(hosts());
-    Added::inherited().onto(&mut cargo);
+    let what = format!("the hosts in {}", root.display());
+    run(root, &mut cargo, &Added::inherited(), &what)
+}
+
+/// `cargo`, a build line, run in `root` with `added` on it, refused
+/// naming `what` it builds where cargo fails.
+fn run(root: &Path, cargo: &mut Command, added: &Added, what: &str) -> Result<()> {
+    added.onto(cargo);
     let status = cargo
         .current_dir(root)
         .status()
-        .context("running cargo to build the hosts")?;
+        .with_context(|| format!("running cargo to build {what}"))?;
     if !status.success() {
-        bail!(
-            "cargo could not build the hosts in {} ({status})",
-            root.display()
-        );
+        bail!("cargo could not build {what} ({status})");
     }
     Ok(())
 }
@@ -224,7 +221,9 @@ impl Added {
     }
 
     /// The flags of `encoded`, split at `0x1f`, where it is set, which
-    /// cargo reads before `plain`; else `plain`'s, split at whitespace.
+    /// cargo reads before `plain`; else `plain`'s, split at whitespace. A
+    /// variable set and empty adds nothing, as an unset one does, where
+    /// cargo would read it as an empty table and drop the option.
     fn carried(encoded: Option<&str>, plain: Option<&str>) -> Added {
         let flags: Vec<String> = match (encoded, plain) {
             (Some(encoded), _) => encoded.split('\x1f').map(str::to_owned).collect(),
