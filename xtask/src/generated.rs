@@ -236,6 +236,13 @@ pub(crate) enum EnvEntry {
 }
 
 impl EnvEntry {
+    /// The value as written, before `relative` makes it a path.
+    pub(crate) fn value(&self) -> &str {
+        match self {
+            EnvEntry::Plain(value) | EnvEntry::Table { value, .. } => value,
+        }
+    }
+
     /// The value as the path cargo hands a build, `root` the checkout.
     pub(crate) fn path(&self, root: &Path) -> PathBuf {
         match self {
