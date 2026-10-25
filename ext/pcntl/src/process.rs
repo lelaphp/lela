@@ -56,11 +56,13 @@ use crate::{State, failed, ffi};
 /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 5
 /// ```
 ///
-/// The child starts with the stat cache empty, as php 8.5.12's
-/// `php_child_init` empties it (`main/main.c:1901`, GH-23986), so a file
-/// the parent stat'ed and another process changed reads as it is now:
-/// the cache is the stream layer's, above the engine's fork, so it is
-/// emptied here.
+/// The child starts with the stat cache and the realpath cache empty,
+/// as php 8.5.12's `php_child_init` empties both
+/// (`php_clear_stat_cache(true, NULL, 0)`, `main/main.c:1901`,
+/// GH-23986), so a file the parent stat'ed and a link it resolved, each
+/// since changed by another process, read as they are now, and
+/// `/proc/self` is the child's. Both caches are above the engine's fork,
+/// so they are emptied here.
 ///
 /// ```php
 /// $f = tempnam(sys_get_temp_dir(), 'fork');
@@ -77,12 +79,30 @@ use crate::{State, failed, ffi};
 /// int(5)
 /// int(0)
 /// ```
+///
+/// ```php
+/// $d = sys_get_temp_dir() . '/fork' . getmypid();
+/// mkdir("$d/a", 0777, true); mkdir("$d/b"); symlink("$d/a", "$d/l");
+/// echo basename(realpath("$d/l")), "\n";
+/// if (($pid = pcntl_fork()) === 0) { unlink("$d/l"); symlink("$d/b", "$d/l"); exit(0); }
+/// pcntl_waitpid($pid, $status);
+/// if (($pid = pcntl_fork()) === 0) { echo basename(realpath("$d/l")), "\n"; exit(0); }
+/// pcntl_waitpid($pid, $status);
+/// echo basename(realpath("$d/l")), "\n";
+/// unlink("$d/l"); rmdir("$d/a"); rmdir("$d/b"); rmdir($d);
+/// ```
+/// ```expect process
+/// a
+/// b
+/// a
+/// ```
 #[php_function]
 pub(crate) fn pcntl_fork(req: &mut Request) -> i64 {
     match req.limits_mut().fork() {
         Ok(Forked::Parent { child }) => child.as_raw().into(),
         Ok(Forked::Child) => {
             req.clear_stat_cache();
+            req.environment_mut().realpath_cache_clear(None);
             0
         }
         Err(error) => {
