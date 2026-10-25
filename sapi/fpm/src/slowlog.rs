@@ -93,7 +93,10 @@ pub(crate) fn check_timed_out(
 /// the slow request counted, and where the pool's slow log opens and the
 /// child's memory is readable, the entry `fpm_php_trace_dump` writes, its
 /// time, pool and pid, the program it serves and the request's frames;
-/// the child let go on after, whatever came of it.
+/// the child let go on after, whatever came of it. php's order holds by
+/// scope: the memory closes (`fpm_trace_close`, the master detached on
+/// Linux) as the `if let` that opened it ends, the slow log is closed as
+/// its arm ends (`fclose`), and only then is the child sent `SIGCONT`.
 pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
     if let Some(scoreboard) = fpm.pools[p].scoreboard {
         scoreboard.update(
@@ -117,7 +120,6 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
         Ok(mut file) => {
             if let Some(memory) = crate::ffi::trace::ready(pid) {
                 std::io::Write::write_all(&mut file, &dump(fpm, p, c, &memory)).ok();
-                crate::ffi::trace::close(memory);
             }
         }
         Err(e) => {

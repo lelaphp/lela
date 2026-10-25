@@ -695,12 +695,14 @@ fn set_option(
         };
         s.as_bytes().to_vec()
     } else {
-        let n = to_long(req, value)?;
+        // php's `ov` is an `int`, so the long is cut to 32 bits before
+        // UDP_SEGMENT's range is checked.
+        let ov = c_int(to_long(req, value)?);
         #[cfg(target_os = "linux")]
-        if option == i64::from(libc::UDP_SEGMENT) && !(0..=65535).contains(&n) {
-            return Err(arg_value_error(req, 4, "be of between 0 and 65535"));
+        if option == i64::from(libc::UDP_SEGMENT) && u16::try_from(ov).is_err() {
+            return Err(arg_value_error(req, 4, "be between 0 and 65535"));
         }
-        c_int(n).to_ne_bytes().to_vec()
+        ov.to_ne_bytes().to_vec()
     };
     Ok(apply(req, socket, fd, lvl, opt, &bytes))
 }
