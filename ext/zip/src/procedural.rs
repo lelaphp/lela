@@ -342,7 +342,10 @@ fn zip_entry_name(
     zip_entry: Resource,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match info(req, zip_entry, "zip_entry_name")? {
-        Some(sb) => Ok(OrFalse::Value(PhpString::new(req, &sb.name)?)),
+        Some(sb) => Ok(OrFalse::Value(PhpString::new(
+            req,
+            php_ext::coerce::c_str(&sb.name),
+        )?)),
         None => Ok(OrFalse::False),
     }
 }
