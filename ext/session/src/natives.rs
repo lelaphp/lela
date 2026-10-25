@@ -16,6 +16,7 @@ use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
+use crate::throwables::Throwables;
 use crate::user::{Slot, method_of, store};
 use crate::{
     Module, State, Status, answer, headers_sent, ini, ini_bool, pending, sent_error, session,
@@ -107,9 +108,10 @@ fn session_module_name(
     };
     if c_str(&name).eq_ignore_ascii_case(b"user") {
         current.give_up(req);
+        let ce = Throwables::of(req)?;
         return Err(php_ext::raising::argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             1,
             "cannot be \"user\"",
         ));
@@ -387,9 +389,10 @@ fn session_create_id(
     let prefix = prefix.0.as_bytes().to_vec();
     if !prefix.is_empty() {
         if prefix.len() > 256 {
+            let ce = Throwables::of(req)?;
             return Err(php_ext::raising::argument_error(
                 req,
-                "ValueError",
+                ce.value_error,
                 1,
                 "cannot be longer than 256 characters",
             ));
@@ -1252,7 +1255,13 @@ fn session_register_shutdown(req: &mut Request) -> Result<(), Thrown> {
 /// alone (`fci_cache.function_handler`).
 fn named(req: &mut Request, name: &[u8]) -> Result<Callable, Thrown> {
     let value = Value::string(PhpString::interned(req, name)?);
-    callable_checked(req, &value).map_err(|message| throw_error(req, "Error", &message))
+    callable_checked(req, &value).map_err(|message| {
+        let ce = match Throwables::of(req) {
+            Ok(ce) => ce,
+            Err(fatal) => return fatal,
+        };
+        throw_error(req, ce.error, &message)
+    })
 }
 
 /// `can_session_handler_be_changed`.

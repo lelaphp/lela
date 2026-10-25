@@ -10,6 +10,7 @@ use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::{Emalloc, Owner, PhpObject};
 
 use crate::ffi::{self, Font, Glyphs, Im, Image, Reported};
+use crate::throwables::Throwables;
 
 /// `final class GdImage`, `@strict-properties`, `@not-serializable`: the
 /// payload is the image, `None` only on an object no native made.
@@ -125,7 +126,11 @@ impl ObjectHandlers for FontHandlers {
 /// The `get_constructor` of both classes.
 fn refuse(req: &mut Request, class: &str) -> Thrown {
     let text = format!("You cannot initialize a {class} object except through helper functions");
-    throw_error(req, "Error", &text)
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    throw_error(req, ce.error, &text)
 }
 
 /// `php_gd_libgdimageptr_from_zval_p`: the image an object holds, or the
@@ -157,7 +162,8 @@ pub(crate) fn wrap(
 fn object_of(req: &mut Request, name: &[u8]) -> Result<Owner<PhpObject>, Thrown> {
     let Some(class) = lookup_class(req, name)? else {
         let text = format!("Class \"{}\" not found", String::from_utf8_lossy(name));
-        return Err(throw_error(req, "Error", &text));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, &text));
     };
     new_object(req, class)
 }

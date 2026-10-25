@@ -14,6 +14,7 @@ use crate::doc::{NODE, Obj, doc_id, fixed};
 use crate::ffi::{
     self, NODE_ASP, NODE_COMMENT, NODE_DOCTYPE, NODE_JSTE, NODE_PHP, NODE_ROOT, NODE_TEXT, Step,
 };
+use crate::throwables::Throwables;
 use crate::{DocId, retain, with_doc};
 
 /// The node an object names, and its document.
@@ -219,9 +220,10 @@ impl tidyNode {
     #[php(private)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
+        let ce = Throwables::of(req)?;
         Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "You should not create a tidyNode manually",
         ))
     }

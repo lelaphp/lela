@@ -13,6 +13,7 @@ use php_ext::raising::{Cause, Level, Thrown, docref, fatal, throw_error, type_er
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
+use crate::throwables::Throwables;
 use crate::{Module, State, Status, absorb, answer, files, pending, session, string_value};
 
 /// `PS(mod_user_names)`: the callables, the request's owner of each.
@@ -311,12 +312,14 @@ pub(super) fn validate_sid(req: &mut Request, id: &[u8]) -> Result<bool, Thrown>
 fn sanity(req: &mut Request, open: bool) -> Result<Option<Module>, Thrown> {
     let state = req.state::<State>();
     if state.status != Status::Active {
-        return Err(throw_error(req, "Error", "Session is not active"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "Session is not active"));
     }
     let Some(module) = state.default_module else {
+        let ce = Throwables::of(req)?;
         return Err(throw_error(
             req,
-            "Error",
+            ce.error,
             "Cannot call default session handler",
         ));
     };

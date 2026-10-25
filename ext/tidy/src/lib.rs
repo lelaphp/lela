@@ -29,6 +29,7 @@ mod doc;
 mod ffi;
 mod node;
 mod output;
+mod throwables;
 
 use php_ext::abi::{Extension, ExtensionBuilder};
 use php_ext::attr::php_const;
@@ -401,6 +402,7 @@ pub fn extension() -> Extension {
         .class::<node::tidyNode>()
         .register(output::OB_TIDYHANDLER)
         .request_state::<State>()
+        .engine_state(throwables::Throwables::start)
         .rinit(output::rinit)
         .info(info)
         .build("tidy")

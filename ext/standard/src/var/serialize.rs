@@ -22,6 +22,7 @@ use super::{
     is_serializable, locked, not_serializable,
 };
 use crate::string::Decimal;
+use crate::throwables::Throwables;
 
 /// What the var hash keys an entry by: the object's identity, or the
 /// reference's.
@@ -574,9 +575,10 @@ fn object_value(
     hash: &mut Serializer,
 ) -> Result<(), Thrown> {
     if let Some(shown) = not_serializable(req, object.class()) {
+        let ce = Throwables::of(req)?;
         return Err(throw_exception_ex(
             req,
-            "Exception",
+            ce.exception,
             &format!("Serialization of '{shown}' is not allowed"),
         ));
     }
@@ -819,9 +821,10 @@ fn custom(
         return Ok(());
     }
     let shown = String::from_utf8_lossy(name).into_owned();
+    let ce = Throwables::of(req)?;
     Err(throw_exception_ex(
         req,
-        "Exception",
+        ce.exception,
         &format!("{shown}::serialize() must return a string or NULL"),
     ))
 }

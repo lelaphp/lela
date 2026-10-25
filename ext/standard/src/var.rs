@@ -23,6 +23,7 @@ use php_ext::values::walk::{self, GiveUp, Guarded, Hold, Unwritten};
 use php_ext::values::{Emalloc, Key, Owner, PhpString, RecursionGuard, SmartStr, Value};
 
 use crate::string::Decimal;
+use crate::throwables::Throwables;
 
 pub(crate) mod debug;
 pub(crate) mod serialize;
@@ -329,7 +330,8 @@ impl ObjectHandlers for Incomplete {
         value.give_up(req);
         name.give_up(req);
         let message = incomplete_message(req, object, "modify a property");
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     }
 
     /// `incomplete_class_get_property_ptr_ptr`: every place refused with
@@ -356,7 +358,8 @@ impl ObjectHandlers for Incomplete {
         _name: &[u8],
     ) -> Result<PropertyPlace, Thrown> {
         let message = incomplete_message(req, object, "modify a property");
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     }
 
     /// `incomplete_class_get_method`: every method refused with the
@@ -376,7 +379,8 @@ impl ObjectHandlers for Incomplete {
         _lowered: &[u8],
     ) -> Result<Option<php_ext::call::Function>, Thrown> {
         let message = incomplete_message(req, object, "call a method");
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     }
 
     fn has_property(
@@ -398,7 +402,8 @@ impl ObjectHandlers for Incomplete {
         _name: &[u8],
     ) -> Result<(), Thrown> {
         let message = incomplete_message(req, object, "modify a property");
-        Err(throw_error(req, "Error", &message))
+        let ce = Throwables::of(req)?;
+        Err(throw_error(req, ce.error, &message))
     }
 }
 

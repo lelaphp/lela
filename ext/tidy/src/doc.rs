@@ -19,6 +19,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value
 
 use crate::ffi::{self, Base, OptType, Status};
 use crate::node::{self, tidyNode};
+use crate::throwables::Throwables;
 use crate::{
     DocId, adopt, default_config, forget, initialized, load_config, set_initialized, with_doc,
 };
@@ -178,13 +179,14 @@ fn set_opt(
     arg: u32,
 ) -> Result<bool, Thrown> {
     let name_shown = shown(name);
+    let ce = Throwables::of(req)?;
     let Some(opt) = with_doc(req, id, |_, doc| Ok(doc.option(name)))?.flatten() else {
         let text = format!("Unknown Tidy configuration option \"{name_shown}\"");
-        return Err(argument_error(req, "ValueError", arg, &text));
+        return Err(argument_error(req, ce.value_error, arg, &text));
     };
     if opt.is_internal() {
         let text = format!("Attempting to set read-only option \"{name_shown}\"");
-        return Err(argument_error(req, "ValueError", arg, &text));
+        return Err(argument_error(req, ce.value_error, arg, &text));
     }
     let value = value.deref();
     let as_text = match opt.kind() {
@@ -222,7 +224,7 @@ fn set_opt(
     text.give_up(req);
     if refused {
         let text = format!("option \"{name_shown}\" does not accept \"{value_shown}\" as a value");
-        return Err(argument_error(req, "TypeError", arg, &text));
+        return Err(argument_error(req, ce.type_error, arg, &text));
     }
     Ok(set)
 }
@@ -413,9 +415,10 @@ fn repair_file(
         return Ok(OrFalse::False);
     };
     let answer = if too_long(data.as_bytes()) {
+        let ce = Throwables::of(req)?;
         Err(argument_error(
             req,
-            "ValueError",
+            ce.value_error,
             1,
             "File content is too long",
         ))
@@ -440,7 +443,8 @@ fn repair_string(
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     null_encoding(req, encoding.as_ref());
     if too_long(string.as_bytes()) {
-        return Err(argument_error(req, "ValueError", 1, "is too long"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 1, "is too long"));
     }
     quick_repair(
         req,
@@ -520,7 +524,8 @@ fn tidy_parse_string(
     #[php(default = null)] encoding: Option<PhpString>,
 ) -> Result<OrFalse<Owner<Tidy>>, Thrown> {
     if too_long(string.as_bytes()) {
-        return Err(argument_error(req, "ValueError", 1, "is too long"));
+        let ce = Throwables::of(req)?;
+        return Err(argument_error(req, ce.value_error, 1, "is too long"));
     }
     parse_new(
         req,
@@ -750,7 +755,11 @@ fn invalid_option(req: &mut Request, name: &[u8], arg: u32) -> Thrown {
         "is an invalid configuration option, \"{}\" given",
         shown(name)
     );
-    argument_error(req, "ValueError", arg, &text)
+    let ce = match Throwables::of(req) {
+        Ok(ce) => ce,
+        Err(fatal) => return fatal,
+    };
+    argument_error(req, ce.value_error, arg, &text)
 }
 
 /// `tidy_get_opt_doc(tidy $tidy, string $option): string|false`.
@@ -830,7 +839,8 @@ fn status(req: &mut Request, object: PhpObject, which: Status) -> Result<i64, Th
 fn initialized_status(req: &mut Request, object: PhpObject, which: Status) -> Result<i64, Thrown> {
     let id = doc_id(req, object)?;
     if !initialized(req, id) {
-        return Err(throw_error(req, "Error", "tidy object is not initialized"));
+        let ce = Throwables::of(req)?;
+        return Err(throw_error(req, ce.error, "tidy object is not initialized"));
     }
     status(req, object, which)
 }
@@ -1123,6 +1133,7 @@ pub(crate) mod class {
         initialized_status, new_string, opt_doc, parse_with, php_class, repair_file, repair_string,
         status, throw_error, tidyNode, too_long, value_error,
     };
+    use crate::throwables::Throwables;
 
     /// `class tidy`: one `PHPTidyObj` each, its document made with it,
     /// uncloneable, cast to the document libtidy saves.
@@ -1184,7 +1195,8 @@ pub(crate) mod class {
             let object = this.object();
             let Some(contents) = file_to_mem(req, filename.as_bytes(), useIncludePath)? else {
                 let text = cannot_load(filename.as_bytes(), useIncludePath);
-                return Err(throw_error(req, "Exception", &text));
+                let ce = Throwables::of(req)?;
+                return Err(throw_error(req, ce.exception, &text));
             };
             let answer = construct(req, object, *contents, config, encoding.as_ref());
             contents.give_up(req);
@@ -1285,7 +1297,8 @@ pub(crate) mod class {
             #[php(default = null)] encoding: Option<PhpString>,
         ) -> Result<bool, Thrown> {
             if too_long(string.as_bytes()) {
-                return Err(argument_error(req, "ValueError", 1, "is too long"));
+                let ce = Throwables::of(req)?;
+                return Err(argument_error(req, ce.value_error, 1, "is too long"));
             }
             parse_with(
                 req,
@@ -1538,7 +1551,8 @@ fn construct(
         return Err(value_error(req, "File content is too long"));
     }
     let id = doc_id(req, object)?;
-    if !throwing_warnings(req, "Exception", |req| apply_config(req, id, config, 2))? {
+    let ce = Throwables::of(req)?;
+    if !throwing_warnings(req, ce.exception, |req| apply_config(req, id, config, 2))? {
         return Ok(());
     }
     parse_string(

@@ -28,6 +28,7 @@ use super::{
     locked, not_serializable,
 };
 use crate::string::Decimal;
+use crate::throwables::Throwables;
 
 /// `HT_MAX_SIZE` on a 64-bit build.
 const HT_MAX_SIZE: i64 = 0x4000_0000;
@@ -2063,9 +2064,10 @@ impl State<'_> {
         };
         self.p = after;
         if let Some(shown) = not_serializable(req, class) {
+            let ce = Throwables::of(req)?;
             return Err(throw_exception_ex(
                 req,
-                "Exception",
+                ce.exception,
                 &format!("Unserialization of '{shown}' is not allowed"),
             ));
         }
