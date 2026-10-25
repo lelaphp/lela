@@ -451,9 +451,11 @@ fn row_of(table: &'static [(u32, Row)], cp: u32) -> Option<&'static Row> {
 /// `php_escape_html_entities_ex(old, oldlen, all, flags, hint_charset,
 /// double_encode, quiet)`: the escaped bytes, or the empty string for
 /// input ill-formed in its charset where neither `ENT_IGNORE` nor
-/// `ENT_SUBSTITUTE` says what to do. `PHPAPI` in `html.h`, which
-/// ext/filter's `FILTER_SANITIZE_FULL_SPECIAL_CHARS` calls with `all`
-/// set and `double_encode` off.
+/// `ENT_SUBSTITUTE` says what to do; the bytes alone, as
+/// `php_info_print_html_esc` prints them, where [`escape_string`] makes
+/// php's string on the request's heap, as ext/filter's
+/// `FILTER_SANITIZE_FULL_SPECIAL_CHARS` calls it with `all` set and
+/// `double_encode` off.
 ///
 /// ```php
 /// var_dump(htmlentities("<é> &amp;", ENT_QUOTES, null, false), filter_var("<é> &amp; 'q'", FILTER_SANITIZE_FULL_SPECIAL_CHARS));
@@ -462,7 +464,6 @@ fn row_of(table: &'static [(u32, Row)], cp: u32) -> Option<&'static Row> {
 /// string(22) "&lt;&eacute;&gt; &amp;"
 /// string(36) "&lt;&eacute;&gt; &amp; &#039;q&#039;"
 /// ```
-#[allow(clippy::too_many_lines)]
 pub fn escape(
     req: &mut Request,
     old: &[u8],
@@ -471,6 +472,95 @@ pub fn escape(
     hint: Option<&[u8]>,
     double_encode: bool,
 ) -> Vec<u8> {
+    escape_grown(req, old, all, flags, hint, double_encode)
+        .bytes
+        .unwrap_or_default()
+}
+
+/// What `php_escape_html_entities_ex` asks of the request's heap besides
+/// the bytes it writes: `replaced`'s room, its first estimate and each
+/// growth as the loop meets it.
+struct Escaped {
+    /// The escaped bytes, `None` for input ill-formed in its charset
+    /// that is refused, php's `zend_string_efree` and the empty string.
+    bytes: Option<Vec<u8>>,
+    /// The room php grows `replaced` to, in order, and whether it asks
+    /// fallibly: the top of each character's turn where fewer than 40
+    /// bytes are left (`zend_string_safe_frealloc(..., 128, fallible:
+    /// true)` since 8.5.12), and infallibly before a kept entity longer
+    /// than what is left.
+    grown: Vec<(usize, bool)>,
+}
+
+/// `php_escape_html_entities_ex(old, oldlen, all, flags, hint_charset,
+/// double_encode, quiet)` as php 8.5.12 lays it on the request's heap
+/// (`Z/ext/standard/html.c:1173-1340`): `replaced` asked for fallibly at
+/// 128 bytes or twice the input and grown fallibly by 128 whenever fewer
+/// than 40 are left, the empty string where the memory limit refused
+/// either, and the string returned the room with what was written, not
+/// cut to it. `PHPAPI` in `html.h`, which ext/filter's
+/// `FILTER_SANITIZE_FULL_SPECIAL_CHARS` calls.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(htmlspecialchars(str_repeat("'", 2 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 3
+/// ```
+pub fn escape_string(
+    req: &mut Request,
+    old: &[u8],
+    all: bool,
+    flags: i64,
+    hint: Option<&[u8]>,
+    double_encode: bool,
+) -> Result<Owner<PhpString>, Thrown> {
+    let escaped = escape_grown(req, old, all, flags, hint, double_encode);
+    let maxlen = if old.len() < 64 {
+        128
+    } else {
+        old.len().saturating_mul(2)
+    };
+    // `zend_string_falloc(maxlen, fallible: true)`, `ZSTR_EMPTY_ALLOC()`
+    // where it is refused.
+    let Some(mut room) = req
+        .memory_mut()
+        .fallible(|req| FreshString::new(req, maxlen))?
+    else {
+        return PhpString::new(req, b"");
+    };
+    for (len, fallibly) in escaped.grown {
+        room = if fallibly {
+            let Some(grown) = req.memory_mut().fallible(|req| room.extend(req, len))? else {
+                return PhpString::new(req, b"");
+            };
+            grown
+        } else {
+            room.extend(req, len)?
+        };
+    }
+    let Some(bytes) = escaped.bytes else {
+        room.free(req);
+        return PhpString::new(req, b"");
+    };
+    room.bytes_mut()[..bytes.len()].copy_from_slice(&bytes);
+    room.set_len(bytes.len());
+    Ok(room.finish())
+}
+
+/// The escape itself, its bytes and the growth php's `replaced` meets
+/// on the way ([`Escaped`]).
+#[allow(clippy::too_many_lines)]
+fn escape_grown(
+    req: &mut Request,
+    old: &[u8],
+    all: bool,
+    flags: i64,
+    hint: Option<&[u8]>,
+    double_encode: bool,
+) -> Escaped {
     let charset = determine_charset(req, hint, false);
     let doctype = flags & DOC_TYPE_MASK;
     let mut all = all;
@@ -497,11 +587,22 @@ pub fn escape(
         b"&#xFFFD;"
     };
     let mut out: Vec<u8> = Vec::with_capacity(old.len() + old.len() / 2);
+    let mut maxlen = if old.len() < 64 {
+        128
+    } else {
+        old.len().saturating_mul(2)
+    };
+    let mut grown = Vec::new();
     let mut cursor = 0usize;
     while cursor < old.len() {
         let before = cursor;
         let (this_char, next) = charset.next_char(old, cursor);
         cursor = next;
+        // "guarantee we have at least 40 bytes to write".
+        if out.len() > maxlen - 40 {
+            maxlen += 128;
+            grown.push((maxlen, true));
+        }
         let Some(mut this_char) = this_char else {
             if flags & IGNORE_ERRORS != 0 {
                 continue;
@@ -509,7 +610,7 @@ pub fn escape(
                 out.extend_from_slice(replacement);
                 continue;
             }
-            return Vec::new();
+            return Escaped { bytes: None, grown };
         };
         let mut sequence: &[u8] = &old[before..cursor];
         if this_char != u32::from(b'&') {
@@ -603,6 +704,11 @@ pub fn escape(
                 })
             };
             if let Some(len) = valid {
+                // "entity size is unbounded, we may need more memory".
+                if maxlen - out.len() < len + 2 {
+                    maxlen += len + 128;
+                    grown.push((maxlen, false));
+                }
                 out.push(b'&');
                 out.extend_from_slice(&old[cursor..cursor + len]);
                 out.push(b';');
@@ -612,7 +718,10 @@ pub fn escape(
         }
         out.extend_from_slice(b"&amp;");
     }
-    out
+    Escaped {
+        bytes: Some(out),
+        grown,
+    }
 }
 
 /// `php_html_entities(INTERNAL_FUNCTION_PARAM_PASSTHRU, all)`, over
@@ -625,28 +734,17 @@ fn entities(
     if string.is_empty() {
         return PhpString::new(req, b"");
     }
-    let out = escape(
+    // php 8.5.12 asks for the string and its growth fallibly, and
+    // answers the empty string where the memory limit refused one, the
+    // limit's fatal raised as the call returns ([`escape_string`]).
+    escape_string(
         req,
         string.as_bytes(),
         all,
         flags,
         hint.as_ref().map(PhpString::as_bytes),
         double_encode,
-    );
-    // php 8.5.12 asks for its first estimate fallibly,
-    // `zend_string_falloc(maxlen)`, 128 bytes or twice the input, and
-    // answers the empty string where the memory limit refused it, the
-    // limit's fatal raised as the call returns.
-    let len = string.len();
-    let maxlen = if len < 64 { 128 } else { len.saturating_mul(2) };
-    let Some(estimate) = req
-        .memory_mut()
-        .fallible(|req| FreshString::new(req, maxlen))?
-    else {
-        return PhpString::new(req, b"");
-    };
-    estimate.free(req);
-    PhpString::new(req, &out)
+    )
 }
 
 /// `htmlspecialchars(string $string, int $flags = ENT_QUOTES |

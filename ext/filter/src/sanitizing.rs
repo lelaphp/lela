@@ -172,8 +172,8 @@ pub(crate) fn full_special_chars(
     } else {
         0
     };
-    let out = php_ext_standard::escape_html_entities(req, s, true, quotes, None, false);
-    value(req, &out)
+    let out = php_ext_standard::escape_html_entities(req, s, true, quotes, None, false)?;
+    Ok(Outcome::Value(out.into_value()))
 }
 
 /// `php_filter_unsafe_raw`, `FILTER_UNSAFE_RAW` and `FILTER_DEFAULT`: the
