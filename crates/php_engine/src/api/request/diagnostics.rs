@@ -736,7 +736,18 @@ impl Request {
     }
 
     /// `php_error_cb` up to its last arm: the diagnostic stored unless it
-    /// repeats, then logged and displayed unless masked.
+    /// repeats, then logged and displayed unless masked. The html form of
+    /// an `E_ERROR` prints the escaped message with `%s`, so a NUL in it
+    /// ends it there, where the plain form keeps every byte:
+    ///
+    /// ```php
+    /// ini_set('html_errors', '1');
+    /// throw new Exception("before\0after");
+    /// ```
+    /// ```expect exit=255
+    /// <br />
+    /// <b>Fatal error</b>:  Uncaught Exception: before in <b>%s</b> on line <b>3</b><br />
+    /// ```
     fn stored_and_shown(&mut self, level: Level, string: PhpString, file: &[u8], line: u32) {
         if !self.displayed(string, file, line) {
             return;
@@ -771,13 +782,21 @@ impl Request {
         }
         let name = level_name(level);
         let trace = self.stack_trace_after_the_site();
-        // What is written is the message's string, its bytes as raised.
-        let said = |before: String, after: &str| -> Vec<u8> {
-            [before.as_bytes(), string.as_bytes(), after.as_bytes()].concat()
+        // What is written is the message's string, its bytes as raised,
+        // where php prints it `%S`: the plain form, the stderr form and
+        // the html form of a level that is no `E_ERROR` or `E_PARSE`. The
+        // log line, the xml fault and the html form of those two print
+        // `ZSTR_VAL(message)` with `%s`, to its first NUL
+        // (`Z/main/main.c:1493`, `:1499`, `:1507`).
+        let whole = string.as_bytes();
+        let to_nul = crate::c_number::c_str(whole);
+        let said_as = |message: &[u8], before: String, after: &str| -> Vec<u8> {
+            [before.as_bytes(), message, after.as_bytes()].concat()
         };
+        let said = |before: String, after: &str| said_as(whole, before, after);
         let site = format!(" in {named} on line {line}{trace}");
         if self.log_errors() {
-            let text = said(format!("PHP {name}:  "), &site);
+            let text = said_as(to_nul, format!("PHP {name}:  "), &site);
             // `spprintf(&log_buffer, …)`, freed once it is logged.
             let Ok(buffer) = crate::api::raising::printf_buffer(self, text.len()) else {
                 return;
@@ -817,7 +836,8 @@ impl Request {
             // `xmlrpc_error_number` as its code and the diagnostic as
             // its string, the message unescaped and no space after the
             // colon; neither string stands around it.
-            let text = said(
+            let text = said_as(
+                to_nul,
                 format!(
                     "<?xml version=\"1.0\"?><methodResponse><fault><value><struct><member><name>faultCode</name><value><int>{}</int></value></member><member><name>faultString</name><value><string>{name}:",
                     self.ini().long(b"xmlrpc_error_number")
@@ -837,7 +857,7 @@ impl Request {
             if let Level::Error | Level::Parse = level {
                 self.printed_escaped(
                     &format!("{prepend}<br />\n<b>{name}</b>:  "),
-                    string.as_bytes(),
+                    to_nul,
                     &format!(" in <b>{named}</b> on line <b>{line}</b><br />\n{append}"),
                 );
             } else {

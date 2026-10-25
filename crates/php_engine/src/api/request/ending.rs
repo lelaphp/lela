@@ -316,7 +316,8 @@ impl Request {
             Level::Parse => Ending::Parse,
             _ => Ending::Fatal(format!(
                 "PHP Fatal error:  {} in {} on line {line}{}",
-                String::from_utf8_lossy(string.as_bytes()),
+                // The log form's `%s`, to the message's first NUL.
+                String::from_utf8_lossy(crate::c_number::c_str(string.as_bytes())),
                 String::from_utf8_lossy(file),
                 self.stack_trace_after_the_site()
             )),
