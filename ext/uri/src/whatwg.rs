@@ -64,6 +64,19 @@ fn reported(kind: ErrorKind) -> (UrlValidationErrorType, bool) {
 /// `fill_errors`: one `UrlValidationError` per logged error, in the order
 /// php pops them, and the reason a message names, the case of the last
 /// failure popped.
+///
+/// Since 8.5.12 the errors stop once the memory limit was met:
+///
+/// ```php
+/// ini_set('memory_limit', '16M');
+/// $errors = null;
+/// new Uri\WhatWg\Url("https://example.com/" . str_repeat("%", 100 * 1024), null, $errors);
+/// echo "not reached\n";
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 32768 bytes) in %s on line 4
+/// ```
 fn fill_errors(
     req: &mut Request,
     errors: &[ValidationError],
@@ -92,6 +105,10 @@ fn fill_errors(
             reason = Some(kind.case_name());
         }
         out.append(req, object.into_value())?;
+        // The errors stop once the memory limit was met, since 8.5.12.
+        if req.memory().has_oom() {
+            break;
+        }
     }
     Ok((out, reason))
 }
