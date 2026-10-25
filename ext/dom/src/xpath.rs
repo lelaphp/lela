@@ -6,13 +6,13 @@
 use php_ext::abi::{Callable, GcTable, Instance, Passed, Path, Raw, Refusals, Std, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, with_string};
+use php_ext::coerce::{callable_checked, to_callable, with_string};
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, docref, pending, throw_error,
+    Level, Thrown, arg_type_error, arg_value_error, docref, throw_error, type_error,
 };
 use php_ext::request::{Foreign, Request};
 use php_ext::values::walk::{self, Hold};
-use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 use php_ext_libxml::Errors;
 use php_ext_libxml::ffi::{
     self, Answer, Called, Item, Name, Node, Operand, Returned, Route, Scope,
@@ -640,7 +640,7 @@ fn dispatch(
                 ));
             };
             let Operand::Str(name) = first else {
-                return Err(throw_error(req, "TypeError", NOT_A_NAME));
+                return Err(type_error(req, NOT_A_NAME));
             };
             (None, name, operands.collect::<Vec<_>>())
         }
@@ -654,27 +654,7 @@ fn dispatch(
             // `fci.function_name`, released once `zend_call_function`
             // returns, after its refusal is thrown.
             let name_value = string(req, &name)?;
-            let found = callable_checked(req, &name_value).map_err(|why| {
-                let shown = String::from_utf8_lossy(&name).into_owned();
-                let message = format!("Invalid callback {shown}, {why}");
-                // `zend_is_callable_ex`'s `error`, `zend_spprintf`'s
-                // buffer, which `zend_call_function` frees after its throw.
-                let error = match Emalloc::printf_buffer(req, why.len()) {
-                    Ok(error) => error,
-                    Err(refused) => return refused,
-                };
-                // What an autoloader threw while the name was looked up is
-                // handed on alone, `error` freed, as php 8.5.12's
-                // `zend_call_function` returns before its refusal; with
-                // nothing pending, the refusal, its `zend_vspprintf` buffer
-                // standing across the throw.
-                let thrown = match pending(req) {
-                    Err(previous) => previous,
-                    Ok(()) => throw_error(req, "Error", &message),
-                };
-                error.free(req);
-                thrown
-            });
+            let found = to_callable(req, &name_value);
             name_value.give_up(req);
             found
         }
@@ -721,9 +701,8 @@ fn dispatch(
         ValueRef::Bool(b) => Ok(Returned::Bool(b)),
         ValueRef::Object(_) => {
             answer.give_up(req);
-            return Err(throw_error(
+            return Err(type_error(
                 req,
-                "TypeError",
                 "Only objects that are instances of DOM nodes can be converted to an XPath expression",
             ));
         }

@@ -1002,7 +1002,7 @@ fn strftime_of(format: &[u8], t: &Time, offset: Option<&Offset>) -> ffi::Strftim
 /// pk(fn () => @strftime('%Z %z', 0)); pk(fn () => @strftime(str_repeat('x', 300), 0)); pk(fn () => @strftime(str_repeat('x', 5000), 0));
 /// ```
 /// ```expect capture
-/// 640 72
+/// 640 80
 /// 1408 384
 /// 20800 0
 /// ```
@@ -1050,7 +1050,7 @@ fn strftime(
 /// pk(fn () => @gmstrftime('%Z %z', 0)); pk(fn () => @gmstrftime(str_repeat('%Y', 200), 0));
 /// ```
 /// ```expect capture
-/// 576 72
+/// 576 80
 /// 2624 896
 /// ```
 #[php_function(deprecated(since = "8.1", message = "use IntlDateFormatter::format() instead"))]

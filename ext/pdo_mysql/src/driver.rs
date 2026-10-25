@@ -15,7 +15,7 @@ use std::borrow::Cow;
 use php_ext::coerce::atoi;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Emalloc, Owner, PhpString, Value};
+use php_ext::values::{Emalloc, FreshString, Owner, PhpString, Sizing, Value};
 use php_ext_mysqlnd::client::{ClientOption, Command, Connect, Idle, Mysqlnd, Stmt as Ps};
 use php_ext_pdo::connector::{
     BindType, Cause, Connection, Connector, Failure, NativeError, OnError, ParameterMap,
@@ -709,14 +709,47 @@ impl Connection for Db {
     }
 
     /// `mysql_handle_quoter`: escaped by the connection's character set,
-    /// `N'…'` for a national string, `_binary'…'` for a LOB.
+    /// `N'…'` for a national string, `_binary'…'` for a LOB, written into
+    /// `zend_string_safe_alloc(2, len, 3 + prefix)` and cut by
+    /// `zend_string_truncate` (`ext/pdo_mysql/mysql_driver.c:333-357` at
+    /// php-8.5.12). So the string stays in the cut's bin: after the loop's
+    /// first pass, `'1'` is 35 bytes and the 40-byte bin, which
+    /// `zend_string_init`'s 28 would not reach. At 113 bytes the 2 × 113 +
+    /// 32 asked for is the 320-byte bin and the cut to 147 the 160-byte
+    /// one, which the peak sees both of:
+    ///
+    /// ```php
+    /// $q = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+    /// foreach (['1', '1', '12345', '123456', '12345678901', str_repeat('a', 113)] as $v) {
+    ///     $v .= '';
+    ///     memory_reset_peak_usage(); $m = memory_get_usage();
+    ///     $x = $q->quote($v);
+    ///     echo strlen($v), ' ', memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n";
+    ///     unset($x);
+    /// }
+    /// foreach ([PDO::PARAM_STR | PDO::PARAM_STR_NATL, PDO::PARAM_LOB] as $t) {
+    ///     $m = memory_get_usage(); $x = $q->quote('123456', $t);
+    ///     echo $x, ' ', memory_get_usage() - $m, "\n";
+    ///     unset($x);
+    /// }
+    /// ```
+    /// ```expect mysql
+    /// 1 72 112
+    /// 1 40 72
+    /// 5 40 88
+    /// 6 48 80
+    /// 11 48 104
+    /// 113 160 480
+    /// N'123456' 48
+    /// _binary'123456' 48
+    /// ```
     fn quote(
         &mut self,
         req: &mut Request,
         text: &[u8],
         ty: BindType,
         raises: OnError,
-    ) -> Result<Vec<u8>, Failure> {
+    ) -> Result<Owner<PhpString>, Failure> {
         let _ = raises;
         let h = self.h(req)?;
         let raw = i64::from(ty.raw());
@@ -731,18 +764,35 @@ impl Connection for Db {
                 natl = false;
             }
         }
-        let escaped = h.server.escape(req, text);
-        let mut out = Vec::with_capacity(escaped.len() + 10);
-        if natl {
-            out.extend_from_slice(b"N'");
+        let prefix: &[u8] = if natl {
+            b"N'"
         } else if lob {
-            out.extend_from_slice(b"_binary'");
+            b"_binary'"
         } else {
-            out.push(b'\'');
-        }
-        out.extend_from_slice(&escaped);
-        out.push(b'\'');
-        Ok(out)
+            b"'"
+        };
+        // `3 + (natl ? 1 : 0) + (binary ? 7 : 0)`: the prefix, the closing
+        // quote and the NUL php writes inside the length. A length that
+        // overflows is the sizing's fatal, php's `safe_address`.
+        let room = text
+            .len()
+            .saturating_mul(2)
+            .saturating_add(prefix.len() + 2);
+        let mut quoted = FreshString::sized(
+            req,
+            room,
+            Sizing::SafeAlloc {
+                n: 2,
+                m: text.len(),
+            },
+        )?;
+        let escaped = h.server.escape(req, text);
+        let len = prefix.len() + escaped.len() + 1;
+        let bytes = quoted.bytes_mut();
+        bytes[..prefix.len()].copy_from_slice(prefix);
+        bytes[prefix.len()..len - 1].copy_from_slice(&escaped);
+        bytes[len - 1] = b'\'';
+        Ok(quoted.truncate(req, len)?.finish())
     }
 
     /// `mysql_handle_begin`.

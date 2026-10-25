@@ -32,7 +32,8 @@ use php_ext::attr::{php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, docref, docref_parameter, pending, throw,
+    Level, Thrown, arg_type_error, arg_value_error, docref, docref_parameter, pending, throw_error,
+    type_error,
 };
 use php_ext::request::{
     Cast, Opening, OwnedStream as _, Request, Resolve, Stream, StreamCtx, Streams as _, Whence,
@@ -271,7 +272,7 @@ fn with_magic<R>(
     f: impl FnOnce(&mut Request, &mut Magic) -> Result<R, Thrown>,
 ) -> Result<R, Thrown> {
     let Some(mut magic) = object.native_mut_or_fatal::<Option<Magic>>(req)?.take() else {
-        return Err(throw(req, "Error", "Invalid finfo object"));
+        return Err(throw_error(req, "Error", "Invalid finfo object"));
     };
     let answer = f(req, &mut magic);
     let slot = object.native_mut_or_fatal::<Option<Magic>>(req)?;
@@ -364,7 +365,7 @@ fn finfo_open(
         return Ok(OrFalse::False);
     };
     let Some(class) = lookup_class(req, b"finfo")? else {
-        return Err(throw(req, "Error", "Class \"finfo\" not found"));
+        return Err(throw_error(req, "Error", "Class \"finfo\" not found"));
     };
     let object = new_object(req, class)?.into_instance::<class::finfo>();
     *object.payload_mut(req)? = Some(magic);
@@ -625,9 +626,8 @@ fn target(req: &mut Request, value: Value) -> Result<Target, Thrown> {
         }
         ValueRef::Resource(_) => match Stream::from_value(req, &value) {
             Some(stream) => Ok(Target::Stream(stream)),
-            None => Err(throw(
+            None => Err(type_error(
                 req,
-                "TypeError",
                 "mime_content_type(): supplied resource is not a valid stream resource",
             )),
         },

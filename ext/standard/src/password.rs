@@ -11,7 +11,7 @@
 use php_ext::abi::Union;
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::to_long;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
@@ -165,12 +165,12 @@ fn make_salt(
     }
     let mut buffer = vec![0u8; length * 3 / 4 + 1];
     if !crate::ffi::random_bytes(&mut buffer) {
-        return Err(throw_error(req, "ValueError", "Unable to generate salt"));
+        return Err(value_error(req, "Unable to generate salt"));
     }
     let encoded = crate::base64::encode(&buffer);
     let salt = encoded.get(..length).unwrap_or_default();
     if salt.len() < length || salt.contains(&b'=') {
-        return Err(throw_error(req, "ValueError", "Generated salt too short"));
+        return Err(value_error(req, "Generated salt too short"));
     }
     Ok(salt
         .iter()
@@ -239,16 +239,15 @@ fn password_hash(
     let digest = match algo {
         Algo::Bcrypt => {
             if password.contains(&0) {
-                return Err(throw_error(
+                return Err(value_error(
                     req,
-                    "ValueError",
                     "Bcrypt password must not contain null character",
                 ));
             }
             let cost = option_long(req, options, b"cost")?.unwrap_or(BCRYPT_COST);
             if !(4..=31).contains(&cost) {
                 let text = format!("Invalid bcrypt cost parameter specified: {cost}");
-                return Err(throw_error(req, "ValueError", &text));
+                return Err(value_error(req, &text));
             }
             let salt = make_salt(req, options, 22)?;
             let mut setting = format!("$2y${cost:02}$").into_bytes();
@@ -259,21 +258,21 @@ fn password_hash(
             let memory =
                 option_long(req, options, b"memory_cost")?.unwrap_or(argon2::DEFAULT_MEMORY_COST);
             let Some(memory) = argon2::memory_cost_in_range(memory) else {
-                return Err(throw_error(req, "ValueError", argon2::MEMORY_COST_RANGE));
+                return Err(value_error(req, argon2::MEMORY_COST_RANGE));
             };
             let time =
                 option_long(req, options, b"time_cost")?.unwrap_or(argon2::DEFAULT_TIME_COST);
             let Some(time) = argon2::time_cost_in_range(time) else {
-                return Err(throw_error(req, "ValueError", argon2::TIME_COST_RANGE));
+                return Err(value_error(req, argon2::TIME_COST_RANGE));
             };
             let threads = option_long(req, options, b"threads")?.unwrap_or(argon2::DEFAULT_THREADS);
             let Some(threads) = argon2::threads_in_range(threads) else {
-                return Err(throw_error(req, "ValueError", argon2::THREADS_RANGE));
+                return Err(value_error(req, argon2::THREADS_RANGE));
             };
             let salt = make_salt(req, options, argon2::SALT_LEN)?;
             match argon2::password_hash(variant, password, &salt, memory, time, threads) {
                 Ok(encoded) => Some(encoded.into_bytes()),
-                Err(error) => return Err(throw_error(req, "ValueError", error.message())),
+                Err(error) => return Err(value_error(req, error.message())),
             }
         }
     };

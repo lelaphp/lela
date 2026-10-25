@@ -9,13 +9,13 @@
 //! payload is the `php_stream` itself; what `fopen` hands back is that
 //! resource (`php_stream_to_zval`), and `fclose` closes it, so the
 //! resource's destructor, [`dtor`], is `php_stream_free` under
-//! `PHP_STREAM_FREE_RSRC_DTOR`. An operation takes the stream out of its
-//! resource for the call and puts it back after, which is what lets a
-//! kind reach the request beside the stream: `php://temp` reads through
-//! the memory stream it encloses, and the plain files kind raises php's
-//! notice on a failed read. Nothing runs PHP code inside a call yet, so
-//! the empty slot a re-entrant call would find is php's `in_free` guard
-//! and not a case a program reaches.
+//! `PHP_STREAM_FREE_RSRC_DTOR`. The stream stays in its resource for the
+//! length of every operation on it, which holds it as php's `GC_ADDREF`
+//! does and borrows it in segments ([`StreamOp`], `held.rs`); a kind is called
+//! with the request, lent out of the stream for the call, which is what
+//! lets `php://temp` read through the memory stream it encloses and the
+//! plain files kind raise php's notice on a failed read while PHP code
+//! that notice serves reaches the stream.
 //!
 //! The operations are php's generic half over the kind's: read, write,
 //! seek, tell, eof, flush and close, `php_stream_get_line`,
@@ -35,20 +35,23 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use crate::api::values::{Emalloc, Owner, ResourceType};
 
 use crate::api::layer::{Face as _, TemporaryGuard};
-use crate::api::raising::{Level, Thrown, raise, throw_error, warning};
+use crate::api::raising::{Level, Thrown, raise, value_error, warning};
 use crate::api::request::{
-    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterFlags, HostPath, Ini, Notification,
-    OptionAnswer, OwnedStream, Request, Standard, Stream, StreamCtx, StreamOption, Whence,
+    Cast, Closer, DirListing, EngineWrapper, FdStream, FilterChain as Chain, FilterFlags, HostPath,
+    Ini, Notification, OptionAnswer, OwnedStream, Request, Standard, Stream, StreamCtx,
+    StreamOption, Whence,
 };
 use crate::api::values::{ClassId, FreshString, PhpArray, PhpString, Resource, Value};
 
 pub(crate) mod filters;
+mod held;
 pub(crate) mod persistent;
 mod rfc2397;
 pub(crate) mod sockets;
 use crate::state::Layer;
 use crate::wrapper::PlainFiles;
-pub(crate) use filters::FilterCall;
+use held::Kind;
+pub(crate) use held::{Slot, StreamOp};
 use persistent::Persistent;
 use sockets::Transports;
 pub(crate) mod userspace;
@@ -277,6 +280,17 @@ pub(crate) trait Ops: Send {
         None
     }
 
+    /// A second kind over this one's state for one call, where PHP code a
+    /// call of this kind serves re-enters the same stream, as php runs
+    /// the operation again on the same `php_stream`: `Some` for a
+    /// user-space stream, whose state is its PHP object, and `None` for a
+    /// kind with native state, which such a call finds in use
+    /// ([`StreamOp::kind`]). The shared kind's close gives back what it
+    /// holds and calls nothing.
+    fn share(&self, _req: &mut Request) -> Option<Box<dyn Ops>> {
+        None
+    }
+
     /// `PHP_STREAM_OPTION_XPORT_API`: one operation of a `transport`,
     /// `None` for php's `PHP_STREAM_OPTION_RETURN_NOTIMPL`, a kind that
     /// is no socket.
@@ -380,7 +394,7 @@ pub(crate) enum MetaData {
 /// operations read, and the `stream->mode` and path `stream_get_meta_data`
 /// prints.
 pub(crate) struct PhpStream {
-    ops: Box<dyn Ops>,
+    ops: Kind,
     /// `stream->wrapper->wops->label`.
     wrapper: &'static str,
     /// `stream->mode`.
@@ -409,12 +423,9 @@ pub(crate) struct PhpStream {
     chunk_size: u32,
     /// `stream->res`, which a filter is handed as its stream.
     res: Option<Resource>,
-    /// `stream->readfilters`, the chain every read of the kind passes
-    /// through, head first.
-    readfilters: Vec<filters::Attached>,
-    /// `stream->writefilters`, the chain every write passes through
-    /// before the kind.
-    writefilters: Vec<filters::Attached>,
+    /// `stream->readfilters` and `stream->writefilters`, made with the
+    /// first filter attached, since most streams have none.
+    filters: Option<Box<filters::Chains>>,
     /// `stream->has_buffered_data`: within one `_php_stream_read`, bytes
     /// were had already, so the kind's read that follows must not wait.
     has_buffered_data: bool,
@@ -463,6 +474,9 @@ struct Flags {
     /// `stream->is_persistent`: what php allocates for the stream,
     /// `pemalloc`'d persistent, is no request's to count.
     persistent: bool,
+    /// `fclose` made the owed flush while an operation held the stream,
+    /// so the free that operation's end makes releases it alone.
+    flushed: bool,
 }
 
 /// What ends a line for `php_stream_locate_eol`: `\n`, php's default,
@@ -485,7 +499,7 @@ const PHP_STREAM_SIZE: usize = 208;
 
 // The payload sits behind the resource payload's one-word table.
 const _: () = assert!(
-    size_of::<Option<PhpStream>>() + 8 <= PHP_STREAM_SIZE,
+    size_of::<held::Payload>() + 8 <= PHP_STREAM_SIZE,
     "a stream does not fit the php_stream php allocates"
 );
 
@@ -631,7 +645,7 @@ impl PhpStream {
     /// its `stream->mode`, the chunk size, and nothing read or written.
     fn new(ops: Box<dyn Ops>, mode: &[u8]) -> PhpStream {
         PhpStream {
-            ops,
+            ops: Kind::In(ops),
             wrapper: "",
             mode: Mode::of(mode),
             orig_path: None,
@@ -644,8 +658,7 @@ impl PhpStream {
             writepos: 0,
             chunk_size: u32::try_from(CHUNK_SIZE).unwrap_or(u32::MAX),
             res: None,
-            readfilters: Vec::new(),
-            writefilters: Vec::new(),
+            filters: None,
             has_buffered_data: false,
             wrapped: None,
         }
@@ -680,16 +693,6 @@ impl PhpStream {
     /// `stream->orig_path`.
     pub(crate) fn orig_path(&self) -> Option<&[u8]> {
         self.orig_path.as_ref().map(OrigPath::bytes)
-    }
-
-    /// `stream->orig_path = pestrdup(path, 0)` over the one it held,
-    /// which is given back first.
-    pub(crate) fn set_orig_path(&mut self, req: &mut Request, path: &[u8]) -> Result<(), Thrown> {
-        if let Some(old) = self.orig_path.take() {
-            old.free(req);
-        }
-        self.orig_path = Some(OrigPath::request(req, path)?);
-        Ok(())
     }
 
     /// `stream->wrapperthis`: the closer given in place, where the
@@ -737,161 +740,44 @@ impl PhpStream {
         self.mode = Mode::of(mode);
     }
 
-    /// `php_stream_notify_progress_increment(PHP_STREAM_CONTEXT(stream),
-    /// n, 0)` for what a socket's read or write took; a throwable the
-    /// callback leaves is kept for the native.
-    fn count_progress(&mut self, req: &mut Request, n: usize) {
-        if n == 0 || !self.ops.counts_progress() {
-            return;
-        }
-        let increment = Notification::ProgressIncrement { dsofar: n, dmax: 0 };
-        if let Some(context) = self.context()
-            && let Err(thrown) = context.notify(req, increment)
-        {
-            filters::defer(req, thrown);
-        }
+    /// The read buffer's bytes dropped, both cursors at its start.
+    const fn drop_buffer(&mut self) {
+        (self.readpos, self.writepos) = (0, 0);
     }
 
-    /// `out_check_eof`'s `php_stream_notify_completed`: the notifier told
-    /// where the read or write changed `eof` from `old_eof`.
-    fn notify_eof_change(&mut self, req: &mut Request, old_eof: bool) {
-        if old_eof == self.eof {
-            return;
-        }
-        if let Some(context) = self.context()
-            && let Err(thrown) = context.completed(req)
-        {
-            filters::defer(req, thrown);
-        }
+    /// The bytes after `readpos` moved to the front of the read buffer.
+    fn compact(&mut self) {
+        self.readbuf.copy_within(self.readpos..self.writepos, 0);
+        self.writepos -= self.readpos;
+        self.readpos = 0;
     }
 
-    /// `_php_stream_fill_read_buffer` (`Z/main/streams/streams.c:564`):
-    /// through the filter chain where the stream has one, else as
-    /// [`PhpStream::fill_unfiltered`] does; a fill that changed `eof`
-    /// notifies `PHP_STREAM_NOTIFY_COMPLETED`.
-    fn fill_read_buffer(&mut self, req: &mut Request, size: usize) -> bool {
-        let old_eof = self.eof;
-        let filled = if self.readfilters.is_empty() {
-            self.fill_unfiltered(req, size)
-        } else {
-            self.fill_filtered(req, size)
-        };
-        self.notify_eof_change(req, old_eof);
-        filled
+    /// The read buffer lent out, with its two cursors, for the
+    /// reallocation [`StreamOp::resize_readbuf`] makes with the request, which
+    /// serves no PHP code; the stream reads as holding no bytes until it
+    /// is back ([`PhpStream::put_readbuf`]).
+    fn lend_readbuf(&mut self) -> (ReadBuf, usize, usize) {
+        let lent = (
+            std::mem::take(&mut self.readbuf),
+            self.readpos,
+            self.writepos,
+        );
+        (self.readpos, self.writepos) = (0, 0);
+        lent
     }
 
-    /// `_php_stream_fill_read_buffer` without a filter chain: nothing
-    /// when the buffer already holds `size` bytes; otherwise the buffer
-    /// compacted and grown by one chunk where the chunk would not fit,
-    /// and one read of the kind into the room after `writepos`. `false`
-    /// is the read that failed.
-    fn fill_unfiltered(&mut self, req: &mut Request, size: usize) -> bool {
-        if self.writepos - self.readpos >= size {
-            return true;
-        }
-        if !self.readbuf.is_empty() && self.readbuf.len() - self.writepos < self.chunk_size() {
-            self.readbuf.copy_within(self.readpos..self.writepos, 0);
-            self.writepos -= self.readpos;
-            self.readpos = 0;
-        }
-        if self.readbuf.len() - self.writepos < self.chunk_size() {
-            let len = self.readbuf.len() + self.chunk_size();
-            if self
-                .readbuf
-                .resize(req, len, self.flags.persistent)
-                .is_err()
-            {
-                return false;
-            }
-        }
-        let Self {
-            ops,
-            eof,
-            readbuf,
-            writepos,
-            has_buffered_data,
-            ..
-        } = self;
-        match ops.read_after_buffer(req, &mut readbuf[*writepos..], eof, *has_buffered_data) {
-            Some(justread) => {
-                *writepos += justread;
-                self.count_progress(req, justread);
-                true
-            }
-            None => false,
-        }
+    /// The read buffer back from its call, with its cursors.
+    fn put_readbuf(&mut self, (readbuf, readpos, writepos): (ReadBuf, usize, usize)) {
+        (self.readbuf, self.readpos, self.writepos) = (readbuf, readpos, writepos);
     }
 
-    /// `_php_stream_read` (`Z/main/streams/streams.c:736`): the buffer
-    /// drained first, then the kind read directly for an unbuffered
-    /// stream and through the buffer otherwise, looping while `buf` has
-    /// room for a plain file, `php://memory` and `php://temp` and
-    /// stopping at the first read for every other kind; `None` is the
-    /// read that failed before a byte was had.
-    pub(crate) fn read(&mut self, req: &mut Request, buf: &mut [u8]) -> Option<usize> {
-        let greedy = self.greedy();
-        let mut didread = 0;
-        let mut size = buf.len();
-        while size > 0 {
-            if self.writepos > self.readpos {
-                let toread = (self.writepos - self.readpos).min(size);
-                buf[didread..didread + toread]
-                    .copy_from_slice(&self.readbuf[self.readpos..self.readpos + toread]);
-                self.readpos += toread;
-                size -= toread;
-                didread += toread;
-                self.has_buffered_data = true;
-            }
-            if size == 0 {
-                break;
-            }
-            let direct = self.flags.no_buffer || self.chunk_size() == 1;
-            let toread = if self.readfilters.is_empty() && direct {
-                let Self {
-                    ops,
-                    eof,
-                    has_buffered_data,
-                    ..
-                } = self;
-                match ops.read_after_buffer(req, &mut buf[didread..], eof, *has_buffered_data) {
-                    Some(n) => {
-                        self.count_progress(req, n);
-                        n
-                    }
-                    None if didread == 0 => return None,
-                    None => break,
-                }
-            } else {
-                if !self.fill_read_buffer(req, size) {
-                    if didread == 0 {
-                        return None;
-                    }
-                    break;
-                }
-                let toread = (self.writepos - self.readpos).min(size);
-                if toread > 0 {
-                    buf[didread..didread + toread]
-                        .copy_from_slice(&self.readbuf[self.readpos..self.readpos + toread]);
-                    self.readpos += toread;
-                }
-                toread
-            };
-            if toread > 0 {
-                didread += toread;
-                size -= toread;
-                self.has_buffered_data = true;
-            } else {
-                break;
-            }
-            if !greedy {
-                break;
-            }
-        }
-        if didread > 0 {
-            self.position += i64::try_from(didread).unwrap_or(i64::MAX);
-            self.has_buffered_data = false;
-        }
-        Some(didread)
+    /// As many of the buffered bytes as `buf` holds moved into it, the
+    /// cursor stepped past them; how many.
+    fn take_buffered(&mut self, buf: &mut [u8]) -> usize {
+        let toread = (self.writepos - self.readpos).min(buf.len());
+        buf[..toread].copy_from_slice(&self.readbuf[self.readpos..self.readpos + toread]);
+        self.readpos += toread;
+        toread
     }
 
     /// The three kinds `_php_stream_read` keeps reading for until the
@@ -899,176 +785,6 @@ impl PhpStream {
     /// `php_stream_memory_ops` and `php_stream_temp_ops`.
     fn greedy(&self) -> bool {
         self.wrapper == PLAIN_FILES || matches!(self.ops.label(), "MEMORY" | "TEMP")
-    }
-
-    /// `_php_stream_eof` (`Z/main/streams/streams.c:840`): not while the
-    /// buffer holds a byte, else what the kind's last read said, or, where
-    /// that was not eof, whether the kind answers
-    /// `PHP_STREAM_OPTION_CHECK_LIVENESS` with `_ERR`.
-    pub(crate) fn eof(&mut self, req: &mut Request) -> bool {
-        if self.writepos > self.readpos {
-            return false;
-        }
-        if !self.eof && self.set_option(req, StreamOption::Liveness) == OptionAnswer::Err {
-            self.eof = true;
-        }
-        self.eof
-    }
-
-    /// `_php_stream_write` (`Z/main/streams/streams.c:1333`) over
-    /// `_php_stream_write_buffer` (`:1189`): nothing for no bytes; a
-    /// seekable stream with bytes still in its read buffer drops them
-    /// and seeks the kind to the position first; then the kind written
-    /// until every byte is taken or one write takes none, `None` where
-    /// the first took none and php returned its `-1`. A write that
-    /// took a byte marks the flush owed at close.
-    pub(crate) fn write(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        if buf.is_empty() {
-            return Some(0);
-        }
-        if !self.ops.writable() {
-            let text = format!(
-                "{}(): Stream is not writable",
-                req.frames().active_function_name()
-            );
-            raise(req, Level::Notice, &text);
-            return None;
-        }
-        if self.writefilters.is_empty() {
-            return self.write_buffer(req, buf);
-        }
-        let bytes = self.write_filtered(req, Some(buf), FilterFlags::Normal);
-        self.flags.was_written = true;
-        bytes
-    }
-
-    /// `_php_stream_write_buffer` (`Z/main/streams/streams.c:1189`): the
-    /// kind written past the filters, as [`PhpStream::write`] describes.
-    fn write_buffer(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        let old_eof = self.eof;
-        let wrote = self.write_kind(req, buf);
-        self.notify_eof_change(req, old_eof);
-        wrote
-    }
-
-    /// The body of [`PhpStream::write_buffer`]: the kind written until
-    /// every byte is taken or one write takes none.
-    fn write_kind(&mut self, req: &mut Request, buf: &[u8]) -> Option<usize> {
-        if buf.is_empty() {
-            return Some(0);
-        }
-        if !self.flags.no_seek && self.readpos != self.writepos {
-            self.readpos = 0;
-            self.writepos = 0;
-            let Self { ops, position, .. } = self;
-            let _ = ops.seek(req, *position, Some(Whence::Set), position);
-        }
-        // A user-space stream is handed a chunk at a time, since what it
-        // is handed is a string of the request's (GH-13071).
-        let chunk = if self.ops.is_userspace() {
-            self.chunk_size().max(1)
-        } else {
-            usize::MAX
-        };
-        let mut didwrite = 0;
-        let mut rest = buf;
-        while !rest.is_empty() {
-            let Self { ops, .. } = self;
-            match ops.write(req, &rest[..rest.len().min(chunk)]) {
-                Some(justwrote) if justwrote > 0 => {
-                    self.count_progress(req, justwrote);
-                    rest = &rest[justwrote..];
-                    didwrite += justwrote;
-                    self.position += i64::try_from(justwrote).unwrap_or(i64::MAX);
-                }
-                // `retval = justwrote`: a kind that took nothing, as a
-                // socket that would block does, answers `0`, and one that
-                // failed `-1`, where nothing was written before.
-                answered if didwrite == 0 => return answered,
-                _ => break,
-            }
-        }
-        if didwrite > 0 {
-            self.flags.was_written = true;
-        }
-        Some(didwrite)
-    }
-
-    /// `_php_stream_seek` (`Z/main/streams/streams.c:1385`): a seek that
-    /// lands inside the read buffer moves the cursor and nothing else;
-    /// otherwise a kind that seeks is asked, `SEEK_CUR` turned into
-    /// `SEEK_SET` from the position first, a negative `SEEK_SET` refused
-    /// before the kind is, and the buffer dropped whatever the kind
-    /// answered; a kind that cannot seek emulates a forward `SEEK_CUR`
-    /// by reading and is php's warning for anything else. A `whence`
-    /// that is none of the three reaches the kind as it is, and a kind
-    /// answers it `-1`.
-    pub(crate) fn seek(&mut self, req: &mut Request, offset: i64, whence: Option<Whence>) -> bool {
-        if !self.flags.no_buffer {
-            let held = i64::try_from(self.writepos - self.readpos).unwrap_or(i64::MAX);
-            match whence {
-                Some(Whence::Cur) if offset > 0 && offset <= held => {
-                    self.readpos += usize::try_from(offset).unwrap_or(0);
-                    self.position += offset;
-                    self.eof = false;
-                    self.fatal_error = false;
-                    return true;
-                }
-                Some(Whence::Set) if offset > self.position && offset <= self.position + held => {
-                    self.readpos += usize::try_from(offset - self.position).unwrap_or(0);
-                    self.position = offset;
-                    self.eof = false;
-                    self.fatal_error = false;
-                    return true;
-                }
-                _ => {}
-            }
-        }
-        if !self.flags.no_seek {
-            let (offset, whence) = match whence {
-                Some(Whence::Cur) => (self.position.saturating_add(offset), Some(Whence::Set)),
-                Some(Whence::Set) if offset < 0 => return false,
-                other => (offset, other),
-            };
-            if !self.writefilters.is_empty() {
-                self.flush(req);
-            }
-            let Self { ops, position, .. } = self;
-            if let Some(sought) = ops.seek(req, offset, whence, position) {
-                if self.ops.lost_seek() {
-                    self.flags.no_seek = true;
-                }
-                if !self.flags.no_seek || sought {
-                    if sought {
-                        self.eof = false;
-                        self.fatal_error = false;
-                    }
-                    self.readpos = 0;
-                    self.writepos = 0;
-                    return sought;
-                }
-            }
-        }
-        if whence == Some(Whence::Cur) && offset >= 0 {
-            let mut left = usize::try_from(offset).unwrap_or(usize::MAX);
-            let mut tmp = [0u8; 1024];
-            while left > 0 {
-                let take = left.min(tmp.len());
-                match self.read(req, &mut tmp[..take]) {
-                    Some(didread) if didread > 0 => left -= didread,
-                    _ => return false,
-                }
-            }
-            self.eof = false;
-            self.fatal_error = false;
-            return true;
-        }
-        let text = format!(
-            "{}(): Stream does not support seeking",
-            req.frames().active_function_name()
-        );
-        warning(req, &text);
-        false
     }
 
     /// `_php_stream_search_delim` (`Z/main/streams/streams.c:1036`): where
@@ -1083,65 +799,6 @@ impl PhpStream {
         hay.windows(delim.len())
             .position(|w| w == delim)
             .map(|at| skip + at)
-    }
-
-    /// `php_stream_get_record` (`Z/main/streams/streams.c:1063`), what
-    /// `stream_get_line` reads: the buffer filled a chunk at a time, for
-    /// every kind, until `delim` is in it or `maxlen` bytes are; then the
-    /// bytes before the delimiter, which is skipped, or `maxlen` of them.
-    /// `None` is php's `NULL`: nothing found and nothing more to come yet
-    /// on a stream short of eof, which a non-blocking one answers, or no
-    /// byte at all at eof.
-    pub(crate) fn get_record(
-        &mut self,
-        req: &mut Request,
-        maxlen: usize,
-        delim: &[u8],
-    ) -> Option<Vec<u8>> {
-        if maxlen == 0 {
-            return None;
-        }
-        let has_delim = !delim.is_empty();
-        let mut found = if has_delim {
-            self.search_delim(maxlen, 0, delim)
-        } else {
-            None
-        };
-        let mut buffered_len = self.writepos - self.readpos;
-        while found.is_none() && buffered_len < maxlen {
-            let to_read_now = (maxlen - buffered_len).min(self.chunk_size());
-            if !self.fill_read_buffer(req, buffered_len + to_read_now) && self.fatal_error {
-                return None;
-            }
-            let just_read = (self.writepos - self.readpos).saturating_sub(buffered_len);
-            if just_read == 0 {
-                break;
-            }
-            if has_delim {
-                let skip = buffered_len.saturating_sub(delim.len() - 1);
-                found = self.search_delim(maxlen, skip, delim);
-                if found.is_some() {
-                    break;
-                }
-            }
-            buffered_len += just_read;
-        }
-        let buffered = self.writepos - self.readpos;
-        let len = match found {
-            Some(at) => at,
-            None if !has_delim && buffered >= maxlen => maxlen,
-            None if buffered < maxlen && !self.eof => return None,
-            None if buffered == 0 && self.eof => return None,
-            None => buffered.min(maxlen),
-        };
-        let mut out = vec![0; len];
-        let got = self.read(req, &mut out).unwrap_or(0);
-        out.truncate(got);
-        if found.is_some() {
-            self.readpos += delim.len();
-            self.position += i64::try_from(delim.len()).unwrap_or(0);
-        }
-        Some(out)
     }
 
     /// `php_stream_locate_eol` (`Z/main/streams/streams.c:909`) over the
@@ -1188,222 +845,26 @@ impl PhpStream {
         }
     }
 
-    /// `_php_stream_get_line` (`Z/main/streams/streams.c:958`) without
-    /// `DETECT_EOL`: bytes up to and including the first `\n`, taken
-    /// from the read buffer and the buffer filled a chunk at a time
-    /// while it holds none, for every kind, the unbuffered ones too;
-    /// `maxlen` is php's, so at most `maxlen - 1` bytes, and `None` is
-    /// php's `grow_mode`, a line of any length. `None` back is a line of no
-    /// bytes, at eof or after a read that failed.
-    ///
-    /// A fill a read filter broke (`PSFS_ERR_FATAL`, `fatal_error`) ends
-    /// the line with nothing, what was gathered dropped, and so does
-    /// [`PhpStream::get_record`]'s (GH-13264):
-    ///
-    /// ```php
-    /// $s = fopen('php://memory', 'r+'); $z = gzcompress(str_repeat("line\n", 3000)); fwrite($s, substr($z, 0, -1) . "1"); rewind($s);
-    /// stream_filter_append($s, 'zlib.inflate', STREAM_FILTER_READ, ['window' => 15]);
-    /// $n = 0; while (($l = fgets($s)) !== false) $n++; var_dump($n, feof($s));
-    /// rewind($s); var_dump(stream_get_line($s, 0, "\n"));
-    /// ```
-    /// ```expect
-    /// Notice: fgets(): zlib: data error in %s on line 4
-    /// int(0)
-    /// bool(true)
-    ///
-    /// Notice: stream_get_line(): zlib: data error in %s on line 5
-    /// bool(false)
-    /// ```
-    pub(crate) fn get_line(&mut self, req: &mut Request, maxlen: Option<usize>) -> Option<Vec<u8>> {
-        if maxlen == Some(0) {
-            return None;
-        }
-        let mut line = Vec::new();
-        let mut left = maxlen.unwrap_or(0);
-        loop {
-            let avail = self.writepos - self.readpos;
-            if avail > 0 {
-                let eol = self.locate_eol();
-                let held = &self.readbuf[self.readpos..self.writepos];
-                let (mut cpysz, mut done) = match eol {
-                    Some(eol) => (eol + 1, true),
-                    None => (avail, false),
-                };
-                if maxlen.is_some() && cpysz >= left - 1 {
-                    cpysz = left - 1;
-                    done = true;
-                }
-                line.extend_from_slice(&held[..cpysz]);
-                self.position += i64::try_from(cpysz).unwrap_or(i64::MAX);
-                self.readpos += cpysz;
-                left = left.saturating_sub(cpysz);
-                if done {
-                    break;
-                }
-            } else if self.eof {
-                break;
-            } else {
-                let toread = match maxlen {
-                    None => self.chunk_size(),
-                    Some(_) => (left - 1).min(self.chunk_size()),
-                };
-                // php gives up on a failed fill only where a filter set
-                // `fatal_error`, dropping what the line held (GH-13264).
-                if !self.fill_read_buffer(req, toread) && self.fatal_error {
-                    return None;
-                }
-                if self.writepos == self.readpos {
-                    break;
-                }
-            }
-        }
-        (!line.is_empty()).then_some(line)
-    }
-
-    /// `php_zend_stream_fsizer` (`Z/main/main.c:1661-1675`): the size
-    /// `php_stream_stat` gives a stream with no read filter, which a user
-    /// wrapper serves with `stream_stat`, and zero for one with a filter
-    /// or no size, since what a filter gives need not be the file's size.
-    pub(crate) fn zend_fsize(&mut self, req: &mut Request) -> usize {
-        if !self.readfilters.is_empty() {
-            return 0;
-        }
-        self.stat(req)
-            .map_or(0, |sb| usize::try_from(sb[7]).unwrap_or(0))
-    }
-
-    /// `_php_stream_copy_to_mem` (`Z/main/streams/streams.c:1569`): up
-    /// to `maxlen` bytes, `None` for all of them, read into the string
-    /// php allocates first, so `memory_get_peak_usage()` sees php's
-    /// sizes. A bound under four chunks reads into a string of that size
-    /// until it is full or the stream is at eof, cut down only where
-    /// less than half of it was read; anything else reads into a string
-    /// sized from `php_stream_stat`'s size past the position and a chunk
-    /// over, extended a chunk at a time while a quarter chunk of room is
-    /// left, until a read gives nothing, and cut to what was read. `None`
-    /// is php's `NULL`, nothing read, which the string is freed for; the
-    /// `Err` is the memory limit's fatal.
-    ///
-    /// ```php
-    /// $p = __DIR__ . '/big.txt'; $w = fopen($p, 'w'); fwrite($w, str_repeat('x', 442 * 1024)); fclose($w);
-    /// $s = file_get_contents($p); unset($s);
-    /// memory_reset_peak_usage(); $m = memory_get_usage(); $s = file_get_contents($p);
-    /// echo memory_get_peak_usage() - $m - filesize($p), ' ', memory_get_usage() - $m - filesize($p), "\n";
-    /// $f = fopen($p, 'r'); $t = stream_get_contents($f, 40000); fclose($f); echo strlen($t), "\n";
-    /// unlink($p);
-    /// ```
-    /// ```expect
-    /// 10776 2080
-    /// 40000
-    /// ```
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn copy_to_mem(
-        &mut self,
-        req: &mut Request,
-        maxlen: Option<usize>,
-    ) -> Result<Option<Owner<PhpString>>, Thrown> {
-        if maxlen == Some(0) {
-            return Ok(None);
-        }
-        if let Some(max) = maxlen
-            && max < 4 * CHUNK_SIZE
-        {
-            let mut out = FreshString::new(req, max)?;
-            let mut len = 0;
-            while len < max && !self.eof(req) {
-                match self.read(req, &mut out.bytes_mut()[len..]) {
-                    Some(n) if n > 0 => len += n,
-                    _ => break,
-                }
-            }
-            if len == 0 {
-                out.free(req);
-                return Ok(None);
-            }
-            out.set_len(len);
-            // "Only truncate if the savings are large enough".
-            if len < max / 2 {
-                out = out.truncate(req, len)?;
-            }
-            return Ok(Some(out.finish()));
-        }
-        let size = self.stat(req).map_or(0, |sb| sb[7]);
-        let mut buflen = if size > 0 {
-            usize::try_from((size - self.position).max(0)).unwrap_or(0) + CHUNK_SIZE
-        } else {
-            CHUNK_SIZE
+    /// The bytes of the line `get_line` is gathering that the buffer
+    /// holds: up to and including the end of the line, at most `left - 1`
+    /// of them where `maxlen` bounds it, the cursor and the position
+    /// stepped past them; whether the line is done.
+    fn line_from_buffer(&mut self, line: &mut Vec<u8>, bounded: bool, left: &mut usize) -> bool {
+        let avail = self.writepos - self.readpos;
+        let eol = self.locate_eol();
+        let (mut cpysz, mut done) = match eol {
+            Some(eol) => (eol + 1, true),
+            None => (avail, false),
         };
-        if let Some(max) = maxlen {
-            buflen = buflen.min(max);
+        if bounded && cpysz >= *left - 1 {
+            cpysz = *left - 1;
+            done = true;
         }
-        let mut out = FreshString::new(req, buflen)?;
-        let min_room = CHUNK_SIZE / 4;
-        let mut len = 0;
-        while let Some(n) = self.read(req, &mut out.bytes_mut()[len..buflen]) {
-            if n == 0 {
-                break;
-            }
-            len += n;
-            if len + min_room >= buflen {
-                if maxlen == Some(len) {
-                    break;
-                }
-                buflen = match maxlen {
-                    Some(max) if buflen + CHUNK_SIZE > max => max,
-                    _ => buflen + CHUNK_SIZE,
-                };
-                out = out.extend(req, buflen)?;
-            }
-        }
-        if len == 0 {
-            out.free(req);
-            return Ok(None);
-        }
-        Ok(Some(out.truncate(req, len)?.finish()))
-    }
-
-    /// `_php_stream_stat` (`Z/main/streams/streams.c:888`): the
-    /// `stream_stat` of the wrapper that opened the stream where it has
-    /// one, else the kind's `ops->stat`.
-    pub(crate) fn stat(&mut self, req: &mut Request) -> Option<StatBuf> {
-        if let Some(stat) = self.wrapped.as_ref().and_then(|w| w.stat) {
-            return self.res.and_then(|res| stat(req, Stream::of(res)));
-        }
-        self.ops.stat(req)
-    }
-
-    /// `php_stream_truncate_set_size` behind
-    /// `php_stream_truncate_supported`: `None` where the kind does not
-    /// truncate.
-    pub(crate) fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
-        self.ops.truncate(req, size)
-    }
-
-    /// `php_stream_lock`: `false` where the kind has no `flock(2)` or
-    /// `flock(2)` refused.
-    pub(crate) fn flock(&mut self, req: &mut Request, operation: i64) -> bool {
-        self.ops.flock(req, operation).unwrap_or(false)
-    }
-
-    /// `_php_stream_set_option` (`Z/main/streams/streams.c:1447`): the
-    /// kind first; what it does not take, the chunk size and whether the
-    /// read buffer is used, the generic layer takes.
-    pub(crate) fn set_option(&mut self, req: &mut Request, option: StreamOption) -> OptionAnswer {
-        let answer = self.ops.set_option(req, option);
-        if answer != OptionAnswer::NotImplemented {
-            return answer;
-        }
-        match option {
-            StreamOption::ChunkSize(size) => {
-                let size = u32::try_from(size).unwrap_or(u32::MAX);
-                OptionAnswer::Previous(std::mem::replace(&mut self.chunk_size, size) as usize)
-            }
-            StreamOption::ReadBuffer { buffered, .. } => {
-                self.set_read_buffer(buffered);
-                OptionAnswer::Ok
-            }
-            _ => answer,
-        }
+        line.extend_from_slice(&self.readbuf[self.readpos..self.readpos + cpysz]);
+        self.position += i64::try_from(cpysz).unwrap_or(i64::MAX);
+        self.readpos += cpysz;
+        *left = left.saturating_sub(cpysz);
+        done
     }
 
     /// `PHP_STREAM_OPTION_READ_BUFFER` as `_php_stream_set_option`
@@ -1419,173 +880,20 @@ impl PhpStream {
         self.ops.glob()
     }
 
-    /// `_php_stream_readdir` (`Z/main/streams/streams.c:2221`): the next
-    /// entry, which `php_stream_read` of one `php_stream_dirent` is.
-    pub(crate) fn read_dir(&mut self, req: &mut Request) -> Option<Vec<u8>> {
-        self.ops.read_dir(req)
-    }
-
-    /// `_php_stream_flush` (`Z/main/streams/streams.c:1316`): the write
-    /// chain flushed through to the kind first, with `closing` its last
-    /// call; the owed flush cleared and the kind flushed.
-    pub(crate) fn flush_closing(&mut self, req: &mut Request, closing: bool) -> bool {
-        if !self.writefilters.is_empty() {
-            let flags = if closing {
-                FilterFlags::FlushClose
-            } else {
-                FilterFlags::FlushInc
-            };
-            let _ = self.write_filtered(req, None, flags);
-        }
-        self.flags.was_written = false;
-        let Self { ops, .. } = self;
-        ops.flush(req)
-    }
-
-    /// `php_stream_flush`, not closing.
-    pub(crate) fn flush(&mut self, req: &mut Request) -> bool {
-        self.flush_closing(req, false)
-    }
-
-    /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd, with a
-    /// `ret` to fill.
-    pub(crate) fn cast(&mut self, req: &mut Request, cast: Cast, warn: bool) -> Option<RawFd> {
-        self.cast_as(req, cast, Ret::Given, warn)
-    }
-
-    /// A kind that seeks sought to the stream's position and the read
-    /// buffer dropped, as `_php_stream_cast` does before it hands a fd
-    /// (`Z/main/streams/cast.c:200-208`).
-    fn seek_to_position(&mut self, req: &mut Request) {
-        if self.ops.seekable() && !self.flags.no_seek {
-            let Self { ops, position, .. } = self;
-            let mut dummy = 0;
-            let _ = ops.seek(req, *position, Some(Whence::Set), &mut dummy);
-            self.readpos = 0;
-            self.writepos = 0;
-        }
-    }
-
-    /// The fd [`Stream::dup_fd`] copies: the stream flushed, and sought
-    /// to its position with the read buffer dropped only where the buffer
-    /// holds bytes, the guard `_php_stream_write_buffer` puts before a
-    /// write (`Z/main/streams/streams.c:1197`), taken here once since the
-    /// buffer does not outlive the stream; the kind's fd as a cast with
-    /// no `ret` answers it.
-    fn keep_fd(&mut self, req: &mut Request) -> Option<RawFd> {
-        self.flush(req);
-        if self.readpos != self.writepos {
-            self.seek_to_position(req);
-        }
-        self.cast_as(req, Cast::Fd, Ret::Null, false)
-    }
-
-    /// `php_stream_can_cast`, `_php_stream_cast` with no `ret` and no
-    /// `show_err`: whether the kind would answer the cast, asked of it
-    /// without flushing, seeking or converting the stream.
-    pub(crate) fn can_cast(&mut self, req: &mut Request, cast: Cast) -> bool {
-        self.cast_as(req, cast, Ret::Null, false).is_some()
-    }
-
-    /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd: with a
-    /// `ret` and short of `PHP_STREAM_AS_FD_FOR_SELECT`, the stream is
-    /// flushed and a kind that seeks is sought to the position, the read
-    /// buffer dropped; the kind is asked for its fd, and one with none is
-    /// php's `Cannot represent a stream of type %s as a %s` under `warn`;
-    /// a cast without `PHP_STREAM_CAST_INTERNAL` that leaves bytes in the
-    /// read buffer is php's warning that they are lost. Asked with no
-    /// `ret`, it answers the fd too where the kind has one, and `Some` is
-    /// php's `SUCCESS`.
-    fn cast_as(&mut self, req: &mut Request, cast: Cast, ret: Ret, warn: bool) -> Option<RawFd> {
-        if ret == Ret::Given && cast != Cast::Select {
-            self.flush(req);
-            self.seek_to_position(req);
-        }
-        // `php_openssl_sockop_cast`'s `PHP_STREAM_AS_FD_FOR_SELECT`: what
-        // the crypto layer holds decrypted moved into the empty read
-        // buffer, so `select(2)` is not asked to wait for bytes already had.
-        if ret == Ret::Given && cast == Cast::Select && self.writepos == self.readpos {
-            let pending = self
-                .ops
-                .as_socket()
-                .map_or(0, |socket| socket.crypto_pending());
-            if pending > 0 {
-                let chunk = self.chunk_size();
-                self.fill_read_buffer(req, pending.min(chunk));
-            }
-        }
-        if !self.readfilters.is_empty() || !self.writefilters.is_empty() {
-            if warn {
-                let text = format!(
-                    "{}(): Cannot cast a filtered stream on this system",
-                    req.frames().active_function_name()
-                );
-                warning(req, &text);
-            }
-            return None;
-        }
-        let own = self.res.map(Stream::of);
-        let fd = match self.ops.cast_target(req, cast, own, ret) {
-            CastTarget::Fd(fd) => Some(fd.as_raw_fd()),
-            CastTarget::Host(standard) => req.host_fd(standard).map(|fd| fd.as_raw_fd()),
-            // `php_stream_cast(intstream, castas, retptr, 1)`: the stream
-            // in this one's place warns of itself, and this one of itself
-            // after it where that failed.
-            CastTarget::Stream(inner) => req
-                .stream_op(inner, |req, s| s.cast_as(req, cast, ret, true))
-                .flatten(),
-            CastTarget::Refused => None,
-        };
-        let Some(fd) = fd else {
-            if warn {
-                let target = match cast {
-                    Cast::Select => "select()able descriptor",
-                    Cast::Socket => "Socket Descriptor",
-                    Cast::Internal | Cast::Fd => "File Descriptor",
-                };
-                let text = format!(
-                    "{}(): Cannot represent a stream of type {} as a {target}",
-                    req.frames().active_function_name(),
-                    self.ops.label()
-                );
-                warning(req, &text);
-            }
-            return None;
-        };
-        let held = self.writepos - self.readpos;
-        if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
-            let text = format!(
-                "{}(): {held} bytes of buffered data lost during stream conversion!",
-                req.frames().active_function_name()
-            );
-            warning(req, &text);
-        }
-        Some(fd)
-    }
-
     /// `_php_stream_free` under `PHP_STREAM_FREE_CLOSE`
     /// (`Z/main/streams/streams.c:388`), what the resource's destructor
     /// runs, so `fclose`, the last owner's release and the shutdown walk
     /// are one path: the owed flush, then the kind closed, then the
     /// stream dropped.
     fn free(mut self, req: &mut Request) -> i32 {
-        self.flush_owed(req);
+        held::owned(req, &mut self, StreamOp::flush_owed);
         self.release(req)
-    }
-
-    /// `_php_stream_free`'s "make sure everything is saved": the write
-    /// chain flushed closing, where the stream was written or has one.
-    fn flush_owed(&mut self, req: &mut Request) {
-        if self.flags.was_written || !self.writefilters.is_empty() {
-            self.flush_closing(req, true);
-        }
     }
 
     /// `_php_stream_free` past the flush: the kind closed, then each
     /// filter taken off, and what the close answered.
     fn release(mut self, req: &mut Request) -> i32 {
-        let Self { ops, .. } = &mut self;
-        let ret = ops.close(req);
+        let ret = self.ops.close(req);
         self.free_filters(req);
         let mut context = None;
         if let Some(wrapped) = self.wrapped.take() {
@@ -1622,10 +930,12 @@ impl PhpStream {
     /// open, so a user filter's `$this->stream` is the open `resource`
     /// php hands it; then `zend_list_close`, whose destructor finds the
     /// stream in its free already (php's `in_free` guard) and leaves it;
-    /// then the kind closed and the filters taken off. The last owner's
-    /// release reaches the free through the destructor instead, the
-    /// resource closed already, as `zend_resource_dtor` closes it first,
-    /// which a user filter's `$this->stream` reads as `null`.
+    /// then the kind closed and the filters taken off, at once, or as the
+    /// operation that holds the stream ends where PHP code it serves
+    /// closed it. The last owner's release reaches the free through the
+    /// destructor instead, the resource closed already, as
+    /// `zend_resource_dtor` closes it first, which a user filter's
+    /// `$this->stream` reads as `null`.
     ///
     /// ```php
     /// class F extends php_user_filter {
@@ -1651,18 +961,903 @@ impl PhpStream {
     /// ```
     pub(crate) fn close_open(req: &mut Request, stream: Stream) {
         let res = stream.resource();
-        req.stream_op(stream, |req, s| s.flush_owed(req));
-        let taken = res
-            .native_mut::<Option<PhpStream>>(req)
-            .and_then(Option::take);
+        req.stream_op(stream, |op| {
+            op.flush_owed();
+            op.with(|s| s.flags.flushed = true);
+        });
+        let taken = res.native_mut::<held::Payload>(req).and_then(Option::take);
         res.close(req);
-        if let Some(taken) = taken {
-            req.streams().pclose_ret = taken.release(req);
+        if let Some(slot) = taken {
+            held::release_slot(req, res, slot);
         }
         // `PHP_STREAM_FREE_CLOSE_PERSISTENT`: a persistent stream closed
         // is gone from the list for every holder.
         req.drop_persistent(res);
     }
+}
+
+/// A stream whose resource closed and which nothing holds any longer
+/// freed: by its resource's destructor, by `fclose`, or as the
+/// operation that held it past either ends ([`StreamOp::end`]). A stream
+/// `fclose` flushed is released, one of the `persistent stream` type is
+/// what its destructor makes of it ([`persistent::finish`]), and every
+/// other is freed, owed flush and all; what its kind's close answered is
+/// `FG(pclose_ret)`.
+pub(crate) fn finish(req: &mut Request, stream: PhpStream) {
+    let ret = if stream.flags.flushed {
+        stream.release(req)
+    } else if stream.flags.persistent {
+        persistent::finish(req, stream)
+    } else {
+        stream.free(req)
+    };
+    req.streams().pclose_ret = ret;
+}
+
+impl StreamOp<'_> {
+    /// `stream->orig_path = pestrdup(path, 0)` over the one it held,
+    /// which is given back first.
+    pub(crate) fn set_orig_path(&mut self, path: &[u8]) -> Result<(), Thrown> {
+        if let Some(Some(old)) = self.with(|s| s.orig_path.take()) {
+            old.free(self.req);
+        }
+        let path = OrigPath::request(self.req, path)?;
+        self.with(|s| s.orig_path = Some(path));
+        Ok(())
+    }
+
+    /// `php_stream_notify_progress_increment(PHP_STREAM_CONTEXT(stream),
+    /// n, 0)` for what a socket's read or write took; a throwable the
+    /// callback leaves is kept for the native.
+    fn count_progress(&mut self, n: usize) {
+        if n == 0 {
+            return;
+        }
+        let context = self
+            .with(|s| s.context().filter(|_| s.ops.counts_progress()))
+            .flatten();
+        let increment = Notification::ProgressIncrement { dsofar: n, dmax: 0 };
+        if let Some(context) = context
+            && let Err(thrown) = context.notify(self.req, increment)
+        {
+            filters::defer(self.req, thrown);
+        }
+    }
+
+    /// `out_check_eof`'s `php_stream_notify_completed`: the notifier told
+    /// where the read or write changed `eof` from `old_eof`.
+    fn notify_eof_change(&mut self, old_eof: bool) {
+        let context = self
+            .with(|s| s.context().filter(|_| s.eof != old_eof))
+            .flatten();
+        if let Some(context) = context
+            && let Err(thrown) = context.completed(self.req)
+        {
+            filters::defer(self.req, thrown);
+        }
+    }
+
+    /// `stream->readbuf = perealloc(stream->readbuf, len, persistent)`,
+    /// the bytes kept; `false` is the memory limit's fatal.
+    fn resize_readbuf(&mut self, len: usize) -> bool {
+        let Some((mut lent, persistent)) = self.with(|s| (s.lend_readbuf(), s.flags.persistent))
+        else {
+            return false;
+        };
+        let resized = lent.0.resize(self.req, len, persistent).is_ok();
+        self.with(|s| s.put_readbuf(lent));
+        resized
+    }
+
+    /// `ops->read` into `buf`, the kind lent out for it, with the
+    /// stream's `eof` for the kind to set and its `has_buffered_data`;
+    /// `None` for php's `-1`, or a kind in use.
+    fn read_kind(&mut self, buf: &mut [u8]) -> Option<usize> {
+        let (mut eof, has_buffered_data) = self.with(|s| (s.eof, s.has_buffered_data))?;
+        let read = self
+            .kind(|req, ops| ops.read_after_buffer(req, buf, &mut eof, has_buffered_data))
+            .flatten();
+        self.with(|s| s.eof = eof);
+        read
+    }
+
+    /// `_php_stream_fill_read_buffer` (`Z/main/streams/streams.c:564`):
+    /// through the filter chain where the stream has one, else as
+    /// [`StreamOp::fill_unfiltered`] does; a fill that changed `eof`
+    /// notifies `PHP_STREAM_NOTIFY_COMPLETED`.
+    fn fill_read_buffer(&mut self, size: usize) -> bool {
+        let Some((old_eof, filtered)) = self.with(|s| (s.eof, s.has_filters(Chain::Read))) else {
+            return false;
+        };
+        let filled = if filtered {
+            self.fill_filtered(size)
+        } else {
+            self.fill_unfiltered(size)
+        };
+        self.notify_eof_change(old_eof);
+        filled
+    }
+
+    /// `_php_stream_fill_read_buffer` without a filter chain: nothing
+    /// when the buffer already holds `size` bytes; otherwise the buffer
+    /// compacted and grown by one chunk where the chunk would not fit,
+    /// and one read of the kind into the room after `writepos`. `false`
+    /// is the read that failed.
+    fn fill_unfiltered(&mut self, size: usize) -> bool {
+        let Some(room) = self.with(|s| {
+            let chunk = s.chunk_size();
+            if s.writepos - s.readpos >= size {
+                return None;
+            }
+            if !s.readbuf.is_empty() && s.readbuf.len() - s.writepos < chunk {
+                s.compact();
+            }
+            Some((s.readbuf.len() - s.writepos < chunk).then(|| s.readbuf.len() + chunk))
+        }) else {
+            return false;
+        };
+        let Some(grow) = room else {
+            return true;
+        };
+        if let Some(len) = grow
+            && !self.resize_readbuf(len)
+        {
+            return false;
+        }
+        // The kind reads into the request's scratch, not the buffer, so PHP
+        // code its read serves finds the buffer and its cursors as they
+        // stand; what it read goes in after `writepos` as it is then.
+        let Some(room) = self.with(|s| s.readbuf.len() - s.writepos) else {
+            return false;
+        };
+        let mut scratch = std::mem::take(&mut self.req.streams().read_scratch);
+        if scratch.len() < room {
+            scratch.resize(room, 0);
+        }
+        let read = self.read_kind(scratch.get_mut(..room).unwrap_or_default());
+        let kept = match read {
+            Some(justread) if justread > 0 => {
+                self.append_read(scratch.get(..justread).unwrap_or_default())
+            }
+            _ => true,
+        };
+        self.req.streams().read_scratch = scratch;
+        match read {
+            Some(justread) if kept => {
+                self.count_progress(justread);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `_php_stream_read` (`Z/main/streams/streams.c:736`): the buffer
+    /// drained first, then the kind read directly for an unbuffered
+    /// stream and through the buffer otherwise, looping while `buf` has
+    /// room for a plain file, `php://memory` and `php://temp` and
+    /// stopping at the first read for every other kind; `None` is the
+    /// read that failed before a byte was had.
+    pub(crate) fn read(&mut self, buf: &mut [u8]) -> Option<usize> {
+        let greedy = self.with(|s| s.greedy())?;
+        let mut didread = 0;
+        while didread < buf.len() {
+            let (buffered, direct) = self.with(|s| {
+                let buffered = s.take_buffered(&mut buf[didread..]);
+                if buffered > 0 {
+                    s.has_buffered_data = true;
+                }
+                let direct =
+                    !s.has_filters(Chain::Read) && (s.flags.no_buffer || s.chunk_size() == 1);
+                (buffered, direct)
+            })?;
+            didread += buffered;
+            if didread == buf.len() {
+                break;
+            }
+            let toread = if direct {
+                match self.read_kind(&mut buf[didread..]) {
+                    Some(n) => {
+                        self.count_progress(n);
+                        n
+                    }
+                    None if didread == 0 => return None,
+                    None => break,
+                }
+            } else {
+                if !self.fill_read_buffer(buf.len() - didread) {
+                    if didread == 0 {
+                        return None;
+                    }
+                    break;
+                }
+                self.with(|s| s.take_buffered(&mut buf[didread..]))
+                    .unwrap_or(0)
+            };
+            if toread == 0 {
+                break;
+            }
+            didread += toread;
+            self.with(|s| s.has_buffered_data = true);
+            if !greedy {
+                break;
+            }
+        }
+        if didread > 0 {
+            self.with(|s| {
+                s.position += i64::try_from(didread).unwrap_or(i64::MAX);
+                s.has_buffered_data = false;
+            });
+        }
+        Some(didread)
+    }
+
+    /// `_php_stream_eof` (`Z/main/streams/streams.c:840`): not while the
+    /// buffer holds a byte, else what the kind's last read said, or, where
+    /// that was not eof, whether the kind answers
+    /// `PHP_STREAM_OPTION_CHECK_LIVENESS` with `_ERR`.
+    pub(crate) fn eof(&mut self) -> bool {
+        match self.with(|s| (s.writepos > s.readpos, s.eof)) {
+            Some((false, false)) => {}
+            Some((buffered, eof)) => return !buffered && eof,
+            None => return false,
+        }
+        if self.set_option(StreamOption::Liveness) == OptionAnswer::Err {
+            self.with(|s| s.eof = true);
+        }
+        self.with(|s| s.eof).unwrap_or(false)
+    }
+
+    /// `_php_stream_write` (`Z/main/streams/streams.c:1333`) over
+    /// `_php_stream_write_buffer` (`:1189`): nothing for no bytes; a
+    /// seekable stream with bytes still in its read buffer drops them
+    /// and seeks the kind to the position first; then the kind written
+    /// until every byte is taken or one write takes none, `None` where
+    /// the first took none and php returned its `-1`. A write that
+    /// took a byte marks the flush owed at close.
+    pub(crate) fn write(&mut self, buf: &[u8]) -> Option<usize> {
+        if buf.is_empty() {
+            return Some(0);
+        }
+        let (writable, filtered) =
+            self.with(|s| (s.ops.writable(), s.has_filters(Chain::Write)))?;
+        if !writable {
+            let text = format!(
+                "{}(): Stream is not writable",
+                self.req.frames().active_function_name()
+            );
+            raise(self.req, Level::Notice, &text);
+            return None;
+        }
+        if !filtered {
+            return self.write_buffer(buf);
+        }
+        let bytes = self.write_filtered(Some(buf), FilterFlags::Normal);
+        self.with(|s| s.flags.was_written = true);
+        bytes
+    }
+
+    /// `_php_stream_write_buffer` (`Z/main/streams/streams.c:1189`): the
+    /// kind written past the filters, as [`StreamOp::write`] describes.
+    fn write_buffer(&mut self, buf: &[u8]) -> Option<usize> {
+        let old_eof = self.with(|s| s.eof)?;
+        let wrote = self.write_kind(buf);
+        self.notify_eof_change(old_eof);
+        wrote
+    }
+
+    /// `ops->write` of `buf`, the kind lent out for it: what it took,
+    /// the position stepped past that and the notifier told; `None` for
+    /// php's `-1`, or a kind in use.
+    fn write_once(&mut self, buf: &[u8]) -> Option<usize> {
+        let wrote = self.kind(|req, ops| ops.write(req, buf)).flatten();
+        if let Some(n) = wrote
+            && n > 0
+        {
+            self.with(|s| s.position += i64::try_from(n).unwrap_or(i64::MAX));
+            self.count_progress(n);
+        }
+        wrote
+    }
+
+    /// `ops->seek` to the stream's position, the kind lent out for it,
+    /// as php seeks before it hands a fd or writes past a read buffer:
+    /// the kind's answer, `position` written as the kind writes it.
+    fn seek_kind_to(&mut self, whence: Option<Whence>, offset: i64) -> Option<bool> {
+        let mut position = self.with(|s| s.position)?;
+        let sought = self
+            .kind(|req, ops| ops.seek(req, offset, whence, &mut position))
+            .flatten();
+        self.with(|s| s.position = position);
+        sought
+    }
+
+    /// The body of [`StreamOp::write_buffer`]: the kind written until
+    /// every byte is taken or one write takes none.
+    fn write_kind(&mut self, buf: &[u8]) -> Option<usize> {
+        if buf.is_empty() {
+            return Some(0);
+        }
+        // A user-space stream is handed a chunk at a time, since what it
+        // is handed is a string of the request's (GH-13071).
+        let (reseek, chunk) = self.with(|s| {
+            let reseek = !s.flags.no_seek && s.readpos != s.writepos;
+            if reseek {
+                s.drop_buffer();
+            }
+            let chunk = if s.ops.is_userspace() {
+                s.chunk_size().max(1)
+            } else {
+                usize::MAX
+            };
+            (reseek.then_some(s.position), chunk)
+        })?;
+        if let Some(position) = reseek {
+            let _ = self.seek_kind_to(Some(Whence::Set), position);
+        }
+        let mut didwrite = 0;
+        let mut rest = buf;
+        while !rest.is_empty() {
+            match self.write_once(&rest[..rest.len().min(chunk)]) {
+                Some(justwrote) if justwrote > 0 => {
+                    rest = &rest[justwrote..];
+                    didwrite += justwrote;
+                }
+                // `retval = justwrote`: a kind that took nothing, as a
+                // socket that would block does, answers `0`, and one that
+                // failed `-1`, where nothing was written before.
+                answered if didwrite == 0 => return answered,
+                _ => break,
+            }
+        }
+        if didwrite > 0 {
+            self.with(|s| s.flags.was_written = true);
+        }
+        Some(didwrite)
+    }
+
+    /// `_php_stream_seek` (`Z/main/streams/streams.c:1385`): a seek that
+    /// lands inside the read buffer moves the cursor and nothing else;
+    /// otherwise a kind that seeks is asked, `SEEK_CUR` turned into
+    /// `SEEK_SET` from the position first, a negative `SEEK_SET` refused
+    /// before the kind is, and the buffer dropped whatever the kind
+    /// answered; a kind that cannot seek emulates a forward `SEEK_CUR`
+    /// by reading and is php's warning for anything else. A `whence`
+    /// that is none of the three reaches the kind as it is, and a kind
+    /// answers it `-1`.
+    pub(crate) fn seek(&mut self, offset: i64, whence: Option<Whence>) -> bool {
+        let inside = self.with(|s| {
+            if s.flags.no_buffer {
+                return false;
+            }
+            let held = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
+            let step = match whence {
+                Some(Whence::Cur) if offset > 0 && offset <= held => offset,
+                Some(Whence::Set) if offset > s.position && offset <= s.position + held => {
+                    offset - s.position
+                }
+                _ => return false,
+            };
+            s.readpos += usize::try_from(step).unwrap_or(0);
+            s.position += step;
+            s.eof = false;
+            s.fatal_error = false;
+            true
+        });
+        match inside {
+            Some(true) => return true,
+            Some(false) => {}
+            None => return false,
+        }
+        let Some((no_seek, position, filtered)) =
+            self.with(|s| (s.flags.no_seek, s.position, s.has_filters(Chain::Write)))
+        else {
+            return false;
+        };
+        if !no_seek {
+            let (offset, whence) = match whence {
+                Some(Whence::Cur) => (position.saturating_add(offset), Some(Whence::Set)),
+                Some(Whence::Set) if offset < 0 => return false,
+                other => (offset, other),
+            };
+            if filtered {
+                self.flush();
+            }
+            if let Some(sought) = self.seek_kind_to(whence, offset) {
+                let settled = self.with(|s| {
+                    if s.ops.lost_seek() {
+                        s.flags.no_seek = true;
+                    }
+                    if s.flags.no_seek && !sought {
+                        return false;
+                    }
+                    if sought {
+                        s.eof = false;
+                        s.fatal_error = false;
+                    }
+                    s.drop_buffer();
+                    true
+                });
+                if settled == Some(true) {
+                    return sought;
+                }
+            }
+        }
+        if whence == Some(Whence::Cur) && offset >= 0 {
+            let mut left = usize::try_from(offset).unwrap_or(usize::MAX);
+            let mut tmp = [0u8; 1024];
+            while left > 0 {
+                let take = left.min(tmp.len());
+                match self.read(&mut tmp[..take]) {
+                    Some(didread) if didread > 0 => left -= didread,
+                    _ => return false,
+                }
+            }
+            self.with(|s| {
+                s.eof = false;
+                s.fatal_error = false;
+            });
+            return true;
+        }
+        let text = format!(
+            "{}(): Stream does not support seeking",
+            self.req.frames().active_function_name()
+        );
+        warning(self.req, &text);
+        false
+    }
+
+    /// `php_stream_get_record` (`Z/main/streams/streams.c:1063`), what
+    /// `stream_get_line` reads: the buffer filled a chunk at a time, for
+    /// every kind, until `delim` is in it or `maxlen` bytes are; then the
+    /// bytes before the delimiter, which is skipped, or `maxlen` of them.
+    /// `None` is php's `NULL`: nothing found and nothing more to come yet
+    /// on a stream short of eof, which a non-blocking one answers, or no
+    /// byte at all at eof.
+    pub(crate) fn get_record(&mut self, maxlen: usize, delim: &[u8]) -> Option<Vec<u8>> {
+        if maxlen == 0 {
+            return None;
+        }
+        let has_delim = !delim.is_empty();
+        let (mut found, mut buffered_len, chunk) = self.with(|s| {
+            let found = has_delim
+                .then(|| s.search_delim(maxlen, 0, delim))
+                .flatten();
+            (found, s.writepos - s.readpos, s.chunk_size())
+        })?;
+        while found.is_none() && buffered_len < maxlen {
+            let to_read_now = (maxlen - buffered_len).min(chunk);
+            let filled = self.fill_read_buffer(buffered_len + to_read_now);
+            let (fatal, just_read) = self.with(|s| {
+                let just_read = (s.writepos - s.readpos).saturating_sub(buffered_len);
+                (s.fatal_error, just_read)
+            })?;
+            if !filled && fatal {
+                return None;
+            }
+            if just_read == 0 {
+                break;
+            }
+            if has_delim {
+                let skip = buffered_len.saturating_sub(delim.len() - 1);
+                found = self.with(|s| s.search_delim(maxlen, skip, delim))?;
+                if found.is_some() {
+                    break;
+                }
+            }
+            buffered_len += just_read;
+        }
+        let (buffered, eof) = self.with(|s| (s.writepos - s.readpos, s.eof))?;
+        let len = match found {
+            Some(at) => at,
+            None if !has_delim && buffered >= maxlen => maxlen,
+            None if buffered < maxlen && !eof => return None,
+            None if buffered == 0 && eof => return None,
+            None => buffered.min(maxlen),
+        };
+        let mut out = vec![0; len];
+        let got = self.read(&mut out).unwrap_or(0);
+        out.truncate(got);
+        if found.is_some() {
+            self.with(|s| {
+                s.readpos = (s.readpos + delim.len()).min(s.writepos);
+                s.position += i64::try_from(delim.len()).unwrap_or(0);
+            });
+        }
+        Some(out)
+    }
+
+    /// `_php_stream_get_line` (`Z/main/streams/streams.c:958`) without
+    /// `DETECT_EOL`: bytes up to and including the first `\n`, taken
+    /// from the read buffer and the buffer filled a chunk at a time
+    /// while it holds none, for every kind, the unbuffered ones too;
+    /// `maxlen` is php's, so at most `maxlen - 1` bytes, and `None` is
+    /// php's `grow_mode`, a line of any length. `None` back is a line of no
+    /// bytes, at eof or after a read that failed.
+    ///
+    /// A fill a read filter broke (`PSFS_ERR_FATAL`, `fatal_error`) ends
+    /// the line with nothing, what was gathered dropped, and so does
+    /// [`StreamOp::get_record`]'s (GH-13264):
+    ///
+    /// ```php
+    /// $s = fopen('php://memory', 'r+'); $z = gzcompress(str_repeat("line\n", 3000)); fwrite($s, substr($z, 0, -1) . "1"); rewind($s);
+    /// stream_filter_append($s, 'zlib.inflate', STREAM_FILTER_READ, ['window' => 15]);
+    /// $n = 0; while (($l = fgets($s)) !== false) $n++; var_dump($n, feof($s));
+    /// rewind($s); var_dump(stream_get_line($s, 0, "\n"));
+    /// ```
+    /// ```expect
+    /// Notice: fgets(): zlib: data error in %s on line 4
+    /// int(0)
+    /// bool(true)
+    ///
+    /// Notice: stream_get_line(): zlib: data error in %s on line 5
+    /// bool(false)
+    /// ```
+    pub(crate) fn get_line(&mut self, maxlen: Option<usize>) -> Option<Vec<u8>> {
+        if maxlen == Some(0) {
+            return None;
+        }
+        let mut line = Vec::new();
+        let mut left = maxlen.unwrap_or(0);
+        loop {
+            let (done, eof, chunk) = self.with(|s| {
+                let done = s.writepos > s.readpos
+                    && s.line_from_buffer(&mut line, maxlen.is_some(), &mut left);
+                (done, s.writepos == s.readpos && s.eof, s.chunk_size())
+            })?;
+            if done || eof {
+                break;
+            }
+            if self.with(|s| s.writepos > s.readpos)? {
+                continue;
+            }
+            let toread = match maxlen {
+                None => chunk,
+                Some(_) => (left - 1).min(chunk),
+            };
+            // php gives up on a failed fill only where a filter set
+            // `fatal_error`, dropping what the line held (GH-13264).
+            let filled = self.fill_read_buffer(toread);
+            let (fatal, empty) = self.with(|s| (s.fatal_error, s.writepos == s.readpos))?;
+            if !filled && fatal {
+                return None;
+            }
+            if empty {
+                break;
+            }
+        }
+        (!line.is_empty()).then_some(line)
+    }
+
+    /// `php_zend_stream_fsizer` (`Z/main/main.c:1661-1675`): the size
+    /// `php_stream_stat` gives a stream with no read filter, which a user
+    /// wrapper serves with `stream_stat`, and zero for one with a filter
+    /// or no size, since what a filter gives need not be the file's size.
+    pub(crate) fn zend_fsize(&mut self) -> usize {
+        if self.with(|s| s.has_filters(Chain::Read)).unwrap_or(true) {
+            return 0;
+        }
+        self.stat()
+            .map_or(0, |sb| usize::try_from(sb[7]).unwrap_or(0))
+    }
+
+    /// `_php_stream_copy_to_mem` (`Z/main/streams/streams.c:1569`): up
+    /// to `maxlen` bytes, `None` for all of them, read into the string
+    /// php allocates first, so `memory_get_peak_usage()` sees php's
+    /// sizes. A bound under four chunks reads into a string of that size
+    /// until it is full or the stream is at eof, cut down only where
+    /// less than half of it was read; anything else reads into a string
+    /// sized from `php_stream_stat`'s size past the position and a chunk
+    /// over, extended a chunk at a time while a quarter chunk of room is
+    /// left, until a read gives nothing, and cut to what was read. `None`
+    /// is php's `NULL`, nothing read, which the string is freed for; the
+    /// `Err` is the memory limit's fatal.
+    ///
+    /// ```php
+    /// $p = __DIR__ . '/big.txt'; $w = fopen($p, 'w'); fwrite($w, str_repeat('x', 442 * 1024)); fclose($w);
+    /// $s = file_get_contents($p); unset($s);
+    /// memory_reset_peak_usage(); $m = memory_get_usage(); $s = file_get_contents($p);
+    /// echo memory_get_peak_usage() - $m - filesize($p), ' ', memory_get_usage() - $m - filesize($p), "\n";
+    /// $f = fopen($p, 'r'); $t = stream_get_contents($f, 40000); fclose($f); echo strlen($t), "\n";
+    /// unlink($p);
+    /// ```
+    /// ```expect
+    /// 10776 2080
+    /// 40000
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn copy_to_mem(
+        &mut self,
+        maxlen: Option<usize>,
+    ) -> Result<Option<Owner<PhpString>>, Thrown> {
+        if maxlen == Some(0) {
+            return Ok(None);
+        }
+        if let Some(max) = maxlen
+            && max < 4 * CHUNK_SIZE
+        {
+            let mut out = FreshString::new(self.req, max)?;
+            let mut len = 0;
+            while len < max && !self.eof() {
+                match self.read(&mut out.bytes_mut()[len..]) {
+                    Some(n) if n > 0 => len += n,
+                    _ => break,
+                }
+            }
+            if len == 0 {
+                out.free(self.req);
+                return Ok(None);
+            }
+            out.set_len(len);
+            // "Only truncate if the savings are large enough".
+            if len < max / 2 {
+                out = out.truncate(self.req, len)?;
+            }
+            return Ok(Some(out.finish()));
+        }
+        let size = self.stat().map_or(0, |sb| sb[7]);
+        let position = self.with(|s| s.position).unwrap_or(0);
+        let mut buflen = if size > 0 {
+            usize::try_from((size - position).max(0)).unwrap_or(0) + CHUNK_SIZE
+        } else {
+            CHUNK_SIZE
+        };
+        if let Some(max) = maxlen {
+            buflen = buflen.min(max);
+        }
+        let mut out = FreshString::new(self.req, buflen)?;
+        let min_room = CHUNK_SIZE / 4;
+        let mut len = 0;
+        while let Some(n) = self.read(&mut out.bytes_mut()[len..buflen]) {
+            if n == 0 {
+                break;
+            }
+            len += n;
+            if len + min_room >= buflen {
+                if maxlen == Some(len) {
+                    break;
+                }
+                buflen = match maxlen {
+                    Some(max) if buflen + CHUNK_SIZE > max => max,
+                    _ => buflen + CHUNK_SIZE,
+                };
+                out = out.extend(self.req, buflen)?;
+            }
+        }
+        if len == 0 {
+            out.free(self.req);
+            return Ok(None);
+        }
+        Ok(Some(out.truncate(self.req, len)?.finish()))
+    }
+
+    /// `_php_stream_stat` (`Z/main/streams/streams.c:888`): the
+    /// `stream_stat` of the wrapper that opened the stream where it has
+    /// one, else the kind's `ops->stat`.
+    pub(crate) fn stat(&mut self) -> Option<StatBuf> {
+        let (stat, res) = self.with(|s| (s.wrapped.as_ref().and_then(|w| w.stat), s.res))?;
+        if let Some(stat) = stat {
+            return res.and_then(|res| stat(self.req, Stream::of(res)));
+        }
+        self.kind(|req, ops| ops.stat(req)).flatten()
+    }
+
+    /// `php_stream_truncate_set_size` behind
+    /// `php_stream_truncate_supported`: `None` where the kind does not
+    /// truncate.
+    pub(crate) fn truncate(&mut self, size: usize) -> Option<bool> {
+        self.kind(|req, ops| ops.truncate(req, size)).flatten()
+    }
+
+    /// `php_stream_lock`: `false` where the kind has no `flock(2)` or
+    /// `flock(2)` refused.
+    pub(crate) fn flock(&mut self, operation: i64) -> bool {
+        self.kind(|req, ops| ops.flock(req, operation))
+            .flatten()
+            .unwrap_or(false)
+    }
+
+    /// `_php_stream_set_option` (`Z/main/streams/streams.c:1447`): the
+    /// kind first; what it does not take, the chunk size and whether the
+    /// read buffer is used, the generic layer takes.
+    pub(crate) fn set_option(&mut self, option: StreamOption) -> OptionAnswer {
+        // A kind in use answers as one that takes no option.
+        let answer = self
+            .kind(|req, ops| ops.set_option(req, option))
+            .unwrap_or(OptionAnswer::NotImplemented);
+        if answer != OptionAnswer::NotImplemented {
+            return answer;
+        }
+        self.with(|s| match option {
+            StreamOption::ChunkSize(size) => {
+                let size = u32::try_from(size).unwrap_or(u32::MAX);
+                OptionAnswer::Previous(std::mem::replace(&mut s.chunk_size, size) as usize)
+            }
+            StreamOption::ReadBuffer { buffered, .. } => {
+                s.set_read_buffer(buffered);
+                OptionAnswer::Ok
+            }
+            _ => answer,
+        })
+        .unwrap_or(answer)
+    }
+
+    /// `_php_stream_readdir` (`Z/main/streams/streams.c:2221`): the next
+    /// entry, which `php_stream_read` of one `php_stream_dirent` is.
+    pub(crate) fn read_dir(&mut self) -> Option<Vec<u8>> {
+        self.kind(|req, ops| ops.read_dir(req)).flatten()
+    }
+
+    /// `_php_stream_flush` (`Z/main/streams/streams.c:1316`): the write
+    /// chain flushed through to the kind first, with `closing` its last
+    /// call; the owed flush cleared and the kind flushed.
+    pub(crate) fn flush_closing(&mut self, closing: bool) -> bool {
+        if self.with(|s| s.has_filters(Chain::Write)).unwrap_or(false) {
+            let flags = if closing {
+                FilterFlags::FlushClose
+            } else {
+                FilterFlags::FlushInc
+            };
+            let _ = self.write_filtered(None, flags);
+        }
+        self.with(|s| s.flags.was_written = false);
+        self.kind(|req, ops| ops.flush(req)).unwrap_or(false)
+    }
+
+    /// `php_stream_flush`, not closing.
+    pub(crate) fn flush(&mut self) -> bool {
+        self.flush_closing(false)
+    }
+
+    /// `_php_stream_free`'s "make sure everything is saved": the write
+    /// chain flushed closing, where the stream was written or has one.
+    pub(crate) fn flush_owed(&mut self) {
+        if self
+            .with(|s| s.flags.was_written || s.has_filters(Chain::Write))
+            .unwrap_or(false)
+        {
+            self.flush_closing(true);
+        }
+    }
+
+    /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd, with a
+    /// `ret` to fill.
+    pub(crate) fn cast(&mut self, cast: Cast, warn: bool) -> Option<RawFd> {
+        self.cast_as(cast, Ret::Given, warn)
+    }
+
+    /// A kind that seeks sought to the stream's position and the read
+    /// buffer dropped, as `_php_stream_cast` does before it hands a fd
+    /// (`Z/main/streams/cast.c:200-208`).
+    fn seek_to_position(&mut self) {
+        let Some(Some(position)) =
+            self.with(|s| (s.ops.seekable() && !s.flags.no_seek).then_some(s.position))
+        else {
+            return;
+        };
+        let mut dummy = 0;
+        let _ = self.kind(|req, ops| ops.seek(req, position, Some(Whence::Set), &mut dummy));
+        self.with(PhpStream::drop_buffer);
+    }
+
+    /// The fd [`Stream::dup_fd`] copies: the stream flushed, and sought
+    /// to its position with the read buffer dropped only where the buffer
+    /// holds bytes, the guard `_php_stream_write_buffer` puts before a
+    /// write (`Z/main/streams/streams.c:1197`), taken here once since the
+    /// buffer does not outlive the stream; the kind's fd as a cast with
+    /// no `ret` answers it.
+    pub(crate) fn keep_fd(&mut self) -> Option<RawFd> {
+        self.flush();
+        if self.with(|s| s.readpos != s.writepos)? {
+            self.seek_to_position();
+        }
+        self.cast_as(Cast::Fd, Ret::Null, false)
+    }
+
+    /// `php_stream_can_cast`, `_php_stream_cast` with no `ret` and no
+    /// `show_err`: whether the kind would answer the cast, asked of it
+    /// without flushing, seeking or converting the stream.
+    pub(crate) fn can_cast(&mut self, cast: Cast) -> bool {
+        self.cast_as(cast, Ret::Null, false).is_some()
+    }
+
+    /// `_php_stream_cast` (`Z/main/streams/cast.c:194`) to a fd: with a
+    /// `ret` and short of `PHP_STREAM_AS_FD_FOR_SELECT`, the stream is
+    /// flushed and a kind that seeks is sought to the position, the read
+    /// buffer dropped; the kind is asked for its fd, and one with none is
+    /// php's `Cannot represent a stream of type %s as a %s` under `warn`;
+    /// a cast without `PHP_STREAM_CAST_INTERNAL` that leaves bytes in the
+    /// read buffer is php's warning that they are lost. Asked with no
+    /// `ret`, it answers the fd too where the kind has one, and `Some` is
+    /// php's `SUCCESS`.
+    pub(crate) fn cast_as(&mut self, cast: Cast, ret: Ret, warn: bool) -> Option<RawFd> {
+        if ret == Ret::Given && cast != Cast::Select {
+            self.flush();
+            self.seek_to_position();
+        }
+        // `php_openssl_sockop_cast`'s `PHP_STREAM_AS_FD_FOR_SELECT`: what
+        // the crypto layer holds decrypted moved into the empty read
+        // buffer, so `select(2)` is not asked to wait for bytes already had.
+        if ret == Ret::Given && cast == Cast::Select {
+            let pending = self
+                .with(|s| {
+                    let pending = s
+                        .ops
+                        .as_socket()
+                        .map_or(0, |socket| socket.crypto_pending());
+                    (s.writepos == s.readpos && pending > 0).then(|| pending.min(s.chunk_size()))
+                })
+                .flatten();
+            if let Some(pending) = pending {
+                self.fill_read_buffer(pending);
+            }
+        }
+        let (filtered, own) = self.with(|s| {
+            let filtered = s.has_filters(Chain::Read) || s.has_filters(Chain::Write);
+            (filtered, s.res.map(Stream::of))
+        })?;
+        if filtered {
+            if warn {
+                let text = format!(
+                    "{}(): Cannot cast a filtered stream on this system",
+                    self.req.frames().active_function_name()
+                );
+                warning(self.req, &text);
+            }
+            return None;
+        }
+        let target = self
+            .kind(|req, ops| match ops.cast_target(req, cast, own, ret) {
+                CastTarget::Fd(fd) => Target::Fd(Some(fd.as_raw_fd())),
+                CastTarget::Host(standard) => {
+                    Target::Fd(req.host_fd(standard).map(|fd| fd.as_raw_fd()))
+                }
+                CastTarget::Stream(inner) => Target::Inner(inner),
+                CastTarget::Refused => Target::Fd(None),
+            })
+            .unwrap_or(Target::Fd(None));
+        // `php_stream_cast(intstream, castas, retptr, 1)`: the stream in
+        // this one's place warns of itself, and this one of itself after
+        // it where that failed.
+        let fd = match target {
+            Target::Fd(fd) => fd,
+            Target::Inner(inner) => self
+                .req
+                .stream_op(inner, |op| op.cast_as(cast, ret, true))
+                .flatten(),
+        };
+        let Some(fd) = fd else {
+            if warn {
+                let target = match cast {
+                    Cast::Select => "select()able descriptor",
+                    Cast::Socket => "Socket Descriptor",
+                    Cast::Internal | Cast::Fd => "File Descriptor",
+                };
+                let label = self.with(|s| s.ops.label()).unwrap_or("");
+                let text = format!(
+                    "{}(): Cannot represent a stream of type {label} as a {target}",
+                    self.req.frames().active_function_name(),
+                );
+                warning(self.req, &text);
+            }
+            return None;
+        };
+        let held = self.with(|s| s.writepos - s.readpos).unwrap_or(0);
+        if ret == Ret::Given && held > 0 && matches!(cast, Cast::Fd | Cast::Socket) {
+            let text = format!(
+                "{}(): {held} bytes of buffered data lost during stream conversion!",
+                self.req.frames().active_function_name()
+            );
+            warning(self.req, &text);
+        }
+        Some(fd)
+    }
+}
+
+/// What a kind's cast came to once the kind is back in the stream: the
+/// fd, or the stream to cast in its place.
+enum Target {
+    Fd(Option<RawFd>),
+    Inner(Stream),
 }
 
 impl Whence {
@@ -2102,7 +2297,7 @@ impl Temp {
         count: Option<usize>,
     ) -> Result<bool, Thrown> {
         let Some((pos, membuf)) = req
-            .stream_op(inner, |_, s| {
+            .stream_with(inner, |s| {
                 s.ops
                     .memory_buffer()
                     .map(|data| (s.position, data.to_vec()))
@@ -2125,11 +2320,11 @@ impl Temp {
             return Ok(false);
         };
         let at = *file;
-        req.stream_op(at, |req, f| f.write(req, &membuf));
+        req.stream_op(at, |op| op.write(&membuf));
         if let Some(memory) = self.inner.replace(file) {
             memory.free(req);
         }
-        req.stream_op(at, |req, f| f.seek(req, pos, Some(Whence::Set)));
+        req.stream_op(at, |op| op.seek(pos, Some(Whence::Set)));
         Ok(true)
     }
 }
@@ -2173,15 +2368,14 @@ impl Ops for Temp {
             Ok(false) => return Some(0),
             Err(_) => return None,
         }
-        req.stream_op(self.inner()?, |req, inner| inner.write(req, buf))
-            .flatten()
+        req.stream_op(self.inner()?, |op| op.write(buf)).flatten()
     }
 
     /// `php_stream_temp_read` (`Z/main/streams/memory.c:381`): the inner
     /// stream read and its eof taken.
     fn read(&mut self, req: &mut Request, buf: &mut [u8], eof: &mut bool) -> Option<usize> {
-        let (got, inner_eof) = req.stream_op(self.inner()?, |req, inner| {
-            (inner.read(req, buf), inner.eof)
+        let (got, inner_eof) = req.stream_op(self.inner()?, |op| {
+            (op.read(buf), op.with(|s| s.eof).unwrap_or(false))
         })?;
         *eof = inner_eof;
         got
@@ -2204,7 +2398,7 @@ impl Ops for Temp {
     /// `php_stream_temp_flush` (`Z/main/streams/memory.c:418`).
     fn flush(&mut self, req: &mut Request) -> bool {
         self.inner()
-            .and_then(|inner| req.stream_op(inner, |req, inner| inner.flush(req)))
+            .and_then(|inner| req.stream_op(inner, StreamOp::flush))
             .unwrap_or(false)
     }
 
@@ -2221,8 +2415,11 @@ impl Ops for Temp {
             *position = -1;
             return Some(false);
         };
-        let (sought, at) = req.stream_op(inner, |req, inner| {
-            (inner.seek(req, offset, whence), inner.position)
+        let (sought, at) = req.stream_op(inner, |op| {
+            (
+                op.seek(offset, whence),
+                op.with(|s| s.position).unwrap_or(-1),
+            )
         })?;
         *position = at;
         Some(sought)
@@ -2235,20 +2432,22 @@ impl Ops for Temp {
     /// `php_stream_temp_stat` (`Z/main/streams/memory.c:510`): the inner
     /// stream's.
     fn stat(&mut self, req: &mut Request) -> Option<StatBuf> {
-        req.stream_op(self.inner()?, |req, inner| inner.stat(req))
-            .flatten()
+        req.stream_op(self.inner()?, StreamOp::stat).flatten()
     }
 
     /// `php_stream_temp_set_option`'s default arm: the inner stream's.
     fn truncate(&mut self, req: &mut Request, size: usize) -> Option<bool> {
-        req.stream_op(self.inner()?, |req, inner| inner.truncate(req, size))
+        req.stream_op(self.inner()?, |op| op.truncate(size))
             .flatten()
     }
 
     /// `php_stream_temp_set_option`'s default arm: the inner stream's.
     fn flock(&mut self, req: &mut Request, operation: i64) -> Option<bool> {
-        req.stream_op(self.inner()?, |req, inner| inner.ops.flock(req, operation))
-            .flatten()
+        req.stream_op(self.inner()?, |op| {
+            op.kind(|req, ops| ops.flock(req, operation))
+        })
+        .flatten()
+        .flatten()
     }
 
     fn meta_data(&self) -> MetaData {
@@ -2280,9 +2479,8 @@ impl Ops for Temp {
             return CastTarget::Refused;
         };
         if ret == Ret::Null {
-            let in_memory = req
-                .stream_ref(inner)
-                .is_some_and(|s| s.ops.memory_buffer().is_some());
+            let in_memory =
+                req.stream_with(inner, |s| s.ops.memory_buffer().is_some()) == Some(true);
             return if in_memory {
                 CastTarget::Refused
             } else {
@@ -2301,7 +2499,7 @@ impl Ops for Temp {
         let Some(inner) = self.inner() else {
             return OptionAnswer::NotImplemented;
         };
-        req.stream_op(inner, |req, inner| inner.set_option(req, option))
+        req.stream_op(inner, |op| op.set_option(option))
             .unwrap_or(OptionAnswer::NotImplemented)
     }
 }
@@ -2344,7 +2542,7 @@ pub(crate) fn orig_path_set(
     stream: Owner<Stream>,
     path: &[u8],
 ) -> Result<Owner<Stream>, Thrown> {
-    let named = req.stream_op(*stream, |req, s| s.set_orig_path(req, path));
+    let named = req.stream_op(*stream, |op| op.set_orig_path(path));
     Ok(freed_on_throw(req, stream, named.transpose())?.0)
 }
 
@@ -3412,7 +3610,7 @@ fn standard_open(
     let seeks = standard == Standard::Stdin || matches!(fd_kind(&fd, mode), FdStream::Socket);
     let stream = fd_stream(req, fd, mode)?;
     if !seeks {
-        req.stream_op(*stream, |_, opened| {
+        req.stream_with(*stream, |opened| {
             opened.flags.no_seek = true;
             opened.position = -1;
         });
@@ -3461,7 +3659,7 @@ fn temp_stream(
     let inner = req.stream_alloc(memory(mode));
     let (outer, inner) = freed_on_throw(req, outer, inner)?;
     let mut inner = Some(inner);
-    req.stream_op(*outer, |_, s| {
+    req.stream_with(*outer, |s| {
         inner = inner.take().and_then(|i| s.ops.enclose(i));
     });
     if let Some(inner) = inner {
@@ -3620,12 +3818,13 @@ pub(crate) trait StreamLayer {
         stream: PhpStream,
         persistent: bool,
     ) -> Result<Owner<Stream>, Thrown>;
-    fn stream_op<R>(
-        &mut self,
+    fn stream_op<'r, R>(
+        &'r mut self,
         stream: Stream,
-        f: impl FnOnce(&mut Request, &mut PhpStream) -> R,
+        f: impl FnOnce(&mut StreamOp<'r>) -> R,
     ) -> Option<R>;
     fn streams_held<R>(&mut self, streams: &[Stream], wait: impl FnOnce(&mut Request) -> R) -> R;
+    fn stream_with<R>(&mut self, stream: Stream, f: impl FnOnce(&mut PhpStream) -> R) -> Option<R>;
     fn stream_ref(&self, stream: Stream) -> Option<&PhpStream>;
     fn stream_of(&self, value: &Value) -> Option<Stream>;
     fn stream_read_to_str(
@@ -3922,7 +4121,7 @@ impl StreamLayer for Request {
         options: OpenOptions,
     ) -> Result<Option<OpenedNamed>, Thrown> {
         if path.is_empty() {
-            return Err(throw_error(self, "ValueError", "Path must not be empty"));
+            return Err(value_error(self, "Path must not be empty"));
         }
         let mut resolved = None;
         if options.use_path {
@@ -4029,9 +4228,9 @@ impl StreamLayer for Request {
         match opened {
             Ok(stream) => {
                 let labelled = self
-                    .stream_op(*stream, |req, s| {
-                        s.wrapper = label;
-                        s.set_orig_path(req, to_open)
+                    .stream_op(*stream, |op| {
+                        op.with(|s| s.wrapper = label);
+                        op.set_orig_path(to_open)
                     })
                     .transpose();
                 if let Err(thrown) = labelled {
@@ -4116,7 +4315,7 @@ impl StreamLayer for Request {
         // The opener's owner, which the open hands its caller.
         let opened = opened?;
         if let Some(stream) = &opened {
-            self.stream_op(**stream, |_, s| s.set_wrapper_stat(stream_stat));
+            self.stream_with(**stream, |s| s.set_wrapper_stat(stream_stat));
         }
         Ok((
             label,
@@ -4128,12 +4327,12 @@ impl StreamLayer for Request {
     /// (`Z/main/streams/streams.c:2360`): a kind that seeks, at position
     /// zero, learns where it is from `SEEK_CUR`.
     fn learn_append_position(&mut self, stream: Stream) {
-        self.stream_op(stream, |req, s| {
-            if !s.flags.no_seek && s.position == 0 {
-                let PhpStream { ops, position, .. } = s;
+        self.stream_op(stream, |op| {
+            if op.with(|s| !s.flags.no_seek && s.position == 0) == Some(true) {
                 let mut newpos = 0;
-                if ops.seek(req, 0, Some(Whence::Cur), &mut newpos) == Some(true) {
-                    *position = newpos;
+                let sought = op.kind(|req, ops| ops.seek(req, 0, Some(Whence::Cur), &mut newpos));
+                if sought == Some(Some(true)) {
+                    op.with(|s| s.position = newpos);
                 }
             }
         });
@@ -4177,7 +4376,7 @@ impl StreamLayer for Request {
         path: &[u8],
         options: OpenOptions,
     ) -> Result<Option<Owner<Stream>>, Thrown> {
-        if self.stream_ref(*stream).is_some_and(|s| s.ops.seekable()) {
+        if self.stream_with(*stream, |s| s.ops.seekable()) == Some(true) {
             return Ok(Some(stream));
         }
         let copy = if options.will_cast {
@@ -4189,9 +4388,9 @@ impl StreamLayer for Request {
         if let Some(copy) = copy {
             if self.copy_all(*stream, *copy) {
                 stream.free(self);
-                let sought = self.stream_op(*copy, |req, s| {
-                    s.seek(req, 0, Some(Whence::Set));
-                    s.set_orig_path(req, path)
+                let sought = self.stream_op(*copy, |op| {
+                    op.seek(0, Some(Whence::Set));
+                    op.set_orig_path(path)
                 });
                 return Ok(Some(freed_on_throw(self, copy, sought.transpose())?.0));
             }
@@ -4218,7 +4417,7 @@ impl StreamLayer for Request {
     fn copy_all(&mut self, from: Stream, to: Stream) -> bool {
         let mut buf = vec![0; CHUNK_SIZE];
         loop {
-            let Some(Some(didread)) = self.stream_op(from, |req, s| s.read(req, &mut buf)) else {
+            let Some(Some(didread)) = self.stream_op(from, |op| op.read(&mut buf)) else {
                 return false;
             };
             if didread == 0 {
@@ -4226,7 +4425,7 @@ impl StreamLayer for Request {
             }
             let mut rest = &buf[..didread];
             while !rest.is_empty() {
-                match self.stream_op(to, |req, s| s.write(req, rest)).flatten() {
+                match self.stream_op(to, |op| op.write(rest)).flatten() {
                     Some(n) if n > 0 => rest = &rest[n..],
                     _ => return false,
                 }
@@ -4305,7 +4504,7 @@ impl StreamLayer for Request {
         };
         match opened {
             Ok(stream) => {
-                self.stream_op(*stream, |_, s| {
+                self.stream_with(*stream, |s| {
                     s.wrapper = label;
                     s.flags.no_buffer = true;
                     s.flags.is_dir = true;
@@ -4342,7 +4541,7 @@ impl StreamLayer for Request {
             }
             head
         } else {
-            let Some(eof) = self.stream_op(stream, |req, s| s.eof(req)) else {
+            let Some(eof) = self.stream_op(stream, StreamOp::eof) else {
                 if let Some(crypto) = crypto {
                     crypto.give_up(self);
                 }
@@ -4350,23 +4549,32 @@ impl StreamLayer for Request {
             };
             meta_three(false, true, eof)
         };
-        let Some(s) = self.stream_ref(stream) else {
+        let read = self.stream_with(stream, |s| {
+            let wrapper_data = s
+                .wrapped
+                .as_ref()
+                .and_then(|w| w.wrapperdata.as_deref().copied())
+                .or_else(|| s.ops.wrapper_data());
+            let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
+            let seekable = s.ops.seekable() && !s.flags.no_seek;
+            let uri = s.orig_path().map(<[u8]>::to_vec);
+            let mode = s.mode.bytes().to_vec();
+            (
+                s.wrapper,
+                wrapper_data,
+                s.ops.label(),
+                mode,
+                unread,
+                seekable,
+                uri,
+            )
+        });
+        let Some((wrapper, wrapper_data, stream_type, mode, unread, seekable, uri)) = read else {
             if let Some(crypto) = crypto {
                 crypto.give_up(self);
             }
             return Ok(out);
         };
-        let wrapper = s.wrapper;
-        let wrapper_data = s
-            .wrapped
-            .as_ref()
-            .and_then(|w| w.wrapperdata.as_deref().copied())
-            .or_else(|| s.ops.wrapper_data());
-        let stream_type = s.ops.label();
-        let mode = s.mode.bytes().to_vec();
-        let unread = i64::try_from(s.writepos - s.readpos).unwrap_or(i64::MAX);
-        let seekable = s.ops.seekable() && !s.flags.no_seek;
-        let uri = s.orig_path().map(<[u8]>::to_vec);
         let mut entries = head;
         if let Some(data) = wrapper_data {
             entries.push((b"wrapper_data".to_vec(), MetaValue::Value(data)));
@@ -4407,7 +4615,7 @@ impl StreamLayer for Request {
     fn set_stream_context(&mut self, stream: Stream, context: Option<StreamCtx>) {
         let mut held = context.map(|context| Owner::take(self, context));
         let old = self
-            .stream_op(stream, |_, s| {
+            .stream_with(stream, |s| {
                 if let Some(socket) = s.ops.as_socket() {
                     socket.set_ctx(context);
                 }
@@ -4424,24 +4632,13 @@ impl StreamLayer for Request {
 
     /// `PHP_STREAM_CONTEXT(stream)`.
     fn stream_context(&self, stream: Stream) -> Option<StreamCtx> {
-        self.stream_ref(stream)?
-            .wrapped
-            .as_ref()?
-            .context
-            .as_deref()
-            .copied()
+        self.stream_ref(stream)?.context()
     }
 
     /// What a socket's active crypto layer shows under `crypto`, ahead of
     /// the three the socket shows.
     fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Owner<Value>>, Thrown> {
-        let meta = self
-            .stream_op(stream, |req, s| {
-                let socket = s.ops.as_socket()?;
-                let layer = socket.crypto_layer()?;
-                Some(layer.meta(req))
-            })
-            .flatten();
+        let meta = self.stream_op(stream, StreamOp::crypto_meta).flatten();
         match meta {
             Some(Ok(Some(array))) => Ok(Some(array.into_value())),
             Some(Err(thrown)) => Err(thrown),
@@ -4536,78 +4733,64 @@ impl StreamLayer for Request {
         // persistent stream's is `pemalloc`'d persistent, off the
         // request's count.
         stream.flags.persistent = persistent;
-        let owner = if persistent {
-            Resource::persistent(self, kind, Some(stream), PHP_STREAM_SIZE)?
-        } else {
+        if !persistent {
             stream.ops.lay_down(self)?;
-            Resource::sized(self, kind, Some(stream), PHP_STREAM_SIZE)?
+        }
+        let slot: held::Payload = Some(Slot::new(stream));
+        let owner = if persistent {
+            Resource::persistent(self, kind, slot, PHP_STREAM_SIZE)?
+        } else {
+            Resource::sized(self, kind, slot, PHP_STREAM_SIZE)?
         };
         let res = *owner;
-        if let Some(Some(stream)) = res.native_mut::<Option<PhpStream>>(self) {
-            stream.res = Some(res);
-            stream.ops.adopt(Stream::of(res));
-        }
+        let stream = Stream::of(res);
+        self.stream_with(stream, |s| {
+            s.res = Some(res);
+            s.ops.adopt(stream);
+        });
         Ok(owner.into_typed(Stream::of))
     }
 
-    /// One operation on a stream with the request free beside it: the
-    /// stream taken out of its resource for the call and put back
-    /// after. `None` is a resource that is closed, is not a stream, or
-    /// is inside a call already, which is php's `in_free` guard. A
-    /// stream whose resource was closed while it was out is freed here,
-    /// since the destructor found the slot empty.
-    fn stream_op<R>(
-        &mut self,
+    /// One operation on a stream ([`StreamOp`]): the stream held where its
+    /// resource keeps it for the length of `f`, which borrows it in
+    /// segments and serves PHP code between them. `None` is a resource
+    /// that is closed or is not a stream. A stream whose resource PHP
+    /// code `f` served closed is freed as `f` returns, where nothing
+    /// else holds it.
+    fn stream_op<'r, R>(
+        &'r mut self,
         stream: Stream,
-        f: impl FnOnce(&mut Request, &mut PhpStream) -> R,
+        f: impl FnOnce(&mut StreamOp<'r>) -> R,
     ) -> Option<R> {
-        let res = stream.resource();
-        let mut taken = res.native_mut::<Option<PhpStream>>(self)?.take()?;
-        let out = f(self, &mut taken);
-        match res.native_mut::<Option<PhpStream>>(self) {
-            Some(slot) => *slot = Some(taken),
-            None => {
-                self.streams().pclose_ret = taken.free(self);
-            }
-        }
+        let mut op = StreamOp::begin(self, stream)?;
+        let out = f(&mut op);
+        op.end();
         Some(out)
     }
 
     /// [`StreamLayer::stream_op`] over several streams at once, for the
-    /// length of `wait`, each with an owner of its resource held: a
-    /// stream out already, or closed, is passed over, and one whose
-    /// resource was closed while it was out is freed as `wait` returns.
+    /// length of `wait`, each held where it is: a closed one is passed
+    /// over, and one closed meanwhile is freed as `wait` returns.
     fn streams_held<R>(&mut self, streams: &[Stream], wait: impl FnOnce(&mut Request) -> R) -> R {
-        let mut taken = Vec::with_capacity(streams.len());
-        for stream in streams {
-            let res = stream.resource();
-            let out = res
-                .native_mut::<Option<PhpStream>>(self)
-                .and_then(Option::take);
-            if let Some(out) = out {
-                taken.push((Owner::take(self, res), out));
-            }
-        }
-        let answered = wait(self);
-        for (res, out) in taken {
-            match res.native_mut::<Option<PhpStream>>(self) {
-                Some(slot) => *slot = Some(out),
-                None => {
-                    self.streams().pclose_ret = out.free(self);
-                }
-            }
-            res.give_up(self);
-        }
-        answered
+        held::hold_each(self, streams, wait)
     }
 
-    /// The stream a resource holds, read: `None` where it is closed, is
-    /// not a stream, or is inside a call.
-    fn stream_ref(&self, stream: Stream) -> Option<&PhpStream> {
-        stream
+    /// One segment of the stream a resource holds, `f` handed the stream
+    /// and no request: `None` where the resource is closed or is not a
+    /// stream.
+    fn stream_with<R>(&mut self, stream: Stream, f: impl FnOnce(&mut PhpStream) -> R) -> Option<R> {
+        let slot = stream
             .resource()
-            .native::<Option<PhpStream>>(self)?
-            .as_ref()
+            .native_mut::<held::Payload>(self)?
+            .as_mut()?;
+        Some(f(&mut slot.stream))
+    }
+
+    /// The stream a resource holds, read: `None` where it is closed or
+    /// is not a stream.
+    fn stream_ref(&self, stream: Stream) -> Option<&PhpStream> {
+        let slot = stream.resource().native::<held::Payload>(self)?.as_ref()?;
+        Some(&slot.stream)
     }
 
     /// `php_stream_from_zval_no_verify_no_error`: the stream a value
@@ -4618,7 +4801,7 @@ impl StreamLayer for Request {
         // so the payload says what `le_stream` and `le_pstream` would.
         let r = value.as_resource()?;
         r.kind()?;
-        r.native::<Option<PhpStream>>(self).map(|_| Stream::of(r))
+        r.native::<held::Payload>(self).map(|_| Stream::of(r))
     }
 
     /// `php_stream_read_to_str` (`Z/main/streams/streams.c:822`): a
@@ -4646,7 +4829,7 @@ impl StreamLayer for Request {
         len: usize,
     ) -> Result<Option<Owner<PhpString>>, Thrown> {
         let mut out = FreshString::new(self, len)?;
-        let Some(Some(read)) = self.stream_op(stream, |req, s| s.read(req, out.bytes_mut())) else {
+        let Some(Some(read)) = self.stream_op(stream, |op| op.read(out.bytes_mut())) else {
             out.free(self);
             return Ok(None);
         };
@@ -4795,8 +4978,7 @@ impl Stream {
     /// that leaves bytes in the read buffer warns that they are lost.
     /// The fd is the stream's, open while the stream is.
     pub fn cast(self, req: &mut Request, cast: Cast, warn: bool) -> Option<RawFd> {
-        req.stream_op(self, |req, stream| stream.cast(req, cast, warn))
-            .flatten()
+        req.stream_op(self, |op| op.cast(cast, warn)).flatten()
     }
 
     /// `dup(2)` of the stream's fd, the copy the caller's: the open file,
@@ -4812,9 +4994,7 @@ impl Stream {
     /// persistent stream, which nothing touches between requests. `None`
     /// for a kind with no fd.
     pub fn dup_fd(self, req: &mut Request) -> Option<OwnedFd> {
-        let fd = req
-            .stream_op(self, |req, stream| stream.keep_fd(req))
-            .flatten()?;
+        let fd = req.stream_op(self, StreamOp::keep_fd).flatten()?;
         crate::api::layer::dup_fd(fd).ok()
     }
 
@@ -4851,11 +5031,11 @@ impl Stream {
     ///
     /// The label of a kind that would not answer the cast.
     pub fn can_cast(self, req: &mut Request, cast: Cast) -> Result<(), &'static str> {
-        req.stream_op(self, |req, stream| {
-            if stream.can_cast(req, cast) {
+        req.stream_op(self, |op| {
+            if op.can_cast(cast) {
                 Ok(())
             } else {
-                Err(stream.ops.label())
+                Err(op.with(|s| s.ops.label()).unwrap_or(""))
             }
         })
         .unwrap_or(Err(""))
@@ -5164,13 +5344,9 @@ impl Ops for Listing {
     reason = "the resource destructor's shape, which a destructor that throws needs"
 )]
 pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
-    let Some(stream) = r
-        .native_mut::<Option<PhpStream>>(req)
-        .and_then(Option::take)
-    else {
-        return Ok(());
-    };
-    req.streams().pclose_ret = stream.free(req);
+    if let Some(slot) = r.native_mut::<held::Payload>(req).and_then(Option::take) {
+        held::release_slot(req, r, slot);
+    }
     Ok(())
 }
 

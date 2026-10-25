@@ -9,7 +9,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{Function, lookup_class, new_object};
 use php_ext::coerce::{numeric_string, to_string, truthy};
-use php_ext::raising::{Thrown, throw, throw_error};
+use php_ext::raising::{Thrown, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -369,7 +369,7 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
     ) -> Result<Option<Function>, Thrown> {
         let _ = object;
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "PDOException",
             "You may not create a PDORow manually",

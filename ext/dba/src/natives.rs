@@ -9,7 +9,7 @@ use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{c_str, coerce_param};
 use php_ext::decl::{Name, Type};
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, arity, deprecated, docref, pending, throw,
+    Level, Thrown, arg_value_error, argument_error, arity, deprecated, docref, pending, throw_error,
 };
 use php_ext::request::{Cast, OwnedStream as _, Request, Resolve, Stream, Streams as _};
 use php_ext::values::walk::{self, Hold};
@@ -151,7 +151,11 @@ fn c_text(bytes: &[u8]) -> String {
 /// `object_init_ex(return_value, dba_connection_ce)`.
 fn new_connection(req: &mut Request) -> Result<Owner<PhpObject>, Thrown> {
     let Some(class) = lookup_class(req, b"Dba\\Connection")? else {
-        return Err(throw(req, "Error", "Class \"Dba\\Connection\" not found"));
+        return Err(throw_error(
+            req,
+            "Error",
+            "Class \"Dba\\Connection\" not found",
+        ));
     };
     new_object(req, class)
 }
@@ -499,7 +503,7 @@ fn with_link<R>(
     let id = match dba.payload_mut(req)? {
         Some(conn) => conn.link,
         None => {
-            return Err(throw(
+            return Err(throw_error(
                 req,
                 "Error",
                 "DBA connection has already been closed",
@@ -507,7 +511,7 @@ fn with_link<R>(
         }
     };
     let Some(mut link) = req.state::<State>().slot(id).and_then(Option::take) else {
-        return Err(throw(
+        return Err(throw_error(
             req,
             "Error",
             "DBA connection has already been closed",
@@ -591,7 +595,7 @@ pub(crate) fn dba_close(req: &mut Request, dba: Instance<Connection>) -> Result<
             crate::close_connection(req, conn);
             Ok(())
         }
-        None => Err(throw(
+        None => Err(throw_error(
             req,
             "Error",
             "DBA connection has already been closed",

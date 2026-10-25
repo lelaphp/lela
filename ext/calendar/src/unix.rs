@@ -3,7 +3,7 @@
 
 use php_ext::abi::OrFalse;
 use php_ext::attr::php_function;
-use php_ext::raising::{Thrown, arg_value_error, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, value_error};
 use php_ext::request::Request;
 
 use crate::{count, int, sdn};
@@ -92,7 +92,7 @@ pub(crate) fn jdtounix(req: &mut Request, julian_day: i64) -> Result<i64, Thrown
             "jday must be between {EPOCH} and {}",
             i64::MAX / SECS_PER_DAY + EPOCH
         );
-        return Err(throw_error(req, "ValueError", &message));
+        return Err(value_error(req, &message));
     }
     Ok((julian_day - EPOCH) * SECS_PER_DAY)
 }

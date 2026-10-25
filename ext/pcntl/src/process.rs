@@ -844,9 +844,7 @@ fn affinity_refused(
                 at,
                 "invalid cpu affinity mask size or unmapped cpu id(s)",
             ),
-            None => {
-                php_ext::raising::throw_error(req, "ValueError", "invalid cpu affinity mask size")
-            }
+            None => php_ext::raising::value_error(req, "invalid cpu affinity mask size"),
         }),
         Errno::EPERM => {
             let text = "Calling process not having the proper privileges";

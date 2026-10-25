@@ -70,7 +70,9 @@ pub enum Handshake {
 /// The socket a crypto layer runs over, lent for one call: the fields of
 /// `php_netstream_data_t` that `xp_ssl.c` reads and writes, which the
 /// engine takes back after the call. `blocked` is `is_blocked`, as
-/// [`CryptoSocket::set_blocking`] leaves it; `timeout` is the read
+/// [`CryptoSocket::set_blocking`] leaves it, which a handshake's
+/// `set_blocking` writes through to the stream at once, so PHP code a
+/// warning of the handshake serves reads the socket as php's does; `timeout` is the read
 /// timeout, `None` for php's `-1`; `timed_out` is `timeout_event`, which
 /// a read that ran out of time sets; `supplemental` is the stream's
 /// `has_buffered_data`, a read after the buffer already gave bytes, which
@@ -85,17 +87,24 @@ pub struct CryptoSocket<'a> {
     pub supplemental: bool,
     pub ctx: Option<StreamCtx>,
     pub stream: Option<Stream>,
+    /// The stream the socket stays in while the layer's call runs, which
+    /// [`CryptoSocket::set_blocking`] writes `is_blocked` through to;
+    /// `None` for a call the socket's own read or write makes.
+    pub(crate) live: Option<Stream>,
 }
 
 impl CryptoSocket<'_> {
     /// `php_set_sock_blocking`: `O_NONBLOCK` cleared for `true` and set
     /// for `false`, and `blocked` with it where the call took; whether it
     /// took.
-    pub fn set_blocking(&mut self, blocking: bool) -> bool {
+    pub fn set_blocking(&mut self, req: &mut Request, blocking: bool) -> bool {
         if crate::api::layer::set_fd_blocking(self.fd, blocking).is_err() {
             return false;
         }
         self.blocked = blocking;
+        if let Some(stream) = self.live {
+            crate::streams::sockets::show_blocking(req, stream, blocking);
+        }
         true
     }
 
@@ -178,6 +187,16 @@ pub trait Crypto: Any + Send {
         socket: &mut CryptoSocket<'_>,
         buf: &[u8],
     ) -> Option<usize>;
+
+    /// Whether the session the layer holds is one the peer issued and so
+    /// can be resumed: exactly when php's FTP client would have stored it
+    /// as `ftp->last_ssl_session` (`ftp_ssl_new_session_cb`,
+    /// `Z/ext/ftp/ftp.c:219-228`, which OpenSSL calls for a session it
+    /// may cache), `SSL_SESSION_is_resumable(SSL_get_session(ssl))` over
+    /// the `SSL` `xp_ssl.c` keeps (`Z/ext/openssl/xp_ssl.c`'s
+    /// `ssl_handle`). An FTPS data connection is refused where the control
+    /// connection's is not (`data_accept`, `Z/ext/ftp/ftp.c:1776-1784`).
+    fn resumable(&self) -> bool;
 
     /// `SSL_pending`: the decrypted bytes the layer holds, which the
     /// `PHP_STREAM_AS_FD_FOR_SELECT` cast moves into the read buffer so

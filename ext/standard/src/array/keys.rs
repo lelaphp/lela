@@ -606,7 +606,7 @@ fn array_change_key_case(
 /// pk(function () { try { array_fill(0, PHP_INT_MAX, 1); } catch (ValueError $e) {} });
 /// ```
 /// ```expect
-/// 2904 32
+/// 2728 32
 /// ```
 #[php_function]
 fn array_fill(

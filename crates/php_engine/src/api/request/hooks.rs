@@ -888,7 +888,7 @@ fn trampoline_call(
             if wanted == 1 { "" } else { "s" }
         );
         return Err(crate::api::raising::under_name(req, Some(&member), |req| {
-            crate::api::raising::throw_error(req, "ArgumentCountError", &message)
+            crate::api::raising::argument_count_error(req, &message)
         }));
     }
     let Some(this) = req.frames().this() else {

@@ -78,7 +78,7 @@ use std::process::{Child, Stdio};
 use php_ext::abi::{False, OrFalse, Path, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::is_space;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, value_error};
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
@@ -398,7 +398,7 @@ pub fn escape_shell_cmd(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thro
     let max = crate::ffi::arg_max();
     if input.len() > max.saturating_sub(3) {
         let text = format!("Command exceeds the allowed length of {max} bytes");
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     }
     let mut out = Vec::with_capacity(input.len() * 2);
     let mut pending: Option<usize> = None;
@@ -440,7 +440,7 @@ pub fn escape_shell_cmd(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thro
     }
     if out.len() > max + 1 {
         let text = format!("Escaped command exceeds the allowed length of {max} bytes");
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     }
     Ok(out)
 }
@@ -452,7 +452,7 @@ fn escape_shell_arg(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thrown> 
     let max = crate::ffi::arg_max();
     if input.len() > max.saturating_sub(3) {
         let text = format!("Argument exceeds the allowed length of {max} bytes");
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     }
     let mut out = vec![b'\''];
     let mut mblen = Mblen::new();
@@ -471,7 +471,7 @@ fn escape_shell_arg(req: &mut Request, input: &[u8]) -> Result<Vec<u8>, Thrown> 
     out.push(b'\'');
     if out.len() > max + 1 {
         let text = format!("Escaped argument exceeds the allowed length of {max} bytes");
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     }
     Ok(out)
 }

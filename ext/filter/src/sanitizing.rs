@@ -4,7 +4,7 @@
 
 use php_ext::call::call;
 use php_ext::coerce::{is_callable, to_callable};
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, type_error};
 use php_ext::request::Request;
 use php_ext::values::Owner;
 
@@ -342,9 +342,8 @@ pub(crate) fn add_slashes(req: &mut Request, _: &Run, s: &[u8]) -> Result<Outcom
 /// ```
 pub(crate) fn callback(req: &mut Request, run: &Run, s: &[u8]) -> Result<Outcome, Thrown> {
     let Some(options) = run.options.filter(|o| is_callable(req, o)) else {
-        return Err(throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             &format!("{}(): Option must be a valid callback", run.native),
         ));
     };

@@ -1921,6 +1921,57 @@ fn operating(name: &str) -> Tree {
     dir
 }
 
+/// One line that starts a second merge, cherry-pick, revert or rebase in
+/// a checkout after the first is refused under `git.operation` though no
+/// operation stands yet (#3261): the hook can record the first start's
+/// base, `HEAD` as the line begins, and never the second's, so the second
+/// would stand foreign to its own starter, its commit and its `--abort`
+/// refused. The fixture is the line main's checkout ran; the control, one
+/// start on a line, is admitted in the same quiet checkout, and so is a
+/// second start in another checkout.
+#[test]
+fn a_line_that_starts_a_second_operation_in_one_checkout_is_refused() {
+    let manifest = Manifest::load(workspace()).unwrap();
+    let quiet = checkout("two-starts", None);
+    let dir = fixtures().join("rules/git.operation");
+    let judged = judge(
+        &manifest,
+        quiet.path(),
+        &call(&dir.join("deny-two-starts.json")),
+    )
+    .unwrap();
+    let denial = judged
+        .denial()
+        .unwrap_or_else(|| panic!("two starts on one line: {judged:?}"));
+    assert_eq!(denial.rule, "git.operation", "{denial:?}");
+    assert!(
+        denial.reason().contains("one operation per line"),
+        "{}",
+        denial.reason()
+    );
+
+    for line in [
+        "git merge --no-commit t3261w && git commit -q -F /var/empty/m.txt",
+        "git merge --abort && git merge --no-commit t3370",
+    ] {
+        let judged = judge(&manifest, quiet.path(), &bash(line)).unwrap();
+        assert!(
+            judged.findings.iter().all(|f| f.rule != "git.operation"),
+            "{line}: {judged:?}"
+        );
+    }
+    let other = checkout("two-starts-other", None);
+    let line = format!(
+        "git merge --no-commit a && git -C {} merge --no-commit b",
+        other.path().display()
+    );
+    let judged = judge(&manifest, quiet.path(), &bash(&line)).unwrap();
+    assert!(
+        judged.findings.iter().all(|f| f.rule != "git.operation"),
+        "{line}: {judged:?}"
+    );
+}
+
 /// A `Bash` rule denying `xtask phpt`, with its qualifiers set by `with`.
 fn probe(with: impl FnOnce(&mut Rule)) -> Manifest {
     let mut manifest = Manifest::load(workspace()).unwrap();

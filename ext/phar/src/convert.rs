@@ -7,7 +7,7 @@
 use std::sync::Arc;
 
 use php_ext::call::instantiate;
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_exception_ex};
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Owner, PhpObject};
 
@@ -56,7 +56,7 @@ pub(crate) fn convert(
     let format = match format {
         None | Some(9_021_976 | -1) => match current {
             Format::Phar if data => {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "UnexpectedValueException",
                     "Cannot write out data phar archive, use Phar::TAR or Phar::ZIP",
@@ -65,7 +65,7 @@ pub(crate) fn convert(
             format => format,
         },
         Some(1) if data => {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "UnexpectedValueException",
                 "Cannot write out data phar archive, use Phar::TAR or Phar::ZIP",
@@ -80,10 +80,11 @@ pub(crate) fn convert(
             } else {
                 "Unknown file format specified, please pass one of Phar::PHAR, Phar::TAR or Phar::ZIP"
             };
-            return Err(throw(req, "BadMethodCallException", message));
+            return Err(throw_exception_ex(req, "BadMethodCallException", message));
         }
     };
-    let bad = |req: &mut Request, m: &str| Err(throw(req, "BadMethodCallException", m));
+    let bad =
+        |req: &mut Request, m: &str| Err(throw_exception_ex(req, "BadMethodCallException", m));
     let flags = match compression {
         None | Some(9_021_976) => own_flags,
         Some(0) => 0,
@@ -198,7 +199,7 @@ pub(crate) fn to_other(
                     copy.free(req);
                     phar.release_all(req);
                     let error = failed?.err().unwrap_or_default();
-                    return Err(throw(
+                    return Err(throw_exception_ex(
                         req,
                         "UnexpectedValueException",
                         &format!(
@@ -282,7 +283,8 @@ fn rename(
         return Ok(None);
     };
     let (is_data, oldpath) = (a.is_data, a.fname.clone());
-    let bad = |req: &mut Request, m: String| Err(throw(req, "BadMethodCallException", &m));
+    let bad =
+        |req: &mut Request, m: String| Err(throw_exception_ex(req, "BadMethodCallException", &m));
     let ext: Vec<u8> = match ext {
         None => default_ext(a).to_vec(),
         Some(ext) => {

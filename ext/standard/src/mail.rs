@@ -18,7 +18,7 @@ use std::process::Stdio;
 use php_ext::abi::{Passed, Path, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::{c_str, is_space, value_name};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error, value_error};
 use php_ext::request::{FormatDate, Ini, OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, PhpArray, PhpString, Value, ValueRef};
@@ -78,11 +78,11 @@ fn build_elem(
         ValueRef::Str(text) => {
             if key.iter().any(|&c| !(33..=126).contains(&c) || c == b':') {
                 let message = format!("Header name \"{name}\" contains invalid characters");
-                return Err(throw_error(req, "ValueError", &message));
+                return Err(value_error(req, &message));
             }
             if let Some(error) = check_field_value(text.as_bytes()) {
                 let message = format!("Header \"{name}\" {error}");
-                return Err(throw_error(req, "ValueError", &message));
+                return Err(value_error(req, &message));
             }
             out.extend_from_slice(key);
             out.extend_from_slice(b": ");
@@ -95,7 +95,7 @@ fn build_elem(
         _ => {
             let given = value_name(req, &value.deref());
             let message = format!("Header \"{name}\" must be of type array|string, {given} given");
-            Err(throw_error(req, "TypeError", &message))
+            Err(type_error(req, &message))
         }
     }
 }
@@ -119,14 +119,14 @@ fn build_elems(
             let found = String::from_utf8_lossy(c_str(found.as_bytes())).into_owned();
             let message =
                 format!("Header \"{name}\" must only contain numeric keys, \"{found}\" found");
-            return Err(throw_error(req, "TypeError", &message));
+            return Err(type_error(req, &message));
         }
         let element = element.deref();
         if !matches!(element.as_ref(), ValueRef::Str(_)) {
             let given = value_name(req, &element);
             let message =
                 format!("Header \"{name}\" must only contain values of type string, {given} found");
-            return Err(throw_error(req, "TypeError", &message));
+            return Err(type_error(req, &message));
         }
         build_elem(req, out, key, &element)?;
         Ok(ControlFlow::Continue(()))
@@ -150,23 +150,21 @@ pub fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Th
             Key::Str(name) => name.as_bytes().to_vec(),
             Key::Int(idx) => {
                 let message = format!("Header name cannot be numeric, {idx} given");
-                return Err(throw_error(req, "TypeError", &message));
+                return Err(type_error(req, &message));
             }
         };
         let value = value.deref();
         let lower = key.to_ascii_lowercase();
         match lower.as_slice() {
             b"to" => {
-                return Err(throw_error(
+                return Err(value_error(
                     req,
-                    "ValueError",
                     "The additional headers cannot contain the \"To\" header",
                 ));
             }
             b"subject" => {
-                return Err(throw_error(
+                return Err(value_error(
                     req,
-                    "ValueError",
                     "The additional headers cannot contain the \"Subject\" header",
                 ));
             }
@@ -176,7 +174,7 @@ pub fn build_headers(req: &mut Request, headers: PhpArray) -> Result<Vec<u8>, Th
             {
                 let target = String::from_utf8_lossy(&lower).into_owned();
                 let message = format!("Header \"{target}\" must be of type string, array given");
-                return Err(throw_error(req, "TypeError", &message));
+                return Err(type_error(req, &message));
             }
             _ => build_elem(req, &mut out, &key, &value)?,
         }

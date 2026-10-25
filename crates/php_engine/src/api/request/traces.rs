@@ -447,7 +447,7 @@ impl Request {
     /// try { str_contains(new stdClass, 'a'); } catch (TypeError $e) { echo implode(',', array_keys($e->getTrace()[0])), "\n"; }
     /// ```
     /// ```expect
-    /// 3136 32
+    /// 2992 32
     /// function,file,line,args
     /// ```
     pub(super) fn render_trace(

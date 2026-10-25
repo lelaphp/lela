@@ -10,7 +10,8 @@ use php_ext::abi::{Instance, OrFalse, Ref, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{c_str, value_name};
 use php_ext::raising::{
-    Level, Thrown, arg_type_error, arg_value_error, argument_error, docref, throw_error,
+    Level, Thrown, arg_type_error, arg_value_error, argument_count_error, argument_error, docref,
+    value_error,
 };
 use php_ext::request::{OptionAnswer, Request, StreamOption};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
@@ -217,9 +218,8 @@ fn socket_select(
         *set = to_fd_set(req, u32::try_from(at).unwrap_or(0) + 1, array)?;
     }
     if sets.iter().flatten().all(Vec::is_empty) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "socket_select(): At least one array argument must be passed",
         ));
     }
@@ -802,7 +802,11 @@ fn packet_name(
         .ok()
         .and_then(|i| nix::net::if_::if_indextoname(i).ok());
     let Some(name) = named else {
-        return Err(throw_error(req, "Error", "invalid interface index"));
+        return Err(php_ext::raising::throw_error(
+            req,
+            "Error",
+            "invalid interface index",
+        ));
     };
     let value = string(req, name.as_bytes())?;
     assign(req, address, value)?;
@@ -1136,9 +1140,7 @@ fn bind_packet(
     let index = nix::net::if_::if_nametoindex(name).unwrap_or(0);
     match ffi::bind_packet(fd, index) {
         Ok(()) => Ok(true),
-        Err(ffi::PacketBind::Invalid) => {
-            Err(throw_error(req, "ValueError", "invalid AF_PACKET socket"))
-        }
+        Err(ffi::PacketBind::Invalid) => Err(value_error(req, "invalid AF_PACKET socket")),
         Err(ffi::PacketBind::Bind(errno)) => {
             socket_error(req, socket.object(), "Unable to bind address", errno as i32);
             Ok(false)
@@ -1285,9 +1287,8 @@ fn socket_recvfrom(
     let mut buf = room(req, usize::try_from(length).unwrap_or(usize::MAX) + 1)?;
     buf.pop();
     if family != libc::AF_UNIX && !port.is_given() {
-        return Err(throw_error(
+        return Err(argument_count_error(
             req,
-            "ArgumentCountError",
             "Wrong parameter count for socket_recvfrom()",
         ));
     }

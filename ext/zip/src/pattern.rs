@@ -5,7 +5,7 @@
 
 use php_ext::abi::OrFalse;
 use php_ext::coerce::{to_long, value_name};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error, value_error};
 use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -64,7 +64,7 @@ fn parse_options(req: &mut Request, options: PhpArray) -> Result<Options, Thrown
     let type_error = |req: &mut Request, name: &str, want: &str, v: &Value| -> Thrown {
         let given = value_name(req, v);
         let message = format!("Option \"{name}\" must be of type {want}, {given} given");
-        throw(req, "TypeError", &message)
+        type_error(req, &message)
     };
     if let Some(v) = find("remove_all_path") {
         o.remove_all_path = long(req, "remove_all_path", v)? != 0;
@@ -106,7 +106,7 @@ fn parse_options(req: &mut Request, options: PhpArray) -> Result<Options, Thrown
             }) = Some(s.to_vec());
             continue;
         };
-        return Err(throw(req, "ValueError", &wrong));
+        return Err(value_error(req, &wrong));
     }
     if let Some(v) = find("flags") {
         let ValueRef::Int(flags) = v.as_ref() else {

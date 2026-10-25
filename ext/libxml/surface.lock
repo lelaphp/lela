@@ -236,6 +236,7 @@ ffi::NodeObject::class_type
 ffi::NodeObject::decrement_doc_ref
 ffi::NodeObject::decrement_node_ptr
 ffi::NodeObject::decrement_resource
+ffi::NodeObject::detach_document
 ffi::NodeObject::doc_props
 ffi::NodeObject::doc_refcount
 ffi::NodeObject::document_handlers
