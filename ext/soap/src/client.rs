@@ -325,6 +325,26 @@ impl SoapClient {
     ///
     /// SoapClient::__doRequest() returned non string value
     /// ```
+    ///
+    /// Since 8.5.12 a multidimensional array's answer stops once the memory
+    /// limit was met making its arrays, and the limit's fatal is the one
+    /// beneath's, not a `SoapFault`:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '16M');
+    /// class C extends SoapClient {
+    ///     public function __doRequest($request, $location, $action, $version, $oneWay = false, $uriParserClass = null): ?string {
+    ///         return '<?xml version="1.0"?><E:Envelope xmlns:E="http://schemas.xmlsoap.org/soap/envelope/" xmlns:A="http://schemas.xmlsoap.org/soap/encoding/" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns:ns1="u"><E:Body><ns1:fResponse><p A:arrayType="xsd:string[' . implode(',', array_fill(0, 300, 1)) . ']">' . str_repeat('<i/>', 300) . '</p></ns1:fResponse></E:Body></E:Envelope>';
+    ///     }
+    /// }
+    /// $c = new C(null, ['location' => 'l', 'uri' => 'u']);
+    /// $c->f();
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 9
+    /// ```
     #[php(tentative)]
     fn __call(
         req: &mut Request,
