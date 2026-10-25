@@ -477,6 +477,16 @@ pub fn pending(req: &Request) -> Option<Thrown> {
     }
 }
 
+/// Whether `php_stream_open_for_zend_ex` refuses a file the request
+/// opens to compile: while a throwable or an exit stands pending, as
+/// what the init files leave (an `exit`, or the unwind exit of an `ev`
+/// that met the memory limit) has `phpdbg_compile` answer `Could not
+/// open file`.
+#[must_use]
+pub fn open_refused(req: &Request) -> bool {
+    pending(req).is_some() || exiting(req)
+}
+
 /// Whether `exit`'s unwind exit is what the request is unwinding, or a
 /// fatal is leaving: nothing a tier stops at.
 #[must_use]

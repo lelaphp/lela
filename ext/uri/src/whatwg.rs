@@ -64,6 +64,22 @@ fn reported(kind: ErrorKind) -> (UrlValidationErrorType, bool) {
 /// `fill_errors`: one `UrlValidationError` per logged error, in the order
 /// php pops them, and the reason a message names, the case of the last
 /// failure popped.
+///
+/// Since 8.5.12 the errors stop once the memory limit was met. The case
+/// crosses the limit where a new chunk is asked for, whose figure holds in
+/// any layout, where a huge block's growth names one the address space
+/// decides (#3442):
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $errors = null;
+/// new Uri\WhatWg\Url("https://example.com/" . str_repeat("%", 10 * 1024), null, $errors);
+/// echo "not reached\n";
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
+/// ```
 fn fill_errors(
     req: &mut Request,
     errors: &[ValidationError],
@@ -92,6 +108,10 @@ fn fill_errors(
             reason = Some(kind.case_name());
         }
         out.append(req, object.into_value())?;
+        // The errors stop once the memory limit was met, since 8.5.12.
+        if req.memory().has_oom() {
+            break;
+        }
     }
     Ok((out, reason))
 }
@@ -174,7 +194,7 @@ pub(crate) struct State {
 /// echo $m - $moves, "\n";
 /// ```
 /// ```expect regime=jit-off capture
-/// 423208
+/// 423544
 /// ```
 pub(crate) fn rinit(req: &mut Request) -> Result<(), Thrown> {
     match lexbor::lent(req, lxb::Parser::new)? {
@@ -704,6 +724,51 @@ impl Url {
     /// NULL
     /// enum(Uri\WhatWg\UrlValidationErrorType::PortOutOfRange)
     /// string(23) "https://example.com/a/c"
+    /// ```
+    ///
+    /// The parse as php-8.5.12's lexbor makes it (its patches 0014,
+    /// 0015, 0016, 0019 and 0020): an `@` before the last one is the
+    /// userinfo's, percent-encoded in the username as in the password; a
+    /// `..` segment ends at `#` and `?`; an opaque path's trailing space
+    /// before a query or fragment is `%20`; a file URL's replacement
+    /// drive path stays hierarchical, so `withPath()` replaces it; and a
+    /// host whose code points outgrow IDNA's inline buffer keeps those it
+    /// had read.
+    ///
+    /// ```php
+    /// use Uri\WhatWg\Url as W;
+    /// $u = new W("http://user@name:pass@word@localhost/");
+    /// var_dump($u->getUsername(), $u->getPassword(), $u->toAsciiString());
+    /// foreach (["https://example.com/..#frag", "https://example.com/..?q=1", "https://example.com/%?q", "data:x ?q", "foo:a b #c"] as $text) {
+    ///     $u = new W($text);
+    ///     var_dump($u->getPath(), $u->getQuery(), $u->getFragment());
+    /// }
+    /// $u = W::parse("c|/x", new W("file:///d:/a/b"));
+    /// var_dump($u->getPath(), $u->withPath("/zz")->getPath());
+    /// var_dump(strlen(W::parse("https://" . str_repeat("é", 5000) . ".com/")->getAsciiHost()));
+    /// ```
+    /// ```expect
+    /// string(11) "user%40name"
+    /// string(11) "pass%40word"
+    /// string(41) "http://user%40name:pass%40word@localhost/"
+    /// string(1) "/"
+    /// NULL
+    /// string(4) "frag"
+    /// string(1) "/"
+    /// string(3) "q=1"
+    /// NULL
+    /// string(2) "/%"
+    /// string(1) "q"
+    /// NULL
+    /// string(4) "x%20"
+    /// string(1) "q"
+    /// NULL
+    /// string(6) "a b%20"
+    /// NULL
+    /// string(1) "c"
+    /// string(5) "/c:/x"
+    /// string(3) "/zz"
+    /// int(5010)
     /// ```
     ///
     /// A host's IDNA processing as pinned lexbor makes it: mapped,

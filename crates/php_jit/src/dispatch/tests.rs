@@ -812,7 +812,7 @@ mod ran {
         self, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, Request, Site, Tier,
     };
 
-    use super::super::run;
+    use super::super::run_lent;
     use crate::enter::tests::entered::numbered;
     use crate::policy::{self, Holder, Outcome, State};
     use crate::record::Start;
@@ -876,7 +876,7 @@ mod ran {
             let Ok(linking) = table.publish(compiled(&body(0), vec![linked]), Start::Enter) else {
                 return Flow::Bail(Fatal::error("the linking trace was not published"));
             };
-            let flow = run(req, frame, linking, &shared);
+            let flow = run_lent(req, frame, linking);
             let resumed = match flow {
                 Flow::Resume(at) => tier::frame(req, at).map(|view| (at == frame, view.opline().0)),
                 _ => None,
@@ -993,7 +993,7 @@ mod ran {
             return Flow::Bail(Fatal::error("the root's exit was not claimed"));
         };
         policy::settle(claim, &Outcome::Published(side));
-        let flow = run(req, frame, root, &shared);
+        let flow = run_lent(req, frame, root);
         let resumed = match flow {
             Flow::Resume(at) => tier::frame(req, at).map(|view| (at == frame, view.opline().0)),
             _ => None,

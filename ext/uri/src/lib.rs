@@ -36,7 +36,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{clone_with, lookup_class, new_object};
-use php_ext::raising::{Thrown, fatal, throw, throw_chained, throw_error};
+use php_ext::raising::{Thrown, fatal, throw_chained, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
@@ -303,12 +303,34 @@ impl<P: UriParser> ObjectHandlers for Handlers<P> {
     }
 }
 
+///
+/// A copy the memory limit refused since 8.5.12 leaves the clone with no
+/// URI, and the limit's fatal is raised at the next check, here the
+/// method's return, where php raises it at the clone itself (the line
+/// the engine names is the check's, #3260):
+///
+/// ```php
+/// ini_set("memory_limit", "8M");
+/// $a = new Uri\Rfc3986\Uri("http://EXAMPLE.COM/" . str_repeat("a/../", 60000));
+/// $b = clone $a; $a->equals($b);
+/// echo "not reached\n";
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
+/// ```
 fn clone_uri<P: UriParser>(
     req: &mut Request,
     object: PhpObject,
 ) -> Result<Owner<PhpObject>, Thrown> {
     let copy = with_uri::<P, _>(req, object, |req, uri| uri.duplicate(req))?;
     let Some(copy) = copy else {
+        // A copy the memory limit refused since 8.5.12: the clone stands
+        // with no URI, and the limit's fatal is raised at the next check,
+        // before anything reads it ([`with_uri`]).
+        if req.memory().has_oom() {
+            return clone_with(req, &object, Slot::<P>(None));
+        }
         return Err(fatal(req, "InternalError: a URI could not be copied"));
     };
     clone_with(req, &object, Slot(Some(copy)))
@@ -326,6 +348,15 @@ fn with_uri<P: UriParser, R>(
         .native_mut::<Slot<P>>(req)
         .and_then(|slot| slot.0.take())
     else {
+        // A clone whose copy the memory limit refused: a throwable, which
+        // the check after the call gives up for the limit's fatal.
+        if req.memory().has_oom() {
+            return Err(throw_exception_ex(
+                req,
+                "Uri\\UriError",
+                "The URI could not be copied",
+            ));
+        }
         return Err(fatal(
             req,
             &format!(
@@ -514,7 +545,7 @@ fn component<P: UriParser, T>(
 ) -> Result<T, Thrown> {
     match read::<P, _>(req, this, mode, f)? {
         Ok(value) => Ok(value),
-        Err(Unreadable) => Err(throw(
+        Err(Unreadable) => Err(throw_exception_ex(
             req,
             "Uri\\UriError",
             &format!("The {name} component cannot be retrieved"),
@@ -578,7 +609,7 @@ fn write_bytes<P: UriParser>(
 
 /// `throw_cannot_recompose_uri_to_string`.
 fn cannot_recompose(req: &mut Request, class: &str) -> Thrown {
-    throw(
+    throw_exception_ex(
         req,
         "Uri\\UriError",
         &format!("Cannot recompose {class} to a string"),
@@ -650,11 +681,11 @@ fn unserialize<P: UriParser>(
         return Err(throw_chained(req, first, "Exception", &invalid));
     }
     let Some(text) = serialized_uri(data) else {
-        return Err(throw(req, "Exception", &invalid));
+        return Err(throw_exception_ex(req, "Exception", &invalid));
     };
     let parsed = P::parse(req, &text, None, false, true)?;
     let Some(uri) = parsed.uri else {
-        return Err(throw(req, "Exception", &invalid));
+        return Err(throw_exception_ex(req, "Exception", &invalid));
     };
     if let Some(slot) = this.native_mut::<Slot<P>>(req) {
         slot.0 = Some(uri);
@@ -666,7 +697,7 @@ fn unserialize<P: UriParser>(
     if no_properties {
         Ok(())
     } else {
-        Err(throw(req, "Exception", &invalid))
+        Err(throw_exception_ex(req, "Exception", &invalid))
     }
 }
 

@@ -8,7 +8,10 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Passed, Raw, Ref, True, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{numeric_string, to_array};
-use php_ext::raising::{Level, Thrown, argument_error, call_stack_end, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, argument_error, call_stack_end, call_stack_limit, docref, throw_error,
+    value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Layout, Owner, PhpArray, PhpString, Value, ValueRef};
@@ -384,12 +387,26 @@ fn replace_flat(
     Ok(())
 }
 
-/// `php_array_replace_recursive`: `src` written over `dest`.
+/// `php_array_replace_recursive`: `src` written over `dest`, each level
+/// asking the stack limit first, as php 8.5.12 asks it
+/// (`Z/ext/standard/array.c:4205`, gh23113):
+///
+/// ```php
+/// $a = [];
+/// for ($i = 0; $i < 30000; $i++) { $a = ['k' => $a]; }
+/// try { array_replace_recursive($a, $a); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect regime=small-stack
+/// Error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
 fn replace_recursive(
     req: &mut Request,
     dest: &mut Owner<PhpArray>,
     src: PhpArray,
 ) -> Result<(), Thrown> {
+    call_stack_limit(req)?;
+    // The floor stands under it, where `-1` sets no limit and php
+    // would run to the thread's end.
     call_stack_end(req)?;
     // `ZEND_HASH_FOREACH_KEY_VAL(src, num_key, string_key, src_entry)`
     // (`Z/ext/standard/array.c:4148`), no owner of the table taken: the
@@ -823,9 +840,8 @@ fn double_range(
     let size = |req: &mut Request, high: f64, low: f64| -> Result<u32, Thrown> {
         let calc = ((high - low) / step) + 1.0;
         if calc >= limit {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 &format!(
                     "The supplied range exceeds the maximum array size by {:.1} elements: start={low:.1}, end={high:.1}, step={step:.1}. Max size: {limit:.0}",
                     calc - limit
@@ -919,9 +935,8 @@ fn long_range(
     let size = |req: &mut Request, high: i64, low: i64| -> Result<u64, Thrown> {
         let calc = high.wrapping_sub(low).cast_unsigned() / step;
         if calc >= HT_MAX_SIZE - 1 {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 &format!(
                     "The supplied range exceeds the maximum array size by {} elements: start={low}, end={high}, step={step}. Calculated size: {calc}. Maximum size: {HT_MAX_SIZE}.",
                     calc - (HT_MAX_SIZE - 1)

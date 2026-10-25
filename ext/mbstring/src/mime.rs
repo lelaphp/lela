@@ -338,12 +338,12 @@ pub(crate) fn header_encode(
 /// returns:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(strlen(mb_encode_mimeheader(str_repeat("\xFF", 2 << 20), "ISO-8859-1", "Q")), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_encode_mimeheader(str_repeat("\xFF", 400000), "ISO-8859-1", "Q")), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn mb_encode_mimeheader(
@@ -587,12 +587,12 @@ fn header_decode(input: &[u8], outcode: Encoding) -> Vec<u8> {
 /// memory limit raises the limit's fatal as the call returns:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(strlen(mb_decode_mimeheader(str_repeat("=?UTF-8?B?w6nDqcOp?= ", (int) (5500 * 1024 / 21)))), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_decode_mimeheader(str_repeat("=?UTF-8?B?w6nDqcOp?= ", (int) (1100 * 1024 / 21)))), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 5636096 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn mb_decode_mimeheader(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {

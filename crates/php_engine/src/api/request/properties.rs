@@ -8,11 +8,12 @@
 //! the source lists and the scope a write names are [`Properties`]'s,
 //! whose fields no file but this one reads.
 
+use crate::c_number::c_str;
 use php_heap::{Fatal, Heap, Obj, Ref, TableRow, Zval};
 use php_link::Row;
 use php_unit::decl::{PropertyDecl, Visibility};
 
-use crate::api::abi::{PropertyRead, PropertyTest};
+use crate::api::abi::{ObjectHandlers, PropertyAccess, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown, none_pending};
 use crate::api::values::walk::{self, ObjectTable, Table};
@@ -23,6 +24,7 @@ use crate::api::values::{
 use frames::Link;
 
 use super::Frames;
+use super::calls::Retval;
 use super::{DeclaredSlot, Hooks, PropertyInfo, Request, RowPlace, frames};
 
 /// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
@@ -232,9 +234,12 @@ pub(super) struct Properties {
     /// after its declared properties; an object here carries what the
     /// heap lays down and nothing more, so the words are the request's,
     /// named by `spl_object_id()` and the property's name. A row is
-    /// dropped the moment its word empties, which is before the object
-    /// can die, so an index the store gives out again is never one an
-    /// old row still names.
+    /// dropped the moment its word empties, and every word is taken under
+    /// a hold of its object that is given up only after the word is
+    /// given back ([`Request::guarded`], [`LentGuard`](super::lazy::LentGuard)),
+    /// so no row outlives its object and an index the store gives out
+    /// again is never one an old row still names, as php's guards, which
+    /// live in the object, die with it.
     guards: Vec<((php_heap::ObjectId, Vec<u8>), u32)>,
     /// The recursion guards of objects whose class uses guards, one row
     /// per walk inside one object (`ZEND_GUARD_RECURSION_*` on the
@@ -274,11 +279,26 @@ impl Default for Properties {
 
 impl Request {
     /// php's warning for a read of the property `name` that an object
-    /// of `class` holds no value for.
+    /// of `class` holds no value for, `Undefined property: %s::$%s`
+    /// (`Z/Zend/zend_object_handlers.c:1012`), the name read to its first
+    /// NUL, as php's `%s` reads it.
+    ///
+    /// ```php
+    /// $o = new stdClass; echo $o->{"foo\0bar"};
+    /// ```
+    /// ```expect
+    /// Warning: Undefined property: stdClass::$foo in %s on line 2
+    /// ```
     pub(crate) fn undefined_property(&mut self, class: ClassId, name: &[u8]) {
         let class = self.symbols().class_name(class);
-        let shown = String::from_utf8_lossy(name);
-        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        let message = [
+            b"Undefined property: ",
+            class.as_bytes(),
+            b"::$",
+            c_str(name),
+        ]
+        .concat();
+        crate::api::raising::warning(self, &message);
     }
 
     /// The truth of `value`, an answer the caller holds, given up once
@@ -454,17 +474,86 @@ impl Request {
     /// 0
     /// 1
     /// ```
+    ///
+    /// An enum's `name` and `value` are cached as any class's, its table
+    /// serving properties as `Std` does: read in place, written through
+    /// the readonly slot's refusal, and a name it does not declare refused
+    /// on every pass, interpreted, under force and where every guard fails
+    /// once:
+    ///
+    /// ```php
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// function w($e) { foreach (['value', 'name', 'foo'] as $p) { try { $e->$p = 1; } catch (Error $x) { echo $x->getMessage(), "\n"; } } try { $e->value .= 'x'; } catch (Error $x) { echo $x->getMessage(), "\n"; } }
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n"; w(Suit::H); w(Suit::S);
+    /// ```
+    /// ```expect
+    /// hHhHhH sSsS
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// ```
+    ///
+    /// ```php
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// function w($e) { foreach (['value', 'name', 'foo'] as $p) { try { $e->$p = 1; } catch (Error $x) { echo $x->getMessage(), "\n"; } } try { $e->value .= 'x'; } catch (Error $x) { echo $x->getMessage(), "\n"; } }
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n"; w(Suit::H); w(Suit::S);
+    /// ```
+    /// ```expect regime=jit-force process
+    /// hHhHhH sSsS
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// ```
+    ///
+    /// ```php
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// function w($e) { foreach (['value', 'name', 'foo'] as $p) { try { $e->$p = 1; } catch (Error $x) { echo $x->getMessage(), "\n"; } } try { $e->value .= 'x'; } catch (Error $x) { echo $x->getMessage(), "\n"; } }
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n"; w(Suit::H); w(Suit::S);
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// hHhHhH sSsS
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// ```
     pub(crate) fn cacheable_offset(
         &self,
         object: PhpObject,
         name: &[u8],
     ) -> Option<crate::exec::PropertyOffset> {
         let class = object.class();
-        if self.own_handlers(class).is_some() {
+        let table = self.own_handlers(class).map(ObjectHandlers::properties);
+        if table == Some(PropertyAccess::Own) {
             return None;
         }
         let found = self.find_property_info(class, name);
-        self.offset_of(class, name, found, self.class_hooks(class))
+        let offset = self.offset_of(class, name, found, self.class_hooks(class));
+        // A table of its own that serves properties as `Std` does, an
+        // enum's (`zend_enum_object_handlers`, std's but for `clone_obj`
+        // and `compare`, `Z/Zend/zend_enum.c:168-170`), caches a name it
+        // declares; one it does not is placed on every pass.
+        if table.is_some() && offset == Some(crate::exec::PropertyOffset::Dynamic) {
+            return None;
+        }
+        offset
     }
 
     /// `zend_get_property_offset`'s answer a fetch may keep, from what
@@ -1062,13 +1151,15 @@ impl Request {
         }
         if !silent {
             let shown = self.symbols().class_name(class);
-            crate::api::raising::notice(
-                self,
-                &format!(
-                    "Accessing static property {shown}::${} as non static",
-                    String::from_utf8_lossy(name)
-                ),
-            );
+            let message = [
+                b"Accessing static property ",
+                shown.as_bytes(),
+                b"::$",
+                c_str(name),
+                b" as non static",
+            ]
+            .concat();
+            crate::api::raising::notice(self, &message);
         }
         Some(Ok(()))
     }
@@ -1829,6 +1920,16 @@ impl Request {
     ///   }
     /// }
     /// ```
+    ///
+    /// The name is printed with `%s`, to its first NUL:
+    ///
+    /// ```php
+    /// class G { function __get($n) { return [1]; } }
+    /// $g = new G; $g->{"f\0bar"}[] = 1;
+    /// ```
+    /// ```expect
+    /// Notice: Indirect modification of overloaded property G::$f has no effect in %s on line 3
+    /// ```
     fn overloaded_write_notice(
         &mut self,
         class: ClassId,
@@ -1841,13 +1942,15 @@ impl Request {
             && got.as_object().is_none()
         {
             let class = self.symbols().class_name(class);
-            let shown = String::from_utf8_lossy(name).into_owned();
-            crate::api::raising::notice(
-                self,
-                &format!(
-                    "Indirect modification of overloaded property {class}::${shown} has no effect"
-                ),
-            );
+            let message = [
+                b"Indirect modification of overloaded property ",
+                class.as_bytes(),
+                b"::$",
+                c_str(name),
+                b" has no effect",
+            ]
+            .concat();
+            crate::api::raising::notice(self, &message);
         }
     }
 
@@ -1952,7 +2055,7 @@ impl Request {
             return Ok(None);
         };
         let class = object.class();
-        let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+        let got = self.call_accessor_into(Retval::Result, object, getter, IN_GET, name, &[])?;
         self.overloaded_write_notice(class, name, read, &got);
         self.hold_magic_get(class, name, getter, got).map(Some)
     }
@@ -2371,8 +2474,13 @@ impl Request {
     }
 
     /// `(*guard) |= bit`, the row laid down by the first accessor to
-    /// take it.
+    /// take it, on an object the taker holds across the window
+    /// ([`Request::guarded`]).
     pub(super) fn guard_take(&mut self, object: PhpObject, name: &[u8], bit: u32) {
+        debug_assert!(
+            object.heap().refcount() >= 2,
+            "a property guard taken on an object nothing holds across it"
+        );
         let id = object.heap().id();
         if let Some((_, word)) = self
             .properties
@@ -2414,9 +2522,47 @@ impl Request {
     /// on the object with the property's name as its first argument and
     /// `arguments` after it, under `bit` in the property guard, which is
     /// taken before the call and given back after it whatever the call
-    /// did. The object is one more owner for the span of the call
-    /// (`GC_ADDREF`, `OBJ_RELEASE`), so an accessor that drops the last
-    /// other owner does not free the object under the handler.
+    /// did. The object is one more owner for the span of the guard
+    /// (`GC_ADDREF` before `(*guard) |= bit`, `OBJ_RELEASE` after
+    /// `(*guard) &= ~bit`, as `zend_std_read_property` and its kin order
+    /// them), so an accessor that drops the last other owner does not
+    /// free the object under the handler, its destructor is called with
+    /// the guard down, and no guard row outlives the object it names.
+    ///
+    /// Each accessor drops the last owner of the object it serves, which
+    /// the next `new` makes again, and the destructor reads through
+    /// `__get` and `__isset` again:
+    ///
+    /// ```php
+    /// class F {
+    ///     function __get($n) { if ($n === 'x') { $GLOBALS['o'] = null; } return 7; }
+    ///     function __set($n, $v) { $GLOBALS['o'] = null; }
+    ///     function __isset($n) { if ($n === 'q') { $GLOBALS['o'] = null; } return true; }
+    ///     function __unset($n) { $GLOBALS['o'] = null; }
+    ///     function __destruct() { echo '[', $this->x, isset($this->q) ? 'i' : '-', ']'; }
+    /// }
+    /// $f = 0; for ($i = 0; $i < 3; $i++) { $o = new F; $f += $o->x; }
+    /// echo "| "; $o = new F; $o->z = 1; echo "| "; $o = new F; var_dump(isset($o->q)); $o = new F; unset($o->u);
+    /// echo "\n", $f, "\n";
+    /// ```
+    /// ```expect
+    /// [7i][7i][7i]| [7i]| [7i]bool(true)
+    /// [7i]
+    /// 21
+    /// ```
+    ///
+    /// A destructor served inside one `__get`, and another object's last
+    /// owner dropped inside its own `__get` that the first reads:
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "d"; } }
+    /// class G { public $keep; function __get($n) { $this->keep = null; return isset($GLOBALS['h']) ? $GLOBALS['h']->y : 2; } }
+    /// class H { function __get($n) { unset($GLOBALS['h']); return 3; } }
+    /// $g = new G; $g->keep = new D; echo $g->a, " "; $h = new H; echo $g->b, " "; $h = new H; echo $g->c, "\n";
+    /// ```
+    /// ```expect
+    /// d2 3 3
+    /// ```
     fn call_accessor(
         &mut self,
         object: PhpObject,
@@ -2425,18 +2571,52 @@ impl Request {
         name: &[u8],
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        self.call_accessor_into(Retval::Native, object, accessor, bit, name, arguments)
+    }
+
+    /// [`Request::call_accessor`] whose accessor's return, where its body
+    /// returned and then threw, goes where `retval` says: `__get`'s under
+    /// a read is the reading opline's `rv`.
+    fn call_accessor_into(
+        &mut self,
+        retval: Retval,
+        object: PhpObject,
+        accessor: Function,
+        bit: u32,
+        name: &[u8],
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
+        self.guarded(object, name, bit, |req| {
+            req.serve_accessor(retval, object, accessor, name, arguments)
+        })
+    }
+
+    /// `serve` under `bit` of `object`'s guard for `name`, the object held
+    /// across the window (`GC_ADDREF` before `(*guard) |= bit`,
+    /// `OBJ_RELEASE` after `(*guard) &= ~bit`), so the row is given back
+    /// before the object can die.
+    pub(super) fn guarded<T>(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        bit: u32,
+        serve: impl FnOnce(&mut Request) -> T,
+    ) -> T {
+        let held = Owner::take(self, object.as_value());
         self.guard_take(object, name, bit);
-        let served = self.serve_accessor(object, accessor, name, arguments);
+        let served = serve(self);
         self.guard_drop(object, name, bit);
+        held.give_up(self);
         served
     }
 
-    /// [`Request::call_accessor`] without the guard, for the one site
-    /// that holds a bit across two calls: `zend_std_has_property` keeps
-    /// `IN_ISSET` standing while it asks the `__get` that `empty` reads
-    /// the truth of.
+    /// [`Request::call_accessor`] without the guard and the hold, for the
+    /// one site that holds both across two calls: `zend_std_has_property`
+    /// keeps `IN_ISSET` standing, and the object, while it asks the
+    /// `__get` that `empty` reads the truth of.
     fn serve_accessor(
         &mut self,
+        retval: Retval,
         object: PhpObject,
         accessor: Function,
         name: &[u8],
@@ -2446,9 +2626,8 @@ impl Request {
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(*name));
         sent.extend_from_slice(arguments);
-        let held = Owner::take(self, object.as_value());
-        let served = self.serve_method_made(accessor, Some(object), object.class(), &sent, &[]);
-        held.give_up(self);
+        let served =
+            self.serve_method_into(retval, accessor, Some(object), object.class(), &sent, &[]);
         name.give_up(self);
         served
     }
@@ -2633,7 +2812,8 @@ impl Request {
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
-                let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                let got =
+                    self.call_accessor_into(Retval::Result, object, getter, IN_GET, name, &[])?;
                 self.overloaded_write_notice(class, name, read, &got);
                 let held = self.hold_magic_get(class, name, getter, got);
                 return adopted(held);
@@ -2652,10 +2832,9 @@ impl Request {
             let instance = self.lazy_init(object)?;
             let guarded = getter.is_some() || issetter.is_some();
             if guarded && self.guard_word(instance, name) & guard_bit == 0 {
-                self.guard_take(instance, name, guard_bit);
-                let read = self.read_property(instance, name, read);
-                self.guard_drop(instance, name, guard_bit);
-                return read;
+                return self.guarded(instance, name, guard_bit, |req| {
+                    req.read_property(instance, name, read)
+                });
             }
             return self.read_property(instance, name, read);
         }
@@ -3355,10 +3534,9 @@ impl Request {
         };
         let bytes = name.as_bytes().to_vec();
         if guarded && self.guard_word(instance, &bytes) & IN_SET == 0 {
-            self.guard_take(instance, &bytes, IN_SET);
-            let written = self.write_property(instance, name, value);
-            self.guard_drop(instance, &bytes, IN_SET);
-            return written;
+            return self.guarded(instance, &bytes, IN_SET, |req| {
+                req.write_property(instance, name, value)
+            });
         }
         self.write_property(instance, name, value)
     }
@@ -3856,6 +4034,15 @@ impl Request {
     /// Exception: Cannot create dynamic property class@anonymous::$y
     /// NULL
     /// ```
+    ///
+    /// The deprecation prints the name with `%s`, to its first NUL:
+    ///
+    /// ```php
+    /// class N {} $n = new N; $n->{"f\0bar"} = 1;
+    /// ```
+    /// ```expect
+    /// Deprecated: Creation of dynamic property N::$f is deprecated in %s on line 2
+    /// ```
     pub(crate) fn dynamic_property_creation(
         &mut self,
         object: PhpObject,
@@ -3877,10 +4064,15 @@ impl Request {
             return Err(crate::api::raising::error(self, &cannot));
         }
         let held = Owner::take(self, object.as_value());
-        crate::api::raising::deprecated(
-            self,
-            &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
-        );
+        let message = [
+            b"Creation of dynamic property ",
+            class_name.as_bytes(),
+            b"::$",
+            c_str(name),
+            b" is deprecated",
+        ]
+        .concat();
+        crate::api::raising::deprecated(self, &message);
         let shared = object.as_value().refcount() > 1;
         held.let_go(self);
         if shared {
@@ -4755,12 +4947,9 @@ impl Request {
         // `OBJ_RELEASE` after the guard is down), so an `__isset` that
         // gives up every other owner does not free the object the
         // `__get` is served on.
-        self.guard_take(object, name, IN_ISSET);
-        let held = Owner::take(self, object.as_value());
-        let answered = self.isset_then_truth(object, name, test, issetter);
-        self.guard_drop(object, name, IN_ISSET);
-        held.give_up(self);
-        answered
+        self.guarded(object, name, IN_ISSET, |req| {
+            req.isset_then_truth(object, name, test, issetter)
+        })
     }
 
     /// `zend_std_has_property`'s `/* have issetter - try with it! */`
@@ -4792,7 +4981,7 @@ impl Request {
         test: PropertyTest,
         issetter: Function,
     ) -> Result<bool, Thrown> {
-        let answered = self.serve_accessor(object, issetter, name, &[])?;
+        let answered = self.serve_accessor(Retval::Native, object, issetter, name, &[])?;
         let truthy = self.truth_of(answered)?;
         if test != PropertyTest::NotEmpty || !truthy {
             return Ok(truthy);
@@ -4841,10 +5030,9 @@ impl Request {
         if self.serves_accessor(instance.class(), Accessor::Isset)
             && self.guard_word(instance, name) & IN_ISSET == 0
         {
-            self.guard_take(instance, name, IN_ISSET);
-            let held = self.has_property(instance, name, test);
-            self.guard_drop(instance, name, IN_ISSET);
-            return held;
+            return self.guarded(instance, name, IN_ISSET, |req| {
+                req.has_property(instance, name, test)
+            });
         }
         self.has_property(instance, name, test)
     }
@@ -5035,10 +5223,9 @@ impl Request {
         if o.laziness() != php_heap::Laziness::Eager {
             let instance = self.lazy_init(object)?;
             if unsetter.is_some() && self.guard_word(instance, name) & IN_UNSET == 0 {
-                self.guard_take(instance, name, IN_UNSET);
-                let unset = self.unset_property(instance, name);
-                self.guard_drop(instance, name, IN_UNSET);
-                return unset;
+                return self.guarded(instance, name, IN_UNSET, |req| {
+                    req.unset_property(instance, name)
+                });
             }
             return self.unset_property(instance, name);
         }

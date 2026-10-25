@@ -18,7 +18,7 @@
 use php_unit::decl::{ClassKind, EnumBacking, Type};
 
 use crate::api::abi::{Entry, Refusals};
-use crate::api::raising::{Thrown, arity, error, throw_error};
+use crate::api::raising::{Thrown, arity, error, value_error};
 use crate::api::request::{ByValue, Request};
 use crate::api::values::{ClassId, Owner, Value, adopted};
 
@@ -191,9 +191,7 @@ fn backing_key(req: &mut Request, given: &Value, backing: EnumBacking) -> Result
         }
     };
     if let Some(n) = long {
-        return Ok(Value::string(
-            req.string(crate::c_number::Long::of(n).as_bytes())?,
-        ));
+        return Ok(Value::string(crate::ops::long_to_str(req, n)?));
     }
     req.addref(given);
     Ok(*given)
@@ -291,9 +289,8 @@ fn not_backing(
         ),
     };
     req.release(wanted);
-    Err(throw_error(
+    Err(value_error(
         req,
-        "ValueError",
         &format!("{shown} is not a valid backing value for enum {class_name}"),
     ))
 }

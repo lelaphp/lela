@@ -6,7 +6,7 @@
 
 use php_ext::abi::{Instance, ObjectHandlers, OrFalse, PropertyTest, Raw, Std, This, Union};
 use php_ext::attr::{php_class, php_function};
-use php_ext::raising::{Thrown, arg_value_error, throw, throw_error};
+use php_ext::raising::{Thrown, arg_value_error, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 use php_ext_libxml::ffi::{ClassType, DocString, Library, Parsed, Parser, Source};
@@ -225,7 +225,7 @@ pub(crate) fn xml_load(
             if from_file {
                 // `zend_throw_exception_ex`'s `%s`: the bytes as given.
                 let message = [&b"Cannot open file '"[..], &source, b"'"].concat();
-                return Err(throw(req, "Exception", &message));
+                return Err(throw_exception_ex(req, "Exception", &message));
             }
             return Err(dom_throw(req, Code::InvalidState));
         }

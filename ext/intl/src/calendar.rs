@@ -19,8 +19,8 @@ use php_ext::call::{call_method, clone_with, instantiate, lookup_class, new_obje
 use php_ext::coerce::{coerce_param, to_long};
 use php_ext::decl::Type;
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, arity, docref, fatal, pending, throw,
-    throw_error,
+    Level, Thrown, arg_value_error, argument_count_error, argument_error, arity, docref, fatal,
+    pending, throw, throw_error,
 };
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -1145,7 +1145,7 @@ fn set_fields(
         }
         4 => {
             let message = "IntlCalendar::set() has no variant with exactly 4 parameters";
-            return Err(throw_error(req, "ArgumentCountError", message));
+            return Err(argument_count_error(req, message));
         }
         n => {
             let n = i32::try_from(n).unwrap_or(6);
@@ -1628,7 +1628,7 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
         pending(req)?;
     }
     if count > 6 {
-        return Err(throw_error(req, "ArgumentCountError", "Too many arguments"));
+        return Err(argument_count_error(req, "Too many arguments"));
     }
     let given: Vec<Value> = (1..=u32::try_from(count).unwrap_or(6))
         .map(|p| {
@@ -1643,7 +1643,7 @@ fn gregorian_body(req: &mut Request, object: PhpObject, constructor: bool) -> Re
         .map_or(0, |i| i + 1);
     if variant == 4 {
         let message = "No variant with 4 arguments (excluding trailing NULLs)";
-        return Err(throw_error(req, "ArgumentCountError", message));
+        return Err(argument_count_error(req, message));
     }
     let calendar = if variant <= 2 {
         // The variant's parse, `Z_PARAM_OBJ_OR_STR_OR_NULL` and

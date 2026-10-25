@@ -290,6 +290,23 @@ fn convert_array(
 /// reentered
 /// 2
 /// ```
+///
+/// A surrogate codepoint, from UCS-2, UCS-4 or a numeric entity, is not
+/// UTF-8: libmbfl's `mb_wchar_to_utf8` writes the substitute for it as
+/// php 8.5.12's does, and only a search's internal UTF-8 keeps it, so
+/// two surrogates stay apart there.
+///
+/// ```php
+/// echo bin2hex(mb_convert_encoding("\x00\x00\x00A\x00\x00\xD8\x00", 'UTF-8', 'UCS-4')), ' ', bin2hex(mb_convert_encoding('&#xD800;', 'UTF-8', 'HTML-ENTITIES')), "\n";
+/// mb_substitute_character('long');
+/// echo bin2hex(mb_convert_encoding("\xDF\xFF", 'UTF-8', 'UCS-2')), "\n";
+/// var_dump(mb_strpos("\xD8\x3D\xDE\x00\xD8\x3D\xDE\x01", "\xD8\x3D\xDE\x01", 0, 'UCS-2'));
+/// ```
+/// ```expect
+/// 413f 3f
+/// 552b44464646
+/// int(2)
+/// ```
 #[php_function]
 // The declared `array|string|false`, each fresh value an owner.
 ///
@@ -298,12 +315,12 @@ fn convert_array(
 /// the call returns:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(strlen(mb_convert_encoding(str_repeat("a", 2 << 20), "UTF-32", "ISO-8859-1")), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_convert_encoding(str_repeat("a", 400000), "UTF-32", "ISO-8859-1")), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 1572864 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[allow(clippy::type_complexity)]
 fn mb_convert_encoding(
@@ -1208,13 +1225,13 @@ fn lost_key(req: &mut Request) -> Thrown {
 /// conversion, and the limit's fatal is raised as the call returns:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// $v = str_repeat("a", 2 << 20);
+/// ini_set('memory_limit', '2M');
+/// $v = str_repeat("a", 400000);
 /// var_dump(mb_convert_variables("UTF-32", "ISO-8859-1", $v), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 1572864 bytes) in %s on line 4
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
 /// ```
 #[php_function]
 fn mb_convert_variables(
@@ -1369,12 +1386,12 @@ fn entity_encode(input: &[u8], enc: Encoding, map: &[u32], hex: bool, sub: Subst
 /// call returns:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(strlen(mb_encode_numericentity(str_repeat("a", 2 << 20), [0x0, 0x10FFFF, 0, 0xFFFFFF], "UTF-8", true)), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_encode_numericentity(str_repeat("a", 400000), [0x0, 0x10FFFF, 0, 0xFFFFFF], "UTF-8", true)), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 1572864 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn mb_encode_numericentity(

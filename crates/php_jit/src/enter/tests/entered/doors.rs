@@ -16,7 +16,7 @@ use php_engine::tier::{
 };
 use php_unit::OplineIdx;
 
-use crate::enter::{Answered, At, Exited, Left, enter};
+use crate::enter::{Answered, At, Exited, Left, Readiness};
 use crate::record::{Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::testing::{self, Scratch, function_of, stdout};
@@ -172,7 +172,7 @@ fn raced(req: &mut Request, frame: FrameRef) -> Result<Turns, String> {
     state
         .headers
         .rows(|| table.segments())
-        .lay(side_id, std::ptr::null(), true);
+        .lay(side_id, std::ptr::null(), Readiness::Settled);
     let grown = Start::Side {
         parent: root,
         exit: ExitId(0),
@@ -195,7 +195,7 @@ fn raced(req: &mut Request, frame: FrameRef) -> Result<Turns, String> {
             let mut seen = Turns::default();
             let root_trace = table.get(root).ok_or("the root is not in its table")?;
             for turn in 0..LIMIT {
-                let answered = enter(req, frame, (&epoch, root_trace), At::First)
+                let answered = super::crossed(req, frame, (&epoch, root_trace), At::First)
                     .map_err(|fatal| format!("{fatal:?}"))?;
                 let at = tier::frame(req, frame).map(|view| view.opline());
                 match turned(&answered, (root, side_id), at) {

@@ -23,6 +23,7 @@ use crate::xp_ssl::{Cipher, Hooks, Io, San};
 unsafe extern "C" {
     fn SSL_set_fd(ssl: *mut sys::SSL, fd: c_int) -> c_int;
     fn SSL_copy_session_id(to: *mut sys::SSL, from: *const sys::SSL) -> c_int;
+    fn SSL_SESSION_is_resumable(s: *const sys::SSL_SESSION) -> c_int;
     fn SSL_set_info_callback(ssl: *mut sys::SSL, cb: Option<InfoCallback>);
     fn SSL_CTX_set_default_passwd_cb(ctx: *mut sys::SSL_CTX, cb: Option<PasswdCallback>);
     fn SSL_CTX_set_default_passwd_cb_userdata(ctx: *mut sys::SSL_CTX, u: *mut c_void);
@@ -36,7 +37,16 @@ unsafe extern "C" {
     -> *mut sys::EVP_PKEY;
     fn ERR_peek_error() -> c_ulong;
     fn ERR_error_string_n(e: c_ulong, buf: *mut c_char, len: usize);
+    fn GENERAL_NAME_get0_otherName(
+        name: *const sys::GENERAL_NAME,
+        oid: *mut *mut sys::ASN1_OBJECT,
+        value: *mut *mut sys::ASN1_TYPE,
+    ) -> c_int;
 }
+
+/// `id-on-dnsSRV` (RFC 4985), the otherName an SRV-ID is, which php
+/// matches by its dotted OID.
+const SRV_NAME_OID: &[u8] = b"1.3.6.1.5.5.7.8.7";
 
 /// `SSL_set_info_callback`'s and `SSL_CTX_set_default_passwd_cb`'s
 /// callback types.
@@ -151,11 +161,14 @@ impl Ctx {
         unsafe { sys::SSL_CTX_set_security_level(self.as_ptr(), level) };
     }
 
-    /// `SSL_CTX_set_alpn_protos`: the list a client offers, in wire form.
-    pub(crate) fn alpn_protos(&self, wire: &[u8]) {
+    /// `SSL_CTX_set_alpn_protos`: the list a client offers, in wire form;
+    /// whether the library took it, which it refuses where a name is
+    /// empty (its answer is zero on success).
+    pub(crate) fn alpn_protos(&self, wire: &[u8]) -> bool {
         let len = c_uint::try_from(wire.len()).unwrap_or(0);
         // SAFETY: the context is live; the library copies `len` bytes.
-        unsafe { sys::SSL_CTX_set_alpn_protos(self.as_ptr(), wire.as_ptr(), len) };
+        let answer = unsafe { sys::SSL_CTX_set_alpn_protos(self.as_ptr(), wire.as_ptr(), len) };
+        answer == 0
     }
 
     /// `SSL_CTX_use_certificate_chain_file`.
@@ -372,6 +385,20 @@ impl Tls {
         unsafe { SSL_set_info_callback(self.ssl(), Some(info_callback)) };
     }
 
+    /// `SSL_SESSION_is_resumable(SSL_get_session(ssl))`: whether the
+    /// session the connection holds is one the server issued for
+    /// resumption, by id or by TLS 1.3's `NewSessionTicket`, which is when
+    /// OpenSSL hands it to a new-session callback.
+    pub(crate) fn session_resumable(&self) -> bool {
+        // SAFETY: the SSL is live; the session it answers is borrowed.
+        let session = unsafe { sys::SSL_get_session(self.ssl()) };
+        if session.is_null() {
+            return false;
+        }
+        // SAFETY: the session is the SSL's own, live while the SSL is.
+        unsafe { SSL_SESSION_is_resumable(session) == 1 }
+    }
+
     /// `SSL_copy_session_id(ssl, from)`.
     pub(crate) fn copy_session_from(&self, from: &Tls) -> bool {
         // SAFETY: both SSLs are live.
@@ -559,7 +586,8 @@ pub(crate) fn verify_error_text(code: c_long) -> Vec<u8> {
 
 /// The subjectAltName names of `cert`, in order, as
 /// `php_openssl_matches_san_list` reads them: a DNS name that converts to
-/// UTF-8 with no NUL before its end, and an IP address's bytes.
+/// UTF-8 with no NUL before its end, or one that does not, an IP
+/// address's bytes, a URI and an SRV-ID; the other kinds are left out.
 pub(crate) fn san_names(cert: &Certificate) -> Vec<San> {
     let (nid, none) = (sys::NID_subject_alt_name, ptr::null_mut());
     // SAFETY: the certificate is live; no critical flag or index asked.
@@ -582,14 +610,28 @@ pub(crate) fn san_names(cert: &Certificate) -> Vec<San> {
             let mut utf8: *mut c_uchar = ptr::null_mut();
             // SAFETY: the string is live; the output is ours to free.
             if unsafe { sys::ASN1_STRING_to_UTF8(&raw mut utf8, data) } < 0 || utf8.is_null() {
+                out.push(San::DnsUnreadable);
                 continue;
             }
             // SAFETY: the library wrote a NUL-terminated string.
             let text = unsafe { CStr::from_ptr(utf8.cast()) }.to_bytes().to_vec();
             // SAFETY: the output is ours, freed once.
             unsafe { sys::OPENSSL_free(utf8.cast()) };
-            if stored == text.len() {
-                out.push(San::Dns(text));
+            out.push(if stored == text.len() {
+                San::Dns(text)
+            } else {
+                San::DnsUnreadable
+            });
+        } else if kind == sys::GEN_URI {
+            out.push(San::Uri);
+        } else if kind == sys::GEN_OTHERNAME {
+            let mut oid: *mut sys::ASN1_OBJECT = ptr::null_mut();
+            // SAFETY: the name is live; the OID answered is the name's own.
+            let got = unsafe { GENERAL_NAME_get0_otherName(name, &raw mut oid, ptr::null_mut()) };
+            // SAFETY: a nonzero answer leaves the name's live OID in `oid`;
+            // php's buffer is 32 bytes.
+            if got != 0 && !oid.is_null() && unsafe { super::object_oid(oid, 32) } == SRV_NAME_OID {
+                out.push(San::Srv);
             }
         } else if kind == sys::GEN_IPADD {
             // SAFETY: the string is live and holds `stored` bytes.

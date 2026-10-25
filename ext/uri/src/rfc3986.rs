@@ -139,6 +139,33 @@ impl UriParser for Rfc3986 {
     const CLASS: &'static str = "Uri\\Rfc3986\\Uri";
 
     /// `php_uri_parser_rfc3986_parse_ex`.
+    ///
+    /// Since 8.5.12 uriparser's memory manager asks fallibly: past the
+    /// memory limit an allocation is refused, the parse fails, and the limit's
+    /// fatal is raised as the call returns, for a path's segments and for the
+    /// copy of the text the URI comes to own:
+    ///
+    /// ```php
+    /// $t = 'https://example.com/' . str_repeat('a/', 1 << 20);
+    /// ini_set('memory_limit', '8M');
+    /// $u = Uri\Rfc3986\Uri::parse($t);
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// $t = 'https://example.com/' . str_repeat('a', 3 << 20);
+    /// ini_set('memory_limit', '8M');
+    /// $u = new Uri\Rfc3986\Uri($t);
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 3145728 bytes) in %s on line 4
+    /// ```
     fn parse(
         req: &mut Request,
         text: &[u8],

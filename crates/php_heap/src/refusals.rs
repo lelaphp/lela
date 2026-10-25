@@ -341,7 +341,7 @@ const POINTS: &[Point] = &[
         name: "a fresh string grown into a run",
         lay: nothing,
         op: |r| {
-            let fresh = r.heap.string_fresh(16)?;
+            let fresh = r.heap.string_fresh(16, crate::Sizing::Alloc)?;
             let fresh = r.heap.string_extend(fresh, 5000)?;
             r.held.push(Zval::string(fresh.finish()));
             Ok(())
@@ -351,7 +351,7 @@ const POINTS: &[Point] = &[
         name: "a fresh string cut to a lower bin",
         lay: nothing,
         op: |r| {
-            let fresh = r.heap.string_fresh(3000)?;
+            let fresh = r.heap.string_fresh(3000, crate::Sizing::Alloc)?;
             let fresh = r.heap.string_truncate(fresh, 8)?;
             r.held.push(Zval::string(fresh.finish()));
             Ok(())

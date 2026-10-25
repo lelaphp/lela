@@ -10,7 +10,7 @@ use nix::ifaddrs::getifaddrs;
 use nix::net::if_::{if_indextoname, if_nametoindex};
 
 use php_ext::coerce::c_str;
-use php_ext::raising::{Level, Thrown, docref, throw_error};
+use php_ext::raising::{Level, Thrown, docref, value_error};
 use php_ext::request::Request;
 use php_ext::values::PhpObject;
 
@@ -170,9 +170,8 @@ pub(crate) fn inet46_addr(
         }
         libc::AF_INET6 => Ok(inet6_addr(req, socket, text)
             .map(|(ip, scope)| Addr::V6(SocketAddrV6::new(ip, 0, 0, scope)))),
-        _ => Err(throw_error(
+        _ => Err(value_error(
             req,
-            "ValueError",
             "IP address used in the context of an unexpected type of socket",
         )),
     }

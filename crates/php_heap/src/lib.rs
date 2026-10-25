@@ -81,7 +81,8 @@ pub use lend::{ecalloc, efree, emalloc, erealloc};
 pub use map::{MapPtr, MapTable};
 pub use mm::{ChunkCache, DelayedOom, PendingOom};
 pub use numeric::{
-    Exponent, Number, double_to_string, numeric_prefix, power, shift_left, shift_right,
+    DoubleText, Exponent, LongText, Number, NumberText, double_to_string, gcvt, numeric_prefix,
+    power, shift_left, shift_right,
 };
 pub use object::{Laziness, Obj, ObjectId};
 pub use observe::{Allocation, AllocationObserverId, ObserveAllocations};
@@ -96,7 +97,7 @@ pub use stack::{
     HeaderImage, ROOM_BYTES, Slot, StackLayout, VmStack,
 };
 pub use standalone::StandaloneHeap;
-pub use string::{FreshStr, Intern, Made, Pending, Str, Strings};
+pub use string::{FreshStr, Intern, Made, Pending, Sizing, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
 use gc::Counted;
@@ -174,7 +175,7 @@ impl Heap {
     /// var_dump(memory_get_usage());
     /// ```
     /// ```expect exit=0
-    /// int(464552)
+    /// int(464680)
     /// ```
     ///
     /// A name a class holds costs nothing to read, and no table is laid
@@ -444,10 +445,23 @@ impl Heap {
     /// A request-scoped string of `bytes`, php's `zend_string_init`:
     /// one allocation out of this heap, one owner, and the bytes as
     /// given.
+    #[inline] // `zend_string_init` is `zend_always_inline`
     pub fn string(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
         let at = self.mm.alloc(Str::allocation_size(bytes.len()))?;
-        // SAFETY: the allocation is exactly the size `init` asks for and
-        // nothing else holds it.
+        // SAFETY: the allocation is exactly the header, the bytes and the
+        // NUL `init` writes, and nothing else holds it.
+        Ok(unsafe { Str::init(at, bytes, 0) })
+    }
+
+    /// A request-scoped string of `bytes` laid at `sizing`'s size
+    /// ([`Sizing::bytes`]): [`Heap::string`] is [`Sizing::Alloc`]'s and
+    /// [`Heap::string_finit`] [`Sizing::Finit`]'s. A sum that overflows is
+    /// php's fatal, raised before anything is asked for.
+    pub fn string_sized(&mut self, bytes: &[u8], sizing: Sizing) -> Result<Str, Fatal> {
+        let at = self.mm.alloc(sizing.bytes(bytes.len())?)?;
+        // SAFETY: every sizing asks for at least the header, the bytes and
+        // the NUL, which is what `init` writes, and nothing else holds the
+        // allocation.
         Ok(unsafe { Str::init(at, bytes, 0) })
     }
 
@@ -465,11 +479,18 @@ impl Heap {
         Ok(unsafe { Str::init_with(at, len, 0, fill) })
     }
 
-    /// `zend_string_alloc(len, 0)`: a string of `len` zero bytes the
-    /// caller writes in place and cuts down before handing it out
-    /// ([`FreshStr`]); the limit is met before it exists.
-    pub fn string_fresh(&mut self, len: usize) -> Result<FreshStr, Fatal> {
-        self.string_with(len, |_| {}).map(FreshStr)
+    /// `zend_string_alloc(len, 0)` at [`Sizing::Alloc`], or the
+    /// constructor `sizing` names, such as `zend_string_safe_alloc` at
+    /// [`Sizing::SafeAlloc`]: a string of `len` zero bytes the caller
+    /// writes in place and cuts down before handing it out ([`FreshStr`]).
+    /// The limit, and the overflow fatal of a sum that overflows, are met
+    /// before it exists.
+    pub fn string_fresh(&mut self, len: usize, sizing: Sizing) -> Result<FreshStr, Fatal> {
+        let at = self.mm.alloc(sizing.bytes(len)?)?;
+        // SAFETY: every sizing asks for at least the header, `len` bytes
+        // and the NUL, which is what `init_with` writes, and nothing else
+        // holds the allocation.
+        Ok(FreshStr(unsafe { Str::init_with(at, len, 0, |_| {}) }))
     }
 
     /// `zend_string_truncate(s, len, 0)`: the fresh string cut to `len`
@@ -515,15 +536,19 @@ impl Heap {
         fill: impl FnOnce(&mut [u8]),
     ) -> Result<Str, Fatal> {
         let header = Str::allocation_size(l);
-        let Some(size) = n.checked_mul(m).and_then(|bytes| bytes.checked_add(header)) else {
+        let Some(len) = n
+            .checked_mul(m)
+            .and_then(|bytes| bytes.checked_add(header))
+            .map(|size| size - header + l)
+        else {
             return Err(self.mm.overflow_refusal(format!(
                 "Possible integer overflow in memory allocation ({n} * {m} + {header})"
             )));
         };
-        let at = self.mm.alloc(size)?;
+        let at = self.mm.alloc(Sizing::SafeAlloc { n, m }.bytes(len)?)?;
         // SAFETY: the allocation holds the header and `n * m + l` bytes
         // with the NUL after them, and nothing else holds it.
-        Ok(unsafe { Str::init_with(at, size - header + l, 0, fill) })
+        Ok(unsafe { Str::init_with(at, len, 0, fill) })
     }
 
     /// `zend_string_release`: one owner fewer, and the string is freed

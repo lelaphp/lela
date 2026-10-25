@@ -176,6 +176,36 @@ impl Compat {
     }
 
     /// `xml_startElementHandler`.
+    ///
+    /// Since 8.5.12 a handler does nothing once the memory limit was met, as
+    /// once a handler threw, and an element whose attributes meet the limit
+    /// is neither handed to the start handler nor kept in the values, the
+    /// limit's fatal raised as the parse returns:
+    ///
+    /// ```php
+    /// $d = '<r a="' . str_repeat('x', 5 << 19) . '" b="' . str_repeat('y', 5 << 19) . '"/>';
+    /// ini_set('memory_limit', '8M');
+    /// $p = xml_parser_create();
+    /// xml_set_element_handler($p, function ($p, $n, $a) { echo "start $n\n"; }, function ($p, $n) { echo "end $n\n"; });
+    /// xml_parse($p, $d, true);
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2637824 bytes) in %s on line 6
+    /// ```
+    ///
+    /// ```php
+    /// $d = '<r>' . str_repeat('<a/>', 3000) . '<b x="' . str_repeat('y', 3 << 20) . '"/>' . str_repeat('<c/>', 3) . '</r>';
+    /// ini_set('memory_limit', '6M');
+    /// $p = xml_parser_create();
+    /// xml_parse_into_struct($p, $d, $v);
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 6291456 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 5
+    /// ```
     fn start(
         &self,
         req: &mut Request,
@@ -183,8 +213,9 @@ impl Compat {
         name: &[u8],
         attributes: &[(Vec<u8>, &[u8])],
     ) -> Result<(), Thrown> {
-        // `xml_handler_aborted`: nothing is done once a handler threw.
-        if at.pending() {
+        // `xml_handler_aborted`: nothing is done once a handler threw or,
+        // since 8.5.12, the memory limit was met.
+        if aborted(req, at) {
             return Ok(());
         }
         let level = match self.parser(req) {
@@ -201,7 +232,10 @@ impl Compat {
             .is_some_and(|p| p.handlers.get(Hook::StartElement).is_some())
         {
             let stripped = PhpString::new(req, stripped(&tag, offset))?;
-            let attrs = self.attributes(req, attributes)?;
+            let Some(attrs) = self.attributes(req, attributes)? else {
+                stripped.give_up(req);
+                return Ok(());
+            };
             let answered = self.serve(
                 req,
                 at,
@@ -239,7 +273,10 @@ impl Compat {
             p.lastwasopen = true;
         }
         if !attributes.is_empty() {
-            let attrs = self.attributes(req, attributes)?;
+            let Some(attrs) = self.attributes(req, attributes)? else {
+                entry.give_up(req);
+                return Ok(());
+            };
             set(req, &mut entry, b"attributes", attrs.into_value())?;
         }
         let Some(mut data) = self.data(req)? else {
@@ -256,11 +293,14 @@ impl Compat {
 
     /// The attributes as the handler and the struct see them: each name
     /// decoded and folded, each value decoded, keyed as a symbol table.
+    ///
+    /// `None` where the memory limit was met adding one, the array given
+    /// up and the handler returning there, since 8.5.12.
     fn attributes(
         &self,
         req: &mut Request,
         attributes: &[(Vec<u8>, &[u8])],
-    ) -> Result<Owner<PhpArray>, Thrown> {
+    ) -> Result<Option<Owner<PhpArray>>, Thrown> {
         let mut array = PhpArray::new(req)?;
         for (name, value) in attributes {
             let key = self.decode_tag(req, name);
@@ -269,14 +309,19 @@ impl Compat {
             let key = Key::from_string(req, key);
             let value = PhpString::new(req, &decoded)?;
             array.set(req, key, value.into_value())?;
+            if req.memory().has_oom() {
+                array.give_up(req);
+                return Ok(None);
+            }
         }
-        Ok(array)
+        Ok(Some(array))
     }
 
     /// `xml_endElementHandler`.
     fn end(&self, req: &mut Request, at: &At, name: &[u8]) -> Result<(), Thrown> {
-        // `xml_handler_aborted`: the level stays where the throw left it.
-        if at.pending() {
+        // `xml_handler_aborted`: the level stays where the throw, or the
+        // memory limit, left it.
+        if aborted(req, at) {
             return Ok(());
         }
         let tag = self.decode_tag(req, name);
@@ -326,7 +371,7 @@ impl Compat {
     /// `xml_characterDataHandler`.
     fn cdata(&self, req: &mut Request, at: &At, text: &[u8]) -> Result<(), Thrown> {
         // `xml_handler_aborted`.
-        if at.pending() {
+        if aborted(req, at) {
             return Ok(());
         }
         if self
@@ -569,6 +614,12 @@ fn separate_owned(req: &mut Request, array: PhpArray) -> Result<Owner<PhpArray>,
     let mut owned = Owner::take(req, array);
     owned.separate(req)?;
     Ok(owned)
+}
+
+/// `xml_handler_aborted` (`Z/ext/xml/xml.c:627` at 8.5.12): a throwable
+/// pending, or the memory limit met.
+fn aborted(req: &Request, at: &At) -> bool {
+    at.pending() || req.memory().has_oom()
 }
 
 fn release_all(req: &mut Request, values: impl IntoIterator<Item = Owner<Value>>) {

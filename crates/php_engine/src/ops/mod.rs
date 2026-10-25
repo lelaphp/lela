@@ -24,13 +24,14 @@ use crate::api::abi::{DimensionRead, PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{
     Level, Thrown, cannot_add_element, deprecated, error, illegal_container_offset, none_pending,
-    throw, throw_error, type_error, warning,
+    throw_error, throw_exception_ex, type_error, warning,
 };
 use crate::api::request::{HookedTable, Request};
 use crate::api::values::walk::{self, Table};
 use crate::api::values::{
     Key, Layout, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef,
 };
+use crate::c_number::c_str;
 
 /// `zval_get_string` (`Z/Zend/zend_operators.c:1066`): a value as the
 /// string php converts it to, which is what `ECHO`, `print`, `.` and
@@ -57,17 +58,11 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             req.addref(value);
             Ok(s)
         }
-        // `zend_long_to_str` and `zend_double_to_str` mark what they
-        // make valid UTF-8, the digits being ASCII.
-        ValueRef::Int(n) => req
-            .string(crate::c_number::Long::of(n).as_bytes())
-            .inspect(PhpString::mark_valid_utf8),
+        ValueRef::Int(n) => long_to_str(req, n),
         ValueRef::Float(f) => {
-            // `zend_double_to_str`: the text, then the warning php raises
-            // when the value it converted was NAN.
-            let text =
-                req.string(double_to_string(f, req.ini().precision(), Exponent::Upper).as_bytes())?;
-            text.mark_valid_utf8();
+            // The text, then the warning php raises when the value it
+            // converted was NAN.
+            let text = double_to_str(req, f)?;
             if f.is_nan() {
                 warning(req, "unexpected NAN value was coerced to string");
             }
@@ -86,6 +81,58 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
             req.string(b"")
         }
     }
+}
+
+/// `zend_long_to_str` (`Z/Zend/zend_operators.c:3532`): a digit is the
+/// process's interned string of it (`ZSTR_CHAR`), and any other long its
+/// digits laid in a buffer on the stack and copied into one string of
+/// the request's (`zend_string_init`), marked valid UTF-8 as php marks
+/// it. So `7` costs nothing and `-7` a string. The `Err` is the memory
+/// limit.
+///
+/// ```php
+/// $n = [1234567, 7, -7, 10, PHP_INT_MIN];
+/// $before = memory_get_usage(); $s = (string) $n[0]; $t = (string) $n[1]; $u = (string) $n[2]; $v = (string) $n[3]; $w = (string) $n[4];
+/// echo $s, "|", $t, "|", $u, "|", $v, "|", $w, "|", memory_get_usage() - $before, "\n";
+/// debug_zval_dump($t, $u);
+/// ```
+/// ```expect
+/// 1234567|7|-7|10|-9223372036854775808|176
+/// string(1) "7" interned
+/// string(2) "-7" refcount(2)
+/// ```
+pub(crate) fn long_to_str(req: &mut Request, n: i64) -> Result<PhpString, Thrown> {
+    if let Ok(digit @ 0..=9) = u8::try_from(n) {
+        return req.string(&[b'0' + digit]);
+    }
+    req.string_init(php_heap::LongText::long(n).as_bytes())
+        .inspect(PhpString::mark_valid_utf8)
+}
+
+/// `zend_double_to_str` (`Z/Zend/zend_operators.c:3616`): `zend_gcvt` at
+/// `precision ? precision : 1` into a buffer on the stack, copied into
+/// one string of the request's (`zend_string_init`) whatever its length,
+/// so a float that prints as one character is a string of its own where
+/// the int of that digit is the interned one, and marked valid UTF-8.
+/// The warning php raises after it for a NAN is its caller's. Kept out
+/// of line, so the buffer's room is taken only where a double is
+/// converted. The `Err` is the memory limit.
+///
+/// ```php
+/// $f = [1.47, 1e100, 2.0, 0.0, -0.0];
+/// $before = memory_get_usage(); $s = (string) $f[0]; $t = (string) $f[1]; $u = (string) $f[2]; $v = (string) $f[3]; $w = (string) $f[4];
+/// echo $s, "|", $t, "|", $u, "|", $v, "|", $w, "|", memory_get_usage() - $before, "\n";
+/// debug_zval_dump($u, $v);
+/// ```
+/// ```expect
+/// 1.47|1.0E+100|2|0|-0|200
+/// string(1) "2" refcount(2)
+/// string(1) "0" refcount(2)
+/// ```
+#[inline(never)]
+pub(crate) fn double_to_str(req: &mut Request, f: f64) -> Result<PhpString, Thrown> {
+    req.string_init(double_to_string(f, req.ini().precision(), Exponent::Upper).as_bytes())
+        .inspect(PhpString::mark_valid_utf8)
 }
 
 /// `zval_get_string_func` over an object: its class's `cast_object`
@@ -458,7 +505,7 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
         req.zval_text(subject, cut)
     };
     let text = quoted.unwrap_or_else(|| format!("of type {}", type_name(req, subject)));
-    throw(
+    throw_exception_ex(
         req,
         "UnhandledMatchError",
         &format!("Unhandled match case {text}"),
@@ -2175,7 +2222,12 @@ pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Va
     let (a, b) = longs(req, "%", left, right)?;
     match inline::remainder(a, b) {
         Some(n) => Ok(Value::int(n)),
-        None => Err(throw(req, "DivisionByZeroError", "Modulo by zero")),
+        // `zend_throw_exception_ex` (`Z/Zend/zend_operators.c:1550`).
+        None => Err(crate::api::raising::throw_exception_ex(
+            req,
+            "DivisionByZeroError",
+            "Modulo by zero",
+        )),
     }
 }
 
@@ -2301,7 +2353,7 @@ fn shift(req: &mut Request, side: Shift, left: &Value, right: &Value) -> Result<
     }
     match u64::try_from(b) {
         Ok(by) => Ok(Value::int(by_heap(a, by))),
-        Err(_) => Err(throw(
+        Err(_) => Err(throw_exception_ex(
             req,
             "ArithmeticError",
             "Bit shift by negative number",
@@ -3500,9 +3552,31 @@ fn identical_values(left: &Value, right: &Value) -> bool {
 }
 
 /// `zend_hash_compare` with `hash_zval_identical_function` and
-/// `ordered` on (`Z/Zend/zend_hash.c:3206`), for [`identical`]: the
-/// protection [`compare_arrays`] takes, over the ordered walk, the same
-/// count and at each step the same key and identical values.
+/// `ordered` on (`Z/Zend/zend_hash.c:3426`), for [`identical`]: the
+/// protection [`compare_arrays`] takes, over the ordered walk of
+/// `zend_hash_compare_impl` (`:3320`), the same count and at each step
+/// the same key and identical values. No PHP code runs under it, so the
+/// walk takes no owner of either table, as php's takes none.
+///
+/// The walk is a loop over the buckets, each step reading the table as
+/// php's loop reads `nNumUsed`, and each row is read in a frame of its
+/// own ([`identical_step`]) that is gone before a pair of nested arrays
+/// recurses here, so a level costs this frame, the two tables and the
+/// walk's place, where php's costs three, `zend_is_identical`,
+/// `zend_hash_compare` and `hash_zval_identical_function`. Under the
+/// small-stack regime a nest 1,500 deep is answered whole, as php's
+/// 256K answers it, and one 4,000 deep refused:
+///
+/// ```php
+/// foreach ([1500, 4000] as $n) {
+///     $a = $b = []; for ($i = 0; $i < $n; $i++) { $a = [$a]; $b = [$b]; }
+///     try { var_dump($a === $b); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect regime=small-stack
+/// bool(true)
+/// Maximum call stack size reached during comparison
+/// ```
 fn identical_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<bool, Thrown> {
     if left.heap().is_same(right.heap()) {
         return Ok(true);
@@ -3515,28 +3589,64 @@ fn identical_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Resul
         return Ok(false);
     }
     left.protect();
-    let walked = identical_entries(req, left, right);
+    let mut at = Walked::default();
+    let walked = loop {
+        match identical_step(left, right, &mut at) {
+            Paired::End => break Ok(true),
+            Paired::Decided(_) => break Ok(false),
+            Paired::Next => {}
+            Paired::Arrays(a, b) => match identical_arrays(req, a, b) {
+                Ok(true) => {}
+                other => break other,
+            },
+        }
+    };
     left.unprotect();
     walked
 }
 
-/// The ordered walk of `zend_hash_compare_impl` under the protection
-/// [`identical_arrays`] takes.
-fn identical_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<bool, Thrown> {
-    // `zend_hash_compare_impl`'s ordered loop: `ht1`'s rows walked, each
-    // beside the next live bucket of `ht2`.
-    let mut at = 0;
-    let differs = walk::foreach(req, left, walk::Hold::None, |req, row| -> walk::Step<()> {
-        let Some((found, key, value)) = right.live_from(at) else {
-            return Ok(ControlFlow::Break(()));
-        };
-        at = found.saturating_add(1);
-        if *row.key() != key || !identical(req, row.value(), &value)? {
-            return Ok(ControlFlow::Break(()));
-        }
-        Ok(ControlFlow::Continue(()))
-    })?;
-    Ok(differs.is_none())
+/// Where the walk of two tables stands: the next bucket of each.
+#[derive(Default)]
+struct Walked {
+    left: u32,
+    right: u32,
+}
+
+/// One step of a comparison's walk of two tables, taken in a frame of
+/// its own so the frame the recursion repeats holds the two tables and
+/// the walk's place and no row (#3261): the walk's end, a pair that
+/// decides the comparison, a pair that leaves it to the next step, or
+/// two arrays for the walk to descend into.
+enum Paired {
+    End,
+    Decided(Ordering),
+    Next,
+    Arrays(PhpArray, PhpArray),
+}
+
+/// One step of `zend_hash_compare_impl`'s ordered loop for
+/// [`identical_arrays`]: the next row of each table, a different key or
+/// a pair that is not identical deciding it, and two arrays left to the
+/// walk.
+#[inline(never)]
+fn identical_step(left: PhpArray, right: PhpArray, at: &mut Walked) -> Paired {
+    let Some((found, key, value)) = left.live_from(at.left) else {
+        return Paired::End;
+    };
+    at.left = found.saturating_add(1);
+    let Some((found, other_key, other)) = right.live_from(at.right) else {
+        return Paired::Decided(Ordering::Greater);
+    };
+    at.right = found.saturating_add(1);
+    if key != other_key {
+        return Paired::Decided(Ordering::Greater);
+    }
+    let (value, other) = (value.deref(), other.deref());
+    match (value.as_array(), other.as_array()) {
+        (Some(a), Some(b)) => Paired::Arrays(a, b),
+        _ if identical_values(&value, &other) => Paired::Next,
+        _ => Paired::Decided(Ordering::Greater),
+    }
 }
 
 /// `is_identical_function` (`Z/Zend/zend_operators.c:2508`):
@@ -3706,20 +3816,16 @@ fn compare_arrays(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<
 /// cycle collector as a possible root. Neither touches an immutable
 /// table, so two constant arrays are walked with nothing held.
 #[must_use = "a hold is given up after the walk"]
-pub(crate) struct HeldTables(Option<(Value, Value)>);
+pub(crate) struct HeldTables(Option<(php_heap::Arr, php_heap::Arr)>);
 
 impl HeldTables {
     /// `GC_TRY_ADDREF(ht1); GC_TRY_ADDREF(ht2)`.
     #[inline]
     pub(crate) fn hold(req: &Request, left: php_heap::Arr, right: php_heap::Arr) -> HeldTables {
         HeldTables((!left.is_immutable() || !right.is_immutable()).then(|| {
-            let held = (
-                Value::array(PhpArray::of(left)),
-                Value::array(PhpArray::of(right)),
-            );
-            req.addref(&held.0);
-            req.addref(&held.1);
-            held
+            req.addref(&Value::array(PhpArray::of(left)));
+            req.addref(&Value::array(PhpArray::of(right)));
+            (left, right)
         }))
     }
 
@@ -3727,8 +3833,8 @@ impl HeldTables {
     #[inline]
     pub(crate) fn give_up(self, req: &mut Request) {
         if let Some((left, right)) = self.0 {
-            req.release(left);
-            req.release(right);
+            req.release(Value::array(PhpArray::of(left)));
+            req.release(Value::array(PhpArray::of(right)));
         }
     }
 }
@@ -3742,6 +3848,9 @@ fn compare_held(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Or
     if left.is_recursive() {
         return Err(nesting_too_deep(req));
     }
+    if left.len() != right.len() {
+        return Ok(left.len().cmp(&right.len()));
+    }
     left.protect();
     let ordering = compare_entries(req, left, right);
     left.unprotect();
@@ -3754,14 +3863,37 @@ fn compare_held(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Or
 /// ([`crate::api::raising::call_stack_end`]), which a limit the ini
 /// turned off (`zend.max_allowed_stack_size=-1`) leaves as the one
 /// guard, where php's walk would exhaust the thread.
+///
+/// Both are read from this frame, so a level never lands between them:
+/// where the limit stands at the floor, as detect sets it on a thread no
+/// larger than php's budget and as a fiber's always is, reaching the
+/// floor is reaching php's limit, and the `Error` is php's; the floor's
+/// own is for a limit below it or none.
+///
+/// How deep a nest reaches the limit is each engine's frame, php's C
+/// frames there and this engine's here, so neither depth is php's to
+/// match; this engine's level is the smaller (2,001 levels of `==` under
+/// 256K where php's is 871, #3261), which errs on the side the design
+/// asks: a nest php compares whole is compared whole here too (§5.6,
+/// #3142).
+#[inline]
 fn compare_stack(req: &mut Request) -> Result<(), Thrown> {
-    if req.limits().stack_overflowed() {
-        return Err(crate::api::raising::error(
-            req,
-            "Maximum call stack size reached during comparison",
-        ));
+    let stack = req.stack_limit();
+    if stack.overflowed() || (stack.exhausted() && stack.max_stack_size() <= stack.floor_size()) {
+        return Err(comparison_too_deep(req));
     }
-    crate::api::raising::call_stack_end(req)
+    if stack.exhausted() {
+        return crate::api::raising::call_stack_end(req);
+    }
+    Ok(())
+}
+
+/// php's `Error` for a comparison past the stack limit, raised off the
+/// frame of the walk that meets it.
+#[cold]
+#[inline(never)]
+fn comparison_too_deep(req: &mut Request) -> Thrown {
+    crate::api::raising::error(req, "Maximum call stack size reached during comparison")
 }
 
 /// php's `Error` for a table a comparison's walk is already inside,
@@ -3775,37 +3907,78 @@ fn compare_stack(req: &mut Request) -> Result<(), Thrown> {
 /// ```expect
 /// Nesting level too deep - recursive dependency?
 /// ```
+#[cold]
+#[inline(never)]
 pub(crate) fn nesting_too_deep(req: &mut Request) -> Thrown {
     crate::api::raising::error(req, "Nesting level too deep - recursive dependency?")
 }
 
-/// `zend_hash_compare_impl` under the protection
-/// [`compare_arrays`] takes.
+/// `zend_hash_compare_impl`'s unordered loop (`Z/Zend/zend_hash.c:3320`)
+/// under the protection [`compare_arrays`] takes: each row of `ht1` in
+/// its order looked up in `ht2` by its key, a key `ht2` lacks making the
+/// left the greater, and the two values compared until one pair differs.
+/// It takes no owner of either table: [`compare_arrays`] holds them while
+/// [`compare`] serves `__toString` or a class's `compare`. Each step reads
+/// the table as php's loop reads `nNumUsed`, each row in a frame of its
+/// own ([`compare_step`]) that is gone before a pair of nested arrays goes
+/// straight back to [`compare_arrays`], so a level costs that frame
+/// alone. Under the small-stack regime `==` and `<=>` answer a nest
+/// 500 deep whole, as php's 256K does and this engine's did not while a
+/// level cost a walk's frame, and refuse one 4,000 deep, as php's does:
+///
+/// ```php
+/// foreach ([500, 4000] as $n) {
+///     $a = $b = []; for ($i = 0; $i < $n; $i++) { $a = [$a]; $b = [$b]; }
+///     try { var_dump($a == $b, $a <=> $b); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// ```
+/// ```expect regime=small-stack
+/// bool(true)
+/// int(0)
+/// Maximum call stack size reached during comparison
+/// ```
+#[inline(always)] // the loop of `compare_arrays`, one frame with it
 fn compare_entries(req: &mut Request, left: PhpArray, right: PhpArray) -> Result<Ordering, Thrown> {
-    if left.len() != right.len() {
-        return Ok(left.len().cmp(&right.len()));
+    let mut at = Walked::default();
+    loop {
+        match compare_step(req, left, right, &mut at)? {
+            Paired::End => return Ok(Ordering::Equal),
+            Paired::Decided(ordering) => return Ok(ordering),
+            Paired::Next => {}
+            Paired::Arrays(a, b) => match compare_arrays(req, a, b)? {
+                Ordering::Equal => {}
+                ordering => return Ok(ordering),
+            },
+        }
     }
-    // `zend_hash_compare_impl`'s loop over `ht1`'s buckets
-    // (`Z/Zend/zend_hash.c:3115`), which takes no owner of either table:
-    // [`compare_arrays`] holds them while `compare` serves `__toString`
-    // or a class's `compare`. The walk fixes the end as it begins where php's
-    // loop reads `nNumUsed` at each step, which only a row appended
-    // mid-compare could tell apart.
-    let decided = crate::api::values::walk::foreach(
-        req,
-        left,
-        crate::api::values::walk::Hold::None,
-        |req, row| -> crate::api::values::walk::Step<Ordering> {
-            let Some(other) = right.get(row.key()) else {
-                return Ok(std::ops::ControlFlow::Break(Ordering::Greater));
-            };
-            match compare(req, &row.value().deref(), &other)? {
-                Ordering::Equal => Ok(std::ops::ControlFlow::Continue(())),
-                ordering => Ok(std::ops::ControlFlow::Break(ordering)),
-            }
-        },
-    )?;
-    Ok(decided.unwrap_or(Ordering::Equal))
+}
+
+/// One step of `zend_hash_compare_impl`'s unordered loop for
+/// [`compare_entries`]: the next row of the left table looked up in the
+/// right one, a key it lacks or a pair [`compare`] orders deciding it,
+/// and two arrays left to the walk.
+#[inline(never)]
+fn compare_step(
+    req: &mut Request,
+    left: PhpArray,
+    right: PhpArray,
+    at: &mut Walked,
+) -> Result<Paired, Thrown> {
+    let Some((found, key, value)) = left.live_from(at.left) else {
+        return Ok(Paired::End);
+    };
+    at.left = found.saturating_add(1);
+    let Some(other) = right.get(&key) else {
+        return Ok(Paired::Decided(Ordering::Greater));
+    };
+    let (value, other) = (value.deref(), other.deref());
+    if let (Some(a), Some(b)) = (value.as_array(), other.as_array()) {
+        return Ok(Paired::Arrays(a, b));
+    }
+    Ok(match compare(req, &value, &other)? {
+        Ordering::Equal => Paired::Next,
+        ordering => Paired::Decided(ordering),
+    })
 }
 
 /// `n` stepped by one, up for [`Arith::Add`] and down for
@@ -4624,15 +4797,37 @@ pub(crate) fn array_entry(
     if mode == DimRead::Silent {
         return Value::null();
     }
-    let message = match key {
-        php_heap::Key::Long(n) => format!("Undefined array key {n}"),
-        php_heap::Key::Str(s) => format!(
-            "Undefined array key \"{}\"",
-            String::from_utf8_lossy(s.bytes())
-        ),
-    };
-    warning(req, &message);
+    undefined_key(req, key);
     Value::null()
+}
+
+/// `zend_undefined_offset` and `zend_undefined_index`
+/// (`Z/Zend/zend_execute.c:2496-2505`): `Undefined array key %ld`, and
+/// `Undefined array key "%s"` with the key read to its first NUL, as
+/// php's `%s` reads it, and the rest of the sentence after it.
+///
+/// The key's bytes stand as the program wrote them, a byte no UTF-8
+/// reads among them:
+///
+/// ```php
+/// $a = []; echo $a["foo\0bar"], $a[7];
+/// set_error_handler(function ($no, $str) { echo bin2hex($str), "\n"; return true; });
+/// echo $a["\xff\0x"];
+/// ```
+/// ```expect
+/// Warning: Undefined array key "foo" in %s on line 2
+///
+/// Warning: Undefined array key 7 in %s on line 2
+/// 556e646566696e6564206172726179206b65792022ff22
+/// ```
+pub(crate) fn undefined_key(req: &mut Request, key: php_heap::Key) {
+    match key {
+        php_heap::Key::Long(n) => warning(req, &format!("Undefined array key {n}")),
+        php_heap::Key::Str(s) => warning(
+            req,
+            &[b"Undefined array key \"", c_str(s.bytes()), b"\""].concat(),
+        ),
+    }
 }
 
 /// `zend_check_string_offset` (`Z/Zend/zend_execute.c`), which
@@ -4675,6 +4870,16 @@ pub(crate) fn array_entry(
 /// Cannot access offset of type ArrayObject on string
 /// Cannot access offset of type array on string
 /// ```
+///
+/// The offset's text is printed with `%s`, to its first NUL:
+///
+/// ```php
+/// $s = "abc"; echo $s["1\0x"], "\n";
+/// ```
+/// ```expect
+/// Warning: Illegal string offset "1" in %s on line 2
+/// b
+/// ```
 pub(crate) fn string_dim_offset(
     req: &mut Request,
     dim: &Value,
@@ -4688,10 +4893,7 @@ pub(crate) fn string_dim_offset(
                 if trailing {
                     warning(
                         req,
-                        &format!(
-                            "Illegal string offset \"{}\"",
-                            String::from_utf8_lossy(s.as_bytes())
-                        ),
+                        &[b"Illegal string offset \"", c_str(s.as_bytes()), b"\""].concat(),
                     );
                 }
                 Ok(Some(n))
@@ -5224,6 +5426,28 @@ fn php_type(value: &Value) -> ZvalType {
     }
 }
 
+/// `zend_wrong_property_read` (`Z/Zend/zend_API.c:111`): `Attempt to
+/// read property "%s" on %s`, the name read to its first NUL as php's
+/// `%s` reads it.
+///
+/// ```php
+/// $n = null; echo $n->{"foo\0bar"};
+/// ```
+/// ```expect
+/// Warning: Attempt to read property "foo" on null in %s on line 2
+/// ```
+pub(crate) fn property_read_on(req: &mut Request, name: &[u8], container: &Value) {
+    let shown = value_name(req, container);
+    let message = [
+        b"Attempt to read property \"",
+        c_str(name),
+        b"\" on ",
+        shown.as_bytes(),
+    ]
+    .concat();
+    warning(req, &message);
+}
+
 /// `zend_zval_value_name` (`Z/Zend/zend_API.c:157`): what a `TypeError`
 /// names a value as, which is its class for an object, `true` or `false`
 /// for a bool, and its type for the rest; what `INIT_METHOD_CALL` names
@@ -5731,8 +5955,8 @@ fn dval_to_lval_cap(d: f64) -> i64 {
 /// A double as php's `%H` renders it in a message: `zend_gcvt` at the
 /// shortest digits, which is [`double_to_string`] under
 /// `serialize_precision`'s -1.
-fn rendered(d: f64) -> String {
-    String::from_utf8_lossy(double_to_string(d, -1, Exponent::Upper).as_bytes()).into_owned()
+fn rendered(d: f64) -> php_heap::DoubleText {
+    double_to_string(d, -1, Exponent::Upper)
 }
 
 /// `ZEND_DOUBLE_FITS_LONG` on a 64-bit long: `(double) ZEND_LONG_MAX`
@@ -5871,12 +6095,26 @@ fn to_number(req: &mut Request, value: &Value) -> Result<Option<Number>, Thrown>
 }
 
 /// The deprecation of a numeric string read as an int that is a float
-/// the int does not hold whole.
+/// the int does not hold whole, the string printed with `%s`, to its
+/// first NUL:
+///
+/// ```php
+/// $i = "1.5\0x" | 0;
+/// ```
+/// ```expect
+/// Warning: A non-numeric value encountered in %s on line 2
+///
+/// Deprecated: Implicit conversion from float-string "1.5" to int loses precision in %s on line 2
+/// ```
 fn float_string_loses_precision(req: &mut Request, s: &[u8]) {
-    let shown = String::from_utf8_lossy(s);
     deprecated(
         req,
-        &format!("Implicit conversion from float-string \"{shown}\" to int loses precision"),
+        &[
+            b"Implicit conversion from float-string \"",
+            c_str(s),
+            b"\" to int loses precision",
+        ]
+        .concat(),
     );
 }
 

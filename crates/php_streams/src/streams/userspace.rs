@@ -364,6 +364,7 @@ fn open_with(
         held: Some(held),
         no_seek: false,
         own: None,
+        share: Share::Stream,
     };
     Ok(Ok(req.stream_alloc(PhpStream::new(Box::new(kind), mode))?))
 }
@@ -428,7 +429,11 @@ fn open_dir_with(
     }
     let held = Some(held);
     Ok(Ok(req.stream_alloc(PhpStream::new(
-        Box::new(UserDir { object, held }),
+        Box::new(UserDir {
+            object,
+            held,
+            share: Share::Stream,
+        }),
         b"r",
     ))?))
 }
@@ -444,6 +449,17 @@ struct UserStream {
     /// The stream the kind is under, which its methods hold against
     /// `fclose`.
     own: Option<Stream>,
+    share: Share,
+}
+
+/// A user-space kind in its stream, whose close is `stream_close` or
+/// `dir_closedir`, or one shared for a call PHP code makes on the stream
+/// inside the kind's own ([`Ops::share`]), whose close gives its owner of
+/// the instance back and calls nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Share {
+    Stream,
+    Call,
 }
 
 impl UserStream {
@@ -779,7 +795,9 @@ impl Ops for UserStream {
     /// `php_userstreamop_close` (`Z/main/streams/userspace.c:699`):
     /// `stream_close` where it is there, then the instance given up.
     fn close(&mut self, req: &mut Request) -> i32 {
-        if let Called::Value(value) = call(req, self.object, b"stream_close", &[]) {
+        if self.share == Share::Stream
+            && let Called::Value(value) = call(req, self.object, b"stream_close", &[])
+        {
             value.give_up(req);
         }
         if let Some(held) = self.held.take() {
@@ -806,6 +824,63 @@ impl Ops for UserStream {
 
     fn lost_seek(&self) -> bool {
         self.no_seek
+    }
+
+    /// The same instance's kind for one more call, as php runs a method
+    /// that reads or writes its own stream through the same `php_stream`:
+    /// one more owner of the instance, given back as the call ends.
+    ///
+    /// ```php
+    /// class W { public $context; static $s; static $n = 0;
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_write($d) { echo "write $d\n"; if (self::$n++ < 2) var_dump(fwrite(self::$s, "x")); return strlen($d); }
+    ///     function stream_eof() { return false; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// W::$s = fopen('ww://x', 'w');
+    /// var_dump(fwrite(W::$s, "abc"));
+    /// ```
+    /// ```expect
+    /// write abc
+    /// write x
+    /// write x
+    /// int(1)
+    /// int(1)
+    /// int(3)
+    /// ```
+    ///
+    /// A seek the shared call finds the instance cannot take leaves the
+    /// stream unseekable, as php's `PHP_STREAM_FLAG_NO_SEEK` on the one `php_stream` does:
+    ///
+    /// ```php
+    /// class W { public $context; static $s; static $n = 0; public $data = '';
+    ///     function stream_open($p, $m, $o, &$op) { return true; }
+    ///     function stream_write($d) { echo "write $d\n"; if (self::$n++ == 0) var_dump(fseek(self::$s, 0)); $this->data .= $d; return strlen($d); }
+    ///     function stream_read($c) { return ''; }
+    ///     function stream_eof() { return true; } }
+    /// stream_wrapper_register('ww', 'W');
+    /// W::$s = fopen('ww://x', 'w+');
+    /// var_dump(fwrite(W::$s, "abc"), fseek(W::$s, 0), ftell(W::$s), stream_get_meta_data(W::$s)['seekable']);
+    /// ```
+    /// ```expect
+    /// write abc
+    ///
+    /// Warning: fseek(): Stream does not support seeking in %s on line 4
+    /// int(-1)
+    ///
+    /// Warning: fseek(): Stream does not support seeking in %s on line 9
+    /// int(3)
+    /// int(-1)
+    /// int(3)
+    /// bool(false)
+    /// ```
+    fn share(&self, req: &mut Request) -> Option<Box<dyn Ops>> {
+        Some(Box::new(UserStream {
+            object: self.object,
+            held: Some(Owner::take(req, self.object)),
+            no_seek: self.no_seek,
+            own: self.own,
+            share: Share::Call,
+        }))
     }
 
     /// `php_userstreamop_stat` (`Z/main/streams/userspace.c:843`):
@@ -962,11 +1037,21 @@ struct UserDir {
     object: PhpObject,
     /// The instance's one owner, the kind's until its close.
     held: Option<Owner<PhpObject>>,
+    share: Share,
 }
 
 impl Ops for UserDir {
     fn label(&self) -> &'static str {
         "user-space-dir"
+    }
+
+    /// The same instance's kind for one more call, as [`UserStream`]'s.
+    fn share(&self, req: &mut Request) -> Option<Box<dyn Ops>> {
+        Some(Box::new(UserDir {
+            object: self.object,
+            held: Some(Owner::take(req, self.object)),
+            share: Share::Call,
+        }))
     }
 
     /// `php_stream_userspace_dir_ops` has no `write`.
@@ -985,7 +1070,9 @@ impl Ops for UserDir {
     /// `php_userstreamop_closedir`: `dir_closedir`, then the instance
     /// given up.
     fn close(&mut self, req: &mut Request) -> i32 {
-        if let Called::Value(value) = call(req, self.object, b"dir_closedir", &[]) {
+        if self.share == Share::Stream
+            && let Called::Value(value) = call(req, self.object, b"dir_closedir", &[])
+        {
             value.give_up(req);
         }
         if let Some(held) = self.held.take() {

@@ -940,7 +940,7 @@ impl Emit<'_> {
                 let (Some(a), Some(b)) = (self.written(lhs)?, self.written(rhs)?) else {
                     return Ok(None);
                 };
-                self.concat_fold(a, b)
+                self.concat_fold(a, b, crate::emit::ConcatFold::Parser)
             }
             _ => Ok(None),
         }

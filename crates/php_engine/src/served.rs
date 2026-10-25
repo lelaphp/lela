@@ -18,8 +18,8 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::api::abi::{
     ClassIterator, ClassUnserialize, CloneObj, CloneObjWith, CoreTable, CurrentPlace, DebugInfo,
-    DimensionRead, DtorObj, GcTable, IteratorElement, ObjectHandlers, PropertiesFor, PropertyPlace,
-    PropertyPurpose, PropertyRead, PropertyTest, Refusals,
+    DimensionRead, DtorObj, GcTable, IteratorElement, ObjectHandlers, PropertiesFor,
+    PropertyAccess, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Refusals,
 };
 use crate::api::call::Function;
 use crate::api::coerce::BinaryOp;
@@ -119,6 +119,7 @@ impl ObjectHandlers for Served {
     forward! {
         fn refusals(&self) -> Refusals;
         fn core_table(&self) -> CoreTable;
+        fn properties(&self) -> PropertyAccess;
         fn dtor_obj(&self) -> DtorObj;
         fn clone_obj(&self) -> Option<CloneObj>;
         fn clone_obj_with(&self) -> Option<CloneObjWith>;

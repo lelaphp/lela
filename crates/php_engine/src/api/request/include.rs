@@ -1021,7 +1021,7 @@ impl Request {
     /// ([`Request::name_unit`]). The `Err` is the memory limit.
     fn eval_name(&mut self, file: &[u8], line: u32) -> Result<PhpString, Thrown> {
         const TAIL: &[u8] = b") : eval()'d code";
-        let line = crate::c_number::Long::of(i64::from(line));
+        let line = php_heap::LongText::long(i64::from(line));
         let parts = [file, b"(", line.as_bytes(), TAIL];
         let len = parts.iter().map(|part| part.len()).sum();
         self.string_with(len, |mut into| {
@@ -1333,7 +1333,7 @@ impl Request {
         if !error.bailed() {
             if matches!(kind, SourceKind::Eval(_)) {
                 for raised in raised.clone() {
-                    self.note_error_in(raised.level, &raised.message, path, raised.line);
+                    self.note_error_in(raised.level, raised.message.as_bytes(), path, raised.line);
                 }
             }
             let class = if error.level == Level::Parse {
@@ -1346,7 +1346,12 @@ impl Request {
             if kind == SourceKind::File {
                 self.while_pending(&thrown, |req| {
                     for raised in raised {
-                        req.note_error_in(raised.level, &raised.message, path, raised.line);
+                        req.note_error_in(
+                            raised.level,
+                            raised.message.as_bytes(),
+                            path,
+                            raised.line,
+                        );
                     }
                 });
             }
@@ -1360,7 +1365,7 @@ impl Request {
         let recording = (kind == SourceKind::File).then(|| self.begin_recording());
         if let Some(noted) = self.declare_refused(refused, path) {
             for raised in error.raised.get(noted..).unwrap_or_default() {
-                self.note_error_in(raised.level, &raised.message, path, raised.line);
+                self.note_error_in(raised.level, raised.message.as_bytes(), path, raised.line);
             }
             self.end_in_compile_time(error.level, &error.message, path, error.line);
         }

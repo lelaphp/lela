@@ -15,7 +15,8 @@ use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{
-    Thrown, arg_value_error, illegal_container_offset, throw, throw_error, warning,
+    Thrown, arg_value_error, illegal_container_offset, throw, throw_error, throw_exception_ex,
+    warning,
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
@@ -83,6 +84,26 @@ pub(crate) type Row = Box<RowState>;
 /// log 3
 /// int(3)
 /// ```
+///
+/// A destructor the clear serves finds the row under way, not unlaid, so
+/// `__construct()` and `__unserialize()` lay nothing over it, and a
+/// `setSize()` it asks is served after
+/// (`SplFixedArray_setSize_destruct_reinit_during_clear.phpt`):
+///
+/// ```php
+/// class R { public static $fn; function __destruct() { if ($f = self::$fn) { self::$fn = null; $f(); } } }
+/// foreach ([fn ($a) => $a->__construct(5), fn ($a) => $a->setSize(3), fn ($a) => $a->__unserialize(["a", "b", "c"])] as $act) {
+///     $a = new SplFixedArray(2); $a[0] = new R; $a[1] = "tail";
+///     R::$fn = fn () => $act($a);
+///     $a->setSize(0);
+///     echo $a->getSize(), "\n";
+/// }
+/// ```
+/// ```expect
+/// 0
+/// 3
+/// 0
+/// ```
 fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Thrown> {
     let (len, under_way) = with(req, object, |a| (a.elements.len(), a.resizing.is_some()))?;
     if size == len {
@@ -91,10 +112,14 @@ fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Throw
     if under_way {
         return with(req, object, |a| a.resizing = Some(size));
     }
-    // `safe_erealloc` before the row grows: the overflow's fatal and the
-    // memory limit's come before a slot is laid down.
-    if size > len {
-        fit(req, object, size)?;
+    // `safe_ferealloc` before the row grows: the overflow's fatal and the
+    // memory limit's come before a slot is laid down, and where the limit
+    // refused the growth the elements stand as they were (`RETURN_OOM()`);
+    // the allocation that charged them is left to the request's end, which
+    // the limit's fatal brings at the next check, where php keeps its
+    // untouched block.
+    if size > len && fit(req, object, size)?.is_err() {
+        return Ok(());
     }
     let fill = nulls(size.saturating_sub(len));
     let cut = with(req, object, |a| {
@@ -109,7 +134,11 @@ fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Throw
         }
     })?;
     if size < len {
-        fit(req, object, size)?;
+        // A row cut is never refused; were it, the row would stand as
+        // it was, as a refused growth leaves it.
+        match fit(req, object, size)? {
+            Ok(()) | Err(Refused) => {}
+        }
     }
     if size == 0 {
         crate::give_up_all(req, cut.into_iter().rev());
@@ -204,6 +233,31 @@ impl SplFixedArray {
     /// SplFixedArray::__construct(): Argument #1 ($size) must be greater than or equal to 0
     /// int(2)
     /// ```
+    ///
+    /// The row is asked for fallibly since 8.5.12: one the memory limit has
+    /// no room for is refused and the limit's fatal raised as the call
+    /// returns. Nor does a constructor called while a resize's clear is under
+    /// way lay a row down:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '4M');
+    /// $a = new SplFixedArray(600000);
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 9601024 bytes) in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class D { public static $a; function __destruct() { self::$a->__construct(5); } }
+    /// $a = new SplFixedArray(2); D::$a = $a; $a[0] = new D;
+    /// $a->setSize(0);
+    /// var_dump($a->getSize());
+    /// ```
+    /// ```expect exit=0
+    /// int(0)
+    /// ```
     fn __construct(
         req: &mut Request,
         this: This<Self>,
@@ -213,17 +267,39 @@ impl SplFixedArray {
         if size < 0 {
             return Err(arg_value_error(req, 1, "be greater than or equal to 0"));
         }
-        if !with(req, this, |a| a.elements.is_empty())? {
+        // Nothing on a second call, nor while a resize is under way,
+        // whose clear empties the row before its destructors run
+        // (`spl_fixedarray_resize_in_progress`, 8.5.12).
+        if !with(req, this, |a| a.elements.is_empty() && a.resizing.is_none())? {
             return Ok(());
         }
         let size = usize::try_from(size).unwrap_or(0);
-        let allocation = laid(req, size)?;
+        let Ok(allocation) = laid(req, size)? else {
+            return Ok(()); // RETURN_OOM()
+        };
         let elements = nulls(size);
         lay(req, this, elements, allocation)
     }
 
     /// `__wakeup(): void`, deprecated: the properties an old serialization
     /// left become the elements.
+    ///
+    /// The row is asked for fallibly since 8.5.12, before the properties are
+    /// copied, so one the memory limit refuses leaves them standing and the
+    /// limit's fatal is raised as the call returns:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '16M');
+    /// $a = new SplFixedArray();
+    /// for ($i = 0; $i < 128 * 1024; $i++) { @$a->{$i} = 0; }
+    /// $pad = str_repeat('a', max(16 * 1024 * 1024 - memory_get_usage(true) - 512 * 1024, 1));
+    /// @$a->__wakeup();
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 6
+    /// ```
     #[php(
         tentative,
         deprecated(
@@ -233,18 +309,27 @@ impl SplFixedArray {
     )]
     fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let this = this.object();
-        if with(req, this, |a| a.elements.is_empty())? {
+        if with(req, this, |a| a.elements.is_empty() && a.resizing.is_none())? {
             let table = Std.get_properties(req, this)?;
             let props: Vec<(Key, Value)> = walk::rows(req, table).collect();
+            // `spl_fixedarray_init` before the properties are copied and
+            // cleaned, as php orders them: where the memory limit refused
+            // the row, RETURN_OOM() with the properties standing.
+            let Ok(allocation) = laid(req, props.len())? else {
+                return Ok(());
+            };
             let mut elements = Vec::with_capacity(props.len());
             for (key, value) in props {
                 elements.push(Owner::take(req, value.deref()));
                 if let Err(thrown) = this.unset_row(req, &key) {
                     crate::give_up_all(req, elements);
+                    if let Some(allocation) = allocation {
+                        allocation.free(req);
+                    }
                     return Err(thrown);
                 }
             }
-            lay_laid(req, this, elements)?;
+            lay(req, this, elements, allocation)?;
         }
         Ok(())
     }
@@ -301,7 +386,7 @@ impl SplFixedArray {
     /// ```
     fn __unserialize(req: &mut Request, this: This<Self>, data: PhpArray) -> Result<(), Thrown> {
         let this = this.object();
-        if !with(req, this, |a| a.elements.is_empty())? {
+        if !with(req, this, |a| a.elements.is_empty() && a.resizing.is_none())? {
             return Ok(());
         }
         let mut elements = Vec::new();
@@ -326,9 +411,16 @@ impl SplFixedArray {
                 }
             }
         }
-        if let Err(thrown) = lay_laid(req, this, elements) {
-            members.give_up(req);
-            return Err(thrown);
+        match lay_laid(req, this, elements) {
+            Ok(true) => {}
+            Ok(false) => {
+                members.give_up(req);
+                return Ok(()); // RETURN_OOM()
+            }
+            Err(thrown) => {
+                members.give_up(req);
+                return Err(thrown);
+            }
         }
         let loaded = crate::load_members(req, this, &Value::array(*members));
         members.give_up(req);
@@ -399,6 +491,18 @@ impl SplFixedArray {
     /// }
     /// array must contain only positive integer keys
     /// ```
+    ///
+    /// The row is asked for fallibly since 8.5.12, as the constructor's is.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '4M');
+    /// $a = SplFixedArray::fromArray([600000 => 1]);
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 9601024 bytes) in %s on line 3
+    /// ```
     #[php(tentative)]
     fn fromArray(
         req: &mut Request,
@@ -426,20 +530,23 @@ impl SplFixedArray {
                 }
             }
             let Some(max) = max else {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "InvalidArgumentException",
                     "array must contain only positive integer keys",
                 ));
             };
             let Some(size) = max.checked_add(1).filter(|s| i64::try_from(*s).is_ok()) else {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "InvalidArgumentException",
                     "integer overflow detected",
                 ));
             };
-            allocation = laid(req, size)?;
+            let Ok(laid) = laid(req, size)? else {
+                return refused_row(req); // RETURN_OOM()
+            };
+            allocation = laid;
             elements = nulls(size);
             let mut nulled = Vec::new();
             for (key, value) in walk::rows(req, array) {
@@ -452,7 +559,10 @@ impl SplFixedArray {
             }
             crate::give_up_all(req, nulled);
         } else {
-            allocation = laid(req, len)?;
+            let Ok(laid) = laid(req, len)? else {
+                return refused_row(req); // RETURN_OOM()
+            };
+            allocation = laid;
             elements = walk::rows(req, array)
                 .map(|(_, value)| Owner::take(req, value.deref()))
                 .collect();
@@ -500,6 +610,21 @@ impl SplFixedArray {
     /// int(4)
     /// NULL
     /// SplFixedArray::setSize(): Argument #1 ($size) must be greater than or equal to 0
+    /// ```
+    ///
+    /// A growth is asked for fallibly since 8.5.12: one the memory limit has
+    /// no room for is refused, the row left as it was, and the limit's fatal
+    /// raised as the call returns.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '4M');
+    /// $a = new SplFixedArray(10);
+    /// $a->setSize(600000);
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 9601024 bytes) in %s on line 4
     /// ```
     #[php(tentative)]
     fn setSize(req: &mut Request, this: This<Self>, size: i64) -> Result<True, Thrown> {
@@ -947,16 +1072,35 @@ fn row_bytes(req: &mut Request, size: usize) -> Result<usize, Thrown> {
     })
 }
 
-/// `spl_fixedarray_init`'s `safe_emalloc(size, sizeof(zval), 0)`: the
-/// allocation of a row of `size` elements, made before the row is
-/// built, so the overflow's fatal and the memory limit's come first;
-/// none for an empty row.
-fn laid(req: &mut Request, size: usize) -> Result<Option<Emalloc>, Thrown> {
+/// `spl_fixedarray_init`'s `safe_femalloc(size, sizeof(zval), 0,
+/// fallible: true)` (8.5.12): the allocation of a row of `size`
+/// elements, made before the row is built, so the overflow's fatal and
+/// the memory limit's come first; none for an empty row, and
+/// [`Refused`] where the memory limit had no room for it.
+fn laid(req: &mut Request, size: usize) -> Result<Result<Option<Emalloc>, Refused>, Thrown> {
     let bytes = row_bytes(req, size)?;
     if bytes == 0 {
-        return Ok(None);
+        return Ok(Ok(None));
     }
-    Emalloc::new(req, bytes).map(Some)
+    let laid = req.memory_mut().fallible(|req| Emalloc::new(req, bytes))?;
+    Ok(laid.map(Some).ok_or(Refused))
+}
+
+/// A row's allocation the memory limit refused, php's `FAILURE` from
+/// `spl_fixedarray_init`, which the native returns on as `RETURN_OOM()`.
+struct Refused;
+
+/// `fromArray`'s answer where its row was refused: `RETURN_OOM()`'s
+/// value is never read, the limit's fatal raised as the call returns,
+/// so an object with an empty row stands for it.
+fn refused_row(req: &mut Request) -> Result<Owner<Instance<SplFixedArray>>, Thrown> {
+    let Some(class) = php_ext::call::lookup_class(req, b"SplFixedArray")? else {
+        return Err(php_ext::raising::fatal(
+            req,
+            "InternalError: SplFixedArray::fromArray served with its class unlinked",
+        ));
+    };
+    Ok(new_object(req, class)?.into_instance())
 }
 
 /// The row `elements` laid into the object with the allocation
@@ -981,14 +1125,19 @@ fn lay(
 }
 
 /// [`lay`] with the row allocated for `elements` first, which are given
-/// up where the allocation is refused.
+/// up where the allocation is refused: `false` where the memory limit
+/// refused it, the native's `RETURN_OOM()`.
 fn lay_laid(
     req: &mut Request,
     object: PhpObject,
     elements: Vec<Owner<Value>>,
-) -> Result<(), Thrown> {
+) -> Result<bool, Thrown> {
     match laid(req, elements.len()) {
-        Ok(allocation) => lay(req, object, elements, allocation),
+        Ok(Ok(allocation)) => lay(req, object, elements, allocation).map(|()| true),
+        Ok(Err(Refused)) => {
+            crate::give_up_all(req, elements);
+            Ok(false)
+        }
         Err(thrown) => {
             crate::give_up_all(req, elements);
             Err(thrown)
@@ -1008,32 +1157,61 @@ fn views(elements: &[Owner<Value>]) -> Vec<Value> {
 
 /// `spl_fixedarray_resize`'s allocation for a row now `size` long:
 /// given back where the row empties, `spl_fixedarray_init`'s where it
-/// had none, and `erealloc`'d otherwise.
-fn fit(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Thrown> {
+/// had none, and `safe_ferealloc(..., fallible: true)`'d otherwise
+/// (8.5.12); [`Refused`] where the memory limit had no room for it.
+fn fit(req: &mut Request, object: PhpObject, size: usize) -> Result<Result<(), Refused>, Thrown> {
     let held = with(req, object, |a| a.allocation.take())?;
     let fitted = match held {
         Some(held) if size == 0 => {
             held.free(req);
             None
         }
-        None => laid(req, size)?,
+        None => match laid(req, size)? {
+            Ok(laid) => laid,
+            Err(Refused) => return Ok(Err(Refused)),
+        },
         Some(held) => {
             let bytes = row_bytes(req, size)?;
-            Some(held.resize(req, bytes)?)
+            match req.memory_mut().fallible(|req| held.resize(req, bytes))? {
+                Some(fitted) => Some(fitted),
+                None => return Ok(Err(Refused)),
+            }
         }
     };
-    with(req, object, |a| a.allocation = fitted)
+    with(req, object, |a| a.allocation = fitted)?;
+    Ok(Ok(()))
 }
 
 /// `spl_fixedarray_object_clone`: the elements with one more owner each.
+///
+/// The clone's row is asked for fallibly since 8.5.12: one the memory
+/// limit refuses leaves the clone empty, and the limit's fatal is raised
+/// at the next check.
+///
+/// ```php
+/// ini_set('memory_limit', '4M');
+/// $a = new SplFixedArray(150000);
+/// $b = clone $a;
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2408448 bytes) in %s on line 3
+/// ```
 fn clone_array(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject>, Thrown> {
     let elements = with(req, object, |a| views(&a.elements))?;
     let elements: Vec<Owner<Value>> = elements
         .into_iter()
         .map(|value| Owner::take(req, value))
         .collect();
-    let allocation = match laid(req, elements.len()) {
-        Ok(allocation) => allocation,
+    let (elements, allocation) = match laid(req, elements.len()) {
+        Ok(Ok(allocation)) => (elements, allocation),
+        // `spl_fixedarray_copy_ctor`'s `FAILURE` since 8.5.12: the clone
+        // with an empty row, the limit's fatal raised at the next check.
+        Ok(Err(Refused)) => {
+            crate::give_up_all(req, elements);
+            (Vec::new(), None)
+        }
         Err(thrown) => {
             crate::give_up_all(req, elements);
             return Err(thrown);

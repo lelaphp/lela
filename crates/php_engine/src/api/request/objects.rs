@@ -15,7 +15,7 @@ use php_unit::decl::{Bare, ClassDecl, ClassKind, PropertyDecl, Visibility};
 
 use crate::api::abi::{DimensionRead, DtorObj, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;
-use crate::api::raising::Thrown;
+use crate::api::raising::{Cause, Thrown};
 use crate::api::values::{
     ClassId, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, adopted, adopted_some,
 };
@@ -24,6 +24,10 @@ use methods::visibility_string;
 use pending::Saved;
 
 use super::{Hooks, Placed, PropertyInfo, Request, RowPlace, methods, pending};
+
+/// `ZEND_DEBUGINFO_FUNC_NAME "() must return an array"`, the fatal
+/// `zend_std_get_debug_info` raises over what is no array.
+const NOT_AN_ARRAY: &str = "__debuginfo() must return an array";
 
 /// Where the destructors' walk was cut short, whose field no file but
 /// this one reads.
@@ -1340,6 +1344,51 @@ impl Request {
     /// ```expect exit=255
     /// Fatal error: __debuginfo() must return an array in %s on line 3
     /// ```
+    ///
+    /// A method that threw, or that the unwind exit left, returns no
+    /// array either: php's call hands back an undefined `retval` and
+    /// raises the same fatal after it, the throwable reported as uncaught
+    /// first. The delayed OOM's fatal is one of those since 8.5.12, its
+    /// unwind exit thrown after the limit's fatal is rendered, so php
+    /// prints two fatals. Only a fatal leaves past the check, as
+    /// `zend_error_noreturn` leaves past everything.
+    ///
+    /// ```php
+    /// class A { function __debugInfo() { return ['a' => str_repeat('x', 3 << 20)]; } }
+    /// ini_set('memory_limit', '2M');
+    /// var_dump(new A);
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 2
+    ///
+    /// Fatal error: __debuginfo() must return an array in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// class X { function __debugInfo() { exit(3); } }
+    /// var_dump(new X);
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: __debuginfo() must return an array in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class T { function __debugInfo() { throw new Exception('t'); } }
+    /// try { var_dump(new T); } catch (Exception $e) { echo "caught\n"; }
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Warning: Uncaught Exception: t in %s:2
+    /// Stack trace:
+    /// #0 [internal function]: T->__debugInfo()
+    /// #1 %s(3): var_dump(Object(T))
+    /// #2 {main}
+    ///   thrown in %s on line 2
+    ///
+    /// Fatal error: __debuginfo() must return an array in %s on line 3
+    /// ```
     pub(crate) fn debug_info(
         &mut self,
         object: PhpObject,
@@ -1355,7 +1404,10 @@ impl Request {
             let info = self.lazy_debug_info(object);
             return adopted_some(info);
         }
-        let value = crate::api::call::call_method_made(self, &object, b"__debugInfo", &[])?;
+        let value = match crate::api::call::call_method_made(self, &object, b"__debugInfo", &[]) {
+            Ok(value) => value,
+            Err(thrown) => return Err(self.debug_info_undefined(thrown)),
+        };
         let value = self.unwrap_reference(value);
         match value.as_array() {
             // The array the method returned, its one owner the caller's,
@@ -1375,11 +1427,24 @@ impl Request {
             }
             None => {
                 self.release(value);
-                Err(crate::api::raising::fatal(
-                    self,
-                    "__debuginfo() must return an array",
-                ))
+                Err(crate::api::raising::fatal(self, NOT_AN_ARRAY))
             }
+        }
+    }
+
+    /// `zend_std_get_debug_info`'s fatal over the undefined `retval` a
+    /// `__debugInfo` call left by `thrown` (`Z/Zend/zend_object_handlers.c:233`):
+    /// raised past a throwable, which is reported as uncaught first, and
+    /// past the unwind exit; a fatal is handed on, since php's leaves the
+    /// handler before the check.
+    #[cold]
+    fn debug_info_undefined(&mut self, thrown: Thrown) -> Thrown {
+        match thrown.cause(self) {
+            Cause::Fatal => thrown,
+            Cause::Throwable(_) => {
+                crate::api::raising::fatal_while_pending(self, thrown, NOT_AN_ARRAY)
+            }
+            Cause::Exit => crate::api::raising::fatal(self, NOT_AN_ARRAY),
         }
     }
 

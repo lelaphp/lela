@@ -184,7 +184,12 @@ impl Request {
                 let thrown = !error.bailed() || error.stage == php_compile::Stage::Opening;
                 if let Some(noted) = self.declare_refused(&refused, path) {
                     for raised in error.raised.get(noted..).unwrap_or_default() {
-                        self.note_error_in(raised.level, &raised.message, path, raised.line);
+                        self.note_error_in(
+                            raised.level,
+                            raised.message.as_bytes(),
+                            path,
+                            raised.line,
+                        );
                     }
                     if thrown {
                         self.emit_recorded(recording);
@@ -391,7 +396,9 @@ impl Request {
     /// `zend_print_zval_r` renders a value.
     fn print_r(&mut self, value: &Value) -> Vec<u8> {
         self.addref(value);
-        let rendered = self.call_named(b"print_r", &[*value, Value::bool(true)]);
+        // `zend_print_zval_r` is C phpdbg calls directly, so a memory
+        // limit met earlier in the request keeps nothing from printing.
+        let rendered = self.call_named_from_c(b"print_r", &[*value, Value::bool(true)]);
         match rendered {
             Ok(returned) => {
                 let bytes = returned
@@ -413,11 +420,28 @@ impl Request {
     /// The function named `name` called with `arguments`, each given
     /// up after, as `zend_call_function` calls one by name.
     pub(crate) fn call_named(&mut self, name: &[u8], arguments: &[Value]) -> Result<Value, Thrown> {
+        self.call_named_by(name, arguments, crate::api::call::call_made)
+    }
+
+    /// [`Request::call_named`] where php calls the function's C directly
+    /// ([`crate::api::call::call_made_from_c`]).
+    fn call_named_from_c(&mut self, name: &[u8], arguments: &[Value]) -> Result<Value, Thrown> {
+        self.call_named_by(name, arguments, crate::api::call::call_made_from_c)
+    }
+
+    /// The function named `name` called with `arguments` by `call`, each
+    /// given up after.
+    fn call_named_by(
+        &mut self,
+        name: &[u8],
+        arguments: &[Value],
+        call: fn(&mut Request, &crate::api::abi::Callable, &[Value]) -> Result<Value, Thrown>,
+    ) -> Result<Value, Thrown> {
         let name = self.string(name)?;
         let callable = crate::api::coerce::to_callable(self, &Value::string(name));
         self.release(Value::string(name));
         let callable = callable?;
-        let called = crate::api::call::call_made(self, &callable, arguments);
+        let called = call(self, &callable, arguments);
         for argument in arguments {
             self.release(*argument);
         }

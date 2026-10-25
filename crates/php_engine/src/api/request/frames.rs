@@ -6,6 +6,7 @@
 //! and the VM stay on the request, since every area reaches them.
 
 use php_heap::{Fatal, FrameRef, Slot, Zval, ZvalRef, ZvalType};
+use php_unit::decl::Bare;
 use php_unit::{CacheSlot, PublishedUnit, Unit};
 
 use crate::api::call::Function;
@@ -409,13 +410,37 @@ impl Request {
     /// stack its frames stand on, the swap php's observer makes at the
     /// switch's notice (`Z/Zend/zend_observer.c:423-424`). The trace
     /// number goes with the error-reporting level and the stack limit,
-    /// which [`Request::on_stack`] leaves the running fiber's.
+    /// which [`Request::on_stack`] leaves the running fiber's. What the
+    /// stack's innermost serving returned goes with it too, php's
+    /// `retval` a local of the stack its `zend_call_function` runs on: a
+    /// suspended fiber a frame's leave destroys ends its serving on its
+    /// own stack, and the value the leaving frame returned stands.
+    ///
+    /// ```php
+    /// $f = new Fiber(function (): int {
+    ///     $g = new Fiber(function () { Fiber::suspend(); });
+    ///     $g->start();
+    ///     return -1;
+    /// });
+    /// $f->start();
+    /// var_dump($f->getReturn());
+    /// echo implode(",", array_map(function ($x) {
+    ///     $g = new Fiber(fn () => Fiber::suspend());
+    ///     $g->start();
+    ///     return $x * 2;
+    /// }, [1, 2])), "\n";
+    /// ```
+    /// ```expect
+    /// int(-1)
+    /// 2,4
+    /// ```
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
         self.switch_stack(other);
         self.swap_error_reporting(&mut other.error_reporting);
         self.swap_trace_num(&mut other.trace_num);
         self.swap_stack_limit(&mut other.stack_limit);
         std::mem::swap(&mut self.fibers.active, &mut other.active);
+        std::mem::swap(&mut self.returned, &mut other.returned);
     }
 
     /// The stack the request runs on and `other`'s change places, the
@@ -1187,12 +1212,12 @@ impl Request {
         class: crate::api::values::ClassId,
     ) -> Option<exec::PropertyOffset> {
         let header = self.vm.at(frame)?;
-        let exec::Cached::Property {
+        let exec::Cached::Property(exec::PropertyPlace {
             class: held,
             function,
             scope,
             offset,
-        } = self.map.get(header.runtime_cache())?.get(slot)
+        }) = self.map.get(header.runtime_cache())?.get(slot)
         else {
             return None;
         };
@@ -1228,12 +1253,12 @@ impl Request {
         let Some(offset) = self.cacheable_offset(object, name) else {
             return;
         };
-        let cached = exec::Cached::Property {
+        let cached = exec::Cached::Property(exec::PropertyPlace {
             class: object.class(),
             function,
             scope,
             offset,
-        };
+        });
         self.prime(frame, slot, cached);
     }
 
@@ -1311,11 +1336,41 @@ impl Request {
     /// `zend_vm_stack_push_call_frame`: a call to `function` pushed with
     /// its room ([`Request::call_room`]) for the `SEND_*` oplines to
     /// write its arguments into, `header` laid down whole; a page the
-    /// memory limit refuses is the fatal php raises there.
+    /// memory limit refuses is the fatal php raises there. A user
+    /// function's runtime cache is laid down first where the request has
+    /// not, as every `INIT_*` handler lays it before it pushes the call
+    /// ([`Request::init_func_run_time_cache`]); the inline `INIT_*` paths,
+    /// which read their callee off a primed cache slot, push through
+    /// [`Request::push_laid`] and [`Request::push_room`], since the pass
+    /// that primed the slot laid the callee's cache. A closure's cache
+    /// was chosen as it was made ([`crate::classes::closure_cache`]). A
+    /// call `zend_call_function` pushes already serving, which no `INIT_*`
+    /// builds, lays it at its activation ([`Request::activate_user`]), as
+    /// `zend_init_func_execute_data` lays it once the arguments are placed,
+    /// so a call its arguments refuse lays nothing:
+    ///
+    /// ```php
+    /// class C { function m($a) { return $this->p . $this->q . $this->r . $this->s; } }
+    /// $o = new C;
+    /// try { call_user_func([$o, 'm'], 1, bogus: 2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $m = memory_get_usage(); $c = (new ReflectionMethod('C', 'm'))->getClosure($o);
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// Unknown named parameter $bogus
+    /// 480
+    /// ```
+    #[inline(always)] // the push of every INIT's slow path, its header moved, not copied
     pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
         let Some((room, header)) = self.laid_call(header) else {
             return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
+        if header.info.building()
+            && header.closure.is_none()
+            && let Some(function) = header.function
+        {
+            self.init_func_run_time_cache(function)?;
+        }
         self.push_room(room, header)
     }
 
@@ -1711,7 +1766,11 @@ impl Request {
     /// slots they leave `UNDEF` (`zend_copy_extra_args`), the frame
     /// grown first where its room is short of that, as a call laid down
     /// for a trampoline is; the opline it stands at by the prologue's
-    /// skip, its runtime cache laid down (`zend_init_func_run_time_cache`);
+    /// skip, its runtime cache laid down where nothing laid it before, as
+    /// `zend_init_func_execute_data` lays it for a call `zend_call_function`
+    /// makes and `ZEND_CALL_TRAMPOLINE` for the magic method it serves
+    /// (`Z/Zend/zend_execute.c:4547`, `Z/Zend/zend_vm_def.h:9017`), where a
+    /// call an `INIT_*` pushed finds it laid ([`Request::push_call`]);
     /// `returns_to` the slot of `caller`'s that takes what it returns.
     /// A function that is no user function is an internal error.
     pub(crate) fn activate_user(
@@ -2419,6 +2478,105 @@ impl Request {
     /// `NULL`.
     pub(crate) fn cache_laid(&self, at: exec::CacheAt) -> bool {
         self.map.laid(at)
+    }
+
+    /// `init_func_run_time_cache` (`Z/Zend/zend_execute.c:4452`): the
+    /// runtime cache of `function`, where it is a user function, laid
+    /// down where the request has not yet ([`exec::lay_runtime_cache`]),
+    /// as php lays it at the `INIT_*` that pushes its call and at the
+    /// lookup of it by name (`zend_fetch_function`). The `Err` is the
+    /// memory limit's fatal, with nothing laid down.
+    ///
+    /// So a closure made over a function before its first call shares
+    /// its cache, by `g(...)`, `Closure::fromCallable`, a reflector and
+    /// `call_user_func`; a method's closure a reflector made, whose
+    /// lookup lays nothing, and a closure bound to another scope take
+    /// one of their own, as `zend_create_closure_ex` emallocs it, and a
+    /// real closure bound to the scope its cache was laid for shares it
+    /// ([`crate::classes::closure_cache`]):
+    ///
+    /// ```php
+    /// function g($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// function h($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// function k($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// function p($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// class C { function m() { return $this->a . $this->b . $this->c . $this->d; } }
+    /// class D { }
+    /// $r = function ($o) { return $o->a . $o->b . $o->c . $o->d; };
+    /// $at = function ($make) { $m = memory_get_usage(); $c = $make(); $grew = memory_get_usage() - $m; unset($c); return $grew; };
+    /// echo $at(fn () => g(...)), " ", $at(fn () => Closure::fromCallable('h')), " ", $at(fn () => (new ReflectionFunction('k'))->getClosure()), " ", $at(fn () => call_user_func('Closure::fromCallable', 'p')), " ";
+    /// echo $at(fn () => (new ReflectionMethod('C', 'm'))->getClosure(new C)), " ", $at(fn () => Closure::bind($r, null, D::class)), " ", $at(fn () => Closure::bind($r, null, null)), "\n";
+    /// ```
+    /// ```expect
+    /// 384 384 384 384 520 480 384
+    /// ```
+    ///
+    /// The same where a trace serves the calls, every guard failing once
+    /// or none, the sizes under opcache's optimizer aside (#3223):
+    ///
+    /// ```php
+    /// function g($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// function h($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// function k($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// function p($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// class C { function m() { return $this->a . $this->b . $this->c . $this->d; } }
+    /// class D { }
+    /// $r = function ($o) { return $o->a . $o->b . $o->c . $o->d; };
+    /// $at = function ($make) { $m = memory_get_usage(); $c = $make(); $grew = memory_get_usage() - $m; unset($c); return $grew; };
+    /// for ($i = 0; $i < 3; $i++) { echo $at(fn () => g(...)), " ", $at(fn () => Closure::fromCallable('h')), " ", $at(fn () => (new ReflectionFunction('k'))->getClosure()), " ", $at(fn () => call_user_func('Closure::fromCallable', 'p')), " ", $at(fn () => Closure::bind($r, null, null)), "\n"; }
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 384 384 384 384 384
+    /// 384 384 384 384 384
+    /// 384 384 384 384 384
+    /// ```
+    ///
+    /// ```php
+    /// function g($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// function h($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// function k($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// function p($o) { return $o->a . $o->b . $o->c . $o->d; }
+    /// class C { function m() { return $this->a . $this->b . $this->c . $this->d; } }
+    /// class D { }
+    /// $r = function ($o) { return $o->a . $o->b . $o->c . $o->d; };
+    /// $at = function ($make) { $m = memory_get_usage(); $c = $make(); $grew = memory_get_usage() - $m; unset($c); return $grew; };
+    /// for ($i = 0; $i < 3; $i++) { echo $at(fn () => g(...)), " ", $at(fn () => Closure::fromCallable('h')), " ", $at(fn () => (new ReflectionFunction('k'))->getClosure()), " ", $at(fn () => call_user_func('Closure::fromCallable', 'p')), " ", $at(fn () => Closure::bind($r, null, null)), "\n"; }
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 384 384 384 384 384
+    /// 384 384 384 384 384
+    /// 384 384 384 384 384
+    /// ```
+    #[inline(always)] // every INIT's push: the function's shape, then whether its cache is laid
+    pub(crate) fn init_func_run_time_cache(&mut self, function: Function) -> Result<(), Fatal> {
+        let Some(shape) = self.user_function(function).map(|user| user.shape) else {
+            return Ok(());
+        };
+        exec::lay_runtime_cache(&mut self.map, &mut self.heap, shape.cache, shape.cache_size)
+    }
+
+    /// `zend_fetch_function` (`Z/Zend/zend_execute.c:4468`): the function
+    /// named `name`, its runtime cache laid down where the request has
+    /// not yet ([`Request::init_func_run_time_cache`]). None where no
+    /// function has the name; the `Err` is the memory limit's fatal.
+    pub(crate) fn fetch_function(&mut self, name: Bare<'_>) -> Result<Option<Function>, Fatal> {
+        let Some(function) = self.function_named(name) else {
+            return Ok(None);
+        };
+        self.init_func_run_time_cache(function)?;
+        Ok(Some(function))
+    }
+
+    /// Where slot `slot` of the cache at `at` stands, which compiled code
+    /// reads in place (`tier::touch`), where the request has laid the
+    /// cache down; none where it has not, since php lays it down at the
+    /// call's `INIT_*` and no sooner ([`Request::init_func_run_time_cache`]).
+    pub(crate) fn touch_cache(
+        &self,
+        at: exec::CacheAt,
+        slot: CacheSlot,
+    ) -> Option<std::ptr::NonNull<exec::Cached>> {
+        self.map.get(at).and_then(|cache| cache.place_of(slot))
     }
 
     /// The scope the cache at `at` was laid down for by the first closure

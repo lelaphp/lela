@@ -2504,11 +2504,32 @@ impl CoreTable {
     }
 }
 
+/// Whether a handler table serves a class's properties as `Std` does:
+/// `read_property`, `write_property`, `has_property`, `unset_property`
+/// and `get_property_ptr_ptr` all the standard handlers', which fill the
+/// runtime-cache slot of the opline they serve themselves
+/// (`zend_get_property_offset`, `Z/Zend/zend_object_handlers.c:386`), so
+/// a property opline's place is cached for the class as for one with no
+/// table of its own; or a table that overrides any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyAccess {
+    Standard,
+    Own,
+}
+
 pub trait ObjectHandlers: Send + Sync {
     /// Which of Core's tables this is ([`CoreTable`]); none at `Std`
     /// and for every table an extension declares.
     fn core_table(&self) -> CoreTable {
         CoreTable::NONE
+    }
+
+    /// How the table serves its class's properties ([`PropertyAccess`]):
+    /// a table that overrides none of the five property slots answers
+    /// `Standard`, and every other keeps the default, `Own`, so no place
+    /// it may serve otherwise is cached.
+    fn properties(&self) -> PropertyAccess {
+        PropertyAccess::Own
     }
 
     /// The class's [`Refusals`], php's `get_constructor` that throws,
@@ -3325,6 +3346,11 @@ impl Refusals {
 impl ObjectHandlers for Refusals {
     fn refusals(&self) -> Refusals {
         *self
+    }
+
+    /// A table of refusals overrides no property slot.
+    fn properties(&self) -> PropertyAccess {
+        PropertyAccess::Standard
     }
 }
 

@@ -11,7 +11,7 @@ use php_ext::abi::{Instance, OrFalse, Ref, This};
 use php_ext::attr::php_class;
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_string, with_string};
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, fatal, throw_error};
+use php_ext::raising::{Thrown, arg_type_error, arg_value_error, fatal, throw_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Emalloc, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -512,11 +512,7 @@ pub(crate) fn poll(
     let read_in = read.get().copied().flatten();
     let error_in = error.get().copied().flatten();
     if read_in.is_none() && error_in.is_none() {
-        return Err(throw_error(
-            req,
-            "ValueError",
-            "No stream arrays were passed",
-        ));
+        return Err(value_error(req, "No stream arrays were passed"));
     }
     let read_links = match read_in {
         Some(array) => Some(links_of(req, array)?),

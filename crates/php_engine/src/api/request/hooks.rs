@@ -14,6 +14,7 @@ use php_unit::decl::{
     Bare, ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility, native_function, parameter,
 };
 
+use super::calls::Retval;
 use super::{Link, Member, MemberAt, Request};
 use crate::api::abi::{
     Entry, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
@@ -389,8 +390,22 @@ impl Request {
         hook: Function,
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        self.call_hook_into(Retval::Native, object, hook, arguments)
+    }
+
+    /// [`Request::call_hook`] whose hook's return, where its body
+    /// returned and then threw, goes where `retval` says: a read's is
+    /// the reading opline's `rv`.
+    fn call_hook_into(
+        &mut self,
+        retval: Retval,
+        object: PhpObject,
+        hook: Function,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
         let held = Owner::take(self, object);
-        let served = self.serve_method_made(hook, Some(object), object.class(), arguments, &[]);
+        let class = object.class();
+        let served = self.serve_method_into(retval, hook, Some(object), class, arguments, &[]);
         held.give_up(self);
         served
     }
@@ -478,7 +493,7 @@ impl Request {
             }
             return self.read_backing(object, name, read);
         }
-        let value = self.call_hook(object, get, &[])?;
+        let value = self.call_hook_into(Retval::Result, object, get, &[])?;
         self.refuse_indirect(object, name, value, read)
     }
 
@@ -888,7 +903,7 @@ fn trampoline_call(
             if wanted == 1 { "" } else { "s" }
         );
         return Err(crate::api::raising::under_name(req, Some(&member), |req| {
-            crate::api::raising::throw_error(req, "ArgumentCountError", &message)
+            crate::api::raising::argument_count_error(req, &message)
         }));
     }
     let Some(this) = req.frames().this() else {

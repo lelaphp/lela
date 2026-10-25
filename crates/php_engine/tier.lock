@@ -38,6 +38,7 @@ tier::Activation::opline
 tier::Argument
 tier::Aside
 tier::Building
+tier::CachedSlot
 tier::Called
 tier::ClassId
 tier::Compiled
@@ -88,7 +89,9 @@ tier::FuncRef::offset
 tier::Held
 tier::Hooked
 tier::MapPtrRaw
+tier::PLACE
 tier::Parked
+tier::PlaceLayout
 tier::PlainCall
 tier::PlainCall::activation
 tier::PlainCall::callee
@@ -155,6 +158,7 @@ tier::interrupted
 tier::jump_targets
 tier::laid
 tier::landing
+tier::lending
 tier::native_returns
 tier::numbered_class
 tier::observes
@@ -178,6 +182,8 @@ tier::stand
 tier::state
 tier::step
 tier::this_class
+tier::touch
+tier::touchable
 tier::trace_num
 tier::under_way
 tier::unwind
@@ -189,6 +195,7 @@ tier::dispatch_held
 tier::free_cv
 tier::lookup_element
 tier::release
+tier::return_entry
 tier::rope_end
 tier::rope_open
 tier::rope_push

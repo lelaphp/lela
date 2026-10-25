@@ -100,9 +100,26 @@ pub enum Cause<'a> {
     Fatal,
 }
 
-/// Raise a diagnostic at `level` with php's message text.
-pub fn raise(req: &mut Request, level: Level, message: &str) {
-    req.note_error(level, message);
+/// Raise a diagnostic at `level` with php's message text, its bytes as
+/// given: what `zend_vstrpprintf` printed. A NUL among them stands, as it
+/// stands in a message php prints with `%S` or is handed whole, and so
+/// does a byte no UTF-8 reads; a `%s` argument is read to its first NUL
+/// by the caller that prints it ([`crate::c_number::c_str`]), the rest of
+/// the sentence after it.
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { echo bin2hex($str), "\n"; return true; });
+/// echo ${"v\0w"};
+/// trigger_error("x\0\xff tail", E_USER_WARNING);
+/// $a = []; echo $a["k\0z"];
+/// ```
+/// ```expect
+/// 556e646566696e6564207661726961626c652024760077
+/// 7800ff207461696c
+/// 556e646566696e6564206172726179206b657920226b22
+/// ```
+pub fn raise(req: &mut Request, level: Level, message: &(impl AsRef<[u8]> + ?Sized)) {
+    req.note_error(level, message.as_ref());
 }
 
 /// `zend_error_at`: the same diagnostic at a file and line of its own
@@ -112,8 +129,14 @@ pub fn raise(req: &mut Request, level: Level, message: &str) {
 /// `TOKEN_PARSE` raises for an octal escape overflow is the witness, in
 /// `ext/tokenizer`: the file is the empty one `tokenize_parse` scans
 /// under, so php prints `in  on line 1`.
-pub fn raise_at(req: &mut Request, level: Level, message: &str, file: &[u8], line: u32) {
-    req.note_error_in(level, message, file, line);
+pub fn raise_at(
+    req: &mut Request,
+    level: Level,
+    message: &(impl AsRef<[u8]> + ?Sized),
+    file: &[u8],
+    line: u32,
+) {
+    req.note_error_in(level, message.as_ref(), file, line);
 }
 
 /// `zend_exception_error(ex, severity)` over the throwable `thrown`
@@ -166,7 +189,12 @@ pub fn uncaught_at(req: &mut Request, thrown: Thrown, severity: Level) -> Result
 /// nothing. `pending` is the native's still, to hand on. The overloaded
 /// element's notice after a throwing `offsetGet` is the witness, in
 /// `ext/spl`.
-pub fn raise_while_pending(req: &mut Request, pending: &Thrown, level: Level, message: &str) {
+pub fn raise_while_pending(
+    req: &mut Request,
+    pending: &Thrown,
+    level: Level,
+    message: &(impl AsRef<[u8]> + ?Sized),
+) {
     req.while_pending(pending, |req| raise(req, level, message));
 }
 
@@ -219,17 +247,17 @@ pub fn startup(req: &mut Request, level: Level, message: &str) {
 }
 
 /// `E_WARNING`.
-pub fn warning(req: &mut Request, message: &str) {
+pub fn warning(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) {
     raise(req, Level::Warning, message);
 }
 
 /// `E_NOTICE`.
-pub fn notice(req: &mut Request, message: &str) {
+pub fn notice(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) {
     raise(req, Level::Notice, message);
 }
 
 /// `E_DEPRECATED`.
-pub fn deprecated(req: &mut Request, message: &str) {
+pub fn deprecated(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) {
     raise(req, Level::Deprecated, message);
 }
 
@@ -805,13 +833,17 @@ pub fn throw(req: &mut Request, class: &str, message: &(impl AsRef<[u8]> + ?Size
     }
 }
 
-/// `zend_throw_error`, `zend_type_error` and `zend_value_error`
-/// (`Z/Zend/zend.c:1816-1900`): `message` printed by `zend_vspprintf`
-/// into a buffer that stands while [`throw`] makes the throwable and
-/// goes after it, so a printed throw peaks where php's does, 256 bytes
-/// over a [`throw`] for a sentence under 255. A message php hands
-/// `zend_throw_exception` as it stands, or `zend_throw_exception_ex`'s
-/// string that becomes the message itself, is [`throw`]'s.
+/// `zend_throw_error` (`Z/Zend/zend.c:1825-1855`): php-8.5.12 prints `message` with
+/// `zend_vstrpprintf` ([`strpprintf`]) and hands that string to
+/// `zend_throw_exception_ex(ce, 0, "%S", message)` ([`throw_exception_ex`]),
+/// which prints it once more into the string the throwable takes as its
+/// message; the first goes after the throw. So a printed throw peaks with
+/// both strings, each laid down by its own 256-byte `smart_str`, where
+/// 8.5.9 held one `zend_vspprintf` buffer.
+///
+/// php's four throws of a sentence side by side: `zend_type_error`'s
+/// ([`type_error`]), `zend_throw_error`'s, `zend_throw_exception_ex`'s
+/// ([`throw_exception_ex`]) and `zend_throw_exception`'s ([`throw`]):
 ///
 /// ```php
 /// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
@@ -822,28 +854,192 @@ pub fn throw(req: &mut Request, class: &str, message: &(impl AsRef<[u8]> + ?Size
 /// ```
 /// ```expect
 /// 14968 32
-/// 2024 0
-/// 1760 0
+/// 1816 0
+/// 1768 0
 /// 2312 0
 /// ```
-pub fn throw_error(req: &mut Request, class: &str, message: &str) -> Thrown {
-    match printf_buffer(req, message.len()) {
-        Ok(buffer) => {
-            let thrown = throw(req, class, message);
+pub fn throw_error(
+    req: &mut Request,
+    class: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
+) -> Thrown {
+    throw_printed(req, Printing::Twice, None, class, message.as_ref())
+}
+
+/// How php prints the sentence of a throwable it makes from a format,
+/// the two paths `Z/Zend/zend.c` has at php-8.5.12.
+#[derive(Clone, Copy)]
+pub(crate) enum Printing {
+    /// `zend_throw_error`: `zend_vstrpprintf`, then
+    /// `zend_throw_exception_ex`'s second print ([`throw_error`]).
+    Twice,
+    /// `zend_type_error`, `zend_value_error` and
+    /// `zend_argument_count_error`: one `zend_vspprintf` buffer standing
+    /// across `zend_throw_exception` ([`throw`]), 256 bytes over a
+    /// [`throw`] for a sentence under 255 ([`type_error`],
+    /// [`value_error`], [`argument_count_error`]).
+    Buffered,
+}
+
+/// The one home of a printed throw: `message` printed as `printing`
+/// says, the throwable of `class` made with it and thrown, chained over
+/// `previous` where one stands (`zend_throw_exception_internal`), and
+/// what the print laid down released once the throw is made. A refusal
+/// of the print hands `previous` on with it.
+fn throw_printed(
+    req: &mut Request,
+    printing: Printing,
+    previous: Option<Thrown>,
+    class: &str,
+    message: &[u8],
+) -> Thrown {
+    let refused = |req: &mut Request, previous: Option<Thrown>, thrown: Thrown| match previous {
+        Some(previous) => previous.chain(req, thrown),
+        None => thrown,
+    };
+    match printing {
+        Printing::Twice => {
+            let first = match strpprintf(req, message) {
+                Ok(first) => Owner::adopt(first),
+                Err(thrown) => return refused(req, previous, thrown),
+            };
+            let thrown = made_and_thrown(req, previous, |req| {
+                formatted_throwable(req, class, first.as_bytes())
+            });
+            first.give_up(req);
+            thrown
+        }
+        Printing::Buffered => {
+            let buffer = match printf_buffer(req, message.len()) {
+                Ok(buffer) => buffer,
+                Err(thrown) => return refused(req, previous, thrown),
+            };
+            let thrown =
+                made_and_thrown(req, previous, |req| new_throwable_made(req, class, message));
             req.heap_mut().free_block(buffer);
             thrown
         }
-        Err(refused) => refused,
     }
 }
 
-/// `zend_type_error`: [`throw_error`] of php's `TypeError`.
-pub(crate) fn type_error(req: &mut Request, message: &str) -> Thrown {
-    throw_error(req, "TypeError", message)
+/// The throwable `made` makes, thrown, or chained over `previous` where
+/// one stands ([`throw_chained`]).
+fn made_and_thrown(
+    req: &mut Request,
+    previous: Option<Thrown>,
+    made: impl FnOnce(&mut Request) -> Result<Value, Thrown>,
+) -> Thrown {
+    if let Some(previous) = previous {
+        return chained(req, previous, made);
+    }
+    match adopted(made(req)) {
+        Ok(throwable) => {
+            let thrown = throw_value(req, &throwable);
+            throwable.give_up(req);
+            thrown
+        }
+        Err(fatal) => fatal,
+    }
+}
+
+/// `zend_throw_exception_ex` (`Z/Zend/zend_exceptions.c:897`): `message`
+/// printed by `zend_vstrpprintf` ([`strpprintf`]), its `smart_str`
+/// standing while the string is laid down, and the string the
+/// throwable's message, where [`throw`]'s `zend_throw_exception` takes
+/// the C string as it stands. The `%` row of [`throw_error`]'s witness
+/// is php's `zend_mod_by_zero_helper`; beside it here, Reflection's and
+/// SPL's printed throws, `intdiv`'s plain `zend_throw_exception` and the
+/// same sentence thrown by the program:
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// pk(function () { try { new ReflectionClass("Nope"); } catch (ReflectionException $e) {} });
+/// pk(function () { try { (new ArrayIterator([]))->seek(5); } catch (OutOfBoundsException $e) {} });
+/// pk(function () { $z = 0; try { 1 % $z; } catch (DivisionByZeroError $e) {} });
+/// pk(function () { try { intdiv(1, 0); } catch (DivisionByZeroError $e) {} });
+/// pk(function () { try { throw new DivisionByZeroError("Modulo by zero"); } catch (DivisionByZeroError $e) {} });
+/// ```
+/// ```expect
+/// 2472 32
+/// 2592 0
+/// 1768 0
+/// 2360 0
+/// 1720 0
+/// ```
+///
+/// The message is the bytes `zend_vstrpprintf` printed, whole: php-8.5.12
+/// prints a name with `%S`, which keeps a NUL (GH-22905), where `%s`
+/// reads an argument to its first NUL and goes on with the format, so
+/// cutting an argument is its caller's, as [`class_not_found`] and
+/// [`undefined_function`] cut theirs. Here Reflection's `%S` beside
+/// `zend_fetch_class`'s and `zend_undefined_function`'s `%s`:
+///
+/// ```php
+/// $n = "foo\0bar";
+/// try { new ReflectionClass($n); } catch (ReflectionException $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// try { new $n; } catch (Error $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// try { $n(); } catch (Error $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// ```
+/// ```expect
+/// 436c6173732022666f6f006261722220646f6573206e6f74206578697374
+/// 436c6173732022666f6f22206e6f7420666f756e64
+/// 43616c6c20746f20756e646566696e65642066756e6374696f6e20666f6f2829
+/// ```
+pub fn throw_exception_ex(
+    req: &mut Request,
+    class: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
+) -> Thrown {
+    made_and_thrown(req, None, |req| {
+        formatted_throwable(req, class, message.as_ref())
+    })
+}
+
+/// `zend_type_error` (`Z/Zend/zend.c:1880`): php's `TypeError` with
+/// `message`, printed as [`Printing::Buffered`] says. The `TypeError` row
+/// of [`throw_error`]'s witness is `unserialize`'s.
+pub fn type_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+    throw_printed(req, Printing::Buffered, None, "TypeError", message.as_ref())
+}
+
+/// `zend_value_error` (`Z/Zend/zend.c:1905`): php's `ValueError` with
+/// `message`, printed as [`Printing::Buffered`] says.
+///
+/// ```php
+/// function pk($f) { $f(); $s = memory_get_usage(); memory_reset_peak_usage(); $f(); echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n"; }
+/// enum E: int { case A = 1; }
+/// pk(function () { try { E::from(3); } catch (ValueError $e) {} });
+/// pk(function () { try { array_chunk([], 0); } catch (ValueError $e) {} });
+/// ```
+/// ```expect
+/// 2648 32
+/// 2760 0
+/// ```
+pub fn value_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+    throw_printed(
+        req,
+        Printing::Buffered,
+        None,
+        "ValueError",
+        message.as_ref(),
+    )
+}
+
+/// `zend_argument_count_error` (`Z/Zend/zend.c:1892`): php's
+/// `ArgumentCountError` with `message`, printed as
+/// [`Printing::Buffered`] says.
+pub fn argument_count_error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
+    throw_printed(
+        req,
+        Printing::Buffered,
+        None,
+        "ArgumentCountError",
+        message.as_ref(),
+    )
 }
 
 /// `zend_throw_error(NULL, …)`: [`throw_error`] of php's `Error`.
-pub(crate) fn error(req: &mut Request, message: &str) -> Thrown {
+pub(crate) fn error(req: &mut Request, message: &(impl AsRef<[u8]> + ?Sized)) -> Thrown {
     throw_error(req, "Error", message)
 }
 
@@ -936,27 +1132,33 @@ pub(crate) fn cannot_add_element(req: &mut Request) -> Thrown {
 }
 
 /// `zend_undefined_function`: php's `Error` naming the function as the
-/// call wrote it.
+/// call wrote it, up to its first NUL, as php's `%s` reads it.
 pub(crate) fn undefined_function(req: &mut Request, name: &[u8]) -> Thrown {
-    let message = format!(
-        "Call to undefined function {}()",
-        String::from_utf8_lossy(name)
-    );
+    let message = [
+        b"Call to undefined function ",
+        crate::c_number::c_str(name),
+        b"()",
+    ]
+    .concat();
     error(req, &message)
 }
 
 /// `zend_undefined_method`: php's `Error` naming the class as declared
-/// and the method as written.
+/// and the method as written, up to its first NUL (`%s`).
 pub(crate) fn undefined_method(
     req: &mut Request,
     class: crate::api::values::ClassId,
     method: &[u8],
 ) -> Thrown {
     let class = req.symbols().class_name(class);
-    let message = format!(
-        "Call to undefined method {class}::{}()",
-        String::from_utf8_lossy(method)
-    );
+    let message = [
+        b"Call to undefined method ",
+        class.as_bytes(),
+        b"::",
+        crate::c_number::c_str(method),
+        b"()",
+    ]
+    .concat();
     error(req, &message)
 }
 
@@ -971,10 +1173,23 @@ pub(crate) fn non_static_method_call(
     error(req, &message)
 }
 
+/// `zend_get_constant_ex`'s and `ZEND_FETCH_CONSTANT`'s refusal where no
+/// constant answers the name, php's `Error` `Undefined constant "%s"`,
+/// the name as written to its first NUL, its bytes as they are.
+pub(crate) fn undefined_constant(req: &mut Request, name: &[u8]) -> Thrown {
+    let message = [
+        b"Undefined constant \"",
+        crate::c_number::c_str(name),
+        b"\"",
+    ]
+    .concat();
+    error(req, &message)
+}
+
 /// `zend_fetch_class`'s refusal where no class answers the name, php's
-/// `Error` naming it as written.
+/// `Error` naming it as written, up to its first NUL (`%s`).
 pub(crate) fn class_not_found(req: &mut Request, name: &[u8]) -> Thrown {
-    let message = format!("Class \"{}\" not found", String::from_utf8_lossy(name));
+    let message = [b"Class \"", crate::c_number::c_str(name), b"\" not found"].concat();
     error(req, &message)
 }
 
@@ -1027,10 +1242,19 @@ pub(crate) fn non_object_error(
 /// RuntimeException: Failed to call sub iterator method / inner
 /// ```
 pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: &str) -> Thrown {
+    chained(req, previous, |req| new_throwable_made(req, class, message))
+}
+
+/// [`throw_chained`] of the throwable `made` makes.
+fn chained(
+    req: &mut Request,
+    previous: Thrown,
+    made: impl FnOnce(&mut Request) -> Result<Value, Thrown>,
+) -> Thrown {
     let Some(earlier) = previous.exception().copied() else {
         return previous;
     };
-    match new_throwable_made(req, class, message) {
+    match made(req) {
         Ok(throwable) => {
             let Some(object) = throwable.as_object() else {
                 req.release(throwable);
@@ -1049,10 +1273,9 @@ pub fn throw_chained(req: &mut Request, previous: Thrown, class: &str, message: 
 }
 
 /// `zend_throw_error` with `EG(exception)` set: [`throw_chained`] with
-/// the buffer `zend_vspprintf` lays down for the message standing
-/// across the throw, as `throw_error` holds it, where `throw_chained`
-/// is `zend_throw_exception`, which formats nothing. A fatal or an
-/// `exit` is handed on as it is.
+/// the two strings [`throw_error`] prints, where `throw_chained` is
+/// `zend_throw_exception`, which prints nothing. A fatal or an `exit` is
+/// handed on as it is.
 ///
 /// ```php
 /// spl_autoload_register(function ($c) { throw new RuntimeException('boom'); });
@@ -1067,29 +1290,40 @@ pub fn throw_error_chained(
     req: &mut Request,
     previous: Thrown,
     class: &str,
-    message: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
 ) -> Thrown {
-    match printf_buffer(req, message.len()) {
-        Ok(buffer) => {
-            let thrown = throw_chained(req, previous, class, message);
-            req.heap_mut().free_block(buffer);
-            thrown
-        }
-        Err(refused) => previous.chain(req, refused),
-    }
+    throw_printed(
+        req,
+        Printing::Twice,
+        Some(previous),
+        class,
+        message.as_ref(),
+    )
 }
 
-/// `zend_throw_error` where `EG(exception)` may already be set, as after
-/// a resolution a deprecation's handler threw through: the new
-/// throwable with the pending one taken off the request and chained as
-/// its `previous` (`zend_throw_exception_internal`), or alone where
-/// none is pending, `zend_vspprintf`'s buffer standing across either.
-/// An `exit` or a fatal standing is handed on as it is.
-pub(crate) fn throw_over_pending(req: &mut Request, class: &str, message: &str) -> Thrown {
+/// A printed throw where `EG(exception)` may already be set, as after a
+/// resolution a deprecation's handler threw through: the new throwable,
+/// printed as `printing` says, with the pending one taken off the
+/// request and chained as its `previous` (`zend_throw_exception_internal`),
+/// or alone where none is pending. An `exit` or a fatal standing is
+/// handed on as it is.
+pub(crate) fn throw_over_pending(
+    req: &mut Request,
+    printing: Printing,
+    class: &str,
+    message: &(impl AsRef<[u8]> + ?Sized),
+) -> Thrown {
+    let message = message.as_ref();
     match req.take_pending_view() {
-        Some(earlier) => throw_error_chained(req, Thrown::of(Some(earlier)), class, message),
+        Some(earlier) => throw_printed(
+            req,
+            printing,
+            Some(Thrown::of(Some(earlier))),
+            class,
+            message,
+        ),
         None if req.is_pending() => Thrown::of(None),
-        None => throw_error(req, class, message),
+        None => throw_printed(req, printing, None, class, message),
     }
 }
 
@@ -1184,7 +1418,7 @@ pub(crate) fn throw_object(req: &mut Request, object: PhpObject) -> Thrown {
 /// echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
 /// ```
 /// ```expect
-/// 2328 32
+/// 2168 32
 /// 1128 0
 /// ```
 #[cfg_attr(debug_assertions, track_caller)]
@@ -1209,6 +1443,26 @@ pub(crate) fn new_throwable_made(
     let message = message.as_ref();
     let message = crate::c_number::c_str(message);
     let message = Owner::adopt(req.string_init(message)?);
+    throwable_with_message(req, class, message)
+}
+
+/// `zend_throw_exception_ex`'s throwable (`Z/Zend/zend_exceptions.c:897`):
+/// the message printed by `zend_vstrpprintf` ([`strpprintf`]), whose
+/// string the object takes as its message, made before the object so it
+/// stands across the trace.
+fn formatted_throwable(req: &mut Request, class: &str, message: &[u8]) -> Result<Value, Thrown> {
+    let message = Owner::adopt(strpprintf(req, message)?);
+    throwable_with_message(req, class, message)
+}
+
+/// `zend_throw_exception_zstr`'s object (`Z/Zend/zend_exceptions.c:858`):
+/// a new instance of `class`, its trace recorded, with `message` written
+/// as its message; `message` is given up where the object is refused.
+fn throwable_with_message(
+    req: &mut Request,
+    class: &str,
+    message: Owner<PhpString>,
+) -> Result<Value, Thrown> {
     let object = match req.new_object_of(class) {
         Ok(object) => object,
         Err(refused) => {
@@ -1264,7 +1518,7 @@ pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 /// echo memory_get_peak_usage() - $s, " ", memory_get_usage() - $s, "\n";
 /// ```
 /// ```expect
-/// 2608 32
+/// 2464 32
 /// ```
 pub(crate) fn throw_argument_error(
     req: &mut Request,
@@ -1400,7 +1654,7 @@ pub fn argument_error(req: &mut Request, class: &str, position: u32, tail: &str)
 
 /// `zend_wrong_parameters_count_error`'s `ArgumentCountError`, `fn()
 /// expects <tail>`, through `zend_argument_count_error`
-/// (`Z/Zend/zend.c:1880`): the method's member string and the printed
+/// (`Z/Zend/zend.c:1892`): the method's member string and the printed
 /// sentence's buffer stand while the throwable is made, so a throw
 /// peaks where php's does.
 ///
@@ -1417,7 +1671,7 @@ pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
     let message = format!("{}() expects {tail}", req.active_native());
     let member = active_member(req);
     under_name(req, member.as_deref(), |req| {
-        throw_error(req, "ArgumentCountError", &message)
+        argument_count_error(req, &message)
     })
 }
 

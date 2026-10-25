@@ -178,7 +178,7 @@ pub fn main() -> ExitCode {
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// bool(true)

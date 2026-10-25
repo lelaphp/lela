@@ -15,7 +15,9 @@ use std::ops::ControlFlow;
 use php_ext::abi::{Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, truthy, with_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, argument_count_error, argument_error, docref, value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, SmartStr, Value};
@@ -327,7 +329,7 @@ fn php_setcookie(
     cookie: &Cookie,
     url_encode: bool,
 ) -> Result<bool, Thrown> {
-    let refuse = |req: &mut Request, text: String| Err(throw_error(req, "ValueError", &text));
+    let refuse = |req: &mut Request, text: String| Err(value_error(req, &text));
     let function = if url_encode {
         "setcookie"
     } else {
@@ -448,7 +450,7 @@ fn cookie_options(
         let value = row.value().deref();
         let Key::Str(key) = key else {
             let text = format!("{function}(): option array cannot have numeric keys");
-            return Err(throw_error(req, "ValueError", &text));
+            return Err(value_error(req, &text));
         };
         let lower = key.as_bytes().to_ascii_lowercase();
         let string = |req: &mut Request| with_string(req, &value, <[u8]>::to_vec);
@@ -465,7 +467,7 @@ fn cookie_options(
                     "{function}(): option \"{}\" is invalid",
                     String::from_utf8_lossy(key.as_bytes())
                 );
-                return Err(throw_error(req, "ValueError", &text));
+                return Err(value_error(req, &text));
             }
         }
         Ok(ControlFlow::Continue(()))
@@ -509,7 +511,7 @@ fn setcookie_common(
                 let text = format!(
                     "{function}(): Expects exactly 3 arguments when argument #3 ($expires_or_options) is an array"
                 );
-                return Err(throw_error(req, "ArgumentCountError", &text));
+                return Err(argument_count_error(req, &text));
             }
             cookie_options(req, options, &mut cookie, function)?;
         }

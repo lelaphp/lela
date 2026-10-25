@@ -224,6 +224,18 @@ impl Reading {
         Ok(reading)
     }
 
+    /// A reading of `instrument` over `scope` whose key is `key`, timed now:
+    /// the record `witness --accept` writes of a verdict it captured, whose
+    /// scope is the crate's accepted verdicts and whose key is the verdict's
+    /// block ([`crate::witness::record_accepted`]), which `permit` asks
+    /// for as it asks for a crate's key.
+    pub(crate) fn keyed(instrument: &str, scope: &str, key: String) -> Result<Reading> {
+        let mut reading = Reading::new(instrument, scope);
+        reading.key = key;
+        reading.at = now()?;
+        Ok(reading)
+    }
+
     /// A reading of `instrument` over `scope` with every other field at its
     /// empty value and `at` at the Unix epoch; the instrument fills the
     /// rest. Its key is empty, which is no scope's hash, so `done` finds

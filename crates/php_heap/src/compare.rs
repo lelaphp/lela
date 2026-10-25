@@ -15,7 +15,7 @@
 use std::cmp::Ordering;
 
 use crate::array::Arr;
-use crate::numeric::{Exponent, Number, double_to_string, numeric_read};
+use crate::numeric::{Exponent, LongText, Number, double_to_string, numeric_read};
 use crate::zval::{Zval, ZvalType};
 
 /// One scalar as `zend_compare` switches on it: php's `IS_NULL`,
@@ -282,7 +282,7 @@ fn long_to_string(n: i64, s: &[u8]) -> Ordering {
     match numeric_read(s).filter(|r| !r.trailing).map(|r| r.number) {
         Some(Number::Long(l)) => n.cmp(&l),
         Some(Number::Double(d)) => three_way(Number::Long(n).double(), d),
-        None => n.to_string().as_bytes().cmp(s),
+        None => LongText::long(n).as_bytes().cmp(s),
     }
 }
 

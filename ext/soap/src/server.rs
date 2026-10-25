@@ -1011,9 +1011,8 @@ impl SoapServer {
                     };
                     let Some(declared) = declared_function(req, &name) else {
                         let shown = String::from_utf8_lossy(&name).into_owned();
-                        return Err(php_ext::raising::throw(
+                        return Err(php_ext::raising::type_error(
                             req,
-                            "TypeError",
                             &format!("SoapServer::addFunction(): Function \"{shown}\" not found"),
                         ));
                     };

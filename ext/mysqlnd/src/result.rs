@@ -1094,6 +1094,37 @@ enum FieldPacket {
 /// 16472
 /// ```
 ///
+/// A name no unit holds, such as `12345` from `SELECT 12345` or from an
+/// emulated `SELECT ?` that is bound an integer, is a string the set owns. That
+/// is opcache's answer and the model here, so a second set of the same name
+/// makes it again. php -n differs, because the CLI has no opcache there:
+/// `accel_startup` refuses it (`Z/ext/opcache/ZendAccelerator.c:3224`) and
+/// never installs `accel_init_interned_string_for_php` (`:610`), which
+/// answers with `zend_string_finit`'s size. Its `zend_string_init_interned`
+/// stays `zend_string_init_interned_request` (`Z/Zend/zend_string.c:312`):
+/// `zend_string_init`'s size, kept in `CG(interned_strings)` until the
+/// request ends and found again at the next ask. So under php -n the name
+/// costs 8 bytes less (`12345` takes the 32-byte bin, not finit's 40) and
+/// only once. Whether the `trace:immutable-literal-arrays` row covers
+/// that difference is a person's ruling, asked on #3425 (#3412):
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// mysqli_free_result(mysqli_query($l, "SELECT 1 AS a"));
+/// foreach ([1, 2] as $i) {
+///     $m = memory_get_usage();
+///     $r = mysqli_query($l, "SELECT 12345");
+///     echo memory_get_usage() - $m, " ";
+///     mysqli_free_result($r);
+///     echo memory_get_usage() - $m, "\n";
+/// }
+/// ```
+/// ```expect mysql regime=jit-off
+/// 16624 192
+/// 16464 0
+/// ```
+///
 /// A name's length past what is left of the packet is the faulty
 /// server's, and the 12 bytes after the names are there whole:
 ///
@@ -1395,8 +1426,7 @@ fn text_value(
             crate::codec::Bits::Long(n) if !native => {
                 PhpString::new(req, n.cast_unsigned().to_string().as_bytes()).map(Owner::into_value)
             }
-            crate::codec::Bits::Long(n) => Ok(Owner::int(n)),
-            crate::codec::Bits::Text(s) => PhpString::new(req, s.as_bytes()).map(Owner::into_value),
+            bits => bits.into_value(req),
         };
     }
     if native && php_type == PhpType::Long && field.flags & column::ZEROFILL == 0 {

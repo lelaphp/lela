@@ -9,11 +9,8 @@ use php_ext::abi::{
     Ref, Refusals, Std, This, Union, Untyped,
 };
 use php_ext::attr::php_class;
-use php_ext::call::call;
-use php_ext::coerce::{truthy, value_name};
-use php_ext::raising::{
-    Level, Thrown, arg_value_error, docref, leave_pending, throw, while_pending,
-};
+use php_ext::coerce::truthy;
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, value_error};
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::walk;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Value, ValueRef};
@@ -21,11 +18,7 @@ use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Resource, Valu
 use crate::archive::{self as za, Archive, Source};
 use crate::c;
 use crate::error::{Done, Er, Status};
-use crate::read::Stdio;
-use crate::write::Hooks;
-
-/// A callable kept past the call that registered it, `zend_fcc_dup`.
-pub(crate) type Kept = Box<Owner<Callable>>;
+use crate::holder::{self, ArchiveId, Callback, OnFailure};
 
 /// `ze_zip_object.last_id`, `-1` until an add.
 pub(crate) struct LastId(pub(crate) i64);
@@ -36,38 +29,26 @@ impl Default for LastId {
     }
 }
 
-/// `ze_zip_object`: the archive while open, its resolved name, the last
-/// index added, the error the last close left, and the callbacks.
+/// `ze_zip_object`: the archive while open, one count of its holder
+/// held, its resolved name, the last index added, and the error the
+/// last close left.
 #[derive(Default)]
 pub(crate) struct Intern {
-    pub(crate) za: Option<Box<Archive>>,
+    pub(crate) archive: Option<ArchiveId>,
     pub(crate) filename: Option<Vec<u8>>,
     pub(crate) last_id: LastId,
     pub(crate) err: Status,
-    pub(crate) progress: Option<Kept>,
-    pub(crate) cancel: Option<Kept>,
-    /// The archive's number, which its entries' streams read by.
-    pub(crate) id: u64,
 }
 
-/// The archive numbered `id` discarded: its entries' streams read php's
-/// `Containing zip archive was closed` from here.
-fn discarded(req: &mut Request, id: u64) {
-    let state = req.state::<crate::State>();
-    state.closed.insert(id);
-    state.files.remove(&id);
+/// The archive the object holds, open or under its close.
+pub(crate) fn archive_id(req: &mut Request, object: PhpObject) -> Option<ArchiveId> {
+    object.native::<Intern>(req)?.archive
 }
 
-/// Archive `id`'s stdio `FILE`, out of the request for one read.
-pub(crate) fn file(req: &mut Request, id: u64) -> Option<Stdio> {
-    req.state::<crate::State>().files.remove(&id)
-}
-
-/// Archive `id`'s stdio `FILE` back.
-pub(crate) fn file_back(req: &mut Request, id: u64, file: Option<Stdio>) {
-    if let Some(f) = file {
-        req.state::<crate::State>().files.insert(id, f);
-    }
+/// `php_zip_object_za`: the archive the object has open.
+pub(crate) fn za(req: &mut Request, object: PhpObject) -> Option<&mut Archive> {
+    let id = archive_id(req, object)?;
+    holder::archive(req, id)
 }
 
 /// `op` on the object's archive with the archive's `FILE` lent to it.
@@ -94,19 +75,8 @@ pub(crate) fn with_file<T>(
     object: PhpObject,
     op: impl FnOnce(&mut Archive) -> T,
 ) -> Option<T> {
-    let id = object.native::<Intern>(req).map_or(0, |i| i.id);
-    let mut f = file(req, id);
-    let za = object
-        .native_mut::<Intern>(req)
-        .and_then(|i| i.za.as_deref_mut());
-    let out = za.map(|za| {
-        za.lend(&mut f);
-        let out = op(za);
-        za.lend(&mut f);
-        out
-    });
-    file_back(req, id, f);
-    out
+    let id = archive_id(req, object)?;
+    holder::with_file(req, id, op)
 }
 
 /// `zip_prop_handlers`: the six properties, each read from the object.
@@ -139,21 +109,23 @@ impl Prop {
         let Some(i) = object.native::<Intern>(req) else {
             return Ok(Owner::null());
         };
-        let status = i.za.as_ref().map_or(i.err, |za| za.error);
+        let (last_id, err, filename) = (i.last_id.0, i.err, i.filename.clone());
+        let za = za(req, object);
+        let status = za.as_ref().map_or(err, |za| za.error);
         let scalar = match self {
-            Prop::LastId => Value::int(i.last_id.0),
+            Prop::LastId => Value::int(last_id),
             Prop::Status => Value::int(i64::from(status.zip)),
             Prop::StatusSys => Value::int(i64::from(status.sys)),
             Prop::NumFiles => {
-                let n = i.za.as_ref().map_or(0, |za| za.num_entries());
+                let n = za.map_or(0, |za| za.num_entries());
                 Value::int(i64::try_from(n).unwrap_or(i64::MAX))
             }
             Prop::Filename => {
-                let bytes = i.filename.clone().unwrap_or_default();
+                let bytes = filename.unwrap_or_default();
                 return Ok(PhpString::new(req, &bytes)?.into_value());
             }
             Prop::Comment => {
-                let bytes = i.za.as_ref().map(|za| za.archive_comment(0));
+                let bytes = za.map(|za| za.archive_comment(0));
                 return Ok(PhpString::new(req, &bytes.unwrap_or_default())?.into_value());
             }
         };
@@ -174,10 +146,11 @@ impl ObjectHandlers for Handlers {
         REFUSALS
     }
 
-    /// `php_zip_object_free_storage`: an open archive closed, its changes
-    /// written, and php's warning where that fails. What a progress or
-    /// cancel callback threw meanwhile is left pending, for the release
-    /// that freed the object to raise.
+    /// `php_zip_object_free_storage`: the object's count of its archive
+    /// released, which closes it unless a stream over one of its entries
+    /// still holds it: its changes written, and php's warning where that
+    /// fails. What a progress or cancel callback threw meanwhile is left
+    /// pending, for the release that freed the object to raise.
     ///
     /// ```php
     /// $f = sys_get_temp_dir() . '/witness-free-' . getmypid() . '.zip';
@@ -193,33 +166,11 @@ impl ObjectHandlers for Handlers {
     /// caught progress
     /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
-        if let Some((mut archive, id)) = object
+        if let Some(id) = object
             .native_mut::<Intern>(req)
-            .and_then(|i| Some((i.za.take()?, i.id)))
+            .and_then(|i| i.archive.take())
         {
-            let (result, thrown) = close_with_hooks(req, object, &mut archive);
-            discarded(req, id);
-            if result.is_err() {
-                let text = archive.error.text(req);
-                let text = format!("Cannot destroy the zip context: {text}");
-                match &thrown {
-                    Some(t) => {
-                        while_pending(req, t, |req| docref(req, Level::Warning, &text));
-                    }
-                    None => docref(req, Level::Warning, &text),
-                }
-            }
-            if let Some(thrown) = thrown {
-                leave_pending(req, thrown);
-            }
-        }
-        let kept = object
-            .native_mut::<Intern>(req)
-            .map(|i| (i.progress.take(), i.cancel.take()));
-        if let Some((p, c)) = kept {
-            for k in [p, c].into_iter().flatten() {
-                k.give_up(req);
-            }
+            holder::release(req, id);
         }
         Std.free_obj(req, object);
     }
@@ -253,7 +204,7 @@ impl ObjectHandlers for Handlers {
         value.give_up(req);
         let class = String::from_utf8_lossy(&Std.get_class_name(req, object)).into_owned();
         let message = format!("Cannot write read-only property {class}::${shown}");
-        Err(throw(req, "Error", &message))
+        Err(throw_error(req, "Error", &message))
     }
 
     fn get_property_ptr_ptr(
@@ -432,109 +383,30 @@ fn refresh(req: &mut Request, object: PhpObject) -> Result<(), Thrown> {
     Ok(())
 }
 
-/// The callbacks a close serves: the progress and cancel callables, and
-/// the first throwable either left.
-struct PhpHooks<'r> {
-    req: &'r mut Request,
-    progress: Option<Callable>,
-    cancel: Option<Callable>,
-    thrown: Option<Thrown>,
-}
-
-impl Hooks for PhpHooks<'_> {
-    /// `php_zip_progress_callback`.
-    fn progress(&mut self, current: f64) {
-        let (Some(cb), None) = (&self.progress, &self.thrown) else {
-            return;
-        };
-        match call(self.req, cb, &[Value::float(current)]) {
-            Ok(v) => v.give_up(self.req),
-            Err(t) => self.thrown = Some(t),
-        }
+/// php's `close` member read: `zend_throw_error(NULL, "Already being
+/// closed")` for a close or an open from a callback the close of the
+/// object's archive serves. php reads it past `ZIP_FROM_OBJECT`, which
+/// finds the archive under its close, so it comes first here.
+fn refuse_closing(req: &mut Request, id: Option<ArchiveId>) -> Result<(), Thrown> {
+    if id.is_some_and(|id| holder::closing(req, id)) {
+        return Err(throw_error(req, "Error", "Already being closed"));
     }
-
-    /// `php_zip_cancel_callback`: a throw cancels, and so does a value
-    /// that is no integer, after php's `TypeError`.
-    fn cancel(&mut self) -> bool {
-        if self.thrown.is_some() {
-            return true;
-        }
-        let Some(cb) = &self.cancel else {
-            return false;
-        };
-        let v = match call(self.req, cb, &[]) {
-            Ok(v) => v,
-            Err(t) => {
-                self.thrown = Some(t);
-                return true;
-            }
-        };
-        let long = match v.deref().as_ref() {
-            ValueRef::Int(n) => Some(n),
-            ValueRef::Bool(b) => Some(i64::from(b)),
-            ValueRef::Null => Some(0),
-            ValueRef::Float(f) if f.is_finite() => Some(c::float_long(f)),
-            ValueRef::Str(s) => std::str::from_utf8(s.as_bytes())
-                .ok()
-                .and_then(|t| t.trim().parse::<i64>().ok()),
-            _ => None,
-        };
-        let Some(long) = long else {
-            let name = value_name(self.req, &v);
-            v.give_up(self.req);
-            let message = format!(
-                "Return value of callback provided to ZipArchive::registerCancelCallback() must be of type int, {name} returned"
-            );
-            self.thrown = Some(throw(self.req, "TypeError", &message));
-            return true;
-        };
-        v.give_up(self.req);
-        c::i32(long) != 0
-    }
-}
-
-/// `zip_close` with the object's callbacks served, and the throwable
-/// one of them left.
-fn close_with_hooks(
-    req: &mut Request,
-    object: PhpObject,
-    archive: &mut Archive,
-) -> (Result<(), ()>, Option<Thrown>) {
-    let (progress, cancel) = object.native::<Intern>(req).map_or((None, None), |i| {
-        (
-            i.progress.as_deref().map(|k| (**k).clone()),
-            i.cancel.as_deref().map(|k| (**k).clone()),
-        )
-    });
-    let umask = req.environment().umask();
-    let mut file = file(req, object.native::<Intern>(req).map_or(0, |i| i.id));
-    archive.lend(&mut file);
-    let mut hooks = PhpHooks {
-        req,
-        progress,
-        cancel,
-        thrown: None,
-    };
-    let result = archive.close(&mut hooks, umask).map_err(|_| ());
-    (result, hooks.thrown)
+    Ok(())
 }
 
 /// `zend_value_error("Invalid or uninitialized Zip object")`.
 fn invalid(req: &mut Request) -> Thrown {
-    throw(req, "ValueError", "Invalid or uninitialized Zip object")
+    value_error(req, "Invalid or uninitialized Zip object")
 }
 
 /// `ZIP_FROM_OBJECT`: the open archive, or php's `ValueError`.
 macro_rules! archive {
     ($req:expr, $this:expr) => {{
         let object = $this.object();
-        if object.native::<Intern>($req).is_none_or(|i| i.za.is_none()) {
+        if za($req, object).is_none() {
             return Err(invalid($req));
         }
-        match object
-            .native_mut::<Intern>($req)
-            .and_then(|i| i.za.as_deref_mut())
-        {
+        match za($req, object) {
             Some(za) => za,
             None => return Err(invalid($req)),
         }
@@ -555,7 +427,7 @@ fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
 /// `RETURN_SB`.
 fn stat_array(req: &mut Request, st: &za::Stat) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
-    let name = string(req, &st.name)?;
+    let name = string(req, c_str(&st.name))?;
     let rows: [(&[u8], Value); 8] = [
         (b"name", Value::string(*name)),
         (b"index", Value::int(c::long(st.index))),
@@ -594,7 +466,7 @@ pub(crate) fn basedir_refuses(req: &mut Request, path: &[u8]) -> bool {
         .is_err()
 }
 
-fn host(path: &[u8]) -> PathBuf {
+pub(crate) fn host(path: &[u8]) -> PathBuf {
     use std::os::unix::ffi::OsStrExt;
     PathBuf::from(std::ffi::OsStr::from_bytes(path))
 }
@@ -633,10 +505,7 @@ fn add_file(
         file = Some(f);
     }
     let source = Source::file(host(&resolved), file, c::u64(start), len);
-    let Some(za) = object
-        .native_mut::<Intern>(req)
-        .and_then(|i| i.za.as_deref_mut())
-    else {
+    let Some(za) = za(req, object) else {
         return Ok(false);
     };
     let source = match source {
@@ -675,17 +544,16 @@ fn added(
     object: PhpObject,
     add: impl FnOnce(&mut Archive) -> Done<usize>,
 ) -> bool {
-    let Some(i) = object.native_mut::<Intern>(req) else {
-        return false;
-    };
-    let Some(za) = i.za.as_deref_mut() else {
+    let Some(za) = za(req, object) else {
         return false;
     };
     let result = add(za);
     if result.is_ok() {
         za.error = Status::default();
     }
-    i.last_id.0 = result.map_or(-1, |n| c::long(n as u64));
+    if let Some(i) = object.native_mut::<Intern>(req) {
+        i.last_id.0 = result.map_or(-1, |n| c::long(n as u64));
+    }
     result.is_ok()
 }
 
@@ -958,54 +826,50 @@ impl ZipArchive {
             return Ok(Union::A(false));
         };
         let object = this.object();
-        if let Some((mut old, id)) = object
-            .native_mut::<Intern>(req)
-            .and_then(|i| Some((i.za.take()?, i.id)))
+        let mut pending = None;
+        let id = archive_id(req, object);
+        refuse_closing(req, id)?;
+        if let Some(id) = id
+            && let Some(closed) = holder::close(req, id, OnFailure::Keep)
         {
-            let (result, thrown) = close_with_hooks(req, object, &mut old);
-            discarded(req, id);
-            if result.is_err() {
-                docref(req, Level::Warning, "Empty string as source");
+            if closed.error.is_some() {
+                let thrown = closed.thrown;
+                let text = "Empty string as source";
+                holder::diagnose(req, thrown.as_ref(), Level::Warning, text);
+                return thrown.map_or(Ok(Union::A(false)), Err);
             }
-            if let Some(t) = thrown {
-                return Err(t);
+            if let Some(i) = object.native_mut::<Intern>(req) {
+                i.archive = None;
             }
-            if result.is_err() {
-                return Ok(Union::A(false));
-            }
+            holder::release(req, id);
+            pending = closed.thrown;
         }
         if let Some(i) = object.native_mut::<Intern>(req) {
             i.filename = None;
         }
         let mut flags = flags;
         if flags & 0x18 == 0 && std::fs::metadata(host(&resolved)).is_ok_and(|m| m.len() == 0) {
-            docref(
-                req,
-                Level::Deprecated,
-                "Using empty file as ZipArchive is deprecated",
-            );
+            let text = "Using empty file as ZipArchive is deprecated";
+            holder::diagnose(req, pending.as_ref(), Level::Deprecated, text);
             flags |= 8;
         }
         let opened = match u32::try_from(flags) {
             Ok(flags) => Archive::open(host(&resolved), flags),
             Err(_) => Err(Status::of(Er::Inval, 0)),
         };
-        let mut archive = match opened {
+        // What the old archive's callbacks threw is raised as the open
+        // returns, the new archive opened as php opens it meanwhile.
+        let raise = |r: Union<bool, i64>| pending.map_or(Ok(r), Err);
+        let archive = match opened {
             Ok(archive) => archive,
-            Err(status) => return Ok(Union::B(i64::from(status.zip))),
+            Err(status) => return raise(Union::B(i64::from(status.zip))),
         };
-        let state = req.state::<crate::State>();
-        state.archives += 1;
-        let id = state.archives;
-        if let Some(f) = archive.data.as_mut().and_then(|d| d.stdio.take()) {
-            state.files.insert(id, f);
-        }
+        let id = holder::create(req, archive);
         if let Some(i) = object.native_mut::<Intern>(req) {
-            i.za = Some(Box::new(archive));
+            i.archive = Some(id);
             i.filename = Some(resolved);
-            i.id = id;
         }
-        Ok(Union::A(true))
+        raise(Union::A(true))
     }
 
     /// `ZipArchive::setPassword()`: the password encrypted entries are
@@ -1076,39 +940,55 @@ impl ZipArchive {
     /// string(59) "Failure to create temporary file: No such file or directory"
     /// Invalid or uninitialized Zip object
     /// ```
+    ///
+    /// A callback the close serves that closes or opens the archive again
+    /// is refused, as php 8.5.12 refuses it (GH-23747):
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('closing-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE); $z->addFromString('a', 'x');
+    /// $z->registerProgressCallback(0.0, function () use ($z) {
+    ///     static $done = false;
+    ///     if ($done) return;
+    ///     $done = true;
+    ///     foreach (['close', 'open'] as $m) {
+    ///         try { $m === 'close' ? $z->close() : $z->open('closing-witness.zip'); } catch (Error $e) { echo "$m: ", $e::class, ': ', $e->getMessage(), "\n"; }
+    ///     }
+    ///     var_dump($z->status);
+    /// });
+    /// var_dump($z->close(), $z->open('closing-witness.zip'), $z->numFiles); $z->close(); unlink('closing-witness.zip');
+    /// ```
+    /// ```expect
+    /// close: Error: Already being closed
+    /// open: Error: Already being closed
+    /// int(0)
+    /// bool(true)
+    /// bool(true)
+    /// int(1)
+    /// ```
     #[php(tentative)]
     fn close(req: &mut Rq, this: Z) -> R<bool> {
         let object = this.object();
-        archive!(req, this);
-        let Some(mut za) = object.native_mut::<Intern>(req).and_then(|i| i.za.take()) else {
+        let id = archive_id(req, object);
+        refuse_closing(req, id)?;
+        let Some((id, closed)) =
+            id.and_then(|id| Some((id, holder::close(req, id, OnFailure::Discard)?)))
+        else {
             return Err(invalid(req));
         };
-        let (result, thrown) = close_with_hooks(req, object, &mut za);
-        discarded(req, object.native::<Intern>(req).map_or(0, |i| i.id));
-        let mut err = Status::default();
-        if result.is_err() {
-            let text = za.error.text(req);
-            match &thrown {
-                Some(t) => {
-                    while_pending(req, t, |req| docref(req, Level::Warning, &text));
-                }
-                None => docref(req, Level::Warning, &text),
-            }
-            err = za.error;
+        if let Some(error) = closed.error {
+            let text = error.text(req);
+            holder::diagnose(req, closed.thrown.as_ref(), Level::Warning, &text);
         }
-        drop(za);
         req.clear_stat_cache();
-        let kept = object.native_mut::<Intern>(req).map(|i| {
-            i.err = err;
+        if let Some(i) = object.native_mut::<Intern>(req) {
+            i.err = closed.error.unwrap_or_default();
             i.filename = None;
-            (i.progress.take(), i.cancel.take())
-        });
-        for k in kept.into_iter().flat_map(|(p, c)| [p, c]).flatten() {
-            k.give_up(req);
+            i.archive = None;
         }
-        match thrown {
+        holder::release(req, id);
+        match closed.thrown {
             Some(t) => Err(t),
-            None => Ok(result.is_ok()),
+            None => Ok(closed.error.is_none()),
         }
     }
 
@@ -1155,12 +1035,11 @@ impl ZipArchive {
     /// ```
     #[php(tentative)]
     fn getStatusString(req: &mut Rq, this: Z) -> R<Owner<PhpString>> {
-        let status = this
-            .object()
+        let object = this.object();
+        let err = object
             .native::<Intern>(req)
-            .map_or(Status::default(), |i| {
-                i.za.as_ref().map_or(i.err, |za| za.error)
-            });
+            .map_or(Status::default(), |i| i.err);
+        let status = za(req, object).map_or(err, |za| za.error);
         let text = status.text(req);
         PhpString::new(req, text.as_bytes())
     }
@@ -1179,11 +1058,11 @@ impl ZipArchive {
     /// int(0)
     /// ```
     fn clearError(req: &mut Rq, this: Z) {
-        if let Some(i) = this.object().native_mut::<Intern>(req) {
-            match &mut i.za {
-                Some(za) => za.error = Status::default(),
-                None => i.err = Status::default(),
-            }
+        let object = this.object();
+        if let Some(za) = za(req, object) {
+            za.error = Status::default();
+        } else if let Some(i) = object.native_mut::<Intern>(req) {
+            i.err = Status::default();
         }
     }
 
@@ -1379,15 +1258,18 @@ impl ZipArchive {
     }
 
     /// `ZipArchive::addGlob()`: each file a glob matches, named as the
-    /// options shape it.
+    /// options shape it; without options php 8.5.12's defaults, an entry
+    /// of the name overwritten and the method left to libzip.
     ///
     /// ```php
-    /// @mkdir('glob-witness'); file_put_contents('glob-witness/a.txt', 'a'); file_put_contents('glob-witness/b.txt', 'b'); file_put_contents('glob-witness/c.php', 'c');
+    /// @mkdir('glob-witness'); file_put_contents('glob-witness/a.txt', 'a'); file_put_contents('glob-witness/b.txt', 'b'); file_put_contents('glob-witness/c.php', 'c'); file_put_contents('glob-witness/d.log', str_repeat('d', 999));
     /// $z = new ZipArchive; $z->open('glob-witness.zip', ZipArchive::CREATE);
     /// var_dump($z->addGlob('glob-witness/*.txt', 0, ['remove_path' => 'glob-witness', 'add_path' => 'in/', 'comp_method' => ZipArchive::CM_STORE]));
     /// var_dump($z->addGlob('glob-witness/*.php', 0, ['remove_all_path' => true]), $z->addGlob('glob-witness/*.none'), $z->addGlob('*', -1));
     /// try { $z->addGlob('*', 0, ['add_path' => '']); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
     /// try { $z->addGlob('*', 0, ['flags' => 'x']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+    /// var_dump(count($z->addGlob('glob-witness/*.log')), count($z->addGlob('glob-witness/*.log')));
+    /// $z->close(); $z->open('glob-witness.zip');
     /// for ($i = 0; $i < $z->numFiles; $i++) { echo $z->getNameIndex($i), ' ', $z->statIndex($i)['comp_method'], "\n"; }
     /// $z->close(); unlink('glob-witness.zip'); array_map('unlink', glob('glob-witness/*')); rmdir('glob-witness');
     /// ```
@@ -1399,7 +1281,7 @@ impl ZipArchive {
     ///   string(18) "glob-witness/b.txt"
     /// }
     ///
-    /// Warning: ZipArchive::addGlob(): At least one of the passed flags is invalid or not supported on this platform in %s on line 5
+    /// Warning: ZipArchive::addGlob(): At least one of the passed flags is invalid or not supported on this platform in %s on line %d
     /// array(1) {
     ///   [0]=>
     ///   string(18) "glob-witness/c.php"
@@ -1409,9 +1291,12 @@ impl ZipArchive {
     /// bool(false)
     /// Option "add_path" must not be empty
     /// Option "flags" must be of type int, string given
+    /// int(1)
+    /// int(1)
     /// in/a.txt 0
     /// in/b.txt 0
     /// c.php 0
+    /// glob-witness/d.log 8
     /// ```
     #[php(tentative)]
     fn addGlob(
@@ -1943,12 +1828,13 @@ impl ZipArchive {
     }
 
     /// `ZipArchive::getNameIndex()`: the name, a CP437 one as UTF-8 unless
-    /// `FL_ENC_RAW` asks for its bytes.
+    /// `FL_ENC_RAW` asks for its bytes; the index taken whole, as php
+    /// 8.5.12 casts it to `zip_uint64_t`.
     ///
     /// ```php
     /// $z = new ZipArchive; $z->open('name-witness.zip', ZipArchive::CREATE); $z->addFromString("caf\x82", '1'); $z->close();
     /// $z->open('name-witness.zip');
-    /// var_dump($z->getNameIndex(0), bin2hex($z->getNameIndex(0, ZipArchive::FL_ENC_RAW)), $z->getNameIndex(1), $z->getNameIndex(-1));
+    /// var_dump($z->getNameIndex(0), bin2hex($z->getNameIndex(0, ZipArchive::FL_ENC_RAW)), $z->getNameIndex(1), $z->getNameIndex(-1), $z->getNameIndex(1 << 32));
     /// $z->close(); unlink('name-witness.zip');
     /// ```
     /// ```expect
@@ -1956,11 +1842,12 @@ impl ZipArchive {
     /// string(8) "63616682"
     /// bool(false)
     /// bool(false)
+    /// bool(false)
     /// ```
     #[php(tentative)]
     fn getNameIndex(req: &mut Rq, this: Z, index: i64, #[php(default = 0)] flags: i64) -> Str {
         let za = archive!(req, this);
-        match za.get_name(self::index(i64::from(c::i32(index))), c::u32(flags)) {
+        match za.get_name(self::index(index), c::u32(flags)) {
             Ok(name) => Ok(OrFalse::Value(PhpString::new(req, c_str(&name))?)),
             Err(_) => Ok(OrFalse::False),
         }
@@ -2507,15 +2394,10 @@ impl ZipArchive {
     /// ```
     #[php(tentative)]
     fn registerProgressCallback(req: &mut Rq, this: Z, rate: f64, callback: Callable) -> R<bool> {
-        archive!(req, this);
+        archive!(req, this).progress = Some(rate);
         let kept = Box::new(Owner::take(req, callback));
-        let old = match this.object().native_mut::<Intern>(req) {
-            Some(i) => {
-                if let Some(za) = &mut i.za {
-                    za.progress = Some(rate);
-                }
-                i.progress.replace(kept)
-            }
+        let old = match archive_id(req, this.object()) {
+            Some(id) => holder::keep(req, id, Callback::Progress, kept),
             None => Some(kept),
         };
         if let Some(old) = old {
@@ -2544,15 +2426,10 @@ impl ZipArchive {
     /// ```
     #[php(tentative)]
     fn registerCancelCallback(req: &mut Rq, this: Z, callback: Callable) -> R<bool> {
-        archive!(req, this);
+        archive!(req, this).cancel = true;
         let kept = Box::new(Owner::take(req, callback));
-        let old = match this.object().native_mut::<Intern>(req) {
-            Some(i) => {
-                if let Some(za) = &mut i.za {
-                    za.cancel = true;
-                }
-                i.cancel.replace(kept)
-            }
+        let old = match archive_id(req, this.object()) {
+            Some(id) => holder::keep(req, id, Callback::Cancel, kept),
             None => Some(kept),
         };
         if let Some(old) = old {
@@ -2642,11 +2519,7 @@ fn set_encryption(
     password: Option<PhpString>,
 ) -> bool {
     let password = password.map(|p| c_str(p.as_bytes()).to_vec());
-    let Some(za) = this
-        .object()
-        .native_mut::<Intern>(req)
-        .and_then(|i| i.za.as_deref_mut())
-    else {
+    let Some(za) = za(req, this.object()) else {
         return false;
     };
     if za.set_encryption(idx, 0, None).is_err() {
@@ -2669,7 +2542,34 @@ fn locate(za: &mut Archive, which: &Union<i64, Vec<u8>>, flags: u32) -> Option<z
     }
 }
 
-/// `php_zip_get_from`: `len` bytes of the entry, all of it under `0`.
+/// `php_zip_get_from`: `len` bytes of the entry, all of it under `0`,
+/// read to the length or the end as php 8.5.12 reads it, and one byte
+/// past an entry read whole, so the CRC and the length are held to the
+/// stat's; php's warning for the error that meets.
+///
+/// ```php
+/// $z = new ZipArchive; $z->open('getfrom-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+/// $z->addFromString('e', ''); $z->addFromString('a', str_repeat('A', 10)); $z->setCompressionName('e', ZipArchive::CM_STORE); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->close();
+/// $b = file_get_contents('getfrom-witness.zip');
+/// for ($i = 0, $cd = 0; $i + 30 < strlen($b); $i++) {
+///     if (substr($b, $i, 4) === "PK\x03\x04" && $b[$i + 30] === 'e') $b[$i + 14] = "\x01";
+///     if (substr($b, $i, 4) === "PK\x01\x02") { if ($cd++ === 0) $b[$i + 16] = "\x01"; else $b = substr_replace($b, pack('V', 20), $i + 24, 4); }
+/// }
+/// file_put_contents('getfrom-witness.zip', $b);
+/// $z->open('getfrom-witness.zip');
+/// var_dump($z->getFromName('e'), $z->getFromIndex(1), $z->getFromName('a', 5), $z->getStatusString());
+/// $z->close(); unlink('getfrom-witness.zip');
+/// ```
+/// ```expect
+///
+/// Warning: ZipArchive::getFromName(): Cannot read entry: CRC error in %s on line %d
+///
+/// Warning: ZipArchive::getFromIndex(): Cannot read entry: Zip archive inconsistent: file length in header doesn't match actual file length in %s on line %d
+/// bool(false)
+/// bool(false)
+/// string(5) "AAAAA"
+/// string(8) "No error"
+/// ```
 fn get_from(req: &mut Rq, this: Z, which: &Union<i64, Vec<u8>>, len: i64, flags: i64) -> Str {
     let za = archive!(req, this);
     if matches!(which, Union::B(name) if name.is_empty()) {
@@ -2679,19 +2579,34 @@ fn get_from(req: &mut Rq, this: Z, which: &Union<i64, Vec<u8>>, len: i64, flags:
     let Some(st) = locate(za, which, flags) else {
         return Ok(OrFalse::False);
     };
-    if st.size < 1 {
-        return Ok(OrFalse::Value(PhpString::new(req, b"")?));
-    }
     let len = usize::try_from(if len < 1 { st.size } else { c::u64(len) }).unwrap_or(usize::MAX);
     let idx = usize::try_from(st.index).unwrap_or(usize::MAX);
-    let data = with_file(req, this.object(), |za| {
+    let read = with_file(req, this.object(), |za| {
         let mut zf = za.fopen(idx, flags, None).ok()?;
-        Some(za.read_entry(&mut zf, len).unwrap_or_default())
+        let mut data = Vec::new();
+        while data.len() < len {
+            match za.read_entry(&mut zf, len - data.len()) {
+                Ok(chunk) if chunk.is_empty() => break,
+                Ok(chunk) => data.extend_from_slice(&chunk),
+                Err(status) => return Some(Err(status)),
+            }
+        }
+        if data.len() as u64 == st.size
+            && let Err(status) = za.read_entry(&mut zf, 1)
+        {
+            return Some(Err(status));
+        }
+        Some(Ok(data))
     });
-    let Some(Some(data)) = data else {
-        return Ok(OrFalse::False);
-    };
-    Ok(OrFalse::Value(PhpString::new(req, &data)?))
+    match read {
+        Some(Some(Ok(data))) => Ok(OrFalse::Value(PhpString::new(req, &data)?)),
+        Some(Some(Err(status))) => {
+            let text = status.text(req);
+            docref(req, Level::Warning, &format!("Cannot read entry: {text}"));
+            Ok(OrFalse::False)
+        }
+        _ => Ok(OrFalse::False),
+    }
 }
 
 /// `php_zip_get_stream`: the entry as a read stream, its name the
@@ -2709,8 +2624,11 @@ fn get_stream(req: &mut Rq, this: Z, which: &Union<i64, Vec<u8>>, flags: i64) ->
     let Some(Ok(zf)) = with_file(req, this.object(), |za| za.fopen(idx, flags, None)) else {
         return Ok(Untyped(OrFalse::False));
     };
-    let id = this.object().native::<Intern>(req).map_or(0, |i| i.id);
-    let stream = crate::stream::open_entry(req, zf, Some((&st.name, id)), b"rb", None, None)?;
+    let Some(id) = archive_id(req, this.object()) else {
+        return Ok(Untyped(OrFalse::False));
+    };
+    let name = c_str(&st.name);
+    let stream = crate::stream::open_entry(req, zf, Some((name, id)), b"rb", None, None)?;
     Ok(Untyped(stream.map_or(OrFalse::False, |s| {
         OrFalse::Value(s.into_resource())
     })))

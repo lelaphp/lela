@@ -28,7 +28,7 @@ use php_ext::abi::{OrFalse, Passed, Raw, Ref, Union, Untyped};
 use php_ext::attr::{php_const, php_function};
 use php_ext::coerce::coerce_param;
 use php_ext::decl::Type;
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, type_error};
 use php_ext::request::Request;
 use php_ext::values::{Charset, Key, Layout, Owner, PhpArray, PhpString, Value};
 use php_ext_random::Rng;
@@ -1493,6 +1493,22 @@ fn ltrim(
 /// wordwrap(): Argument #4 ($cut_long_words) cannot be true when argument #2 ($width) is 0
 /// ```
 ///
+/// A break the text ends with is the text's own, and no second one is
+/// written after it (`wordwrap_trailing_break.phpt`):
+///
+/// ```php
+/// foreach ([["abc\n", 3, "\n", true], ["ab cd\n", 5, "\n", true], ["abc-", 3, "-", true], ["\r\n", 1, "\r\n", true], ["ab cd\r\n", 5, "\r\n", false]] as [$t, $w, $b, $c]) {
+///     echo json_encode(wordwrap($t, $w, $b, $c)), "\n";
+/// }
+/// ```
+/// ```expect
+/// "abc\n"
+/// "ab cd\n"
+/// "abc-"
+/// "\r\n"
+/// "ab cd\r\n"
+/// ```
+///
 /// Where the break is longer than a byte or long words are cut, php asks
 /// for the longest the text can grow to before it scans a byte, and the
 /// memory limit is met there, whatever the text turns out to be. Since
@@ -1900,9 +1916,8 @@ fn implode_frameless(
 /// call was made by, which `get_active_function_name()` puts in it.
 fn not_an_array(req: &mut Request) -> Thrown {
     let name = req.frames().active_function_name();
-    throw_error(
+    type_error(
         req,
-        "TypeError",
         &format!(
             "{name}(): If argument #1 ($separator) is of type string, argument #2 ($array) must be of type array, null given"
         ),

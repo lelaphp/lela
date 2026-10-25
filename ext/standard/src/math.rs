@@ -9,7 +9,9 @@ use php_ext::abi::{Passed, Raw, Union};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::coerce::{BinaryOp, binary_op, coerce_param, is_space};
 use php_ext::decl::Type;
-use php_ext::raising::{Level, Thrown, arg_value_error, deprecated, docref, throw, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_value_error, deprecated, docref, throw_exception_ex, value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
@@ -330,6 +332,18 @@ fn whole(num: Number, apply: fn(f64) -> f64) -> f64 {
 ///   }
 ///   - Return [ float ]
 /// }
+/// ```
+///
+/// A whole value rounded to no places is itself (gh22410), so one past
+/// 2^53 is not moved by the pre-rounding:
+///
+/// ```php
+/// var_dump(round(1.0), round((float) 9003241321073828), round((float) -9003241321073828));
+/// ```
+/// ```expect
+/// float(1)
+/// float(9003241321073828)
+/// float(-9003241321073828)
 /// ```
 #[php_function]
 fn round(
@@ -656,10 +670,14 @@ fn is_infinite(num: f64) -> bool {
 fn intdiv(req: &mut Request, num1: i64, num2: i64) -> Result<i64, Thrown> {
     let (dividend, divisor) = (num1, num2);
     if divisor == 0 {
-        return Err(throw(req, "DivisionByZeroError", "Division by zero"));
+        return Err(throw_exception_ex(
+            req,
+            "DivisionByZeroError",
+            "Division by zero",
+        ));
     }
     if divisor == -1 && dividend == i64::MIN {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ArithmeticError",
             "Division of PHP_INT_MIN by -1 is not an integer",
@@ -1081,9 +1099,8 @@ fn value_to_base(req: &mut Request, value: Number, base: u32) -> Result<Vec<u8>,
     if let Union::B(f) = value {
         let mut fvalue = f.floor();
         if fvalue.is_infinite() {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 &format!("An infinite value cannot be converted to base {base}"),
             ));
         }
@@ -1506,6 +1523,11 @@ fn round_helper(integral: f64, value: f64, exponent: f64, places: i32, mode: i32
 #[allow(clippy::float_cmp)]
 pub(crate) fn math_round(value: f64, places: i32, mode: i32) -> f64 {
     if !value.is_finite() || value == 0.0 {
+        return value;
+    }
+    // php 8.5.12 (gh22410): a whole value rounded to no places is itself,
+    // where the pre-rounding check could move a large one by one.
+    if places == 0 && value == value.trunc() {
         return value;
     }
     let places = places.max(i32::MIN + 1);

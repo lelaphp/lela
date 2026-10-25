@@ -371,15 +371,16 @@ fn mb_convert_case(
 ///
 /// The conversion's buffer is the request's and grows fallibly since 8.5.12,
 /// so a conversion past the memory limit is refused its growth and the
-/// limit's fatal is raised as the call returns:
+/// limit's fatal is raised as the call returns. The case crosses the limit
+/// where a new chunk is asked for, whose figure holds in any layout (#3442):
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(strlen(mb_strtoupper(str_repeat("\u{0390}", 1 << 20), "UTF-8")), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_strtoupper(str_repeat("\u{0390}", 400000), "UTF-8")), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 1572864 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn mb_strtoupper(

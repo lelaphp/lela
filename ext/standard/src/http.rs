@@ -43,11 +43,13 @@ use php_ext::abi::{Raw, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::{value_name, with_string};
 use php_ext::decl::{ClassKind, EnumBacking};
-use php_ext::raising::{Thrown, arg_type_error, throw_error, warning};
+use php_ext::raising::{Thrown, arg_type_error, throw_error, value_error, warning};
 use php_ext::request::{BodyLimits, Ini, Request};
 use php_ext::values::walk;
 use php_ext::values::walk::Hold;
-use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
+use php_ext::values::{
+    ClassId, Key, Owner, PhpArray, PhpObject, PhpString, SmartStr, Value, ValueRef,
+};
 
 use crate::string::Decimal;
 use crate::url::{PHP_QUERY_RFC3986, url_encode};
@@ -141,18 +143,13 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
         let value = row.value().deref();
         let key = match key {
             Key::Int(_) => {
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    "Invalid integer key in $options argument",
-                ));
+                return Err(value_error(req, "Invalid integer key in $options argument"));
             }
             Key::Str(key) => key,
         };
         if key.is_empty() {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 "Invalid empty string key in $options argument",
             ));
         }
@@ -161,7 +158,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
                 "Invalid key \"{}\" in $options argument",
                 String::from_utf8_lossy(key.as_bytes())
             );
-            return Err(throw_error(req, "ValueError", &text));
+            return Err(value_error(req, &text));
         };
         let value = value.deref();
         let quantity = match value.as_ref() {
@@ -178,7 +175,7 @@ fn body_limits(req: &mut Request, options: PhpArray) -> Result<Vec<(Limit, i64)>
                     "Invalid {} value in $options argument",
                     value_name(req, &value)
                 );
-                return Err(throw_error(req, "ValueError", &text));
+                return Err(value_error(req, &text));
             }
         };
         limits.push((limit, quantity));
@@ -197,7 +194,8 @@ fn enum_backing(req: &Request, object: PhpObject) -> Option<EnumBacking> {
 
 /// One pass of `php_url_encode_hash_ex`'s walk.
 struct Query<'a> {
-    out: Vec<u8>,
+    /// `formstr`, the `smart_str` the walk appends to.
+    out: SmartStr,
     separator: &'a [u8],
     raw: bool,
 }
@@ -226,39 +224,44 @@ impl Query<'_> {
                     .class_decl(object.class())
                     .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
                     .unwrap_or_default();
-                return Err(throw_error(
+                return Err(value_error(
                     req,
-                    "ValueError",
                     &format!("Unbacked enum {name} cannot be converted to a string"),
                 ));
             }
             value = object.prop(req, b"value").unwrap_or_default();
         }
-        if !self.out.is_empty() {
-            self.out.extend_from_slice(self.separator);
+        let out = &mut self.out;
+        if !out.as_bytes().is_empty() {
+            out.append(req, self.separator)?;
         }
         if let Some(prefix) = key_prefix {
-            self.out.extend_from_slice(prefix);
+            out.append(req, prefix)?;
         }
+        let mut encoded = Vec::new();
         match key {
-            KeyText::Name(name) => url_encode(name, self.raw, &mut self.out),
+            KeyText::Name(name) => {
+                url_encode(name, self.raw, &mut encoded);
+                out.append(req, &encoded)?;
+            }
             KeyText::Index(index) => {
-                self.out.extend_from_slice(num_prefix);
-                self.out.extend_from_slice(Decimal::of(*index).as_bytes());
+                out.append(req, num_prefix)?;
+                out.append(req, Decimal::of(*index).as_bytes())?;
             }
         }
         if key_prefix.is_some() {
-            self.out.extend_from_slice(b"%5D");
+            out.append(req, b"%5D")?;
         }
-        self.out.push(b'=');
+        out.append(req, b"=")?;
         match value.deref().as_ref() {
-            ValueRef::Int(n) => self.out.extend_from_slice(Decimal::of(n).as_bytes()),
-            ValueRef::Bool(b) => self.out.push(if b { b'1' } else { b'0' }),
+            ValueRef::Int(n) => out.append(req, Decimal::of(n).as_bytes()),
+            ValueRef::Bool(b) => out.append(req, if b { b"1" } else { b"0" }),
             _ => {
-                with_string(req, &value, |s| url_encode(s, self.raw, &mut self.out))?;
+                encoded.clear();
+                with_string(req, &value, |s| url_encode(s, self.raw, &mut encoded))?;
+                out.append(req, &encoded)
             }
         }
-        Ok(())
     }
 
     /// `php_url_encode_hash_ex` over `rows`, an array's entries or an
@@ -486,6 +489,26 @@ fn visible_name(
 /// string(32) "o%5Bpub%5D=1&o%5Barr%5D%5Bx%5D=4"
 /// http_build_query(): Argument #1 ($data) must be of type array, string given
 /// ```
+///
+/// The query is built in a `smart_str` and returned by
+/// `smart_str_extract`, so the string kept is trimmed to its length at
+/// `zend_string_finit`'s size, and the empty query is the interned empty
+/// string:
+///
+/// ```php
+/// class K { public $d = 1; }
+/// foreach ([[], ['a' => 1], new K, ['abc' => 'def', 'g' => [1, 2]], array_fill(0, 40, 'xyz'), array_fill(0, 400, 'xyz')] as $q) {
+///     $m = memory_get_usage(); $s = http_build_query($q); echo strlen($s), ' ', memory_get_usage() - $m, "\n"; unset($s);
+/// }
+/// ```
+/// ```expect
+/// 0 32
+/// 3 40
+/// 3 416
+/// 29 64
+/// 269 320
+/// 3089 4096
+/// ```
 #[php_function]
 fn http_build_query(
     req: &mut Request,
@@ -527,13 +550,20 @@ fn http_build_query(
             .map_or_else(|| b"&".to_vec(), <[u8]>::to_vec),
     };
     let mut query = Query {
-        out: Vec::new(),
+        out: SmartStr::default(),
         separator: &separator,
         raw: encoding_type == PHP_QUERY_RFC3986,
     };
     let num_prefix = numeric_prefix.as_bytes().to_vec();
-    query.hash(req, table, object, &num_prefix, None)?;
-    PhpString::new(req, &query.out)
+    // `smart_str_free(&formstr)` before `RETURN_THROWS()`, and
+    // `RETURN_STR(smart_str_extract(&formstr))` (`Z/ext/standard/http.c:248`):
+    // the walk's buffer trimmed to the query, `zend_string_finit`'s size
+    // in php-8.5.12.
+    if let Err(thrown) = query.hash(req, table, object, &num_prefix, None) {
+        query.out.free(req);
+        return Err(thrown);
+    }
+    query.out.extract(req)
 }
 
 /// `http_get_last_response_headers(): ?array`

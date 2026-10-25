@@ -188,6 +188,40 @@ fn indented(req: &mut Request, width: usize, rest: &[u8]) {
     }
 }
 
+/// `zval_array_element_dump`'s and `zval_object_property_dump`'s
+/// `ZEND_CHECK_STACK_LIMIT` arm, php 8.5.12's (`Z/ext/standard/var.c:267`,
+/// `:288`): where the stack has passed `zend.max_allowed_stack_size`, the
+/// row is `nesting level too deep` after its indent, with no newline, in
+/// place of its key and value, and the walk goes on to the next row.
+///
+/// `var_dump_stack_limit.phpt`'s shape under the small-stack regime,
+/// the dump handed to an `ob_start` callback that answers only whether
+/// the refusal is in it, since the depth each engine reaches is its own
+/// frames':
+///
+/// ```php
+/// $a = [];
+/// for ($i = 0; $i < 50000; $i++) { $a = [$a]; }
+/// $o = $first = new stdClass;
+/// for ($i = 0; $i < 50000; $i++) { $o->next = new stdClass; $o = $o->next; }
+/// $guarded = fn ($chunk) => str_contains($chunk, 'nesting level too deep') ? "guarded\n" : "whole\n";
+/// ob_start($guarded); debug_zval_dump($a); ob_end_flush();
+/// ob_start($guarded); debug_zval_dump($first); ob_end_flush();
+/// while (is_array($a) && isset($a[0])) { $a = $a[0]; }
+/// while ($next = $first->next ?? null) { $first->next = $next->next ?? null; }
+/// ```
+/// ```expect regime=small-stack
+/// guarded
+/// guarded
+/// ```
+fn too_deep(req: &mut Request, level: usize) -> bool {
+    if !req.limits().stack_overflowed() {
+        return false;
+    }
+    indented(req, level + 1, b"nesting level too deep");
+    true
+}
+
 /// `zval_object_property_dump`'s value: the row's value dumped, its
 /// count read as php reads it, or for a typed property nothing has
 /// written `uninitialized(T)` at the indent the value would take.
@@ -277,18 +311,7 @@ fn dump(req: &mut Request, value: &Value, level: usize) -> Result<(), Thrown> {
         ValueRef::Bool(true) => req.response_mut().write(b"bool(true)\n"),
         ValueRef::Null | ValueRef::Undef => req.response_mut().write(b"NULL\n"),
         ValueRef::Int(n) => req.response_mut().write(format!("int({n})\n").as_bytes()),
-        ValueRef::Float(f) => {
-            // `%.*H` writes a non-finite double whole, as `zend_gcvt`
-            // does at -1 (`Z/main/snprintf.c:886-899`).
-            let precision = if f.is_finite() {
-                req.ini().serialize_precision()
-            } else {
-                -1
-            };
-            let text = float_format(f, precision, Exponent::Upper);
-            req.response_mut()
-                .write(format!("float({text})\n").as_bytes());
-        }
+        ValueRef::Float(f) => dump_double(req, f),
         ValueRef::Str(s) => {
             req.response_mut()
                 .write(format!("string({}) \"", s.len()).as_bytes());
@@ -362,6 +385,9 @@ fn dump_array(
     // `GC_DTOR_NO_REF(myht)` (`Z/ext/standard/var.c:347`, `:363`).
     let held = Hold::Owner(GiveUp::Dtor);
     let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
+        if too_deep(req, level) {
+            return Ok(ControlFlow::Continue(()));
+        }
         match row.key() {
             Key::Int(n) => indented(req, level + 1, format!("[{n}]=>\n").as_bytes()),
             Key::Str(s) => {
@@ -430,6 +456,9 @@ fn dump_object(
     );
     req.response_mut().write(&header);
     let dumped = walk::properties(req, &held, Unwritten::Shown, |req, row| -> walk::Step {
+        if too_deep(req, level) {
+            return Ok(ControlFlow::Continue(()));
+        }
         // An element a class shows among its properties is an integer
         // key, `[%ld]=>`.
         let prop = match row.key() {
@@ -475,4 +504,21 @@ fn dump_object(
         (Err(thrown), Ok(())) | (Ok(()), Err(thrown)) => Err(thrown),
         (Ok(()), Ok(())) => Ok(()),
     }
+}
+
+/// `var_dump`'s `float(%.*H)` line. `%.*H` writes a non-finite double
+/// whole, as `zend_gcvt` does at -1 (`Z/main/snprintf.c:886-899`). Out of
+/// line, so the text's buffer stands in this leaf's frame and not in
+/// every nesting level of [`dump`], as php's `num_buf` stands in
+/// `format_converter`'s and not in `php_var_dump`'s.
+#[inline(never)]
+fn dump_double(req: &mut Request, f: f64) {
+    let precision = if f.is_finite() {
+        req.ini().serialize_precision()
+    } else {
+        -1
+    };
+    let text = float_format(f, precision, Exponent::Upper);
+    req.response_mut()
+        .write(format!("float({text})\n").as_bytes());
 }

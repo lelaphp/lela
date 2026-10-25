@@ -27,7 +27,7 @@ use crate::api::abi::{
     ClassIterator, CurrentPlace, DtorObj, ExtensionBuilder, GcTable, Instance, IteratorElement,
     ObjectHandlers, Refusals, This, Untyped,
 };
-use crate::api::raising::{Thrown, error, throw};
+use crate::api::raising::{Thrown, error, throw_exception_ex};
 use crate::api::request::Request;
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Value};
 
@@ -724,7 +724,7 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         _ => {
             answered.give_up(req);
             let name = req.symbols().class_name(object.class());
-            Err(throw(
+            Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!(
