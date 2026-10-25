@@ -755,7 +755,7 @@ impl Mm {
         if self.counted_out() {
             return Err(Refused::Fatal(Fatal::hard_limit(self.hard_limit, size)));
         }
-        if self.entries == Entries::Custom {
+        if self.entries != Entries::Zend {
             return self.alloc_custom(size);
         }
         let at = self.alloc_heap(size)?;
@@ -839,7 +839,7 @@ impl Mm {
         if self.counted_out() {
             return Err(Refused::Fatal(Fatal::hard_limit(self.hard_limit, size)));
         }
-        if self.entries == Entries::Custom {
+        if self.entries != Entries::Zend {
             // SAFETY: the caller's contract, handed on.
             return unsafe { self.realloc_custom(at, copy, size) };
         }
@@ -889,7 +889,7 @@ impl Mm {
     /// As [`Mm::free_heap`]'s.
     #[inline]
     pub(crate) unsafe fn free(&mut self, at: NonNull<u8>) {
-        if self.entries == Entries::Custom {
+        if self.entries != Entries::Zend {
             // SAFETY: the caller's contract, handed on.
             unsafe { self.free_custom(at) };
             return;
@@ -944,6 +944,8 @@ impl Mm {
     /// still names the block (design §4.4, #2230). Its bytes go back
     /// with [`Mm::free_retired`]; a block retired already is left as it
     /// stands.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn retire(&mut self, at: NonNull<u8>) {
         if self.is_retired(at) {
             return;
@@ -985,6 +987,8 @@ impl Mm {
     /// # Safety
     ///
     /// Where `at` is retired, nothing names it any more.
+    #[cold]
+    #[inline(never)]
     pub(crate) unsafe fn free_retired(&mut self, at: NonNull<u8>) {
         let Some(index) = self.retired.iter().position(|block| *block == at) else {
             return;
