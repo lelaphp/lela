@@ -705,6 +705,8 @@ fn followed<'t>(
         let exited = match left {
             Left::Exit(exited) => exited,
             Left::Unwound(frame) => return Flow::Resume(frame),
+            // php's `ZEND_VM_RETURN` past the serving's entry frame.
+            Left::Returned => return Flow::Returned,
             // php's escape stub: no exit, no line and no word; the
             // interpreter runs the handler of the opline the return left
             // the frame at, a landing's trace where one is compiled there.

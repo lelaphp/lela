@@ -29,7 +29,7 @@ use super::{
     COUNTED, Dtor, Emit, Kernel, STOOD_CALL, STOOD_FRAME, STOOD_FUNC, STOOD_OPLINE, STOOD_ROOM,
     Scalar, imm, leave_of, mismatch, trusted,
 };
-use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, THREW};
+use crate::lower::{IMAGES_AT, INTERRUPT_AT, READY_AT, RETURNED, THREW};
 use crate::types::{Abort, End, ExitId, Frame, Imm, Line, OpId, Operand, Owners, Returned, Vars};
 
 /// What a leave in place writes into the caller's slot: a scalar, or a
@@ -410,8 +410,8 @@ impl Emit<'_> {
     /// ```
     ///
     /// A trace that stops at a `RETURN` leaves its frame in place and goes
-    /// on in the caller ([`End::Return`]); the interpreter serves the
-    /// `RETURN` of a frame a native called, through the trace's end:
+    /// on in the caller ([`End::Return`]); the `RETURN` of a frame a native
+    /// called ends the serving through the leave kernel ([`Emit::leave_top`]):
     ///
     /// ```php
     /// function fib($n) { if ($n < 2) { return $n; } return fib($n - 1) + fib($n - 2); }
@@ -527,7 +527,7 @@ impl Emit<'_> {
         } else {
             self.b.ins().jump(join, &[]);
         }
-        self.left_or_not(id, line, (slow, join))
+        self.left_or_not(id, line, (caller, returned), (slow, join))
     }
 
     /// The slot of the caller's slots at `callers` that a call returning
@@ -883,14 +883,14 @@ impl Emit<'_> {
         &mut self,
         id: OpId,
         line: &Line,
+        (caller, returned): (Value, Out),
         (slow, join): (Block, Block),
     ) -> Result<(), Abort> {
         self.b.switch_to_block(slow);
         self.b.seal_block(slow);
         let at_end = self.returns_at_end(id);
         if let Some(exit) = at_end {
-            let block = self.exit_block(exit)?;
-            self.b.ins().jump(block, &[]);
+            self.leave_top(line, (caller, returned), exit)?;
         } else {
             self.step_kernel(id, line)?;
             self.b.ins().jump(join, &[]);
@@ -908,6 +908,99 @@ impl Emit<'_> {
         } else {
             self.after_step(id, line)
         }
+    }
+
+    /// The `RETURN` a trace ends at, of a frame served from outside the
+    /// loop, `zend_call_function`'s (`caller` none, or the loop's: a
+    /// native's call, or a magic method a handler reached), served
+    /// through [`Kernel::Leave`] where the frame is
+    /// the serving's entry, and [`RETURNED`] answered, as php's
+    /// `zend_jit_leave_func` over a frame that may be the top returns
+    /// `ZEND_VM_RETURN` to `execute_ex` for a `ZEND_CALL_TOP` frame
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:11160`), so the native that called
+    /// it, `__get`'s reader or `array_map`, goes on with no exit taken;
+    /// `exit`, the trace's end, for any other such frame. A `__get` that
+    /// writes the object it is called on, which the loop reads after, as
+    /// §4.2's clobber rule has it, and throws, one that reads another
+    /// property through `__get` again, one a native calls, and one that
+    /// frees the object it is called on:
+    ///
+    /// ```php
+    /// class G { private $v = 3; public $r = 0; function __get($n) { if ($n === 'boom' && $this->r++ > 5) { throw new Exception("at $this->r"); } return $n === 'deep' ? $this->again + 1 : $this->v; } }
+    /// class F { function __get($n) { $GLOBALS['o'] = null; return 7; } }
+    /// function k($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->x + $o->deep; try { $t += $o->boom; } catch (Exception $e) { $t += 100; } $t += $o->r; } return $t; }
+    /// $o = new F; $f = 0; for ($i = 0; $i < 20; $i++) { $f += $o->x; $o = new F; }
+    /// echo k(new G, 20), " ", $f, " ", array_sum(array_map(fn ($o) => $o->x, [new G, new G])), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 1768 140 6
+    /// ```
+    ///
+    /// ```php
+    /// class G { private $v = 3; public $r = 0; function __get($n) { if ($n === 'boom' && $this->r++ > 5) { throw new Exception("at $this->r"); } return $n === 'deep' ? $this->again + 1 : $this->v; } }
+    /// class F { function __get($n) { $GLOBALS['o'] = null; return 7; } }
+    /// function k($o, $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += $o->x + $o->deep; try { $t += $o->boom; } catch (Exception $e) { $t += 100; } $t += $o->r; } return $t; }
+    /// $o = new F; $f = 0; for ($i = 0; $i < 20; $i++) { $f += $o->x; $o = new F; }
+    /// echo k(new G, 20), " ", $f, " ", array_sum(array_map(fn ($o) => $o->x, [new G, new G])), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 1768 140 6
+    /// ```
+    fn leave_top(
+        &mut self,
+        line: &Line,
+        (caller, returned): (Value, Out),
+        exit: ExitId,
+    ) -> Result<(), Abort> {
+        let top = self.b.create_block();
+        self.b.set_cold_block(top);
+        let block = self.exit_block(exit)?;
+        let none = self.b.ins().icmp_imm_s(IntCC::Equal, caller, 0);
+        let looped = self.b.ins().band_imm_u(caller, i64::from(L.caller_loop()));
+        let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
+        let outside = self.b.ins().bor(none, looped);
+        self.b.ins().brif(outside, top, &[], block, &[]);
+        self.b.switch_to_block(top);
+        self.b.seal_block(top);
+        let slot = self.answer();
+        let (word, info) = match returned {
+            Out::Scalar(scalar) => {
+                // The scalar's two words, written where the answer is read.
+                let at = self.b.ins().stack_addr(I64, slot, 0);
+                self.write(at, 0, scalar);
+                let word = self.b.ins().stack_load(I64, I64, slot, 0);
+                let info = self.b.ins().stack_load(I64, I32, slot, super::TYPE_AT);
+                (word, info)
+            }
+            Out::Copied(word, info) | Out::Moved(word, info) => (word, info),
+        };
+        let [room, opline] = self.served(line)?;
+        let left = self.b.ins().stack_addr(I64, slot, 0);
+        self.call(
+            Kernel::Leave,
+            &[room, opline, word, info, left],
+            leave_of(line),
+        )?;
+        let left = self.b.ins().stack_load(I64, I64, slot, 0);
+        let (returned_block, other) = self.split();
+        let not = self.b.ins().icmp_imm_s(IntCC::Equal, left, 0);
+        self.b.ins().brif(not, other, &[], returned_block, &[]);
+        self.b.switch_to_block(returned_block);
+        self.b.seal_block(returned_block);
+        // The temporary handed its value over, as the handler takes it.
+        if let (Out::Moved(..), Operand::Value(value)) = (returned, line.op1) {
+            let (room, at) = self.place(self.value(value)?.slot)?;
+            let undef = self.b.ins().iconst(I32, super::tag(ZvalType::Undef));
+            self.b
+                .ins()
+                .store(trusted(), undef, room, at + super::TYPE_AT);
+        }
+        let answer = self.b.ins().iconst(I32, i64::from(RETURNED));
+        self.b.ins().return_(&[answer]);
+        self.b.switch_to_block(other);
+        self.b.seal_block(other);
+        self.b.ins().jump(block, &[]);
+        Ok(())
     }
 
     /// The exit the trace takes where the `RETURN` at `id`, its last op,

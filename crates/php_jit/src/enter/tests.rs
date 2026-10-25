@@ -416,6 +416,7 @@ pub(crate) mod entered {
                     | crate::enter::Left::Escaped(frame),
                 ) => Flow::Resume(frame),
                 Ok(crate::enter::Left::Declined) => Flow::Continue,
+                Ok(crate::enter::Left::Returned) => Flow::Returned,
                 Err(fatal) => Flow::Bail(fatal),
             }
         }

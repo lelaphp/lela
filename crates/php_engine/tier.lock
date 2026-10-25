@@ -193,6 +193,7 @@ tier::dispatch_held
 tier::free_cv
 tier::lookup_element
 tier::release
+tier::return_entry
 tier::rope_end
 tier::rope_open
 tier::rope_push

@@ -493,6 +493,7 @@ kernels! {
         Concat => concat(a: u64, a_info: u32, b: u64, b_info: u32, kinds: u32) -> Zval = tier::concat;
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
+        Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
     }
 }
 
@@ -517,6 +518,29 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, _) = held(on, func)?;
     tier::dispatch_held(req, frame, held)
+}
+
+/// The `leave` kernel: the value the `RETURN` at `at`, which a trace ends
+/// at, hands over, in a frame served from outside the loop, set as the
+/// serving's return value where the frame is the serving's entry
+/// ([`tier::return_entry`]), as the handler's `RETURN` of such a frame sets
+/// it and ends the serving, answered one; zero, with nothing done, for any
+/// other frame, which the trace's end exit leaves to the interpreter. php's
+/// `zend_jit_leave_func` returns `ZEND_VM_RETURN` to `execute_ex` for such
+/// a frame, `ZEND_CALL_TOP`.
+fn leave(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<u64, Fatal> {
+    let frame = NonNull::new(on.room.0)
+        .and_then(|room| tier::at_room(req, room))
+        .ok_or_else(|| internal("a kernel was handed a room no frame on the stack has"))?;
+    if frame != tier::entry(req) {
+        return Ok(0);
+    }
+    tier::stand(req, frame, on.at);
+    Ok(u64::from(tier::return_entry(
+        req,
+        frame,
+        zval(word, type_info),
+    )))
 }
 
 /// The `push_call` kernel (`jit-design.md` §4.3): the `INIT_*` at `at`
@@ -911,6 +935,10 @@ pub(crate) enum Left {
     /// trace's lowest frame left the frame that stands at an opline the
     /// trace does not go on at, whose handler the interpreter runs.
     Escaped(FrameRef),
+    /// Through the `RETURN` of the serving's entry frame, which takes no
+    /// exit: the serving is over and its return value set
+    /// ([`lower::RETURNED`]), as php's `ZEND_VM_RETURN` ends `execute_ex`.
+    Returned,
     /// Entered at its loop's body, the trace found the frame holding
     /// other than it knows there: nothing ran and the frame stands where
     /// it stood, so `dispatch` goes on to the loop's header and enters the
@@ -1069,6 +1097,7 @@ pub(crate) fn enter<'t>(
                 tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
             Left::Escaped(frame)
         }
+        Answer::Returned => Left::Returned,
         Answer::Abandoned => {
             return Err(internal(
                 "a trace left through no exit of its own and kept nothing",
@@ -1471,7 +1500,7 @@ pub(crate) fn remembered(req: &Request, frame: FrameRef, escaped: &Trace, landed
 
 /// What compiled code answered `enter`, decoded once: an exit of the
 /// trace's, [`lower::UNWOUND`], [`lower::INTERRUPTED`], [`lower::DECLINED`],
-/// [`lower::ESCAPED`], or anything else, [`lower::ABANDONED`]
+/// [`lower::ESCAPED`], [`lower::RETURNED`], or anything else, [`lower::ABANDONED`]
 /// with nothing kept among it, which no trace answers but by a defect.
 enum Answer {
     Exit(ExitId),
@@ -1479,6 +1508,7 @@ enum Answer {
     Interrupted,
     Declined,
     Escaped,
+    Returned,
     Abandoned,
 }
 
@@ -1491,6 +1521,7 @@ impl Answer {
             _ if word == lower::INTERRUPTED => Answer::Interrupted,
             _ if word == lower::DECLINED => Answer::Declined,
             _ if word == lower::ESCAPED => Answer::Escaped,
+            _ if word == lower::RETURNED => Answer::Returned,
             _ => Answer::Abandoned,
         }
     }

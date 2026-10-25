@@ -63,7 +63,8 @@ mod strings;
 mod tail;
 mod view;
 pub use crossing::{
-    at_room, current, free_cv, free_operands, laid, primed, release, room, stack, stack_room, stand,
+    at_room, current, free_cv, free_operands, laid, primed, release, return_entry, room, stack,
+    stack_room, stand,
 };
 pub use dims::{dim_key, lookup_element};
 pub use frames::{
@@ -808,6 +809,12 @@ fn serve<T: Tier, D: Telling>(req: &mut Request, entry: FrameRef) -> Result<(), 
         T::safepoint(req, entry, Site::Entry, Held::of(code))
     };
     let first = answered(req, flow, entry)?;
+    // A tier that served the entry frame to its end, `Flow::Returned`, left
+    // the loop nothing to serve, as php's `execute_ex` returns at once
+    // where the entry's compiled code returned `ZEND_VM_RETURN`.
+    if first == Stepped::Done {
+        return Ok(());
+    }
     serve_frame::<T, D>(req, first)
 }
 
