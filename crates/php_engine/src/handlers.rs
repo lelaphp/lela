@@ -24419,11 +24419,11 @@ fn inline_return(
 /// the frame popped, and `returned` into the `VAR` the call opline
 /// named, or released where the caller reads nothing.
 fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
-    crate::observer::returned(req, frame, Some(&returned));
     if req.stack_mut().entry() == frame {
-        req.set_returned(returned);
+        req.entry_returned(frame, returned);
         return Ok(Stepped::Done.into());
     }
+    crate::observer::returned(req, frame, Some(&returned));
     let (caller, returns_to) = req.returning(frame);
     req.leave_frame(frame);
     if handed_back(req, returns_to, returned) {

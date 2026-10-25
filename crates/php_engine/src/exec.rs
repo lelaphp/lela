@@ -1532,6 +1532,12 @@ impl CacheSize {
             room: code.cache_room,
         }
     }
+
+    /// Whether slot `slot` is one of the cache's, which its lay gives a
+    /// place ([`RuntimeCache::place_of`]).
+    pub(crate) fn holds(self, slot: CacheSlot) -> bool {
+        slot.0 < self.slots
+    }
 }
 
 /// `init_func_run_time_cache` over a function's cache pointer and size
@@ -1539,8 +1545,8 @@ impl CacheSize {
 /// lays it, the first `INIT_*` that pushes a call of the function in the
 /// request, or the first lookup of it by name for a callable or a
 /// reflector (`zend_fetch_function`, `Z/Zend/zend_execute.c:4468`), and
-/// found laid down by every one after, a test of one word as php's
-/// `RUN_TIME_CACHE()` is, with the lay out of line; its room carved from the
+/// found laid down by every one after, as php tests `RUN_TIME_CACHE()`,
+/// the lay itself out of line; its room carved from the
 /// compiler's arena as `init_func_run_time_cache_i` carves them
 /// (`Z/Zend/zend_execute.c:4455`). The arena's blocks are 64 KiB, so a
 /// cache moves nothing until the newest block has not the room for it,

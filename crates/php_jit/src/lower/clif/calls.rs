@@ -958,8 +958,9 @@ impl Emit<'_> {
         (caller, returned): (Value, Out),
         exit: ExitId,
     ) -> Result<(), Abort> {
+        // The serving's entry is the path taken: a `__get`'s or a native's
+        // callback's trace returns there every time it is entered.
         let top = self.b.create_block();
-        self.b.set_cold_block(top);
         let block = self.exit_block(exit)?;
         let outside = self.outside(caller);
         self.b.ins().brif(outside, top, &[], block, &[]);
@@ -985,7 +986,9 @@ impl Emit<'_> {
             leave_of(line),
         )?;
         let left = self.b.ins().stack_load(I64, I64, slot, 0);
-        let (returned_block, other) = self.split();
+        // A frame served from outside that is not the serving's entry is
+        // the rare one, and its block the cold one.
+        let (other, returned_block) = self.split();
         let not = self.b.ins().icmp_imm_s(IntCC::Equal, left, 0);
         self.b.ins().brif(not, other, &[], returned_block, &[]);
         self.b.switch_to_block(returned_block);

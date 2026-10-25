@@ -2495,8 +2495,8 @@ impl Request {
     /// (`GC_ADDREF` before `(*guard) |= bit`, `OBJ_RELEASE` after
     /// `(*guard) &= ~bit`, as `zend_std_read_property` and its kin order
     /// them), so an accessor that drops the last other owner does not
-    /// free the object under the handler, its destructor runs with the
-    /// guard down, and no guard row outlives the object it names.
+    /// free the object under the handler, its destructor is called with
+    /// the guard down, and no guard row outlives the object it names.
     ///
     /// Each accessor drops the last owner of the object it serves, which
     /// the next `new` makes again, and the destructor reads through

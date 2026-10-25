@@ -381,7 +381,7 @@ impl CachedSlot {
 /// the touch lays nothing down: the slot is answered none, its opline is
 /// its handler's until the call's `INIT_*` lays the cache, and a later
 /// entry touches it again. A function's cache stands where it was laid
-/// for as long as the request runs, so compiled code that was handed
+/// for as long as the request is served, so compiled code that was handed
 /// the slot reads it for as long as it may. None also for a file's own
 /// code, whose every activation lays a fresh cache, for an op array the
 /// epoch holds no row for, and for a slot past its cache.
@@ -398,7 +398,8 @@ pub fn touch(req: &Request, epoch: &Epoch, raw: MapPtrRaw) -> Option<CachedSlot>
 /// its cache, which no call lays down.
 #[must_use]
 pub fn touchable(epoch: &Epoch, raw: MapPtrRaw) -> bool {
-    touched_code(epoch, raw).is_some_and(|code| raw.slot < code.cache_size)
+    touched_code(epoch, raw)
+        .is_some_and(|code| crate::exec::CacheSize::of(code).holds(CacheSlot(raw.slot)))
 }
 
 /// The op array of a function's whose cache slot `raw` names, which the

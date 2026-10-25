@@ -1107,6 +1107,20 @@ pub(crate) fn enter<'t>(
 /// it.
 static NO_PLACE: u32 = tier::PLACE.unprimed();
 
+/// The address compiled code reads for a slot the touch has not answered,
+/// [`NO_PLACE`]'s.
+fn no_place() -> usize {
+    ptr::from_ref(&NO_PLACE).expose_provenance()
+}
+
+/// Whether slot `raw`, whose address the request keeps as `at`, is one a
+/// later entry touches again: the touch has not answered it, and a call
+/// can lay its cache, where a file's own code's or one past its cache
+/// never is ([`tier::touchable`]).
+fn untouched(epoch: &Epoch, raw: tier::MapPtrRaw, at: usize) -> bool {
+    at == no_place() && tier::touchable(epoch, raw)
+}
+
 /// The touch (`jit-design.md` §4.6, #2957's note; [`tier::touch`]): the
 /// address of each runtime-cache slot `trace`'s code reads in `req`, one
 /// a slot of `Trace.map_ptrs`, where the request laid its cache down, and
@@ -1168,10 +1182,7 @@ fn touched(req: &Request, (epoch, trace): (&Epoch, &Trace)) -> impl Iterator<Ite
 
 /// [`touched`] of the one slot `raw`.
 fn touch_one(req: &Request, epoch: &Epoch, raw: tier::MapPtrRaw) -> usize {
-    tier::touch(req, epoch, raw).map_or_else(
-        || ptr::from_ref(&NO_PLACE).expose_provenance(),
-        CachedSlot::address,
-    )
+    tier::touch(req, epoch, raw).map_or_else(no_place, CachedSlot::address)
 }
 
 /// The request's addresses a trace's code reads: the headers of the calls
@@ -1344,16 +1355,15 @@ impl Headers {
                 entered.laid = !entered.missing && callees_laid(req, trace);
             }
             if entered.untouched {
-                let none = ptr::from_ref(&NO_PLACE).expose_provenance();
                 let slots = entered
                     .addresses
                     .get_mut(trace.calls.len()..)
                     .unwrap_or_default();
                 entered.untouched = false;
                 for (raw, at) in trace.map_ptrs.iter().zip(slots) {
-                    if *at == none {
+                    if *at == no_place() {
                         *at = touch_one(req, epoch, *raw);
-                        entered.untouched |= *at == none && tier::touchable(epoch, *raw);
+                        entered.untouched |= untouched(epoch, *raw, *at);
                     }
                 }
             }
@@ -1366,17 +1376,14 @@ impl Headers {
         let missing = addresses.contains(&0);
         let headers = addresses.len();
         addresses.extend(touched(req, (epoch, trace)));
-        let none = ptr::from_ref(&NO_PLACE).expose_provenance();
-        // Only a slot a later call can lay is touched again: one no call
-        // lays, a file's own code's or one past its cache, never is.
-        let untouched = (addresses.get(headers..).unwrap_or_default().iter())
+        let retouch = (addresses.get(headers..).unwrap_or_default().iter())
             .zip(&trace.map_ptrs)
-            .any(|(at, raw)| *at == none && tier::touchable(epoch, *raw));
+            .any(|(at, raw)| untouched(epoch, *raw, *at));
         let entered = Entered {
             addresses: addresses.into_boxed_slice(),
             missing,
             laid: !missing && callees_laid(req, trace),
-            untouched,
+            untouched: retouch,
         };
         let found = (entered.addresses.as_ptr(), entered.laid);
         if traces.len() <= row {

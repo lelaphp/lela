@@ -6,6 +6,7 @@
 //! and the VM stay on the request, since every area reaches them.
 
 use php_heap::{Fatal, FrameRef, Slot, Zval, ZvalRef, ZvalType};
+use php_unit::decl::Bare;
 use php_unit::{CacheSlot, PublishedUnit, Unit};
 
 use crate::api::call::Function;
@@ -2522,12 +2523,24 @@ impl Request {
     /// 384 384 384 384 384
     /// 384 384 384 384 384
     /// ```
-    #[inline(always)] // a test of one word on every pushed call, as php's
+    #[inline(always)] // every INIT's push: the function's shape, then whether its cache is laid
     pub(crate) fn init_func_run_time_cache(&mut self, function: Function) -> Result<(), Fatal> {
         let Some(shape) = self.user_function(function).map(|user| user.shape) else {
             return Ok(());
         };
         exec::lay_runtime_cache(&mut self.map, &mut self.heap, shape.cache, shape.cache_size)
+    }
+
+    /// `zend_fetch_function` (`Z/Zend/zend_execute.c:4468`): the function
+    /// named `name`, its runtime cache laid down where the request has
+    /// not yet ([`Request::init_func_run_time_cache`]). None where no
+    /// function has the name; the `Err` is the memory limit's fatal.
+    pub(crate) fn fetch_function(&mut self, name: Bare<'_>) -> Result<Option<Function>, Fatal> {
+        let Some(function) = self.function_named(name) else {
+            return Ok(None);
+        };
+        self.init_func_run_time_cache(function)?;
+        Ok(Some(function))
     }
 
     /// Where slot `slot` of the cache at `at` stands, which compiled code

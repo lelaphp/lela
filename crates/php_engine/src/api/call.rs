@@ -1884,12 +1884,8 @@ pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
 ///
 /// The `Err` is the memory limit's fatal.
 pub fn fetch_function(req: &mut Request, name: &[u8]) -> Result<Option<Function>, Thrown> {
-    let Some(function) = req.function_named(Bare::of(name)) else {
-        return Ok(None);
-    };
-    let laid = req.init_func_run_time_cache(function);
-    req.fatal_of(laid)?;
-    Ok(Some(function))
+    let fetched = req.fetch_function(Bare::of(name));
+    req.fatal_of(fetched)
 }
 
 /// The `static` variables of what `callable` names, name and value in the
@@ -3192,20 +3188,20 @@ fn function_callable(
         };
         return crate::classes::closure_from_frame(req, frame).map(|made| made.as_value());
     }
-    let found = req.function_named(name.into()).or_else(|| {
-        if name_kind == php_unit::decl::NameKind::FullyQualified {
-            return None;
-        }
-        let at = name.0.iter().rposition(|b| *b == b'\\')?;
-        req.function_named(Bare::resolved(name.0.get(at + 1..)?))
-    });
-    let Some(function) = found else {
+    // `zend_fetch_function` (`Z/Zend/zend_ast.c:1074`), which lays the
+    // function's runtime cache down as it finds it, by the name and then,
+    // unqualified, by its last segment.
+    let mut found = req.fetch_function(name.into());
+    if matches!(found, Ok(None))
+        && name_kind != php_unit::decl::NameKind::FullyQualified
+        && let Some(tail) =
+            (name.0.iter().rposition(|b| *b == b'\\')).and_then(|at| name.0.get(at + 1..))
+    {
+        found = req.fetch_function(Bare::resolved(tail));
+    }
+    let Some(function) = req.fatal_of(found)? else {
         return Err(undefined_function(req, &name.0));
     };
-    // `zend_fetch_function` (`Z/Zend/zend_ast.c:1074`) lays the function's
-    // runtime cache down as it finds it.
-    let laid = req.init_func_run_time_cache(function);
-    req.fatal_of(laid)?;
     req.keep_callable(unit, at, function);
     let frame = crate::classes::CallFrame::Callee {
         function,

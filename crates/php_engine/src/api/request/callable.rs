@@ -774,15 +774,12 @@ impl Request {
         deprecations: Deprecations,
     ) -> Result<(), Refusal> {
         let ce_org = fcc.calling.take();
-        // `zend_fetch_function`, which lays the function's runtime cache
-        // down as it finds it.
-        if ce_org.is_none()
-            && let Some(function) = self.function_named(Bare::of(callable))
-        {
-            let laid = self.init_func_run_time_cache(function);
-            self.fatal_of(laid).map_err(|_| Refusal::Unsaid)?;
-            fcc.function = Some(Callee::Function(function));
-            return Ok(());
+        if ce_org.is_none() {
+            let fetched = self.fetch_function(Bare::of(callable));
+            if let Some(function) = self.fatal_of(fetched).map_err(|_| Refusal::Unsaid)? {
+                fcc.function = Some(Callee::Function(function));
+                return Ok(());
+            }
         }
         let split = compound_split(callable);
         let method: Vec<u8> = match split {
