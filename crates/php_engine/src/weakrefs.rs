@@ -315,7 +315,11 @@ fn entry_of(req: &Request, map: PhpObject, key: PhpObject) -> Option<Value> {
 /// nothing under.
 fn not_contained(req: &mut Request, key: PhpObject) -> Thrown {
     let class = req.symbols().class_name(key.class());
-    let message = format!("Object {class}#{} not contained in WeakMap", key.index());
+    let message = bytes!(
+        b"Object ",
+        class,
+        format!("#{} not contained in WeakMap", key.index())
+    );
     error(req, &message)
 }
 

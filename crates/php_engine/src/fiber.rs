@@ -1437,13 +1437,12 @@ impl FiberError {
     /// ```
     #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
-        let name = req.symbols().class_name(this.object().class());
-        Err(error(
-            req,
-            &format!(
-                "The \"{name}\" class is reserved for internal use and cannot be manually instantiated"
-            ),
-        ))
+        let message = bytes!(
+            b"The \"",
+            req.symbols().class_name(this.object().class()),
+            b"\" class is reserved for internal use and cannot be manually instantiated"
+        );
+        Err(error(req, &message))
     }
 }
 

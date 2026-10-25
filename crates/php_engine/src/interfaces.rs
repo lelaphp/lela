@@ -723,14 +723,12 @@ fn iterated(req: &mut Request, object: PhpObject, by_ref: bool) -> Result<Iterat
         }
         _ => {
             answered.give_up(req);
-            let name = req.symbols().class_name(object.class());
-            Err(throw_exception_ex(
-                req,
-                "Exception",
-                &format!(
-                    "Objects returned by {name}::getIterator() must be traversable or implement interface Iterator"
-                ),
-            ))
+            let message = bytes!(
+                b"Objects returned by ",
+                req.symbols().class_name(object.class()),
+                b"::getIterator() must be traversable or implement interface Iterator"
+            );
+            Err(throw_exception_ex(req, "Exception", &message))
         }
     }
 }

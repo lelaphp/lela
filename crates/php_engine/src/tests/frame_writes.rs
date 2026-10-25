@@ -71,7 +71,8 @@ fn shown(
         Some(Err(thrown)) => match thrown.cause(req) {
             Cause::Throwable(throwable) => {
                 let throwable = *throwable;
-                let class = req.symbols().class_name(throwable.class());
+                let class = String::from_utf8_lossy(req.symbols().class_name(throwable.class()))
+                    .into_owned();
                 let message = throwable
                     .prop(req, b"message")
                     .and_then(|message| message.as_str_bytes().map(<[u8]>::to_vec))

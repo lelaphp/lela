@@ -1339,11 +1339,13 @@ pub(crate) fn resolved_type_name(req: &Request, scopes: Scopes, ty: &Type) -> St
     let Some(own) = scopes.own else {
         return php_unit::type_to_string(ty);
     };
-    let own_name = req.symbols().class_name(own);
+    // The type's text is a `String` here; a name no UTF-8 reads prints
+    // as it does in the type's other renderings.
+    let own_name = String::from_utf8_lossy(req.symbols().class_name(own));
     let parent_name = req
         .symbols()
         .class_parent(own)
-        .map(|parent| req.symbols().class_name(parent));
+        .map(|parent| String::from_utf8_lossy(req.symbols().class_name(parent)));
     let resolved = resolve_named(ty, &own_name, parent_name.as_deref());
     let called = scopes.called.map_or_else(
         || String::from("static"),

@@ -435,7 +435,8 @@ impl Serves {
 
     fn function_of(req: &Request, function: Function, scope: Option<ClassId>) -> Serves {
         Serves::Function {
-            scope: scope.map(|class| req.symbols().class_name(class)),
+            scope: scope
+                .map(|class| String::from_utf8_lossy(req.symbols().class_name(class)).into_owned()),
             name: req
                 .symbols()
                 .function_decl(function)
@@ -693,7 +694,10 @@ fn end(observed: &mut Observed<'_>, returned: Option<&Value>) {
     let depth = observed.state::<crate::State>().observer.depth;
     if let Some(raised) = observed.diagnostics().raised() {
         let class = match raised {
-            Raised::Throwable(throwable) => observed.symbols().class_name(throwable.class()),
+            Raised::Throwable(throwable) => {
+                String::from_utf8_lossy(observed.symbols().class_name(throwable.class()))
+                    .into_owned()
+            }
             Raised::UnwindExit => String::from("UnwindExit"),
             Raised::GracefulExit => String::from("GracefulExit"),
         };
@@ -743,12 +747,13 @@ fn retval_info(
         None => info.extend_from_slice(b"NULL"),
         Some(value) if switches.show_return_value => {
             if let Some(object) = value.as_object() {
-                let named = format!(
-                    "object({})#{}",
+                let named = [
+                    b"object(".as_slice(),
                     req.symbols().class_name(object.class()),
-                    object.index()
-                );
-                info.extend_from_slice(named.as_bytes());
+                    format!(")#{}", object.index()).as_bytes(),
+                ]
+                .concat();
+                info.extend_from_slice(&named);
             } else {
                 let level = depth.saturating_mul(2).saturating_add(3);
                 // What the walk threw stands pending, as php's smart_str

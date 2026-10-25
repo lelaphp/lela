@@ -198,11 +198,12 @@ pub(crate) fn object_to_string(
         }
         returned.give_up(req);
     }
-    let name = req.symbols().class_name(class);
-    Err(error(
-        req,
-        &format!("Object of class {name} could not be converted to string"),
-    ))
+    let message = bytes!(
+        b"Object of class ",
+        req.symbols().class_name(class),
+        b" could not be converted to string"
+    );
+    Err(error(req, &message))
 }
 
 /// Where a `SWITCH_LONG`, `SWITCH_STRING` or `MATCH` sends the loop:
@@ -647,7 +648,11 @@ fn object_is_true(req: &mut Request, object: PhpObject) -> Result<bool, Thrown> 
         }
         Ok(None) => {
             let class = req.symbols().class_name(object.class());
-            let message = format!("Object of class {class} could not be converted to bool");
+            let message = bytes!(
+                b"Object of class ",
+                class,
+                b" could not be converted to bool"
+            );
             if req.note_error(Level::RecoverableError, &message) {
                 req.bail_out();
             }
@@ -1576,14 +1581,23 @@ pub(crate) fn typed_ref_holds(
                 let one_declared = php_unit::type_to_string(&first_ty);
                 let two_declared = php_unit::type_to_string(ty);
                 let given = type_name(req, &held.undef_as_null());
-                return Err(type_error(
-                    req,
-                    &format!(
-                        "Reference with value of type {given} held by property {class}::${} of type {one_declared} is not compatible with property {two}::${} of type {two_declared}",
-                        String::from_utf8_lossy(&first_name),
-                        String::from_utf8_lossy(name)
-                    ),
-                ));
+                let message = bytes!(
+                    b"Reference with value of type ",
+                    given,
+                    b" held by property ",
+                    class,
+                    b"::$",
+                    &first_name[..],
+                    b" of type ",
+                    one_declared,
+                    b" is not compatible with property ",
+                    two,
+                    b"::$",
+                    name,
+                    b" of type ",
+                    two_declared
+                );
+                return Err(type_error(req, &message));
             }
         }
         Assignable::No => {}
@@ -1630,13 +1644,22 @@ pub(crate) fn incdec_prop_error(
         Holder::Property => "",
         Holder::Reference => "a reference held by ",
     };
-    let thrown = type_error(
-        req,
-        &format!(
-            "Cannot {word} {what}property {class}::${} of type {declared} past its {edge} value",
-            String::from_utf8_lossy(name)
-        ),
+    let message = bytes!(
+        b"Cannot ",
+        word,
+        b" ",
+        what,
+        b"property ",
+        class,
+        b"::$",
+        name,
+        b" of type ",
+        declared,
+        b" past its ",
+        edge,
+        b" value"
     );
+    let thrown = type_error(req, &message);
     (thrown, Value::int(limit))
 }
 
@@ -1692,13 +1715,17 @@ pub(crate) fn ref_type_error(
     let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
-    type_error(
-        req,
-        &format!(
-            "Cannot assign {given} to reference held by property {class}::${} of type {declared}",
-            String::from_utf8_lossy(name)
-        ),
-    )
+    let message = bytes!(
+        b"Cannot assign ",
+        given,
+        b" to reference held by property ",
+        class,
+        b"::$",
+        name,
+        b" of type ",
+        declared
+    );
+    type_error(req, &message)
 }
 
 /// `zend_throw_conflicting_coercion_error`
@@ -1722,14 +1749,24 @@ fn conflicting_coercion(
     let one_declared = php_unit::type_to_string(one_ty);
     let two_declared = php_unit::type_to_string(two_ty);
     let given = value_name(req, &value.undef_as_null());
-    type_error(
-        req,
-        &format!(
-            "Cannot assign {given} to reference held by property {one_class}::${} of type {one_declared} and property {two_class}::${} of type {two_declared}, as this would result in an inconsistent type conversion",
-            String::from_utf8_lossy(one_name),
-            String::from_utf8_lossy(two_name)
-        ),
-    )
+    let message = bytes!(
+        b"Cannot assign ",
+        given,
+        b" to reference held by property ",
+        one_class,
+        b"::$",
+        one_name,
+        b" of type ",
+        one_declared,
+        b" and property ",
+        two_class,
+        b"::$",
+        two_name,
+        b" of type ",
+        two_declared,
+        b", as this would result in an inconsistent type conversion"
+    );
+    type_error(req, &message)
 }
 
 /// `MAY_BE_*` (`Z/Zend/zend_type_info.h:26-32`), the bits
@@ -1787,15 +1824,19 @@ pub(crate) fn verify_class_constant_type(
     let declared = php_unit::type_to_string(ty);
     let given = match held.as_object() {
         Some(object) => req.symbols().class_name(object.class()),
-        None => held.type_name().to_string(),
+        None => held.type_name().as_bytes(),
     };
-    Err(type_error(
-        req,
-        &format!(
-            "Cannot assign {given} to class constant {class}::{} of type {declared}",
-            String::from_utf8_lossy(name)
-        ),
-    ))
+    let message = bytes!(
+        b"Cannot assign ",
+        given,
+        b" to class constant ",
+        class,
+        b"::",
+        name,
+        b" of type ",
+        declared
+    );
+    Err(type_error(req, &message))
 }
 
 fn property_type_error(
@@ -1818,13 +1859,17 @@ fn property_type_error(
     let class = req.symbols().class_name(declaring);
     let declared = php_unit::type_to_string(ty);
     let given = value_name(req, &value.undef_as_null());
-    type_error(
-        req,
-        &format!(
-            "Cannot assign {given} to property {class}::${} of type {declared}",
-            String::from_utf8_lossy(name)
-        ),
-    )
+    let message = bytes!(
+        b"Cannot assign ",
+        given,
+        b" to property ",
+        class,
+        b"::$",
+        name,
+        b" of type ",
+        declared
+    );
+    type_error(req, &message)
 }
 
 /// `zend_cast_zval_to_object` (`Z/Zend/zend_execute.h:225`) under the
@@ -5483,10 +5528,10 @@ pub(crate) fn value_name(req: &Request, value: &Value) -> String {
 /// Unsupported operand types: ArrayObject | int
 /// Unsupported operand types: array - bool
 /// ```
-pub(crate) fn zval_type_name(req: &Request, value: &Value) -> String {
+pub(crate) fn zval_type_name<'r>(req: &'r Request, value: &Value) -> &'r [u8] {
     match value.as_ref() {
         ValueRef::Object(o) => req.symbols().class_name(o.class()),
-        _ => String::from(value.type_name()),
+        _ => value.type_name().as_bytes(),
     }
 }
 
@@ -5665,9 +5710,12 @@ fn operands<T>(
     {
         return Ok((a, b));
     }
-    let message = format!(
-        "Unsupported operand types: {} {operator} {}",
+    let message = bytes!(
+        b"Unsupported operand types: ",
         zval_type_name(req, left),
+        b" ",
+        operator,
+        b" ",
         zval_type_name(req, right)
     );
     Err(type_error(req, &message))

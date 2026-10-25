@@ -1103,19 +1103,23 @@ fn throwable_at(
 /// ```
 pub fn illegal_container_offset(
     req: &mut Request,
-    container: &str,
+    container: &(impl AsRef<[u8]> + ?Sized),
     offset: &Value,
     read: crate::api::abi::DimensionRead,
 ) -> Thrown {
     use crate::api::abi::DimensionRead;
     let given = crate::ops::zval_type_name(req, &offset.deref());
     let message = match read {
-        DimensionRead::Silent => format!("Cannot access offset of type {given} in isset or empty"),
-        DimensionRead::Unset if container == "string" => {
+        DimensionRead::Silent => bytes!(
+            b"Cannot access offset of type ",
+            given,
+            b" in isset or empty"
+        ),
+        DimensionRead::Unset if container.as_ref() == b"string" => {
             return error(req, "Cannot unset string offsets");
         }
-        DimensionRead::Unset => format!("Cannot unset offset of type {given} on {container}"),
-        _ => format!("Cannot access offset of type {given} on {container}"),
+        DimensionRead::Unset => bytes!(b"Cannot unset offset of type ", given, b" on ", container),
+        _ => bytes!(b"Cannot access offset of type ", given, b" on ", container),
     };
     type_error(req, &message)
 }
@@ -1153,7 +1157,7 @@ pub(crate) fn undefined_method(
     let class = req.symbols().class_name(class);
     let message = [
         b"Call to undefined method ",
-        class.as_bytes(),
+        class,
         b"::",
         crate::c_number::c_str(method),
         b"()",
@@ -1169,7 +1173,11 @@ pub(crate) fn non_static_method_call(
     function: crate::api::call::Function,
 ) -> Thrown {
     let name = req.qualified_name_of(function);
-    let message = format!("Non-static method {name}() cannot be called statically");
+    let message = bytes!(
+        b"Non-static method ",
+        name,
+        b"() cannot be called statically"
+    );
     error(req, &message)
 }
 
@@ -1498,7 +1506,8 @@ fn throwable_with_message(
 pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
     let member = active_member(req);
-    throw_argument_error(req, member.as_deref(), "TypeError", tail, &message)
+    let member = member.as_deref().map(str::as_bytes);
+    throw_argument_error(req, member, "TypeError", tail, message.as_bytes())
 }
 
 /// `zend_argument_error_variadic` (`Z/Zend/zend_API.c:398`) around the
@@ -1522,10 +1531,10 @@ pub fn arg_type_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
 /// ```
 pub(crate) fn throw_argument_error(
     req: &mut Request,
-    member: Option<&str>,
+    member: Option<&[u8]>,
     class: &str,
     tail: &str,
-    message: &str,
+    message: &[u8],
 ) -> Thrown {
     under_name(req, member, |req| match printf_buffer(req, tail.len()) {
         Ok(formatted) => {
@@ -1549,10 +1558,10 @@ fn active_member(req: &Request) -> Option<String> {
 /// prints and releases it once the throwable is made.
 pub(crate) fn under_name(
     req: &mut Request,
-    member: Option<&str>,
+    member: Option<&[u8]>,
     throw: impl FnOnce(&mut Request) -> Thrown,
 ) -> Thrown {
-    let name = match member.map(|member| PhpString::new(req, member.as_bytes())) {
+    let name = match member.map(|member| PhpString::new(req, member)) {
         Some(Ok(name)) => Some(name),
         Some(Err(refused)) => return refused,
         None => None,
@@ -1630,7 +1639,8 @@ pub(crate) fn printf_buffer(req: &mut Request, len: usize) -> Result<php_heap::B
 pub fn arg_value_error(req: &mut Request, position: u32, tail: &str) -> Thrown {
     let message = req.argument_message(position, tail);
     let member = active_member(req);
-    throw_argument_error(req, member.as_deref(), "ValueError", tail, &message)
+    let member = member.as_deref().map(str::as_bytes);
+    throw_argument_error(req, member, "ValueError", tail, message.as_bytes())
 }
 
 /// `zend_argument_error`: a throwable of `class` for the argument at
@@ -1649,7 +1659,8 @@ pub fn argument_error(req: &mut Request, class: &str, position: u32, tail: &str)
     let message = req.argument_message(position, "");
     let message = format!("{}{tail}", message.trim_end_matches("must "));
     let member = active_member(req);
-    throw_argument_error(req, member.as_deref(), class, tail, &message)
+    let member = member.as_deref().map(str::as_bytes);
+    throw_argument_error(req, member, class, tail, message.as_bytes())
 }
 
 /// `zend_wrong_parameters_count_error`'s `ArgumentCountError`, `fn()
@@ -1670,7 +1681,7 @@ pub fn argument_error(req: &mut Request, class: &str, position: u32, tail: &str)
 pub fn arg_count_error(req: &mut Request, tail: &str) -> Thrown {
     let message = format!("{}() expects {tail}", req.active_native());
     let member = active_member(req);
-    under_name(req, member.as_deref(), |req| {
+    under_name(req, member.as_deref().map(str::as_bytes), |req| {
         argument_count_error(req, &message)
     })
 }

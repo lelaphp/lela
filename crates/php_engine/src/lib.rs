@@ -34,6 +34,17 @@
     clippy::unimplemented
 )]
 
+/// The bytes of each piece in turn, each anything `AsRef<[u8]>`: a
+/// message as php's `%s` prints the names in it, byte for byte, where
+/// `format!` would hold them to UTF-8 (#3428).
+macro_rules! bytes {
+    ($($piece:expr),+ $(,)?) => {{
+        let mut bytes: Vec<u8> = Vec::new();
+        $(bytes.extend_from_slice(::core::convert::AsRef::<[u8]>::as_ref(&$piece));)+
+        bytes
+    }};
+}
+
 pub mod api;
 mod arena;
 mod attributes;

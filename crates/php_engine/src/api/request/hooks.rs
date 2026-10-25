@@ -414,10 +414,23 @@ impl Request {
     /// as `zobj->ce->name` names it.
     fn hooked_error(&mut self, object: PhpObject, name: &[u8], sentence: &str) -> Thrown {
         let class = self.symbols().class_name(object.class());
-        let shown = String::from_utf8_lossy(name).into_owned();
-        let message = sentence
-            .replace("{class}", &class)
-            .replace("{name}", &shown);
+        let mut message = Vec::new();
+        let mut rest = sentence;
+        while let Some(at) = rest.find('{') {
+            let (head, tail) = rest.split_at(at);
+            message.extend_from_slice(head.as_bytes());
+            if let Some(after) = tail.strip_prefix("{class}") {
+                message.extend_from_slice(class);
+                rest = after;
+            } else if let Some(after) = tail.strip_prefix("{name}") {
+                message.extend_from_slice(name);
+                rest = after;
+            } else {
+                message.push(b'{');
+                rest = tail.get(1..).unwrap_or_default();
+            }
+        }
+        message.extend_from_slice(rest.as_bytes());
         crate::api::raising::error(self, &message)
     }
 
@@ -894,17 +907,21 @@ fn trampoline_call(
         let class = scope
             .map(|scope| req.symbols().class_name(scope))
             .unwrap_or_default();
-        let shown = String::from_utf8_lossy(&name).into_owned();
+        let spelled = bytes!(class, b"::$", &name[..], b"::", kind.name());
+        let message = bytes!(
+            spelled,
+            format!(
+                "() expects exactly {wanted} argument{}, {given} given",
+                if wanted == 1 { "" } else { "s" }
+            )
+        );
         // The member string `get_active_function_or_method_name` makes
         // stands across the printed throw.
-        let member = format!("{class}::${shown}::{}", kind.name());
-        let message = format!(
-            "{member}() expects exactly {wanted} argument{}, {given} given",
-            if wanted == 1 { "" } else { "s" }
-        );
-        return Err(crate::api::raising::under_name(req, Some(&member), |req| {
-            crate::api::raising::argument_count_error(req, &message)
-        }));
+        return Err(crate::api::raising::under_name(
+            req,
+            Some(&spelled),
+            |req| crate::api::raising::argument_count_error(req, &message),
+        ));
     }
     let Some(this) = req.frames().this() else {
         return Err(crate::api::raising::error(

@@ -408,18 +408,21 @@ impl Request {
             return Ok(());
         }
         let shown = visibility_string(self.method_visibility(function));
-        let class = self.method_class(function).map_or_else(
-            || String::from("object"),
-            |class| self.symbols().class_name(class),
-        );
+        let class = self
+            .method_class(function)
+            .map_or(&b"object"[..], |class| self.symbols().class_name(class));
         let from = self.scope_phrase(scope);
-        Err(crate::api::raising::error(
-            self,
-            &format!(
-                "Call to {shown} method {class}::{}() from {from}",
-                String::from_utf8_lossy(written)
-            ),
-        ))
+        let message = bytes!(
+            b"Call to ",
+            shown,
+            b" method ",
+            class,
+            b"::",
+            written,
+            b"() from ",
+            from
+        );
+        Err(crate::api::raising::error(self, &message))
     }
 
     /// The end of `zend_std_get_static_method`
@@ -459,22 +462,20 @@ impl Request {
             .method_decl(function)
             .map(|decl| decl.function.name.clone())
             .unwrap_or_default();
-        let shown = format!(
-            "{}::{}",
-            self.symbols().class_name(class),
-            String::from_utf8_lossy(&name.0)
-        );
+        let shown = bytes!(self.symbols().class_name(class), b"::", &name.0[..]);
         if is_abstract {
             return Err(crate::api::raising::error(
                 self,
-                &format!("Cannot call abstract method {shown}()"),
+                &bytes!(b"Cannot call abstract method ", shown, b"()"),
             ));
         }
         if is_trait {
             crate::api::raising::deprecated(
                 self,
-                &format!(
-                    "Calling static trait method {shown} is deprecated, it should only be called on a class using the trait"
+                &bytes!(
+                    b"Calling static trait method ",
+                    shown,
+                    b" is deprecated, it should only be called on a class using the trait"
                 ),
             );
             none_pending(self)?;
@@ -536,10 +537,10 @@ impl Request {
 
     /// `scope ? "scope " : "global scope"` with the scope's name after
     /// it, the tail php's bad-call texts end in.
-    pub(super) fn scope_phrase(&self, scope: Option<ClassId>) -> String {
+    pub(super) fn scope_phrase(&self, scope: Option<ClassId>) -> Vec<u8> {
         match scope {
-            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
-            None => String::from("global scope"),
+            Some(scope) => bytes!(b"scope ", self.symbols().class_name(scope)),
+            None => b"global scope".to_vec(),
         }
     }
 
@@ -574,11 +575,13 @@ impl Request {
             ClassKind::Class if decl.flags.is_abstract => "abstract class",
             ClassKind::Class => return Ok(()),
         };
-        let name = self.symbols().class_name(class);
-        Err(crate::api::raising::error(
-            self,
-            &format!("Cannot instantiate {what} {name}"),
-        ))
+        let message = bytes!(
+            b"Cannot instantiate ",
+            what,
+            b" ",
+            self.symbols().class_name(class)
+        );
+        Err(crate::api::raising::error(self, &message))
     }
 
     /// The name a call frame carries for a native method, its declared
@@ -586,16 +589,16 @@ impl Request {
     /// and the empty string for the pass function, which has none.
     pub(crate) fn method_name_string(&mut self, function: Function) -> Result<PhpString, Thrown> {
         let name = if function == Function::PASS {
-            String::new()
+            Vec::new()
         } else {
             self.declared_name(function)
         };
-        self.declared_string(name.as_bytes()).map(Owner::hand_on)
+        self.declared_string(&name).map(Owner::hand_on)
     }
 
     /// [`Request::qualified_name`] for a raise about a method called on
     /// its class.
-    pub(crate) fn qualified_name_of(&self, function: Function) -> String {
+    pub(crate) fn qualified_name_of(&self, function: Function) -> Vec<u8> {
         self.qualified_name(function, None)
     }
 
@@ -870,16 +873,29 @@ impl<'r> Symbols<&'r Request> {
         self.0.method_function(row.scope(), row.row.at)
     }
 
-    /// `ZSTR_VAL(ce->name)` as a message's `%s` prints it: the name a
+    /// `ZSTR_VAL(ce->name)` as a message's `%s` prints it: the bytes a
     /// class was declared under up to its NUL, so an anonymous class is
-    /// `class@anonymous` ([`php_unit::decl::shown`]), and `object` for
-    /// one the tables have no declaration for. A value holding the name,
-    /// `get_class()`'s, is [`Request::class_name_bytes`].
-    pub fn class_name(self, class: ClassId) -> String {
-        self.0.symbols().class_decl(class).map_or_else(
-            || String::from("object"),
-            |decl| php_unit::decl::shown(&decl.name.0).into_owned(),
-        )
+    /// `class@anonymous` ([`php_unit::decl::shown_bytes`]), and `object`
+    /// for one the tables have no declaration for. A value holding the
+    /// name, `get_class()`'s, is [`Request::class_name_bytes`]. A name
+    /// no UTF-8 reads stands in every message as it was declared:
+    ///
+    /// ```php
+    /// set_error_handler(function ($no, $str) { echo bin2hex($str), "\n"; return true; });
+    /// eval("class \xdcb { public function __construct(public int \$i = 0) {} } echo (new \xdcb)->x;");
+    /// eval("\$o = new \xdcb; \$o->p = 1;");
+    /// try { eval("(new \xdcb)->m();"); } catch (Error $e) { echo bin2hex($e->getMessage()), "\n"; }
+    /// try { eval("new \xdcb('x');"); } catch (TypeError $e) { echo bin2hex(strstr($e->getMessage(), ",", true)), "\n"; }
+    /// ```
+    /// ```expect
+    /// 556e646566696e65642070726f70657274793a20dc623a3a2478
+    /// 4372656174696f6e206f662064796e616d69632070726f706572747920dc623a3a24702069732064657072656361746564
+    /// 43616c6c20746f20756e646566696e6564206d6574686f6420dc623a3a6d2829
+    /// dc623a3a5f5f636f6e73747275637428293a20417267756d656e742023312028246929206d757374206265206f66207479706520696e74
+    /// ```
+    pub fn class_name(self, class: ClassId) -> &'r [u8] {
+        (self.0.symbols().class_decl(class))
+            .map_or(b"object", |decl| php_unit::decl::shown_bytes(&decl.name.0))
     }
 
     /// `instanceof_function`: whether `class` is `of`, extends it, or

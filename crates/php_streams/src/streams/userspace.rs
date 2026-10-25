@@ -223,7 +223,7 @@ fn create_object(
 
 /// The class's name, as the warnings print it.
 fn class_name(req: &Request, object: PhpObject) -> String {
-    req.symbols().class_name(object.class())
+    String::from_utf8_lossy(req.symbols().class_name(object.class())).into_owned()
 }
 
 /// A method's `is not implemented!` warning.

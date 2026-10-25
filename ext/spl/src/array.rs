@@ -1695,7 +1695,7 @@ fn hash_key(req: &mut Request, offset: &Value) -> Result<Option<Key>, Thrown> {
 
 /// `zend_illegal_container_offset(object->ce->name, offset, read)`.
 fn illegal(req: &mut Request, object: PhpObject, offset: &Value, read: DimensionRead) -> Thrown {
-    let class = req.symbols().class_name(object.class());
+    let class = req.symbols().class_name(object.class()).to_vec();
     illegal_container_offset(req, &class, offset, read)
 }
 

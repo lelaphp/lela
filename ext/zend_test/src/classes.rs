@@ -356,7 +356,7 @@ impl _ZendTestClass {
         }
         let text = format!(
             "be of type stdclass|Iterator, {} given",
-            req.symbols().class_name(object.class())
+            String::from_utf8_lossy(req.symbols().class_name(object.class()))
         );
         Err(arg_type_error(req, 1, &text))
     }

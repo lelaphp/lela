@@ -379,7 +379,10 @@ fn named(req: &Request, frame: &ChainFrame<'_>) -> String {
         .map(|decl| String::from_utf8_lossy(&decl.name.0).into_owned())
         .unwrap_or_default();
     match frame.function_scope() {
-        Some(class) => format!("{}::{name}", req.symbols().class_name(class)),
+        Some(class) => format!(
+            "{}::{name}",
+            String::from_utf8_lossy(req.symbols().class_name(class))
+        ),
         None => name,
     }
 }

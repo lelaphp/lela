@@ -769,11 +769,13 @@ fn zend_call_method(
     };
     let name = Name(method.as_bytes().into());
     let Some(callable) = known_method(req, class, &name, object) else {
-        let text = format!(
-            "Couldn't find implementation for method {}::{}",
+        let text = [
+            b"Couldn't find implementation for method ".as_slice(),
             req.symbols().class_name(class),
-            String::from_utf8_lossy(method.as_bytes())
-        );
+            b"::",
+            method.as_bytes(),
+        ]
+        .concat();
         return Err(fatal(req, &text));
     };
     let arguments: Vec<Value> = [arg1, arg2]
@@ -1229,7 +1231,7 @@ fn zend_test_internal_dnf_arguments(
     }
     let text = format!(
         "be of type Iterator|(Traversable&Countable), {} given",
-        req.symbols().class_name(arg.class())
+        String::from_utf8_lossy(req.symbols().class_name(arg.class()))
     );
     Err(arg_type_error(req, 1, &text))
 }

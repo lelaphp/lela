@@ -745,12 +745,16 @@ impl Request {
             return true;
         }
         let shown = visibility_string(visibility);
-        let class = self.symbols().class_name(object.class());
+        let class = self.symbols().class_name(object.class()).to_vec();
         if !self.frames().executing() {
             crate::api::raising::warning(
                 self,
-                &format!(
-                    "Call to {shown} {class}::__destruct() from global scope during shutdown ignored"
+                &bytes!(
+                    b"Call to ",
+                    shown,
+                    b" ",
+                    class,
+                    b"::__destruct() from global scope during shutdown ignored"
                 ),
             );
             return false;
@@ -761,7 +765,14 @@ impl Request {
         let from = self.scope_phrase(self.executed_scope());
         let thrown = crate::api::raising::error(
             self,
-            &format!("Call to {shown} {class}::__destruct() from {from}"),
+            &bytes!(
+                b"Call to ",
+                shown,
+                b" ",
+                class,
+                b"::__destruct() from ",
+                from
+            ),
         );
         self.leave_pending(&thrown);
         false
@@ -1030,10 +1041,8 @@ impl Request {
             return Ok(());
         }
         let class = self.symbols().class_name(object.class());
-        Err(crate::api::raising::error(
-            self,
-            &format!("Cannot use object of type {class} as array"),
-        ))
+        let message = bytes!(b"Cannot use object of type ", class, b" as array");
+        Err(crate::api::raising::error(self, &message))
     }
 
     /// What the four `zend_std_*_dimension` handlers do around the
@@ -1208,16 +1217,20 @@ impl Request {
         }
         // `zend_bad_constructor_call`: the sentence names no `method`.
         let shown = visibility_string(self.method_visibility(constructor));
-        let class = self.method_class(constructor).map_or_else(
-            || String::from("object"),
-            |class| self.symbols().class_name(class),
-        );
+        let class = self
+            .method_class(constructor)
+            .map_or(&b"object"[..], |class| self.symbols().class_name(class));
         let from = self.scope_phrase(scope);
         object.heap().set_destructor_called(true);
-        Err(crate::api::raising::error(
-            self,
-            &format!("Call to {shown} {class}::__construct() from {from}"),
-        ))
+        let message = bytes!(
+            b"Call to ",
+            shown,
+            b" ",
+            class,
+            b"::__construct() from ",
+            from
+        );
+        Err(crate::api::raising::error(self, &message))
     }
 
     /// `zend_std_cast_object_tostring`: `__toString` for a string, its
@@ -1271,10 +1284,12 @@ impl Request {
                 self.release(value);
                 crate::api::raising::pending(self)?;
                 let class = self.symbols().class_name(object.class());
-                Err(crate::api::raising::error(
-                    self,
-                    &format!("Method {class}::__toString() must return a string value"),
-                ))
+                let message = bytes!(
+                    b"Method ",
+                    class,
+                    b"::__toString() must return a string value"
+                );
+                Err(crate::api::raising::error(self, &message))
             }
             TypeTag::Bool => Ok(Some(Owner::bool(true))),
             _ => Ok(None),
@@ -1416,12 +1431,12 @@ impl Request {
             None if value.tag() == TypeTag::Null => {
                 self.release(value);
                 let class = self.symbols().class_name(object.class());
-                crate::api::raising::deprecated(
-                    self,
-                    &format!(
-                        "Returning null from {class}::__debugInfo() is deprecated, return an empty array instead"
-                    ),
+                let message = bytes!(
+                    b"Returning null from ",
+                    class,
+                    b"::__debugInfo() is deprecated, return an empty array instead"
                 );
+                crate::api::raising::deprecated(self, &message);
                 let empty = self.array();
                 adopted(empty).map(Some)
             }
@@ -1758,10 +1773,13 @@ impl Request {
                     } else {
                         ("float", Value::float(1.0))
                     };
-                    crate::api::raising::notice(
-                        self,
-                        &format!("Object of class {class} could not be converted to {to}"),
+                    let message = bytes!(
+                        b"Object of class ",
+                        class,
+                        b" could not be converted to ",
+                        to
                     );
+                    crate::api::raising::notice(self, &message);
                     Owner::take(self, one)
                 }
                 _ => {
@@ -1797,7 +1815,7 @@ impl Request {
         let custom = self.object_custom(object.class());
         let cloned = self.heap.object_clone(object.heap(), custom);
         let Some(new) = self.fatal_of(cloned)? else {
-            let class = self.symbols().class_name(object.class());
+            let class = String::from_utf8_lossy(self.symbols().class_name(object.class()));
             return self.fatal_of(Err(Fatal::error(format!(
                 "InternalError: Std::clone_obj over an object of class {class}, whose native payload its own table must copy"
             ))));
@@ -2056,10 +2074,8 @@ impl Request {
     /// php's `Error` for a class whose `clone_obj` slot is null.
     pub(super) fn uncloneable(&mut self, object: PhpObject) -> Thrown {
         let class = self.symbols().class_name(object.class());
-        crate::api::raising::error(
-            self,
-            &format!("Trying to clone an uncloneable object of class {class}"),
-        )
+        let message = bytes!(b"Trying to clone an uncloneable object of class ", class);
+        crate::api::raising::error(self, &message)
     }
 
     /// The body `ZEND_CLONE` and the `clone()` function share
@@ -2087,12 +2103,12 @@ impl Request {
             Some(with) => {
                 let Some(clone_obj_with) = table.clone_obj_with() else {
                     let class = self.symbols().class_name(object.class());
-                    return Err(crate::api::raising::error(
-                        self,
-                        &format!(
-                            "Cloning objects of class {class} with updated properties is not supported"
-                        ),
-                    ));
+                    let message = bytes!(
+                        b"Cloning objects of class ",
+                        class,
+                        b" with updated properties is not supported"
+                    );
+                    return Err(crate::api::raising::error(self, &message));
                 };
                 let scope = self.executed_scope();
                 self.serve_as_table(object.class(), |req| {

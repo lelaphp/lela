@@ -476,7 +476,7 @@ fn illegal_offset(
     offset: &Value,
     read: DimensionRead,
 ) -> Thrown {
-    let class = req.symbols().class_name(object.class());
+    let class = req.symbols().class_name(object.class()).to_vec();
     illegal_container_offset(req, &class, offset, read)
 }
 

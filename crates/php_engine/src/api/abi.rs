@@ -3333,11 +3333,16 @@ impl Refusals {
     /// in the template.
     fn refuse_construction(req: &mut Request, object: PhpObject, instead: Option<&str>) -> Thrown {
         let class = req.symbols().class_name(object.class());
-        let message = match instead {
-            Some(instead) => {
-                format!("Cannot directly construct {class}, use {instead} instead")
-            }
-            None => format!("Cannot directly construct {class}"),
+        let message = if let Some(instead) = instead {
+            bytes!(
+                b"Cannot directly construct ",
+                class,
+                b", use ",
+                instead,
+                b" instead"
+            )
+        } else {
+            bytes!(b"Cannot directly construct ", class)
         };
         crate::api::raising::error(req, &message)
     }

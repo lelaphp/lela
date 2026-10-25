@@ -830,7 +830,7 @@ impl Request {
         &mut self,
         (holder, declaring): (ClassId, ClassId),
         name: &[u8],
-        class_name: &str,
+        class_name: &[u8],
     ) -> Result<Value, Thrown> {
         if (self.class_data.evaluated_constant(holder, name)).is_some() {
             let value = self.evaluated_in(holder, declaring, name)?;
@@ -839,13 +839,13 @@ impl Request {
         }
         let data = self.class_data.rows.row(declaring);
         if data.visiting.iter().any(|held| **held == *name) {
-            return Err(crate::api::raising::error(
-                self,
-                &format!(
-                    "Cannot declare self-referencing constant {class_name}::{}",
-                    String::from_utf8_lossy(name)
-                ),
-            ));
+            let message = bytes!(
+                b"Cannot declare self-referencing constant ",
+                class_name,
+                b"::",
+                name
+            );
+            return Err(crate::api::raising::error(self, &message));
         }
         data.visiting.push(name.into());
         let evaluated = self.evaluated_in(holder, declaring, name);

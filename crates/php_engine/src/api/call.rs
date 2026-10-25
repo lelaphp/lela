@@ -1069,14 +1069,10 @@ pub fn known_method(
         Some((property, kind)) => req.property_hook_function(class, property, kind)?,
         None => req.symbols().method_named(class, &name.0)?,
     };
-    let spelled = format!(
-        "{}::{}",
-        req.symbols().class_name(class),
-        String::from_utf8_lossy(&name.0)
-    );
+    let spelled = bytes!(req.symbols().class_name(class), b"::", &name.0[..]);
     Some(Callable::of(
         Value::null(),
-        spelled.as_bytes(),
+        &spelled,
         Target::Method {
             function,
             scope: class,

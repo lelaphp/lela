@@ -5049,12 +5049,17 @@ impl StreamLayer for Request {
         }
         let shown = String::from_utf8_lossy(protocol);
         let text = if taken {
-            format!("Protocol {shown}:// is already defined.")
+            format!("Protocol {shown}:// is already defined.").into_bytes()
         } else {
             let name = self.symbols().class_name(class);
-            format!(
-                "Invalid protocol scheme specified. Unable to register wrapper class {name} to {shown}://"
-            )
+            [
+                b"Invalid protocol scheme specified. Unable to register wrapper class ".as_slice(),
+                name,
+                b" to ",
+                shown.as_bytes(),
+                b"://",
+            ]
+            .concat()
         };
         crate::api::raising::docref(self, Level::Warning, &text);
         false

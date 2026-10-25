@@ -652,7 +652,7 @@ impl Request {
             Some(Some(held)) => Ok(PhpString::of(held)),
             Some(None) => {
                 let name = self.declared_name(function);
-                self.declared_string(name.as_bytes()).map(Owner::hand_on)
+                self.declared_string(&name).map(Owner::hand_on)
             }
             None => self.declared_string(b"native").map(Owner::hand_on),
         }
