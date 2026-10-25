@@ -85,20 +85,22 @@ pub fn float_to_long(f: f64) -> i64 {
     }
 }
 
-/// `zend_long_to_str`: the digits as a string of the request's, which
-/// for one digit is the process's interned one, as php's `ZSTR_CHAR` is.
-#[cfg_attr(debug_assertions, track_caller)]
+/// `zend_long_to_str`, [`crate::ops::long_to_str`] through the face: the
+/// digits as a string of the request's, which for one digit is the
+/// process's interned one, as php's `ZSTR_CHAR` is.
 pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thrown> {
-    PhpString::new(req, crate::c_number::Long::of(n).as_bytes())
+    crate::ops::long_to_str(req, n).map(Owner::adopt)
 }
 
 /// `zend_gcvt(f, precision ? precision : 1, '.', exponent, buf)`, as
 /// `smart_str_append_double` and `zend_double_to_str` call it, the one
 /// [`php_heap::double_to_string`] through the face: `precision`
 /// significant digits, a `0` read as one, or with `-1` the shortest
-/// text that reads back as the same double, in the form php chooses, and
-/// not yet a string of the request's. The exponent character is the
-/// caller's, as it is at each of php's call sites: `Exponent::Upper` for
+/// text that reads back as the same double, in the form php chooses,
+/// laid on the stack as php's `buf` is ([`php_heap::DoubleText`], read
+/// as the `str` it holds) and not yet a string of the request's. The
+/// exponent character is the caller's, as it is at each of php's call
+/// sites: `Exponent::Upper` for
 /// `var_export`, `%G` and `%H`, `Exponent::Lower` for `%g` and `%h`. A
 /// `zero_fraction` such as `smart_str_append_double` takes is the
 /// caller's too, since only `var_export` and `json_encode` ask for it.
@@ -146,7 +148,7 @@ pub fn int_to_string(req: &mut Request, n: i64) -> Result<Owner<PhpString>, Thro
 /// [1.5,1.0e+20,-0]
 /// ```
 #[must_use]
-pub fn float_format(f: f64, precision: i32, exponent: Exponent) -> String {
+pub fn float_format(f: f64, precision: i32, exponent: Exponent) -> php_heap::DoubleText {
     php_heap::double_to_string(f, precision, exponent)
 }
 
@@ -165,7 +167,7 @@ pub fn float_format(f: f64, precision: i32, exponent: Exponent) -> String {
 /// a:2:{i:0;d:3.0E+0;i:1;d:;}|3.0e+0|3|I
 /// ```
 #[must_use]
-pub fn gcvt(f: f64, ndigit: i32, exponent: Exponent) -> String {
+pub fn gcvt(f: f64, ndigit: i32, exponent: Exponent) -> php_heap::DoubleText {
     php_heap::gcvt(f, ndigit, exponent)
 }
 

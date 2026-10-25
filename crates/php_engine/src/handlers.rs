@@ -22398,12 +22398,21 @@ pub(crate) fn strlen<T: Tier>(
     unary(req, frame, code, op, crate::ops::strlen)
 }
 
-/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8788`): the
+/// The inline path of `ZEND_STRLEN` (`Z/Zend/zend_vm_def.h:8772`): the
 /// length [`inline::string_length`] reads of a string as it stands,
-/// into the temporary. `None`, with nothing touched, for a temporary
-/// holding the string's owner, which the opcode gives up (`FREE_OP1`),
-/// for everything the rule leaves to the kernel, and for a temporary
-/// for the answer holding an owner.
+/// into the temporary, and then a temporary's owner of the string given
+/// up as the handler's `zval_ptr_dtor_str` gives it up, so the string a
+/// conversion or a join made for the call is freed here. `None`, with
+/// nothing touched, for everything the rule leaves to the kernel and for
+/// a temporary for the answer holding an owner.
+///
+/// ```php
+/// $i = 1234; $s = "ab";
+/// echo strlen((string)$i), "|", strlen($s . $s), "|", strlen("x$i"), "|", strlen($s), "\n";
+/// ```
+/// ```expect
+/// 4|4|5|2
+/// ```
 #[inline(always)] // as `inline_arith`
 fn inline_strlen(
     req: &mut Request,
@@ -22414,11 +22423,20 @@ fn inline_strlen(
 ) -> Option<Edge> {
     let slots = req.slots_mut(frame);
     let z = a.read(slots, code, op.op1);
-    if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) && z.is_refcounted() {
-        return None;
-    }
     let length = inline::string_length(z)?;
+    let owner = match z.as_str() {
+        Some(s) if matches!(a.kind(), OperandKind::Tmp | OperandKind::Var) && z.is_refcounted() => {
+            Some((a.slot(op.op1)?, s))
+        }
+        _ => None,
+    };
     write_owning_nothing(slots, op, Zval::long(length))?;
+    if let Some((operand, s)) = owner {
+        if let Some(slot) = slots.get_mut(operand) {
+            *slot = Zval::UNDEF;
+        }
+        req.heap_mut().release_string(s);
+    }
     Some(Ok(advanced()))
 }
 
@@ -22500,8 +22518,62 @@ pub(crate) fn cast<T: Tier>(
             op.extended_value
         )));
     };
+    if to == crate::ops::CastTo::Str
+        && let Some(edge) = inline_cast_string(req, frame, code, op, ByKind(op.op1_type))
+    {
+        return edge;
+    }
     unary(req, frame, code, op, |req, value| {
         crate::ops::cast(req, value, to)
+    })
+}
+
+/// The inline path of `ZEND_CAST` to a string (`Z/Zend/zend_vm_def.h:6512`)
+/// over an int or a float as it stands, `zval_get_string`'s two arms
+/// for them: [`crate::ops::long_to_str`] and [`crate::ops::double_to_str`]
+/// into the temporary, neither operand holding anything to free. `None`,
+/// with nothing touched, for any other operand, for a NAN, whose warning
+/// the kernel raises, and for a temporary for the answer holding an
+/// owner. The memory limit ends the request at this opline, as the
+/// kernel's does.
+///
+/// ```php
+/// $i = 42; $f = -2.5; $n = NAN;
+/// echo (string)$i, "|", (string)$f, "|", (string)($i * 1000000), "|", (string)0.1, "|", (string)$n, "\n";
+/// ```
+/// ```expect
+/// 42|-2.5|42000000|0.1|
+/// Warning: unexpected NAN value was coerced to string in %s on line 3
+/// NAN
+/// ```
+#[inline(always)] // as `inline_arith`
+fn inline_cast_string(
+    req: &mut Request,
+    frame: FrameRef,
+    code: &OpArray,
+    op: &Opline,
+    a: impl Operand,
+) -> Option<Edge> {
+    let slots = req.slots_mut(frame);
+    let z = a.read(slots, code, op.op1);
+    let out = op.out as usize;
+    if slots.get(out)?.is_refcounted() {
+        return None;
+    }
+    let made = if let Some(n) = z.as_long() {
+        crate::ops::long_to_str(req, n)
+    } else {
+        let f = z.as_double().filter(|f| !f.is_nan())?;
+        crate::ops::double_to_str(req, f)
+    };
+    Some(match made {
+        Ok(text) => {
+            if let Some(into) = req.slots_mut(frame).get_mut(out) {
+                *into = Zval::string(text.heap());
+            }
+            Ok(advanced())
+        }
+        Err(thrown) => threw(req, frame, &thrown),
     })
 }
 
