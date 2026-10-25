@@ -19,11 +19,14 @@
 //! at the hard limit.
 
 use crate::api::abi::{Encoding, Multibyte};
-use crate::api::raising::{Level, Thrown, docref, throw};
+use crate::api::raising::{Level, Thrown, docref, throw_exception_ex};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{Emalloc, Owner, PhpArray, PhpString, Value};
 use crate::c_number::{c_str, is_space};
+
+/// `EMIT_WARNING_OR_ERROR`'s throwable under `request_parse_body()`.
+const PARSE_BODY: &str = "RequestParseBodyException";
 
 /// `FILLUNIT` (`Z/main/rfc1867.c:188`).
 const FILLUNIT: usize = 1024 * 5;
@@ -714,7 +717,7 @@ impl Handler {
     /// `request_parse_body()`, the warning otherwise.
     fn refuse(&self, req: &mut Request, message: &str) -> Result<(), Thrown> {
         if self.throwing {
-            return Err(throw(req, "RequestParseBodyException", message));
+            return Err(throw_exception_ex(req, PARSE_BODY, message));
         }
         docref(req, Level::Warning, message);
         Ok(())
@@ -833,7 +836,7 @@ pub(crate) fn post_handler(
     let content_length = req.content_length();
     let refuse = |req: &mut Request, message: &str| {
         if throwing {
-            return Err(throw(req, "RequestParseBodyException", message));
+            return Err(throw_exception_ex(req, PARSE_BODY, message));
         }
         docref(req, Level::Warning, message);
         Ok(())

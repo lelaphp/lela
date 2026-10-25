@@ -80,7 +80,7 @@ impl SmartStr {
             len.saturating_add(OVERHEAD).next_multiple_of(PAGE) - OVERHEAD
         };
         let buf = match self.buf.take() {
-            None => req.heap_mut().string_fresh(grown),
+            None => req.heap_mut().string_fresh(grown, php_heap::Sizing::Alloc),
             Some(buf) => req.heap_mut().string_erealloc(buf, grown),
         };
         self.buf = Some(req.fatal_of(buf)?);

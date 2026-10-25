@@ -11,7 +11,7 @@ dax-php is the third engine: a PHP 8.5 engine in Rust that copies Zend's executi
 | sapi/ | 9 | 0 |
 | xtask | 1 | 0 |
 
-<!-- /computed in=d3533aa742d59757ec2252d7c53d5ee75053e717a9c72adc085f821b9c239463 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
+<!-- /computed in=3dd572de7d51bc71bb1c233dec408bf25abfa21e0e1791160f873f76129646b1 out=b85e1b865d1c52266cf05808f0e042bf6dea128568977cc61be6b0830734c1ae -->
 
 ## What makes the third engine special?
 
@@ -98,7 +98,7 @@ harness-design.md
 jit-design.md
 third-engine-design.md
 
-<!-- /computed in=8b5358f8e2821b1589eddea0cd5bd062a53f119520c570b94d5145a4fd323aa0 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
+<!-- /computed in=c5d7f484942d65efda32284810792a226416e0ded0b7e581d63d585045e72ed6 out=59c14cd45b0ce3a636958ac2b89a22d1b68161882044aa0617b42f93947e231e -->
 <!-- computed exec cmd=scripts/adr-index.sh inputs=docs/adr/*.md,scripts/adr-index.sh name=adrs | do not edit; run computed -->
 
 - ADR-0001 (accepted, 2026-09-05): The unit format, including the opcode enum, is a leaf crate below both the compiler and the engine
@@ -122,18 +122,18 @@ third-engine-design.md
 
 | seam | lock | items | ceiling |
 |---|---|---|---|
-| heap | heap.lock | 502 |  |
+| heap | heap.lock | 507 |  |
 | process | process.lock | 40 |  |
 | unit | unit.lock | 125 |  |
 | link | link.lock | 62 |  |
 | ops | ops.lock | 209 |  |
-| api | api.lock | 1504 | 1525 |
+| api | api.lock | 1516 | 1525 |
 | sapi | sapi.lock | 58 |  |
-| tier | tier.lock | 192 |  |
+| tier | tier.lock | 196 |  |
 | layer | layer.lock | 38 |  |
 | harness | xtask.lock | 428 |  |
 
-<!-- /computed in=a099cd0b31246384c52975ad02f5e312bccd1b738aad5cb7656b199e25333940 out=54bd569736ef6d51e837ad71519406f69907873b08b48fcccb2bdeae2d4821ae -->
+<!-- /computed in=f4cdf6903d0726a5076c77f25adffff8703cf58792a89e13f82ffeadff921019 out=9a63dcf9082ef6bcf7c169ee18df8ba05f72cecde81d320a8f4ac813bb9ac4b5 -->
 <!-- computed exec cmd="cargo xtask --help" inputs=xtask/src/cli.rs name=instruments as=fence | do not edit; run computed -->
 ```
 The harness for the third engine

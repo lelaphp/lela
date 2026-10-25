@@ -15,7 +15,8 @@ use php_ext::attr::php_class;
 use php_ext::call::{call_method, clone_with, internal_iterator, new_object};
 use php_ext::coerce::{to_long, truthy};
 use php_ext::raising::{
-    Thrown, arg_value_error, illegal_container_offset, throw, throw_error, warning,
+    Thrown, arg_value_error, illegal_container_offset, throw, throw_error, throw_exception_ex,
+    warning,
 };
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
@@ -509,14 +510,14 @@ impl SplFixedArray {
                 }
             }
             let Some(max) = max else {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "InvalidArgumentException",
                     "array must contain only positive integer keys",
                 ));
             };
             let Some(size) = max.checked_add(1).filter(|s| i64::try_from(*s).is_ok()) else {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "InvalidArgumentException",
                     "integer overflow detected",

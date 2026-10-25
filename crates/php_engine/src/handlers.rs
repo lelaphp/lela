@@ -65,7 +65,9 @@ use php_unit::{CacheSlot, ConstIdx, OpArray, OperandKind, Opline};
 
 use crate::api::abi::{DimensionRead, PropertyPlace, PropertyRead, PropertyTest};
 use crate::api::call::Function;
-use crate::api::raising::{Thrown, non_static_method_call, none_pending, undefined_method};
+use crate::api::raising::{
+    Thrown, non_static_method_call, none_pending, type_error, undefined_method,
+};
 use crate::api::request::ropes::RopeAt;
 use crate::api::request::{CodeFrom, ConstantRead, Opened, Raised, Request};
 use crate::api::values::walk::{self, Hold};
@@ -2894,7 +2896,12 @@ pub(crate) fn init_user_call<T: Tier>(
             let message =
                 format!("{native}(): Argument #1 ($callback) must be a valid callback, {refusal}");
             Err(refusal.across(req, |req| {
-                crate::api::raising::throw_over_pending(req, "TypeError", &message)
+                crate::api::raising::throw_over_pending(
+                    req,
+                    crate::api::raising::Printing::Buffered,
+                    "TypeError",
+                    &message,
+                )
             }))
         }
     };
@@ -3106,9 +3113,8 @@ pub(crate) fn send_array<T: Tier>(
     let given = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let Some(array) = given.as_array() else {
         let shown = crate::ops::value_name(req, &given.undef_as_null());
-        let thrown = crate::api::raising::throw_error(
+        let thrown = type_error(
             req,
-            "TypeError",
             &format!(
                 "call_user_func_array(): Argument #2 ($args) must be of type array, {shown} given"
             ),
@@ -3194,9 +3200,8 @@ fn send_array_slice(
     let Some(mut length) = length else {
         let shown = crate::ops::value_name(req, &given);
         exec::free_operand(req, frame, op.op2_type, op.op2);
-        return Err(crate::api::raising::throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             &format!("array_slice(): Argument #3 ($length) must be of type ?int, {shown} given"),
         ));
     };
@@ -4837,7 +4842,7 @@ fn return_type_error(
         None => String::from("none"),
     };
     let message = format!("{name}(): Return value must be of type {declared}, {given} returned");
-    Ok(crate::api::raising::throw_error(req, "TypeError", &message))
+    Ok(type_error(req, &message))
 }
 
 /// `zend_verify_type_error_common`'s `need_msg`: the type resolved
@@ -4885,7 +4890,7 @@ pub(crate) fn verify_never_type<T: Tier>(
         "function"
     };
     let message = format!("{name}(): never-returning {kind} must not implicitly return");
-    let thrown = crate::api::raising::throw_error(req, "TypeError", &message);
+    let thrown = type_error(req, &message);
     threw(req, frame, &thrown)
 }
 
@@ -5104,9 +5109,9 @@ pub(crate) fn callable_convert<T: Tier>(
 /// pk(function () use ($s) { try { $s->invoke(null, []); } catch (TypeError $e) {} });
 /// ```
 /// ```expect
-/// 3496 32
-/// 3544 0
-/// 3584 0
+/// 3352 32
+/// 3384 0
+/// 3424 0
 /// ```
 fn arg_type_error(
     req: &mut Request,
@@ -7698,7 +7703,7 @@ fn fetch_class_constant_found(
                 named.type_name()
             );
             exec::free_operand(req, frame, op.op2_type, op.op2);
-            let thrown = crate::api::raising::throw_error(req, "TypeError", &message);
+            let thrown = type_error(req, &message);
             return threw(req, frame, &thrown);
         };
         Cow::Owned(name)
@@ -9654,9 +9659,8 @@ fn verify_ref_array_assignable(req: &mut Request, cell: PhpRef) -> Result<(), Th
         return Ok(());
     };
     let class = req.symbols().class_name(declaring);
-    Err(crate::api::raising::throw_error(
+    Err(type_error(
         req,
-        "TypeError",
         &format!(
             "Cannot auto-initialize an array inside a reference held by property {class}::${shown} of type {ty}"
         ),
@@ -9680,9 +9684,8 @@ fn refuse_fetch(
                 let class = req.symbols().class_name(typed.declaring);
                 let ty = php_unit::type_to_string(&typed.ty);
                 let shown = String::from_utf8_lossy(name);
-                return Err(crate::api::raising::throw_error(
+                return Err(type_error(
                     req,
-                    "TypeError",
                     &format!(
                         "Cannot auto-initialize an array inside property {class}::${shown} of type {ty}"
                     ),
@@ -12134,9 +12137,8 @@ pub(crate) fn clone<T: Tier>(
     let operand = exec::operand(req, frame, code, op.op1_type, op.op1).deref();
     let cloned = match operand.as_object() {
         Some(object) => req.clone_object(object, None).map(Owner::hand_on),
-        None => Err(crate::api::raising::throw_error(
+        None => Err(type_error(
             req,
-            "TypeError",
             &format!(
                 "clone(): Argument #1 ($object) must be of type object, {} given",
                 crate::ops::value_name(req, &operand)
@@ -12393,11 +12395,7 @@ pub(crate) fn fetch_class_name<T: Tier>(
         let class = value.as_object().map(|v| v.class());
         let Some(class) = class else {
             let shown = crate::ops::value_name(req, &value);
-            let thrown = crate::api::raising::throw_error(
-                req,
-                "TypeError",
-                &format!("Cannot use \"::class\" on {shown}"),
-            );
+            let thrown = type_error(req, &format!("Cannot use \"::class\" on {shown}"));
             exec::free_operand(req, frame, op.op1_type, op.op1);
             return threw(req, frame, &thrown);
         };
@@ -19728,9 +19726,8 @@ fn append_unpacked(req: &mut Request, a: php_heap::Arr, value: Value) -> Result<
 fn unpack_iterator(req: &mut Request, object: PhpObject) -> Result<PhpObject, Thrown> {
     if !crate::interfaces::is_traversable(req, object.class()) {
         let given = crate::ops::value_name(req, &object.as_value());
-        return Err(crate::api::raising::throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             &format!("Only arrays and Traversables can be unpacked, {given} given"),
         ));
     }
@@ -19876,9 +19873,8 @@ pub(crate) fn send_unpack<T: Tier>(
             exec::operand(req, frame, code, op.op1_type, op.op1);
         }
         let given = crate::ops::value_name(req, &spread.undef_as_null());
-        Ok(Err(crate::api::raising::throw_error(
+        Ok(Err(type_error(
             req,
-            "TypeError",
             &format!("Only arrays and Traversables can be unpacked, {given} given"),
         )))
     };
@@ -23374,9 +23370,8 @@ pub(crate) fn get_class<T: Tier>(
         let class = value.as_object().map(|v| v.class());
         let Some(class) = class else {
             let shown = crate::ops::value_name(req, &value);
-            let thrown = crate::api::raising::throw_error(
+            let thrown = type_error(
                 req,
-                "TypeError",
                 &format!(
                     "get_class(): Argument #1 ($object) must be of type object, {shown} given"
                 ),
@@ -23535,9 +23530,8 @@ pub(crate) fn array_key_exists<T: Tier>(
         }
         if !req.is_pending() {
             let shown = crate::ops::value_name(req, &subject);
-            let thrown = crate::api::raising::throw_error(
+            let thrown = type_error(
                 req,
-                "TypeError",
                 &format!(
                     "array_key_exists(): Argument #2 ($array) must be of type array, {shown} given"
                 ),

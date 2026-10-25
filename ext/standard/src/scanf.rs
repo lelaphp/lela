@@ -10,7 +10,7 @@ use crate::string::Decimal;
 use php_ext::abi::{Ref, Union, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{c_str, is_space};
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, ValueRef};
 
@@ -474,10 +474,10 @@ fn scan(
 ) -> Result<Owner<Value>, Thrown> {
     let total = match validate(format, num_vars) {
         Ok(total) => total,
-        Err(Invalid::Value(message)) => return Err(throw_error(req, "ValueError", message)),
+        Err(Invalid::Value(message)) => return Err(value_error(req, message)),
         Err(Invalid::BadChar(c)) => {
             let text = format!("Bad scan conversion character \"{}\"", char::from(c));
-            return Err(throw_error(req, "ValueError", &text));
+            return Err(value_error(req, &text));
         }
     };
     let mut target = if num_vars > 0 {

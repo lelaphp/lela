@@ -24,7 +24,7 @@ use crate::api::abi::{DimensionRead, PropertiesFor, PropertyPurpose};
 use crate::api::coerce::BinaryOp;
 use crate::api::raising::{
     Level, Thrown, cannot_add_element, deprecated, error, illegal_container_offset, none_pending,
-    throw, throw_error, type_error, warning,
+    throw_error, throw_exception_ex, type_error, warning,
 };
 use crate::api::request::{HookedTable, Request};
 use crate::api::values::walk::{self, Table};
@@ -458,7 +458,7 @@ pub(crate) fn match_unhandled_error(req: &mut Request, subject: &Value) -> Throw
         req.zval_text(subject, cut)
     };
     let text = quoted.unwrap_or_else(|| format!("of type {}", type_name(req, subject)));
-    throw(
+    throw_exception_ex(
         req,
         "UnhandledMatchError",
         &format!("Unhandled match case {text}"),
@@ -2175,7 +2175,12 @@ pub(crate) fn r#mod(req: &mut Request, left: &Value, right: &Value) -> Result<Va
     let (a, b) = longs(req, "%", left, right)?;
     match inline::remainder(a, b) {
         Some(n) => Ok(Value::int(n)),
-        None => Err(throw(req, "DivisionByZeroError", "Modulo by zero")),
+        // `zend_throw_exception_ex` (`Z/Zend/zend_operators.c:1550`).
+        None => Err(crate::api::raising::throw_exception_ex(
+            req,
+            "DivisionByZeroError",
+            "Modulo by zero",
+        )),
     }
 }
 
@@ -2301,7 +2306,7 @@ fn shift(req: &mut Request, side: Shift, left: &Value, right: &Value) -> Result<
     }
     match u64::try_from(b) {
         Ok(by) => Ok(Value::int(by_heap(a, by))),
-        Err(_) => Err(throw(
+        Err(_) => Err(throw_exception_ex(
             req,
             "ArithmeticError",
             "Bit shift by negative number",

@@ -1668,6 +1668,18 @@ impl NodeObject {
     pub fn doc_refcount(&self) -> u32 {
         self.doc_ref().map_or(0, |d| d.refcount)
     }
+
+    /// `intern->document->ptr = NULL`: the tree the document reference
+    /// owns handed to whatever takes it next, so the reference's last
+    /// count frees its switches and its namespace mappings and leaves the
+    /// tree alone. This is how ext/xsl's `importStylesheet` gives libxslt
+    /// the document of the clone it compiled. Every object that counts
+    /// the reference sees it detached.
+    pub fn detach_document(&mut self) {
+        if let Some(d) = self.doc_ref_mut() {
+            d.doc = ptr::null_mut();
+        }
+    }
 }
 
 /// A document reference handed from one object to another, php's

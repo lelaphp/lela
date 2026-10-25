@@ -16,7 +16,7 @@ use std::ops::ControlFlow;
 
 use php_ext::abi::PropertyPurpose;
 use php_ext::call;
-use php_ext::coerce::{Exponent, float_format, numeric_string};
+use php_ext::coerce::{Exponent, gcvt, numeric_string};
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
@@ -177,9 +177,24 @@ fn held(
     wrote
 }
 
-/// `php_json_encode_double`: `zend_gcvt` at `serialize_precision`, with
-/// `.0` appended under `JSON_PRESERVE_ZERO_FRACTION` where the text
-/// carries no decimal point.
+/// `php_json_encode_double`: `zend_gcvt` at `serialize_precision` as the
+/// entry stands (`Z/ext/json/json_encoder.c:84`), with `.0` appended
+/// under `JSON_PRESERVE_ZERO_FRACTION` where the text carries no decimal
+/// point. The entry reaches `zend_gcvt` with none of the `precision ?
+/// precision : 1` that `var_export` reads it through, so at `0` the one
+/// digit is written exponentially once the point stands past it:
+///
+/// ```php
+/// foreach ([0, 1, -1] as $p) {
+///     ini_set('serialize_precision', $p);
+///     echo $p, ": ", json_encode([10/3, 0.25, 1.5, 0.0, -1.5, 1e25, 0.1]), "|", json_encode(0.0, JSON_PRESERVE_ZERO_FRACTION), "|", var_export(10/3, true), "\n";
+/// }
+/// ```
+/// ```expect
+/// 0: [3.0e+0,0.2,2.0e+0,0.0e+0,-2.0e+0,1.0e+25,0.1]|0.0e+0|3.0
+/// 1: [3,0.2,2,0,-2,1.0e+25,0.1]|0.0|3.0
+/// -1: [3.3333333333333335,0.25,1.5,0,-1.5,1.0e+25,0.1]|0.0|3.3333333333333335
+/// ```
 fn encode_double(
     req: &mut Request,
     buf: &mut SmartStr,
@@ -187,7 +202,7 @@ fn encode_double(
     options: i64,
     precision: i32,
 ) -> Result<(), Thrown> {
-    let mut text = float_format(value, precision, Exponent::Lower);
+    let mut text = gcvt(value, precision, Exponent::Lower);
     if options & JSON_PRESERVE_ZERO_FRACTION != 0 && !text.contains('.') {
         text.push_str(".0");
     }

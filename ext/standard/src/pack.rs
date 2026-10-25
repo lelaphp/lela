@@ -11,7 +11,7 @@ use crate::string::Decimal;
 use php_ext::abi::{OrFalse, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::{atoi, to_double, to_long, to_string, with_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
 
@@ -149,9 +149,8 @@ fn packed(
             }
             b'a' | b'A' | b'Z' | b'h' | b'H' => {
                 if currentarg >= num_args {
-                    return Err(throw_error(
+                    return Err(value_error(
                         req,
-                        "ValueError",
                         &format!("Type {ch}: not enough arguments"),
                     ));
                 }
@@ -175,20 +174,12 @@ fn packed(
                 }
                 let current = i64::try_from(currentarg).unwrap_or(INT_MAX);
                 if current > INT_MAX - arg || current + arg > i64::try_from(num_args).unwrap_or(0) {
-                    return Err(throw_error(
-                        req,
-                        "ValueError",
-                        &format!("Type {ch}: too few arguments"),
-                    ));
+                    return Err(value_error(req, &format!("Type {ch}: too few arguments")));
                 }
                 currentarg += usize::try_from(arg).unwrap_or(0);
             }
             _ => {
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    &format!("Type {ch}: unknown format code"),
-                ));
+                return Err(value_error(req, &format!("Type {ch}: unknown format code")));
             }
         }
         codes.push((code, arg));
@@ -378,9 +369,8 @@ fn packed(
 
 /// `INC_OUTPUTPOS`'s refusal.
 fn overflow(req: &mut Request, code: char) -> Thrown {
-    throw_error(
+    value_error(
         req,
-        "ValueError",
         &format!("Type {code}: integer overflow in format string"),
     )
 }
@@ -581,11 +571,7 @@ fn unpack(
             b'q' | b'Q' | b'J' | b'P' | b'd' | b'e' | b'E' => 8,
             _ => {
                 array.give_up(req);
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    &format!("Invalid format type {ch}"),
-                ));
+                return Err(value_error(req, &format!("Invalid format type {ch}")));
             }
         };
         let mut i: i64 = 0;

@@ -12,7 +12,8 @@ use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, docref, leave_pending, throw, while_pending,
+    Level, Thrown, arg_value_error, docref, leave_pending, throw_error, type_error, value_error,
+    while_pending,
 };
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::walk;
@@ -253,7 +254,7 @@ impl ObjectHandlers for Handlers {
         value.give_up(req);
         let class = String::from_utf8_lossy(&Std.get_class_name(req, object)).into_owned();
         let message = format!("Cannot write read-only property {class}::${shown}");
-        Err(throw(req, "Error", &message))
+        Err(throw_error(req, "Error", &message))
     }
 
     fn get_property_ptr_ptr(
@@ -485,7 +486,7 @@ impl Hooks for PhpHooks<'_> {
             let message = format!(
                 "Return value of callback provided to ZipArchive::registerCancelCallback() must be of type int, {name} returned"
             );
-            self.thrown = Some(throw(self.req, "TypeError", &message));
+            self.thrown = Some(type_error(self.req, &message));
             return true;
         };
         v.give_up(self.req);
@@ -521,7 +522,7 @@ fn close_with_hooks(
 
 /// `zend_value_error("Invalid or uninitialized Zip object")`.
 fn invalid(req: &mut Request) -> Thrown {
-    throw(req, "ValueError", "Invalid or uninitialized Zip object")
+    value_error(req, "Invalid or uninitialized Zip object")
 }
 
 /// `ZIP_FROM_OBJECT`: the open archive, or php's `ValueError`.

@@ -9,7 +9,9 @@ use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Raw, Refusals, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, value_name, with_string};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_type_error, arg_value_error, docref, throw_error, value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::{FreshString, Key, Owner, PhpObject, PhpString, Value, ValueRef};
@@ -297,33 +299,29 @@ fn deflate_init(
     let options = Options(options.value());
     let level = options.long(req, b"level", -1)?;
     if !(-1..=9).contains(&level) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "deflate_init(): \"level\" option must be between -1 and 9",
         ));
     }
     let memory = options.long(req, b"memory", 8)?;
     if !(1..=9).contains(&memory) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "deflate_init(): \"memory\" option must be between 1 and 9",
         ));
     }
     let window = options.long(req, b"window", 15)?;
     if !(8..=15).contains(&window) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "deflate_init(): \"window\" option must be between 8 and 15",
         ));
     }
     let strategy = options.long(req, b"strategy", 0)?;
     if !(0..=4).contains(&strategy) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "deflate_init(): \"strategy\" option must be one of ZLIB_FILTERED, ZLIB_HUFFMAN_ONLY, ZLIB_RLE, ZLIB_FIXED, or ZLIB_DEFAULT_STRATEGY",
         ));
     }
@@ -533,12 +531,11 @@ fn inflate_init(
     let window = options.long(req, b"window", 15)?;
     if !(8..=15).contains(&window) {
         let text = format!("zlib window size (logarithm) ({window}) must be within 8..15");
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     }
     if !known(encoding) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "Encoding mode must be ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP or ZLIB_ENCODING_DEFLATE",
         ));
     }

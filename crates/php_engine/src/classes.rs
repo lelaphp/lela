@@ -28,7 +28,7 @@ use crate::api::abi::{
     Instance, NamedVariadic, ObjectHandlers, Passed, Raw, Refusals, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target, write_prop};
-use crate::api::raising::{Thrown, error, throw, throw_over_pending, warning};
+use crate::api::raising::{Printing, Thrown, error, throw, throw_over_pending, warning};
 use crate::api::request::{Refusal, Request};
 use crate::api::values::{
     ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value, adopted, adopted_some,
@@ -1175,6 +1175,7 @@ impl Closure {
         {
             return Err(throw_over_pending(
                 req,
+                Printing::Buffered,
                 "TypeError",
                 "Failed to create closure from callable",
             ));
@@ -1185,6 +1186,7 @@ impl Closure {
             Err(Refusal::Unsaid) => {
                 return Err(throw_over_pending(
                     req,
+                    Printing::Buffered,
                     "TypeError",
                     "Failed to create closure from callable",
                 ));
@@ -1192,7 +1194,7 @@ impl Closure {
             Err(refusal) => {
                 return Err(refusal.across(req, |req| {
                     let message = format!("Failed to create closure from callable: {refusal}");
-                    throw_over_pending(req, "TypeError", &message)
+                    throw_over_pending(req, Printing::Buffered, "TypeError", &message)
                 }));
             }
         };

@@ -242,6 +242,7 @@ abi::ObjectHandlers::iterator_element
 abi::ObjectHandlers::iterator_size
 abi::ObjectHandlers::method_receiver
 abi::ObjectHandlers::own_iterator
+abi::ObjectHandlers::properties
 abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
@@ -291,6 +292,7 @@ abi::PreloadThread
 abi::PreloadThread::joined
 abi::PreloadThread::new
 abi::PropertiesFor
+abi::PropertyAccess
 abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead
@@ -422,6 +424,7 @@ coerce::compare
 coerce::count
 coerce::float_format
 coerce::float_to_long
+coerce::gcvt
 coerce::identical
 coerce::int_to_string
 coerce::is_callable
@@ -502,6 +505,7 @@ raising::arg_count_error
 raising::arg_null_deprecated
 raising::arg_type_error
 raising::arg_value_error
+raising::argument_count_error
 raising::argument_error
 raising::arity
 raising::call_stack_end
@@ -528,9 +532,12 @@ raising::throw_at
 raising::throw_chained
 raising::throw_error
 raising::throw_error_chained
+raising::throw_exception_ex
 raising::throw_value
 raising::throwing_warnings
+raising::type_error
 raising::uncaught_at
+raising::value_error
 raising::warning
 raising::while_pending
 request::Allocation
@@ -589,6 +596,7 @@ request::Crypto::enable
 request::Crypto::meta
 request::Crypto::pending
 request::Crypto::read
+request::Crypto::resumable
 request::Crypto::setup
 request::Crypto::write
 request::CryptoSocket
@@ -993,6 +1001,7 @@ request::StreamCtx::unset_option
 request::StreamFilter
 request::StreamFilter::close
 request::StreamFilter::filter
+request::StreamFilter::share
 request::StreamOps
 request::StreamOps::buffered
 request::StreamOps::close
@@ -1256,6 +1265,7 @@ values::FreshString::is_empty
 values::FreshString::len
 values::FreshString::new
 values::FreshString::set_len
+values::FreshString::sized
 values::FreshString::truncate
 values::HashIterator
 values::HashIterator::new
@@ -1455,6 +1465,8 @@ values::Resource::unlist
 values::ResourceType
 values::ResourceView
 values::ResourceView::resource
+values::Sizing
+values::Sizing::bytes
 values::SmartStr
 values::SmartStr::append
 values::SmartStr::as_bytes

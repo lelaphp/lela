@@ -4050,20 +4050,25 @@ impl<'a> PermanentStrings<'a> {
     }
 
     /// The string php's compile makes of `bytes` on the asking request's
-    /// heap (`zend_string_init`, the string `concat_function` makes),
+    /// heap at `sizing`'s size (`zend_string_init`, the string
+    /// `concat_function` makes, or a name `zend_strpprintf` prints),
     /// asked of that heap before the table is: none where the compile is
     /// the engine's, the empty string and one byte being the process's
     /// (`ZSTR_CHAR`). The `Err` is the memory limit, and with it the
     /// answer is the asking request's alone, which no cache holds; the
     /// table is left as it stood.
-    fn charge(&mut self, bytes: &[u8]) -> Result<Option<php_heap::Str>, php_heap::Fatal> {
+    fn charge(
+        &mut self,
+        bytes: &[u8],
+        sizing: php_heap::Sizing,
+    ) -> Result<Option<php_heap::Str>, php_heap::Fatal> {
         let CompileHeap::Request(heap) = &mut self.heap else {
             return Ok(None);
         };
         if bytes.len() <= 1 {
             return Ok(None);
         }
-        heap.string(bytes).map(Some).inspect_err(|_| {
+        heap.string_sized(bytes, sizing).map(Some).inspect_err(|_| {
             self.answers = Answers::Asker;
         })
     }
@@ -4122,8 +4127,9 @@ impl Intern for PermanentStrings<'_> {
         &mut self,
         bytes: &[u8],
         valid_utf8: bool,
+        sizing: php_heap::Sizing,
     ) -> Result<php_heap::Str, php_heap::Fatal> {
-        let copy = self.charge(bytes)?;
+        let copy = self.charge(bytes, sizing)?;
         if let Some(held) = self.names.find(bytes) {
             self.stand(copy, None);
             return Ok(held);

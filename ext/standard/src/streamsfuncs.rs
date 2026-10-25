@@ -90,7 +90,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::{callable_checked, with_string};
 use php_ext::raising::{
     Level, Thrown, arg_type_error, arg_value_error, argument_error, arity, deprecated, docref,
-    throw_error,
+    type_error, value_error,
 };
 use php_ext::request::{
     MAXPATHLEN, Notification, NotifyCode, OptionAnswer, Request, Resolve, Stream, StreamCtx,
@@ -226,9 +226,8 @@ fn parse_options(req: &mut Request, res: StreamCtx, options: PhpArray) -> Result
                 })?;
                 Ok(ControlFlow::Continue(()))
             }
-            _ => Err(throw_error(
+            _ => Err(value_error(
                 req,
-                "ValueError",
                 "Options should have the form [\"wrappername\"][\"optionname\"] = $value",
             )),
         }
@@ -260,11 +259,7 @@ fn parse_params(req: &mut Request, res: StreamCtx, params: PhpArray) -> Result<(
     if let Some(options) = params.find(b"options") {
         let options = options.deref();
         let Some(options) = options.as_array() else {
-            return Err(throw_error(
-                req,
-                "TypeError",
-                "Invalid stream/context parameter",
-            ));
+            return Err(type_error(req, "Invalid stream/context parameter"));
         };
         return parse_options(req, res, options);
     }

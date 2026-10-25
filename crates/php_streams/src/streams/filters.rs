@@ -20,11 +20,11 @@
 
 use std::collections::VecDeque;
 
-use super::PhpStream;
+use super::{PhpStream, StreamOp};
 use crate::api::raising::{Thrown, warning};
 use crate::api::request::{
     Brigade, FilterChain as Chain, FilterFactory, FilterFlags, FilterStatus, Request, Stream,
-    StreamFilter, Supplier, Whence,
+    StreamFilter, Supplier,
 };
 use crate::api::values::{Emalloc, Owner, Resource, Value};
 use crate::state::Layer;
@@ -43,7 +43,7 @@ const FILTER_WRITE: i64 = 2;
 /// `stream_filter_append` named it, its resource, of which the chain
 /// holds one owner.
 pub(crate) struct Attached {
-    ops: Box<dyn StreamFilter>,
+    ops: FilterOps,
     /// The filter's `php_stream_filter` on the request's heap, as
     /// `pemalloc` keeps one for a stream that is not persistent, freed
     /// where `php_stream_filter_free` frees it; `None` for a persistent
@@ -55,105 +55,53 @@ pub(crate) struct Attached {
     res: Option<Owner<Resource>>,
 }
 
+/// `filter->fops` with what the factory made: on its chain, or lent out
+/// for its call ([`StreamOp::run_filter`]), the place on the chain marked with
+/// the call's number so the filter comes back to it wherever PHP code
+/// the call served moved the chain.
+enum FilterOps {
+    On(Box<dyn StreamFilter>),
+    Lent(Lend),
+}
+
+impl FilterOps {
+    /// The filter, where it is on its chain and not out for a call.
+    fn into_on(self) -> Option<Box<dyn StreamFilter>> {
+        match self {
+            FilterOps::On(ops) => Some(ops),
+            FilterOps::Lent(_) => None,
+        }
+    }
+}
+
+/// A stream's two filter chains, `stream->readfilters` and
+/// `stream->writefilters`, head first: every read of the kind passes
+/// through the first, every write through the second before the kind.
+#[derive(Default)]
+pub(crate) struct Chains {
+    read: Vec<Attached>,
+    write: Vec<Attached>,
+}
+
+/// The number of one filter call, which marks the lent filter's place on
+/// its chain ([`FilterOps::Lent`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Lend(u64);
+
+impl crate::state::State {
+    /// The next filter call's number.
+    fn next_lend(&mut self) -> Lend {
+        self.filter_lends += 1;
+        Lend(self.filter_lends)
+    }
+}
+
 /// The payload of a `stream filter` resource: the stream the filter is
 /// attached to and the chain it is on; the resource itself finds the
 /// filter on it.
 struct Named {
     stream: Stream,
     chain: Chain,
-}
-
-/// One filter's call on the stream it is attached to. The stream is out
-/// of its resource while the filter runs, so what php's filter reaches
-/// through its `stream` pointer, `php_stream_tell` and
-/// `php_stream_seek` as `consumed` calls them and `php_stream_eof`, is
-/// answered from here: the position and the end as they stood when the
-/// call was made, and a seek the filter asks for, taken on the stream
-/// when the call returns.
-///
-/// ```php
-/// class F extends php_user_filter {
-///     function filter($in, $out, &$consumed, $closing): int {
-///         echo "at ", ftell($this->stream), $closing ? " closing" : "", "\n";
-///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
-///         if ($closing) fseek($this->stream, 3);
-///         return PSFS_PASS_ON;
-///     }
-/// }
-/// stream_filter_register('f', 'F');
-/// $m = fopen('php://memory', 'w+'); fwrite($m, "abcdef"); rewind($m); fread($m, 1);
-/// $f = stream_filter_append($m, 'f', STREAM_FILTER_READ);
-/// var_dump(fread($m, 2));
-/// stream_filter_remove($f);
-/// var_dump(ftell($m), fread($m, 10));
-/// ```
-/// ```expect
-/// at 1
-/// string(2) "bc"
-/// at 3 closing
-/// int(3)
-/// string(3) "def"
-/// ```
-///
-/// `feof` from inside the call answers what the stream was when the
-/// call was made, at its end for the last read:
-///
-/// ```php
-/// class F extends php_user_filter {
-///     function filter($in, $out, &$consumed, $closing): int {
-///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
-///         echo "filtered", $closing ? " closing" : "", feof($this->stream) ? " at eof" : "", "\n";
-///         return PSFS_PASS_ON;
-///     }
-/// }
-/// stream_filter_register('f', 'F');
-/// $t = fopen('php://temp', 'r+b'); fwrite($t, str_repeat('a', 8200)); rewind($t);
-/// stream_filter_append($t, 'f', STREAM_FILTER_READ);
-/// var_dump(strlen(stream_get_contents($t)));
-/// ```
-/// ```expect
-/// filtered
-/// filtered closing at eof
-/// int(8200)
-/// ```
-pub(crate) struct FilterCall {
-    stream: Stream,
-    position: i64,
-    /// `php_stream_eof` as it stood when the call was made: nothing in
-    /// the read buffer and the kind at its end.
-    eof: bool,
-    seek: Option<(i64, Option<Whence>)>,
-}
-
-impl FilterCall {
-    /// The position of `stream`, where it is this call's.
-    pub(crate) fn position_of(&self, stream: Stream) -> Option<i64> {
-        let position = match self.seek {
-            Some((offset, Some(Whence::Set))) => offset,
-            _ => self.position,
-        };
-        (stream.resource() == self.stream.resource()).then_some(position)
-    }
-
-    /// Whether `stream`, where it is this call's, was at its end.
-    pub(crate) fn eof_of(&self, stream: Stream) -> Option<bool> {
-        (stream.resource() == self.stream.resource()).then_some(self.eof)
-    }
-
-    /// A seek of `stream` kept for the call's return, `false` where the
-    /// stream is not this call's.
-    pub(crate) fn defer_seek(
-        &mut self,
-        stream: Stream,
-        offset: i64,
-        whence: Option<Whence>,
-    ) -> bool {
-        if stream.resource() != self.stream.resource() {
-            return false;
-        }
-        self.seek = Some((offset, whence));
-        true
-    }
 }
 
 /// A throwable a filter raised, kept for the native that asked, unless
@@ -171,60 +119,303 @@ pub(super) fn defer(req: &mut Request, thrown: Thrown) {
 
 impl PhpStream {
     fn chain_mut(&mut self, chain: Chain) -> &mut Vec<Attached> {
+        let chains = self.filters.get_or_insert_with(Box::default);
         match chain {
-            Chain::Read => &mut self.readfilters,
-            Chain::Write => &mut self.writefilters,
+            Chain::Read => &mut chains.read,
+            Chain::Write => &mut chains.write,
         }
     }
 
+    /// How many filters `chain` has.
+    pub(super) fn filter_count(&self, chain: Chain) -> usize {
+        self.filters.as_ref().map_or(0, |chains| match chain {
+            Chain::Read => chains.read.len(),
+            Chain::Write => chains.write.len(),
+        })
+    }
+
+    /// Whether `chain` has a filter.
+    pub(super) fn has_filters(&self, chain: Chain) -> bool {
+        self.filter_count(chain) > 0
+    }
+
+    /// The filter at `at` of `chain` lent out for its call under the
+    /// call's number `lend`, `None` where there is none there or it is
+    /// out already.
+    fn lend_filter(
+        &mut self,
+        chain: Chain,
+        at: usize,
+        lend: Lend,
+    ) -> Option<Box<dyn StreamFilter>> {
+        let attached = self.chain_mut(chain).get_mut(at)?;
+        if matches!(attached.ops, FilterOps::Lent(_)) {
+            return None;
+        }
+        match std::mem::replace(&mut attached.ops, FilterOps::Lent(lend)) {
+            FilterOps::On(ops) => Some(ops),
+            FilterOps::Lent(_) => None,
+        }
+    }
+
+    /// A filter back from its call to the place marked `lend`, on
+    /// whichever chain it is now; handed back where PHP code the call
+    /// served took the place off.
+    fn put_filter(
+        &mut self,
+        lend: Lend,
+        ops: Box<dyn StreamFilter>,
+    ) -> Option<Box<dyn StreamFilter>> {
+        let place = self
+            .filters
+            .iter_mut()
+            .flat_map(|chains| chains.read.iter_mut().chain(chains.write.iter_mut()))
+            .find(|f| matches!(f.ops, FilterOps::Lent(n) if n == lend));
+        match place {
+            Some(place) => {
+                place.ops = FilterOps::On(ops);
+                None
+            }
+            None => Some(ops),
+        }
+    }
+
+    /// The filters of both chains taken off and kept, as a persistent
+    /// stream keeps them past its resource: each one's resource closed and
+    /// the chain's owner of it given up, its `fops` kept, its `dtor` not
+    /// served ([`super::persistent::Kept`]).
+    pub(super) fn keep_filters(&mut self, req: &mut Request) -> super::persistent::Kept {
+        let mut kept = super::persistent::Kept::default();
+        let Some(chains) = self.filters.take() else {
+            return kept;
+        };
+        let Chains { read, write } = *chains;
+        for (chain, into) in [(read, &mut kept.read), (write, &mut kept.write)] {
+            for Attached { ops, header, res } in chain {
+                if let Some(res) = res {
+                    res.close(req);
+                    res.give_up(req);
+                }
+                if let Some(header) = header {
+                    header.free(req);
+                }
+                into.extend(ops.into_on());
+            }
+        }
+        kept
+    }
+
+    /// Kept filters attached again, each chain in its order, with no
+    /// resource, as the stream php's list kept still has them.
+    pub(super) fn attach_kept(&mut self, kept: super::persistent::Kept) {
+        let attach = |ops| Attached {
+            ops: FilterOps::On(ops),
+            header: None,
+            res: None,
+        };
+        self.chain_mut(Chain::Read)
+            .extend(kept.read.into_iter().map(attach));
+        self.chain_mut(Chain::Write)
+            .extend(kept.write.into_iter().map(attach));
+    }
+
+    /// The filters of both chains taken off at the stream's free
+    /// (`Z/main/streams/streams.c:510`): each one's resource closed and
+    /// the chain's owner of it given up, then its `dtor` served.
+    pub(super) fn free_filters(&mut self, req: &mut Request) {
+        let Some(chains) = self.filters.take() else {
+            return;
+        };
+        let Chains { read, write } = *chains;
+        for filter in read.into_iter().chain(write) {
+            release_filter(req, filter);
+        }
+    }
+}
+
+impl StreamOp<'_> {
     /// One `fops->filter` call of the filter at `at` of `chain`, the
-    /// stream being this one: `PSFS_ERR_FATAL` for a filter that threw,
-    /// or that is not called because a throwable is pending already.
+    /// filter lent out of its chain for the call, or a filter shared for
+    /// it where the filter can be re-entered, and the stream where it
+    /// is, so what the filter reaches through its `stream`,
+    /// `php_stream_tell`, `php_stream_seek` as `consumed` calls them and
+    /// `php_stream_eof`, is the live stream, as php's is:
+    /// `PSFS_ERR_FATAL` for a filter that threw, for one in use by a call
+    /// further out, or one not called because a throwable is pending
+    /// already. `fclose` refuses the stream for the call's length, as
+    /// `userfilter_filter` sets `PHP_STREAM_FLAG_NO_FCLOSE` around it.
+    ///
+    /// ```php
+    /// class F extends php_user_filter {
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         echo "at ", ftell($this->stream), $closing ? " closing" : "", "\n";
+    ///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+    ///         if ($closing) fseek($this->stream, 3);
+    ///         return PSFS_PASS_ON;
+    ///     }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $m = fopen('php://memory', 'w+'); fwrite($m, "abcdef"); rewind($m); fread($m, 1);
+    /// $f = stream_filter_append($m, 'f', STREAM_FILTER_READ);
+    /// var_dump(fread($m, 2));
+    /// stream_filter_remove($f);
+    /// var_dump(ftell($m), fread($m, 10));
+    /// ```
+    /// ```expect
+    /// at 1
+    /// string(2) "bc"
+    /// at 3 closing
+    /// int(3)
+    /// string(3) "def"
+    /// ```
+    ///
+    /// `feof` from inside the call answers what the stream is, at its
+    /// end for the last read:
+    ///
+    /// ```php
+    /// class F extends php_user_filter {
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+    ///         echo "filtered", $closing ? " closing" : "", feof($this->stream) ? " at eof" : "", "\n";
+    ///         return PSFS_PASS_ON;
+    ///     }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $t = fopen('php://temp', 'r+b'); fwrite($t, str_repeat('a', 8200)); rewind($t);
+    /// stream_filter_append($t, 'f', STREAM_FILTER_READ);
+    /// var_dump(strlen(stream_get_contents($t)));
+    /// ```
+    /// ```expect
+    /// filtered
+    /// filtered closing at eof
+    /// int(8200)
+    /// ```
+    ///
+    /// A user filter that reads its own stream is called again inside its
+    /// call, as deep as it reads ([`StreamFilter::share`]):
+    ///
+    /// ```php
+    /// class F extends php_user_filter {
+    ///     static $depth = 0;
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         $d = ++self::$depth;
+    ///         while ($b = stream_bucket_make_writeable($in)) { echo str_repeat('  ', $d - 1), "$d: {$b->data}\n"; $consumed += $b->datalen; $b->data = strtoupper($b->data); stream_bucket_append($out, $b); }
+    ///         if ($d < 3 && !$closing) var_dump(fread($this->stream, 2));
+    ///         self::$depth--;
+    ///         return PSFS_PASS_ON;
+    ///     }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $m = fopen('php://memory', 'w+'); fwrite($m, 'abcdefghij'); rewind($m);
+    /// stream_set_chunk_size($m, 2);
+    /// stream_filter_append($m, 'f', STREAM_FILTER_READ);
+    /// var_dump(fread($m, 4), ftell($m));
+    /// ```
+    /// ```expect
+    /// 1: ab
+    ///   2: cd
+    ///     3: ef
+    /// string(2) "EF"
+    /// string(2) "CD"
+    /// 1: gh
+    ///   2: ij
+    /// string(0) ""
+    /// string(2) "IJ"
+    /// string(4) "ABGH"
+    /// int(10)
+    /// ```
+    ///
+    /// and one that closes it is refused, each call and the close's own
+    /// flush alike:
+    ///
+    /// ```php
+    /// class G extends php_user_filter {
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         if ($this->stream) var_dump(fclose($this->stream));
+    ///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+    ///         return PSFS_PASS_ON;
+    ///     }
+    /// }
+    /// stream_filter_register('g', 'G');
+    /// $w = fopen('php://memory', 'w+');
+    /// stream_filter_append($w, 'g', STREAM_FILTER_WRITE);
+    /// var_dump(fwrite($w, "xyz"), is_resource($w));
+    /// rewind($w); var_dump(stream_get_contents($w));
+    /// var_dump(fclose($w), is_resource($w));
+    /// ```
+    /// ```expect
+    /// Warning: fclose(): cannot close the provided stream, as it must not be manually closed in %s on line 4
+    /// bool(false)
+    /// int(3)
+    /// bool(true)
+    ///
+    /// Warning: fclose(): cannot close the provided stream, as it must not be manually closed in %s on line 4
+    /// bool(false)
+    /// string(3) "xyz"
+    ///
+    /// Warning: fclose(): cannot close the provided stream, as it must not be manually closed in %s on line 4
+    /// bool(false)
+    /// bool(true)
+    /// bool(false)
+    /// ```
     fn run_filter(
         &mut self,
-        req: &mut Request,
         chain: Chain,
         at: usize,
         io: (&mut Brigade, &mut Brigade),
         consumed: Option<&mut usize>,
         flags: FilterFlags,
     ) -> FilterStatus {
-        if req.diagnostics_mut().stream_thrown().is_some() {
+        if self.req.diagnostics_mut().stream_thrown().is_some() {
             return FilterStatus::ErrFatal;
         }
-        let Some(stream) = self.res.map(Stream::of) else {
+        let Some(stream) = self.with(|s| s.res.map(Stream::of)).flatten() else {
             return FilterStatus::ErrFatal;
         };
-        let position = self.position;
-        let eof = self.eof && self.writepos == self.readpos;
-        let Some(filter) = self.chain_mut(chain).get_mut(at) else {
+        let lend = self.req.streams().next_lend();
+        let Some(filter) = self.with(|s| s.lend_filter(chain, at, lend)).flatten() else {
             return FilterStatus::ErrFatal;
+        };
+        // A filter that can be re-entered is called through a filter shared
+        // for the call, and goes back on its chain at once, where a call
+        // made inside this one finds it, as php's finds the same filter.
+        let mut called = match filter.share(self.req) {
+            Some(shared) => {
+                self.put_back(lend, filter);
+                shared
+            }
+            None => filter,
         };
         let (input, output) = io;
-        let call = FilterCall {
-            stream,
-            position,
-            eof,
-            seek: None,
-        };
-        let outer = req.streams().filtering.replace(call);
-        req.streams().held_streams.push(stream.resource());
-        let answered = filter
-            .ops
-            .filter(req, stream, input, output, consumed, flags);
-        req.streams().held_streams.pop();
-        let call = std::mem::replace(&mut req.streams().filtering, outer);
-        let status = match answered {
+        self.req.streams().held_streams.push(stream.resource());
+        let answered = called.filter(self.req, stream, input, output, consumed, flags);
+        self.req.streams().held_streams.pop();
+        self.put_back(lend, called);
+        match answered {
             Ok(status) => status,
             Err(thrown) => {
-                defer(req, thrown);
+                defer(self.req, thrown);
                 FilterStatus::ErrFatal
             }
-        };
-        if let Some((offset, whence)) = call.and_then(|call| call.seek) {
-            self.seek(req, offset, whence);
         }
-        status
+    }
+
+    /// How many filters `chain` has as the stream stands now, which PHP
+    /// code a filter served may have changed, as php's walk follows
+    /// `filter->next` as it stands.
+    fn filters_on(&mut self, chain: Chain) -> usize {
+        self.with(|s| s.filter_count(chain)).unwrap_or(0)
+    }
+
+    /// A filter back from its call to its place on the chain marked
+    /// `lend`; one whose place is gone, or shared for the call, closed.
+    fn put_back(&mut self, lend: Lend, filter: Box<dyn StreamFilter>) {
+        let unplaced = self.with(|s| s.put_filter(lend, filter)).flatten();
+        if let Some(mut unplaced) = unplaced
+            && let Err(thrown) = unplaced.close(self.req)
+        {
+            defer(self.req, thrown);
+        }
     }
 
     /// `_php_stream_fill_read_buffer`'s filtered arm
@@ -252,51 +443,54 @@ impl PhpStream {
     ///
     /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 104857600 bytes) in %s on line 6
     /// ```
-    pub(super) fn fill_filtered(&mut self, req: &mut Request, size: usize) -> bool {
-        let Ok(Some(mut chunk)) = req
+    pub(super) fn fill_filtered(&mut self, size: usize) -> bool {
+        let Some(chunk_size) = self.with(|s| s.chunk_size()) else {
+            return false;
+        };
+        let Ok(Some(mut chunk)) = self
+            .req
             .memory_mut()
-            .fallible(|req| Emalloc::new(req, self.chunk_size()))
+            .fallible(|req| Emalloc::new(req, chunk_size))
         else {
             return false;
         };
-        let filled = self.fill_through_chain(req, size, chunk.bytes_mut());
-        chunk.free(req);
+        let filled = self.fill_through_chain(size.min(chunk_size), chunk.bytes_mut());
+        chunk.free(self.req);
         filled
     }
 
-    /// The rounds of [`PhpStream::fill_filtered`], each read of the kind
-    /// into `chunk`, php's `chunk_buf`.
-    fn fill_through_chain(&mut self, req: &mut Request, size: usize, chunk: &mut [u8]) -> bool {
-        let to_read_now = size.min(self.chunk_size());
+    /// The rounds of [`StreamOp::fill_filtered`] while the buffer holds
+    /// fewer than `to_read_now` bytes, each read of the kind into
+    /// `chunk`, php's `chunk_buf`.
+    fn fill_through_chain(&mut self, to_read_now: usize, chunk: &mut [u8]) -> bool {
         let mut inp = Brigade::new();
         let mut outp = Brigade::new();
-        while !self.eof && self.writepos - self.readpos < to_read_now {
-            let Self {
-                ops,
-                eof,
-                has_buffered_data,
-                ..
-            } = self;
-            let justread = ops.read_after_buffer(req, chunk, eof, *has_buffered_data);
-            self.count_progress(req, justread.unwrap_or(0));
-            if justread.is_none() && self.writepos == self.readpos {
+        while self.with(|s| !s.eof && s.writepos - s.readpos < to_read_now) == Some(true) {
+            let justread = self.read_kind(chunk);
+            self.count_progress(justread.unwrap_or(0));
+            let Some((empty, eof)) = self.with(|s| (s.writepos == s.readpos, s.eof)) else {
+                return false;
+            };
+            if justread.is_none() && empty {
                 return false;
             }
             let flags = match justread {
                 Some(n) if n > 0 => {
                     inp.push_back(chunk[..n].to_vec());
-                    if self.eof {
+                    if eof {
                         FilterFlags::FlushClose
                     } else {
                         FilterFlags::Normal
                     }
                 }
-                _ if self.eof => FilterFlags::FlushClose,
+                _ if eof => FilterFlags::FlushClose,
                 _ => FilterFlags::FlushInc,
             };
             let mut status = FilterStatus::ErrFatal;
-            for at in 0..self.readfilters.len() {
-                status = self.run_filter(req, Chain::Read, at, (&mut inp, &mut outp), None, flags);
+            let mut at = 0;
+            while at < self.filters_on(Chain::Read) {
+                status = self.run_filter(Chain::Read, at, (&mut inp, &mut outp), None, flags);
+                at += 1;
                 if status != FilterStatus::PassOn {
                     break;
                 }
@@ -306,7 +500,7 @@ impl PhpStream {
             match status {
                 FilterStatus::PassOn => {
                     while let Some(bucket) = inp.pop_front() {
-                        if !self.buffer_bucket(req, &bucket) {
+                        if !self.buffer_bucket(&bucket) {
                             // php 8.5.12 drops the buckets left and goes
                             // on with a buffer that still holds its
                             // bytes; this one is empty, so the fill ends
@@ -318,8 +512,10 @@ impl PhpStream {
                 }
                 FilterStatus::FeedMe => outp.clear(),
                 FilterStatus::ErrFatal => {
-                    self.eof = true;
-                    self.fatal_error = true;
+                    self.with(|s| {
+                        s.eof = true;
+                        s.fatal_error = true;
+                    });
                     return false;
                 }
             }
@@ -335,37 +531,34 @@ impl PhpStream {
     /// compacting was not enough, `fperealloc` asked fallibly as php
     /// 8.5.12 asks it, since what a filter hands on is unbounded by what
     /// it was fed; `false` is the growth the memory limit refused.
-    fn buffer_bucket(&mut self, req: &mut Request, bucket: &[u8]) -> bool {
-        if !self.readbuf.is_empty() && self.readbuf.len() - self.writepos < bucket.len() {
-            self.readbuf.copy_within(self.readpos..self.writepos, 0);
-            self.writepos -= self.readpos;
-            self.readpos = 0;
-        }
-        if self.readbuf.len() - self.writepos < bucket.len() {
-            let grown = self.readbuf.len() + bucket.len();
-            if !self.grow_readbuf(req, grown) {
-                return false;
+    fn buffer_bucket(&mut self, bucket: &[u8]) -> bool {
+        let Some((room, len)) = self.with(|s| {
+            if !s.readbuf.is_empty() && s.readbuf.len() - s.writepos < bucket.len() {
+                s.compact();
             }
+            (s.readbuf.len() - s.writepos, s.readbuf.len())
+        }) else {
+            return false;
+        };
+        if room < bucket.len() && !self.grow_readbuf(len + bucket.len()) {
+            return false;
         }
-        self.readbuf[self.writepos..self.writepos + bucket.len()].copy_from_slice(bucket);
-        self.writepos += bucket.len();
-        true
+        self.with(|s| s.push_read(bucket)) == Some(true)
     }
 
     /// One bucket written after `writepos`, the buffer grown by the
     /// bucket's length where it has not the room, as php's
     /// `readbuflen += bucket->buflen` and `perealloc` grow it; `false` is
     /// the memory limit's fatal, rendered.
-    fn append_read(&mut self, req: &mut Request, bucket: &[u8]) -> bool {
-        if self.readbuf.len() - self.writepos < bucket.len() {
-            let grown = self.readbuf.len() + bucket.len();
-            if !self.resize_readbuf(req, grown) {
-                return false;
-            }
+    pub(super) fn append_read(&mut self, bucket: &[u8]) -> bool {
+        let Some((room, len)) = self.with(|s| (s.readbuf.len() - s.writepos, s.readbuf.len()))
+        else {
+            return false;
+        };
+        if room < bucket.len() && !self.resize_readbuf(len + bucket.len()) {
+            return false;
         }
-        self.readbuf[self.writepos..self.writepos + bucket.len()].copy_from_slice(bucket);
-        self.writepos += bucket.len();
-        true
+        self.with(|s| s.push_read(bucket)) == Some(true)
     }
 
     /// `_php_stream_write_filtered` (`Z/main/streams/streams.c:1245`):
@@ -375,7 +568,6 @@ impl PhpStream {
     /// the kind refused a write.
     pub(super) fn write_filtered(
         &mut self,
-        req: &mut Request,
         buf: Option<&[u8]>,
         flags: FilterFlags,
     ) -> Option<usize> {
@@ -386,9 +578,11 @@ impl PhpStream {
         }
         let mut consumed = 0usize;
         let mut status = FilterStatus::ErrFatal;
-        for at in 0..self.writefilters.len() {
+        let mut at = 0;
+        while at < self.filters_on(Chain::Write) {
             let counted = (at == 0).then_some(&mut consumed);
-            status = self.run_filter(req, Chain::Write, at, (&mut inp, &mut outp), counted, flags);
+            status = self.run_filter(Chain::Write, at, (&mut inp, &mut outp), counted, flags);
+            at += 1;
             if status != FilterStatus::PassOn {
                 break;
             }
@@ -399,7 +593,7 @@ impl PhpStream {
         match status {
             FilterStatus::PassOn => {
                 while let Some(bucket) = inp.pop_front() {
-                    if self.write_buffer(req, &bucket).is_none() {
+                    if self.write_buffer(&bucket).is_none() {
                         failed = true;
                     }
                 }
@@ -417,49 +611,50 @@ impl PhpStream {
     /// filtered bytes replacing the buffer, the buffer given to a filter
     /// that asks to be fed, and php's `Filter failed to process
     /// pre-buffered data` and `false` where it breaks.
-    fn attach(&mut self, req: &mut Request, chain: Chain, filter: Attached, append: bool) -> bool {
-        if !append {
-            self.chain_mut(chain).insert(0, filter);
+    fn attach(&mut self, chain: Chain, filter: Attached, append: bool) -> bool {
+        let held = self.with(|s| {
+            if !append {
+                s.chain_mut(chain).insert(0, filter);
+                return None;
+            }
+            s.chain_mut(chain).push(filter);
+            let held = &s.readbuf[s.readpos..s.writepos];
+            (chain == Chain::Read && !held.is_empty())
+                .then(|| (held.to_vec(), s.filter_count(Chain::Read) - 1))
+        });
+        let Some(Some((held, at))) = held else {
             return true;
-        }
-        self.chain_mut(chain).push(filter);
-        let held = self.writepos - self.readpos;
-        if chain != Chain::Read || held == 0 {
-            return true;
-        }
-        let mut inp: Brigade = VecDeque::from([self.readbuf[self.readpos..self.writepos].to_vec()]);
+        };
+        let held_len = held.len();
+        let mut inp: Brigade = VecDeque::from([held]);
         let mut outp = Brigade::new();
         let mut consumed = 0usize;
-        let at = self.readfilters.len() - 1;
         let mut status = self.run_filter(
-            req,
             Chain::Read,
             at,
             (&mut inp, &mut outp),
             Some(&mut consumed),
             FilterFlags::Normal,
         );
-        if self.readpos + consumed > self.writepos {
+        if consumed > held_len {
             status = FilterStatus::ErrFatal;
         }
         match status {
             FilterStatus::ErrFatal => {
                 let text = format!(
                     "{}(): Filter failed to process pre-buffered data",
-                    req.frames().active_function_name()
+                    self.req.frames().active_function_name()
                 );
-                warning(req, &text);
+                warning(self.req, &text);
                 return false;
             }
             FilterStatus::FeedMe => {
-                self.readpos = 0;
-                self.writepos = 0;
+                self.with(PhpStream::drop_buffer);
             }
             FilterStatus::PassOn => {
-                self.readpos = 0;
-                self.writepos = 0;
+                self.with(PhpStream::drop_buffer);
                 while let Some(bucket) = outp.pop_front() {
-                    if !self.append_read(req, &bucket) {
+                    if !self.append_read(&bucket) {
                         return false;
                     }
                 }
@@ -475,7 +670,7 @@ impl PhpStream {
     /// flush, and one that breaks is `false`. What the last passes on goes
     /// into the read buffer for the read chain, php's shuffle of the
     /// buffer with it, and to the kind for the write chain.
-    fn flush_from(&mut self, req: &mut Request, chain: Chain, at: usize, finish: bool) -> bool {
+    fn flush_from(&mut self, chain: Chain, at: usize, finish: bool) -> bool {
         let mut inp = Brigade::new();
         let mut outp = Brigade::new();
         let mut flags = if finish {
@@ -483,9 +678,11 @@ impl PhpStream {
         } else {
             FilterFlags::FlushInc
         };
-        let len = self.chain_mut(chain).len();
-        for current in at..len {
-            match self.run_filter(req, chain, current, (&mut inp, &mut outp), None, flags) {
+        let mut current = at;
+        while current < self.filters_on(chain) {
+            let status = self.run_filter(chain, current, (&mut inp, &mut outp), None, flags);
+            current += 1;
+            match status {
                 FilterStatus::FeedMe => return true,
                 FilterStatus::ErrFatal => return false,
                 FilterStatus::PassOn => {}
@@ -500,88 +697,51 @@ impl PhpStream {
         }
         match chain {
             Chain::Read => {
-                if self.readpos > 0 {
-                    // php moves the held bytes to the front and sets
-                    // `readpos` to zero before it subtracts it from
-                    // `writepos`, which it therefore leaves where it was.
-                    self.readbuf.copy_within(self.readpos..self.writepos, 0);
-                    self.readpos = 0;
-                }
-                if flushed > self.readbuf.len() - self.writepos {
-                    let grown = self.writepos + flushed + self.chunk_size();
-                    if !self.resize_readbuf(req, grown) {
-                        return false;
+                let Some((short, grown)) = self.with(|s| {
+                    if s.readpos > 0 {
+                        // php moves the held bytes to the front and sets
+                        // `readpos` to zero before it subtracts it from
+                        // `writepos`, which it therefore leaves where it was.
+                        s.readbuf.copy_within(s.readpos..s.writepos, 0);
+                        s.readpos = 0;
                     }
+                    let grown = s.writepos + flushed + s.chunk_size();
+                    (flushed > s.readbuf.len() - s.writepos, grown)
+                }) else {
+                    return false;
+                };
+                if short && !self.resize_readbuf(grown) {
+                    return false;
                 }
                 while let Some(bucket) = inp.pop_front() {
-                    self.readbuf[self.writepos..self.writepos + bucket.len()]
-                        .copy_from_slice(&bucket);
-                    self.writepos += bucket.len();
+                    if self.with(|s| s.push_read(&bucket)) != Some(true) {
+                        return false;
+                    }
                 }
             }
             Chain::Write => {
                 while let Some(bucket) = inp.pop_front() {
-                    let Self { ops, position, .. } = self;
-                    if let Some(count) = ops.write(req, &bucket)
-                        && count > 0
-                    {
-                        *position += i64::try_from(count).unwrap_or(i64::MAX);
-                        self.count_progress(req, count);
-                    }
+                    let _ = self.write_once(&bucket);
                 }
             }
         }
         true
     }
+}
 
-    /// The filters of both chains taken off at the stream's free
-    /// (`Z/main/streams/streams.c:510`): each one's resource closed and
-    /// the chain's owner of it given up, then its `dtor` served.
-    /// The filters of both chains taken off and kept, as a persistent
-    /// stream keeps them past its resource: each one's resource closed and
-    /// the chain's owner of it given up, its `fops` kept, its `dtor` not
-    /// served ([`super::persistent::Kept`]).
-    pub(super) fn keep_filters(&mut self, req: &mut Request) -> super::persistent::Kept {
-        let mut kept = super::persistent::Kept::default();
-        for (chain, into) in [
-            (&mut self.readfilters, &mut kept.read),
-            (&mut self.writefilters, &mut kept.write),
-        ] {
-            for Attached { ops, header, res } in chain.drain(..) {
-                if let Some(res) = res {
-                    res.close(req);
-                    res.give_up(req);
-                }
-                if let Some(header) = header {
-                    header.free(req);
-                }
-                into.push(ops);
-            }
-        }
-        kept
-    }
-
-    /// Kept filters attached again, each chain in its order, with no
-    /// resource, as the stream php's list kept still has them.
-    pub(super) fn attach_kept(&mut self, kept: super::persistent::Kept) {
-        let attach = |ops| Attached {
-            ops,
-            header: None,
-            res: None,
+impl PhpStream {
+    /// `bucket` written after `writepos` into the room the buffer has;
+    /// `false` where it has not the room.
+    fn push_read(&mut self, bucket: &[u8]) -> bool {
+        let Some(room) = self
+            .readbuf
+            .get_mut(self.writepos..self.writepos + bucket.len())
+        else {
+            return false;
         };
-        self.readfilters.extend(kept.read.into_iter().map(attach));
-        self.writefilters.extend(kept.write.into_iter().map(attach));
-    }
-
-    pub(super) fn free_filters(&mut self, req: &mut Request) {
-        let filters: Vec<Attached> = self
-            .readfilters
-            .drain(..)
-            .chain(self.writefilters.drain(..))
-            .collect();
-        for filter in filters {
-            release_filter(req, filter);
-        }
+        room.copy_from_slice(bucket);
+        self.writepos += bucket.len();
+        true
     }
 }
 
@@ -602,17 +762,16 @@ fn placed(s: &mut PhpStream, chain: Chain, append: bool) -> Option<&mut Attached
 /// a call before it threw, as php's is: what a filter holds is given up
 /// with it, and a filter whose `dtor` serves PHP code serves none while
 /// a throwable is pending ([`crate::api::request::StreamFilter::close`]).
+/// A filter out for its call is closed as it comes back.
 fn release_filter(req: &mut Request, filter: Attached) {
-    let Attached {
-        mut ops,
-        header,
-        res,
-    } = filter;
+    let Attached { ops, header, res } = filter;
     if let Some(res) = res {
         res.close(req);
         res.give_up(req);
     }
-    if let Err(thrown) = ops.close(req) {
+    if let Some(mut ops) = ops.into_on()
+        && let Err(thrown) = ops.close(req)
+    {
         defer(req, thrown);
     }
     if let Some(header) = header {
@@ -728,7 +887,7 @@ impl FilterLayer for Request {
             }
         };
         Some(Attached {
-            ops,
+            ops: FilterOps::On(ops),
             header,
             res: None,
         })
@@ -742,12 +901,15 @@ impl FilterLayer for Request {
             return Ok(None);
         };
         let flushed = self
-            .stream_op(stream, |req, s| {
-                let at = s
-                    .chain_mut(chain)
-                    .iter()
-                    .position(|f| f.res.as_deref() == Some(&res))?;
-                Some(s.flush_from(req, chain, at, true))
+            .stream_op(stream, |op| {
+                let at = op
+                    .with(|s| {
+                        s.chain_mut(chain)
+                            .iter()
+                            .position(|f| f.res.as_deref() == Some(&res))
+                    })
+                    .flatten()?;
+                Some(op.flush_from(chain, at, true))
             })
             .flatten();
         if flushed == Some(false) {
@@ -759,7 +921,7 @@ impl FilterLayer for Request {
             return Ok(Some(false));
         }
         let taken = self
-            .stream_op(stream, |_, s| {
+            .stream_with(stream, |s| {
                 let filters = s.chain_mut(chain);
                 let at = filters
                     .iter()
@@ -794,11 +956,11 @@ impl Stream {
         name: &[u8],
         chain: Chain,
     ) -> Result<bool, Thrown> {
-        let persistent = req.stream_ref(self).is_some_and(|s| s.flags.persistent);
+        let persistent = req.stream_with(self, |s| s.flags.persistent) == Some(true);
         let Some(filter) = req.filter_create(name, None, persistent) else {
             return Ok(false);
         };
-        req.stream_op(self, |req, s| s.attach(req, chain, filter, true));
+        req.stream_op(self, |op| op.attach(chain, filter, true));
         match req.diagnostics_mut().stream_thrown().take() {
             Some(thrown) => Err(thrown),
             None => Ok(true),
@@ -826,8 +988,7 @@ impl Stream {
         let mut read_write = read_write;
         if read_write & (FILTER_READ | FILTER_WRITE) == 0 {
             let mode = req
-                .stream_ref(self)
-                .map(|s| s.mode.bytes().to_vec())
+                .stream_with(self, |s| s.mode.bytes().to_vec())
                 .unwrap_or_default();
             if mode.contains(&b'r') || mode.contains(&b'+') {
                 read_write |= FILTER_READ;
@@ -836,7 +997,7 @@ impl Stream {
                 read_write |= FILTER_WRITE;
             }
         }
-        let persistent = req.stream_ref(self).is_some_and(|s| s.flags.persistent);
+        let persistent = req.stream_with(self, |s| s.flags.persistent) == Some(true);
         let mut last = None;
         for (bit, chain) in [(FILTER_READ, Chain::Read), (FILTER_WRITE, Chain::Write)] {
             if read_write & bit == 0 {
@@ -849,13 +1010,13 @@ impl Stream {
                 };
             };
             let attached = req
-                .stream_op(self, |req, s| s.attach(req, chain, filter, append))
+                .stream_op(self, |op| op.attach(chain, filter, append))
                 .unwrap_or(false);
             if !attached {
                 // `php_stream_filter_remove(filter, 1)`: the filter that
                 // broke on the buffer taken off its chain and freed.
                 let taken = req
-                    .stream_op(self, |_, s| s.chain_mut(chain).pop())
+                    .stream_with(self, |s| s.chain_mut(chain).pop())
                     .flatten();
                 if let Some(filter) = taken {
                     release_filter(req, filter);
@@ -875,7 +1036,7 @@ impl Stream {
         // laid down as the resource's payload, where the header it was
         // made with goes.
         let header = req
-            .stream_op(self, |_, s| {
+            .stream_with(self, |s| {
                 placed(s, chain, append).and_then(|f| f.header.take())
             })
             .flatten();
@@ -892,7 +1053,7 @@ impl Stream {
             None => Resource::persistent(req, kind, named, HEADER)?,
         };
         let mut held = Some(Owner::take(req, *res));
-        req.stream_op(self, |_, s| {
+        req.stream_with(self, |s| {
             if let Some(filter) = placed(s, chain, append) {
                 filter.res = held.take();
             }
