@@ -1488,11 +1488,14 @@ impl CachingIterator {
         if let Some(value) = cache.get(&key) {
             return Ok(value.deref());
         }
+        // `Undefined array key "%s"` over the key as given, quoted
+        // whatever it reads as: the string to its first NUL.
         let shown = match &key {
-            Key::Int(n) => n.to_string(),
-            Key::Str(s) => String::from_utf8_lossy(s.as_bytes()).into_owned(),
+            Key::Int(n) => n.to_string().into_bytes(),
+            Key::Str(s) => php_ext::coerce::c_str(s.as_bytes()).to_vec(),
         };
-        php_ext::raising::warning(req, &format!("Undefined array key \"{shown}\""));
+        let message = [b"Undefined array key \"", shown.as_slice(), b"\""].concat();
+        php_ext::raising::warning(req, &message);
         Ok(Value::null())
     }
 

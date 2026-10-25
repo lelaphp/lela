@@ -21,6 +21,7 @@ use crate::observer::OnThrow;
 use crate::trampoline::CallTrampoline;
 use php_heap::FrameRef;
 use php_unit::decl::HookKind;
+use php_unit::{Opcode, OperandKind};
 
 use super::Code;
 use super::Symbols;
@@ -63,6 +64,33 @@ enum Carried<'a> {
     HookTrampoline(&'a [u8], HookKind),
 }
 
+/// The function a call serves, the object it runs on and the class
+/// `static` names in it: `zend_fcall_info_cache`'s `function_handler`,
+/// `object` and `called_scope`.
+#[derive(Clone, Copy)]
+struct Callee {
+    function: Function,
+    this: Option<PhpObject>,
+    called_scope: Option<ClassId>,
+}
+
+/// Where a user callee's return goes when its body returned and then
+/// threw, from a local's destructor at its end: php's `retval` pointer,
+/// which `zend_call_function` writes and its caller frees.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Retval {
+    /// A buffer of the caller's own, `zval retval` on a native's stack,
+    /// which the native gives up as it meets `EG(exception)`: given up
+    /// with the `Err`.
+    Native,
+    /// The `result` temporary of the opline the calling frame stands at,
+    /// `zend_std_read_property`'s `rv`, which is `FETCH_OBJ_R`'s and
+    /// `FETCH_OBJ_IS`'s `EX_VAR(opline->result.var)`: written there, for
+    /// `ZEND_HANDLE_EXCEPTION` to free after the opline's operands
+    /// (`free_throwing_result`).
+    Result,
+}
+
 impl Request {
     /// `zend_call_function` over a native method: the call frame pushed
     /// as `INIT_METHOD_CALL` and the `SEND_*` oplines would push it, the
@@ -92,11 +120,37 @@ impl Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
-        self.serve_call(
+        self.serve_method_into(
+            Retval::Native,
             function,
             this,
-            Some(called_scope),
+            called_scope,
+            arguments,
+            extra_named,
+        )
+    }
+
+    /// [`Request::serve_method_made`] whose callee's return, where its
+    /// body returned and then threw, goes where `retval` says: a property
+    /// read's `get` hook and `__get` write it to the reading opline's
+    /// `result` temporary, as `zend_std_read_property` hands them `rv`.
+    pub(crate) fn serve_method_into(
+        &mut self,
+        retval: Retval,
+        function: Function,
+        this: Option<PhpObject>,
+        called_scope: ClassId,
+        arguments: &[Value],
+        extra_named: &[(PhpString, Value)],
+    ) -> Result<Value, Thrown> {
+        self.serve_call(
+            Callee {
+                function,
+                this,
+                called_scope: Some(called_scope),
+            },
             Carried::Nothing,
+            retval,
             arguments,
             extra_named,
         )
@@ -120,7 +174,17 @@ impl Request {
     ) -> Result<Value, Thrown> {
         let function = self.parent_hook_trampoline(kind);
         let carried = Carried::HookTrampoline(name, kind);
-        self.serve_call(function, Some(object), Some(scope), carried, arguments, &[])
+        self.serve_call(
+            Callee {
+                function,
+                this: Some(object),
+                called_scope: Some(scope),
+            },
+            carried,
+            Retval::Native,
+            arguments,
+            &[],
+        )
     }
 
     /// The trampoline's record on `call`, given up where the call has no
@@ -170,10 +234,13 @@ impl Request {
             ));
         };
         self.serve_call(
-            closure.function,
-            closure.this,
-            closure.called_scope,
+            Callee {
+                function: closure.function,
+                this: closure.this,
+                called_scope: closure.called_scope,
+            },
             Carried::Closure(object),
+            Retval::Native,
             arguments,
             extra_named,
         )
@@ -223,10 +290,13 @@ impl Request {
             (payload.info.scope.replace(scope), cache)
         });
         let served = self.serve_call(
-            closure.function,
-            Some(this),
-            Some(scope),
+            Callee {
+                function: closure.function,
+                this: Some(this),
+                called_scope: Some(scope),
+            },
             Carried::Closure(object),
+            Retval::Native,
             arguments,
             extra_named,
         );
@@ -323,10 +393,13 @@ impl Request {
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
         self.serve_call(
-            function,
-            None,
-            None,
+            Callee {
+                function,
+                this: None,
+                called_scope: None,
+            },
             Carried::Nothing,
+            Retval::Native,
             arguments,
             extra_named,
         )
@@ -349,10 +422,9 @@ impl Request {
     /// ```
     fn serve_call(
         &mut self,
-        function: Function,
-        this: Option<PhpObject>,
-        called_scope: Option<ClassId>,
+        target: Callee,
         carried: Carried<'_>,
+        retval: Retval,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
@@ -367,14 +439,7 @@ impl Request {
         // destructor or a `__toString` a scoped write serves stands in its
         // own scope.
         self.in_fake_scope(None, |req| {
-            req.serve_call_body(
-                function,
-                this,
-                called_scope,
-                carried,
-                arguments,
-                extra_named,
-            )
+            req.serve_call_body(target, carried, retval, arguments, extra_named)
         })
     }
 
@@ -389,20 +454,29 @@ impl Request {
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
         self.in_fake_scope(None, |req| {
-            req.serve_call_body(function, None, None, Carried::Nothing, arguments, &[])
+            let target = Callee {
+                function,
+                this: None,
+                called_scope: None,
+            };
+            req.serve_call_body(target, Carried::Nothing, Retval::Native, arguments, &[])
         })
     }
 
     /// [`Request::serve_call`] with no scope a write named standing.
     fn serve_call_body(
         &mut self,
-        function: Function,
-        this: Option<PhpObject>,
-        called_scope: Option<ClassId>,
+        target: Callee,
         carried: Carried<'_>,
+        retval: Retval,
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Value, Thrown> {
+        let Callee {
+            function,
+            this,
+            called_scope,
+        } = target;
         let closure = match carried {
             Carried::Closure(closure) => Some(closure),
             Carried::Nothing | Carried::HookTrampoline(..) => None,
@@ -518,7 +592,7 @@ impl Request {
             }
         };
         if self.user_function(function).is_some() {
-            let served = self.serve_user(call, caller);
+            let served = self.serve_user(call, caller, retval);
             return self.checked_after_call(served);
         }
         // `zend_call_function` ends an observed native with `fci->retval`
@@ -769,7 +843,56 @@ impl Request {
     /// What the body returned is the caller's, one owner; what it left
     /// pending is the `Err`, the throwable's one owner with it, so a
     /// native reads a callback's raise the way it reads its own
-    /// ([`Request::leave_pending`] puts it back).
+    /// ([`Request::leave_pending`] puts it back). A body that returned
+    /// and then threw, from a local's destructor at its end, has its
+    /// value held ([`Request::hold_thrown_return`]) and given up where
+    /// the opline that called the native unwinds, after that opline's
+    /// operands, as php's caller holds the `retval`: so that value's
+    /// destructor runs after the receiver's and before the `catch`, a
+    /// property hook's and a callback's alike.
+    ///
+    /// ```php
+    /// class V { function __destruct() { echo "V::__destruct\n"; } }
+    /// class T { function __destruct() { throw new Exception("t"); } }
+    /// class C { public $h { get { $l = new T; return new V; } } function __destruct() { echo "C::__destruct\n"; } }
+    /// class M { function __get($n) { $l = new T; return new V; } function __destruct() { echo "M::__destruct\n"; } }
+    /// function f() { $l = new T; return new V; }
+    /// try { $x = (new C)->h; } catch (Exception $e) { echo "caught\n"; }
+    /// try { $x = (new M)->m; } catch (Exception $e) { echo "caught\n"; }
+    /// try { array_map('f', [1]); } catch (Exception $e) { echo "caught\n"; }
+    /// echo "done\n";
+    /// ```
+    /// ```expect
+    /// C::__destruct
+    /// V::__destruct
+    /// caught
+    /// M::__destruct
+    /// V::__destruct
+    /// caught
+    /// V::__destruct
+    /// caught
+    /// done
+    /// ```
+    ///
+    /// What the body returned is its own while a destructor its leave
+    /// serves runs a body of its own, which returns too: each serving has
+    /// its own `retval`, as each `zend_call_function` has.
+    ///
+    /// ```php
+    /// class D { function __destruct() { echo "D\n"; } }
+    /// function f($x) { $l = new D; return [$x * 2]; }
+    /// var_dump(array_map('f', [1]));
+    /// ```
+    /// ```expect
+    /// D
+    /// array(1) {
+    ///   [0]=>
+    ///   array(1) {
+    ///     [0]=>
+    ///     int(2)
+    ///   }
+    /// }
+    /// ```
     ///
     /// A callback with a declared parameter type is held to it here as
     /// it is held to it under `DO_UCALL`, since one
@@ -821,10 +944,24 @@ impl Request {
     /// returns, the `zend_bailout()` php's catch blocks end with. The
     /// session's decode is the witness, in `ext/session`: its handler's
     /// `destroy` is served after the fatal a class declaration raised.
-    fn serve_user(&mut self, call: FrameRef, caller: exec::Caller) -> Result<Value, Thrown> {
+    fn serve_user(
+        &mut self,
+        call: FrameRef,
+        caller: exec::Caller,
+        retval: Retval,
+    ) -> Result<Value, Thrown> {
         let caught = self.bailout;
         self.catch_bailout();
-        let served = self.serve_user_uncaught(call, caller);
+        // What an outer serving's entry frame returned stands while this
+        // one runs, a destructor its leave serves among them, and is its
+        // own again after: `returned` is one per serving, as each
+        // `zend_call_function` has its own `retval`.
+        let outer = self.take_returned();
+        let served = self.serve_user_uncaught(call, caller, retval);
+        let left = std::mem::replace(&mut self.returned, outer);
+        if left.is_refcounted() && !self.bailout {
+            self.release_thrown_value(left);
+        }
         if caught {
             self.set_bailing_out(true);
         }
@@ -835,6 +972,7 @@ impl Request {
         &mut self,
         call: FrameRef,
         caller: exec::Caller,
+        retval: Retval,
     ) -> Result<Value, Thrown> {
         let standing = call.0 as usize;
         let shape = self.call_shape(call).unwrap_or_default();
@@ -881,6 +1019,13 @@ impl Request {
         let served = self.fatal_of(served);
         self.pop_frames_to(standing);
         served?;
+        if self.raised.is_some() {
+            // The body returned and then threw or exited, from a local's
+            // destructor at its end: what it returned is php's `retval`,
+            // where `retval` says it is.
+            let returned = self.take_returned();
+            self.thrown_return(caller, retval, returned);
+        }
         match self.take_pending_view() {
             Some(pending) => Err(Thrown::of(Some(pending))),
             // The callback exited: what the native reads is php's
@@ -890,6 +1035,32 @@ impl Request {
             // native as it left the callback.
             None if self.is_pending() => Err(Thrown::of(None)),
             None => Ok(std::mem::take(&mut self.returned)),
+        }
+    }
+
+    /// What a user callee returned before it threw, put where php's
+    /// `retval` is ([`Retval`]): the `result` temporary of the opline the calling
+    /// frame stands at where that is a property read's, `FETCH_OBJ_R`'s
+    /// or `FETCH_OBJ_IS`'s, the read's `rv`, so `free_throwing_result`
+    /// frees it after the opline's operands; given up at once otherwise,
+    /// as a native gives up its own `retval` on `EG(exception)`. Out of
+    /// line, since nothing reaches it but a throw.
+    #[cold]
+    #[inline(never)]
+    fn thrown_return(&mut self, caller: exec::Caller, retval: Retval, value: Value) {
+        let result = caller
+            .frame()
+            .filter(|_| retval == Retval::Result)
+            .and_then(|frame| {
+                let at = self.frame_at(frame)?;
+                let op = exec::opline_at(at.code()?, at.opline())?;
+                let reads = matches!(op.opcode, Opcode::FetchObjR | Opcode::FetchObjIs)
+                    && matches!(op.out_type, OperandKind::Tmp | OperandKind::Var);
+                reads.then_some((frame, op.out))
+            });
+        match result {
+            Some((frame, out)) => self.replace_slot(frame, out, value),
+            None => self.release(value),
         }
     }
 

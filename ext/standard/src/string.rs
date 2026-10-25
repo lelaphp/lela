@@ -1493,6 +1493,22 @@ fn ltrim(
 /// wordwrap(): Argument #4 ($cut_long_words) cannot be true when argument #2 ($width) is 0
 /// ```
 ///
+/// A break the text ends with is the text's own, and no second one is
+/// written after it (`wordwrap_trailing_break.phpt`):
+///
+/// ```php
+/// foreach ([["abc\n", 3, "\n", true], ["ab cd\n", 5, "\n", true], ["abc-", 3, "-", true], ["\r\n", 1, "\r\n", true], ["ab cd\r\n", 5, "\r\n", false]] as [$t, $w, $b, $c]) {
+///     echo json_encode(wordwrap($t, $w, $b, $c)), "\n";
+/// }
+/// ```
+/// ```expect
+/// "abc\n"
+/// "ab cd\n"
+/// "abc-"
+/// "\r\n"
+/// "ab cd\r\n"
+/// ```
+///
 /// Where the break is longer than a byte or long words are cut, php asks
 /// for the longest the text can grow to before it scans a byte, and the
 /// memory limit is met there, whatever the text turns out to be. Since

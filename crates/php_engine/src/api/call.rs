@@ -2196,10 +2196,7 @@ fn global_constant(
         unqualified_constant(req, name)
     };
     let Some((key, value)) = found else {
-        return Err(error(
-            req,
-            &format!("Undefined constant \"{}\"", String::from_utf8_lossy(name)),
-        ));
+        return Err(crate::api::raising::undefined_constant(req, name));
     };
     crate::api::raising::deprecated_constant(req, &key)?;
     req.addref(&value);
@@ -2981,14 +2978,7 @@ fn prop_link(
 /// [`prop_link`]'s read of `name` off `object`.
 fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, Thrown> {
     let Some(instance) = object.as_object() else {
-        let shown = crate::ops::value_name(req, &object.undef_as_null());
-        crate::api::raising::warning(
-            req,
-            &format!(
-                "Attempt to read property \"{}\" on {shown}",
-                String::from_utf8_lossy(name)
-            ),
-        );
+        crate::ops::property_read_on(req, name, &object.undef_as_null());
         return Ok(Chained {
             value: Value::null(),
             short: false,

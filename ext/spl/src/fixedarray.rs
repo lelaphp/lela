@@ -84,6 +84,26 @@ pub(crate) type Row = Box<RowState>;
 /// log 3
 /// int(3)
 /// ```
+///
+/// A destructor the clear serves finds the row under way, not unlaid, so
+/// `__construct()` and `__unserialize()` lay nothing over it, and a
+/// `setSize()` it asks is served after
+/// (`SplFixedArray_setSize_destruct_reinit_during_clear.phpt`):
+///
+/// ```php
+/// class R { public static $fn; function __destruct() { if ($f = self::$fn) { self::$fn = null; $f(); } } }
+/// foreach ([fn ($a) => $a->__construct(5), fn ($a) => $a->setSize(3), fn ($a) => $a->__unserialize(["a", "b", "c"])] as $act) {
+///     $a = new SplFixedArray(2); $a[0] = new R; $a[1] = "tail";
+///     R::$fn = fn () => $act($a);
+///     $a->setSize(0);
+///     echo $a->getSize(), "\n";
+/// }
+/// ```
+/// ```expect
+/// 0
+/// 3
+/// 0
+/// ```
 fn resize(req: &mut Request, object: PhpObject, size: usize) -> Result<(), Thrown> {
     let (len, under_way) = with(req, object, |a| (a.elements.len(), a.resizing.is_some()))?;
     if size == len {

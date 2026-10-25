@@ -12,7 +12,8 @@ use php_ext::abi::{Passed, Ref, Untyped, Variadic};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, call_stack_end, docref, throw_error,
+    Level, Thrown, arg_value_error, argument_error, call_stack_end, call_stack_limit, docref,
+    throw_error,
 };
 use php_ext::request::{Overwrite, Request};
 use php_ext::values::walk::{self, GiveUp, Hold};
@@ -617,7 +618,28 @@ fn compact(
     Ok(out)
 }
 
-/// `php_compact_var`.
+/// `php_compact_var`: a name looked up, or an array of names walked,
+/// the stack limit asked at each nested array before its recursion, so
+/// a nesting past it is one `Error` and no sibling is walked after it
+/// (gh23115); an undefined name is `Undefined variable $%S`, whole.
+///
+/// ```php
+/// $names = [];
+/// for ($i = 0; $i < 30000; $i++) { $names = [$names, []]; }
+/// try { compact($names); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; var_dump($e->getPrevious()); }
+/// ```
+/// ```expect regime=small-stack
+/// Error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// NULL
+/// ```
+///
+/// ```php
+/// set_error_handler(function ($no, $str) { echo bin2hex($str), "\n"; return true; });
+/// compact("a\0b");
+/// ```
+/// ```expect
+/// 636f6d7061637428293a20556e646566696e6564207661726961626c652024610062
+/// ```
 fn compact_var(
     req: &mut Request,
     out: &mut Owner<PhpArray>,
@@ -644,15 +666,24 @@ fn compact_var(
                     out.set(req, key, value)?;
                 }
             } else {
-                let shown = String::from_utf8_lossy(&bytes).into_owned();
-                docref(req, Level::Warning, &format!("Undefined variable ${shown}"));
+                // `$%S`: the name whole.
+                docref(
+                    req,
+                    Level::Warning,
+                    &[b"Undefined variable $", &bytes[..]].concat(),
+                );
             }
         }
         ValueRef::Array(array) => {
+            // php 8.5.12 asks the stack limit before the recursion
+            // (`Z/ext/standard/array.c:2727`, gh23115).
+            call_stack_limit(req)?;
+            // The floor stands under it, where `-1` sets no limit and php
+            // would run to the thread's end.
+            call_stack_end(req)?;
             if array.is_recursive() {
                 return Err(throw_error(req, "Error", "Recursion detected"));
             }
-            call_stack_end(req)?;
             array.protect();
             // `ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(entry), value_ptr)`
             // (`Z/ext/standard/array.c:2707`), no owner of the table taken:
