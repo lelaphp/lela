@@ -111,7 +111,7 @@ bool(true)
 int(30)
 bool(true)
 int(1400)
-socket_set_option(): Argument #4 ($value) must be of between 0 and 65535
+socket_set_option(): Argument #4 ($value) must be between 0 and 65535
 bool(true)
 bool(true)
 

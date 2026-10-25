@@ -698,7 +698,7 @@ fn set_option(
         let n = to_long(req, value)?;
         #[cfg(target_os = "linux")]
         if option == i64::from(libc::UDP_SEGMENT) && !(0..=65535).contains(&n) {
-            return Err(arg_value_error(req, 4, "be of between 0 and 65535"));
+            return Err(arg_value_error(req, 4, "be between 0 and 65535"));
         }
         c_int(n).to_ne_bytes().to_vec()
     };
