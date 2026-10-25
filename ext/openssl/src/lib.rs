@@ -60,7 +60,7 @@ use php_ext::request::{Request, Streams as _};
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
 /// `register_openssl_symbols`: the constants in `openssl.stub.php`'s
-/// order, as the oracle's OpenSSL 3 build declares them (no `MD2`, no
+/// order, as the oracle's OpenSSL 4 build declares them (no `MD2`, no
 /// `SSLV23_PADDING`). The two version constants are the headers' (see
 /// [`header`]), which agree with each other whatever libcrypto is loaded.
 ///

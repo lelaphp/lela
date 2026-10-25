@@ -38,18 +38,33 @@ use crate::x509::object_of;
 /// `STREAM_CRYPTO_IS_CLIENT`, the low bit of a crypto method.
 const IS_CLIENT: i64 = 1;
 
-/// The protocol bits of `STREAM_CRYPTO_METHOD_*`, lowest first, as this
-/// OpenSSL 3 build has them: no `SSLv2` or `SSLv3` (`OPENSSL_NO_SSL3`), so
-/// `PHP_OPENSSL_MIN_PROTO_VERSION` is TLS 1.0.
+/// The protocol bits of `STREAM_CRYPTO_METHOD_*`, lowest first. `SSLv2`
+/// is never built.
+const SSL3: i64 = 1 << 2;
 const TLS1_0: i64 = 1 << 3;
 const TLS1_1: i64 = 1 << 4;
 const TLS1_2: i64 = 1 << 5;
 const TLS1_3: i64 = 1 << 6;
 
+/// `HAVE_SSL3`: the headers this build compiled against leave
+/// `OPENSSL_NO_SSL3` undefined, as OpenSSL 4's do and OpenSSL 3's do not.
+const HAVE_SSL3: bool = crate::header::HAVE_SSL3;
+
+/// The protocols from `PHP_OPENSSL_MIN_PROTO_VERSION` to
+/// `PHP_OPENSSL_MAX_PROTO_VERSION`, lowest first: `SSLv3` first where the
+/// build has it, else TLS 1.0.
+const PROTOCOLS: &[i64] = if HAVE_SSL3 {
+    &[SSL3, TLS1_0, TLS1_1, TLS1_2, TLS1_3]
+} else {
+    &[TLS1_0, TLS1_1, TLS1_2, TLS1_3]
+};
+
 /// `STREAM_CRYPTO_METHOD_TLS_ANY_CLIENT`.
 const TLS_ANY_CLIENT: i64 = TLS1_0 | TLS1_1 | TLS1_2 | TLS1_3 | IS_CLIENT;
 
-/// `TLS1_VERSION` to `TLS1_3_VERSION`, what `SSL_version` answers.
+/// `SSL3_VERSION` and `TLS1_VERSION` to `TLS1_3_VERSION`, what
+/// `SSL_version` answers.
+const SSL3_VERSION: c_int = 0x300;
 const TLS1_VERSION: c_int = 0x301;
 const TLS1_1_VERSION: c_int = 0x302;
 const TLS1_2_VERSION: c_int = 0x303;
@@ -100,8 +115,8 @@ const DEFAULT_RENEG_LIMIT: i64 = 2;
 const DEFAULT_RENEG_WINDOW: i64 = 300;
 
 /// The `transports` openssl's `MINIT` registers, in its order: `ssl`,
-/// `tls`, `tlsv1.0` to `tlsv1.3`, then `tcp` over `standard`'s, each
-/// labelled as `php_openssl_socket_ops` is.
+/// `sslv3` where the build has it, `tls`, `tlsv1.0` to `tlsv1.3`, then
+/// `tcp` over `standard`'s, each labelled as `php_openssl_socket_ops` is.
 ///
 /// ```php
 /// echo implode(',', stream_get_transports()), "\n";
@@ -111,16 +126,17 @@ const DEFAULT_RENEG_WINDOW: i64 = 300;
 /// var_dump(stream_socket_client('udp://127.0.0.1:9') !== false);
 /// ```
 /// ```expect
-/// tcp,udp,unix,udg,ssl,tls,tlsv1.0,tlsv1.1,tlsv1.2,tlsv1.3
+/// tcp,udp,unix,udg,ssl,sslv3,tls,tlsv1.0,tlsv1.1,tlsv1.2,tlsv1.3
 /// string(14) "tcp_socket/ssl"
 /// bool(false)
 /// bool(true)
 /// ```
 pub(crate) fn transports() -> Vec<XportFactory> {
     [
-        "ssl", "tls", "tlsv1.0", "tlsv1.1", "tlsv1.2", "tlsv1.3", "tcp",
+        "ssl", "sslv3", "tls", "tlsv1.0", "tlsv1.1", "tlsv1.2", "tlsv1.3", "tcp",
     ]
     .into_iter()
+    .filter(|&name| HAVE_SSL3 || name != "sslv3")
     .map(|name| XportFactory {
         name,
         label: "tcp_socket/ssl",
@@ -164,7 +180,7 @@ impl CryptoMethod {
             max
         };
         let mut flags = self.protocols;
-        for version in [TLS1_0, TLS1_1, TLS1_2, TLS1_3] {
+        for &version in PROTOCOLS {
             if version >= min && version <= max {
                 flags |= version;
             } else {
@@ -177,16 +193,19 @@ impl CryptoMethod {
 
 /// `php_openssl_get_min_proto_version_flag`.
 fn min_flag(flags: i64) -> i64 {
-    [TLS1_0, TLS1_1, TLS1_2, TLS1_3]
-        .into_iter()
+    PROTOCOLS
+        .iter()
+        .copied()
         .find(|v| flags & v != 0)
         .unwrap_or(TLS1_3)
 }
 
 /// `php_openssl_get_max_proto_version_flag`.
 fn max_flag(flags: i64) -> i64 {
-    [TLS1_3, TLS1_2, TLS1_1, TLS1_0]
-        .into_iter()
+    PROTOCOLS
+        .iter()
+        .rev()
+        .copied()
         .find(|v| flags & v != 0)
         .unwrap_or(TLS1_3)
 }
@@ -197,6 +216,7 @@ fn proto_version(flag: i64) -> c_int {
         TLS1_3 => TLS1_3_VERSION,
         TLS1_1 => TLS1_1_VERSION,
         TLS1_0 => TLS1_VERSION,
+        SSL3 if HAVE_SSL3 => SSL3_VERSION,
         _ => TLS1_2_VERSION,
     }
 }
@@ -563,6 +583,7 @@ fn factory(
 ) -> Result<Box<dyn Crypto>, Thrown> {
     let on_connect = match proto {
         "ssl" | "tls" => Some(crypto_method(req, context, TLS_ANY_CLIENT)?),
+        "sslv3" => Some(SSL3 | IS_CLIENT),
         "tlsv1.0" => Some(TLS1_0 | IS_CLIENT),
         "tlsv1.1" => Some(TLS1_1 | IS_CLIENT),
         "tlsv1.2" => Some(TLS1_2 | IS_CLIENT),
@@ -1847,6 +1868,7 @@ impl Crypto for Layer {
             TLS1_2_VERSION => b"TLSv1.2",
             TLS1_1_VERSION => b"TLSv1.1",
             TLS1_VERSION => b"TLSv1",
+            SSL3_VERSION if HAVE_SSL3 => b"SSLv3",
             _ => b"UNKNOWN",
         };
         let mut array = PhpArray::new(req)?;
