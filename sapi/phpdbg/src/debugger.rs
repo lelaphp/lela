@@ -397,7 +397,7 @@ fn compiled_after_init(session: &mut Session, req: &Request, discard: bool) {
     if session.stopped.is_some() || read::open_refused(req) {
         session.out.drop_compiled();
     } else {
-        out::compiled(session, discard);
+        session.out.compiled(discard);
     }
 }
 

@@ -1548,7 +1548,7 @@ pub fn compiled_in_init(s: &mut Session) {
         return;
     }
     // What the compile wrote comes here, before its notice.
-    out::compiled(s, false);
+    s.out.compiled(false);
     if let Some(exec) = &s.exec {
         let message = if s.stdin_code.is_some() {
             b"Successful compilation of stdin input".to_vec()

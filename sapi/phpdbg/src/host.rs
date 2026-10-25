@@ -96,14 +96,15 @@ pub fn serve(engine: &Engine, mut s: Session) -> i32 {
         let description = describe(&s, plan);
         let sink = Box::new(Sink { session: Some(s) });
         let (observed, mut sink) = engine.serve(description, sink, |_| HostServes::Program);
-        // A request that never entered its program writes what it held as
-        // it was written.
+        // What a request held and never gave its place, because it never
+        // entered its program or its init files never ran, written as it
+        // was written.
         let any: &mut dyn std::any::Any = sink.as_mut();
         if let Some(back) = any
             .downcast_mut::<Sink>()
             .and_then(|sink| sink.session.as_mut())
         {
-            out::compiled(back, false);
+            back.out.compiled(false);
         }
         if observed.start_failed {
             return start_failed(sink.as_mut());

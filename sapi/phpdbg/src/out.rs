@@ -221,30 +221,6 @@ pub fn interruptible(req: &mut Request, f: impl FnOnce(&mut Request)) {
     }
 }
 
-/// What the cycle's compile wrote, written where php's compile after
-/// the init files writes it: its log under `PHPDBG_DISCARD_OUTPUT` where
-/// `discard` says php's `settings || phpdbg_startup_run > 0` holds, that
-/// is past the first cycle or before a startup run, its displays
-/// whatever it says.
-pub fn compiled(s: &mut Session, discard: bool) {
-    let held = s.out.unhold();
-    if held.is_empty() {
-        return;
-    }
-    let outer = s.out.discarding;
-    s.out.discarding |= discard;
-    for written in held {
-        match written {
-            Held::Program(bytes) => s.out.program(&bytes),
-            Held::Log(entry) => s.out.log(&entry),
-            Held::Stderr(bytes) => {
-                std::io::stderr().lock().write_all(&bytes).ok();
-            }
-        }
-    }
-    s.out.discarding = outer;
-}
-
 impl Out {
     /// From here until the program is entered, what the sink is given is
     /// the compile's, and is held ([`Compile`]).
@@ -252,8 +228,30 @@ impl Out {
         self.compile = Compile::Holding(Vec::new());
     }
 
+    /// What the cycle's compile wrote, written where php's compile after
+    /// the init files writes it: its log under `PHPDBG_DISCARD_OUTPUT`
+    /// where `discard` says php's `settings || phpdbg_startup_run > 0`
+    /// holds, that is past the first cycle or before a startup run, its
+    /// displays whatever it says.
+    pub fn compiled(&mut self, discard: bool) {
+        let held = self.unhold();
+        if held.is_empty() {
+            return;
+        }
+        let outer = self.discarding;
+        self.discarding |= discard;
+        for written in held {
+            match written {
+                Held::Program(bytes) => self.program(&bytes),
+                Held::Log(entry) => self.log(&entry),
+                Held::Stderr(bytes) => stderr(&bytes),
+            }
+        }
+        self.discarding = outer;
+    }
+
     /// The program is entered: the sink writes through again, and what
-    /// the compile wrote waits for [`compiled`].
+    /// the compile wrote waits for [`Out::compiled`].
     pub fn entered(&mut self) {
         if let Compile::Holding(held) = &mut self.compile {
             self.compile = Compile::Waiting(std::mem::take(held));
@@ -426,6 +424,11 @@ fn raw(bytes: &[u8]) {
     stdout.flush().ok();
 }
 
+/// The bytes to stderr as they are: the error stream.
+fn stderr(bytes: &[u8]) {
+    std::io::stderr().lock().write_all(bytes).ok();
+}
+
 /// `zend_dump_op_array`'s listing, which it writes to stderr
 /// (`Z/Zend/Optimizer/zend_dump.c`), the newline fact untouched.
 pub fn dump(bytes: &[u8]) {
@@ -484,11 +487,10 @@ impl OutputSink for Sink {
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
-        if let Some(held) = self.session.as_mut().and_then(|s| s.out.holding()) {
-            held.push(Held::Stderr(bytes.to_vec()));
-            return;
+        match self.session.as_mut().and_then(|s| s.out.holding()) {
+            Some(held) => held.push(Held::Stderr(bytes.to_vec())),
+            None => stderr(bytes),
         }
-        std::io::stderr().lock().write_all(bytes).ok();
     }
 }
 
