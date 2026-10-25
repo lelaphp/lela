@@ -347,10 +347,24 @@ fn xtype(req: &mut Request, mode: i64) -> Result<Kind, Thrown> {
     }
 }
 
-/// `timeout_sec` held above zero.
-fn positive_timeout(req: &mut Request, timeout: i64) -> Result<(), Thrown> {
+/// `PHP_FTP_TIMEOUT_SEC_MAX`, `PHP_TIMEOUT_ULL_MAX / 1000000.0` as a
+/// `uint64_t`: the seconds past which the timeout's microseconds overflow.
+const TIMEOUT_SEC_MAX: i64 = 18_446_744_073_709;
+
+/// `timeout_sec` held above zero and below [`TIMEOUT_SEC_MAX`], as
+/// argument 3, each refusal's sentence ending in `option` (php 8.5.12's
+/// GH-20601: `ftp_ssl_connect` and `ftp_set_option` check the bound too).
+fn bounded_timeout(req: &mut Request, timeout: i64, option: &str) -> Result<(), Thrown> {
     if timeout <= 0 {
-        return Err(arg_value_error(req, 3, "be greater than 0"));
+        return Err(arg_value_error(
+            req,
+            3,
+            &format!("be greater than 0{option}"),
+        ));
+    }
+    if timeout >= TIMEOUT_SEC_MAX {
+        let tail = format!("be less than {TIMEOUT_SEC_MAX}{option}");
+        return Err(arg_value_error(req, 3, &tail));
     }
     Ok(())
 }
@@ -396,12 +410,7 @@ fn ftp_connect(
     #[php(default = 21)] port: i64,
     #[php(default = 90)] timeout: i64,
 ) -> Result<OrFalse<Owner<Instance<Connection>>>, Thrown> {
-    // `PHP_TIMEOUT_ULL_MAX / 1000000.0`, as a `uint64_t`.
-    const MAX: i64 = 18_446_744_073_709;
-    positive_timeout(req, timeout)?;
-    if timeout >= MAX {
-        return Err(arg_value_error(req, 3, &format!("be less than {MAX}")));
-    }
+    bounded_timeout(req, timeout, "")?;
     match Ftp::open(req, hostname.as_bytes(), port, timeout, false)? {
         Some(session) => Ok(OrFalse::Value(connection(req, session)?)),
         None => Ok(OrFalse::False),
@@ -414,10 +423,12 @@ fn ftp_connect(
 /// ```php
 /// var_dump(ftp_ssl_connect('127.0.0.1', 1));
 /// try { ftp_ssl_connect('x', 21, -1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// try { ftp_ssl_connect('x', 21, PHP_INT_MAX); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect
 /// bool(false)
 /// ftp_ssl_connect(): Argument #3 ($timeout) must be greater than 0
+/// ftp_ssl_connect(): Argument #3 ($timeout) must be less than 18446744073709
 /// ```
 #[php_function]
 fn ftp_ssl_connect(
@@ -426,7 +437,7 @@ fn ftp_ssl_connect(
     #[php(default = 21)] port: i64,
     #[php(default = 90)] timeout: i64,
 ) -> Result<OrFalse<Owner<Instance<Connection>>>, Thrown> {
-    positive_timeout(req, timeout)?;
+    bounded_timeout(req, timeout, "")?;
     match Ftp::open(req, hostname.as_bytes(), port, timeout, true)? {
         Some(session) => Ok(OrFalse::Value(connection(req, session)?)),
         None => Ok(OrFalse::False),
@@ -1795,7 +1806,7 @@ impl Opt {
 /// $f = ftp_connect("127.0.0.1", $p);
 /// var_dump(ftp_get_option($f, FTP_TIMEOUT_SEC), ftp_get_option($f, FTP_AUTOSEEK), ftp_get_option($f, FTP_USEPASVADDRESS));
 /// var_dump(ftp_set_option($f, FTP_TIMEOUT_SEC, 5), ftp_set_option($f, FTP_AUTOSEEK, false), ftp_get_option($f, FTP_TIMEOUT_SEC), ftp_get_option($f, FTP_AUTOSEEK));
-/// foreach ([[FTP_TIMEOUT_SEC, "5"], [FTP_TIMEOUT_SEC, 0], [FTP_AUTOSEEK, 1], [FTP_USEPASVADDRESS, null], [9, 1]] as [$o, $v]) { try { ftp_set_option($f, $o, $v); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
+/// foreach ([[FTP_TIMEOUT_SEC, "5"], [FTP_TIMEOUT_SEC, 0], [FTP_TIMEOUT_SEC, PHP_INT_MAX], [FTP_AUTOSEEK, 1], [FTP_USEPASVADDRESS, null], [9, 1]] as [$o, $v]) { try { ftp_set_option($f, $o, $v); } catch (Error $e) { echo $e->getMessage(), "\n"; } }
 /// try { ftp_get_option($f, 9); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// ```
 /// ```expect process
@@ -1808,6 +1819,7 @@ impl Opt {
 /// bool(false)
 /// ftp_set_option(): Argument #3 ($value) must be of type int for the FTP_TIMEOUT_SEC option, string given
 /// ftp_set_option(): Argument #3 ($value) must be greater than 0 for the FTP_TIMEOUT_SEC option
+/// ftp_set_option(): Argument #3 ($value) must be less than 18446744073709 for the FTP_TIMEOUT_SEC option
 /// ftp_set_option(): Argument #3 ($value) must be of type bool for the FTP_AUTOSEEK option, int given
 /// ftp_set_option(): Argument #3 ($value) must be of type bool for the FTP_USEPASVADDRESS option, null given
 /// ftp_set_option(): Argument #2 ($option) must be one of FTP_TIMEOUT_SEC, FTP_AUTOSEEK, or FTP_USEPASVADDRESS
@@ -1829,11 +1841,10 @@ fn ftp_set_option(
         arg_type_error(req, 3, &tail)
     };
     let setting = match (opt, value.as_ref()) {
-        (Opt::Timeout, ValueRef::Int(n)) if n <= 0 => {
-            let tail = "be greater than 0 for the FTP_TIMEOUT_SEC option";
-            return Err(arg_value_error(req, 3, tail));
+        (Opt::Timeout, ValueRef::Int(n)) => {
+            bounded_timeout(req, n, " for the FTP_TIMEOUT_SEC option")?;
+            Setting::Timeout(n)
         }
-        (Opt::Timeout, ValueRef::Int(n)) => Setting::Timeout(n),
         (Opt::Timeout, _) => return Err(wrong(req, "int", "FTP_TIMEOUT_SEC")),
         (Opt::Autoseek, ValueRef::Bool(b)) => Setting::Autoseek(b),
         (Opt::Autoseek, _) => return Err(wrong(req, "bool", "FTP_AUTOSEEK")),
