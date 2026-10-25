@@ -1666,8 +1666,10 @@ pub(crate) fn discard_all(req: &mut Request) {
 }
 
 /// `php_output_deactivate` (`Z/main/output.c:176`): the header block
-/// committed if nothing sent it, the layer inactive, every handler
-/// left freed and the stack's storage with them; and
+/// committed if nothing sent it, but for a request ended at the hard
+/// memory limit, where php's `_exit(137)` never reaches this; the layer
+/// inactive, every handler left freed and the stack's storage with them;
+/// and
 /// `sapi_deactivate_destroy` (`Z/main/SAPI.c:537`) after it, the
 /// mimetype and the status line given back. Nothing of the request
 /// runs between the two, so they are one act here.
