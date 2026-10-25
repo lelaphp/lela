@@ -1103,8 +1103,8 @@ enum FieldPacket {
 /// `zend_string_init`'s size, kept in `CG(interned_strings)` until the
 /// request ends and found again at the next ask. So under php -n the name
 /// costs 8 bytes less (`12345` takes the 32-byte bin, not finit's 40) and
-/// only once. That difference is the `trace:immutable-literal-arrays` row's
-/// (#3412):
+/// only once. Whether the `trace:immutable-literal-arrays` row covers
+/// that difference is a person's ruling, asked on #3425 (#3412):
 ///
 /// ```php
 /// mysqli_report(MYSQLI_REPORT_OFF);
