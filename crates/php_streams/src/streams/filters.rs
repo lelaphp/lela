@@ -668,8 +668,27 @@ impl StreamOp<'_> {
     /// the first with `PSFS_FLAG_FLUSH_CLOSE` under `finish` and
     /// `PSFS_FLAG_FLUSH_INC` otherwise; a filter asking to be fed ends the
     /// flush, and one that breaks is `false`. What the last passes on goes
-    /// into the read buffer for the read chain, php's shuffle of the
-    /// buffer with it, and to the kind for the write chain.
+    /// into the read buffer for the read chain, after the bytes not yet
+    /// read, and to the kind for the write chain:
+    ///
+    /// ```php
+    /// class F extends php_user_filter {
+    ///     function filter($in, $out, &$consumed, $closing): int {
+    ///         while ($b = stream_bucket_make_writeable($in)) { $consumed += $b->datalen; stream_bucket_append($out, $b); }
+    ///         if ($closing) stream_bucket_append($out, stream_bucket_new($this->stream, 'END'));
+    ///         return PSFS_PASS_ON;
+    ///     }
+    /// }
+    /// stream_filter_register('f', 'F');
+    /// $m = fopen('php://memory', 'w+'); fwrite($m, 'abcdef'); rewind($m);
+    /// $f = stream_filter_append($m, 'f', STREAM_FILTER_READ);
+    /// var_dump(fread($m, 2), stream_filter_remove($f), stream_get_contents($m));
+    /// ```
+    /// ```expect
+    /// string(2) "ab"
+    /// bool(true)
+    /// string(7) "cdefEND"
+    /// ```
     fn flush_from(&mut self, chain: Chain, at: usize, finish: bool) -> bool {
         let mut inp = Brigade::new();
         let mut outp = Brigade::new();
@@ -699,10 +718,11 @@ impl StreamOp<'_> {
             Chain::Read => {
                 let Some((short, grown)) = self.with(|s| {
                     if s.readpos > 0 {
-                        // php moves the held bytes to the front and sets
-                        // `readpos` to zero before it subtracts it from
-                        // `writepos`, which it therefore leaves where it was.
+                        // The held bytes backed up to the front, and
+                        // `writepos` moved back with them before `readpos`
+                        // is zero, as 8.5.12 orders the two.
                         s.readbuf.copy_within(s.readpos..s.writepos, 0);
+                        s.writepos -= s.readpos;
                         s.readpos = 0;
                     }
                     let grown = s.writepos + flushed + s.chunk_size();

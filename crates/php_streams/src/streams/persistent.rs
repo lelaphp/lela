@@ -230,12 +230,15 @@ pub(crate) fn unlist(req: &mut Request, stream: Stream) {
     res.unlist(req);
 }
 
-/// `PHP_RSHUTDOWN_FUNCTION(streams)` and the request's end
+/// `ZEND_MODULE_POST_ZEND_DEACTIVATE_D(streams)` at 8.5.12, which was
+/// `PHP_RSHUTDOWN_FUNCTION(streams)` before, and the request's end
 /// (`forget_persistent_resource_id_numbers`, `streams.c:68-101`): every
 /// entry the request still holds given back to the engine's pool, its
-/// resource and its `stream->ctx` forgotten. Served as the request's
-/// stream state is dropped, after the resources are closed, when every
-/// entry is idle.
+/// resource and its `stream->ctx` forgotten, nothing of them released,
+/// since the request's resources, each `stream->ctx` among them, are
+/// destroyed already. Served as the request's stream state is dropped,
+/// after the resources are closed, when every entry is idle and holds
+/// no `stream->ctx`.
 pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
     for held in held {
         if let State::Idle(mut entry) = held.state {

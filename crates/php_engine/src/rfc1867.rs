@@ -19,7 +19,7 @@
 //! at the hard limit.
 
 use crate::api::abi::{Encoding, Multibyte};
-use crate::api::raising::{Level, Thrown, docref, throw_exception_ex};
+use crate::api::raising::{Cause, Level, Thrown, docref, throw_exception_ex};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{Emalloc, Owner, PhpArray, PhpString, Value};
@@ -215,11 +215,15 @@ struct Buffer {
     /// What `multipart_buffer_new` asks the request's heap for: the
     /// struct, its buffer and the two boundaries `spprintf` writes.
     held: Vec<Emalloc>,
+    /// The `post_max_size` the body is held to, the handler's or the
+    /// `request_parse_body()` option's, which `fill_buffer` reads at
+    /// 8.5.12.
+    post_max_size: i64,
 }
 
 impl Buffer {
     /// `multipart_buffer_new`.
-    fn new(req: &mut Request, boundary: &[u8]) -> Result<Buffer, Thrown> {
+    fn new(req: &mut Request, boundary: &[u8], post_max_size: i64) -> Result<Buffer, Thrown> {
         let size = (boundary.len() + 6).max(FILLUNIT);
         let mut dashed = b"--".to_vec();
         dashed.extend_from_slice(boundary);
@@ -240,6 +244,7 @@ impl Buffer {
             boundary_next: next,
             last: Vec::new(),
             held,
+            post_max_size,
         })
     }
 
@@ -257,12 +262,18 @@ impl Buffer {
     }
 
     /// `fill_buffer`: what is held moved to the start, and the free room
-    /// filled from the host; how much came.
+    /// filled from the host; how much came. A body read past
+    /// `post_max_size` already fills nothing more, as 8.5.12 stops it
+    /// (`Z/main/rfc1867.c:227`), so a body whose `Content-Length` said
+    /// less, or nothing, is cut where it passed the limit.
     fn fill(&mut self, req: &mut Request) -> usize {
         if self.len > 0 && self.begin != 0 {
             self.bytes.copy_within(self.begin..self.begin + self.len, 0);
         }
         self.begin = 0;
+        if self.past_limit(req) {
+            return 0;
+        }
         let mut total = 0;
         let want = self.size - self.len;
         if want > 0 {
@@ -272,6 +283,26 @@ impl Buffer {
             total += got.len();
         }
         total
+    }
+
+    /// Whether the body read so far, `SG(read_post_bytes)`, is past the
+    /// `post_max_size` it is held to.
+    fn past_limit(&self, req: &Request) -> bool {
+        self.post_max_size > 0 && req.post_bytes_read() > self.post_max_size
+    }
+
+    /// `fileupload_done`'s warning at 8.5.12, `sapi_error`'s, for a body
+    /// read past `post_max_size`, whatever stopped the parse.
+    fn warn_past_limit(&self, req: &mut Request) {
+        if self.past_limit(req) {
+            let limit = self.post_max_size;
+            req.note_error(
+                Level::Warning,
+                &format!(
+                    "Actual POST length does not match Content-Length, and exceeds {limit} bytes"
+                ),
+            );
+        }
     }
 
     /// `multipart_buffer_eof`.
@@ -698,15 +729,16 @@ fn normalize_protected(name: &[u8]) -> Vec<u8> {
 
 /// What one pass of the handler holds beside the request: the names a file
 /// upload protects (`PG(rfc1867_protected_variables)`), the arrays it
-/// writes, whether a refusal is thrown (`request_parse_body()`), and what
-/// it keeps on the request's heap from part to part to `fileupload_done`:
-/// the part's header lines, `lbuf` with its room `llen`, `abuf` and
-/// `array_index`.
+/// writes, whether a refusal is thrown (`request_parse_body()`) and the
+/// throwable a refusal left pending, and what it keeps on the request's
+/// heap from part to part to `fileupload_done`: the part's header lines,
+/// `lbuf` with its room `llen`, `abuf` and `array_index`.
 struct Handler {
     protected: Owner<PhpArray>,
     post: PhpArray,
     files: PhpArray,
     throwing: bool,
+    pending: Option<Thrown>,
     headers: Headers,
     lbuf: Option<(Emalloc, usize)>,
     abuf: Option<Text>,
@@ -714,14 +746,65 @@ struct Handler {
 }
 
 impl Handler {
-    /// `EMIT_WARNING_OR_ERROR`: php's `RequestParseBodyException` under
-    /// `request_parse_body()`, the warning otherwise.
-    fn refuse(&self, req: &mut Request, message: &str) -> Result<(), Thrown> {
-        if self.throwing {
-            return Err(throw_exception_ex(req, PARSE_BODY_EXCEPTION, message));
+    /// What `rfc1867_post_handler` lays down before the first part: the
+    /// protected names' table, `SG(rfc1867_uploaded_files)`
+    /// ([`Request::uploaded_files`]) and `$_FILES`'s array where the
+    /// request has none yet.
+    fn new(req: &mut Request, post: PhpArray, throwing: bool) -> Result<Handler, Thrown> {
+        let protected = PhpArray::new(req)?;
+        let files = req.uploaded_files().and_then(|_| {
+            if let Some(files) = req.files_track() {
+                return Ok(files);
+            }
+            let files = req.array()?;
+            req.set_files_track(files);
+            Ok(files)
+        });
+        let files = match files {
+            Ok(files) => files,
+            Err(thrown) => {
+                protected.give_up(req);
+                return Err(thrown);
+            }
+        };
+        Ok(Handler {
+            protected,
+            post,
+            files,
+            throwing,
+            pending: None,
+            headers: Headers::default(),
+            lbuf: None,
+            abuf: None,
+            array_index: None,
+        })
+    }
+
+    /// `EMIT_WARNING_OR_ERROR`: php's warning, or under
+    /// `request_parse_body()` its `RequestParseBodyException`, thrown as
+    /// `zend_throw_exception_ex` throws it, pending while the body is
+    /// parsed on, so a later refusal is what leaves with the earlier one
+    /// its `previous` (`Thrown::chain`).
+    fn refuse(&mut self, req: &mut Request, message: &str) {
+        if !self.throwing {
+            docref(req, Level::Warning, message);
+            return;
         }
-        docref(req, Level::Warning, message);
-        Ok(())
+        let now = throw_exception_ex(req, PARSE_BODY_EXCEPTION, message);
+        self.pending = Some(match self.pending.take() {
+            Some(earlier) => earlier.chain(req, now),
+            None => now,
+        });
+    }
+
+    /// What leaves the handler: what it served, and the throwable a
+    /// refusal left pending, the one raised later chained over it.
+    fn leaving(&mut self, req: &mut Request, served: Result<(), Thrown>) -> Result<(), Thrown> {
+        match (self.pending.take(), served) {
+            (None, served) => served,
+            (Some(pending), Ok(())) => Err(pending),
+            (Some(pending), Err(later)) => Err(pending.chain(req, later)),
+        }
     }
 
     /// `add_protected_variable` at 8.5.12: the name, normalized, kept in
@@ -884,24 +967,13 @@ pub(crate) fn post_handler(
         );
         return Ok(());
     }
-    let mut mbuff = Buffer::new(req, boundary)?;
-    let protected = PhpArray::new(req)?;
-    let files = if let Some(files) = req.files_track() {
-        files
-    } else {
-        let files = req.array()?;
-        req.set_files_track(files);
-        files
-    };
-    let mut upload = Handler {
-        protected,
-        post,
-        files,
-        throwing,
-        headers: Headers::default(),
-        lbuf: None,
-        abuf: None,
-        array_index: None,
+    let mut mbuff = Buffer::new(req, boundary, post_max_size)?;
+    let mut upload = match Handler::new(req, post, throwing) {
+        Ok(upload) => upload,
+        Err(thrown) => {
+            mbuff.free(req);
+            return Err(thrown);
+        }
     };
     let translation = Translation::of(req);
     let limits = Limits {
@@ -912,13 +984,25 @@ pub(crate) fn post_handler(
         upload_max_filesize,
     };
     let served = (|| {
-        if req.upload_event(&Upload::Start { content_length })? && !req.has_oom() {
-            parts(req, &mut upload, &mut mbuff, limits, translation.as_ref())?;
+        let parsed = if req.upload_event(&Upload::Start { content_length })? && !req.has_oom() {
+            parts(req, &mut upload, &mut mbuff, limits, translation.as_ref())
+        } else {
+            Ok(())
+        };
+        // A throwable a callback left is pending in php, which goes on to
+        // `fileupload_done` all the same; a fatal or an exit leaves.
+        if let Err(thrown) = &parsed
+            && !matches!(thrown.cause(req), Cause::Throwable(_))
+        {
+            return parsed;
         }
+        mbuff.warn_past_limit(req);
+        parsed?;
         let read = req.post_bytes_read();
         req.upload_event(&Upload::End { read })?;
         Ok(())
     })();
+    let served = upload.leaving(req, served);
     upload.free(req);
     mbuff.free(req);
     served
@@ -1058,7 +1142,7 @@ fn parts(
                 &format!(
                     "Multipart body parts limit exceeded {body_parts_limit}. To increase the limit change max_multipart_body_parts in php.ini."
                 ),
-            )?;
+            );
             break;
         }
         // Translated, the part is read in the encoding its last header
@@ -1134,25 +1218,20 @@ fn parts(
                     }
                 }
             } else {
-                let refused = if count == max_input_vars + 1 {
+                if count == max_input_vars + 1 {
                     upload.refuse(
                         req,
                         &format!(
                             "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
                         ),
-                    )
-                } else {
-                    Ok(())
+                    );
+                }
+                let event = Upload::FormData {
+                    read,
+                    name: &name,
+                    value: value.bytes(),
                 };
-                let told = refused.and_then(|()| {
-                    let event = Upload::FormData {
-                        read,
-                        name: &name,
-                        value: value.bytes(),
-                    };
-                    req.upload_event(&event)
-                });
-                if let Err(thrown) = told {
+                if let Err(thrown) = req.upload_event(&event) {
                     value.free(req);
                     param.free(req);
                     return Err(thrown);
@@ -1179,18 +1258,14 @@ fn parts(
             skip_upload = true;
             if upload_cnt == 0 {
                 upload_cnt -= 1;
-                let refused = upload.refuse(
+                upload.refuse(
                     req,
                     "Maximum number of allowable file uploads has been exceeded",
                 );
-                if let Err(thrown) = refused {
-                    Disposition { param, filename }.free(req);
-                    return Err(thrown);
-                }
             }
         }
         let Some(filename) = filename else {
-            upload.refuse(req, "File Upload Mime headers garbled")?;
+            upload.refuse(req, "File Upload Mime headers garbled");
             break;
         };
         let param_text = if let Some(param) = param {
@@ -1267,12 +1342,7 @@ fn parts(
             temp = req.open_temporary_fd(dir.as_deref(), b"php", TemporaryGuard::OnFallback);
             upload_cnt -= 1;
             if temp.is_none() {
-                let refused =
-                    upload.refuse(req, "File upload error - unable to create a temporary file");
-                if let Err(thrown) = refused {
-                    named.free(req);
-                    return Err(thrown);
-                }
+                upload.refuse(req, "File upload error - unable to create a temporary file");
                 cancel_upload = UPLOAD_ERROR_E;
             }
         }
@@ -1346,7 +1416,17 @@ fn parts(
             }
             None
         } else {
-            temp_path.inspect(|path| req.note_uploaded(path.clone()))
+            match temp_path {
+                Some(path) => {
+                    let bytes = path.into_os_string().into_encoded_bytes();
+                    if let Err(thrown) = req.note_uploaded(&bytes) {
+                        named.free(req);
+                        return Err(thrown);
+                    }
+                    Some(bytes)
+                }
+                None => None,
+            }
         };
         if req.has_oom() {
             named.free(req);
@@ -1407,7 +1487,7 @@ fn parts(
             basename(&filename, &step_internal),
             &filename,
             cancel_upload,
-            temp_name,
+            temp_name.as_deref(),
             total_bytes,
         )?;
         named.free(req);
@@ -1436,7 +1516,7 @@ fn describe(
     name: &[u8],
     filename: &[u8],
     cancel_upload: i64,
-    temp_name: Option<std::path::PathBuf>,
+    temp_name: Option<&[u8]>,
     total_bytes: i64,
 ) -> Result<bool, Thrown> {
     if !upload.file_string(req, &slot("name"), name, false)?
@@ -1464,10 +1544,17 @@ fn describe(
     if !upload.protect(req, param)? || !upload.protect(req, &tmp_slot)? {
         return Ok(false);
     }
-    let kept = temp_name
-        .map(|path| path.into_os_string().into_encoded_bytes())
-        .unwrap_or_default();
-    if !upload.file_string(req, &tmp_slot, &kept, true)? {
+    // The string the uploads' table keys the file by, shared, as
+    // `ZVAL_STR_COPY(&zfilename, temp_filename)` shares it; the empty
+    // string where the upload was cancelled.
+    let shared = temp_name
+        .and_then(|path| req.uploaded_name(path))
+        .map(|name| Owner::take(req, name).into_value());
+    let registered = match shared {
+        Some(name) => upload.register(req, upload.files, &tmp_slot, name, true)?,
+        None => upload.file_string(req, &tmp_slot, b"", true)?,
+    };
+    if !registered {
         return Ok(false);
     }
     let files = upload.files;

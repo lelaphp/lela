@@ -213,7 +213,28 @@ impl Dechunk {
     /// moved to the front of `buf`, their sizes, extensions, line ends
     /// and the trailer dropped; bytes that are no chunk pass as they
     /// are, and so does everything after them. The length of what is
-    /// left.
+    /// left. A size past `SIZE_MAX` is no chunk, as 8.5.12 guards it,
+    /// so the bytes from it on pass as they are, where a size that
+    /// wrapped to 0 ended the body:
+    ///
+    /// ```php
+    /// foreach (["10000000000000000\nBODY\n0\n", "fffffffffffffffff\nBODY\n0\n", "5\nhello\n0\n"] as $body) {
+    ///     $m = fopen('php://memory', 'w+'); fwrite($m, $body); rewind($m);
+    ///     stream_filter_append($m, 'dechunk', STREAM_FILTER_READ);
+    ///     var_dump(stream_get_contents($m));
+    /// }
+    /// ```
+    /// ```expect
+    /// string(9) "0
+    /// BODY
+    /// 0
+    /// "
+    /// string(9) "f
+    /// BODY
+    /// 0
+    /// "
+    /// string(5) "hello"
+    /// ```
     #[allow(clippy::too_many_lines)] // one function in php, ported as one
     fn dechunk(&mut self, buf: &mut [u8]) -> usize {
         let end = buf.len();
@@ -239,10 +260,13 @@ impl Dechunk {
                             break;
                         }
                     };
-                    self.chunk_size = self
-                        .chunk_size
-                        .wrapping_mul(16)
-                        .wrapping_add(usize::from(digit));
+                    // 8.5.12's guard: a size past `SIZE_MAX` is no
+                    // chunk, where it wrapped to one before.
+                    if self.chunk_size > usize::MAX / 16 {
+                        self.state = ChunkState::Error;
+                        break;
+                    }
+                    self.chunk_size = self.chunk_size * 16 + usize::from(digit);
                     self.state = ChunkState::Size;
                     p += 1;
                 }

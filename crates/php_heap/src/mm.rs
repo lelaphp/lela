@@ -63,11 +63,33 @@ mod leaks;
 mod oom;
 #[cfg(debug_assertions)]
 mod origins;
+pub(crate) mod tracked;
 
 pub use cache::ChunkCache;
 pub use oom::{DelayedOom, PendingOom};
 
 use oom::{HardLimitPercent, Wake};
+use tracked::Tracked;
+
+/// Which allocator a heap serves its blocks from, php's
+/// `use_custom_heap` and the handlers it names: Zend's own chunks, bins
+/// and runs, or the system's allocator with each block's size kept
+/// ([`tracked`]), chosen once for every heap of the process
+/// ([`tracked::chosen`]).
+#[derive(Debug)]
+enum Allocator {
+    Zend,
+    Tracked(Box<Tracked>),
+}
+
+/// The arm `alloc`, `realloc` and `free` take, php's `use_custom_heap`:
+/// Zend's own, or the custom one that serves the tracked allocator and
+/// tells the observers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Entries {
+    Zend,
+    Custom,
+}
 
 /// `ZEND_MM_CHUNK_SIZE`: 2 MiB, and the alignment of every chunk, so the
 /// chunk an allocation belongs to is its address with the low bits cut.
@@ -230,6 +252,12 @@ struct Huge {
 /// blocks and the four numbers php answers `memory_get_usage()` and
 /// `memory_get_peak_usage()` with.
 pub(crate) struct Mm {
+    /// The allocator its blocks come from.
+    allocator: Allocator,
+    /// php's `heap->use_custom_heap`: whether the entries take their cold
+    /// arm, for the tracked allocator or for the observers, the one test
+    /// an allocation pays for either ([`Mm::reckon_custom`]).
+    entries: Entries,
     /// The chunks in php's walk order; the first is php's `main_chunk`
     /// and is never moved or deleted.
     chunks: Vec<NonNull<Chunk>>,
@@ -340,13 +368,43 @@ impl Mm {
         Mm::over(Some(cache))
     }
 
+    /// A heap of the allocator the process chose: Zend's, or, where the
+    /// environment asked for it, the tracked one, which maps no chunk and
+    /// takes nothing from the cache.
     fn over(cache: Option<Arc<ChunkCache>>) -> Mm {
-        let kept = cache.as_ref().and_then(|cache| cache.take());
+        let allocator = if tracked::chosen() {
+            Allocator::Tracked(Box::default())
+        } else {
+            Allocator::Zend
+        };
+        Mm::of(allocator, cache)
+    }
+
+    /// A tracked heap, whatever the process chose, for the tests. Its
+    /// blocks are asked for raw: the debug build's freed-block mark and
+    /// owner table read the process's choice ([`tracked::chosen`]), not
+    /// the heap's, since they reach a block with no heap in hand, so a
+    /// counted value laid on this heap in a process that chose Zend's
+    /// would be read as a chunk's.
+    #[cfg(test)]
+    pub(crate) fn tracked() -> Mm {
+        Mm::of(Allocator::Tracked(Box::default()), None)
+    }
+
+    fn of(allocator: Allocator, cache: Option<Arc<ChunkCache>>) -> Mm {
+        let zend = matches!(allocator, Allocator::Zend);
+        let kept = cache
+            .as_ref()
+            .filter(|_| zend)
+            .and_then(|cache| cache.take());
         let (main, cached, avg_chunks_count) = match kept {
             Some(kept) => (Some(kept.main), kept.cached, kept.avg_chunks_count),
-            None => (chunk_alloc(CHUNK_SIZE), Vec::new(), 1.0),
+            None if zend => (chunk_alloc(CHUNK_SIZE), Vec::new(), 1.0),
+            None => (None, Vec::new(), 1.0),
         };
         let mut mm = Mm {
+            allocator,
+            entries: if zend { Entries::Zend } else { Entries::Custom },
             chunks: Vec::new(),
             cached,
             free_slot: [std::ptr::null_mut(); BINS],
@@ -697,7 +755,24 @@ impl Mm {
         if self.counted_out() {
             return Err(Refused::Fatal(Fatal::hard_limit(self.hard_limit, size)));
         }
+        if self.entries != Entries::Zend {
+            return self.alloc_custom(size);
+        }
         let at = self.alloc_heap(size)?;
+        #[cfg(debug_assertions)]
+        self.trace(None, at);
+        Ok(at)
+    }
+
+    /// `_malloc_custom`: the tracked allocator's block or Zend's, and the
+    /// observers told of it.
+    #[cold]
+    #[inline(never)]
+    fn alloc_custom(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
+        let at = match self.allocator {
+            Allocator::Tracked(_) => self.tracked_malloc(size)?,
+            Allocator::Zend => self.alloc_heap(size)?,
+        };
         #[cfg(debug_assertions)]
         self.trace(None, at);
         if !self.observers.is_empty() {
@@ -764,8 +839,37 @@ impl Mm {
         if self.counted_out() {
             return Err(Refused::Fatal(Fatal::hard_limit(self.hard_limit, size)));
         }
+        if self.entries != Entries::Zend {
+            // SAFETY: the caller's contract, handed on.
+            return unsafe { self.realloc_custom(at, copy, size) };
+        }
         // SAFETY: the caller's contract, handed on.
         let to = unsafe { self.realloc_heap(at, copy, size) }?;
+        #[cfg(debug_assertions)]
+        self.trace(Some(at), to);
+        Ok(to)
+    }
+
+    /// `_realloc_custom`: the tracked allocator's `realloc` or Zend's,
+    /// and the observers told of it.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::realloc_heap`]'s.
+    #[cold]
+    #[inline(never)]
+    unsafe fn realloc_custom(
+        &mut self,
+        at: NonNull<u8>,
+        copy: usize,
+        size: usize,
+    ) -> Result<NonNull<u8>, Refused> {
+        let to = match self.allocator {
+            // SAFETY: the caller's contract, handed on.
+            Allocator::Tracked(_) => unsafe { self.tracked_realloc(at, size) }?,
+            // SAFETY: the caller's contract, handed on.
+            Allocator::Zend => unsafe { self.realloc_heap(at, copy, size) }?,
+        };
         #[cfg(debug_assertions)]
         self.trace(Some(at), to);
         if !self.observers.is_empty() {
@@ -785,8 +889,30 @@ impl Mm {
     /// As [`Mm::free_heap`]'s.
     #[inline]
     pub(crate) unsafe fn free(&mut self, at: NonNull<u8>) {
+        if self.entries != Entries::Zend {
+            // SAFETY: the caller's contract, handed on.
+            unsafe { self.free_custom(at) };
+            return;
+        }
         // SAFETY: the caller's contract, handed on.
         unsafe { self.free_heap(at) };
+        #[cfg(debug_assertions)]
+        if let Some(traces) = &mut self.traces {
+            traces.remove(&at.as_ptr().addr());
+        }
+    }
+
+    /// `_free_custom`: the block back to the tracked allocator or to
+    /// Zend's, and the observers told of it.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::free_heap`]'s.
+    #[cold]
+    #[inline(never)]
+    unsafe fn free_custom(&mut self, at: NonNull<u8>) {
+        // SAFETY: the caller's contract, handed on.
+        unsafe { self.free_block(at) };
         #[cfg(debug_assertions)]
         if let Some(traces) = &mut self.traces {
             traces.remove(&at.as_ptr().addr());
@@ -798,12 +924,28 @@ impl Mm {
         }
     }
 
+    /// The block at `at` given back to the allocator it came from.
+    ///
+    /// # Safety
+    ///
+    /// As [`Mm::free_heap`]'s.
+    unsafe fn free_block(&mut self, at: NonNull<u8>) {
+        match self.allocator {
+            // SAFETY: the caller's contract, handed on.
+            Allocator::Tracked(_) => unsafe { self.tracked_free(at) },
+            // SAFETY: the caller's contract, handed on.
+            Allocator::Zend => unsafe { self.free_heap(at) },
+        }
+    }
+
     /// `_efree` as `memory_get_usage()` and the observers see it, the
     /// bytes kept: what a pinned block's destruction does at php's
     /// moment, so the request's counts fall where php's do while a pin
     /// still names the block (design §4.4, #2230). Its bytes go back
     /// with [`Mm::free_retired`]; a block retired already is left as it
     /// stands.
+    #[cold]
+    #[inline(never)]
     pub(crate) fn retire(&mut self, at: NonNull<u8>) {
         if self.is_retired(at) {
             return;
@@ -811,7 +953,7 @@ impl Mm {
         // A block freed already is no block to retire: a debug build
         // names it as it names a second free ([`Mm::free_small`]).
         #[cfg(debug_assertions)]
-        if freed::is_freed(at) {
+        if matches!(self.allocator, Allocator::Zend) && freed::is_freed(at) {
             self.sensed.record(crate::sensed::Sensed::FreedTwice {
                 at: at.as_ptr().addr(),
                 size: self.accounted(at),
@@ -819,6 +961,11 @@ impl Mm {
             return;
         }
         self.size = self.size.saturating_sub(self.accounted(at));
+        // A tracked heap's two usages are one number, as php's
+        // `tracked_free` keeps them.
+        if matches!(self.allocator, Allocator::Tracked(_)) {
+            self.real_size = self.size;
+        }
         self.retired.push(at);
         if !self.observers.is_empty() {
             self.observers.tell(Allocation::Freed {
@@ -840,6 +987,8 @@ impl Mm {
     /// # Safety
     ///
     /// Where `at` is retired, nothing names it any more.
+    #[cold]
+    #[inline(never)]
     pub(crate) unsafe fn free_retired(&mut self, at: NonNull<u8>) {
         let Some(index) = self.retired.iter().position(|block| *block == at) else {
             return;
@@ -848,7 +997,7 @@ impl Mm {
         self.size += self.accounted(at);
         // SAFETY: the caller's contract: the block is this heap's, its
         // free was only counted, and nothing names it.
-        unsafe { self.free_heap(at) };
+        unsafe { self.free_block(at) };
         #[cfg(debug_assertions)]
         if let Some(traces) = &mut self.traces {
             traces.remove(&at.as_ptr().addr());
@@ -859,6 +1008,9 @@ impl Mm {
     /// block at `at`: its bin's size, its pages, or a huge block's bytes
     /// and the bin slot of its list node.
     fn accounted(&self, at: NonNull<u8>) -> usize {
+        if let Allocator::Tracked(tracked) = &self.allocator {
+            return tracked.size_of(at).unwrap_or(0);
+        }
         let offset = at.as_ptr().addr() & (CHUNK_SIZE - 1);
         if offset == 0 {
             return self
@@ -888,6 +1040,9 @@ impl Mm {
     /// memory at `at`. A slot the debug quarantine holds is still in its
     /// chunk, so it answers yes and its second free is sensed as one.
     pub(crate) fn owns(&self, at: NonNull<u8>) -> bool {
+        if let Allocator::Tracked(tracked) = &self.allocator {
+            return tracked.holds(at.as_ptr().addr());
+        }
         if at.as_ptr().addr() & (CHUNK_SIZE - 1) == 0 {
             return self.huge.iter().any(|block| block.at == at);
         }
@@ -901,6 +1056,9 @@ impl Mm {
     /// question it can answer. Unlike [`Mm::owns`] it asks of an
     /// address, not of a block the heap handed out.
     pub(crate) fn holds(&self, address: usize) -> bool {
+        if let Allocator::Tracked(tracked) = &self.allocator {
+            return tracked.holds(address);
+        }
         let within =
             |start: usize, size: usize| (start..start.saturating_add(size)).contains(&address);
         self.chunks
@@ -919,6 +1077,9 @@ impl Mm {
     ///
     /// `at` is live in this heap ([`Mm::owns`]).
     pub(crate) unsafe fn usable(&self, at: NonNull<u8>) -> usize {
+        if let Allocator::Tracked(tracked) = &self.allocator {
+            return tracked.size_of(at).unwrap_or(0);
+        }
         let offset = at.as_ptr().addr() & (CHUNK_SIZE - 1);
         if offset == 0 {
             return self
@@ -953,7 +1114,9 @@ impl Mm {
         &mut self,
         observer: Box<dyn ObserveAllocations>,
     ) -> AllocationObserverId {
-        self.observers.add(observer)
+        let at = self.observers.add(observer);
+        self.reckon_custom();
+        at
     }
 
     /// The observer at `at` taken out of this heap's list, where it is
@@ -962,7 +1125,19 @@ impl Mm {
         &mut self,
         at: AllocationObserverId,
     ) -> Option<Box<dyn ObserveAllocations>> {
-        self.observers.remove(at)
+        let removed = self.observers.remove(at);
+        self.reckon_custom();
+        removed
+    }
+
+    /// [`Mm::entries`] set again as the allocator and the observers stand.
+    fn reckon_custom(&mut self) {
+        let custom = matches!(self.allocator, Allocator::Tracked(_)) || !self.observers.is_empty();
+        self.entries = if custom {
+            Entries::Custom
+        } else {
+            Entries::Zend
+        };
     }
 
     /// `zend_mm_alloc_heap`: `size` usable bytes, from the bin its size
@@ -1561,6 +1736,11 @@ impl Mm {
     /// starts from zero. A debug build drains its [`Quarantine`] first,
     /// so the sweep counts every slot php's would count free.
     fn gc_heap(&mut self) -> usize {
+        // A custom heap's sweep is its handler's, and the tracked one
+        // names none (`Z/Zend/zend_alloc.c:2242`).
+        if let Allocator::Tracked(_) = self.allocator {
+            return 0;
+        }
         #[cfg(debug_assertions)]
         self.drain_quarantine();
         for (bin_num, &elements) in BIN_ELEMENTS.iter().enumerate() {
@@ -1734,11 +1914,109 @@ impl Mm {
     }
 }
 
+impl Mm {
+    /// `tracked_malloc` (`Z/Zend/zend_alloc.c:3335`): the limit asked for
+    /// the bytes, with no sweep, then the system's block, the two usages
+    /// moved by exactly the bytes asked and the peaks left where they
+    /// stand, as php's `ZEND_MM_STAT` arm leaves them.
+    #[cold]
+    #[inline(never)]
+    fn tracked_malloc(&mut self, size: usize) -> Result<NonNull<u8>, Refused> {
+        self.check_limit(size, false)?;
+        let Allocator::Tracked(tracked) = &mut self.allocator else {
+            return Err(Refused::Fatal(Fatal::error("zend_mm_heap corrupted")));
+        };
+        let Some(at) = tracked.malloc(size) else {
+            return Err(Refused::Fatal(system_out_of_memory()));
+        };
+        self.size += size;
+        self.real_size = self.size;
+        Ok(at)
+    }
+
+    /// `tracked_realloc` (`Z/Zend/zend_alloc.c:3374`): a grow asks the
+    /// limit for the difference, its refusal leaving the block as it
+    /// stood; then the system's `realloc`, and the usages moved by the
+    /// difference.
+    ///
+    /// # Safety
+    ///
+    /// `at` is a live block of this heap that nothing reads or writes
+    /// during the call.
+    #[cold]
+    #[inline(never)]
+    unsafe fn tracked_realloc(
+        &mut self,
+        at: NonNull<u8>,
+        size: usize,
+    ) -> Result<NonNull<u8>, Refused> {
+        let old_size = match &self.allocator {
+            Allocator::Tracked(tracked) => tracked.size_of(at),
+            Allocator::Zend => None,
+        };
+        let Some(old_size) = old_size else {
+            return Err(Refused::Fatal(Fatal::error("zend_mm_heap corrupted")));
+        };
+        if size > old_size {
+            self.check_limit(size - old_size, false)?;
+        }
+        let Allocator::Tracked(tracked) = &mut self.allocator else {
+            return Err(Refused::Fatal(Fatal::error("zend_mm_heap corrupted")));
+        };
+        // SAFETY: the caller's contract: `at` is a live block of this
+        // heap's table and nothing touches it during the call.
+        let Some(to) = (unsafe { tracked.realloc(at, size) }) else {
+            return Err(Refused::Fatal(system_out_of_memory()));
+        };
+        self.size = self.size - old_size + size;
+        self.real_size = self.size;
+        Ok(to)
+    }
+
+    /// `tracked_free` (`Z/Zend/zend_alloc.c:3359`): the block back to the
+    /// system and the usages down by the bytes it was asked for.
+    ///
+    /// # Safety
+    ///
+    /// `at` is a live block of this heap that nothing names after the
+    /// call.
+    #[cold]
+    #[inline(never)]
+    unsafe fn tracked_free(&mut self, at: NonNull<u8>) {
+        let Allocator::Tracked(tracked) = &mut self.allocator else {
+            return;
+        };
+        // SAFETY: the caller's contract, handed on.
+        let freed = unsafe { tracked.free(at) };
+        // php asserts the block is the table's (`tracked_get_size_zv`); a
+        // debug build names the free of one it is not, a second free
+        // among them.
+        let Some(size) = freed else {
+            #[cfg(debug_assertions)]
+            self.sensed.record(crate::sensed::Sensed::FreedTwice {
+                at: at.as_ptr().addr(),
+                size: 0,
+            });
+            return;
+        };
+        self.size -= size;
+        self.real_size = self.size;
+    }
+}
+
+/// `zend_out_of_memory` (`Z/Zend/zend_alloc.c:3279`): the system's
+/// allocator had nothing to give a tracked heap.
+#[cold]
+fn system_out_of_memory() -> Fatal {
+    Fatal::error("Out of memory")
+}
+
 impl std::fmt::Debug for Mm {
     /// What php's `memory_get_usage()` answers, and the chunks behind
     /// it; the addresses are the machine's and say nothing.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Mm")
+            .field("tracked", &matches!(self.allocator, Allocator::Tracked(_)))
             .field("size", &self.size)
             .field("real_size", &self.real_size)
             .field("peak", &self.peak)
@@ -2477,6 +2755,11 @@ pub(crate) mod freed {
     /// pointer, never one derived from a reference to its header, whose
     /// provenance ends at the header's eight bytes (#2414).
     pub(crate) fn is_freed(at: NonNull<u8>) -> bool {
+        // A tracked heap's blocks are the system's, which carry no mark
+        // and sit in no chunk ([`super::tracked`]).
+        if super::tracked::chosen() {
+            return false;
+        }
         let mark = mark_at(at);
         // SAFETY: `at` names a refcounted value whose count is about to
         // move: a block of this heap, live or freed into a bin or a `run`
