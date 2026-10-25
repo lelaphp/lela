@@ -4,8 +4,8 @@
  * over the C library so the vendored copy compiles byte for byte outside
  * php-src (third-engine-design.md §7.2, #1173). `zend_string` keeps
  * php's layout, `Zend/zend_types.h`, because libmbfl writes its header
- * fields; the allocators are `malloc` and kin where php's are `emalloc`
- * and kin, as ext/lexbor's and ext/uri's vendored libraries allocate.
+ * fields; the allocators are php_heap's `emalloc` and kin, the request's
+ * heap under a lend, as php's are `zend_mm`'s.
  * Nothing here is libmbfl's; it is the part of Zend libmbfl reads.
  */
 #ifndef MBSTRING_SHIM_ZEND_H
@@ -45,10 +45,36 @@ typedef struct _zend_string {
 #define GC_TYPE_INFO(p) (p)->gc.type_info
 #define GC_ADD_FLAGS(p, flags) ((p)->gc.type_info |= ((flags) << 0))
 
-#define emalloc(size) malloc(size)
-#define ecalloc(nmemb, size) calloc((nmemb), (size))
-#define erealloc(ptr, size) realloc((ptr), (size))
-#define efree(ptr) free(ptr)
+/* php_heap's `emalloc` and kin (`crates/php_heap/src/lend.rs`, ADR-0014):
+ * under a lend of a request's heap a block is the request's, counted as
+ * php's `zend_mm` counts its own, and outside one, where the engine's
+ * multibyte scanner converts with no request, the system allocator's.
+ * `efree` outside a lend frees nothing, so a free asks first whether one
+ * stands; the binding frees a block made under a lend under a lend too. */
+void *emalloc(size_t size);
+void *ecalloc(size_t nmemb, size_t size);
+void *erealloc(void *ptr, size_t size);
+void efree(void *ptr);
+bool php_heap_lend_standing(void);
+/* php 8.5.12's `_safe_ferealloc`: fallible for the one call. */
+void *_safe_ferealloc(void *ptr, size_t nmemb, size_t size, size_t offset);
+
+static inline void mbs_efree(void *ptr)
+{
+	if (php_heap_lend_standing()) {
+		(efree)(ptr);
+	} else {
+		free(ptr);
+	}
+}
+#define efree(ptr) mbs_efree(ptr)
+
+/* `Zend/zend_alloc.h`'s `safe_ferealloc`: `_safe_ferealloc` where it is
+ * fallible, `_safe_erealloc`, whose overflow no string this binding is
+ * handed reaches, where it is not. */
+#define safe_ferealloc(ptr, nmemb, size, offset, fallible) \
+	((fallible) ? _safe_ferealloc((ptr), (nmemb), (size), (offset)) \
+		: erealloc((ptr), (nmemb) * (size) + (offset)))
 
 #define ZEND_ASSERT(c) ((void) 0)
 #define ZEND_DEBUG 0
@@ -59,6 +85,7 @@ typedef struct _zend_string {
 #define ZEND_ATTRIBUTE_UNUSED __attribute__((unused))
 #define zend_always_inline inline __attribute__((always_inline))
 #define EXPECTED(c) __builtin_expect(!!(c), 1)
+typedef enum { SUCCESS = 0, FAILURE = -1 } zend_result;
 #define UNEXPECTED(c) __builtin_expect(!!(c), 0)
 #define PHP_HAVE_BUILTIN_USUB_OVERFLOW 1
 
@@ -77,7 +104,7 @@ extern zend_string *zend_empty_string;
 static zend_always_inline zend_string *zend_string_alloc(size_t len, bool persistent)
 {
 	(void) persistent;
-	zend_string *ret = malloc(_ZSTR_STRUCT_SIZE(len));
+	zend_string *ret = emalloc(_ZSTR_STRUCT_SIZE(len));
 	GC_SET_REFCOUNT(ret, 1);
 	GC_TYPE_INFO(ret) = GC_STRING;
 	ZSTR_H(ret) = 0;

@@ -3,6 +3,14 @@
 //! three whole-string calls it makes, each as a safe type. The structs
 //! are laid out as `mbfl/mbfl_encoding.h`, `mbfl/mbfl_language.h` and
 //! `mbfl/mbfl_string.h` lay them out.
+//!
+//! libmbfl allocates through `php_heap`'s `emalloc` and kin (`shim/zend.h`):
+//! a native calls it with the request's heap lent (`text::on_heap`), so its
+//! buffers are the request's and the memory limit meets them as php's, and
+//! the engine's multibyte scanner calls it with no lend, on the system
+//! allocator. What it answers records which, and is freed where it was
+//! made, or, made under a lend and dropped outside one, left to the
+//! request's end.
 
 use std::ffi::{CString, c_char, c_int, c_uint, c_void};
 use std::ptr;
@@ -106,7 +114,8 @@ unsafe extern "C" {
     fn mbs_buf_reset(buf: *mut ConvertBuf, len: usize);
     fn mbs_buf_append(buf: *mut ConvertBuf, bytes: *const u8, len: usize);
     fn mbs_string_free(str: *mut ZendString);
-    fn free(ptr: *mut c_void);
+    fn mbs_free(ptr: *mut c_void);
+    safe fn php_heap_lend_standing() -> bool;
     safe static mbfl_encoding_utf8: RawEncoding;
     safe static mbfl_encoding_pass: RawEncoding;
     safe static mbfl_encoding_8bit: RawEncoding;
@@ -310,7 +319,7 @@ impl Encoding {
         // SAFETY: the cutter reads inside `[start, end)` and answers a
         // string it allocated, or the interned empty one.
         let out = unsafe { cut(range.start.cast_mut(), from, len, range.end.cast_mut()) };
-        Some(ZStr(out).to_vec())
+        Some(ZStr(out, lent()).to_vec())
     }
 
     /// `mbfl_encoding_preferred_mime_name`.
@@ -319,24 +328,43 @@ impl Encoding {
     }
 }
 
-/// A `zend_string` libmbfl made, freed on drop.
-struct ZStr(*mut ZendString);
+/// Whether a lend of the request's heap stands (ADR-0014): libmbfl
+/// allocates on the request's heap under one and on the system's outside
+/// one, where the engine's multibyte scanner converts with no request.
+fn lent() -> bool {
+    php_heap_lend_standing()
+}
+
+/// A `zend_string` libmbfl made, and whether it was made under a lend,
+/// freed on drop: under a lend where it was made under one, else, outside
+/// one, the request's end's, since outside a lend nothing frees a block
+/// of the heap.
+struct ZStr(*mut ZendString, bool);
 
 impl ZStr {
-    fn to_vec(&self) -> Vec<u8> {
+    fn bytes(&self) -> &[u8] {
         // SAFETY: libmbfl answers a live string, its header as the shim
         // lays it out.
         let Some(s) = (unsafe { self.0.as_ref() }) else {
-            return Vec::new();
+            return &[];
         };
-        // SAFETY: `val` holds `len` bytes, the string's own.
-        unsafe { std::slice::from_raw_parts((&raw const s.val).cast::<u8>(), s.len) }.to_vec()
+        // SAFETY: `val` holds `len` bytes, the string's own, for as long as
+        // `self` holds it.
+        unsafe { std::slice::from_raw_parts((&raw const s.val).cast::<u8>(), s.len) }
+    }
+
+    fn to_vec(&self) -> Vec<u8> {
+        self.bytes().to_vec()
     }
 }
 
 impl Drop for ZStr {
     fn drop(&mut self) {
-        // SAFETY: the string is libmbfl's, freed once, the empty one never.
+        if self.1 && !lent() {
+            return;
+        }
+        // SAFETY: the string is libmbfl's, freed once, the empty one never,
+        // under a lend where it was made under one.
         unsafe { mbs_string_free(self.0) }
     }
 }
@@ -350,10 +378,33 @@ pub(crate) fn fast_convert(
     replacement: u32,
     mode: u32,
 ) -> (Vec<u8>, u32) {
+    let (out, errors) = fast_convert_held(input, from, to, replacement, mode);
+    (out.bytes().to_vec(), errors)
+}
+
+/// The string `mb_fast_convert` answered, held where libmbfl made it, as
+/// php holds `haystack_u8` and `needle_u8` while it searches them.
+pub(crate) struct Converted(ZStr);
+
+impl Converted {
+    pub(crate) fn bytes(&self) -> &[u8] {
+        self.0.bytes()
+    }
+}
+
+/// [`fast_convert`]'s string left where libmbfl made it.
+pub(crate) fn fast_convert_held(
+    input: &[u8],
+    from: Encoding,
+    to: Encoding,
+    replacement: u32,
+    mode: u32,
+) -> (Converted, u32) {
     let mut errors = 0;
+    let made_lent = lent();
     // SAFETY: the converter reads `input.len()` bytes of `input` and
     // answers a string it allocated.
-    let out = ZStr(unsafe {
+    let out = unsafe {
         mb_fast_convert(
             input.as_ptr().cast_mut(),
             input.len(),
@@ -363,13 +414,14 @@ pub(crate) fn fast_convert(
             mode,
             &raw mut errors,
         )
-    });
-    (out.to_vec(), errors)
+    };
+    (Converted(ZStr(out, made_lent)), errors)
 }
 
 /// `mbfl_strcut`, for an encoding with neither `cut`, a fixed width nor
-/// a `mblen_table`.
-pub(crate) fn strcut(input: &[u8], encoding: Encoding, from: usize, len: usize) -> Vec<u8> {
+/// a `mblen_table`; `None` where it answered `NULL`, which since 8.5.12 is
+/// its memory device refused a growth past the memory limit.
+pub(crate) fn strcut(input: &[u8], encoding: Encoding, from: usize, len: usize) -> Option<Vec<u8>> {
     let mut string = MbflString {
         encoding: encoding.0,
         val: input.as_ptr().cast_mut(),
@@ -382,16 +434,20 @@ pub(crate) fn strcut(input: &[u8], encoding: Encoding, from: usize, len: usize) 
     };
     // SAFETY: `string` describes `input`, which libmbfl only reads; the
     // result's bytes are allocated by it and freed below.
-    unsafe { mbfl_strcut(&raw mut string, &raw mut result, from, len) };
+    let answered = unsafe { mbfl_strcut(&raw mut string, &raw mut result, from, len) };
+    if answered.is_null() {
+        return None;
+    }
     let out = if result.val.is_null() {
         Vec::new()
     } else {
         // SAFETY: the result holds `len` bytes at `val`.
         unsafe { std::slice::from_raw_parts(result.val, result.len) }.to_vec()
     };
-    // SAFETY: the bytes were `emalloc`ed, `malloc` under the shim.
-    unsafe { free(result.val.cast()) };
-    out
+    // SAFETY: the bytes were `emalloc`ed in this call, freed under the
+    // lend, or outside one, they were made in.
+    unsafe { mbs_free(result.val.cast()) };
+    Some(out)
 }
 
 /// `mb_convert_kana_codepoint` (`filters/mbfilter_cjk.c`): `c` converted
@@ -460,6 +516,8 @@ impl Language {
 pub(crate) struct Encoder {
     buf: ConvertBuf,
     encoding: Encoding,
+    /// Whether its buffer was made under a lend ([`ZStr`]'s rule).
+    lent: bool,
 }
 
 impl Encoder {
@@ -475,7 +533,11 @@ impl Encoder {
             error_mode: 0,
             str: ptr::null_mut(),
         };
-        let mut encoder = Encoder { buf, encoding };
+        let mut encoder = Encoder {
+            buf,
+            encoding,
+            lent: lent(),
+        };
         // SAFETY: `buf` is a valid `mb_convert_buf` to initialise.
         unsafe { mbs_buf_init(&raw mut encoder.buf, size, replacement, mode) };
         encoder
@@ -547,7 +609,11 @@ impl Encoder {
 
 impl Drop for Encoder {
     fn drop(&mut self) {
-        // SAFETY: the buffer was initialised by `new` and is freed once.
+        if self.lent && !lent() {
+            return;
+        }
+        // SAFETY: the buffer was initialised by `new` and is freed once,
+        // under a lend where it was made under one.
         unsafe { mbs_buf_free(&raw mut self.buf) }
     }
 }

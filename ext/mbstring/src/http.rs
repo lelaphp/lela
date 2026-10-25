@@ -6,15 +6,15 @@
 //! `mbstring.http_output_conv_mimetypes` names.
 
 use crate::convert::guess;
-use crate::ffi::mbfl::{Encoder, Encoding};
+use crate::ffi::mbfl::{Encoder, Encoding, fast_convert_held};
 use crate::settings::{Source, State, settings};
-use crate::text::new_string;
 use crate::text::value_error;
+use crate::text::{new_string, on_heap, substitute};
 use php_ext::abi::{OrFalse, Ref, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
 use php_ext::request::{ContentType, Ini, Input, Request};
-use php_ext::values::{Owner, PhpArray, PhpString, Value};
+use php_ext::values::{Emalloc, Owner, PhpArray, PhpString, Value};
 use php_ext_pcre::Regex;
 
 /// `PHP_OUTPUT_HANDLER_START` and `PHP_OUTPUT_HANDLER_FINAL`.
@@ -82,11 +82,15 @@ fn url_decode(text: &[u8]) -> Vec<u8> {
 /// registered.
 pub(crate) type Variables = Vec<(Vec<u8>, Vec<u8>)>;
 
-/// `_php_mb_encoding_handler_ex`: the variables of `text`, split on any
-/// of `separators` and url-decoded, their encoding detected over every
-/// name and value together where more than one is listed, and each
-/// converted to `to`; with the encoding it read them in, none where it
-/// read none.
+/// `_php_mb_encoding_handler_ex` as php 8.5.12 makes it: the variables
+/// of `text`, split on any of `separators` and url-decoded, their
+/// encoding detected over every name and value together where more than
+/// one is listed, each converted to `to` and handed to `each`; with the
+/// encoding it read them in, none where it read none. The tables php
+/// keeps of each name and value, two of the count of separators and one
+/// times two, are asked for fallibly first, and a refusal reads nothing;
+/// the variables stop once the memory limit was met (`ZEND_HAS_OOM()`),
+/// which reads as none.
 pub(crate) fn encoding_handler(
     req: &mut Request,
     text: &[u8],
@@ -94,11 +98,46 @@ pub(crate) fn encoding_handler(
     to: Encoding,
     from_list: &[Encoding],
     report_errors: bool,
-) -> (Variables, Option<Encoding>) {
+    mut each: impl FnMut(&mut Request, &[u8], &[u8]) -> Result<(), Thrown>,
+) -> Result<Option<Encoding>, Thrown> {
     let text = php_ext::coerce::c_str(text);
     if text.is_empty() {
-        return (Vec::new(), None);
+        return Ok(None);
     }
+    let num = (text.iter().filter(|b| separators.contains(b)).count() + 1) * 2;
+    // `val_list` and `len_list`, `fecalloc` since 8.5.12.
+    let table = num.saturating_mul(size_of::<usize>());
+    let Some(val_list) = req.memory_mut().fallible(|req| Emalloc::new(req, table))? else {
+        return Ok(None);
+    };
+    let Some(len_list) = req.memory_mut().fallible(|req| Emalloc::new(req, table))? else {
+        val_list.free(req);
+        return Ok(None);
+    };
+    let detected = variables(
+        req,
+        text,
+        separators,
+        to,
+        from_list,
+        report_errors,
+        &mut each,
+    );
+    len_list.free(req);
+    val_list.free(req);
+    detected
+}
+
+/// [`encoding_handler`]'s variables, past its two tables.
+fn variables(
+    req: &mut Request,
+    text: &[u8],
+    separators: &[u8],
+    to: Encoding,
+    from_list: &[Encoding],
+    report_errors: bool,
+    each: &mut impl FnMut(&mut Request, &[u8], &[u8]) -> Result<(), Thrown>,
+) -> Result<Option<Encoding>, Thrown> {
     let mut pairs: Variables = Vec::new();
     for var in text
         .split(|b| separators.contains(b))
@@ -117,7 +156,7 @@ pub(crate) fn encoding_handler(
             "Input variables exceeded {max_input_vars}. To increase the limit change max_input_vars in php.ini."
         );
         docref(req, Level::Warning, &text);
-        return (Vec::new(), None);
+        return Ok(None);
     }
     let from = match from_list {
         [] => Encoding::pass(),
@@ -136,13 +175,33 @@ pub(crate) fn encoding_handler(
             })
         }
     };
-    if from != Encoding::pass() && to != Encoding::pass() {
-        for (name, value) in &mut pairs {
-            *name = crate::convert::convert_counted(req, name, from, to);
-            *value = crate::convert::convert_counted(req, value, from, to);
+    let sub = substitute(req);
+    for (name, value) in &pairs {
+        if from != Encoding::pass() && to != Encoding::pass() {
+            let ((name, name_errors), (value, value_errors)) = on_heap(req, || {
+                (
+                    fast_convert_held(name, from, to, sub.char, sub.raw_mode()),
+                    fast_convert_held(value, from, to, sub.char, sub.raw_mode()),
+                )
+            })?;
+            req.state::<State>().illegal_chars += u64::from(name_errors) + u64::from(value_errors);
+            // `estrndup` of the value, freed after its registration.
+            let val = Emalloc::new(req, value.bytes().len() + 1)?;
+            let registered = each(req, name.bytes(), value.bytes());
+            on_heap(req, || drop((name, value)))?;
+            val.free(req);
+            registered?;
+        } else {
+            let val = Emalloc::new(req, value.len() + 1)?;
+            let registered = each(req, name, value);
+            val.free(req);
+            registered?;
+        }
+        if req.memory().has_oom() {
+            return Ok(None);
         }
     }
-    (pairs, Some(from))
+    Ok(Some(from))
 }
 
 /// `mbstr_treat_data`, with `php_mb_post_handler` for a form body: under
@@ -188,7 +247,19 @@ pub(crate) fn treat_data(
     if input != Input::Post {
         state.illegal_chars = 0;
     }
-    let (variables, detected) = encoding_handler(req, source, &separators, to, &from_list, false);
+    let mut variables: Variables = Vec::new();
+    let detected = encoding_handler(
+        req,
+        source,
+        &separators,
+        to,
+        &from_list,
+        false,
+        |_, n, v| {
+            variables.push((n.to_vec(), v.to_vec()));
+            Ok(())
+        },
+    )?;
     let state = req.state::<State>();
     state.identified = detected;
     if detected.is_some() {
@@ -230,6 +301,19 @@ pub(crate) fn treat_data(
 /// }
 /// 0
 /// ```
+///
+/// Since 8.5.12 the tables of names and values are asked for fallibly, so a
+/// string of more variables than the memory limit has room for reads none,
+/// and the limit's fatal is raised as the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(mb_parse_str(str_repeat("a&", 1 << 20), $r), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16793600 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn mb_parse_str(
     req: &mut Request,
@@ -252,14 +336,25 @@ fn mb_parse_str(
         let s = settings(req);
         (s.current_internal, s.http_input.clone())
     };
-    let (variables, detected) =
-        encoding_handler(req, string.as_bytes(), &separators, to, &from_list, true);
-    for (name, value) in variables {
-        // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`.
-        let value = crate::text::cut_string(req, &value)?;
-        req.variables_mut()
-            .register_variable(into, &name, value.into_value())?;
-    }
+    // `estrndup` of the string, which php splits in place, held for
+    // the parse.
+    let held = Emalloc::new(req, string.len() + 1)?;
+    let detected = encoding_handler(
+        req,
+        string.as_bytes(),
+        &separators,
+        to,
+        &from_list,
+        true,
+        |req, name, value| {
+            // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`.
+            let value = crate::text::cut_string(req, value)?;
+            req.variables_mut()
+                .register_variable(into, name, value.into_value())
+        },
+    );
+    held.free(req);
+    let detected = detected?;
     req.state::<State>().identified = detected;
     Ok(detected.is_some())
 }
@@ -417,15 +512,16 @@ fn mb_output_handler(
         return Ok(crate::text::same(req, string));
     };
     let last = status & HANDLER_FINAL != 0;
-    let mut out = Encoder::new(encoding, string.len(), sub.char, sub.raw_mode());
-    let mut rest = string.as_bytes();
-    let mut buf = [0u32; 128];
-    while !rest.is_empty() {
-        let n = internal.decode(&mut rest, &mut buf, &mut state);
-        out.write(&buf[..n], rest.is_empty() && last);
-    }
-    let errors = out.errors();
-    let bytes = out.into_vec();
+    let (errors, bytes) = on_heap(req, || {
+        let mut out = Encoder::new(encoding, string.len(), sub.char, sub.raw_mode());
+        let mut rest = string.as_bytes();
+        let mut buf = [0u32; 128];
+        while !rest.is_empty() {
+            let n = internal.decode(&mut rest, &mut buf, &mut state);
+            out.write(&buf[..n], rest.is_empty() && last);
+        }
+        (out.errors(), out.into_vec())
+    })?;
     let st = req.state::<State>();
     st.illegal_chars += u64::from(errors);
     st.outconv = if last { None } else { Some(state) };

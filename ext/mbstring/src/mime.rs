@@ -10,7 +10,7 @@ use crate::tables::{
     ENCODING_7BIT, ENCODING_8BIT, ENCODING_BASE64, MBFL_OUTPUTFILTER_ILLEGAL_MODE_CHAR,
     MIME_CHAR_NEEDS_QENCODE,
 };
-use crate::text::{new_string, same, value_error};
+use crate::text::{new_string, on_heap, same, value_error};
 use php_ext::abi::{Path, Union};
 use php_ext::attr::php_function;
 use php_ext::raising::{Level, Thrown, docref};
@@ -332,6 +332,19 @@ pub(crate) fn header_encode(
 ///  =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
 ///  =?ISO-2022-JP?Q?=1B=24B=24=22=1B=28B=3F=1B=24B=24=22=1B=28B=3F?=
 /// ```
+///
+/// Since 8.5.12 the encoding's buffer grows fallibly, and an encoding refused
+/// its growth stops the native; the limit's fatal is raised as the call
+/// returns:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(strlen(mb_encode_mimeheader(str_repeat("\xFF", 2 << 20), "ISO-8859-1", "Q")), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn mb_encode_mimeheader(
     req: &mut Request,
@@ -368,14 +381,23 @@ fn mb_encode_mimeheader(
         base64 = false;
     }
     let internal = settings(req).current_internal;
-    match header_encode(
-        string.as_bytes(),
-        internal,
-        charset,
-        base64,
-        newline.as_bytes(),
-        indent,
-    ) {
+    let encoded = on_heap(req, || {
+        header_encode(
+            string.as_bytes(),
+            internal,
+            charset,
+            base64,
+            newline.as_bytes(),
+            indent,
+        )
+    })?;
+    // Since 8.5.12 an encoding a buffer's growth was refused in is
+    // `NULL`, and the native returns (`RETURN_OOM()`).
+    if req.memory().has_oom() {
+        // RETURN_OOM()
+        return crate::text::cut_string(req, b"");
+    }
+    match encoded {
         // `zend_empty_string` for an empty input, before anything is
         // encoded.
         Some(_) if string.is_empty() => crate::text::cut_string(req, b""),
@@ -560,10 +582,22 @@ fn header_decode(input: &[u8], outcode: Encoding) -> Vec<u8> {
 /// string(10) "plain text"
 /// string(15) "=?nope?B?QQ==?="
 /// ```
+///
+/// The decoded header's buffer is the request's, so a header past the
+/// memory limit raises the limit's fatal as the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(strlen(mb_decode_mimeheader(str_repeat("=?UTF-8?B?w6nDqcOp?= ", (int) (5500 * 1024 / 21)))), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 5636096 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn mb_decode_mimeheader(req: &mut Request, string: PhpString) -> Result<Owner<PhpString>, Thrown> {
     let internal = settings(req).current_internal;
-    let out = header_decode(string.as_bytes(), internal);
+    let out = on_heap(req, || header_decode(string.as_bytes(), internal))?;
     new_string(req, &out)
 }
 
@@ -831,26 +865,36 @@ fn mb_send_mail(
     let subject_bytes = subject.0.as_bytes();
     let indent = i64::try_from("Subject: [PHP-jp nnnnnnnn]".len() + line_sep.len()).unwrap_or(0);
     let subject_enc = pick(subject_bytes);
-    let subject = header_encode(
-        subject_bytes,
-        subject_enc,
-        tran_cs,
-        head_enc == Encoding::base64(),
-        line_sep,
-        indent,
-    )
+    let subject = on_heap(req, || {
+        header_encode(
+            subject_bytes,
+            subject_enc,
+            tran_cs,
+            head_enc == Encoding::base64(),
+            line_sep,
+            indent,
+        )
+    })?
     .unwrap_or_else(|| subject_bytes.to_vec());
+    // Since 8.5.12 a subject a buffer's growth was refused in stops the
+    // native before anything is sent.
+    if req.memory().has_oom() {
+        // RETURN_OOM()
+        return Ok(false);
+    }
     let message_bytes = message.0.as_bytes();
     let msg_enc = pick(message_bytes);
     let sub = Substitute::QUESTION;
-    let (tmp, _) = fast_convert(message_bytes, msg_enc, tran_cs, sub.char, sub.raw_mode());
-    let (body, _) = fast_convert(
-        &tmp,
-        Encoding::eight_bit(),
-        body_enc,
-        sub.char,
-        sub.raw_mode(),
-    );
+    let (body, _) = on_heap(req, || {
+        let (tmp, _) = fast_convert(message_bytes, msg_enc, tran_cs, sub.char, sub.raw_mode());
+        fast_convert(
+            &tmp,
+            Encoding::eight_bit(),
+            body_enc,
+            sub.char,
+            sub.raw_mode(),
+        )
+    })?;
     let mut out: Vec<u8> = Vec::new();
     if let Some(given) = str_headers.as_deref().filter(|h| !h.is_empty()) {
         let mut len = given.len();

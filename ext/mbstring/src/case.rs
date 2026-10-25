@@ -9,7 +9,7 @@ use crate::tables::{
     UCCASE_LOWER_TABLE, UCCASE_TITLE_G, UCCASE_TITLE_TABLE, UCCASE_UPPER_G, UCCASE_UPPER_TABLE,
     UCPROP_OFFSETS, UCPROP_RANGES,
 };
-use crate::text::{new_string, substitute, value_error};
+use crate::text::{new_string, on_heap, substitute, value_error};
 use php_ext::attr::php_function;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
@@ -354,7 +354,7 @@ fn mb_convert_case(
         ));
     };
     let sub = substitute(req);
-    let out = convert(*mode, string.as_bytes(), enc, enc, sub);
+    let out = on_heap(req, || convert(*mode, string.as_bytes(), enc, enc, sub))?;
     new_string(req, &out)
 }
 
@@ -368,6 +368,19 @@ fn mb_convert_case(
 /// string(2) "c1"
 /// string(3) "A?B"
 /// ```
+///
+/// The conversion's buffer is the request's and grows fallibly since 8.5.12,
+/// so a conversion past the memory limit is refused its growth and the
+/// limit's fatal is raised as the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(strlen(mb_strtoupper(str_repeat("\u{0390}", 1 << 20), "UTF-8")), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 1572864 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn mb_strtoupper(
     req: &mut Request,
@@ -376,7 +389,9 @@ fn mb_strtoupper(
 ) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 2)?;
     let sub = substitute(req);
-    let out = convert(CaseMode::Upper, string.as_bytes(), enc, enc, sub);
+    let out = on_heap(req, || {
+        convert(CaseMode::Upper, string.as_bytes(), enc, enc, sub)
+    })?;
     new_string(req, &out)
 }
 
@@ -397,6 +412,8 @@ fn mb_strtolower(
 ) -> Result<Owner<PhpString>, Thrown> {
     let enc = self::encoding(req, encoding, 2)?;
     let sub = substitute(req);
-    let out = convert(CaseMode::Lower, string.as_bytes(), enc, enc, sub);
+    let out = on_heap(req, || {
+        convert(CaseMode::Lower, string.as_bytes(), enc, enc, sub)
+    })?;
     new_string(req, &out)
 }
