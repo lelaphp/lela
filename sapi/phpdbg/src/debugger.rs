@@ -370,7 +370,7 @@ fn idle_prompt(session: &mut Session, req: &mut Request, quits: bool) {
 /// `Could not open file`, and the context is not compiled. True where
 /// that is so.
 fn unopened(session: &mut Session, req: &mut Request) -> bool {
-    if read::pending(req).is_none() && !read::exiting(req) {
+    if !read::open_refused(req) {
         return false;
     }
     // `run` compiles it again, and writes the notice then.
