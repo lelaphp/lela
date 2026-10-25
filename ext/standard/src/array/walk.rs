@@ -12,7 +12,7 @@ use php_ext::abi::{Callable, Passed, Raw, Ref, True, Variadic};
 use php_ext::attr::php_function;
 use php_ext::call::call;
 use php_ext::coerce::{truthy, value_name};
-use php_ext::raising::{Thrown, arg_type_error, call_stack_end, throw_error};
+use php_ext::raising::{Thrown, arg_type_error, call_stack_limit, throw_error};
 use php_ext::request::Request;
 use php_ext::values::walk::Hold;
 use php_ext::values::{Emalloc, Key, Layout, Owner, PhpArray, PhpRef, Value, ValueRef, walk};
@@ -411,10 +411,21 @@ fn walk_level(req: &mut Request, holder: PhpRef, walk: &Walk) -> Result<(), Thro
 /// given. The live walk owns the cell and the key for the step, as
 /// php's `Z_ADDREF(ref)` before a descent and its `ZVAL_COPY(&args[0])`
 /// and key copy before a call do, so a callback that removes the element
-/// leaves both to the call.
+/// leaves both to the call. A descent asks the stack limit first, as
+/// php 8.5.12's `php_array_walk` asks it at each level
+/// (`Z/ext/standard/array.c:1469`, gh23111):
+///
+/// ```php
+/// $a = [];
+/// for ($i = 0; $i < 30000; $i++) { $a = [$a]; }
+/// try { array_walk_recursive($a, function ($v) {}); } catch (Throwable $e) { echo $e::class, ": ", $e->getMessage(), "\n"; }
+/// ```
+/// ```expect regime=small-stack
+/// Error: Maximum call stack size of %d bytes (zend.max_allowed_stack_size - zend.reserved_stack_size) reached. Infinite recursion?
+/// ```
 fn visit(req: &mut Request, reference: PhpRef, key: &Key, walk: &Walk) -> Result<(), Thrown> {
     if walk.recursive && reference.get().as_array().is_some() {
-        call_stack_end(req)?;
+        call_stack_limit(req)?;
         let Some(nested) = reference.separate_array(req)? else {
             return Ok(());
         };

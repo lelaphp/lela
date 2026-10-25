@@ -1603,7 +1603,7 @@ fn dump_array(req: &mut Request, common: &str, array: PhpArray, level: usize) {
         .write(format!("{common}array({}) {{\n", array.len()).as_bytes());
     let held = Hold::Owner(GiveUp::Dtor);
     let walked = walk::foreach_guarded(req, array, held, |req, row| -> walk::Step {
-        if too_deep(req, level, req.stack_limit().exhausted()) {
+        if too_deep(req, level, req.stack_limit().overflowed()) {
             return Ok(ControlFlow::Continue(()));
         }
         // `php_array_element_dump`.
@@ -1928,11 +1928,9 @@ fn leave_chained(req: &mut Request, thrown: crate::api::raising::Thrown) {
 /// is pinned. The chain is taken apart a link at a time after, so its
 /// release is no deeper than the stack either.
 ///
-/// An array's element is the same refusal at the thread's floor rather
-/// than its limit: php's `php_array_element_dump` asks nothing and runs
-/// to the thread's end, so an array nested past the limit under a small
-/// `zend.max_allowed_stack_size` is dumped whole in both engines
-/// (`php_compile::StackLimit::exhausted`).
+/// An array's element is the same refusal at the same limit, php
+/// 8.5.12's `php_array_element_dump` (`Z/ext/standard/var.c:47`), which
+/// 8.5.9 left unguarded (`var_dump_stack_limit.phpt`).
 ///
 /// ```php
 /// $o = $first = new stdClass;
@@ -1941,8 +1939,15 @@ fn leave_chained(req: &mut Request, thrown: crate::api::raising::Thrown) {
 /// var_dump($first);
 /// ob_end_flush();
 /// while ($next = $first->next ?? null) { $first->next = $next->next ?? null; }
+/// $a = [];
+/// for ($i = 0; $i < 50000; $i++) { $a = [$a]; }
+/// ob_start(fn ($chunk) => str_contains($chunk, 'nesting level too deep') ? "nesting level too deep\n" : "the whole array\n");
+/// var_dump($a);
+/// ob_end_flush();
+/// while (is_array($a) && isset($a[0])) { $a = $a[0]; }
 /// ```
 /// ```expect regime=small-stack
+/// nesting level too deep
 /// nesting level too deep
 /// ```
 fn too_deep(req: &mut Request, level: usize, past: bool) -> bool {
