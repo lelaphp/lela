@@ -13,15 +13,15 @@ use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, compiled_inline,
-    compound_in_place, constant, constant_types, goes_one_way, guard_sites, held_as_is,
-    inline_may_leave, is_call, keeps_temporaries, keyed, may_exit, op1_types, out_types,
-    packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced, slot_of,
-    within, writes, written, written_after_entry, written_through,
+    Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, checked_order,
+    compiled_inline, compound_in_place, constant, constant_types, goes_one_way, guard_sites,
+    held_as_is, inline_may_leave, is_call, keeps_temporaries, keyed, may_exit, op1_types,
+    out_types, packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced,
+    slot_of, within, writes, written, written_after_entry, written_through,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
-    Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
+    Frees, Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
     LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Slotted,
     Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
@@ -102,12 +102,11 @@ enum At {
     /// The frame stands where it goes on.
     Stands,
     /// After a fetch whose element's type a guard holds: the opline past
-    /// it with the element, read as `read` says, stored and its
-    /// temporaries freed, or, while a call is under way, the fetch again.
+    /// it with the element, read as `read` says, stored, the temporaries
+    /// it read freed, and a call under way restored.
     Fetched {
         fetch: OplineIdx,
-        op1: bool,
-        op2: bool,
+        frees: Frees,
         out: ValueId,
         read: Read,
     },
@@ -808,14 +807,20 @@ impl<'a> Builder<'a> {
         let pushes = form == Form::Inline && is_call(op.opcode);
         // A native's call returns what its declaration says, as php's
         // trace TSSA types a `DO_ICALL`'s result by the `func` its record
-        // names (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`).
-        // Only a `DO_ICALL`'s callee is fixed where the opline is
-        // compiled: a call by name, a method's or a dynamic one may serve
+        // names (`Z/ext/opcache/jit/zend_jit_trace.c:2626-2650`), and a
+        // frameless call's by the native its opline names, through the
+        // call map (`zend_get_func_info`).
+        // Only those two callees are fixed where the opline is compiled:
+        // a call by name, a method's or a dynamic one may serve
         // another function than the one recorded, which php's trace holds
         // with a guard on the callee this tier does not take.
-        let returns = (op.opcode == Opcode::DoIcall)
-            .then(|| self.calls.last().and_then(|call| call.returns))
-            .flatten();
+        let returns = if op.opcode.is_frameless_icall() {
+            (self.view.frameless_returns(op.extended_value)).map(super::declared)
+        } else if op.opcode == Opcode::DoIcall {
+            self.calls.last().and_then(|call| call.returns)
+        } else {
+            None
+        };
         let out = match slot {
             Some(slot) if !pushes && !fused => {
                 let types = out_types(op, [t1, t2, td], seen.read[0], code);
@@ -1823,7 +1828,10 @@ impl<'a> Builder<'a> {
         let t1 = self.types_of(frame, operands[0]);
         let mut held: [Option<(Types, Read)>; 3] = [None; 3];
         let sites = guard_sites(op, data_line, samples, t1, self.meta(frame).code);
-        for site in &sites {
+        for site in checked_order(op.opcode)
+            .iter()
+            .filter(|site| sites.contains(site))
+        {
             let at = *site as usize;
             // php follows an indirect `VAR` for the element writes alone.
             let sample = samples[at].filter(|s| !s.indirect || written_through(op.opcode));
@@ -2061,8 +2069,10 @@ impl<'a> Builder<'a> {
             (_, Some((def, frame, opline, kind, op1, op2))) => {
                 let fetched = |read| At::Fetched {
                     fetch: opline,
-                    op1: self.is_temp(op1),
-                    op2: self.is_temp(op2),
+                    frees: Frees {
+                        op1: self.is_temp(op1),
+                        op2: self.is_temp(op2),
+                    },
                     out: value,
                     read,
                 };
@@ -2639,7 +2649,7 @@ impl<'a> Builder<'a> {
                 }
                 Source::Interrupt(repeat) => {
                     let exit = match interrupt_reuses {
-                        Some(first) if spec.stores.is_empty() && spec.landing == Landing::Plain => {
+                        Some(first) if spec.stores.is_empty() && spec.landing == Landing::PLAIN => {
                             first
                         }
                         _ => exits.take(spec, level.clone())?,
@@ -2697,7 +2707,7 @@ impl<'a> Builder<'a> {
         let reserved = ExitSpec {
             frame: Frame::ROOT,
             opline: Some(entry),
-            landing: Landing::Plain,
+            landing: Landing::PLAIN,
             stores: Vec::new(),
             known: Vec::new(),
             grows: Grows::Never,
@@ -2746,6 +2756,7 @@ impl<'a> Builder<'a> {
                 (GuardAt::Before(op), Check::Layout { .. }) => Order::At(op, Stage::Inside),
                 (GuardAt::Before(op), Check::Room { .. }) => Order::At(op, Stage::Pushes),
                 (GuardAt::Before(op), _) => Order::At(op, Stage::Before),
+                (GuardAt::Within(op), Check::Direction { .. }) => Order::At(op, Stage::Branches),
                 (GuardAt::Within(op), _) => Order::At(op, Stage::Within),
             };
             order.push((key, Source::Guard(at)));
@@ -3232,25 +3243,27 @@ impl<'a> Builder<'a> {
             At::Stands => (None, restored(calls)),
             At::Fetched {
                 fetch,
-                op1,
-                op2,
+                frees,
                 out,
                 read,
             } => {
-                if calls {
-                    (Some(fetch), Landing::RestoreCall)
-                } else {
-                    extra = Some(Store {
-                        slot: self.val(out).slot,
-                        from: Stored::Copied { value: out, read },
-                    });
-                    let landing = if op1 || op2 {
-                        Landing::FreeTemps { op1, op2 }
-                    } else {
-                        Landing::Plain
-                    };
-                    (Some(OplineIdx(fetch.0 + 1)), landing)
-                }
+                // Past the fetch, with the element it copied, as php's
+                // guard on a fetched element leaves for the opline after
+                // it with the copy in its stack map
+                // (`zend_jit_guard_fetch_result_type`,
+                // `Z/ext/opcache/jit/zend_jit_ir.c:8067-8085`), and with a
+                // call under way restored, as `zend_jit_trace_get_exit_point`
+                // adds `ZEND_JIT_EXIT_RESTORE_CALL` to any exit taken while
+                // one is (`Z/ext/opcache/jit/zend_jit_trace.c:144-147`).
+                extra = Some(Store {
+                    slot: self.val(out).slot,
+                    from: Stored::Copied { value: out, read },
+                });
+                let landing = Landing {
+                    frees,
+                    restores_call: calls,
+                };
+                (Some(OplineIdx(fetch.0 + 1)), landing)
             }
         };
         // A caller's register value is in its slot from the call into the
@@ -3780,7 +3793,13 @@ enum Order {
 }
 
 /// What happens at an op, in the order php's code generator takes its
-/// exits: the guards before it on its operands' types; the exit an
+/// exits: the guards before it on its operands' types; the exit the way
+/// the trace did not go leaves through, which php takes before it emits
+/// the op's code, its smart branch's or `FE_FETCH_R`'s
+/// (`Z/ext/opcache/jit/zend_jit_trace.c`'s `zend_jit_trace_get_exit_point`
+/// before `zend_jit_cmp`, `zend_jit_isset_isempty_dim` or
+/// `zend_jit_fe_fetch`, whose packed guard follows it,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:13839-13843`); the exit an
 /// inline fetch opens its code with, php's `ZEND_JIT_EXIT_TO_VM` that
 /// `zend_jit_fetch_dim_read` takes first (`Z/ext/opcache/jit/zend_jit_ir.c:12540-12547`);
 /// the layout guard php takes inside the op's code, after it
@@ -3793,6 +3812,7 @@ enum Order {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Stage {
     Before,
+    Branches,
     Opens,
     Inside,
     Within,
@@ -3871,8 +3891,8 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
 
 fn restored(calls: bool) -> Landing {
     if calls {
-        Landing::RestoreCall
+        Landing::RESTORE_CALL
     } else {
-        Landing::Plain
+        Landing::PLAIN
     }
 }

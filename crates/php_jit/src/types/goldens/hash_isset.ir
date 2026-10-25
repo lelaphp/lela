@@ -26,8 +26,8 @@ loop at 0, loop, interrupt exit 14
   -> #8 f0.T5 [bool] reg
 0010 f0 ISSET_ISEMPTY_DIM_OBJ #5, #3 inline
   -> #9 f0.T6 [bool] reg
-  guard #9 false -> exit 9
-  guard #8 true -> exit 10
+  guard #8 true -> exit 9
+  guard #9 false -> exit 10
 0011 f0 ADD #8, #9 step unwinds -> unwind 0
   -> #10 f0.T7 [long]
   guard #10 long -> exit 11
@@ -48,7 +48,7 @@ exit 6: f0 0016 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f
 exit 7: f0 0009 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 8: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 9: f0 0011 plain f0.CV2=#6 f0.CV4=#3 f0.T5=#8 f0.T6=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
-exit 10: f0 0011 plain f0.CV2=#6 f0.CV4=#3 f0.T5=#8 f0.T6=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T6:false
+exit 10: f0 0011 plain f0.CV2=#6 f0.CV4=#3 f0.T5=#8 f0.T6=#9 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T5:true
 exit 11: f0 0012 plain f0.CV2=#6 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 12: f0 0012 plain f0.CV2=#6 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long
 exit 13: f0 0013 plain f0.CV2=#11 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long

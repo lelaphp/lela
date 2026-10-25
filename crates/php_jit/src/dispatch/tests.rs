@@ -867,11 +867,11 @@ mod ran {
             };
             let number = (numbered::number as *const ()).addr();
             let body = |at: u32| answering(calling(number, at, &[], true), 0);
-            let cold = compiled(&body(1), vec![landing(2, Landing::Plain)]);
+            let cold = compiled(&body(1), vec![landing(2, Landing::PLAIN)]);
             let Ok(cold) = table.publish(cold, Start::Enter) else {
                 return Flow::Bail(Fatal::error("the cold trace was not published"));
             };
-            let mut linked = landing(1, Landing::Plain);
+            let mut linked = landing(1, Landing::PLAIN);
             linked.link = Some(cold);
             let Ok(linking) = table.publish(compiled(&body(0), vec![linked]), Start::Enter) else {
                 return Flow::Bail(Fatal::error("the linking trace was not published"));
@@ -967,7 +967,7 @@ mod ran {
         };
         let number = (numbered::number as *const ()).addr();
         let body = |at: u32| answering(calling(number, at, &[], true), 0);
-        let root = compiled(&body(0), vec![landing(1, Landing::Plain)]);
+        let root = compiled(&body(0), vec![landing(1, Landing::PLAIN)]);
         let Ok(root) = table.publish(root, Start::Enter) else {
             return Flow::Bail(Fatal::error("the root was not published"));
         };
@@ -976,7 +976,7 @@ mod ran {
             exit: ExitId(0),
         };
         let side = if published {
-            let side = compiled(&body(1), vec![landing(2, Landing::Plain)]);
+            let side = compiled(&body(1), vec![landing(2, Landing::PLAIN)]);
             match table.publish(side, grew) {
                 Ok(side) => side,
                 Err(_) => return Flow::Bail(Fatal::error("the side was not published")),

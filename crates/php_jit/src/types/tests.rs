@@ -19,9 +19,9 @@ use php_heap::ZvalType;
 use php_unit::{Opcode, OplineIdx};
 
 use super::{
-    Check, Def, End, ExitId, Form, Frame, Grows, GuardAt, Home, Imm, Interrupt, Landing, Line, Op,
-    OpId, Operand, Pointee, Repeat, Slot, Slotted, TraceIr, Types, ValueId, build,
-    on_declared_slot,
+    Check, Def, End, ExitId, Form, Frame, Frees, Grows, GuardAt, Home, Imm, Interrupt, Landing,
+    Line, Op, OpId, Operand, Pointee, Repeat, Slot, Slotted, Stored, TraceIr, Types, ValueId,
+    build, on_declared_slot,
 };
 use crate::lower::dump;
 use crate::record::{Landed, Stop, TraceRecord};
@@ -820,6 +820,168 @@ fn a_natives_call_returns_what_it_declares() -> Result<(), String> {
     Ok(())
 }
 
+/// A frameless call returns what its native declares, as php's trace
+/// TSSA types what one writes through the call map it builds for every op
+/// array a trace runs through (`zend_get_func_info`,
+/// `Z/Zend/Optimizer/zend_func_info.c:132-150`): `class_exists()`
+/// returns a `bool`, so what it wrote is no reference the clobber rule
+/// reads again, and an opline that reads it holds it as php's does. The
+/// engine with no extension this test serves on has no `substr()`; the
+/// pinned php's trace of `strlen(substr($s, 1))` in a loop holds no guard
+/// on its `string` at the `STRLEN` (#3438).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_frameless_call_returns_what_its_native_declares() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f(int $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += (int) class_exists('stdClass'); } return $t; }
+        echo f(10), \"\\n\";",
+    )?;
+    let at = stepped(&ir, Opcode::FramelessIcall1)?;
+    let Some(Op::Line(call)) = ir.ops.get(at.index()) else {
+        return Err("no FRAMELESS_ICALL_1".to_owned());
+    };
+    let out = call.out.ok_or("the call keeps no result")?;
+    assert_eq!(
+        ir.values[out.0 as usize].types,
+        Types::BOOL,
+        "{}",
+        dump::render(&ir)
+    );
+    let again = (ir.values.iter())
+        .any(|value| value.def == Def::Reload(at) && value.slot == ir.values[out.0 as usize].slot);
+    assert!(!again, "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// php's code generator holds an `ASSIGN_DIM`'s variable before the
+/// value its `OP_DATA` writes (`CHECK_OP1_TRACE_TYPE`, then
+/// `CHECK_OP1_DATA_TRACE_TYPE`, `Z/ext/opcache/jit/zend_jit_trace.c:5064-5101`),
+/// where its TSSA marks them the other way round. In a file's own code
+/// the variable's guard leaves no type known, so the guard on the value
+/// after it leaves through the same exit: the pinned php's trace of this
+/// loop takes one exit, `exit_2: 0010/----/0`, at `$a[0] = class_exists($c)`
+/// for both, where holding the value first took two (#3438).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_element_writes_guards_are_held_in_phps_order() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", ""), ("record.start", "loop")],
+        "$a = [1, 2];
+        $c = $argc > 5 ? 'q' : 'stdClass';
+        for ($i = 0; $i < 10; $i++) { $a[0] = class_exists($c); }
+        echo $a[0], \"\\n\";",
+    )?;
+    let at = (ir.ops.iter())
+        .position(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::AssignDim))
+        .and_then(|at| u32::try_from(at).ok())
+        .map(OpId)
+        .ok_or_else(|| format!("no ASSIGN_DIM:\n{}", dump::render(&ir)))?;
+    let Some(Op::Line(write)) = ir.ops.get(at.index()) else {
+        return Err("no ASSIGN_DIM".to_owned());
+    };
+    let held: Vec<(Operand, ExitId)> = (ir.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Before(at))
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => Some((Operand::Value(value), guard.exit)),
+            _ => None,
+        })
+        .collect();
+    let exit = held.first().map(|(_, exit)| *exit);
+    assert_eq!(
+        held,
+        exit.map(|exit| vec![(write.op1, exit), (write.data, exit)])
+            .unwrap_or_default(),
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
+/// A fetched element's guards leave past the fetch with the element it
+/// copied, a call under way or none, as php's
+/// `zend_jit_guard_fetch_result_type` takes them for the opline after it
+/// and `zend_jit_trace_get_exit_point` restores the call
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:8067-8085`,
+/// `Z/ext/opcache/jit/zend_jit_trace.c:144-147`): the pinned php's trace
+/// of `strtoupper($a[1])` in a loop takes `exit_5` and `exit_6`,
+/// `0007/.../CALL` with `X4` copied, at the fetch, where this tier left
+/// for the fetch again through the exit of its array's guard, and
+/// `binary_trees`' `check_tree` takes php's `exit_6` to `exit_9`, two
+/// per level it inlines (#3438).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_fetched_elements_guard_leaves_past_the_fetch_under_a_call() -> Result<(), String> {
+    let ir = built(
+        &IN_F,
+        "function f(array $a, int $n) { $t = 0; for ($i = 0; $i < $n; $i++) { $t += strcmp($a[1], 'b'); } return $t; }
+        echo f(['a', 'bc'], 10), \"\\n\";",
+    )?;
+    let at = inline_at(&ir, Opcode::FetchDimR)?;
+    let Some(Op::Line(fetch)) = ir.ops.get(at.index()) else {
+        return Err("no FETCH_DIM_R".to_owned());
+    };
+    let elements: Vec<ExitId> = (ir.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Within(at))
+        .map(|guard| guard.exit)
+        .collect();
+    assert_eq!(elements.len(), 2, "{}", dump::render(&ir));
+    let past = OplineIdx(fetch.opline.0 + 1);
+    for exit in &elements {
+        let spec = &ir.exits[usize::from(exit.0)];
+        assert_eq!(
+            (spec.opline, spec.landing),
+            (Some(past), Landing::RESTORE_CALL),
+            "{}",
+            dump::render(&ir)
+        );
+        assert!(
+            (spec.stores.iter()).any(|store| matches!(store.from, Stored::Copied { .. })),
+            "{}",
+            dump::render(&ir)
+        );
+    }
+    assert_ne!(elements[0], elements[1], "{}", dump::render(&ir));
+    Ok(())
+}
+
+/// `FE_FETCH_R` takes the exit the way out of the loop leaves through
+/// before its array's packed guard, as php's code generator takes it
+/// before `zend_jit_fe_fetch`, whose packed guard follows
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:6320-6350`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:13839-13843`): the pinned php's trace
+/// through this `foreach` takes `exit_8: 0005` before `exit_9: 0002`
+/// (#3438).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_foreach_leaves_its_loop_before_it_holds_the_arrays_layout() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", ""), ("record.start", "loop")],
+        "function f($a) { foreach ($a as $v) { return $v; } return 0; }
+        $x = [[1, 2], [3]];
+        for ($i = 0; $i < 4; $i++) { echo f($x[$i % 2]), \"\\n\"; }",
+    )?;
+    let at = inline_at(&ir, Opcode::FeFetchR)?;
+    let exit_of = |held: fn(&Check) -> bool| {
+        (ir.guards.iter())
+            .find(|guard| {
+                matches!(guard.at, GuardAt::Before(op) | GuardAt::Within(op) if op == at)
+                    && held(&guard.check)
+            })
+            .map(|guard| guard.exit)
+    };
+    let direction = exit_of(|check| matches!(check, Check::Direction { .. }));
+    let layout = exit_of(|check| matches!(check, Check::Layout { .. }));
+    let (Some(direction), Some(layout)) = (direction, layout) else {
+        return Err(format!(
+            "no direction and layout at the fetch:\n{}",
+            dump::render(&ir)
+        ));
+    };
+    assert!(direction.0 < layout.0, "{}", dump::render(&ir));
+    Ok(())
+}
+
 /// The place of the first stepped opline of `opcode`.
 fn stepped(ir: &TraceIr, opcode: Opcode) -> Result<OpId, String> {
     ir.ops
@@ -1168,7 +1330,7 @@ fn a_link_leaves_through_the_exit_that_names_its_trace() -> Result<(), String> {
 
 /// A fetched element's guard leaves past the fetch with the element
 /// stored, and frees the temporary array the fetch read, which compiled
-/// code has not freed: `Landing::FreeTemps`.
+/// code has not freed: its landing's `frees`.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> {
@@ -1183,8 +1345,8 @@ fn a_fetched_elements_guard_frees_the_temporary_it_read() -> Result<(), String> 
         echo f(3), \"\\n\";",
     )?;
     assert!(
-        ir.exits.iter().any(|exit| exit.landing
-            == Landing::FreeTemps {
+        ir.exits.iter().any(|exit| exit.landing.frees
+            == Frees {
                 op1: true,
                 op2: false
             }),
