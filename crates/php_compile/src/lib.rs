@@ -994,6 +994,11 @@ impl<'u> Parts<'u> {
         for (named, bytes) in self.walk() {
             let made = match (own.get(&named), making, named) {
                 (Some(own), ..) => Some(*own),
+                (None, Making::All, Named::Function(_) | Named::Class(_))
+                    if named.printed_among(self.classes, &bytes) =>
+                {
+                    Some(strings.intern_reallocated(&bytes, false)?)
+                }
                 (None, Making::All | Making::Read, Named::Read(_))
                 | (None, Making::All, Named::File | Named::Function(_) | Named::Class(_)) => {
                     Some(strings.intern(&bytes)?)
@@ -1212,6 +1217,46 @@ pub enum FunctionAt {
         property: usize,
         kind: HookKind,
     },
+}
+
+impl FunctionAt {
+    /// Whether php names the function here, called `name`, with
+    /// `zend_strpprintf`, whose `smart_str_extract` php-8.5.12 trims to
+    /// `zend_string_finit`'s size: a closure's `{closure:…}`
+    /// (`zend_begin_func_decl`, `Z/Zend/zend_compile.c:8379`), which no
+    /// written name can begin as, and a property hook's `$name::get`
+    /// (`zend_compile_property_hooks`, `:8782`). Every other is the
+    /// scanner's string.
+    #[must_use]
+    pub fn printed(self, name: &[u8]) -> bool {
+        match self {
+            FunctionAt::Hook { .. } => true,
+            FunctionAt::Dynamic(_) => name.starts_with(b"{"),
+            FunctionAt::Top(_) | FunctionAt::Method { .. } => false,
+        }
+    }
+}
+
+impl Named {
+    /// Whether the name is one php prints with `zend_strpprintf`, called
+    /// `name` in `unit`: a closure's or a hook's
+    /// ([`FunctionAt::printed`]), and an anonymous class's
+    /// `class@anonymous…` (`zend_generate_anon_class_name`, `:9219`).
+    #[must_use]
+    pub fn printed(self, unit: &Unit, name: &[u8]) -> bool {
+        self.printed_among(&unit.classes, name)
+    }
+
+    /// [`Named::printed`] of a unit whose classes are `classes`.
+    fn printed_among(self, classes: &[ClassDecl], name: &[u8]) -> bool {
+        match self {
+            Named::Function(at) => at.printed(name),
+            Named::Class(at) => classes
+                .get(at)
+                .is_some_and(|class| class.flags.is_anonymous),
+            _ => false,
+        }
+    }
 }
 
 /// The names a file's op arrays carry interned into `strings`, the home

@@ -506,6 +506,10 @@ pub(crate) struct Emit<'a> {
     /// read as ([`Self::folded`]), which a class constant's declaration
     /// and a default keep ([`Self::held_value`]).
     folded_string: Option<Zval>,
+    /// The `.`s php's parser folded before the compiler saw them
+    /// ([`Self::parser_folds`]), each a `ZEND_AST_ZVAL` to the `.` over
+    /// it.
+    parser_dots: std::collections::HashSet<NodeId<tree::BinaryExpr>>,
     /// `CG(active_class_entry)->parent_name`: the name the class being
     /// compiled extends, which `parent` needs one of.
     active_parent: Option<Vec<u8>>,
@@ -1298,6 +1302,19 @@ enum Operated {
     Kept(Zval),
 }
 
+/// Which of php's two folds of a `.` over two constants
+/// ([`Emit::concat_made`]): both are `concat_function`, each into a
+/// zval of its own choosing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConcatFold {
+    /// `zend_ast_create_concat_op` as the parser reduces the `.`, into
+    /// its left side.
+    Parser,
+    /// `zend_try_ct_eval_binary_op` as the compiler folds it, into a
+    /// fresh zval.
+    Compiler,
+}
+
 impl Operated {
     /// The value, kept where it stands: a claim dropped, its string the
     /// unit's as any other the compile made.
@@ -1638,6 +1655,7 @@ impl<'a> Emit<'a> {
             imports: Imports::default(),
             active_class: None,
             folded_string: None,
+            parser_dots: std::collections::HashSet::new(),
             active_parent: None,
             active_function: None,
             own_names: Vec::new(),
@@ -2260,6 +2278,19 @@ impl<'a> Emit<'a> {
         }
     }
 
+    /// [`Self::own_string`] of a name php prints with `zend_strpprintf`
+    /// ([`crate::Named::printed`]) where `printed` says so, trimmed to
+    /// `zend_string_finit`'s size ([`Intern::intern_reallocated`]).
+    fn own_printed(&mut self, bytes: &[u8], printed: bool) -> Result<Zval, CompileError> {
+        if !printed {
+            return self.own_string(bytes);
+        }
+        match self.strings.intern_reallocated(bytes, false) {
+            Ok(s) => Ok(Zval::string(s)),
+            Err(fatal) => Err(self.fatal_of(fatal)),
+        }
+    }
+
     /// `zend_string_tolower(ce->name)`, the key `DECLARE_CLASS` and
     /// `DECLARE_ANON_CLASS` bind a class under: the class's own name
     /// (`own`, [`ActiveClass::own`]) held once more where lowering
@@ -2361,7 +2392,7 @@ impl<'a> Emit<'a> {
             return Ok(made);
         }
         let name = function.name.clone();
-        let own = self.own_string(&name)?;
+        let own = self.own_printed(&name, function.at.printed(&name))?;
         let made = self.strings.hold_made(own);
         if let Some(function) = &mut self.active_function {
             function.own = own.as_str();
@@ -2425,6 +2456,14 @@ impl<'a> Emit<'a> {
     fn string_made(&mut self, bytes: &[u8], utf8: bool) -> Result<Made, CompileError> {
         self.strings
             .intern_made(bytes, utf8)
+            .map_err(|fatal| self.fatal_of(fatal))
+    }
+
+    /// [`Self::string_made`] of a string php reallocated to its length
+    /// where it stands ([`Intern::intern_made_reallocated`]).
+    fn string_made_reallocated(&mut self, bytes: &[u8], utf8: bool) -> Result<Made, CompileError> {
+        self.strings
+            .intern_made_reallocated(bytes, utf8)
             .map_err(|fatal| self.fatal_of(fatal))
     }
 
@@ -6273,7 +6312,7 @@ impl<'a> Emit<'a> {
             object_beside: Box::default(),
             attribute_validator: None,
         };
-        let own = self.own_string(&name)?.as_str();
+        let own = self.own_printed(&name, anonymous)?.as_str();
         (self.own_names).extend(own.map(|own| (crate::Named::Class(at), own)));
         self.active_class = Some(ActiveClass::entered(&name, class.kind, at, anonymous, own));
         self.active_parent.clone_from(&parent);
@@ -9002,9 +9041,9 @@ impl<'a> Emit<'a> {
     /// ```expect regime=jit-off
     /// 536  class S1 { const K = "abcdefghij5"; }
     /// 888  $GLOBALS["a"] = S1::K;
-    /// 536  class S2 { const K = "abcdefghij" . 5; }
+    /// 544  class S2 { const K = "abcdefghij" . 5; }
     /// 0  $GLOBALS["a"] = S2::K;
-    /// 536  interface S3 { const K = "abcdefghij" . "5"; }
+    /// 544  interface S3 { const K = "abcdefghij" . "5"; }
     /// 0  $GLOBALS["a"] = S3::K;
     /// ```
     ///
@@ -15317,7 +15356,11 @@ impl<'a> Emit<'a> {
         right: Where,
     ) -> Result<Where, CompileError> {
         if let (Where::Constant(a), Where::Constant(b)) = (left, right) {
-            match self.constant_operands(op, a, b) {
+            let fold = match (op, self.binary_of(id)) {
+                (BinaryOp::Concat, (lhs, _, Some(rhs))) => self.parser_folds(id, lhs, rhs),
+                _ => ConcatFold::Compiler,
+            };
+            match self.constant_operands(op, a, b, fold) {
                 Ok(folded) => return Ok(Where::Constant(self.operands_folded(id, folded))),
                 Err(Unfolded::NoConstant(_)) => {}
                 Err(Unfolded::Unread(refused) | Unfolded::Refused(refused)) => {
@@ -15633,21 +15676,79 @@ impl<'a> Emit<'a> {
         }
     }
 
-    /// `zend_try_ct_eval_binary_op` over `concat_function`: the one
-    /// string the two constants join into, or nothing where either is
-    /// left to the opcode.
+    /// `concat_function` over two constants as `fold` makes it: the one
+    /// string they join into, or nothing where either is left to the
+    /// opcode.
     pub(crate) fn concat_fold(
         &mut self,
         left: Zval,
         right: Zval,
+        fold: ConcatFold,
     ) -> Result<Option<Zval>, CompileError> {
-        Ok(self.concat_made(left, right)?.map(|made| made.value()))
+        Ok(self
+            .concat_made(left, right, fold)?
+            .map(|made| made.value()))
+    }
+
+    /// Whether php's parser folded the `.` at `id`, whose sides are
+    /// `left` and `right`, before the compiler saw it:
+    /// `zend_ast_create_concat_op` over two `ZEND_AST_ZVAL`s, each a
+    /// written value or a `.` the parser folded. Asked once both sides
+    /// have folded, so a side's answer is the set's, and a chain of `n`
+    /// is `n` asks.
+    fn parser_folds(
+        &mut self,
+        id: NodeId<tree::BinaryExpr>,
+        left: tree::Expr,
+        right: tree::Expr,
+    ) -> ConcatFold {
+        let zval = |this: &Self, side: tree::Expr| {
+            this.is_written_value(side)
+                || matches!(peel(this.parsed, side), tree::Expr::BinaryExpr(dot) if this.parser_dots.contains(&dot))
+        };
+        if zval(self, left) && zval(self, right) {
+            self.parser_dots.insert(id);
+            ConcatFold::Parser
+        } else {
+            ConcatFold::Compiler
+        }
     }
 
     /// [`Self::concat_fold`]'s string as the claim of the one who asked
     /// ([`Made`]), which hands it back once it is read
     /// ([`Self::binary_constant`]) or keeps it by dropping the claim.
-    fn concat_made(&mut self, left: Zval, right: Zval) -> Result<Option<Made>, CompileError> {
+    ///
+    /// The parser's fold joins into its left side, `concat_function(zv0,
+    /// zv0, zv1)`, so a left side of the scanner's or a fold's own, two
+    /// bytes or more, is grown where it stands by `zend_string_extend`,
+    /// which php-8.5.12 sizes as `zend_string_finit`
+    /// ([`Intern::intern_made_reallocated`]); the interned one-byte and
+    /// empty strings, and every compiler's fold, which joins into a
+    /// fresh zval, are `zend_string_alloc`'s. Under opcache, a
+    /// fold's string in an `eval`'s class constant:
+    ///
+    /// ```php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('class W2 { const K = "zzzzzzzzzzzzzz" . 7; }');
+    /// foreach (['"abcdefghij5"', '"abcdefghi" . 55', '"abcdefgh" . 5555555', '"a" . "bcdefghijkl"', '"ab" . "cdefghijkl"', '55 . "abcdefghi"', '"abcdefgh" . (5 . 5)'] as $i => $e) {
+    ///     echo m("class F$i { const K = $e; }"), " ", $e, "\n";
+    /// }
+    /// ```
+    /// ```expect regime=jit-off
+    /// 520 "abcdefghij5"
+    /// 528 "abcdefghi" . 55
+    /// 528 "abcdefgh" . 5555555
+    /// 520 "a" . "bcdefghijkl"
+    /// 528 "ab" . "cdefghijkl"
+    /// 528 55 . "abcdefghi"
+    /// 528 "abcdefgh" . (5 . 5)
+    /// ```
+    fn concat_made(
+        &mut self,
+        left: Zval,
+        right: Zval,
+        fold: ConcatFold,
+    ) -> Result<Option<Made>, CompileError> {
         // `zend_binary_op_produces_error`'s concatenation arm: an array
         // on either side is the warning left to the request, and no
         // conversion is made of the other side here.
@@ -15669,7 +15770,17 @@ impl<'a> Emit<'a> {
                     // then the interning that keeps a string the table
                     // already holds as it is.
                     let utf8 = a.is_valid_utf8() && b.is_valid_utf8();
-                    Some(self.string_made(&[a.bytes(), b.bytes()].concat(), utf8))
+                    let joined = [a.bytes(), b.bytes()].concat();
+                    Some(
+                        if fold == ConcatFold::Parser
+                            && a.bytes().len() > 1
+                            && !b.bytes().is_empty()
+                        {
+                            self.string_made_reallocated(&joined, utf8)
+                        } else {
+                            self.string_made(&joined, utf8)
+                        },
+                    )
                 }
                 _ => None,
             },
@@ -16461,7 +16572,8 @@ impl<'a> Emit<'a> {
                     continue;
                 }
                 last_const = Some(if let Some(held) = last_const.take() {
-                    self.concat_fold(held, value)?.unwrap_or(value)
+                    self.concat_fold(held, value, ConcatFold::Compiler)?
+                        .unwrap_or(value)
                 } else {
                     reserved = Some(self.oplines.len());
                     self.push(Opline::default());
@@ -17154,8 +17266,13 @@ impl<'a> Emit<'a> {
         right: tree::Expr,
     ) -> Result<Zval, Unfolded> {
         let mark = self.claims.mark();
-        let folded =
-            (self.constant_pair(left, right)).and_then(|(a, b)| self.constant_operands(op, a, b));
+        let folded = (self.constant_pair(left, right)).and_then(|(a, b)| {
+            let fold = match op {
+                BinaryOp::Concat => self.parser_folds(id, left, right),
+                _ => ConcatFold::Compiler,
+            };
+            self.constant_operands(op, a, b, fold)
+        });
         let claims = self.claims.since(mark);
         let folded = folded?;
         self.consume(claims, [left, right]);
@@ -17181,17 +17298,21 @@ impl<'a> Emit<'a> {
     /// out of the frame a left-nested chain stands in once per
     /// operator: the string a concatenation or a bitwise operator over
     /// two strings makes is the node's claim ([`Operated::Made`]), and
-    /// every other value is kept.
+    /// every other value is kept. A `.` is folded as `fold` says, the
+    /// parser's or the compiler's ([`Self::parser_folds`]).
     fn constant_operands(
         &mut self,
         op: BinaryOp,
         left: Zval,
         right: Zval,
+        fold: ConcatFold,
     ) -> Result<Operated, Unfolded> {
         if op == BinaryOp::Concat {
-            let made = self.concat_made(left, right)?.ok_or(Unfolded::NoConstant(
-                "a concatenation this compiler cannot fold yet",
-            ))?;
+            let made = self
+                .concat_made(left, right, fold)?
+                .ok_or(Unfolded::NoConstant(
+                    "a concatenation this compiler cannot fold yet",
+                ))?;
             return Ok(Operated::Made(made));
         }
         if bitwise(op) {
@@ -21884,6 +22005,7 @@ mod tests {
             imports: Imports::default(),
             active_class: None,
             folded_string: None,
+            parser_dots: std::collections::HashSet::new(),
             active_parent: None,
             active_function: None,
             own_names: Vec::new(),

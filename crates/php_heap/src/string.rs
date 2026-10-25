@@ -817,6 +817,27 @@ pub trait Intern {
         (self.intern_marked(bytes, valid_utf8)).map(|s| Made(Zval::string(s)))
     }
 
+    /// [`Intern::intern_made`] of a string php made at another length and
+    /// reallocated to its own where it stands, which php-8.5.12 sizes as
+    /// `zend_string_finit` does, `len` past the empty string's aligned
+    /// header ([`crate::Heap::string_finit`]): the parser's `.` of two
+    /// written values, `zend_string_extend` of the left one
+    /// (`zend_ast_create_concat_op`, `Z/Zend/zend_ast.c:489`), and a name
+    /// the compile prints, `zend_strpprintf`'s `smart_str_extract`
+    /// trimmed by `zend_string_realloc` (`Z/Zend/zend_smart_str.h:119`).
+    /// A home that lays nothing on a request's heap makes it as any other.
+    fn intern_reallocated(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
+        self.intern_marked(bytes, valid_utf8)
+    }
+
+    /// [`Intern::intern_reallocated`] as a claim the asker alone holds and
+    /// gives back once it has read it, as [`Intern::intern_made`] is
+    /// [`Intern::intern_marked`]'s: the parser's fold, which the fold
+    /// above it consumes.
+    fn intern_made_reallocated(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Made, Fatal> {
+        (self.intern_reallocated(bytes, valid_utf8)).map(|s| Made(Zval::string(s)))
+    }
+
     /// The next of the names a compile hands over once its unit is
     /// whole, in the order of the compiler's walk of what they name
     /// (`php_compile::named`): `name`, the string this home gave for it,
