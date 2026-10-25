@@ -461,25 +461,27 @@ pub(crate) enum Held {
     /// rule where the manifest gives it a tolerance (#1902, #2336, #2659).
     Series,
     /// A series held to a bound, its `[[bench]]` row's tolerance
-    /// ([`Shown::tolerance`]), G1's (design §9.2, #2947, #3130): a fail
-    /// where the bar's ratio, a set's geomean, is established behind by
-    /// more than it, one plus it for a time, or is `mixed`, whose value a
-    /// bound is not read from (§10, #3127); and a pass where it is within
-    /// it or swamped, as a swamped night is never a regression (protocol
-    /// §1.2, §12), or where the bar has no row.
+    /// ([`Shown::tolerance`]), G1's (design §9.2, #2947, #3130), row by
+    /// row and never by a set's geomean, as Mitchell ruled on #3280: a
+    /// fail where any row resolves slower (§4.3) with its ratio beyond one
+    /// plus the tolerance, or with no finite ratio, and a pass otherwise,
+    /// or where the bar has no `[[bench]]` row. A `NOISE-SWAMPED` row is never a
+    /// regression (protocol §1.2) and holds nothing; the geomean, signed,
+    /// `mixed` or unsigned, is published and holds nothing (§10), since it
+    /// averages away a regression concentrated on one row.
     Bound,
 }
 
 impl Held {
     /// The reading's status for what a bar `took`: a control fails at
-    /// [`Took::fails_at`] resolved rows, a bound where its first arm is
-    /// established behind its second by more than `tolerance` percent, in
-    /// time or in rate ([`to_go`]), or the ratio is mixed or no number; a
-    /// series is held to no bound.
+    /// [`Took::fails_at`] resolved rows, a bound where any row's first arm
+    /// resolves behind its second by more than `tolerance` percent, in
+    /// time or in rate ([`Measured::behind`]), or where it measured no
+    /// row; a series is held to no bound.
     fn status(self, took: &Took, tolerance: Option<f64>) -> Status {
-        let (value, sign) = (took.ratio(), took.sign());
         let beyond = |pct| {
-            value.is_nan() || sign == Sign::Mixed || to_go(took).is_some_and(|behind| behind > pct)
+            took.rows.is_empty()
+                || (took.rows.iter()).any(|(_, row)| row.behind().is_some_and(|b| b > pct))
         };
         let resolved: usize = took.each_way().iter().sum();
         match self {
@@ -624,6 +626,15 @@ impl Measured {
     /// The paired delta's sign (§4.3).
     fn sign(&self) -> Sign {
         sign(self.delta.n, self.delta.q1, self.delta.q3, self.unit)
+    }
+
+    /// How far this row's first arm stands behind its second, where it
+    /// resolved slower: what a bound holds each row to (#3280). A row
+    /// resolved slower whose ratio is no finite number, its second arm
+    /// measuring nothing, is behind by more than any tolerance.
+    fn behind(&self) -> Option<f64> {
+        (self.sign() == Sign::Slower)
+            .then(|| lost(self.ratio(), self.unit).unwrap_or(f64::INFINITY))
     }
 }
 
@@ -1277,7 +1288,7 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
         ),
         Held::Bound => bar.tolerance().map_or_else(
             || format!("a bound with no `[[bench]]` row, so a series held to none ({PROTOCOL} §12.3)"),
-            |pct| format!("a bound, {} held to at most {pct}% behind {}, its `[[bench]]` tolerance ({PROTOCOL} §12.3)", bar.names[0], bar.names[1]),
+            |pct| format!("a bound, {} held on each row to at most {pct}% behind {}, its `[[bench]]` tolerance, and the geomean to nothing ({PROTOCOL} §10, §12.3)", bar.names[0], bar.names[1]),
         ),
     }
 }
@@ -1289,9 +1300,18 @@ fn held_by(bar: &Shown<'_>, took: &Took) -> String {
 /// or the second arm measured nothing.
 fn to_go(took: &Took) -> Option<f64> {
     // Every arm of a bar measures in one unit, the first row's.
-    let (ratio, (_, first)) = (took.ratio(), took.rows.first()?);
+    let (_, first) = took.rows.first()?;
     let signed = matches!(took.sign(), Sign::Faster | Sign::Slower);
-    (signed && ratio.is_finite()).then(|| ((ratio - 1.0) * 100.0 * first.unit.worse()).max(0.0))
+    signed.then(|| lost(took.ratio(), first.unit)).flatten()
+}
+
+/// The first arm's loss at `ratio` as a percentage of the second, a time
+/// more or a rate less, nothing where it is ahead, and none where the
+/// ratio is no finite number.
+fn lost(ratio: f64, unit: Unit) -> Option<f64> {
+    ratio
+        .is_finite()
+        .then(|| ((ratio - 1.0) * 100.0 * unit.worse()).max(0.0))
 }
 
 /// A measured number as the store keeps it: to the microsecond, which is
@@ -1533,19 +1553,14 @@ mod tests {
     /// A set's ratio is the geomean of its rows', 0.5 and 2.0 making 1.0,
     /// its sign established only where every row's is (protocol §10) and
     /// signed only where every row points one way, `mixed` with the count
-    /// each way where they do not (#3127); and a bound on a geomean
-    /// established above it or mixed, and not on a swamped one (#2947).
+    /// each way where they do not (#3127), and no distance to go stated
+    /// where it is unsigned.
     #[test]
-    fn a_set_is_held_by_its_geomean() {
+    fn a_set_s_geomean_is_signed_only_where_every_row_points_one_way() {
         let set = took(vec![row(Ms, &AHEAD, -50.0), row(Ms, &BEHIND, 100.0)], true);
         assert!(close(set.ratio(), 1.0), "{}", set.ratio());
         assert_eq!((set.sign(), set.each_way()), (Sign::Mixed, [1, 1]));
         assert_eq!(to_go(&set), None, "a mixed geomean has no sign");
-        assert_eq!(
-            Held::Bound.status(&set, Some(2.0)),
-            Status::Fail,
-            "a bound is not read from a mixed geomean, near 1.00 as it is"
-        );
         let swamped = took(
             vec![row(Ms, &BEHIND, 10.0), row(Ms, &STRADDLES, 10.0)],
             true,
@@ -1561,24 +1576,6 @@ mod tests {
             "one swamped row leaves the geomean unsigned"
         );
         assert_eq!(Held::Control.status(&swamped, None), Status::Pass, "1 of 2");
-        assert_eq!(Held::Bound.status(&swamped, Some(2.0)), Status::Pass);
-        let at = took(vec![row(Ms, &BEHIND, 0.0), row(Ms, &BEHIND, 0.0)], true);
-        assert_eq!(at.sign(), Sign::Slower);
-        assert_eq!(
-            Held::Bound.status(&at, Some(0.0)),
-            Status::Pass,
-            "at the bound"
-        );
-        let behind = took(vec![row(Ms, &BEHIND, 10.0), row(Ms, &BEHIND, 10.0)], true);
-        assert_eq!(Held::Bound.status(&behind, Some(2.0)), Status::Fail);
-        let ahead = took(vec![row(Ms, &AHEAD, -10.0), row(Ms, &AHEAD, -10.0)], true);
-        assert_eq!(ahead.sign(), Sign::Faster);
-        assert_eq!(Held::Bound.status(&ahead, Some(2.0)), Status::Pass);
-        let fewer = took(vec![row(Rps, &AHEAD, -10.0), row(Rps, &AHEAD, -10.0)], true);
-        assert_eq!(fewer.sign(), Sign::Slower, "fewer requests a second");
-        assert_eq!(Held::Bound.status(&fewer, Some(2.0)), Status::Fail);
-        let more = took(vec![row(Rps, &BEHIND, 10.0), row(Rps, &BEHIND, 10.0)], true);
-        assert_eq!(Held::Bound.status(&more, Some(2.0)), Status::Pass);
         let shown = super::geomean(&set);
         assert!(
             shown.contains(
@@ -1589,6 +1586,82 @@ mod tests {
         assert_eq!(
             super::geomean(&took(vec![row(Ms, &BEHIND, 1.0)], false)),
             ""
+        );
+    }
+
+    /// A bound holds each row and never the geomean, as Mitchell ruled on
+    /// #3280: one kernel at +10% beside six at +0.1% is a geomean of
+    /// 1.0145, within 2%, and fails on its one row; +20% beside −17%
+    /// fails, and still beside a swamped row; six at −3% beside one at
+    /// +0.2% pass, `mixed` as their geomean is. A swamped row holds
+    /// nothing however far its median, a row at the bound passes, a rate
+    /// is behind where it answers fewer requests a second, and a row
+    /// resolved slower with no finite ratio fails, as a bar of no row does.
+    #[test]
+    fn a_bound_holds_each_row_and_never_the_geomean() {
+        let bound = |rows: Vec<Measured>, pct| Held::Bound.status(&took(rows, true), Some(pct));
+        let concentrated = || {
+            let six = (0..6).map(|_| row(Ms, &BEHIND, 0.1));
+            std::iter::once(row(Ms, &BEHIND, 10.0))
+                .chain(six)
+                .collect::<Vec<_>>()
+        };
+        let set = took(concentrated(), true);
+        assert!((set.ratio() - 1.0145).abs() < 1e-4, "{}", set.ratio());
+        assert!(
+            to_go(&set).is_some_and(|behind| behind < 2.0),
+            "the geomean is within 2%"
+        );
+        assert_eq!(bound(concentrated(), 2.0), Status::Fail, "one row at +10%");
+        let opposite = || vec![row(Ms, &BEHIND, 20.0), row(Ms, &AHEAD, -17.0)];
+        assert_eq!(took(opposite(), true).sign(), Sign::Mixed);
+        assert_eq!(bound(opposite(), 2.0), Status::Fail, "+20% / -17%");
+        let beside = opposite()
+            .into_iter()
+            .chain([row(Ms, &STRADDLES, 0.0)])
+            .collect();
+        assert_eq!(bound(beside, 2.0), Status::Fail, "+20% / -17% / swamped");
+        let faster = || (0..6).map(|_| row(Ms, &AHEAD, -3.0));
+        let slight = faster().chain([row(Ms, &BEHIND, 0.2)]).collect::<Vec<_>>();
+        assert_eq!(took(slight, true).sign(), Sign::Mixed);
+        let slight = faster().chain([row(Ms, &BEHIND, 0.2)]).collect();
+        assert_eq!(
+            bound(slight, 2.0),
+            Status::Pass,
+            "six at -3% and one at +0.2%"
+        );
+        let swamped = vec![row(Ms, &STRADDLES, 50.0), row(Ms, &BEHIND, 1.0)];
+        assert_eq!(
+            bound(swamped, 2.0),
+            Status::Pass,
+            "a swamped row holds nothing"
+        );
+        let at = vec![row(Ms, &BEHIND, 0.0), row(Ms, &BEHIND, 0.0)];
+        assert_eq!(bound(at, 0.0), Status::Pass, "at the bound");
+        let ahead = vec![row(Ms, &AHEAD, -10.0), row(Ms, &AHEAD, -10.0)];
+        assert_eq!(bound(ahead, 2.0), Status::Pass);
+        let fewer = vec![row(Rps, &AHEAD, -10.0), row(Rps, &STRADDLES, 0.0)];
+        assert_eq!(bound(fewer, 2.0), Status::Fail, "fewer requests a second");
+        let more = vec![row(Rps, &BEHIND, 10.0), row(Rps, &BEHIND, 10.0)];
+        assert_eq!(bound(more, 2.0), Status::Pass);
+        let unmeasured = vec![row(Ms, &STRADDLES, f64::NAN), row(Ms, &AHEAD, -1.0)];
+        assert_eq!(
+            bound(unmeasured, 2.0),
+            Status::Pass,
+            "a swamped row with no ratio"
+        );
+        let unmeasured = vec![row(Ms, &BEHIND, f64::NAN), row(Ms, &AHEAD, -1.0)];
+        assert_eq!(
+            bound(unmeasured, 2.0),
+            Status::Fail,
+            "slower, with no ratio"
+        );
+        let infinite = vec![row(Ms, &BEHIND, f64::INFINITY)];
+        assert_eq!(bound(infinite, 2.0), Status::Fail, "slower, past any ratio");
+        assert_eq!(bound(Vec::new(), 2.0), Status::Fail, "nothing measured");
+        assert_eq!(
+            Held::Series.status(&took(concentrated(), true), Some(2.0)),
+            Status::Pass
         );
     }
 
@@ -1650,7 +1723,7 @@ mod tests {
         assert_eq!((held(1.0), held(3.0)), (Status::Pass, Status::Fail));
         let shown = super::held_by(&bar(Held::Bound, Some(g1)), &set(3.0));
         assert!(
-            shown.contains("a held to at most 2% behind b, its `[[bench]]` tolerance"),
+            shown.contains("a held on each row to at most 2% behind b, its `[[bench]]` tolerance"),
             "{shown}"
         );
         let missing = "[budget]\ntotal = 1\nnew = 1\ndocs = 1\nharness = 1\nlock_packages = 1\n\n[[bench]]\nbar = \"g1\"\n";
