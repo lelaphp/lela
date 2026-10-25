@@ -66,32 +66,34 @@ impl Closure {
     /// version the record does not say, a keg loaded that it does not
     /// name, and a keg it names installed at another version or not at
     /// all each refuse, every one named in the one refusal with both
-    /// versions; so does a keg it names that is not pinned, with the
-    /// `brew pin` that pins it.
+    /// versions; so does a keg it names, installed at its version, that is
+    /// not pinned, with the `brew pin` that pins it. A keg that drifted is
+    /// not offered the pin, which would hold it where it drifted to.
     pub(crate) fn held(&self, binaries: &[&Path]) -> Result<()> {
         let walked = Walked::from(binaries)?;
-        let (mut drift, mut unpinned) = (Vec::new(), Vec::new());
+        let (mut drift, mut drifted) = (Vec::new(), BTreeSet::new());
         for (keg, version) in &walked.kegs {
             match self.0.get(keg) {
-                Some(recorded) if recorded == version => {}
+                Some(recorded) if recorded == version => continue,
                 Some(recorded) => drift.push(format!("{keg} is {version}, recorded {recorded}")),
                 None => drift.push(format!("{keg} {version} is loaded and not recorded")),
             }
+            drifted.insert(keg.as_str());
         }
+        let mut unpinned = Vec::new();
         if let Some(prefix) = &walked.prefix {
             let unloaded = self.0.iter().filter(|(keg, _)| !walked.names(keg));
             for (keg, recorded) in unloaded {
                 match installed(prefix, keg) {
-                    Some(version) if version == *recorded => {}
+                    Some(version) if version == *recorded => continue,
                     Some(version) => drift.push(format!("{keg} is {version}, recorded {recorded}")),
                     None => drift.push(format!("{keg} is not installed, recorded {recorded}")),
                 }
+                drifted.insert(keg.as_str());
             }
             let pins = prefix.join("var/homebrew/pinned");
-            let loose = self
-                .0
-                .keys()
-                .filter(|keg| pins.join(keg).symlink_metadata().is_err());
+            let at_record = self.0.keys().filter(|keg| !drifted.contains(keg.as_str()));
+            let loose = at_record.filter(|keg| pins.join(keg).symlink_metadata().is_err());
             unpinned.extend(loose.map(String::as_str));
         }
         let mut refusal = Vec::new();
@@ -502,6 +504,9 @@ mod tests {
             "ca-certificates, zip of the pin's [closure] are not `brew pin`ned, so a `brew upgrade` \
              can move them before this walk sees the move (#3468): `brew pin ca-certificates zip`"
         );
+        // A keg that drifted is named as drift and offered no pin, which
+        // would hold it at the version it drifted to.
+        fs::remove_file(root.join("var/homebrew/pinned/zstd")).unwrap();
         let mut record = RECORD;
         record[2].1 = "1.5.6";
         let err = closure(&record).held(&[&php]).unwrap_err().to_string();
