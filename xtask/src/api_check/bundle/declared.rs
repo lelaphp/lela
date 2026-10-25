@@ -284,6 +284,7 @@ mod tests {
             dir,
             package: format!("php_ext_{name}"),
             deps: Vec::new(),
+            packages: BTreeSet::default(),
             inherits_lints: true,
         };
         let read = Declared::read(&krate).unwrap();

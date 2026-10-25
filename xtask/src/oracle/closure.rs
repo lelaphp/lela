@@ -17,6 +17,15 @@
 //! store `ca-certificates` among them, is read at `<prefix>/opt/<keg>`,
 //! the link Homebrew points at the version it installed.
 //!
+//! **What holds a keg still** is its pin: every keg the record names is
+//! `brew pin`ned, a link under `<prefix>/var/homebrew/pinned/`, so a `brew
+//! upgrade` run for another reason passes it over (#3468). The walk sees a
+//! keg move only after it moved, by when the recorded version is gone from
+//! the Cellar; an unpinned keg is refused before it can. A machine with no
+//! Homebrew prefix under its binaries, a Linux runner, holds neither, and a
+//! macOS runner is held as the oracle's machine is, since
+//! `scripts/ci/pinned-php.sh` pins each keg it pours before any lane.
+//!
 //! **What a build was made against** is the record's digest, [`Closure::digest`]: a
 //! variant's macOS build is made against the Homebrew the record names, so
 //! its pin names the digest beside its md5, as a Linux build names its
@@ -57,10 +66,11 @@ impl Closure {
     /// version the record does not say, a keg loaded that it does not
     /// name, and a keg it names installed at another version or not at
     /// all each refuse, every one named in the one refusal with both
-    /// versions.
+    /// versions; so does a keg it names that is not pinned, with the
+    /// `brew pin` that pins it.
     pub(crate) fn held(&self, binaries: &[&Path]) -> Result<()> {
         let walked = Walked::from(binaries)?;
-        let mut drift = Vec::new();
+        let (mut drift, mut unpinned) = (Vec::new(), Vec::new());
         for (keg, version) in &walked.kegs {
             match self.0.get(keg) {
                 Some(recorded) if recorded == version => {}
@@ -77,12 +87,34 @@ impl Closure {
                     None => drift.push(format!("{keg} is not installed, recorded {recorded}")),
                 }
             }
+            let pins = prefix.join("var/homebrew/pinned");
+            let loose = self
+                .0
+                .keys()
+                .filter(|keg| pins.join(keg).symlink_metadata().is_err());
+            unpinned.extend(loose.map(String::as_str));
         }
+        let mut refusal = Vec::new();
         if !drift.is_empty() {
-            bail!(
+            refusal.push(format!(
                 "the kegs the pinned php loads drifted from the pin's [closure]: {}. Report the drift; the pin moves only by a person's hand",
                 drift.join("; ")
-            );
+            ));
+        }
+        if !unpinned.is_empty() {
+            let (is, it) = if unpinned.len() == 1 {
+                ("is", "it")
+            } else {
+                ("are", "them")
+            };
+            refusal.push(format!(
+                "{} of the pin's [closure] {is} not `brew pin`ned, so a `brew upgrade` can move {it} before this walk sees the move (#3468): `brew pin {}`",
+                unpinned.join(", "),
+                unpinned.join(" ")
+            ));
+        }
+        if !refusal.is_empty() {
+            bail!("{}", refusal.join(". "));
         }
         Ok(())
     }
@@ -114,11 +146,7 @@ impl Walked {
             if !seen.insert(file.clone()) {
                 continue;
             }
-            let loads = Loads::of(&file)?;
-            for name in &loads.names {
-                let Some(real) = loads.resolved(&file, name)? else {
-                    continue;
-                };
+            for real in Loads::libraries(&file)? {
                 if let Some((prefix, keg)) = in_cellar(&real) {
                     walked.prefix.get_or_insert(prefix);
                     walked.kegs.insert(keg);
@@ -131,6 +159,59 @@ impl Walked {
 
     fn names(&self, keg: &str) -> bool {
         self.kegs.iter().any(|(name, _)| name == keg)
+    }
+}
+
+/// The libraries one binary names in its own load commands, each by the
+/// file it resolves to and the keg that file stands in, beside the
+/// Homebrew prefix the binary stands under (#3458). A crate built against
+/// a keg is held to these, so it links the keg the oracle loads itself
+/// and not another the closure carries for a library's sake, as it
+/// carries openssl@3 beside the openssl@4 php loads.
+#[derive(Debug)]
+pub(crate) struct Own {
+    prefix: PathBuf,
+    libraries: Vec<(PathBuf, String)>,
+}
+
+impl Own {
+    /// What `binary` loads itself; none where it is not on this machine
+    /// or stands under no Cellar, as a Linux build does.
+    pub(crate) fn of(binary: &Path) -> Result<Option<Own>> {
+        let Ok(real) = fs::canonicalize(binary) else {
+            return Ok(None);
+        };
+        let Some((prefix, _)) = in_cellar(&real) else {
+            return Ok(None);
+        };
+        let libraries = Loads::libraries(&real)?.into_iter().filter_map(|file| {
+            let (_, (keg, _)) = in_cellar(&file)?;
+            Some((file, keg))
+        });
+        Ok(Some(Own {
+            prefix,
+            libraries: libraries.collect(),
+        }))
+    }
+
+    /// The keg the binary loads a library of `stem` from: `openssl@4` for
+    /// `libssl`, by `libssl.4.dylib`.
+    pub(crate) fn keg_loading(&self, stem: &str) -> Option<&str> {
+        let named = |file: &Path| {
+            let name = file.file_name()?.to_str()?;
+            Some(name.strip_prefix(stem)?.starts_with('.'))
+        };
+        (self.libraries.iter())
+            .find(|(file, _)| named(file) == Some(true))
+            .map(|(_, keg)| keg.as_str())
+    }
+
+    /// The keg of the binary's prefix `path` stands in once its links are
+    /// followed (`/opt/homebrew/opt/openssl@4` is `openssl@4`); none where
+    /// it is not on this machine or in no keg of that prefix.
+    pub(crate) fn keg_at(&self, path: &Path) -> Option<String> {
+        let (prefix, (keg, _)) = in_cellar(&fs::canonicalize(path).ok()?)?;
+        (prefix == self.prefix).then_some(keg)
     }
 }
 
@@ -226,6 +307,17 @@ impl Loads {
         Ok(loads)
     }
 
+    /// Every library `file` names that resolves to a file on disk, as
+    /// [`Loads::resolved`] places each.
+    fn libraries(file: &Path) -> Result<Vec<PathBuf>> {
+        let loads = Loads::of(file)?;
+        let mut out = Vec::new();
+        for name in &loads.names {
+            out.extend(loads.resolved(file, name)?);
+        }
+        Ok(out)
+    }
+
     /// A library `loader` names as the file it resolves to, none for one
     /// not on disk, a system library's: an absolute name, one under
     /// `@loader_path/`, or one under `@rpath/` found in the first of the
@@ -262,14 +354,15 @@ fn word(bytes: &[u8], at: usize) -> Option<u32> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
     use crate::scratch::Tree;
 
-    /// A 64-bit Mach-O file whose load commands name `loads`.
-    fn macho(loads: &[&str]) -> Vec<u8> {
+    /// A 64-bit Mach-O file whose load commands name `loads`, as a stand-in
+    /// for a binary of the pin's here and in `api_check::binding`.
+    pub(crate) fn macho(loads: &[&str]) -> Vec<u8> {
         let loads: Vec<(u32, &str)> = loads.iter().map(|name| (LOADS[0], *name)).collect();
         commanded(&loads)
     }
@@ -299,19 +392,20 @@ mod tests {
     /// A Homebrew prefix of the closure's shape: php loading zip by its
     /// `opt` link and the system library, zip loading zstd beside it by
     /// `@rpath` through an rpath under `@loader_path`, and ca-certificates
-    /// installed and loaded by none.
+    /// installed and loaded by none; every keg pinned, as `brew pin` links
+    /// it under `var/homebrew/pinned/`.
     fn prefix(tree: &Tree) -> (PathBuf, PathBuf) {
         let root = tree.path().join("brew");
         let keg = |name: &str, version: &str, file: &str, bytes: Vec<u8>| {
             let dir = root.join("Cellar").join(name).join(version);
             fs::create_dir_all(dir.join("lib")).unwrap();
-            fs::create_dir_all(root.join("opt")).unwrap();
             fs::write(dir.join(file), bytes).unwrap();
-            symlink(
-                format!("../Cellar/{name}/{version}"),
-                root.join("opt").join(name),
-            )
-            .unwrap();
+            for links in ["opt", "var/homebrew/pinned"] {
+                let at = root.join(links);
+                fs::create_dir_all(&at).unwrap();
+                let up = "../".repeat(links.matches('/').count() + 1);
+                symlink(format!("{up}Cellar/{name}/{version}"), at.join(name)).unwrap();
+            }
         };
         let zip = root.join("opt/zip/lib/libzip.dylib");
         let php = macho(&[zip.to_str().unwrap(), "/usr/lib/libSystem.B.dylib"]);
@@ -386,6 +480,26 @@ mod tests {
             err.contains("zstd 1.5.7_1 is loaded and not recorded"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_keg_installed_at_its_version_and_not_pinned_refuses_naming_the_pin() {
+        let tree = Tree::new("closure-unpinned").unwrap();
+        let (php, root) = prefix(&tree);
+        for keg in ["ca-certificates", "zip"] {
+            fs::remove_file(root.join("var/homebrew/pinned").join(keg)).unwrap();
+        }
+        let err = closure(&RECORD).held(&[&php]).unwrap_err().to_string();
+        assert_eq!(
+            err,
+            "ca-certificates, zip of the pin's [closure] are not `brew pin`ned, so a `brew upgrade` \
+             can move them before this walk sees the move (#3468): `brew pin ca-certificates zip`"
+        );
+        let mut record = RECORD;
+        record[2].1 = "1.5.6";
+        let err = closure(&record).held(&[&php]).unwrap_err().to_string();
+        assert!(err.contains("zstd is 1.5.7_1, recorded 1.5.6"), "{err}");
+        assert!(err.ends_with("`brew pin ca-certificates zip`"), "{err}");
     }
 
     #[test]
