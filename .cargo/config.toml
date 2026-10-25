@@ -83,10 +83,14 @@ AARCH64_APPLE_DARWIN_CURL_LIB_DIR = { value = "/opt/homebrew/opt/curl/lib", forc
 # compiles every crate's objects and links every host and test binary
 # for, and the one a `cc` build script compiles its C for (lexbor,
 # libmbfl, timelib, uriparser, the shims), which it otherwise built for
-# the SDK's 26.2; the keg archives linked in, libpcre2-8.a, libsqlite3.a
-# and libtidy's, are built for 15.0, so ld no longer warns that an object
-# is newer than the link. Cargo hands it to every build script, rustc
-# run and `cargo run` or test process; another platform's target reads
-# no such variable. `xtask api-check` holds it to the pinned php's
-# minos in each host's reading, so it moves with the oracle.
+# the installed SDK's own version; the keg archives linked in,
+# libpcre2-8.a, libsqlite3.a and libtidy's, are built for 15.0, so ld no
+# longer warns that an object is newer than the link. Cargo hands it to
+# every build script, rustc run and `cargo run` or test process, the
+# harness's own among them; what the harness runs under the oracle's
+# recipe, a witness's or a phpt test's php, starts from the environment
+# the recipe clears and states (`oracle.toml`, `[recipe.env]`), so no
+# test sees it. Another platform's target reads no such variable.
+# `xtask api-check` holds it to the pinned php's minos in each host's
+# reading, so it moves with the oracle.
 MACOSX_DEPLOYMENT_TARGET = { value = "15.0", force = true }
