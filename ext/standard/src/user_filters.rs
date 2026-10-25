@@ -105,7 +105,8 @@ use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
 };
 use php_ext::values::{
-    Owner, PhpArray, PhpObject, PhpRef, PhpString, Resource, ResourceType, Value, ValueRef,
+    Owner, PhpArray, PhpObject, PhpRef, PhpString, PropertyScope, Resource, ResourceType, Value,
+    ValueRef,
 };
 
 use crate::State;
@@ -738,7 +739,25 @@ fn stream_bucket_make_writeable(
 
 /// `php_stream_bucket_attach` (`Z/ext/standard/user_filters.c:373`): the
 /// bucket a `StreamBucket` holds, its bytes made the object's `data`,
-/// put at the tail of the brigade or at its head.
+/// put at the tail of the brigade or at its head. An unset `$data` is
+/// read as php reads it, an `Error`, and the bucket is not moved
+/// (`Z/ext/standard/user_filters.c:421`, new at php-8.5.12):
+///
+/// ```php
+/// class F extends php_user_filter {
+///     function filter($in, $out, &$consumed, bool $closing): int {
+///         while ($b = stream_bucket_make_writeable($in)) { unset($b->data); stream_bucket_prepend($out, $b); }
+///         return PSFS_PASS_ON;
+///     }
+/// }
+/// stream_filter_register('f', 'F');
+/// $m = fopen('php://memory', 'w+'); fwrite($m, 'abc'); rewind($m);
+/// stream_filter_append($m, 'f');
+/// try { var_dump(stream_get_contents($m)); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// ```
+/// ```expect
+/// Typed property StreamBucket::$data must not be accessed before initialization
+/// ```
 fn bucket_attach(
     req: &mut Request,
     native: &str,
@@ -762,8 +781,13 @@ fn bucket_attach(
         let text = format!("{native}(): supplied {what} is not a valid userfilter.bucket resource");
         return Err(throw_error(req, "TypeError", &text));
     };
-    if let Some(data) = object.prop(req, b"data").map(|value| value.deref())
-        && let Some(bytes) = data.as_php_string().map(|s| s.as_bytes().to_vec())
+    // `zend_read_property(..., "data", silent=false)`: an unset typed
+    // `$data` is php's `Error`, raised before the bucket moves, as 8.5.12
+    // checks `EG(exception)` there.
+    let data = object.read_prop_in(req, PropertyScope::Executing, b"data")?;
+    let bytes = data.deref().as_php_string().map(|s| s.as_bytes().to_vec());
+    data.give_up(req);
+    if let Some(bytes) = bytes
         && let Some(cell) = res.native_mut::<BucketCell>(req)
     {
         cell.0 = bytes;
