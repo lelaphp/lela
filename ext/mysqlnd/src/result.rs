@@ -1393,8 +1393,7 @@ fn text_value(
             crate::codec::Bits::Long(n) if !native => {
                 PhpString::new(req, n.cast_unsigned().to_string().as_bytes()).map(Owner::into_value)
             }
-            crate::codec::Bits::Long(n) => Ok(Owner::int(n)),
-            crate::codec::Bits::Text(s) => PhpString::new(req, s.as_bytes()).map(Owner::into_value),
+            bits => bits.into_value(req),
         };
     }
     if native && php_type == PhpType::Long && field.flags & column::ZEROFILL == 0 {

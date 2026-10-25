@@ -735,7 +735,9 @@ pub struct Rewritten {
 /// until `php_pdo_free_statement` destroys it. A parameter bound by
 /// position over the rewritten query takes one more owner of its name
 /// (`rewrite_name_to_position`'s `zend_string_copy`), so its name costs
-/// nothing of its own:
+/// nothing of its own. The last statement names its column with `AS v`,
+/// so the name mysqlnd interns is one the compiled program already holds,
+/// opcache or not:
 ///
 /// ```php
 /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_EMULATE_PREPARES => false]);
@@ -753,7 +755,7 @@ pub struct Rewritten {
 /// unset($s);
 /// echo memory_get_usage() - $m, "\n";
 /// $q = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
-/// $s = $q->prepare('SELECT ?');
+/// $s = $q->prepare('SELECT ? AS v');
 /// $m = memory_get_usage();
 /// $s->execute([12345]);
 /// echo memory_get_usage() - $m, "\n";
@@ -763,7 +765,7 @@ pub struct Rewritten {
 /// 22200
 /// 776
 /// 0
-/// 16984
+/// 16960
 /// ```
 pub struct ParameterMap {
     table: Owner<PhpArray>,

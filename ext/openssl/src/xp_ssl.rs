@@ -20,7 +20,7 @@ use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use php_ext::call::call;
-use php_ext::coerce::{callable_checked, callable_name, to_long, truthy, with_string};
+use php_ext::coerce::{to_callable, to_long, truthy, with_string};
 use php_ext::raising::{Level, Thrown, docref, leave_pending, raise, throw_error};
 use php_ext::request::{
     Crypto, CryptoSocket, Handshake, OwnedStream as _, Readiness, Request, Stream, StreamCtx,
@@ -1430,18 +1430,7 @@ impl Layer {
             );
             return Ok(());
         };
-        let callable = match callable_checked(req, &callback) {
-            Ok(callable) => callable,
-            Err(why) => {
-                let name = callable_name(req, &callback)?;
-                let text = format!(
-                    "Invalid callback {}, {why}",
-                    String::from_utf8_lossy(name.as_bytes())
-                );
-                name.give_up(req);
-                return Err(throw_error(req, "Error", &text));
-            }
-        };
+        let callable = to_callable(req, &callback)?;
         let argument = socket.stream.map_or(Value::null(), Stream::as_value);
         let returned = call(req, &callable, &[argument])?;
         if matches!(returned.as_ref(), ValueRef::Bool(true))
