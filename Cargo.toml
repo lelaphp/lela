@@ -128,7 +128,7 @@ aes = "0.9"                         # ext/zip: WinZip AES entries read and writt
 hmac = "0.13"                       # ext/zip: WinZip AES's authentication code
 pbkdf2 = "0.13"                     # ext/zip: WinZip AES's key derivation
 sha1 = { version = "0.11", default-features = false }  # ext/zip: WinZip AES's HMAC-SHA1
-crc32fast = "1.5"                   # ext/zip: an entry's CRC-32, the crate the zip crate depends on
+crc32fast = "1.5"                   # ext/zip: an entry's CRC-32
 getrandom = { version = "0.4", features = ["std"] }  # ext/zip: the salt and the PKWARE header an encrypted entry is written with
 hyper = { version = "1.7", default-features = false, features = ["server", "http1"] }  # sapi/makala: the production server's HTTP/1.1 framing, RFC 9112's Transfer-Encoding and Content-Length rules, no parser of our own (#2337, #2333)
 hyper-util = { version = "0.1.17", default-features = false, features = ["tokio"] }  # sapi/makala: hyper's sockets on tokio (#2337)
