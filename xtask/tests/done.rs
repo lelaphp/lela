@@ -429,6 +429,50 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
     assert!(verdict.unmet.contains(&named), "{verdict:#?}");
 }
 
+/// Condition 10 (#3372): a diff that changes `.cargo/config.toml` asks for
+/// a fresh passing `fold` reading of `sapi/cli`, and one taken before the
+/// file changed is stale, since `sapi/cli`'s key covers the files rustc is
+/// built under; a failing one is unmet with its message, and a diff that
+/// changes none of those files asks for no reading.
+#[test]
+fn a_change_to_what_rustc_is_built_under_asks_for_a_fold_reading() {
+    let root = scratch("fold");
+    let asked = |verdict: &Verdict| -> Vec<String> {
+        let fold = verdict.unmet.iter().filter(|u| u.starts_with("fold: "));
+        fold.cloned().collect()
+    };
+    write(
+        &root,
+        "sapi/cli/Cargo.toml",
+        "[package]\nname = \"php_sapi_cli\"\nversion = \"0.0.0\"\n\n[dependencies]\nphp_bundle = { path = \"../../crates/php_bundle\" }\n",
+    );
+    assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+    let store = Store::of_workspace(&root);
+    store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
+
+    write(
+        &root,
+        ".cargo/config.toml",
+        "[target.'cfg(all())']\nrustflags = []\n",
+    );
+    assert_eq!(
+        asked(&judge(&root)),
+        [
+            "fold: no reading for sapi/cli over the tree now, and .cargo/config.toml changed; `cargo xtask fold` takes it"
+        ]
+    );
+    let mut failing = fresh(&root, "fold", "sapi/cli");
+    failing.status = Status::Fail;
+    failing.message = "sapi/cli: hoisted".into();
+    store.record(&[failing]).unwrap();
+    assert_eq!(
+        asked(&judge(&root)),
+        ["fold: sapi/cli fail: sapi/cli: hoisted"]
+    );
+    store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
+    assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+}
+
 // ------------------------------------------- the base is main
 
 /// A scratch repository on `t9`, cut from `main`, with `main` one commit
