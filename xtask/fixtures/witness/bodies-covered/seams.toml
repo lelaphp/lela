@@ -1,0 +1,18 @@
+# A negative control (harness-design.md §4.1, §12 item 4): a workspace that
+# must fail the instrument named by the directory above it. The pin is the
+# real one, by path.
+[oracle]
+pin = "../../../../oracle.toml"
+[budget]
+total = 1000
+new = 1000
+docs = 1000
+harness = 1000
+lock_packages = 1000
+clean_build_release_s = 1000
+api_items = 1000
+bindings = 1000
+
+[[crate]]
+name = "ext/pcre"
+budget = 1000

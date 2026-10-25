@@ -557,6 +557,111 @@ fn a_capture_whose_two_runs_differ_writes_nothing_and_fails_the_crate() {
     );
 }
 
+/// `--accept --bodies` writes each plain fence the oracle does not meet
+/// from the oracle's two runs, and leaves a fence it meets and a fence
+/// marked `capture` byte for byte (#3455, as #3429 ruled): the authored
+/// `string(%d) "%s"` the oracle's two runs still meet, though they print
+/// two lengths, and the authored stderr line with its wildcards are kept as
+/// written, and the lines the oracle moved are its own. `--accept` alone
+/// writes no body, and a second run writes nothing.
+#[test]
+fn accept_bodies_writes_the_plain_fences_the_oracle_does_not_meet() {
+    if oracle().is_none() {
+        return;
+    }
+    let met = "/// ```php\n/// echo 1;\n/// ```\n/// ```expect\n/// %d\n/// ```\npub fn met() {}\n";
+    let marked = "/// ```php\n/// echo 3;\n/// ```\n/// ```expect capture\n/// x\n/// ```\npub fn marked() {}\n";
+    let snippet = "/// ```php\n/// ini_set('display_errors', 'stderr');\n/// echo \"one\\n\";\n/// var_dump(__FILE__);\n/// echo \"three\", $u;\n/// ```\n";
+    let stderr = "/// ```stderr\n/// Warning: Undefined variable $u in %s on line %d\n/// ```\n";
+    let text = format!(
+        "{met}{snippet}/// ```expect\n/// uno\n/// string(%d) \"%s\"\n/// tres\n/// ```\n{stderr}pub fn moved() {{}}\n{marked}"
+    );
+    let root = scratch("bodies", &text);
+    let file = root.join("ext/fixture/src/lib.rs");
+
+    let reading = run(&root, &registry(""), Accept::Status);
+    assert_eq!(count(&reading, "failed"), 2, "{reading:#?}");
+    assert_eq!(count(&reading, "accepted"), 0);
+    assert_eq!(
+        fs::read_to_string(&file).unwrap(),
+        text,
+        "`--accept` alone writes no body"
+    );
+
+    let reading = run(&root, &registry(""), Accept::Bodies);
+    assert_eq!(count(&reading, "accepted"), 1, "{reading:#?}");
+    assert_eq!(
+        count(&reading, "failed"),
+        1,
+        "the capture's stale body stands: {reading:#?}"
+    );
+    let written = fs::read_to_string(&file).unwrap();
+    let expected = format!(
+        "{met}{snippet}/// ```expect\n/// one\n/// string(%d) \"%s\"\n/// three\n/// ```\n{stderr}pub fn moved() {{}}\n{marked}"
+    );
+    assert_eq!(written, expected);
+
+    let again = run(&root, &registry(""), Accept::Bodies);
+    assert_eq!(count(&again, "accepted"), 0, "{again:#?}");
+    assert_eq!(count(&again, "failed"), 1, "{again:#?}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), written);
+}
+
+/// The two negative controls of `--accept --bodies` (harness §4.1, §8;
+/// #3455), each run over its fixture and holding it to nothing written:
+/// `xtask/fixtures/witness/bodies-moves`, a plain fence whose oracle runs
+/// print `string(N)` over two scratch paths and whose body has no wildcard
+/// to meet both, fails the crate; and
+/// `xtask/fixtures/witness/bodies-covered`, a fence the fixture's `trace:`
+/// row covers and the oracle does not meet, stays covered and names the
+/// row, since its body is the engine's side of it. The note naming the
+/// moved line is held beside the judge.
+#[test]
+fn accept_bodies_refuses_a_line_the_two_runs_differ_on_and_a_covered_fence() {
+    if oracle().is_none() {
+        return;
+    }
+    for (name, status, said) in [
+        (
+            "bodies-moves",
+            Status::Fail,
+            "1 of 1 witnesses missed what they pin: ext/pcre/src/lib.rs:16",
+        ),
+        (
+            "bodies-covered",
+            Status::Pass,
+            "`--bodies` wrote nothing: the fence pins the engine's side of trace:fixture-bodies-covered, not the oracle's",
+        ),
+    ] {
+        let root = fixture_at("witness", name);
+        let file = root.join("ext/pcre/src/lib.rs");
+        let before = fs::read_to_string(&file).unwrap();
+        let manifest = Manifest::load(&root).unwrap();
+        let ask = Ask {
+            crates: vec!["ext/pcre".to_owned()],
+            accept: Accept::Bodies,
+            ..Ask::default()
+        };
+        let readings =
+            witness::run(&root, &manifest, &Registry::load(&root).unwrap(), &ask).unwrap();
+        let [reading] = &readings[..] else {
+            panic!("{readings:#?}")
+        };
+        assert_eq!(reading.status, status, "{name}: {reading:#?}");
+        assert_eq!(count(reading, "accepted"), 0, "{name}: {reading:#?}");
+        assert!(
+            reading.message.contains(said),
+            "{name}: {}",
+            reading.message
+        );
+        assert_eq!(
+            fs::read_to_string(&file).unwrap(),
+            before,
+            "{name}: nothing is written"
+        );
+    }
+}
+
 /// The natives the attributes declare, read with the oracle away so the
 /// coverage half is all that is judged (harness §4.5 condition 2,
 /// revision 58): the subjects are the attribute-declared `fn`s and the

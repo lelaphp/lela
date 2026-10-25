@@ -162,9 +162,31 @@ fn both(
     }
     // A fence marked `capture` is written whole from the oracle's streams,
     // where a second run from a scratch tree apart prints them again
-    // (#801); one it refuses is written nothing, and names the line.
+    // (#801); one it refuses is written nothing, and names the line. A
+    // plain fence the oracle does not meet is written so under `--bodies`,
+    // its authored wildcard lines kept (#3455); one it refuses is written
+    // nothing, judged as it stands, and its note names why.
     let mut captured = witness.clone();
-    let (was, now) = if on.ask.accept == Accept::Streams && witness.capture {
+    let mut refused = None;
+    let rewrites = on.ask.accept == Accept::Bodies
+        && !witness.capture
+        && !met(on.oracle.pin(), witness, exit, oracle_out).unwrap_or(true);
+    let (was, now) = if rewrites {
+        let written = bodies(on.oracle, witness, exit, oracle_out).and_then(|(stdout, stderr)| {
+            fence::streams(&head, &stdout, &stderr).map(|lines| (stdout, stderr, lines))
+        });
+        match written {
+            Ok((stdout, stderr, lines)) => {
+                captured.stdout = stdout;
+                captured.stderr = (!stderr.is_empty()).then_some(stderr);
+                (&witness.fences[..], lines)
+            }
+            Err(why) => {
+                refused = Some(why);
+                (&witness.fences[..1], vec![head])
+            }
+        }
+    } else if on.ask.accept == Accept::Streams && witness.capture {
         let streams = again(on.oracle, witness, oracle_out).and_then(|(stdout, stderr)| {
             fence::streams(&head, &stdout, &stderr).map(|lines| (stdout, stderr, lines))
         });
@@ -215,13 +237,17 @@ fn both(
         Ok(ran) => ran,
         Err(verdict) => return verdict,
     };
-    Ok(held(
+    let mut verdict = held(
         on.oracle.pin(),
         on.registry,
         witness,
         exit,
         &[(Run::Oracle, oracle_out), (Run::Engine, &ran)],
-    ))
+    );
+    if let Some(why) = refused {
+        verdict.note = format!("`--bodies` wrote nothing: {why}\n{}", verdict.note);
+    }
+    Ok(verdict)
 }
 
 /// The run of record, with what it entered kept, or the bork where it did
@@ -265,11 +291,22 @@ fn alone(
     oracle_out: &Observation,
     kept: &mut Kept,
 ) -> Result<Judged> {
-    let recorded = format!(
+    let mut recorded = format!(
         "held to the engine alone under {}; the oracle's run, not judged: {}",
         row.id,
         ended(oracle_out)
     );
+    // The fence pins the engine's side of the row, so the oracle's streams
+    // are no body for it (#3455).
+    if on.ask.accept == Accept::Bodies
+        && !witness.capture
+        && !met(on.oracle.pin(), witness, witness.exit, oracle_out).unwrap_or(true)
+    {
+        recorded = format!(
+            "`--bodies` wrote nothing: the fence pins the engine's side of {}, not the oracle's; {recorded}",
+            row.id
+        );
+    }
     if on.ask.accept == Accept::Streams && witness.capture {
         return Ok(judged(
             witness,
@@ -371,17 +408,17 @@ fn ran_by_oracle(oracle: &Oracle<'_>, witness: &Witness) -> Result<Observation> 
     }
 }
 
-/// The two streams a capture writes: the oracle's `first` run, held to a
-/// second from a scratch tree apart ([`oracle::Place::Apart`]), each
-/// already under the recipe's normalisation. `Err` names what the two runs
-/// did not agree on, the status or each line that differs, since a line
-/// that moves with the directory, the process or the clock is the
-/// author's to write with a wildcard (harness §8, #801).
-fn again(
+/// The oracle's run of `witness` again from a scratch tree apart
+/// ([`oracle::Place::Apart`]), held to `first`'s status: the second run a
+/// write of the oracle's streams stands on, a capture's (#801) and a
+/// body's (#3455), since a line that moves with the directory, the
+/// process or the clock is the author's to write with a wildcard
+/// (harness §8). `Err` names a status the two runs did not agree on.
+fn apart(
     oracle: &Oracle<'_>,
     witness: &Witness,
     first: &Observation,
-) -> Result<(String, String), String> {
+) -> Result<Observation, String> {
     let second = ran_by_oracle(&oracle.apart(), witness)
         .map_err(|trouble| format!("the oracle's second run did not run: {trouble:#}"))?;
     if first.exit != second.exit {
@@ -396,17 +433,38 @@ fn again(
             status(&second)
         ));
     }
+    Ok(second)
+}
+
+/// A run's two streams as the text a fence holds, each already under the
+/// recipe's normalisation; `Err` names each that is not UTF-8.
+fn texts(ran: &Observation) -> Result<[&str; 2], String> {
+    let (stdout, stderr) = (
+        std::str::from_utf8(&ran.stdout),
+        std::str::from_utf8(&ran.stderr),
+    );
+    if let (Ok(stdout), Ok(stderr)) = (stdout, stderr) {
+        return Ok([stdout, stderr]);
+    }
+    let not = [("stdout", stdout.is_err()), ("stderr", stderr.is_err())];
+    let named: Vec<String> = (not.iter().filter(|(_, not)| *not))
+        .map(|(name, _)| format!("{name} is not UTF-8, which a fence cannot hold"))
+        .collect();
+    Err(named.join("; "))
+}
+
+/// The two streams a capture writes: the oracle's `first` run, held to a
+/// second apart ([`apart`]) line by line. `Err` names what the two runs
+/// did not agree on, the status or each line that differs.
+fn again(
+    oracle: &Oracle<'_>,
+    witness: &Witness,
+    first: &Observation,
+) -> Result<(String, String), String> {
+    let second = apart(oracle, witness, first)?;
+    let [one, two] = [texts(first)?, texts(&second)?];
     let mut moved = Vec::new();
-    let mut texts = [String::new(), String::new()];
-    let pairs = [
-        ("stdout", &first.stdout, &second.stdout),
-        ("stderr", &first.stderr, &second.stderr),
-    ];
-    for (text, (name, one, two)) in texts.iter_mut().zip(pairs) {
-        let (Ok(one), Ok(two)) = (std::str::from_utf8(one), std::str::from_utf8(two)) else {
-            moved.push(format!("{name} is not UTF-8, which a fence cannot hold"));
-            continue;
-        };
+    for (name, one, two) in [("stdout", one[0], two[0]), ("stderr", one[1], two[1])] {
         let (mut a, mut b) = (one.split('\n'), two.split('\n'));
         for at in 1.. {
             match (a.next(), b.next()) {
@@ -419,13 +477,53 @@ fn again(
                 )),
             }
         }
-        one.clone_into(text);
     }
     if !moved.is_empty() {
         return Err(moved.join("; "));
     }
-    let [stdout, stderr] = texts;
-    Ok((stdout, stderr))
+    Ok((one[0].to_owned(), one[1].to_owned()))
+}
+
+/// The two streams `--bodies` writes into a plain fence the oracle's
+/// `first` run does not meet: the oracle's, from it and a second run
+/// apart ([`apart`]), each authored line whose wildcards the oracle's
+/// still meets in both kept as written ([`body::kept`]). The fence's
+/// status is not a body's to move: one the fence pins and the oracle does
+/// not give is refused, since a difference in a status is the registry's
+/// or a fix's (design §8). What it would write is held whole to both runs
+/// by [`met`], the judge's own rule, so it writes nothing the judge would
+/// fail. `Err` names why nothing is written.
+fn bodies(
+    oracle: &Oracle<'_>,
+    witness: &Witness,
+    exit: Exit,
+    first: &Observation,
+) -> Result<(String, String), String> {
+    if first.exit.code() != exit.asserted() {
+        let pinned = (exit.asserted()).map_or_else(|| "none".to_owned(), |c| format!("status {c}"));
+        return Err(format!(
+            "the oracle ends on {} and the fence pins {pinned}, and a body's write moves no status",
+            first.exit
+        ));
+    }
+    let second = apart(oracle, witness, first)?;
+    let [one, two] = [texts(first)?, texts(&second)?];
+    let pin = oracle.pin();
+    let rules = &pin.recipe.normalise;
+    let stderr = witness.stderr.as_deref().unwrap_or_default();
+    let mut written = witness.clone();
+    written.stdout = super::body::kept(rules, "stdout", &witness.stdout, [one[0], two[0]])?;
+    let stderr = super::body::kept(rules, "stderr", stderr, [one[1], two[1]])?;
+    written.stderr = Some(stderr);
+    for ran in [first, &second] {
+        if !met(pin, &written, exit, ran).unwrap_or(false) {
+            return Err(
+                "the authored lines kept among the oracle's do not meet the oracle's run as a whole"
+                    .to_owned(),
+            );
+        }
+    }
+    Ok((written.stdout, written.stderr.unwrap_or_default()))
 }
 
 /// A witness borked on `trouble`, or the `Err` [`one`] returns where the

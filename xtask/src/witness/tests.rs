@@ -737,6 +737,65 @@ fn a_capture_whose_two_runs_differ_names_the_line_and_captures_nothing() {
     );
 }
 
+/// The refusals of `--accept --bodies`, by the fixtures it must refuse
+/// (#3455): a plain fence whose two oracle runs print two `string(N)` and
+/// whose body has no wildcard meeting both is written nothing and fails,
+/// its note naming the line and each run's text of it; a fence a `trace:`
+/// row covers is written nothing and stays covered, its note naming the
+/// row.
+#[test]
+fn a_body_the_two_runs_differ_on_or_a_row_covers_is_written_nothing_and_named() {
+    if oracle().is_none() {
+        return;
+    }
+    let ask = Ask {
+        accept: Accept::Bodies,
+        ..Ask::default()
+    };
+    for (name, judged, said) in [
+        (
+            "bodies-moves",
+            Judgement::Fail,
+            "`--bodies` wrote nothing: stdout line 1 is `string(",
+        ),
+        (
+            "bodies-covered",
+            Judgement::Covered,
+            "`--bodies` wrote nothing: the fence pins the engine's side of trace:fixture-bodies-covered",
+        ),
+    ] {
+        let root = workspace().join("xtask/fixtures/witness").join(name);
+        let fixture = Manifest::load(&root).unwrap();
+        let found = super::extract(&root, &fixture.crates[0], None, Target::built()).unwrap();
+        let registry = Registry::load(&root).unwrap();
+        let oracle = fixture.pin().unwrap().oracle();
+        let tally = judge(&oracle, &binary(), &registry, &ask, &found, None).unwrap();
+        let (judgement, note) = only(&tally);
+        assert_eq!(judgement, judged, "{name}: {note}");
+        assert!(tally.captured.is_empty(), "{name}: {tally:#?}");
+        assert!(note.starts_with(said), "{name}: {note}");
+    }
+    // A status the fence pins and the oracle does not give is no body's
+    // to move: the fence is written nothing, and fails as it stands.
+    let text =
+        "/// ```php\n/// echo 2; exit(3);\n/// ```\n/// ```expect\n/// 1\n/// ```\npub fn k() {}\n";
+    let tally = judged(
+        Path::new("ext/fixture/src/lib.rs"),
+        text,
+        &registry(""),
+        Accept::Bodies,
+    );
+    let (judgement, note) = only(&tally);
+    assert_eq!(judgement, Judgement::Fail, "{note}");
+    assert!(tally.captured.is_empty(), "{tally:#?}");
+    assert!(
+        note.starts_with(
+            "`--bodies` wrote nothing: the oracle ends on status 3 and the fence pins status 0"
+        ),
+        "{note}"
+    );
+}
+
 /// An accepted row names one side of a difference, the oracle's or the
 /// engine's, so it accepts a fence one run misses and never one both miss.
 #[test]

@@ -84,6 +84,19 @@
 //! capture never invents one. What it wrote is printed fence by fence,
 //! and held as any fence is.
 //!
+//! **What `--accept --bodies` writes** (#3455, as Mitchell ruled on
+//! #3429). The status, and into each plain fence the oracle does not
+//! meet, the fence whole from the instrument's own two runs of the oracle,
+//! the same two a capture stands on: a fence's body is its author's and
+//! the oracle judges it, so a fence the oracle meets is left byte for
+//! byte. Each authored line whose wildcards the oracle's line still meets
+//! in both runs is kept as written ([`body`]), and the oracle's line is
+//! written for the rest. A line the two runs differ on that no kept line
+//! meets, a status the fence pins and the oracle does not give, and a
+//! fence a `trace:` row covers, whose body is the engine's side of the
+//! row, are refused: nothing is written, and the verdict's note names
+//! why. What it wrote is printed fence by fence, as a capture's is.
+//!
 //! **What coverage is.** The manifest's `witness.coverage` rule names the
 //! scope, `crates/php_engine/src/ops/**` and `ext/*/src/**`; a kernel or a
 //! native there without a witness raises `missing`, and `done` prints it
@@ -123,6 +136,7 @@
 //! `skipped` in the reading, and neither a pass nor a fail.
 
 mod anchor;
+mod body;
 pub(crate) mod fence;
 mod fpm;
 mod host;
@@ -504,14 +518,20 @@ pub enum Accept {
     /// each fence marked `capture`, where a second run from a scratch
     /// directory apart prints them byte for byte.
     Streams,
+    /// `--accept --bodies`: the status, and into each plain fence the
+    /// oracle does not meet, the oracle's two streams where a second run
+    /// apart prints them again, each authored line the oracle's still
+    /// meets kept as written ([`body`]; #3455, as #3429 ruled).
+    Bodies,
 }
 
 impl From<crate::cli::Accepting> for Accept {
     fn from(asked: crate::cli::Accepting) -> Accept {
-        match (asked.accept, asked.streams) {
-            (false, _) => Accept::Nothing,
-            (true, false) => Accept::Status,
-            (true, true) => Accept::Streams,
+        match (asked.accept, asked.streams, asked.bodies) {
+            (false, ..) => Accept::Nothing,
+            (true, false, false) => Accept::Status,
+            (true, true, _) => Accept::Streams,
+            (true, false, true) => Accept::Bodies,
         }
     }
 }
@@ -523,6 +543,7 @@ impl Accept {
             Accept::Nothing => &[],
             Accept::Status => &["--accept"],
             Accept::Streams => &["--accept", "--streams"],
+            Accept::Bodies => &["--accept", "--bodies"],
         }
     }
 }
