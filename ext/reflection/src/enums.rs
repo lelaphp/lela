@@ -11,7 +11,7 @@ use php_ext::abi::{Instance, Raw, This, Union};
 use php_ext::attr::php_class;
 use php_ext::call::class_constant;
 use php_ext::decl::{ClassKind, EnumBacking, Type};
-use php_ext::raising::{Thrown, fatal, throw, throw_error};
+use php_ext::raising::{Thrown, fatal, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value};
 
@@ -51,7 +51,7 @@ fn held_to_enum(req: &mut Request, class: ClassId) -> Result<(), Thrown> {
         return Ok(());
     }
     let name = class_name_of(req, class);
-    Err(throw(
+    Err(throw_exception_ex(
         req,
         "ReflectionException",
         &format!(
@@ -217,7 +217,7 @@ impl ReflectionEnum {
             let message = format
                 .replacen("{}", &String::from_utf8_lossy(&held), 1)
                 .replacen("{}", &String::from_utf8_lossy(&name), 1);
-            return Err(throw(req, "ReflectionException", &message));
+            return Err(throw_exception_ex(req, "ReflectionException", &message));
         }
         let object = case_factory(req, class, &name)?;
         Ok(object.into_instance())
@@ -350,7 +350,7 @@ impl ReflectionEnumUnitCase {
             // `ReflectionClassConstant::__construct`'s refusal, which the
             // case constructor runs first.
             let held = class_name_of(req, class);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -370,7 +370,7 @@ impl ReflectionEnumUnitCase {
             String::from_utf8_lossy(&name)
         );
         if !case_names(req, class).contains(&name) {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!("Constant {shown} is not a case"),
@@ -380,7 +380,7 @@ impl ReflectionEnumUnitCase {
         let backed_reflector =
             class_name_of(req, this.class()).eq_ignore_ascii_case(b"ReflectionEnumBackedCase");
         if backed_reflector && backing_of(req, class).is_none() {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!("Enum case {shown} is not a backed case"),

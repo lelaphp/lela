@@ -488,7 +488,7 @@ fn a_subset_the_pinned_tree_has_not_is_a_reading_that_says_so_and_not_a_silent_d
     let reading = &readings[0];
     assert_eq!(reading.status, Status::Fail, "{reading:#?}");
     assert!(
-        reading.message.contains("Zend/nope") && reading.message.contains("php-8.5.9"),
+        reading.message.contains("Zend/nope") && reading.message.contains("php-8.5.12"),
         "the row and the pin are both named: {}",
         reading.message
     );

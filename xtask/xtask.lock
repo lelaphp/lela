@@ -422,6 +422,7 @@ vocab::run
 witness::Accept
 witness::Ask
 witness::Scope
+witness::record_accepted
 witness::run
 worktree::add
 worktree::retire

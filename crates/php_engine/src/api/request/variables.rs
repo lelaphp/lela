@@ -301,7 +301,9 @@ impl Request {
                             .is_some_and(|method| method.name().eq_ignore_ascii_case(b"POST"))
                     }) =>
             {
-                let array = PhpArray::new(self)?;
+                // `php_default_treat_data`'s `PARSE_POST`,
+                // `array_init_singleton` (`Z/main/php_variables.c:502`).
+                let array = self.array_singleton()?;
                 self.handle_post(*array, &BodyLimits::default())?;
                 array
             }
@@ -825,7 +827,7 @@ impl Variables<&mut Request> {
 }
 
 impl Request {
-    /// `php_default_treat_data` (`Z/main/php_variables.c:455`) for the
+    /// `php_default_treat_data` (`Z/main/php_variables.c:487`) for the
     /// query string and the cookie header: a fresh array, and each
     /// variable of `source` registered into it.
     pub(crate) fn treat_data(
@@ -833,7 +835,8 @@ impl Request {
         input: Input,
         source: Option<&[u8]>,
     ) -> Result<Owner<PhpArray>, Thrown> {
-        let array = PhpArray::new(self)?;
+        // `array_init_singleton` (`Z/main/php_variables.c:502`).
+        let array = self.array_singleton()?;
         self.treat_into(input, source, *array, &BodyLimits::default())?;
         Ok(array)
     }
@@ -1036,24 +1039,28 @@ impl Request {
     /// array's from here, and so is each key the walk makes.
     ///
     /// A plain name is `php_register_variable_quick`'s, and a bracketed
-    /// name's containers are `zend_symtable_str_update_ind`'s, each a
-    /// string of its own whatever its length:
+    /// name's containers are `zend_symtable_str_update_ind`'s, each key a
+    /// string of its own whatever its length, and each container an
+    /// `array_init_singleton`, room for one element that doubles as it
+    /// fills:
     ///
     /// ```php
-    /// foreach (['x=1', 'xy=1', 'x[a]=1', 'xy[a]=1', 'x[ab]=1', 'xy[ab]=1', 'x[a][b]=1', '1[a]=1', 'x[1]=1'] as $q) {
+    /// foreach (['x=1', 'xy=1', 'x[a]=1', 'xy[a]=1', 'x[ab]=1', 'xy[ab]=1', 'x[a][b]=1', '1[a]=1', 'x[1]=1', 'x[]=1&x[]=2&x[]=3', 'x[a]=1&x[b]=2&x[c]=3'] as $q) {
     ///     $m = memory_get_usage(); parse_str($q, $r); $n = memory_get_usage() - $m; unset($r); echo $q, " ", $n, "\n";
     /// }
     /// ```
     /// ```expect regime=jit-off
     /// x=1 408
-    /// xy=1 440
-    /// x[a]=1 816
-    /// xy[a]=1 816
-    /// x[ab]=1 848
-    /// xy[ab]=1 848
-    /// x[a][b]=1 1224
-    /// 1[a]=1 624
-    /// x[1]=1 656
+    /// xy=1 448
+    /// x[a]=1 536
+    /// xy[a]=1 536
+    /// x[ab]=1 576
+    /// xy[ab]=1 576
+    /// x[a][b]=1 664
+    /// 1[a]=1 344
+    /// x[1]=1 536
+    /// x[]=1&x[]=2&x[]=3 576
+    /// x[a]=1&x[b]=2&x[c]=3 656
     /// ```
     pub(crate) fn register_in(
         &mut self,
@@ -1211,8 +1218,10 @@ impl Request {
         key: Option<Owner<Key>>,
     ) -> Result<Option<Owner<Key>>, Thrown> {
         let mut parent = descend(track, path);
+        // Each container `array_init_singleton`'s
+        // (`Z/main/php_variables.c:260`, `:277`, `:285`).
         let Some(key) = key else {
-            let fresh = PhpArray::new(self)?;
+            let fresh = self.array_singleton()?;
             if !parent.try_append(self, fresh.into_value())? {
                 return Ok(None);
             }
@@ -1220,7 +1229,7 @@ impl Request {
             return Ok(last.map(|key| Owner::take(self, key)));
         };
         if parent.get(&key).is_none_or(|v| v.as_array().is_none()) {
-            let fresh = match PhpArray::new(self) {
+            let fresh = match self.array_singleton() {
                 Ok(fresh) => fresh,
                 Err(thrown) => {
                     key.give_up(self);

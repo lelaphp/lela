@@ -221,13 +221,15 @@ impl Exponent {
     }
 }
 
-/// `zend_gcvt` (`Zend/zend_strtod.c:4509`), which every float php prints
-/// goes through: `precision` significant digits when it is not negative,
-/// and the shortest text that reads back as the same double when it is,
-/// which is what `serialize_precision = -1` asks for. The form is php's:
-/// exponential when the decimal point stands past `ndigit` digits or more
-/// than three places before them, fixed otherwise, with the exponent
-/// character the caller passes, as php's callers each pass their own.
+/// `zend_double_to_str` and `smart_str_append_double`, which a float's
+/// conversion to a string, `echo`, `print_r` and `var_export` go
+/// through: [`gcvt`] at `precision ? precision : 1`
+/// (`Z/Zend/zend_operators.c:3621`, `Z/Zend/zend_smart_str.c:160`), so a
+/// `precision` of `0` prints as `1` does. `precision` significant digits
+/// when it is not negative, and the shortest text that reads back as the
+/// same double when it is, which is what `var_export` at its
+/// `serialize_precision = -1` asks for, with the exponent character the
+/// caller passes, as php's callers each pass their own.
 ///
 /// ```php
 /// echo 2.5, "|", 1.0, "|", 0.1 + 0.2, "|", 1e25, "|", 0.00001, "|", 1/3, "|", -0.0, "|", INF, "|", -INF, "|", 5e-324, "|", 0.001;
@@ -278,28 +280,9 @@ impl Exponent {
 /// [0.10000000000000000555,1.0000000000000000906e+25]|0.10000000000000000555
 /// ```
 ///
-/// A non-finite double is its word, `INF`, `-INF` or `NAN`, written by
-/// `snprintf(buf, ndigit + 1, ...)` (`Z/Zend/zend_strtod.c:4525`), so a
-/// precision shorter than the word cuts it; the shortest form's 17 never
-/// does:
-///
-/// ```php
-/// $inf = INF;
-/// foreach ([0, 1, 2, 3, -1] as $p) {
-///     ini_set('precision', $p); ini_set('serialize_precision', $p);
-///     echo $p, ": ", INF, "|", -INF, "|", @strval(NAN), "|", serialize(-INF), "|", var_export(NAN, true), "|", print_r(-INF, true), "|", "IN" == $inf ? "eq" : "ne", "\n";
-/// }
-/// ```
-/// ```expect
-/// 0: I|-|N|d:;|N|-|ne
-/// 1: I|-|N|d:-;|N|-|ne
-/// 2: IN|-I|NA|d:-I;|NA|-I|eq
-/// 3: INF|-IN|NAN|d:-IN;|NAN|-IN|ne
-/// -1: INF|-INF|NAN|d:-INF;|NAN|-INF|ne
-/// ```
-///
-/// The paths that format a non-finite double on their own keep the word
-/// whole at every precision: `var_dump`'s `%.*H`, userland `printf` and
+/// A non-finite double is cut to the precision as [`gcvt`] cuts it, and
+/// the paths that format one on their own keep the word whole at every
+/// precision: `var_dump`'s `%.*H`, userland `printf` and
 /// `json_encode`, which refuses one:
 ///
 /// ```php
@@ -325,10 +308,82 @@ impl Exponent {
 /// ```
 #[must_use]
 pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> String {
+    gcvt(value, if precision == 0 { 1 } else { precision }, exponent)
+}
+
+/// `zend_gcvt(value, ndigit, '.', exponent, buf)` (`Z/Zend/zend_strtod.c:4509`)
+/// at the `ndigit` its caller hands it, as `serialize`, `json_encode` and
+/// soap's `to_xml_double` hand it `serialize_precision` or `precision` as
+/// the entry stands, where [`double_to_string`] hands it one for a zero.
+/// The digits are `zend_dtoa`'s: `ndigit` of them, a count under one
+/// read as one, or for a negative `ndigit` the shortest that reads back
+/// as the same double, the `ndigit` then read as 17. The form is php's:
+/// exponential when the decimal point stands past `ndigit` digits or more
+/// than three places before them, fixed otherwise. So at an `ndigit` of `0` the one digit is written
+/// exponentially whenever the point stands past it, and `10/3` is
+/// `3.0E+0` where a precision of one prints `3`:
+///
+/// ```php
+/// ini_set('serialize_precision', 0);
+/// echo serialize([10/3, 0.25, 123456789.0, 0.0]), "|", json_encode([10/3, 0.25, 1.5, 0.0, -1.5, 1e25]), "\n";
+/// ```
+/// ```expect
+/// a:4:{i:0;d:3.0E+0;i:1;d:0.2;i:2;d:1.0E+8;i:3;d:0.0E+0;}|[3.0e+0,0.2,2.0e+0,0.0e+0,-2.0e+0,1.0e+25]
+/// ```
+///
+/// At one digit the form is the one `precision = 0` prints, and at
+/// seventeen the shortest text that reads back is no longer what is
+/// asked for, so `0.1` carries its seventeenth digit:
+///
+/// ```php
+/// foreach ([0, 1, 17, -1] as $p) {
+///     ini_set('serialize_precision', $p);
+///     echo $p, ": ", serialize([10/3, 0.1, -1.5, 1e25, 5e-324, INF, -INF, NAN]), "\n";
+/// }
+/// ```
+/// ```expect
+/// 0: a:8:{i:0;d:3.0E+0;i:1;d:0.1;i:2;d:-2.0E+0;i:3;d:1.0E+25;i:4;d:5.0E-324;i:5;d:;i:6;d:;i:7;d:;}
+/// 1: a:8:{i:0;d:3;i:1;d:0.1;i:2;d:-2;i:3;d:1.0E+25;i:4;d:5.0E-324;i:5;d:I;i:6;d:-;i:7;d:N;}
+/// 17: a:8:{i:0;d:3.3333333333333335;i:1;d:0.10000000000000001;i:2;d:-1.5;i:3;d:1.0000000000000001E+25;i:4;d:4.9406564584124654E-324;i:5;d:INF;i:6;d:-INF;i:7;d:NAN;}
+/// -1: a:8:{i:0;d:3.3333333333333335;i:1;d:0.1;i:2;d:-1.5;i:3;d:1.0E+25;i:4;d:5.0E-324;i:5;d:INF;i:6;d:-INF;i:7;d:NAN;}
+/// ```
+///
+/// A non-finite double is its word, `INF`, `-INF` or `NAN`, written by
+/// `snprintf(buf, ndigit + 1, ...)` (`Z/Zend/zend_strtod.c:4525`), so a
+/// precision shorter than the word cuts it; the shortest form's 17 never
+/// does:
+///
+/// ```php
+/// $inf = INF;
+/// foreach ([0, 1, 2, 3, -1] as $p) {
+///     ini_set('precision', $p); ini_set('serialize_precision', $p);
+///     echo $p, ": ", INF, "|", -INF, "|", @strval(NAN), "|", serialize(-INF), "|", var_export(NAN, true), "|", print_r(-INF, true), "|", "IN" == $inf ? "eq" : "ne", "\n";
+/// }
+/// ```
+/// ```expect
+/// 0: I|-|N|d:;|N|-|ne
+/// 1: I|-|N|d:-;|N|-|ne
+/// 2: IN|-I|NA|d:-I;|NA|-I|eq
+/// 3: INF|-IN|NAN|d:-IN;|NAN|-IN|ne
+/// -1: INF|-INF|NAN|d:-INF;|NAN|-INF|ne
+/// ```
+///
+/// Under an `ndigit` of `0` that word is nothing at all, since
+/// `snprintf(buf, 0 + 1, ...)` keeps no character of it:
+///
+/// ```php
+/// ini_set('serialize_precision', 0);
+/// echo serialize([INF, -INF, NAN, 1.5]), "\n";
+/// ```
+/// ```expect
+/// a:4:{i:0;d:;i:1;d:;i:2;d:;i:3;d:2.0E+0;}
+/// ```
+#[must_use]
+pub fn gcvt(value: f64, ndigit: i32, exponent: Exponent) -> String {
     // `zend_gcvt` asks `zend_dtoa` for the shortest digits when `ndigit`
     // is negative, and reads `ndigit` as 17 for the form it then chooses,
     // whatever those digits came to.
-    let ndigit = if precision < 0 { 17 } else { precision.max(1) };
+    let form_ndigit = if ndigit < 0 { 17 } else { ndigit };
     if !value.is_finite() {
         let word = if value.is_nan() {
             "NAN"
@@ -337,15 +392,15 @@ pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> Strin
         } else {
             "-INF"
         };
-        let kept = usize::try_from(ndigit).unwrap_or(0).min(word.len());
+        let kept = usize::try_from(form_ndigit).unwrap_or(0).min(word.len());
         return word[..kept].to_owned();
     }
-    let (digits, point) = significant(value.abs(), precision);
+    let (digits, point) = significant(value.abs(), ndigit);
     let mut out = String::new();
     if value.is_sign_negative() {
         out.push('-');
     }
-    if (point >= 0 && point > ndigit) || point < -3 {
+    if (point >= 0 && point > form_ndigit) || point < -3 {
         exponential(&mut out, &digits, point - 1, exponent);
     } else {
         fixed(&mut out, &digits, point);
@@ -356,9 +411,10 @@ pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> Strin
 /// `zend_dtoa`'s two answers for a value that is finite and not negative:
 /// the significant digits with their trailing zeros dropped, and where
 /// the decimal point stands among them (php's `decpt`, one past the last
-/// digit before it). A `precision` that is not negative asks for that
+/// digit before it). An `ndigit` that is not negative asks for that
 /// many digits, and a negative one for the shortest that reads back as
-/// the same double; Rust's formatter gives both.
+/// the same double; Rust's formatter gives both. A count under one is
+/// one, as `zend_dtoa` reads it (`Z/Zend/zend_strtod.c:3940`).
 ///
 /// Asked for a digit count, `zend_dtoa` rounds the double's own decimal
 /// expansion to it, under no cap of its own: past seventeen those digits
@@ -367,11 +423,11 @@ pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> Strin
 /// `0.10000000000000000555`. Rust's formatter rounds the same expansion
 /// by the same rule, half to even, which is `zend_dtoa`'s where
 /// `ROUND_BIASED` is not defined, as php does not define it.
-fn significant(value: f64, precision: i32) -> (String, i32) {
-    let rendered = if precision < 0 {
+fn significant(value: f64, ndigit: i32) -> (String, i32) {
+    let rendered = if ndigit < 0 {
         format!("{value:e}")
     } else {
-        let ndigit = usize::try_from(precision.max(1))
+        let ndigit = usize::try_from(ndigit.max(1))
             .unwrap_or(EXACT_DIGITS)
             .min(EXACT_DIGITS);
         format!("{value:.*e}", ndigit - 1)
@@ -593,6 +649,33 @@ mod tests {
         assert_eq!(double_to_string(1e25, -1, Exponent::Lower), "1.0e+25");
         assert_eq!(double_to_string(1e-5, -1, Exponent::Lower), "1.0e-5");
         assert_eq!(double_to_string(0.1, -1, Exponent::Lower), "0.1");
+    }
+
+    /// `zend_gcvt` at an `ndigit` of `0`, as `serialize`, `json_encode`
+    /// and soap hand it the entry: one digit, written exponentially once
+    /// the point stands past it, and no character of a non-finite word;
+    /// `zend_double_to_str` hands it one instead. Read off the oracle.
+    #[test]
+    fn an_ndigit_of_zero_is_zend_gcvt_s_and_a_precision_of_zero_is_one() {
+        for (value, raw, clamped) in [
+            (10.0_f64 / 3.0, "3.0E+0", "3"),
+            (0.25, "0.2", "0.2"),
+            (0.0, "0.0E+0", "0"),
+            (-1.5, "-2.0E+0", "-2"),
+            (123_456_789.0, "1.0E+8", "1.0E+8"),
+            (1e25, "1.0E+25", "1.0E+25"),
+            (f64::INFINITY, "", "I"),
+            (f64::NEG_INFINITY, "", "-"),
+            (f64::NAN, "", "N"),
+        ] {
+            assert_eq!(gcvt(value, 0, Exponent::Upper), raw, "{value} at ndigit 0");
+            assert_eq!(
+                double_to_string(value, 0, Exponent::Upper),
+                clamped,
+                "{value} at precision 0"
+            );
+        }
+        assert_eq!(gcvt(10.0 / 3.0, 0, Exponent::Lower), "3.0e+0");
     }
 
     /// Every row read off the oracle at the pin: `zend_dtoa` takes the

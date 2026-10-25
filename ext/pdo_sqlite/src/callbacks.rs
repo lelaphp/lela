@@ -9,7 +9,7 @@
 use php_ext::abi::Callable;
 use php_ext::call::call;
 use php_ext::coerce::{value_name, with_string};
-use php_ext::raising::{Thrown, throw_error};
+use php_ext::raising::{Thrown, type_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpRef, PhpString, Value, ValueRef};
 
@@ -250,9 +250,8 @@ fn collate(
     let name = req.frames().active_function_name();
     let given = value_name(req, &returned);
     returned.give_up(req);
-    let thrown = throw_error(
+    let thrown = type_error(
         req,
-        "TypeError",
         &format!(
             "{name}(): Return value of the collation callback must be of type int, {given} returned"
         ),
@@ -297,9 +296,8 @@ fn authorize(
     let given = value_name(req, &returned);
     returned.give_up(req);
     let Some(answer) = answer else {
-        return Err(throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             &format!(
                 "{name}(): Return value of the authorizer callback must be of type int, {given} returned"
             ),
@@ -307,9 +305,8 @@ fn authorize(
     };
     match i32::try_from(answer) {
         Ok(answer @ (SQLITE_OK | SQLITE_IGNORE | SQLITE_DENY)) => Ok(answer),
-        _ => Err(throw_error(
+        _ => Err(value_error(
             req,
-            "ValueError",
             &format!(
                 "{name}(): Return value of the authorizer callback must be one of Pdo\\Sqlite::OK, Pdo\\Sqlite::DENY, or Pdo\\Sqlite::IGNORE"
             ),

@@ -11,7 +11,8 @@ use php_ext::call::{autoload, call, call_array, known_method, lookup_class, new_
 use php_ext::coerce::{callable_checked, to_long, to_string, truthy, value_name, with_string};
 use php_ext::decl::Name;
 use php_ext::raising::{
-    Level, Thrown, arg_count_error, argument_error, docref, throw_error, while_pending,
+    Level, Thrown, arg_count_error, argument_error, docref, throw_error, type_error, value_error,
+    while_pending,
 };
 use php_ext::request::{Request, Streams as _};
 use php_ext::values::{
@@ -307,14 +308,13 @@ pub(super) fn value(
 ) -> Result<Owner<Value>, Thrown> {
     let count = stmt::read(req, object, |s| s.column_count).unwrap_or(0);
     let Ok(at) = usize::try_from(column) else {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "Column index must be greater than or equal to 0",
         ));
     };
     if at >= count {
-        return Err(throw_error(req, "ValueError", "Invalid column index"));
+        return Err(value_error(req, "Invalid column index"));
     }
     let got = stmt::with_driver(req, object, |req, driver| driver.value(req, at, ty))?;
     let mut value = match got {
@@ -1042,14 +1042,13 @@ fn column_row(
         column
     };
     if colno < 0 {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "Column index must be greater than or equal to 0",
         ));
     }
     if usize::try_from(colno).is_ok_and(|c| c >= count) {
-        return Err(throw_error(req, "ValueError", "Invalid column index"));
+        return Err(value_error(req, "Invalid column index"));
     }
     let read_at = if flags.is(Flag::Group) && column == -1 {
         1
@@ -1628,7 +1627,7 @@ fn all_arguments(
             };
             with.func = match callable_checked(req, &callback) {
                 Ok(callable) => Some(callable),
-                Err(error) => return Err(throw_error(req, "TypeError", &error)),
+                Err(error) => return Err(type_error(req, &error)),
             };
         }
         Some(Kind::Column) => {

@@ -11,7 +11,7 @@
 //! engine ([`Translation`]).
 
 use crate::api::abi::{Encoding, Multibyte};
-use crate::api::raising::{Level, Thrown, docref, throw};
+use crate::api::raising::{Level, Thrown, docref, throw_exception_ex};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{Owner, PhpArray, PhpString, Value};
@@ -425,7 +425,11 @@ impl Handler {
     /// `request_parse_body()`, the warning otherwise.
     fn refuse(&self, req: &mut Request, message: &str) -> Result<(), Thrown> {
         if self.throwing {
-            return Err(throw(req, "RequestParseBodyException", message));
+            return Err(throw_exception_ex(
+                req,
+                "RequestParseBodyException",
+                message,
+            ));
         }
         docref(req, Level::Warning, message);
         Ok(())

@@ -14,7 +14,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use php_ext::abi::{Class, ClassRef, Instance, OrFalse, Path, Static, This, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::new_object;
-use php_ext::raising::{Level, Thrown, argument_error, docref, throw, throw_error};
+use php_ext::raising::{
+    Level, Thrown, argument_error, docref, throw, throw_error, throw_exception_ex,
+};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{
@@ -143,7 +145,7 @@ pub(super) fn initialize(
         Made::Refused(errors) => {
             if how.ctor {
                 let (at, c, message) = first_error(&errors);
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "DateMalformedStringException",
                     &format!(
@@ -1920,7 +1922,7 @@ impl DateTime {
     /// $m = memory_get_usage(); $d = DateTime::createFromTimestamp(1); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect
-    /// 3120 32
+    /// 3056 32
     /// 304
     /// ```
     #[php(tentative)]
@@ -2172,7 +2174,7 @@ impl DateTime {
     /// $tz = new DateTimeZone('+01:00'); $m = memory_get_usage(); $d = new DateTime('now', $tz); $e = new DateTime('@1'); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect
-    /// 3328 32
+    /// 3200 32
     /// 624
     /// ```
     fn setMicrosecond(

@@ -13,7 +13,7 @@ use php_ext::call::{
 };
 use php_ext::coerce::value_name;
 use php_ext::decl::PropertyDecl;
-use php_ext::raising::{Thrown, arg_type_error, argument_error, throw};
+use php_ext::raising::{Thrown, arg_type_error, argument_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Owner, PhpObject};
 
@@ -114,7 +114,11 @@ pub(super) fn reset_as_lazy(
     let object = object_of(req, object, class, 1)?;
     held_options(req, 3, options)?;
     if object.is_lazy() {
-        return Err(throw(req, "ReflectionException", "Object is already lazy"));
+        return Err(throw_exception_ex(
+            req,
+            "ReflectionException",
+            "Object is already lazy",
+        ));
     }
     match strategy {
         Strategy::Ghost => reset_as_lazy_ghost(req, &object, class, initializer, options),
@@ -149,7 +153,7 @@ pub(super) fn lazy_compatible(
     let shown = String::from_utf8_lossy(name).into_owned();
     let Some((class, declared)) = prop else {
         let of = String::from_utf8_lossy(&class_name_of(req, asked)).into_owned();
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!("Can not use {method} on dynamic property {of}::${shown}"),
@@ -158,7 +162,7 @@ pub(super) fn lazy_compatible(
     let class = *class;
     if !declared.is_instance {
         let of = String::from_utf8_lossy(&class_name_of(req, class)).into_owned();
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!("Can not use {method} on static property {of}::${shown}"),
@@ -167,7 +171,7 @@ pub(super) fn lazy_compatible(
     // `ZEND_ACC_VIRTUAL`: a property with no slot has none to write.
     if php_ext::call::property_is_virtual(req, class, name) {
         let of = String::from_utf8_lossy(&class_name_of(req, class)).into_owned();
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!("Can not use {method} on virtual property {of}::${shown}"),
@@ -181,7 +185,7 @@ pub(super) fn lazy_compatible(
         .any(|at| is_internal(req, at) && Some(at) != std_class);
     if internal {
         let of = String::from_utf8_lossy(&class_name_of(req, object.class())).into_owned();
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!("Can not use {method} on internal class {of}"),

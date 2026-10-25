@@ -6,7 +6,7 @@
 //! is a C string, so a line and a key end at their first NUL.
 
 use php_ext::coerce::c_str;
-use php_ext::raising::{Level, Thrown, docref, throw};
+use php_ext::raising::{Level, Thrown, docref, throw_error};
 use php_ext::request::{OwnedStream as _, Request, Stream, Streams as _, Whence};
 use php_ext::values::Owner;
 
@@ -455,7 +455,7 @@ impl Inifile {
                 rest.seek(req, 0, Whence::Set);
                 file.seek(req, 0, Whence::End);
                 if !copy(req, rest, file, None) {
-                    result = Err(throw(
+                    result = Err(throw_error(
                         req,
                         "Error",
                         "Could not copy from temporary stream - ini file truncated",

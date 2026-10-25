@@ -10,7 +10,7 @@ use php_ext::abi::{
 };
 use php_ext::call::{call_method, lookup_class, new_object};
 use php_ext::coerce::{to_double, to_long, to_number, to_string, value_name, with_string};
-use php_ext::raising::{Level, Thrown, docref, throw_error, throw_error_chained};
+use php_ext::raising::{Level, Thrown, docref, throw_error, type_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self};
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, ValueRef};
@@ -538,7 +538,7 @@ fn prop_dim_read(
 /// `value_str`, or php's `TypeError` for a value with none.
 fn text_of(req: &mut Request, value: &Value, access: Access) -> Result<Vec<u8>, Thrown> {
     match complex(req, value, access) {
-        Some(message) => Err(throw_error(req, "TypeError", &message)),
+        Some(message) => Err(type_error(req, &message)),
         None => plain_text(req, value),
     }
 }
@@ -710,9 +710,8 @@ fn write_access(
                 Access::Attributes => "attribute",
                 Access::Elements => "element",
             };
-            Err(throw_error(
+            Err(value_error(
                 req,
-                "ValueError",
                 &format!("Cannot create {what} with an empty name"),
             ))
         }
@@ -763,7 +762,10 @@ fn prop_dim_write(
         // buffer standing across the throw) then chains it as its previous.
         Err(uninitialised) => {
             return Err(match value.and_then(|v| complex(req, v, access)) {
-                Some(message) => throw_error_chained(req, uninitialised, "TypeError", &message),
+                Some(message) => {
+                    let now = type_error(req, &message);
+                    uninitialised.chain(req, now)
+                }
                 None => uninitialised,
             });
         }
@@ -784,11 +786,7 @@ fn prop_dim_write(
                     .and_then(Node::parent)
                     .is_some_and(|p| p.kind() == Kind::Document)
             {
-                return Err(throw_error(
-                    req,
-                    "ValueError",
-                    "Cannot append to an attribute list",
-                ));
+                return Err(value_error(req, "Cannot append to an attribute list"));
             }
             if let (Access::Attributes, None, Walk::Elements(name)) = (access, first, &view.walk) {
                 node = base.new_child(base.ns(), name, None);

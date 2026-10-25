@@ -9,7 +9,7 @@ use php_ext::abi::{Instance, OrFalse, Path, Raw, This, Union, Untyped};
 use php_ext::attr::php_class;
 use php_ext::coerce::value_name;
 use php_ext::raising::{
-    Level, Thrown, arg_value_error, argument_error, docref, throw, throw_error,
+    Level, Thrown, arg_value_error, argument_error, docref, throw_error, throw_exception_ex,
 };
 use php_ext::request::Request;
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, walk};
@@ -2110,7 +2110,7 @@ impl DOMNode {
     /// ```
     fn __sleep(req: &mut Request, this: This<Self>) -> Result<PhpArray, Thrown> {
         let name = class_name(req, this.object().class());
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "Exception",
             &format!(
@@ -2129,7 +2129,7 @@ impl DOMNode {
     /// ```
     fn __wakeup(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let name = class_name(req, this.object().class());
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "Exception",
             &format!(

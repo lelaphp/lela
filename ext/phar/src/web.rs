@@ -3,7 +3,7 @@
 //! from.
 
 use php_ext::abi::Callable;
-use php_ext::raising::{Thrown, throw};
+use php_ext::raising::{Thrown, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{PhpArray, PhpString, Value, walk};
 
@@ -56,7 +56,7 @@ pub(crate) fn mount(req: &mut Request, inner: &[u8], outer: &[u8]) -> Result<(),
         match path::split_fname(req, &file, Exec::Either, Create::No)? {
             Ok(split) => {
                 if inner.len() > 7 && inner.starts_with(b"phar://") {
-                    return Err(throw(
+                    return Err(throw_exception_ex(
                         req,
                         "PharException",
                         &format!(
@@ -85,7 +85,7 @@ fn fallback(req: &mut Request, file: &[u8], inner: &[u8], outer: &[u8]) -> Resul
     if let Ok(split) = path::split_fname(req, inner, Exec::Either, Create::No)? {
         return mount_in(req, &split.arch, Some(&split.arch), &split.entry, outer);
     }
-    Err(throw(
+    Err(throw_exception_ex(
         req,
         "PharException",
         &format!("Mounting of {} to {} failed", lossy(inner), lossy(outer)),
@@ -104,14 +104,14 @@ fn mount_in(
 ) -> Result<(), Thrown> {
     let shown = arch.map_or_else(|| "(null)".to_string(), |a| lossy(a).into_owned());
     let Some(id) = archives(req).by_fname(fname) else {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "PharException",
             &format!("{shown} is not a phar archive, cannot mount"),
         ));
     };
     if !entry::mount(req, id, outer, path)? {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "PharException",
             &format!(
@@ -141,14 +141,14 @@ pub(crate) fn mung_server(req: &mut Request, names: PhpArray) -> Result<(), Thro
         })
         .collect();
     if bits.is_empty() {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "PharException",
             &format!("No values passed to Phar::mungServer(), {LIST}"),
         ));
     }
     if bits.len() > 4 {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "PharException",
             &format!("Too many values passed to Phar::mungServer(), {LIST}"),
@@ -156,7 +156,7 @@ pub(crate) fn mung_server(req: &mut Request, names: PhpArray) -> Result<(), Thro
     }
     for bit in bits {
         let Some(bit) = bit else {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "PharException",
                 &format!("Non-string value passed to Phar::mungServer(), {LIST}"),
@@ -484,7 +484,7 @@ pub(crate) fn web_phar(
     match open::open_executed(req, alias.as_deref())? {
         Ok(()) => {}
         Err(None) => return Ok(()),
-        Err(Some(error)) => return Err(throw(req, "PharException", &error)),
+        Err(Some(error)) => return Err(throw_exception_ex(req, "PharException", &error)),
     }
     let served = req
         .variables()
@@ -598,7 +598,7 @@ fn rewritten(req: &mut Request, rewrite: &Callable, entry: &[u8]) -> Result<Vec<
         return Err(do_403(req));
     }
     answered.give_up(req);
-    Err(throw(
+    Err(throw_exception_ex(
         req,
         "PharException",
         "phar error: rewrite callback must return a string or false",
@@ -701,7 +701,7 @@ fn mime_of(req: &mut Request, entry: &[u8], mimes: PhpArray) -> Result<(Vec<u8>,
             return match code {
                 0 => Ok((Vec::new(), Mime::Php)),
                 1 => Ok((Vec::new(), Mime::Phps)),
-                _ => Err(throw(
+                _ => Err(throw_exception_ex(
                     req,
                     "PharException",
                     "Unknown mime type specifier used, only Phar::PHP, Phar::PHPS and a mime type string are allowed",
@@ -711,7 +711,7 @@ fn mime_of(req: &mut Request, entry: &[u8], mimes: PhpArray) -> Result<(Vec<u8>,
         if let Some(mime) = value.as_str_bytes() {
             return Ok((mime.to_vec(), Mime::Other));
         }
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "PharException",
             "Unknown mime type specifier used (not a string or int), only Phar::PHP, Phar::PHPS and a mime type string are allowed",

@@ -11,7 +11,7 @@ use php_ext::coerce::{
     callable_name, is_callable as callable, is_space, is_type, numeric_string, to_array, to_double,
     to_long, to_object, to_string, truthy,
 };
-use php_ext::raising::{Thrown, arg_value_error, throw_error, warning};
+use php_ext::raising::{Thrown, arg_value_error, value_error, warning};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, TypeTag, Value, ValueRef, walk};
 
@@ -353,11 +353,7 @@ fn settype(req: &mut Request, var: Ref<Value>, r#type: PhpString) -> Result<bool
         }
         b"null" => Owner::null(),
         b"resource" => {
-            return Err(throw_error(
-                req,
-                "ValueError",
-                "Cannot convert to resource type",
-            ));
+            return Err(value_error(req, "Cannot convert to resource type"));
         }
         _ => return Err(arg_value_error(req, 2, "be a valid type")),
     };

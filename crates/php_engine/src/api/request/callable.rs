@@ -62,8 +62,8 @@ impl Refusal {
     /// pk(function () { try { call_user_func(1); } catch (TypeError $e) {} });
     /// ```
     /// ```expect
-    /// 3240 32
-    /// 3272 0
+    /// 3144 32
+    /// 3176 0
     /// 2952 0
     /// 2392 0
     /// 2648 0

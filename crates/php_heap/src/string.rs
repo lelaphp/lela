@@ -283,8 +283,10 @@ impl Str {
     /// [`Str::allocation_size`] of the same `len`, which the bins then
     /// round. The same sum is `zend_string_finit`'s,
     /// `zend_string_safe_falloc(len, 1, 0)`.
-    pub(crate) const fn reallocation_size(len: usize) -> usize {
-        Str::allocation_size(0) + len
+    pub(crate) fn reallocation_size(len: usize) -> usize {
+        // A length whose sum overflows asks for everything, which the
+        // allocator refuses as php's limit does.
+        Sizing::Finit.bytes(len).unwrap_or(usize::MAX)
     }
 
     /// Lay a string of `bytes` down at `at`, which is an allocation of
@@ -740,11 +742,7 @@ impl crate::Heap {
     /// interned ones `zend_string_init_fast` hands out for the empty
     /// string and one byte are the caller's.
     pub fn string_finit(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
-        let at = self.mm.alloc(Str::reallocation_size(bytes.len()))?;
-        // SAFETY: the allocation holds the header, the bytes and the NUL,
-        // since `reallocation_size` is at least `allocation_size`, and
-        // nothing else holds it.
-        Ok(unsafe { Str::init(at, bytes, 0) })
+        self.string_sized(bytes, Sizing::Finit)
     }
 }
 
@@ -770,6 +768,61 @@ impl std::fmt::Debug for Str {
     }
 }
 
+/// Which of php-8.5.12's two sizes a string of the request's is laid at
+/// for its length, the one thing about a string php's constructors and
+/// its in-place reallocations disagree on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sizing {
+    /// `zend_string_alloc`'s and `zend_string_init`'s: the header, the
+    /// bytes and the NUL rounded together,
+    /// `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))` ([`crate::Heap::string`]).
+    #[default]
+    Alloc,
+    /// `zend_string_finit`'s, and what `zend_string_realloc`, `_extend`
+    /// and `_truncate` grow or cut a string to where it stands: `len`
+    /// past the empty string's aligned header (`Z/Zend/zend_string.h:217`,
+    /// `:279`), up to seven bytes more ([`crate::Heap::string_finit`]). The
+    /// parser's `.` of two written values grows its left one so
+    /// (`zend_ast_create_concat_op`, `Z/Zend/zend_ast.c:489`), and a name
+    /// the compile prints with `zend_strpprintf` is trimmed so by
+    /// `smart_str_extract` (`Z/Zend/zend_smart_str.h:119`).
+    Finit,
+    /// `zend_string_safe_alloc(n, m, l, 0)`'s (`Z/Zend/zend_string.h:177`):
+    /// the product `n * m` past the aligned header of a string of the
+    /// `l` bytes left, where the string's length is `n * m + l`. That is
+    /// not [`Sizing::Alloc`] of the same length: `pdo_mysql`'s quoter asks
+    /// for `safe_alloc(2, 1, 3)`, 34 bytes and the 40-byte bin, where a
+    /// 5-byte string takes 30 and the 32-byte bin.
+    SafeAlloc { n: usize, m: usize },
+}
+
+impl Sizing {
+    /// The bytes a string of `len` bytes laid at this size asks the
+    /// allocator for. [`Sizing::Finit`] is `zend_string_safe_falloc(len,
+    /// 1, 0)`, so it is [`Sizing::SafeAlloc`] of `len` and 1 through the
+    /// same sum. A product past `len`, which includes one that overflows,
+    /// and a sum that overflows are php's `Possible integer overflow in
+    /// memory allocation` fatal (`safe_address_guarded`), raised before
+    /// anything is asked for. Its third number is the aligned header the
+    /// product is added to, the empty string's where no `l` is left.
+    pub fn bytes(self, len: usize) -> Result<usize, Fatal> {
+        let (n, m) = match self {
+            Sizing::Alloc => return Ok(Str::allocation_size(len)),
+            Sizing::Finit => (len, 1),
+            Sizing::SafeAlloc { n, m } => (n, m),
+        };
+        let product = n.checked_mul(m).filter(|product| *product <= len);
+        let header = Str::allocation_size(product.map_or(0, |product| len - product));
+        product
+            .and_then(|product| product.checked_add(header))
+            .ok_or_else(|| {
+                Fatal::error(format!(
+                    "Possible integer overflow in memory allocation ({n} * {m} + {header})"
+                ))
+            })
+    }
+}
+
 /// A home for interned strings: php's `zend_new_interned_string` behind
 /// its two handlers (`Z/Zend/zend_string.c:363-373`), which the compiler
 /// and the engine call without knowing which home answers.
@@ -785,7 +838,7 @@ pub trait Intern {
     /// ask, and the fatal the allocator raised when there is no memory
     /// for it.
     fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
-        self.intern_marked(bytes, false)
+        self.intern_marked(bytes, false, Sizing::Alloc)
     }
 
     /// [`Intern::intern`] of bytes the asker knows to be valid UTF-8 when
@@ -793,8 +846,15 @@ pub trait Intern {
     /// string carrying `IS_STR_VALID_UTF8`: a string this ask lays down
     /// is marked before the table takes it, and one the home already
     /// holds is handed back as it stands, with its own flags, as
-    /// `zend_interned_string_ht_lookup` finds it.
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal>;
+    /// `zend_interned_string_ht_lookup` finds it. A string laid on a
+    /// request's heap is laid at `sizing`'s size; a home that lays none
+    /// there has no use for it.
+    fn intern_marked(
+        &mut self,
+        bytes: &[u8],
+        valid_utf8: bool,
+        sizing: Sizing,
+    ) -> Result<Str, Fatal>;
 
     /// [`Intern::intern`] of a string laid as a string of `room` bytes and
     /// cut to `bytes` where it stands (`ZSTR_LEN(s) = len`), which keeps
@@ -804,7 +864,7 @@ pub trait Intern {
     /// the bytes as any other.
     fn intern_in(&mut self, bytes: &[u8], room: usize) -> Result<Str, Fatal> {
         let _ = room;
-        self.intern_marked(bytes, false)
+        self.intern_marked(bytes, false, Sizing::Alloc)
     }
 
     /// [`Intern::intern_marked`] of a string the asker alone will hold
@@ -813,8 +873,13 @@ pub trait Intern {
     /// `zend_eval_const_expr` destroys a child's zval once the node it
     /// folds into stands. The [`Made`] is the claim; dropped instead of
     /// given back, the string is kept as any other this home made.
-    fn intern_made(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Made, Fatal> {
-        (self.intern_marked(bytes, valid_utf8)).map(|s| Made(Zval::string(s)))
+    fn intern_made(
+        &mut self,
+        bytes: &[u8],
+        valid_utf8: bool,
+        sizing: Sizing,
+    ) -> Result<Made, Fatal> {
+        (self.intern_marked(bytes, valid_utf8, sizing)).map(|s| Made(Zval::string(s)))
     }
 
     /// The next of the names a compile hands over once its unit is
@@ -1022,8 +1087,8 @@ impl Intern for Strings {
     /// php's `zend_string_init_interned_permanent`
     /// (`Z/Zend/zend_string.c:267-280`): the frozen table, then this one,
     /// then a string on the system allocator, hashed and flagged before
-    /// it is published.
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
+    /// it is published; a string of the engine's, so no request's size.
+    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool, _: Sizing) -> Result<Str, Fatal> {
         if let Some(frozen) = frozen_string(bytes) {
             return Ok(frozen);
         }
@@ -1485,7 +1550,9 @@ mod tests {
         let _alone = crate::serial::alone();
         let mut heap = crate::Heap::new();
         let base = heap.memory_usage(false);
-        let mut fresh = heap.string_fresh(2103).expect("a fresh string");
+        let mut fresh = heap
+            .string_fresh(2103, Sizing::Alloc)
+            .expect("a fresh string");
         fresh.bytes_mut()[..5].copy_from_slice(b"hello");
         assert_eq!(heap.memory_usage(false) - base, 2560);
         // php-8.5.12's truncate asks 32 + 5, the 40-byte bin.
@@ -1507,7 +1574,7 @@ mod tests {
         let _alone = crate::serial::alone();
         let mut heap = crate::Heap::new();
         let base = heap.memory_usage(false);
-        let mut fresh = heap.string_fresh(5).expect("a fresh string");
+        let mut fresh = heap.string_fresh(5, Sizing::Alloc).expect("a fresh string");
         fresh.bytes_mut().copy_from_slice(b"hello");
         assert_eq!(heap.memory_usage(false) - base, 32);
         let mut grown = heap.string_extend(fresh, 40).expect("an extended string");

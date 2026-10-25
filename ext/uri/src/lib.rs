@@ -36,7 +36,7 @@ use php_ext::abi::{
 };
 use php_ext::attr::php_class;
 use php_ext::call::{clone_with, lookup_class, new_object};
-use php_ext::raising::{Thrown, fatal, throw, throw_chained, throw_error};
+use php_ext::raising::{Thrown, fatal, throw_chained, throw_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
@@ -514,7 +514,7 @@ fn component<P: UriParser, T>(
 ) -> Result<T, Thrown> {
     match read::<P, _>(req, this, mode, f)? {
         Ok(value) => Ok(value),
-        Err(Unreadable) => Err(throw(
+        Err(Unreadable) => Err(throw_exception_ex(
             req,
             "Uri\\UriError",
             &format!("The {name} component cannot be retrieved"),
@@ -578,7 +578,7 @@ fn write_bytes<P: UriParser>(
 
 /// `throw_cannot_recompose_uri_to_string`.
 fn cannot_recompose(req: &mut Request, class: &str) -> Thrown {
-    throw(
+    throw_exception_ex(
         req,
         "Uri\\UriError",
         &format!("Cannot recompose {class} to a string"),
@@ -650,11 +650,11 @@ fn unserialize<P: UriParser>(
         return Err(throw_chained(req, first, "Exception", &invalid));
     }
     let Some(text) = serialized_uri(data) else {
-        return Err(throw(req, "Exception", &invalid));
+        return Err(throw_exception_ex(req, "Exception", &invalid));
     };
     let parsed = P::parse(req, &text, None, false, true)?;
     let Some(uri) = parsed.uri else {
-        return Err(throw(req, "Exception", &invalid));
+        return Err(throw_exception_ex(req, "Exception", &invalid));
     };
     if let Some(slot) = this.native_mut::<Slot<P>>(req) {
         slot.0 = Some(uri);
@@ -666,7 +666,7 @@ fn unserialize<P: UriParser>(
     if no_properties {
         Ok(())
     } else {
-        Err(throw(req, "Exception", &invalid))
+        Err(throw_exception_ex(req, "Exception", &invalid))
     }
 }
 

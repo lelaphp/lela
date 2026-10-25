@@ -360,9 +360,9 @@ impl Request {
     /// 112  $GLOBALS["p2"] = new P2;
     /// 928  class N1 { public $p = 1; } class N2 extends N1 { public $q = R::B; }
     /// 112  $GLOBALS["n2"] = new N2;
-    /// 1072  class A6 { public $p = 1; } class B6 extends A6 { public $p { get => 5; } }
+    /// 1080  class A6 { public $p = 1; } class B6 extends A6 { public $p { get => 5; } }
     /// 112  $GLOBALS["b6"] = new B6;
-    /// 1072  class A8 { public $p = 1; } class B8 extends A8 { public $p = 3 { get => 5; } }
+    /// 1080  class A8 { public $p = 1; } class B8 extends A8 { public $p = 3 { get => 5; } }
     /// 112  $GLOBALS["b8"] = new B8;
     /// object(K3)#2 (2) {
     ///   ["p"]=>

@@ -228,7 +228,7 @@ pub(crate) fn from_text(
         return Ok(n);
     }
     Err(if position == 0 {
-        throw_error(req, "ValueError", "Number is not an integer string")
+        php_ext::raising::value_error(req, "Number is not an integer string")
     } else {
         argument_error(req, "ValueError", position, "is not an integer string")
     })
