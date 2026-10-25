@@ -66,7 +66,7 @@ use crate::divergence::Registry;
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::oracle::{Invocation, Oracle, Program, Promise, diff, normalise_in};
-use crate::phpt::adapter::Said;
+use crate::phpt::adapter::{Said, system_with_timeout};
 use crate::reading::{Reading, Status};
 use crate::witness::makala::{self, Ports};
 
@@ -152,12 +152,14 @@ fn skipped(oracle: &Oracle<'_>, tree: &Path, entry: &Entry) -> Result<Option<Str
     let program = own.write("skipif.php", body)?;
     let php = &oracle.pin().oracle.path;
     let beside = tree.join(&entry.id);
-    let ran = oracle.run_under(&Invocation {
-        cwd: beside.parent(),
-        raw: true,
-        ..Invocation::new(php, Program::Beside(&program))
-    })?;
-    Ok(match Said::ran(ran) {
+    let ran = system_with_timeout(
+        oracle,
+        &Invocation {
+            cwd: beside.parent(),
+            ..Invocation::new(php, Program::Beside(&program))
+        },
+    )?;
+    Ok(match Said::ran(&ran) {
         Said::Skip(why) => Some(why),
         Said::Bork(said) => Some(format!("invalid output from SKIPIF: {said}")),
         Said::XFail(_) | Said::Warn(_) | Said::Run => None,

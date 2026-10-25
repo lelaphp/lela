@@ -295,7 +295,7 @@ impl<'a> Adapter<'a> {
             let shown = SKIPIF_SHOWS.map(String::from);
             let section = ("skip", body, &shown[..]);
             let out = self.run_section(subset, test, &env, section, phpt.has("PHPDBG"))?;
-            match Said::ran(out) {
+            match Said::ran(&out) {
                 Said::Skip(why) => return Ok(Err(Judged::new(id, name, Judgement::Skip, why))),
                 Said::Bork(said) => {
                     return Ok(Err(borked(
@@ -320,13 +320,12 @@ impl<'a> Adapter<'a> {
     /// The test's program, written where upstream writes it, run through
     /// the binary under test with the sections that shape one run, and
     /// taken away after; then `CLEAN`, which takes away what the test
-    /// left. What it wrote as it wrote it, with upstream's `Termsig=` line
-    /// ([`handed_back`]) and not yet normalised, or the verdict it came to
-    /// without an expectation to hold it to: a file already standing where the
-    /// program goes borks the test rather than being overwritten, and a
-    /// program still running at the recipe's limit fails it, since a hang
-    /// is the engine's failure on this test as a wrong answer is and not
-    /// the end of the lane (#691). Upstream's limit is the same 60 s
+    /// left. What [`system_with_timeout`] handed back, not yet normalised,
+    /// or the verdict it came to without an expectation to hold it to: a
+    /// file already standing where the program goes borks the test rather
+    /// than being overwritten, and a program still running at the
+    /// recipe's limit fails it, since a hang is the engine's failure on
+    /// this test as a wrong answer is and not the end of the lane (#691). Upstream's limit is the same 60 s
     /// (run-tests.php:1187), and past it upstream kills the process and
     /// holds what it wrote, with its `** ERROR: process timed out **`
     /// line, to the expectation, which fails (run-tests.php:1205-1209).
@@ -370,18 +369,18 @@ impl<'a> Adapter<'a> {
                 merged: capture.stdout && capture.stderr,
             },
             cwd: Some(&subset.root),
-            raw: true,
             ..Invocation::new(self.binary, Program::Beside(&program))
         };
         let (dbg_flags, commands) = (phpdbg::FLAGS.map(String::from), phpdbg::stdin(phpt));
+        let dbg_args = phpdbg::args(phpt);
         let served = request.zip(self.hosts.http.as_deref());
         let ran = if let Some((request, host)) = served {
             http::served(&self.oracle.pin().recipe, host, &program, request, ini, env)
         } else {
-            match (request, &self.hosts.cgi, &self.hosts.phpdbg) {
+            let call = match (request, &self.hosts.cgi, &self.hosts.phpdbg) {
                 (_, _, Some(host)) if phpt.has("PHPDBG") => {
                     self.pinned_phpdbg.asserted(self.oracle.pin(), host)?;
-                    self.oracle.run_under(&Invocation {
+                    Invocation {
                         binary: host,
                         program: if phpt.has("FILE") {
                             invocation.program
@@ -389,12 +388,12 @@ impl<'a> Adapter<'a> {
                             Program::Nothing
                         },
                         flags: &dbg_flags,
-                        args: &phpdbg::args(phpt),
+                        args: &dbg_args,
                         stdin: Stdin::Pipe(&commands),
                         ..invocation
-                    })
+                    }
                 }
-                (Some(request), Some(host), _) => self.oracle.run_under(&Invocation {
+                (Some(request), Some(host), _) => Invocation {
                     binary: host,
                     flags: &cgi_flags,
                     args: &request.args,
@@ -404,10 +403,10 @@ impl<'a> Adapter<'a> {
                         .as_deref()
                         .map_or(invocation.stdin, Stdin::File),
                     ..invocation
-                }),
-                _ => self.oracle.run_under(&invocation),
-            }
-            .map(handed_back)
+                },
+                _ => invocation,
+            };
+            system_with_timeout(self.oracle, &call)
         };
         drop(written);
         let output = match ran {
@@ -440,8 +439,9 @@ impl<'a> Adapter<'a> {
     /// an empty pipe on stdin, as upstream's does. A `--PHPDBG--` test's
     /// run under the pinned phpdbg with `-rr` (`debugger`), as upstream's
     /// run under the debugger it hosts the test through, where the pin
-    /// names one. What a section wrote is handed back as it wrote it, which
-    /// a `SKIPIF`'s reader trims as upstream trims it ([`Said::ran`]).
+    /// names one. What a section wrote is what [`system_with_timeout`]
+    /// hands back, which a `SKIPIF`'s reader trims as upstream trims it
+    /// ([`Said::ran`]).
     fn run_section(
         &self,
         subset: &Subset,
@@ -449,7 +449,7 @@ impl<'a> Adapter<'a> {
         env: &Environment,
         (kind, body, ini): (&str, &[u8], &[String]),
         debugger: bool,
-    ) -> Result<Observation> {
+    ) -> Result<Vec<u8>> {
         let program = test.beside(Some(kind));
         let written = Written::new(&program, body)?;
         self.oracle.asserted()?;
@@ -462,18 +462,16 @@ impl<'a> Adapter<'a> {
             }
             None => (&pin.oracle.path, &[][..]),
         };
-        let out = self
-            .oracle
-            .run_under(&Invocation {
-                ini,
-                flags,
-                env: env.entries(),
-                stdin: Stdin::Pipe(&[]),
-                streams: Streams::Pipes { merged: false },
-                cwd: Some(&subset.root),
-                raw: true,
-                ..Invocation::new(pinned, Program::Beside(&program))
-            })
+        let call = Invocation {
+            ini,
+            flags,
+            env: env.entries(),
+            stdin: Stdin::Pipe(&[]),
+            streams: Streams::Pipes { merged: false },
+            cwd: Some(&subset.root),
+            ..Invocation::new(pinned, Program::Beside(&program))
+        };
+        let out = system_with_timeout(self.oracle, &call)
             .with_context(|| format!("running the {kind} section of {}", test.file.display()))?;
         drop(written);
         Ok(out)
@@ -858,13 +856,12 @@ pub(crate) enum Said {
 
 impl Said {
     /// What a `SKIPIF`'s run says, read as upstream reads what its
-    /// `system_with_timeout` handed back ([`handed_back`]).
-    pub(crate) fn ran(out: Observation) -> Said {
-        Said::of(&String::from_utf8_lossy(&handed_back(out)))
+    /// [`system_with_timeout`] handed back.
+    pub(crate) fn ran(handed: &[u8]) -> Said {
+        Said::of(&String::from_utf8_lossy(handed))
     }
 
-    /// What `written` says: what a `SKIPIF` wrote, as [`handed_back`]
-    /// hands it back.
+    /// What a `SKIPIF` said, `written` being what its run handed back.
     pub(crate) fn of(written: &str) -> Said {
         let said = written.trim_matches(TRIM);
         let after = |word: &str| {
@@ -889,14 +886,24 @@ impl Said {
     }
 }
 
+/// Upstream's `system_with_timeout`: `call` run by `oracle` with what it
+/// wrote handed back as it wrote it (`raw`), with its `Termsig=` line
+/// ([`handed_back`]), for the caller to trim after it as upstream trims
+/// after it. The one way the runner runs a test's program and the
+/// sections beside it.
+pub(crate) fn system_with_timeout(oracle: &Oracle<'_>, call: &Invocation<'_>) -> Result<Vec<u8>> {
+    let out = oracle.run_under(&Invocation { raw: true, ..*call })?;
+    Ok(handed_back(out))
+}
+
 /// What upstream's `system_with_timeout` hands back of a run, the test's
 /// program and its `SKIPIF` alike: what it wrote, as it wrote it, and a
 /// `Termsig=` line where a signal ended it or it exited 129 to 159
-/// (run-tests.php:1235-1239), which upstream trims with the rest, so the
-/// run is taken `raw` and normalised after. So a php that `_exit(137)`s at its hard
-/// memory limit (`zend_mm_hard_limit_error`) reads `Termsig=9`, as an
-/// expectation that ends in it wants, and a `SKIPIF` that crashed having
-/// written nothing borks. Upstream's `SKIPIF` command line opens with
+/// (run-tests.php:1235-1239), which upstream trims with the rest. So a
+/// php that `_exit(137)`s at its hard memory limit
+/// (`zend_mm_hard_limit_error`) reads `Termsig=9`, as an expectation that
+/// ends in it wants, and a `SKIPIF` that crashed having written nothing
+/// borks. Upstream's `SKIPIF` command line opens with
 /// `unset`s (run-tests.php:2123), so the shell forks php and exits with
 /// 128 and the signal that ended it: the oracle's `proc_get_status` over
 /// that shape with a php that killed itself with 11 answers `signaled`
