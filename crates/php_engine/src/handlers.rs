@@ -22528,7 +22528,7 @@ pub(crate) fn cast<T: Tier>(
     })
 }
 
-/// The inline path of `ZEND_CAST` to a string (`Z/Zend/zend_vm_def.h:6526`)
+/// The inline path of `ZEND_CAST` to a string (`Z/Zend/zend_vm_def.h:6512`)
 /// over an int or a float as it stands, `zval_get_string`'s two arms
 /// for them: [`crate::ops::long_to_str`] and [`crate::ops::double_to_str`]
 /// into the temporary, neither operand holding anything to free. `None`,

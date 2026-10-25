@@ -464,7 +464,7 @@ impl Key {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn to_prop_name(&self, req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
         match self {
-            Key::Int(n) => PhpString::new(req, php_heap::LongText::long(*n).as_bytes()),
+            Key::Int(n) => crate::ops::long_to_str(req, *n).map(Owner::adopt),
             Key::Str(s) => Ok(Owner::take(req, *s)),
         }
     }

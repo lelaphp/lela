@@ -82,7 +82,7 @@ pub(crate) fn to_string(req: &mut Request, value: &Value) -> Result<PhpString, T
     }
 }
 
-/// `zend_long_to_str` (`Z/Zend/zend_operators.c:3533`): a digit is the
+/// `zend_long_to_str` (`Z/Zend/zend_operators.c:3532`): a digit is the
 /// process's interned string of it (`ZSTR_CHAR`), and any other long its
 /// digits laid in a buffer on the stack and copied into one string of
 /// the request's (`zend_string_init`), marked valid UTF-8 as php marks
