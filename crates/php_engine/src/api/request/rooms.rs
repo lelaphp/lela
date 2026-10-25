@@ -243,6 +243,13 @@ impl Request {
     /// `!defined(__APPLE__)` keeps `alloca` off them) and the stack's
     /// elsewhere: held while the program is served and given back with
     /// [`Request::give_back_old_cwd`].
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        expect(
+            clippy::unused_self,
+            reason = "only Apple's platforms take the buffer from the request's heap"
+        )
+    )]
     pub(crate) fn old_cwd(&mut self) -> Option<Emalloc> {
         #[cfg(target_vendor = "apple")]
         {
