@@ -29,13 +29,31 @@ use crate::manifest::Manifest;
 use crate::oracle::Own;
 
 /// A package that links a native library the oracle links too: the
-/// `[env]` variable that points its build at the library, bare or after
-/// the target's name (`AARCH64_APPLE_DARWIN_OPENSSL_DIR`), and the library
-/// php loads, by its file's stem.
+/// `[env]` variable that points its build at the library, the forms of it
+/// that build reads ([`Reads`]), and the library php loads, by its file's
+/// stem.
 struct Native {
     package: &'static str,
     variable: &'static str,
+    reads: Reads,
     library: &'static str,
+}
+
+/// Which forms of a native's variable the build that links it reads: the
+/// bare name, the name after the target's (`AARCH64_APPLE_DARWIN_`), or
+/// either, each as the `build.rs` that reads it is written, so a binding
+/// is held where the build reads it and no form it ignores binds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reads {
+    /// openssl-sys 0.9's `env`, the target's form and then the bare one
+    /// (`build/main.rs:42-46`).
+    Either,
+    /// libsqlite3-sys 0.38's `{env_prefix}_LIB_DIR`, the bare name alone
+    /// (`build.rs:468`).
+    Bare,
+    /// ext/curl's own `build.rs`, the target's form alone; curl-sys reads
+    /// no `CURL_LIB_DIR` of any form.
+    Target,
 }
 
 /// The packages the workspace links a native library of the oracle's
@@ -44,29 +62,37 @@ static NATIVES: [Native; 3] = [
     Native {
         package: "openssl-sys",
         variable: "OPENSSL_DIR",
+        reads: Reads::Either,
         library: "libssl",
     },
     Native {
         package: "libsqlite3-sys",
         variable: "SQLITE3_LIB_DIR",
+        reads: Reads::Bare,
         library: "libsqlite3",
     },
     Native {
         package: "curl-sys",
         variable: "CURL_LIB_DIR",
+        reads: Reads::Target,
         library: "libcurl",
     },
 ];
 
 impl Native {
     /// Whether `variable` is this package's on the target the harness is
-    /// built for, the one the engine's build is: bare, or after that
-    /// target's name as openssl-sys and curl-sys read it, so another
-    /// target's binding is not held to this machine's php.
+    /// built for, the one the engine's build is, in a form its build reads
+    /// ([`Reads`]), so another target's binding is not held to this
+    /// machine's php and a form the build ignores binds nothing.
     fn names(&self, variable: &str) -> bool {
         let host = env!("XTASK_TARGET").to_uppercase().replace('-', "_");
-        variable == self.variable
-            || variable.strip_prefix(&host) == Some(&format!("_{}", self.variable))
+        let bare = variable == self.variable;
+        let target = variable.strip_prefix(&host) == Some(&format!("_{}", self.variable));
+        match self.reads {
+            Reads::Either => bare || target,
+            Reads::Bare => bare,
+            Reads::Target => target,
+        }
     }
 }
 
@@ -182,19 +208,28 @@ impl Bindings {
 mod names {
     use super::NATIVES;
 
-    /// A native's variable binds bare or after the name of the target the
-    /// harness is built for, the form `.cargo/config.toml` writes
-    /// (`AARCH64_APPLE_DARWIN_OPENSSL_DIR`), and not after another
-    /// target's name or any other prefix.
+    /// Each native's variable binds in the forms its build reads and no
+    /// other (#3458): openssl-sys's bare or after the name of the target
+    /// the harness is built for, libsqlite3-sys's bare alone, and ext/curl's
+    /// after the target alone; none after another target's name or any
+    /// other prefix.
     #[test]
-    fn a_variable_binds_bare_or_after_this_target_alone() {
-        let openssl = &NATIVES[0];
+    fn a_variable_binds_in_the_forms_its_build_reads_alone() {
         let host = env!("XTASK_TARGET").to_uppercase().replace('-', "_");
-        assert!(openssl.names("OPENSSL_DIR"));
-        assert!(openssl.names(&format!("{host}_OPENSSL_DIR")));
-        assert!(!openssl.names("POWERPC64_IBM_AIX_OPENSSL_DIR"));
-        assert!(!openssl.names("DEP_OPENSSL_DIR"));
-        assert!(!openssl.names(&format!("{host}_OPENSSL_LIB_DIR")));
+        let forms = |variable: &str| {
+            let reads = NATIVES.iter().find(|n| n.variable == variable).unwrap();
+            [
+                variable.to_owned(),
+                format!("{host}_{variable}"),
+                format!("POWERPC64_IBM_AIX_{variable}"),
+                format!("DEP_{variable}"),
+            ]
+            .map(|form| reads.names(&form))
+        };
+        assert_eq!(forms("OPENSSL_DIR"), [true, true, false, false]);
+        assert_eq!(forms("SQLITE3_LIB_DIR"), [true, false, false, false]);
+        assert_eq!(forms("CURL_LIB_DIR"), [false, true, false, false]);
+        assert!(!NATIVES[0].names(&format!("{host}_OPENSSL_LIB_DIR")));
     }
 }
 
