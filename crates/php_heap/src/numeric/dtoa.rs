@@ -33,8 +33,22 @@ pub(super) enum Digits {
     Shortest,
     /// `zend_dtoa(d, 2, ndigits, ...)`: this many significant digits,
     /// correctly rounded, a count under one read as one, trailing zeros
-    /// suppressed.
+    /// suppressed but on the exact division of a small integer, which
+    /// stops at the count with its zeros, as `1005` at three digits is
+    /// `100` and prints `1.00E+3`.
     Significant(i32),
+}
+
+impl Digits {
+    /// What `zend_gcvt` asks for at `ndigit`: the shortest for a negative
+    /// one, `ndigit` significant digits otherwise.
+    pub(super) fn at(ndigit: i32) -> Self {
+        if ndigit < 0 {
+            Self::Shortest
+        } else {
+            Self::Significant(ndigit)
+        }
+    }
 }
 
 /// `P`, the significand's bits.
@@ -69,13 +83,12 @@ const TENS: [f64; 23] = [
 /// `bigtens[]`.
 const BIGTENS: [f64; 5] = [1e16, 1e32, 1e64, 1e128, 1e256];
 
-/// The words a big integer holds. The widest any conversion builds is
-/// the smallest subnormal's numerator, `5^324` times its significand
-/// and the shifts that scale it, about 800 bits: 25 words, which
-/// `zend_dtoa_s_digits_are_the_correctly_rounded_expansion` beside
-/// `gcvt` reaches over every power of two (24 words fail it). A
-/// product is laid out at the sum of its factors' words, which the
-/// operands of a conversion keep under that; 40 is half again.
+/// The words a big integer holds. The widest any conversion lays out
+/// is `mult`'s product for the largest subnormal at the shortest digits,
+/// laid at the sum of its factors' words before it is trimmed: 25 words,
+/// which `the_digits_are_the_correctly_rounded_expansion` below reaches
+/// over every power of two and the extremes (24 words fail it). 40 is
+/// half again.
 const WORDS: usize = 40;
 
 /// Gay's `Bigint` with its `wds` words in use, least significant first.
@@ -87,7 +100,7 @@ struct Big {
 
 impl Big {
     /// `i2b`.
-    fn from(i: u32) -> Self {
+    fn small(i: u32) -> Self {
         let mut x = [0; WORDS];
         x[0] = i;
         Big { x, wds: 1 }
@@ -232,7 +245,7 @@ fn pow5mult(mut b: Big, mut k: i32) -> Big {
     if k == 0 {
         return b;
     }
-    let mut p5 = Big::from(625);
+    let mut p5 = Big::small(625);
     loop {
         if k & 1 != 0 {
             b = mult(&b, &p5);
@@ -249,7 +262,7 @@ fn pow5mult(mut b: Big, mut k: i32) -> Big {
 fn diff(a: &Big, b: &Big) -> (Big, bool) {
     let order = cmp(a, b);
     if order == 0 {
-        return (Big::from(0), false);
+        return (Big::small(0), false);
     }
     let (a, b, negative) = if order < 0 {
         (b, a, true)
@@ -277,7 +290,7 @@ fn diff(a: &Big, b: &Big) -> (Big, bool) {
 /// its trailing zero bits shifted out, its binary exponent and its
 /// significant bits, for `d` finite, positive and not zero.
 fn d2b(word0: u32, word1: u32) -> (Big, i32, i32) {
-    let mut b = Big::from(0);
+    let mut b = Big::small(0);
     let mut z = word0 & FRAC_MASK;
     let de = ((word0 & 0x7fff_ffff) >> 20) as i32;
     if de != 0 {
@@ -322,22 +335,30 @@ fn dshift(s: &Big, p2: i32) -> i32 {
 /// written past `s0`, a string of nines carrying into the digit before it,
 /// and all nines becoming a one with the point moved, `k++`.
 fn round_up(s: &mut Vec<u8>, s0: usize, k: &mut i32) {
-    while let Some(&last) = s.last() {
-        if last != b'9' {
-            if let Some(digit) = s.last_mut() {
-                *digit += 1;
-            }
+    loop {
+        let first = s.len() == s0 + 1;
+        let Some(digit) = s.last_mut() else {
+            return;
+        };
+        if *digit != b'9' {
+            *digit += 1;
             return;
         }
-        if s.len() - 1 == s0 {
+        if first {
             *k += 1;
-            if let Some(digit) = s.last_mut() {
-                *digit = b'1';
-            }
+            *digit = b'1';
             return;
         }
         s.pop();
     }
+}
+
+/// The `round_9_up` label: a nine that rounds up is written and carried
+/// into the digits before it; the answer is the point it leaves.
+fn round_nine_up(s: &mut Vec<u8>, s0: usize, mut k: i32) -> i32 {
+    s.push(b'9');
+    round_up(s, s0, &mut k);
+    k + 1
 }
 
 /// The trailing zeros `zend_dtoa` suppresses, past `s0`.
@@ -527,7 +548,7 @@ pub(super) fn dtoa(d: f64, asked: Digits, s: &mut Vec<u8>) -> i32 {
         };
         b2 += i;
         s2 += i;
-        mhi = Some(Big::from(1));
+        mhi = Some(Big::small(1));
     }
     if m2 > 0 && s2 > 0 {
         let i = m2.min(s2);
@@ -550,7 +571,7 @@ pub(super) fn dtoa(d: f64, asked: Digits, s: &mut Vec<u8>) -> i32 {
             b = pow5mult(b, b5);
         }
     }
-    let mut big_s = Big::from(1);
+    let mut big_s = Big::small(1);
     if s5 > 0 {
         big_s = pow5mult(big_s, s5);
     }
@@ -606,9 +627,7 @@ pub(super) fn dtoa(d: f64, asked: Digits, s: &mut Vec<u8>) -> i32 {
             let j1 = if negative { 1 } else { cmp(&b, &delta) };
             if j1 == 0 && word1 & 1 == 0 {
                 if digit == b'9' {
-                    s.push(b'9');
-                    round_up(s, s0, &mut k);
-                    return k + 1;
+                    return round_nine_up(s, s0, k);
                 }
                 if j > 0 {
                     digit += 1;
@@ -622,9 +641,7 @@ pub(super) fn dtoa(d: f64, asked: Digits, s: &mut Vec<u8>) -> i32 {
                     let j1 = cmp(&b, &big_s);
                     if j1 > 0 || (j1 == 0 && digit & 1 != 0) {
                         if digit == b'9' {
-                            s.push(b'9');
-                            round_up(s, s0, &mut k);
-                            return k + 1;
+                            return round_nine_up(s, s0, k);
                         }
                         digit += 1;
                     }
@@ -634,9 +651,7 @@ pub(super) fn dtoa(d: f64, asked: Digits, s: &mut Vec<u8>) -> i32 {
             }
             if j1 > 0 {
                 if digit == b'9' {
-                    s.push(b'9');
-                    round_up(s, s0, &mut k);
-                    return k + 1;
+                    return round_nine_up(s, s0, k);
                 }
                 s.push(digit + 1);
                 return k + 1;
@@ -679,4 +694,109 @@ pub(super) fn dtoa(d: f64, asked: Digits, s: &mut Vec<u8>) -> i32 {
         trim_zeros(s, s0);
     }
     k + 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `zend_dtoa`'s digits against the expansion Rust's formatter
+    /// rounds, the same correctly rounded digits by another algorithm:
+    /// half to even on a tie, as `zend_dtoa` rounds with `ROUND_BIASED`
+    /// undefined, and the shortest that reads back for a negative
+    /// `ndigit`, where the two part only between two strings equally
+    /// near the double. The doubles are the extremes, every power of two
+    /// and ten, and 20,000 bit patterns from a fixed seed.
+    #[test]
+    fn the_digits_are_the_correctly_rounded_expansion() {
+        fn expansion(value: f64, ndigit: i32) -> (String, i32) {
+            let rendered = if ndigit < 0 {
+                format!("{value:e}")
+            } else {
+                format!("{value:.*e}", usize::try_from(ndigit.max(1) - 1).unwrap())
+            };
+            let (mantissa, power) = rendered.split_once('e').unwrap();
+            let mut digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+            while digits.len() > 1 && digits.ends_with('0') {
+                digits.pop();
+            }
+            (digits, power.parse::<i32>().unwrap() + 1)
+        }
+        let mut values = vec![
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            5e-324,
+            1e-323,
+            2.225_073_858_507_201e-308,
+            1e23,
+            9_007_199_254_740_993.0,
+            0.1,
+            0.5,
+            1.0 / 3.0,
+            123_456_789_012_345.0,
+            999_999_999_999_999.9,
+        ];
+        // Miri interprets the whole sweep in hours; it takes every
+        // 211th power, five patterns and the shorter counts.
+        let step = if cfg!(miri) { 211 } else { 1 };
+        for e in (-1074..1024).step_by(step) {
+            values.push(2_f64.powi(e));
+        }
+        for e in (-323..309).step_by(step) {
+            values.push(format!("1e{e}").parse().unwrap());
+        }
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..(if cfg!(miri) { 5 } else { 20_000 }) {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let value = f64::from_bits(state >> 1);
+            if value.is_finite() && value != 0.0 {
+                values.push(value);
+            }
+        }
+        for value in values {
+            let counts: &[i32] = if cfg!(miri) {
+                &[-1, 0, 2, 14, 17]
+            } else {
+                &[-1, 0, 1, 2, 3, 6, 14, 15, 16, 17, 18, 25, 40]
+            };
+            for &ndigit in counts {
+                let mut out = Vec::new();
+                let point = dtoa(value, Digits::at(ndigit), &mut out);
+                let mut digits = String::from_utf8(out).unwrap();
+                while digits.len() > 1 && digits.ends_with('0') {
+                    digits.pop();
+                }
+                let (expected, at) = expansion(value, ndigit);
+                if ndigit < 0 && digits != expected {
+                    // Two shortest strings equally near the double, as
+                    // `2^-25`'s `...312` and `...313` are: Rust's formatter
+                    // takes the upper, `zend_dtoa` the even one.
+                    let read = |d: &str| format!("0.{d}e{point}").parse::<f64>().unwrap();
+                    assert_eq!((digits.len(), point), (expected.len(), at), "{value:e}");
+                    assert_eq!(
+                        (read(&digits), read(&expected)),
+                        (value, value),
+                        "{value:e}"
+                    );
+                    continue;
+                }
+                assert_eq!((digits, point), (expected, at), "{value:e} at {ndigit}");
+            }
+        }
+        // The widest digit runs: a subnormal's whole expansion, and the
+        // largest double's.
+        let widest: &[f64] = if cfg!(miri) {
+            &[5e-324]
+        } else {
+            &[5e-324, 2.225_073_858_507_201e-308, f64::MAX]
+        };
+        for &value in widest {
+            let mut out = Vec::new();
+            let point = dtoa(value, Digits::Significant(800), &mut out);
+            let digits = String::from_utf8(out).unwrap();
+            assert_eq!((digits, point), expansion(value, 800), "{value:e} at 800");
+        }
+    }
 }
