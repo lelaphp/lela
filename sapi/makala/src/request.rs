@@ -224,7 +224,7 @@ pub(crate) fn serving(engine: &Engine, root: &Arc<[u8]>) -> impl Fn(Job) + Clone
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// bool(true)
@@ -387,7 +387,7 @@ const ZLOG_BUFFER: usize = 2048;
 /// ```
 /// ```expect capture
 /// 404
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// File not found.
@@ -452,7 +452,7 @@ fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// HTTP_CONTENT_LENGTH=3
@@ -498,7 +498,7 @@ fn refusal(info: &RequestInfo) -> Option<Refusal<'_>> {
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// SCRIPT_NAME=/witness.php
@@ -711,7 +711,7 @@ impl OutputSink for Sink {
     /// ```
     /// ```expect capture
     /// 200
-    /// x-powered-by: PHP/8.5.9
+    /// x-powered-by: PHP/8.5.12
     /// content-type: text/html; charset=UTF-8
     ///
     /// bool(false)
@@ -762,7 +762,7 @@ impl OutputSink for Sink {
     /// ```
     /// ```expect
     /// 200
-    /// x-powered-by: PHP/8.5.9
+    /// x-powered-by: PHP/8.5.12
     /// content-type: text/html; charset=UTF-8
     ///
     /// body
