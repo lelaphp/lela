@@ -1432,3 +1432,47 @@ fn the_fixture_whose_line_the_engine_s_host_answers_otherwise_fails() {
     }
     read(&fixture);
 }
+
+/// A crate whose reading is said before anything runs is journaled as a
+/// judged one is (#3457): the watching run reads the journal alone, and a
+/// host's lines file that did not parse printed nothing, wrote no reading
+/// and exited 0. The fixture's `sapi/cgi` carries a `then` with a key no
+/// `then` takes.
+#[test]
+fn a_crate_unread_before_the_run_is_journaled_as_failed() {
+    use crate::reading::Status;
+    let root = workspace().join("xtask/fixtures/witness/host-lines-unread");
+    let fixture = Manifest::load(&root).unwrap();
+    let tree = Tree::new("host-lines-unread").unwrap();
+    let path = tree.join("journal");
+    let journal = super::watch::Journal::open(&path).unwrap();
+    let ask = Ask {
+        crates: vec!["sapi/cgi".to_owned()],
+        staged: false,
+        ..Ask::default()
+    };
+    let binary = Binary::of(&root);
+    let readings = super::run_in(
+        &root,
+        &fixture,
+        &registry(""),
+        &ask,
+        Some(&journal),
+        &binary,
+    )
+    .unwrap();
+    let [reading] = &readings[..] else {
+        panic!("{readings:#?}")
+    };
+    assert_eq!(reading.status, Status::Fail, "{reading:#?}");
+    assert!(
+        reading.message.contains("is no host's lines"),
+        "{}",
+        reading.message
+    );
+    let journaled = fs::read_to_string(&path).unwrap();
+    assert!(
+        journaled.contains("is no host's lines"),
+        "the journal: {journaled}"
+    );
+}

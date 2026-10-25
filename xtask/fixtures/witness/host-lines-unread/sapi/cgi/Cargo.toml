@@ -1,0 +1,4 @@
+[package]
+name = "php_sapi_cgi"
+version = "0.0.0"
+edition = "2024"
