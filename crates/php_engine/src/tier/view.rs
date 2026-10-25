@@ -387,12 +387,26 @@ impl CachedSlot {
 /// epoch holds no row for, and for a slot past its cache.
 #[must_use]
 pub fn touch(req: &Request, epoch: &Epoch, raw: MapPtrRaw) -> Option<CachedSlot> {
-    let code = (epoch.func(FuncRef(MapPtrOffset::Engine(raw.offset))))
-        .filter(|func| !func.is_main())
-        .and_then(|func| func.op_array())?;
+    let code = touched_code(epoch, raw)?;
     let at = crate::exec::CacheAt::of(code.runtime_cache);
     let slot = req.touch_cache(at, CacheSlot(raw.slot))?;
     Some(CachedSlot(slot.cast()))
+}
+
+/// Whether [`touch`] can ever answer slot `raw` in a request: not for a
+/// file's own code, an op array the epoch holds no row for, or a slot past
+/// its cache, which no call lays down.
+#[must_use]
+pub fn touchable(epoch: &Epoch, raw: MapPtrRaw) -> bool {
+    touched_code(epoch, raw).is_some_and(|code| raw.slot < code.cache_size)
+}
+
+/// The op array of a function's whose cache slot `raw` names, which the
+/// touch reads.
+fn touched_code(epoch: &Epoch, raw: MapPtrRaw) -> Option<&OpArray> {
+    (epoch.func(FuncRef(MapPtrOffset::Engine(raw.offset))))
+        .filter(|func| !func.is_main())
+        .and_then(|func| func.op_array())
 }
 
 /// Where a property opline over a constant name finds the property on an

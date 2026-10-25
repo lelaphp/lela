@@ -182,6 +182,7 @@ tier::state
 tier::step
 tier::this_class
 tier::touch
+tier::touchable
 tier::trace_num
 tier::under_way
 tier::unwind

@@ -1318,13 +1318,30 @@ impl Request {
     /// which read their callee off a primed cache slot, push through
     /// [`Request::push_laid`] and [`Request::push_room`], since the pass
     /// that primed the slot laid the callee's cache. A closure's cache
-    /// was chosen as it was made ([`crate::classes::closure_cache`]).
+    /// was chosen as it was made ([`crate::classes::closure_cache`]). A
+    /// call `zend_call_function` pushes already serving, which no `INIT_*`
+    /// builds, lays it at its activation ([`Request::activate_user`]), as
+    /// `zend_init_func_execute_data` lays it once the arguments are placed,
+    /// so a call its arguments refuse lays nothing:
+    ///
+    /// ```php
+    /// class C { function m($a) { return $this->p . $this->q . $this->r . $this->s; } }
+    /// $o = new C;
+    /// try { call_user_func([$o, 'm'], 1, bogus: 2); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// $m = memory_get_usage(); $c = (new ReflectionMethod('C', 'm'))->getClosure($o);
+    /// echo memory_get_usage() - $m, "\n";
+    /// ```
+    /// ```expect
+    /// Unknown named parameter $bogus
+    /// 480
+    /// ```
     #[inline(always)] // the push of every INIT's slow path, its header moved, not copied
     pub(crate) fn push_call(&mut self, header: exec::Header) -> Result<FrameRef, Fatal> {
         let Some((room, header)) = self.laid_call(header) else {
             return Err(Fatal::error("InternalError: a call pushed with no callee"));
         };
-        if header.closure.is_none()
+        if header.info.building()
+            && header.closure.is_none()
             && let Some(function) = header.function
         {
             self.init_func_run_time_cache(function)?;

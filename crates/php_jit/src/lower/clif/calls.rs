@@ -814,10 +814,7 @@ impl Emit<'_> {
         let owns = self.b.ins().bor(annex, flagged);
         let owns = self.b.ins().icmp_imm_s(IntCC::NotEqual, owns, 0);
         refused = self.b.ins().bor(refused, owns);
-        let none = self.b.ins().icmp_imm_s(IntCC::Equal, caller, 0);
-        let looped = self.b.ins().band_imm_u(caller, i64::from(L.caller_loop()));
-        let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
-        let outside = self.b.ins().bor(none, looped);
+        let outside = self.outside(caller);
         refused = self.b.ins().bor(refused, outside);
         if let Imm::Leave {
             owners: Owners::Kernel,
@@ -828,6 +825,15 @@ impl Emit<'_> {
             refused = self.b.ins().bor(refused, owners);
         }
         Ok(refused)
+    }
+
+    /// Whether the frame whose header names `caller` was served from outside
+    /// the loop: none, or the loop's (`exec::Caller::Outside`, `Loop`).
+    fn outside(&mut self, caller: Value) -> Value {
+        let none = self.b.ins().icmp_imm_s(IntCC::Equal, caller, 0);
+        let looped = self.b.ins().band_imm_u(caller, i64::from(L.caller_loop()));
+        let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
+        self.b.ins().bor(none, looped)
     }
 
     /// Whether the record `last` of the frame table at `frames` is not the
@@ -955,10 +961,7 @@ impl Emit<'_> {
         let top = self.b.create_block();
         self.b.set_cold_block(top);
         let block = self.exit_block(exit)?;
-        let none = self.b.ins().icmp_imm_s(IntCC::Equal, caller, 0);
-        let looped = self.b.ins().band_imm_u(caller, i64::from(L.caller_loop()));
-        let looped = self.b.ins().icmp_imm_s(IntCC::NotEqual, looped, 0);
-        let outside = self.b.ins().bor(none, looped);
+        let outside = self.outside(caller);
         self.b.ins().brif(outside, top, &[], block, &[]);
         self.b.switch_to_block(top);
         self.b.seal_block(top);

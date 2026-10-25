@@ -24,9 +24,10 @@
 //! it serves through, which `api-check` writes into `tier.lock`'s kernels
 //! section where the face does not list it already (§5.3).
 //!
-//! **What `enter` does not do yet.** A call `push_call` began is on the engine's stack, pushed by
-//! the engine, where php's compiled code keeps it in a register until an exit's
-//! `RESTORE_CALL` links it, so `Landing::RestoreCall` restores nothing.
+//! **What `enter` does not do yet.** A call `push_call` began is on the
+//! engine's stack, pushed by the engine, where php's compiled code keeps
+//! it in a register until an exit's `RESTORE_CALL` links it, so
+//! `Landing::RestoreCall` restores nothing.
 //!
 //! `ExitCtx` is generic over the request it carries, so that the bench
 //! bar and the wrappers' own tests cross it over a stand-in with no
@@ -529,13 +530,7 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
 /// `zend_jit_leave_func` returns `ZEND_VM_RETURN` to `execute_ex` for such
 /// a frame, `ZEND_CALL_TOP`.
 fn leave(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<u64, Fatal> {
-    let frame = NonNull::new(on.room.0)
-        .and_then(|room| tier::at_room(req, room))
-        .ok_or_else(|| internal("a kernel was handed a room no frame on the stack has"))?;
-    if frame != tier::entry(req) {
-        return Ok(0);
-    }
-    tier::stand(req, frame, on.at);
+    let frame = standing(req, on.room, on.at)?;
     Ok(u64::from(tier::return_entry(
         req,
         frame,
@@ -1130,7 +1125,8 @@ static NO_PLACE: u32 = tier::PLACE.unprimed();
 /// $d = sys_get_temp_dir() . '/touch' . getmypid(); @mkdir($d);
 /// file_put_contents("$d/r.php", '<?php eval(\'class Base { public $x = 1; }\'); class C extends Base { function m() { return $this->x; } }
 /// function size($o) { $m = memory_get_usage(); $c = (new ReflectionMethod("C", "m"))->getClosure($o); $grew = memory_get_usage() - $m; unset($c); return $grew; }
-/// function k($o, $n) { $t = 0; $w = 0; for ($i = 0; $i < $n; $i++) { if ($i == 0) { $w = size($o); } $t += $o->m(); } return $t . " " . ($w > size($o) ? "own" : "shared"); }
+/// function fcc($o) { $m = memory_get_usage(); $c = $o->m(...); $grew = memory_get_usage() - $m; unset($c); return $grew; }
+/// function k($o, $n) { $t = 0; $w = $f = 0; for ($i = 0; $i < $n; $i++) { if ($i == 0) { $w = size($o); $f = fcc($o); } $t += $o->m(); } return $t . " " . ($w > size($o) ? "own" : "shared") . " " . ($f > fcc($o) ? "own" : "shared"); }
 /// echo k(new C, 20), "\n";');
 /// $s = stream_socket_server('tcp://127.0.0.1:0'); $port = parse_url(stream_socket_get_name($s, false), PHP_URL_PORT); fclose($s);
 /// $ini = ['opcache.enable=1', 'opcache.enable_cli=1', 'opcache.jit=tracing', 'opcache.jit_buffer_size=64M', 'opcache.jit_hot_loop=1', 'opcache.jit_hot_func=1', 'opcache.jit_hot_side_exit=1', 'opcache.file_update_protection=0'];
@@ -1142,15 +1138,16 @@ static NO_PLACE: u32 = tier::PLACE.unprimed();
 /// proc_terminate($p); proc_close($p); unlink("$d/r.php"); rmdir($d);
 /// ```
 /// ```expect regime=jit-force process
-/// 20 own
-/// 20 own
+/// 20 own shared
+/// 20 own shared
 /// ```
 ///
 /// ```php
 /// $d = sys_get_temp_dir() . '/touch' . getmypid(); @mkdir($d);
 /// file_put_contents("$d/r.php", '<?php eval(\'class Base { public $x = 1; }\'); class C extends Base { function m() { return $this->x; } }
 /// function size($o) { $m = memory_get_usage(); $c = (new ReflectionMethod("C", "m"))->getClosure($o); $grew = memory_get_usage() - $m; unset($c); return $grew; }
-/// function k($o, $n) { $t = 0; $w = 0; for ($i = 0; $i < $n; $i++) { if ($i == 0) { $w = size($o); } $t += $o->m(); } return $t . " " . ($w > size($o) ? "own" : "shared"); }
+/// function fcc($o) { $m = memory_get_usage(); $c = $o->m(...); $grew = memory_get_usage() - $m; unset($c); return $grew; }
+/// function k($o, $n) { $t = 0; $w = $f = 0; for ($i = 0; $i < $n; $i++) { if ($i == 0) { $w = size($o); $f = fcc($o); } $t += $o->m(); } return $t . " " . ($w > size($o) ? "own" : "shared") . " " . ($f > fcc($o) ? "own" : "shared"); }
 /// echo k(new C, 20), "\n";');
 /// $s = stream_socket_server('tcp://127.0.0.1:0'); $port = parse_url(stream_socket_get_name($s, false), PHP_URL_PORT); fclose($s);
 /// $ini = ['opcache.enable=1', 'opcache.enable_cli=1', 'opcache.jit=tracing', 'opcache.jit_buffer_size=64M', 'opcache.jit_hot_loop=1', 'opcache.jit_hot_func=1', 'opcache.jit_hot_side_exit=1', 'opcache.file_update_protection=0'];
@@ -1162,8 +1159,8 @@ static NO_PLACE: u32 = tier::PLACE.unprimed();
 /// proc_terminate($p); proc_close($p); unlink("$d/r.php"); rmdir($d);
 /// ```
 /// ```expect regime=jit-exit-fuzz process
-/// 20 own
-/// 20 own
+/// 20 own shared
+/// 20 own shared
 /// ```
 fn touched(req: &Request, (epoch, trace): (&Epoch, &Trace)) -> impl Iterator<Item = usize> {
     (trace.map_ptrs.iter()).map(move |raw| touch_one(req, epoch, *raw))
@@ -1356,7 +1353,7 @@ impl Headers {
                 for (raw, at) in trace.map_ptrs.iter().zip(slots) {
                     if *at == none {
                         *at = touch_one(req, epoch, *raw);
-                        entered.untouched |= *at == none;
+                        entered.untouched |= *at == none && tier::touchable(epoch, *raw);
                     }
                 }
             }
@@ -1370,7 +1367,11 @@ impl Headers {
         let headers = addresses.len();
         addresses.extend(touched(req, (epoch, trace)));
         let none = ptr::from_ref(&NO_PLACE).expose_provenance();
-        let untouched = addresses.get(headers..).unwrap_or_default().contains(&none);
+        // Only a slot a later call can lay is touched again: one no call
+        // lays, a file's own code's or one past its cache, never is.
+        let untouched = (addresses.get(headers..).unwrap_or_default().iter())
+            .zip(&trace.map_ptrs)
+            .any(|(at, raw)| *at == none && tier::touchable(epoch, *raw));
         let entered = Entered {
             addresses: addresses.into_boxed_slice(),
             missing,
