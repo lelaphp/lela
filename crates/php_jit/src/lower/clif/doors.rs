@@ -37,7 +37,7 @@ use crate::lower::{
     LANDING_TAG, LANDINGS, Linked, READY_AT, ROOT_AT, ROW_BYTES, ROW_IMAGES, ROW_READY,
     ROW_SEGMENT, ROWS_AT, STOOD_AT, Stands, TRACE_AT,
 };
-use crate::types::{Abort, End, ExitId, Grows, Landing};
+use crate::types::{Abort, End, ExitId, Grows};
 
 /// Where a jump finds the trace it enters.
 #[derive(Debug, Clone, Copy)]
@@ -82,7 +82,7 @@ impl Emit<'_> {
     /// landing of it does nothing but stand the frame.
     fn goes_on_at(&self, exit: ExitId, linked: Option<Linked>) -> Option<Stands> {
         let spec = self.ir.exits.get(usize::from(exit.0))?;
-        if !matches!(spec.landing, Landing::Plain | Landing::RestoreCall) {
+        if spec.landing.frees.any() {
             return None;
         }
         if let Some(opline) = spec.opline {

@@ -27,8 +27,8 @@ loop at 0, loop, interrupt exit 16
 0010 f0 COALESCE #9 step unwinds -> unwind 0
   -> #10 f0.T6 [long]
   checks direction taken -> exit 8
-  guard #10 long -> exit 9
-  guard #7 long -> exit 10
+  guard #7 long -> exit 9
+  guard #10 long -> exit 10
 0012 f0 ADD #7, #10 inline
   -> #11 f0.T7 [long] reg
   checks #11 long -> exit 11
@@ -61,7 +61,7 @@ exit 6: f0 0022 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f
 exit 7: f0 0008 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 8: f0 0011 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
 exit 9: f0 0012 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long
-exit 10: f0 0012 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T6:long
+exit 10: f0 0012 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T4:long
 exit 11: f0 0012 plain f0.CV2=#1 f0.CV4=#3 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T4:long f0.T6:long
 exit 12: f0 0017 plain f0.CV2=#1 f0.CV4=#3 f0.T7=#11 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long
 exit 13: f0 0017 plain f0.CV2=#1 f0.CV4=#3 f0.T7=#11 f0.T10=#15 f0.CV0:array f0.CV1:long f0.CV2:long f0.CV3:string f0.CV4:long f0.T7:long f0.T10:long

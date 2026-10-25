@@ -1133,8 +1133,11 @@ pub(crate) fn header(req: &mut Request) {
 /// it at once; the callback `header_register_callback` left served;
 /// `headers_sent` set; and `sapi_send_headers_free`, the status line
 /// given back. The block is handed to the sink here, php's
-/// `sapi_module.send_headers`, whose answer is that it sent them.
-/// Nothing here answers `headers_only`, the
+/// `sapi_module.send_headers`, which answers whether it sent them: a
+/// block it could not send is `SAPI_HEADER_SEND_FAILED`, which puts
+/// `headers_sent` back and answers false (`Z/main/SAPI.c:943-946`), so
+/// [`header`] sets `PHP_OUTPUT_DISABLED`. Nothing here answers
+/// `headers_only`, the
 /// `HEAD` request that refuses a body, since no host describes one yet.
 fn send_headers(req: &mut Request) -> bool {
     if req.output().headers_sent {
@@ -1171,9 +1174,12 @@ fn send_headers(req: &mut Request) -> bool {
         callback.give_up(req);
     }
     req.output_mut().headers_sent = true;
-    req.send_header_block();
+    let sent = req.send_header_block().is_ok();
+    if !sent {
+        req.output_mut().headers_sent = false;
+    }
     send_headers_free(req);
-    true
+    sent
 }
 
 /// `sapi_send_headers_free` (`Z/main/SAPI.c:490`): the status line and
@@ -2101,7 +2107,52 @@ mod tests {
     use std::sync::Arc;
 
     use crate::api::request::Request;
-    use crate::engine::{Engine, RequestDescription};
+    use crate::engine::{Aborted, Engine, OutputSink, RequestDescription, ResponseHead};
+
+    /// A host whose header block never reaches the client, as php's
+    /// built-in server's under a client that reset the connection
+    /// (GH-23425): the body it was handed, kept.
+    #[derive(Default)]
+    struct Refusing {
+        body: Vec<u8>,
+    }
+
+    impl OutputSink for Refusing {
+        fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
+            self.body.extend_from_slice(bytes);
+            Ok(())
+        }
+
+        fn flush(&mut self) {}
+
+        fn send_headers(&mut self, _: &ResponseHead) -> Result<(), Aborted> {
+            Err(Aborted { exit_status: None })
+        }
+
+        fn log(&mut self, _: &[u8]) {}
+
+        fn write_stderr(&mut self, _: &[u8]) {}
+    }
+
+    /// `SAPI_HEADER_SEND_FAILED` (`Z/main/SAPI.c:943-946`): the block the
+    /// host could not send puts `headers_sent` back, so `headers_sent()`
+    /// answers false after the first byte, and `php_header` sets
+    /// `PHP_OUTPUT_DISABLED`, so that byte and the rest go nowhere.
+    #[test]
+    fn a_header_block_the_host_could_not_send_leaves_headers_sent_false() {
+        let engine = Engine::builder().build();
+        let mut req = Request::lent(
+            Arc::clone(&engine.shared),
+            RequestDescription::default(),
+            Box::new(Refusing::default()),
+        );
+        req.response_mut().write(b"x");
+        assert!(req.response().headers_sent().is_none());
+        req.response_mut().write(b"y");
+        assert!(req.response().headers_sent().is_none());
+        let sink = crate::test::handed_back::<Refusing>(req.release_sink());
+        assert_eq!(sink.map(|sink| sink.body), Some(Vec::new()));
+    }
 
     /// A request under a host whose `header_handler` takes a line.
     fn web_request() -> Box<Request> {

@@ -19,8 +19,8 @@ use std::sync::Arc;
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::request::{HostPath, Request, Standard, Unresolved};
-use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Resource, Value};
+use crate::api::request::{Callee, Family, HostPath, Request, Retval, Standard, Unresolved};
+use crate::api::values::{ClassId, Owner, PhpObject, PhpString, Resource, Value, adopted};
 
 pub use crate::api::request::paths::scheme_length;
 pub use crate::api::request::temporary::TemporaryGuard;
@@ -173,8 +173,10 @@ pub trait Face: sealed::Sealed {
     /// The tail of `zend_call_function` where the callee left something
     /// pending and no frame stands to take it.
     fn thrown_without_frame(&mut self, thrown: &Thrown) -> Result<Value, Thrown>;
-    /// `zend_call_function` over a method, as a user-space wrapper's
-    /// calls are served.
+    /// A method served as a user-space wrapper's calls are,
+    /// `zend_call_method_if_exists`'s `zend_call_known_fcc` and
+    /// `zend_call_known_instance_method` for its constructor: once the
+    /// memory limit was met, its refusal is `zend_call_known_function`'s.
     fn serve_method(
         &mut self,
         function: Function,
@@ -252,7 +254,15 @@ impl Face for Request {
         arguments: &[Value],
         extra_named: &[(PhpString, Value)],
     ) -> Result<Owner<Value>, Thrown> {
-        Request::serve_method(self, function, this, called_scope, arguments, extra_named)
+        let method = Callee::method(function, this, called_scope);
+        adopted(Request::serve_method_into(
+            self,
+            Retval::Native,
+            Family::Known,
+            method,
+            arguments,
+            extra_named,
+        ))
     }
     fn instantiable(&mut self, class: ClassId) -> Result<(), Thrown> {
         Request::instantiable(self, class)

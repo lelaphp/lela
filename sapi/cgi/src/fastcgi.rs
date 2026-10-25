@@ -232,9 +232,10 @@ impl OutputSink for Response {
     }
 
     /// `sapi_cgi_send_headers`, the head [`php_sapi::cgi::head`] writes.
-    fn send_headers(&mut self, head: &ResponseHead) {
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), Aborted> {
         let block = php_sapi::cgi::head(head);
         self.wire().write(Kind::Stdout, &block);
+        Ok(())
     }
 
     /// `sapi_cgi_log_message`: the entry and `\n` as the request's

@@ -27,7 +27,7 @@
 //! **What `enter` does not do yet.** A call `push_call` began is on the
 //! engine's stack, pushed by the engine, where php's compiled code keeps
 //! it in a register until an exit's `RESTORE_CALL` links it, so
-//! `Landing::RestoreCall` restores nothing.
+//! a landing's `restores_call` restores nothing.
 //!
 //! `ExitCtx` is generic over the request it carries, so that the bench
 //! bar and the wrappers' own tests cross it over a stand-in with no
@@ -52,7 +52,7 @@ use php_unit::{MapPtrOffset, OperandKind, OplineIdx};
 
 use crate::lower::{self, Stood, engine_offset};
 use crate::table::{Exit, Trace};
-use crate::types::{ExitId, Landing};
+use crate::types::ExitId;
 
 /// What a request is to the crossing: the interrupt compiled code tests at a
 /// loop header, and whether a kernel that returned left the request
@@ -1694,15 +1694,13 @@ fn land(req: &mut Request, exit: &Exit) -> Result<FrameRef, Fatal> {
     if let Some(at) = exit.opline {
         tier::stand(req, frame, at);
     }
-    match exit.landing {
-        Landing::Plain | Landing::RestoreCall => {}
-        Landing::FreeTemps { op1, op2 } => {
-            let read = exit
-                .opline
-                .and_then(|at| at.0.checked_sub(1))
-                .ok_or_else(|| internal("a landing frees what no opline before its own read"))?;
-            tier::free_operands(req, frame, OplineIdx(read), op1, op2);
-        }
+    let frees = exit.landing.frees;
+    if frees.any() {
+        let read = exit
+            .opline
+            .and_then(|at| at.0.checked_sub(1))
+            .ok_or_else(|| internal("a landing frees what no opline before its own read"))?;
+        tier::free_operands(req, frame, OplineIdx(read), frees.op1, frees.op2);
     }
     Ok(frame)
 }

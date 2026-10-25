@@ -158,7 +158,9 @@ impl OutputSink for Kept {
         Ok(())
     }
     fn flush(&mut self) {}
-    fn send_headers(&mut self, _: &ResponseHead) {}
+    fn send_headers(&mut self, _: &ResponseHead) -> Result<(), Aborted> {
+        Ok(())
+    }
     fn log(&mut self, entry: &[u8]) {
         self.0.extend_from_slice(entry);
     }

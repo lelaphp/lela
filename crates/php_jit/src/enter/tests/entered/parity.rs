@@ -186,7 +186,7 @@ fn trace(frames: Vec<FrameInfo>, ops: Vec<Op>, (frame, opline): (Frame, u32)) ->
         exits: vec![ExitSpec {
             frame,
             opline: Some(OplineIdx(opline)),
-            landing: Landing::Plain,
+            landing: Landing::PLAIN,
             stores: Vec::new(),
             known: Vec::new(),
             grows: Grows::Never,

@@ -343,6 +343,21 @@ pub(crate) enum Command {
     /// held through the registry under `trace:dump/<kernel>`; the engine's
     /// side is `php` built with the tier's feature.
     TraceDump(crate::trace_dump::Ask),
+    /// Hold the release `serve_frame` to LLVM's fold of a request field's
+    /// address into each access; one reading, at `sapi/cli`.
+    ///
+    /// Each instantiation is disassembled, and one that reaches a field
+    /// through an address held apart from the request's register fails.
+    /// The fold is what `.cargo/config.toml`'s LLVM
+    /// `--cgp-max-address-users-to-scan=1000` buys every profile (design
+    /// §10 Profiles, #3372), and the sensor is how a toolchain that keeps
+    /// the option's name and changes its meaning is found: `done` asks for
+    /// a fresh passing reading on a diff that changes the toolchain file or
+    /// `.cargo/config.toml`. A site is an `add xN, <request>, #C` whose
+    /// sum the next instruction naming `xN` loads or stores through at
+    /// an offset `[<request>, #C + offset]` could encode, the shape #3345
+    /// found; an `aarch64` Mac alone, a skip elsewhere.
+    Fold(crate::fold::Ask),
     /// Hold makala to the pinned php-fpm: each request of the HTTP-served
     /// subset served by both, the status, header lines and body compared;
     /// one reading, at makala's crate.

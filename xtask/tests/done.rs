@@ -429,6 +429,59 @@ fn a_dependents_reading_is_stale_once_a_crate_in_its_closure_changes() {
     assert!(verdict.unmet.contains(&named), "{verdict:#?}");
 }
 
+/// Condition 10 (#3372): a diff that changes `.cargo/config.toml` asks for
+/// a fresh passing `fold` reading of `sapi/cli`, and one taken before the
+/// file changed is stale, since `sapi/cli`'s key covers the files rustc is
+/// built under; a failing one is unmet with its message, a skip, a host
+/// the sensor cannot read, is met and a note, and a diff that changes none
+/// of those files asks for no reading.
+#[test]
+fn a_change_to_what_rustc_is_built_under_asks_for_a_fold_reading() {
+    let root = scratch("fold");
+    let asked = |verdict: &Verdict| -> Vec<String> {
+        let fold = verdict.unmet.iter().filter(|u| u.starts_with("fold: "));
+        fold.cloned().collect()
+    };
+    write(
+        &root,
+        "sapi/cli/Cargo.toml",
+        "[package]\nname = \"php_sapi_cli\"\nversion = \"0.0.0\"\n\n[dependencies]\nphp_bundle = { path = \"../../crates/php_bundle\" }\n",
+    );
+    assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+    let store = Store::of_workspace(&root);
+    store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
+
+    write(
+        &root,
+        ".cargo/config.toml",
+        "[target.'cfg(all())']\nrustflags = []\n",
+    );
+    assert_eq!(
+        asked(&judge(&root)),
+        [
+            "fold: no reading for sapi/cli over the tree now, and .cargo/config.toml changed; `cargo xtask fold` takes it, building the release sapi/cli first (minutes)"
+        ]
+    );
+    let mut skipped = fresh(&root, "fold", "sapi/cli");
+    skipped.status = Status::Skip;
+    skipped.message = "sapi/cli: not held; this host is x86_64".into();
+    store.record(&[skipped]).unwrap();
+    let verdict = judge(&root);
+    assert_eq!(asked(&verdict), Vec::<String>::new());
+    let note = "fold: sapi/cli not held on this host: sapi/cli: not held; this host is x86_64";
+    assert!(verdict.notes.contains(&note.to_owned()), "{verdict:#?}");
+    let mut failing = fresh(&root, "fold", "sapi/cli");
+    failing.status = Status::Fail;
+    failing.message = "sapi/cli: hoisted".into();
+    store.record(&[failing]).unwrap();
+    assert_eq!(
+        asked(&judge(&root)),
+        ["fold: sapi/cli fail: sapi/cli: hoisted"]
+    );
+    store.record(&[fresh(&root, "fold", "sapi/cli")]).unwrap();
+    assert_eq!(asked(&judge(&root)), Vec::<String>::new());
+}
+
 // ------------------------------------------- the base is main
 
 /// A scratch repository on `t9`, cut from `main`, with `main` one commit
@@ -1543,7 +1596,7 @@ fn ci_runs_the_per_commit_job_on_main_and_judges_since_the_same_base() {
 /// While `DAX_BUILD_RUNNER` is set the oracle job is skipped, and the done
 /// step names as `--not-run` exactly the instruments of condition 1 that
 /// job's steps run, so a lane added there is named here or `done` is red
-/// for its absence (#2477).
+/// for its absence (#2477); and `fold`, which no runner takes, always.
 #[test]
 fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
     let manifest = Manifest::load(workspace()).unwrap();
@@ -1576,7 +1629,18 @@ fn a_skipped_oracle_job_has_done_name_every_instrument_it_runs_not_run() {
         .skip(1)
         .filter_map(|rest| rest.split_whitespace().next())
         .collect();
-    assert_eq!(named, runs, "{step}");
+    // `fold` is named on every run, before the test of the oracle job:
+    // no runner is the aarch64 Mac it reads (#3384).
+    let mut asked = runs.clone();
+    asked.insert("fold");
+    assert_eq!(named, asked, "{step}");
+    let always = step
+        .find("set -- --not-run fold\n")
+        .expect("fold is named on every run");
+    assert!(
+        always < step.find("if [ \"$ORACLE\" = skipped ]").unwrap(),
+        "{step}"
+    );
     assert!(
         step.contains("::warning title=the oracle lane did not run::"),
         "{step}"

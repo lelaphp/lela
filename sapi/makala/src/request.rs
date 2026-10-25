@@ -732,10 +732,11 @@ impl OutputSink for Sink {
         true
     }
 
-    fn send_headers(&mut self, head: &ResponseHead) {
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), Aborted> {
         if let Some(waiting) = self.head.take() {
             waiting.send(head.clone()).ok();
         }
+        Ok(())
     }
 
     fn log(&mut self, entry: &[u8]) {
@@ -852,7 +853,7 @@ mod tests {
             match &head.target[..] {
                 b"/panic.php" => panic!("a request panicked before its head, on cue"),
                 b"/cut.php" => {
-                    sink.send_headers(&ok());
+                    sink.send_headers(&ok()).ok();
                     sink.write(b"partial").ok();
                     let (read, seen) = &READ;
                     let guard = read.lock().unwrap_or_else(PoisonError::into_inner);
@@ -863,7 +864,7 @@ mod tests {
                     panic!("a request panicked mid-response, on cue");
                 }
                 _ => {
-                    sink.send_headers(&ok());
+                    sink.send_headers(&ok()).ok();
                     let name = std::thread::current().name().unwrap_or("").to_owned();
                     sink.write(name.as_bytes()).ok();
                 }
