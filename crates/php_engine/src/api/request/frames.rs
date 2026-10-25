@@ -1101,6 +1101,17 @@ impl Request {
         self.vm.cached(&self.map, frame, slot)
     }
 
+    /// [`Request::cached`] read in place, none for a slot that reads
+    /// `Unprimed` for want of one ([`exec::Vm::cached_in_place`]).
+    #[inline]
+    pub(crate) fn cached_in_place(
+        &self,
+        frame: FrameRef,
+        slot: CacheSlot,
+    ) -> Option<&exec::Cached> {
+        self.vm.cached_in_place(&self.map, frame, slot)
+    }
+
     /// `CACHE_PTR(num, ptr)`: `value` into the runtime cache of the op
     /// array `frame` serves at `slot`, in this request's map table
     /// ([`exec::Vm::prime`]), where every pass after reads it.

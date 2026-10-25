@@ -1792,14 +1792,13 @@ pub(crate) fn init_fcall<T: Tier, A: Operand + Default>(
 /// first pass primed it, and take it too.
 #[inline(always)] // as `inline_send`
 fn inline_init_fcall(req: &mut Request, frame: FrameRef, op: &Opline, at: u32) -> Option<Edge> {
-    let mut call = match req.cached(frame, CacheSlot(op.out)) {
-        Cached::Call(call) => call,
-        Cached::Function(function) => return init_native(req, frame, function, op, at),
+    // Read off the slot in place, so only the fields the push lays are
+    // loaded, where a copy of the slot is made whole on the stack first.
+    let call = match req.cached_in_place(frame, CacheSlot(op.out))? {
+        Cached::Call(call) => *call,
+        &Cached::Function(function) => return init_native(req, frame, function, op, at),
         _ => return None,
     };
-    if call.awaits {
-        call = primed_again(req, frame, op, call);
-    }
     let count = op.extended_value;
     let header = move || exec::Header::primed(call, count);
     Some(match req.push_laid(call.room as usize, header) {
@@ -1910,8 +1909,10 @@ fn init_call(
     named: ConstIdx,
 ) -> Edge {
     let slot = CacheSlot(op.out);
-    let function = if let Some(function) = req.cached(frame, slot).function() {
-        Some(function)
+    // The callee, and whether this pass looked it up by name, where it
+    // primes the slot.
+    let (function, looked_up) = if let Some(function) = req.cached(frame, slot).function() {
+        (Some(function), false)
     } else {
         let named = exec::constant(code, named);
         let found = lookups.iter().find_map(|&at| {
@@ -1922,11 +1923,7 @@ fn init_call(
                 .unwrap_or_default();
             exec::find_function(req, Bare::resolved(key))
         });
-        if let Some(function) = found {
-            let primed = primed_call(req, function, op.extended_value);
-            req.prime(frame, slot, primed);
-        }
-        found
+        (found, true)
     };
     let Some(function) = function else {
         // The name as the constant spells it, `zval_get_string`.
@@ -1939,14 +1936,22 @@ fn init_call(
         req.release(Value::string(name));
         return threw(req, frame, &thrown);
     };
-    pushed(req, frame, exec::Header::call(function, op.extended_value))
+    req.push_call(exec::Header::call(function, op.extended_value))?;
+    // Written once the push has laid the callee's runtime cache down
+    // (`init_func_run_time_cache`), so a call that enters plainly keeps
+    // its entry laid from the first pass after this one.
+    if looked_up {
+        let primed = primed_call(req, function, op.extended_value);
+        req.prime(frame, slot, primed);
+    }
+    Ok(advance(req, frame))
 }
 
 /// What an `INIT_*`'s slot keeps of `function`, called with `count`
 /// arguments: the push a user function's call takes, made off its row
 /// once ([`exec::PrimedCall`]), and any other callee alone. A call that
-/// enters plainly lays its entry once the callee's cache is laid down,
-/// on each pass from the second; a named argument or an unpack that
+/// enters plainly lays its entry, the callee's cache laid down by the
+/// first pass's push, on each pass from the second; a named argument or an unpack that
 /// moves the count past what the `INIT` said unlays it, and a call past
 /// the parameters never lays it:
 ///
@@ -1982,28 +1987,7 @@ fn primed_call(req: &Request, function: Function, count: u32) -> Cached {
         sent: shape.sent.with_laid_entry(laid),
         cache,
         opline,
-        awaits: enters && !laid,
     })
-}
-
-/// A slot whose call `awaits` its callee's runtime cache made again, and
-/// what it keeps now: laid, once the callee's first activation laid the
-/// cache down, and awaiting it still before.
-#[cold]
-#[inline(never)]
-fn primed_again(
-    req: &mut Request,
-    frame: FrameRef,
-    op: &Opline,
-    call: exec::PrimedCall,
-) -> exec::PrimedCall {
-    let Cached::Call(again) = primed_call(req, call.function, op.extended_value) else {
-        return call;
-    };
-    if !again.awaits {
-        req.prime(frame, CacheSlot(op.out), Cached::Call(again));
-    }
-    again
 }
 
 /// `zend_vm_stack_push_call_frame` for an `INIT_*`: the call `header`

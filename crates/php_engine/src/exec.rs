@@ -1480,11 +1480,19 @@ impl RuntimeCache {
     /// allocation.
     #[inline]
     pub(crate) fn get(&self, slot: CacheSlot) -> Cached {
+        self.slot(slot).copied().unwrap_or_default()
+    }
+
+    /// The slot at `slot` as it stands, read in place: what
+    /// [`RuntimeCache::get`] copies out, none where it reads `Unprimed`
+    /// for want of a slot. A handler that reads a few fields of a wide
+    /// variant reads them here, off the slot, where the copy would make
+    /// it whole on the stack first.
+    #[inline]
+    pub(crate) fn slot(&self, slot: CacheSlot) -> Option<&Cached> {
         self.slots
             .as_ref()
             .and_then(|slots| slots.get((slot.0 / SLOT_BYTES) as usize))
-            .copied()
-            .unwrap_or_default()
     }
 
     /// Where the slot at `slot` stands, which compiled code reads in
@@ -1831,9 +1839,10 @@ pub(crate) enum Cached {
 ///
 /// Where the call enters plainly, the flags say its entry is laid
 /// ([`CallInfo::LAID_ENTRY`]) and the slot keeps the runtime cache and
-/// the opline its activation would write, so `DO_UCALL` reads no row; one
-/// whose cache the request has not laid down yet `awaits` it, and the
-/// first pass after its first activation makes the slot again.
+/// the opline its activation would write, so `DO_UCALL` reads no row. The
+/// slot is made after the first pass's push, which lays the callee's
+/// runtime cache down where php lays it (`init_func_run_time_cache`), so
+/// every slot a plain entry primes keeps it laid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct PrimedCall {
     pub(crate) function: Function,
@@ -1842,7 +1851,6 @@ pub(crate) struct PrimedCall {
     pub(crate) sent: CallInfo,
     pub(crate) cache: CacheAt,
     pub(crate) opline: u32,
-    pub(crate) awaits: bool,
 }
 
 /// [`Cached::Unprimed`]'s tag, what a slot compiled code reads holds
@@ -2545,9 +2553,20 @@ impl Vm {
     /// (`EX(run_time_cache)`, [`RuntimeCache::get`]).
     #[inline]
     pub(crate) fn cached(&self, map: &RuntimeCaches, frame: FrameRef, slot: CacheSlot) -> Cached {
-        self.at(frame)
-            .and_then(|header| map.get(header.runtime_cache()))
-            .map_or(Cached::Unprimed, |cache| cache.get(slot))
+        self.cached_in_place(map, frame, slot)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// [`Vm::cached`] read in place ([`RuntimeCache::slot`]).
+    #[inline]
+    pub(crate) fn cached_in_place<'m>(
+        &self,
+        map: &'m RuntimeCaches,
+        frame: FrameRef,
+        slot: CacheSlot,
+    ) -> Option<&'m Cached> {
+        map.get(self.at(frame)?.runtime_cache())?.slot(slot)
     }
 
     /// `CACHE_PTR(num, ptr)`: `value` into the runtime cache of the op
