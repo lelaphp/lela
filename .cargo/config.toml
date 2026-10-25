@@ -43,7 +43,8 @@ SQLITE3_STATIC = { value = "1", force = true }
 # Apple silicon Mac and links the first it finds; the oracle, php 8.5.12,
 # links `openssl@4`, as the keg's libcurl does (design §7.2, #1108,
 # #3381); named for that target alone, the variable binds ext/openssl to
-# the major version the oracle has, whatever else the Cellar holds.
+# the major version the oracle has, whatever else the Cellar holds, and
+# a Linux host still finds its OpenSSL 3 through pkg-config.
 AARCH64_APPLE_DARWIN_OPENSSL_DIR = { value = "/opt/homebrew/opt/openssl@4", force = true }
 
 # curl-sys links whatever `-l curl` finds on an Apple target, the SDK's

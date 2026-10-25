@@ -23,6 +23,7 @@ use crate::xp_ssl::{Cipher, Hooks, Io, San};
 unsafe extern "C" {
     fn SSL_set_fd(ssl: *mut sys::SSL, fd: c_int) -> c_int;
     fn SSL_copy_session_id(to: *mut sys::SSL, from: *const sys::SSL) -> c_int;
+    fn SSL_SESSION_is_resumable(s: *const sys::SSL_SESSION) -> c_int;
     fn SSL_set_info_callback(ssl: *mut sys::SSL, cb: Option<InfoCallback>);
     fn SSL_CTX_set_default_passwd_cb(ctx: *mut sys::SSL_CTX, cb: Option<PasswdCallback>);
     fn SSL_CTX_set_default_passwd_cb_userdata(ctx: *mut sys::SSL_CTX, u: *mut c_void);
@@ -382,6 +383,20 @@ impl Tls {
     pub(crate) fn reneg_callback(&self) {
         // SAFETY: the SSL is live; the callback is ours.
         unsafe { SSL_set_info_callback(self.ssl(), Some(info_callback)) };
+    }
+
+    /// `SSL_SESSION_is_resumable(SSL_get_session(ssl))`: whether the
+    /// session the connection holds is one the server issued for
+    /// resumption, by id or by TLS 1.3's `NewSessionTicket`, which is when
+    /// OpenSSL hands it to a new-session callback.
+    pub(crate) fn session_resumable(&self) -> bool {
+        // SAFETY: the SSL is live; the session it answers is borrowed.
+        let session = unsafe { sys::SSL_get_session(self.ssl()) };
+        if session.is_null() {
+            return false;
+        }
+        // SAFETY: the session is the SSL's own, live while the SSL is.
+        unsafe { SSL_SESSION_is_resumable(session) == 1 }
     }
 
     /// `SSL_copy_session_id(ssl, from)`.

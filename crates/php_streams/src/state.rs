@@ -17,8 +17,8 @@ use crate::api::request::{
     EngineWrapper, FilterFactory, Request, Standard, StreamCtx, StreamWrapper, context_dtor,
 };
 use crate::api::values::Resource;
+use crate::streams::Registered;
 use crate::streams::persistent::{Entry, Held};
-use crate::streams::{FilterCall, Registered};
 use crate::supplied::Supplied;
 use crate::wrapper::StatCache;
 
@@ -79,9 +79,16 @@ pub(crate) struct State {
     /// being served (`Streams::set_opened_path`), which an include
     /// compiles the file under.
     pub(crate) opened_path: Option<Vec<u8>>,
-    /// The filter call in progress, whose stream is out of its resource
-    /// while the filter runs.
-    pub(crate) filtering: Option<FilterCall>,
+    /// How many filter calls the request has lent a filter out for,
+    /// each call's number the mark of the filter's place on its chain.
+    pub(crate) filter_lends: u64,
+    /// The streams whose resource closed while an operation held them,
+    /// by the resource each was the payload of, which the last operation
+    /// to let go frees ([`crate::streams::StreamOp`]).
+    pub(crate) closed: Vec<(Resource, crate::streams::Slot)>,
+    /// What a kind reads into before its bytes go into a stream's read
+    /// buffer, kept between reads so a fill allocates nothing of its own.
+    pub(crate) read_scratch: Vec<u8>,
     /// `BG(CurrentStatFile)` and `BG(CurrentLStatFile)`, `php_stat`'s
     /// cache, which the plain files kind clears.
     pub(crate) stat_cache: StatCache,
@@ -166,7 +173,9 @@ impl Default for State {
             standard_closed: [false; 3],
             wrapper_errors: Vec::new(),
             opened_path: None,
-            filtering: None,
+            filter_lends: 0,
+            closed: Vec::new(),
+            read_scratch: Vec::new(),
             stat_cache: StatCache::default(),
             persistent: Vec::new(),
             engine: None,
