@@ -250,11 +250,16 @@ pub(crate) fn interpreted<T: Tier>() -> bool {
 
 /// Where a request keeps its tier's [`Tier::State`]
 /// (`jit-design.md` §2.2, #3144): laid once with the request, by the
-/// loop the engine bound ([`Loops::bound`]), and read by [`state`]. Its
-/// box is never replaced, moved out of or borrowed mutably while the
-/// request lives, and [`state`] lends it only shared: a tier lends its
-/// state across the request's own borrow on that (`php_jit`'s
-/// `enter::lent`, #3437).
+/// loop the engine bound ([`Loops::bound`]), and read by [`state`].
+/// Its box is never replaced, moved out of or borrowed mutably while
+/// the request lives, and the types hold that outside `api::request`,
+/// where the request is made: the box is this type's private field,
+/// with no `&mut` method, and the request's field holding it is private
+/// to `api::request`, which hands it out only shared
+/// ([`Request::tier_state`]). A tier lends its state across the
+/// request's own borrow on that (`php_jit`'s `enter::lent`, #3437), and
+/// checks under `debug_assertions` that the state stands where it lent
+/// it after each lend.
 pub(crate) struct TierState(Option<Box<dyn Any + Send>>);
 
 impl TierState {
@@ -275,7 +280,7 @@ impl TierState {
 /// the engine binds a loop that lays none, `Nop`'s.
 #[must_use]
 pub fn state<S: Any>(req: &Request) -> Option<&S> {
-    req.tier.0.as_deref()?.downcast_ref()
+    req.tier_state().0.as_deref()?.downcast_ref()
 }
 
 /// One safepoint's word (`jit-design.md` §3.2): two atomics, zero at

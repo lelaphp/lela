@@ -254,8 +254,12 @@ pub enum Unresolved {
 #[allow(clippy::struct_excessive_bools)] // php's EG and PG flags, each its own global, read alone
 pub struct Request {
     pub(crate) shared: Arc<Shared>,
-    /// The tier's state, laid with the request ([`crate::tier::state`]).
-    pub(crate) tier: crate::tier::TierState,
+    /// The tier's state, laid with the request and never written again:
+    /// private to `api::request`, where the request is made, and read
+    /// elsewhere through [`Request::tier_state`] alone, so a `&mut` of it
+    /// or a value written over it anywhere else fails to compile
+    /// ([`crate::tier::TierState`]).
+    tier: crate::tier::TierState,
     description: RequestDescription,
     /// The uncaught throwable kept for a host that renders it ([`inspect::Inspected`]).
     inspect: inspect::Inspected,
@@ -1049,6 +1053,14 @@ fn user_function_decl(user: &UserFunction) -> Option<&FunctionDecl> {
 }
 
 impl Request {
+    /// The tier's state the request was laid with, shared: the one way to
+    /// it outside `api::request`, so nothing there borrows it mutably or
+    /// replaces it ([`crate::tier::state`]).
+    #[inline]
+    pub(crate) fn tier_state(&self) -> &crate::tier::TierState {
+        &self.tier
+    }
+
     /// A request no host lent a sink, which keeps what it writes in one
     /// of its own that no host reads: the engine's startup, its end where
     /// the host left no sink ([`EngineBuilder::ends_into`](crate::engine::EngineBuilder::ends_into)), and a unit

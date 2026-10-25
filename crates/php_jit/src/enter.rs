@@ -433,30 +433,41 @@ pub(crate) fn lent<T>(
 ) -> Option<T> {
     let state = tier::state::<crate::JitRequest>(req)?;
     state.epoch.get_or_init(|| tier::epoch(req));
-    let state = ptr::from_ref(state);
+    let found = ptr::from_ref(state);
     // SAFETY: the request lays its tier's state once, as it is made, in a
-    // box of its own that it never replaces, moves out of or borrows
-    // mutably (`tier::state`, the one way to it, lends it shared), and
-    // drops it only as the request ends; `serve` borrows the request for
-    // less than that. So the state stands where `tier::state` found it,
-    // written only through its cells, for as long as `serve` serves, and
-    // no `&mut` of it is made meanwhile: what the box holds is not the
-    // request's own memory, which `serve`'s borrow covers.
-    let state = unsafe { &*state };
+    // box of its own, and drops it only as the request ends; `serve`
+    // borrows the request for less than that. Nothing replaces, moves
+    // out of or borrows the box mutably meanwhile, and php_engine's types
+    // hold that outside `api::request`, where the request is made: the
+    // box is `TierState`'s private field, with no `&mut` method, and the
+    // request's field holding it is private to `api::request`, which
+    // hands it out only shared (`Request::tier_state`, `tier::state`). So the
+    // state stands where `tier::state` found it, written only through
+    // its cells, for as long as `serve` serves: what the box holds is not
+    // the request's own memory, which `serve`'s borrow covers. What the
+    // types leave open, `api::request` itself and a swap of two whole
+    // requests, the assertion past `serve` catches in every build with
+    // debug assertions.
+    let state = unsafe { &*found };
     let epoch = state.epoch.get()?;
     let table = match state.table.get() {
         Some(table) => Some(&**table),
         None => crate::table::shared_of_epoch(epoch)
             .map(|table| &**state.table.get_or_init(|| std::sync::Arc::clone(table))),
     };
-    Some(serve(
+    let served = serve(
         req,
         Lent {
             state,
             epoch,
             table,
         },
-    ))
+    );
+    debug_assert!(
+        tier::state::<crate::JitRequest>(req).is_some_and(|now| ptr::eq(now, found)),
+        "the request's tier state was replaced or moved while a crossing borrowed it"
+    );
+    Some(served)
 }
 
 /// One `extern "C"` wrapper per listed kernel (`jit-design.md` §4.6,
