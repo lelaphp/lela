@@ -146,11 +146,7 @@ impl Walked {
             if !seen.insert(file.clone()) {
                 continue;
             }
-            let loads = Loads::of(&file)?;
-            for name in &loads.names {
-                let Some(real) = loads.resolved(&file, name)? else {
-                    continue;
-                };
+            for real in Loads::libraries(&file)? {
                 if let Some((prefix, keg)) = in_cellar(&real) {
                     walked.prefix.get_or_insert(prefix);
                     walked.kegs.insert(keg);
@@ -163,6 +159,59 @@ impl Walked {
 
     fn names(&self, keg: &str) -> bool {
         self.kegs.iter().any(|(name, _)| name == keg)
+    }
+}
+
+/// The libraries one binary names in its own load commands, each by the
+/// file it resolves to and the keg that file stands in, beside the
+/// Homebrew prefix the binary stands under (#3458). A crate built against
+/// a keg is held to these, so it links the keg the oracle loads itself
+/// and not another the closure carries for a library's sake, as it
+/// carries openssl@3 beside the openssl@4 php loads.
+#[derive(Debug)]
+pub(crate) struct Own {
+    prefix: PathBuf,
+    libraries: Vec<(PathBuf, String)>,
+}
+
+impl Own {
+    /// What `binary` loads itself; none where it is not on this machine
+    /// or stands under no Cellar, as a Linux build does.
+    pub(crate) fn of(binary: &Path) -> Result<Option<Own>> {
+        let Ok(real) = fs::canonicalize(binary) else {
+            return Ok(None);
+        };
+        let Some((prefix, _)) = in_cellar(&real) else {
+            return Ok(None);
+        };
+        let libraries = Loads::libraries(&real)?.into_iter().filter_map(|file| {
+            let (_, (keg, _)) = in_cellar(&file)?;
+            Some((file, keg))
+        });
+        Ok(Some(Own {
+            prefix,
+            libraries: libraries.collect(),
+        }))
+    }
+
+    /// The keg the binary loads a library of `stem` from: `openssl@4` for
+    /// `libssl`, by `libssl.4.dylib`.
+    pub(crate) fn keg_loading(&self, stem: &str) -> Option<&str> {
+        let named = |file: &Path| {
+            let name = file.file_name()?.to_str()?;
+            Some(name.strip_prefix(stem)?.starts_with('.'))
+        };
+        (self.libraries.iter())
+            .find(|(file, _)| named(file) == Some(true))
+            .map(|(_, keg)| keg.as_str())
+    }
+
+    /// The keg of the binary's prefix `path` stands in once its links are
+    /// followed (`/opt/homebrew/opt/openssl@4` is `openssl@4`); none where
+    /// it is not on this machine or in no keg of that prefix.
+    pub(crate) fn keg_at(&self, path: &Path) -> Option<String> {
+        let (prefix, (keg, _)) = in_cellar(&fs::canonicalize(path).ok()?)?;
+        (prefix == self.prefix).then_some(keg)
     }
 }
 
@@ -258,6 +307,17 @@ impl Loads {
         Ok(loads)
     }
 
+    /// Every library `file` names that resolves to a file on disk, as
+    /// [`Loads::resolved`] places each.
+    fn libraries(file: &Path) -> Result<Vec<PathBuf>> {
+        let loads = Loads::of(file)?;
+        let mut out = Vec::new();
+        for name in &loads.names {
+            out.extend(loads.resolved(file, name)?);
+        }
+        Ok(out)
+    }
+
     /// A library `loader` names as the file it resolves to, none for one
     /// not on disk, a system library's: an absolute name, one under
     /// `@loader_path/`, or one under `@rpath/` found in the first of the
@@ -294,14 +354,15 @@ fn word(bytes: &[u8], at: usize) -> Option<u32> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::os::unix::fs::symlink;
 
     use super::*;
     use crate::scratch::Tree;
 
-    /// A 64-bit Mach-O file whose load commands name `loads`.
-    fn macho(loads: &[&str]) -> Vec<u8> {
+    /// A 64-bit Mach-O file whose load commands name `loads`, as a stand-in
+    /// for a binary of the pin's here and in `api_check::binding`.
+    pub(crate) fn macho(loads: &[&str]) -> Vec<u8> {
         let loads: Vec<(u32, &str)> = loads.iter().map(|name| (LOADS[0], *name)).collect();
         commanded(&loads)
     }
