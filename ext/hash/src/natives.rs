@@ -1197,12 +1197,15 @@ fn hash_hmac_algos(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
 }
 
 /// `hash_pbkdf2(string $algo, string $password, string $salt, int $iterations, int $length = 0, bool $binary = false, array $options = []): string`.
-/// The lengths are php's single-precision `ceil`s.
+/// The block count is php 8.5.12's integer `ceil`, so no length rounds
+/// down to one block too few:
 ///
 /// ```php
 /// var_dump(hash_pbkdf2('sha256', 'password', 'salt', 1000), hash_pbkdf2('sha1', 'password', 'salt', 1, 20), bin2hex(hash_pbkdf2('md5', 'p', 's', 2, 5, true)), hash_pbkdf2('sha1', 'p', 's', 3, 7));
 /// try { hash_pbkdf2('md5', 'p', 's', 0); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
 /// try { hash_pbkdf2('md5', 'p', 's', 1, -1); } catch (ValueError $e) { echo $e->getMessage(), "\n"; }
+/// $h = hash_pbkdf2('md5', 'password', 'salt', 1, 33554433);
+/// var_dump(strlen($h), substr($h, -3));
 /// ```
 /// ```expect
 /// string(64) "632c2812e46d4604102ba7618e9d6d7d2f8128f6266b4a03264d2a0460b7dcb3"
@@ -1211,12 +1214,30 @@ fn hash_hmac_algos(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
 /// string(7) "00e3ddf"
 /// hash_pbkdf2(): Argument #4 ($iterations) must be greater than 0
 /// hash_pbkdf2(): Argument #5 ($length) must be greater than or equal to 0
+/// int(33554433)
+/// string(3) "490"
 /// ```
-#[allow(
-    clippy::cast_precision_loss,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
+///
+/// The state, both keys' blocks, the digest and its copy, then every
+/// derived block in one `safe_emalloc(loops, digest_size, 0)`
+/// before the first round, so a length past the memory limit ends the
+/// request at once, as php's does, rather than after the rounds:
+///
+/// ```php
+/// memory_reset_peak_usage(); $m = memory_get_usage();
+/// $h = hash_pbkdf2('md5', 'p', 's', 1, 4096, true);
+/// var_dump(memory_get_peak_usage() - $m, memory_get_usage() - $m);
+/// memory_reset_peak_usage(); $m = memory_get_usage();
+/// $g = hash_pbkdf2('sha256', 'p', 's', 1, 3001);
+/// var_dump(memory_get_peak_usage() - $m, memory_get_usage() - $m);
+/// ```
+/// ```expect
+/// int(12288)
+/// int(8192)
+/// int(4608)
+/// int(3072)
+/// ```
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 #[php_function]
 fn hash_pbkdf2(
     req: &mut Request,
@@ -1228,51 +1249,88 @@ fn hash_pbkdf2(
     #[php(default = false)] binary: bool,
     #[php(default = [])] options: PhpArray,
 ) -> Result<Owner<PhpString>, Thrown> {
-    let mut length = length;
     let (password, salt) = (password.as_bytes(), salt.as_bytes().to_vec());
     let algo = fetch(req, algo.as_bytes(), true)?;
+    if salt.len() > i32::MAX as usize - 4 {
+        return Err(arg_value_error(
+            req,
+            3,
+            "be less than or equal to INT_MAX - 4 bytes",
+        ));
+    }
     if iterations <= 0 {
         return Err(arg_value_error(req, 4, "be greater than 0"));
     }
     if length < 0 {
         return Err(arg_value_error(req, 5, "be greater than or equal to 0"));
     }
+    let state = context(req, algo)?;
     // `ops->hash_init(context, args)`: what the options may raise, raised.
     drop((algo.init)(req, Options(Some(options)))?);
+    let (k1_block, k2_block) = (
+        Emalloc::new(req, algo.block)?,
+        Emalloc::new(req, algo.block)?,
+    );
+    let (digest_block, temp) = (
+        Emalloc::new(req, algo.digest)?,
+        Emalloc::new(req, algo.digest)?,
+    );
     let k1 = hmac_key(req, algo, password)?;
     let size = algo.digest;
-    if length == 0 {
-        length = size as i64 * if binary { 1 } else { 2 };
-    }
+    // Every length below is at most `ZEND_LONG_MAX`, so none overflows.
+    let length = match length {
+        0 if binary => size,
+        0 => size * 2,
+        given => given as usize,
+    };
     let digest_length = if binary {
         length
     } else {
-        ((length as f32) / 2.0).ceil() as i64
+        length / 2 + length % 2
     };
-    let loops = ((digest_length as f32) / (size as f32)).ceil() as i64;
-    let mut result = Vec::new();
-    let mut salted = salt.clone();
-    for i in 1..=loops {
-        salted.truncate(salt.len());
-        salted.extend_from_slice(&(i as u32).to_be_bytes());
-        let mut digest = hmac(req, algo, &k1, &salted)?;
-        let mut temp = digest.clone();
+    let loops = (digest_length - 1) / size + 1;
+    let mut result = Emalloc::new(req, loops * size)?;
+    let mut salted = Emalloc::new(req, salt.len() + 4)?;
+    salted.bytes_mut()[..salt.len()].copy_from_slice(&salt);
+    for (i, block) in result.bytes_mut().chunks_exact_mut(size).enumerate() {
+        // `pack("N", i)`: php's `i` is a `zend_long`, cut to its low 32 bits.
+        let counter = (i as u64 + 1) as u32;
+        salted.bytes_mut()[salt.len()..].copy_from_slice(&counter.to_be_bytes());
+        let mut digest = hmac(req, algo, &k1, salted.bytes())?;
+        block.copy_from_slice(&digest);
         for _ in 1..iterations {
             digest = hmac(req, algo, &k1, &digest)?;
-            for (t, d) in temp.iter_mut().zip(&digest) {
+            for (t, d) in block.iter_mut().zip(&digest) {
                 *t ^= d;
             }
         }
-        result.extend_from_slice(&temp);
     }
-    let mut bytes = if binary {
-        result
-    } else {
-        result.truncate(digest_length as usize);
-        hex(&result)
+    for freed in [k1_block, k2_block, salted, state, digest_block, temp] {
+        freed.free(req);
+    }
+    let mut out = match FreshString::new(req, length) {
+        Ok(out) => out,
+        Err(thrown) => {
+            result.free(req);
+            return Err(thrown);
+        }
     };
-    bytes.truncate(length as usize);
-    PhpString::new(req, &bytes)
+    if binary {
+        out.bytes_mut().copy_from_slice(&result.bytes()[..length]);
+    } else {
+        // `php_hash_bin2hex` writes `digest_length * 2` hexits; an odd
+        // length's last falls on the terminator php then writes.
+        for (hexits, byte) in out
+            .bytes_mut()
+            .chunks_mut(2)
+            .zip(&result.bytes()[..digest_length])
+        {
+            let pair = hex(&[*byte]);
+            hexits.copy_from_slice(&pair[..hexits.len()]);
+        }
+    }
+    result.free(req);
+    Ok(out.finish())
 }
 
 /// `hash_equals(string $known_string, string $user_string): bool`: two
