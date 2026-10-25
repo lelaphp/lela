@@ -8,6 +8,7 @@
 //! the source lists and the scope a write names are [`Properties`]'s,
 //! whose fields no file but this one reads.
 
+use crate::c_number::c_str;
 use php_heap::{Fatal, Heap, Obj, Ref, TableRow, Zval};
 use php_link::Row;
 use php_unit::decl::{PropertyDecl, Visibility};
@@ -23,6 +24,7 @@ use crate::api::values::{
 use frames::Link;
 
 use super::Frames;
+use super::calls::Retval;
 use super::{DeclaredSlot, Hooks, PropertyInfo, Request, RowPlace, frames};
 
 /// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
@@ -277,11 +279,26 @@ impl Default for Properties {
 
 impl Request {
     /// php's warning for a read of the property `name` that an object
-    /// of `class` holds no value for.
+    /// of `class` holds no value for, `Undefined property: %s::$%s`
+    /// (`Z/Zend/zend_object_handlers.c:1012`), the name read to its first
+    /// NUL, as php's `%s` reads it.
+    ///
+    /// ```php
+    /// $o = new stdClass; echo $o->{"foo\0bar"};
+    /// ```
+    /// ```expect
+    /// Warning: Undefined property: stdClass::$foo in %s on line 2
+    /// ```
     pub(crate) fn undefined_property(&mut self, class: ClassId, name: &[u8]) {
         let class = self.symbols().class_name(class);
-        let shown = String::from_utf8_lossy(name);
-        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        let message = [
+            b"Undefined property: ",
+            class.as_bytes(),
+            b"::$",
+            c_str(name),
+        ]
+        .concat();
+        crate::api::raising::warning(self, &message);
     }
 
     /// The truth of `value`, an answer the caller holds, given up once
@@ -1134,13 +1151,15 @@ impl Request {
         }
         if !silent {
             let shown = self.symbols().class_name(class);
-            crate::api::raising::notice(
-                self,
-                &format!(
-                    "Accessing static property {shown}::${} as non static",
-                    String::from_utf8_lossy(name)
-                ),
-            );
+            let message = [
+                b"Accessing static property ",
+                shown.as_bytes(),
+                b"::$",
+                c_str(name),
+                b" as non static",
+            ]
+            .concat();
+            crate::api::raising::notice(self, &message);
         }
         Some(Ok(()))
     }
@@ -1901,6 +1920,16 @@ impl Request {
     ///   }
     /// }
     /// ```
+    ///
+    /// The name is printed with `%s`, to its first NUL:
+    ///
+    /// ```php
+    /// class G { function __get($n) { return [1]; } }
+    /// $g = new G; $g->{"f\0bar"}[] = 1;
+    /// ```
+    /// ```expect
+    /// Notice: Indirect modification of overloaded property G::$f has no effect in %s on line 3
+    /// ```
     fn overloaded_write_notice(
         &mut self,
         class: ClassId,
@@ -1913,13 +1942,15 @@ impl Request {
             && got.as_object().is_none()
         {
             let class = self.symbols().class_name(class);
-            let shown = String::from_utf8_lossy(name).into_owned();
-            crate::api::raising::notice(
-                self,
-                &format!(
-                    "Indirect modification of overloaded property {class}::${shown} has no effect"
-                ),
-            );
+            let message = [
+                b"Indirect modification of overloaded property ",
+                class.as_bytes(),
+                b"::$",
+                c_str(name),
+                b" has no effect",
+            ]
+            .concat();
+            crate::api::raising::notice(self, &message);
         }
     }
 
@@ -2024,7 +2055,7 @@ impl Request {
             return Ok(None);
         };
         let class = object.class();
-        let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+        let got = self.call_accessor_into(Retval::Result, object, getter, IN_GET, name, &[])?;
         self.overloaded_write_notice(class, name, read, &got);
         self.hold_magic_get(class, name, getter, got).map(Some)
     }
@@ -2540,8 +2571,23 @@ impl Request {
         name: &[u8],
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        self.call_accessor_into(Retval::Native, object, accessor, bit, name, arguments)
+    }
+
+    /// [`Request::call_accessor`] whose accessor's return, where its body
+    /// returned and then threw, goes where `retval` says: `__get`'s under
+    /// a read is the reading opline's `rv`.
+    fn call_accessor_into(
+        &mut self,
+        retval: Retval,
+        object: PhpObject,
+        accessor: Function,
+        bit: u32,
+        name: &[u8],
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
         self.guarded(object, name, bit, |req| {
-            req.serve_accessor(object, accessor, name, arguments)
+            req.serve_accessor(retval, object, accessor, name, arguments)
         })
     }
 
@@ -2570,6 +2616,7 @@ impl Request {
     /// `__get` that `empty` reads the truth of.
     fn serve_accessor(
         &mut self,
+        retval: Retval,
         object: PhpObject,
         accessor: Function,
         name: &[u8],
@@ -2579,7 +2626,8 @@ impl Request {
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(*name));
         sent.extend_from_slice(arguments);
-        let served = self.serve_method_made(accessor, Some(object), object.class(), &sent, &[]);
+        let served =
+            self.serve_method_into(retval, accessor, Some(object), object.class(), &sent, &[]);
         name.give_up(self);
         served
     }
@@ -2764,7 +2812,8 @@ impl Request {
             }
         } else if let Some(getter) = getter {
             if self.guard_word(object, name) & IN_GET == 0 {
-                let got = self.call_accessor(object, getter, IN_GET, name, &[])?;
+                let got =
+                    self.call_accessor_into(Retval::Result, object, getter, IN_GET, name, &[])?;
                 self.overloaded_write_notice(class, name, read, &got);
                 let held = self.hold_magic_get(class, name, getter, got);
                 return adopted(held);
@@ -3985,6 +4034,15 @@ impl Request {
     /// Exception: Cannot create dynamic property class@anonymous::$y
     /// NULL
     /// ```
+    ///
+    /// The deprecation prints the name with `%s`, to its first NUL:
+    ///
+    /// ```php
+    /// class N {} $n = new N; $n->{"f\0bar"} = 1;
+    /// ```
+    /// ```expect
+    /// Deprecated: Creation of dynamic property N::$f is deprecated in %s on line 2
+    /// ```
     pub(crate) fn dynamic_property_creation(
         &mut self,
         object: PhpObject,
@@ -4006,10 +4064,15 @@ impl Request {
             return Err(crate::api::raising::error(self, &cannot));
         }
         let held = Owner::take(self, object.as_value());
-        crate::api::raising::deprecated(
-            self,
-            &format!("Creation of dynamic property {class_name}::${shown} is deprecated"),
-        );
+        let message = [
+            b"Creation of dynamic property ",
+            class_name.as_bytes(),
+            b"::$",
+            c_str(name),
+            b" is deprecated",
+        ]
+        .concat();
+        crate::api::raising::deprecated(self, &message);
         let shared = object.as_value().refcount() > 1;
         held.let_go(self);
         if shared {
@@ -4918,7 +4981,7 @@ impl Request {
         test: PropertyTest,
         issetter: Function,
     ) -> Result<bool, Thrown> {
-        let answered = self.serve_accessor(object, issetter, name, &[])?;
+        let answered = self.serve_accessor(Retval::Native, object, issetter, name, &[])?;
         let truthy = self.truth_of(answered)?;
         if test != PropertyTest::NotEmpty || !truthy {
             return Ok(truthy);

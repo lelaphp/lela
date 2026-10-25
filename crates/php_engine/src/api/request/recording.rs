@@ -20,7 +20,7 @@ use super::Request;
 /// One diagnostic held back, `zend_error_info`.
 struct Held {
     level: Level,
-    message: String,
+    message: Vec<u8>,
     file: Vec<u8>,
     line: u32,
 }
@@ -134,7 +134,13 @@ impl Request {
     ///
     /// Fatal error: 'break' not in the 'loop' or 'switch' context in %s on line 3
     /// ```
-    pub(super) fn recorded(&mut self, level: Level, message: &str, file: &[u8], line: u32) -> bool {
+    pub(super) fn recorded(
+        &mut self,
+        level: Level,
+        message: &[u8],
+        file: &[u8],
+        line: u32,
+    ) -> bool {
         let fatal = super::fatal_errors(level);
         if fatal && !self.record.held.is_empty() {
             let held = mem::take(&mut self.record.held);
@@ -157,7 +163,7 @@ impl Request {
         }
         self.record.held.push(Held {
             level,
-            message: message.to_owned(),
+            message: message.to_vec(),
             file: file.to_vec(),
             line,
         });

@@ -16,12 +16,44 @@ fn is_id(name: &[u8]) -> bool {
     name.iter().all(u8::is_ascii_digit)
 }
 
-/// `strtoul(name, 0, 10)`.
-fn id(name: &[u8]) -> u32 {
-    std::str::from_utf8(name)
+/// Whose ID [`id`] reads, a user's or a group's: `fpm_unix_parse_uid`'s
+/// or `_gid`'s.
+#[derive(Clone, Copy)]
+enum Whose {
+    User,
+    Group,
+}
+
+/// `fpm_unix_parse_uid` and `fpm_unix_parse_gid`, php 8.5.12's
+/// (gh19320): the digits as `strtoumax` reads them, refused where they
+/// run past `uintmax_t` or past a `uid_t`'s or `gid_t`'s range, the
+/// `(uid_t) -1` that means none among them, with the log line naming the
+/// pool and the ID as written.
+fn id(pool: &[u8], name: &[u8], kind: Whose) -> Option<u32> {
+    let value = std::str::from_utf8(name)
         .ok()
-        .and_then(|n| n.parse().ok())
-        .unwrap_or(0)
+        .and_then(|n| n.parse::<u64>().ok());
+    if let Some(value) = value.and_then(|v| u32::try_from(v).ok())
+        && value != u32::MAX
+    {
+        return Some(value);
+    }
+    let (what, function, line) = match kind {
+        Whose::User => ("user", "fpm_unix_parse_uid", 69),
+        Whose::Group => ("group", "fpm_unix_parse_gid", 87),
+    };
+    let text = format!(
+        "[pool {}] {what} ID '{}' is out of range",
+        String::from_utf8_lossy(pool),
+        String::from_utf8_lossy(name)
+    );
+    crate::zlog::log(
+        crate::zlog::Level::Error,
+        crate::zlog::Site::at(function, line),
+        text.as_bytes(),
+        None,
+    );
+    None
 }
 
 /// `fpm_unix_get_passwd`: the user, or the log line where there is none.
@@ -71,13 +103,16 @@ fn group(pool: &[u8], name: &[u8], level: crate::zlog::Level, sys: bool) -> Opti
 pub(crate) fn test_config(config: &PoolConfig, domain: Domain) -> bool {
     use crate::zlog::Level;
     let name = &config.name;
-    let check_passwd = |user: &Option<Vec<u8>>, sys: bool| {
-        user.as_deref()
-            .is_none_or(|u| is_id(u) || passwd(name, u, Level::Error, sys).is_some())
+    // php 8.5.12: an empty name passes, and an ID is read in range.
+    let check_passwd = |user: &Option<Vec<u8>>, sys: bool| match user.as_deref() {
+        None | Some([]) => true,
+        Some(u) if is_id(u) => id(name, u, Whose::User).is_some(),
+        Some(u) => passwd(name, u, Level::Error, sys).is_some(),
     };
-    let check_group = |g: &Option<Vec<u8>>, sys: bool| {
-        g.as_deref()
-            .is_none_or(|g| is_id(g) || group(name, g, Level::Error, sys).is_some())
+    let check_group = |g: &Option<Vec<u8>>, sys: bool| match g.as_deref() {
+        None | Some([]) => true,
+        Some(g) if is_id(g) => id(name, g, Whose::Group).is_some(),
+        Some(g) => group(name, g, Level::Error, sys).is_some(),
     };
     check_passwd(&config.user, false)
         && check_group(&config.group, false)
@@ -125,7 +160,7 @@ pub(crate) fn socket_permissions(config: &PoolConfig) -> Option<Permissions> {
     }
     if let Some(owner) = config.listen_owner.as_deref().filter(|o| !o.is_empty()) {
         if is_id(owner) {
-            permissions.uid = Some(id(owner));
+            permissions.uid = Some(id(&config.name, owner, Whose::User)?);
         } else {
             let user = passwd(&config.name, owner, Level::Error, true)?;
             permissions.uid = Some(user.uid.as_raw());
@@ -134,7 +169,7 @@ pub(crate) fn socket_permissions(config: &PoolConfig) -> Option<Permissions> {
     }
     if let Some(g) = config.listen_group.as_deref().filter(|g| !g.is_empty()) {
         if is_id(g) {
-            permissions.gid = Some(id(g));
+            permissions.gid = Some(id(&config.name, g, Whose::Group)?);
         } else {
             permissions.gid = Some(group(&config.name, g, Level::Error, true)?.gid.as_raw());
         }
@@ -189,7 +224,7 @@ pub(crate) fn conf_pool(config: &PoolConfig, run_as_root: bool) -> Option<Creden
     if Uid::effective().is_root() {
         if let Some(user) = config.user.as_deref().filter(|u| !u.is_empty()) {
             if is_id(user) {
-                credentials.set_uid = id(user);
+                credentials.set_uid = id(&config.name, user, Whose::User)?;
                 if let Ok(Some(pwd)) = User::from_uid(Uid::from_raw(credentials.set_uid)) {
                     credentials.set_gid = pwd.gid.as_raw();
                     credentials.set_user = Some(pwd.name.into_bytes());
@@ -204,7 +239,7 @@ pub(crate) fn conf_pool(config: &PoolConfig, run_as_root: bool) -> Option<Creden
         }
         if let Some(g) = config.group.as_deref().filter(|g| !g.is_empty()) {
             credentials.set_gid = if is_id(g) {
-                id(g)
+                id(&config.name, g, Whose::Group)?
             } else {
                 group(&config.name, g, Level::Error, false)?.gid.as_raw()
             };

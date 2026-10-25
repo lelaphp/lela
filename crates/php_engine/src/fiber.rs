@@ -283,6 +283,13 @@ pub(crate) struct Execution {
     /// a coroutine below it comes back to the fiber that stack's resumer
     /// had active, and not to the `Fiber` it passed through.
     pub(crate) active: Option<PhpObject>,
+    /// What the innermost serving on this stack has returned, the
+    /// `retval` of its `zend_call_function`, which is a local of the
+    /// stack it was called on: a serving on a fiber's stack that ends
+    /// while another stack runs, as a suspended fiber destroyed in its
+    /// resumer's leave unwinds, puts back that stack's, not the one
+    /// running.
+    pub(crate) returned: Value,
 }
 
 /// One coroutine that is running: the object holding it, a `Fiber` or an
@@ -2231,6 +2238,7 @@ fn lay_down<P: HoldsCoroutine>(
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
         // Taken from the first resume ([`switch_into`]).
         active: None,
+        returned: Value::null(),
     };
     let record = req.heap_mut().block(STACK_RECORD);
     let record = req.fatal_of(record)?;

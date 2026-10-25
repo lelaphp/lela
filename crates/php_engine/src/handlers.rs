@@ -7839,7 +7839,15 @@ pub(crate) fn fetch_constant<T: Tier>(
 
 /// [`fetch_constant`] where its slot holds nothing: the lookup, by the
 /// name and then, for an unqualified name in a namespace, the global one,
-/// and the slot written for a constant that is not deprecated.
+/// and the slot written for a constant that is not deprecated. A name
+/// none answers is `Undefined constant "%s"`, its bytes as written:
+///
+/// ```php
+/// try { eval("echo N\xe9;"); } catch (Error $e) { echo bin2hex($e->getMessage()), "\n"; }
+/// ```
+/// ```expect
+/// 556e646566696e656420636f6e7374616e7420224ee922
+/// ```
 #[inline(never)]
 fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: &Opline) -> Edge {
     if op.op2_type != OperandKind::Const {
@@ -7855,12 +7863,7 @@ fn fetch_constant_found(req: &mut Request, frame: FrameRef, code: &OpArray, op: 
         found = req.constant_found(&key);
     }
     let Some((at, value, deprecated)) = found else {
-        let written = String::from_utf8_lossy(&named(code, op.op2)).into_owned();
-        let thrown = crate::api::raising::throw_error(
-            req,
-            "Error",
-            &format!("Undefined constant \"{written}\""),
-        );
+        let thrown = crate::api::raising::undefined_constant(req, &named(code, op.op2));
         return threw(req, frame, &thrown);
     };
     req.addref(&value);
@@ -8984,14 +8987,7 @@ fn fetch_obj(
     } else if fetch == PropertyRead::Warning {
         name.name(req, frame, code, op).map(|name| {
             let name = name.as_str_bytes().unwrap_or_default();
-            crate::api::raising::warning(
-                req,
-                &format!(
-                    "Attempt to read property \"{}\" on {}",
-                    String::from_utf8_lossy(name),
-                    crate::ops::value_name(req, &container)
-                ),
-            );
+            crate::ops::property_read_on(req, name, &container);
             Value::null()
         })
     } else {
@@ -16518,14 +16514,7 @@ fn undefined_key_write(
         php_heap::Key::Str(s) => Some(Owner::take(req, Value::of_slot(php_heap::Zval::string(s)))),
         php_heap::Key::Long(_) => None,
     };
-    let message = match key {
-        php_heap::Key::Long(n) => format!("Undefined array key {n}"),
-        php_heap::Key::Str(s) => format!(
-            "Undefined array key \"{}\"",
-            String::from_utf8_lossy(s.bytes())
-        ),
-    };
-    crate::api::raising::warning(req, &message);
+    crate::ops::undefined_key(req, key);
     let left = held.let_go(req);
     let landing = if req.is_pending() {
         Err(Thrown::of(None))
@@ -17676,12 +17665,10 @@ fn unwritten_step_slot(
     if typed {
         return Err(req.uninitialized_property(object.class(), bytes));
     }
-    let shown = String::from_utf8_lossy(bytes).into_owned();
     if req.overloaded_place(object, bytes) {
         return Ok(PropertyPtr::Served(WriteBack::Property));
     }
-    let class = req.symbols().class_name(object.class());
-    crate::api::raising::warning(req, &format!("Undefined property: {class}::${shown}"));
+    req.undefined_property(object.class(), bytes);
     Ok(PropertyPtr::Slot(slot, typed))
 }
 
@@ -25925,7 +25912,24 @@ fn fast_call_var(code: &OpArray, element: php_unit::TryCatch) -> Option<u32> {
 /// opcodes that build a structure to their live ranges, and the two
 /// whose `result` is a class rather than a value to nobody; a smart
 /// branch may never have written its temporary, which reads `UNDEF`
-/// here and is nobody's either.
+/// here and is nobody's either. A call whose body returned and then
+/// threw, from a local's destructor at its end, wrote its temporary,
+/// and so did a property read whose `get` hook or `__get` did, its `rv`:
+/// that is given up here ([`Request::release_thrown_value`]), after the
+/// opline's operands, so its destructor runs before the `catch`.
+///
+/// ```php
+/// class V { function __destruct() { echo "V::__destruct\n"; } }
+/// class T { function __destruct() { throw new Exception("t"); } }
+/// function f() { $l = new T; return new V; }
+/// try { $x = f(); } catch (Exception $e) { echo "caught\n"; }
+/// echo "done\n";
+/// ```
+/// ```expect
+/// V::__destruct
+/// caught
+/// done
+/// ```
 fn free_throwing_result(req: &mut Request, frame: FrameRef, op: &Opline) {
     if !matches!(op.out_type, OperandKind::Tmp | OperandKind::Var) {
         return;
@@ -25943,7 +25947,7 @@ fn free_throwing_result(req: &mut Request, frame: FrameRef, op: &Opline) {
     }
     let slot = op.out;
     let garbage = req.take_slot(frame, slot);
-    req.release(garbage);
+    req.release_thrown_value(garbage);
 }
 
 /// `ZEND_VM_JMP_EX(target, 0)`: the frame at `at`, with neither the

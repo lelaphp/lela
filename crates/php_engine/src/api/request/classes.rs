@@ -1901,7 +1901,7 @@ impl Request {
         let mut noted = 0;
         for (landed, before) in unit.top_level.iter().zip(&declared.raised_before) {
             for raised in raised.get(noted..*before).unwrap_or_default() {
-                self.note_error_in(raised.level, &raised.message, file, raised.line);
+                self.note_error_in(raised.level, raised.message.as_bytes(), file, raised.line);
             }
             noted = noted.max(*before);
             if !self.declare_top_level(unit, &mut load, *landed) {

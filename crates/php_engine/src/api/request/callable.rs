@@ -811,11 +811,15 @@ impl Request {
                         )));
                     }
                     if deprecations == Deprecations::Raised {
-                        let form = format!(
-                            "Callables of the form [\"{}\", \"{}\"] are deprecated",
-                            self.symbols().class_name(org),
-                            shown(callable)
-                        );
+                        let class = self.symbols().class_name(org);
+                        let form = [
+                            b"Callables of the form [\"",
+                            class.as_bytes(),
+                            b"\", \"",
+                            php_unit::decl::shown_bytes(callable),
+                            b"\"] are deprecated",
+                        ]
+                        .concat();
                         crate::api::raising::deprecated(self, &form);
                     }
                 }

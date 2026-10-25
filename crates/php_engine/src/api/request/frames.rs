@@ -410,13 +410,37 @@ impl Request {
     /// stack its frames stand on, the swap php's observer makes at the
     /// switch's notice (`Z/Zend/zend_observer.c:423-424`). The trace
     /// number goes with the error-reporting level and the stack limit,
-    /// which [`Request::on_stack`] leaves the running fiber's.
+    /// which [`Request::on_stack`] leaves the running fiber's. What the
+    /// stack's innermost serving returned goes with it too, php's
+    /// `retval` a local of the stack its `zend_call_function` runs on: a
+    /// suspended fiber a frame's leave destroys ends its serving on its
+    /// own stack, and the value the leaving frame returned stands.
+    ///
+    /// ```php
+    /// $f = new Fiber(function (): int {
+    ///     $g = new Fiber(function () { Fiber::suspend(); });
+    ///     $g->start();
+    ///     return -1;
+    /// });
+    /// $f->start();
+    /// var_dump($f->getReturn());
+    /// echo implode(",", array_map(function ($x) {
+    ///     $g = new Fiber(fn () => Fiber::suspend());
+    ///     $g->start();
+    ///     return $x * 2;
+    /// }, [1, 2])), "\n";
+    /// ```
+    /// ```expect
+    /// int(-1)
+    /// 2,4
+    /// ```
     pub(crate) fn switch_execution(&mut self, other: &mut crate::fiber::Execution) {
         self.switch_stack(other);
         self.swap_error_reporting(&mut other.error_reporting);
         self.swap_trace_num(&mut other.trace_num);
         self.swap_stack_limit(&mut other.stack_limit);
         std::mem::swap(&mut self.fibers.active, &mut other.active);
+        std::mem::swap(&mut self.returned, &mut other.returned);
     }
 
     /// The stack the request runs on and `other`'s change places, the

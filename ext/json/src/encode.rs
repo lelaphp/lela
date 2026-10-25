@@ -640,6 +640,23 @@ impl Guard {
 /// {"a":1,"b":2}
 /// ```
 ///
+/// A hook that returned and then threw, from a local's destructor at
+/// its end, ends the encoding with its value given up before the
+/// `catch` (`json_encode_hooked_property_throwing_getter.phpt`):
+///
+/// ```php
+/// class V { function __destruct() { echo "V::__destruct\n"; } }
+/// class T { function __destruct() { throw new Exception("t"); } }
+/// class C { public $h { get { $l = new T; return new V; } } }
+/// try { json_encode(new C); } catch (Exception $e) { echo "caught\n"; }
+/// echo "done\n";
+/// ```
+/// ```expect
+/// V::__destruct
+/// caught
+/// done
+/// ```
+///
 /// A call of its own, so what reading an object's table takes is off
 /// the stack of a nest of arrays encoded level by level (#3159).
 #[inline(never)]

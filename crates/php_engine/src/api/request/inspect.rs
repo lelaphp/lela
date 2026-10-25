@@ -184,7 +184,12 @@ impl Request {
                 let thrown = !error.bailed() || error.stage == php_compile::Stage::Opening;
                 if let Some(noted) = self.declare_refused(&refused, path) {
                     for raised in error.raised.get(noted..).unwrap_or_default() {
-                        self.note_error_in(raised.level, &raised.message, path, raised.line);
+                        self.note_error_in(
+                            raised.level,
+                            raised.message.as_bytes(),
+                            path,
+                            raised.line,
+                        );
                     }
                     if thrown {
                         self.emit_recorded(recording);
