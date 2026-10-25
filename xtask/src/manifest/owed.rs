@@ -1,9 +1,10 @@
 //! `[[owed]]`: the instruments a crate owes a fresh passing reading of
 //! before `done` (harness-design.md §4.5 condition 1), one row per
 //! instrument, as Mitchell ruled on #3184 and #3206 built. Which crates
-//! owe it is the row's: a glob or a list of them, less its `exempt`, and,
-//! where the row names one, a predicate the harness derives in code
-//! ([`When`]). The instrument ([`Instrument`]) and the predicate are
+//! owe it is the row's: a glob or a list of them and, where the row names
+//! one, a predicate the harness derives in code ([`When`]), the one way a
+//! row narrows (#3278: it fails closed, so a new crate owes the row).
+//! A row carrying `exempt` is refused as any unknown key is. The instrument ([`Instrument`]) and the predicate are
 //! decoded here and nowhere else, and a pattern that names no crate is
 //! refused, so a misspelt row cannot drop an obligation unseen.
 
@@ -12,8 +13,7 @@ use serde::Deserialize;
 
 use super::{Crate, OneOrMany, segment_matches};
 
-/// One `[[owed]]` row: the crates `crates` names, less `exempt`, owe a
-/// reading of `instrument` where `when` holds of them.
+/// One `[[owed]]` row: the crates `crates` names owe a reading of `instrument` where `when` holds of them.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Owed {
@@ -22,9 +22,6 @@ pub struct Owed {
     /// characters, a `/` among them, so `"*"` is every crate and
     /// `"ext/*"` every extension.
     pub crates: OneOrMany,
-    /// The crates among them that owe nothing, globbed as `crates` is.
-    #[serde(default)]
-    pub exempt: Vec<String>,
     /// What else must hold of a crate, derived in code.
     pub when: Option<When>,
 }
@@ -103,27 +100,24 @@ pub(crate) fn of_the_engine(krate: &Crate) -> bool {
 }
 
 impl Owed {
-    /// Whether the crate named `name` is among the row's `crates` and
-    /// none of its `exempt`.
+    /// Whether the crate named `name` is among the row's `crates`.
     pub fn covers(&self, name: &str) -> bool {
-        let named = |pattern: &str| segment_matches(pattern, name);
-        self.crates.iter().any(named) && !self.exempt.iter().any(|p| named(p))
+        self.crates
+            .iter()
+            .any(|pattern| segment_matches(pattern, name))
     }
 }
 
 /// The rows as the grammar holds them: each instrument named by one row
-/// alone, and each pattern of `crates` and `exempt` naming a crate of the
-/// manifest's `crates`.
+/// alone, and each pattern of `crates` naming a crate of the manifest's
+/// `crates`.
 pub(super) fn hold(rows: &[Owed], crates: &[Crate]) -> Result<()> {
     for (n, row) in rows.iter().enumerate() {
         let instrument = row.instrument.name();
         if rows[..n].iter().any(|r| r.instrument == row.instrument) {
             bail!("[[owed]] names {instrument:?} twice; one row states what it is owed");
         }
-        let mut patterns = row
-            .crates
-            .iter()
-            .chain(row.exempt.iter().map(String::as_str));
+        let mut patterns = row.crates.iter();
         let named = |p: &str| crates.iter().any(|k| segment_matches(p, &k.name));
         if let Some(pattern) = patterns.find(|p| !named(p)) {
             bail!("an [[owed]] row for {instrument} names {pattern:?}, which matches no crate");
