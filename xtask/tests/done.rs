@@ -2089,17 +2089,18 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
     assert!(!verdict.met(), "{verdict:#?}");
 }
 
-/// A withdrawal stays met past the commits after it (#3476): a bundle
+/// A withdrawal is renewed past the commits after it (#3476): a bundle
 /// branch withdraws its recorded ticket first and then lands its other
 /// tickets' commits, as t3459 withdrew #3459 at e61851ebe and landed
-/// #3440's and #3449's after it. The withdrawal settled the ticket at the
-/// tracker, which no later tree undoes, and the fixes a stale reading
-/// would point to lead nowhere: `ticket read` holds the unticked boxes,
-/// and a second withdrawal is refused as closed already. So a passing
-/// withdrawal is met whatever the tree; a refused one, stale after the
-/// commit, stays unmet.
+/// #3440's and #3449's after it. The first commit stales the withdrawal's
+/// reading, and the `ticket read` `done` names reads the ticket the
+/// tracker now holds closed with the withdrawal's comment, so it writes a
+/// passing reading that carries the withdrawal and the condition is met
+/// again. A read used to hold the unticked boxes, and a second withdrawal
+/// is refused as closed already, so nothing renewed it. A refused
+/// withdrawal is no closing comment, and stays unmet.
 #[test]
-fn a_withdrawal_stays_met_past_a_later_commit_and_a_refused_one_does_not() {
+fn a_withdrawal_is_renewed_by_a_read_past_a_later_commit_and_a_refused_one_is_not() {
     use xtask::ticket::{Act, Reach, Successors, Verdict as Close};
     let root = scratch("withdrawn-then-commit");
     let repo = Repo::at(&root);
@@ -2117,6 +2118,36 @@ fn a_withdrawal_stays_met_past_a_later_commit_and_a_refused_one_does_not() {
         repo.git(&["add", "--", name]);
         repo.git(&["commit", "-q", "-m", name]);
     };
+    // The tracker after the close: the ticket closed, carrying the comment
+    // the close wrote, or none where the close was refused.
+    let read_closed = |body: &str, comments: &[&str]| {
+        let tracker = Tracker::empty("done-withdrawn");
+        let mut answer = serde_json::to_value(xtask::ticket::Issue {
+            body: std::fs::read_to_string(fixtures().join("done/ticket").join(body)).unwrap(),
+            state: xtask::ticket::State::Closed,
+            ..issue(31)
+        })
+        .unwrap();
+        let comments: Vec<_> = comments
+            .iter()
+            .map(|c| serde_json::json!({ "body": c }))
+            .collect();
+        answer["comments"] = comments.into();
+        tracker.with_answer(31, &answer.to_string());
+        let reading = xtask::ticket::run(
+            &root,
+            &xtask::manifest::Manifest::load(&root).unwrap(),
+            &tracker.gh(),
+            Act::Read,
+            xtask::track::Ticket::new(31),
+            None,
+        )
+        .unwrap();
+        Store::of_workspace(&root)
+            .record(std::slice::from_ref(&reading))
+            .unwrap();
+        reading
+    };
 
     let reading = ticket_act(
         &root,
@@ -2126,16 +2157,31 @@ fn a_withdrawal_stays_met_past_a_later_commit_and_a_refused_one_does_not() {
     );
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
     commit("after-the-withdrawal.txt");
+    let lines = about_the_ticket(&judge(&root));
+    assert!(lines.len() == 1 && lines[0].contains("stale"), "{lines:?}");
+    let comment = "Withdrawn by `xtask ticket close` at 1234567: measured on HEAD: not in the tree; 0 of 2 criteria ticked; opens nothing";
+    let read = read_closed("withdrawn.md", &["an earlier comment", comment]);
+    assert_eq!(read.status, Status::Pass, "{}", read.message);
+    assert_eq!(read.numbers["withdrawn"], 1.into(), "{read:#?}");
+    assert!(
+        read.message
+            .contains("withdrawn at 1234567: measured on HEAD"),
+        "{}",
+        read.message
+    );
     let verdict = judge(&root);
     assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
 
     let reading = ticket_act(&root, 31, "unticked.md", withdrawn("nothing here"));
     assert_eq!(reading.status, Status::Fail, "{}", reading.message);
     commit("after-the-refusal.txt");
-    let verdict = judge(&root);
-    let lines = about_the_ticket(&verdict);
-    assert_eq!(lines.len(), 1, "{verdict:#?}");
-    assert!(lines[0].contains("stale"), "{lines:?}");
+    let read = read_closed("withdrawn.md", &["an earlier comment"]);
+    assert_eq!(read.status, Status::Fail, "{}", read.message);
+    let lines = about_the_ticket(&judge(&root));
+    assert!(
+        lines.len() == 1 && lines[0].contains("0 of 2 criteria ticked"),
+        "{lines:?}"
+    );
 }
 
 /// The phpt skip the missing engine binary causes is met, and `done`
