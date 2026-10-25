@@ -90,7 +90,7 @@ impl Row {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// <h2><a name="module_cgi-fcgi" href="#module_cgi-fcgi">cgi-fcgi</a></h2>
@@ -190,7 +190,7 @@ fn error_header(req: &mut Request) {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// sent
@@ -214,7 +214,7 @@ fn fastcgi_finish_request(req: &mut Request) -> bool {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// witness static 1 1 1 Running
@@ -230,7 +230,7 @@ fn fastcgi_finish_request(req: &mut Request) -> bool {
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// array|false
@@ -262,7 +262,7 @@ fn fpm_get_status(req: &mut Request) -> Result<OrFalse<Owner<PhpArray>>, Thrown>
 /// p=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// Array

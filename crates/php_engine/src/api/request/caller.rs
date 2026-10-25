@@ -9,7 +9,7 @@
 use php_heap::{FrameRef, Slot, Zval};
 
 use crate::api::call::Function;
-use crate::api::raising::Thrown;
+use crate::api::raising::{Thrown, argument_count_error};
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 use crate::exec;
 
@@ -108,12 +108,6 @@ impl Request {
         }
     }
 
-    /// The innermost user frame, the one a native's variable access
-    /// reads: `EG(current_execute_data)`'s caller.
-    pub(super) fn caller_frame(&self) -> Option<FrameRef> {
-        self.innermost_user_frame()
-    }
-
     /// The call being served read once: how many arguments it was given
     /// and the first `N` of them as [`Frames::argument`] reads each,
     /// `UNDEF` past the count; none given and all `UNDEF` outside a
@@ -132,10 +126,9 @@ impl Request {
         (given, arguments)
     }
 
-    /// `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`) from `position`
-    /// on: the call's remaining arguments as they stand on the frame,
-    /// each a view the call keeps one owner of, and none where the call
-    /// gave fewer. A call that carries extra named arguments is
+    /// `ZEND_NUM_ARGS()` as `Z_PARAM_VARIADIC` (`Z/Zend/zend_API.h:2181`)
+    /// reads it, the tail running from its parameter to the count; zero
+    /// outside a native's body. A call that carries extra named arguments is
     /// `ZPP_ERROR_UNEXPECTED_EXTRA_NAMED`, php's `ArgumentCountError`
     /// from `zend_unexpected_extra_named_error`
     /// (`Z/Zend/zend_API.c:394`), since a variadic native that reads
@@ -161,23 +154,16 @@ impl Request {
     /// 1016 0
     /// 752 0
     /// ```
-    pub(crate) fn variadic_arguments(&mut self, position: u32) -> Result<Vec<Value>, Thrown> {
+    pub(crate) fn variadic_count(&mut self) -> Result<u32, Thrown> {
         let Some(call) = self.serving_call() else {
-            return Ok(Vec::new());
+            return Ok(0);
         };
-        if !call.extra_named().is_empty() {
-            let message = format!(
-                "{}() does not accept unknown named parameters",
-                self.active_native()
-            );
-            return Err(crate::api::raising::throw_error(
-                self,
-                "ArgumentCountError",
-                &message,
-            ));
+        if call.extra_named().is_empty() {
+            return Ok(call.num_args());
         }
-        let from = usize::try_from(position.saturating_sub(1)).unwrap_or(usize::MAX);
-        Ok(call.arguments().get(from..).unwrap_or_default().to_vec())
+        let native = self.active_native();
+        let message = format!("{native}() does not accept unknown named parameters");
+        Err(argument_count_error(self, &message))
     }
 
     /// `Z_PARAM_VARIADIC_WITH_NAMED`'s named half: the extra named
@@ -381,11 +367,7 @@ impl Request {
     /// native being served.
     pub(crate) fn dynamic_call(&mut self) -> Thrown {
         let name = self.frames().active_function_name();
-        crate::api::raising::throw_error(
-            self,
-            "Error",
-            &format!("Cannot call {name}() dynamically"),
-        )
+        crate::api::raising::error(self, &format!("Cannot call {name}() dynamically"))
     }
 
     /// `zend_active_function()`: the native being served, which is the
@@ -395,7 +377,7 @@ impl Request {
     /// back, as `EG(current_execute_data)` is then that frame. The
     /// raisers render its declared name and its parameters' names off
     /// the declaration, never off the caller's spelling.
-    pub(super) fn active_native_function(&self) -> Option<Function> {
+    pub(crate) fn active_native_function(&self) -> Option<Function> {
         self.serving_call()?.function()
     }
 
@@ -960,7 +942,7 @@ impl Frames<&mut Request> {
     /// rebuild it in php. A view: no owner taken.
     #[must_use]
     pub fn caller_var(self, name: &[u8]) -> Option<Value> {
-        let frame = self.0.caller_frame()?;
+        let frame = self.0.innermost_user_frame()?;
         let table = self.0.rebuild_symbol_table(frame);
         let value = self.0.symbol_value(table, name)?;
         (value.tag() != TypeTag::Undef).then_some(value)
@@ -980,7 +962,7 @@ impl Frames<&mut Request> {
     /// name it made, of which a table that adds the name takes an owner,
     /// as php's `zend_hash_update_ind` takes one of its key.
     pub fn set_caller_var(self, name: PhpString, value: Owner<Value>, order: Overwrite) {
-        let Some(frame) = self.0.caller_frame() else {
+        let Some(frame) = self.0.innermost_user_frame() else {
             value.give_up(self.0);
             return;
         };
@@ -997,7 +979,7 @@ impl Frames<&mut Request> {
     /// `force` php adds no table to a frame that has none. A sink: the
     /// variable takes the value's owner.
     pub fn set_local_var(self, name: &[u8], value: Owner<Value>) -> bool {
-        let Some(frame) = self.0.caller_frame() else {
+        let Some(frame) = self.0.innermost_user_frame() else {
             value.give_up(self.0);
             return false;
         };

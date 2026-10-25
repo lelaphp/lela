@@ -92,18 +92,20 @@ fn a_product_that_overflows_is_php_s_fatal_and_no_allocation() {
 
 /// The walks php leaves unguarded, which recurse in php until the
 /// thread's stack runs out and fault, are held to the thread's floor
-/// here (`php_ext::raising::call_stack_end`): each over a nest deeper
+/// here (`php_ext::raising::call_stack_end`), and those php 8.5.12
+/// guards ask its limit (`call_stack_limit`): each over a nest deeper
 /// than the test harness's 2 MiB thread is the catchable `Error`, and
-/// the request goes on to the next.
+/// the request goes on to the next. `debug_zval_dump`'s rows are
+/// guarded the way php 8.5.12 guards them, `nesting level too deep` in
+/// place of the row and no `Error`.
 #[test]
-fn an_unguarded_walk_deeper_than_the_thread_is_refused_at_its_floor() {
+fn a_walk_deeper_than_the_thread_is_refused_at_its_limit_or_its_floor() {
     let source = r#"<?php
 $a = []; for ($i = 0; $i < 200000; $i++) { $a = ['k' => $a]; }
 $b = $a;
 $walks = [
     fn () => print_r($a, true),
     fn () => var_export($a, true),
-    function () use ($a) { ob_start(); try { debug_zval_dump($a); } finally { ob_end_clean(); } },
     function () use ($a) { $c = $a; array_walk_recursive($c, fn () => null); },
     fn () => array_merge_recursive($a, $b),
     fn () => array_replace_recursive($a, $b),
@@ -114,13 +116,17 @@ $walks = [
 foreach ($walks as $walk) {
     try { $walk(); echo "whole\n"; } catch (Error $e) { echo strstr($e->getMessage(), ' of ', true), "\n"; }
 }
+ob_start(); debug_zval_dump($a); echo str_contains(ob_get_clean(), 'nesting level too deep') ? "nesting level too deep\n" : "whole\n";
 echo 'done';
 "#;
     let (stdout, fatal) = served(source);
     assert_eq!(fatal, None);
     assert_eq!(
         stdout,
-        format!("{}done", "Maximum call stack size\n".repeat(9))
+        format!(
+            "{}nesting level too deep\ndone",
+            "Maximum call stack size\n".repeat(8)
+        )
     );
 }
 
@@ -337,10 +343,10 @@ fn zend_multibyte_support_is_disabled_without_a_provider() {
     );
 }
 
-/// #1556: argument #6's bound is the integer `ZEND_ULONG_FMT` names,
-/// `PHP_TIMEOUT_ULL_MAX / 1000000`; the pinned php prints what a register
-/// held there, so the witness beside `fsockopen` holds the digits
-/// and this holds the number (`trace:fsockopen-timeout-bound`).
+/// #1556: argument #5's bound is the integer php-8.5.12 prints,
+/// `PHP_TIMEOUT_ULL_MAX / 1000000` (`Z/ext/standard/fsock.c:110`), on
+/// every platform, as the witness beside `fsockopen` holds it at the
+/// oracle's.
 #[test]
 fn fsockopen_s_timeout_bound_is_the_integer_php_s_format_names() {
     let (stdout, fatal) = served(
@@ -349,7 +355,7 @@ fn fsockopen_s_timeout_bound_is_the_integer_php_s_format_names() {
     assert_eq!(fatal, None);
     assert_eq!(
         stdout,
-        "fsockopen(): Argument #6 must be -1 or between 0 and 18446744073709\npfsockopen(): Argument #6 must be -1 or between 0 and 18446744073709"
+        "fsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709\npfsockopen(): Argument #5 ($timeout) must be -1 or between 0 and 18446744073709"
     );
 }
 

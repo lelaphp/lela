@@ -67,6 +67,11 @@ fn judged(witness: &Witness, judgement: Judgement, note: impl Into<String>) -> J
 #[derive(Debug, Default)]
 pub(super) struct Kept {
     pub(super) captured: Vec<Captured>,
+    /// The fence an `--accept` run left as it stood because the oracle's
+    /// run reproduced the verdict it pins, at its file and the line of its
+    /// `expect` fence: a verdict `--accept` takes as the oracle's as surely
+    /// as one it writes ([`super::record_accepted`]).
+    pub(super) reproduced: Option<(std::path::PathBuf, usize)>,
     pub(super) entered: Record,
 }
 
@@ -188,6 +193,11 @@ fn both(
             was: was.to_vec(),
             now,
         });
+    } else if on.ask.accept != Accept::Nothing
+        && (matches!(exit, Exit::Pinned(_)) || witness.capture)
+        && met(on.oracle.pin(), witness, exit, oracle_out).unwrap_or(false)
+    {
+        kept.reproduced = Some((witness.file.clone(), witness.fence));
     }
     let witness = &captured;
     if exit == Exit::Bare {
@@ -592,11 +602,12 @@ pub(super) fn held(
             Judgement::Fail,
             missed
                 .iter()
-                .map(|(run, _, actual)| {
-                    format!(
+                .map(|(run, verdict, actual)| match verdict {
+                    Compared::Moved(moved) => format!("what {run} ran is not what {moved}\n"),
+                    _ => format!(
                         "what the fences pin is not what {run} ran:\n{}",
                         oracle::diff(&expected, actual)
-                    )
+                    ),
                 })
                 .collect::<Vec<_>>()
                 .concat(),

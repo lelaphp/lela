@@ -13,35 +13,78 @@ use php_ext::values::{Owner, PhpObject, PhpString, Value, ValueRef};
 
 use crate::constants as c;
 use crate::ffi::{Cx, Hook};
-use crate::handle::{Curl, HeaderTo, ReadFrom, WriteTo, verify_handlers};
+use crate::handle::{Curl, Handler, HeaderTo, ReadFrom, WriteTo, dup, verify_handlers};
 
-/// `zend_call_known_fcc` on the `CurlHandle`'s callable, `ch->in_callback`
-/// set around it, with `ch` first and `rest` after; the value returned,
-/// the `CurlHandle`'s streams verified after it as php verifies them.
+/// The `CurlHandle`'s callable `pick` names, with `ch` first and `rest`
+/// after, through [`call_held`]; the value returned, the `CurlHandle`'s
+/// streams verified after it as php verifies them.
 fn user(
     cx: &mut Cx<'_>,
     object: PhpObject,
-    pick: impl Fn(&Curl) -> Option<&crate::handle::Handler>,
+    pick: impl Fn(&Curl) -> Option<&Handler>,
     rest: &[Value],
 ) -> Option<Owner<Value>> {
-    let callable = object
+    let held = object
         .native::<Curl>(cx.req)
-        .and_then(|curl| pick(curl).map(|handler| (**handler).clone()))?;
+        .and_then(|curl| pick(curl).map(|handler| dup(cx.req, handler)))?;
     let mut arguments = vec![object.as_value()];
     arguments.extend_from_slice(rest);
-    set_in_callback(cx.req, object, true);
-    let returned = cx.call(&callable, &arguments);
-    set_in_callback(cx.req, object, false);
+    let returned = call_held(cx, object, held, &arguments);
     if returned.is_some() {
         verify_handlers(cx.req, object, true);
     }
     returned
 }
 
-fn set_in_callback(req: &mut Request, object: PhpObject, on: bool) {
-    if let Some(curl) = object.native_mut::<Curl>(req) {
-        curl.in_callback = on;
-    }
+/// `php_curl_call_callback` (php 8.5.12, `Z/ext/curl/interface.c:523`):
+/// `zend_call_known_fcc` with `ch->in_callback` set, the callable's
+/// objects held across the call, so a callback that replaces or clears
+/// itself runs to its end on an object still alive, and given up while
+/// the guard still stands, so a destructor that runs then is refused
+/// `curl_reset` and `curl_close` as the callback is; then the guard as it
+/// stood before, for a callback inside another.
+///
+/// ```php
+/// class Callback {
+///     public string $value = 'alive';
+///     function __construct(private CurlHandle $h) {}
+///     function write($h, $data) { curl_setopt($h, CURLOPT_WRITEFUNCTION, null); echo $this->value, "\n"; return strlen($data); }
+///     function __destruct() {
+///         try { curl_reset($this->h); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+///         curl_setopt($this->h, CURLOPT_WRITEFUNCTION, static function ($h, $data) { echo "installed\n"; return strlen($data); });
+///     }
+/// }
+/// $f = tempnam(sys_get_temp_dir(), 'cb'); file_put_contents($f, 'x');
+/// $h = curl_init("file://$f");
+/// curl_setopt($h, CURLOPT_WRITEFUNCTION, [new Callback($h), 'write']);
+/// var_dump(curl_exec($h), curl_exec($h));
+/// unlink($f);
+/// ```
+/// ```expect
+/// alive
+/// curl_reset(): Attempt to reset cURL handle from a callback
+/// installed
+/// bool(true)
+/// bool(true)
+/// ```
+fn call_held(
+    cx: &mut Cx<'_>,
+    object: PhpObject,
+    held: Handler,
+    arguments: &[Value],
+) -> Option<Owner<Value>> {
+    let was = set_in_callback(cx.req, object, true);
+    let returned = cx.call(&held, arguments);
+    held.give_up(cx.req);
+    set_in_callback(cx.req, object, was);
+    returned
+}
+
+/// `ch->in_callback = on`, answering what it was.
+fn set_in_callback(req: &mut Request, object: PhpObject, on: bool) -> bool {
+    object
+        .native_mut::<Curl>(req)
+        .is_some_and(|curl| std::mem::replace(&mut curl.in_callback, on))
 }
 
 /// A string argument of the request's, `ZVAL_STRINGL`; `None` where the
@@ -112,10 +155,16 @@ pub(crate) fn write(cx: &mut Cx<'_>, object: PhpObject, data: &[u8]) -> usize {
             let stream = curl.write.stream();
             to_stream(cx.req, stream, data)
         }
-        WriteTo::Return => {
-            curl.returned.extend_from_slice(data);
-            data.len()
-        }
+        // `CURL_WRITEFUNC_ERROR` where the memory limit refused the
+        // room, since 8.5.12; the transfer ends in `CURLE_WRITE_ERROR`.
+        WriteTo::Return => match crate::handle::keep(cx.req, object, data) {
+            Ok(true) => data.len(),
+            Ok(false) => 0xFFFF_FFFF,
+            Err(thrown) => {
+                cx.raise(thrown);
+                0xFFFF_FFFF
+            }
+        },
         WriteTo::User => user_write(cx, object, false, data),
     }
 }
@@ -240,18 +289,18 @@ pub(crate) fn debug(cx: &mut Cx<'_>, object: PhpObject, kind: i64, data: &[u8]) 
     if kind == c::CURLINFO_HEADER_OUT {
         curl.header_out = Some(data.to_vec());
     }
-    let Some(callable) = curl.hook(Hook::Debug).map(|handler| (**handler).clone()) else {
+    let held = object
+        .native::<Curl>(cx.req)
+        .and_then(|curl| curl.hook(Hook::Debug).map(|handler| dup(cx.req, handler)));
+    let Some(held) = held else {
         return 0;
     };
     let Some(text) = string(cx, data) else {
+        held.give_up(cx.req);
         return 0;
     };
-    set_in_callback(cx.req, object, true);
-    let returned = cx.call(
-        &callable,
-        &[object.as_value(), Value::int(kind), Value::string(*text)],
-    );
-    set_in_callback(cx.req, object, false);
+    let arguments = [object.as_value(), Value::int(kind), Value::string(*text)];
+    let returned = call_held(cx, object, held, &arguments);
     text.give_up(cx.req);
     if let Some(returned) = returned {
         returned.give_up(cx.req);
@@ -289,12 +338,12 @@ pub(crate) fn prereq(
             n as c_int
         }
         ValueRef::Int(_) => {
-            let thrown = throw_error(cx.req, "ValueError", text);
+            let thrown = php_ext::raising::value_error(cx.req, text);
             cx.raise(thrown);
             0
         }
         _ => {
-            let thrown = throw_error(cx.req, "TypeError", text);
+            let thrown = php_ext::raising::type_error(cx.req, text);
             cx.raise(thrown);
             0
         }

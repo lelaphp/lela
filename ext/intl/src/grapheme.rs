@@ -13,6 +13,7 @@ use php_ext::values::{Owner, PhpArray, PhpString, Value};
 use crate::error;
 use crate::ffi::collator::Collator;
 use crate::ffi::grapheme::{Breaks, DONE, Search};
+use crate::ffi::heap::Block;
 use crate::ffi::{self, Code};
 use crate::utf8;
 
@@ -178,9 +179,23 @@ struct Find<'a> {
     locale: &'a [u8],
 }
 
-/// `grapheme_strpos_utf16`: the grapheme the match starts at and its
-/// code unit, `None` where there is none or an error was set.
-fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>, Thrown> {
+/// Where `grapheme_strpos_utf16` found the needle: the graphemes before
+/// it, what it answers, and the code points before it, its `puchar_pos`,
+/// which `strstr_common_handler` steps the UTF-8 haystack by (none for
+/// an empty needle, whose `-1` steps nothing).
+#[derive(Clone, Copy)]
+struct Found {
+    graphemes: i64,
+    chars: usize,
+}
+
+/// `grapheme_strpos_utf16`: where the match starts, `None` where there
+/// is none or an error was set. An empty haystack holds no needle that
+/// is not empty, and nothing is converted for it.
+fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<Found>, Thrown> {
+    if find.haystack.is_empty() && !find.needle.is_empty() {
+        return Ok(None);
+    }
     let Some(haystack) = utf16(
         req,
         find.haystack,
@@ -202,12 +217,16 @@ fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>
         if at == -1 {
             return Err(offset_error(req));
         }
-        let at = if find.last && offset >= 0 {
-            ffi::length(haystack.len()).unwrap_or(i32::MAX)
+        let end = if find.last && offset >= 0 {
+            haystack.len()
         } else {
-            at
+            usize::try_from(at).unwrap_or(0)
         };
-        return Ok(Some((i64::from(at), -1)));
+        let graphemes = count_graphemes(haystack.get(..end).unwrap_or(&haystack));
+        return Ok(Some(Found {
+            graphemes,
+            chars: 0,
+        }));
     }
     let locale = ffi::c_string(find.locale);
     let mut search = match Search::open(&needle, &haystack, &locale, breaks) {
@@ -237,7 +256,8 @@ fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>
             .filter(|&p| p >= at)
             .unwrap_or(DONE)
     } else {
-        // php searches forwards, backwards being broken.
+        // php searches forwards, backwards being broken, each search
+        // from the boundary after the last match, so matches overlap.
         let mut previous = DONE;
         loop {
             let p = search.next(&mut status);
@@ -245,6 +265,13 @@ fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>
                 break previous;
             }
             previous = p;
+            let next = search.breaks().following(p);
+            if next == DONE {
+                break previous;
+            }
+            if let Err(code) = search.set_offset(next) {
+                return fail(req, code, "Invalid search offset").map(|()| None);
+            }
         }
     };
     if status.is_failure() {
@@ -256,12 +283,15 @@ fn strpos_utf16(req: &mut Request, find: &Find<'_>) -> Result<Option<(i64, i32)>
     let prefix = haystack
         .get(..usize::try_from(found).unwrap_or(0))
         .unwrap_or(&[]);
-    Ok(Some((count_graphemes(prefix), found)))
+    Ok(Some(Found {
+        graphemes: count_graphemes(prefix),
+        chars: char::decode_utf16(prefix.iter().copied()).count(),
+    }))
 }
 
 /// A position answered, `false` for none.
-fn position(found: Option<(i64, i32)>) -> OrFalse<i64> {
-    found.map_or(OrFalse::False, |(at, _)| OrFalse::Value(at))
+fn position(found: Option<Found>) -> OrFalse<i64> {
+    found.map_or(OrFalse::False, |found| OrFalse::Value(found.graphemes))
 }
 
 /// `grapheme_strlen(string $string): int|false|null`.
@@ -306,6 +336,23 @@ fn grapheme_strlen(req: &mut Request, string: PhpString) -> Result<Option<OrFals
 /// int(2)
 /// grapheme_strpos(): Argument #3 ($offset) must be contained in argument #1 ($haystack)
 /// ```
+///
+/// An ASCII haystack that misses a needle by bytes is searched again,
+/// canonically, where the needle is not ASCII, so `K` matches the Kelvin
+/// sign; an empty haystack holds no needle, with no error set; and an
+/// empty needle answers the grapheme its offset names, not the code unit
+/// (php 8.5.12).
+///
+/// ```php
+/// var_dump(grapheme_strpos("aKbK", "\u{212A}", 2), grapheme_strpos("abc", "\u{E9}"), grapheme_strpos("", "\u{E9}"), intl_get_error_code(), grapheme_strpos("😀x", "", 1));
+/// ```
+/// ```expect
+/// int(3)
+/// bool(false)
+/// bool(false)
+/// int(0)
+/// int(1)
+/// ```
 #[php_function]
 fn grapheme_strpos(
     req: &mut Request,
@@ -321,9 +368,13 @@ fn grapheme_strpos(
     let offset = i32::try_from(offset).unwrap_or(0);
     if offset >= 0 && ascii(hay, hay.len()) {
         let from = usize::try_from(offset).unwrap_or(0);
-        return Ok(
-            memnstr(hay, nee, from).map_or(OrFalse::False, |at| OrFalse::Value(len_of(&hay[..at])))
-        );
+        if let Some(at) = memnstr(hay, nee, from) {
+            return Ok(OrFalse::Value(len_of(&hay[..at])));
+        }
+        // A needle that is not ASCII can still match canonically.
+        if ascii(nee, nee.len()) {
+            return Ok(OrFalse::False);
+        }
     }
     let find = Find {
         haystack: hay,
@@ -396,6 +447,20 @@ fn grapheme_stripos(
 /// int(3)
 /// int(0)
 /// int(3)
+/// ```
+///
+/// A negative offset searches forwards from each match's next boundary,
+/// so overlapping matches are found; an empty needle answers a count of
+/// graphemes (php 8.5.12).
+///
+/// ```php
+/// var_dump(grapheme_strrpos("\u{E9}\u{E9}\u{E9}", "\u{E9}\u{E9}", -1), grapheme_strripos("\u{C9}\u{E9}\u{C9}", "\u{E9}\u{E9}", -1), grapheme_strrpos("😀x", ""), grapheme_strrpos("😀x", "", -1));
+/// ```
+/// ```expect
+/// int(1)
+/// int(1)
+/// int(2)
+/// int(1)
 /// ```
 #[php_function]
 fn grapheme_strrpos(
@@ -600,6 +665,18 @@ fn grapheme_substr(
 /// string(2) "@x"
 /// bool(false)
 /// ```
+///
+/// A haystack and needle both ASCII are searched by bytes; otherwise
+/// the search is canonical, so `e` and a combining acute match `é`, and
+/// the cut steps the UTF-8 haystack by the code points before the match,
+/// a supplementary one counted once (php 8.5.12).
+///
+/// ```php
+/// echo json_encode([grapheme_strstr("pe\u{301}x", "\u{E9}"), grapheme_strstr("pe\u{301}x", "\u{E9}", true), grapheme_strstr("😀abc", "a"), grapheme_stristr("😀e\u{301}abc", "A", true)]), "\n";
+/// ```
+/// ```expect
+/// ["e\u0301x","p","abc","\ud83d\ude00e\u0301"]
+/// ```
 #[php_function]
 #[allow(non_snake_case)]
 fn grapheme_strstr(
@@ -644,13 +721,11 @@ fn strstr(
     locale: Path,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let (hay, nee) = (haystack.as_bytes(), needle.as_bytes());
-    if !ignore_case {
+    if !ignore_case && ascii(hay, hay.len()) && ascii(nee, nee.len()) {
         let Some(found) = memnstr(hay, nee, 0) else {
             return Ok(OrFalse::False);
         };
-        if ascii(hay, hay.len()) {
-            return bytes(req, if before { &hay[..found] } else { &hay[found..] });
-        }
+        return bytes(req, if before { &hay[..found] } else { &hay[found..] });
     }
     let find = Find {
         haystack: hay,
@@ -660,12 +735,12 @@ fn strstr(
         last: false,
         locale: locale.0.as_bytes(),
     };
-    let Some((_, unit)) = strpos_utf16(req, &find)? else {
+    let Some(found) = strpos_utf16(req, &find)? else {
         return Ok(OrFalse::False);
     };
-    // php steps one code point per UTF-16 unit the match starts at.
+    // `U8_FWD_N`: one code point at a time, the match's `puchar_pos`.
     let mut at = 0;
-    for _ in 0..unit.max(0) {
+    for _ in 0..found.chars {
         if at >= hay.len() {
             break;
         }
@@ -687,6 +762,18 @@ fn strstr(
 /// }
 /// int(3)
 /// grapheme_str_split(): Argument #2 ($length) must be greater than 0 and less than or equal to 1073741823
+/// ```
+///
+/// Since 8.5.12 a chunk the memory limit was met in stops the split, and
+/// the limit's fatal is raised as the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(count(grapheme_str_split(str_repeat("a", 4 << 20), 1 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn grapheme_str_split(
@@ -718,7 +805,6 @@ fn grapheme_str_split(
         text.get(from..from + usize::try_from(len).unwrap_or(0))
             .unwrap_or(&[])
     };
-    let mut chunks = Vec::new();
     let (mut pos, mut start, mut end, mut i, mut current, mut end_len) =
         (0i64, 0i64, 0i64, 0i64, 0i64, 0i64);
     while pos != i64::from(DONE) {
@@ -726,24 +812,29 @@ fn grapheme_str_split(
         pos = i64::from(breaks.next());
         if i == length - 1 {
             if pos != i64::from(DONE) {
-                chunks.push(slice(start, pos - current));
+                let chunk = stringl(req, slice(start, pos - current))?;
+                parts.append(req, chunk.into_value())?;
+                // Since 8.5.12 a chunk the memory limit was met in stops
+                // the split.
+                if req.memory().has_oom() {
+                    parts.give_up(req);
+                    // RETURN_OOM()
+                    return Ok(OrFalse::False);
+                }
                 end = start + pos - current;
                 i = 0;
+                start += pos - current;
+                current = pos;
             }
-            start += pos - current;
-            current = pos;
         } else {
             i += 1;
         }
     }
     if i != 0 && end_len != 0 {
-        chunks.push(slice(end, end_len));
-    }
-    drop(breaks);
-    for chunk in chunks {
-        let chunk = PhpString::new(req, chunk)?;
+        let chunk = stringl(req, slice(end, end_len))?;
         parts.append(req, chunk.into_value())?;
     }
+    drop(breaks);
     Ok(OrFalse::Value(parts))
 }
 
@@ -759,6 +850,32 @@ fn grapheme_str_split(
 /// int(6)
 /// int(9)
 /// grapheme_levenshtein(): Argument #3 ($insertion_cost) must be greater than 0 and less than or equal to 1073741823
+/// ```
+///
+/// Since 8.5.12 the two rows are asked for fallibly, so rows past the
+/// memory limit are refused and the limit's fatal is raised as the call
+/// returns, the distance never computed:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(grapheme_levenshtein("a", str_repeat("b", 1 << 20), 1, 2, 3), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 8404992 bytes) in %s on line 3
+/// ```
+///
+/// and a UTF-16 copy the limit was met in stops the native before any
+/// grapheme is compared:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $size = (int) (2.5 * 1024 * 1024);
+/// var_dump(grapheme_levenshtein(str_repeat("a", $size), str_repeat("b", $size), 1, 2, 3), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 5259264 bytes) in %s on line 4
 /// ```
 #[php_function]
 fn grapheme_levenshtein(
@@ -785,13 +902,56 @@ fn grapheme_levenshtein(
         (a, b) = (b, a);
     }
     let message = "Error converting input string to UTF-16";
-    let Some(a) = utf16(req, a, message)? else {
-        return Ok(OrFalse::False);
+    // `intl_convert_utf8_to_utf16` into `eumalloc`'s block, then, since
+    // 8.5.12, `ZEND_HAS_OOM()`: a copy the memory limit was met in stops
+    // the native (`RETURN_OOM()`'s value), before any row is asked for.
+    let a = match ffi::to_utf16_block(req, a)? {
+        Ok(a) if req.memory().has_oom() => {
+            a.0.give_back(req);
+            // RETURN_OOM()
+            return Ok(OrFalse::False);
+        }
+        Ok(a) => a,
+        Err(code) => {
+            fail(req, code, message)?;
+            return Ok(OrFalse::False);
+        }
     };
-    let Some(b) = utf16(req, b, message)? else {
-        return Ok(OrFalse::False);
+    let b = match ffi::to_utf16_block(req, b)? {
+        Ok(b) if req.memory().has_oom() => {
+            b.0.give_back(req);
+            a.0.give_back(req);
+            // RETURN_OOM()
+            return Ok(OrFalse::False);
+        }
+        Ok(b) => b,
+        Err(code) => {
+            a.0.give_back(req);
+            fail(req, code, message)?;
+            return Ok(OrFalse::False);
+        }
     };
-    let (len1, len2) = (count_graphemes(&a), count_graphemes(&b));
+    let answered = {
+        let (a_text, b_text) = (&a.0.as_slice()[..a.1], &b.0.as_slice()[..b.1]);
+        distance(req, a_text, b_text, (ins, rep, del), locale.0.as_bytes())
+    };
+    b.0.give_back(req);
+    a.0.give_back(req);
+    answered
+}
+
+/// The distance `grapheme_levenshtein` answers over the two UTF-16
+/// copies, as php walks them: two rows of `strlen_2 + 1` costs, asked
+/// for fallibly since 8.5.12 (`safe_femalloc`), and each grapheme of one
+/// compared with each of the other by the locale's collator, in place.
+fn distance(
+    req: &mut Request,
+    a: &[u16],
+    b: &[u16],
+    (ins, rep, del): (i64, i64, i64),
+    locale: &[u8],
+) -> Result<OrFalse<i64>, Thrown> {
+    let (len1, len2) = (count_graphemes(a), count_graphemes(b));
     if len1 < 0 || len2 < 0 {
         return Ok(OrFalse::False);
     }
@@ -801,33 +961,37 @@ fn grapheme_levenshtein(
     if len2 == 0 {
         return Ok(OrFalse::Value(len1 * del));
     }
-    let (Ok(mut bi1), Ok(mut bi2)) = (Breaks::utf16(&a), Breaks::utf16(&b)) else {
+    let (Ok(mut bi1), Ok(mut bi2)) = (Breaks::utf16(a), Breaks::utf16(b)) else {
         return Ok(OrFalse::False);
     };
     let mut status = Code::ZERO;
-    let opened = Collator::open(&ffi::c_string(locale.0.as_bytes()), &mut status);
+    let opened = Collator::open(&ffi::c_string(locale), &mut status);
     let Some(collator) = opened else {
         fail(req, status, "Error on ucol_open")?;
         return Ok(OrFalse::False);
     };
     let width = usize::try_from(len2).unwrap_or(0) + 1;
-    let mut p1: Vec<i64> = (0..width).map(|i| len_of_index(i) * ins).collect();
-    let mut p2 = vec![0i64; width];
-    let unit = |text: &[u16], from: i32, to: i32| -> Vec<u16> {
-        let (from, to) = (
-            usize::try_from(from).unwrap_or(0),
-            usize::try_from(to).unwrap_or(0),
-        );
-        text.get(from..to).unwrap_or(&[]).to_vec()
+    let Some(mut p1) = Block::<i64>::ask(req, width, true)? else {
+        // RETURN_OOM()
+        return Ok(OrFalse::False);
     };
+    let Some(mut p2) = Block::<i64>::ask(req, width, true)? else {
+        p1.give_back(req);
+        // RETURN_OOM()
+        return Ok(OrFalse::False);
+    };
+    for (i, cost) in p1.as_mut_slice().iter_mut().enumerate() {
+        *cost = len_of_index(i) * ins;
+    }
     loop {
         let current1 = bi1.current();
         let pos1 = bi1.next();
         if pos1 == DONE {
             break;
         }
-        let g1 = unit(&a, current1, pos1);
-        p2[0] = p1[0] + del;
+        let g1 = unit(a, current1, pos1);
+        let (row1, row2) = (p1.as_slice(), p2.as_mut_slice());
+        row2[0] = row1[0] + del;
         let mut i2 = 0;
         loop {
             let current2 = bi2.current();
@@ -835,21 +999,39 @@ fn grapheme_levenshtein(
             if pos2 == DONE {
                 break;
             }
-            let g2 = unit(&b, current2, pos2);
-            let mut c0 = p1[i2]
-                + if collator.strcoll(&g1, &g2) == 0 {
+            let g2 = unit(b, current2, pos2);
+            let mut c0 = row1[i2]
+                + if collator.strcoll(g1, g2) == 0 {
                     0
                 } else {
                     rep
                 };
-            c0 = c0.min(p1[i2 + 1] + del).min(p2[i2] + ins);
-            p2[i2 + 1] = c0;
+            c0 = c0.min(row1[i2 + 1] + del).min(row2[i2] + ins);
+            row2[i2 + 1] = c0;
             i2 += 1;
         }
         bi2.first();
         std::mem::swap(&mut p1, &mut p2);
     }
-    Ok(OrFalse::Value(p1[width - 1]))
+    let distance = p1.as_slice()[width - 1];
+    p2.give_back(req);
+    p1.give_back(req);
+    Ok(OrFalse::Value(distance))
+}
+
+/// `add_next_index_stringl`'s string, `ZVAL_STRINGL`: `zend_string_init`,
+/// the request's own whatever its length, one byte among them.
+fn stringl(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+    PhpString::filled(req, bytes.len(), |b| b.copy_from_slice(bytes))
+}
+
+/// The units of one grapheme, between two of the iterator's breaks.
+fn unit(text: &[u16], from: i32, to: i32) -> &[u16] {
+    let (from, to) = (
+        usize::try_from(from).unwrap_or(0),
+        usize::try_from(to).unwrap_or(0),
+    );
+    text.get(from..to).unwrap_or(&[])
 }
 
 /// An index as a count.

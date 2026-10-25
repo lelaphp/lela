@@ -310,6 +310,22 @@ fn open(
 /// shmop_read(): Argument #3 ($size) is out of range
 /// shmop_read(): Argument #3 ($size) is out of range
 /// ```
+///
+/// The string is asked for fallibly since 8.5.12: a span the memory
+/// limit has no room for is refused, and the limit's fatal is raised as
+/// the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '2M');
+/// $s = shmop_open(0, "c", 0600, 5 << 19);
+/// shmop_delete($s);
+/// $r = shmop_read($s, 0, 0);
+/// var_dump("unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2637824 bytes) in %s on line 5
+/// ```
 #[php_function]
 fn shmop_read(
     req: &mut Request,
@@ -330,7 +346,17 @@ fn shmop_read(
         usize::try_from(count).unwrap_or(0),
     );
     let bytes = with(req, shmop, |segment| segment.read(offset, count))?;
-    PhpString::new(req, &bytes)
+    // `zend_string_finit(..., fallible: true)` of the span
+    // (`Z/ext/shmop/shmop.c:248` at 8.5.12): where the memory limit
+    // refused it, `RETURN_OOM()`, the limit's fatal raised as the call
+    // returns.
+    match req
+        .memory_mut()
+        .fallible(|req| PhpString::finit(req, &bytes))?
+    {
+        Some(read) => Ok(read),
+        None => PhpString::new(req, b""), // RETURN_OOM()
+    }
 }
 
 /// `shmop_close(Shmop $shmop): void`, which does nothing: the object

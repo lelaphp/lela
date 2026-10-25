@@ -15,6 +15,7 @@ use crate::error::{self, Carrier, IntlError};
 use crate::ffi::converter::{
     self as ucnv, Callbacks, Converter, ConverterId, Live, Reason, Target,
 };
+use crate::ffi::heap::Block;
 use crate::ffi::{Code, c_string};
 use crate::utf8;
 
@@ -335,6 +336,19 @@ impl UConverter {
         })
     }
 
+    /// Since 8.5.12 the UTF-16 between the two encodings and the string
+    /// are asked for fallibly, so a conversion past the memory limit is
+    /// refused there and the limit's fatal is raised as the call returns:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $c = new UConverter("UTF-32BE", "ISO-8859-1");
+    /// var_dump($c->convert(str_repeat("A", 2 << 20)), "unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 4
+    /// ```
     #[php(tentative)]
     fn convert(
         req: &mut Request,
@@ -347,7 +361,7 @@ impl UConverter {
         let (src, dest) = converters(req, object);
         let (src, dest) = if reverse { (dest, src) } else { (src, dest) };
         match convert(req, Some(object), dest, src, str.as_bytes())? {
-            Some(bytes) => PhpString::new(req, &bytes).map(OrFalse::Value),
+            Some(made) => Ok(OrFalse::Value(made)),
             None => Ok(OrFalse::False),
         }
     }
@@ -632,6 +646,19 @@ impl UConverter {
     /// string(105) "UConverter::transcode(): Ambiguous encoding specified, using ibm-943_P15A-2003: U_AMBIGUOUS_ALIAS_WARNING"
     /// UConverter::transcode(): Error setting encoding: 4 - U_FILE_ACCESS_ERROR
     /// ```
+    ///
+    /// Since 8.5.12 the UTF-16 between the two encodings and the string
+    /// are asked for fallibly, so a conversion past the memory limit is
+    /// refused there and the limit's fatal is raised as the call returns:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// var_dump(UConverter::transcode(str_repeat("A", 2 << 20), "UTF-32BE", "ISO-8859-1"), "unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 3
+    /// ```
     #[php(tentative)]
     fn transcode(
         req: &mut Request,
@@ -681,8 +708,15 @@ impl UConverter {
         };
         src.close(req);
         dest.close(req);
+        let answer = match answer {
+            Ok(Some(made)) if pending.is_set() => {
+                made.give_up(req);
+                Ok(None)
+            }
+            answer => answer,
+        };
         match pending.answer(req, answer)? {
-            Some(bytes) => PhpString::new(req, &bytes).map(OrFalse::Value),
+            Some(made) => Ok(OrFalse::Value(made)),
             None => Ok(OrFalse::False),
         }
     }
@@ -897,7 +931,7 @@ fn convert(
     dest: Option<ConverterId>,
     src: Option<ConverterId>,
     text: &[u8],
-) -> Answer<Option<Vec<u8>>> {
+) -> Answer<Option<Owner<PhpString>>> {
     let mut pending = Pending::default();
     // Each converter held for the whole conversion, so a callback that
     // replaces or frees it leaves its close to the conversion's end.
@@ -916,10 +950,21 @@ fn convert(
         fail(req, object, Code::INVALID_STATE, message)?;
         return Ok(None);
     };
+    let answer = match answer {
+        Ok(Some(made)) if pending.is_set() => {
+            made.give_up(req);
+            Ok(None)
+        }
+        answer => answer,
+    };
     pending.answer(req, answer)
 }
 
-/// [`convert`]'s body, what a callback threw left in `pending`.
+/// [`convert`]'s body, what a callback threw left in `pending`: the
+/// intermediate UTF-16 in a block of the request's heap and the string
+/// made while it is held, both asked for fallibly since 8.5.12
+/// (`safe_femalloc` and `zend_string_falloc`); `None` where either was
+/// refused, as php's `NULL`, the delayed OOM recorded.
 fn convert_with(
     req: &mut Request,
     object: Option<PhpObject>,
@@ -927,34 +972,58 @@ fn convert_with(
     dest: &Live<'_>,
     src: &Live<'_>,
     text: &[u8],
-) -> Answer<Option<Vec<u8>>> {
+) -> Answer<Option<Owner<PhpString>>> {
     let (needed, code) = lend(req, object, pending, |cb| src.decode(&mut [], text, cb));
     if code.is_failure() && code != Code::BUFFER_OVERFLOW {
         failure(req, object, code)?;
         return Ok(None);
     }
     let capacity = usize::try_from(needed).unwrap_or(0) + 1;
-    let mut units = vec![0u16; capacity + 1];
-    let room = &mut units[..capacity];
+    let Some(mut temp) = Block::<u16>::ask(req, capacity + 1, true)? else {
+        return Ok(None);
+    };
+    let answered = encoded(req, object, pending, (dest, src), &mut temp, capacity, text);
+    temp.give_back(req);
+    answered
+}
+
+/// The UTF-16 of `text` decoded into `temp`, `capacity` units of it,
+/// then encoded into the string, which is asked for while `temp` is held.
+fn encoded(
+    req: &mut Request,
+    object: Option<PhpObject>,
+    pending: &mut Pending,
+    (dest, src): (&Live<'_>, &Live<'_>),
+    temp: &mut Block<u16>,
+    capacity: usize,
+    text: &[u8],
+) -> Answer<Option<Owner<PhpString>>> {
+    let room = &mut temp.as_mut_slice()[..capacity];
     let (len, code) = lend(req, object, pending, |cb| src.decode(room, text, cb));
     if code.is_failure() {
         failure(req, object, code)?;
         return Ok(None);
     }
-    units.truncate(usize::try_from(len).unwrap_or(0));
-    let (needed, code) = lend(req, object, pending, |cb| dest.encode(&mut [], &units, cb));
+    let units = &temp.as_slice()[..usize::try_from(len).unwrap_or(0).min(capacity)];
+    let (needed, code) = lend(req, object, pending, |cb| dest.encode(&mut [], units, cb));
     if code.is_failure() && code != Code::BUFFER_OVERFLOW {
         failure(req, object, code)?;
         return Ok(None);
     }
     let mut out = vec![0u8; usize::try_from(needed).unwrap_or(0) + 1];
-    let (len, code) = lend(req, object, pending, |cb| dest.encode(&mut out, &units, cb));
+    let (len, code) = lend(req, object, pending, |cb| dest.encode(&mut out, units, cb));
+    out.truncate(usize::try_from(len).unwrap_or(0));
+    let made = req
+        .memory_mut()
+        .fallible(|req| PhpString::filled(req, out.len(), |b| b.copy_from_slice(&out)))?;
     if code.is_failure() {
+        if let Some(made) = made {
+            made.give_up(req);
+        }
         failure(req, object, code)?;
         return Ok(None);
     }
-    out.truncate(usize::try_from(len).unwrap_or(0));
-    Ok(Some(out))
+    Ok(made)
 }
 
 /// `op` with the object's callbacks lent where its class is a subclass of

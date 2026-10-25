@@ -8,7 +8,10 @@
 //! `_PATCH` as the header's own macro does; the text is the header's macro
 //! as the C preprocessor expands it under `DEP_OPENSSL_INCLUDE`. Both are
 //! written to `$OUT_DIR/header.rs` as Rust constants, and a header that
-//! cannot be read fails the build.
+//! cannot be read fails the build. Beside them goes whether the headers
+//! define `OPENSSL_NO_SSL3`, which `xp_ssl.c` and `openssl.c` test with
+//! `#ifndef` (`HAVE_SSL3`, and `sslv3` among the registered names): OpenSSL 3's
+//! configuration defines it and OpenSSL 4's does not.
 
 use std::collections::BTreeSet;
 use std::env;
@@ -16,7 +19,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 /// The line the preprocessor expands: the marker, then the macro.
-const SOURCE: &str = "#include <openssl/opensslv.h>\nphp_openssl_header OPENSSL_VERSION_TEXT\n";
+const SOURCE: &str = "#include <openssl/opensslv.h>\n#include <openssl/opensslconf.h>\n\
+#ifdef OPENSSL_NO_SSL3\nphp_openssl_ssl3 0\n#else\nphp_openssl_ssl3 1\n#endif\n\
+php_openssl_header OPENSSL_VERSION_TEXT\n";
 
 fn main() {
     println!("cargo::rerun-if-changed=build.rs");
@@ -32,22 +37,32 @@ fn run() -> Result<(), String> {
     let number = u32::from_str_radix(&number, 16)
         .map_err(|error| format!("DEP_OPENSSL_VERSION_NUMBER `{number}`: {error}"))?;
     let include = env::var_os("DEP_OPENSSL_INCLUDE").map(PathBuf::from);
-    let text = expand(&out, include.as_deref())?;
+    let Headers { text, ssl3 } = expand(&out, include.as_deref())?;
     let (high, low) = (number >> 16, number & 0xffff);
     let header = format!(
         "/// `OPENSSL_VERSION_TEXT` of the headers this build compiled against.\n\
          pub(crate) const OPENSSL_VERSION_TEXT: &str = {text:?};\n\
          /// `OPENSSL_VERSION_NUMBER` of the same headers, `0xMNN00PP0L`.\n\
-         pub(crate) const OPENSSL_VERSION_NUMBER: i64 = 0x{high:04x}_{low:04x};\n"
+         pub(crate) const OPENSSL_VERSION_NUMBER: i64 = 0x{high:04x}_{low:04x};\n\
+         /// `HAVE_SSL3`: the same headers leave `OPENSSL_NO_SSL3` undefined.\n\
+         pub(crate) const HAVE_SSL3: bool = {ssl3};\n"
     );
     fs::write(out.join("header.rs"), header).map_err(|error| format!("header.rs: {error}"))
 }
 
-/// `OPENSSL_VERSION_TEXT` as the C preprocessor expands it, its adjacent
-/// quoted strings joined. The `opensslv.h` it read, named by its line
-/// markers, is watched, so that a changed header rebuilds the crate as it
-/// would rebuild php.
-fn expand(out: &Path, include: Option<&Path>) -> Result<String, String> {
+/// What the headers say, as the C preprocessor reads them.
+struct Headers {
+    /// `OPENSSL_VERSION_TEXT`, its adjacent quoted strings joined.
+    text: String,
+    /// Whether `OPENSSL_NO_SSL3` is left undefined.
+    ssl3: bool,
+}
+
+/// [`Headers`] as the C preprocessor expands them. The `opensslv.h` and
+/// the configuration header it read, named by its line markers, are
+/// watched, so that a changed header rebuilds the crate as it would
+/// rebuild php.
+fn expand(out: &Path, include: Option<&Path>) -> Result<Headers, String> {
     let source = out.join("opensslv.c");
     fs::write(&source, SOURCE).map_err(|error| format!("opensslv.c: {error}"))?;
     let mut build = cc::Build::new();
@@ -70,15 +85,28 @@ fn expand(out: &Path, include: Option<&Path>) -> Result<String, String> {
         .lines()
         .filter(|line| line.starts_with('#'))
         .filter_map(|line| line.split('"').nth(1))
-        .filter(|path| path.ends_with("/opensslv.h"))
+        .filter(|path| {
+            ["/opensslv.h", "/opensslconf.h", "/configuration.h"]
+                .iter()
+                .any(|name| path.ends_with(name))
+        })
         .collect();
     for path in read {
         println!("cargo::rerun-if-changed={path}");
     }
-    after_marker(&expanded, "php_openssl_header")
+    let text = after_marker(&expanded, "php_openssl_header")
         .as_deref()
         .and_then(quoted)
-        .ok_or_else(|| "<openssl/opensslv.h> defines no string OPENSSL_VERSION_TEXT".to_owned())
+        .ok_or_else(|| "<openssl/opensslv.h> defines no string OPENSSL_VERSION_TEXT".to_owned())?;
+    let ssl3 = match after_marker(&expanded, "php_openssl_ssl3")
+        .as_deref()
+        .and_then(|rest| rest.split_whitespace().next())
+    {
+        Some("1") => true,
+        Some("0") => false,
+        _ => return Err("the OPENSSL_NO_SSL3 probe did not expand".to_owned()),
+    };
+    Ok(Headers { text, ssl3 })
 }
 
 /// The adjacent quoted C strings of `tokens` as one string, as the

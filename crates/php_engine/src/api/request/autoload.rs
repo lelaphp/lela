@@ -8,7 +8,7 @@
 use crate::api::abi::Callable;
 use crate::api::call::Target;
 use crate::api::raising::Thrown;
-use crate::api::values::{Key, Owner, PhpArray, PhpString, Value};
+use crate::api::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value};
 
 use super::Request;
 use super::Symbols;
@@ -17,12 +17,79 @@ use super::Symbols;
 /// this one reads.
 #[derive(Default)]
 pub(super) struct Autoload {
-    autoloaders: Vec<Owner<Callable>>,
+    autoloaders: Vec<Loader>,
     /// `EG(in_autoload)`: the lowered names an autoloader is loading,
     /// each a key of php's table, which the first lookup that may
     /// autoload lays down on the request's heap and which stands, its
     /// data with it, until the request ends.
     in_autoload: Option<PhpArray>,
+}
+
+/// One autoloader as php's `autoload_func_info` holds it
+/// (`Z/ext/spl/php_spl.c:350`, `autoload_func_info_from_fci`): what its
+/// callable resolved to, and an owner of the receiver (`alfi->obj`,
+/// `fcc.object`, a closure's bound `$this` among them) and of the
+/// callable itself where it was an object (`alfi->closure`, a `Closure`
+/// or an object with `__invoke`). It owns nothing of the value it was
+/// registered as, so an array `[$obj, 'load']` the program registered is
+/// the program's alone, freed when the program gives it up, and
+/// `spl_autoload_functions()` makes the arrays again.
+struct Loader {
+    target: Target,
+    receiver: Option<Owner<PhpObject>>,
+    closure: Option<Owner<PhpObject>>,
+}
+
+impl Loader {
+    /// The record `autoload_func_info_from_fci` makes of `callable`: one
+    /// more owner of its receiver and of its object, where it has them.
+    fn of(req: &mut Request, callable: &Callable) -> Loader {
+        let target = callable.target();
+        let receiver = Loader::receiver_of(req, target).map(|this| Owner::take(req, this));
+        let closure = callable
+            .value()
+            .deref()
+            .as_object()
+            .map(|object| Owner::take(req, object));
+        Loader {
+            target,
+            receiver,
+            closure,
+        }
+    }
+
+    /// `fcc.object`: a method's receiver, or the `$this` a closure is
+    /// bound to.
+    fn receiver_of(req: &Request, target: Target) -> Option<PhpObject> {
+        match target {
+            Target::Method { this, .. } => this,
+            Target::Closure(object) => object.closure(req).and_then(|closure| closure.this),
+            Target::Function(_) => None,
+        }
+    }
+
+    /// `autoload_func_info_equals`: the same function, receiver and class
+    /// ([`Target`]'s identity), and the same object where either was
+    /// registered as one.
+    fn is(&self, req: &Request, callable: &Callable) -> bool {
+        let object = callable.value().deref().as_object();
+        let held = self.closure.as_ref().map(|closure| closure.index());
+        self.target == callable.target()
+            && held == object.map(|object| object.index())
+            && self.receiver.as_ref().map(|this| this.index())
+                == Loader::receiver_of(req, callable.target()).map(|this| this.index())
+    }
+
+    /// `autoload_func_info_destroy`: the receiver given up, then the
+    /// closure.
+    fn give_up(self, req: &mut Request) {
+        if let Some(receiver) = self.receiver {
+            receiver.give_up(req);
+        }
+        if let Some(closure) = self.closure {
+            closure.give_up(req);
+        }
+    }
 }
 
 impl Request {
@@ -34,13 +101,13 @@ impl Request {
         }
     }
 
-    /// The autoloader at `at` on the stack, what `spl_perform_autoload`
-    /// serves next.
-    pub(crate) fn autoloader(&self, at: usize) -> Option<Callable> {
+    /// What the autoloader at `at` on the stack resolved to, what
+    /// `spl_perform_autoload` serves next.
+    pub(crate) fn autoloader(&self, at: usize) -> Option<Target> {
         self.autoload
             .autoloaders
             .get(at)
-            .map(|loader| (**loader).clone())
+            .map(|loader| loader.target)
     }
 
     /// `zend_hash_add_empty_element(EG(in_autoload), lc_name)`, the
@@ -104,15 +171,20 @@ impl Request {
 
     /// What [`autoload_functions`](Self::autoload_functions) makes, its one owner not yet named.
     pub(crate) fn autoload_functions_made(&mut self) -> Result<Vec<Value>, Thrown> {
-        let loaders: Vec<(Target, Value)> = self
+        let loaders: Vec<(Target, Option<PhpObject>)> = self
             .autoload
             .autoloaders
             .iter()
-            .map(|loader| (loader.target(), loader.value()))
+            .map(|loader| {
+                (
+                    loader.target,
+                    loader.closure.as_ref().map(|closure| **closure),
+                )
+            })
             .collect();
         let mut out = Vec::with_capacity(loaders.len());
-        for (target, value) in loaders {
-            match self.autoload_listed(target, &value) {
+        for (target, closure) in loaders {
+            match self.autoload_listed(target, closure) {
                 Ok(listed) => out.push(listed),
                 Err(thrown) => {
                     for listed in out {
@@ -128,8 +200,12 @@ impl Request {
     /// One loader as [`Symbols::autoload_functions`] lists it: one
     /// registered as an object, a closure or an invokable one, is that
     /// object (`alfi->closure`).
-    fn autoload_listed(&mut self, target: Target, value: &Value) -> Result<Value, Thrown> {
-        if let Some(object) = value.deref().as_object() {
+    fn autoload_listed(
+        &mut self,
+        target: Target,
+        closure: Option<PhpObject>,
+    ) -> Result<Value, Thrown> {
+        if let Some(object) = closure {
             self.addref(&object.as_value());
             return Ok(object.as_value());
         }
@@ -139,7 +215,7 @@ impl Request {
                 Ok(object.as_value())
             }
             Target::Function(function) => {
-                let name = self.function_name(function);
+                let name = self.declared_name(function);
                 Ok(Value::string(self.string(name.as_bytes())?))
             }
             Target::Method {
@@ -154,7 +230,7 @@ impl Request {
                     let class = Value::string(self.string(class.as_bytes())?);
                     Owner::adopt(class)
                 };
-                let name = self.function_name(function);
+                let name = self.declared_name(function);
                 let mut pair = self.array()?;
                 pair.append(self, first)?;
                 let name = Value::string(self.string(name.as_bytes())?);
@@ -168,11 +244,11 @@ impl Request {
 impl Symbols<&mut Request> {
     /// `spl_autoload_register()`: the callable onto the stack, at its
     /// head under `prepend`, and nothing where one of the same target
-    /// is there already (`spl_find_registered_function`). The stack
-    /// takes an [`Owner`] of the callable, as
-    /// `autoload_func_info_from_fci` takes one of its object and closure,
-    /// and gives them up when the callable leaves the stack or the
-    /// request ends.
+    /// is there already (`spl_find_registered_function`, by
+    /// `autoload_func_info_equals`). The stack keeps a [`Loader`], what
+    /// `autoload_func_info_from_fci` keeps: the target and an owner of
+    /// its receiver and of its object, given up when the loader leaves
+    /// the stack or the request ends.
     /// A `Class::method` string registered with `$this` in scope is
     /// served on that object after the expression that made it is gone:
     ///
@@ -195,37 +271,37 @@ impl Symbols<&mut Request> {
     /// end
     /// destructed
     /// ```
-    pub fn autoload_register(self, loader: Callable, prepend: bool) -> Result<(), Thrown> {
-        if self
-            .0
+    pub fn autoload_register(self, loader: &Callable, prepend: bool) -> Result<(), Thrown> {
+        let req = self.0;
+        if req
             .autoload
             .autoloaders
             .iter()
-            .any(|held| held.target() == loader.target())
+            .any(|held| held.is(req, loader))
         {
             return Ok(());
         }
-        let loader = Owner::take(self.0, loader);
+        let loader = Loader::of(req, loader);
         if prepend {
-            self.0.autoload.autoloaders.insert(0, loader);
+            req.autoload.autoloaders.insert(0, loader);
         } else {
-            self.0.autoload.autoloaders.push(loader);
+            req.autoload.autoloaders.push(loader);
         }
         Ok(())
     }
 
     /// `spl_autoload_unregister()`.
     pub fn autoload_unregister(self, loader: &Callable) -> bool {
-        let Some(at) = self
-            .0
+        let req = self.0;
+        let Some(at) = req
             .autoload
             .autoloaders
             .iter()
-            .position(|l| l.target() == loader.target())
+            .position(|held| held.is(req, loader))
         else {
             return false;
         };
-        self.0.autoload.autoloaders.remove(at).give_up(self.0);
+        req.autoload.autoloaders.remove(at).give_up(req);
         true
     }
 

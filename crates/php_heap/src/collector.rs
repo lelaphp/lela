@@ -1101,6 +1101,31 @@ impl Heap {
     /// to the buffer as garbage where it is not in it already; the count
     /// of what was found, references not among it, and `flags` told
     /// when a destructor is still to be served.
+    ///
+    /// The table an object's handler hands back is garbage of its own,
+    /// `gc_add_garbage((zend_refcounted *)ht)` where its colour turns
+    /// from white and `GC_INFO(ht)` is none (`Z/Zend/zend_gc.c:1576-1580`,
+    /// php 8.5.12), so an array that table is shared with stays whole
+    /// when a destructor keeps it (GH-24050):
+    ///
+    /// ```php
+    /// class R { public $c; public $self; function __destruct() { $GLOBALS['kept'] = $this->c; } }
+    /// class H { public $o; public $r; public $self; }
+    /// $array = ['victim' => new stdClass, 'key' => 'value'];
+    /// $h = new H; $r = new R;
+    /// $h->o = (object) $array;
+    /// $r->c = function () use ($array) { return $array; };
+    /// $h->r = $r; $h->self = $h; $r->self = $r;
+    /// unset($array); gc_collect_cycles();
+    /// unset($h, $r); var_dump(gc_collect_cycles(), gc_collect_cycles());
+    /// var_dump($kept()['victim']);
+    /// ```
+    /// ```expect
+    /// int(2)
+    /// int(0)
+    /// object(stdClass)#1 (0) {
+    /// }
+    /// ```
     fn gc_collect_white(
         hooks: &mut dyn HeapHooks,
         root: Node,
@@ -1127,6 +1152,17 @@ impl Heap {
                     } else {
                         match children(hooks, node, kids) {
                             (Some(table), split) if table.newly(collect) => {
+                                // The table blackened here is garbage as
+                                // an array reached on its own is, where the
+                                // buffer does not hold it already, so a
+                                // destructor's resurrection takes it out
+                                // of the garbage with what it holds
+                                // (GH-24050, php 8.5.12).
+                                if let Table::Arr(a) = table
+                                    && Node::Arr(a).gc().is_unplaced()
+                                {
+                                    Heap::gc_growing(hooks, |gc| gc.add_garbage(Node::Arr(a)));
+                                }
                                 push_all(&kids[..split], &mut stack, collect);
                                 walk(&kids[split..], &mut stack, collect)
                             }
@@ -1691,6 +1727,54 @@ mod tests {
         assert_eq!(Heap::gc_collect_cycles(&mut r), 2);
         assert_eq!(r.served, vec![1, 2]);
         assert_eq!(r.heap.objects(), 0);
+    }
+
+    /// The `GC_TYPE_INFO` word compiled code reads at [`Zval::GC_INFO_AT`]
+    /// past a block's start, held to [`Zval::LEAK_BITS`], says what
+    /// `possible_root` says: a fresh array and a fresh object may leak, a
+    /// string and a reference are not collectable, and an array once in
+    /// the root buffer is in it already.
+    #[test]
+    fn the_leak_bits_compiled_code_reads_say_what_the_collector_says() {
+        let _alone = alone();
+        let mut r = Recorder::new();
+        r.heap.gc.enable(true);
+        let read = |z: Zval| {
+            let block = z.counted().expect("a counted value").block().as_ptr();
+            let at = block.wrapping_add(Zval::GC_INFO_AT).cast::<[u8; 4]>();
+            // SAFETY: the block stands for the read, and its header's
+            // `GC_TYPE_INFO` is the four bytes `GC_INFO_AT` bytes in.
+            let word = u32::from_ne_bytes(unsafe { at.read() });
+            word & Zval::LEAK_BITS == 0
+        };
+        let a = r.heap.array().expect("an array");
+        let o = r.heap.object(1, 1, 0).expect("an object");
+        let s = r.heap.string(b"held").expect("a string");
+        let cell = r.heap.reference(Zval::long(1)).expect("a reference");
+        for z in [
+            Zval::array(a),
+            Zval::object(o),
+            Zval::string(s),
+            Zval::reference(cell),
+        ] {
+            let collectable = matches!(z.kind(), ZvalType::Array | ZvalType::Object);
+            assert_eq!(read(z), collectable, "{:?}", z.kind());
+            if collectable {
+                assert!(possible_root(z).is_some(), "{:?}", z.kind());
+            }
+        }
+        a.addref();
+        Heap::release(&mut r, Zval::array(a));
+        assert_eq!(r.heap.gc_status().roots, 1);
+        assert!(!read(Zval::array(a)) && possible_root(Zval::array(a)).is_none());
+        for z in [
+            Zval::array(a),
+            Zval::object(o),
+            Zval::string(s),
+            Zval::reference(cell),
+        ] {
+            Heap::release(&mut r, z);
+        }
     }
 
     /// `$a = []; $a[] =& $a; unset($a);`: one root, the table, and one

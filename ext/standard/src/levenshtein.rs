@@ -4,20 +4,42 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 use php_ext::attr::php_function;
-use php_ext::values::PhpString;
+use php_ext::raising::Thrown;
+use php_ext::request::Request;
+use php_ext::values::{Emalloc, PhpString};
 
 /// `reference_levdist(string1, string2, cost_ins, cost_rep, cost_del)`.
-fn levdist<'a>(mut a: &'a [u8], mut b: &'a [u8], ins: i64, rep: i64, del: i64) -> i64 {
+/// `reference_levdist`: the distance, or `None` where the memory limit
+/// refused a row, php 8.5.12's `false`. The two rows are php's
+/// `safe_femalloc`'d ones, eight bytes for each byte of the second
+/// string and one more, asked for fallibly on the request's heap and
+/// held while the distance is reckoned.
+fn levdist<'a>(
+    req: &mut Request,
+    (mut a, mut b): (&'a [u8], &'a [u8]),
+    ins: i64,
+    rep: i64,
+    del: i64,
+) -> Result<Option<i64>, Thrown> {
     let long = |n: usize| i64::try_from(n).unwrap_or(i64::MAX);
     if a.is_empty() {
-        return long(b.len()).wrapping_mul(ins);
+        return Ok(Some(long(b.len()).wrapping_mul(ins)));
     }
     if b.is_empty() {
-        return long(a.len()).wrapping_mul(del);
+        return Ok(Some(long(a.len()).wrapping_mul(del)));
     }
     if a.len() < b.len() && ins == rep && rep == del {
         std::mem::swap(&mut a, &mut b);
     }
+    // "Each row is eight times the length of string2."
+    let row = (b.len() + 1).saturating_mul(8);
+    let Some(first) = req.memory_mut().fallible(|req| Emalloc::new(req, row))? else {
+        return Ok(None);
+    };
+    let Some(second) = req.memory_mut().fallible(|req| Emalloc::new(req, row))? else {
+        first.free(req);
+        return Ok(None);
+    };
     let mut p1: Vec<i64> = (0..=b.len()).map(|i| long(i).wrapping_mul(ins)).collect();
     let mut p2: Vec<i64> = vec![0; b.len() + 1];
     for &x in a {
@@ -36,7 +58,9 @@ fn levdist<'a>(mut a: &'a [u8], mut b: &'a [u8], ins: i64, rep: i64, del: i64) -
         }
         std::mem::swap(&mut p1, &mut p2);
     }
-    p1[b.len()]
+    second.free(req);
+    first.free(req);
+    Ok(Some(p1[b.len()]))
 }
 
 /// `levenshtein(string $string1, string $string2, int $insertion_cost
@@ -74,19 +98,36 @@ fn levdist<'a>(mut a: &'a [u8], mut b: &'a [u8], ins: i64, rep: i64, del: i64) -
 ///   - Return [ int ]
 /// }
 /// ```
+///
+/// Since 8.5.12 the two rows, eight bytes for each byte of the second
+/// string, are asked for fallibly: past the memory limit one is refused,
+/// and the limit's fatal is raised as the call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '16M');
+/// $b = str_repeat('b', 1 << 20);
+/// var_dump(levenshtein('kitten', 'sitting'), levenshtein('ab', $b), levenshtein('ab', $b, 1, 2, 3), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 8404992 bytes) in %s on line 4
+/// ```
 #[php_function]
 fn levenshtein(
+    req: &mut Request,
     string1: PhpString,
     string2: PhpString,
     #[php(default = 1)] insertion_cost: i64,
     #[php(default = 1)] replacement_cost: i64,
     #[php(default = 1)] deletion_cost: i64,
-) -> i64 {
-    levdist(
-        string1.as_bytes(),
-        string2.as_bytes(),
+) -> Result<i64, Thrown> {
+    let distance = levdist(
+        req,
+        (string1.as_bytes(), string2.as_bytes()),
         insertion_cost,
         replacement_cost,
         deletion_cost,
-    )
+    )?;
+    // RETURN_OOM() where a row was refused.
+    Ok(distance.unwrap_or(0))
 }

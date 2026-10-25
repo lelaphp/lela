@@ -120,6 +120,29 @@ const char *php_memnstr(const char *haystack, const char *needle, size_t needle_
 #define pefree(p, persistent) free(p)
 void *safe_emalloc(size_t nmemb, size_t size, size_t offset);
 
+/* php 8.5.12's `cdf.c` asks for its tables with `femalloc`,
+ * `safe_femalloc` and `safe_ferealloc`, each fallible. They are php_heap's
+ * `_safe_ferealloc`, the lend's fallible entry, which the binding makes
+ * every libmagic call that reaches `cdf.c` under: the tables are the
+ * request's heap's, and one past the memory limit is refused with NULL,
+ * the delayed OOM recorded. Every site passes `fallible` true. Outside a
+ * lend it is the system's `realloc`. */
+void *_safe_ferealloc(void *ptr, size_t nmemb, size_t size, size_t offset);
+#define femalloc(size, fallible) _safe_ferealloc(NULL, 1, (size), 0)
+#define safe_femalloc(nmemb, size, offset, fallible) \
+	_safe_ferealloc(NULL, (nmemb), (size), (offset))
+#define safe_ferealloc(ptr, nmemb, size, offset, fallible) \
+	_safe_ferealloc((ptr), (nmemb), (size), (offset))
+
+/* `cdf.c` and `readcdf.c`, which free those tables, are compiled with
+ * `FILEINFO_SHIM_LENT_FREE`: their `efree` is php_heap's, which under the
+ * lend gives a block of the heap back to it and any other to the system
+ * allocator. */
+#ifdef FILEINFO_SHIM_LENT_FREE
+#undef efree
+void efree(void *ptr);
+#endif
+
 size_t spprintf(char **pbuf, size_t max_len, const char *format, ...);
 size_t vspprintf(char **pbuf, size_t max_len, const char *format, va_list ap);
 

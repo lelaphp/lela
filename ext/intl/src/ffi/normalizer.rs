@@ -81,6 +81,30 @@ impl Normalizer {
         status.check().map(|_| out)
     }
 
+    /// `unorm2_normalize` into `dest`, its last unit left for the
+    /// terminator as php hands `uret_len` beside `uret_len + 1` units: the
+    /// length the whole text needs, and the code.
+    pub(crate) fn normalize_into(self, text: &[u16], dest: &mut [u16]) -> (i32, Code) {
+        let mut status = Code::ZERO;
+        let Ok(len) = length(text.len()) else {
+            return (-1, Code::BUFFER_OVERFLOW);
+        };
+        let capacity = length(dest.len().saturating_sub(1)).unwrap_or(i32::MAX);
+        // SAFETY: the source is a live slice of len units, dest holds more
+        // than capacity units and ICU writes no further.
+        let needed = unsafe {
+            sys::unorm2_normalize(
+                self.0,
+                text.as_ptr(),
+                len,
+                dest.as_mut_ptr(),
+                capacity,
+                &mut status,
+            )
+        };
+        (needed, status)
+    }
+
     /// `unorm2_isNormalized`.
     pub(crate) fn is_normalized(self, text: &[u16]) -> Result<bool, Code> {
         let len = length(text.len())?;

@@ -97,14 +97,18 @@ fn body(len: usize) -> Compiled {
     Compiled {
         bytes: vec![0xc3; len],
         entry_offset: 0,
+        body_offset: 0,
         align: 16,
         exits: Box::new([]),
         leaves: None,
+        checks_interrupt: false,
         stub: None,
         opens: None,
         entry_stood: false,
         body: None,
         fuzzed: crate::lower::Fuzzed::default(),
+        slots: crate::lower::EntrySlots::default(),
+        landings: crate::lower::LandingSlots::default(),
         calls: Box::new([]),
         callee_caches: Box::new([]),
         map_ptrs: Box::new([]),
@@ -144,7 +148,7 @@ fn piped(
 ) -> (Outcome, State, String) {
     let shared = &engine.shared;
     let mut lines = Vec::new();
-    let compile = |ir: &TraceIr, name: TraceName| -> Result<Compiled, Abort> {
+    let compile = |ir: &TraceIr, name: TraceName, _| -> Result<Compiled, Abort> {
         match backend {
             Backend::Dump => {
                 let text = crate::lower::dump::render(ir);

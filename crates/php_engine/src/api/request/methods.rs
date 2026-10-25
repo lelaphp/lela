@@ -176,8 +176,12 @@ impl Request {
     /// that declared it.
     fn row_method_at(&self, class: ClassId, row: Row<ClassId>) -> Option<(ClassId, &MethodDecl)> {
         let holder = row.holder_in(class);
-        let decl = self.symbols().class_decl(holder)?;
-        Some((holder, decl.methods.get(usize::try_from(row.at).ok()?)?))
+        Some((holder, self.method_decl_at(holder, row.at)?))
+    }
+
+    /// The method at `at` of the methods `class` declares.
+    fn method_decl_at(&self, class: ClassId, at: u32) -> Option<&MethodDecl> {
+        (self.symbols().class_decl(class)?.methods).get(usize::try_from(at).ok()?)
     }
 
     /// `ce->function_table` of a linked class in php's order, each method
@@ -292,11 +296,7 @@ impl Request {
         // `zend_add_trait_method`'s copy of a native trait's method: the
         // using class's row, under the alias's name and visibility.
         if let Some((class, ClassNative::Trait { at, .. })) = self.class_native_of(function) {
-            return self
-                .symbols()
-                .class_decl(class)?
-                .methods
-                .get(usize::try_from(at).ok()?);
+            return self.method_decl_at(class, at);
         }
         if let Some((class, ClassNative::Enum(method))) = self.class_native_of(function) {
             return self
@@ -311,11 +311,7 @@ impl Request {
         }
         if let Some(method) = self.native_method(function) {
             return match method.at {
-                MethodAt::Declared { class, at } => self
-                    .symbols()
-                    .class_decl(class)?
-                    .methods
-                    .get(usize::try_from(at).ok()?),
+                MethodAt::Declared { class, at } => self.method_decl_at(class, at),
                 MethodAt::Trampoline { at: index, .. }
                 | MethodAt::ParentHook { at: index, .. }
                 | MethodAt::Unlisted { at: index } => {
@@ -416,13 +412,9 @@ impl Request {
             || String::from("object"),
             |class| self.symbols().class_name(class),
         );
-        let from = match scope {
-            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
-            None => String::from("global scope"),
-        };
-        Err(crate::api::raising::throw_error(
+        let from = self.scope_phrase(scope);
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!(
                 "Call to {shown} method {class}::{}() from {from}",
                 String::from_utf8_lossy(written)
@@ -457,10 +449,7 @@ impl Request {
         let Some(class) = self.method_class(function) else {
             return Ok(plain);
         };
-        let is_trait = self
-            .symbols()
-            .class_decl(class)
-            .is_some_and(|decl| decl.kind == ClassKind::Trait);
+        let is_trait = self.class_is(class, ClassKind::Trait);
         // The name is spelled only for the `Error` or the deprecation:
         // nearly every call is neither, and makes no string.
         if !is_abstract && !is_trait {
@@ -476,9 +465,8 @@ impl Request {
             String::from_utf8_lossy(&name.0)
         );
         if is_abstract {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!("Cannot call abstract method {shown}()"),
             ));
         }
@@ -548,8 +536,8 @@ impl Request {
 
     /// `scope ? "scope " : "global scope"` with the scope's name after
     /// it, the tail php's bad-call texts end in.
-    pub(super) fn scope_phrase(&self) -> String {
-        match self.executed_scope() {
+    pub(super) fn scope_phrase(&self, scope: Option<ClassId>) -> String {
+        match scope {
             Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
             None => String::from("global scope"),
         }
@@ -587,9 +575,8 @@ impl Request {
             ClassKind::Class => return Ok(()),
         };
         let name = self.symbols().class_name(class);
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot instantiate {what} {name}"),
         ))
     }
@@ -922,12 +909,7 @@ impl<'r> Symbols<&'r Request> {
         if class == of {
             return true;
         }
-        if self
-            .0
-            .symbols()
-            .class_decl(of)
-            .is_some_and(|decl| decl.kind == ClassKind::Interface)
-        {
+        if self.0.class_is(of, ClassKind::Interface) {
             return self.0.symbols().interfaces(class).contains(&of);
         }
         self.0.ancestors(class).any(|parent| parent == of)

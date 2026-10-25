@@ -1,0 +1,13 @@
+start loop
+root e4
+op e4 19 long long - taken
+op e4 7 array - - -
+op e4 8 array.packed.reference.indirect - long -
+op e4 10 array - - -
+op e4 11 array.packed.reference.indirect - long -
+op e4 13 long - - -
+op e4 14 array - - -
+op e4 15 array.packed.reference.indirect - - -
+op e4 16 array.packed.indirect long long -
+op e4 18 long - - -
+stop loop

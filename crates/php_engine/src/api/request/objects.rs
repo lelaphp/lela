@@ -15,7 +15,7 @@ use php_unit::decl::{Bare, ClassDecl, ClassKind, PropertyDecl, Visibility};
 
 use crate::api::abi::{DimensionRead, DtorObj, NativeNew, ObjectHandlers, Std};
 use crate::api::call::Function;
-use crate::api::raising::Thrown;
+use crate::api::raising::{Cause, Thrown};
 use crate::api::values::{
     ClassId, Owner, PhpArray, PhpObject, PhpString, TypeTag, Value, adopted, adopted_some,
 };
@@ -24,6 +24,10 @@ use methods::visibility_string;
 use pending::Saved;
 
 use super::{Hooks, Placed, PropertyInfo, Request, RowPlace, methods, pending};
+
+/// `ZEND_DEBUGINFO_FUNC_NAME "() must return an array"`, the fatal
+/// `zend_std_get_debug_info` raises over what is no array.
+const NOT_AN_ARRAY: &str = "__debuginfo() must return an array";
 
 /// Where the destructors' walk was cut short, whose field no file but
 /// this one reads.
@@ -94,44 +98,12 @@ impl Request {
         custom: usize,
     ) -> Result<PhpObject, Thrown> {
         self.update_class_constants(class)?;
-        let slots = self.made(class).slots;
-        let allocated = self.heap.object_with(class.0, slots, custom, payload);
+        let made = self.made(class);
+        let allocated = self.heap.object_with(class.0, made.slots, custom, payload);
         let object = self.fatal_of(allocated).map(PhpObject::of)?;
         self.init_properties(object);
-        self.object_created(object)?;
+        self.object_made(object, made)?;
         Ok(object)
-    }
-
-    /// `object_properties_init`: each declared instance property's slot
-    /// takes its default, `zend_update_class_constants` having evaluated
-    /// the expression it was written as in the scope of the class that
-    /// declared it (`ce->properties_info_table[i]->ce`); a property with
-    /// no default is `null` where it is untyped and stays uninitialised
-    /// where it is typed, as `zend_declare_typed_property` leaves it.
-    /// The slots are [`Request::placed_properties`]', so an inherited
-    /// property takes the parent's default in the parent's slot.
-    ///
-    /// The defaults are evaluated before the object is made, as
-    /// `zend_update_class_constants` runs inside `object_init_ex` before
-    /// `zend_objects_new`, so an object a default makes, an enum's case
-    /// among them, takes its number in the object store before the object being made does.
-    ///
-    /// ```php
-    /// class A { public $p = E::V; }
-    /// enum E { case V; }
-    /// var_dump(new A);
-    /// ```
-    /// ```expect
-    /// object(A)#2 (1) {
-    ///   ["p"]=>
-    ///   enum(E::V)
-    /// }
-    /// ```
-    pub(super) fn property_defaults(
-        &mut self,
-        class: ClassId,
-    ) -> Result<Vec<Option<Value>>, Thrown> {
-        self.default_properties(class)
     }
 
     /// `ce->default_properties_table` beside `ce->properties_info_table`
@@ -216,15 +188,15 @@ impl Request {
     /// after: what a linked class declares, and the chain above it,
     /// never changes.
     pub(crate) fn placed_properties(&self, class: ClassId) -> &[PropertyInfo] {
+        self.placement(class).map_or(&[], Placed::slots)
+    }
+
+    /// Where `class`'s declared properties are on its objects
+    /// ([`Placed`]), as the class's link built it.
+    pub(crate) fn placement(&self, class: ClassId) -> Option<&Placed> {
         match self.native_class_at(class) {
-            Some(native) => self
-                .shared
-                .placed
-                .get(native)
-                .map_or(&[], |placed| &placed.slots),
-            None => self
-                .declared_row(class)
-                .map_or(&[], |row| &row.bound.placed.slots),
+            Some(native) => self.shared.placed.get(native),
+            None => self.declared_row(class).map(|row| &row.bound.placed),
         }
     }
 
@@ -236,7 +208,6 @@ impl Request {
     /// back through the stack, thirteen instructions on a computed name's
     /// placement.
     #[inline(always)]
-    #[allow(clippy::inline_always)]
     pub(super) fn properties_info(&self, class: ClassId) -> Option<PropertiesInfo<'_>> {
         let (record, placed, decl) = if let Some(native) = self.native_class_at(class) {
             (
@@ -359,9 +330,10 @@ pub(crate) fn placed_of<'d>(
     class: ClassId,
     decl: &ClassDecl,
     record: Option<&LinkedClass<ClassId>>,
-    parent: &[PropertyInfo],
+    above: &Placed,
     decl_of: impl Fn(PropertyInfo) -> Option<&'d PropertyDecl>,
 ) -> Placed {
+    let parent = above.slots();
     let own_name = |row: &Row<ClassId>| match row.holder {
         None => decl
             .properties
@@ -383,15 +355,27 @@ pub(crate) fn placed_of<'d>(
     };
     let mut took = vec![false; decl.properties.len()];
     let mut placed = Vec::with_capacity(parent.len().saturating_add(decl.properties.len()));
+    let mut holes = above.holes;
     for &inherited in parent {
-        let redeclared = decl_of(inherited)
-            .filter(|property| property.visibility != Visibility::Private)
+        let above =
+            decl_of(inherited).filter(|property| property.visibility != Visibility::Private);
+        let redeclared = above
             .and_then(|property| own(&property.name.0))
             .filter(|at| decl.properties.get(*at).is_some_and(|p| p.is_instance));
         match redeclared.and_then(|at| Some((at, took.get_mut(at)?))) {
             Some((at, took)) => {
                 *took = true;
                 placed.push(row(at));
+                // `do_inherit_property` leaves a slot `IS_UNDEF`: the
+                // backed property's own, its default moved to the
+                // parent's, or the parent's, where hooks over a property
+                // with none keep the child's slot (`use_child_prop`).
+                let child = decl.properties.get(at);
+                let hooked_over = above.is_some_and(|above| above.hooks.is_none())
+                    && child.is_some_and(|child| child.hooks.is_some());
+                if child.is_some_and(|child| !child.is_virtual) || hooked_over {
+                    holes += 1;
+                }
             }
             None => placed.push(inherited),
         }
@@ -412,6 +396,7 @@ pub(crate) fn placed_of<'d>(
     Placed {
         slots: placed.into_boxed_slice(),
         rows,
+        holes,
     }
 }
 
@@ -606,8 +591,10 @@ impl Request {
             return;
         };
         // `zend_object_is_lazy`: a lazy object's destructor is not
-        // served, nor a forwarding proxy's, whose instance serves its own.
-        if object.heap().laziness() != php_heap::Laziness::Eager {
+        // served, nor a forwarding proxy's, whose instance serves its own;
+        // and none once the memory limit was met (`ZEND_HAS_OOM()`,
+        // `Z/Zend/zend_objects.c:119` at 8.5.12).
+        if object.heap().laziness() != php_heap::Laziness::Eager || self.has_oom() {
             return;
         }
         if !self.destructor_reachable(object, destructor) {
@@ -771,10 +758,9 @@ impl Request {
         if self.method_accessible(destructor) {
             return true;
         }
-        let from = self.scope_phrase();
-        let thrown = crate::api::raising::throw_error(
+        let from = self.scope_phrase(self.executed_scope());
+        let thrown = crate::api::raising::error(
             self,
-            "Error",
             &format!("Call to {shown} {class}::__destruct() from {from}"),
         );
         self.leave_pending(&thrown);
@@ -997,9 +983,7 @@ impl Request {
         {
             return Some(table);
         }
-        self.symbols()
-            .class_decl(class)
-            .is_some_and(|decl| decl.kind == ClassKind::Enum)
+        self.class_is(class, ClassKind::Enum)
             .then_some(&crate::enums::ENUM as &'static dyn ObjectHandlers)
     }
 
@@ -1046,9 +1030,8 @@ impl Request {
             return Ok(());
         }
         let class = self.symbols().class_name(object.class());
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!("Cannot use object of type {class} as array"),
         ))
     }
@@ -1107,18 +1090,10 @@ impl Request {
         self.array_access(object)?;
         let offset = offset.copied().unwrap_or_else(Value::null);
         let read = self.with_array_access(object, offset, |req, offset| {
-            if read == DimensionRead::Silent {
-                let exists = crate::api::call::call_method_made(
-                    req,
-                    &object,
-                    b"offsetExists",
-                    std::slice::from_ref(&offset),
-                )?;
-                let answer = crate::api::coerce::truthy(req, &exists);
-                req.release(exists);
-                if !answer? {
-                    return Ok(Value::null());
-                }
+            if read == DimensionRead::Silent
+                && !truth_of_call(req, object, b"offsetExists", offset)?
+            {
+                return Ok(Value::null());
             }
             crate::api::call::call_method_made(req, &object, b"offsetGet", &[offset])
         });
@@ -1176,27 +1151,11 @@ impl Request {
     ) -> Result<bool, Thrown> {
         self.array_access(object)?;
         self.with_array_access(object, *offset, |req, offset| {
-            let exists = crate::api::call::call_method_made(
-                req,
-                &object,
-                b"offsetExists",
-                std::slice::from_ref(&offset),
-            )?;
-            let answer = crate::api::coerce::truthy(req, &exists);
-            req.release(exists);
-            let answer = answer?;
+            let answer = truth_of_call(req, object, b"offsetExists", offset)?;
             if !answer || !not_empty {
                 return Ok(answer);
             }
-            let value = crate::api::call::call_method_made(
-                req,
-                &object,
-                b"offsetGet",
-                std::slice::from_ref(&offset),
-            )?;
-            let answer = crate::api::coerce::truthy(req, &value);
-            req.release(value);
-            answer
+            truth_of_call(req, object, b"offsetGet", offset)
         })
     }
 
@@ -1253,14 +1212,10 @@ impl Request {
             || String::from("object"),
             |class| self.symbols().class_name(class),
         );
-        let from = match scope {
-            Some(scope) => format!("scope {}", self.symbols().class_name(scope)),
-            None => String::from("global scope"),
-        };
+        let from = self.scope_phrase(scope);
         object.heap().set_destructor_called(true);
-        Err(crate::api::raising::throw_error(
+        Err(crate::api::raising::error(
             self,
-            "Error",
             &format!("Call to {shown} {class}::__construct() from {from}"),
         ))
     }
@@ -1272,6 +1227,26 @@ impl Request {
     /// (`if (!EG(exception))`): a call refused while a throwable stands,
     /// as a native's conversion past a throw meets it, answers that one,
     /// which ext/intl's `umsg_format_helper` is the witness of.
+    ///
+    /// The object is held for the call, `GC_ADDREF(readobj)`, and given up
+    /// after it with `zend_object_release`, so a cast or an interpolation
+    /// leaves an object another owner holds a possible root:
+    ///
+    /// ```php
+    /// class A { function __toString(): string { return 'a'; } }
+    /// function t() {
+    ///     $o = new A;
+    ///     gc_collect_cycles(); $s = (string) $o; $one = gc_status()['roots'];
+    ///     gc_collect_cycles(); $s = "<$o>"; $two = gc_status()['roots'];
+    ///     var_dump($s, $one, $two);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// string(3) "<a>"
+    /// int(1)
+    /// int(1)
+    /// ```
     pub(crate) fn cast_object(
         &mut self,
         object: PhpObject,
@@ -1286,17 +1261,18 @@ impl Request {
                 {
                     return Ok(None);
                 }
-                let value = crate::api::call::call_method_made(self, &object, b"__toString", &[])?;
-                let value = self.unwrap_reference(value);
+                let held = Owner::take(self, object);
+                let value = crate::api::call::call_method_made(self, &object, b"__toString", &[]);
+                held.give_up(self);
+                let value = self.unwrap_reference(value?);
                 if value.as_php_string().is_some() {
                     return Ok(Some(Owner::adopt(value)));
                 }
                 self.release(value);
                 crate::api::raising::pending(self)?;
                 let class = self.symbols().class_name(object.class());
-                Err(crate::api::raising::throw_error(
+                Err(crate::api::raising::error(
                     self,
-                    "Error",
                     &format!("Method {class}::__toString() must return a string value"),
                 ))
             }
@@ -1368,6 +1344,51 @@ impl Request {
     /// ```expect exit=255
     /// Fatal error: __debuginfo() must return an array in %s on line 3
     /// ```
+    ///
+    /// A method that threw, or that the unwind exit left, returns no
+    /// array either: php's call hands back an undefined `retval` and
+    /// raises the same fatal after it, the throwable reported as uncaught
+    /// first. The delayed OOM's fatal is one of those since 8.5.12, its
+    /// unwind exit thrown after the limit's fatal is rendered, so php
+    /// prints two fatals. Only a fatal leaves past the check, as
+    /// `zend_error_noreturn` leaves past everything.
+    ///
+    /// ```php
+    /// class A { function __debugInfo() { return ['a' => str_repeat('x', 3 << 20)]; } }
+    /// ini_set('memory_limit', '2M');
+    /// var_dump(new A);
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 2
+    ///
+    /// Fatal error: __debuginfo() must return an array in %s on line 4
+    /// ```
+    ///
+    /// ```php
+    /// class X { function __debugInfo() { exit(3); } }
+    /// var_dump(new X);
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: __debuginfo() must return an array in %s on line 3
+    /// ```
+    ///
+    /// ```php
+    /// class T { function __debugInfo() { throw new Exception('t'); } }
+    /// try { var_dump(new T); } catch (Exception $e) { echo "caught\n"; }
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Warning: Uncaught Exception: t in %s:2
+    /// Stack trace:
+    /// #0 [internal function]: T->__debugInfo()
+    /// #1 %s(3): var_dump(Object(T))
+    /// #2 {main}
+    ///   thrown in %s on line 2
+    ///
+    /// Fatal error: __debuginfo() must return an array in %s on line 3
+    /// ```
     pub(crate) fn debug_info(
         &mut self,
         object: PhpObject,
@@ -1383,7 +1404,10 @@ impl Request {
             let info = self.lazy_debug_info(object);
             return adopted_some(info);
         }
-        let value = crate::api::call::call_method_made(self, &object, b"__debugInfo", &[])?;
+        let value = match crate::api::call::call_method_made(self, &object, b"__debugInfo", &[]) {
+            Ok(value) => value,
+            Err(thrown) => return Err(self.debug_info_undefined(thrown)),
+        };
         let value = self.unwrap_reference(value);
         match value.as_array() {
             // The array the method returned, its one owner the caller's,
@@ -1403,11 +1427,24 @@ impl Request {
             }
             None => {
                 self.release(value);
-                Err(crate::api::raising::fatal(
-                    self,
-                    "__debuginfo() must return an array",
-                ))
+                Err(crate::api::raising::fatal(self, NOT_AN_ARRAY))
             }
+        }
+    }
+
+    /// `zend_std_get_debug_info`'s fatal over the undefined `retval` a
+    /// `__debugInfo` call left by `thrown` (`Z/Zend/zend_object_handlers.c:233`):
+    /// raised past a throwable, which is reported as uncaught first, and
+    /// past the unwind exit; a fatal is handed on, since php's leaves the
+    /// handler before the check.
+    #[cold]
+    fn debug_info_undefined(&mut self, thrown: Thrown) -> Thrown {
+        match thrown.cause(self) {
+            Cause::Fatal => thrown,
+            Cause::Throwable(_) => {
+                crate::api::raising::fatal_while_pending(self, thrown, NOT_AN_ARRAY)
+            }
+            Cause::Exit => crate::api::raising::fatal(self, NOT_AN_ARRAY),
         }
     }
 
@@ -1453,9 +1490,8 @@ impl Request {
     ) -> Result<Option<std::cmp::Ordering>, Thrown> {
         use std::cmp::Ordering;
         if self.limits().stack_overflowed() {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 "Maximum call stack size reached during object comparison",
             ));
         }
@@ -1589,21 +1625,49 @@ impl Request {
     /// int(3)
     /// Nesting level too deep - recursive dependency?
     /// ```
+    ///
+    /// The two tables are held for the walk and given up after it, as
+    /// `zend_compare_symbol_tables` holds them ([`crate::ops::HeldTables`]),
+    /// so each is a possible root after it, beside the two objects:
+    ///
+    /// ```php
+    /// function t() {
+    ///     $a = new stdClass; $a->x = 1; $b = new stdClass; $b->x = 1;
+    ///     gc_collect_cycles();
+    ///     var_dump($a == $b, gc_status()['roots']);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(4)
+    /// ```
     fn compare_tables(&mut self, x: Obj, y: Obj) -> Result<std::cmp::Ordering, Thrown> {
         let (left, right) = self.property_tables(x, y)?;
         let table = left.table();
         if table.is_same(right.table()) {
             return Ok(std::cmp::Ordering::Equal);
         }
-        if left.len() != right.len() {
-            return Ok(left.len().cmp(&right.len()));
-        }
-        if table.is_recursive() {
-            return Err(crate::ops::nesting_too_deep(self));
-        }
-        table.protect();
-        let order = self.compare_rows(left, right, ClassId(x.class()));
-        table.unprotect();
+        let held = crate::ops::HeldTables::hold(self, table, right.table());
+        // `zend_hash_compare`'s stack check, before its recursion guard
+        // (`Z/Zend/zend_hash.c:3432-3437`), as [`crate::ops`]' walk of two
+        // arrays asks it.
+        let order = if self.limits().stack_overflowed() {
+            Err(crate::api::raising::error(
+                self,
+                "Maximum call stack size reached during comparison",
+            ))
+        } else if left.len() != right.len() {
+            Ok(left.len().cmp(&right.len()))
+        } else if table.is_recursive() {
+            Err(crate::ops::nesting_too_deep(self))
+        } else {
+            table.protect();
+            let order = self.compare_rows(left, right, ClassId(x.class()));
+            table.unprotect();
+            order
+        };
+        held.give_up(self);
         order
     }
 
@@ -1689,20 +1753,15 @@ impl Request {
             None => match target {
                 TypeTag::Int | TypeTag::Float => {
                     let class = self.symbols().class_name(object.class());
-                    let to = if target == TypeTag::Int {
-                        "int"
+                    let (to, one) = if target == TypeTag::Int {
+                        ("int", Value::int(1))
                     } else {
-                        "float"
+                        ("float", Value::float(1.0))
                     };
                     crate::api::raising::notice(
                         self,
                         &format!("Object of class {class} could not be converted to {to}"),
                     );
-                    let one = if target == TypeTag::Int {
-                        Value::int(1)
-                    } else {
-                        Value::float(1.0)
-                    };
                     Owner::take(self, one)
                 }
                 _ => {
@@ -1743,13 +1802,7 @@ impl Request {
                 "InternalError: Std::clone_obj over an object of class {class}, whose native payload its own table must copy"
             ))));
         };
-        let new = PhpObject::of(new);
-        self.clone_slot_sources(new);
-        if let Err(thrown) = self.serve_clone_method(new) {
-            self.release(new.as_value());
-            return Err(thrown);
-        }
-        Ok(Owner::adopt(new))
+        self.cloned(PhpObject::of(new)).map(Owner::adopt)
     }
 
     /// `zend_objects_clone_members`' `ZEND_REF_ADD_TYPE_SOURCE`: a slot
@@ -1838,10 +1891,14 @@ impl Request {
         object: PhpObject,
         payload: T,
     ) -> Result<PhpObject, Thrown> {
-        let custom = self.object_custom(object.class());
-        let cloned = self.heap.object_clone_with(object.heap(), custom, payload);
-        let new = PhpObject::of(self.fatal_of(cloned)?);
-        self.lay_beside(new)?;
+        let new = self.clone_with_payload(object, payload)?;
+        self.cloned(new)
+    }
+
+    /// The end of a clone over `new`, the copy: its typed references
+    /// counted ([`Request::clone_slot_sources`]) and `__clone` served
+    /// on it, the copy released where it throws.
+    fn cloned(&mut self, new: PhpObject) -> Result<PhpObject, Thrown> {
         self.clone_slot_sources(new);
         if let Err(thrown) = self.serve_clone_method(new) {
             self.release(new.as_value());
@@ -1942,9 +1999,8 @@ impl Request {
         let walked = walk::foreach(self, properties, Hold::None, |req, row| -> walk::Step {
             let value = match row.value().as_php_ref() {
                 Some(_) if row.value().refcount() > 1 => {
-                    return Err(crate::api::raising::throw_error(
+                    return Err(crate::api::raising::error(
                         req,
-                        "Error",
                         "Cannot assign by reference when cloning with updated properties",
                     ));
                 }
@@ -1978,11 +2034,7 @@ impl Request {
         let bytes = name.as_bytes().to_vec();
         let place = match table.get_property_ptr_ptr(self, object, &bytes) {
             Ok(place) => place,
-            Err(thrown) => {
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
-            }
+            Err(thrown) => return self.refused_write(name, value, thrown),
         };
         if place == crate::api::abi::PropertyPlace::Handlers {
             return table.write_property(self, object, name, value);
@@ -1990,11 +2042,7 @@ impl Request {
         let silent = self.serves_accessor(object.class(), super::Accessor::Set);
         let slot = match self.declared_slot_for_write(object, &bytes, "modify", silent) {
             Ok(placed) => placed.map(|(slot, _)| slot),
-            Err(thrown) => {
-                value.give_up(self);
-                name.give_up(self);
-                return Err(thrown);
-            }
+            Err(thrown) => return self.refused_write(name, value, thrown),
         };
         table.write_property(self, object, name, value)?;
         if let Some(slot) = slot {
@@ -2008,15 +2056,14 @@ impl Request {
     /// php's `Error` for a class whose `clone_obj` slot is null.
     pub(super) fn uncloneable(&mut self, object: PhpObject) -> Thrown {
         let class = self.symbols().class_name(object.class());
-        crate::api::raising::throw_error(
+        crate::api::raising::error(
             self,
-            "Error",
             &format!("Trying to clone an uncloneable object of class {class}"),
         )
     }
 
     /// The body `ZEND_CLONE` and the `clone()` function share
-    /// (`Z/Zend/zend_vm_def.h:6010`, `Z/Zend/zend_builtin_functions.c:72`):
+    /// (`Z/Zend/zend_vm_def.h:6011`, `Z/Zend/zend_builtin_functions.c:72`):
     /// a null `clone_obj` is php's `Error` for an uncloneable object,
     /// read before anything else; a `__clone` that is not public is held
     /// to `zend_check_method_accessible` from the executed scope, the
@@ -2040,9 +2087,8 @@ impl Request {
             Some(with) => {
                 let Some(clone_obj_with) = table.clone_obj_with() else {
                     let class = self.symbols().class_name(object.class());
-                    return Err(crate::api::raising::throw_error(
+                    return Err(crate::api::raising::error(
                         self,
-                        "Error",
                         &format!(
                             "Cloning objects of class {class} with updated properties is not supported"
                         ),
@@ -2072,4 +2118,16 @@ impl Request {
         self.lay_beside(new)?;
         Ok(new)
     }
+}
+
+/// The truth of what `object`'s `method` answers for `offset`, the
+/// answer given up once read.
+fn truth_of_call(
+    req: &mut Request,
+    object: PhpObject,
+    method: &[u8],
+    offset: Value,
+) -> Result<bool, Thrown> {
+    let answered = crate::api::call::call_method_made(req, &object, method, &[offset])?;
+    req.truth_of(answered)
 }

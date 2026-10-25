@@ -18,8 +18,8 @@ use std::sync::{Mutex, PoisonError};
 
 use crate::api::abi::{
     ClassIterator, ClassUnserialize, CloneObj, CloneObjWith, CoreTable, CurrentPlace, DebugInfo,
-    DimensionRead, DtorObj, GcTable, IteratorElement, ObjectHandlers, PropertiesFor, PropertyPlace,
-    PropertyPurpose, PropertyRead, PropertyTest, Refusals,
+    DimensionRead, DtorObj, GcTable, IteratorElement, ObjectHandlers, PropertiesFor,
+    PropertyAccess, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest, Refusals,
 };
 use crate::api::call::Function;
 use crate::api::coerce::BinaryOp;
@@ -69,6 +69,18 @@ macro_rules! serve {
     };
 }
 
+/// The slots that read the table and serve nothing: each forwarded to
+/// the extension's table as it stands.
+macro_rules! forward {
+    ($(fn $slot:ident(&self) -> $answer:ty;)*) => {
+        $(
+            fn $slot(&self) -> $answer {
+                self.table.$slot()
+            }
+        )*
+    };
+}
+
 // Every slot is forwarded, so a slot added to the trait and missed here
 // is a lint and never `Std`'s default standing in for the extension's.
 #[deny(clippy::missing_trait_methods)]
@@ -104,28 +116,19 @@ impl ObjectHandlers for Served {
         fn get_properties_for(&self, req: &mut Request, object: PhpObject, purpose: PropertyPurpose) -> Result<PropertiesFor, Thrown>;
     }
 
-    fn refusals(&self) -> Refusals {
-        self.table.refusals()
-    }
-
-    fn core_table(&self) -> CoreTable {
-        self.table.core_table()
-    }
-
-    fn dtor_obj(&self) -> DtorObj {
-        self.table.dtor_obj()
-    }
-
-    fn clone_obj(&self) -> Option<CloneObj> {
-        self.table.clone_obj()
-    }
-
-    fn clone_obj_with(&self) -> Option<CloneObjWith> {
-        self.table.clone_obj_with()
-    }
-
-    fn current_place(&self) -> Option<CurrentPlace> {
-        self.table.current_place()
+    forward! {
+        fn refusals(&self) -> Refusals;
+        fn core_table(&self) -> CoreTable;
+        fn properties(&self) -> PropertyAccess;
+        fn dtor_obj(&self) -> DtorObj;
+        fn clone_obj(&self) -> Option<CloneObj>;
+        fn clone_obj_with(&self) -> Option<CloneObjWith>;
+        fn current_place(&self) -> Option<CurrentPlace>;
+        fn own_iterator(&self) -> bool;
+        fn iterator_size(&self) -> usize;
+        fn properties_overloaded(&self) -> bool;
+        fn write_overloaded(&self) -> bool;
+        fn unserialize(&self) -> Option<ClassUnserialize>;
     }
 
     fn get_iterator(
@@ -142,26 +145,6 @@ impl ObjectHandlers for Served {
                 extension,
             }) as Box<dyn ClassIterator>
         }))
-    }
-
-    fn own_iterator(&self) -> bool {
-        self.table.own_iterator()
-    }
-
-    fn iterator_size(&self) -> usize {
-        self.table.iterator_size()
-    }
-
-    fn properties_overloaded(&self) -> bool {
-        self.table.properties_overloaded()
-    }
-
-    fn write_overloaded(&self) -> bool {
-        self.table.write_overloaded()
-    }
-
-    fn unserialize(&self) -> Option<ClassUnserialize> {
-        self.table.unserialize()
     }
 }
 

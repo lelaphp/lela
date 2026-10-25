@@ -27,7 +27,7 @@ fn the_default_content_type_reaches_a_web_host_s_block_and_not_the_cli_s() {
     assert_eq!(String::from_utf8_lossy(&web.stdout), "x");
     assert_eq!(
         web.headers,
-        b"X-Powered-By: PHP/8.5.9\r\nContent-type: text/html; charset=UTF-8\r\n"
+        b"X-Powered-By: PHP/8.5.12\r\nContent-type: text/html; charset=UTF-8\r\n"
     );
     let mut cli = crate::test::Capture::default();
     engine.serve_into(description("<?php echo 'x';"), &mut cli);
@@ -116,7 +116,8 @@ fn a_host_s_ini_value_is_read_as_the_scanner_reads_a_bare_word() {
             .build();
         engine
             .shared
-            .ini_default(b"error_append_string")
+            .ini
+            .master(b"error_append_string")
             .map(|bytes| String::from_utf8_lossy(bytes).into_owned())
     };
     for off in ["Off", "OFF", "oFf", "FALSE", "none", "None", "NULL", "off "] {

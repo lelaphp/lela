@@ -7,7 +7,7 @@
 use php_ext::abi::{Instance, OrFalse, Path, True, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::value_name;
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref};
+use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, type_error};
 use php_ext::request::{Ini, Opening, OwnedStream as _, Request, Stream, Streams as _};
 use php_ext::values::{Emalloc, Owner, PhpString, Value, ValueRef};
 
@@ -603,9 +603,8 @@ fn sink(req: &mut Request, file: &Value, name: &str) -> Result<Option<Sink>, Thr
         ValueRef::Null => Sink::new(req, To::Output).map(Some),
         ValueRef::Resource(_) => match Stream::from_value(req, file) {
             Some(stream) => Sink::new(req, To::Stream(stream)).map(Some),
-            None => Err(php_ext::raising::throw_error(
+            None => Err(type_error(
                 req,
-                "TypeError",
                 &format!("{name}(): supplied resource is not a valid stream resource"),
             )),
         },

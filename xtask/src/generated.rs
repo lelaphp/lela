@@ -33,6 +33,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 
 use crate::git;
 use crate::lock::{CargoLock, Expanded, package_of};
@@ -213,20 +214,60 @@ fn nearest_generated<'g>(generated: &[&'g str], dir: &str) -> Option<&'g str> {
 /// [`CONF_DIR`]: cargo hands that table to clippy-driver, with
 /// `force` or without it once the environment has no value of its own.
 pub(crate) fn conf_dir_set(root: &Path) -> Result<Vec<&'static str>> {
+    let configs = cargo_env(root)?.into_iter();
+    Ok(configs
+        .filter(|(_, env)| env.contains_key(CONF_DIR))
+        .map(|(config, _)| config)
+        .collect())
+}
+
+/// One `[env]` entry of a cargo configuration as cargo reads it: a value,
+/// or a table of one whose `relative` makes it a path from the directory
+/// `.cargo/` stands in (`force` and the rest are not read here).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum EnvEntry {
+    Plain(String),
+    Table {
+        value: String,
+        #[serde(default)]
+        relative: bool,
+    },
+}
+
+impl EnvEntry {
+    /// The value as the path cargo hands a build, `root` the checkout.
+    pub(crate) fn path(&self, root: &Path) -> PathBuf {
+        match self {
+            EnvEntry::Plain(value)
+            | EnvEntry::Table {
+                value,
+                relative: false,
+            } => PathBuf::from(value),
+            EnvEntry::Table {
+                value,
+                relative: true,
+            } => root.join(value),
+        }
+    }
+}
+
+/// The `[env]` table of each cargo configuration the checkout carries, by
+/// the configuration's path, in the order of [`CARGO_CONFIGS`].
+pub(crate) fn cargo_env(root: &Path) -> Result<Vec<(&'static str, BTreeMap<String, EnvEntry>)>> {
+    #[derive(Deserialize)]
+    struct Configured {
+        #[serde(default)]
+        env: BTreeMap<String, EnvEntry>,
+    }
     let mut out = Vec::new();
     for config in CARGO_CONFIGS {
         let Ok(text) = fs::read_to_string(root.join(config)) else {
             continue;
         };
-        let table: toml::Table =
-            toml::from_str(&text).with_context(|| format!("{config} is not TOML"))?;
-        let sets = table
-            .get("env")
-            .and_then(toml::Value::as_table)
-            .is_some_and(|env| env.contains_key(CONF_DIR));
-        if sets {
-            out.push(config);
-        }
+        let read: Configured = toml::from_str(&text)
+            .with_context(|| format!("{config} is not a cargo configuration"))?;
+        out.push((config, read.env));
     }
     Ok(out)
 }

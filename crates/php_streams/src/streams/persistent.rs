@@ -24,8 +24,9 @@ use crate::api::abi::Pool;
 use crate::api::layer::Face as _;
 use crate::state::EngineState;
 
+use super::held::Payload;
 use super::sockets::Socket;
-use super::{PhpStream, Request, Stream};
+use super::{PhpStream, Request, Stream, StreamOp};
 use crate::api::raising::Thrown;
 use crate::api::request::{OptionAnswer, OwnedStream, StreamOption};
 use crate::api::values::{Owner, Resource};
@@ -121,7 +122,7 @@ impl Persistent for Request {
             return Ok(None);
         };
         let alive = self
-            .stream_op(*stream, |req, s| s.set_option(req, StreamOption::Liveness))
+            .stream_op(*stream, |op| op.set_option(StreamOption::Liveness))
             .is_some_and(|answer| answer == OptionAnswer::Ok);
         if alive {
             return Ok(Some(stream));
@@ -149,7 +150,7 @@ impl Persistent for Request {
     /// ```
     /// ```expect
     /// 32
-    /// 32 hi
+    /// 40 hi
     /// ```
     fn lend(&mut self, key: Vec<u8>, entry: Entry) -> Result<Owner<Stream>, Thrown> {
         let stream = reopen(self, entry)?;
@@ -229,12 +230,15 @@ pub(crate) fn unlist(req: &mut Request, stream: Stream) {
     res.unlist(req);
 }
 
-/// `PHP_RSHUTDOWN_FUNCTION(streams)` and the request's end
+/// `ZEND_MODULE_POST_ZEND_DEACTIVATE_D(streams)` at 8.5.12, which was
+/// `PHP_RSHUTDOWN_FUNCTION(streams)` before, and the request's end
 /// (`forget_persistent_resource_id_numbers`, `streams.c:68-101`): every
 /// entry the request still holds given back to the engine's pool, its
-/// resource and its `stream->ctx` forgotten. Served as the request's
-/// stream state is dropped, after the resources are closed, when every
-/// entry is idle.
+/// resource and its `stream->ctx` forgotten, nothing of them released,
+/// since the request's resources, each `stream->ctx` among them, are
+/// destroyed already. Served as the request's stream state is dropped,
+/// after the resources are closed, when every entry is idle and holds
+/// no `stream->ctx`.
 pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
     for held in held {
         if let State::Idle(mut entry) = held.state {
@@ -255,18 +259,25 @@ pub(crate) fn give_back(pool: &Pool<Vec<u8>, Entry>, held: Vec<Held>) {
 /// a socket's.
 pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
     let res = stream.resource();
-    let socket = req.stream_op(*stream, |_, s| s.ops.as_socket().is_some());
+    let socket = req.stream_with(*stream, |s| s.ops.as_socket().is_some());
     if socket != Some(true) {
         stream.free(req);
         return None;
     }
-    req.stream_op(*stream, |req, s| s.flush_owed(req));
-    let taken = res
-        .native_mut::<Option<PhpStream>>(req)
-        .and_then(Option::take);
+    req.stream_op(*stream, StreamOp::flush_owed);
+    let taken = res.native_mut::<Payload>(req).and_then(Option::take);
     res.close(req);
     req.drop_persistent(res);
-    let kept = taken.and_then(|mut taken| {
+    // A stream an operation holds is that operation's to free.
+    let taken = match taken {
+        Some(slot) if slot.is_held() => {
+            super::held::release_slot(req, res, slot);
+            None
+        }
+        taken => taken,
+    };
+    let kept = taken.and_then(|slot| {
+        let mut taken = slot.stream;
         let mut socket = taken.ops.as_socket()?.detach();
         socket.forget_request();
         let orig_path = taken.orig_path.take().map(|path| path.into_persistent(req));
@@ -304,25 +315,26 @@ pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
 /// ```expect
 /// string(3) "ABC"
 /// ```
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "the resource destructor's shape, which a destructor that throws needs"
-)]
 pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
-    let Some(mut stream) = r
-        .native_mut::<Option<PhpStream>>(req)
-        .and_then(Option::take)
-    else {
-        return Ok(());
+    super::dtor(req, r)
+}
+
+/// [`dtor`]'s work on the stream once nothing holds it: a stream held
+/// under its key keeps its socket idle there, and every other is freed;
+/// what the kind's close answered.
+pub(crate) fn finish(req: &mut Request, stream: PhpStream) -> i32 {
+    // Where the entry stands is asked each time it is used: closing the
+    // filters' resources and flushing the write chain may serve PHP code
+    // that changes the list.
+    let held_at = |req: &mut Request, stream: &PhpStream| {
+        let r = stream.res?;
+        req.streams()
+            .persistent
+            .iter()
+            .position(|held| matches!(held.state, State::InResource(res) if res == r))
     };
-    let held = req
-        .streams()
-        .persistent
-        .iter()
-        .position(|held| matches!(held.state, State::InResource(res) if res == r));
-    if let Some(at) = held
-        && stream.ops.as_socket().is_some()
-    {
+    let mut stream = stream;
+    if held_at(req, &stream).is_some() && stream.ops.as_socket().is_some() {
         // php's destructor is `NULL`: nothing is flushed and the filters
         // stay on the stream, to end with it at the engine's end
         // ([`engine_end`]) or travel with it to the request that asks
@@ -336,17 +348,18 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
                 .map(|path| path.into_persistent(req)),
             filters,
         });
-        if let Some(entry) = entry {
+        if let Some(entry) = entry
+            && let Some(at) = held_at(req, &stream)
+        {
             req.streams().persistent[at].state = State::Idle(entry);
         }
     } else {
-        stream.flush_owed(req);
-        if let Some(at) = held {
+        super::held::owned(req, &mut stream, StreamOp::flush_owed);
+        if let Some(at) = held_at(req, &stream) {
             req.streams().persistent.remove(at);
         }
     }
-    req.streams().pclose_ret = stream.release(req);
-    Ok(())
+    stream.release(req)
 }
 
 /// `zend_destroy_rsrc_list(&EG(persistent_list))`'s free of an entry

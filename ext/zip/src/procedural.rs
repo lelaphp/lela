@@ -4,7 +4,7 @@
 
 use php_ext::abi::{OrFalse, Path, Untyped};
 use php_ext::attr::php_function;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString, Resource, ResourceType, Value};
 
@@ -62,18 +62,26 @@ fn entry_type(req: &mut Request) -> ResourceType {
     reason = "the resource destructor's shape, which a destructor that throws needs"
 )]
 fn free_dir(req: &mut Request, res: Resource) -> Result<(), Thrown> {
-    struct None_;
-    impl crate::write::Hooks for None_ {
+    /// A close no callback is registered for, of an archive no stream
+    /// reads.
+    struct Alone(Box<Archive>);
+    impl crate::write::Program for Alone {
+        fn archive(&mut self) -> Option<&mut Archive> {
+            Some(&mut self.0)
+        }
         fn progress(&mut self, _: f64) {}
         fn cancel(&mut self) -> bool {
             false
         }
+        fn in_use(&mut self) -> bool {
+            false
+        }
     }
-    let Some(mut za) = res.native_mut::<Dir>(req).and_then(|d| d.za.take()) else {
+    let Some(za) = res.native_mut::<Dir>(req).and_then(|d| d.za.take()) else {
         return Ok(());
     };
     let umask = req.environment().umask();
-    if za.close(&mut None_, umask).is_err() {
+    if crate::write::close(&mut Alone(za), umask).is_err() {
         docref(req, Level::Warning, "Cannot destroy the zip context");
     }
     Ok(())
@@ -89,7 +97,7 @@ fn fetch(
 ) -> Result<Resource, Thrown> {
     if res.kind() != Some(kind) {
         let text = format!("{native}(): supplied resource is not a valid {name} resource");
-        return Err(throw(req, "TypeError", &text));
+        return Err(type_error(req, &text));
     }
     Ok(res)
 }
@@ -136,7 +144,7 @@ fn zip_open(req: &mut Request, filename: Path) -> Result<Untyped<Owner<Value>>, 
             };
             Ok(Untyped(Resource::new(req, kind, dir)?.into_value()))
         }
-        Err(status) => Ok(Untyped(Owner::int(i64::from(status.zip)))),
+        Err(status) => Ok(Untyped(Owner::int(status.er.code()))),
     }
 }
 
@@ -342,7 +350,10 @@ fn zip_entry_name(
     zip_entry: Resource,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     match info(req, zip_entry, "zip_entry_name")? {
-        Some(sb) => Ok(OrFalse::Value(PhpString::new(req, &sb.name)?)),
+        Some(sb) => Ok(OrFalse::Value(PhpString::new(
+            req,
+            php_ext::coerce::c_str(&sb.name),
+        )?)),
         None => Ok(OrFalse::False),
     }
 }

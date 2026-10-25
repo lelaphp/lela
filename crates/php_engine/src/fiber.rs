@@ -49,7 +49,7 @@ use crate::api::abi::{
     Callable, DtorObj, GcTable, Instance, NamedVariadic, ObjectHandlers, Refusals, This,
 };
 use crate::api::call::call_named_made;
-use crate::api::raising::{Thrown, throw, throw_error};
+use crate::api::raising::{Thrown, error, throw_error, throw_exception_ex};
 use crate::api::request::{ObservedChain, Raised, Request};
 use crate::api::values::{Owner, PhpObject, PhpString, Value};
 use crate::classes::{Error, Throwable};
@@ -283,6 +283,13 @@ pub(crate) struct Execution {
     /// a coroutine below it comes back to the fiber that stack's resumer
     /// had active, and not to the `Fiber` it passed through.
     pub(crate) active: Option<PhpObject>,
+    /// What the innermost serving on this stack has returned, the
+    /// `retval` of its `zend_call_function`, which is a local of the
+    /// stack it was called on: a serving on a fiber's stack that ends
+    /// while another stack runs, as a suspended fiber destroyed in its
+    /// resumer's leave unwinds, puts back that stack's, not the one
+    /// running.
+    pub(crate) returned: Value,
 }
 
 /// One coroutine that is running: the object holding it, a `Fiber` or an
@@ -883,11 +890,7 @@ pub(crate) fn with_held<R>(
 /// The payload of `object`, which a `Fiber`'s object always carries.
 fn payload(req: &mut Request, object: PhpObject) -> Result<&mut ZendFiber, Thrown> {
     if object.native::<ZendFiber>(req).is_none() {
-        return Err(throw_error(
-            req,
-            "Error",
-            "Fiber object with no fiber payload",
-        ));
+        return Err(error(req, "Fiber object with no fiber payload"));
     }
     object
         .native_mut::<ZendFiber>(req)
@@ -1143,7 +1146,7 @@ impl Fiber {
     ) -> Result<Owner<Value>, Thrown> {
         switch_refused(req)?;
         let named: Vec<(PhpString, Value)> = args.named().to_vec();
-        let back = start(req, this.object(), args.positional, named)?;
+        let back = start(req, this.object(), &args.positional, named)?;
         delegate(req, back)
     }
 
@@ -1190,14 +1193,7 @@ impl Fiber {
         this: This<Self>,
         #[php(default = null)] value: Value,
     ) -> Result<Owner<Value>, Thrown> {
-        switch_refused(req)?;
-        let this = this.object();
-        if payload(req, this)?.coroutine.status != CoroutineStatus::Suspended {
-            return Err(fiber_error(
-                req,
-                "Cannot resume a fiber that is not suspended",
-            ));
-        }
+        let this = resumable(req, this.object())?;
         req.addref(&value);
         let back = switch_into::<ZendFiber>(req, this, Transfer::Value(value))?;
         delegate(req, back)
@@ -1241,14 +1237,7 @@ impl Fiber {
         exception: Instance<Throwable>,
     ) -> Result<Owner<Value>, Thrown> {
         let throwable = exception.object();
-        switch_refused(req)?;
-        let this = this.object();
-        if payload(req, this)?.coroutine.status != CoroutineStatus::Suspended {
-            return Err(fiber_error(
-                req,
-                "Cannot resume a fiber that is not suspended",
-            ));
-        }
+        let this = resumable(req, this.object())?;
         req.addref(&throwable.as_value());
         let back =
             switch_into::<ZendFiber>(req, this, Transfer::Throw(Thrown::of(Some(throwable))))?;
@@ -1449,9 +1438,8 @@ impl FiberError {
     #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let name = req.symbols().class_name(this.object().class());
-        Err(throw_error(
+        Err(error(
             req,
-            "Error",
             &format!(
                 "The \"{name}\" class is reserved for internal use and cannot be manually instantiated"
             ),
@@ -1657,9 +1645,8 @@ fn switch_into<P: HoldsCoroutine>(
 ) -> Result<Transfer, Thrown> {
     let coroutine = coroutine_of::<P>(req, object)?;
     let (Some(mut stack), Some(own)) = (coroutine.stack.take(), coroutine.execution.take()) else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "InternalError: a fiber coroutine resumed with no stack of its own",
         ));
     };
@@ -1940,9 +1927,8 @@ fn suspend_into<P: HoldsCoroutine>(
         .iter()
         .any(|running| running.fiber.is(object));
     if !running {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "InternalError: a suspend of a fiber coroutine that is not running",
         ));
     }
@@ -2089,7 +2075,7 @@ fn start_gc_fiber(req: &mut Request) {
         payload.callable = Some(callable);
     }
     req.fibers_mut().gc.fiber = Some(fiber);
-    let started = start(req, fiber, Vec::new(), Vec::new());
+    let started = start(req, fiber, &[], Vec::new());
     settle(req, started);
 }
 
@@ -2102,9 +2088,8 @@ fn start_gc_fiber(req: &mut Request) {
 /// destroyed at the request's end while it waits returns too.
 fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some(fiber) = req.fibers().gc.fiber else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "InternalError: gc_destructor_fiber served with no collector's fiber",
         ));
     };
@@ -2162,7 +2147,7 @@ fn gc_destructor_fiber(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 fn start(
     req: &mut Request,
     this: PhpObject,
-    arguments: Vec<Value>,
+    arguments: &[Value],
     named: Vec<(PhpString, Value)>,
 ) -> Result<Transfer, Thrown> {
     let fiber = payload(req, this)?;
@@ -2173,12 +2158,12 @@ fn start(
         ));
     }
     let Some(callable) = fiber.callable.clone() else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "Cannot start a fiber whose constructor was not called",
         ));
     };
+    let arguments = arguments.to_vec();
     let body = move |req: &mut Request| {
         let outcome = call_named_made(req, &callable, &arguments, &named);
         let held = payload(req, this)
@@ -2223,7 +2208,7 @@ fn lay_down<P: HoldsCoroutine>(
     let stack = match stack {
         Ok(stack) => stack,
         Err(StackRefused::TooSmall(least)) => {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("Fiber stack size is too small, it needs to be at least {least} bytes"),
@@ -2236,7 +2221,7 @@ fn lay_down<P: HoldsCoroutine>(
                 .strip_suffix(&format!(" (os error {errno})"))
                 .unwrap_or(&text)
                 .to_string();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("Fiber stack allocate failed: mmap failed: {text} ({errno})"),
@@ -2253,6 +2238,7 @@ fn lay_down<P: HoldsCoroutine>(
         stack_limit: StackLimit::fiber(stack.base(), stack.end(), reserved),
         // Taken from the first resume ([`switch_into`]).
         active: None,
+        returned: Value::null(),
     };
     let record = req.heap_mut().block(STACK_RECORD);
     let record = req.fatal_of(record)?;
@@ -2490,6 +2476,19 @@ impl Coroutine {
             }
         }
     }
+}
+
+/// `Fiber::resume`'s and `Fiber::throw`'s refusals before either: a
+/// switch the request refuses, and a fiber that is not suspended.
+fn resumable(req: &mut Request, this: PhpObject) -> Result<PhpObject, Thrown> {
+    switch_refused(req)?;
+    if payload(req, this)?.coroutine.status != CoroutineStatus::Suspended {
+        return Err(fiber_error(
+            req,
+            "Cannot resume a fiber that is not suspended",
+        ));
+    }
+    Ok(this)
 }
 
 #[cfg(test)]

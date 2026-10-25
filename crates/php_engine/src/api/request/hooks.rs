@@ -14,6 +14,7 @@ use php_unit::decl::{
     Bare, ClassDecl, FunctionDecl, HookKind, MethodDecl, Visibility, native_function, parameter,
 };
 
+use super::calls::Retval;
 use super::{Link, Member, MemberAt, Request};
 use crate::api::abi::{
     Entry, PropertiesFor, PropertyPlace, PropertyPurpose, PropertyRead, PropertyTest,
@@ -44,6 +45,16 @@ pub(crate) struct Hooked {
     pub(crate) is_virtual: bool,
     root: ClassId,
 }
+
+/// The sentences a hooked property's refusal says, `{class}` and
+/// `{name}` filled in ([`Request::hooked_error`]).
+const WRITE_ONLY: &str = "Property {class}::${name} is write-only";
+const READ_VIRTUAL: &str = "Must not read from virtual property {class}::${name}";
+const WRITE_VIRTUAL: &str = "Must not write to virtual property {class}::${name}";
+const INDIRECT_MODIFICATION: &str = "Indirect modification of {class}::${name} is not allowed";
+const UNSET_HOOKED: &str = "Cannot unset hooked property {class}::${name}";
+const REFERENCE_TO_HOOKED: &str = "Cannot create reference to property {class}::${name}";
+const READ_ONLY: &str = "Property {class}::${name} is read-only";
 
 impl Request {
     /// The linked class a declaration names, the one `class` is where
@@ -267,12 +278,7 @@ impl Request {
     /// ```
     pub(crate) fn hooked_accessible(&self, hooked: &Hooked) -> bool {
         let scope = self.property_scope();
-        match hooked.visibility {
-            Visibility::Public => true,
-            _ if scope == Some(hooked.declaring) => true,
-            Visibility::Private => false,
-            Visibility::Protected => self.check_protected(hooked.root, scope),
-        }
+        self.reaches_member(hooked.declaring, hooked.root, hooked.visibility, scope)
     }
 
     /// `EG(current_execute_data)`'s function and `$this`.
@@ -299,17 +305,29 @@ impl Request {
         .unwrap_or(Function::PASS)
     }
 
-    /// The property a parent hook trampoline being served names, php's
-    /// `internal_function.reserved[0]`: the call's name `$name::get`
-    /// less its `$` and its hook, beside the property's class, the
-    /// call's scope.
+    /// The property a hook trampoline being served reads or writes,
+    /// php's `internal_function.reserved[0]`, beside the property's
+    /// class, the call's scope.
     fn trampoline_property(&self) -> Option<(Vec<u8>, Option<ClassId>)> {
         let call = self.serving_call()?;
-        let written = call.annex()?.name?;
-        let bytes = written.as_bytes();
-        let name = bytes.strip_prefix(b"$")?;
-        let end = name.iter().rposition(|b| *b == b':')?.checked_sub(1)?;
-        Some((name.get(..end)?.to_vec(), call.called_scope()))
+        let trampoline = call.annex()?.trampoline.as_ref()?;
+        Some((trampoline.property.to_vec(), call.called_scope()))
+    }
+
+    /// `zend_get_property_hook_trampoline(prop_info, kind, name)`'s
+    /// record of `property`: the name the trampoline of `kind` is called
+    /// by, `$name::get` or `$name::set`, made on the request's heap as
+    /// php's `zend_string_concat3` makes it.
+    pub(crate) fn hook_trampoline(
+        &mut self,
+        property: &[u8],
+        kind: HookKind,
+    ) -> Result<crate::exec::HookTrampoline, Thrown> {
+        let name = [b"$", property, b"::", kind.name().as_bytes()].concat();
+        Ok(crate::exec::HookTrampoline {
+            property: property.into(),
+            name: self.string(&name)?,
+        })
     }
 
     /// `zend_is_in_hook`: whether the function running is a hook of the
@@ -372,8 +390,22 @@ impl Request {
         hook: Function,
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        self.call_hook_into(Retval::Native, object, hook, arguments)
+    }
+
+    /// [`Request::call_hook`] whose hook's return, where its body
+    /// returned and then threw, goes where `retval` says: a read's is
+    /// the reading opline's `rv`.
+    fn call_hook_into(
+        &mut self,
+        retval: Retval,
+        object: PhpObject,
+        hook: Function,
+        arguments: &[Value],
+    ) -> Result<Value, Thrown> {
         let held = Owner::take(self, object);
-        let served = self.serve_method_made(hook, Some(object), object.class(), arguments, &[]);
+        let class = object.class();
+        let served = self.serve_method_into(retval, hook, Some(object), class, arguments, &[]);
         held.give_up(self);
         served
     }
@@ -386,7 +418,7 @@ impl Request {
         let message = sentence
             .replace("{class}", &class)
             .replace("{name}", &shown);
-        crate::api::raising::throw_error(self, "Error", &message)
+        crate::api::raising::error(self, &message)
     }
 
     /// `ZEND_HOOKED_PROPERTY_OFFSET` at `zend_std_read_property`, placed
@@ -450,26 +482,18 @@ impl Request {
     ) -> Result<Value, Thrown> {
         let Some(get) = hooked.get else {
             if hooked.is_virtual {
-                return Err(self.hooked_error(
-                    object,
-                    name,
-                    "Property {class}::${name} is write-only",
-                ));
+                return Err(self.hooked_error(object, name, WRITE_ONLY));
             }
             let value = self.read_backing(object, name, read)?;
             return self.refuse_indirect(object, name, value, read);
         };
         if !self.should_call_hook(&hooked, name, object) {
             if hooked.is_virtual {
-                return Err(self.hooked_error(
-                    object,
-                    name,
-                    "Must not read from virtual property {class}::${name}",
-                ));
+                return Err(self.hooked_error(object, name, READ_VIRTUAL));
             }
             return self.read_backing(object, name, read);
         }
-        let value = self.call_hook(object, get, &[])?;
+        let value = self.call_hook_into(Retval::Result, object, get, &[])?;
         self.refuse_indirect(object, name, value, read)
     }
 
@@ -506,11 +530,8 @@ impl Request {
             Err(thrown) => return Some(thrown),
         };
         let refused = self.refuse_indirect(object, name, answered, PropertyRead::Write);
-        let thrown = crate::api::raising::throw_error(
-            self,
-            "Error",
-            "Cannot assign by reference to overloaded object",
-        );
+        let thrown =
+            crate::api::raising::error(self, "Cannot assign by reference to overloaded object");
         match refused {
             Ok(value) => self.release(value),
             Err(previous) => {
@@ -541,11 +562,7 @@ impl Request {
             return Ok(value);
         }
         self.release(value);
-        Err(self.hooked_error(
-            object,
-            name,
-            "Indirect modification of {class}::${name} is not allowed",
-        ))
+        Err(self.hooked_error(object, name, INDIRECT_MODIFICATION))
     }
 
     /// The backing value of a hooked property, its slot read as
@@ -578,9 +595,7 @@ impl Request {
         if placed.ty.typed() {
             return Err(self.uninitialized_property(object.class(), name));
         }
-        let class = self.symbols().class_name(object.class());
-        let shown = String::from_utf8_lossy(name).into_owned();
-        crate::api::raising::warning(self, &format!("Undefined property: {class}::${shown}"));
+        self.undefined_property(object.class(), name);
         Ok(Value::null())
     }
 
@@ -623,21 +638,18 @@ impl Request {
         };
         let Some(set) = hooked.set else {
             if hooked.is_virtual {
-                return refused(self, name, value, "Property {class}::${name} is read-only");
+                return refused(self, name, value, READ_ONLY);
             }
             return self.write_backing(object, name, value, hooked);
         };
         if !self.should_call_hook(&hooked, &bytes, object) {
             if hooked.is_virtual {
-                let sentence = "Must not write to virtual property {class}::${name}";
-                return refused(self, name, value, sentence);
+                return refused(self, name, value, WRITE_VIRTUAL);
             }
             return self.write_backing(object, name, value, hooked);
         }
         if let Some(thrown) = self.hooked_set_refused(object.class(), hooked, &bytes) {
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         let served = self.call_hook(object, set, &[*value]);
         value.give_up(self);
@@ -676,9 +688,7 @@ impl Request {
         hooked: Hooked,
     ) -> Result<(), Thrown> {
         if let Some(thrown) = self.hooked_set_refused(object.class(), hooked, name.as_bytes()) {
-            value.give_up(self);
-            name.give_up(self);
-            return Err(thrown);
+            return self.refused_write(name, value, thrown);
         }
         if let Some(placed) = self.declared_slot(object.class(), name.as_bytes())
             && object.heap().slot(placed.slot).is_undef()
@@ -720,21 +730,13 @@ impl Request {
         }
         let Some(get) = hooked.get else {
             if hooked.is_virtual {
-                return Err(self.hooked_error(
-                    object,
-                    name,
-                    "Property {class}::${name} is write-only",
-                ));
+                return Err(self.hooked_error(object, name, WRITE_ONLY));
             }
             return self.has_backing(object, name, test);
         };
         if !self.should_call_hook(&hooked, name, object) {
             if hooked.is_virtual {
-                return Err(self.hooked_error(
-                    object,
-                    name,
-                    "Must not read from virtual property {class}::${name}",
-                ));
+                return Err(self.hooked_error(object, name, READ_VIRTUAL));
             }
             return self.has_backing(object, name, test);
         }
@@ -787,11 +789,7 @@ impl Request {
     /// Cannot unset hooked property C::$p
     /// ```
     pub(crate) fn unset_hooked(&mut self, object: PhpObject, name: &[u8]) -> Thrown {
-        self.hooked_error(
-            object,
-            name,
-            "Cannot unset hooked property {class}::${name}",
-        )
+        self.hooked_error(object, name, UNSET_HOOKED)
     }
 
     /// `zend_std_get_property_ptr_ptr`: a hooked property's backing slot
@@ -886,9 +884,8 @@ fn trampoline_call(
     wanted: usize,
 ) -> Result<(PhpObject, Vec<u8>), Thrown> {
     let Some((name, scope)) = req.trampoline_property() else {
-        return Err(crate::api::raising::throw_error(
+        return Err(crate::api::raising::error(
             req,
-            "Error",
             "InternalError: a parent hook trampoline served with no property",
         ));
     };
@@ -906,13 +903,12 @@ fn trampoline_call(
             if wanted == 1 { "" } else { "s" }
         );
         return Err(crate::api::raising::under_name(req, Some(&member), |req| {
-            crate::api::raising::throw_error(req, "ArgumentCountError", &message)
+            crate::api::raising::argument_count_error(req, &message)
         }));
     }
     let Some(this) = req.frames().this() else {
-        return Err(crate::api::raising::throw_error(
+        return Err(crate::api::raising::error(
             req,
-            "Error",
             "InternalError: a parent hook trampoline served with no receiver",
         ));
     };
@@ -933,8 +929,7 @@ fn parent_hook_get(req: &mut Request) -> Result<Owner<Value>, Thrown> {
 fn parent_hook_set(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let (this, name) = trampoline_call(req, HookKind::Set, 1)?;
     let value = req.frames().argument(1).unwrap_or_else(Value::null).deref();
-    let key = req.string(&name)?;
-    let key = Owner::adopt(key);
+    let key = Owner::adopt(req.string(&name)?);
     // The return's owner, and the write's.
     let returned = Owner::take(req, value);
     let written = Owner::take(req, value);
@@ -1172,11 +1167,7 @@ impl Request {
                         .and_then(|get| self.symbols().function_decl(get))
                         .is_some_and(|decl| decl.returns_by_ref)
                 {
-                    return Err(self.hooked_error(
-                        object,
-                        &row.name,
-                        "Cannot create reference to property {class}::${name}",
-                    ));
+                    return Err(self.hooked_error(object, &row.name, REFERENCE_TO_HOOKED));
                 }
                 // `value == &EG(uninitialized_zval)`: a backed property
                 // with no `get` hook whose slot nothing wrote is no row.
@@ -1656,46 +1647,5 @@ impl Request {
             HookKind::Get => hooked.get,
             HookKind::Set => hooked.set,
         }
-    }
-
-    /// [`crate::api::call::read_raw_property`].
-    pub(crate) fn read_raw(&mut self, object: PhpObject, name: &[u8]) -> Result<Value, Thrown> {
-        match self.row_hooked(object.class(), name) {
-            Some(hooked) if hooked.is_virtual => Err(self.hooked_error(
-                object,
-                name,
-                "Must not read from virtual property {class}::${name}",
-            )),
-            _ => self.read_backing(object, name, PropertyRead::Warning),
-        }
-    }
-
-    /// [`crate::api::call::write_raw_property`].
-    pub(crate) fn write_raw(
-        &mut self,
-        object: PhpObject,
-        name: Owner<PhpString>,
-        value: Owner<Value>,
-    ) -> Result<(), Thrown> {
-        let Some(hooked) = self.row_hooked(object.class(), name.as_bytes()) else {
-            return self.write_property(object, name, value);
-        };
-        if hooked.is_virtual {
-            let bytes = name.as_bytes().to_vec();
-            value.give_up(self);
-            name.give_up(self);
-            return Err(self.hooked_error(
-                object,
-                &bytes,
-                "Must not write to virtual property {class}::${name}",
-            ));
-        }
-        if let Some(placed) = self.declared_slot(object.class(), name.as_bytes())
-            && object.heap().slot(placed.slot).is_undef()
-            && self.lazy_slot(object.heap(), placed.slot)
-        {
-            return self.lazy_write(object, name, value, false);
-        }
-        self.write_std_property(object, name, value)
     }
 }

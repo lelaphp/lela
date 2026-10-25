@@ -295,7 +295,11 @@ fn what_a_statement_handler_throws_is_raised_where_the_statement_stands() {
 /// `echo` of two arguments two statements of one line; and
 /// after a fatal in the code, which leaves past the clearing, it is
 /// told of nothing; a thrown `Error` left uncaught is no fatal, and
-/// `zend_eval_string_ex` renders it after the clearing.
+/// `zend_eval_string_ex` renders it after the clearing. Under php
+/// 8.5.12 the memory limit's fatal does not leave past it either: it is
+/// raised at the loop's interrupt check and unwinds by the unwind exit
+/// (`zend_handle_delayed_oom`), which returns through the clearing, so
+/// the shutdown function is told of what it reaches.
 #[test]
 fn a_string_the_host_evaluates_tells_no_statement_until_it_returns() {
     fn command_line(engine: &Engine, dir: &Path, code: &str) -> String {
@@ -346,16 +350,29 @@ fn a_string_the_host_evaluates_tells_no_statement_until_it_returns() {
     let fatal = command_line(
         &engine,
         dir,
-        &format!(
-            "{shutdown} ini_set('memory_limit', '2M'); $s = '.'; while (true) {{ $s .= $s; }}"
-        ),
+        &format!("{shutdown} trigger_error('boom', E_USER_ERROR);"),
     );
     rec.mark("fatal");
     assert!(fatal.ends_with("6\n"), "{fatal}");
+    let delayed = command_line(
+        &engine,
+        dir,
+        &format!(
+            "{shutdown} ini_set('memory_limit', '2M'); $t = '.'; for ($i = 0; $i < 16; $i++) {{ $t .= $t; }} $s = ''; while (true) {{ $s .= $t; }}"
+        ),
+    );
+    rec.mark("delayed");
+    assert!(delayed.contains("Allowed memory size"), "{delayed}");
+    assert!(delayed.ends_with("6\n"), "{delayed}");
     let events = rec.events();
+    let shutdown_told = told(&["down.php:2", "inc.php:3", "down.php:2"], &[0]);
     assert_eq!(
         statements(&events.between("built", "returned")),
-        told(&["down.php:2", "inc.php:3", "down.php:2"], &[0])
+        shutdown_told
     );
     assert_eq!(statements(&events.between("returned", "fatal")), []);
+    assert_eq!(
+        statements(&events.between("fatal", "delayed")),
+        shutdown_told
+    );
 }

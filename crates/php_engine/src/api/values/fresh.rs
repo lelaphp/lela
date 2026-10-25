@@ -5,7 +5,7 @@ use php_heap::FreshStr;
 
 use crate::api::raising::Thrown;
 use crate::api::request::Request;
-use crate::api::values::{Owner, PhpString};
+use crate::api::values::{Owner, PhpString, Sizing};
 
 /// `zend_string_alloc(len, 0)` before the string is handed out: `len`
 /// zero bytes on the request's heap, the holder's alone, written in place
@@ -26,7 +26,7 @@ use crate::api::values::{Owner, PhpString};
 /// ```
 /// ```expect
 /// int(403968)
-/// int(64)
+/// int(80)
 /// ```
 #[derive(Debug)]
 pub struct FreshString(FreshStr);
@@ -35,7 +35,42 @@ impl FreshString {
     /// `zend_string_alloc(len, 0)`; the `Err` is the memory limit's
     /// fatal, met before the string exists.
     pub fn new(req: &mut Request, len: usize) -> Result<FreshString, Thrown> {
-        let fresh = req.heap_mut().string_fresh(len);
+        FreshString::sized(req, len, Sizing::Alloc)
+    }
+
+    /// [`FreshString::new`] laid at the size of the constructor `sizing`
+    /// names. A native that makes its string with `zend_string_safe_alloc(n,
+    /// m, l, 0)` asks for `n * m + l` bytes at [`Sizing::SafeAlloc`]
+    /// `{ n, m }`, whose allocation is the product past the aligned header
+    /// of `l` bytes. That is a larger bin than `zend_string_alloc`'s at
+    /// some lengths, and the `zend_string_truncate` after it may stay in
+    /// that bin or fall from it. `memory_get_peak_usage()` sees which,
+    /// since a cut to a smaller bin holds both blocks at once.
+    /// `mysqli_real_escape_string` asks for `safe_alloc(2, len, 0)`. After
+    /// the loop's first pass, 1 byte is 34 and the 40-byte bin, which the
+    /// cut keeps, and 113 bytes are 258 and the 320-byte bin, which the
+    /// cut to 145 leaves for the 160-byte one, both blocks held at the
+    /// peak, where `zend_string_alloc(226)` would take 256. The `Err` is
+    /// the memory limit's fatal or php's `Possible integer overflow in
+    /// memory allocation`, met before the string exists.
+    ///
+    /// ```php
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// foreach ([1, 1, 113] as $n) {
+    ///     $v = str_repeat('a', $n);
+    ///     memory_reset_peak_usage(); $m = memory_get_usage();
+    ///     $e = mysqli_real_escape_string($l, $v);
+    ///     echo $n, ' ', memory_get_usage() - $m, ' ', memory_get_peak_usage() - $m, "\n";
+    ///     unset($e);
+    /// }
+    /// ```
+    /// ```expect mysql
+    /// 1 72 112
+    /// 1 40 72
+    /// 113 160 480
+    /// ```
+    pub fn sized(req: &mut Request, len: usize, sizing: Sizing) -> Result<FreshString, Thrown> {
+        let fresh = req.heap_mut().string_fresh(len, sizing);
         req.fatal_of(fresh).map(FreshString)
     }
 

@@ -242,6 +242,7 @@ abi::ObjectHandlers::iterator_element
 abi::ObjectHandlers::iterator_size
 abi::ObjectHandlers::method_receiver
 abi::ObjectHandlers::own_iterator
+abi::ObjectHandlers::properties
 abi::ObjectHandlers::properties_overloaded
 abi::ObjectHandlers::read_dimension
 abi::ObjectHandlers::read_property
@@ -291,6 +292,7 @@ abi::PreloadThread
 abi::PreloadThread::joined
 abi::PreloadThread::new
 abi::PropertiesFor
+abi::PropertyAccess
 abi::PropertyPlace
 abi::PropertyPurpose
 abi::PropertyRead
@@ -381,6 +383,7 @@ call::constant
 call::eval_const_expr
 call::eval_declared
 call::fetch_constant
+call::fetch_function
 call::initialize_lazy
 call::instantiate
 call::instantiate_named
@@ -422,6 +425,7 @@ coerce::compare
 coerce::count
 coerce::float_format
 coerce::float_to_long
+coerce::gcvt
 coerce::identical
 coerce::int_to_string
 coerce::is_callable
@@ -502,6 +506,7 @@ raising::arg_count_error
 raising::arg_null_deprecated
 raising::arg_type_error
 raising::arg_value_error
+raising::argument_count_error
 raising::argument_error
 raising::arity
 raising::call_stack_end
@@ -528,9 +533,12 @@ raising::throw_at
 raising::throw_chained
 raising::throw_error
 raising::throw_error_chained
+raising::throw_exception_ex
 raising::throw_value
 raising::throwing_warnings
+raising::type_error
 raising::uncaught_at
+raising::value_error
 raising::warning
 raising::while_pending
 request::Allocation
@@ -589,6 +597,7 @@ request::Crypto::enable
 request::Crypto::meta
 request::Crypto::pending
 request::Crypto::read
+request::Crypto::resumable
 request::Crypto::setup
 request::Crypto::write
 request::CryptoSocket
@@ -782,8 +791,10 @@ request::MAXPATHLEN
 request::Memory
 request::Memory::adopt
 request::Memory::disown
+request::Memory::fallible
 request::Memory::foreign
 request::Memory::gc_possible_root
+request::Memory::has_oom
 request::Memory::heap_holds
 request::Memory::holding
 request::Memory::lend_heap
@@ -991,6 +1002,7 @@ request::StreamCtx::unset_option
 request::StreamFilter
 request::StreamFilter::close
 request::StreamFilter::filter
+request::StreamFilter::share
 request::StreamOps
 request::StreamOps::buffered
 request::StreamOps::close
@@ -1254,6 +1266,7 @@ values::FreshString::is_empty
 values::FreshString::len
 values::FreshString::new
 values::FreshString::set_len
+values::FreshString::sized
 values::FreshString::truncate
 values::HashIterator
 values::HashIterator::new
@@ -1301,7 +1314,6 @@ values::Owner::set
 values::Owner::set_next_free
 values::Owner::set_str
 values::Owner::set_symtable_str
-values::Owner::sort_by
 values::Owner::take
 values::Owner::try_append
 values::Owner::unset
@@ -1423,7 +1435,9 @@ values::PhpString
 values::PhpString::as_bytes
 values::PhpString::declared
 values::PhpString::existing_interned
+values::PhpString::fast
 values::PhpString::filled
+values::PhpString::finit
 values::PhpString::interned
 values::PhpString::is_empty
 values::PhpString::is_valid_utf8
@@ -1452,6 +1466,8 @@ values::Resource::unlist
 values::ResourceType
 values::ResourceView
 values::ResourceView::resource
+values::Sizing
+values::Sizing::bytes
 values::SmartStr
 values::SmartStr::append
 values::SmartStr::as_bytes
@@ -1461,6 +1477,7 @@ values::SmartStr::finish
 values::SmartStr::free
 values::SmartStr::remove
 values::SmartStr::reserve
+values::SortAlgorithm
 values::TypeTag
 values::Value
 values::Value::array

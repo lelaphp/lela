@@ -1847,6 +1847,20 @@ impl crate::Heap {
         self.array_sized(0)
     }
 
+    /// `zend_new_array_singleton()`, `array_init_singleton`
+    /// (`Z/Zend/zend_hash.c:344`): the header of [`Heap::array`] with
+    /// `nTableSize` set to one past `zend_hash_check_size`'s eight, so
+    /// its first write lays down room for one element, a packed slot
+    /// and the two hash slots in 24 bytes, or a bucket and two hash
+    /// slots in 40, and each growth doubles from there. php-8.5.12 makes
+    /// the arrays of the request's input with it.
+    pub fn array_singleton(&mut self) -> Result<Arr, Fatal> {
+        let at = self.mm.alloc(HEADER)?;
+        // SAFETY: the allocation is the header's size and nothing else
+        // holds it.
+        Ok(unsafe { Arr::init(at, 1) })
+    }
+
     /// `zend_new_array(size)`, `array_init_size`: the header, with the
     /// first data allocation sized for `size` elements through
     /// `zend_hash_check_size`.
@@ -2950,7 +2964,9 @@ mod tests {
             (Key::Str(s), Zval::long(14)),
             (Key::Long(-3), Zval::long(16)),
         ];
-        let a = strings.constant_array(&entries).expect("a constant array");
+        let a = strings
+            .constant_array(&entries, 3)
+            .expect("a constant array");
         assert!(a.is_immutable());
         assert_eq!(a.refcount(), 1);
         assert!(!Zval::array(a).is_refcounted());
@@ -3014,7 +3030,7 @@ mod tests {
         assert_eq!(e.next_free(), i64::MIN);
         assert!(!Zval::array(e).is_refcounted());
         let mut strings = crate::Strings::new();
-        assert!(strings.constant_array(&[]).is_ok_and(|a| a.is_same(e)));
+        assert!(strings.constant_array(&[], 0).is_ok_and(|a| a.is_same(e)));
         drop(strings);
         let mut nothing = Nothing::new();
         let before = nothing.heap.memory_usage(false);
@@ -3038,7 +3054,7 @@ mod tests {
         let mut nothing = Nothing::new();
         let a = nothing
             .strings
-            .constant_array(&[(Key::Long(0), Zval::long(1))])
+            .constant_array(&[(Key::Long(0), Zval::long(1))], 1)
             .expect("a constant array");
         assert!(a.is_immutable());
         assert!(!Zval::array(a).is_refcounted());

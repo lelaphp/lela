@@ -7,7 +7,7 @@ use std::ops::ControlFlow;
 use php_ext::abi::{False, Instance, OrFalse, True, Union};
 use php_ext::attr::php_function;
 use php_ext::coerce::to_long;
-use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, argument_error, docref, value_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value};
@@ -1277,7 +1277,7 @@ fn polygon(
             "Trying to use {count} points in array with only {} points",
             elements / 2
         );
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     }
     let mut list = vec![Point::default(); usize::try_from(count).unwrap_or(0)];
     for (i, point) in (0_i64..).zip(list.iter_mut()) {

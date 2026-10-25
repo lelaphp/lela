@@ -4,36 +4,35 @@ frame f1 e1 callee of f0, 1 cvs 6 temps
 frame f2 e1 callee of f1, 1 cvs 6 temps
 entry
   #0 f0.CV0 [long]
-loop at 0, recursive call, interrupt exit 3
+loop at 0, recursive call, interrupt exit 0
   #1 f0.CV0 [long] = phi(#0, #5)
 0001 f0 IS_SMALLER #1, int(2) fused inline
-  checks direction taken -> exit 0
-  guard room 192 -> exit 1
-0005 f0 INIT_FCALL_BY_NAME const#1 inline map 0
+  checks direction taken -> exit 1
+  guard room 192 -> exit 2
+0005 f0 INIT_FCALL_BY_NAME const#1 inline
      f0 init e1 in-place
 0006 f0 SUB #1, int(1) inline
   -> #2 f0.T1 [long] reg
-  checks #2 long -> exit 2
+  checks #2 long -> exit 3
 0007 f0 SEND_VAL_EX #2 inline
-0008 f0 DO_FCALL_BY_NAME inline unwinds -> unwind 0
+0008 f0 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 0
      f1 enter e1
   -> #3 f1.CV0 [long]
 0001 f1 IS_SMALLER #3, int(2) fused inline
-  checks direction taken -> exit 0
-  guard room 192 -> exit 1
-0005 f1 INIT_FCALL_BY_NAME const#1 inline map 0
+  checks direction taken -> exit 1
+  guard room 192 -> exit 2
+0005 f1 INIT_FCALL_BY_NAME const#1 inline
      f1 init e1 in-place
 0006 f1 SUB #3, int(1) inline
   -> #4 f1.T1 [long] reg
-  checks #4 long -> exit 2
+  checks #4 long -> exit 3
 0007 f1 SEND_VAL_EX #4 inline
-0008 f1 DO_FCALL_BY_NAME inline unwinds -> unwind 0
+0008 f1 DO_FCALL_BY_NAME inline in-place unwinds -> unwind 0
      f2 enter e1
   -> #5 f2.CV0 [long]
 end: back to 0
-exit 0: f0 0003 plain f0.CV0:long
-exit 1: f0 0005 plain f0.CV0:long to vm
-exit 2: f0 0006 restore call f0.CV0:long
-exit 3: f0 0001 plain f0.CV0:long to vm
+exit 0: f0 0001 plain to vm
+exit 1: f0 0003 plain f0.CV0:long
+exit 2: f0 0005 plain f0.CV0:long to vm
+exit 3: f0 0006 restore call f0.CV0:long
 unwind 0:
-map 0: offset 1 slot 0

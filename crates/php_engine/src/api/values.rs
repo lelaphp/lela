@@ -149,16 +149,66 @@ pub struct PhpString(Str);
 
 impl PhpString {
     /// A string of these bytes out of the request's heap, which is where
-    /// every string a native returns comes from (design §5.13). php's
-    /// `ZVAL_STRINGL_FAST`: the empty string and a string of one byte are
-    /// the process's interned ones and allocate nothing, and anything
-    /// longer is `zend_string_init`, one allocation counted against the
-    /// request. The `Err` is the memory limit, recorded on the request as
-    /// php's fatal and ending the native as `zend_mm` bails out.
+    /// every string a native returns comes from (design §5.13): the
+    /// empty string and a string of one byte are the process's interned
+    /// ones and allocate nothing, and anything longer is
+    /// `zend_string_init`, one allocation counted against the request.
+    /// Where php's native makes its string with `zend_string_init_fast`
+    /// (`ZVAL_STRINGL_FAST`), whose allocation php-8.5.12 sizes apart, it
+    /// is [`PhpString::fast`]. The `Err` is the memory limit, recorded on
+    /// the request as php's fatal and ending the native as `zend_mm`
+    /// bails out.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn new(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
-        let made = req.string(bytes)?;
-        Ok(Owner::adopt(made))
+        adopted(req.string(bytes))
+    }
+
+    /// php-8.5.12's `zend_string_init_fast`, `ZVAL_STRINGL_FAST`: the
+    /// interned string for the empty string and one byte, as
+    /// [`PhpString::new`], and otherwise `zend_string_finit`, whose allocation is the bytes past the
+    /// aligned header of the empty string (`Z/Zend/zend_string.h:215-238`),
+    /// so `substr`'s string can take a bin more than `strrev`'s, which is
+    /// `zend_string_alloc`, takes for the same length; the program writes
+    /// its first line before it measures:
+    ///
+    /// ```php
+    /// echo "substr strrev\n"; $big = str_repeat('0123456789', 100);
+    /// foreach ([2, 7, 8, 100] as $l) { $m = memory_get_usage(); $s = substr($big, 1, $l); $a = memory_get_usage() - $m; $t = strrev($s); echo $l, ' ', $a, ' ', memory_get_usage() - $m - $a, "\n"; $s = $t = null; }
+    /// ```
+    /// ```expect
+    /// substr strrev
+    /// 2 40 32
+    /// 7 40 32
+    /// 8 40 40
+    /// 100 160 128
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn fast(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        adopted(req.string_fast(bytes))
+    }
+
+    /// php-8.5.12's `zend_string_finit`: a string of the request's own
+    /// whatever its length, even the empty string and one byte, which
+    /// [`PhpString::new`] and [`PhpString::fast`] hand out interned, and
+    /// asking the bytes past the aligned header of the empty string, as
+    /// [`PhpString::fast`] does past one byte (`Z/Zend/zend_string.h:215`).
+    /// It is where php copies a buffer it already has, as `wordwrap`'s
+    /// single-byte break does its subject, so one byte takes the 40-byte
+    /// bin where `substr`'s is the interned character:
+    ///
+    /// ```php
+    /// echo "wordwrap substr\n";
+    /// foreach (['a', 'abcdefg', str_repeat('x', 100)] as $t) { $m = memory_get_usage(); $s = wordwrap($t, 75, "\n"); $a = memory_get_usage() - $m; $r = substr("_$t", 1); echo strlen($t), ' ', $a, ' ', memory_get_usage() - $m - $a, "\n"; $s = $r = null; }
+    /// ```
+    /// ```expect
+    /// wordwrap substr
+    /// 1 40 0
+    /// 7 40 40
+    /// 100 160 160
+    /// ```
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub fn finit(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        adopted(req.string_finit(bytes))
     }
 
     /// The string a declaration holds for these bytes, with one owner for
@@ -204,7 +254,7 @@ impl PhpString {
     /// `accel_init_interned_string_for_php`: the engine's string for these
     /// bytes, a name or a constant the engine's startup or a published
     /// unit holds, which costs nothing, once the request has compiled a
-    /// file; a string of the request's own otherwise, `zend_string_init`
+    /// file; a string of the request's own otherwise, `zend_string_finit`
     /// whatever its length, and never one kept to be found again. What
     /// php's unserializer makes of an array's or an object's key. The
     /// `Err` is the memory limit.
@@ -226,8 +276,7 @@ impl PhpString {
         len: usize,
         fill: impl FnOnce(&mut [u8]),
     ) -> Result<Owner<PhpString>, Thrown> {
-        let made = req.string_with(len, fill)?;
-        Ok(Owner::adopt(made))
+        adopted(req.string_with(len, fill))
     }
 
     /// A string of `n * m + l` bytes written in place by `fill`, php's
@@ -245,8 +294,7 @@ impl PhpString {
         l: usize,
         fill: impl FnOnce(&mut [u8]),
     ) -> Result<Owner<PhpString>, Thrown> {
-        let made = req.string_product(n, m, l, fill)?;
-        Ok(Owner::adopt(made))
+        adopted(req.string_product(n, m, l, fill))
     }
 
     /// The face over a heap string the engine already holds: a constant
@@ -416,7 +464,7 @@ impl Key {
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn to_prop_name(&self, req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
         match self {
-            Key::Int(n) => PhpString::new(req, crate::c_number::Long::of(*n).as_bytes()),
+            Key::Int(n) => crate::ops::long_to_str(req, *n).map(Owner::adopt),
             Key::Str(s) => Ok(Owner::take(req, *s)),
         }
     }
@@ -464,6 +512,32 @@ impl Key {
 #[derive(Clone, Copy)]
 pub struct PhpArray(Arr);
 
+/// Which of php's two sorts of a table [`PhpArray::sort_by`] is, as each
+/// native calls one: `zend_hash_sort`, which sorts the table as it
+/// stands (`ksort()`, `krsort()`, intl's `Collator::sort()`), or
+/// `zend_array_sort` (`Z/Zend/zend_hash.c:3083`), which holds the table
+/// one owner more while it sorts and gives that owner up after with
+/// `gc_check_possible_root`, so the sorted table is offered to the
+/// collector (`sort()`, `usort()`, `asort()` and the rest of
+/// `Z/ext/standard/array.c`'s sorts).
+///
+/// ```php
+/// function keys() { $k = []; $k['b'] = 1; $k['a'] = 2; ksort($k); krsort($k); return gc_status()['roots']; }
+/// function values() { $v = []; $v['b'] = 2; $v['a'] = 1; asort($v); return gc_status()['roots']; }
+/// var_dump(keys(), values());
+/// ```
+/// ```expect
+/// int(0)
+/// int(1)
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SortAlgorithm {
+    /// `zend_hash_sort`: no hold, no possible root.
+    Hash,
+    /// `zend_array_sort`: a hold, then a release that may offer a root.
+    Array,
+}
+
 /// How a table [`PhpArray::sized`] lays down is laid out: php's packed
 /// array, a list of values indexed from zero, or its hash, the buckets
 /// and their hash slots, `zend_hash_real_init_packed` and
@@ -481,8 +555,7 @@ impl PhpArray {
     /// `zend_mm` bails out.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn new(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-        let made = req.array()?;
-        Ok(Owner::adopt(made))
+        adopted(req.array())
     }
 
     /// A new array [`PhpArray::new`] makes and `fill` writes, given up
@@ -512,8 +585,7 @@ impl PhpArray {
     /// memory limit.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn init_size(req: &mut Request, size: u32) -> Result<Owner<PhpArray>, Thrown> {
-        let made = req.array_sized(size, true)?;
-        Ok(Owner::adopt(made))
+        adopted(req.array_sized(size, true))
     }
 
     /// `RETURN_EMPTY_ARRAY`, `ZVAL_EMPTY_ARRAY`: the process's one
@@ -601,8 +673,7 @@ impl PhpArray {
             Layout::Packed => req.heap_mut().array_packed(size),
             Layout::Hash => req.heap_mut().array_mixed(size),
         };
-        let made = req.fatal_of(laid).map(PhpArray::of)?;
-        Ok(Owner::adopt(made))
+        adopted(req.fatal_of(laid).map(PhpArray::of))
     }
 
     /// The face over a heap array the engine already holds.
@@ -951,8 +1022,7 @@ impl PhpArray {
     /// one more owner, what `array_merge` and `+` build on.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn copy(&self, req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
-        let made = req.array_dup(self.0).map(PhpArray::of)?;
-        Ok(Owner::adopt(made))
+        adopted(req.array_dup(self.0).map(PhpArray::of))
     }
 
     /// The first live element at or past the bucket `position`, with
@@ -997,11 +1067,13 @@ impl PhpArray {
     /// positions alone and the array is left as php leaves it before what
     /// was thrown is raised from here.
     ///
-    /// The table is held one owner more while it is sorted,
-    /// `zend_array_sort_ex`'s `GC_ADDREF(ht)`, so a comparison whose code
-    /// writes the array separates it: the variable takes the copy with the
-    /// write, and the table sorted is given up after, destroyed where
-    /// nothing else holds it.
+    /// Under [`SortAlgorithm::Array`] the table is held one owner more
+    /// while it is sorted, `zend_array_sort_ex`'s `GC_ADDREF(ht)`, so a
+    /// comparison whose code writes the array separates it: the variable
+    /// takes the copy with the write, and the table sorted is given up
+    /// after, destroyed where nothing else holds it and otherwise offered
+    /// to the collector. Under [`SortAlgorithm::Hash`] it is sorted as it
+    /// stands, held by nothing and offered to no collector.
     ///
     /// ```php
     /// function resize_arr() { global $arr; for ($i = 0; $i < 4; $i++) { $arr[$i] = $i; } }
@@ -1027,6 +1099,7 @@ impl PhpArray {
     pub fn sort_by(
         &mut self,
         req: &mut Request,
+        algorithm: SortAlgorithm,
         renumber: bool,
         mut compare: impl FnMut(
             &mut Request,
@@ -1035,7 +1108,7 @@ impl PhpArray {
         ) -> Result<Ordering, Thrown>,
     ) -> Result<(), Thrown> {
         self.separate(req)?;
-        let held = Owner::take(req, self.to_value());
+        let held = (algorithm == SortAlgorithm::Array).then(|| Owner::take(req, self.to_value()));
         let mut pending: Option<Thrown> = None;
         let sorted = req.array_sort(self.0, renumber, &mut |req, x, y| {
             let ordering = if pending.is_some() {
@@ -1053,7 +1126,9 @@ impl PhpArray {
             };
             ordering.then(x.position.cmp(&y.position))
         });
-        held.give_up(req);
+        if let Some(held) = held {
+            held.give_up(req);
+        }
         sorted?;
         pending.map_or(Ok(()), Err)
     }
@@ -1457,8 +1532,7 @@ impl PhpObject {
         req: &mut Request,
         payload: T,
     ) -> Result<Owner<PhpObject>, Thrown> {
-        let made = req.clone_members_payload(*self, payload);
-        adopted(made)
+        adopted(req.clone_members_payload(*self, payload))
     }
 
     /// What a `Closure` carries, for a closure object: its native
@@ -1484,11 +1558,9 @@ impl PhpObject {
         req: &mut Request,
     ) -> Result<Vec<(Owner<PhpString>, Value)>, Thrown> {
         let bound = req.closure_bound(*self, true);
-        let mut out = Vec::with_capacity(bound.len());
-        for (name, value) in bound {
-            out.push((PhpString::new(req, &name)?, value));
-        }
-        Ok(out)
+        (bound.into_iter())
+            .map(|(name, value)| Ok((PhpString::new(req, &name)?, value)))
+            .collect()
     }
 
     /// The declared and dynamic properties in declaration order,
@@ -1621,7 +1693,7 @@ impl PhpObject {
     /// echo '[', http_build_query(new DateTime('2020-01-01 UTC')), "]\n";
     /// ```
     /// ```expect
-    /// 408
+    /// 416
     /// b=1&c=2
     /// []
     /// ```
@@ -1657,7 +1729,7 @@ impl PhpObject {
     /// $l = new K; $m = memory_get_usage(); $s = serialize($l); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect
-    /// 32
+    /// 40
     /// 56
     /// ```
     pub fn slots_without_table(&self, req: &mut Request) -> Result<Option<walk::Table>, Thrown> {
@@ -2033,8 +2105,7 @@ impl PhpObject {
     /// ```
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn row_ref(&self, req: &mut Request, key: &Key) -> Result<Owner<PhpRef>, Thrown> {
-        let made = req.table_row_ref(*self, key);
-        adopted(made)
+        adopted(req.table_row_ref(*self, key))
     }
 
     /// Where the row `key` stands in the object's property table, the
@@ -2082,8 +2153,7 @@ impl PhpObject {
     /// ```
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn typed_row_ref(&self, req: &mut Request, key: &Key) -> Result<Owner<PhpRef>, Thrown> {
-        let made = req.table_typed_row_ref(*self, key);
-        adopted(made)
+        adopted(req.table_typed_row_ref(*self, key))
     }
 
     /// One property by name, without a handler in the way: a view of
@@ -2396,11 +2466,12 @@ impl PhpObject {
     }
 
     /// `Z_PROP_FLAG_P(OBJ_PROP(obj, offset)) & IS_PROP_LAZY` for the
-    /// declared property `name`, on the object the initialised proxies
-    /// lead to: whether it still waits for the initializer.
+    /// property `name` that `declaring` declares, on the object the
+    /// initialised proxies lead to: whether it still waits for the
+    /// initializer.
     #[must_use]
-    pub fn is_lazy_prop(&self, req: &Request, name: &[u8]) -> bool {
-        req.lazy_property(*self, name)
+    pub fn is_lazy_prop(&self, req: &Request, declaring: ClassId, name: &[u8]) -> bool {
+        req.lazy_property(*self, declaring, name)
     }
 
     /// `zend_lazy_object_get_initializer_zv`: the initializer of a lazy
@@ -2459,8 +2530,7 @@ impl PhpRef {
     /// `Err` is the memory limit as the fatal that ends the request.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn new(req: &mut Request, value: Owner<Value>) -> Result<Owner<PhpRef>, Thrown> {
-        let made = req.reference(value.hand_on());
-        adopted(made)
+        adopted(req.reference(value.hand_on()))
     }
 
     /// The value held, `Z_REFVAL`: a view, no owner taken.
@@ -2538,7 +2608,8 @@ impl PhpRef {
             return Ok(());
         }
         let strict = req.strict_types();
-        req.assign_to_reference(self.0, value, strict)
+        // `zend_try_assign_typed_ref`: the value moves in, from no operand.
+        req.assign_to_reference(self.0, value, strict, php_unit::OperandKind::Unused)
     }
 
     /// The value held replaced by what php's `convert_to_*` makes of it
@@ -2621,6 +2692,12 @@ pub use php_link::NameHasher;
 /// `lazy proxy ` before `object(` ([`PhpObject::laziness`]).
 pub use php_heap::Laziness;
 
+/// Which of php's string constructors a string is laid as, for its size:
+/// `zend_string_alloc`'s ([`Sizing::Alloc`]), `zend_string_finit`'s
+/// ([`Sizing::Finit`]) or `zend_string_safe_alloc`'s
+/// ([`Sizing::SafeAlloc`]), what [`FreshString::sized`] is given.
+pub use php_heap::Sizing;
+
 /// What an object's property table holds of its declared properties
 /// (design §5.4): the slots standing for them, or copies of them the
 /// table holds as plain values ([`PhpObject::declared_rows`]).
@@ -2660,8 +2737,7 @@ impl Resource {
         kind: ResourceType,
         payload: T,
     ) -> Result<Owner<Resource>, Thrown> {
-        let made = req.new_resource(kind, payload);
-        adopted(made)
+        adopted(req.new_resource(kind, payload))
     }
 
     /// [`Resource::new`] with the payload laid inside an allocation of
@@ -2678,8 +2754,7 @@ impl Resource {
         size: usize,
     ) -> Result<Owner<Resource>, Thrown> {
         let allocated = req.heap_mut().resource_sized(kind, payload, size);
-        let made = req.fatal_of(allocated).map(Resource::of);
-        adopted(made)
+        adopted(req.fatal_of(allocated).map(Resource::of))
     }
 
     /// `zend_register_resource(NULL, type)`: a resource of `kind` with no
@@ -2687,14 +2762,8 @@ impl Resource {
     /// limit's fatal.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn bare(req: &mut Request, kind: ResourceType) -> Result<Owner<Resource>, Thrown> {
-        let made = Self::bare_made(req, kind);
-        adopted(made)
-    }
-
-    /// What [`bare`] makes, its one owner not yet named.
-    pub(crate) fn bare_made(req: &mut Request, kind: ResourceType) -> Result<Resource, Thrown> {
         let allocated = req.heap_mut().resource(kind);
-        req.fatal_of(allocated).map(Resource::of)
+        adopted(req.fatal_of(allocated).map(Resource::of))
     }
 
     /// [`Resource::sized`] for what php `pemalloc`s persistent, as
@@ -2707,19 +2776,8 @@ impl Resource {
         payload: T,
         size: usize,
     ) -> Result<Owner<Resource>, Thrown> {
-        let made = Self::persistent_made(req, kind, payload, size);
-        adopted(made)
-    }
-
-    /// What [`persistent`] makes, its one owner not yet named.
-    pub(crate) fn persistent_made<T: Any + Send>(
-        req: &mut Request,
-        kind: ResourceType,
-        payload: T,
-        size: usize,
-    ) -> Result<Resource, Thrown> {
         let allocated = req.heap_mut().resource_persistent(kind, payload, size);
-        req.fatal_of(allocated).map(Resource::of)
+        adopted(req.fatal_of(allocated).map(Resource::of))
     }
 
     /// The resource as a value, `ZVAL_RES`: named, no owner taken.
@@ -3118,6 +3176,13 @@ impl Value {
     #[inline]
     pub(crate) const fn to_zval(self) -> Zval {
         self.zval
+    }
+
+    /// The zval this value is, borrowed: what a reader whose answer
+    /// borrows the zval's string reads ([`php_heap::Scalar::of`]).
+    #[inline]
+    pub(crate) const fn as_zval(&self) -> &Zval {
+        &self.zval
     }
 
     /// The zval this value is inside an array's bucket or a property

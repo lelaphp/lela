@@ -76,8 +76,9 @@ pub(crate) struct Observers {
 }
 
 impl Observers {
-    /// Whether no observer is in the list: the one test an allocation
-    /// pays for observation.
+    /// Whether no observer is in the list, which the heap reads into its
+    /// `use_custom_heap` as the list changes, so an allocation pays one
+    /// test for observation and the tracked allocator together.
     #[inline]
     pub(crate) fn is_empty(&self) -> bool {
         self.list.is_empty()

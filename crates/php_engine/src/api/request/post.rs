@@ -20,7 +20,7 @@ use super::variables::BodyLimits;
 use crate::api::abi::{Beneath, chain};
 use crate::api::raising::{Level, Thrown, docref, throw_error};
 use crate::api::request::temporary::TemporaryGuard;
-use crate::api::values::{Owner, PhpArray, adopted};
+use crate::api::values::{Key, Owner, PhpArray, PhpString, Value, adopted};
 use crate::engine::{Body, Method};
 
 /// `SAPI_POST_BLOCK_SIZE` (`Z/main/SAPI.h:28`): what the form reader
@@ -42,11 +42,7 @@ impl PostEntry {
     /// The row a content type names: the type lowered and cut at its
     /// first `;`, `,` or space, as `sapi_read_post_data` cuts it.
     fn of(content_type: &[u8]) -> Option<PostEntry> {
-        let end = content_type
-            .iter()
-            .position(|b| matches!(b, b';' | b',' | b' '))
-            .unwrap_or(content_type.len());
-        let named = content_type[..end].to_ascii_lowercase();
+        let named = content_type[..type_end(content_type)].to_ascii_lowercase();
         match named.as_slice() {
             b"application/x-www-form-urlencoded" => Some(PostEntry::Form),
             b"multipart/form-data" => Some(PostEntry::Multipart),
@@ -106,9 +102,12 @@ pub(crate) struct Post {
     /// `SG(request_info).request_body`: what the form reader buffered,
     /// and what `php://input` read after it.
     request_body: Option<Vec<u8>>,
-    /// `SG(rfc1867_uploaded_files)`: each file an upload wrote, by its
-    /// temporary path, until it is moved or the request ends.
-    pub(crate) uploaded: Vec<PathBuf>,
+    /// `SG(rfc1867_uploaded_files)`: the table the multipart handler lays
+    /// on the request's heap, `ALLOC_HASHTABLE` and `zend_hash_init`, each
+    /// file an upload wrote a row of it until it is moved or the request
+    /// ends, keyed by its temporary path, the one string `$_FILES` names
+    /// it by too ([`Request::note_uploaded`]).
+    pub(crate) uploaded: Option<PhpArray>,
     /// `SG(request_parse_body_context).throw_exceptions`: what the
     /// multipart handler refuses is thrown and not warned of, under
     /// `request_parse_body()`.
@@ -136,10 +135,7 @@ impl Request {
             .web()
             .and_then(|web| web.content_type.clone())
             .unwrap_or_default();
-        let end = content_type
-            .iter()
-            .position(|b| matches!(b, b';' | b',' | b' '))
-            .unwrap_or(content_type.len());
+        let end = type_end(&content_type);
         let mut dup = content_type[..end].to_ascii_lowercase();
         dup.extend_from_slice(&content_type[end..]);
         let entry = PostEntry::of(&content_type);
@@ -288,7 +284,7 @@ impl Request {
         let Some(content_type) = self.post.content_type.take() else {
             return Ok(());
         };
-        match self.post.entry {
+        let handled = match self.post.entry {
             Some(PostEntry::Form) => {
                 let body = self.post.request_body.clone().unwrap_or_default();
                 self.add_post_vars(array, &body, limits)
@@ -296,8 +292,15 @@ impl Request {
             Some(PostEntry::Multipart) => {
                 crate::rfc1867::post_handler(self, &content_type, array, limits)
             }
-            None => Ok(()),
+            None => return Ok(()),
+        };
+        // `if (ZEND_HAS_OOM()) zend_handle_delayed_oom();` (`Z/main/SAPI.c:168`
+        // at 8.5.12): a body that took the request past its memory limit
+        // ends it in the limit's fatal before the script runs.
+        if self.has_oom() {
+            self.handle_delayed_oom();
         }
+        handled
     }
 
     /// What `php://input` reads (`Z/ext/standard/php_fopen_wrapper.c:77`):
@@ -355,28 +358,63 @@ impl Request {
         let handled = self.handle_post(post, limits);
         self.post.throwing = throwing;
         let files = std::mem::replace(&mut self.http_globals.files, kept).unwrap_or(files);
-        match handled {
-            Ok(()) if !self.is_pending() => Ok((post, files)),
-            Ok(()) => {
-                self.release(crate::api::values::Value::array(post));
-                self.release(crate::api::values::Value::array(files));
-                Err(Thrown::of(None))
-            }
-            Err(thrown) => {
-                self.release(crate::api::values::Value::array(post));
-                self.release(crate::api::values::Value::array(files));
-                Err(thrown)
-            }
-        }
+        let thrown = match handled {
+            Ok(()) if !self.is_pending() => return Ok((post, files)),
+            Ok(()) => Thrown::of(None),
+            Err(thrown) => thrown,
+        };
+        self.release(crate::api::values::Value::array(post));
+        self.release(crate::api::values::Value::array(files));
+        Err(thrown)
     }
 
     /// `destroy_uploaded_files_hash` (`Z/main/rfc1867.c:170`), at
     /// `sapi_deactivate_destroy`: every uploaded file no
     /// `move_uploaded_file()` moved, removed.
     pub(crate) fn destroy_uploaded_files(&mut self) {
-        for file in std::mem::take(&mut self.post.uploaded) {
-            std::fs::remove_file(file).ok();
+        let Some(table) = self.post.uploaded.take() else {
+            return;
+        };
+        let mut position = 0;
+        while let Some((at, key, _)) = table.live_from(position) {
+            if let Key::Str(path) = key {
+                std::fs::remove_file(path_of(path.as_bytes())).ok();
+            }
+            position = at + 1;
         }
+        self.release(Value::array(table));
+    }
+
+    /// `SG(rfc1867_uploaded_files)` as `rfc1867_post_handler` lays it
+    /// down before it reads a part (`Z/main/rfc1867.c:795`): the table on
+    /// the request's heap, laid once. php lays a fresh one each time the
+    /// handler parses a body and forgets the last, its files with it; a
+    /// second parse in one request keeps the first table here, so every
+    /// file an upload wrote is still removed at the request's end.
+    pub(crate) fn uploaded_files(&mut self) -> Result<PhpArray, Thrown> {
+        if let Some(table) = self.post.uploaded {
+            return Ok(table);
+        }
+        let table = self.array()?;
+        self.post.uploaded = Some(table);
+        Ok(table)
+    }
+
+    /// The string the table keys the upload at `path` by, the one
+    /// `$_FILES` names it by, as `ZVAL_STR_COPY(&zfilename,
+    /// temp_filename)` shares it; a view.
+    pub(crate) fn uploaded_name(&self, path: &[u8]) -> Option<PhpString> {
+        let table = self.post.uploaded?;
+        let mut position = 0;
+        while let Some((at, key, _)) = table.live_from(position) {
+            if let Key::Str(name) = key
+                && name.as_bytes() == path
+            {
+                return Some(name);
+            }
+            position = at + 1;
+        }
+        None
     }
 
     /// Whether a multipart refusal is thrown, under `request_parse_body()`.
@@ -394,9 +432,14 @@ impl Request {
         self.http_globals.files = Some(files);
     }
 
-    /// One file an upload wrote, kept for `is_uploaded_file()`.
-    pub(crate) fn note_uploaded(&mut self, path: PathBuf) {
-        self.post.uploaded.push(path);
+    /// One file an upload wrote, kept for `is_uploaded_file()`:
+    /// `zend_hash_add_ptr(SG(rfc1867_uploaded_files), temp_filename, ...)`,
+    /// its temporary path a string on the request's heap and the key of
+    /// its row.
+    pub(crate) fn note_uploaded(&mut self, path: &[u8]) -> Result<(), Thrown> {
+        let mut table = self.uploaded_files()?;
+        let name = PhpString::new(self, path)?;
+        table.set(self, name.into_key(), Owner::null())
     }
 
     /// `php_rfc1867_callback` over one step: the chain entered from the
@@ -433,8 +476,7 @@ impl Variables<&Request> {
         self.0
             .post
             .uploaded
-            .iter()
-            .any(|file| file.as_os_str().as_encoded_bytes() == path)
+            .is_some_and(|table| table.find(path).is_some())
     }
 }
 
@@ -457,13 +499,10 @@ impl Variables<&mut Request> {
     /// `move_uploaded_file()`'s first half: take the upload's temporary
     /// path out of the request, once.
     pub fn take_uploaded_file(self, path: &[u8]) -> Option<PathBuf> {
-        let at = self
-            .0
-            .post
-            .uploaded
-            .iter()
-            .position(|file| file.as_os_str().as_encoded_bytes() == path)?;
-        Some(self.0.post.uploaded.remove(at))
+        let name = self.0.uploaded_name(path)?;
+        let mut table = self.0.post.uploaded?;
+        table.unset(self.0, &Key::Str(name)).ok()?;
+        Some(path_of(path))
     }
 
     /// The variables of the query string or the cookie header, parsed
@@ -472,7 +511,27 @@ impl Variables<&mut Request> {
     /// before `$_GET` and `$_COOKIE` are made; empty for any other input.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn input_variables(self, input: super::Input) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.input_variables_made(input);
-        adopted(made)
+        adopted(self.0.input_variables_made(input))
+    }
+}
+
+/// Where a content type's type ends: its first `;`, `,` or space, as
+/// `sapi_read_post_data` cuts it.
+fn type_end(content_type: &[u8]) -> usize {
+    (content_type.iter())
+        .position(|b| matches!(b, b';' | b',' | b' '))
+        .unwrap_or(content_type.len())
+}
+
+/// The path a temporary file's name is, its bytes as the system's.
+fn path_of(bytes: &[u8]) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        PathBuf::from(std::ffi::OsStr::from_bytes(bytes))
+    }
+    #[cfg(not(unix))]
+    {
+        PathBuf::from(String::from_utf8_lossy(bytes).into_owned())
     }
 }

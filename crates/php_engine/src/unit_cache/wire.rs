@@ -16,9 +16,8 @@ use php_heap::{Intern, Key, Zval, ZvalType};
 use php_unit::decl::{
     AliasModifier, Attribute, AttributeArgument, AttributeValidator, ClassConstDecl, ClassDecl,
     ClassFlags, ClassKind, ConstDecl, ConstExpr, ConstantName, DynamicProperties, EnumBacking,
-    FunctionDecl, HookKind, ImmutableArray, MethodDecl, Name, NameKind, Parameter,
-    ParameterDefault, PropertyDecl, PropertyHooks, Radix, TraitAdaptation, TraitMethodRef, Type,
-    Visibility,
+    FunctionDecl, HookKind, MethodDecl, Name, NameKind, Parameter, ParameterDefault, PropertyDecl,
+    PropertyHooks, Radix, TraitAdaptation, TraitMethodRef, Type, UnitValue, Visibility,
 };
 use php_unit::{
     AutoGlobal, BoundVar, ConstIdx, Diagnostic, Handler, HookBody, Level, LiveKind, LiveRange,
@@ -301,7 +300,7 @@ impl Wire for Zval {
                     };
                     entries.push((key, Zval::take(r)?));
                 }
-                Zval::array(r.strings.constant_array(&entries).ok()?)
+                Zval::array(r.strings.constant_array(&entries, entries.len()).ok()?)
             }
             k if k == ZvalType::ConstExpr as u8 => Zval::const_expr(u32::take(r)?),
             k if k == ZvalType::Ptr as u8 => Zval::ptr(u32::take(r)?),
@@ -407,7 +406,7 @@ record! {
         dynamic_func_defs, bound_vars, no_receiver, strict_types, return_mask, numeric_dims,
     }
     AttributeArgument { name, value }
-    Attribute { name, arguments, line, strict }
+    Attribute { name, arguments, line, strict, own_name }
     Parameter { name, ty, by_ref, prefer_ref, promoted, variadic, default, attributes }
     FunctionDecl {
         name, parameters, return_type, returns_by_ref, is_generator, attributes, doc_comment,
@@ -695,7 +694,9 @@ impl Wire for ConstExpr {
                 line,
             } => (21u8, (class, (method, line))).put(out),
             ConstExpr::ScopeClass => 22u8.put(out),
-            ConstExpr::ImmutableArray(array) => (23u8, array.value()).put(out),
+            // A request's counted array is in no unit the cache keeps.
+            ConstExpr::UnitValue(held) if held.value().is_refcounted() => None,
+            ConstExpr::UnitValue(held) => (23u8, held.value()).put(out),
         }
     }
     fn take(r: &mut Reader<'_>) -> Option<Self> {
@@ -793,7 +794,7 @@ impl Wire for ConstExpr {
                 line: Wire::take(r)?,
             },
             22 => ConstExpr::ScopeClass,
-            23 => ConstExpr::ImmutableArray(ImmutableArray::new(Wire::take(r)?)?),
+            23 => ConstExpr::UnitValue(UnitValue::new(Wire::take(r)?)?),
             _ => return None,
         })
     }

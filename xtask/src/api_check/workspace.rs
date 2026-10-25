@@ -3,6 +3,7 @@
 //! workspace dependencies are read from that file. Nothing is built and
 //! cargo is not run; the instrument reads manifests and sources.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -21,6 +22,9 @@ pub struct Present {
     /// The cargo package name; `php_ext_random` for `ext/random`.
     pub package: String,
     pub deps: Vec<Dep>,
+    /// The packages from outside the workspace it depends on, of every
+    /// kind, by package name (`openssl-sys`).
+    pub external: BTreeSet<String>,
     /// Whether its `Cargo.toml` carries `[lints] workspace = true`, the one
     /// way the root manifest's `[workspace.lints]` reaches a member (#2111).
     pub inherits_lints: bool,
@@ -113,9 +117,11 @@ impl Crates {
                 .and_then(|lints| lints.get("workspace"))
                 .and_then(Value::as_bool)
                 == Some(true);
+            let (deps, external) = dependencies(&table, &dir, root, &layout);
             present.push(Present {
                 name: row.name.clone(),
-                deps: deps(&table, &dir, root, &layout),
+                deps,
+                external,
                 inherits_lints,
                 dir,
                 package,
@@ -146,8 +152,14 @@ impl Crates {
 }
 
 /// The workspace dependencies of one `Cargo.toml`, of every kind, one
-/// entry per crate depended on: linked when any of its entries is.
-fn deps(table: &toml::Table, dir: &Path, root: &Path, layout: &Layout) -> Vec<Dep> {
+/// entry per crate depended on: linked when any of its entries is; and
+/// beside them every other package it depends on, by name.
+fn dependencies(
+    table: &toml::Table,
+    dir: &Path,
+    root: &Path,
+    layout: &Layout,
+) -> (Vec<Dep>, BTreeSet<String>) {
     const KINDS: [(&str, bool); 3] = [
         ("dependencies", true),
         ("dev-dependencies", false),
@@ -164,10 +176,11 @@ fn deps(table: &toml::Table, dir: &Path, root: &Path, layout: &Layout) -> Vec<De
             sections.extend(at.get(key).and_then(Value::as_table).map(|s| (s, linked)));
         }
     }
-    let mut out: Vec<Dep> = Vec::new();
+    let (mut out, mut external): (Vec<Dep>, BTreeSet<String>) = Default::default();
     for (section, linked) in sections {
         for (key, value) in section {
             let Some(name) = dep_crate(key, value, dir, root, layout) else {
+                external.insert(package_of(key, value).to_owned());
                 continue;
             };
             let alias = key.replace('-', "_");
@@ -181,7 +194,13 @@ fn deps(table: &toml::Table, dir: &Path, root: &Path, layout: &Layout) -> Vec<De
             }
         }
     }
-    out
+    (out, external)
+}
+
+/// The package one dependency entry names: its `package`, or its key.
+fn package_of<'a>(key: &'a str, value: &'a Value) -> &'a str {
+    let renamed = value.get("package").and_then(Value::as_str);
+    renamed.unwrap_or(key)
 }
 
 /// The manifest crate one dependency entry names: by its `path` when it
@@ -194,10 +213,5 @@ fn dep_crate(key: &str, value: &Value, dir: &Path, root: &Path, layout: &Layout)
         let rel = target.strip_prefix(normalize(root)).ok()?;
         return layout.name_of_path(rel);
     }
-    let package = entry
-        .get("package")
-        .and_then(Value::as_str)
-        .unwrap_or(key)
-        .replace('-', "_");
-    layout.name_of_package(&package)
+    layout.name_of_package(&package_of(key, value).replace('-', "_"))
 }

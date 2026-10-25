@@ -16,7 +16,7 @@
 use php_ext::coerce::c_str;
 use php_ext::coerce::{atoi, to_double, to_long, truthy};
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Level, Thrown, docref, throw_error};
+use php_ext::raising::{Level, Thrown, docref, value_error};
 use php_ext::request::{
     Handshake, Notification, NotifyCode, Opening, OptionAnswer, OwnedStream as _, Request,
     SocketOptions, Stream, StreamCtx, StreamOption, StreamWrapper, Streams as _, Xport,
@@ -354,11 +354,13 @@ fn php_trim(s: &[u8]) -> &[u8] {
 /// The flags one call of `php_stream_url_wrap_http_ex` is made with:
 /// `HTTP_WRAPPER_HEADER_INIT` for the first request of a chain, or
 /// `HTTP_WRAPPER_REDIRECTED` with `HTTP_WRAPPER_KEEP_METHOD` where a 307
-/// or a 308 keeps the method.
+/// or a 308 keeps the method, and `HTTP_WRAPPER_STRIP_AUTH` once the
+/// chain has left its first origin (GHSA-fpwc-w8rq-cr92), which every
+/// later hop keeps, back on the first origin as well.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hop {
     First,
-    Redirected { keep_method: bool },
+    Redirected { keep_method: bool, strip_auth: bool },
 }
 
 impl Hop {
@@ -371,13 +373,38 @@ impl Hop {
     }
 
     const fn keep_method(self) -> bool {
-        matches!(self, Hop::Redirected { keep_method: true })
+        matches!(
+            self,
+            Hop::Redirected {
+                keep_method: true,
+                ..
+            }
+        )
+    }
+
+    /// `HTTP_WRAPPER_STRIP_AUTH`: the user's `Authorization`, `Cookie`
+    /// and, off a proxy, `Proxy-Authorization` headers are not sent.
+    const fn strip_auth(self) -> bool {
+        matches!(
+            self,
+            Hop::Redirected {
+                strip_auth: true,
+                ..
+            }
+        )
     }
 
     /// Whether the request carries `content`: the first, and one a 307
     /// or a 308 redirected.
     const fn sends_content(self) -> bool {
-        matches!(self, Hop::First | Hop::Redirected { keep_method: true })
+        matches!(
+            self,
+            Hop::First
+                | Hop::Redirected {
+                    keep_method: true,
+                    ..
+                }
+        )
     }
 }
 
@@ -495,24 +522,22 @@ fn get_line(
     stream.get_line(req, maxlen)
 }
 
-/// How a request's socket is secured: not at all, by the `ssl`
-/// `transport`, or by a `CONNECT` through a `proxy` whose tunnel then
-/// carries TLS, whose `Proxy-Authorization` the request to the host
-/// leaves out.
+/// How one request reaches its host: over TLS (`use_ssl`) or not,
+/// through the `proxy` (`use_proxy`) or straight to it, and with the
+/// full URI on the request line (`request_fulluri`) or its path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ssl {
-    Off,
-    Direct,
-    Tunnel,
+#[allow(clippy::struct_excessive_bools)] // php's three locals of the one function
+struct Route {
+    use_ssl: bool,
+    use_proxy: bool,
+    request_fulluri: bool,
 }
 
-impl Ssl {
-    fn of(use_ssl: bool, use_proxy: bool) -> Ssl {
-        match (use_ssl, use_proxy) {
-            (false, _) => Ssl::Off,
-            (true, false) => Ssl::Direct,
-            (true, true) => Ssl::Tunnel,
-        }
+impl Route {
+    /// A `CONNECT` through the `proxy` whose tunnel then carries TLS,
+    /// whose `Proxy-Authorization` the request to the host leaves out.
+    const fn tunnel(self) -> bool {
+        self.use_ssl && self.use_proxy
     }
 }
 
@@ -732,14 +757,14 @@ fn wrap_http_ex(
             "{}(): Provided stream context has invalid value for the \"uri_parser_class\" option",
             req.frames().active_function_name()
         );
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     };
     let Some(mut resource) = parser.parse(req, c_str(path))? else {
         return Ok(None);
     };
     let scheme = resource.scheme.clone().unwrap_or_default();
     let web = scheme.eq_ignore_ascii_case(b"http") || scheme.eq_ignore_ascii_case(b"https");
-    let (use_ssl, use_proxy, request_fulluri, transport) = if web {
+    let (route, transport) = if web {
         if chain
             .mode
             .iter()
@@ -754,7 +779,12 @@ fn wrap_http_ex(
             resource.port = Some(if use_ssl { 443 } else { 80 });
         }
         if let Some(proxy) = &chain.options.proxy {
-            (use_ssl, true, request_fulluri, proxy.clone())
+            let route = Route {
+                use_ssl,
+                use_proxy: true,
+                request_fulluri,
+            };
+            (route, proxy.clone())
         } else {
             let host = resource.host.as_deref().map(c_str).unwrap_or_default();
             let mut transport = if use_ssl {
@@ -764,7 +794,12 @@ fn wrap_http_ex(
             };
             transport.extend_from_slice(host);
             transport.extend_from_slice(format!(":{}", resource.port.unwrap_or(0)).as_bytes());
-            (use_ssl, false, request_fulluri, transport)
+            let route = Route {
+                use_ssl,
+                use_proxy: false,
+                request_fulluri,
+            };
+            (route, transport)
         }
     } else {
         let Some(proxy) = chain.options.proxy.clone() else {
@@ -778,9 +813,15 @@ fn wrap_http_ex(
         };
         // Called from a non-http wrapper with http proxying asked for
         // (ftp).
-        (false, true, true, proxy)
+        let route = Route {
+            use_ssl: false,
+            use_proxy: true,
+            request_fulluri: true,
+        };
+        (route, proxy)
     };
-    if request_fulluri && c_str(path).iter().any(|b| matches!(b, b'\n' | b'\r')) {
+    let use_ssl = route.use_ssl;
+    if route.request_fulluri && c_str(path).iter().any(|b| matches!(b, b'\n' | b'\r')) {
         log(
             req,
             "HTTP wrapper full URI path does not allow CR or LF characters",
@@ -820,7 +861,7 @@ fn wrap_http_ex(
         }
     };
     let stream = match stream {
-        Some(stream) if use_ssl && use_proxy => tunnel(req, chain, stream, &resource)?,
+        Some(stream) if route.tunnel() => tunnel(req, chain, stream, &resource)?,
         stream => stream,
     };
     let mut info = HeaderInfo::new();
@@ -842,15 +883,7 @@ fn wrap_http_ex(
     {
         redirect_max = max;
     }
-    let request = request_bytes(
-        req,
-        chain,
-        path,
-        &mut resource,
-        Ssl::of(use_ssl, use_proxy),
-        request_fulluri,
-        hop,
-    );
+    let request = request_bytes(req, chain, path, &mut resource, route, hop);
     stream.write(req, &request);
     held!(req, stream, chain.headers(req));
     let status = held!(req, stream, read_status(req, chain, *stream));
@@ -939,6 +972,7 @@ fn wrap_http_ex(
             log_bytes(req, "Invalid redirect URL! ", &new_path);
             return out(req, chain, None, hop, &info, chunk_size);
         };
+        let same_origin = same_origin(&resource, &target, use_ssl);
         let controlled = [&target.user, &target.password, &target.path]
             .into_iter()
             .flatten()
@@ -948,12 +982,16 @@ fn wrap_http_ex(
             return out(req, chain, None, hop, &info, chunk_size);
         }
         let keep_method = matches!(status.code, 307 | 308);
+        let strip_auth = hop.strip_auth() || !same_origin;
         let redirected = wrap_http_ex(
             req,
             chain,
             &new_path,
             redirect_max - 1,
-            Hop::Redirected { keep_method },
+            Hop::Redirected {
+                keep_method,
+                strip_auth,
+            },
         )?;
         return out(req, chain, redirected, hop, &info, chunk_size);
     }
@@ -968,11 +1006,10 @@ fn request_bytes(
     chain: &mut Chain,
     path: &[u8],
     resource: &mut UriStruct,
-    ssl: Ssl,
-    request_fulluri: bool,
+    route: Route,
     hop: Hop,
 ) -> Vec<u8> {
-    let use_ssl = ssl != Ssl::Off;
+    let use_ssl = route.use_ssl;
     let options = &chain.options;
     let mut buf = Vec::new();
     let custom = options.method.as_ref().filter(|method| {
@@ -988,7 +1025,7 @@ fn request_bytes(
         }
         None => buf.extend_from_slice(b"GET "),
     }
-    if request_fulluri {
+    if route.request_fulluri {
         buf.extend_from_slice(c_str(path));
     } else {
         match resource
@@ -1016,11 +1053,20 @@ fn request_bytes(
     let mut have = Have::default();
     let mut user_headers = None;
     if let Some(header) = &options.header {
-        let mut bag = header.clone();
-        let mut lower = header.to_ascii_lowercase();
+        // php's bag is a C string from here on: what follows a NUL is
+        // neither searched, stripped nor sent.
+        let mut bag = c_str(header).to_vec();
+        let mut lower = bag.to_ascii_lowercase();
         if !hop.header_init() && !hop.keep_method() {
-            strip_header(&mut bag, &mut lower, b"content-length:");
-            strip_header(&mut bag, &mut lower, b"content-type:");
+            strip_header(&mut bag, &mut lower, b"content-length");
+            strip_header(&mut bag, &mut lower, b"content-type");
+        }
+        if hop.strip_auth() {
+            strip_header(&mut bag, &mut lower, b"authorization");
+            strip_header(&mut bag, &mut lower, b"cookie");
+            if !route.use_proxy {
+                strip_header(&mut bag, &mut lower, b"proxy-authorization");
+            }
         }
         have.user_agent = check_has_header(&lower, b"user-agent:");
         have.host = check_has_header(&lower, b"host:");
@@ -1029,7 +1075,7 @@ fn request_bytes(
         have.content_length = check_has_header(&lower, b"content-length:");
         have.content_type = check_has_header(&lower, b"content-type:");
         have.connection = check_has_header(&lower, b"connection:");
-        if ssl == Ssl::Tunnel {
+        if route.tunnel() {
             remove_proxy_authorization(&mut bag, &lower);
         }
         user_headers = (!bag.is_empty()).then_some(bag);
@@ -1136,23 +1182,114 @@ struct Have {
     connection: bool,
 }
 
-/// `strip_header`: the first `name` of the lowered bag, where it starts
-/// the bag or a line, taken out of both bags with its line and the
-/// `\n` that ends it, or with the rest of the bags where none does.
+/// `next_header_line`: where the line after the one at `at` starts,
+/// past its `\r`, its `\n` or its `\r\n`.
+fn next_header_line(bag: &[u8], mut at: usize) -> usize {
+    while at < bag.len() && !matches!(bag[at], b'\r' | b'\n') {
+        at += 1;
+    }
+    if bag.get(at) == Some(&b'\r') {
+        at += 1;
+    }
+    if bag.get(at) == Some(&b'\n') {
+        at += 1;
+    }
+    at
+}
+
+/// `strip_header`: every line of the lowered bag that opens with `name`,
+/// blanks allowed before its colon, taken out of both bags with the
+/// folded lines that carry the rest of its value; where nothing follows
+/// it, the line breaks before it too, so the `\r\n` sent after the bag
+/// does not close the header block early. The first chain leaves its
+/// origin, the second stays on it, and the third comes back to its
+/// origin from another, withheld all the same, as every hop after the
+/// one that left keeps `HTTP_WRAPPER_STRIP_AUTH`:
+///
+/// ```php
+/// $a = stream_socket_server('tcp://127.0.0.1:0');
+/// $b = stream_socket_server('tcp://127.0.0.1:0');
+/// $addrA = stream_socket_get_name($a, false);
+/// $addrB = stream_socket_get_name($b, false);
+/// $echo = function ($c) {
+///     preg_match_all('/^([A-Za-z-]+)[ \t]*:/m', fread($c, 4096), $m);
+///     $body = implode(',', $m[1]);
+///     fwrite($c, "HTTP/1.0 200 OK\r\nContent-Length: " . strlen($body) . "\r\n\r\n$body");
+///     fclose($c);
+/// };
+/// if (pcntl_fork() === 0) {
+///     $c = stream_socket_accept($a);
+///     fread($c, 4096);
+///     fwrite($c, "HTTP/1.0 302 Found\r\nLocation: http://$addrB/x\r\nContent-Length: 0\r\n\r\n");
+///     fclose($c);
+///     $echo(stream_socket_accept($b));
+///     $c = stream_socket_accept($a);
+///     fread($c, 4096);
+///     fwrite($c, "HTTP/1.0 302 Found\r\nLocation: /y\r\nContent-Length: 0\r\n\r\n");
+///     fclose($c);
+///     $echo(stream_socket_accept($a));
+///     $c = stream_socket_accept($a);
+///     fread($c, 4096);
+///     fwrite($c, "HTTP/1.0 302 Found\r\nLocation: http://$addrB/b\r\nContent-Length: 0\r\n\r\n");
+///     fclose($c);
+///     $c = stream_socket_accept($b);
+///     fread($c, 4096);
+///     fwrite($c, "HTTP/1.0 302 Found\r\nLocation: http://$addrA/back\r\nContent-Length: 0\r\n\r\n");
+///     fclose($c);
+///     $echo(stream_socket_accept($a));
+///     exit(0);
+/// }
+/// $ctx = stream_context_create(['http' => ['header' => "Authorization: Bearer x\r\n"
+///     . "Cookie : sid=1\r\n\tfolded\r\nX-Custom: 1\r\nProxy-Authorization: Basic eA=="]]);
+/// var_dump(file_get_contents("http://$addrA/", false, $ctx));
+/// var_dump(file_get_contents("http://$addrA/", false, $ctx));
+/// var_dump(file_get_contents("http://$addrA/z", false, $ctx));
+/// pcntl_wait($status);
+/// ```
+/// ```expect process
+/// string(24) "Host,Connection,X-Custom"
+/// string(65) "Host,Connection,Authorization,Cookie,X-Custom,Proxy-Authorization"
+/// string(24) "Host,Connection,X-Custom"
+/// ```
 fn strip_header(bag: &mut Vec<u8>, lower: &mut Vec<u8>, name: &[u8]) {
-    let Some(start) = lower.windows(name.len()).position(|w| w == name) else {
-        return;
-    };
-    if start != 0 && lower[start - 1] != b'\n' {
-        return;
+    let mut line = 0;
+    while line < lower.len() {
+        if !lower[line..].starts_with(name) {
+            line = next_header_line(lower, line);
+            continue;
+        }
+        let mut colon = line + name.len();
+        while matches!(lower.get(colon), Some(b' ' | b'\t')) {
+            colon += 1;
+        }
+        if lower.get(colon) != Some(&b':') {
+            line = next_header_line(lower, line);
+            continue;
+        }
+        let mut next = next_header_line(lower, line);
+        while matches!(lower.get(next), Some(b' ' | b'\t')) {
+            next = next_header_line(lower, next);
+        }
+        if next == lower.len() {
+            while line > 0 && matches!(lower[line - 1], b'\r' | b'\n') {
+                line -= 1;
+            }
+        }
+        bag.drain(line..next);
+        lower.drain(line..next);
     }
-    if let Some(eol) = lower[start..].iter().position(|b| *b == b'\n') {
-        bag.drain(start..=start + eol);
-        lower.drain(start..=start + eol);
-    } else {
-        bag.truncate(start);
-        lower.truncate(start);
-    }
+}
+
+/// Whether a redirect from `resource` to `target` stays on its origin:
+/// the same scheme and host, ignoring case, and the same `port`, the
+/// default of the request's own scheme standing in for one not given.
+fn same_origin(resource: &UriStruct, target: &UriStruct, use_ssl: bool) -> bool {
+    let default_port = if use_ssl { 443 } else { 80 };
+    let port = |uri: &UriStruct| uri.port.filter(|port| *port != 0).unwrap_or(default_port);
+    let same = |a: &Option<Vec<u8>>, b: &Option<Vec<u8>>| matches!((a, b), (Some(a), Some(b)) if a.eq_ignore_ascii_case(b));
+    same(&resource.scheme, &target.scheme)
+        && same(&resource.host, &target.host)
+        && port(resource) == port(target)
 }
 
 /// `check_has_header`: `name` anywhere in the lowered bag where it

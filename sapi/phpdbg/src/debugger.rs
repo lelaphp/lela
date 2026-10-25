@@ -370,7 +370,7 @@ fn idle_prompt(session: &mut Session, req: &mut Request, quits: bool) {
 /// `Could not open file`, and the context is not compiled. True where
 /// that is so.
 fn unopened(session: &mut Session, req: &mut Request) -> bool {
-    if read::pending(req).is_none() && !read::exiting(req) {
+    if !read::open_refused(req) {
         return false;
     }
     // `run` compiles it again, and writes the notice then.
@@ -538,11 +538,11 @@ fn drive(req: &mut Request, frame: FrameRef) -> Flow {
 /// [Successful compilation of %SCRATCH%/witness.php]
 /// prompt> 1
 /// prompt> 0
-/// prompt> [PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %SCRATCH%/witness.php on line 3]
+/// prompt> [PHP Fatal error:  Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %SCRATCH%/witness.php on line 3]
 /// >00003: $s = str_repeat("x", 4 << 20);
 ///  00004: echo "after\n";
-/// prompt> 1
-/// prompt> [Script ended normally]
+/// prompt> prompt> after
+/// [Script ended normally]
 /// prompt>
 /// ```
 pub fn fatal_logged(req: &mut Request) -> AfterLog {

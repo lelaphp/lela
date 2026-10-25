@@ -20,7 +20,7 @@ use crate::exec::IncludeKind;
 use crate::supplied::chain::{FileArgs, StringArgs};
 use crate::unit_cache::CompileRefused;
 
-use super::{HandlePath, HostPath, Opened, Refused, Request, Unresolved, is_wrapper_url};
+use super::{HandlePath, Opened, Request, Unresolved, is_wrapper_url};
 
 /// The request's code facet (design §4.4): the code the request compiles
 /// and serves beside its main file, includes and their resolution,
@@ -167,7 +167,12 @@ impl Request {
     ) -> Result<Option<Result<PublishedUnit, CompileRefused>>, Thrown> {
         let shared = Arc::clone(&self.shared);
         let top = Beneath::<chain::CompileFile>::top(shared.supplied.compile_file.links(), args);
-        Ok(top.serve(self)?.map(|compiled| compiled.0))
+        let compiled = top.serve(self);
+        // A delayed OOM the compile recorded is named at the site that
+        // was executing as it compiled, the `include` php reads, before
+        // the included file's frame stands above it.
+        self.locate_oom();
+        Ok(compiled?.map(|compiled| compiled.0))
     }
 
     /// `php_execute_script_ex` (`Z/main/main.c:2617`): the primary file
@@ -411,7 +416,7 @@ impl Request {
                     self.addref(&Value::string(opened_path));
                     Ok(opened_path)
                 }
-                None => self.interned(&script).map(Owner::hand_on),
+                None => self.new_interned(&script).map(Owner::hand_on),
             };
             held.and_then(|held| self.note_included_held(held)).ok();
         } else {
@@ -528,16 +533,16 @@ impl Request {
         if written.contains(&0) {
             return self.failed_opening(kind, written);
         }
-        let held = self.held_as_written(written);
+        let mut held = self.held_as_written(written);
         let resolved = match &held {
-            Some(held) => Ok(held.path.clone()),
+            Some((held, _)) => Ok(held.path.clone()),
             None => self.code_mut().resolve_path(written),
         };
         if kind.once()
             && held.is_none()
             && let Ok(path) = &resolved
         {
-            self.file_once_key(written, path);
+            held = self.file_once_key(written, path);
         }
         if kind.once()
             && let Ok(path) = &resolved
@@ -546,7 +551,8 @@ impl Request {
             return Ok(Opened::Already);
         }
         let path = match resolved {
-            Ok(path) if !is_wrapper_url(&path) => path,
+            // A stream the cache holds is served as a file it holds is.
+            Ok(path) if held.is_some() || !is_wrapper_url(&path) => path,
             // php's `resolved_path = zend_string_copy(inc_filename)` for a
             // path it could not resolve, which a stream wrapper opens.
             Ok(path) => return self.include_stream(kind, written, &path),
@@ -560,18 +566,15 @@ impl Request {
             Err(Unresolved::Missing(reason)) => {
                 // The plain files wrapper is handed the path as written,
                 // and asks the guard of it before it opens.
-                let reason = match self.include_guard(kind, written) {
-                    Ok(_) => reason,
-                    Err(refused) => refused.into(),
-                };
-                self.open_stream_failed(kind, written, &reason);
-                return self.failed_opening(kind, written);
+                let refused = self.include_guard(kind, written, written);
+                return refused.unwrap_or_else(|| self.not_opened(kind, written, &reason, written));
             }
         };
-        if let Err(refused) = self.include_guard(kind, &path) {
-            // The stream opens the resolved path, which its warning names.
-            self.open_stream_failed(kind, &path, &refused.into());
-            return self.failed_opening(kind, written);
+        // A file the lookup by the key found is opened by nothing here.
+        if held.is_none()
+            && let Some(failed) = self.include_guard(kind, &path, written)
+        {
+            return failed;
         }
         if kind.once() {
             // `zend_stream_open` before `zend_hash_add_empty_element(&EG(
@@ -581,25 +584,43 @@ impl Request {
             if held.is_none()
                 && let Err(reason) = readable(&path)
             {
-                self.open_stream_failed(kind, written, &reason);
-                return self.failed_opening(kind, written);
+                return self.not_opened(kind, written, &reason, written);
             }
             self.note_included(&path)?;
         }
-        // A unit the lookup by the key served is opcache's answer above
-        // every link; any other file is compiled through them all, inside
-        // the include, as `zend_include_or_eval` calls `zend_compile_file`.
-        let cached = if let Some(held) = held {
-            Some(self.held_answer(&held))
+        // A unit the lookup by the key found, fresh, is opcache's answer
+        // above every link; any other file is compiled through them all,
+        // inside the include, as `zend_include_or_eval` calls
+        // `zend_compile_file`. A stale one, discarded, is opened as a miss
+        // opens it: an include's through the path as written again, a once
+        // form's at the path it put in the table.
+        let served = held.map(|(held, how)| self.held_answer(&held, how, written, handle));
+        let served = served.transpose()?;
+        // What the opening names where it fails, `file_handle->filename`:
+        // a once form's stale file's the path it put in the table.
+        let named = if matches!(served, Some(None)) {
+            &path[..]
         } else {
-            let outer = self.include.including.replace((kind, self.vm.depth()));
-            let compiled = self.compile_file(&path, Some(written), handle);
-            self.include.including = outer;
-            compiled?
+            written
+        };
+        let cached = match served {
+            Some(Some(answer)) => Some(answer),
+            Some(None) if !kind.once() => return self.include_through(kind, written, handle),
+            stale => {
+                if stale.is_some()
+                    && let Some(failed) = self.include_guard(kind, &path, named)
+                {
+                    return failed;
+                }
+                let outer = self.include.including.replace((kind, self.vm.depth()));
+                let compiled = self.compile_file(&path, Some(written), handle);
+                self.include.including = outer;
+                compiled?
+            }
         };
         match cached {
             Some(Ok(unit)) => {
-                self.note_included(&path)?;
+                self.note_compiled_file(&path, &unit)?;
                 Ok(Opened::Unit(unit))
             }
             Some(Err(refused)) => Err(self.refused_include(&refused, &path, SourceKind::File)),
@@ -607,11 +628,7 @@ impl Request {
             // stat, or not readable. php's plain-files opener fails with
             // the system's `errno`, which its warning prints, so the
             // reason is what opening the path answers now.
-            None => {
-                let reason = unreadable(&path);
-                self.open_stream_failed(kind, written, &reason);
-                self.failed_opening(kind, written)
-            }
+            None => self.not_opened(kind, named, &unreadable(&path), named),
         }
     }
 
@@ -675,9 +692,11 @@ impl Request {
     }
 
     /// `php_plain_files_stream_opener`'s guard over the path an include
-    /// opens (`Z/main/streams/plain_wrapper.c:1265`), its warning named by
-    /// the construct: the resolved path, or the path as written where
-    /// none resolved, and the stream's warning naming the same.
+    /// of `written` opens (`Z/main/streams/plain_wrapper.c:1265`): the
+    /// include failed where it refuses the path, its warning named by the
+    /// construct, the resolved path, or the path as written where none
+    /// resolved, and the stream's warning naming the same; none where it
+    /// lets the path be opened.
     ///
     /// ```php
     /// ini_set('open_basedir', __DIR__);
@@ -691,19 +710,99 @@ impl Request {
     /// Warning: include(): Failed opening '/etc/hosts' for inclusion (include_path='%s') in %s on line 3
     /// bool(false)
     /// ```
-    fn include_guard(&mut self, kind: IncludeKind, path: &[u8]) -> Result<HostPath, Refused> {
+    ///
+    /// A file opcache's lookup by the path as written serves with nothing
+    /// due is opened by nothing, so nothing guards it:
+    ///
+    /// ```php
+    /// ini_set('opcache.revalidate_freq', 60);
+    /// $f = __DIR__ . '/guarded.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// var_dump(include $f);
+    /// ini_set('open_basedir', '/nonexistent');
+    /// var_dump(include $f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// int(1)
+    /// int(1)
+    /// ```
+    ///
+    /// and nor does one whose stat is due, which `do_validate_timestamps`
+    /// stats without opening it and finds unchanged
+    /// ([`Request::held_answer`]):
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/g.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// var_dump(include $f);
+    /// ini_set('open_basedir', '/nonexistent');
+    /// var_dump(include $f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// int(1)
+    /// int(1)
+    /// ```
+    ///
+    /// A once form's file the key found and its stat finds changed is
+    /// opened after the path went in the table, as php's
+    /// `zend_include_or_eval` puts it there before `persistent_compile_file`
+    /// validates it, so a refused open leaves the file included:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/e1.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// $g = realpath(__DIR__) . '/e2.inc'; file_put_contents($g, '<?php return 1;'); touch($g, time() - 60);
+    /// var_dump(opcache_compile_file($f), opcache_compile_file($g));
+    /// file_put_contents($g, '<?php return 2;'); touch($g, time() - 30);
+    /// ini_set('open_basedir', '/nonexistent');
+    /// var_dump(include_once $f, @include_once $g, in_array($g, get_included_files()), require_once $g);
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// bool(true)
+    /// int(1)
+    /// bool(false)
+    /// bool(true)
+    /// bool(true)
+    /// ```
+    ///
+    /// Its failure names that path, as `file_handle->filename` is, and
+    /// not the path as written:
+    ///
+    /// ```php
+    /// chdir(__DIR__);
+    /// file_put_contents('r2.inc', '<?php return 1;'); touch('r2.inc', time() - 60);
+    /// var_dump(opcache_compile_file('r2.inc'));
+    /// file_put_contents('r2.inc', '<?php return 2;'); touch('r2.inc', time() - 30);
+    /// ini_set('open_basedir', '/nonexistent');
+    /// var_dump(include_once 'r2.inc');
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    ///
+    /// Warning: include_once(): open_basedir restriction in effect. File(%s/r2.inc) is not within the allowed path(s): (/nonexistent) in %s on line 7
+    ///
+    /// Warning: include_once(%s/r2.inc): Failed to open stream: Operation not permitted in %s on line 7
+    ///
+    /// Warning: include_once(): Failed opening '%s/r2.inc' for inclusion (include_path='%s') in %s on line 7
+    /// bool(false)
+    /// ```
+    fn include_guard(
+        &mut self,
+        kind: IncludeKind,
+        path: &[u8],
+        written: &[u8],
+    ) -> Option<Result<Opened, Thrown>> {
         let outer = self.include.including.replace((kind, self.vm.depth()));
         let guarded = self.environment_mut().check_open_basedir(path, true);
         self.include.including = outer;
-        guarded
+        Some(self.not_opened(kind, path, &guarded.err()?.into(), written))
     }
 
     /// An include of a path a stream wrapper serves, `zend_stream_open`'s
     /// `php_stream_open_for_zend_ex` under `USE_PATH | REPORT_ERRORS |
     /// STREAM_OPEN_FOR_INCLUDE`: the stream opened as its wrapper opens it,
     /// the warnings raised under it naming the construct, read whole, and
-    /// compiled as a file under the path, a unit of the request's own
-    /// that nothing publishes, since opcache keeps plain files alone. The
+    /// compiled as a file under the path, held by the unit cache where
+    /// opcache's predicate admits the path, a `phar://` one
+    /// ([`FileArgs::cached`]), and the request's own otherwise. The
     /// path goes in the included-files table as the construct puts a
     /// file's there, before the compile for the once forms and after it
     /// for the others.
@@ -827,7 +926,7 @@ impl Request {
             }
             None => return self.failed_opening(kind, written),
         };
-        self.note_included(path)?;
+        self.note_compiled_file(path, &unit)?;
         Ok(Opened::Unit(unit))
     }
 
@@ -922,7 +1021,7 @@ impl Request {
     /// ([`Request::name_unit`]). The `Err` is the memory limit.
     fn eval_name(&mut self, file: &[u8], line: u32) -> Result<PhpString, Thrown> {
         const TAIL: &[u8] = b") : eval()'d code";
-        let line = crate::c_number::Long::of(i64::from(line));
+        let line = php_heap::LongText::long(i64::from(line));
         let parts = [file, b"(", line.as_bytes(), TAIL];
         let len = parts.iter().map(|part| part.len()).sum();
         self.string_with(len, |mut into| {
@@ -956,7 +1055,9 @@ impl Request {
         let args = StringArgs::new(code, name, position);
         let top =
             Beneath::<chain::CompileString>::top(shared.supplied.compile_string.links(), args);
-        Ok(top.serve(self)?.0)
+        let compiled = top.serve(self);
+        self.locate_oom();
+        Ok(compiled?.0)
     }
 
     /// `f` over a string the host evaluates of its own, `-r`'s code, the
@@ -1064,32 +1165,59 @@ impl Request {
         self.heap_mut().free_block(copy);
     }
 
-    /// `php_stream_open_wrapper`'s warning under `REPORT_ERRORS`, the
-    /// `Failed to open stream: %s` of `php_stream_display_wrapper_errors`
-    /// with `strerror(errno)`, raised through `php_error_docref1` with
-    /// the construct and the path as written as its origin.
-    pub(super) fn open_stream_failed(
+    /// The include of `written` failed where the stream it opens at
+    /// `named` does not open: `php_stream_open_wrapper`'s warning under
+    /// `REPORT_ERRORS`, the `Failed to open stream: %s` of
+    /// `php_stream_display_wrapper_errors` with `strerror(errno)`, raised
+    /// through `php_error_docref1` with the construct and `named` as its
+    /// origin, then [`Request::failed_opening`].
+    pub(super) fn not_opened(
         &mut self,
         kind: IncludeKind,
-        written: &[u8],
+        named: &[u8],
         reason: &std::io::Error,
-    ) {
+        written: &[u8],
+    ) -> Result<Opened, Thrown> {
         let reason = reason.to_string();
         let reason = reason
             .split_once(" (os error")
             .map_or(reason.as_str(), |(text, _)| text);
         let opener = self.opener(kind);
-        self.wrapper_warning(
-            &opener,
-            written,
-            &format!("Failed to open stream: {reason}"),
-        );
+        let named = crate::c_number::c_str(named);
+        self.wrapper_warning(&opener, named, &format!("Failed to open stream: {reason}"));
+        self.failed_opening(kind, written)
     }
 
     /// `php_message_handler_for_zend`'s `ZMSG_FAILED_INCLUDE_FOPEN` and
     /// `ZMSG_FAILED_REQUIRE_FOPEN` (`Z/main/main.c:1746`): the warning
     /// and `false` for an `include`, the `Error` for a `require`, each
-    /// naming the path as written and `include_path` as the ini has it.
+    /// naming the path as written, up to a NUL byte in it as its
+    /// `estrdup` reads it, and `include_path` as the ini has it.
+    ///
+    /// ```php
+    /// set_include_path('.');
+    /// var_dump(include "gone\0.php");
+    /// try { require "gone\0.php"; } catch (Error $e) { echo $e->getMessage(), "\n"; }
+    /// ```
+    /// ```expect
+    /// Warning: include(): Failed opening 'gone' for inclusion (include_path='.') in %s on line 3
+    /// bool(false)
+    /// Failed opening required 'gone' (include_path='.')
+    /// ```
+    ///
+    /// `opcache_compile_file` opens the path as C reads it, so its stream
+    /// warns first:
+    ///
+    /// ```php
+    /// set_include_path('.');
+    /// var_dump(opcache_compile_file("gone\0.php"));
+    /// ```
+    /// ```expect regime=jit-off
+    /// Warning: opcache_compile_file(gone): Failed to open stream: No such file or directory in %s on line 3
+    ///
+    /// Warning: opcache_compile_file(): Failed opening 'gone' for inclusion (include_path='.') in %s on line 3
+    /// bool(false)
+    /// ```
     pub(super) fn failed_opening(
         &mut self,
         kind: IncludeKind,
@@ -1098,11 +1226,10 @@ impl Request {
         let include_path =
             String::from_utf8_lossy(self.ini().get(b"include_path").unwrap_or_default())
                 .into_owned();
-        let shown = String::from_utf8_lossy(written).into_owned();
+        let shown = String::from_utf8_lossy(crate::c_number::c_str(written)).into_owned();
         if kind.required() {
-            return Err(crate::api::raising::throw_error(
+            return Err(crate::api::raising::error(
                 self,
-                "Error",
                 &format!("Failed opening required '{shown}' (include_path='{include_path}')"),
             ));
         }
@@ -1195,11 +1322,18 @@ impl Request {
             self.end_in_compile_time(error.level, &error.message, &file, line);
             return Thrown::of(None);
         }
+        // The compile met php 8.5.12's hard memory limit: `_exit(137)`
+        // where it asked, so nothing it declared stands and nothing it
+        // raised is rendered.
+        if let php_compile::Raise::HardLimit { limit, asked } = error.raise {
+            self.terminate_at_hard_limit(limit, asked);
+            return Thrown::of(None);
+        }
         let raised = error.raised.iter();
         if !error.bailed() {
             if matches!(kind, SourceKind::Eval(_)) {
                 for raised in raised.clone() {
-                    self.note_error_in(raised.level, &raised.message, path, raised.line);
+                    self.note_error_in(raised.level, raised.message.as_bytes(), path, raised.line);
                 }
             }
             let class = if error.level == Level::Parse {
@@ -1212,7 +1346,12 @@ impl Request {
             if kind == SourceKind::File {
                 self.while_pending(&thrown, |req| {
                     for raised in raised {
-                        req.note_error_in(raised.level, &raised.message, path, raised.line);
+                        req.note_error_in(
+                            raised.level,
+                            raised.message.as_bytes(),
+                            path,
+                            raised.line,
+                        );
                     }
                 });
             }
@@ -1226,7 +1365,7 @@ impl Request {
         let recording = (kind == SourceKind::File).then(|| self.begin_recording());
         if let Some(noted) = self.declare_refused(refused, path) {
             for raised in error.raised.get(noted..).unwrap_or_default() {
-                self.note_error_in(raised.level, &raised.message, path, raised.line);
+                self.note_error_in(raised.level, raised.message.as_bytes(), path, raised.line);
             }
             self.end_in_compile_time(error.level, &error.message, path, error.line);
         }
@@ -1308,6 +1447,32 @@ impl Request {
         self.note_included_held(held)
     }
 
+    /// The string a once form put in `EG(included_files)` for the file
+    /// at `full` before compiling it, its `opened_path`, which names
+    /// what the compile makes of it; none for any other compile.
+    pub(crate) fn opened_once(&self, full: &[u8]) -> Option<PhpString> {
+        let once = (self.include.including).is_some_and(|(kind, _)| kind.once());
+        self.included_files.held(full).filter(|_| once)
+    }
+
+    /// [`Request::note_included`] for the file `path` that `unit` was
+    /// compiled from or served as: `compile_filename`'s
+    /// `zend_hash_add_empty_element(&EG(included_files), opened_path)`,
+    /// whose `opened_path` is the string a request-only compile names its
+    /// op arrays' `filename` by, so a unit the request compiled for itself
+    /// lends the table its file's name and the path costs no string more;
+    /// a path is the bytes of no other name a unit holds.
+    fn note_compiled_file(&mut self, path: &[u8], unit: &PublishedUnit) -> Result<(), Thrown> {
+        let own = (self.unit_strings).file_of(PublishedUnit::as_ptr(unit), path);
+        match own.filter(|_| !self.included_files.contains(path)) {
+            Some(own) => {
+                self.addref(&Value::string(own));
+                self.note_included_held(own)
+            }
+            None => self.note_included(path),
+        }
+    }
+
     /// [`Request::note_included`] over `held`, a string whose one owner
     /// the table takes: one another place holds already, so no string is
     /// made; given up where the table has its path.
@@ -1379,7 +1544,7 @@ impl Code<&mut Request> {
             return Err(Thrown::of(self.0.take_pending_view()));
         }
         let standing = self.0.vm.depth();
-        let from = (self.0.caller_frame()).map_or(super::CodeFrom::Top(None), |frame| {
+        let from = (self.0.innermost_user_frame()).map_or(super::CodeFrom::Top(None), |frame| {
             super::CodeFrom::Nested(frame, None)
         });
         let callee = self.0.push_code_frame(unit, from);
@@ -1469,7 +1634,7 @@ fn readable(path: &[u8]) -> Result<(), std::io::Error> {
 
 /// Why the file at `path` cannot be read, as [`readable`] answers it; a
 /// file that opens now went and came back, and reads as gone.
-fn unreadable(path: &[u8]) -> std::io::Error {
+pub(super) fn unreadable(path: &[u8]) -> std::io::Error {
     readable(path)
         .err()
         .unwrap_or_else(|| std::io::Error::from(std::io::ErrorKind::NotFound))

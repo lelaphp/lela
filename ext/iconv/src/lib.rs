@@ -36,7 +36,7 @@ use php_ext::raising::{Level, Thrown, arg_value_error, docref};
 use php_ext::request::{
     BufferHandler, ContentType, HandlerCall, HandlerStatus, Request, Streams as _,
 };
-use php_ext::values::{Owner, PhpArray, PhpString};
+use php_ext::values::{FreshString, Owner, PhpArray, PhpString};
 
 /// Request-scoped: built at request start, dropped after `rshutdown`,
 /// private to this crate (ADR-0005); nothing in it is shared or synchronised.
@@ -300,6 +300,8 @@ enum Error {
     TooBig,
     Malformed,
     OutOfBounds,
+    /// `PHP_ICONV_ERR_ALLOC`: a fallible ask the memory limit refused.
+    Alloc,
     Unknown(Errno),
 }
 
@@ -347,6 +349,7 @@ fn failed<T>(req: &mut Request, error: Error, to: &[u8], from: &[u8]) -> Result<
         Error::TooBig => (false, "Buffer length exceeded".to_owned()),
         Error::Malformed => (false, "Malformed string".to_owned()),
         Error::Unknown(errno) => (true, format!("Unknown error ({})", errno.code())),
+        Error::Alloc => (true, format!("Unknown error ({})", ffi::errno().code())),
     };
     docref(req, if notice { Level::Notice } else { Level::Warning }, &text);
     Ok(OrFalse::False)
@@ -357,6 +360,71 @@ fn failed<T>(req: &mut Request, error: Error, to: &[u8], from: &[u8]) -> Result<
 fn convert(input: &[u8], to: &[u8], from: &[u8]) -> Result<Vec<u8>, Error> {
     let (out, result) = opened(to, from)?.convert(input);
     result.map(|()| out).map_err(Error::from)
+}
+
+/// `php_iconv_string` as php 8.5.12 makes it, into a string of the
+/// request's heap: `in_len + 32` bytes asked for fallibly
+/// (`zend_string_falloc`), grown by the input's length at each `E2BIG`
+/// and by 16 while the shift state is flushed, each growth fallible
+/// (`zend_string_fextend`); a refusal is php's `errno = 0` and so its
+/// unknown error, the delayed OOM recorded. The string cut to what was
+/// written, or the error, its string given back.
+fn iconv_string(
+    req: &mut Request,
+    input: &[u8],
+    to: &[u8],
+    from: &[u8],
+) -> Result<Result<FreshString, Error>, Thrown> {
+    let mut cd = match opened(to, from) {
+        Ok(cd) => cd,
+        Err(error) => return Ok(Err(error)),
+    };
+    let refused = Err(Error::Unknown(Errno::Other(0)));
+    let mut bsz = input.len() + 32;
+    let Some(mut out) = req
+        .memory_mut()
+        .fallible(|req| FreshString::new(req, bsz))?
+    else {
+        return Ok(refused);
+    };
+    let (mut used, mut rest, mut result) = (0, input, Ok(0));
+    while !rest.is_empty() {
+        let (written, step) = cd.step(Some(&mut rest), &mut out.bytes_mut()[used..]);
+        used += written;
+        result = step;
+        if result == Err(Errno::TooBig) && !rest.is_empty() {
+            bsz += input.len();
+            let Some(grown) = req.memory_mut().fallible(|req| out.extend(req, bsz))? else {
+                return Ok(refused);
+            };
+            out = grown;
+            continue;
+        }
+        break;
+    }
+    while result.is_ok() {
+        let (written, step) = cd.step(None, &mut out.bytes_mut()[used..]);
+        used += written;
+        result = step;
+        if result != Err(Errno::TooBig) {
+            break;
+        }
+        bsz += 16;
+        let Some(grown) = req.memory_mut().fallible(|req| out.extend(req, bsz))? else {
+            return Ok(refused);
+        };
+        out = grown;
+    }
+    match result {
+        Ok(_) => {
+            out.set_len(used);
+            Ok(Ok(out))
+        }
+        Err(errno) => {
+            out.free(req);
+            Ok(Err(Error::from(errno)))
+        }
+    }
 }
 
 /// `_php_iconv_strlen`: the characters counted eight bytes of
@@ -663,6 +731,19 @@ fn iconv_strrpos(
 /// bool(false)
 /// bool(false)
 /// ```
+///
+/// Since 8.5.12 the string is asked for fallibly, and each growth, so a
+/// conversion past the memory limit is refused there and the limit's fatal
+/// is raised as the call returns:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(iconv('ASCII', 'UTF-32', str_repeat('a', 5 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 5259264 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn iconv(
     req: &mut Request,
@@ -675,8 +756,8 @@ fn iconv(
         too_long(req);
         return Ok(OrFalse::False);
     }
-    match convert(string.as_bytes(), to, from) {
-        Ok(out) => Ok(OrFalse::Value(PhpString::new(req, &out)?)),
+    match iconv_string(req, string.as_bytes(), to, from)? {
+        Ok(out) => Ok(OrFalse::Value(out.finish())),
         Err(error) => failed(req, error, to, from),
     }
 }

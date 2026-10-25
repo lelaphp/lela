@@ -54,6 +54,11 @@
 //!   there, whether a side trace may grow from it, and the trace a `Link`
 //!   stop links to. Places that leave with an equal spec naming an opline
 //!   share one exit, php's reuse in `zend_jit_trace_get_exit_point`.
+//! - **php's `RECV` exits first.** An entered trace of a function with
+//!   typed parameters numbers the exits php's `zend_jit_recv` takes in
+//!   its prologue ahead of its own, though the prologue ran before
+//!   `Site::Entry` and no code tests them, so every later exit carries
+//!   php's number (#3269).
 //! - **No exit for a throw.** A kernel that leaves a throwable pending,
 //!   bails out or panics leaves through an [`Unwind`], which stores the
 //!   registers and is numbered apart from the exits, as php's compiled
@@ -72,7 +77,7 @@ mod opcodes;
 #[cfg(test)]
 mod tests;
 
-use php_engine::tier::{FuncRef, MapPtrRaw, PlainCall, UnitView};
+use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, UnitView};
 use php_heap::ZvalType;
 use php_unit::{ConstIdx, Opcode, OplineIdx};
 
@@ -157,6 +162,10 @@ pub(crate) struct FrameInfo {
     /// How many of its slots are variables; the temporaries follow.
     pub(crate) cvs: u32,
     pub(crate) temps: u32,
+    /// Where the op array's table of constants begins, the address of its
+    /// first zval, which the trace's epoch holds: where an inline form
+    /// reads a constant no scalar is from, php's `RT_CONSTANT`.
+    pub(crate) literals: usize,
 }
 
 /// How a frame stands to the trace's others.
@@ -249,8 +258,14 @@ pub(crate) enum Op {
         began: Began,
         plain: Option<PlainCall>,
     },
-    /// The frame a call pushed runs.
-    Enter { frame: Frame },
+    /// The frame a call pushed runs. `stores` are the values the caller
+    /// holds in registers, written to their slots as the call enters, so
+    /// that what reads the caller's frame where the trace does not, a
+    /// recursion's next turn, the interpreter past a recursive call or a
+    /// return trace, reads them there: php keeps no register across a call
+    /// into a frame its trace inlines (`zend_jit_trace_allocate_registers`,
+    /// `Z/ext/opcache/jit/zend_jit_trace.c:3169-3180`).
+    Enter { frame: Frame, stores: Vec<ValueId> },
     /// A return lands in `frame`, and `out` is what the call's slot holds
     /// after it, where the call keeps one. A return past the trace's
     /// lowest frame `escapes` unless the interpreter stands at that
@@ -321,7 +336,7 @@ pub(crate) enum Imm {
     /// takes it by value, which php decides as it compiles
     /// (`zend_jit_send_val`, `Z/ext/opcache/jit/zend_jit_ir.c:9466-9506`).
     Arg(u32),
-    /// The binary operator of an `ASSIGN_OP`.
+    /// The binary operator of an `ASSIGN_OP` or an `ASSIGN_DIM_OP`.
     Binary(Opcode),
     /// A `DO_*CALL` that makes a call compiled code pushed in place, and
     /// makes it the callee's frame in place where nothing refuses it
@@ -331,17 +346,110 @@ pub(crate) enum Imm {
     Make {
         returns: Option<u32>,
     },
-    /// A `RETURN` compiled code leaves its frame by in place where the
-    /// frame holds nothing the leave kernel must give up
+    /// A `RETURN` compiled code leaves its frame by in place
     /// (`zend_jit_leave_func`, `Z/ext/opcache/jit/zend_jit_ir.c:11035-11263`):
-    /// a function's frame and its value a scalar, with no observer
-    /// declared. `owners` where a variable of the frame may own something,
-    /// which the leave then tests as it leaves, leaving through the leave
-    /// kernel where one does, as php's `zend_jit_free_cv` tests each
-    /// variable its inference does not hold uncounted.
+    /// a function's frame, with no observer declared; what it hands its
+    /// caller, and the variables it gives up as it leaves ([`Owners`]).
     Leave {
-        owners: bool,
+        owners: Owners,
+        value: Returned,
     },
+    /// The types a `TYPE_CHECK` asks for, its `extended_value`: one bit
+    /// per type, `1 << IS_*`, php's `MAY_BE_*` mask.
+    Mask(u32),
+    /// A property opline compiled in place on the declared slot its name
+    /// is placed at on objects of the class a guard before it holds
+    /// (`zend_jit_fetch_obj`, `zend_jit_assign_obj`, `zend_jit_assign_obj_op`,
+    /// `zend_jit_incdec_obj`, `Z/ext/opcache/jit/zend_jit_ir.c:14206-15700`
+    /// over a known `prop_info`): where it finds the slot, and an
+    /// `ASSIGN_OBJ_OP`'s operator.
+    Property {
+        slot: Slotted,
+        binary: Option<Opcode>,
+    },
+}
+
+/// Where a property opline compiled in place finds its declared slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Slotted {
+    /// By its number, on objects of the published class a guard before
+    /// the opline holds.
+    Declared(u32),
+    /// In the request's own runtime-cache slot the opline reads
+    /// ([`Line::map_ptr`]), under the guard compiled code holds there on
+    /// its tag and its class, as php's code reads `CACHED_PTR(cache_slot)`
+    /// and the offset past it for a class that is not immutable
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`): a request-scoped
+    /// class's, whose id and slots are the request's.
+    Cached,
+}
+
+/// The object a property opline reads and a class guard holds: `$this`
+/// of a frame, `Z_OBJ(EX(This))`, or a value the trace holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Object {
+    This(Frame),
+    Value(ValueId),
+}
+
+/// The variables of a frame a `RETURN` left in place gives up, as php's
+/// trace compiles the loop over `op_array->last_var` before
+/// `zend_jit_leave_func` (`Z/ext/opcache/jit/zend_jit_trace.c:5586-5634`):
+/// each that the trace does not hold uncounted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Owners {
+    /// Every variable holds what no reference counts: the leave frees
+    /// nothing.
+    Uncounted,
+    /// The variables that may own something, each freed in place in slot
+    /// order, `zend_jit_free_cv` unrolled.
+    Each(Vars),
+    /// More variables than [`Vars`] holds, their type words tested at
+    /// once and the leave kernel's to free where one owns something, as
+    /// php calls `zend_free_compiled_variables` where it will not unroll
+    /// (`zend_jit_trace.c:5593-5598`).
+    Kernel,
+}
+
+/// A set of a frame's variables, by number, the first [`Vars::MAX`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Vars(u64);
+
+impl Vars {
+    /// How many variables a set can name.
+    pub(crate) const MAX: u32 = u64::BITS;
+
+    /// The set with `var` added; `None` past [`Vars::MAX`].
+    pub(crate) fn with(self, var: u32) -> Option<Vars> {
+        let bit = 1u64.checked_shl(var)?;
+        Some(Vars(self.0 | bit))
+    }
+
+    /// Whether the set names no variable.
+    pub(crate) fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The variables named, in slot order.
+    pub(crate) fn iter(self) -> impl Iterator<Item = u32> {
+        (0..Vars::MAX).filter(move |var| (self.0 >> var) & 1 == 1)
+    }
+}
+
+/// What a `RETURN` left in place hands its caller, as
+/// `zend_jit_return` writes it (`Z/ext/opcache/jit/zend_jit_ir.c:11265-11400`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Returned {
+    /// A scalar, or nothing, `null`.
+    Scalar,
+    /// A constant no reference counts, an immutable array or an interned
+    /// string, copied as it is (`ZVAL_COPY_CONST`): the address of its
+    /// zval among the op array's constants, which the trace's epoch
+    /// holds.
+    Constant(usize),
+    /// What a temporary holds, moved whole with its owner
+    /// (`ZVAL_COPY_VALUE`), given up where the caller reads no return.
+    Moved,
 }
 
 /// An operand as the op reads it.
@@ -402,8 +510,29 @@ pub(crate) enum Check {
     Type { value: ValueId, tag: ZvalType },
     /// The slot holds a reference, and what it refers to is of this type.
     Deref { value: ValueId, tag: ZvalType },
-    /// The array is laid out so: php's packed guard.
-    Layout { value: ValueId, layout: Layout },
+    /// The `VAR` holds the address of a zval, `IS_INDIRECT`, as a fetch
+    /// for writing leaves it, and that zval is of this type, php's
+    /// `zend_jit_fetch_indirect_var` (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`):
+    /// the `VAR`'s own type is tested where its value may be other than
+    /// [`Types::INDIRECT`], where php's `add_indirect_guard` is set, the
+    /// `indirect_reference` mark past an inline fetch for writing clear
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:5951`), a type here. Where the
+    /// zval it points at is a reference, the guard holds it one and the
+    /// value it refers to of this type, as php's `zend_jit_fetch_reference`
+    /// follows it after (`Z/ext/opcache/jit/zend_jit_ir.c:17021-17085`); the
+    /// exit goes back to the opline.
+    Indirect {
+        value: ValueId,
+        tag: ZvalType,
+        pointee: Pointee,
+    },
+    /// The array is laid out so, held in the slot or through the
+    /// reference the slot holds: php's packed guard.
+    Layout {
+        value: ValueId,
+        layout: Layout,
+        read: Read,
+    },
     /// The jump goes the way it went.
     Direction { taken: bool },
     /// The interpreter stands at this opline of this op array once the op
@@ -419,6 +548,11 @@ pub(crate) enum Check {
     /// exit goes back to the interpreter, which pushes the frame on a page
     /// of its own.
     Room { bytes: u32 },
+    /// The object is of this class, php's `zend_jit_class_guard`, which
+    /// compares `obj->ce` (`Z/ext/opcache/jit/zend_jit_ir.c:14191-14204`):
+    /// a published class, whose id names the one linked class in every
+    /// request of the trace's epoch.
+    Class { object: Object, class: ClassId },
     /// A table's jump went elsewhere than this opline: php's exit per
     /// target of `zend_jit_switch`, taken where the stepped jump went
     /// there and landing where it went, so exit-fuzz fails it never.
@@ -484,7 +618,9 @@ pub(crate) enum Grows {
     Side,
     /// The exit goes back to the interpreter alone and never grows one,
     /// php's `ZEND_JIT_EXIT_TO_VM`: a loop's interrupt test
-    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7223`).
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7223`), and an entered trace's
+    /// `RECV` exits, which `zend_jit_recv` takes
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10872`).
     Never,
 }
 
@@ -531,27 +667,87 @@ pub(crate) enum Stored {
     Copied { value: ValueId, read: Read },
 }
 
-/// How a fetched element is read: in place, or through the reference the
-/// element is.
+/// How a zval is read: in place, through the reference it is, or
+/// through the address an indirect `VAR` holds ([`Check::Indirect`]), to
+/// the zval there or the value of the reference it is: a fetched element,
+/// the array a layout guard holds, and the array an element write writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Read {
     InPlace,
     Through,
+    Indirect(Pointee),
+}
+
+/// What an indirect `VAR` is read as: the zval it points at, or the value
+/// of the reference that zval is, as php follows `zend_jit_fetch_indirect_var`
+/// with `zend_jit_fetch_reference` where the recorder saw both
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`, `:17021-17085`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Pointee {
+    Value,
+    Reference,
+}
+
+impl Read {
+    /// How the recorder reached the zval it sampled: through an
+    /// `IS_INDIRECT`, then through the `IS_REFERENCE` it points at where
+    /// it is one, through an `IS_REFERENCE`, or in place.
+    pub(crate) fn sampled(sample: php_engine::tier::Sample) -> Read {
+        match (sample.indirect, sample.reference) {
+            (false, false) => Read::InPlace,
+            (false, true) => Read::Through,
+            (true, false) => Read::Indirect(Pointee::Value),
+            (true, true) => Read::Indirect(Pointee::Reference),
+        }
+    }
 }
 
 /// What the trampoline does at an exit before the interpreter goes on
-/// (the glossary's Landing).
+/// (the glossary's Landing), beside standing the frame at its opline:
+/// two things apart, as php's exit frees an opline's operands and
+/// restores a call under way each on its own (`ZEND_JIT_EXIT_FREE_OP1`,
+/// `ZEND_JIT_EXIT_FREE_OP2`, `ZEND_JIT_EXIT_RESTORE_CALL`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Landing {
-    Plain,
-    /// The opline before the exit's read these temporaries, and compiled
-    /// code has not freed them yet.
-    FreeTemps {
-        op1: bool,
-        op2: bool,
-    },
-    /// A call an `INIT_*` began is under way, and is restored.
-    RestoreCall,
+pub(crate) struct Landing {
+    /// The temporaries the opline before the exit's read, which compiled
+    /// code has not freed yet.
+    pub(crate) frees: Frees,
+    /// Whether a call an `INIT_*` began is under way, and is restored.
+    pub(crate) restores_call: bool,
+}
+
+impl Landing {
+    /// A landing that stands the frame and does nothing else.
+    pub(crate) const PLAIN: Landing = Landing {
+        frees: Frees::NONE,
+        restores_call: false,
+    };
+
+    /// A landing that restores the call under way and frees nothing.
+    pub(crate) const RESTORE_CALL: Landing = Landing {
+        frees: Frees::NONE,
+        restores_call: true,
+    };
+}
+
+/// Which of the temporaries an opline read a landing frees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct Frees {
+    pub(crate) op1: bool,
+    pub(crate) op2: bool,
+}
+
+impl Frees {
+    /// None of them.
+    pub(crate) const NONE: Frees = Frees {
+        op1: false,
+        op2: false,
+    };
+
+    /// Whether it frees either.
+    pub(crate) fn any(self) -> bool {
+        self.op1 || self.op2
+    }
 }
 
 /// How the trace ends.
@@ -575,20 +771,26 @@ pub(crate) struct LoopHeader {
     /// The op the back edge goes to.
     pub(crate) at: OpId,
     pub(crate) repeat: Repeat,
-    /// Where the interrupt test leaves (`jit-design.md` §4.3).
+    /// Where the interrupt test leaves, or that the loop takes none
+    /// (`jit-design.md` §4.3).
     pub(crate) interrupt: Interrupt,
 }
 
 /// Where a loop's interrupt test goes once the interrupt is raised, as
 /// php's `zend_jit_trace` chooses its `timeout_exit_addr`
-/// (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7228`).
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:7210-7234`), or that it takes
+/// none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Interrupt {
     /// Through this exit, php's `ZEND_JIT_EXIT_TO_VM` exit point at the
     /// loop's header, which never grows a side trace, numbered after
     /// every exit of the loop's body as php takes it where it closes the
     /// loop: where php's code does not keep the instruction pointer the
-    /// trace entered with, or keeps values in registers there.
+    /// trace entered with, or keeps values in registers there. In an
+    /// entered trace whose first `RECV` takes an exit, and where the test
+    /// stores no register, it is that `RECV`'s, exit 0, landing at the
+    /// entry's opline, as php's test reuses the exit at opline zero
+    /// (`jit-design.md` §4.2, #3269).
     Exit(ExitId),
     /// Through php's interrupt stub, `jit_stub_interrupt_handler`, which
     /// takes no exit: the interrupt is handled and the trace entered again
@@ -598,6 +800,95 @@ pub(crate) enum Interrupt {
     /// end, so the interpreter needs nothing back. The header's opline,
     /// where the frame is stood for the stub.
     Stub(OplineIdx),
+    /// Nowhere: a loop by recursive return takes no test and numbers no
+    /// exit for one, as php's `zend_jit_trace` sets no
+    /// `timeout_exit_addr` where the trace stops at
+    /// `ZEND_JIT_TRACE_STOP_RECURSIVE_RET` and `zend_jit_trace_end_loop`
+    /// emits no check without one (`Z/ext/opcache/jit/zend_jit_ir.c:17378-17386`).
+    /// Each turn returns one frame shallower, so the loop ends where the
+    /// stack it unwinds does. Nor does a side trace's link to it test the
+    /// interrupt, as php sets no `ZEND_JIT_TRACE_CHECK_INTERRUPT` for it
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:7209-7212`).
+    ///
+    /// A recursion with no end that a trace by recursive return serves
+    /// meets the timeout all the same: the recursive call's loop tests
+    /// it, through the `RECV` exit its test reuses (#3269), and each
+    /// trace the recursion leaves hands the interpreter its interrupt
+    /// check, where the timeout's fatal is raised:
+    ///
+    /// ```php
+    /// set_time_limit(1);
+    /// function f(int $d) { if ($d === 0) { return 0; } $x = f($d - 1); $y = f($d - 1); return $x; }
+    /// echo f(60), "\n";
+    /// ```
+    /// ```expect exit=255 regime=jit-inline process wall=1s
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:2
+    /// ---- TRACE 1 abort (deep recursion)
+    ///
+    /// ---- TRACE 1 start (enter) f() %s:3
+    /// ---- TRACE 1 stop (recursive call)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 1 f() %s:3
+    /// ---- TRACE 2 start (side trace 1/1) f() %s:3
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (return) f() %s:3
+    /// ---- TRACE 3 stop (recursive return)
+    /// ---- TRACE 3 compiled
+    ///
+    ///      TRACE 3 exit 3 f() %s:3
+    /// ---- TRACE 4 start (side trace 3/3) f() %s:3
+    /// ---- TRACE 4 stop (link to 1)
+    /// ---- TRACE 4 compiled
+    /// ```
+    ///
+    /// So does a single recursion, whose returns the trace by recursive
+    /// return serves alone:
+    ///
+    /// ```php
+    /// set_time_limit(1);
+    /// function f($n) { return $n ? f($n - 1) + 1 : 0; } $t = true; while ($t) { f(50); }
+    /// ```
+    /// ```expect exit=255 regime=jit-inline process wall=1s
+    /// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+    /// ```
+    /// ```stderr
+    /// ---- TRACE 1 start (enter) $main() %s:2
+    /// ---- TRACE 1 abort (inner loop)
+    /// ---- TRACE 1 start (loop) $main() %s:3
+    /// ---- TRACE 1 abort (deep recursion)
+    ///
+    /// ---- TRACE 1 start (enter) f() %s:3
+    /// ---- TRACE 1 stop (recursive call)
+    /// ---- TRACE 1 compiled
+    ///
+    ///      TRACE 1 exit 1 f() %s:3
+    /// ---- TRACE 2 start (side trace 1/1) f() %s:3
+    /// ---- TRACE 2 stop (return)
+    /// ---- TRACE 2 compiled
+    ///
+    /// ---- TRACE 3 start (return) f() %s:3
+    /// ---- TRACE 3 stop (recursive return)
+    /// ---- TRACE 3 compiled
+    ///
+    /// ---- TRACE 4 start (loop) $main() %s:3
+    /// ---- TRACE 4 stop (link to 1)
+    /// ---- TRACE 4 compiled
+    /// ```
+    None,
+}
+
+impl Interrupt {
+    /// Whether the loop tests the interrupt, at its header and before a
+    /// side trace's link to it.
+    pub(crate) fn tested(self) -> bool {
+        !matches!(self, Interrupt::None)
+    }
 }
 
 /// What a looping trace repeats: php's three stops that make a loop.
@@ -646,6 +937,23 @@ pub(crate) fn cannot_raise(op: Opcode, by: Operand) -> bool {
 /// returns, where it declares a return type.
 pub(crate) fn declared(ty: &php_unit::decl::Type) -> Types {
     opcodes::of_type(Some(ty), false)
+}
+
+/// The property oplines compiled code serves in place on a declared slot
+/// ([`Imm::Property`]), whose place the recorder takes from the engine's
+/// cache once the handler has primed it (`UnitView::hold_place`).
+pub(crate) fn on_declared_slot(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        Opcode::FetchObjR
+            | Opcode::FetchObjW
+            | Opcode::AssignObj
+            | Opcode::AssignObjOp
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj
+    )
 }
 
 /// The trace `rec` builds, read through `view`, or why it builds none.

@@ -153,6 +153,183 @@ fn the_bench_arms_leave_one_tally() {
     assert!(calls(Through::Direct, 1000).is_ok_and(|t| t != 0));
 }
 
+/// A runtime-cache slot read as compiled code reads it, by pointer casts
+/// at the offsets `tier::PLACE` names, at the address the touch answers
+/// (#3346): a primed property's place, whose tag, class, offset tag, slot
+/// and type are the interpreter's, a call's slot, whose tag is another
+/// variant's, and both unprimed on a request whose first activation of
+/// the method the touch reads them at. A variant reordered or a
+/// representation drifted fails here rather than in a trace.
+mod touched {
+    use std::ptr;
+    use std::sync::OnceLock;
+
+    use php_engine::tier::{
+        self, Extension, ExtensionBuilder, Flow, FrameRef, MapPtrRaw, PLACE, PropertySlot, Request,
+        Site, Tier, UnitView,
+    };
+
+    use crate::testing::{self, Scratch, function_of, stdout};
+
+    /// The property's slot in `m`, once a request took its place.
+    static PLACED: OnceLock<MapPtrRaw> = OnceLock::new();
+
+    /// One slot as compiled code reads it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    struct Read {
+        tag: u32,
+        class: u32,
+        offset_tag: u8,
+        ty: u16,
+        number: u32,
+    }
+
+    /// What the tier read in one request, and the class of `$this`.
+    #[derive(Debug, Default)]
+    struct Seen {
+        reads: Vec<Read>,
+        class: u32,
+    }
+
+    /// `sizeof(void *)`: a slot's bytes as an opline numbers them.
+    const SLOT_BYTES: u32 = 8;
+
+    /// The slot at `address`, read at `PLACE`'s offsets: its tag, and what
+    /// stands past it only where the tag is a property's, as compiled code
+    /// reads it, since another variant's bytes there may hold nothing.
+    fn read(address: usize) -> Read {
+        let base = ptr::with_exposed_provenance::<u8>(address);
+        let at = |offset: u32| base.wrapping_add(offset as usize);
+        // SAFETY: `address` is a slot of the request's runtime cache, laid
+        // down for as long as the request runs, whose tag every variant
+        // writes at `PLACE.tag()`.
+        let tag = unsafe { at(PLACE.tag()).cast::<u32>().read_unaligned() };
+        if tag != PLACE.property() {
+            return Read {
+                tag,
+                class: 0,
+                offset_tag: 0,
+                ty: 0,
+                number: 0,
+            };
+        }
+        // SAFETY: the slot holds a property's place, whose class and
+        // offset's tag stand at the offsets `PLACE` names within it.
+        let class = unsafe { at(PLACE.class()).cast::<u32>().read_unaligned() };
+        // SAFETY: as above.
+        let offset_tag = unsafe { at(PLACE.offset_tag()).read() };
+        if offset_tag != PLACE.declared() {
+            return Read {
+                tag,
+                class,
+                offset_tag,
+                ty: 0,
+                number: 0,
+            };
+        }
+        // SAFETY: the offset is a declared slot's, whose type and number
+        // stand at the offsets `PLACE` names.
+        let ty = unsafe { at(PLACE.ty()).cast::<u16>().read_unaligned() };
+        // SAFETY: as above.
+        let number = unsafe { at(PLACE.slot()).cast::<u32>().read_unaligned() };
+        Read {
+            tag,
+            class,
+            offset_tag,
+            ty,
+            number,
+        }
+    }
+
+    /// At an activation of `m`: its property's slot and the call's slot
+    /// before it, touched and read, once a request took the place; and the
+    /// place taken where the handler primed it.
+    fn look(req: &mut Request, frame: FrameRef) {
+        let epoch = tier::epoch(req);
+        if let Some(raw) = PLACED.get().copied() {
+            let call = MapPtrRaw {
+                slot: raw.slot - SLOT_BYTES,
+                ..raw
+            };
+            for raw in [raw, call] {
+                if let Some(slot) = tier::touch(req, &epoch, raw) {
+                    req.state::<Seen>().reads.push(read(slot.address()));
+                }
+            }
+            return;
+        }
+        let (Some(class), Some(f)) = (tier::this_class(req, frame), tier::func(req, frame)) else {
+            return;
+        };
+        req.state::<Seen>().class = tier::class_number(class);
+        let Some(at) = tier::frame(req, frame)
+            .and_then(|view| view.op_array())
+            .and_then(|code| {
+                code.oplines()
+                    .find(|op| op.opcode().name() == "ZEND_FETCH_OBJ_R")
+                    .map(|op| op.at())
+            })
+        else {
+            return;
+        };
+        let mut view = UnitView::new(req);
+        if view.hold_place(req, frame, at, class)
+            && let Some(raw) = view.place(f, at, class).and_then(PropertySlot::cached)
+        {
+            PLACED.get_or_init(|| raw);
+        }
+    }
+
+    /// The tier that reads the slots at each activation of `m`.
+    struct Looking;
+
+    impl Tier for Looking {
+        type State = ();
+
+        fn safepoint(req: &mut Request, frame: FrameRef, site: Site, _: tier::Held<'_>) -> Flow {
+            if site == Site::Entry && function_of(req, frame).as_deref() == Some(&b"m"[..]) {
+                look(req, frame);
+            }
+            Flow::Continue
+        }
+
+        fn extension() -> Option<Extension> {
+            Some(
+                ExtensionBuilder::default()
+                    .request_state::<Seen>()
+                    .build("looking"),
+            )
+        }
+    }
+
+    #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+    #[test]
+    fn a_touched_slot_reads_as_the_interpreter_wrote_it() {
+        let engine = testing::engine::<Looking>(&[]);
+        let scratch = Scratch::new();
+        let program = "eval('class Base { }');
+            function g() { return 1; }
+            class K extends Base { public $a = 0; public $x = 7; function m() { return g() + $this->x; } }
+            $k = new K; echo $k->m() + $k->m() + $k->m(), \"\\n\";";
+        let (served, primed) = scratch.serve_kept::<Seen>(&engine, program);
+        assert_eq!(stdout(&served), "24\n");
+        let primed = primed.unwrap_or_default();
+        let [place, call] = primed.reads[..] else {
+            panic!("{primed:?}");
+        };
+        assert_eq!(place.tag, PLACE.property(), "{primed:?}");
+        assert_eq!(place.class, primed.class, "{primed:?}");
+        assert_eq!(place.offset_tag, PLACE.declared(), "{primed:?}");
+        let untyped = u32::from(place.ty) & PLACE.untyped();
+        assert_eq!((place.number, untyped), (1, PLACE.untyped()), "{primed:?}");
+        assert!(call.tag != PLACE.property() && call.tag != PLACE.unprimed());
+        let (_, fresh) = scratch.serve_kept::<Seen>(&engine, program);
+        let fresh = fresh.unwrap_or_default();
+        let tags: Vec<u32> = fresh.reads.iter().take(2).map(|slot| slot.tag).collect();
+        assert_eq!(tags, [PLACE.unprimed(); 2], "{fresh:?}");
+    }
+}
+
 /// Hand-assembled bodies entered through `enter` on real requests
 /// (`jit-design.md` §4.6 *Tested*), on the one target whose arena maps
 /// code today: a test tier enters, at a function's activation, the body
@@ -175,9 +352,25 @@ pub(crate) mod entered {
         Numbered, STOOD_CALL, STOOD_OPLINE, a64, answering, calling, compiled, landing,
     };
     use crate::testing::{self, Scratch, function_of, stdout};
-    use crate::types::Landing;
+    use crate::types::{Frees, Landing};
 
+    mod doors;
     mod parity;
+
+    /// `trace` entered on `frame` as the dispatch enters it: under what the
+    /// request lends where the tier laid its state, as a stand-in's
+    /// otherwise.
+    fn crossed<'t>(
+        req: &mut Request,
+        frame: FrameRef,
+        (epoch, trace): (&'t tier::Epoch, &'t crate::table::Trace),
+        at: super::super::At,
+    ) -> Result<super::super::Answered<'t>, Fatal> {
+        super::super::lent(req, |req, lent| {
+            enter(req, Some(lent.state), frame, (epoch, trace), at)
+        })
+        .unwrap_or_else(|| enter(req, None, frame, (epoch, trace), at))
+    }
 
     /// What a test enters, by the function whose activation enters it.
     trait Plan: 'static {
@@ -225,7 +418,9 @@ pub(crate) mod entered {
             else {
                 return Flow::Bail(Fatal::error("the body was not published"));
             };
-            match enter(req, frame, (&epoch, trace), crate::enter::At::First) {
+            match crossed(req, frame, (&epoch, trace), crate::enter::At::First)
+                .map(|answered| answered.left)
+            {
                 Ok(crate::enter::Left::Exit(exited)) => {
                     req.state::<Seen>().exits.push((function, exited.exit.0));
                     Flow::Resume(exited.frame)
@@ -236,6 +431,7 @@ pub(crate) mod entered {
                     | crate::enter::Left::Escaped(frame),
                 ) => Flow::Resume(frame),
                 Ok(crate::enter::Left::Declined) => Flow::Continue,
+                Ok(crate::enter::Left::Returned) => Flow::Returned,
                 Err(fatal) => Flow::Bail(fatal),
             }
         }
@@ -284,7 +480,7 @@ pub(crate) mod entered {
                 words.extend(a64::EPILOGUE);
                 compiled(
                     &words,
-                    vec![landing(1, Landing::Plain), landing(2, Landing::Plain)],
+                    vec![landing(1, Landing::PLAIN), landing(2, Landing::PLAIN)],
                 )
             })
         }
@@ -339,7 +535,7 @@ pub(crate) mod entered {
                 _ => return None,
             };
             let words = answering(calling(kernel.addr(), 0, &[], true), 0);
-            Some(compiled(&words, vec![landing(0, Landing::Plain)]))
+            Some(compiled(&words, vec![landing(0, Landing::PLAIN)]))
         }
     }
 
@@ -395,9 +591,12 @@ pub(crate) mod entered {
             let words = [a64::movz(0, 0), a64::EPILOGUE[1]];
             let exit = landing(
                 fetch + 1,
-                Landing::FreeTemps {
-                    op1: true,
-                    op2: false,
+                Landing {
+                    frees: Frees {
+                        op1: true,
+                        op2: false,
+                    },
+                    restores_call: false,
                 },
             );
             Some(compiled(&words, vec![exit]))
@@ -458,7 +657,10 @@ pub(crate) mod entered {
             words.extend(a64::EPILOGUE);
             Some(compiled(
                 &words,
-                vec![landing(1, Landing::RestoreCall), landing(0, Landing::Plain)],
+                vec![
+                    landing(1, Landing::RESTORE_CALL),
+                    landing(0, Landing::PLAIN),
+                ],
             ))
         }
     }

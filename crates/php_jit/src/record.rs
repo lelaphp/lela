@@ -35,7 +35,7 @@ use php_engine::tier::{
     self, Building, Epoch, Fatal, FrameRef, FuncRef, Request, SafepointIdx, Sample, Stepped,
     UnitView,
 };
-use php_heap::ZvalType;
+use php_heap::{ZvalType, constant_truth};
 use php_unit::{OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use crate::JitRequest;
@@ -759,8 +759,9 @@ pub(crate) enum Headed {
 
 /// `frame`, which a back edge of loop `header` left where it lands,
 /// stepped on to where php's trace of the loop is rooted and entered:
-/// php's heat and its trace stand at the loop's header, the condition
-/// of a `for` or a `while`, which the interpreter reaches past the body
+/// php's heat and its trace stand at the loop's header ([`loop_root`]),
+/// the condition of a `for` or a `while` that php's optimizer keeps,
+/// which the interpreter reaches past the body
 /// the back edge lands on, so a recording starts there and a trace is
 /// entered there, as php's handler at that opline is the trace. A call
 /// the body makes is stepped through; a fatal is the step's.
@@ -945,6 +946,34 @@ impl<'p> Recorder<'p> {
         policy::bad_stop(word, times)
     }
 
+    /// The opline at `at` of `func`, about to be served in `frame`,
+    /// written down as one `Op` with its operands sampled, and the native
+    /// a frameless call names taken into `view`
+    /// ([`UnitView::hold_frameless`]); its `op1`'s sample and how many
+    /// class records php's trace adds beside it ([`classes`]).
+    fn write_down(
+        &mut self,
+        req: &Request,
+        view: &mut UnitView,
+        frame: FrameRef,
+        (func, at): (FuncRef, OplineIdx),
+        (op, after): (&Opline, Option<&Opline>),
+    ) -> (Option<Sample>, u32) {
+        let (op1, op2, data) = sampled(req, frame, op, after);
+        self.events.push(Event::Op {
+            func,
+            opline: at,
+            op1,
+            op2,
+            data,
+            branch: None,
+        });
+        if op.opcode.is_frameless_icall() {
+            view.hold_frameless(req, op.extended_value);
+        }
+        (op1, classes(op, op1, op2))
+    }
+
     /// The recording loop from `frame`, rooted in `root`'s op array.
     fn record(
         &mut self,
@@ -977,17 +1006,8 @@ impl<'p> Recorder<'p> {
             if !stepped && behind.is_none() && unsupported(op.opcode) {
                 return Ok((Stop::NotSupported, ended(frame, false)));
             }
-            let (op1, op2, data) = sampled(req, frame, &op, after.as_ref());
-            let classes = u32::from(op1.is_some_and(|s| s.class.is_some()))
-                + u32::from(op2.is_some_and(|s| s.class.is_some()));
-            self.events.push(Event::Op {
-                func,
-                opline: at,
-                op1,
-                op2,
-                data,
-                branch: None,
-            });
+            let (op1, classes) =
+                self.write_down(req, view, frame, (func, at), (&op, after.as_ref()));
             if self.count(1 + classes) {
                 return Ok((Stop::TooLong, ended(frame, stepped)));
             }
@@ -1017,6 +1037,7 @@ impl<'p> Recorder<'p> {
             stepped = true;
             let went = match edge {
                 Stepped::Same(next) => {
+                    placed(req, view, (frame, next), (&op, at), op1);
                     frame = next;
                     self.same(req, view, frame, (&op, at, after.as_ref()), call)
                 }
@@ -1071,7 +1092,7 @@ impl<'p> Recorder<'p> {
     fn begun(
         &mut self,
         req: &Request,
-        view: &UnitView,
+        view: &mut UnitView,
         frame: FrameRef,
         root: FuncRef,
         behind: Option<OplineIdx>,
@@ -1084,17 +1105,10 @@ impl<'p> Recorder<'p> {
         let op = (view.op_array(root))
             .and_then(|code| code.oplines.get(condition.0 as usize).copied())
             .ok_or_else(|| Bailed::Fatal(off_the_end(condition)))?;
-        let (op1, op2, _) = sampled(req, frame, &op, None);
-        let classes = u32::from(op1.is_some_and(|s| s.class.is_some()))
-            + u32::from(op2.is_some_and(|s| s.class.is_some()));
-        self.events.push(Event::Op {
-            func: root,
-            opline: condition,
-            op1,
-            op2,
-            data: None,
-            branch: Some(true),
-        });
+        let (_, classes) = self.write_down(req, view, frame, (root, condition), (&op, None));
+        if let Some(Event::Op { branch, .. }) = self.events.last_mut() {
+            *branch = Some(true);
+        }
         Ok(self.count(1 + classes))
     }
 
@@ -1203,9 +1217,7 @@ impl<'p> Recorder<'p> {
             self.megamorphic.push(call.call);
         }
         let callee = Callee::of(req, call);
-        if callee.user().is_some() {
-            view.hold_call(req, call.call);
-        }
+        view.hold_call(req, call.call);
         self.events.push(Event::InitCall {
             callee,
             began: Began::Here,
@@ -1567,7 +1579,8 @@ pub(crate) fn sampled(
     );
     let op1 = op1_read
         .then(|| tier::sample(req, frame, op.op1_type, op.op1))
-        .flatten();
+        .flatten()
+        .or_else(|| on_this(op).then(|| this(req, frame)).flatten());
     let static_prop = matches!(
         op.opcode,
         Opcode::Instanceof
@@ -1613,6 +1626,59 @@ pub(crate) fn sampled(
     (op1, op2, data)
 }
 
+/// The place a property opline at `at`, stepped in `frame` and gone on
+/// in `next`, found on the object of the class its `op1` sample names,
+/// taken where it stays in its frame ([`UnitView::hold_place`]).
+fn placed(
+    req: &Request,
+    view: &mut UnitView,
+    (frame, next): (FrameRef, FrameRef),
+    (op, at): (&Opline, OplineIdx),
+    op1: Option<Sample>,
+) {
+    if next == frame
+        && let Some(class) = op1.and_then(|sample| sample.class)
+        && types::on_declared_slot(op.opcode)
+    {
+        view.hold_place(req, frame, at, class);
+    }
+}
+
+/// Whether `op` reads `$this` as its object, its `op1` unused: a property
+/// opline or a method's call on `$this`, whose class the recorder writes
+/// down as `op1`'s, as php's code generator reads `$this`'s class off
+/// the frame it compiles for.
+fn on_this(op: &Opline) -> bool {
+    op.op1_type == OperandKind::Unused
+        && (types::on_declared_slot(op.opcode)
+            || matches!(
+                op.opcode,
+                Opcode::InitMethodCall | Opcode::IssetIsemptyPropObj
+            ))
+}
+
+/// `$this` of `frame` sampled as an object of its class.
+fn this(req: &Request, frame: FrameRef) -> Option<Sample> {
+    tier::this_class(req, frame).map(|class| Sample {
+        kind: ZvalType::Object,
+        indirect: false,
+        reference: false,
+        packed: false,
+        class: Some(class),
+    })
+}
+
+/// php's `ZEND_JIT_TRACE_OP1_TYPE` and `_OP2_TYPE` records an opline
+/// takes, one per class its slotted operands hold: `$this`'s class, which
+/// this recorder writes down for a property opline and a method's call,
+/// php records only in a closure, so it is counted for no operand php
+/// samples no slot of.
+fn classes(op: &Opline, op1: Option<Sample>, op2: Option<Sample>) -> u32 {
+    let slotted = |kind: OperandKind| !matches!(kind, OperandKind::Unused | OperandKind::Const);
+    u32::from(slotted(op.op1_type) && op1.is_some_and(|s| s.class.is_some()))
+        + u32::from(op2.is_some_and(|s| s.class.is_some()))
+}
+
 /// Whether the frame a root's return landed in serves the same op array
 /// as the frame below it: php's `RECURSION_EXIT`.
 fn recursion_exits(req: &Request, caller: FrameRef) -> bool {
@@ -1644,10 +1710,18 @@ pub(crate) fn position(req: &Request, frame: FrameRef) -> OplineIdx {
     tier::frame(req, frame).map_or(OplineIdx(0), |view| view.opline())
 }
 
-/// The loop header standing at `at`, as php's trace roots it: the
-/// safepoint past the entry, and no return's own number, whose loop
-/// [`loop_root`] finds at `at`.
+/// The loop header standing at `at`, as php's trace roots it, where
+/// php's CFG finds a loop at all ([`found`]): [`loop_at`]'s.
 pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
+    loop_at(code, at).filter(|header| found(code, *header))
+}
+
+/// The loop whose root stands at `at`, counted or not: the safepoint
+/// past the entry, and no return's own number, whose loop [`loop_root`]
+/// finds at `at`. Its word says whether php counts it, which a claim
+/// asks ([`counts`]), so a return that lands here reads it with no walk
+/// of the op array (`dispatch::goes_on`).
+pub(crate) fn loop_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
     code.safepoints
         .iter()
         .enumerate()
@@ -1660,6 +1734,131 @@ pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
         .map(SafepointIdx)
 }
 
+/// Whether php counts the heat of loop `header`, whose back edge left
+/// `frame` where it lands: `zend_jit_setup_hot_trace_counters` swaps the
+/// handler of the header of each loop php's CFG finds
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:8954-8980`), and finds none where
+/// the header is not [`reachable`] from the entry but through a `catch`, so
+/// php never records such a loop, and its word is blacklisted at its
+/// first claim, with no line (`dispatch::hot`). An op array no trace
+/// reads is counted: its word reads sealed already.
+///
+/// The `try` throws in `$main` itself, so the code past its `catch` is
+/// reached through the `catch` alone, and the entry's recording aborts
+/// at the throw and roots nothing more, where a throw in a callee
+/// (`dispatch::safepoint`) leaves the loop a root:
+///
+/// ```php
+/// try { throw new Exception("x"); } catch (Exception $e) {}
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += $i; }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 abort (exception)
+///
+/// ```
+pub(crate) fn counts(req: &Request, frame: FrameRef, header: SafepointIdx) -> bool {
+    tier::served(req, frame).is_none_or(|held| found(held.code(), header))
+}
+
+/// Whether php's CFG finds loop `header`: its root is [`reachable`] from
+/// the entry, and so is a jump back to where its back edge lands, as
+/// `zend_cfg_identify_loops` finds a loop by a back edge from a block the
+/// entry reaches, an unreached block drawing no edge
+/// (`Z/Zend/Optimizer/zend_cfg.c:607-617`, `:778-880`). A `foreach`
+/// whose body always returns has none: the `JMP` its compiler emits past
+/// the body is dead, and php's trace records through the `FE_FETCH_R` as
+/// through any other opline.
+///
+/// ```php
+/// function first($a) { foreach ($a as $v) { return $v; } return 0; }
+/// $s = 0;
+/// for ($i = 0; $i < 3; $i++) { $s += first([$i, 9]); }
+/// echo $s, "\n";
+/// ```
+/// ```expect regime=jit-inline process capture
+/// 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %SCRATCH%/witness.php:3
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %SCRATCH%/witness.php:4
+/// ---- TRACE 1 stop (loop)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 2 $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 start (side trace 1/2) $main() %SCRATCH%/witness.php:5
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+/// ```
+pub(crate) fn found(code: &OpArray, header: SafepointIdx) -> bool {
+    let (Some(root), Some(&site)) = (
+        loop_root(code, header),
+        code.safepoints.get(header.0 as usize),
+    ) else {
+        return false;
+    };
+    let seen = reachable(code);
+    let reaches = |at: OplineIdx| seen.get(at.0 as usize).copied().unwrap_or(false);
+    let end = u32::try_from(code.oplines.len()).unwrap_or(u32::MAX);
+    reaches(root)
+        && (site.0..end)
+            .map(OplineIdx)
+            .any(|at| reaches(at) && tier::jump_targets(code, at).any(|to| to == site))
+}
+
+/// Per opline, whether it is reached from the op array's entry along
+/// the edges php's CFG draws (`zend_build_cfg`,
+/// `Z/Zend/Optimizer/zend_cfg.c:496-587`): each of its
+/// [`tier::jump_targets`], and the opline after each opline that has
+/// one, all
+/// but a return, a throw, a `MATCH_ERROR`, a `VERIFY_NEVER_TYPE`, a
+/// `FAST_RET`, a `JMP` and a `MATCH`. No edge enters a `catch` from the
+/// `try` it guards, so code reached through a `catch` alone has no
+/// immediate dominator (`zend_cfg_compute_dominators_tree`, `:694-724`),
+/// and `zend_cfg_identify_loops` looks for loops among the entry's
+/// dominator tree alone (`:832-844`). A throw inside an expression ends a
+/// block in php only where one starts past it; here it ends one always,
+/// which nothing observes, as the opline past a throw never runs.
+///
+/// `php_ssa`'s CFG and dominator tree replace this walk once ADR-0015's
+/// crate lands, and this tier reads its loop headers from there.
+fn reachable(code: &OpArray) -> Vec<bool> {
+    let mut seen = vec![false; code.oplines.len()];
+    let mut work = vec![OplineIdx(0)];
+    while let Some(at) = work.pop() {
+        let index = at.0 as usize;
+        let (Some(op), Some(seen)) = (code.oplines.get(index), seen.get_mut(index)) else {
+            continue;
+        };
+        if std::mem::replace(seen, true) {
+            continue;
+        }
+        work.extend(tier::jump_targets(code, at));
+        let ends = matches!(
+            op.opcode,
+            Opcode::Return
+                | Opcode::ReturnByRef
+                | Opcode::GeneratorReturn
+                | Opcode::Throw
+                | Opcode::MatchError
+                | Opcode::VerifyNeverType
+                | Opcode::FastRet
+                | Opcode::Jmp
+                | Opcode::Match
+        );
+        if !ends {
+            work.extend(at.0.checked_add(1).map(OplineIdx));
+        }
+    }
+    seen
+}
+
 /// The opline php's trace of loop `header` roots at, where the safepoint
 /// numbers an opline the back edge lands on: the block php's CFG finds
 /// as the loop's header (`zend_cfg_identify_loops`), the one
@@ -1670,6 +1869,53 @@ pub(crate) fn header_at(code: &OpArray, at: OplineIdx) -> Option<SafepointIdx> {
 /// the loop is entered at its condition, which dominates the body and is
 /// its header, while the back edge's `JMPNZ` lands on the body; every
 /// other loop is entered where its back edge lands.
+///
+/// php's CFG is built over the op array its optimizer left, which this
+/// engine runs none of (design §6.1, #1220), so a condition pass 1 folds
+/// as it is written, a jump on a constant operand, is read as folded: a
+/// `while (true)` or a `for (;;)`, whose condition is a jump on a
+/// constant php makes a `JMP` back to the body ([`folds_to_jmp`]), is
+/// headed at the body, where the back edge lands, and its condition is
+/// no header. The opline past a call that ends the
+/// body is then a landing a compiled trace arms ([`landings`]), as php's
+/// `zend_jit_trace_setup_ret_counter` arms the folded `JMP`, so a return
+/// trace is rooted there and links to the loop's (#3317):
+///
+/// ```php
+/// set_time_limit(1);
+/// function f($n) { return $n ? f($n - 1) + 1 : 0; }
+/// while (true) { f(50); }
+/// ```
+/// ```expect exit=255 regime=jit-inline process wall=1s
+/// Fatal error: Maximum execution time of 1 second exceeded in %s on line 3
+/// ```
+/// ```stderr
+/// ---- TRACE 1 start (enter) $main() %s:2
+/// ---- TRACE 1 abort (inner loop)
+/// ---- TRACE 1 start (loop) $main() %s:4
+/// ---- TRACE 1 abort (deep recursion)
+///
+/// ---- TRACE 1 start (enter) f() %s:3
+/// ---- TRACE 1 stop (recursive call)
+/// ---- TRACE 1 compiled
+///
+///      TRACE 1 exit 1 f() %s:3
+/// ---- TRACE 2 start (side trace 1/1) f() %s:3
+/// ---- TRACE 2 stop (return)
+/// ---- TRACE 2 compiled
+///
+/// ---- TRACE 3 start (return) f() %s:3
+/// ---- TRACE 3 stop (recursive return)
+/// ---- TRACE 3 compiled
+///
+/// ---- TRACE 4 start (loop) $main() %s:4
+/// ---- TRACE 4 stop (link to 1)
+/// ---- TRACE 4 compiled
+///
+/// ---- TRACE 5 start (return) $main() %s:4
+/// ---- TRACE 5 stop (link to 4)
+/// ---- TRACE 5 compiled
+/// ```
 pub(crate) fn loop_root(code: &OpArray, header: SafepointIdx) -> Option<OplineIdx> {
     code.safepoints
         .get(header.0 as usize)
@@ -1680,13 +1926,38 @@ pub(crate) fn loop_root(code: &OpArray, header: SafepointIdx) -> Option<OplineId
 fn rooted(code: &OpArray, site: OplineIdx) -> OplineIdx {
     before_body(code, site)
         .filter(|condition| {
-            // The condition's own jump back to the body, at or past the
-            // `JMP`'s target: a `JMP` past a loop entered where it lands,
-            // an `else`'s or a `break`'s, is followed by none.
-            (code.oplines.iter().skip(condition.0 as usize))
-                .any(|op| op.jump_target() == Some(site))
+            // A condition php keeps, with its own jump back to the body
+            // at or past the `JMP`'s target: a `JMP` past a loop entered
+            // where it lands, an `else`'s or a `break`'s, is followed by
+            // none.
+            !folds_to_jmp(code, *condition, site)
+                && (code.oplines.iter().skip(condition.0 as usize))
+                    .any(|op| op.jump_target() == Some(site))
         })
         .unwrap_or(site)
+}
+
+/// Whether the opline at `at` is a jump to `to` that php's optimizer
+/// makes a `JMP` there: a `JMPZ` or a `JMPNZ` on a constant whose truth
+/// takes it, which pass 1 rewrites as a `JMP` (and one that does not, as
+/// a `NOP`; `Z/Zend/Optimizer/pass1.c:315-333`). Standing where a `for`'s
+/// or a `while`'s `JMP` enters the loop, it is the whole of the
+/// condition's block, which the block pass then threads that `JMP`
+/// through onto the body, and drops as a jump to the next block
+/// (`Z/Zend/Optimizer/block_pass.c:1272-1295`), so php's CFG enters the
+/// loop at the body.
+fn folds_to_jmp(code: &OpArray, at: OplineIdx, to: OplineIdx) -> bool {
+    code.oplines.get(at.0 as usize).is_some_and(|op| {
+        let jumps_when = match op.opcode {
+            Opcode::Jmpnz => true,
+            Opcode::Jmpz => false,
+            _ => return false,
+        };
+        op.op1_type == OperandKind::Const
+            && op.jump_target() == Some(to)
+            && (code.literals.get(op.op1 as usize)).and_then(|value| constant_truth(*value))
+                == Some(jumps_when)
+    })
 }
 
 /// Where the `JMP` right before `site` goes, where it goes past it: a

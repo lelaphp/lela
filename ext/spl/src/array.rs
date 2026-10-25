@@ -29,7 +29,8 @@ use php_ext::attr::php_class;
 use php_ext::call::{autoload, call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{
-    Level, Thrown, deprecated, illegal_container_offset, throw, throw_error, warning,
+    Level, Thrown, deprecated, illegal_container_offset, throw, throw_error, throw_exception_ex,
+    warning,
 };
 use php_ext::request::Request;
 use php_ext::values::walk;
@@ -830,7 +831,7 @@ impl ArrayObject {
         if let Some(name) = class.and_then(|c| c.as_str_bytes().map(<[u8]>::to_vec)) {
             let shown = String::from_utf8_lossy(&name).into_owned();
             let Some(found) = autoload(req, &name)? else {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "UnexpectedValueException",
                     &format!(
@@ -839,7 +840,7 @@ impl ArrayObject {
                 ));
             };
             if !crate::is_a(req, found, b"Iterator") {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "UnexpectedValueException",
                     &format!(
@@ -1192,7 +1193,7 @@ impl ArrayIterator {
                 return Ok(());
             }
         }
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "OutOfBoundsException",
             &format!("Seek position {position} is out of range"),
@@ -1726,7 +1727,7 @@ fn read(req: &mut Request, object: PhpObject, offset: &Value, warn: bool) -> Res
         Ok(value.deref())
     } else {
         if warn {
-            warning(req, &format!("Undefined array key {}", shown(&key)));
+            undefined_key(req, &key);
         }
         Ok(Value::null())
     }
@@ -1769,7 +1770,7 @@ fn place(
         match read {
             DimensionRead::Unset => return Ok(None),
             DimensionRead::ReadWrite => {
-                warning(req, &format!("Undefined array key {}", shown(&key)));
+                undefined_key(req, &key);
             }
             _ => {}
         }
@@ -1871,12 +1872,31 @@ fn refuse_readonly(req: &mut Request, backing: PhpObject, key: &Key) -> Result<(
 }
 
 /// A key as php's `Undefined array key` warning shows it, a string
-/// quoted.
-fn shown(key: &Key) -> String {
+/// quoted and read to its first NUL, as `spl_array_get_dimension_ptr`'s
+/// `%s` reads it (`Z/ext/spl/spl_array.c:354`).
+///
+/// ```php
+/// $o = new ArrayObject([]); echo $o["foo\0bar"];
+/// ```
+/// ```expect
+/// Warning: Undefined array key "foo" in %s on line 2
+/// ```
+fn shown(key: &Key) -> Vec<u8> {
     match key {
-        Key::Int(n) => n.to_string(),
-        Key::Str(s) => format!("\"{}\"", String::from_utf8_lossy(s.as_bytes())),
+        Key::Int(n) => n.to_string().into_bytes(),
+        // `"%s"`: the key to its first NUL, its bytes as they stand.
+        Key::Str(s) => [b"\"", php_ext::coerce::c_str(s.as_bytes()), b"\""].concat(),
     }
+}
+
+/// `Undefined array key %ld` and `Undefined array key "%s"`, the warning
+/// `spl_array_get_dimension_ptr` raises for a key the storage does not
+/// hold ([`shown`]).
+fn undefined_key(req: &mut Request, key: &Key) {
+    warning(
+        req,
+        &[b"Undefined array key ".as_slice(), &shown(key)].concat(),
+    );
 }
 
 /// `spl_array_write_dimension_ex` without the overrides; the value is
@@ -2270,7 +2290,7 @@ impl ObjectHandlers for Handlers {
         let table = table(req, object)?;
         if table.get(req, &key)?.is_none() {
             if fetch == DimensionRead::ReadWrite {
-                warning(req, &format!("Undefined array key {}", shown(&key)));
+                undefined_key(req, &key);
             }
             table.set(req, &key, Owner::null())?;
         }
@@ -2452,6 +2472,26 @@ impl ObjectHandlers for Handlers {
         Std.unset_property(req, object, name)
     }
 
+    /// `spl_array_compare_objects`: `zend_compare_symbol_tables` over the
+    /// two tables `spl_array_get_hash_table` answers, then
+    /// `zend_std_compare_objects` where they are equal. Two arrays are
+    /// compared where they stand, which holds both for the walk and gives
+    /// each up after it as a possible root, as php's compare does; a
+    /// table of an object's properties is compared as a copy of its rows.
+    ///
+    /// ```php
+    /// function t() {
+    ///     $x = [1]; $x[] = 2; $y = [1]; $y[] = 2;
+    ///     $a = new ArrayObject($x); $b = new ArrayObject($y); unset($x, $y);
+    ///     $before = gc_status()['roots'];
+    ///     var_dump($a == $b, gc_status()['roots'] - $before);
+    /// }
+    /// t();
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(2)
+    /// ```
     fn compare(
         &self,
         req: &mut Request,
@@ -2464,11 +2504,25 @@ impl ObjectHandlers for Handlers {
         if l.native::<SplArrayObject>(req).is_none() || r.native::<SplArrayObject>(req).is_none() {
             return Std.compare(req, left, right);
         }
-        let a = table(req, l)?.copy(req)?;
-        let b = table(req, r)?.copy(req)?;
-        let ordering = compare(req, &Value::array(*a), &Value::array(*b));
-        a.give_up(req);
-        b.give_up(req);
+        let ordering = match (table(req, l)?, table(req, r)?) {
+            (Table::Array(_, a), Table::Array(_, b)) => {
+                compare(req, &Value::array(a), &Value::array(b))
+            }
+            (a, b) => {
+                let a = a.copy(req)?;
+                let b = match b.copy(req) {
+                    Ok(b) => b,
+                    Err(thrown) => {
+                        a.give_up(req);
+                        return Err(thrown);
+                    }
+                };
+                let ordering = compare(req, &Value::array(*a), &Value::array(*b));
+                a.give_up(req);
+                b.give_up(req);
+                ordering
+            }
+        };
         match ordering? {
             Ordering::Equal => Std.compare(req, left, right),
             other => Ok(Some(other)),
@@ -2652,7 +2706,7 @@ fn set_array(
                     crate::class_name(req, other.class()),
                     crate::class_name(req, object.class()),
                 );
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "InvalidArgumentException",
                     &format!(
@@ -2665,7 +2719,7 @@ fn set_array(
             if crate::is_a(req, other.class(), b"UnitEnum") {
                 let class =
                     String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "InvalidArgumentException",
                     &format!("Enums are not compatible with {class}"),

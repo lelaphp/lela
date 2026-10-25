@@ -28,7 +28,7 @@ use crate::api::abi::{
     Instance, NamedVariadic, ObjectHandlers, Passed, Raw, Refusals, Static, This, Union, Untyped,
 };
 use crate::api::call::{Function, Target, write_prop};
-use crate::api::raising::{Thrown, throw, throw_error, throw_over_pending, warning};
+use crate::api::raising::{Printing, Thrown, error, throw, throw_over_pending, warning};
 use crate::api::request::{Refusal, Request};
 use crate::api::values::{
     ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value, adopted, adopted_some,
@@ -113,11 +113,7 @@ impl ObjectHandlers for ClosureHandlers {
     ///   thrown in %s on line 2
     /// ```
     fn get_constructor(&self, req: &mut Request, _: PhpObject) -> Result<Option<Function>, Thrown> {
-        Err(throw_error(
-            req,
-            "Error",
-            "Instantiation of class Closure is not allowed",
-        ))
+        Err(error(req, "Instantiation of class Closure is not allowed"))
     }
 
     /// `zend_closure_free_storage`: `zend_object_std_dtor` first, which
@@ -465,7 +461,7 @@ impl ObjectHandlers for ClosureHandlers {
             && x.called_scope == y.called_scope
             && kind(x.function) == kind(y.function)
             && req.method_class(x.function) == req.method_class(y.function)
-            && req.function_name(x.function) == req.function_name(y.function);
+            && req.declared_name(x.function) == req.declared_name(y.function);
         Ok(same.then_some(Ordering::Equal))
     }
 }
@@ -857,11 +853,7 @@ impl Closure {
     #[php(private, arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        Err(throw_error(
-            req,
-            "Error",
-            "Instantiation of class Closure is not allowed",
-        ))
+        Err(error(req, "Instantiation of class Closure is not allowed"))
     }
 
     /// `Closure::bind(Closure $closure, ?object $newThis, object|string|null $newScope = "static"): ?Closure`,
@@ -894,12 +886,7 @@ impl Closure {
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
     ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
-        adopted_some(do_closure_bind(
-            req,
-            closure.object(),
-            newThis,
-            NewScope::of(newScope),
-        ))
+        adopted_some(do_closure_bind(req, closure.object(), newThis, newScope))
     }
 
     /// `Closure::bindTo(?object $newThis, object|string|null $newScope = "static"): ?Closure`,
@@ -969,12 +956,7 @@ impl Closure {
         newThis: Option<PhpObject>,
         #[php(default = "static")] newScope: Option<Union<PhpObject, PhpString>>,
     ) -> Result<Option<Owner<Instance<Closure>>>, Thrown> {
-        adopted_some(do_closure_bind(
-            req,
-            this.object(),
-            newThis,
-            NewScope::of(newScope),
-        ))
+        adopted_some(do_closure_bind(req, this.object(), newThis, newScope))
     }
 
     /// `Closure::call(object $newThis, mixed ...$args): mixed`,
@@ -1193,6 +1175,7 @@ impl Closure {
         {
             return Err(throw_over_pending(
                 req,
+                Printing::Buffered,
                 "TypeError",
                 "Failed to create closure from callable",
             ));
@@ -1203,6 +1186,7 @@ impl Closure {
             Err(Refusal::Unsaid) => {
                 return Err(throw_over_pending(
                     req,
+                    Printing::Buffered,
                     "TypeError",
                     "Failed to create closure from callable",
                 ));
@@ -1210,7 +1194,7 @@ impl Closure {
             Err(refusal) => {
                 return Err(refusal.across(req, |req| {
                     let message = format!("Failed to create closure from callable: {refusal}");
-                    throw_over_pending(req, "TypeError", &message)
+                    throw_over_pending(req, Printing::Buffered, "TypeError", &message)
                 }));
             }
         };
@@ -1234,11 +1218,7 @@ impl Closure {
     /// ```
     fn getCurrent(req: &mut Request) -> Result<Instance<Closure>, Thrown> {
         let Some(closure) = req.calling_closure() else {
-            return Err(throw_error(
-                req,
-                "Error",
-                "Current function is not a closure",
-            ));
+            return Err(error(req, "Current function is not a closure"));
         };
         Ok(Instance::of(closure))
     }
@@ -1319,7 +1299,25 @@ pub(crate) enum CallFrame {
 /// other callee is `zend_create_fake_closure` over it, its scope the
 /// class that declares it, bound to the frame's receiver, and its
 /// called scope the receiver's class where it has one and the frame's
-/// called scope where it has none.
+/// called scope where it has none. One bound to no receiver is marked
+/// uncollectable, as `zend_create_fake_closure` marks it, so it is never
+/// a possible root; one bound to a receiver is:
+///
+/// ```php
+/// class X { public $f; }
+/// class M { function m() {} static function s() {} }
+/// $x = new X; $x->f = strlen(...); $c = $x->f; unset($c);
+/// $s = M::s(...); $s2 = $s; unset($s2);
+/// $w = Closure::fromCallable('strlen'); $v = $w; unset($v);
+/// var_dump(gc_status()['roots']);
+/// $m = new M; $b = $m->m(...); $b2 = $b; unset($b2);
+/// var_dump(gc_status()['roots'], ($x->f)("abc"));
+/// ```
+/// ```expect
+/// int(0)
+/// int(2)
+/// int(3)
+/// ```
 pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<PhpObject, Thrown> {
     let (function, this, called_scope) = match frame {
         CallFrame::Closure(closure) => {
@@ -1353,13 +1351,20 @@ pub(crate) fn closure_from_frame(req: &mut Request, frame: CallFrame) -> Result<
         bound: None,
         fake: true,
     };
-    create_closure(
+    let made = create_closure(
         req,
         (&fake, ClosureCache::Function),
         scope,
         called_scope,
         this,
-    )
+    )?;
+    // `zend_create_fake_closure`'s `GC_ADD_FLAGS(&closure->std,
+    // GC_NOT_COLLECTABLE)` where no receiver is bound: such a closure is
+    // part of no cycle, so no release offers it to the collector.
+    if this.is_none() {
+        made.heap().set_uncollectable();
+    }
+    Ok(made)
 }
 
 /// `zend_ast_evaluate`'s `ZEND_AST_OP_ARRAY` arm: a closure of a
@@ -1393,21 +1398,17 @@ pub(crate) fn const_expr_closure(
     at: u32,
     scope: Option<ClassId>,
 ) -> Result<PhpObject, Thrown> {
+    let missing =
+        "InternalError: a constant expression's closure naming a function its unit has not";
     let Some((_, body)) = unit.dynamic.get(at as usize) else {
-        return Err(crate::api::raising::fatal(
-            req,
-            "InternalError: a constant expression's closure naming a function its unit has not",
-        ));
+        return Err(crate::api::raising::fatal(req, missing));
     };
     let bound = crate::exec::starting_statics(req, body)?;
     let Some(function) = req.closure_function(unit, at) else {
         if let Some(bound) = bound {
             req.release(Value::array(bound));
         }
-        return Err(crate::api::raising::fatal(
-            req,
-            "InternalError: a constant expression's closure naming a function its unit has not",
-        ));
+        return Err(crate::api::raising::fatal(req, missing));
     };
     let info = ClosureInfo {
         function,
@@ -1432,11 +1433,7 @@ pub(crate) fn const_expr_closure(
 /// not (`zend_call_known_fcc`); what it returns is the call's.
 pub(crate) fn closure_invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> {
     let Some(this) = req.frames().this() else {
-        return Err(throw_error(
-            req,
-            "Error",
-            "Closure::__invoke called with no receiver",
-        ));
+        return Err(error(req, "Closure::__invoke called with no receiver"));
     };
     let arguments: Vec<Value> = (1..=u32::try_from(req.frames().argument_count())
         .unwrap_or(u32::MAX))
@@ -2229,24 +2226,6 @@ fn throwable_property<T: FromArgument>(
     Raw::from_value(req, value)
 }
 
-/// The `object|string|null $newScope` of `bind` and `bindTo`,
-/// `Z_PARAM_OBJ_OR_STR_OR_NULL` with php's default `"static"`.
-enum NewScope {
-    Object(PhpObject),
-    Named(Vec<u8>),
-    Null,
-}
-
-impl NewScope {
-    fn of(scope: Option<Union<PhpObject, PhpString>>) -> NewScope {
-        match scope {
-            Some(Union::A(object)) => NewScope::Object(object),
-            Some(Union::B(name)) => NewScope::Named(name.as_bytes().to_vec()),
-            None => NewScope::Null,
-        }
-    }
-}
-
 /// `do_closure_bind` (`Z/Zend/zend_closures.c:323`): the scope the
 /// arguments name, an object's class, `"static"` the closure's own and
 /// any other string the class of that name, php's warning and `null`
@@ -2302,26 +2281,24 @@ fn do_closure_bind(
     req: &mut Request,
     closure: PhpObject,
     this: Option<PhpObject>,
-    scope: NewScope,
+    scope: Option<Union<PhpObject, PhpString>>,
 ) -> Result<Option<Instance<Closure>>, Thrown> {
     let Some(ClosureObject { info, cache: from }) = closure.native::<ClosureObject>(req).cloned()
     else {
         return Ok(None);
     };
     let scope = match scope {
-        NewScope::Object(object) => Some(object.class()),
-        NewScope::Named(name) if name == b"static" => info.scope,
-        NewScope::Named(name) => {
-            let Some(class) = req.class_named(Bare::of(&name)) else {
-                warning(
-                    req,
-                    &format!("Class \"{}\" not found", String::from_utf8_lossy(&name)),
-                );
+        Some(Union::A(object)) => Some(object.class()),
+        Some(Union::B(name)) if name.as_bytes() == b"static" => info.scope,
+        Some(Union::B(name)) => {
+            let Some(class) = req.class_named(Bare::of(name.as_bytes())) else {
+                let shown = String::from_utf8_lossy(name.as_bytes());
+                warning(req, &format!("Class \"{shown}\" not found"));
                 return Ok(None);
             };
             Some(class)
         }
-        NewScope::Null => None,
+        None => None,
     };
     if !valid_closure_binding(req, &info, this, scope) {
         return Ok(None);
@@ -2348,7 +2325,7 @@ fn create_closure(
     this: Option<PhpObject>,
 ) -> Result<PhpObject, Thrown> {
     let Some(class) = req.class_named(Bare::resolved(b"Closure")) else {
-        return Err(throw_error(req, "Error", "Class \"Closure\" not found"));
+        return Err(error(req, "Class \"Closure\" not found"));
     };
     let bound = info
         .bound
@@ -2400,7 +2377,7 @@ fn valid_closure_binding(
             && let Some(own) = info.scope
             && !req.symbols().instance_of(this.class(), own)
         {
-            let method = req.function_name(info.function);
+            let method = req.declared_name(info.function);
             let message = format!(
                 "Cannot bind method {}::{method}() to object of class {}, this will be an error in PHP 9",
                 req.symbols().class_name(own),

@@ -15,6 +15,18 @@
 //! `--accept` has written, so the line it captured is inside the tree the
 //! reading is over.
 //!
+//! **The record of what `--accept` took.** Every `--accept`, a run over
+//! the crate or one narrowed to a file or an item, records each verdict it
+//! wrote, and each one the oracle's run reproduced as it stood, under the
+//! crate's accepted scope, keyed by the verdict's block:
+//! the `php` fence through the `expect` fence that pins it, and the
+//! `stderr` fence after it ([`crate::witness::record_accepted`]). A hit
+//! whose block a record names is the instrument's whatever else the file
+//! or the crate became since, so a run narrowed with `--item`, which
+//! writes no reading of the crate, is evidence as a run over it is, and a
+//! prose edit beside the fence or a merge that moves the crate on leaves it
+//! standing. The record lands at `worktree retire` as every reading does.
+//!
 //! **Evidence that travels with the commits.** A tree hash names one
 //! state of the crate, and a merge makes a state no branch measured: a
 //! line a branch's `--accept` captured reached main beside another
@@ -60,10 +72,14 @@
 //! before, and `whole-file.json`, the file whole as a `Write` with a
 //! captured status in it, which is judged twice — denied over a workspace
 //! whose store holds no reading of it, permitted over the tree `witness`
-//! measured. No case of this row can be one that never fires, since what
+//! measured. Beside them `carried-and-accepted.json`: a file whose old
+//! verdict a measured commit carries and whose new one an `--accept
+//! --item` recorded, permitted since each hit is read against every kind
+//! of evidence on its own, and `carried-and-typed.json`, the new status
+//! typed over, denied (#3441). No case of this row can be one that never fires, since what
 //! decides is the evidence and not the shape of the call (#134).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
@@ -75,7 +91,8 @@ use crate::manifest::Manifest;
 use crate::reading::Store;
 
 /// Whether every hit of the row's pattern in `written` was captured by the
-/// instrument `unless` names: the sentence at the top of this module.
+/// instrument `unless` names: the sentence at the top of this module, each
+/// hit by any one kind of evidence.
 pub(super) fn captured(
     manifest: &Manifest,
     root: &Path,
@@ -105,16 +122,58 @@ pub(super) fn captured(
         (Ok(Some(reading)), Ok(tree)) => !reading.key().is_empty() && reading.key() == tree,
         _ => false,
     };
-    fresh
-        || carried(
+    if fresh {
+        return true;
+    }
+    // Each hit is the instrument's where any one kind of evidence covers
+    // it: a file of verdicts carried by measured commits gains new ones an
+    // `--accept --item` recorded, and neither kind covers both (#3441).
+    let mut open = hits(regex, written);
+    if open.is_empty() {
+        return false;
+    }
+    accepted(root, instrument, &krate.name, written, &mut open);
+    if !open.is_empty() {
+        carried(
             root,
             instrument,
             &krate.name,
             &krate.path(),
             regex,
-            written,
             path,
-        )
+            &mut open,
+        );
+    }
+    open.is_empty()
+}
+
+/// Takes out of `open` each hit whose verdict `--accept` recorded writing
+/// ([`crate::witness::record_accepted`]), in this workspace's store or the
+/// store of another worktree of the clone, where `worktree retire` lands a
+/// branch's. The record names a verdict by its block, the `php` fence
+/// through the `expect` fence that pins it ([`crate::witness::fence::verdict`]),
+/// so a run narrowed to a file or an item, which writes no reading of the
+/// crate, leaves one as a crate's run does, and prose edited around the
+/// block or a merge that moves the crate on leaves it standing. A verdict
+/// typed by hand is a block no record names; a store that cannot be read
+/// takes out nothing.
+fn accepted(root: &Path, instrument: &str, scope: &str, written: &str, open: &mut Vec<Hit>) {
+    let verdicts: BTreeMap<usize, String> = (open.iter())
+        .filter_map(|hit| Some((hit.line, crate::witness::fence::verdict(written, hit.line)?)))
+        .collect();
+    let wanted: BTreeSet<String> = verdicts.values().cloned().collect();
+    if wanted.is_empty() {
+        return;
+    }
+    let scope = crate::witness::accepted_scope(scope);
+    let mut found = BTreeSet::new();
+    for store in stores(root) {
+        match store.measured_over(instrument, &scope, &wanted) {
+            Ok(those) => found.extend(those),
+            Err(_) => return,
+        }
+    }
+    open.retain(|hit| !verdicts.get(&hit.line).is_some_and(|v| found.contains(v)));
 }
 
 /// How many of the commits that last changed a file are looked through for
@@ -123,43 +182,39 @@ pub(super) fn captured(
 /// from costing one `ls-tree` per commit it ever had.
 const COMMITS: usize = 64;
 
-/// Whether every hit in `written` stands, in the block around it, in the
-/// file at `path` as it was at a commit whose sources of the crate at
-/// `under` a reading of `instrument` was taken over, in this workspace's
-/// store or the store of another worktree of the clone (#1448). The
-/// evidence travels with the commits: a line `--accept` captured on a
-/// branch is in the branch's commit, the commit's crate is what the
-/// branch's reading measured, and the reading reaches the main checkout's
-/// store at `worktree retire`, so a merge that also brings other changes to
-/// the crate is still read as the branch's capture, and a block typed by hand
-/// in a commit nothing measured is not. A block is the hit's line and every
-/// line around it up to the nearest blank one, the rustdoc paragraph and
-/// the item under it, so an edit to what the line stands in is a block no
-/// commit carried. Anything this cannot read is no evidence.
+/// Takes out of `open` each hit whose block stands in the file at `path`
+/// as it was at a commit whose sources of the crate at `under` a reading
+/// of `instrument` at `scope` was taken over, in this workspace's store
+/// or the store of another worktree of the clone (#1448). The evidence travels with the commits: a line
+/// `--accept` captured on a branch is in the branch's commit, the
+/// commit's crate is what the branch's reading measured, and the reading
+/// reaches the main checkout's store at `worktree retire`, so a merge that
+/// also brings other changes to the crate is still read as the branch's
+/// capture, and a block typed by hand in a commit nothing measured is not.
+/// A block is the hit's line and every line around it up to the nearest
+/// blank one, the rustdoc paragraph and the item under it, so an edit to
+/// what the line stands in is a block no commit carried. Anything this
+/// cannot read takes out nothing.
 fn carried(
     root: &Path,
     instrument: &str,
     scope: &str,
     under: &Path,
     regex: &Regex,
-    written: &str,
     path: &Path,
-) -> bool {
-    let mut wanted = blocks(regex, written);
-    if wanted.is_empty() {
-        return false;
-    }
+    open: &mut Vec<Hit>,
+) {
     let Some(file) = path.to_str() else {
-        return false;
+        return;
     };
     let count = COMMITS.to_string();
     let Ok(log) = git::git(root, &["log", "--format=%H", "-n", &count, "--", file]) else {
-        return false;
+        return;
     };
     let mut commits = Vec::new();
     for commit in log.lines().filter(|c| !c.is_empty()) {
         let Ok(tree) = Snapshot::commit(root, commit).and_then(|then| then.key(under)) else {
-            return false;
+            return;
         };
         commits.push((commit, tree));
     }
@@ -168,7 +223,7 @@ fn carried(
     for store in stores(root) {
         match store.measured_over(instrument, scope, &trees) {
             Ok(found) => measured.extend(found),
-            Err(_) => return false,
+            Err(_) => return,
         }
     }
     for (commit, tree) in &commits {
@@ -178,14 +233,12 @@ fn carried(
         let Ok(Some(then)) = git::show(root, commit, file) else {
             continue;
         };
-        for block in blocks(regex, &then) {
-            wanted.remove(&block);
-        }
-        if wanted.is_empty() {
-            return true;
+        let then: BTreeSet<String> = hits(regex, &then).into_iter().map(|h| h.block).collect();
+        open.retain(|hit| !then.contains(&hit.block));
+        if open.is_empty() {
+            return;
         }
     }
-    false
 }
 
 /// This workspace's store, then the store of every other worktree of the
@@ -201,9 +254,17 @@ fn stores(root: &Path) -> Vec<Store> {
     roots.iter().map(|r| Store::of_workspace(r)).collect()
 }
 
-/// The block around each hit of `regex` in `text`: its line and the lines
-/// on either side up to the nearest blank one.
-fn blocks(regex: &Regex, text: &str) -> BTreeSet<String> {
+/// One hit of the row's pattern in a text: its line, by which a fence's
+/// verdict is read, and its block, the line and the lines on either side
+/// up to the nearest blank one, by which a commit carries it.
+#[derive(Debug)]
+struct Hit {
+    line: usize,
+    block: String,
+}
+
+/// Each hit of `regex` in `text`, in order.
+fn hits(regex: &Regex, text: &str) -> Vec<Hit> {
     let lines: Vec<&str> = text.lines().collect();
     let mut starts = Vec::with_capacity(lines.len());
     let mut at = 0;
@@ -222,7 +283,8 @@ fn blocks(regex: &Regex, text: &str) -> BTreeSet<String> {
             let last = (line + 1..lines.len())
                 .find(|i| blank(*i))
                 .unwrap_or(lines.len());
-            Some(lines[first..last].join("\n"))
+            let block = lines[first..last].join("\n");
+            Some(Hit { line, block })
         })
         .collect()
 }
@@ -238,15 +300,18 @@ fn instrument_of(unless: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{blocks, instrument_of};
+    use super::{hits, instrument_of};
 
     #[test]
     fn a_hits_block_runs_to_the_blank_lines_around_it() {
         let regex = regex_lite::Regex::new(r"exit=\d+").unwrap();
         let text = "a\n\n/// x\n/// exit=3\nfn f() {}\n\nb exit=4\n";
-        let found: Vec<String> = blocks(&regex, text).into_iter().collect();
-        assert_eq!(found, ["/// x\n/// exit=3\nfn f() {}", "b exit=4"]);
-        assert!(blocks(&regex, "nothing here").is_empty());
+        let found: Vec<(usize, String)> = (hits(&regex, text).into_iter())
+            .map(|hit| (hit.line, hit.block))
+            .collect();
+        let blocks = ["/// x\n/// exit=3\nfn f() {}", "b exit=4"].map(String::from);
+        assert_eq!(found, [(3, blocks[0].clone()), (6, blocks[1].clone())]);
+        assert!(hits(&regex, "nothing here").is_empty());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// the request's is allocated from (`zend_test_gh18756`).
 pub use php_heap::StandaloneHeap;
 pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
-use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, SortEntry, Str, Zval, ZvalRef};
+use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, Sizing, SortEntry, Str, Zval, ZvalRef};
 pub use php_heap::{ecalloc, efree, emalloc, erealloc};
 
 use crate::api::abi::{Beneath, chain};
@@ -94,9 +94,9 @@ impl Request {
 /// include $f;
 /// ```
 /// ```expect exit=0
-/// 368
-/// 688
-/// 624
+/// 384
+/// 704
+/// 640
 /// ```
 ///
 /// and more where two constants alike are one string in php's table and
@@ -119,26 +119,76 @@ pub(super) struct RequestStrings<'a> {
     /// The strings and arrays the compile has made, which the unit
     /// takes.
     pub(super) made: &'a mut super::unit_strings::Compiling,
+    /// Whether what it lays is interned ([`Intern::interning`]).
+    pub(super) interning: bool,
+}
+
+impl RequestStrings<'_> {
+    /// Whether a string asked for is looked for in the engine's table
+    /// first: where it is interned and the request holds opcache's
+    /// buffer.
+    fn asks_table(&self) -> bool {
+        self.interning && self.hold == SharedHold::Taken
+    }
 }
 
 impl Intern for RequestStrings<'_> {
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
+    /// The frozen string of no byte or one, the engine's where the table
+    /// is asked and holds it, else one laid on the request's heap at
+    /// `sizing`'s size, which the unit takes.
+    fn intern_marked(
+        &mut self,
+        bytes: &[u8],
+        valid_utf8: bool,
+        sizing: Sizing,
+    ) -> Result<Str, Fatal> {
         if bytes.len() <= 1
             && let Some(frozen) = self.shared.permanent(bytes)
         {
             return Ok(frozen);
         }
-        if self.hold == SharedHold::Taken
+        if self.asks_table()
             && let Some(held) = self.shared.existing_interned(bytes)
         {
             return Ok(held);
         }
-        let s = self.heap.string(bytes)?;
+        let s = self.heap.string_sized(bytes, sizing)?;
         if valid_utf8 {
             s.mark_valid_utf8();
         }
         self.made.add(Zval::string(s));
         Ok(s)
+    }
+
+    /// `zend_string_init` of `room` bytes cut to `bytes`, and
+    /// `zval_make_interned_string` over it where it is interned, which
+    /// finds the engine's string where the request has taken its
+    /// [`SharedHold`].
+    fn intern_in(&mut self, bytes: &[u8], room: usize) -> Result<Str, Fatal> {
+        if self.asks_table()
+            && let Some(held) = self.shared.existing_interned(bytes)
+        {
+            return Ok(held);
+        }
+        let mut laid = self
+            .heap
+            .string_fresh(room.max(bytes.len()), Sizing::Alloc)?;
+        laid.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
+        laid.set_len(bytes.len());
+        let s = laid.finish();
+        self.made.add(Zval::string(s));
+        Ok(s)
+    }
+
+    fn interning(&mut self, on: bool) -> bool {
+        std::mem::replace(&mut self.interning, on)
+    }
+
+    /// A declaration's own string, kept as what its place in the
+    /// compile's walk names when the unit is taken
+    /// ([`Request::hold_compiled`]).
+    fn hand_name(&mut self, name: Option<Str>) {
+        self.made.hand(name);
     }
 
     /// A constant the request defined, substituted where an `eval`
@@ -157,9 +207,13 @@ impl Intern for RequestStrings<'_> {
 
     /// A string the fold that made it has read, given up, as
     /// `zend_eval_const_expr` frees an operand once the value it made stands; one
-    /// the engine's table holds is no string of the compile's.
+    /// the engine's table holds is no string of the compile's. An array
+    /// stays the unit's, with the owners of its entries it took over, and
+    /// goes with its op arrays.
     fn give_back(&mut self, made: php_heap::Made) {
-        let string = made.str();
+        let Some(string) = made.value().as_str() else {
+            return;
+        };
         if self.made.take(Zval::string(string)) {
             self.heap.release_string(string);
         }
@@ -209,13 +263,12 @@ impl Intern for RequestStrings<'_> {
     ///   string(12) "uuuuuuuuuuuu" refcount(1)
     /// }
     /// ```
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+    fn constant_array(&mut self, entries: &[(Key, Zval)], size: usize) -> Result<Arr, Fatal> {
         if entries.is_empty() {
             return Ok(Arr::empty());
         }
-        let a = self
-            .heap
-            .array_sized(u32::try_from(entries.len()).unwrap_or(u32::MAX))?;
+        let size = size.max(entries.len());
+        let a = (self.heap).array_sized(u32::try_from(size).unwrap_or(u32::MAX))?;
         self.made.add(Zval::array(a));
         for &(key, z) in entries {
             let moved = self.made.take(z);
@@ -269,8 +322,9 @@ impl Request {
     /// (`Z/ext/opcache/ZendAccelerator.c:610`): the engine's string for
     /// `bytes` where the request has taken its [`SharedHold`] and the engine's
     /// table, opcache's buffer, holds them, which costs the request
-    /// nothing, and otherwise a string of the request's own,
-    /// `zend_string_init`, whose one owner is the caller's. Nothing is
+    /// nothing, and otherwise a string of the request's own, php-8.5.12's
+    /// `zend_string_finit` ([`Request::string_finit`]), whose one owner
+    /// is the caller's. Nothing is
     /// kept to be found again, so two asks are two strings, and the
     /// empty string and one byte have no shortcut of their own: opcache's
     /// buffer holds `ZSTR_CHAR`'s strings (`accel_copy_permanent_strings`,
@@ -294,16 +348,38 @@ impl Request {
     /// unlink($f);
     /// ```
     /// ```expect regime=jit-off process capture
-    /// 32 32
+    /// 40 40
     /// ```
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn interned(&mut self, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
-        if self.shared_hold == SharedHold::Taken
-            && let Some(held) = self.shared.existing_interned(bytes)
-        {
-            return Ok(Owner::adopt(PhpString::of(held)));
+        match self.held_interned(bytes) {
+            Some(held) => Ok(held),
+            None => self.string_finit(bytes).map(Owner::adopt),
         }
-        self.string_init(bytes).map(Owner::adopt)
+    }
+
+    /// `zend_new_interned_string` of a string `zend_string_init` made, as
+    /// opcache installs it, `accel_new_interned_string_for_php`
+    /// (`Z/ext/opcache/ZendAccelerator.c:577`): the engine's string where
+    /// [`Request::interned`] would answer it, and otherwise the string
+    /// php made, `zend_string_init`'s size and not
+    /// `zend_string_finit`'s.
+    #[cfg_attr(debug_assertions, track_caller)]
+    pub(crate) fn new_interned(&mut self, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
+        match self.held_interned(bytes) {
+            Some(held) => Ok(held),
+            None => self.string_init(bytes).map(Owner::adopt),
+        }
+    }
+
+    /// The engine's string for `bytes` once the request has taken its
+    /// [`SharedHold`] and the engine's table holds them.
+    fn held_interned(&self, bytes: &[u8]) -> Option<Owner<PhpString>> {
+        if self.shared_hold != SharedHold::Taken {
+            return None;
+        }
+        let held = self.shared.existing_interned(bytes)?;
+        Some(Owner::adopt(PhpString::of(held)))
     }
 
     /// The request's [`SharedHold`] taken, as `persistent_compile_file` takes
@@ -314,9 +390,9 @@ impl Request {
     }
 
     /// A string of `bytes` out of this request's heap, what
-    /// [`PhpString::new`] is: php's `ZVAL_STRINGL_FAST`, the process's
-    /// interned string for the empty string and a string of one byte
-    /// (`ZSTR_EMPTY_ALLOC`, `ZSTR_CHAR`), `zend_string_init` otherwise.
+    /// [`PhpString::new`] is: the process's interned string for the
+    /// empty string and a string of one byte (`ZSTR_EMPTY_ALLOC`,
+    /// `ZSTR_CHAR`), `zend_string_init` otherwise.
     /// The memory limit is the fatal that ends the request, recorded
     /// here where `zend_mm` leaves the request, and the `Thrown` that
     /// carries no throwable ends the native.
@@ -327,6 +403,37 @@ impl Request {
             return Ok(PhpString::of(frozen));
         }
         let allocated = self.heap.string(bytes);
+        self.allocated(allocated)
+    }
+
+    /// A string of `bytes` the way php-8.5.12's `zend_string_init_fast`
+    /// makes one, what [`PhpString::fast`] is: the interned string for
+    /// the empty string and one byte, as [`Request::string`] hands out,
+    /// and otherwise `zend_string_finit` ([`Request::string_finit`]).
+    pub(crate) fn string_fast(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        if bytes.len() <= 1
+            && let Some(frozen) = self.shared.permanent(bytes)
+        {
+            return Ok(PhpString::of(frozen));
+        }
+        self.string_finit(bytes)
+    }
+
+    /// A string of `bytes` out of this request's heap whatever their
+    /// length, php-8.5.12's `zend_string_finit`
+    /// ([`php_heap::Heap::string_finit`]).
+    pub(crate) fn string_finit(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
+        self.string_sized(bytes, Sizing::Finit)
+    }
+
+    /// A string of `bytes` out of this request's heap whatever their
+    /// length, laid at `sizing`'s size ([`php_heap::Heap::string_sized`]).
+    pub(crate) fn string_sized(
+        &mut self,
+        bytes: &[u8],
+        sizing: Sizing,
+    ) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string_sized(bytes, sizing);
         self.allocated(allocated)
     }
 
@@ -416,10 +523,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     #[inline]
     pub(crate) fn release(&mut self, value: Value) {
-        let z = value.to_zval();
-        if z.is_refcounted() {
-            Heap::release(&mut Hooks(self), z);
-        }
+        self.release_zval(value.to_zval());
     }
 
     /// `GC_DELREF` and `gc_check_possible_root` over a value the caller
@@ -442,10 +546,7 @@ impl Request {
     #[cfg_attr(debug_assertions, track_caller)]
     #[inline]
     pub(crate) fn release_nogc(&mut self, value: Value) {
-        let z = value.to_zval();
-        if z.is_refcounted() {
-            Heap::release_nogc(&mut Hooks(self), z);
-        }
+        self.release_zval_nogc(value.to_zval());
     }
 
     /// [`Request::release`] over a zval a slot held, the owner it held
@@ -508,6 +609,14 @@ impl Request {
     pub(crate) fn array(&mut self) -> Result<PhpArray, Thrown> {
         let allocated = self.heap.array();
         self.fatal_of(allocated).map(PhpArray::of)
+    }
+
+    /// An empty array whose first write makes room for one element,
+    /// php's `array_init_singleton` ([`php_heap::Heap::array_singleton`]),
+    /// one owner the caller's.
+    pub(crate) fn array_singleton(&mut self) -> Result<Owner<PhpArray>, Thrown> {
+        let allocated = self.heap.array_singleton();
+        adopted(self.fatal_of(allocated).map(PhpArray::of))
     }
 
     /// `zend_new_array(size)`, what `INIT_ARRAY` lays down for the
@@ -674,6 +783,11 @@ impl Request {
     pub(crate) fn fatal_of<T>(&mut self, answered: Result<T, Fatal>) -> Result<T, Thrown> {
         match answered {
             Ok(value) => Ok(value),
+            // A fallible ask's refusal ends nothing: it is carried out to
+            // its scope ([`Memory::fallible`]).
+            Err(fatal) if *fatal.reason() == php_heap::FatalReason::Refused => {
+                Err(Thrown::of(None))
+            }
             Err(fatal) => {
                 self.end_in(&fatal);
                 Err(Thrown::of(None))
@@ -690,6 +804,50 @@ impl Request {
             .limit_bytes(b"memory_limit")
             .min(self.limit_bytes(b"max_memory_limit"));
         self.heap.set_memory_limit(limit.min(usize::MAX >> 1));
+        // `memory_hard_limit_percent`, which follows the soft limit;
+        // php's `NULL`, its default, is the heap's own `-1`.
+        let percent = self.ini().get(b"memory_hard_limit_percent");
+        if let Some(percent) = percent.filter(|p| !p.is_empty()).map(Ini::parse_bytes) {
+            self.heap.set_memory_hard_limit_percent(percent);
+        }
+    }
+
+    /// `OnChangeMemoryHardLimitPercent` (`Z/main/main.c:391` at 8.5.12)
+    /// over `value`, `None` for php's `NULL`, which is `-1`: a percent
+    /// under 100 other than `-1` is php's warning and refused, and so is
+    /// one the heap refuses while the soft limit is exceeded,
+    /// `zend_set_memory_hard_limit_percent`'s `FAILURE`; whether the
+    /// entry takes it is the answer.
+    ///
+    /// ```php
+    /// var_dump(ini_set('memory_hard_limit_percent', '50'), ini_set('memory_hard_limit_percent', '150'), ini_get('memory_hard_limit_percent'));
+    /// ini_set('memory_limit', '2M');
+    /// ini_set('memory_hard_limit_percent', '300');
+    /// $a = str_repeat('x', 5 << 20);
+    /// echo "unreached\n";
+    /// ```
+    /// ```expect exit=255
+    /// Warning: memory_hard_limit_percent must be >= 100, or -1 in %s on line 2
+    /// bool(false)
+    /// string(0) ""
+    /// string(3) "150"
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 5259264 bytes) in %s on line 5
+    /// ```
+    pub(crate) fn memory_hard_limit_percent_taken(&mut self, value: Option<&[u8]>) -> bool {
+        let percent = value.map_or(-1, Ini::parse_bytes);
+        if percent < 100 && percent != -1 {
+            crate::api::raising::warning(self, "memory_hard_limit_percent must be >= 100, or -1");
+            return false;
+        }
+        if !self.heap.set_memory_hard_limit_percent(percent) {
+            crate::api::raising::warning(
+                self,
+                &format!("Failed to set memory_hard_limit_percent to {percent}"),
+            );
+            return false;
+        }
+        true
     }
 
     /// An entry `zend_ini_parse_uquantity` reads, `-1` the largest size.
@@ -815,8 +973,7 @@ impl Request {
     /// of the request's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub(crate) fn gc_status(&mut self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.gc_status_made();
-        adopted(made)
+        adopted(self.gc_status_made())
     }
 
     /// What [`gc_status`](Self::gc_status) makes, its one owner not yet named.
@@ -834,17 +991,17 @@ impl Request {
             ("roots", Value::int(i64::from(status.roots))),
             (
                 "application_time",
-                Value::float(seconds(status.application_time)),
+                Value::float(status.application_time.as_secs_f64()),
             ),
             (
                 "collector_time",
-                Value::float(seconds(status.collector_time)),
+                Value::float(status.collector_time.as_secs_f64()),
             ),
             (
                 "destructor_time",
-                Value::float(seconds(status.destructor_time)),
+                Value::float(status.destructor_time.as_secs_f64()),
             ),
-            ("free_time", Value::float(seconds(status.free_time))),
+            ("free_time", Value::float(status.free_time.as_secs_f64())),
         ] {
             let key = PhpString::new(self, name.as_bytes())?.into_key();
             array.set(self, key, Owner::take(self, value))?;
@@ -1069,6 +1226,19 @@ impl Request {
 }
 
 impl Memory<&Request> {
+    /// `ZEND_HAS_OOM()` (`Z/Zend/zend_alloc.h:63` at 8.5.12): whether the
+    /// memory limit was met in this request, its fatal pending or being
+    /// raised, until `php_request_shutdown` begins. php 8.5.12's natives
+    /// read it to stop a loop whose allocations were served past the
+    /// limit, as `RETURN_OOM` stops a fallible one, and leave the fatal
+    /// to the interrupt check after the call. One load of the heap's
+    /// state.
+    #[must_use]
+    #[inline]
+    pub fn has_oom(self) -> bool {
+        self.0.has_oom()
+    }
+
     /// `memory_get_usage()`.
     #[must_use]
     pub fn usage(self, real: bool) -> usize {
@@ -1097,6 +1267,48 @@ impl Memory<&Request> {
 }
 
 impl Memory<&mut Request> {
+    /// `ask` served with the request's heap fallible, php's
+    /// `zend_mm_set_fallible(true)` around one allocation, as php 8.5.12's
+    /// `femalloc`, `zend_string_safe_falloc` and their kin ask
+    /// (`ZEND_MM_FALLIBLE_FORWARD`, `Z/Zend/zend_alloc.c:3060`): an
+    /// allocation the memory limit has no room for is refused rather than
+    /// served, the delayed OOM recorded, and the answer is `None`, php's
+    /// `NULL`, for the native to end on as `RETURN_OOM` ends it, with
+    /// nothing pending; the next safepoint, the interrupt check after the
+    /// call, raises the limit's fatal. A fallible ask is held to the soft
+    /// limit alone, never to the hard one. The heap's fallibility is put
+    /// back as `ask` returns, so scopes nest as php's saved word does.
+    ///
+    /// The scope is the allocation's, as php's forward wraps the one call:
+    /// a native asks fallibly for the string it returns and nothing else,
+    /// so no PHP code it serves is served fallibly.
+    ///
+    /// # Errors
+    ///
+    /// What `ask` threw, the request's end among it: a fatal, the hard
+    /// limit an allocation outside the scope met, or a throwable.
+    pub fn fallible<T>(
+        self,
+        ask: impl FnOnce(&mut Request) -> Result<T, Thrown>,
+    ) -> Result<Option<T>, Thrown> {
+        let was = self.0.heap.set_fallible(true);
+        let answered = ask(self.0);
+        self.0.heap.set_fallible(was);
+        let refused = self.0.heap.take_refused();
+        match answered {
+            Ok(value) => Ok(Some(value)),
+            // The heap's latch says a refusal was met in the scope; it
+            // cannot say the `Err` in hand is that refusal, since a
+            // throwable or a fatal can follow one in the same scope (a
+            // lend's system refusal after lexbor's), so the `Err` is the
+            // refusal only where it carries nothing else.
+            Err(thrown) if refused && thrown.exception().is_none() && self.0.ending().is_none() => {
+                Ok(None)
+            }
+            Err(thrown) => Err(thrown),
+        }
+    }
+
     /// `call` served with the request's heap lent to C for its length
     /// (ADR-0014, design §5.14): a C library compiled against
     /// `php_heap`'s `emalloc`, `ecalloc`, `erealloc`, `estrdup`,
@@ -1178,11 +1390,6 @@ impl Memory<&mut Request> {
     pub fn gc_possible_root(self, value: &Value) {
         Heap::gc_check_possible_root(&mut Hooks(self.0), value.to_zval());
     }
-}
-
-/// `(double) hrtime / ZEND_NANO_IN_SEC`, a collector time in seconds.
-fn seconds(d: std::time::Duration) -> f64 {
-    d.as_secs_f64()
 }
 
 /// `sizeof(zend_loop_var)`.

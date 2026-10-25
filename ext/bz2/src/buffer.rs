@@ -108,6 +108,19 @@ use crate::ffi::{Action, Code, Compress, Decompress};
 /// ```expect exit=0
 /// 4096
 /// ```
+///
+/// The string of the worst case is asked for fallibly since 8.5.12: past
+/// the memory limit it is refused, and the limit's fatal is raised as the
+/// call returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(bzcompress(str_repeat('a', 5 << 20)), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 5308416 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn bzcompress(
     req: &mut Request,
@@ -139,7 +152,14 @@ fn bzcompress(
     // `zend_string_alloc(dest_len, 0)` before the library is asked, so
     // the worst case stands on the request's heap while it compresses,
     // and `zend_string_truncate` to what it wrote.
-    let mut dest = FreshString::new(req, chunk)?;
+    // `zend_string_falloc` since 8.5.12, `RETURN_OOM()` where the memory
+    // limit refused it.
+    let Some(mut dest) = req
+        .memory_mut()
+        .fallible(|req| FreshString::new(req, chunk))?
+    else {
+        return PhpString::new(req, b"").map(Union::A);
+    };
     match compress_buffer(source, dest.bytes_mut(), block_size, work_factor) {
         Ok(written) => Ok(Union::A(dest.truncate(req, written)?.finish())),
         Err(code) => {
@@ -199,6 +219,23 @@ fn compress_buffer(
 /// int(45)
 /// int(1048576)
 /// ```
+///
+/// The string, twice the input at first and the input's length again
+/// each round, is asked for fallibly since 8.5.12: past the memory limit
+/// it is refused, and the limit's fatal is raised as the call returns.
+/// Here the first is refused, for an input that does not compress:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// $bz = bzcompress(random_bytes(2 << 20));
+/// var_dump(strlen($bz) > 2 << 20);
+/// var_dump(bzdecompress($bz), "unreached");
+/// ```
+/// ```expect exit=255
+/// bool(true)
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4227072 bytes) in %s on line 5
+/// ```
 #[php_function]
 fn bzdecompress(
     req: &mut Request,
@@ -209,22 +246,58 @@ fn bzdecompress(
         return Ok(Union::B(OrFalse::False));
     };
     let source = data.as_bytes();
-    let mut dest = vec![0; source.len().saturating_mul(2)];
-    let (mut read, mut size) = (0, 0);
+    let n = source.len();
+    // "In most cases bz2 offers at least 2:1 compression": php's string
+    // of twice the input and one byte, then each round's room for the
+    // input's length again, and last the string cut to what was
+    // written, each asked for fallibly since 8.5.12; where the memory
+    // limit refuses one the call returns (`goto failure`), the limit's
+    // fatal raised as it returns.
+    let Some(mut dest) = resized(req, None, n.saturating_mul(2).saturating_add(1))? else {
+        return PhpString::new(req, b"").map(Union::A);
+    };
+    let (mut read, mut size, mut room) = (0, 0, n.saturating_mul(2));
     let code = loop {
-        let step = stream.decompress(&source[read..], &mut dest[size..]);
+        let end = size + room;
+        let step = stream.decompress(&source[read..], &mut dest.bytes_mut()[size..end]);
         read += step.read;
         size += step.written;
-        if step.code != Code::Ok || read == source.len() {
+        if step.code != Code::Ok || read == n {
             break step.code;
         }
-        dest.resize(size + source.len(), 0);
+        room = n;
+        let Some(grown) = resized(req, Some(dest), size + room + 1)? else {
+            return PhpString::new(req, b"").map(Union::A);
+        };
+        dest = grown;
     };
     match code {
         Code::Ok | Code::StreamEnd => {
-            dest.truncate(size);
-            Ok(Union::A(PhpString::new(req, &dest)?))
+            let Some(mut cut) = resized(req, Some(dest), size + 1)? else {
+                return PhpString::new(req, b"").map(Union::A);
+            };
+            cut.set_len(size);
+            Ok(Union::A(cut.finish()))
         }
-        failed => Ok(Union::B(OrFalse::Value(failed.number()))),
+        failed => {
+            dest.free(req);
+            Ok(Union::B(OrFalse::Value(failed.number())))
+        }
     }
+}
+
+/// `zend_string_safe_frealloc(dest, 1, len, 0, 0, fallible: true)`, or the
+/// first `zend_string_safe_falloc` where there is no string yet: `len`
+/// bytes, those written kept, or `None` where the memory limit refused
+/// them, the string then the request's end's.
+fn resized(
+    req: &mut Request,
+    held: Option<FreshString>,
+    len: usize,
+) -> Result<Option<FreshString>, Thrown> {
+    req.memory_mut().fallible(|req| match held {
+        None => FreshString::new(req, len),
+        Some(held) if len >= held.len() => held.extend(req, len),
+        Some(held) => held.truncate(req, len),
+    })
 }

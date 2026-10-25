@@ -18,6 +18,13 @@ use crate::write;
 /// `TAR_GLOBAL_HDR` and `TAR_FILE_HDR`, a pax header's type bytes.
 const TAR_GLOBAL_HDR: u8 = b'g';
 const TAR_FILE_HDR: u8 = b'x';
+/// `TAR_CHAR`, `TAR_BLOCK` and `TAR_FIFO`, the device and fifo type bytes.
+const TAR_CHAR: u8 = b'3';
+const TAR_BLOCK: u8 = b'4';
+const TAR_FIFO: u8 = b'6';
+/// `TAR_LONGLINK` and `TAR_LONGNAME`, GNU's long link and long name records.
+const TAR_LONGLINK: u8 = b'K';
+const TAR_LONGNAME: u8 = b'L';
 
 /// The fields of `tar_header` as offsets into its 512 bytes.
 const NAME: std::ops::Range<usize> = 0..100;
@@ -45,6 +52,40 @@ fn number(field: &[u8]) -> u32 {
         num = num.wrapping_mul(8).wrapping_add(u32::from(b - b'0'));
     }
     num
+}
+
+/// `phar_tar_size`: the size field as php 8.5.12 reads it (GHSA-j3wh-g957-2m85),
+/// leading spaces skipped, octal digits, then only spaces and NULs to the
+/// field's end; `None` for GNU's base-256 form, any other byte, and a size
+/// whose block rounding would pass `u32::MAX`.
+fn size(field: &[u8]) -> Option<u32> {
+    let mut i = field.iter().take_while(|b| **b == b' ').count();
+    if field.get(i).is_some_and(|b| b & 0x80 != 0) {
+        return None;
+    }
+    let mut num: u64 = 0;
+    for b in field[i..].iter().take_while(|b| (b'0'..=b'7').contains(*b)) {
+        num = num * 8 + u64::from(b - b'0');
+        i += 1;
+    }
+    i += field[i..]
+        .iter()
+        .take_while(|b| **b == b' ' || **b == 0)
+        .count();
+    if i != field.len() {
+        return None;
+    }
+    u32::try_from(num).ok().filter(|n| *n <= u32::MAX - 511)
+}
+
+/// `phar_tar_type_has_data`: whether a header's type byte is followed by
+/// its data blocks, which every type but links, devices, directories and
+/// fifos is.
+fn type_has_data(typeflag: u8) -> bool {
+    !matches!(
+        typeflag,
+        TAR_LINK | TAR_SYMLINK | TAR_CHAR | TAR_BLOCK | TAR_DIR | TAR_FIFO
+    )
 }
 
 /// `phar_tar_octal`: `val` in `len` octal digits; the digits all `7`
@@ -181,7 +222,42 @@ fn process_metadata(archive: &mut Archive, name: &[u8], contents: Option<&[u8]>)
 
 /// `phar_parse_tarfile`: every header read to the end of the archive or
 /// the two zero blocks, the magic entries taken up, the signature
-/// verified, and the archive registered under its name and alias.
+/// verified, and the archive registered under its name and alias. Each
+/// header's size is read as php 8.5.12's `phar_tar_size` reads it, a GNU
+/// long link is refused (GHSA-j3wh-g957-2m85), and the data of every type
+/// that carries any is skipped, so no header hides inside a member's data.
+///
+/// ```php
+/// function member($name, $size, $type = '0', $data = '') {
+///     $h = pack('a100a8a8a8a12a12a8a1a100a6a2a247', $name, '0000644', '', '', $size, '00000000000', '        ', $type, '', 'ustar', '00', '');
+///     $h = substr_replace($h, sprintf('%06o', array_sum(array_map('ord', str_split($h)))) . "\0 ", 148, 8);
+///     return $h . str_pad($data, (strlen($data) + 511) & ~511, "\0");
+/// }
+/// $t = __DIR__ . '/tar-size-witness.tar';
+/// $tars = [
+///     member('a.txt', '37777777777'),
+///     member('a.txt', "\x80\0\0\0\0\0\0\0\0\0\x02\0"),
+///     member('a.txt', '1x'),
+///     member('a.txt', '00000000000', 'K'),
+///     member('carrier', '00000001000', '7', member('hidden', '00000000000')),
+/// ];
+/// foreach ($tars as $tar) {
+///     file_put_contents($t, $tar . str_repeat("\0", 1024));
+///     try {
+///         foreach (new PharData($t) as $f) echo $f->getFilename(), "\n";
+///     } catch (UnexpectedValueException $e) {
+///         echo substr(strstr($e->getMessage(), '" is'), 2), "\n";
+///     }
+/// }
+/// unlink($t);
+/// ```
+/// ```expect
+/// is a corrupted tar file (invalid entry size)
+/// is a corrupted tar file (invalid entry size)
+/// is a corrupted tar file (invalid entry size)
+/// is a tar file with an unsupported GNU long link entry
+/// carrier
+/// ```
 #[allow(clippy::too_many_lines)] // php's one function, its refusals in its order
 pub(crate) fn parse(
     req: &mut Request,
@@ -228,7 +304,16 @@ pub(crate) fn parse(
             }
         }
         let typeflag = buf[TYPEFLAG];
-        let size = number(&buf[SIZE]);
+        let Some(size) = size(&buf[SIZE]) else {
+            return fail(format!(
+                "phar error: \"{name}\" is a corrupted tar file (invalid entry size)"
+            ));
+        };
+        if typeflag == TAR_LONGLINK {
+            return fail(format!(
+                "phar error: \"{name}\" is a tar file with an unsupported GNU long link entry"
+            ));
+        }
         let skip = if !old && (typeflag == TAR_GLOBAL_HDR || typeflag == TAR_FILE_HDR) {
             Some(round(size))
         } else {
@@ -283,8 +368,8 @@ pub(crate) fn parse(
                 return truncated();
             }
         } else {
-            if longlink.is_none() && typeflag == b'L' {
-                if size == u32::MAX || size == 0 {
+            if longlink.is_none() && typeflag == TAR_LONGNAME {
+                if size == 0 || size as usize > total {
                     return fail(format!(
                         "phar error: \"{name}\" is a corrupted tar file (invalid entry size)"
                     ));
@@ -407,7 +492,7 @@ pub(crate) fn parse(
                 cur.at = pos.max(at.min(pos));
             }
             let padded = round(size);
-            if (typeflag == 0 || typeflag == TAR_FILE) && padded > 0 {
+            if type_has_data(typeflag) && padded > 0 {
                 cur.at += padded as usize;
                 if cur.at > total {
                     return truncated();

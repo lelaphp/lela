@@ -1,4 +1,4 @@
-Extension [ <persistent> extension #10 ctype version 8.5.9 ] {
+Extension [ <persistent> extension #10 ctype version 8.5.12 ] {
 
   - Functions {
     Function [ <internal:ctype> function ctype_alnun ] {

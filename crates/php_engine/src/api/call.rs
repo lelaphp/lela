@@ -13,7 +13,7 @@ use php_unit::{ConstIdx, Opcode, Unit};
 
 use crate::api::abi::{Callable, PropertyRead};
 use crate::api::raising::{
-    Thrown, argument_error, class_not_found, non_static_method_call, throw_error,
+    Thrown, argument_error, class_not_found, error, non_static_method_call, type_error,
     undefined_function, undefined_method,
 };
 use crate::api::request::{Request, Strategy};
@@ -230,15 +230,13 @@ impl Iter {
     /// the caller's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn value(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
-        let made = crate::interfaces::current(req, self.0);
-        adopted(made)
+        adopted(crate::interfaces::current(req, self.0))
     }
 
     /// `funcs->get_current_key`, one owner, the caller's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn key(self, req: &mut Request) -> Result<Owner<Value>, Thrown> {
-        let made = crate::interfaces::key(req, self.0);
-        adopted(made)
+        adopted(crate::interfaces::key(req, self.0))
     }
 
     /// `funcs->move_forward`.
@@ -297,7 +295,7 @@ fn without_frame(req: &mut Request, served: Result<Value, Thrown>) -> Result<Val
 /// The `zend_function` behind a target, `fcc.function_handler`: a
 /// closure's is its payload's, `zend_get_closure_method_def`. What the
 /// named arguments are placed against.
-fn callee(req: &Request, target: Target) -> Option<Function> {
+pub(crate) fn callee(req: &Request, target: Target) -> Option<Function> {
     match target {
         Target::Function(function) | Target::Method { function, .. } => Some(function),
         Target::Closure(object) => object.closure(req).map(|closure| closure.function),
@@ -414,8 +412,7 @@ pub fn call(
     callable: &Callable,
     arguments: &[Value],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = call_made(req, callable, arguments);
-    adopted(made)
+    adopted(call_made(req, callable, arguments))
 }
 
 /// What [`call`] makes, its one owner not yet named.
@@ -425,6 +422,23 @@ pub(crate) fn call_made(
     arguments: &[Value],
 ) -> Result<Value, Thrown> {
     serve(req, callable.target(), arguments, &[])
+}
+
+/// [`call_made`] where php calls the callee's C directly rather than
+/// through `zend_call_function`: a native function served past the
+/// memory limit's refusal of every call once it was met
+/// ([`Request::serve_function_from_c`]); any other callee as
+/// [`call_made`] serves it.
+pub(crate) fn call_made_from_c(
+    req: &mut Request,
+    callable: &Callable,
+    arguments: &[Value],
+) -> Result<Value, Thrown> {
+    let served = match callable.target() {
+        Target::Function(function) => req.serve_function_from_c(function, arguments),
+        target => return serve(req, target, arguments, &[]),
+    };
+    without_frame(req, served)
 }
 
 /// `zend_call_function` with named arguments after the positional ones,
@@ -447,8 +461,7 @@ pub fn call_named(
     arguments: &[Value],
     named: &[(PhpString, Value)],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = call_named_made(req, callable, arguments, named);
-    adopted(made)
+    adopted(call_named_made(req, callable, arguments, named))
 }
 
 /// What [`call_named`] makes, its one owner not yet named.
@@ -516,8 +529,7 @@ pub fn call_array(
     callable: &Callable,
     array: PhpArray,
 ) -> Result<Owner<Value>, Thrown> {
-    let made = call_array_made(req, callable, array);
-    adopted(made)
+    adopted(call_array_made(req, callable, array))
 }
 
 /// What [`call_array`] makes, its one owner not yet named.
@@ -556,9 +568,8 @@ pub(crate) fn call_array_made(
     }
     match refused {
         None => serve(req, target, &placement.arguments, &placement.extra_named),
-        Some(None) => Err(throw_error(
+        Some(None) => Err(error(
             req,
-            "Error",
             "Cannot use positional argument after named argument",
         )),
         Some(Some((named, name))) => Err(named.throw(req, name)),
@@ -702,7 +713,7 @@ impl NamedRefused {
                 format!("Named parameter ${spelled} overwrites previous argument")
             }
         };
-        throw_error(req, "Error", &message)
+        error(req, &message)
     }
 }
 
@@ -1013,8 +1024,7 @@ pub fn call_method(
     method: &[u8],
     arguments: &[Value],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = call_method_made(req, object, method, arguments);
-    adopted(made)
+    adopted(call_method_made(req, object, method, arguments))
 }
 
 /// What [`call_method`] makes, its one owner not yet named.
@@ -1136,33 +1146,86 @@ pub fn property_is_virtual(req: &Request, class: ClassId, name: &[u8]) -> bool {
     req.property_virtual(class, name)
 }
 
-/// A hooked property's backing value, read past its hooks as the
-/// `get` hook itself reads it, which is what
-/// `ReflectionProperty::getRawValue` reaches through
-/// `zend_get_property_hook_trampoline`: a virtual property has none,
-/// php's `Error`; a typed one nothing wrote is the uninitialised-access
-/// `Error`. One more owner of the value, the caller's.
+/// A hooked property's backing value, read past its hooks as
+/// `ReflectionProperty::getRawValue` reads it: the `get` trampoline of
+/// the property `scope` declares, `prop_info->ce`, called on `object`
+/// with `zend_call_known_instance_method_with_0_params`, whose
+/// `read_property` finds it running. A virtual property has none,
+/// php's `Error`, and a typed one nothing wrote is the
+/// uninitialised-access `Error`, each thrown under the trampoline's
+/// frame. One more owner of the value, the caller's.
+///
+/// ```php
+/// class R { public int $a { get => $this->a + 1; } public $v { get => 5; set { } } }
+/// $r = new R;
+/// foreach (['a', 'v'] as $n) {
+///     try { (new ReflectionProperty(R::class, $n))->getRawValue($r); }
+///     catch (Error $e) { echo $e->getMessage(), "\n", $e->getTraceAsString(), "\n"; }
+/// }
+/// ```
+/// ```expect
+/// Typed property R::$a must not be accessed before initialization
+/// #0 [internal function]: R->$a::get()
+/// #1 %s(5): ReflectionProperty->getRawValue(Object(R))
+/// #2 {main}
+/// Must not read from virtual property R::$v
+/// #0 [internal function]: R->$v::get()
+/// #1 %s(5): ReflectionProperty->getRawValue(Object(R))
+/// #2 {main}
+/// ```
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn read_raw_property(
     req: &mut Request,
     object: &PhpObject,
+    scope: ClassId,
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = req.read_raw(*object, name);
-    adopted(made)
+    adopted(req.serve_hook_trampoline(*object, scope, name, HookKind::Get, &[]))
 }
 
-/// A hooked property's backing value written past its hooks, as the
-/// `set` hook itself writes it, `ReflectionProperty::setRawValue`'s
-/// trampoline: a virtual property has none, php's `Error`. A sink of
-/// both owners, given up whatever arm runs.
+/// A hooked property's backing value written past its hooks as
+/// `ReflectionProperty::setRawValue` writes it,
+/// `zend_call_known_instance_method_with_1_params(func, object, NULL,
+/// value)` over the `set` trampoline of the property `scope` declares:
+/// the call takes an owner of `value` of its own, and the trampoline
+/// returns the value it wrote, which the call gives up with
+/// `zval_ptr_dtor` as `zend_call_known_function` gives up a return
+/// nobody asked for, so a refcounted one is a possible root.
+///
+/// ```php
+/// class B {}
+/// class R { public B $a { set { echo "hook\n"; $this->a = $value; } } public B $plain; public int $n { set { $this->n = $value; } } }
+/// function t() {
+///     $r = new R; $p = new ReflectionProperty(R::class, 'a'); $v = new B; $w = new B;
+///     gc_collect_cycles(); $p->setRawValue($r, $v); echo "hooked uninit ", gc_status()['roots'], "\n";
+///     gc_collect_cycles(); $p->setRawValue($r, $w); echo "hooked over ", gc_status()['roots'], "\n";
+///     $q = new ReflectionProperty(R::class, 'plain'); gc_collect_cycles(); $q->setRawValue($r, $v); echo "plain ", gc_status()['roots'], "\n";
+///     try { (new ReflectionProperty(R::class, 'n'))->setRawValue($r, 'x'); }
+///     catch (TypeError $e) { echo $e->getMessage(), "\n", $e->getTraceAsString(), "\n"; }
+/// }
+/// t();
+/// ```
+/// ```expect
+/// hooked uninit 2
+/// hooked over 3
+/// plain 1
+/// Cannot assign string to property R::$n of type int
+/// #0 [internal function]: R->$n::set('x')
+/// #1 %s(9): ReflectionProperty->setRawValue(Object(R), 'x')
+/// #2 %s(12): t()
+/// #3 {main}
+/// ```
 pub fn write_raw_property(
     req: &mut Request,
     object: &PhpObject,
-    name: Owner<PhpString>,
-    value: Owner<Value>,
+    scope: ClassId,
+    name: &[u8],
+    value: Value,
 ) -> Result<(), Thrown> {
-    req.write_raw(*object, name, value)
+    let arguments = [value];
+    let returned = req.serve_hook_trampoline(*object, scope, name, HookKind::Set, &arguments)?;
+    req.release(returned);
+    Ok(())
 }
 
 /// `new $class(...$arguments)`: [`new_object`] and then the
@@ -1212,8 +1275,7 @@ pub fn instantiate_named(
     arguments: &[Value],
     named: &[(PhpString, Value)],
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = instantiate_named_made(req, class, arguments, named);
-    adopted(made)
+    adopted(instantiate_named_made(req, class, arguments, named))
 }
 
 /// What [`instantiate_named`] makes, its one owner not yet named.
@@ -1282,11 +1344,7 @@ fn construct_object(
             && let Some((name, _)) = named.first()
         {
             object.mark_destructor_called();
-            let message = format!(
-                "Unknown named parameter ${}",
-                String::from_utf8_lossy(name.as_bytes())
-            );
-            return Err(throw_error(req, "Error", &message));
+            return Err(NamedRefused::Unknown.throw(req, *name));
         }
         return Ok(());
     };
@@ -1440,8 +1498,7 @@ pub fn attribute_object(
     scope: Option<ClassId>,
     file: Option<&[u8]>,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = attribute_object_made(req, class, attribute, scope, file);
-    adopted(made)
+    adopted(attribute_object_made(req, class, attribute, scope, file))
 }
 
 /// What [`attribute_object`] makes, its one owner not yet named.
@@ -1643,8 +1700,7 @@ pub fn load_file(req: &mut Request, path: &[u8]) -> Result<bool, Thrown> {
 /// abstract class is php's `Error` for what cannot be instantiated.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn new_object(req: &mut Request, class: ClassId) -> Result<Owner<PhpObject>, Thrown> {
-    let made = new_object_made(req, class);
-    adopted(made)
+    adopted(new_object_made(req, class))
 }
 
 /// What [`new_object`] makes, its one owner not yet named.
@@ -1676,24 +1732,12 @@ pub fn clone_with<T: std::any::Any + Send>(
     object: &PhpObject,
     payload: T,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = clone_with_made(req, object, payload);
-    adopted(made)
-}
-
-/// What [`clone_with`] makes, its one owner not yet named.
-// The face's signature, which the engine's callers share.
-#[allow(clippy::trivially_copy_pass_by_ref)]
-pub(crate) fn clone_with_made<T: std::any::Any + Send>(
-    req: &mut Request,
-    object: &PhpObject,
-    payload: T,
-) -> Result<PhpObject, Thrown> {
     let copy = req.clone_with_payload(*object, payload)?;
     if let Err(thrown) = req.serve_clone_method(copy) {
         req.release(copy.as_value());
         return Err(thrown);
     }
-    Ok(copy)
+    Ok(Owner::adopt(copy))
 }
 
 /// `zend_objects_clone_members(new, old)`, what a class's `clone_obj`
@@ -1731,8 +1775,7 @@ pub fn internal_iterator(
     req: &mut Request,
     object: &PhpObject,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = crate::interfaces::internal_iterator(req, *object);
-    adopted(made)
+    adopted(crate::interfaces::internal_iterator(req, *object))
 }
 
 /// `PHAR_G(orig_fopen)(INTERNAL_FUNCTION_PARAM_PASSTHRU)`: the entry the
@@ -1840,6 +1883,28 @@ pub fn lookup_function(req: &Request, name: &[u8]) -> Option<Function> {
     req.function_named(Bare::of(name))
 }
 
+/// `zend_fetch_function` (`Z/Zend/zend_execute.c:4468`): the function
+/// [`lookup_function`] finds, its runtime cache laid down where the
+/// request has not yet, as php lays it for a reflector made over the
+/// function by name (`ReflectionFunction::__construct`,
+/// `ReflectionParameter::__construct`), so a closure made from it
+/// shares the cache, as one made by `g(...)` does:
+///
+/// ```php
+/// function g($o) { return $o->a . $o->b . $o->c . $o->d; }
+/// $m = memory_get_usage(); $c = (new ReflectionFunction('g'))->getClosure();
+/// echo memory_get_usage() - $m, "\n";
+/// ```
+/// ```expect
+/// 384
+/// ```
+///
+/// The `Err` is the memory limit's fatal.
+pub fn fetch_function(req: &mut Request, name: &[u8]) -> Result<Option<Function>, Thrown> {
+    let fetched = req.fetch_function(Bare::of(name));
+    req.fatal_of(fetched)
+}
+
 /// The `static` variables of what `callable` names, name and value in the
 /// order the op array's table holds them, as
 /// `ReflectionFunctionAbstract::getStaticVariables` copies
@@ -1855,11 +1920,9 @@ pub fn bound_variables(
     callable: &Callable,
 ) -> Result<Vec<(Owner<PhpString>, Value)>, Thrown> {
     let rows = req.static_variables(callable.target());
-    let mut out = Vec::with_capacity(rows.len());
-    for (name, value) in rows {
-        out.push((PhpString::new(req, &name)?, value));
-    }
-    Ok(out)
+    (rows.into_iter())
+        .map(|(name, value)| Ok((PhpString::new(req, &name)?, value)))
+        .collect()
 }
 
 /// Serve the autoloaders for `name`, `zend_lookup_class_ex` after the
@@ -1972,7 +2035,9 @@ pub(crate) fn autoload_keyed(req: &mut Request, name: &[u8]) -> Result<Option<Cl
 
 /// [`autoload`], `keyed` where the caller holds the lowered name.
 fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<ClassId>, Thrown> {
-    if name.is_empty() {
+    // The empty name, and a lone namespace separator, which names no
+    // class (`Z/Zend/zend_execute_API.c:1225-1228`), before the table.
+    if name.is_empty() || (!keyed && name == b"\\") {
         return Ok(None);
     }
     let key = Bare::of(name);
@@ -2013,7 +2078,7 @@ fn autoload_as(req: &mut Request, name: &[u8], keyed: bool) -> Result<Option<Cla
             } else {
                 req.standing_string(bare)?
             };
-            let returned = serve(req, loader.target(), &[Value::string(class)], &[]);
+            let returned = serve(req, loader, &[Value::string(class)], &[]);
             req.release(Value::string(class));
             req.release(returned?);
             if let Some(class) = req.class_named(key) {
@@ -2049,7 +2114,7 @@ pub fn perform_autoload(req: &mut Request, name: PhpString) -> Result<Option<Cla
     req.without_site_override(|req| {
         let mut at = 0;
         while let Some(loader) = req.autoloader(at) {
-            let returned = serve(req, loader.target(), &[Value::string(name)], &[]);
+            let returned = serve(req, loader, &[Value::string(name)], &[]);
             req.release(returned?);
             if !lowered.starts_with(b"\\")
                 && let Some(class) = req.class_named(Bare::resolved(&lowered))
@@ -2089,12 +2154,6 @@ pub fn constant(req: &mut Request, name: &[u8]) -> Result<Option<Value>, Thrown>
 /// witness is the one that pins each arm at the oracle.
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn fetch_constant(req: &mut Request, name: &[u8]) -> Result<Owner<Value>, Thrown> {
-    let made = fetch_constant_made(req, name);
-    adopted(made)
-}
-
-/// What [`fetch_constant`] makes, its one owner not yet named.
-pub(crate) fn fetch_constant_made(req: &mut Request, name: &[u8]) -> Result<Value, Thrown> {
     // `zend_get_constant_ex`'s own strip; the class part is then handed
     // to the class lookup as written, which strips a `\` of its own, as
     // `zend_fetch_class` does: `constant("\\\\ArrayObject::STD_PROP_LIST")`
@@ -2107,9 +2166,9 @@ pub(crate) fn fetch_constant_made(req: &mut Request, name: &[u8]) -> Result<Valu
         let (class_name, constant_name) = (&name[..colon - 1], &name[colon + 1..]);
         let class = fetch_class(req, class_name)?;
         let shown = String::from_utf8_lossy(class_name).into_owned();
-        return req.class_constant_shown(class, constant_name, &shown);
+        return adopted(req.class_constant_shown(class, constant_name, &shown));
     }
-    global_constant(req, name, None)
+    adopted(global_constant(req, name, None))
 }
 
 /// `zend_get_constant_ex`'s arm for a constant that is no class's
@@ -2137,11 +2196,7 @@ fn global_constant(
         unqualified_constant(req, name)
     };
     let Some((key, value)) = found else {
-        return Err(throw_error(
-            req,
-            "Error",
-            &format!("Undefined constant \"{}\"", String::from_utf8_lossy(name)),
-        ));
+        return Err(crate::api::raising::undefined_constant(req, name));
     };
     crate::api::raising::deprecated_constant(req, &key)?;
     req.addref(&value);
@@ -2176,36 +2231,14 @@ fn special_constant(name: &[u8]) -> Option<Value> {
 /// `zend_lookup_class_ex`, the table and then the autoloaders, with
 /// `Class "X" not found` where neither has it.
 pub(crate) fn fetch_class(req: &mut Request, name: &[u8]) -> Result<ClassId, Thrown> {
-    if name.eq_ignore_ascii_case(b"self") {
-        return req.frames().scope().ok_or_else(|| {
-            throw_error(
-                req,
-                "Error",
-                "Cannot access \"self\" when no class scope is active",
-            )
-        });
-    }
-    if name.eq_ignore_ascii_case(b"parent") {
-        let Some(scope) = req.frames().scope() else {
-            return Err(throw_error(
-                req,
-                "Error",
-                "Cannot access \"parent\" when no class scope is active",
-            ));
-        };
-        return req.symbols().class_parent(scope).ok_or_else(|| {
-            throw_error(
-                req,
-                "Error",
-                "Cannot access \"parent\" when current class scope has no parent",
-            )
-        });
+    if name.eq_ignore_ascii_case(b"self") || name.eq_ignore_ascii_case(b"parent") {
+        let scope = req.frames().scope();
+        return const_class(req, name, scope);
     }
     if name.eq_ignore_ascii_case(b"static") {
         return req.frames().called_scope().ok_or_else(|| {
-            throw_error(
+            error(
                 req,
-                "Error",
                 "Cannot access \"static\" when no class scope is active",
             )
         });
@@ -2251,8 +2284,7 @@ pub fn class_constant(
     class: ClassId,
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = req.updated_class_constant(class, name);
-    adopted(made)
+    adopted(req.updated_class_constant(class, name))
 }
 
 /// Evaluate a constant expression in `scope`, `zval_update_constant_ex`:
@@ -2342,8 +2374,7 @@ pub fn eval_const_expr(
     expr: &ConstExpr,
     scope: Option<ClassId>,
 ) -> Result<Owner<Value>, Thrown> {
-    let made = eval_const_expr_made(req, expr, scope);
-    adopted(made)
+    adopted(eval_const_expr_made(req, expr, scope))
 }
 
 /// What [`eval_const_expr`] makes, its one owner not yet named.
@@ -2375,8 +2406,7 @@ pub fn eval_declared(
     expr: &ConstExpr,
     scope: Option<ClassId>,
 ) -> Result<Owner<Value>, Thrown> {
-    let made = eval_declared_made(req, expr, scope);
-    adopted(made)
+    adopted(eval_declared_made(req, expr, scope))
 }
 
 /// What [`eval_declared`] makes, its one owner not yet named.
@@ -2399,6 +2429,32 @@ fn evaluate(req: &mut Request, expr: &ConstExpr, scope: Option<ClassId>) -> Resu
 
 /// `zend_ast_evaluate_inner`: one node of [`eval_const_expr`] under the
 /// site `zend_ast_evaluate_ex` stood the request at.
+///
+/// A unit's array is copied with an owner, so an `eval`'s default costs
+/// a call nothing and an attributed `const`'s keeps the constant's own
+/// owner past the `eval`'s main op array:
+///
+/// ```php
+/// eval('function h($p = [5 => 1]) { return $p; }');
+/// h(); $m = memory_get_usage(); h(); h(); echo memory_get_usage() - $m, "\n";
+/// eval('#[Attribute] class B {} #[B] const Y = [1, 2]; debug_zval_dump(Y);');
+/// debug_zval_dump(Y);
+/// ```
+/// ```expect regime=jit-off
+/// 0
+/// array(2) packed refcount(3){
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// array(2) packed refcount(2){
+///   [0]=>
+///   int(1)
+///   [1]=>
+///   int(2)
+/// }
+/// ```
 fn evaluate_node(
     req: &mut Request,
     expr: &ConstExpr,
@@ -2410,9 +2466,13 @@ fn evaluate_node(
         ConstExpr::Long { value: n, .. } => Ok(Value::int(*n)),
         ConstExpr::Double(f) => Ok(Value::float(*f)),
         ConstExpr::Str(s) => Ok(Value::string(req.string(s)?)),
-        // The unit's constant array as it stands, which takes no owner,
-        // as `ZVAL_COPY` takes none of an `IS_ARRAY_IMMUTABLE`.
-        ConstExpr::ImmutableArray(array) => Ok(Value::of_zval(array.value())),
+        // `ZVAL_COPY` of the unit's array: one more owner of a request's,
+        // none of an `IS_ARRAY_IMMUTABLE`.
+        ConstExpr::UnitValue(held) => {
+            let value = Value::of_zval(held.value());
+            req.addref(&value);
+            Ok(value)
+        }
         // `zend_get_constant_ex` under the node's `attr`, which words a
         // `CONST_DEPRECATED` constant's deprecation after it found it.
         ConstExpr::Constant { name, .. } => {
@@ -2433,7 +2493,7 @@ fn evaluate_node(
                     named.type_name()
                 );
                 req.release(named);
-                return Err(throw_error(req, "TypeError", &message));
+                return Err(type_error(req, &message));
             };
             req.release(named);
             class_constant_expr(req, class, &Name(bytes.into_boxed_slice()), scope)
@@ -2678,17 +2738,15 @@ fn class_name_node(
     let parent = class.eq_ignore_ascii_case(b"parent");
     let name = if parent || class.eq_ignore_ascii_case(b"self") {
         let Some(scope) = scope else {
-            return Err(throw_error(
+            return Err(error(
                 req,
-                "Error",
                 "Cannot use \"self\" when no class scope is active",
             ));
         };
         let named = if parent {
             req.symbols().class_parent(scope).ok_or_else(|| {
-                throw_error(
+                error(
                     req,
-                    "Error",
                     "Cannot use \"parent\" when current class scope has no parent",
                 )
             })?
@@ -2849,9 +2907,8 @@ fn chain_node(
             }
             if under.value.deref().as_object().is_some() {
                 req.release(under.value);
-                return Err(throw_error(
+                return Err(error(
                     req,
-                    "Error",
                     "Cannot use [] on objects in constant expression",
                 ));
             }
@@ -2921,14 +2978,7 @@ fn prop_link(
 /// [`prop_link`]'s read of `name` off `object`.
 fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, Thrown> {
     let Some(instance) = object.as_object() else {
-        let shown = crate::ops::value_name(req, &object.undef_as_null());
-        crate::api::raising::warning(
-            req,
-            &format!(
-                "Attempt to read property \"{}\" on {shown}",
-                String::from_utf8_lossy(name)
-            ),
-        );
+        crate::ops::property_read_on(req, name, &object.undef_as_null());
         return Ok(Chained {
             value: Value::null(),
             short: false,
@@ -2939,9 +2989,8 @@ fn prop_read(req: &mut Request, object: &Value, name: &[u8]) -> Result<Chained, 
         .class_decl(instance.class())
         .is_some_and(|decl| decl.kind == php_unit::decl::ClassKind::Enum);
     if !is_enum {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "Fetching properties on non-enums in constant expressions is not allowed",
         ));
     }
@@ -3146,14 +3195,18 @@ fn function_callable(
         };
         return crate::classes::closure_from_frame(req, frame).map(|made| made.as_value());
     }
-    let found = req.function_named(name.into()).or_else(|| {
-        if name_kind == php_unit::decl::NameKind::FullyQualified {
-            return None;
-        }
-        let at = name.0.iter().rposition(|b| *b == b'\\')?;
-        req.function_named(Bare::resolved(name.0.get(at + 1..)?))
-    });
-    let Some(function) = found else {
+    // `zend_fetch_function` (`Z/Zend/zend_ast.c:1074`), which lays the
+    // function's runtime cache down as it finds it, by the name and then,
+    // unqualified, by its last segment.
+    let mut found = req.fetch_function(name.into());
+    if matches!(found, Ok(None))
+        && name_kind != php_unit::decl::NameKind::FullyQualified
+        && let Some(tail) =
+            (name.0.iter().rposition(|b| *b == b'\\')).and_then(|at| name.0.get(at + 1..))
+    {
+        found = req.fetch_function(Bare::resolved(tail));
+    }
+    let Some(function) = req.fatal_of(found)? else {
         return Err(undefined_function(req, &name.0));
     };
     req.keep_callable(unit, at, function);
@@ -3202,9 +3255,8 @@ fn method_callable(
     let ce = const_class(req, &class.0, scope)?;
     let magic = req.symbols().method_named(ce, b"__callstatic").is_some();
     let magic_refused = |req: &mut Request| {
-        throw_error(
+        error(
             req,
-            "Error",
             "Creating a callable for the magic __callStatic() method is not supported in constant expressions",
         )
     };
@@ -3244,9 +3296,8 @@ fn const_class(req: &mut Request, class: &[u8], scope: Option<ClassId>) -> Resul
     }
     let word = if parent { "parent" } else { "self" };
     let Some(scope) = scope else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             &format!("Cannot access \"{word}\" when no class scope is active"),
         ));
     };
@@ -3254,9 +3305,8 @@ fn const_class(req: &mut Request, class: &[u8], scope: Option<ClassId>) -> Resul
         return Ok(scope);
     }
     req.symbols().class_parent(scope).ok_or_else(|| {
-        throw_error(
+        error(
             req,
-            "Error",
             "Cannot access \"parent\" when current class scope has no parent",
         )
     })
@@ -3292,9 +3342,8 @@ fn add_unpacked_element(
     spread: &Value,
 ) -> Result<(), Thrown> {
     let Some(source) = spread.deref().as_array() else {
-        return Err(throw_error(
+        return Err(error(
             req,
-            "Error",
             "Only arrays can be unpacked in constant expression",
         ));
     };
@@ -3318,11 +3367,7 @@ fn add_unpacked_element(
 /// php's `Error` for a node its constant-expression walk does not
 /// evaluate.
 fn invalid_operations(req: &mut Request) -> Thrown {
-    throw_error(
-        req,
-        "Error",
-        "Constant expression contains invalid operations",
-    )
+    error(req, "Constant expression contains invalid operations")
 }
 
 /// One binary operator of a constant expression, by the spelling the
@@ -3398,8 +3443,7 @@ fn binary(req: &mut Request, op: &[u8], lhs: &Value, rhs: &Value) -> Result<Valu
 /// ```
 #[cfg_attr(debug_assertions, track_caller)]
 pub fn iterate(req: &mut Request, object: &PhpObject) -> Result<Owner<Iter>, Thrown> {
-    let made = crate::interfaces::get_iterator(req, *object, false).map(Iter);
-    adopted(made)
+    adopted(crate::interfaces::get_iterator(req, *object, false).map(Iter))
 }
 
 /// `zend_create_fake_closure` over a resolved callable, what
@@ -3427,8 +3471,7 @@ pub fn closure_from_callable(
     req: &mut Request,
     callable: &Callable,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = crate::classes::fake_closure(req, callable);
-    adopted(made)
+    adopted(crate::classes::fake_closure(req, callable))
 }
 
 /// Read a property through the class's `read_property` handler: a
@@ -3474,8 +3517,7 @@ pub fn read_static_prop(
     class: ClassId,
     name: &[u8],
 ) -> Result<Owner<Value>, Thrown> {
-    let made = req.static_property(class, name, Some(class), PropertyRead::Warning);
-    adopted(made)
+    adopted(req.static_property(class, name, Some(class), PropertyRead::Warning))
 }
 
 /// Address a `static` property of `class` silently — a property of the
@@ -3535,8 +3577,7 @@ pub fn new_lazy_ghost(
     initializer: &Callable,
     options: i64,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = req.make_lazy(None, class, initializer, Strategy::Ghost, options);
-    adopted(made)
+    adopted(req.make_lazy(None, class, initializer, Strategy::Ghost, options))
 }
 
 /// `zend_object_make_lazy` under `ZEND_LAZY_OBJECT_STRATEGY_PROXY`, what
@@ -3550,8 +3591,7 @@ pub fn new_lazy_proxy(
     factory: &Callable,
     options: i64,
 ) -> Result<Owner<PhpObject>, Thrown> {
-    let made = req.make_lazy(None, class, factory, Strategy::Proxy, options);
-    adopted(made)
+    adopted(req.make_lazy(None, class, factory, Strategy::Proxy, options))
 }
 
 /// `zend_object_make_lazy(obj, class, ...)` under the ghost strategy,
@@ -3607,17 +3647,19 @@ pub fn mark_lazy_initialized(req: &mut Request, object: &PhpObject) -> Result<Ph
 
 /// `ReflectionProperty::skipLazyInitialization` under `None` and
 /// `ReflectionProperty::setRawValueWithoutLazyInitialization` under
-/// `Some`: the declared property `name`, on the object the initialised
+/// `Some`: the property `name` that `declaring` declares, the effective
+/// property's slot (`prop->offset`), on the object the initialised
 /// proxies lead to, stops waiting for the initializer, holding its
-/// default or `value` written past `__set` and hooks; the object stops
-/// being lazy once no property waits. `value` is a sink's, the object's
-/// from here. The checks on the property php makes first are the
-/// caller's.
+/// default, or with its `IS_PROP_LAZY` cleared while `write`, the
+/// caller's `reflection_property_set_raw_value`, writes it on that object;
+/// the object stops being lazy once no property waits. The checks on the
+/// property php makes first are the caller's.
 pub fn skip_lazy_initialization(
     req: &mut Request,
     object: &PhpObject,
+    declaring: ClassId,
     name: &[u8],
-    value: Option<Owner<Value>>,
+    write: Option<crate::api::request::RawWrite<'_>>,
 ) -> Result<(), Thrown> {
-    req.lazy_skip(*object, name, value)
+    req.lazy_skip(*object, declaring, name, write)
 }

@@ -7,6 +7,7 @@
 //! tables.
 
 use std::fmt::Write as _;
+use std::io::Write as _;
 
 use php_unit::decl::Name;
 
@@ -74,16 +75,6 @@ fn info_html_esc(text: &[u8]) -> Vec<u8> {
         }
     }
     out
-}
-
-/// `fmt::Write` into bytes, for the rows [`Extensions::info_rows`] formats.
-struct Bytes<'a>(&'a mut Vec<u8>);
-
-impl std::fmt::Write for Bytes<'_> {
-    fn write_str(&mut self, text: &str) -> std::fmt::Result {
-        self.0.extend_from_slice(text.as_bytes());
-        Ok(())
-    }
 }
 
 impl Request {
@@ -388,7 +379,7 @@ impl Extensions<&mut Request> {
     /// q=1
     /// ```
     /// ```expect
-    /// X-Powered-By: PHP/8.5.9
+    /// X-Powered-By: PHP/8.5.12
     /// Content-type: text/html; charset=UTF-8
     ///
     /// <h2><a name="module_json" href="#module_json">json</a></h2>
@@ -438,7 +429,7 @@ impl Extensions<&mut Request> {
                     out.extend_from_slice(b"<tr>");
                     for (i, cell) in cells.iter().enumerate() {
                         let class = if i == 0 { "e" } else { "v" };
-                        write!(Bytes(&mut out), "<td class=\"{class}\">").ok();
+                        write!(out, "<td class=\"{class}\">").ok();
                         if cell.is_empty() {
                             out.extend_from_slice(b"<i>no value</i>");
                         } else {
@@ -452,11 +443,11 @@ impl Extensions<&mut Request> {
                     let _ = columns;
                     let spaces = 74_usize.saturating_sub(header.len()) / 2;
                     let pad = " ".repeat(spaces.max(1));
-                    writeln!(Bytes(&mut out), "{pad}{header}{pad}").ok();
+                    writeln!(out, "{pad}{header}{pad}").ok();
                 }
                 (InfoRow::Colspan(columns, header), false) => {
                     writeln!(
-                        Bytes(&mut out),
+                        out,
                         "<tr class=\"h\"><th colspan=\"{columns}\">{header}</th></tr>"
                     )
                     .ok();

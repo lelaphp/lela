@@ -14,7 +14,7 @@ use php_ext::attr::php_function;
 use php_ext::coerce::compare;
 use php_ext::raising::Thrown;
 use php_ext::request::Request;
-use php_ext::values::{Key, Owner, PhpArray, Value, walk};
+use php_ext::values::{Key, Owner, PhpArray, SortAlgorithm, Value, walk};
 
 use super::constants::{
     SORT_ASC, SORT_DESC, SORT_FLAG_CASE, SORT_LOCALE_STRING, SORT_NATURAL, SORT_NUMERIC,
@@ -116,7 +116,9 @@ fn sort(
     let mut target = array_by_reference(req, &array)?;
     let sorted = target
         .array
-        .sort_by(req, true, |req, (_, a), (_, b)| compared(req, flags, a, b));
+        .sort_by(req, SortAlgorithm::Array, true, |req, (_, a), (_, b)| {
+            compared(req, flags, a, b)
+        });
     target.finish(req);
     sorted?;
     Ok(True)
@@ -204,7 +206,7 @@ fn sort(
 fn usort(req: &mut Request, array: Ref<PhpArray>, callback: Callable) -> Result<True, Thrown> {
     let mut deprecated = false;
     walk::detached(req, &array, |req, copy| {
-        copy.sort_by(req, true, |req, (_, a), (_, b)| {
+        copy.sort_by(req, SortAlgorithm::Array, true, |req, (_, a), (_, b)| {
             user_compare(req, &callback, &mut deprecated, a, b)
         })
     })?;
@@ -327,9 +329,14 @@ fn data_sort(
     renumber: bool,
 ) -> Result<True, Thrown> {
     let mut target = array_by_reference(req, array)?;
-    let sorted = target.array.sort_by(req, renumber, |req, (_, a), (_, b)| {
-        compared(req, flags, a, b).map(|o| if reverse { o.reverse() } else { o })
-    });
+    let sorted = target.array.sort_by(
+        req,
+        SortAlgorithm::Array,
+        renumber,
+        |req, (_, a), (_, b)| {
+            compared(req, flags, a, b).map(|o| if reverse { o.reverse() } else { o })
+        },
+    );
     target.finish(req);
     sorted?;
     Ok(True)
@@ -503,9 +510,12 @@ fn key_sort(
     reverse: bool,
 ) -> Result<True, Thrown> {
     let mut target = array_by_reference(req, array)?;
-    let sorted = target.array.sort_by(req, false, |req, (a, _), (b, _)| {
-        key_compare(req, flags, a, b, reverse)
-    });
+    // `zend_hash_sort`: php's key sorts hold nothing (`Z/ext/standard/array.c:582`).
+    let sorted = target
+        .array
+        .sort_by(req, SortAlgorithm::Hash, false, |req, (a, _), (b, _)| {
+            key_compare(req, flags, a, b, reverse)
+        });
     target.finish(req);
     sorted?;
     Ok(True)
@@ -557,7 +567,9 @@ fn natural_sort(req: &mut Request, array: &Ref<PhpArray>, fold: bool) -> Result<
     let flags = SORT_NATURAL | if fold { SORT_FLAG_CASE } else { 0 };
     let sorted = target
         .array
-        .sort_by(req, false, |req, (_, a), (_, b)| compared(req, flags, a, b));
+        .sort_by(req, SortAlgorithm::Array, false, |req, (_, a), (_, b)| {
+            compared(req, flags, a, b)
+        });
     target.finish(req);
     sorted?;
     Ok(True)
@@ -617,7 +629,7 @@ fn user_sort(
 ) -> Result<True, Thrown> {
     let mut deprecated = false;
     walk::detached(req, array, |req, copy| {
-        copy.sort_by(req, false, |req, (ka, a), (kb, b)| {
+        copy.sort_by(req, SortAlgorithm::Array, false, |req, (ka, a), (kb, b)| {
             if by_key {
                 let (x, y) = (key_value(ka), key_value(kb));
                 // `php_array_user_key_compare_unstable`: the keys, read
@@ -855,8 +867,8 @@ fn array_multisort(
     #[php(prefer_ref)] array: Ref<Untyped<Value>>,
     #[php(prefer_ref)] rest: Variadic<Ref<Untyped<Value>>>,
 ) -> Result<True, Thrown> {
-    use php_ext::raising::{arg_type_error, throw_error};
-    let given: Vec<Ref<Untyped<Value>>> = std::iter::once(array).chain(rest.0).collect();
+    use php_ext::raising::{arg_type_error, value_error};
+    let given: Vec<Ref<Untyped<Value>>> = std::iter::once(array).chain(rest).collect();
     // Each array with the cell it came in, and the comparison each array
     // is sorted by, `(flags, descending)`.
     let mut arrays: Vec<(PhpArray, Ref<Untyped<Value>>)> = Vec::new();
@@ -921,11 +933,7 @@ fn array_multisort(
     };
     let size = first.len();
     if arrays.iter().any(|(array, _)| array.len() != size) {
-        return Err(throw_error(
-            req,
-            "ValueError",
-            "Array sizes are inconsistent",
-        ));
+        return Err(value_error(req, "Array sizes are inconsistent"));
     }
     if size < 1 {
         return Ok(True);

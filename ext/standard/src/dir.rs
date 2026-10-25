@@ -63,7 +63,7 @@ use std::path::Path;
 use php_ext::abi::{Instance, OrFalse, Path as PathArg, Refusals, This};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, type_error};
 use php_ext::request::{MAXPATHLEN, OwnedStream as _, Request, Resolve, Stream, Streams, Whence};
 use php_ext::values::{Owner, PhpArray, PhpString, Resource, Value, ValueRef};
 
@@ -337,9 +337,8 @@ fn this_stream(req: &mut Request, this: This<Directory>, method: &str) -> Result
         ));
     };
     let Some(stream) = Stream::from_value(req, &handle) else {
-        return Err(throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             &format!(
                 "Directory::{method}(): cannot use Directory resource after it has been closed"
             ),

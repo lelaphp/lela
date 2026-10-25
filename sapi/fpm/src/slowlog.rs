@@ -117,8 +117,7 @@ pub(crate) fn trace(fpm: &mut Fpm, p: usize, c: usize) {
         Ok(mut file) => {
             if let Some(memory) = crate::ffi::trace::ready(pid) {
                 std::io::Write::write_all(&mut file, &dump(fpm, p, c, &memory)).ok();
-                drop(memory);
-                crate::ffi::trace::close(pid);
+                crate::ffi::trace::close(memory);
             }
         }
         Err(e) => {

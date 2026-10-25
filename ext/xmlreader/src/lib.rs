@@ -33,7 +33,7 @@ use php_ext::abi::{
 use php_ext::attr::php_class;
 use php_ext::call::{Function, instantiate, lookup_class};
 use php_ext::coerce::truthy;
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, fatal, throw_error, type_error};
 use php_ext::request::{Request, Resolve, Stream};
 use php_ext::values::walk;
 use php_ext::values::{
@@ -1008,7 +1008,7 @@ impl XMLReader {
         let Some(stream) = Stream::from_value(req, &Value::resource(stream)) else {
             let message =
                 "XMLReader::fromStream(): supplied resource is not a valid stream resource";
-            return Err(throw_error(req, "TypeError", message));
+            return Err(type_error(req, message));
         };
         valid_encoding(req, encoding.as_ref())?;
         let (e, u) = (

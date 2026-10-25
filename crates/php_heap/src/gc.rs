@@ -54,6 +54,10 @@ pub(crate) struct Refcounted {
 /// the word with the pin above the count.
 pub(crate) const REFCOUNT_AT: usize = std::mem::offset_of!(Refcounted, refcount);
 
+/// Where in a counted value's header its type, flags and collector bits
+/// are, php's `GC_TYPE_INFO`: the word [`LEAK_BITS`] is tested in.
+pub(crate) const TYPE_INFO_AT: usize = std::mem::offset_of!(Refcounted, type_info);
+
 /// The first of the walks' pins over a block other than an object, whose
 /// pins are counted ([`crate::Obj::pin`]) (design §4.4, #2197, #2230,
 /// #2291), the pins past the first counted beside it ([`Nested`]): the
@@ -68,7 +72,7 @@ pub(crate) const REFCOUNT_AT: usize = std::mem::offset_of!(Refcounted, refcount)
 /// count to zero asks it once there, from the word it has in hand.
 const PINNED: u32 = 1 << 31;
 /// The count's thirty-one bits beneath the pin.
-const COUNT: u32 = !PINNED;
+pub(crate) const COUNT: u32 = !PINNED;
 
 /// What one owner given up left of a block's count
 /// ([`Counted::release`]).
@@ -124,6 +128,11 @@ pub(crate) const OBJ_PINS: u32 = (1 << 30) - 1;
 const TYPE_MASK: u32 = 0x0000_000f;
 /// `GC_INFO_SHIFT`: the collector's twenty-two bits start here.
 const INFO_SHIFT: u32 = 10;
+/// `GC_INFO_MASK | (GC_NOT_COLLECTABLE << GC_FLAGS_SHIFT)`: the bits of
+/// `GC_TYPE_INFO` of which a value `gc_possible_root` may take has none,
+/// php's `GC_MAY_LEAK` (`Z/Zend/zend_gc.h:110`), the one place the rule
+/// is written ([`Refcounted::may_leak`], [`crate::Zval::LEAK_BITS`]).
+pub(crate) const LEAK_BITS: u32 = (!0 << INFO_SHIFT) | NOT_COLLECTABLE;
 /// `GC_ADDRESS` (`Z/Zend/zend_gc.c:90`): the low twenty bits of the
 /// info, the value's index in the root buffer, compressed past 2^19.
 const GC_ADDRESS: u32 = 0x000f_ffff;
@@ -277,7 +286,7 @@ impl Refcounted {
     /// no colour, and collectable, which is what makes a value one
     /// `gc_possible_root` may take.
     pub(crate) fn may_leak(&self) -> bool {
-        self.type_info.get() & ((!0 << INFO_SHIFT) | NOT_COLLECTABLE) == 0
+        self.type_info.get() & LEAK_BITS == 0
     }
 }
 

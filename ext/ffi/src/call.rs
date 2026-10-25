@@ -9,7 +9,7 @@ use php_ext::abi::{Beneath, Callable, chain};
 use php_ext::coerce::{callable_checked, to_double, to_long, truthy, value_name, with_string};
 use php_ext::raising::{Thrown, fatal, while_pending};
 use php_ext::request::Request;
-use php_ext::values::{Owner, PhpObject, Value, ValueRef};
+use php_ext::values::{Owner, Value, ValueRef};
 
 use crate::cdata::{Fetch, as_cdata, func_pointee, to_value, type_name, view, write_value};
 use crate::decls::function_symbol;
@@ -20,16 +20,14 @@ use crate::{State, ffi_error, types};
 /// A callback C may call: libffi's closure over the PHP callable, kept
 /// until the request ends as php keeps `FFI_G(callbacks)`.
 ///
-/// It owns what php's `zend_ffi_create_callback` owns, which is narrower
-/// than [`Owner<Callable>`]: a `Closure` object's one count,
-/// `GC_ADDREF(ZEND_CLOSURE_OBJECT(fcc.function_handler))`
-/// (`Z/ext/ffi/ffi.c:1110`), and nothing of any other callable, so an
-/// `[$obj, 'm']` callback leaves `$obj` to its PHP owners.
+/// It owns the callable whole, as php-8.5.12's `zend_ffi_create_callback`
+/// holds its `zend_fcall_info_cache` with `zend_fcc_addref` and gives it
+/// up with `zend_fcc_dtor` (`Z/ext/ffi/ffi.c:1104`, `:923`): a closure's
+/// count, and the receiver of an `[$obj, 'm']` callback, so `$obj`
+/// stands until the request's end however its PHP owners let go.
 pub(crate) struct Callback {
     closure: Closure,
-    callable: Callable,
-    /// The `Closure` object the callable is, its owner.
-    owned: Option<Owner<PhpObject>>,
+    callable: Owner<Callable>,
     ty: TypeId,
 }
 
@@ -446,9 +444,9 @@ fn pass_var_arg(
 /// 1234
 /// ```
 ///
-/// The callback owns a `Closure` and nothing of another callable
-/// ([`Callback`]): an `[$obj, 'm']` callback's object is destructed at
-/// its last PHP owner, a closure made of one at the request's end.
+/// The callback owns its callable whole ([`Callback`]): an
+/// `[$obj, 'm']` callback's object and a closure made of one are both
+/// destructed at the request's end, after the program's last line.
 ///
 /// ```php
 /// class A { function m($x) { return $x + 1; } function __destruct() { echo "dtor\n"; } }
@@ -467,10 +465,10 @@ fn pass_var_arg(
 /// ```
 /// ```expect
 /// int(2)
-/// dtor
 /// unset
 /// int(6)
 /// end
+/// dtor
 /// dtor
 /// ```
 pub(crate) fn create_callback(
@@ -521,16 +519,10 @@ pub(crate) fn create_callback(
         Err(ClosureError::Prepare) => return Err(ffi_error(req, "Cannot prepare callback")),
     };
     let code = closure.code();
-    let owned = callable
-        .value()
-        .deref()
-        .as_object()
-        .filter(|object| object.closure(req).is_some())
-        .map(|object| Owner::take(req, object));
+    let callable = Owner::take(req, callable);
     req.state::<State>().callbacks.push(Callback {
         closure,
         callable,
-        owned,
         ty: func,
     });
     Ok(code)
@@ -587,7 +579,7 @@ fn callback(req: &mut Request, index: usize, ret: usize, args: &[usize]) {
         .state::<State>()
         .callbacks
         .get(index)
-        .map(|callback| (callback.callable.clone(), callback.ty))
+        .map(|callback| (Callable::clone(&callback.callable), callback.ty))
     else {
         return;
     };
@@ -714,14 +706,12 @@ pub(crate) fn rshutdown(req: &mut Request) {
 }
 
 /// The callbacks given up at the end of the request, each one's code
-/// freed and the `Closure` it owned given up, as php's `RSHUTDOWN`
+/// freed and the callable it owned given up, as php's `RSHUTDOWN`
 /// destroys `FFI_G(callbacks)` (`zend_ffi_callback_hash_dtor`).
 fn release_callbacks(req: &mut Request) {
     let callbacks = std::mem::take(&mut req.state::<State>().callbacks);
     for callback in callbacks {
         drop(callback.closure);
-        if let Some(owned) = callback.owned {
-            owned.give_up(req);
-        }
+        callback.callable.give_up(req);
     }
 }

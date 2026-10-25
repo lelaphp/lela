@@ -427,12 +427,15 @@ files = { "t.php" = "<?php\nfunction f() {}\nclass A {}\ninterface I {}\nclass C
 stdin = "ev var_dump(function_exists(\"f\"), class_exists(\"A\", false), interface_exists(\"I\", false), class_exists(\"C\", false), function_exists(\"g\"))\nq\n"
 streams = "merged"
 
-# The auto compile under `-r` comes after the init files whatever they left:
-# where their code bailed out, its displays come before the startup run asks
-# to restart (`n`, the session at the prompt); php is fully started after it,
-# so after a restart (`y`) the next cycle's auto compile stands at an
-# invisible prompt inside its log, where `q` bails out of the log before the
-# fatal is displayed and the status written, and the session ends with 0.
+# The auto compile under `-r` comes after the init files whatever they left.
+# An init file's `ev` that meets the memory limit raises php 8.5.12's delayed
+# fatal with the `ev`'s frame executing, so `zend_handle_delayed_oom` throws
+# the unwind exit, which phpdbg's loop turns back into a bailout that `ev`'s
+# `zend_catch` takes, writing the status 0 and leaving the unwind exit in
+# `EG(exception)`. With it pending, `php_stream_open_for_zend_ex` refuses the
+# context: its `Could not open file` is written nowhere under
+# `PHPDBG_DISCARD_OUTPUT`, nothing compiles, and the status stays 0 as the
+# startup run asks to restart (`n`, the session at the prompt).
 [[line]]
 name = "under-r-the-auto-compile-displays-after-init-files-that-bailed-out"
 args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -440,7 +443,8 @@ files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = nu
 stdin = "n\nq\n"
 streams = "merged"
 
-# The same, restarted.
+# The same, restarted: the next cycle's init file meets the limit again, and
+# its auto compile is refused alike.
 [[line]]
 name = "under-r-a-restart-s-auto-compile-quit-inside-its-log-leaves-the-status"
 args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -449,12 +453,10 @@ stdin = "y\nq\n"
 streams = "merged"
 
 # The restarted cycle's startup run is not `run` but the line the cycle
-# before parsed last, `first_command`, here the init file's `ev` (#2912): `c`
-# leaves the auto compile's invisible log prompt, its fatal displayed, and
-# the resubmitted `ev` meets the memory limit again, whose fatal emits the
-# record the refusal left standing first, the refusal's fatal last with the
-# trace of where the `ev` stands, which bails out of it to the prompt; `ev`'s
-# `zend_catch` writes the status 0, and nothing asks to restart again.
+# before parsed last, `first_command`, here the init file's `ev` (#2912). The
+# unwind exit its init file left pending bails the resubmitted `ev` out as it
+# begins, writing nothing; `ev 1` after it prints, `c` writes nothing, and
+# nothing asks to restart again.
 [[line]]
 name = "under-r-a-restart-resubmits-the-line-the-cycle-before-parsed-last"
 args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -462,8 +464,8 @@ files = { "t.php" = "<?php\nfunction f(int $a = null) {}\nfunction g(int $b = nu
 stdin = "y\nev 1\nc\nq\n"
 streams = "merged"
 
-# The same over a context that compiles: the resubmitted `ev` meets the
-# memory limit again, and the prompt stands where nothing executes.
+# The same over a context that compiles: the resubmitted `ev` bails out
+# alike, and the `ev` after it prints where nothing executes.
 [[line]]
 name = "a-restart-resubmits-the-init-file-s-line-over-a-context-that-compiles"
 args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
@@ -754,7 +756,7 @@ stdin = "b {dir}/t.php:#0\nr\nq\n"
 mask = [['\(opline #\d+\)', '(opline #N)']]
 
 # php runs an included file whose code is its one `RETURN` of a constant only
-# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6569-6572`);
+# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6570-6573`);
 # under phpdbg's it executes it, so the loop steps that `RETURN` and a
 # breakpoint on its line stops there. The address php prints is masked.
 [[line]]
@@ -765,7 +767,7 @@ stdin = "b {dir}/inc.php:6\nr\nc\nq\n"
 mask = [['#\d{10,}', '#N']]
 
 # php runs an included file whose code is its one `RETURN` of a constant only
-# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6569-6572`);
+# while `zend_execute_ex` is php's own (`Z/Zend/zend_vm_def.h:6570-6573`);
 # under phpdbg's it executes it, so the loop steps that `RETURN` and a
 # breakpoint on its opline stops there. The address php prints is masked.
 [[line]]

@@ -308,11 +308,12 @@ fn ini() -> Vec<IniDecl> {
 /// (new ReflectionExtension('date'))->info();
 /// ```
 /// ```expect
+///
 /// date
 ///
 /// date/time support => enabled
 /// timelib version => 2022.17
-/// "Olson" Timezone Database Version => 2026.3
+/// "Olson" Timezone Database Version => 2026.5
 /// Timezone Database => internal
 /// Default timezone => Europe/Berlin
 ///

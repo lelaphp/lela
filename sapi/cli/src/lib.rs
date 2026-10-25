@@ -125,20 +125,23 @@ pub fn version(engine: &Engine) -> String {
 /// §5.6, #3043), and the process ends there, in the child of a fork as
 /// in the process that started it.
 pub fn main() -> ! {
+    // The host's own copy of its arguments, taken before `save_ps_args`:
+    // on Linux the standard library reads them from the C runtime's
+    // `argv`, whose `argv[1..]` the area's set-up points at its last NUL.
+    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
     // `save_ps_args`, which php's `main` calls before anything else reads
     // `argv` (`php_cli.c:1224-1228`).
     TITLE.set(ffi::save_ps_args().map(ProcessTitle::new)).ok();
-    php_sapi::main_on_request_stack(served)
+    php_sapi::main_on_request_stack(move || served(&argv))
 }
 
 /// What [`main`] serves, the command line read and served, and the
 /// status it ends the process with, C's `stdout` flushed before the
 /// engine ends, as `php_sapi::exit_code` flushed it when `main` returned.
-fn served() -> i32 {
-    let argv: Vec<OsString> = std::env::args_os().skip(1).collect();
+fn served(argv: &[OsString]) -> i32 {
     let started = OnceCell::new();
     let cli = |startup: &Startup| started.get_or_init(|| engine(startup));
-    let options = match Options::parse(&argv, &|startup| cli(startup).has_shell()) {
+    let options = match Options::parse(argv, &|startup| cli(startup).has_shell()) {
         Ok(options) => options,
         Err(refused) => {
             std::io::stderr()

@@ -283,31 +283,9 @@ impl<'a> OplineView<'a> {
     }
 
     /// The oplines it may jump to, past falling through to the next one,
-    /// as `zend_dump_op` prints them: each target of a `SWITCH_LONG`,
-    /// `SWITCH_STRING` or `MATCH`'s table in its order, then the one
-    /// field `zend_vm_opcodes_flags` shapes `JMP_ADDR`, `op1` for a
-    /// `JMP` or a `FAST_CALL`, `op2` for a conditional jump, a
-    /// `FE_RESET_*` or a `CATCH` that is not its try's last, and
-    /// `extended_value` for a `FE_FETCH_*` or a table's default. None
-    /// for an opline that jumps nowhere.
+    /// as `zend_dump_op` prints them ([`crate::tier::jump_targets`]).
     pub fn jump_targets(&self) -> impl Iterator<Item = OplineIdx> + use<'a> {
-        let table = matches!(
-            self.op.opcode,
-            php_unit::Opcode::SwitchLong | php_unit::Opcode::SwitchString | php_unit::Opcode::Match
-        )
-        .then_some(self.op)
-        .filter(|op| op.op2_type == OperandKind::Const)
-        .and_then(|op| self.code.literals.get(op.op2 as usize))
-        .and_then(|zval| zval.as_arr());
-        let cases = table.into_iter().flat_map(|table| {
-            table.iter().filter_map(|(_, target)| {
-                target
-                    .as_long()
-                    .and_then(|at| u32::try_from(at).ok())
-                    .map(OplineIdx)
-            })
-        });
-        cases.chain(self.op.jump_target())
+        crate::tier::jump_targets(self.code, self.at)
     }
 }
 

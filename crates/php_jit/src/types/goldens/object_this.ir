@@ -1,0 +1,54 @@
+trace loop e1, stop loop
+frame f0 e1 root, 3 cvs 13 temps
+entry
+  #0 f0.CV1 [undef, any]
+  #2 f0.CV2 [long]
+  #4 f0.CV0 [long]
+  guard #4 long -> exit 0
+  guard #2 long -> exit 1
+loop at 0, loop, interrupt exit 13
+  #1 f0.CV1 [long] = phi(#0, #9)
+  #3 f0.CV2 [long] reg = phi(#2, #10)
+0017 f0 IS_SMALLER #3, #4 fused inline
+  checks direction taken -> exit 2
+  guard f0.this class 41 -> exit 3
+0004 f0 FETCH_OBJ_R const#2 inline slot 0 leaves -> exit 4
+  -> #5 f0.T2 [long] reg
+  checks #5 long -> exit 5
+  checks #5 ref to long -> exit 6
+  guard #1 long -> exit 7
+0005 f0 ASSIGN_OP #1, #5 inline
+  -> #6 f0.CV1 [long] reg
+  checks #6 long -> exit 8
+0006 f0 ASSIGN_OBJ const#3, #3 inline slot 0 unwinds -> unwind 0
+0008 f0 ASSIGN_OBJ_OP const#4, float(1.5) inline slot 1 unwinds -> unwind 0
+0010 f0 PRE_INC_OBJ const#6 inline slot 0 unwinds -> unwind 0
+0011 f0 FETCH_OBJ_W const#7 inline slot 2 leaves -> exit 9
+  -> #7 f0.T7 [ref, any]
+  guard #7 ind to array -> exit 10
+0012 f0 ASSIGN_DIM #7, #3 step unwinds -> unwind 0
+0014 f0 ISSET_ISEMPTY_PROP_OBJ const#8 step unwinds -> unwind 0
+  -> #8 f0.T9 [true]
+  guard #8 true -> exit 11
+0015 f0 ASSIGN_OP #6, #8 step unwinds -> unwind 1
+  -> #9 f0.CV1 [long, double]
+0016 f0 PRE_INC #3 inline
+  -> #10 f0.CV2 [long] reg
+  checks #10 long -> exit 12
+end: back to 0
+exit 0: f0 0017 plain
+exit 1: f0 0017 plain f0.CV0:long
+exit 2: f0 0019 plain f0.CV2=#3 f0.CV0:long f0.CV2:long
+exit 3: f0 0004 plain f0.CV2=#3 f0.CV0:long f0.CV2:long
+exit 4: f0 0004 plain f0.CV2=#3 f0.CV0:long f0.CV2:long to vm
+exit 5: f0 0005 plain f0.CV2=#3 f0.T2=copied #5 f0.CV0:long f0.CV2:long
+exit 6: f0 0005 plain f0.CV2=#3 f0.T2=copied #5 through a reference f0.CV0:long f0.CV2:long
+exit 7: f0 0005 plain f0.CV2=#3 f0.T2=#5 f0.CV0:long f0.CV2:long f0.T2:long
+exit 8: f0 0005 plain f0.CV2=#3 f0.T2=#5 f0.CV0:long f0.CV1:long f0.CV2:long f0.T2:long
+exit 9: f0 0011 plain f0.CV1=#6 f0.CV2=#3 f0.CV0:long f0.CV1:long f0.CV2:long to vm
+exit 10: f0 0012 plain f0.CV1=#6 f0.CV2=#3 f0.CV0:long f0.CV1:long f0.CV2:long
+exit 11: f0 0015 plain f0.CV1=#6 f0.CV2=#3 f0.CV0:long f0.CV1:long f0.CV2:long
+exit 12: f0 0016 plain f0.CV2=#3 f0.CV0:long f0.CV2:long
+exit 13: f0 0017 plain f0.CV2=#3 f0.CV0:long f0.CV1:long f0.CV2:long to vm
+unwind 0: f0.CV1=#6 f0.CV2=#3
+unwind 1: f0.CV2=#3

@@ -16,7 +16,9 @@ use php_ext::request::{
     Handshake, OwnedStream as _, PHP_VERSION, Request, SocketOptions, Stream, StreamCtx,
     Streams as _, Xport,
 };
-use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef, walk};
+use php_ext::values::{
+    FreshString, Key, Owner, PhpArray, PhpObject, PhpString, SmartStr, Value, ValueRef, walk,
+};
 use php_ext_standard::md5::Md5;
 use php_ext_standard::{UriParser, base64};
 use php_ext_uri::{Parser, UriStruct};
@@ -256,9 +258,9 @@ fn unsigned_of(n: i64) -> u64 {
 }
 
 /// `sscanf(line, "%x", &buf_size) > 0`: the hex number at the start of
-/// a chunk's size line, its blanks, a sign and a `0x` read past, into an
-/// `int`; none where no digit stands there.
-fn scan_hex(line: &[u8]) -> Option<i32> {
+/// a chunk's size line, its blanks, a sign and a `0x` read past, into the
+/// `unsigned int` php 8.5.12 hands it; none where no digit stands there.
+fn scan_hex(line: &[u8]) -> Option<u32> {
     let b = c_str(line);
     let mut i = 0;
     while i < b.len() && is_space(b[i]) {
@@ -290,10 +292,9 @@ fn scan_hex(line: &[u8]) -> Option<i32> {
     let n = if negative { n.wrapping_neg() } else { n };
     #[expect(
         clippy::cast_possible_truncation,
-        clippy::cast_possible_wrap,
-        reason = "`%x` stores into the `int` php hands it"
+        reason = "`%x` stores into the `unsigned int` php hands it"
     )]
-    let n = n as u32 as i32;
+    let n = n as u32;
     Some(n)
 }
 
@@ -404,19 +405,30 @@ fn is_blank_line(line: &[u8]) -> bool {
 }
 
 /// `get_http_headers`: the response's head, each line up to the blank
-/// one as the stream gave it; none where the stream ended first, or
-/// where the blank line came before any.
+/// one as the stream gave it, gathered in a `smart_str` on the request's
+/// heap; none where the stream ended first, where the blank line came
+/// before any, or, since 8.5.12, once the memory limit was met after a
+/// line (`ZEND_HAS_OOM()`).
 fn get_http_headers(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
     // `smart_str` holds no string until the first append.
-    let mut response: Option<Vec<u8>> = None;
+    let mut response = SmartStr::default();
+    let mut any = false;
     while let Some(line) = gets(req, stream)? {
         if is_blank_line(&line) {
-            return Ok(response);
+            let head = any.then(|| response.as_bytes().to_vec());
+            response.free(req);
+            return Ok(head);
         }
-        response
-            .get_or_insert_with(Vec::new)
-            .extend_from_slice(c_str(&line));
+        if let Err(thrown) = response.append(req, c_str(&line)) {
+            response.free(req);
+            return Err(thrown);
+        }
+        any = true;
+        if req.memory().has_oom() {
+            break;
+        }
     }
+    response.free(req);
     Ok(None)
 }
 
@@ -459,9 +471,48 @@ fn get_http_header_value(headers: &[u8], name: &[u8]) -> Option<Vec<u8>> {
     header_value_at(headers, name).map(|(at, len)| headers[at..at + len].to_vec())
 }
 
+/// `ZSTR_MAX_LEN` (`Z/Zend/zend_string.h:109`): `SIZE_MAX` less a
+/// string's aligned header and terminator.
+const ZSTR_MAX_LEN: usize = usize::MAX - 32;
+
+/// `http_buf`, the string php 8.5.12 reads a body into, laid on the
+/// request's heap at its sizes beside the bytes the engine reads: asked
+/// for, and grown, fallibly where php's are.
+struct HttpBuf(Option<FreshString>);
+
+impl HttpBuf {
+    /// The buffer grown to `len` bytes, `zend_string_falloc` or
+    /// `zend_string_safe_frealloc` where `fallibly`, else
+    /// `zend_string_alloc`; `false` where the memory limit refused it, the
+    /// buffer then gone as php's `zend_string_release` lets it go.
+    fn grow(&mut self, req: &mut Request, len: usize, fallibly: bool) -> R<bool> {
+        let held = self.0.take();
+        let ask = |req: &mut Request| match held {
+            None => FreshString::new(req, len),
+            Some(held) => held.extend(req, len),
+        };
+        let grown = if fallibly {
+            req.memory_mut().fallible(ask)?
+        } else {
+            Some(ask(req)?)
+        };
+        let refused = grown.is_none();
+        self.0 = grown;
+        Ok(!refused)
+    }
+
+    /// The buffer let go, `zend_string_release`.
+    fn free(self, req: &mut Request) {
+        if let Some(held) = self.0 {
+            held.free(req);
+        }
+    }
+}
+
 /// `get_http_body`: the response's body, chunked, of its
 /// `Content-Length` or to the end of a connection that closes; none
-/// where it can be read none of these ways or its chunks are broken.
+/// where it can be read none of these ways, its chunks are broken, or,
+/// since 8.5.12, the memory limit refused its buffer's room.
 fn get_http_body(
     req: &mut Request,
     stream: Stream,
@@ -489,10 +540,15 @@ fn get_http_body(
         return chunked_body(req, stream);
     }
     if header_length != 0 {
-        if header_length < 0 || header_length == i32::MAX {
+        // `header_length >= ZSTR_MAX_LEN` since 8.5.12, which an `int`
+        // never reaches here.
+        let Ok(want) = usize::try_from(header_length) else {
+            return Ok(None);
+        };
+        let mut buf = HttpBuf(None);
+        if !buf.grow(req, want, true)? {
             return Ok(None);
         }
-        let want = usize::try_from(header_length).unwrap_or_default();
         let mut body = Vec::new();
         while body.len() < want {
             let left = want - body.len();
@@ -500,16 +556,29 @@ fn get_http_body(
                 break;
             }
         }
+        buf.free(req);
         return Ok(Some(body));
     }
     if header_close {
+        let mut buf = HttpBuf(None);
         let mut body = Vec::new();
         loop {
+            // The first room is `zend_string_alloc(4096)`, each one after
+            // it grown by 4096 fallibly and bounded, since 8.5.12.
+            let first = buf.0.is_none();
+            if !first && body.len() >= ZSTR_MAX_LEN - 4096 {
+                buf.free(req);
+                return Ok(None);
+            }
+            if !buf.grow(req, body.len() + 4096, !first)? {
+                return Ok(None);
+            }
             read_more(req, stream, &mut body, 4096);
             if stream.eof(req) {
                 break;
             }
         }
+        buf.free(req);
         return Ok(Some(body));
     }
     Ok(None)
@@ -518,8 +587,18 @@ fn get_http_body(
 /// The chunked arm of [`get_http_body`]: each chunk's size line read as
 /// `%x`, the chunk and its `\r\n`, to the chunk of size zero, then the
 /// trailer headers read past. A size line that does not parse is read
-/// again from what the last `gets` left, as php's buffer keeps it.
+/// again from what the last `gets` left, as php's buffer keeps it. Since
+/// 8.5.12 the size is unsigned, refused past `ZSTR_MAX_LEN`, and each
+/// chunk's room asked for fallibly.
 fn chunked_body(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
+    let mut buf = HttpBuf(None);
+    let body = chunks(req, stream, &mut buf);
+    buf.free(req);
+    body
+}
+
+/// [`chunked_body`]'s reads, into `buf`'s room.
+fn chunks(req: &mut Request, stream: Stream, buf: &mut HttpBuf) -> R<Option<Vec<u8>>> {
     let mut body: Option<Vec<u8>> = None;
     let mut size_line: Vec<u8> = Vec::new();
     let mut done = false;
@@ -532,15 +611,18 @@ fn chunked_body(req: &mut Request, stream: Stream) -> R<Option<Vec<u8>>> {
             return Ok(None);
         };
         if buf_size > 0 {
-            let have = int_of(i64::try_from(body.as_ref().map_or(0, Vec::len)).unwrap_or(0));
-            if have.wrapping_add(buf_size).wrapping_add(1) < 0 {
+            let have = body.as_ref().map_or(0, Vec::len);
+            let want = usize::try_from(buf_size).unwrap_or(usize::MAX);
+            if want >= ZSTR_MAX_LEN - have {
                 return Ok(None);
             }
-            let buf = body.get_or_insert_with(Vec::new);
-            let want = usize::try_from(buf_size).unwrap_or_default();
+            if !buf.grow(req, have + want, true)? {
+                return Ok(None);
+            }
+            let body = body.get_or_insert_with(Vec::new);
             let mut len_size = 0;
             while len_size < want {
-                let Some(read) = read_more(req, stream, buf, want - len_size) else {
+                let Some(read) = read_more(req, stream, body, want - len_size) else {
                     // Error or EOF.
                     done = true;
                     break;

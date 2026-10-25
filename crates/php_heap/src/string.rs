@@ -65,6 +65,11 @@ const _: () = assert!(std::mem::offset_of!(StrHeader, gc) == 0);
 /// The header's size, php's `_ZSTR_HEADER_SIZE`.
 const HEADER: usize = size_of::<StrHeader>();
 
+// php's `zend_string`: the length after the refcounted header and the
+// hash, the bytes after the length, which compiled code reads at
+// `Str::LEN_AT` and `Str::VAL_AT`.
+const _: () = assert!(Str::LEN_AT == 16 && Str::VAL_AT == 24);
+
 /// `IS_STR_INTERNED` (`Z/Zend/zend_types.h:849`): the bit a table's
 /// string carries whichever table it is in, which is what says it is
 /// never refcounted and never freed by a release.
@@ -145,11 +150,26 @@ impl FreshStr {
     /// written and the hash forgotten. A `len` under the string's is its
     /// own length.
     pub(crate) fn extend(self, mm: &mut Mm, len: usize) -> Result<FreshStr, Fatal> {
+        self.grow(mm, len, Str::reallocation_size)
+    }
+
+    /// The buffer of a `smart_str` grown to hold `len` bytes,
+    /// `smart_str_erealloc`'s `ferealloc2(str->s, len + _ZSTR_HEADER_SIZE + 1, ...)`
+    /// (`Z/Zend/zend_smart_str.c:44`): as [`FreshStr::extend`], but asking
+    /// for the header and `len` with its NUL, not `zend_string_extend`'s
+    /// sum.
+    pub(crate) fn erealloc(self, mm: &mut Mm, len: usize) -> Result<FreshStr, Fatal> {
+        self.grow(mm, len, Str::allocation_size)
+    }
+
+    /// [`FreshStr::extend`] and [`FreshStr::erealloc`], the allocation
+    /// asked for as `size` of the new length says.
+    fn grow(self, mm: &mut Mm, len: usize, size: fn(usize) -> usize) -> Result<FreshStr, Fatal> {
         let old = self.len();
         let len = len.max(old);
         // SAFETY: this is the string's one name and the request's own
         // allocation, its header and first `old` bytes initialised.
-        let at = unsafe { mm.realloc(self.0.address(), HEADER + old, Str::allocation_size(len)) }?;
+        let at = unsafe { mm.realloc(self.0.address(), HEADER + old, size(len)) }?;
         let header = at.cast::<StrHeader>();
         // SAFETY: the header moved with the bytes, and nothing else names
         // the allocation.
@@ -175,7 +195,8 @@ impl FreshStr {
         let len = len.min(self.len());
         // SAFETY: this is the string's one name and the request's own
         // allocation, its header and first `len` bytes initialised.
-        let at = unsafe { mm.realloc(self.0.address(), HEADER + len, Str::allocation_size(len)) }?;
+        let at =
+            unsafe { mm.realloc(self.0.address(), HEADER + len, Str::reallocation_size(len)) }?;
         let header = at.cast::<StrHeader>();
         // SAFETY: the header moved with the bytes, and nothing else names
         // the allocation.
@@ -201,13 +222,22 @@ impl FreshStr {
 pub struct Str(NonNull<StrHeader>);
 
 impl Str {
+    /// Where in `zend_string` its length is, `ZSTR_LEN`: the bytes
+    /// without the NUL, a `size_t`. What the compiled tier reads a
+    /// string's length through (`jit-design.md` §4.3).
+    pub const LEN_AT: usize = std::mem::offset_of!(StrHeader, len);
+    /// Where its bytes begin, `ZSTR_VAL`: past the header,
+    /// `_ZSTR_HEADER_SIZE`.
+    pub const VAL_AT: usize = HEADER;
+
     /// The bytes one allocation of a string of `len` bytes takes:
     /// php's `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))`, which is what
     /// makes `memory_get_usage()` move by what php's moves by.
     ///
-    /// A copy of part of a string is `zend_string_init` of that many
-    /// bytes, so `substr` moves `memory_get_usage()` by this rounded up
-    /// to its bin, a `run` of whole pages past 3072 bytes, and by nothing
+    /// A copy of part of a string is `zend_string_init_fast` of that
+    /// many bytes, which php-8.5.12 sizes as [`Str::reallocation_size`],
+    /// so `substr` moves `memory_get_usage()` by that rounded up to its
+    /// bin, a `run` of whole pages past 3072 bytes, and by nothing
     /// for a span of one byte, the interned character, or one that is the
     /// whole string, which is the argument's own (#2661). A constant
     /// string is interned and its copy one more name for it, so neither
@@ -228,20 +258,35 @@ impl Str {
     /// ```expect capture
     /// copied, moved
     /// 0,1 0
-    /// 0,7 32
-    /// 0,10 40
-    /// 5,100 128
+    /// 0,7 40
+    /// 0,10 48
+    /// 5,100 160
     /// 0,3000 3072
     /// 0,5000 8192
     /// 1,9999 12288
     /// 0,10000 0
-    /// -10,null 40
+    /// -10,null 48
     /// literal 0
     /// strtoupper 40
     /// integer 32
     /// ```
     pub(crate) const fn allocation_size(len: usize) -> usize {
         (HEADER + len + 1).next_multiple_of(8)
+    }
+
+    /// The bytes a string of the request's grown or cut to `len` bytes
+    /// where it stands asks `erealloc` for: php-8.5.12's
+    /// `zend_string_realloc`, `_extend` and `_truncate`, which call
+    /// `safe_fperealloc(s, 1, len, ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(0)))`
+    /// (`Z/Zend/zend_string.h:279`, `:311`, `:343`): `len` past the
+    /// aligned header of the empty string, up to seven bytes more than
+    /// [`Str::allocation_size`] of the same `len`, which the bins then
+    /// round. The same sum is `zend_string_finit`'s,
+    /// `zend_string_safe_falloc(len, 1, 0)`.
+    pub(crate) fn reallocation_size(len: usize) -> usize {
+        // A length whose sum overflows asks for everything, which the
+        // allocator refuses as php's limit does.
+        Sizing::Finit.bytes(len).unwrap_or(usize::MAX)
     }
 
     /// Lay a string of `bytes` down at `at`, which is an allocation of
@@ -357,7 +402,7 @@ impl Str {
                 // names the allocation but this; its header, bytes and NUL
                 // are initialised.
                 let at = unsafe {
-                    mm.realloc(s.address(), HEADER + old + 1, Str::allocation_size(len))
+                    mm.realloc(s.address(), HEADER + old + 1, Str::reallocation_size(len))
                 }?;
                 Str(at.cast())
             } else {
@@ -679,6 +724,28 @@ unsafe impl Send for Str {}
 
 /// Two strings are the one string when their bytes are, which is php's
 /// `zend_string_equals`; identity is what interning is for.
+impl crate::Heap {
+    /// `smart_str_erealloc` of a buffer ([`FreshStr::erealloc`]): grown to
+    /// `len` bytes as `erealloc2` grows it, the new bytes zero.
+    pub fn string_erealloc(&mut self, s: FreshStr, len: usize) -> Result<FreshStr, Fatal> {
+        s.erealloc(&mut self.mm, len)
+    }
+
+    /// A request-scoped string of `bytes`, php-8.5.12's
+    /// `zend_string_finit(str, len, 0, ...)`, which is
+    /// `zend_string_safe_falloc(len, 1, 0)` and the copy
+    /// (`Z/Zend/zend_string.h:215-225`): one allocation of
+    /// [`Str::reallocation_size`] bytes, `len` past the aligned header of
+    /// the empty string, where [`crate::Heap::string`], php's
+    /// `zend_string_init`, asks for the header and `len` rounded
+    /// together. A string of one byte is allocated here too; the
+    /// interned ones `zend_string_init_fast` hands out for the empty
+    /// string and one byte are the caller's.
+    pub fn string_finit(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
+        self.string_sized(bytes, Sizing::Finit)
+    }
+}
+
 impl PartialEq for Str {
     fn eq(&self, other: &Str) -> bool {
         self.0 == other.0 || self.bytes() == other.bytes()
@@ -701,6 +768,61 @@ impl std::fmt::Debug for Str {
     }
 }
 
+/// Which of php-8.5.12's two sizes a string of the request's is laid at
+/// for its length, the one thing about a string php's constructors and
+/// its in-place reallocations disagree on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sizing {
+    /// `zend_string_alloc`'s and `zend_string_init`'s: the header, the
+    /// bytes and the NUL rounded together,
+    /// `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))` ([`crate::Heap::string`]).
+    #[default]
+    Alloc,
+    /// `zend_string_finit`'s, and what `zend_string_realloc`, `_extend`
+    /// and `_truncate` grow or cut a string to where it stands: `len`
+    /// past the empty string's aligned header (`Z/Zend/zend_string.h:217`,
+    /// `:279`), up to seven bytes more ([`crate::Heap::string_finit`]). The
+    /// parser's `.` of two written values grows its left one so
+    /// (`zend_ast_create_concat_op`, `Z/Zend/zend_ast.c:489`), and a name
+    /// the compile prints with `zend_strpprintf` is trimmed so by
+    /// `smart_str_extract` (`Z/Zend/zend_smart_str.h:119`).
+    Finit,
+    /// `zend_string_safe_alloc(n, m, l, 0)`'s (`Z/Zend/zend_string.h:177`):
+    /// the product `n * m` past the aligned header of a string of the
+    /// `l` bytes left, where the string's length is `n * m + l`. That is
+    /// not [`Sizing::Alloc`] of the same length: `pdo_mysql`'s quoter asks
+    /// for `safe_alloc(2, 1, 3)`, 34 bytes and the 40-byte bin, where a
+    /// 5-byte string takes 30 and the 32-byte bin.
+    SafeAlloc { n: usize, m: usize },
+}
+
+impl Sizing {
+    /// The bytes a string of `len` bytes laid at this size asks the
+    /// allocator for. [`Sizing::Finit`] is `zend_string_safe_falloc(len,
+    /// 1, 0)`, so it is [`Sizing::SafeAlloc`] of `len` and 1 through the
+    /// same sum. A product past `len`, which includes one that overflows,
+    /// and a sum that overflows are php's `Possible integer overflow in
+    /// memory allocation` fatal (`safe_address_guarded`), raised before
+    /// anything is asked for. Its third number is the aligned header the
+    /// product is added to, the empty string's where no `l` is left.
+    pub fn bytes(self, len: usize) -> Result<usize, Fatal> {
+        let (n, m) = match self {
+            Sizing::Alloc => return Ok(Str::allocation_size(len)),
+            Sizing::Finit => (len, 1),
+            Sizing::SafeAlloc { n, m } => (n, m),
+        };
+        let product = n.checked_mul(m).filter(|product| *product <= len);
+        let header = Str::allocation_size(product.map_or(0, |product| len - product));
+        product
+            .and_then(|product| product.checked_add(header))
+            .ok_or_else(|| {
+                Fatal::error(format!(
+                    "Possible integer overflow in memory allocation ({n} * {m} + {header})"
+                ))
+            })
+    }
+}
+
 /// A home for interned strings: php's `zend_new_interned_string` behind
 /// its two handlers (`Z/Zend/zend_string.c:363-373`), which the compiler
 /// and the engine call without knowing which home answers.
@@ -716,7 +838,7 @@ pub trait Intern {
     /// ask, and the fatal the allocator raised when there is no memory
     /// for it.
     fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
-        self.intern_marked(bytes, false)
+        self.intern_marked(bytes, false, Sizing::Alloc)
     }
 
     /// [`Intern::intern`] of bytes the asker knows to be valid UTF-8 when
@@ -724,8 +846,26 @@ pub trait Intern {
     /// string carrying `IS_STR_VALID_UTF8`: a string this ask lays down
     /// is marked before the table takes it, and one the home already
     /// holds is handed back as it stands, with its own flags, as
-    /// `zend_interned_string_ht_lookup` finds it.
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal>;
+    /// `zend_interned_string_ht_lookup` finds it. A string laid on a
+    /// request's heap is laid at `sizing`'s size; a home that lays none
+    /// there has no use for it.
+    fn intern_marked(
+        &mut self,
+        bytes: &[u8],
+        valid_utf8: bool,
+        sizing: Sizing,
+    ) -> Result<Str, Fatal>;
+
+    /// [`Intern::intern`] of a string laid as a string of `room` bytes and
+    /// cut to `bytes` where it stands (`ZSTR_LEN(s) = len`), which keeps
+    /// the block's bin: `__DIR__`, which `zend_try_ct_eval_magic_const`
+    /// lays at the length of the whole file name before `zend_dirname`
+    /// shortens it. A home that lays nothing on a request's heap interns
+    /// the bytes as any other.
+    fn intern_in(&mut self, bytes: &[u8], room: usize) -> Result<Str, Fatal> {
+        let _ = room;
+        self.intern_marked(bytes, false, Sizing::Alloc)
+    }
 
     /// [`Intern::intern_marked`] of a string the asker alone will hold
     /// and gives back once it has read it ([`Intern::give_back`]): a
@@ -733,8 +873,24 @@ pub trait Intern {
     /// `zend_eval_const_expr` destroys a child's zval once the node it
     /// folds into stands. The [`Made`] is the claim; dropped instead of
     /// given back, the string is kept as any other this home made.
-    fn intern_made(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Made, Fatal> {
-        self.intern_marked(bytes, valid_utf8).map(Made)
+    fn intern_made(
+        &mut self,
+        bytes: &[u8],
+        valid_utf8: bool,
+        sizing: Sizing,
+    ) -> Result<Made, Fatal> {
+        (self.intern_marked(bytes, valid_utf8, sizing)).map(|s| Made(Zval::string(s)))
+    }
+
+    /// The next of the names a compile hands over once its unit is
+    /// whole, in the order of the compiler's walk of what they name
+    /// (`php_compile::named`): `name`, the string this home gave for it,
+    /// where the compile asked for one. A home that makes a string each
+    /// time it is asked keeps it as that declaration's own, so the
+    /// declaration costs no string more for it, and what it is the name
+    /// of is told by its place in the walk, never by its bytes.
+    fn hand_name(&mut self, name: Option<Str>) {
+        let _ = name;
     }
 
     /// `made` read for the last time: the string this home made for the
@@ -762,37 +918,64 @@ pub trait Intern {
         !value.is_refcounted()
     }
 
-    /// [`Intern::hold`] of a string as a claim the asker holds alone and
-    /// gives back once it has read it ([`Intern::give_back`]), as a fold
-    /// over the substituted constant destroys its copy; none where this
-    /// home cannot hold it.
-    fn hold_made(&mut self, s: Str) -> Option<Made> {
-        self.hold(Zval::string(s)).then_some(Made(s))
+    /// [`Intern::hold`] of a string or an array as a claim the asker
+    /// holds alone and gives back once it has read it
+    /// ([`Intern::give_back`]), as a fold over the substituted constant,
+    /// or over an element it read out of an array, destroys its copy;
+    /// none where this home cannot hold it.
+    fn hold_made(&mut self, value: Zval) -> Option<Made> {
+        self.hold(value).then_some(Made(value))
     }
 
     /// A constant array of a unit in this home (design §5.3): the
     /// entries in this order, the keys strings this home made or
     /// integers. An engine's is php's `IS_ARRAY_IMMUTABLE`, no owner
     /// counted and living as long as the home does; a request's compile
-    /// makes one its unit owns. What a `switch` or a `match` jump table
-    /// is (`zend_compile_switch`, `zend_compile_match`).
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal>;
+    /// makes one its unit owns, laid at the `size` php's compile inits it
+    /// with (`array_init_size`, `zend_hash_init`), which counts what was
+    /// written and not what stands, and which a home that persists the
+    /// array has no use for. What a `switch` or a `match` jump table is
+    /// (`zend_compile_switch`, `zend_compile_match`).
+    fn constant_array(&mut self, entries: &[(Key, Zval)], size: usize) -> Result<Arr, Fatal>;
+
+    /// [`Intern::constant_array`] of an array the asker alone holds and
+    /// gives back once it has read it ([`Intern::give_back`]), each entry
+    /// one owner the array took over: the array `zend_try_ct_eval_array`
+    /// made for a node, which `zend_eval_const_expr` destroys with its
+    /// strings once a fold over it stands (`zval_ptr_dtor`).
+    fn constant_array_made(&mut self, entries: &[(Key, Zval)], size: usize) -> Result<Made, Fatal> {
+        (self.constant_array(entries, size)).map(|a| Made(Zval::array(a)))
+    }
+
+    /// Whether what this home lays from here on is interned, php's
+    /// `zend_new_interned_string` asked of it, and whether it was until
+    /// now: `false` while a compile makes the strings php's scanner and
+    /// `zend_eval_const_expr` lay and nothing interns, an array's
+    /// elements and keys, a `static`'s initial value, an attribute's
+    /// argument and a jump table's key, where a string an opline names,
+    /// a declaration's value and a name are interned. A home that interns
+    /// every string, a cached unit's, keeps on and answers `true`.
+    fn interning(&mut self, on: bool) -> bool {
+        let _ = on;
+        true
+    }
 }
 
-/// One string an [`Intern`] home made for an asker that holds it alone
-/// and hands it back with [`Intern::give_back`] once it has read it.
-/// Only [`Intern::intern_made`] makes one, and it is neither copied nor
-/// cloned, so a string another place made, a constant operand's, is
-/// never a claim to hand back. Its [`Made::str`] is a view: the asker
+/// One string or constant array an [`Intern`] home made for an asker
+/// that holds it alone and hands it back with [`Intern::give_back`] once
+/// it has read it. Only [`Intern::intern_made`], [`Intern::hold_made`]
+/// and [`Intern::constant_array_made`] make one, and it is neither copied
+/// nor cloned, so a value another place made, a constant operand's, is
+/// never a claim to hand back. Its [`Made::value`] is a view: the asker
 /// gives the claim back only once nothing it put the view in reads it
 /// again.
 #[derive(Debug)]
-pub struct Made(Str);
+pub struct Made(Zval);
 
 impl Made {
-    /// The string, a view: the claim stays the holder's.
+    /// The string or the array, a view: the claim stays the holder's.
     #[must_use]
-    pub fn str(&self) -> Str {
+    pub fn value(&self) -> Zval {
         self.0
     }
 }
@@ -855,7 +1038,7 @@ impl Strings {
                 self.table.add(hash, s);
             }
         }
-        self.arrays.append(&mut pending.arrays);
+        (self.arrays).extend(pending.arrays.drain(..).map(|(a, _)| a));
     }
 
     /// Intern each of `known` and keep it at its position for
@@ -904,8 +1087,8 @@ impl Intern for Strings {
     /// php's `zend_string_init_interned_permanent`
     /// (`Z/Zend/zend_string.c:267-280`): the frozen table, then this one,
     /// then a string on the system allocator, hashed and flagged before
-    /// it is published.
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
+    /// it is published; a string of the engine's, so no request's size.
+    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool, _: Sizing) -> Result<Str, Fatal> {
         if let Some(frozen) = frozen_string(bytes) {
             return Ok(frozen);
         }
@@ -924,7 +1107,7 @@ impl Intern for Strings {
     /// `zend_persist_zval` over a constant array under opcache: one
     /// array on the system allocator, immutable, shared by every request
     /// that serves the unit, freed with the engine.
-    fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
+    fn constant_array(&mut self, entries: &[(Key, Zval)], _: usize) -> Result<Arr, Fatal> {
         let a = persistent_array(entries)?;
         self.arrays.push(a);
         Ok(a)
@@ -962,7 +1145,8 @@ impl Drop for Strings {
 #[derive(Default)]
 pub struct Pending {
     slots: HashMap<u64, Vec<PendingString>>,
-    arrays: Vec<Arr>,
+    /// Each constant array beside the claims on it that stand.
+    arrays: Vec<(Arr, u32)>,
 }
 
 /// One string a compile made and the asks it answered that were not
@@ -990,10 +1174,34 @@ impl Pending {
         Ok(s)
     }
 
-    /// One claim on `s` given back ([`Intern::give_back`]): the string
-    /// freed where no other ask stands on it; nothing for a string this
-    /// set did not make.
-    pub fn give_back(&mut self, s: Str) {
+    /// One claim on `z` given back ([`Intern::give_back`]): a string
+    /// freed where no other ask stands on it, and an array with each
+    /// string and array it holds given back in turn, the one ask on each
+    /// it took over as it was laid; nothing for a value this set did not
+    /// make.
+    pub fn give_back(&mut self, z: Zval) {
+        let Some(s) = z.as_str() else {
+            let Some(at) =
+                (z.as_arr()).and_then(|a| self.arrays.iter().position(|(held, _)| held.is_same(a)))
+            else {
+                return;
+            };
+            let asks = self.arrays.get_mut(at).map(|(_, asks)| {
+                *asks = asks.saturating_sub(1);
+                *asks
+            });
+            if asks == Some(0) {
+                let (a, _) = self.arrays.swap_remove(at);
+                for (key, value) in &a {
+                    if let Key::Str(key) = key {
+                        self.give_back(Zval::string(key));
+                    }
+                    self.give_back(value);
+                }
+                free_persistent_array(a);
+            }
+            return;
+        };
         let hash = hash_func(s.bytes());
         let Some(chain) = self.slots.get_mut(&hash) else {
             return;
@@ -1009,11 +1217,36 @@ impl Pending {
     }
 
     /// A constant array of the unit (design §5.3), laid as
-    /// [`Strings`] lays one and the table's once the unit is published.
+    /// [`Strings`] lays one and the table's once the unit is published,
+    /// with one claim on it: one ask on each string and array this set
+    /// made that it holds is the array's from here, as php's array takes
+    /// over the zvals `zend_try_ct_eval_array` folded.
     pub fn constant_array(&mut self, entries: &[(Key, Zval)]) -> Result<Arr, Fatal> {
         let a = persistent_array(entries)?;
-        self.arrays.push(a);
+        if !a.is_same(Arr::empty()) {
+            self.arrays.push((a, 1));
+        }
         Ok(a)
+    }
+
+    /// One ask more on `z` where this set made it ([`Intern::hold`]), a
+    /// string or an array a fold hands on out of an array it reads, so
+    /// giving that array back leaves it standing.
+    pub fn hold(&mut self, z: Zval) {
+        if let Some(a) = z.as_arr() {
+            if let Some((_, asks)) = self.arrays.iter_mut().find(|(held, _)| held.is_same(a)) {
+                *asks = asks.saturating_add(1);
+            }
+            return;
+        }
+        let Some(s) = z.as_str() else {
+            return;
+        };
+        let chain = self.slots.get_mut(&hash_func(s.bytes()));
+        if let Some(held) = chain.and_then(|chain| chain.iter_mut().find(|held| held.s.is_same(s)))
+        {
+            held.asks = held.asks.saturating_add(1);
+        }
     }
 
     /// How many strings stand made.
@@ -1033,7 +1266,7 @@ impl Drop for Pending {
     /// A set never published: what the compile made, its unit refused,
     /// given back.
     fn drop(&mut self) {
-        for a in self.arrays.drain(..) {
+        for (a, _) in self.arrays.drain(..) {
             free_persistent_array(a);
         }
         for s in self.take_strings() {
@@ -1261,13 +1494,13 @@ mod tests {
         let fold = pending.intern(b"fold", false).expect("a string");
         let again = pending.intern(b"fold", false).expect("the same string");
         assert!(fold.is_same(again));
-        pending.give_back(fold);
+        pending.give_back(Zval::string(fold));
         assert_eq!(pending.count(), 1);
-        pending.give_back(again);
+        pending.give_back(Zval::string(again));
         assert_eq!(pending.count(), 0);
         pending.intern(b"kept", true).expect("a string");
         pending.intern(b"held already", false).expect("a shadow");
-        pending.give_back(held);
+        pending.give_back(Zval::string(held));
         table.publish(pending);
         assert_eq!(table.count(), 2);
         assert!(table.find(b"kept").is_some_and(|s| s.is_valid_utf8()));
@@ -1276,6 +1509,36 @@ mod tests {
         refused.intern(b"refused", false).expect("a string");
         drop(refused);
         assert!(table.find(b"refused").is_none());
+    }
+
+    /// A pending array takes over the asks on what it holds: given back,
+    /// it gives back one ask on each string and array in it, so a string
+    /// another ask stands on stays, and one a hold kept for a fold's
+    /// value stays too.
+    #[test]
+    fn a_pending_array_given_back_gives_back_its_strings() {
+        let mut pending = Pending::default();
+        let key = pending.intern(b"key", false).expect("a string");
+        let kept = pending.intern(b"kept", false).expect("a string");
+        let value = pending.intern(b"value", false).expect("a string");
+        pending.intern(b"kept", false).expect("a second ask");
+        let inner = pending
+            .constant_array(&[(Key::Long(0), Zval::string(value))])
+            .expect("an array");
+        let outer = pending
+            .constant_array(&[
+                (Key::Str(key), Zval::string(kept)),
+                (Key::Long(1), Zval::array(inner)),
+            ])
+            .expect("an array");
+        pending.hold(Zval::string(value));
+        assert_eq!(pending.count(), 3);
+        pending.give_back(Zval::array(outer));
+        assert_eq!(pending.count(), 2);
+        assert!(pending.arrays.is_empty());
+        pending.give_back(Zval::string(kept));
+        pending.give_back(Zval::string(value));
+        assert_eq!(pending.count(), 0);
     }
 
     /// `zend_string_alloc` then `zend_string_truncate`: the bytes written
@@ -1287,15 +1550,18 @@ mod tests {
         let _alone = crate::serial::alone();
         let mut heap = crate::Heap::new();
         let base = heap.memory_usage(false);
-        let mut fresh = heap.string_fresh(2103).expect("a fresh string");
+        let mut fresh = heap
+            .string_fresh(2103, Sizing::Alloc)
+            .expect("a fresh string");
         fresh.bytes_mut()[..5].copy_from_slice(b"hello");
         assert_eq!(heap.memory_usage(false) - base, 2560);
+        // php-8.5.12's truncate asks 32 + 5, the 40-byte bin.
         let cut = heap.string_truncate(fresh, 5).expect("a truncated string");
-        assert_eq!(heap.memory_usage(false) - base, 32);
+        assert_eq!(heap.memory_usage(false) - base, 40);
         let same = heap.string_truncate(cut, 3).expect("a truncated string");
         let s = same.finish();
         assert_eq!(s.bytes(), b"hel");
-        assert_eq!(heap.memory_usage(false) - base, 32);
+        assert_eq!(heap.memory_usage(false) - base, 40);
         heap.release_string(s);
         assert_eq!(heap.memory_usage(false), base);
     }
@@ -1308,7 +1574,7 @@ mod tests {
         let _alone = crate::serial::alone();
         let mut heap = crate::Heap::new();
         let base = heap.memory_usage(false);
-        let mut fresh = heap.string_fresh(5).expect("a fresh string");
+        let mut fresh = heap.string_fresh(5, Sizing::Alloc).expect("a fresh string");
         fresh.bytes_mut().copy_from_slice(b"hello");
         assert_eq!(heap.memory_usage(false) - base, 32);
         let mut grown = heap.string_extend(fresh, 40).expect("an extended string");

@@ -262,18 +262,25 @@ impl<K: Hash + Eq + Clone, V> Cache<K, V> {
         self.entries().get(key).map(Arc::clone)
     }
 
-    /// `value` held for `key`, or what another thread put there while
-    /// this one built it, which is kept: the one both are answered. A
-    /// value held there that `stale` answers true for is replaced, under
-    /// every key that held it, as one bucket of php's hash that several
-    /// keys point to is updated in place.
-    pub(crate) fn insert_over(&self, key: K, stale: impl Fn(&V) -> bool, value: V) -> Arc<V> {
+    /// The `value` built from what it replaces held for `key`, or what
+    /// another thread held there first, which is kept and nothing built:
+    /// the one both are answered. A value held there that `stale` answers
+    /// true for is replaced, under every key that held it, as one bucket
+    /// of php's hash that several keys point to is updated in place.
+    /// `value` is built while the cache's `Mutex` is held, so it reads
+    /// only what it is handed.
+    pub(crate) fn insert_over(
+        &self,
+        key: K,
+        stale: impl Fn(&V) -> bool,
+        value: impl FnOnce(Option<&V>) -> V,
+    ) -> Arc<V> {
         let mut entries = self.entries();
         let replaced = match entries.get(&key) {
             Some(found) if !stale(found) => return Arc::clone(found),
             found => found.map(Arc::clone),
         };
-        let value = Arc::new(value);
+        let value = Arc::new(value(replaced.as_deref()));
         let Some(replaced) = replaced else {
             self.make_room(&mut entries);
             entries.insert(key, Arc::clone(&value));
@@ -964,7 +971,7 @@ impl Extension {
 /// name, version, ini entries, lifecycle functions and the two state
 /// declarations. Its functions, classes and constants are rows of the
 /// engine's tables, each naming the extension that declared it.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct ExtensionEntry {
     pub(crate) name: String,
     /// Whether the entry stands in `module_registry` as a program reads
@@ -1005,7 +1012,7 @@ pub(crate) struct ExtensionEntry {
 /// engine's build moves into them row by row, so no declaration is held
 /// twice: its functions, classes and constants, and what it adds to the
 /// classes of others.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct Declarations {
     pub(crate) functions: Vec<(FunctionDecl, Entry)>,
     pub(crate) classes: Vec<NativeClassDecl>,
@@ -1100,33 +1107,15 @@ impl<T> Drop for States<T> {
 #[derive(Default)]
 pub struct ExtensionBuilder {
     version: Option<&'static str>,
-    functions: Vec<(FunctionDecl, Entry)>,
-    classes: Vec<NativeClassDecl>,
-    constants: Vec<ConstDecl>,
-    ini: Vec<IniDecl>,
-    on_modify: Vec<(Vec<u8>, IniHandler)>,
-    dependencies: Vec<Dependency>,
-    request_state: Option<StateBuilder>,
-    process_state: Option<ProcessStateBuilder>,
-    engine_state: Option<EngineStateBuilder>,
-    rinit: Option<Rinit>,
-    rshutdown: Option<EndFunction>,
-    deactivate: Option<EndFunction>,
-    post_deactivate: Option<EndFunction>,
-    engine_end: Option<EndFunction>,
-    zend: Option<ZendExtension>,
-    supplies: Supplies,
-    info: Option<Info>,
-    constants_link: Option<ConstantsLink>,
-    class_constants: Vec<(Name, Vec<ClassConstDecl>)>,
-    trampolines: Vec<(Name, MethodDecl, Entry)>,
+    entry: ExtensionEntry,
+    declarations: Declarations,
 }
 
 impl ExtensionBuilder {
     /// The natives: each declaration with its entry.
     #[must_use]
     pub fn functions(mut self, functions: Vec<(FunctionDecl, Entry)>) -> ExtensionBuilder {
-        self.functions.extend(functions);
+        self.declarations.functions.extend(functions);
         self
     }
 
@@ -1141,7 +1130,7 @@ impl ExtensionBuilder {
         mut self,
         classes: Vec<(ClassDecl, Vec<(MethodDecl, Entry)>)>,
     ) -> ExtensionBuilder {
-        self.classes.extend(
+        self.declarations.classes.extend(
             classes
                 .into_iter()
                 .map(|(decl, methods)| (decl, methods, None, None)),
@@ -1163,7 +1152,9 @@ impl ExtensionBuilder {
         methods: Vec<(MethodDecl, Entry)>,
         handlers: &'static dyn ObjectHandlers,
     ) -> ExtensionBuilder {
-        self.classes.push((class, methods, Some(handlers), None));
+        self.declarations
+            .classes
+            .push((class, methods, Some(handlers), None));
         self
     }
 
@@ -1220,7 +1211,8 @@ impl ExtensionBuilder {
         handlers: &'static dyn ObjectHandlers,
         new: NativeNew,
     ) -> ExtensionBuilder {
-        self.classes
+        self.declarations
+            .classes
             .push((class, methods, Some(handlers), Some(new)));
         self
     }
@@ -1228,14 +1220,14 @@ impl ExtensionBuilder {
     /// The constants.
     #[must_use]
     pub fn constants(mut self, constants: Vec<ConstDecl>) -> ExtensionBuilder {
-        self.constants.extend(constants);
+        self.declarations.constants.extend(constants);
         self
     }
 
     /// The ini entries with their defaults.
     #[must_use]
     pub fn ini(mut self, entries: Vec<IniDecl>) -> ExtensionBuilder {
-        self.ini.extend(entries);
+        self.entry.ini.extend(entries);
         self
     }
 
@@ -1244,7 +1236,8 @@ impl ExtensionBuilder {
     /// once over the value the host set as the engine is built.
     #[must_use]
     pub fn on_modify(mut self, name: &[u8], handler: OnModify) -> ExtensionBuilder {
-        self.on_modify
+        self.entry
+            .on_modify
             .push((name.to_vec(), IniHandler::Written(handler)));
         self
     }
@@ -1256,7 +1249,8 @@ impl ExtensionBuilder {
     /// [`Ini::long`].
     #[must_use]
     pub fn on_update_long(mut self, name: &[u8], handler: LongHandler) -> ExtensionBuilder {
-        self.on_modify
+        self.entry
+            .on_modify
             .push((name.to_vec(), IniHandler::Long(handler)));
         self
     }
@@ -1266,7 +1260,7 @@ impl ExtensionBuilder {
     /// none has php's null pointer, the empty table.
     #[must_use]
     pub fn dependencies(mut self, dependencies: Vec<Dependency>) -> ExtensionBuilder {
-        self.dependencies.extend(dependencies);
+        self.entry.dependencies.extend(dependencies);
         self
     }
 
@@ -1276,7 +1270,7 @@ impl ExtensionBuilder {
     /// php's `Version` row and its ini entries.
     #[must_use]
     pub fn info(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
-        self.info = Some(hook);
+        self.entry.info = Some(hook);
         self
     }
 
@@ -1284,7 +1278,7 @@ impl ExtensionBuilder {
     /// dropped after the `rshutdown` hooks in reverse (ADR-0005).
     #[must_use]
     pub fn request_state<T: Default + Send + 'static>(mut self) -> ExtensionBuilder {
-        self.request_state = Some((TypeId::of::<T>(), || Box::new(T::default())));
+        self.entry.request_state = Some((TypeId::of::<T>(), || Box::new(T::default())));
         self
     }
 
@@ -1310,7 +1304,7 @@ impl ExtensionBuilder {
         mut self,
         build: fn() -> Result<P, Refusal>,
     ) -> ExtensionBuilder {
-        self.process_state = Some((
+        self.entry.process_state = Some((
             TypeId::of::<P>(),
             Arc::new(move || build().map(|state| Box::new(state) as Box<dyn Any + Send + Sync>)),
         ));
@@ -1328,7 +1322,7 @@ impl ExtensionBuilder {
         mut self,
         build: fn(&Start) -> Result<E, Refusal>,
     ) -> ExtensionBuilder {
-        self.engine_state = Some(Arc::new(move |start: &Start| {
+        self.entry.engine_state = Some(Arc::new(move |start: &Start| {
             build(start).map(|state| Box::new(state) as Box<dyn Any + Send + Sync>)
         }));
         self
@@ -1342,7 +1336,7 @@ impl ExtensionBuilder {
     /// ending as php's does after `php_request_startup` fails.
     #[must_use]
     pub fn rinit(mut self, hook: fn(&mut Request) -> Result<(), Thrown>) -> ExtensionBuilder {
-        self.rinit = Some(hook);
+        self.entry.rinit = Some(hook);
         self
     }
 
@@ -1352,7 +1346,7 @@ impl ExtensionBuilder {
     /// and the next extension's is still served.
     #[must_use]
     pub fn rshutdown(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
-        self.rshutdown = Some(hook);
+        self.entry.rshutdown = Some(hook);
         self
     }
 
@@ -1366,7 +1360,7 @@ impl ExtensionBuilder {
     /// such as a link a session save handler writes through.
     #[must_use]
     pub fn deactivate(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
-        self.deactivate = Some(hook);
+        self.entry.deactivate = Some(hook);
         self
     }
 
@@ -1382,7 +1376,7 @@ impl ExtensionBuilder {
     /// the request state's `Drop` (ADR-0010).
     #[must_use]
     pub fn post_deactivate(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
-        self.post_deactivate = Some(hook);
+        self.entry.post_deactivate = Some(hook);
         self
     }
 
@@ -1400,7 +1394,7 @@ impl ExtensionBuilder {
     /// whose start was refused is not ended.
     #[must_use]
     pub fn engine_end(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
-        self.engine_end = Some(hook);
+        self.entry.engine_end = Some(hook);
         self
     }
 
@@ -1419,7 +1413,7 @@ impl ExtensionBuilder {
     /// php's stands beneath them.
     #[must_use]
     pub fn interrupt(mut self, hook: InterruptHook) -> ExtensionBuilder {
-        self.supplies.interrupt = Some(hook);
+        self.entry.supplies.interrupt = Some(hook);
         self
     }
 
@@ -1432,7 +1426,7 @@ impl ExtensionBuilder {
     /// opline stands.
     #[must_use]
     pub fn ticks(mut self, hook: TicksHook) -> ExtensionBuilder {
-        self.supplies.ticks = Some(hook);
+        self.entry.supplies.ticks = Some(hook);
         self
     }
 
@@ -1451,7 +1445,7 @@ impl ExtensionBuilder {
     /// for a file it does not serve.
     #[must_use]
     pub fn compile_file(mut self, hook: CompileFileHook) -> ExtensionBuilder {
-        self.supplies.compile_file = Some(hook);
+        self.entry.supplies.compile_file = Some(hook);
         self
     }
 
@@ -1469,7 +1463,7 @@ impl ExtensionBuilder {
     /// first and the earlier when the later serves the one beneath.
     #[must_use]
     pub fn compile_string(mut self, hook: CompileStringHook) -> ExtensionBuilder {
-        self.supplies.compile_string = Some(hook);
+        self.entry.supplies.compile_string = Some(hook);
         self
     }
 
@@ -1485,7 +1479,7 @@ impl ExtensionBuilder {
     /// beneath.
     #[must_use]
     pub fn error(mut self, hook: ErrorHook) -> ExtensionBuilder {
-        self.supplies.error = Some(hook);
+        self.entry.supplies.error = Some(hook);
         self
     }
 
@@ -1504,7 +1498,7 @@ impl ExtensionBuilder {
     /// nothing of php's stands beneath them.
     #[must_use]
     pub fn thrown(mut self, hook: ThrownHook) -> ExtensionBuilder {
-        self.supplies.thrown = Some(hook);
+        self.entry.supplies.thrown = Some(hook);
         self
     }
 
@@ -1527,7 +1521,7 @@ impl ExtensionBuilder {
     /// pays one load and one branch at the push and one at the return.
     #[must_use]
     pub fn observer(mut self, init: ObserverInit) -> ExtensionBuilder {
-        self.supplies.observers.push((init, None));
+        self.entry.supplies.observers.push((init, None));
         self
     }
 
@@ -1542,7 +1536,7 @@ impl ExtensionBuilder {
         init: ObserverInit,
         registered: ObserverRegistered,
     ) -> ExtensionBuilder {
-        self.supplies.observers.push((init, Some(registered)));
+        self.entry.supplies.observers.push((init, Some(registered)));
         self
     }
 
@@ -1559,7 +1553,7 @@ impl ExtensionBuilder {
     /// declare more than one.
     #[must_use]
     pub fn error_observer(mut self, observer: ErrorObserver) -> ExtensionBuilder {
-        self.supplies.error_observers.push(observer);
+        self.entry.supplies.error_observers.push(observer);
         self
     }
 
@@ -1573,7 +1567,7 @@ impl ExtensionBuilder {
     /// opcache tells php's observers on every hit.
     #[must_use]
     pub fn function_declared_observer(mut self, observer: FunctionDeclared) -> ExtensionBuilder {
-        self.supplies.functions_declared.push(observer);
+        self.entry.supplies.functions_declared.push(observer);
         self
     }
 
@@ -1590,7 +1584,7 @@ impl ExtensionBuilder {
     /// again on every load.
     #[must_use]
     pub fn class_linked_observer(mut self, observer: ClassLinked) -> ExtensionBuilder {
-        self.supplies.classes_linked.push(observer);
+        self.entry.supplies.classes_linked.push(observer);
         self
     }
 
@@ -1616,7 +1610,7 @@ impl ExtensionBuilder {
         declared: OpcodesDeclared,
         handler: OpcodeHandler,
     ) -> ExtensionBuilder {
-        self.supplies.opcodes = Some(crate::observer::OpcodeObserver { declared, handler });
+        self.entry.supplies.opcodes = Some(crate::observer::OpcodeObserver { declared, handler });
         self
     }
 
@@ -1627,7 +1621,7 @@ impl ExtensionBuilder {
     /// extension's in the order it declared them.
     #[must_use]
     pub fn fiber_init(mut self, handler: FiberHandler) -> ExtensionBuilder {
-        self.supplies.fiber_init.push(handler);
+        self.entry.supplies.fiber_init.push(handler);
         self
     }
 
@@ -1639,7 +1633,7 @@ impl ExtensionBuilder {
     /// what is begun in a fiber is ended in it.
     #[must_use]
     pub fn fiber_switch(mut self, handler: FiberSwitchHandler) -> ExtensionBuilder {
-        self.supplies.fiber_switch.push(handler);
+        self.entry.supplies.fiber_switch.push(handler);
         self
     }
 
@@ -1649,7 +1643,7 @@ impl ExtensionBuilder {
     /// request ends in a fatal is never told of.
     #[must_use]
     pub fn fiber_destroy(mut self, handler: FiberHandler) -> ExtensionBuilder {
-        self.supplies.fiber_destroy.push(handler);
+        self.entry.supplies.fiber_destroy.push(handler);
         self
     }
 
@@ -1663,7 +1657,7 @@ impl ExtensionBuilder {
     /// the one beneath.
     #[must_use]
     pub fn gc_collect(mut self, hook: GcCollectHook) -> ExtensionBuilder {
-        self.supplies.gc_collect = Some(hook);
+        self.entry.supplies.gc_collect = Some(hook);
         self
     }
 
@@ -1678,7 +1672,7 @@ impl ExtensionBuilder {
     /// every file is held and validated on every hit.
     #[must_use]
     pub fn admission(mut self, hook: fn(&mut Request, &[u8]) -> Admission) -> ExtensionBuilder {
-        self.supplies.admission = Some(hook);
+        self.entry.supplies.admission = Some(hook);
         self
     }
 
@@ -1694,7 +1688,7 @@ impl ExtensionBuilder {
     /// did not serve; beneath every link the chain serves.
     #[must_use]
     pub fn post_startup(mut self, hook: PostStartupHook) -> ExtensionBuilder {
-        self.supplies.post_startup = Some(hook);
+        self.entry.supplies.post_startup = Some(hook);
         self
     }
 
@@ -1706,7 +1700,7 @@ impl ExtensionBuilder {
     /// other.
     #[must_use]
     pub fn cached(mut self, hook: fn(&mut Request, &[u8])) -> ExtensionBuilder {
-        self.supplies.cached = Some(hook);
+        self.entry.supplies.cached = Some(hook);
         self
     }
 
@@ -1722,7 +1716,7 @@ impl ExtensionBuilder {
     /// face: a pass is told the file, and rewrites nothing.
     #[must_use]
     pub fn optimizer_pass(mut self, pass: fn(&mut Request, &[u8])) -> ExtensionBuilder {
-        self.supplies.optimizer_passes.push(pass);
+        self.entry.supplies.optimizer_passes.push(pass);
         self
     }
 
@@ -1738,21 +1732,21 @@ impl ExtensionBuilder {
     /// (ADR-0008, #1348).
     #[must_use]
     pub fn fatal_logged(mut self, hook: fn(&mut Request) -> AfterLog) -> ExtensionBuilder {
-        self.supplies.fatal_logged = Some(hook);
+        self.entry.supplies.fatal_logged = Some(hook);
         self
     }
 
-    /// Served once the primary program has ended and before the request
-    /// shuts down, the moment between `php_execute_script` and
-    /// `php_request_shutdown` where php-fpm's loop puts the line
-    /// `fastcgi.error_header` names into the head
+    /// Served once the primary program has ended, as the request starts
+    /// to shut down: `php_request_shutdown`'s first step, where it sets
+    /// `EG_FLAGS_IN_SHUTDOWN` (`Z/main/main.c:1960`), before the shutdown
+    /// functions are called, and the moment php-fpm's loop puts the line
+    /// `fastcgi.error_header` names into the head just before
     /// (`Z/sapi/fpm/fpm/fpm_main.c:1931-1940`): every extension's hook in
-    /// bundle order, for a program served whole and not for a lint, a
-    /// highlight or a strip. An extension a host declares for itself is
-    /// the one that hands it (ADR-0008, #1348).
+    /// bundle order, on every host's request. An extension a host
+    /// declares for itself is the one that hands it (ADR-0008, #1348).
     #[must_use]
     pub fn program_ended(mut self, hook: fn(&mut Request)) -> ExtensionBuilder {
-        self.supplies.program_ended = Some(hook);
+        self.entry.supplies.program_ended = Some(hook);
         self
     }
 
@@ -1762,7 +1756,7 @@ impl ExtensionBuilder {
     /// as the last `MINIT` to write the table wins.
     #[must_use]
     pub fn shell(mut self, shell: Shell) -> ExtensionBuilder {
-        self.supplies.shell = Some(shell);
+        self.entry.supplies.shell = Some(shell);
         self
     }
 
@@ -1777,7 +1771,7 @@ impl ExtensionBuilder {
     /// filter; with none, every value is registered as it came.
     #[must_use]
     pub fn input_filter(mut self, hook: InputFilterHook) -> ExtensionBuilder {
-        self.supplies.input_filter = Some(hook);
+        self.entry.supplies.input_filter = Some(hook);
         self
     }
 
@@ -1793,7 +1787,7 @@ impl ExtensionBuilder {
     /// bundle order with a hook treats the data.
     #[must_use]
     pub fn treat_data(mut self, hook: TreatDataHook) -> ExtensionBuilder {
-        self.supplies.treat_data = Some(hook);
+        self.entry.supplies.treat_data = Some(hook);
         self
     }
 
@@ -1807,7 +1801,7 @@ impl ExtensionBuilder {
     /// serves the one beneath.
     #[must_use]
     pub fn resolve_path(mut self, hook: ResolvePathHook) -> ExtensionBuilder {
-        self.supplies.resolve_path = Some(hook);
+        self.entry.supplies.resolve_path = Some(hook);
         self
     }
 
@@ -1817,7 +1811,7 @@ impl ExtensionBuilder {
     /// `php_module_startup` writes `zend_stream_open_function` once.
     #[must_use]
     pub fn stream_hooks(mut self, hooks: crate::layer::StreamHooks) -> ExtensionBuilder {
-        self.supplies.stream_hooks = Some(hooks);
+        self.entry.supplies.stream_hooks = Some(hooks);
         self
     }
 
@@ -1833,7 +1827,7 @@ impl ExtensionBuilder {
     /// which nothing is fetched or converted.
     #[must_use]
     pub fn encodings(mut self, bind: EncodingsHook) -> ExtensionBuilder {
-        self.supplies.encodings = Some(bind);
+        self.entry.supplies.encodings = Some(bind);
         self
     }
 
@@ -1850,7 +1844,7 @@ impl ExtensionBuilder {
     /// every link the chain answers `true`, php's `SUCCESS`.
     #[must_use]
     pub fn upload(mut self, hook: UploadHook) -> ExtensionBuilder {
-        self.supplies.upload = Some(hook);
+        self.entry.supplies.upload = Some(hook);
         self
     }
 
@@ -1861,7 +1855,7 @@ impl ExtensionBuilder {
     /// reads.
     #[must_use]
     pub fn zend_extension(mut self, row: ZendExtension) -> ExtensionBuilder {
-        self.zend = Some(row);
+        self.entry.zend = Some(row);
         self
     }
 
@@ -1879,7 +1873,10 @@ impl ExtensionBuilder {
     /// took out, is intercepted by nothing.
     #[must_use]
     pub fn intercept(mut self, name: &[u8], entry: Entry) -> ExtensionBuilder {
-        self.supplies.intercepts.push((Name(name.into()), entry));
+        self.entry
+            .supplies
+            .intercepts
+            .push((Name(name.into()), entry));
         self
     }
 
@@ -1890,7 +1887,8 @@ impl ExtensionBuilder {
     /// order, which is `MINIT` order (ADR-0005).
     #[must_use]
     pub fn register<T: Send + Sync + 'static>(mut self, value: T) -> ExtensionBuilder {
-        self.supplies
+        self.entry
+            .supplies
             .registered
             .push((TypeId::of::<T>(), Arc::new(value)));
         self
@@ -1909,7 +1907,7 @@ impl ExtensionBuilder {
         mut self,
         link: fn(Vec<ConstDecl>, &[&T]) -> Vec<ConstDecl>,
     ) -> ExtensionBuilder {
-        self.constants_link = Some(Arc::new(move |declared, registered| {
+        self.declarations.constants_link = Some(Arc::new(move |declared, registered| {
             let values: Vec<&T> = registered
                 .under(TypeId::of::<T>())
                 .filter_map(|(_, value)| value.downcast_ref::<T>())
@@ -1932,7 +1930,9 @@ impl ExtensionBuilder {
         class: &[u8],
         constants: Vec<ClassConstDecl>,
     ) -> ExtensionBuilder {
-        self.class_constants.push((Name(class.into()), constants));
+        self.declarations
+            .class_constants
+            .push((Name(class.into()), constants));
         self
     }
 
@@ -1949,7 +1949,7 @@ impl ExtensionBuilder {
         class: &[u8],
         methods: Vec<(MethodDecl, Entry)>,
     ) -> ExtensionBuilder {
-        self.trampolines.extend(
+        self.declarations.trampolines.extend(
             methods
                 .into_iter()
                 .map(|(method, entry)| (Name(class.into()), method, entry)),
@@ -1970,38 +1970,16 @@ impl ExtensionBuilder {
 
     /// The extension, named as php names it (`ctype`, `pcre`).
     #[must_use]
-    pub fn build(self, name: &str) -> Extension {
+    pub fn build(mut self, name: &str) -> Extension {
+        let entry = &mut self.entry;
+        name.clone_into(&mut entry.name);
+        entry.listed = true;
+        entry.version = self.version.unwrap_or(crate::api::request::PHP_VERSION);
+        entry.supplies.statement_handler =
+            entry.zend.as_ref().and_then(|row| row.statement_handler);
         Extension {
-            entry: ExtensionEntry {
-                name: name.to_owned(),
-                listed: true,
-                version: self.version.unwrap_or(crate::api::request::PHP_VERSION),
-                ini: self.ini,
-                on_modify: self.on_modify,
-                dependencies: self.dependencies,
-                request_state: self.request_state,
-                process_state: self.process_state,
-                engine_state: self.engine_state,
-                rinit: self.rinit,
-                rshutdown: self.rshutdown,
-                deactivate: self.deactivate,
-                post_deactivate: self.post_deactivate,
-                engine_end: self.engine_end,
-                supplies: Supplies {
-                    statement_handler: self.zend.as_ref().and_then(|row| row.statement_handler),
-                    ..self.supplies
-                },
-                zend: self.zend,
-                info: self.info,
-            },
-            declarations: Declarations {
-                functions: self.functions,
-                classes: self.classes,
-                constants: self.constants,
-                constants_link: self.constants_link,
-                class_constants: self.class_constants,
-                trampolines: self.trampolines,
-            },
+            entry: self.entry,
+            declarations: self.declarations,
         }
     }
 }
@@ -2207,12 +2185,8 @@ impl Callable {
     /// ```
     #[must_use]
     pub fn required(&self, req: &Request) -> usize {
-        let function = match self.target {
-            Target::Function(function) | Target::Method { function, .. } => function,
-            Target::Closure(closure) => match closure.closure(req) {
-                Some(info) => info.function,
-                None => return 0,
-            },
+        let Some(function) = crate::api::call::callee(req, self.target) else {
+            return 0;
         };
         req.symbols().function_decl(function).map_or(0, |decl| {
             decl.parameters
@@ -2530,11 +2504,32 @@ impl CoreTable {
     }
 }
 
+/// Whether a handler table serves a class's properties as `Std` does:
+/// `read_property`, `write_property`, `has_property`, `unset_property`
+/// and `get_property_ptr_ptr` all the standard handlers', which fill the
+/// runtime-cache slot of the opline they serve themselves
+/// (`zend_get_property_offset`, `Z/Zend/zend_object_handlers.c:386`), so
+/// a property opline's place is cached for the class as for one with no
+/// table of its own; or a table that overrides any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyAccess {
+    Standard,
+    Own,
+}
+
 pub trait ObjectHandlers: Send + Sync {
     /// Which of Core's tables this is ([`CoreTable`]); none at `Std`
     /// and for every table an extension declares.
     fn core_table(&self) -> CoreTable {
         CoreTable::NONE
+    }
+
+    /// How the table serves its class's properties ([`PropertyAccess`]):
+    /// a table that overrides none of the five property slots answers
+    /// `Standard`, and every other keeps the default, `Own`, so no place
+    /// it may serve otherwise is cached.
+    fn properties(&self) -> PropertyAccess {
+        PropertyAccess::Own
     }
 
     /// The class's [`Refusals`], php's `get_constructor` that throws,
@@ -3344,13 +3339,18 @@ impl Refusals {
             }
             None => format!("Cannot directly construct {class}"),
         };
-        crate::api::raising::throw_error(req, "Error", &message)
+        crate::api::raising::error(req, &message)
     }
 }
 
 impl ObjectHandlers for Refusals {
     fn refusals(&self) -> Refusals {
         *self
+    }
+
+    /// A table of refusals overrides no property slot.
+    fn properties(&self) -> PropertyAccess {
+        PropertyAccess::Standard
     }
 }
 

@@ -791,9 +791,9 @@ pub(crate) fn pcntl_setcpuaffinity(
     for value in values {
         let cpu = match value.as_ref() {
             php_ext::values::ValueRef::Int(n) => n,
-            php_ext::values::ValueRef::Str(s) => match Key::lookup(*s) {
+            php_ext::values::ValueRef::Str(s) => match Key::lookup(s) {
                 Key::Int(n) => n,
-                Key::Str(_) => {
+                Key::Str(s) => {
                     let shown = String::from_utf8_lossy(s.as_bytes()).into_owned();
                     let tail = format!("cpu id invalid value ({shown})");
                     return Err(argument_error(req, "ValueError", 2, &tail));
@@ -844,9 +844,7 @@ fn affinity_refused(
                 at,
                 "invalid cpu affinity mask size or unmapped cpu id(s)",
             ),
-            None => {
-                php_ext::raising::throw_error(req, "ValueError", "invalid cpu affinity mask size")
-            }
+            None => php_ext::raising::value_error(req, "invalid cpu affinity mask size"),
         }),
         Errno::EPERM => {
             let text = "Calling process not having the proper privileges";

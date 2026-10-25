@@ -297,23 +297,33 @@ fn md5(
 /// NULL)` opens it, and each read of up to 1024 bytes read into one
 /// buffer on the stack and handed to `update`, as php's `buf[1024]`
 /// holds one read at a time, so hashing a file allocates nothing for it.
-/// `false` after the warning the open left, or where the reads stopped
-/// short of the end.
+/// `None` after the warning the open left; else how the reads ended.
 pub(super) fn digest_file(
     req: &mut Request,
     filename: PhpString,
     mut update: impl FnMut(&[u8]),
-) -> Result<bool, Thrown> {
+) -> Result<Option<Digested>, Thrown> {
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", false)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut buf = [0u8; 1024];
-    while let Some(n @ 1..) = stream.read_into(req, &mut buf) {
-        update(&buf[..n]);
-    }
-    let complete = stream.eof(req);
+    let failed = loop {
+        match stream.read_into(req, &mut buf) {
+            Some(0) => break false,
+            Some(n) => update(&buf[..n]),
+            None => break true,
+        }
+    };
+    let at_end = stream.eof(req);
     stream.free(req);
-    Ok(complete)
+    Ok(Some(Digested { at_end, failed }))
+}
+
+/// How [`digest_file`]'s reads ended: whether the stream stood at its
+/// end, and whether the last read failed (`n < 0`).
+pub(super) struct Digested {
+    pub(super) at_end: bool,
+    pub(super) failed: bool,
 }
 
 /// `md5_file(string $filename, bool $binary = false): string|false`.
@@ -373,7 +383,10 @@ fn md5_file(
     #[php(default = false)] binary: bool,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut context = Md5::new();
-    if !digest_file(req, filename.0, |read| context.update(read))? {
+    // `if (!php_stream_eof(stream))`: a read that failed at the end is
+    // the digest of what was read.
+    let read = digest_file(req, filename.0, |read| context.update(read))?;
+    if !read.is_some_and(|read| read.at_end) {
         return Ok(OrFalse::False);
     }
     let digest = context.finish();

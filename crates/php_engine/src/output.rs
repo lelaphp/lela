@@ -78,6 +78,8 @@ const DISABLED: u32 = 0x02;
 const WRITTEN: u32 = 0x04;
 const SENT: u32 = 0x08;
 const ACTIVATED: u32 = 0x10_0000;
+/// `PHP_OUTPUT_LOCKED`: a handler is running.
+pub(crate) const LOCKED: u32 = 0x20;
 
 /// `PHP_OUTPUT_HANDLER_INITBUF_SIZE` (`Z/main/php_output.h:84-90`): a
 /// chunk size rounded up to 4 KiB, or 16 KiB for none.
@@ -219,7 +221,7 @@ const HEADER_CELL: usize = 24 + 16 - 1;
 /// q=1
 /// ```
 /// ```expect
-/// X-Powered-By: PHP/8.5.9
+/// X-Powered-By: PHP/8.5.12
 /// Content-type: text/html; charset=UTF-8
 ///
 /// 88 56 0
@@ -407,7 +409,7 @@ impl Output {
     /// `PHP_OUTPUT_LOCKED` while one runs, the low byte.
     pub(crate) fn status(&self) -> u32 {
         let active = if self.handlers.is_empty() { 0 } else { 0x10 };
-        let locked = if self.running.is_some() { 0x20 } else { 0 };
+        let locked = if self.running.is_some() { LOCKED } else { 0 };
         (self.flags | active | locked) & 0xff
     }
 
@@ -1269,16 +1271,6 @@ fn apply_default_charset(req: &Request, mimetype: &[u8]) -> (Vec<u8>, bool) {
     }
 }
 
-/// The line less its trailing spaces, linefeeds and carriage returns,
-/// as `sapi_header_op` cuts them (`Z/main/SAPI.c:736`).
-fn trimmed_end(line: &[u8]) -> &[u8] {
-    let mut end = line.len();
-    while end > 0 && line[end - 1].is_ascii_whitespace() {
-        end -= 1;
-    }
-    &line[..end]
-}
-
 /// `sapi_remove_header` (`Z/main/SAPI.c:600`): every line whose name is
 /// `name`, case aside, with `:` after it; with `prefix_len` set, one
 /// whose first `name.len()` bytes are `name` however it goes on; each
@@ -1361,7 +1353,7 @@ pub(crate) fn header_add(
         return false;
     }
     let written = line.len();
-    let line = trimmed_end(line);
+    let line = line.trim_ascii_end();
     // The safety check walks the line once, and the first byte it trips
     // on names the refusal (`Z/main/SAPI.c:740-755`).
     match line.iter().find(|b| matches!(b, b'\n' | b'\r' | 0)) {
@@ -1463,7 +1455,7 @@ pub(crate) fn header_remove(req: &mut Request, name: Option<&[u8]>) -> bool {
     if name.is_empty() {
         return false;
     }
-    let name = trimmed_end(name);
+    let name = name.trim_ascii_end();
     if name.contains(&b':') {
         req.note_error(Level::Warning, "Header to delete may not contain colon.");
         return false;
@@ -1482,7 +1474,7 @@ pub(crate) fn header_remove_prefix(req: &mut Request, prefix: &[u8], name_len: u
     if !header_modifiable(req) || prefix.is_empty() {
         return false;
     }
-    let prefix = trimmed_end(prefix);
+    let prefix = prefix.trim_ascii_end();
     remove_header(req, prefix, name_len);
     true
 }
@@ -1652,11 +1644,13 @@ pub(crate) fn end_all(req: &mut Request) {
 }
 
 /// `php_output_discard_all` (`Z/main/output.c:345`): every handler
-/// popped with its buffer thrown away, each handler still served its
-/// final call, which is what `php_error_cb` does before it displays the
-/// memory limit's fatal while the heap's limit is lifted
-/// (`Z/main/main.c:1405-1407`), so the fatal is not written into a
-/// buffer the request would then flush.
+/// popped with its buffer thrown away, each handler served its final
+/// call, which is what `php_error_cb` does before it displays the memory
+/// limit's fatal while the limit is reported
+/// (`Z/main/main.c:1434` at 8.5.12), so the fatal is not written into a
+/// buffer the request would then flush. A user handler's final call is a
+/// `zend_call_function`, which makes no call once the limit was met, so
+/// a user handler writes nothing there:
 ///
 /// ```php
 /// ini_set('memory_limit', '2M');
@@ -1665,23 +1659,28 @@ pub(crate) fn end_all(req: &mut Request) {
 /// $a = str_repeat('x', 4 << 20);
 /// ```
 /// ```expect exit=255
-/// handled
-///
-/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4194336 bytes) in %s on line 5
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 5
 /// ```
 pub(crate) fn discard_all(req: &mut Request) {
     while req.output().level() > 0 && stack_pop(req, POP_DISCARD | POP_FORCE) {}
 }
 
 /// `php_output_deactivate` (`Z/main/output.c:176`): the header block
-/// committed if nothing sent it, the layer inactive, every handler
-/// left freed and the stack's storage with them; and
+/// committed if nothing sent it, but for a request ended at the hard
+/// memory limit, where php's `_exit(137)` never reaches this; the layer
+/// inactive, every handler left freed and the stack's storage with them;
+/// and
 /// `sapi_deactivate_destroy` (`Z/main/SAPI.c:537`) after it, the
 /// mimetype and the status line given back. Nothing of the request
 /// runs between the two, so they are one act here.
 pub(crate) fn deactivate(req: &mut Request) {
     if req.output().flags & ACTIVATED != 0 {
-        header(req);
+        // php's `_exit(137)` at the hard memory limit never reaches
+        // `php_output_deactivate`, so a request ended there commits no
+        // head and runs no header callback (`Ending::Terminated`, #3435).
+        if !req.terminated() {
+            header(req);
+        }
         let output = req.output_mut();
         output.flags ^= ACTIVATED;
         output.running = None;

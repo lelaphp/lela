@@ -15,7 +15,7 @@ use php_ext::abi::{Callable, NamedVariadic, OrFalse, Path, Ref, True, Union, Unt
 use php_ext::attr::{php_const, php_function};
 use php_ext::call::{call, call_array, call_named, fetch_constant};
 use php_ext::coerce::{c_str, numeric_string, with_string};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, warning};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error, value_error, warning};
 use php_ext::request::{Ini, OwnedStream as _, Request, ScannerFile, Streams as _};
 use php_ext::syntax::Scanning;
 use php_ext::values::walk::{self, Hold};
@@ -163,7 +163,7 @@ fn long2ip(req: &mut Request, ip: i64) -> Result<Owner<PhpString>, Thrown> {
 /// ```
 /// ```expect capture
 /// 200
-/// x-powered-by: PHP/8.5.9
+/// x-powered-by: PHP/8.5.12
 /// content-type: text/html; charset=UTF-8
 ///
 /// string(9) "localhost"
@@ -587,9 +587,8 @@ fn time_nanosleep(
         return Err(arg_value_error(req, 2, "be greater than or equal to 0"));
     };
     if nanoseconds > 999_999_999 {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "Nanoseconds was not in the range 0 to 999 999 999 or seconds was negative",
         ));
     }
@@ -733,8 +732,8 @@ fn get_include_path(req: &mut Request) -> Result<OrFalse<Owner<PhpString>>, Thro
 /// ```expect
 /// 160
 /// -160
-/// 56
-/// -56
+/// 64
+/// -64
 /// ```
 #[php_function]
 fn error_get_last(req: &mut Request) -> Result<Option<Owner<PhpArray>>, Thrown> {
@@ -1386,9 +1385,8 @@ fn error_log(
             crate::mail::php_mail(req, to, b"PHP error_log message", message, headers, None)?
         }
         LogTo::Tcp => {
-            return Err(throw_error(
+            return Err(value_error(
                 req,
-                "ValueError",
                 "TCP/IP option is not available for error logging",
             ));
         }
@@ -1675,7 +1673,8 @@ fn ignore_user_abort(
 /// ```
 #[php_function]
 fn register_tick_function(req: &mut Request, callback: Callable, args: Variadic<Value>) -> bool {
-    req.code_mut().register_tick_function(callback, args.0)
+    req.code_mut()
+        .register_tick_function(callback, args.into_iter().collect())
 }
 
 /// `unregister_tick_function(callable $callback): void`: the first
@@ -2429,7 +2428,6 @@ fn forward_static_call(
     callback: Callable,
     args: Variadic<Value>,
 ) -> Result<Owner<Value>, Thrown> {
-    let arguments = args.0;
     if req.frames().scope().is_none() {
         return Err(php_ext::raising::throw_error(
             req,
@@ -2438,7 +2436,7 @@ fn forward_static_call(
         ));
     }
     let callback = forwarded(req, &callback);
-    call(req, &callback, &arguments)
+    call(req, &callback, &args)
 }
 
 /// `forward_static_call_array(callable $callback, array $args): mixed`,

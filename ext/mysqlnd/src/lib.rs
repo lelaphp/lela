@@ -49,7 +49,7 @@ use php_ext::request::{Ini, Request};
 use crate::conn::ConnData;
 
 /// `PHP_MYSQLND_VERSION`, `"mysqlnd " PHP_VERSION`.
-const VERSION: &str = "mysqlnd 8.5.9";
+const VERSION: &str = "mysqlnd 8.5.12";
 
 /// The `mysqlnd.*` entries, `PHP_INI_BEGIN` in php's order: the name,
 /// the default, and who may set it.
@@ -79,11 +79,13 @@ enum Scope {
 }
 
 /// The request's state: the connections, lent out to one call at a
-/// time, and `mysqlnd_global_stats`.
+/// time, `mysqlnd_global_stats`, and `MYSQLND_G(collect_statistics)`,
+/// the entry as `OnUpdateBool` keeps it ([`on_update_collect_statistics`]).
 #[derive(Default)]
 struct State {
     conns: Vec<Slot>,
     stats: Vec<u64>,
+    collect_statistics: bool,
 }
 
 /// One connection of the table: its data, absent while it is lent; the
@@ -114,7 +116,7 @@ pub struct ReverseApi {
 /// bool(true)
 /// string(4) "4096"
 /// string(1) "1"
-/// string(13) "mysqlnd 8.5.9"
+/// string(14) "mysqlnd 8.5.12"
 /// ```
 pub fn extension() -> Extension {
     ExtensionBuilder::default()
@@ -139,7 +141,9 @@ pub fn extension() -> Extension {
         .on_update_long(b"mysqlnd.net_read_timeout", LongHandler::Any)
         .on_update_long(b"mysqlnd.log_mask", LongHandler::Any)
         .on_update_long(b"mysqlnd.mempool_default_size", LongHandler::Any)
+        .on_modify(COLLECT_STATISTICS, on_update_collect_statistics)
         .request_state::<State>()
+        .rinit(rinit)
         .info(mysqlnd_info)
         .version(VERSION)
         .build("mysqlnd")
@@ -157,7 +161,7 @@ pub fn extension() -> Extension {
 /// mysqlnd
 ///
 /// mysqlnd => enabled
-/// Version => mysqlnd 8.5.9
+/// Version => mysqlnd 8.5.12
 /// Compression => supported
 /// core SSL => supported
 /// extended SSL => supported
@@ -202,7 +206,7 @@ fn mysqlnd_info(req: &mut Request) {
     // The two `OnUpdateLong` entries, as their quantities.
     let read = req.ini().long(b"mysqlnd.net_read_buffer_size").to_string();
     let timeout = req.ini().long(b"mysqlnd.net_read_timeout").to_string();
-    let stats = yes(req, b"mysqlnd.collect_statistics");
+    let stats = yes(req, COLLECT_STATISTICS);
     let memory = yes(req, b"mysqlnd.collect_memory_statistics");
     let tracing = req.ini().value(b"mysqlnd.debug").map_or_else(
         || "n/a".to_owned(),
@@ -281,15 +285,42 @@ impl Handle {
         req: &mut Request,
         f: impl FnOnce(&mut Request, &mut ConnData) -> R,
     ) -> Option<R> {
-        let enabled = ini_bool(req, b"mysqlnd.collect_statistics");
-        let mut conn = slot_of(req.state::<State>(), self)?.conn.take()?;
+        let state = req.state::<State>();
+        let enabled = state.collect_statistics;
+        let mut conn = slot_of(state, self)?.conn.take()?;
         conn.stats.enabled = enabled;
         let answered = f(req, &mut conn);
-        flush(req, &mut conn);
-        if let Some(slot) = slot_of(req.state::<State>(), self) {
+        let state = req.state::<State>();
+        flush(state, &mut conn);
+        if let Some(slot) = slot_of(state, self) {
             slot.conn = Some(conn);
         }
         Some(answered)
+    }
+
+    /// The connection read where it stands, for what reads and counts
+    /// nothing: no lend, so no statistic is switched on or flushed and
+    /// `mysqlnd.collect_statistics` is not read; `None` where the number
+    /// names no connection or the connection is lent already, as for
+    /// [`Handle::with`]. The accessors read through it, so reading the
+    /// connection's facts counts nothing:
+    ///
+    /// ```php
+    /// mysqli_report(MYSQLI_REPORT_OFF);
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// mysqli_query($l, 'SELEC 1');
+    /// $before = mysqli_get_connection_stats($l);
+    /// $facts = [mysqli_errno($l), mysqli_sqlstate($l), mysqli_affected_rows($l), mysqli_warning_count($l), mysqli_real_escape_string($l, "a'b"), mysqli_more_results($l), count(mysqli_error_list($l))];
+    /// echo json_encode($facts), "\n";
+    /// var_dump(array_diff_assoc(mysqli_get_connection_stats($l), $before));
+    /// ```
+    /// ```expect mysql
+    /// [1064,"42000",-1,0,"a\\'b",false,1]
+    /// array(0) {
+    /// }
+    /// ```
+    pub(crate) fn peek<R>(self, req: &mut Request, f: impl FnOnce(&ConnData) -> R) -> Option<R> {
+        slot_of(req.state::<State>(), self)?.conn.as_deref().map(f)
     }
 
     /// `get_reference`: one more owner of the connection.
@@ -300,9 +331,27 @@ impl Handle {
     }
 
     /// `free_reference`: one owner fewer, and the last one's close sent and
-    /// the connection dropped.
+    /// the connection dropped, counted as `mysqlnd.collect_statistics`
+    /// stands when it is:
+    ///
+    /// ```php
+    /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
+    /// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+    /// $r = mysqli_query($l, "SELECT 1 UNION ALL SELECT 2", MYSQLI_USE_RESULT);
+    /// ini_set('mysqlnd.collect_statistics', '0');
+    /// $before = mysqli_get_client_stats();
+    /// unset($p);
+    /// $l = null;
+    /// $r = null;
+    /// echo json_encode(array_diff_assoc(mysqli_get_client_stats(), $before)), "\n";
+    /// ```
+    /// ```expect mysql
+    /// []
+    /// ```
     pub(crate) fn release(self, req: &mut Request) {
-        let taken = match slot_of(req.state::<State>(), self) {
+        let state = req.state::<State>();
+        let enabled = state.collect_statistics;
+        let taken = match slot_of(state, self) {
             Some(slot) => {
                 slot.refs -= 1;
                 if slot.refs == 0 {
@@ -314,8 +363,11 @@ impl Handle {
             None => None,
         };
         if let Some(mut conn) = taken {
+            // The close counts under the entry as it stands now, as a
+            // lend's call does, not as the last lend left it.
+            conn.stats.enabled = enabled;
             conn.send_close(req).ok();
-            flush(req, &mut conn);
+            flush(req.state::<State>(), &mut conn);
             conn.dtor(req);
         }
     }
@@ -362,8 +414,7 @@ fn slot_of(state: &mut State, handle: Handle) -> Option<&mut Slot> {
 }
 
 /// What a connection counted for the request's statistics added there.
-fn flush(req: &mut Request, conn: &mut ConnData) {
-    let state = req.state::<State>();
+fn flush(state: &mut State, conn: &mut ConnData) {
     state.stats.resize(stats::COUNT, 0);
     conn.stats.flush(&mut state.stats);
 }
@@ -380,6 +431,51 @@ impl State {
 /// A boolean entry as `OnUpdateBool` reads it.
 fn ini_bool(req: &Request, name: &[u8]) -> bool {
     req.ini().get(name).is_some_and(Ini::parse_bool)
+}
+
+/// The entry whose value decides whether a connection counts.
+const COLLECT_STATISTICS: &[u8] = b"mysqlnd.collect_statistics";
+
+/// The request's `MYSQLND_G(collect_statistics)` laid from the entry as
+/// the request starts with it, as `MYSQLND_G` holds the value the entry
+/// was registered with.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the `rinit` slot's shape, which a hook that throws needs"
+)]
+fn rinit(req: &mut Request) -> Result<(), Thrown> {
+    req.state::<State>().collect_statistics = ini_bool(req, COLLECT_STATISTICS);
+    Ok(())
+}
+
+/// `OnUpdateBool` over `MYSQLND_G(collect_statistics)`: the value read
+/// as `zend_ini_parse_bool` reads it, written where every lend of a
+/// connection reads it, at `ini_set()`, `ini_restore()` and the
+/// request's end alike. A connection counts what it does while the entry
+/// is on and nothing while it is off:
+///
+/// ```php
+/// $l = mysqli_connect('127.0.0.1', 'root', '', 'test');
+/// $rows = fn () => mysqli_get_connection_stats($l)['buffered_sets'];
+/// $fetch = function () use ($l) { $r = mysqli_query($l, 'SELECT 1'); mysqli_fetch_row($r); };
+/// $fetch(); echo $rows(), "\n";
+/// var_dump(ini_set('mysqlnd.collect_statistics', '0')); $fetch(); echo $rows(), "\n";
+/// ini_restore('mysqlnd.collect_statistics'); var_dump(ini_get('mysqlnd.collect_statistics')); $fetch(); echo $rows(), "\n";
+/// ```
+/// ```expect mysql
+/// 1
+/// string(1) "1"
+/// 1
+/// string(1) "1"
+/// 2
+/// ```
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "the `on_modify` slot's shape, which a handler that throws needs"
+)]
+fn on_update_collect_statistics(req: &mut Request, value: Option<&[u8]>) -> Result<bool, Thrown> {
+    req.state::<State>().collect_statistics = value.is_some_and(Ini::parse_bool);
+    Ok(true)
 }
 
 #[cfg(test)]

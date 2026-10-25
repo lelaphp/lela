@@ -9,7 +9,9 @@ use php_ext::abi::{Instance, ObjectHandlers, OrFalse, Raw, Refusals, Union};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::{to_long, value_name, with_string};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_type_error, arg_value_error, docref, throw_error, value_error,
+};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::{FreshString, Key, Owner, PhpObject, PhpString, Value, ValueRef};
@@ -297,33 +299,29 @@ fn deflate_init(
     let options = Options(options.value());
     let level = options.long(req, b"level", -1)?;
     if !(-1..=9).contains(&level) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "deflate_init(): \"level\" option must be between -1 and 9",
         ));
     }
     let memory = options.long(req, b"memory", 8)?;
     if !(1..=9).contains(&memory) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "deflate_init(): \"memory\" option must be between 1 and 9",
         ));
     }
     let window = options.long(req, b"window", 15)?;
     if !(8..=15).contains(&window) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "deflate_init(): \"window\" option must be between 8 and 15",
         ));
     }
     let strategy = options.long(req, b"strategy", 0)?;
     if !(0..=4).contains(&strategy) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "deflate_init(): \"strategy\" option must be one of ZLIB_FILTERED, ZLIB_HUFFMAN_ONLY, ZLIB_RLE, ZLIB_FIXED, or ZLIB_DEFAULT_STRATEGY",
         ));
     }
@@ -400,6 +398,19 @@ fn deflate_init(
 /// int(69632)
 /// int(69632)
 /// ```
+///
+/// The string of the guess is asked for fallibly since 8.5.12: past the
+/// memory limit it is refused, and the limit's fatal is raised as the call
+/// returns.
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(deflate_add(deflate_init(ZLIB_ENCODING_RAW), str_repeat('a', 5 << 20), ZLIB_FINISH), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 5324800 bytes) in %s on line 3
+/// ```
 #[php_function]
 fn deflate_add(
     req: &mut Request,
@@ -445,7 +456,15 @@ fn deflate_rounds(
     input: &[u8],
     flush: Flush,
 ) -> Result<Result<Owner<PhpString>, Status>, Thrown> {
-    let mut out = FreshString::new(req, size_guess(input.len()).max(64))?;
+    // `zend_string_falloc` since 8.5.12, `RETURN_OOM()` where the memory
+    // limit refused it.
+    let guess = size_guess(input.len()).max(64);
+    let Some(mut out) = req
+        .memory_mut()
+        .fallible(|req| FreshString::new(req, guess))?
+    else {
+        return PhpString::new(req, b"").map(Ok);
+    };
     let (mut read, mut used) = (0, 0);
     let status = loop {
         if used == out.len() {
@@ -502,6 +521,23 @@ fn deflate_rounds(
 /// Encoding mode must be ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP or ZLIB_ENCODING_DEFLATE
 /// bool(true)
 /// ```
+///
+/// Raw deflate takes its dictionary at once under any window, as 8.5.12
+/// reads the encoding asked for and not the window bits made of it:
+///
+/// ```php
+/// $dict = 'the quick brown fox jumps over the lazy dog';
+/// $data = str_repeat("$dict ", 4);
+/// foreach ([10, 15] as $window) {
+///     $opts = ['window' => $window, 'dictionary' => $dict];
+///     $comp = deflate_add(deflate_init(ZLIB_ENCODING_RAW, $opts), $data, ZLIB_FINISH);
+///     var_dump(inflate_add(inflate_init(ZLIB_ENCODING_RAW, $opts), $comp, ZLIB_FINISH) === $data);
+/// }
+/// ```
+/// ```expect
+/// bool(true)
+/// bool(true)
+/// ```
 #[php_function]
 fn inflate_init(
     req: &mut Request,
@@ -512,12 +548,11 @@ fn inflate_init(
     let window = options.long(req, b"window", 15)?;
     if !(8..=15).contains(&window) {
         let text = format!("zlib window size (logarithm) ({window}) must be within 8..15");
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     }
     if !known(encoding) {
-        return Err(throw_error(
+        return Err(value_error(
             req,
-            "ValueError",
             "Encoding mode must be ZLIB_ENCODING_RAW, ZLIB_ENCODING_GZIP or ZLIB_ENCODING_DEFLATE",
         ));
     }
@@ -531,7 +566,10 @@ fn inflate_init(
         );
         return Ok(OrFalse::False);
     };
-    if bits == ZLIB_ENCODING_RAW
+    // The encoding asked for, not the window bits made of it: a raw
+    // stream under any window takes its dictionary now (8.5.12's
+    // `orig_encoding`).
+    if encoding == ZLIB_ENCODING_RAW
         && let Some(dict) = dictionary.take_if(|dict| !dict.is_empty())
         && stream.set_dictionary(req, &dict)? == Status::DataError
     {
@@ -691,8 +729,13 @@ fn inflate_rounds(
             Status::Ok | Status::BufError
                 if full && (step.status == Status::Ok || flush == Flush::Finish) =>
             {
+                // `php_zlib_inflate_grow`, `zend_string_fextend` since
+                // 8.5.12: `RETURN_OOM()` where the memory limit refused it.
                 let len = out.len() + CHUNK_SIZE;
-                out = out.extend(req, len)?;
+                let Some(grown) = req.memory_mut().fallible(|req| out.extend(req, len))? else {
+                    return PhpString::new(req, b"").map(Inflated::Out);
+                };
+                out = grown;
                 continue;
             }
             Status::Ok | Status::BufError | Status::StreamEnd => break,

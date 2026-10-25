@@ -269,6 +269,32 @@ fn xml_set_object(
 /// xml_set_element_handler(): Argument #2 ($start_handler) an object must be set via xml_set_object() to be able to lookup method
 /// ```
 ///
+/// No handler is changed while the parser is parsing, so a handler cannot
+/// free the callable being served; the one that threw stops the handlers
+/// after it from being served:
+///
+/// ```php
+/// $p = xml_parser_create();
+/// xml_set_element_handler($p, function ($p, $n) {
+///     try { xml_set_element_handler($p, null, null); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+///     try { xml_set_default_handler($p, null); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+///     echo "<$n>\n";
+///     if ($n === 'B') throw new Exception('stop');
+/// }, fn($p, $n) => print("</$n>\n"));
+/// try { xml_parse($p, '<a><b/>t<c/></a>', true); } catch (Exception $e) { echo $e->getMessage(), "\n"; }
+/// var_dump(xml_set_element_handler($p, null, null));
+/// ```
+/// ```expect
+/// Cannot change handlers while parsing
+/// Cannot change handlers while parsing
+/// <A>
+/// Cannot change handlers while parsing
+/// Cannot change handlers while parsing
+/// <B>
+/// stop
+/// bool(true)
+/// ```
+///
 /// A handler is kept as `zend_fcc_dup` keeps it, so a `Class::method`
 /// string set with `$this` in scope keeps that object until the parser
 /// gives the handler up:

@@ -26,22 +26,24 @@
 //! a diagnostic that copies a name does (`ZVAL_STR_COPY`), so nothing a
 //! unit made is held to the request's end for being made.
 
-use std::borrow::Cow;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
-use php_heap::{Str, Zval};
+use php_compile::values::Holder;
+use php_compile::{Named, SourceKind};
+use php_heap::{Sizing, Str, Zval};
 use php_link::NameHasher;
-use php_unit::decl::{FunctionDecl, TraitAdaptation};
-use php_unit::{PublishedUnit, Unit, WeakUnit};
+use php_unit::decl::TraitAdaptation;
+use php_unit::{OperandKind, PublishedUnit, Unit, WeakUnit};
 
 use super::Request;
 use super::declared_bytes::{self, Blocks, ClassBlocks, Declared, Gone};
 use crate::api::raising::Thrown;
 use crate::api::values::{PhpString, Value};
 
-/// The most names held already a unit's names are compared with one by
-/// one, past which a set of them is made.
-const SCANNED_NAMES: usize = 16;
+/// `ZEND_BIND_EXPLICIT` (`Z/Zend/zend_compile.h:1196`): the bit of the
+/// `extended_value` of the `BIND_STATIC` a closure's body binds a `use`
+/// variable with.
+const BIND_EXPLICIT: u32 = 4;
 
 /// The strings of the request-only units the request holds: each unit's,
 /// one owner apiece, beside the unit they go with, the newest name string
@@ -68,6 +70,10 @@ pub(crate) struct UnitStrings {
     /// The blocks of what units declared that are over, for
     /// [`Request::release_unit_strings`] to give back.
     dead_blocks: Vec<Blocks>,
+    /// `zend_lazy_class_load`'s copies of the classes of files the cache
+    /// keeps that the request linked as its own, with what their links
+    /// laid, held to the request's end.
+    copied: Vec<Blocks>,
     /// What op arrays that are over gave back and [`UnitStrings::take`]
     /// has not yet taken: a dynamic definition's, at its last count.
     gone: Vec<Gone>,
@@ -135,27 +141,19 @@ struct Spare {
     main: Vec<Zval>,
     constants: Vec<Zval>,
     names: Vec<PhpString>,
-    found_main: Vec<PhpString>,
-    found: Vec<PhpString>,
+    found_main: Vec<Option<PhpString>>,
+    unnamed: Vec<Named>,
 }
 
 /// The strings one op array a request-only unit declared owns apart
 /// from the unit, a dynamic definition's, which `destroy_op_array`
 /// releases with it: its name (`op_array->function_name`) and its
-/// lowered key where it is bound under one, its constants and its
-/// variables' names, and the views of those `by_bytes` may point at.
+/// lowered key where it is bound under one, its variables' names, which
+/// `by_bytes` may point at, and its constants.
 #[derive(Default)]
 pub(super) struct OpArrayStrings {
     names: Vec<PhpString>,
     constants: Vec<Zval>,
-    found: Vec<PhpString>,
-}
-
-impl OpArrayStrings {
-    /// Its names and the views of its constants a copy may find.
-    fn names(&self) -> impl Iterator<Item = &PhpString> {
-        self.names.iter().chain(&self.found)
-    }
 }
 
 /// One request-only unit and the strings it owns.
@@ -177,25 +175,31 @@ struct Held {
     /// The constant strings and arrays of what it declared, given up
     /// once nothing holds it.
     constants: Vec<Zval>,
-    /// Its op arrays' names ([`php_compile::op_array_names`]): those a
-    /// file's compile made, and an `eval`'s, made as it is noted.
+    /// The names its declarations own ([`php_compile::named`]): its op
+    /// arrays' and classes', their keys and the names they are read by,
+    /// those its compile made and an `eval`'s others, made as it is
+    /// noted.
     names: Vec<PhpString>,
     /// Whether the names were made, which a unit's noting does once.
     named: bool,
+    /// What each name of a unit that declares, in the order of
+    /// [`php_compile::named`], names where neither the compile handed
+    /// its string over nor the file's was made before the compile
+    /// ([`Request::name_unit`]): those its noting may make
+    /// ([`Request::hold_unit_names`]).
+    unnamed: Vec<Named>,
     /// The file's name of an `eval` that declares nothing, the string its
     /// name was made as before its compile ([`Request::name_unit`]),
     /// held to the main op array's end with no entry of `by_bytes`, so
     /// the `eval` hashes nothing for it: a copy of it is found by
     /// [`UnitStrings::find`] looking over the few that stand.
     file: Option<PhpString>,
-    /// The strings of `main` that stand for a name a declaration is read
-    /// by, its variables', which [`UnitStrings::by_bytes`] may point at
-    /// until the main op array ends: views, the owners being `main`'s.
-    found_main: Vec<PhpString>,
-    /// The strings of `constants` that stand for such a name, a declared
-    /// function's variables' and a declared property's, pointed at while
-    /// the unit lives: views, the owners being `constants`'.
-    found: Vec<PhpString>,
+    /// The strings of `main` that name its variables, by the number of
+    /// the CV each names, `op_array->vars`, which
+    /// [`UnitStrings::by_bytes`] may point at until the main op array
+    /// ends: views, the owners being `main`'s; none for a name that is
+    /// the interned string.
+    found_main: Vec<Option<PhpString>>,
     /// php's blocks for the op arrays and classes it declared
     /// ([`super::declared_bytes`]).
     declared: Declared,
@@ -226,6 +230,15 @@ enum Past {
 #[derive(Default)]
 pub(crate) struct Compiling {
     made: Vec<Zval>,
+    /// What the compile handed over as its declarations' own names
+    /// ([`php_heap::Intern::hand_name`]), one for each place of the walk
+    /// that tells what each names ([`php_compile::named`]).
+    names: Vec<Option<Str>>,
+    /// The string the file under compile was opened under where the
+    /// request holds one already, one owner: `EG(included_files)`'s for a
+    /// once form, whose `opened_path` `zend_set_compiled_filename` names
+    /// the op arrays by in place of a string of the compile's.
+    opened: Option<PhpString>,
 }
 
 impl Compiling {
@@ -235,34 +248,32 @@ impl Compiling {
         self.made.push(z);
     }
 
+    /// The next of the names the compile handed over.
+    pub(super) fn hand(&mut self, name: Option<Str>) {
+        self.names.push(name);
+    }
+
     /// Whether `z` is one this compile made, its owner taken out to be
-    /// the caller's: a constant array moving a string or an array the
-    /// compile made into itself. The newest are looked at first, which
-    /// are an array's own entries.
+    /// the caller's ([`taken`]).
     pub(super) fn take(&mut self, z: Zval) -> bool {
-        if !z.is_refcounted() {
-            return false;
-        }
-        match self.made.iter().rposition(|made| made.is_same_value(z)) {
-            Some(at) => {
-                self.made.swap_remove(at);
-                true
-            }
-            None => false,
-        }
+        taken(&mut self.made, z)
     }
 }
 
-/// The op array a string or an array a compile made is held by.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Owner {
-    /// The main op array, given up as its execution ends.
-    Main,
-    /// A function, a method, a hook or a class, held while the unit
-    /// lives.
-    Tables,
-    /// The dynamic definition at its place, given up with its op array.
-    Definition(usize),
+/// Whether `z` is among `made`, the values a compile made, one owner
+/// each, its owner taken out to be the caller's: a constant array moving
+/// a string or an array the compile made into itself, or a declaration
+/// taking its name. The newest are looked at first, which are an
+/// array's own entries.
+fn taken(made: &mut Vec<Zval>, z: Zval) -> bool {
+    if !z.is_refcounted() {
+        return false;
+    }
+    let Some(at) = made.iter().rposition(|made| made.is_same_value(z)) else {
+        return false;
+    };
+    made.swap_remove(at);
+    true
 }
 
 /// `made`, the strings and arrays a compile of `unit` made, each beside
@@ -276,164 +287,145 @@ enum Owner {
 /// constants, its variables' names and what a fold made on the way,
 /// which php's compile frees as it goes. A constant is told by its
 /// allocation, not its bytes, since two written alike are two strings.
-fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Owner, Zval)> {
-    let owner_of = |at: usize| function_owner(unit, at);
-    let bodies = || {
-        (unit.functions.iter().chain(&unit.dynamic))
-            .map(|(_, body)| body)
-            .chain(unit.methods.iter().map(|method| &method.body))
-            .chain(unit.hooks.iter().map(|hook| &hook.body))
-            .enumerate()
-            .map(move |(at, body)| (owner_of(at), body))
-    };
-    let constants = || {
-        bodies().flat_map(|(owner, body)| {
+///
+/// An array a declaration keeps inside a tree that did not fold whole is
+/// held where the tree is: the op array's constant expression for a
+/// parameter's default, a promoted one's and an abstract method's among
+/// them (`OpArray::const_exprs`), and the declaration for a class
+/// constant, a default, a static, an attribute's argument and a `const`
+/// ([`php_compile::values::declared_values`]). Each outlives the `eval` that declared it, read
+/// after the heap is churned:
+///
+/// ```php
+/// eval('#[Attribute(Attribute::TARGET_ALL)] class At { function __construct(public $v) {} } class Foo { function __construct(public $a) {} }');
+/// eval('function f1($p = [[1, 2], Z]) { return $p; }');
+/// eval('function f2($p = new Foo([3, 4])) { return $p->a; }');
+/// eval('$GLOBALS["c1"] = function ($p = [[5], Z]) { return $p; };');
+/// eval('class M { function m($p = [[6], Z]) { return $p; } static function s($p = new Foo([7])) { return $p->a; } function __construct(public $q = [[8], Z]) {} }');
+/// eval('abstract class AB { abstract function a($p = [[9], Z]); } interface IF1 { const IC = [[10], Z]; function i($p = [[11], Z]); }');
+/// eval('class D { const C = [[12], Z]; public $p = [[13], Z]; public static $s = [[14], Z]; }');
+/// eval('trait T { public $tp = [[15], Z]; public static $ts = [[16], Z]; } class UT { use T; }');
+/// eval('function f3() { static $s = [[17], Z]; return $s; }');
+/// eval('#[At([[18], Z])] class AC { #[At([[19], Z])] const K = 1; #[At([[20], Z])] public $p; #[At([[21], Z])] function m(#[At([[22], Z])] $a) {} public $h { #[At([[23], Z])] get => 1; } }');
+/// eval('enum EN { #[At([[24], Z])] case A; const L = [[25], Z]; }');
+/// eval('#[At([[26], Z])] function f4() {}');
+/// eval('$GLOBALS["c2"] = #[At([[27], Z])] fn () => 1;');
+/// eval('define("Z3", 3); #[At([[28], Z])] const Y1 = [[29], Z3];');
+/// eval('define("Z4", 4); const Y2 = [[30], Z4];');
+/// define('Z', 'z');
+/// $junk = array_fill(0, 2000, str_repeat("x", 100));
+/// $o = [];
+/// $o[] = f1(); $o[] = f2(); $o[] = $c1(); $o[] = (new M)->m(); $o[] = M::s(); $o[] = (new M)->q;
+/// $o[] = (new ReflectionMethod('AB', 'a'))->getParameters()[0]->getDefaultValue();
+/// $o[] = IF1::IC; $o[] = (new ReflectionMethod('IF1', 'i'))->getParameters()[0]->getDefaultValue();
+/// $o[] = D::C; $o[] = (new D)->p; $o[] = D::$s;
+/// $o[] = (new UT)->tp; $o[] = UT::$ts; $o[] = f3();
+/// $at = fn ($r) => $r->getAttributes()[0]->newInstance()->v;
+/// $o[] = $at(new ReflectionClass('AC')); $o[] = $at(new ReflectionClassConstant('AC', 'K')); $o[] = $at(new ReflectionProperty('AC', 'p'));
+/// $o[] = $at(new ReflectionMethod('AC', 'm')); $o[] = $at((new ReflectionMethod('AC', 'm'))->getParameters()[0]);
+/// $o[] = $at((new ReflectionProperty('AC', 'h'))->getHook(PropertyHookType::Get));
+/// $o[] = $at(new ReflectionEnumUnitCase('EN', 'A')); $o[] = EN::L;
+/// $o[] = $at(new ReflectionFunction('f4')); $o[] = $at(new ReflectionFunction($c2));
+/// $o[] = $at(new ReflectionConstant('Y1')); $o[] = Y1; $o[] = Y2;
+/// echo json_encode($o), "\n";
+/// ```
+/// ```expect regime=jit-off
+/// [[[1,2],"z"],[3,4],[[5],"z"],[[6],"z"],[7],[[8],"z"],[[9],"z"],[[10],"z"],[[11],"z"],[[12],"z"],[[13],"z"],[[14],"z"],[[15],"z"],[[16],"z"],[[17],"z"],[[18],"z"],[[19],"z"],[[20],"z"],[[21],"z"],[[22],"z"],[[23],"z"],[[24],"z"],[[25],"z"],[[26],"z"],[[27],"z"],[[28],"z"],[[29],3],[[30],4]]
+/// ```
+fn main_constants(unit: &Unit, made: &mut Vec<Zval>) -> Vec<(Holder, Zval)> {
+    let mut literals: Vec<(Zval, Holder)> = bodies(unit)
+        .flat_map(|(owner, body)| {
             (body.literals.iter().copied())
                 .chain(body.bound_vars.iter().map(|bound| bound.value))
-                .map(move |z| (owner, z))
+                .map(move |z| (z, owner))
         })
-    };
-    let mut held: Vec<(Str, Owner)> = constants()
-        .filter_map(|(owner, z)| Some((z.as_str()?, owner)))
         .collect();
-    held.sort_unstable_by(|a, b| a.0.bytes().cmp(b.0.bytes()));
-    let arrays: Vec<(Zval, Owner)> = constants()
-        .filter(|(_, z)| z.as_arr().is_some())
-        .map(|(owner, z)| (z, owner))
-        .collect();
-    let names = declared_names(unit);
-    let mut values = class_constant_values(unit);
-    // Each dynamic definition's variables, one string each it takes, the
-    // last definition's first, to be taken from the end.
-    let mut vars: HashMap<&[u8], Vec<usize>, NameHasher> = HashMap::with_hasher(NameHasher);
-    for (at, (_, body)) in unit.dynamic.iter().enumerate().rev() {
-        for var in &body.vars {
-            vars.entry(&*var.0).or_default().push(at);
+    // And a value a constant expression the op array keeps whole holds
+    // inside its tree (`IS_CONSTANT_AST`), a parameter's default that did
+    // not fold among them, whose `RECV_INIT` holds the tree.
+    for (owner, body) in bodies(unit) {
+        for expr in &body.const_exprs {
+            php_compile::values::unit_values(expr, &mut |z| literals.push((z, owner)));
         }
     }
+    let literals = ByIdentity::of(literals);
+    let mut declared = ByIdentity::of(php_compile::values::declared_values(unit));
+    // A declaration's, one owner for each slot that holds it, ahead of
+    // an op array's constant's.
     made.drain(..)
         .map(|z| {
-            let owner = match z.as_str() {
-                Some(s) => {
-                    let bytes = s.bytes();
-                    let from = held.partition_point(|(held, _)| held.bytes() < bytes);
-                    let literal = (held.get(from..).unwrap_or_default().iter())
-                        .take_while(|(held, _)| held.bytes() == bytes)
-                        .find(|(held, _)| held.is_same(s))
-                        .map(|(_, owner)| *owner);
-                    literal.unwrap_or_else(|| {
-                        let var = vars.get_mut(bytes).and_then(Vec::pop);
-                        match var {
-                            Some(at) => Owner::Definition(at),
-                            None if names.contains(bytes) => Owner::Tables,
-                            None => match values.get_mut(bytes) {
-                                Some(left) if *left > 0 => {
-                                    *left -= 1;
-                                    Owner::Tables
-                                }
-                                _ => Owner::Main,
-                            },
-                        }
-                    })
-                }
-                None => (arrays.iter())
-                    .find(|(held, _)| held.is_same_value(z))
-                    .map_or(Owner::Main, |(_, owner)| *owner),
-            };
+            let owner = (declared.take(z))
+                .or_else(|| literals.find(z))
+                .unwrap_or(Holder::Main);
             (owner, z)
         })
         .collect()
 }
 
-/// The names `unit`'s declarations are read by
-/// ([`php_compile::declared_names`]), as a set; the main op array's
-/// variables are not among them.
-fn declared_names(unit: &Unit) -> HashSet<Vec<u8>, NameHasher> {
-    php_compile::declared_names(unit)
-        .map(Cow::into_owned)
-        .collect()
+/// The holders of a compile's strings and arrays, each found by its
+/// identity, never by its bytes: the strings sorted by their bytes, so a
+/// string is looked for among those alike, and the arrays as listed.
+struct ByIdentity {
+    strings: Vec<(Str, Holder)>,
+    arrays: Vec<(Zval, Holder)>,
 }
 
-/// The string values `unit`'s classes declare their constants with, each
-/// beside how many constants hold it: the string the compile made for
-/// one, written or folded, is the class's from its declaration, as
-/// php's `constants_table` holds the zval `zend_compile_class_const_decl`
-/// put there, and its first read finds it ([`Request::declared_string`])
-/// rather than make one. A value is told by its bytes, so the compile's
-/// strings of those bytes are taken for it in the order made, as many as
-/// constants hold it. An enum case's is not among them, its value
-/// standing in the case's copied expression ([`declared_bytes::AstCopy`]).
-///
-/// ```php
-/// $f = sys_get_temp_dir() . '/w3263-class-values.inc';
-/// file_put_contents($f, <<<'PHP'
-/// <?php
-/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
-/// m('class W {}');
-/// foreach ([
-///     'class S1 { const K = "abcdefghij5"; }',
-///     '$GLOBALS["a"] = S1::K;',
-///     'class S2 { const K = "abcdefghij" . 5; }',
-///     '$GLOBALS["a"] = S2::K;',
-///     'interface S3 { const K = "abcdefghij" . "5"; }',
-///     '$GLOBALS["a"] = S3::K;',
-/// ] as $c) echo m($c), "  ", $c, "\n";
-/// PHP);
-/// include $f;
-/// unlink($f);
-/// ```
-/// ```expect regime=jit-off
-/// 536  class S1 { const K = "abcdefghij5"; }
-/// 888  $GLOBALS["a"] = S1::K;
-/// 536  class S2 { const K = "abcdefghij" . 5; }
-/// 0  $GLOBALS["a"] = S2::K;
-/// 536  interface S3 { const K = "abcdefghij" . "5"; }
-/// 0  $GLOBALS["a"] = S3::K;
-/// ```
-///
-/// A class name a constant resolves to is such a value: `B10::class` and
-/// `Bxyz::class` a string of their own, as php's scanner made one for the
-/// name written, even where it names the class itself, whose own name is
-/// another string ([`Request::hold_compiled`] leaves the value to the
-/// constant); `self::class` the class's name itself (`ZVAL_STR_COPY`):
-///
-/// ```php
-/// $f = sys_get_temp_dir() . '/w3268-class-names.inc';
-/// file_put_contents($f, <<<'PHP'
-/// <?php
-/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
-/// m('class W {}'); m('$q0 = 1;');
-/// foreach ([
-///     'class B9 { const K = "abcdefghij"; }',
-///     'class B10 { const K = B10::class; }',
-///     'class B11 { const K = Bxyz::class; }',
-///     'class B12 { const K = self::class; }',
-///     '$GLOBALS["a"] = B10::K;',
-///     '$GLOBALS["b"] = [B9::K, B11::K, B12::K];',
-/// ] as $c) echo m($c), "  ", $c, "\n";
-/// PHP);
-/// include $f;
-/// unlink($f);
-/// ```
-/// ```expect regime=jit-off
-/// 536  class B9 { const K = "abcdefghij"; }
-/// 528  class B10 { const K = B10::class; }
-/// 528  class B11 { const K = Bxyz::class; }
-/// 496  class B12 { const K = self::class; }
-/// 512  $GLOBALS["a"] = B10::K;
-/// 216  $GLOBALS["b"] = [B9::K, B11::K, B12::K];
-/// ```
-fn class_constant_values(unit: &Unit) -> HashMap<&[u8], usize, NameHasher> {
-    let mut values = HashMap::with_hasher(NameHasher);
-    let constants = (unit.classes.iter())
-        .flat_map(|class| &class.constants)
-        .filter(|constant| !constant.is_case);
-    for constant in constants {
-        if let php_unit::decl::ConstExpr::Str(value) = &constant.value {
-            *values.entry(&**value).or_insert(0) += 1;
+impl ByIdentity {
+    /// The counted values of `held`, each beside what holds it.
+    fn of(held: impl IntoIterator<Item = (Zval, Holder)>) -> ByIdentity {
+        let (mut strings, mut arrays) = (Vec::new(), Vec::new());
+        for (z, owner) in held.into_iter().filter(|(z, _)| z.is_refcounted()) {
+            match z.as_str() {
+                Some(s) => strings.push((s, owner)),
+                None => arrays.push((z, owner)),
+            }
+        }
+        strings.sort_unstable_by(|a, b| a.0.bytes().cmp(b.0.bytes()));
+        ByIdentity { strings, arrays }
+    }
+
+    /// Where `z` stands among the strings or among the arrays.
+    fn place(&self, z: Zval) -> Option<Place> {
+        let Some(s) = z.as_str() else {
+            return (self
+                .arrays
+                .iter()
+                .position(|(held, _)| held.is_same_value(z)))
+            .map(Place::Array);
+        };
+        let from = self
+            .strings
+            .partition_point(|(held, _)| held.bytes() < s.bytes());
+        (self.strings.get(from..).unwrap_or_default().iter())
+            .take_while(|(held, _)| held.bytes() == s.bytes())
+            .position(|(held, _)| held.is_same(s))
+            .map(|at| Place::String(from + at))
+    }
+
+    /// What holds `z`, where something does.
+    fn find(&self, z: Zval) -> Option<Holder> {
+        match self.place(z)? {
+            Place::String(at) => self.strings.get(at).map(|(_, owner)| *owner),
+            Place::Array(at) => self.arrays.get(at).map(|(_, owner)| *owner),
         }
     }
-    values
+
+    /// What holds `z`, taken out, so a second owner of it finds the next
+    /// holder.
+    fn take(&mut self, z: Zval) -> Option<Holder> {
+        match self.place(z)? {
+            Place::String(at) => Some(self.strings.remove(at).1),
+            Place::Array(at) => Some(self.arrays.swap_remove(at).1),
+        }
+    }
+}
+
+/// Where a value stands in a [`ByIdentity`]: its place among the strings
+/// or among the arrays.
+#[derive(Clone, Copy)]
+enum Place {
+    String(usize),
+    Array(usize),
 }
 
 /// `by_bytes`'s entry for `bytes` pointed at `s`.
@@ -446,36 +438,68 @@ fn point(by_bytes: &mut HashMap<Box<[u8]>, Option<PhpString>, NameHasher>, s: Ph
     }
 }
 
-/// The op array the name at `index` of [`php_compile::op_array_names`]
-/// of `unit` is the name of, in its order: the file's, each function's
-/// and each dynamic definition's, then each method's, hook's and
-/// class's.
-fn name_owner(unit: &Unit, index: usize) -> Owner {
-    index
-        .checked_sub(1)
-        .map_or(Owner::Tables, |at| function_owner(unit, at))
+/// Each op array `unit` declares beside what holds it: a function's, a
+/// method's and a hook's the unit, a dynamic definition's its own.
+fn bodies(unit: &Unit) -> impl Iterator<Item = (Holder, &php_unit::OpArray)> {
+    let dynamic =
+        (unit.dynamic.iter().enumerate()).map(|(at, (_, body))| (Holder::Dynamic(at), body));
+    (unit.functions.iter().map(|(_, body)| (Holder::Unit, body)))
+        .chain(dynamic)
+        .chain(
+            unit.methods
+                .iter()
+                .map(|method| (Holder::Unit, &method.body)),
+        )
+        .chain(unit.hooks.iter().map(|hook| (Holder::Unit, &hook.body)))
 }
 
-/// The op array that is the function at `at` of the unit's functions
-/// followed by its dynamic definitions: a definition's own, or the
-/// unit's tables for a function and for any place past them.
-fn function_owner(unit: &Unit, at: usize) -> Owner {
-    match at.checked_sub(unit.functions.len()) {
-        Some(at) if at < unit.dynamic.len() => Owner::Definition(at),
-        _ => Owner::Tables,
-    }
+/// The names `body` binds by a `BIND_STATIC` that no `use` wrote, a
+/// `static` or an arrow function's capture, where the binding is the
+/// first opline to name its CV.
+fn first_bound(body: &php_unit::OpArray) -> impl Iterator<Item = (usize, &[u8])> {
+    let mut met = vec![false; body.vars.len()];
+    body.oplines.iter().filter_map(move |op| {
+        let cv = usize::try_from(op.op1).ok();
+        let first = op.opcode == php_unit::Opcode::BindStatic
+            && op.extended_value & BIND_EXPLICIT == 0
+            && cv.and_then(|cv| met.get(cv)) == Some(&false);
+        let operands = [
+            (op.op1_type, op.op1),
+            (op.op2_type, op.op2),
+            (op.out_type, op.out),
+        ];
+        for (_, at) in operands.iter().filter(|(kind, _)| *kind == OperandKind::Cv) {
+            if let Some(met) = usize::try_from(*at).ok().and_then(|at| met.get_mut(at)) {
+                *met = true;
+            }
+        }
+        let cv = cv.filter(|_| first)?;
+        body.vars.get(cv).map(|name| (cv, &*name.0))
+    })
 }
 
 impl Held {
+    /// `name`, one owner, held as the main op array's name of its CV
+    /// `cv`, given up as the main op array's execution ends.
+    fn name_main_var(&mut self, cv: usize, name: PhpString) {
+        self.main.push(Zval::string(name.heap()));
+        if self.found_main.len() <= cv {
+            self.found_main.resize(cv + 1, None);
+        }
+        if let Some(slot) = self.found_main.get_mut(cv) {
+            *slot = Some(name);
+        }
+    }
+
     /// The names `owner` holds: a dynamic definition's own, the unit's
     /// for any other, a function's, a method's or a class's.
-    fn names_of(&mut self, owner: Owner) -> &mut Vec<PhpString> {
+    fn names_of(&mut self, owner: Holder) -> &mut Vec<PhpString> {
         match owner {
-            Owner::Definition(at) => match self.declared.definition_strings(at) {
+            Holder::Dynamic(at) => match self.declared.definition_strings(at) {
                 Some(own) => &mut own.names,
                 None => &mut self.names,
             },
-            Owner::Main | Owner::Tables => &mut self.names,
+            Holder::Main | Holder::Unit => &mut self.names,
         }
     }
 }
@@ -484,8 +508,8 @@ impl UnitStrings {
     /// The string `unit`, a unit the request compiled for itself, holds
     /// as its file's name `file`: [`Held::file`], or its name among the
     /// names of one that declares.
-    fn file_of(&self, unit: *const Unit, file: &[u8]) -> Option<PhpString> {
-        let held = (self.units.iter()).find(|held| std::ptr::eq(held.unit.as_ptr(), unit))?;
+    pub(super) fn file_of(&self, unit: *const Unit, file: &[u8]) -> Option<PhpString> {
+        let held = self.units.get(self.position(unit)?)?;
         (held.file.into_iter().chain(held.names.iter().copied()))
             .find(|name| name.as_bytes() == file)
     }
@@ -543,7 +567,7 @@ impl UnitStrings {
                 held.declared.main_over(gone);
             }
             constants.append(&mut held.main);
-            found.append(&mut held.found_main);
+            found.extend(held.found_main.drain(..).flatten());
             if alive && !matches!(held.past, Past::Closures(0)) {
                 return true;
             }
@@ -551,13 +575,13 @@ impl UnitStrings {
             dead.append(&mut held.names);
             files.extend(held.file.take());
             constants.append(&mut held.constants);
-            found.append(&mut held.found);
+            held.unnamed.clear();
             spare.push(Spare {
                 main: std::mem::take(&mut held.main),
                 constants: std::mem::take(&mut held.constants),
                 names: std::mem::take(&mut held.names),
                 found_main: std::mem::take(&mut held.found_main),
-                found: std::mem::take(&mut held.found),
+                unnamed: std::mem::take(&mut held.unnamed),
             });
             false
         });
@@ -568,11 +592,9 @@ impl UnitStrings {
             let OpArrayStrings {
                 mut names,
                 constants: mut owned,
-                found: mut views,
             } = strings;
             dead.append(&mut names);
             constants.append(&mut owned);
-            found.append(&mut views);
         }
         for name in dead.iter().chain(&found) {
             let bytes = name.as_bytes();
@@ -585,8 +607,8 @@ impl UnitStrings {
                     .iter()
                     .rev()
                     .flat_map(|held| {
-                        (held.names.iter().chain(&held.found).chain(&held.found_main))
-                            .chain(held.declared.strings().flat_map(OpArrayStrings::names))
+                        (held.names.iter().chain(held.found_main.iter().flatten()))
+                            .chain(held.declared.strings().flat_map(|own| &own.names))
                     })
                     .find(|held| held.as_bytes() == bytes)
                     .copied();
@@ -602,9 +624,29 @@ impl UnitStrings {
         (dead, constants)
     }
 
+    /// The string the main op array of `unit`, a unit the request
+    /// compiled for itself, names its CV `cv` by while it runs,
+    /// `op_array->vars[cv]`: the compile's own, or the scanner's a
+    /// `static` is first met at; none where it is the interned one.
+    pub(super) fn main_var(&self, unit: *const Unit, cv: usize) -> Option<PhpString> {
+        let held = self.units.get(self.position(unit)?)?;
+        held.found_main.get(cv).copied().flatten()
+    }
+
     /// Whether the request holds no request-only unit.
     pub(super) fn is_empty(&self) -> bool {
         self.units.is_empty()
+    }
+
+    /// Whether the unit at `unit` is one the request compiled for itself.
+    pub(super) fn holds(&self, unit: *const Unit) -> bool {
+        self.position(unit).is_some()
+    }
+
+    /// The blocks of a class of a file the cache keeps, held to the
+    /// request's end.
+    pub(super) fn keep_copied(&mut self, blocks: Blocks) {
+        self.copied.push(blocks);
     }
 
     /// The blocks of the class at `at` of the unit at `unit`'s classes,
@@ -637,11 +679,7 @@ impl UnitStrings {
 
     /// The entry for `unit`, laid down where there is none.
     fn held(&mut self, unit: &PublishedUnit) -> usize {
-        if let Some(at) = self
-            .units
-            .iter()
-            .position(|held| std::ptr::eq(held.unit.as_ptr(), PublishedUnit::as_ptr(unit)))
-        {
+        if let Some(at) = self.position(PublishedUnit::as_ptr(unit)) {
             return at;
         }
         let spare = self.spare.pop().unwrap_or_default();
@@ -660,9 +698,9 @@ impl UnitStrings {
             constants: spare.constants,
             names: spare.names,
             named: false,
+            unnamed: spare.unnamed,
             file: None,
             found_main: spare.found_main,
-            found: spare.found,
             declared: Declared::default(),
         });
         self.units.len() - 1
@@ -730,100 +768,244 @@ impl Request {
     /// 0 0
     /// 1rstuvwxyzabcdefghijklmnopq
     /// ```
+    ///
+    /// A declaration's name is the string php's compile copies where
+    /// the declaration names itself, and a token's of its own anywhere
+    /// else, a call, a `new` or a static call in the same `eval` among
+    /// them; a runtime declaration's lowered key is its `DECLARE_*`'s
+    /// constant:
+    ///
+    /// ```php
+    /// $f = sys_get_temp_dir() . '/w3286-own-names.inc';
+    /// file_put_contents($f, <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;'); m('interface I1 {}');
+    /// foreach ([
+    ///     'class Y5 {} function f13() { $o = new Y5; return 1; }',
+    ///     'class y8 {} function f8() { $o = new y8; return 1; }',
+    ///     'function fa1() { return __FUNCTION__; }',
+    ///     'class Ca3 { function g() { return __CLASS__; } }',
+    ///     'class Ca5 { function g() { return self::class; } }',
+    ///     'function fa7() { function fa8() {} }',
+    ///     'function fa9() { function Fa10() {} }',
+    ///     'function fa13() { class Ca14 {} }',
+    ///     'class Ca17 implements I1 {}',
+    ///     'function fa18() {} function fa19() { fa18(); }',
+    ///     'class Ca22 { function meth() {} function g() { $this->meth(); } }',
+    ///     'class Ca23 { static function meth() {} function g() { Ca23::meth(); } }',
+    ///     'function fa24() { return new class {}; }',
+    /// ] as $c) echo m($c), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 544
+    /// 480
+    /// 256
+    /// 608
+    /// 608
+    /// 368
+    /// 400
+    /// 464
+    /// 192
+    /// 416
+    /// 800
+    /// 896
+    /// 528
+    /// ```
+    ///
+    /// Each is given to what it names by its place in the compile's walk
+    /// ([`php_compile::named`]), never by its bytes, so a dynamic
+    /// definition's variable named like a function, a property named like
+    /// its class and a class named like a function are each a string of
+    /// their own, gone with what holds them (the file under the recipe's
+    /// `TMPDIR`):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3311-colliding-names.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('function abcdefgi() { return 2; } $GLOBALS["d"] = function () { $abcdefgi = "w"; return $abcdefgi; };'), "\n";
+    /// echo m('if (1) { function qwertyu() { $qwertyuiop = 1; return $qwertyuiop; } } function qwertyuiop() { return 3; }'), "\n";
+    /// echo m('class Abcdefgk { public $abcdefgk = 1; protected $Abcdefgk = 2; }'), "\n";
+    /// echo m('class abcdefgl { public $abcdefgl = 4; }'), "\n";
+    /// echo m('class zxcvbnm {} function zxcvbnm() { return 5; }'), "\n";
+    /// $m = memory_get_usage(); unset($d); echo memory_get_usage() - $m, "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode(eval('return [abcdefgi(), qwertyu(), qwertyuiop(), (array) new Abcdefgk, (new abcdefgl)->abcdefgl, zxcvbnm(), new zxcvbnm];')), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1520
+    /// 496
+    /// 664
+    /// 528
+    /// 288
+    /// -744
+    /// [2,1,3,{"abcdefgk":1,"\u0000*\u0000Abcdefgk":2},4,5,{}]
+    /// ```
     pub(crate) fn hold_compiled(&mut self, unit: &PublishedUnit) {
         let strings = &mut self.unit_strings;
         let at = strings.held(unit);
-        let made = &mut strings.compiling.made;
         let Some(held) = strings.units.get_mut(at) else {
             return;
         };
-        // A file's compile made its op arrays' names
-        // ([`php_compile::intern_names`]), which a copy of one finds
-        // ([`Request::declared_string`]) while the unit lives; an
-        // `eval`'s made none, and they are made as it is noted
-        // ([`Request::hold_unit_names`]). A compile that made no string
-        // has none of them to find.
-        let values = class_constant_values(unit);
-        if !made.is_empty() {
-            let mut seen = HashSet::with_hasher(NameHasher);
-            for (index, name) in php_compile::op_array_names(unit).enumerate() {
-                let of_name = |z: &Zval| z.as_str().is_some_and(|s| s.bytes() == name);
-                // A class constant's value of the name's bytes is its
-                // class's, never the name: `class B10 { const K =
-                // B10::class; }` holds two strings, as php's scanner made
-                // one for each token.
-                let reserved = values.get(name).copied().unwrap_or(0);
-                if made.iter().filter(|z| of_name(z)).count() <= reserved {
-                    continue;
+        // The strings the compile handed over as its declarations' own
+        // ([`php_heap::Intern::hand_name`]), each given to what its place
+        // in the walk names ([`php_compile::named`]): an op array's or a
+        // class's name or key, which an `eval`'s noting makes no other of
+        // ([`Request::hold_unit_names`]), or a name a declaration is read
+        // by, a main op array's variable's until it ends. A copy of one
+        // finds it ([`Request::declared_string`]) while what holds it
+        // lives. Any other string of a name's bytes is a token's of its
+        // own, as php's scanner made one for each.
+        let Compiling {
+            made,
+            names,
+            opened,
+        } = &mut strings.compiling;
+        held.unnamed.clear();
+        // A refused compile hands nothing over.
+        let handed = names.drain(..).chain(std::iter::repeat(None));
+        // The main op array's variables come first among the names read,
+        // in the order of its CVs.
+        let mut cvs = 0..;
+        for ((named, _), name) in php_compile::named(unit).zip(handed) {
+            let cv = (named == Named::Read(Holder::Main))
+                .then(|| cvs.next())
+                .flatten();
+            let mut own = (name.filter(|s| taken(made, Zval::string(*s)))).map(PhpString::of);
+            // The file's name the request opened it under where it holds
+            // one, which the compile's own gives way to, given up with the
+            // main op array's constants; an interned one stands.
+            if named == Named::File
+                && let Some(compiled) = own
+                && let Some(opened) = opened.take()
+            {
+                made.push(Zval::string(compiled.heap()));
+                own = Some(opened);
+            }
+            let Some(s) = own else {
+                if held.declares && !matches!(named, Named::Read(_)) {
+                    held.unnamed.push(named);
                 }
-                let Some(at) = made.iter().rposition(of_name) else {
-                    continue;
-                };
-                if !seen.insert(name) {
-                    continue;
-                }
-                let Some(s) = made.swap_remove(at).as_str().map(PhpString::of) else {
-                    continue;
-                };
-                held.names_of(name_owner(unit, index)).push(s);
-                point(&mut strings.by_bytes, s);
+                continue;
+            };
+            match cv {
+                Some(cv) => held.name_main_var(cv, s),
+                None => held.names_of(named.holder()).push(s),
+            }
+            point(&mut strings.by_bytes, s);
+        }
+        // An opened name the compile's interned one left standing goes
+        // with the main op array's constants too.
+        made.extend(opened.take().map(|opened| Zval::string(opened.heap())));
+        if !held.declares {
+            held.main.append(made);
+            return;
+        }
+        for (owner, z) in main_constants(unit, made) {
+            match owner {
+                Holder::Main => held.main.push(z),
+                Holder::Unit => held.constants.push(z),
+                Holder::Dynamic(at) => match held.declared.definition_strings(at) {
+                    Some(own) => own.constants.push(z),
+                    None => held.constants.push(z),
+                },
             }
         }
-        // The strings that stand for a name a declaration is read by,
-        // which a copy of one finds while what holds them lives: the main
-        // op array's variables' until it ends, the declarations' while
-        // the unit lives, a dynamic definition's while its op array does.
-        let main_vars: HashSet<&[u8], NameHasher> =
-            unit.main.vars.iter().map(|var| &*var.0).collect();
-        let owned = if held.declares {
-            main_constants(unit, made)
-        } else {
-            made.drain(..).map(|z| (Owner::Main, z)).collect()
-        };
-        let names = if owned.iter().any(|(owner, _)| *owner != Owner::Main) {
-            declared_names(unit)
-        } else {
-            HashSet::default()
-        };
-        // What a declaration finds by its bytes: a name it is read by, or
-        // a class constant's value.
-        let found =
-            |s: &PhpString| names.contains(s.as_bytes()) || values.contains_key(s.as_bytes());
-        for (owner, z) in owned {
-            let name = z.as_str().map(PhpString::of);
-            match owner {
-                Owner::Main => {
-                    held.main.push(z);
-                    if let Some(s) = name.filter(|s| main_vars.contains(s.as_bytes())) {
-                        held.found_main.push(s);
-                        point(&mut strings.by_bytes, s);
-                    }
-                }
-                Owner::Tables => {
-                    held.constants.push(z);
-                    if let Some(s) = name.filter(found) {
-                        held.found.push(s);
-                        point(&mut strings.by_bytes, s);
-                    }
-                }
-                Owner::Definition(at) => {
-                    let Some(own) = held.declared.definition_strings(at) else {
-                        held.constants.push(z);
-                        continue;
-                    };
-                    own.constants.push(z);
-                    if let Some(s) = name.filter(|s| names.contains(s.as_bytes())) {
-                        own.found.push(s);
-                        point(&mut strings.by_bytes, s);
-                    }
-                }
-            }
+    }
+
+    /// The owner a request-only unit holds of `value` for a declaration
+    /// written as a value, given up as the request's row takes the
+    /// declaration's slot over: php's `constants_table` and
+    /// `default_properties_table` are the declaration's slot, one owner
+    /// where the engine keeps the declaration and the row apart. Nothing
+    /// for a value no unit holds, an immutable one or one an evaluation
+    /// made. So a request's class constant reads php's count, an
+    /// object's default one more, the object's, and a static two, the
+    /// default's and the slot's (`ZVAL_COPY_OR_DUP`); a parameter's
+    /// default string is the `RECV_INIT` constant's, which Reflection
+    /// copies. Each is told by its identity, so two constants of the
+    /// same bytes hold two strings, as php's two zvals are:
+    ///
+    /// ```php
+    /// eval('class K { const S = "abcdefghijk" . "x"; const T = "abcdefghijkx"; public $p = "abcdefghijk" . "y"; public static $s = "abcdefghijk" . "z"; }');
+    /// eval('class KA { const C = [1, 2]; public $p = [3]; public static $s = [4]; }');
+    /// eval('function f($p = "abcdefghijk" . "w", $q = [5]) {}');
+    /// $k = new K;
+    /// $ka = new KA;
+    /// debug_zval_dump(K::S, $k->p, K::$s, KA::C, $ka->p, KA::$s, K::S, KA::C, K::T);
+    /// foreach ((new ReflectionFunction('f'))->getParameters() as $p) {
+    ///     debug_zval_dump($p->getDefaultValue());
+    /// }
+    /// ```
+    /// ```expect regime=jit-off
+    /// string(12) "abcdefghijkx" refcount(3)
+    /// string(12) "abcdefghijky" refcount(3)
+    /// string(12) "abcdefghijkz" refcount(3)
+    /// array(2) packed refcount(3){
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// array(1) packed refcount(3){
+    ///   [0]=>
+    ///   int(3)
+    /// }
+    /// array(1) packed refcount(3){
+    ///   [0]=>
+    ///   int(4)
+    /// }
+    /// string(12) "abcdefghijkx" refcount(3)
+    /// array(2) packed refcount(3){
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// string(12) "abcdefghijkx" refcount(2)
+    /// string(12) "abcdefghijkw" refcount(2)
+    /// array(1) packed refcount(2){
+    ///   [0]=>
+    ///   int(5)
+    /// }
+    /// ```
+    pub(super) fn take_declaration_slot(&mut self, value: Value) {
+        let z = value.to_zval();
+        let held = (self.unit_strings.units.iter_mut()).any(|held| {
+            let at = held.constants.iter().position(|c| c.is_same_value(z));
+            at.map(|at| held.constants.swap_remove(at)).is_some()
+        });
+        if held {
+            self.release(value);
+        }
+    }
+
+    /// The file the next compile reads was opened under `opened`, a
+    /// string the request holds, of which the compile takes one owner as
+    /// its file's name ([`Request::hold_compiled`]).
+    pub(crate) fn compile_opened(&mut self, opened: PhpString) {
+        self.addref(&Value::string(opened));
+        if let Some(stale) = self.unit_strings.compiling.opened.replace(opened) {
+            self.release(Value::string(stale));
         }
     }
 
     /// The constant strings a compile the compiler refused made, given up
     /// as `zend_compile`'s refusal destroys the op array it was making.
     pub(crate) fn release_compiled(&mut self) {
+        self.unit_strings.compiling.names.clear();
+        if let Some(opened) = self.unit_strings.compiling.opened.take() {
+            self.release(Value::string(opened));
+        }
         let mut made = std::mem::take(&mut self.unit_strings.compiling.made);
         for z in made.drain(..) {
             self.release(Value::of_slot(z));
@@ -838,24 +1020,22 @@ impl Request {
     /// other names, as `destroy_op_array` releases `op_array->filename`:
     /// for a unit that declares nothing, which has no other name, as its
     /// [`Held::file`], and for one that declares, among its names. A unit
-    /// that holds a name of those bytes already leaves the string to be
-    /// given up now.
+    /// named already leaves the string to be given up now.
     pub(crate) fn name_unit(&mut self, unit: &PublishedUnit, name: PhpString) {
         let strings = &mut self.unit_strings;
         let at = strings.held(unit);
-        let Some(held) = strings.units.get_mut(at).filter(|held| {
-            held.file.is_none()
-                && !(held.names.iter()).any(|held| held.as_bytes() == name.as_bytes())
+        let Some(held) = (strings.units.get_mut(at)).filter(|held| {
+            held.file.is_none() && (!held.declares || held.unnamed.contains(&Named::File))
         }) else {
             self.release(Value::string(name));
             return;
         };
         if held.declares {
             held.names.push(name);
+            held.unnamed.retain(|named| *named != Named::File);
             point(&mut strings.by_bytes, name);
         } else {
             held.file = Some(name);
-            held.named = true;
             strings.files += 1;
         }
     }
@@ -903,95 +1083,179 @@ impl Request {
     /// 112
     /// 176
     /// ```
-    pub(crate) fn hold_unit_names(&mut self, unit: &PublishedUnit) -> Result<(), Thrown> {
-        let at = self.unit_strings.held(unit);
+    ///
+    /// and so is a function's lowered key, the function table's, where
+    /// php interns only a class's and a method's:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3310-function-key.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('namespace NS1; class NQ { const K = self::class; } function fn1() { return NQ::K; }'), "\n";
+    /// echo m('function Fqwertyu() { return 2; } class Cqwertyu { function Mqwertyu() { return 3; } }'), "\n";
+    /// echo NS1\fn1(), Fqwertyu(), (new Cqwertyu)->Mqwertyu(), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 672
+    /// 776
+    /// NS1\NQ23
+    /// ```
+    ///
+    /// A `static` variable's key, and an arrow function's capture's, is a
+    /// string of its own where opcache holds the bytes, and a `use`
+    /// variable's is the interned one:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3311-static-key.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;'); m('function w0() {}');
+    /// $abcdefg = 1; $abcdefh = 2; $abcdefi = 3;
+    /// echo m('function stve() { static $stve = 1; return $stve; }'), "\n";
+    /// echo m('$abcdefg = 1; $GLOBALS["k"] = function () use ($abcdefg) { return $abcdefg; };'), "\n";
+    /// echo m('$GLOBALS["l"] = function () { static $abcdefh = 4; return $abcdefh; };'), "\n";
+    /// echo m('$abcdefi = 3; $GLOBALS["n"] = fn () => $abcdefi;'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode([stve(), $k(), $l(), $n()]), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 696
+    /// 2032
+    /// 1552
+    /// 1552
+    /// [1,1,4,3]
+    /// ```
+    ///
+    /// And so is an `eval`'s main op array's, which names the variable in
+    /// the symbol table the `eval` attaches to while the table lives
+    /// ([`Request::attach_symbol_table`]), where the binding is the first
+    /// place the variable is met; one met first as a variable is the
+    /// interned one:
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3315-main-static.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;'); m('function w0() {}');
+    /// $abcdefk = 1; $abcdefm = 2; $abcdefn = 3;
+    /// echo m('static $abcdefk = 1;'), "\n";
+    /// echo m('function wz() {} static $abcdefm = 1;'), "\n";
+    /// echo m('$abcdefn = 2; static $abcdefn = 1;'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo m('static $abcdefk = 4; return $abcdefk;'), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 64
+    /// 272
+    /// 32
+    /// 64
+    /// ```
+    pub(crate) fn hold_unit_names(
+        &mut self,
+        unit: &PublishedUnit,
+        kind: SourceKind,
+    ) -> Result<(), Thrown> {
+        let Some(at) = self.unit_strings.position(PublishedUnit::as_ptr(unit)) else {
+            return Ok(());
+        };
         let Some(held) = self.unit_strings.units.get_mut(at) else {
             return Ok(());
         };
         if std::mem::replace(&mut held.named, true) {
             return Ok(());
         }
-        // The names held already: the file's, made before the compile
-        // ([`Request::name_unit`]) and shared by every op array
-        // (`zend_string_copy`), and those the compile made as constants
-        // ([`Request::hold_compiled`]), a bound function's lowered name
-        // among them, which php's compile makes one string with its name.
-        let held_before = held.names.len();
-        let file = held.file;
-        // A set of them where they are many, an `eval` of many functions.
-        let before: Option<HashSet<Vec<u8>, NameHasher>> =
-            (held_before > SCANNED_NAMES).then(|| {
-                held.names
-                    .iter()
-                    .map(|made| made.as_bytes().to_vec())
-                    .collect()
-            });
-        // A class's name, the last of them, is `zend_new_interned_string`'s
-        // in `zend_compile_class_decl`: the interned string where opcache
-        // holds the bytes, no string of the unit's.
-        let first_class = php_compile::op_array_names(unit)
-            .count()
-            .saturating_sub(unit.classes.len());
-        for (index, name) in php_compile::op_array_names(unit).enumerate() {
-            let owner = name_owner(unit, index);
-            let interned = index >= first_class && self.shared.existing_interned(name).is_some();
-            let made = interned
-                || file.is_some_and(|file| file.as_bytes() == name)
-                || match owner {
-                    // A definition's own, which its compile made with it.
-                    Owner::Definition(_) => (self.unit_strings.units.get_mut(at))
-                        .and_then(|held| held.names_of(owner).first())
-                        .is_some_and(|made| made.as_bytes() == name),
-                    Owner::Main | Owner::Tables => before.as_ref().map_or_else(
-                        || {
-                            (self.unit_strings.units.get(at))
-                                .and_then(|held| held.names.get(..held_before))
-                                .is_some_and(|names| {
-                                    names.iter().any(|made| made.as_bytes() == name)
-                                })
-                        },
-                        |before| before.contains(name),
-                    ),
+        // The names held already are the file's, made before the
+        // compile ([`Request::name_unit`]) and shared by every op array
+        // (`zend_string_copy`), and those the compile handed over
+        // ([`Request::hold_compiled`]); `unnamed` lists the others, in
+        // the walk's order.
+        let unnamed = std::mem::take(&mut held.unnamed);
+        let mut unnamed_at = unnamed.iter().peekable();
+        for (named, name) in php_compile::named(unit) {
+            if unnamed_at.peek().is_none() {
+                break;
+            }
+            if unnamed_at.next_if_eq(&&named).is_none() {
+                continue;
+            }
+            let made = match named {
+                // A file's name the compile left unmade is the one
+                // opcache holds, `zend_set_compiled_filename`'s
+                // `zend_new_interned_string`; an `eval`'s is its own.
+                Named::File => matches!(kind, SourceKind::Eval(_)),
+                // Every op array's, made once for each: two closures on
+                // one line are two `{closure:…}` strings, and a
+                // function's name and a top-level one's key, the function
+                // table's, are made whatever the cache holds
+                // (`zend_begin_func_decl`), the scanner's string a method's
+                // name is among them (`zend_begin_method_decl`).
+                Named::Function(_) | Named::FunctionKey(_) => true,
+                // A class's name and its and its methods' keys are
+                // `zend_new_interned_string`'s: the interned string where
+                // opcache holds the bytes, `count` or `__tostring` or one
+                // a cached file's constants hold, and the one made goes
+                // (`accel_new_interned_string_for_php`).
+                Named::Class(_) | Named::ClassKey(_) | Named::MethodKey { .. } => {
+                    self.shared.existing_interned(&name).is_none()
+                }
+                // A dynamic definition's key is its `DECLARE_FUNCTION`'s
+                // constant, the compile's, or the interned string where
+                // opcache holds the bytes (`zend_insert_literal`); and
+                // the names declarations are read by are the compile's.
+                Named::DefinitionKey(_) | Named::Read(_) => false,
+            };
+            if made {
+                // A closure's, a hook's and an anonymous class's name are
+                // `zend_strpprintf`'s, trimmed to `zend_string_finit`'s
+                // size (`Named::sizing`).
+                let owner = named.holder();
+                let sizing = named.sizing(unit, &name);
+                // At `zend_string_init`'s size the empty string and one
+                // byte are the process's interned strings.
+                let lay = move |req: &mut Request, bytes: &[u8]| match sizing {
+                    Sizing::Alloc => req.string(bytes),
+                    sizing => req.string_sized(bytes, sizing),
                 };
-            // Every other is made once for each op array or class: two
-            // closures on one line are two `{closure:…}` strings.
-            if !made {
-                self.hold_name(at, owner, name)?;
+                self.hold_made(at, &name, lay, |held, made| {
+                    held.names_of(owner).push(made);
+                })?;
             }
         }
-        // And the lowered key each is bound under where it is not its
-        // name (`zend_string_tolower`): a function's, one a
-        // `DECLARE_FUNCTION` binds among them, a class's, which the class
-        // table keeps however it was bound, and a method's, the class's
-        // `function_table` key. A closure has none.
-        let functions = (unit.functions.iter()).map(|(decl, _)| (Owner::Tables, &decl.name));
-        let dynamic = (unit.dynamic.iter().enumerate())
-            .map(
-                |(at, (decl, _)): (usize, &(FunctionDecl, php_unit::OpArray))| {
-                    (Owner::Definition(at), &decl.name)
-                },
-            )
-            .filter(|(_, name)| !name.0.starts_with(b"{"));
-        let lowered = functions
-            .chain(dynamic)
-            .chain(
-                unit.classes
-                    .iter()
-                    .map(|class| (Owner::Tables, &class.name)),
-            )
-            .chain((unit.classes.iter()).flat_map(|class| {
-                (php_unit::written_methods(class).iter())
-                    .map(|method| (Owner::Tables, &method.function.name))
-            }))
-            .filter(|(_, name)| name.0.iter().any(u8::is_ascii_uppercase));
-        // `zend_new_interned_string` hands back the interned string for a
-        // lowered name opcache holds, `count` or `__tostring` or one a
-        // cached file's constants hold, and the one made goes
-        // (`accel_new_interned_string_for_php`).
-        for (owner, name) in lowered {
-            let lower = name.0.to_ascii_lowercase();
-            if self.shared.existing_interned(&lower).is_none() {
-                self.hold_name(at, owner, &lower)?;
+        if let Some(held) = self.unit_strings.units.get_mut(at) {
+            // Its vector kept for the next unit's.
+            held.unnamed = unnamed;
+            held.unnamed.clear();
+        }
+        // And the key of each `static` variable and arrow function's
+        // capture of its main op array and each op array it declares
+        // where opcache holds its bytes: the scanner's string, which
+        // `zend_compile_static_var_common` keys `static_variables` by and
+        // `lookup_cv` names its CV by where the binding is the first place
+        // the variable is met, no `zval_make_interned_string` having asked
+        // for it, where `zend_compile_closure_binding` interns a `use`
+        // variable's (`ZEND_BIND_EXPLICIT`).
+        let main = std::iter::once((Holder::Main, &unit.main));
+        for (holder, body) in main.chain(bodies(unit)) {
+            for (cv, name) in first_bound(body) {
+                if name.len() > 1 && self.shared.existing_interned(name).is_some() {
+                    match holder {
+                        Holder::Main => self.hold_main_var(at, cv, name)?,
+                        holder => self.hold_name(at, holder, name)?,
+                    }
+                }
             }
         }
         // And each trait a class uses, `zend_compile_use_trait`'s
@@ -999,9 +1263,9 @@ impl Request {
         // where it is not its name (`zend_string_tolower`), neither
         // interned.
         for name in unit.classes.iter().flat_map(|class| &class.traits) {
-            self.hold_name(at, Owner::Tables, &name.0)?;
+            self.hold_name(at, Holder::Unit, &name.0)?;
             if name.0.iter().any(u8::is_ascii_uppercase) {
-                self.hold_name(at, Owner::Tables, &name.0.to_ascii_lowercase())?;
+                self.hold_name(at, Holder::Unit, &name.0.to_ascii_lowercase())?;
             }
         }
         // And each name an adaptation writes, a string of its own for
@@ -1020,7 +1284,7 @@ impl Request {
                     .collect(),
             };
             for name in names {
-                self.hold_name(at, Owner::Tables, &name.0)?;
+                self.hold_name(at, Holder::Unit, &name.0)?;
             }
         }
         Ok(())
@@ -1034,7 +1298,7 @@ impl Request {
             return Ok(());
         }
         match self.unit_strings.position(unit) {
-            Some(at) => self.hold_name(at, Owner::Tables, name),
+            Some(at) => self.hold_name(at, Holder::Unit, name),
             None => Ok(()),
         }
     }
@@ -1042,11 +1306,33 @@ impl Request {
     /// `name` made as a string of the request's, held by the unit at
     /// `at` with its names, or with the names of its op array `owner`
     /// names.
-    fn hold_name(&mut self, at: usize, owner: Owner, name: &[u8]) -> Result<(), Thrown> {
-        let made = self.string(name)?;
+    fn hold_name(&mut self, at: usize, owner: Holder, name: &[u8]) -> Result<(), Thrown> {
+        self.hold_made(at, name, Request::string, |held, made| {
+            held.names_of(owner).push(made);
+        })
+    }
+
+    /// `name` made as a string of the request's, the name of the CV `cv`
+    /// of the main op array of the unit at `at` ([`Held::found_main`]).
+    fn hold_main_var(&mut self, at: usize, cv: usize, name: &[u8]) -> Result<(), Thrown> {
+        self.hold_made(at, name, Request::string, |held, made| {
+            held.name_main_var(cv, made);
+        })
+    }
+
+    /// `name` laid as a string of the request's by `lay` and given to
+    /// the unit at `at` by `give`.
+    fn hold_made(
+        &mut self,
+        at: usize,
+        name: &[u8],
+        lay: impl FnOnce(&mut Request, &[u8]) -> Result<PhpString, Thrown>,
+        give: impl FnOnce(&mut Held, PhpString),
+    ) -> Result<(), Thrown> {
+        let made = lay(self, name)?;
         point(&mut self.unit_strings.by_bytes, made);
         if let Some(held) = self.unit_strings.units.get_mut(at) {
-            held.names_of(owner).push(made);
+            give(held, made);
         }
         Ok(())
     }
@@ -1140,9 +1426,9 @@ impl Request {
     /// $m = memory_get_usage(); unset($i); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect regime=jit-off
-    /// -936
+    /// -952
     /// -1536
-    /// -640
+    /// -656
     /// -720
     /// ```
     pub(crate) fn uncount_closure(&mut self, function: crate::api::call::Function) {
@@ -1212,7 +1498,7 @@ impl Request {
     /// ```
     /// ```expect regime=jit-off
     /// 384
-    /// 704
+    /// 720
     /// 192
     /// 160
     /// ```
@@ -1271,7 +1557,7 @@ impl Request {
             names.extend(strings.names);
             constants.extend(strings.constants);
         }
-        for blocks in held.dead_blocks {
+        for blocks in held.dead_blocks.into_iter().chain(held.copied) {
             blocks.free(self);
         }
         for held in held.units {

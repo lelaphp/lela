@@ -14,16 +14,18 @@ use std::sync::Arc;
 use php_compile::SourceKind;
 
 use super::Code;
-use super::{AccelServed, Request, Unresolved};
+use super::include::unreadable;
+use super::{AccelServed, Request, Unresolved, is_cacheable_stream_path, is_wrapper_url};
 use crate::api::abi::{Admission, FileCache, Lookup, Validation};
 use crate::api::raising::Thrown;
 use crate::api::values::{Emalloc, PhpString};
+use crate::c_number::c_str;
 use crate::engine::{CompileHeap, ForRequest};
 use crate::exec::IncludeKind;
 use crate::supplied::chain::FileArgs;
 use crate::supplied::tell;
 use crate::unit_cache::{
-    Asked, Cached, CompileRefused, Disk, Filed, Fresh, Held, Levels, UnitKey, full_path,
+    Asked, Cached, Disk, Filed, Fresh, Held, Levels, Stamp, Stat, UnitKey, full_path,
 };
 
 /// What the `zend_file_handle` a file is compiled through holds when
@@ -50,10 +52,19 @@ pub(crate) enum HandlePath {
     /// made is held open until then ([`Request::require_kept`]).
     Kept,
     /// A stream a wrapper opened, `php_stream_open_for_zend_ex` over a
-    /// URL ([`Request::include_stream`]): its bytes compiled as the
-    /// request's own, which no cache holds, since opcache keeps plain
-    /// files alone, whatever path the stream names as opened.
+    /// URL ([`Request::include_stream`]): its bytes compiled under the
+    /// path the stream names as opened, held by the cache where opcache's
+    /// predicate keeps that path ([`FileArgs::cached`]) and as the
+    /// request's own otherwise.
     Stream,
+}
+
+impl HandlePath {
+    /// Whether the `zend_file_handle` holds the path alone and no opened
+    /// path.
+    fn path_alone(self) -> bool {
+        matches!(self, HandlePath::Filename | HandlePath::Kept)
+    }
 }
 
 /// The unit cache for one request: [`Code::unit_cache`].
@@ -99,8 +110,8 @@ pub struct CacheStatus {
     /// The names the files are held under, each file's full path and
     /// the paths as written beside it, `ZCSG(hash).num_entries`.
     pub keys: u64,
-    /// The files held, in the order the cache took them, the preload's
-    /// pseudo-file and its saved scripts first.
+    /// The files held, in `accelerator_get_scripts`' order, bucket by
+    /// bucket of opcache's hash ([`crate::unit_cache::UnitCache::status`]).
     pub files: Vec<CachedFile>,
     /// What `opcache.preload` preloaded, `ZCSG(preload_script)`; none
     /// where nothing was.
@@ -182,8 +193,12 @@ pub struct CacheBudget {
     /// must be wasted for a cache that runs out to restart.
     pub max_wasted: u32,
     /// `ZCSG(hash).max_num_entries`: how many names files are held
-    /// under.
+    /// under, and the buckets they are held in.
     pub keys: u64,
+    /// `ZCG(root_hash)`, which every name's hash is xored with before its
+    /// bucket is taken: the inode of `/` where `opcache.validate_root`
+    /// asks for it, and zero otherwise.
+    pub root: u64,
     /// Whether the tier started in the segment (`zend_jit_startup`, in
     /// `accel_post_startup` once the segment is laid down), which takes
     /// the `zend_get_op_array_extension_handle` every op array compiled
@@ -235,11 +250,11 @@ impl Request {
     /// relative path's key asks for the working directory, which lays
     /// `ZCG(cwd)` down the first time ([`Request::accel_cwd`]).
     fn written_key(&mut self, written: &[u8]) -> Option<UnitKey> {
+        if written.starts_with(b"/") || is_cacheable_stream_path(written) {
+            return Some(UnitKey::full(written));
+        }
         if written.is_empty() || super::paths::scheme_length(written).is_some() {
             return None;
-        }
-        if written.starts_with(b"/") {
-            return Some(UnitKey::full(written));
         }
         // The memory limit's fatal is recorded and ends the request.
         self.accel_cwd().ok();
@@ -269,10 +284,24 @@ impl Request {
     }
 
     /// `persistent_compile_file`'s first lookup, by the path as written:
-    /// the file held under `written`'s name, a hit served without the
-    /// path resolved or the file stat'ed, where the answer for it looks
-    /// by the path as written and nothing is due; none where a hit would
-    /// need either, which the lookup by the full path gives.
+    /// the file held under `written`'s name, where the answer looks by the
+    /// path as written, and the validation the answer for it gives, which
+    /// [`Request::held_answer`] holds it to where it is served. Nothing is
+    /// validated or counted until then, so an `include_once` of a file
+    /// already included is no hit, as `persistent_zend_resolve_path`
+    /// counts none:
+    ///
+    /// ```php
+    /// $f = __DIR__ . '/once.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// $hits = fn () => opcache_get_status()['opcache_statistics']['hits'];
+    /// include $f; include $f; $before = $hits();
+    /// var_dump(include_once $f, $hits() - $before);
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// bool(true)
+    /// int(0)
+    /// ```
     ///
     /// ```php
     /// ini_set('opcache.validate_timestamps', 0);
@@ -292,7 +321,7 @@ impl Request {
     /// bool(true)
     /// bool(false)
     /// ```
-    pub(crate) fn held_as_written(&mut self, written: &[u8]) -> Option<Arc<Held>> {
+    pub(crate) fn held_as_written(&mut self, written: &[u8]) -> Option<(Arc<Held>, Validation)> {
         let key = self.written_key(written)?;
         let shared = Arc::clone(&self.shared);
         let held = shared.units.find(&self.arena.files, &key)?;
@@ -304,39 +333,146 @@ impl Request {
         else {
             return None;
         };
-        let now = self.environment().request_time();
-        if !held.trusted(validation, now) {
-            return None;
-        }
-        self.arena.files.hit(&held, validation, now);
-        self.accel_loaded = (held.unit.as_ref().ok().cloned()).map(|unit| (unit, AccelServed::Hit));
-        self.early_bound = (held.unit.as_ref().ok())
-            .map(|unit| (PublishedUnit::clone(unit), Arc::clone(&held.early)));
-        if let Ok(unit) = &held.unit {
-            self.note_held(unit);
-        }
-        Some(held)
+        // The cache bypassed, `EveryHit`, looks nothing up by the key.
+        (validation != Validation::EveryHit).then_some((held, validation))
     }
 
-    /// What `held` answers this request, as [`crate::unit_cache::served`]
-    /// serves a hit: the unit, or the refusal with what it had declared
-    /// made the request's own.
-    pub(crate) fn held_answer(&mut self, held: &Held) -> Result<PublishedUnit, CompileRefused> {
-        match &held.unit {
-            Ok(unit) => Ok(PublishedUnit::clone(unit)),
-            Err(error) => Err(CompileRefused::published(error.clone(), |unit| {
-                self.take_unit(unit)
-            })),
+    /// `validate_timestamp_and_record` over `held`, found by the key the
+    /// path `written` makes and handed over as `handle` holds it: fresh
+    /// where nothing is due, and else as `do_validate_timestamps` finds it
+    /// (`Z/ext/opcache/ZendAccelerator.c:1117-1187`), the path as written
+    /// resolved again where `handle` has no opened path, without the
+    /// file opened, so nothing guards it, a stream's to none
+    /// (`php_resolve_path`), and the file stat'ed where the path is
+    /// `held`'s. What a wrapper's `url_stat` throws on the way is thrown.
+    fn held_fresh(
+        &mut self,
+        held: &Held,
+        validation: Validation,
+        written: &[u8],
+        handle: HandlePath,
+    ) -> Result<bool, Thrown> {
+        let now = self.environment().request_time();
+        if held.trusted(validation, now) {
+            return Ok(true);
         }
+        if handle.path_alone() && !is_wrapper_url(written) {
+            match self.code_mut().resolve_path(written) {
+                Ok(path) => {
+                    self.revalidated_path(written, &path);
+                    if path != held.path {
+                        return Ok(false);
+                    }
+                }
+                Err(Unresolved::Missing(_)) => {}
+                Err(Unresolved::Threw(thrown)) => return Err(thrown),
+            }
+        }
+        Ok(held.validated(validation, now, self))
+    }
+
+    /// What `held`, found by the key `written` makes under `validation`
+    /// and handed over as `handle`, answers this request, as
+    /// `persistent_compile_file` answers a hit by its key: held to
+    /// [`Request::held_fresh`] and, fresh, a hit, counted, as
+    /// [`crate::unit_cache::served`] serves one, the unit or the refusal
+    /// with what it had declared made the request's own; none for a
+    /// stale one, discarded as `zend_accel_lock_discard_script` discards
+    /// it, which the miss after it opens and compiles.
+    ///
+    /// A hit whose stat is due opens nothing, so the `open_basedir` guard
+    /// is asked only of a file found changed:
+    ///
+    /// ```php
+    /// $f = realpath(__DIR__) . '/due.inc'; file_put_contents($f, '<?php return 1;'); touch($f, time() - 60);
+    /// $g = realpath(__DIR__) . '/due2.inc'; file_put_contents($g, '<?php return 1;'); touch($g, time() - 60);
+    /// var_dump(include $f, include $g, opcache_compile_file($f));
+    /// file_put_contents($g, '<?php return 2;'); touch($g, time() - 30);
+    /// ini_set('open_basedir', '/nonexistent');
+    /// var_dump(include $f, opcache_compile_file($f), @include $g);
+    /// var_dump(opcache_get_status()['scripts'][$g]['timestamp']);
+    /// ```
+    /// ```expect regime=jit-off
+    /// int(1)
+    /// int(1)
+    /// bool(true)
+    /// int(1)
+    /// bool(true)
+    /// bool(false)
+    /// int(0)
+    /// ```
+    ///
+    /// A key whose path now resolves to another held file is a miss, the
+    /// file compiled and the other's copy served, no hit counted on it,
+    /// and the key stays filed beside the discarded copy, so the next
+    /// include by it is a miss again ([`Filed::Existing`]):
+    ///
+    /// ```php
+    /// $d = realpath(__DIR__) . '/to' . getmypid(); @mkdir("$d/x", 0777, true); @mkdir("$d/y");
+    /// foreach (['x', 'y'] as $t) { file_put_contents("$d/$t/a.inc", "<?php return '$t';"); touch("$d/$t/a.inc", time() - 60); }
+    /// symlink("$d/x", "$d/to");
+    /// $s = fn () => array_values(array_intersect_key(opcache_get_status()['opcache_statistics'], ['hits' => 0, 'misses' => 0]));
+    /// echo include "$d/to/a.inc", include "$d/y/a.inc", include "$d/y/a.inc", "\n";
+    /// [$h, $m] = $s();
+    /// unlink("$d/to"); symlink("$d/y", "$d/to");
+    /// var_dump(include "$d/to/a.inc", include_once "$d/to/a.inc", include "$d/to/a.inc");
+    /// [$h2, $m2] = $s();
+    /// echo $h2 - $h, ' ', $m2 - $m, ' ', opcache_get_status()['scripts']["$d/y/a.inc"]['hits'], "\n";
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off
+    /// xyy
+    /// string(1) "y"
+    /// bool(true)
+    /// string(1) "y"
+    /// 0 2 1
+    /// ```
+    ///
+    /// and so it is under a file cache, which the miss does not read: the
+    /// `zend_file_handle` holds the path alone, which
+    /// `do_validate_timestamps` gives back unopened. Served by the binary, since the child is
+    /// `PHP_BINARY`:
+    ///
+    /// ```php
+    /// $d = realpath(sys_get_temp_dir()) . '/kept' . getmypid(); @mkdir("$d/x", 0777, true); @mkdir("$d/y"); @mkdir("$d/c");
+    /// foreach (['x', 'y'] as $t) { file_put_contents("$d/$t/a.inc", "<?php return '$t';"); touch("$d/$t/a.inc", time() - 60); }
+    /// symlink("$d/x", "$d/to");
+    /// $code = '$d = $argv[1]; $s = fn () => opcache_get_status()["opcache_statistics"]; echo include "$d/to/a.inc", include "$d/y/a.inc"; $a = $s(); unlink("$d/to"); symlink("$d/y", "$d/to"); echo include "$d/to/a.inc", include "$d/to/a.inc"; $b = $s(); echo " ", $b["hits"] - $a["hits"], " ", $b["misses"] - $a["misses"], "\n";';
+    /// $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.revalidate_freq=0', '-d', "opcache.file_cache=$d/c", '-r', $code, $d], [1 => ['pipe', 'w']], $pipes);
+    /// echo stream_get_contents($pipes[1]); proc_close($p);
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off process
+    /// xyyy 0 2
+    /// ```
+    pub(crate) fn held_answer(
+        &mut self,
+        held: &Held,
+        validation: Validation,
+        written: &[u8],
+        handle: HandlePath,
+    ) -> Result<Cached, Thrown> {
+        if !self.held_fresh(held, validation, written, handle)? {
+            self.shared.units.discard_held(&self.arena.files, held);
+            return Ok(None);
+        }
+        let now = self.environment().request_time();
+        self.arena.files.hit(held, validation, now);
+        let answer = Some(Ok(PublishedUnit::clone(&held.unit)));
+        let early = Some(Arc::clone(&held.early));
+        self.note_load(&answer, validation, Filed::Hit, early);
+        Ok(answer)
     }
 
     /// `persistent_zend_resolve_path` under `include_once` and
     /// `require_once`, the lookup by the key `written` makes having
-    /// missed: the key filed beside the full path `path` where the cache
-    /// holds that, as `zend_accel_add_key` files it, whether or not the
-    /// file was included already, so the include that follows is a hit
-    /// by the key and opens no stream. A relative include whose key is
-    /// not filed yet while its full path is held opens the file:
+    /// missed: the file held under the full path `path`, which the once
+    /// form serves as one the key found, `ZCG(cache_persistent_script)`,
+    /// and validates where it is served ([`Request::held_answer`]), with
+    /// the key filed beside it as `zend_accel_add_key` files it, whether
+    /// or not the file was included already, so the include that follows
+    /// is a hit by the key and opens no stream. A relative include whose
+    /// key is not filed yet while its full path is held opens the file:
     ///
     /// ```php
     /// function r() { return get_resource_id(fopen('php://memory', 'r')); }
@@ -368,22 +504,56 @@ impl Request {
     /// string(1) "c"
     /// int(21)
     /// ```
-    pub(crate) fn file_once_key(&mut self, written: &[u8], path: &[u8]) {
+    ///
+    /// So a once form whose key names a discarded copy while the path
+    /// it resolves to is held elsewhere is a hit on that file, where an
+    /// include by the same key is a miss:
+    ///
+    /// ```php
+    /// $d = realpath(__DIR__) . '/to' . getmypid(); @mkdir("$d/x", 0777, true); @mkdir("$d/y");
+    /// foreach (['x', 'y'] as $t) { file_put_contents("$d/$t/a.inc", "<?php return '$t';"); touch("$d/$t/a.inc", time() - 60); }
+    /// symlink("$d/x", "$d/to");
+    /// $s = fn () => array_values(array_intersect_key(opcache_get_status()['opcache_statistics'], ['hits' => 0, 'misses' => 0]));
+    /// var_dump(include "$d/to/a.inc", opcache_compile_file("$d/y/a.inc"));
+    /// unlink("$d/to"); symlink("$d/y", "$d/to");
+    /// var_dump(opcache_invalidate("$d/x/a.inc", true));
+    /// [$h, $m] = $s();
+    /// var_dump(include_once "$d/to/a.inc");
+    /// [$h2, $m2] = $s();
+    /// var_dump(include "$d/to/a.inc");
+    /// [$h3, $m3] = $s();
+    /// echo $h2 - $h, ' ', $m2 - $m, ' ', $h3 - $h2, ' ', $m3 - $m2, ' ', opcache_get_status()['scripts']["$d/y/a.inc"]['hits'], "\n";
+    /// exec('rm -rf ' . escapeshellarg($d));
+    /// ```
+    /// ```expect regime=jit-off
+    /// string(1) "x"
+    /// bool(true)
+    /// bool(true)
+    /// string(1) "y"
+    /// string(1) "y"
+    /// 1 0 0 1 1
+    /// ```
+    pub(crate) fn file_once_key(
+        &mut self,
+        written: &[u8],
+        path: &[u8],
+    ) -> Option<(Arc<Held>, Validation)> {
         let full = full_path(path, &self.cwd);
-        let as_written = matches!(
-            self.admission(&full),
-            Admission::Held {
-                lookup: Lookup::AsWritten,
-                ..
-            }
-        );
+        let Admission::Held {
+            validation,
+            lookup: Lookup::AsWritten,
+            ..
+        } = self.admission(&full)
+        else {
+            return None;
+        };
         let shared = Arc::clone(&self.shared);
-        if as_written
-            && let Some(key) = self.written_key(written)
-            && let Some(held) = shared.units.find(&self.arena.files, &UnitKey::full(&full))
-        {
-            shared.units.add_key(&self.arena.files, key, &held);
-        }
+        let key = self.written_key(written)?;
+        let held = shared
+            .units
+            .find(&self.arena.files, &UnitKey::full(&full))?;
+        shared.units.add_key(&self.arena.files, key, &held);
+        (validation != Validation::EveryHit).then_some((held, validation))
     }
 
     /// The unit for the file at `path`, resolved already, as
@@ -506,7 +676,7 @@ impl Request {
         }
         let shared = Arc::clone(&self.shared);
         let full = full_path(path, &self.cwd);
-        if handle == HandlePath::Stream {
+        if !args.cached() {
             return self.compiled_alone(args, &full);
         }
         let (validation, lookup, protection, file_cache, memory) = match self.admission(&full) {
@@ -530,13 +700,6 @@ impl Request {
             ),
         };
         let now = self.environment().request_time();
-        if memory
-            && matches!(handle, HandlePath::Filename | HandlePath::Kept)
-            && let Some(held) = shared.units.find(&self.arena.files, &UnitKey::full(&full))
-            && !held.trusted(validation, now)
-        {
-            self.revalidated_path(written.unwrap_or(path), &full);
-        }
         let resolved = lookup == Lookup::Resolved;
         let written = (written.filter(|_| lookup == Lookup::AsWritten))
             .and_then(|written| self.written_key(written));
@@ -550,6 +713,7 @@ impl Request {
             path: &full,
             source,
             written,
+            opened: !handle.path_alone(),
             validation,
             protection,
             now,
@@ -573,6 +737,9 @@ impl Request {
             |unit| shared.publish_compiled(unit),
             |req, unit| req.publish_unit(unit),
         );
+        if filed == Filed::Own {
+            return self.compiled_alone(args, &full);
+        }
         let scanned = scanned.get();
         self.note_pushed(scanned.map_or_else(super::Pushed::default, |scanned| scanned.pushed));
         let cached = crate::unit_cache::served(compiled, |unit| self.take_unit(unit));
@@ -602,11 +769,17 @@ impl Request {
     /// at this request's asking ([`crate::engine::Shared::compile_file`]): under the
     /// request's encoding and with its keys and classes, as opcache's miss
     /// compiles on the request, and charged to the request's heap while
-    /// it runs, so a fold that outgrows `memory_limit` is the request's
-    /// `E_ERROR` at the constant's line, as php's
-    /// `zend_eval_const_expr` raises it with opcache and without it, what
-    /// the file declared before it standing; the request holds nothing of
-    /// the compile once it ends, and a hit compiles nothing:
+    /// it runs. Since php 8.5.12 a fold past `memory_limit` is served, the
+    /// delayed OOM named at the `include` that compiles it, and the compile
+    /// runs on; one that outgrows the hard limit, twice the soft one, ends
+    /// the process there with php's line on its standard error and
+    /// nothing else served, no shutdown function among it, with opcache and
+    /// without it. The request holds nothing of the compile once it
+    /// ends, and a hit compiles nothing. The ask that crosses the hard
+    /// limit is the fold's 16007168 bytes, as opcache's miss asks it;
+    /// php's own compile without opcache crosses one fold step sooner,
+    /// at 15007744, which the engine's compile, always opcache's, does
+    /// not follow, so the first fence leaves the figure open:
     ///
     /// ```php
     /// ini_set('display_errors', '0');
@@ -624,10 +797,10 @@ impl Request {
     /// include $file;
     /// echo "included\n";
     /// ```
-    /// ```expect exit=255
-    /// 1 Allowed memory size of 16777216 bytes exhausted on line 5
-    /// bool(true)
-    /// bool(false)
+    /// ```expect process exit=137
+    /// ```
+    /// ```stderr
+    /// Hard memory limit of 33554432 bytes exhausted (tried to allocate %d bytes) in %s on line 14
     /// ```
     /// ```php
     /// ini_set('display_errors', '0');
@@ -645,16 +818,20 @@ impl Request {
     /// include $file;
     /// echo "included\n";
     /// ```
-    /// ```expect regime=jit-off exit=255
-    /// 1 Allowed memory size of 16777216 bytes exhausted on line 5
-    /// bool(true)
-    /// bool(false)
+    /// ```expect regime=jit-off process exit=137
+    /// ```
+    /// ```stderr
+    /// Hard memory limit of 33554432 bytes exhausted (tried to allocate 16007168 bytes) in %s on line 14
     /// ```
     ///
     /// The limit holds what php's compile holds at once, the string a fold
     /// makes beside the operands it reads, each given back once the node
     /// over it stands (`php_compile`'s fold claims): the file compiles
-    /// under 40M and not under 32M, as php's does in either regime:
+    /// under 40M and not under 32M, as php's does in either regime. Since
+    /// php 8.5.12 the compile runs on past the limit, which it meets as
+    /// the delayed OOM the included file's first safepoint raises at the
+    /// `include`'s line, and under 16M on to the hard limit, where the
+    /// child ends with nothing written:
     ///
     /// ```php
     /// $child = <<<'PHP'
@@ -676,18 +853,19 @@ impl Request {
     /// file_put_contents($f, $child);
     /// foreach (['16M', '24M', '32M', '40M', '128M'] as $limit) {
     ///     foreach (['-n', '-n -d opcache.enable_cli=1 -d opcache.jit=off -d opcache.file_update_protection=0'] as $regime) {
-    ///         echo $limit, ' ', shell_exec(escapeshellarg(PHP_BINARY) . " $regime " . escapeshellarg($f) . " $limit");
+    ///         $out = shell_exec(escapeshellarg(PHP_BINARY) . " $regime " . escapeshellarg($f) . " $limit 2>&1");
+    ///         echo $limit, ' ', preg_replace('/ \(tried to allocate .*/', '', $out);
     ///     }
     /// }
     /// unlink($f);
     /// ```
     /// ```expect process
-    /// 16M Allowed memory size of 16777216 bytes exhausted on line 4
-    /// 16M Allowed memory size of 16777216 bytes exhausted on line 4
-    /// 24M Allowed memory size of 25165824 bytes exhausted on line 4
-    /// 24M Allowed memory size of 25165824 bytes exhausted on line 4
-    /// 32M Allowed memory size of 33554432 bytes exhausted on line 4
-    /// 32M Allowed memory size of 33554432 bytes exhausted on line 4
+    /// 16M Hard memory limit of 33554432 bytes exhausted
+    /// 16M Hard memory limit of 33554432 bytes exhausted
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 13
+    /// 24M Allowed memory size of 25165824 bytes exhausted on line 13
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 13
+    /// 32M Allowed memory size of 33554432 bytes exhausted on line 13
     /// 40M 16000000 bytes
     /// 40M 16000000 bytes
     /// 128M 16000000 bytes
@@ -739,7 +917,9 @@ impl Request {
             .and_then(Result::ok)
             .zip(early)
             .filter(|(_, early)| early.iter().any(Option::is_some));
-        if let (Some(Ok(unit)), Filed::Hit | Filed::Held, Some(_)) = (cached, filed, served) {
+        if let (Some(Ok(unit)), Filed::Hit | Filed::Held | Filed::Existing, Some(_)) =
+            (cached, filed, served)
+        {
             self.note_held(unit);
         }
     }
@@ -754,11 +934,57 @@ impl Request {
     /// A file no cache holds compiled as this request's own, from the
     /// `source` handed down or the file's bytes, which are opened as a
     /// stream where php opens them ([`FileArgs::opens_stream`]): one the
-    /// answer keeps out, and a wrapper's stream ([`HandlePath::Stream`]).
+    /// answer keeps out, and a wrapper's stream opcache does not cache
+    /// ([`FileArgs::cached`]).
+    ///
+    /// And one the cache leaves to it ([`crate::unit_cache::Filed::Own`]):
+    /// written within `opcache.file_update_protection` seconds, which
+    /// opcache compiles through `accelerator_orig_compile_file` before it
+    /// would persist anything, so the include costs what php's compile
+    /// lays on the request, its names made as an `eval`'s are
+    /// ([`Request::hold_unit_names`]) and its file's name the string
+    /// `EG(included_files)` keeps, a once form's put there before the
+    /// compile ([`Request::opened_once`]) (the program under the recipe's
+    /// `TMPDIR`, read after the heap is churned):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3316-fresh-include.php', <<<'PHP'
+    /// <?php
+    /// ini_set('opcache.file_update_protection', '2');
+    /// function inc($name, $src, $once = false) { $f = sys_get_temp_dir() . "/w3316-$name.inc"; file_put_contents($f, $src); $m = memory_get_usage(); $once ? include_once $f : include $f; $d = memory_get_usage() - $m; unlink($f); return $d; }
+    /// inc('w0', '<?php class W {} $q0 = 1;');
+    /// echo inc('a', '<?php function abcdefgz() { return 2; } $GLOBALS["d"] = function () { $abcdefgz = "w"; return $abcdefgz; };'), "\n";
+    /// echo inc('b', '<?php class Abcdefgy { public $abcdefgy = 1; protected $Abcdefgy = 2; function Abcdefgy2() { return __FUNCTION__ . __METHOD__ . __CLASS__; } }'), "\n";
+    /// echo inc('c', '<?php $GLOBALS["e"] = function () { return __FUNCTION__ . __FUNCTION__; }; $GLOBALS["g"] = fn() => __FUNCTION__ . __FUNCTION__;'), "\n";
+    /// echo inc('d', '<?php if (1) { function Qwertyz() { $qwertyz = 1; return [$qwertyz, __FUNCTION__]; } }'), "\n";
+    /// echo inc('e', '<?php function Fqwerty1() { return 1; }', true), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode([abcdefgz(), $d(), (array) new Abcdefgy, (new Abcdefgy)->Abcdefgy2(), $e() === $g(), Qwertyz(), Fqwerty1()]), "\n";
+    /// $m = memory_get_usage(); unset($d, $e, $g); echo memory_get_usage() - $m, "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 1400
+    /// 1008
+    /// 1616
+    /// 384
+    /// 272
+    /// [2,"w",{"abcdefgy":1,"\u0000*\u0000Abcdefgy":2},"Abcdefgy2Abcdefgy::Abcdefgy2Abcdefgy",true,[1,"Qwertyz"],1]
+    /// -2192
+    /// ```
     fn compiled_alone(&mut self, args: FileArgs<'_>, full: &[u8]) -> Cached {
         let source = crate::unit_cache::source_or_read(args.source, args.path)?;
         if args.opens_stream() {
             self.open_include_stream(full, args.handle);
+        }
+        if args.handle == HandlePath::Host {
+            self.fill_primary_handle(source.len()).ok();
+        }
+        if let Some(opened) = self.opened_once(full) {
+            self.compile_opened(opened);
         }
         let shared = Arc::clone(&self.shared);
         Some(shared.compile_for(self, &source, args.path, SourceKind::File))
@@ -833,12 +1059,10 @@ impl Request {
         };
         let stamp = match validation {
             Validation::Never => None,
-            Validation::Window { .. } | Validation::EveryHit => {
-                let Some(stamp) = crate::unit_cache::stamp_seconds(&full) else {
-                    return Ok(false);
-                };
-                Some(stamp)
-            }
+            Validation::Window { .. } | Validation::EveryHit => match self.stamp(&full) {
+                Some(stamp) => Some(stamp.seconds()),
+                None => return Ok(false),
+            },
         };
         Ok(disk(file_cache, &self.shared.units.build).holds(&full, stamp))
     }
@@ -861,7 +1085,9 @@ impl Request {
     /// accelerator admitted, held as php without opcache compiles it,
     /// which optimizes nothing.
     fn tell_compiled(&mut self, full: &[u8], validation: Validation, filed: Filed) {
-        if validation != Validation::EveryHit && matches!(filed, Filed::Held | Filed::Kept) {
+        if validation != Validation::EveryHit
+            && matches!(filed, Filed::Held | Filed::Existing | Filed::Kept)
+        {
             self.run_optimizer_passes(full);
         }
         if filed == Filed::Held {
@@ -885,6 +1111,20 @@ impl Request {
     }
 }
 
+impl Stat for Request {
+    /// `zend_get_file_handle_timestamp`: a plain file's `stat(2)`, and a
+    /// stream wrapper's path's `zend_get_stream_timestamp`, its wrapper's
+    /// `url_stat` asked quietly through the stream layer
+    /// ([`crate::layer::StreamHooks::timestamp`]).
+    fn stamp(&mut self, path: &[u8]) -> Option<Stamp> {
+        if !is_wrapper_url(path) {
+            return Stamp::of(path);
+        }
+        let hooks = self.stream_hooks()?;
+        (hooks.timestamp)(self, path).map(Stamp::stat)
+    }
+}
+
 impl<'r> Code<&'r mut Request> {
     /// The unit cache (design §6.3), as `opcache_*` read it.
     pub fn unit_cache(self) -> UnitCache<'r> {
@@ -903,10 +1143,8 @@ impl UnitCache<'_> {
 
     /// `filename_is_in_cache`: whether a unit is held under the name
     /// `written` is filed under, as an include files it, and is fresh as
-    /// the answer for it validates a hit, which stats nothing where no
-    /// hit is due; one that is due is held to the file `written`
-    /// resolves to as `do_validate_timestamps` holds it, which throws
-    /// what a wrapper's `url_stat` throws. With `on_disk`, the question is
+    /// an include's hit by the key is ([`Request::held_fresh`]), a stale
+    /// one discarded by nothing. With `on_disk`, the question is
     /// the second level's, `filename_is_in_file_cache`: whether that file
     /// cache keeps a unit of the file `written` resolves to that it would
     /// read back, its `mtime` held to the one it was kept at where the
@@ -922,23 +1160,11 @@ impl UnitCache<'_> {
         else {
             return Ok(false);
         };
-        if held.unit.is_err() {
-            return Ok(false);
-        }
         let validation = match req.admission(&held.path) {
             Admission::KeptOut | Admission::OnDisk { .. } => return Ok(false),
             Admission::Held { validation, .. } => validation,
         };
-        let now = req.environment().request_time();
-        if held.trusted(validation, now) {
-            return Ok(true);
-        }
-        match req.code_mut().resolve_path(written) {
-            Ok(path) if path != held.path => return Ok(false),
-            Ok(_) | Err(Unresolved::Missing(_)) => {}
-            Err(Unresolved::Threw(thrown)) => return Err(thrown),
-        }
-        Ok(held.validated(validation, now))
+        req.held_fresh(&held, validation, written, HandlePath::Filename)
     }
 
     /// `zend_accel_invalidate`: the copies `how` names of the file
@@ -990,16 +1216,18 @@ impl UnitCache<'_> {
         if let Some(file_cache) = self.req.file_cache_of(&path) {
             disk(&file_cache, &self.req.shared.units.build).invalidate(&path);
         }
-        let req = &self.req;
+        let (shared, arena) = (Arc::clone(&self.req.shared), Arc::clone(&self.req.arena));
         let forced = how == Invalidation::Forced;
-        let held = (req.shared.units).discard(&req.arena.files, &UnitKey::full(&path), forced);
+        let held = (shared.units).discard(&arena.files, &UnitKey::full(&path), forced, self.req);
         Ok(on_disk || held)
     }
 
     /// `opcache_compile_file`'s `persistent_compile_file` without the
-    /// execution: the file `written` names resolved as an `include`
-    /// resolves it and held to the `open_basedir` guard as its open is,
-    /// failing with the include's warnings under the native's name,
+    /// execution: the file `written` names served by the key as an
+    /// `include` serves it ([`Request::held_answer`]), opened by nothing,
+    /// and else resolved as an `include` resolves it and held to the
+    /// `open_basedir` guard as its open is, failing with the include's
+    /// warnings under the native's name,
     /// compiled into the cache, and its functions and the
     /// classes it can bind declared in the request, which leaves
     /// `get_included_files()` as it was. `false` where nothing opens; a
@@ -1007,60 +1235,41 @@ impl UnitCache<'_> {
     /// after the parse ends the request.
     pub fn compile(&mut self, written: &[u8]) -> Result<bool, Thrown> {
         let req = &mut *self.req;
-        let (resolved, held) = if written.contains(&0) {
-            let missing = std::io::Error::from(std::io::ErrorKind::NotFound);
-            (Err(Unresolved::Missing(missing)), None)
-        } else {
-            match req.held_as_written(written) {
-                Some(held) => (Ok(held.path.clone()), Some(req.held_answer(&held))),
-                None => (req.code_mut().resolve_path(written), None),
-            }
+        let nul = written.contains(&0);
+        let served = match (!nul).then(|| req.held_as_written(written)).flatten() {
+            Some((held, how)) => (req.held_answer(&held, how, written, HandlePath::Filename)?)
+                .map(|unit| (unit, held.path.clone())),
+            None => None,
         };
         // The plain files opener's guard, which warns under the native's
-        // name: of the resolved path, or the held unit's, and of the path
-        // as written where none resolved.
-        let resolved = match resolved {
-            Ok(path) => match req.environment_mut().check_open_basedir(&path, true) {
-                Ok(_) => Ok(path),
-                Err(refused) => {
-                    req.open_stream_failed(IncludeKind::Include, &path, &refused.into());
-                    return req
-                        .failed_opening(IncludeKind::Include, written)
-                        .map(|_| false);
+        // name: of the resolved path, and of the path as written where
+        // none resolved; the stream's warning names the same.
+        let opened = match served {
+            Some(served) => Ok(served),
+            None if nul => Err((written.to_vec(), unreadable(c_str(written)))),
+            None => match req.code_mut().resolve_path(written) {
+                Ok(path) => match req.environment_mut().check_open_basedir(&path, true) {
+                    Ok(_) => match req.cached_file(&path, Some(written), HandlePath::Filename) {
+                        Some(unit) => Ok((unit, path)),
+                        None => Err((written.to_vec(), unreadable(&path))),
+                    },
+                    Err(refused) => Err((path, refused.into())),
+                },
+                Err(Unresolved::Missing(reason)) => {
+                    let refused = req.environment_mut().check_open_basedir(written, true);
+                    Err((written.to_vec(), refused.err().map_or(reason, Into::into)))
                 }
+                Err(Unresolved::Threw(thrown)) => return Err(thrown),
             },
-            Err(Unresolved::Missing(reason)) if !written.contains(&0) => {
-                match req.environment_mut().check_open_basedir(written, true) {
-                    Ok(_) => Err(Unresolved::Missing(reason)),
-                    Err(refused) => Err(Unresolved::Missing(refused.into())),
-                }
-            }
-            other => other,
         };
-        let compiled = resolved.map(|path| {
-            let unit = held.or_else(|| req.cached_file(&path, Some(written), HandlePath::Filename));
-            (unit, path)
-        });
-        let unit = match compiled {
-            Ok((Some(Ok(unit)), _)) => unit,
-            Ok((Some(Err(refused)), path)) => {
+        let unit = match opened {
+            Ok((Ok(unit), _)) => unit,
+            Ok((Err(refused), path)) => {
                 return Err(req.refused_include(&refused, &path, php_compile::SourceKind::File));
             }
-            Ok((None, _)) => {
-                let reason = std::io::Error::from(std::io::ErrorKind::NotFound);
-                req.open_stream_failed(IncludeKind::Include, written, &reason);
-                return req
-                    .failed_opening(IncludeKind::Include, written)
-                    .map(|_| false);
-            }
-            Err(Unresolved::Threw(thrown)) => return Err(thrown),
-            Err(Unresolved::Missing(reason)) => {
-                if !written.contains(&0) {
-                    req.open_stream_failed(IncludeKind::Include, written, &reason);
-                }
-                return req
-                    .failed_opening(IncludeKind::Include, written)
-                    .map(|_| false);
+            Err((named, reason)) => {
+                let failed = req.not_opened(IncludeKind::Include, &named, &reason, written);
+                return failed.map(|_| false);
             }
         };
         if !crate::engine::note_compiled(req, &unit, php_compile::SourceKind::File) {
@@ -1202,8 +1411,8 @@ impl AccelServed {
     fn of(validation: Validation, filed: Filed) -> Option<AccelServed> {
         match filed {
             _ if validation == Validation::EveryHit => None,
-            Filed::Compiled => None,
-            Filed::Held => Some(AccelServed::Compiled),
+            Filed::Compiled | Filed::Own => None,
+            Filed::Held | Filed::Existing => Some(AccelServed::Compiled),
             Filed::Hit | Filed::Unheld | Filed::Kept => Some(AccelServed::Hit),
         }
     }

@@ -368,7 +368,7 @@ fn required(name: &str) -> Dependency {
 /// mysqli
 ///
 /// MysqlI Support => enabled
-/// Client API library version => mysqlnd 8.5.9
+/// Client API library version => mysqlnd 8.5.12
 /// Active Persistent Links => 0
 /// Inactive Persistent Links => 0
 /// Active Links => 0

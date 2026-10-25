@@ -563,7 +563,7 @@ impl Stmt {
     pub fn more_rowsets(&self, req: &mut Request) -> bool {
         self.conn
             .handle()
-            .with(req, |_, conn| conn.more_rowsets())
+            .peek(req, ConnData::more_rowsets)
             .unwrap_or(false)
     }
 
@@ -666,7 +666,7 @@ impl Stmt {
         let conn = self.conn;
         let affected = conn
             .handle()
-            .with(req, |_, c| c.upsert.affected_rows)
+            .peek(req, |c| c.upsert.affected_rows)
             .unwrap_or(u64::MAX);
         let held = conn.acquire(req);
         let closed = self.close(req, false);
@@ -868,7 +868,25 @@ fn send_execute(
 /// `mysqlnd_stmt_execute_parse_response`: the answer to a
 /// `COM_STMT_EXECUTE` (or the next set of rows, or the OUT parameters a `CALL` sends after its
 /// own), the statement's status taken from the connection, the rows'
-/// reader chosen by the cursor the server opened or did not.
+/// reader chosen by the cursor the server opened or did not. An OK takes
+/// the statement's columns to none, the one that ends a `CALL`'s sets
+/// among them:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+/// $l = new mysqli('127.0.0.1', 'root', '', 'test');
+/// $l->query('DROP PROCEDURE IF EXISTS mysqlnd_witness_field_count');
+/// $l->query('CREATE PROCEDURE mysqlnd_witness_field_count() BEGIN SELECT 1 AS a; SELECT 2 AS b, 3 AS c; END');
+/// $s = $l->prepare('CALL mysqlnd_witness_field_count()');
+/// $s->execute();
+/// do { var_dump($s->field_count); $s->get_result(); } while ($s->next_result());
+/// $l->query('DROP PROCEDURE mysqlnd_witness_field_count');
+/// ```
+/// ```expect mysql
+/// int(1)
+/// int(2)
+/// int(0)
+/// ```
 fn parse_execute_response(
     req: &mut Request,
     stmt: &mut StmtData,
@@ -887,6 +905,9 @@ fn parse_execute_response(
             conn.last_query_type,
             QueryType::Upsert | QueryType::LoadLocal
         ) {
+            // An OK has no columns, the stored procedure's last one among
+            // them: php 8.5.12's `stmt->field_count = conn->field_count`.
+            stmt.field_count = conn.field_count;
             return Ok(true);
         }
         if let Some(result) = stmt.result.as_mut() {
@@ -1257,9 +1278,10 @@ fn fetch(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
         stmt.upsert.server_status = server_status;
     }
     match got {
-        Ok(Some(row)) => {
+        Ok(Some(mut row)) => {
             let binds = stmt.result_bind.as_mut();
-            assign_row(req, binds, row)?;
+            assign_row(req, binds, &mut row)?;
+            result.recycle(req, row);
             Ok(StmtFetch::Row)
         }
         Ok(None) => Ok(StmtFetch::NoData),
@@ -1277,15 +1299,15 @@ fn fetch(req: &mut Request, stmt: &mut StmtData, conn: &mut ConnData) -> Result<
 fn assign_row(
     req: &mut Request,
     binds: Option<&mut Binds<ResultBind>>,
-    row: Row,
+    row: &mut Row,
 ) -> Result<(), Thrown> {
     let Some(binds) = binds else {
-        for value in row {
+        for value in row.drain(..) {
             value.give_up(req);
         }
         return Ok(());
     };
-    let mut values = row.into_iter();
+    let mut values = row.drain(..);
     for bind in binds.iter_mut() {
         let Some(value) = values.next() else { break };
         if !bind.bound {
@@ -1492,7 +1514,23 @@ fn free_stmt_content(req: &mut Request, stmt: &mut StmtData) {
 
 /// `mysqlnd_stmt::close_on_server`: the rows on the line read off, the
 /// statement closed with `COM_STMT_CLOSE` while the connection is ready,
-/// counted by how often it ran.
+/// counted by how often it ran; a close the server did not take is
+/// `false` after the statement's rows are freed as for one it took:
+///
+/// ```php
+/// mysqli_report(MYSQLI_REPORT_OFF);
+/// $l = new mysqli('127.0.0.1', 'root', '', 'test');
+/// $stmts = [];
+/// for ($i = 0; $i < 20; $i++) { $stmts[] = $l->prepare('DO 1'); }
+/// $l->query('KILL ' . $l->thread_id);
+/// do { array_pop($stmts); usleep(1000); } while ($stmts && !$l->errno);
+/// echo "done\n";
+/// ```
+/// ```expect mysql
+///
+/// Warning: main(): Error occurred while closing statement in %s on line 7
+/// done
+/// ```
 fn close_on_server(
     req: &mut Request,
     stmt: &mut StmtData,
@@ -1500,6 +1538,7 @@ fn close_on_server(
     implicit: bool,
 ) -> Result<bool, Thrown> {
     empty_errors(req, stmt, conn);
+    let mut closed = true;
     loop {
         if stmt.state == StmtState::WaitingUseOrStore {
             run_handler(req, stmt, conn)?;
@@ -1521,11 +1560,10 @@ fn close_on_server(
             },
             1,
         );
-        if conn.state == ConnState::Ready
-            && !conn.send_command(req, Com::StmtClose, &stmt.stmt_id.to_le_bytes(), false)?
-        {
-            stmt.error.copy_from(req, &conn.error)?;
-            return Ok(false);
+        // A close the server did not take is the answer, after the rest
+        // is released as for one it took.
+        if conn.state == ConnState::Ready {
+            closed = conn.send_command(req, Com::StmtClose, &stmt.stmt_id.to_le_bytes(), false)?;
         }
     }
     match stmt.execute_count {
@@ -1536,5 +1574,5 @@ fn close_on_server(
     if let Some(result) = stmt.result.take() {
         result.free(req, conn, true)?;
     }
-    Ok(true)
+    Ok(closed)
 }

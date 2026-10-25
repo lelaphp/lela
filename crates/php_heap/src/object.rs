@@ -136,7 +136,22 @@ pub struct Obj(NonNull<ObjHeader>);
 // `Heap::object_with`. The refcount `Cell` is what keeps it off `Sync`.
 unsafe impl Send for Obj {}
 
+// The two words compiled code reads of an object, at php's offsets in
+// `zend_object` (`ce`, `properties_table`): the class at sixteen as php's
+// `ce` pointer is there, and the first declared slot past the forty-byte
+// header.
+const _: () = assert!(Obj::CLASS_AT == 16 && Obj::SLOTS_AT == 40);
+
 impl Obj {
+    /// Where in the object its class's number is, php's `zend_object.ce`:
+    /// what the compiled tier's class guard compares, as
+    /// `zend_jit_class_guard` compares `obj->ce` (`jit-design.md` §4.3).
+    pub const CLASS_AT: usize = std::mem::offset_of!(ObjHeader, class);
+    /// Where the object's first declared slot stands, php's
+    /// `properties_table`, each slot a zval past it: what the compiled
+    /// tier reads and writes a declared property at, `OBJ_PROP_NUM`.
+    pub const SLOTS_AT: usize = HEADER;
+
     fn header(&self) -> &ObjHeader {
         // SAFETY: an `Obj` names an object `init` laid down, live while
         // its owner holds it, which is php's `zend_object *` contract.
@@ -382,6 +397,16 @@ impl Obj {
         } else {
             self.header().gc.del_flags(gc::OBJ_WEAKLY_REFERENCED);
         }
+    }
+
+    /// `GC_ADD_FLAGS(object, GC_NOT_COLLECTABLE)`: the object can be part
+    /// of no cycle, so a release that leaves it owners never offers it to
+    /// the collector (`GC_MAY_LEAK`). php marks an enum case
+    /// (`zend_enum_new`, `Z/Zend/zend_enum.c:42`) and a fake closure with
+    /// no receiver (`zend_create_fake_closure`,
+    /// `Z/Zend/zend_closures.c:870`), and nothing else of an object.
+    pub fn set_uncollectable(&self) {
+        self.add_flag(gc::NOT_COLLECTABLE);
     }
 
     /// `Z_PROTECT_RECURSION_P`: the walk is inside.

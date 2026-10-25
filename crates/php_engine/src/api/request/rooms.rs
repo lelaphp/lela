@@ -33,6 +33,14 @@ const FIBER_CONTEXT: usize = 112;
 #[cfg(target_vendor = "apple")]
 const OLD_CWD: usize = 4096;
 
+/// `ZCG(cwd)` and `ZCG(cwd_check)`: the string, and whether a key has
+/// put its bytes in the engine's table since it was laid.
+#[derive(Debug)]
+struct AccelCwd {
+    string: PhpString,
+    checked: bool,
+}
+
 /// The rooms a request holds ([`Request::rooms`]).
 #[derive(Debug, Default)]
 pub(crate) struct Rooms {
@@ -49,9 +57,9 @@ pub(crate) struct Rooms {
     path_copies: Vec<Emalloc>,
     /// `ZCG(cwd)`: `accel_getcwd`'s string of the working directory,
     /// laid down the first time opcache keys a relative path
-    /// (`Z/ext/opcache/ZendAccelerator.c:235`) and kept until the
-    /// request ends.
-    accel_cwd: Option<PhpString>,
+    /// (`Z/ext/opcache/ZendAccelerator.c:235`), laid anew by each
+    /// `chdir()` after (`accel_chdir`) and kept until the request ends.
+    accel_cwd: Option<AccelCwd>,
     /// The primary file's `zend_file_handle`, from the host's
     /// `zend_stream_init_fp` until `zend_destroy_file_handle` after
     /// `php_execute_script`, or until the request ends where php-fpm's
@@ -115,13 +123,62 @@ impl Request {
     }
 
     /// `accel_getcwd` as `accel_make_persistent_key` asks it for a
-    /// relative path: `ZCG(cwd)` laid down once, the first time. The
+    /// relative path: `ZCG(cwd)` laid down the first time, and put in the
+    /// engine's table by the first key after it was laid
+    /// (`ZCG(cwd_check)`, [`crate::engine::Shared::intern_cwd`]). The
     /// `Err` is the memory limit's fatal.
     pub(crate) fn accel_cwd(&mut self) -> Result<(), Thrown> {
         if self.rooms.accel_cwd.is_none() {
-            let cwd = self.cwd.as_os_str().as_encoded_bytes().to_vec();
-            self.rooms.accel_cwd = Some(self.string_init(&cwd)?);
+            self.lay_accel_cwd()?;
         }
+        if let Some(laid) = self.rooms.accel_cwd.as_mut().filter(|laid| !laid.checked) {
+            laid.checked = true;
+            self.shared.intern_cwd(laid.string.as_bytes());
+        }
+        Ok(())
+    }
+
+    /// `accel_chdir`, opcache's `chdir()` past the move: `ZCG(cwd)` laid
+    /// anew for the directory it moved to and the one before given
+    /// back, where a key laid one, and the next key's `ZCG(cwd_check)`
+    /// putting the new one in the engine's table. So a relative include
+    /// after a `chdir()` finds its `__DIR__` there (the program under
+    /// the recipe's `TMPDIR`, each include written during the request):
+    ///
+    /// ```php
+    /// ini_set('opcache.file_update_protection', '2');
+    /// $d = sys_get_temp_dir() . "/w3324-chdir"; @mkdir($d); @mkdir("$d/s"); @mkdir("$d/t");
+    /// foreach (["a.inc", "s/b.inc", "t/c.inc"] as $f) { file_put_contents("$d/$f", '<?php $GLOBALS["dirs"][] = __DIR__;'); }
+    /// chdir($d); include "./a.inc";
+    /// $m = memory_get_usage(); chdir("$d/s"); $n = memory_get_usage(); include "./b.inc"; $o = memory_get_usage();
+    /// chdir("$d/t"); $p = memory_get_usage(); include "./c.inc"; $q = memory_get_usage();
+    /// echo $n - $m, " ", $o - $n, " ", $p - $o, " ", $q - $p, "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo implode(" ", array_map("basename", $dirs)), "\n";
+    /// foreach (["a.inc", "s/b.inc", "t/c.inc"] as $f) { unlink("$d/$f"); }
+    /// rmdir("$d/s"); rmdir("$d/t"); rmdir($d);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 0 96 0 96
+    /// w3324-chdir s t
+    /// ```
+    pub(crate) fn accel_chdir(&mut self) -> Result<(), Thrown> {
+        if let Some(laid) = self.rooms.accel_cwd.take() {
+            self.release(Value::string(laid.string));
+            self.lay_accel_cwd()?;
+        }
+        Ok(())
+    }
+
+    /// `ZCG(cwd)` laid for the working directory as it stands, not yet
+    /// in the engine's table.
+    fn lay_accel_cwd(&mut self) -> Result<(), Thrown> {
+        let cwd = self.cwd.as_os_str().as_encoded_bytes().to_vec();
+        let string = self.string_init(&cwd)?;
+        self.rooms.accel_cwd = Some(AccelCwd {
+            string,
+            checked: false,
+        });
         Ok(())
     }
 
@@ -186,6 +243,13 @@ impl Request {
     /// `!defined(__APPLE__)` keeps `alloca` off them) and the stack's
     /// elsewhere: held while the program is served and given back with
     /// [`Request::give_back_old_cwd`].
+    #[cfg_attr(
+        not(target_vendor = "apple"),
+        expect(
+            clippy::unused_self,
+            reason = "only Apple's platforms take the buffer from the request's heap"
+        )
+    )]
     pub(crate) fn old_cwd(&mut self) -> Option<Emalloc> {
         #[cfg(target_vendor = "apple")]
         {
@@ -214,8 +278,8 @@ impl Request {
         self.destroy_primary_handle();
         self.free_path_copies();
         let rooms = std::mem::take(&mut self.rooms);
-        if let Some(cwd) = rooms.accel_cwd {
-            self.release(Value::string(cwd));
+        if let Some(laid) = rooms.accel_cwd {
+            self.release(Value::string(laid.string));
         }
         for room in [rooms.main_fiber, rooms.cwd_state].into_iter().flatten() {
             room.free(self);

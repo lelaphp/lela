@@ -900,11 +900,7 @@ impl Frames<&Request> {
             return false;
         };
         body != Body::Main
-            && preloaded.scripts.iter().any(|held| {
-                held.unit
-                    .as_ref()
-                    .is_ok_and(|held| PublishedUnit::ptr_eq(held, unit))
-            })
+            && (preloaded.scripts.iter()).any(|held| PublishedUnit::ptr_eq(&held.unit, unit))
     }
 }
 

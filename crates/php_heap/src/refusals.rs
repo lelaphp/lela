@@ -15,16 +15,17 @@
 //! Two kinds of refusal point, two tests:
 //!
 //! - **The allocator's own arms of the limit**, each reached through the
-//!   limit itself, at a heap whose one chunk is full
+//!   limit itself by a fallible ask, at a heap whose one chunk is full
 //!   ([`each_arm_of_the_allocator_the_limit_reaches_refuses_and_leaves_the_block_it_had`]).
 //!   Three arms the limit cannot reach are the system's alone, and are
 //!   not here: `grow` and `alloc_huge` given no mapping (`Out of memory`),
 //!   and a huge block's list node, asked of its bin after the mapping with
 //!   at least a chunk of the limit still free.
 //! - **Every entry point above it**, refused at each of its asks in turn
-//!   ([`POINTS`]): a heap at its limit refuses whichever ask finds no room,
+//!   ([`POINTS`]): since php 8.5.12 the soft limit serves an `emalloc`
+//!   and the hard limit refuses whichever ask takes the heap past it,
 //!   which a test cannot stage for the `n`th ask of an operation, so the
-//!   allocator is armed to refuse that ask as the limit refuses it
+//!   allocator is armed to refuse that ask as the hard limit refuses it
 //!   (`Mm::refuse_after`). What the operation touched is then read and
 //!   written as a shutdown function would, the operation served again
 //!   whole, and everything released. The cycle collector's root buffer
@@ -197,11 +198,11 @@ fn walk(heap: &Heap, z: Zval, name: &str) {
     }
 }
 
-/// Whether `refused` is the limit's fatal.
+/// Whether `refused` is the hard limit's fatal.
 fn is_the_limit<T>(refused: &Result<T, Fatal>) -> bool {
     matches!(
         refused.as_ref().map_err(Fatal::reason),
-        Err(FatalReason::Error(text)) if text.starts_with("Allowed memory size of ")
+        Err(FatalReason::HardLimit { .. })
     )
 }
 
@@ -340,7 +341,7 @@ const POINTS: &[Point] = &[
         name: "a fresh string grown into a run",
         lay: nothing,
         op: |r| {
-            let fresh = r.heap.string_fresh(16)?;
+            let fresh = r.heap.string_fresh(16, crate::Sizing::Alloc)?;
             let fresh = r.heap.string_extend(fresh, 5000)?;
             r.held.push(Zval::string(fresh.finish()));
             Ok(())
@@ -350,7 +351,7 @@ const POINTS: &[Point] = &[
         name: "a fresh string cut to a lower bin",
         lay: nothing,
         op: |r| {
-            let fresh = r.heap.string_fresh(3000)?;
+            let fresh = r.heap.string_fresh(3000, crate::Sizing::Alloc)?;
             let fresh = r.heap.string_truncate(fresh, 8)?;
             r.held.push(Zval::string(fresh.finish()));
             Ok(())
@@ -728,11 +729,11 @@ const POINTS: &[Point] = &[
     Point {
         name: "a frame past the VM stack's page",
         lay: |r| r.stack.open(&mut r.heap),
-        op: |r| r.stack.push_frame(&mut r.heap, 20_000, 0, 1).map(drop),
+        op: |r| r.stack.push_frame(&mut r.heap, 20_000, 0, || 1).map(drop),
     },
     Point {
         name: "the top frame grown past its page",
-        lay: |r| r.stack.push_frame(&mut r.heap, 16_000, 0, 1).map(drop),
+        lay: |r| r.stack.push_frame(&mut r.heap, 16_000, 0, || 1).map(drop),
         op: |r| {
             let top = r.stack.current();
             r.stack.grow_top(&mut r.heap, top, 1000)
@@ -741,7 +742,7 @@ const POINTS: &[Point] = &[
     Point {
         name: "a frame moved to the heap",
         lay: |r| {
-            r.stack.push_frame(&mut r.heap, 4, 2, 1)?;
+            r.stack.push_frame(&mut r.heap, 4, 2, || 1)?;
             if let Some((_, frame)) = r.stack.top_mut() {
                 frame.slots_mut().fill(Zval::long(4));
             }
@@ -758,7 +759,7 @@ const POINTS: &[Point] = &[
         name: "a frame moved to the heap and restored",
         lay: |r| r.stack.open(&mut r.heap),
         op: |r| {
-            r.stack.push_frame(&mut r.heap, 4, 0, 1)?;
+            r.stack.push_frame(&mut r.heap, 4, 0, || 1)?;
             if let Some(frame) = r.stack.move_to_heap(&mut r.heap)? {
                 r.stack.restore_frame(&mut r.heap, frame)?;
             }
@@ -831,7 +832,6 @@ fn every_ask_of_every_entry_point_refused_in_turn_leaves_what_it_touched_whole()
                 "{}: ask {asks} refused, and the operation answered {served:?}",
                 point.name
             );
-            r.heap.overflow_rendered();
             r.use_after(point.name);
             (point.op)(&mut r)
                 .unwrap_or_else(|f| panic!("{}: served again after ask {asks}: {f:?}", point.name));
@@ -845,17 +845,18 @@ fn every_ask_of_every_entry_point_refused_in_turn_leaves_what_it_touched_whole()
 }
 
 /// A heap whose one chunk is full: the limit at the bytes the chunk
-/// holds, every free page taken in a `run` of one, and the fatal that
-/// met rendered. The next ask that needs a page meets the limit; what
-/// the caller allocated before stands, and its bins keep their free
-/// slots.
+/// holds, and every free page taken in a `run` of one by a fallible ask
+/// until one is refused, the delayed OOM it left behind taken off. The
+/// next ask that needs a page meets the limit; what the caller allocated
+/// before stands, and its bins keep their free slots.
 fn brim(heap: &mut Heap) -> Vec<NonNull<u8>> {
     assert!(heap.set_memory_limit(heap.memory_usage(true)));
     let mut pages = Vec::new();
-    while let Ok(at) = heap.mm.alloc(PAGE) {
+    while let Ok(Some(at)) = heap.mm.try_alloc(PAGE) {
         pages.push(at);
     }
-    heap.overflow_rendered();
+    assert!(heap.has_oom());
+    heap.reset_oom();
     pages
 }
 
@@ -894,10 +895,11 @@ fn reads(at: NonNull<u8>, len: usize, byte: u8) -> bool {
 /// a full heap: a bin with no free slot, a `run` of pages, a huge block;
 /// a reallocation cut to a lower bin, grown past its bin, grown from a
 /// bin to a `run`, grown past the pages after its `run`, a huge block
-/// grown past the limit by the difference and one cut to a `run`. Each
-/// refusal is the limit's fatal with the limit lifted until it is
-/// rendered, the block a reallocation was asked of keeps its bytes and
-/// is freed after, and the heap's count reads where it stood.
+/// cut to a `run`. Asked fallibly, each is refused, php's `NULL`, with
+/// the delayed OOM left behind, the block a reallocation was asked of
+/// keeping its bytes, php's "original block is left untouched", and the
+/// heap's count where it stood. Asked as an `emalloc` is, each is served
+/// past the soft limit and leaves the same delayed OOM.
 #[test]
 fn each_arm_of_the_allocator_the_limit_reaches_refuses_and_leaves_the_block_it_had() {
     let _alone = alone();
@@ -906,17 +908,23 @@ fn each_arm_of_the_allocator_the_limit_reaches_refuses_and_leaves_the_block_it_h
         let mut heap = Heap::new();
         let pages = brim(&mut heap);
         let before = heap.memory_usage(false);
-        let refused = heap.mm.alloc(len);
-        assert!(is_the_limit(&refused), "{arm}: {refused:?}");
-        assert!(heap.in_memory_limit_error(), "{arm}: the limit lifted");
+        let refused = heap.mm.try_alloc(len);
+        assert!(matches!(refused, Ok(None)), "{arm}: {refused:?}");
+        assert!(heap.has_oom(), "{arm}: the delayed OOM");
         assert_eq!(
             heap.memory_usage(false),
             before,
             "{arm}: the count taken back"
         );
-        heap.overflow_rendered();
-        for page in pages {
-            // SAFETY: a page `brim` took, freed once.
+        heap.reset_oom();
+        assert!(heap.set_memory_hard_limit_percent(1000));
+        let served = heap
+            .mm
+            .alloc(len)
+            .unwrap_or_else(|f| panic!("{arm}: {f:?}"));
+        assert!(heap.has_oom(), "{arm}: served, and the delayed OOM");
+        for page in pages.into_iter().chain([served]) {
+            // SAFETY: a page `brim` took, or the block served, freed once.
             unsafe { heap.mm.free(page) };
         }
     }
@@ -933,14 +941,21 @@ fn each_arm_of_the_allocator_the_limit_reaches_refuses_and_leaves_the_block_it_h
         let pages = brim(&mut heap);
         let before = heap.memory_usage(false);
         // SAFETY: a live block of this heap whose `from` bytes are written.
-        let refused = unsafe { heap.mm.realloc(at, from, to) };
-        assert!(is_the_limit(&refused), "{arm}: {refused:?}");
+        let refused = unsafe { heap.mm.try_realloc(at, from, to) };
+        assert!(matches!(refused, Ok(None)), "{arm}: {refused:?}");
+        assert!(heap.has_oom(), "{arm}: the delayed OOM");
         assert_eq!(heap.memory_usage(false), before, "{arm}: the count unmoved");
         assert!(reads(at, from, 0x5a), "{arm}: the block keeps its bytes");
-        heap.overflow_rendered();
-        // SAFETY: the block the refusal left standing, and the pages, each
+        heap.reset_oom();
+        assert!(heap.set_memory_hard_limit_percent(1000));
+        // SAFETY: as above.
+        let served =
+            unsafe { heap.mm.realloc(at, from, to) }.unwrap_or_else(|f| panic!("{arm}: {f:?}"));
+        assert!(heap.has_oom(), "{arm}: served, and the delayed OOM");
+        assert!(reads(served, from.min(to), 0x5a), "{arm}: the bytes moved");
+        // SAFETY: the block the reallocation served, and the pages, each
         // freed once.
-        unsafe { heap.mm.free(at) };
+        unsafe { heap.mm.free(served) };
         for page in pages {
             // SAFETY: as above.
             unsafe { heap.mm.free(page) };
@@ -963,7 +978,6 @@ fn an_iterator_whose_copy_the_limit_refuses_stays_counted_where_it_stood() {
     r.heap.mm.refuse_after(0);
     let refused = r.heap.iterator_pos_ex(idx, b);
     assert!(r.heap.mm.disarm() && is_the_limit(&refused), "{refused:?}");
-    r.heap.overflow_rendered();
     assert!(a.has_iterators(), "the iterator still counts on its table");
     let first = r.held.remove(0);
     Heap::release(&mut r, first);

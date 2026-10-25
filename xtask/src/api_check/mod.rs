@@ -51,6 +51,7 @@
 //! item's `#[mirrors]` is held against the pinned php-src ([`mirrors`],
 //! #2353).
 
+mod binding;
 mod bundle;
 mod inventory;
 pub(crate) mod lock;
@@ -70,6 +71,7 @@ use crate::manifest::{Edge, LockCeiling, Manifest, Seam, Section};
 use crate::reading::{Reading, Status, Store};
 use crate::sources::Standing;
 
+use binding::Bindings;
 use inventory::{Inventory, Leaf, Written, kernels_named, uses};
 use lock::{Block, Diff, Lock, list};
 use surfaces::Surfaces;
@@ -140,6 +142,7 @@ pub(crate) fn measure(
     }
     let snapshot = Snapshot::disk(root)?;
     let surfaces = Surfaces::read(root, manifest.pin().map(|pin| &pin.source))?;
+    let bindings = Bindings::read(manifest, root)?;
     let mut readings = Vec::new();
     for seam in &manifest.seams {
         readings.push(seam_reading(
@@ -165,6 +168,7 @@ pub(crate) fn measure(
             &crates,
             &mut inventory,
             &surfaces,
+            &bindings,
             krate,
         )?);
     }
@@ -668,6 +672,7 @@ fn crate_reading(
     crates: &Crates,
     inventory: &mut Inventory<'_>,
     surfaces: &Surfaces,
+    bindings: &Bindings,
     krate: &Present,
 ) -> Result<Reading> {
     let mut reading = Reading::for_scope(INSTRUMENT, &krate.name, manifest, snapshot)?;
@@ -753,6 +758,12 @@ fn crate_reading(
         problems.extend(held.problems);
         notes.extend(held.notes);
     }
+
+    // Its links to a native library, each held to the keg the pinned php
+    // loads that library from (#3458).
+    let held = bindings.hold(krate);
+    problems.extend(held.problems);
+    notes.extend(held.notes);
 
     if problems.is_empty() {
         reading.status = Status::Pass;

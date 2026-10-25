@@ -213,7 +213,6 @@ impl RuntimeCaches {
     /// its two callers: an `eval` in a loop hands one number back each
     /// time (#3051).
     #[inline(always)]
-    #[allow(clippy::inline_always)]
     fn hand_back(&mut self, mut numbers: Vec<u32>) {
         // One push a number: an `eval`'s unit has one or a few, which a
         // push writes in place where `append` copies through `memcpy`.

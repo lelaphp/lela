@@ -27,7 +27,7 @@ use crate::api::abi::{
     ClassIterator, CloneObj, DebugInfo, DimensionRead, GcTable, Instance, IteratorElement,
     ObjectHandlers, Refusals, This, Untyped,
 };
-use crate::api::raising::{Thrown, throw_error};
+use crate::api::raising::{Thrown, error, type_error};
 use crate::api::request::Request;
 use crate::api::values::{
     HashIterator, Key, Owner, PhpArray, PhpObject, PhpString, Place, Value, walk,
@@ -126,25 +126,21 @@ fn unregister(req: &mut Request, object: PhpObject, holder: Holder, unref: bool)
 fn unref_single(req: &mut Request, id: u32, holder: Holder) {
     match holder {
         Holder::Reference(at) => {
-            if let Some(reference) = stored(req, at)
+            if let Some(reference) = req.stored_object(at)
                 && let Some(payload) = reference.native_mut::<WeakRef>(req)
             {
                 payload.referent = None;
             }
         }
         Holder::Map(at) => {
-            let entries = stored(req, at)
+            let entries = req
+                .stored_object(at)
                 .and_then(|map| map.native::<ZendWeakMap>(req).and_then(|m| m.entries));
             if let Some(mut entries) = entries {
                 entries.unset(req, &Key::Int(i64::from(id))).ok();
             }
         }
     }
-}
-
-/// The live object the store holds under `id`, the holder a row names.
-fn stored(req: &Request, id: u32) -> Option<PhpObject> {
-    req.stored_object(id)
 }
 
 /// `zend_weakrefs_notify` (`Z/Zend/zend_weakrefs.c:212`), which the
@@ -177,7 +173,7 @@ pub(crate) fn gc_entries(
     let entries = entries.heap();
     for (key, _) in &entries {
         if let php_heap::Key::Long(id) = key
-            && let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id))
+            && let Some(owner) = u32::try_from(id).ok().and_then(|id| req.stored_object(id))
             && let Some(entry) = entries.value_ref(key)
         {
             visit(owner.heap(), entry);
@@ -198,7 +194,7 @@ pub(crate) fn gc_keyed(req: &Request, key: Obj, visit: &mut dyn FnMut(php_heap::
     };
     for holder in holders {
         if let Holder::Map(at) = *holder
-            && let Some(map) = stored(req, at)
+            && let Some(map) = req.stored_object(at)
             && let Some(entries) = entries_of(req, map)
             && let Some(entry) = entries.heap().value_ref(php_heap::Key::Long(i64::from(id)))
         {
@@ -281,11 +277,7 @@ struct WeakMapHandlers;
 fn map_key(req: &mut Request, offset: &Value) -> Result<PhpObject, Thrown> {
     match offset.deref().as_object() {
         Some(object) => Ok(object),
-        None => Err(throw_error(
-            req,
-            "TypeError",
-            "WeakMap key must be an object",
-        )),
+        None => Err(type_error(req, "WeakMap key must be an object")),
     }
 }
 
@@ -324,7 +316,7 @@ fn entry_of(req: &Request, map: PhpObject, key: PhpObject) -> Option<Value> {
 fn not_contained(req: &mut Request, key: PhpObject) -> Thrown {
     let class = req.symbols().class_name(key.class());
     let message = format!("Object {class}#{} not contained in WeakMap", key.index());
-    throw_error(req, "Error", &message)
+    error(req, &message)
 }
 
 impl ObjectHandlers for WeakMapHandlers {
@@ -355,7 +347,7 @@ impl ObjectHandlers for WeakMapHandlers {
             return;
         };
         for id in keyed_ids(req, entries) {
-            if let Some(owner) = stored(req, id) {
+            if let Some(owner) = req.stored_object(id) {
                 unregister(req, owner, Holder::Map(object.index()), false);
             }
         }
@@ -392,7 +384,7 @@ impl ObjectHandlers for WeakMapHandlers {
         read: DimensionRead,
     ) -> Result<Owner<Value>, Thrown> {
         let Some(offset) = offset else {
-            return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
+            return Err(error(req, "Cannot append to WeakMap"));
         };
         let key = map_key(req, offset)?;
         let Some(value) = entry_of(req, object, key) else {
@@ -454,7 +446,7 @@ impl ObjectHandlers for WeakMapHandlers {
     ) -> Result<(), Thrown> {
         let Some(offset) = offset else {
             value.give_up(req);
-            return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
+            return Err(error(req, "Cannot append to WeakMap"));
         };
         let key = match map_key(req, offset) {
             Ok(key) => key,
@@ -541,7 +533,7 @@ impl ObjectHandlers for WeakMapHandlers {
                 .filter_map(|(key, value)| match key {
                     Key::Int(id) => u32::try_from(id)
                         .ok()
-                        .and_then(|id| stored(req, id))
+                        .and_then(|id| req.stored_object(id))
                         .map(|o| (o, value)),
                     Key::Str(_) => None,
                 })
@@ -578,7 +570,8 @@ impl ObjectHandlers for WeakMapHandlers {
         let table = PhpArray::filled(req, |req, table| {
             for (key, value) in entries {
                 let Key::Int(id) = key else { continue };
-                let Some(owner) = u32::try_from(id).ok().and_then(|id| stored(req, id)) else {
+                let Some(owner) = u32::try_from(id).ok().and_then(|id| req.stored_object(id))
+                else {
                     continue;
                 };
                 let pair = PhpArray::filled(req, |req, pair| {
@@ -697,7 +690,9 @@ impl ClassIterator for MapIter {
     /// keyed by, `null` past the last.
     fn key(&mut self, req: &mut Request, map: PhpObject) -> Result<Owner<Value>, Thrown> {
         let object = match self.here(req, map) {
-            Some((_, Key::Int(id), _)) => u32::try_from(id).ok().and_then(|id| stored(req, id)),
+            Some((_, Key::Int(id), _)) => {
+                u32::try_from(id).ok().and_then(|id| req.stored_object(id))
+            }
             _ => None,
         };
         let key = object.map_or_else(Value::null, |object| object.as_value());
@@ -727,7 +722,7 @@ fn weakmap_place(
     offset: Option<&Value>,
 ) -> Result<php_heap::ZvalRef, Thrown> {
     let Some(offset) = offset else {
-        return Err(throw_error(req, "Error", "Cannot append to WeakMap"));
+        return Err(error(req, "Cannot append to WeakMap"));
     };
     let key = map_key(req, offset)?;
     let at = entry_key(key);
@@ -736,7 +731,7 @@ fn weakmap_place(
     };
     match entries.heap().value_ref(at.heap()) {
         Some(place) => Ok(place),
-        None => Err(throw_error(req, "Error", "Cannot append to WeakMap")),
+        None => Err(error(req, "Cannot append to WeakMap")),
     }
 }
 
@@ -749,7 +744,7 @@ fn weakmap_clone(req: &mut Request, object: PhpObject) -> Result<Owner<PhpObject
     };
     let made = req.clone_with_payload(object, ZendWeakMap { entries: copy })?;
     for id in copy.map(|copy| keyed_ids(req, copy)).unwrap_or_default() {
-        if let Some(owner) = stored(req, id) {
+        if let Some(owner) = req.stored_object(id) {
             register(req, owner, Holder::Map(made.index()));
         }
     }
@@ -801,9 +796,8 @@ impl WeakReference {
     #[php(arity = manual)]
     fn __construct(req: &mut Request, this: This<Self>) -> Result<(), Thrown> {
         let _ = this;
-        Err(throw_error(
+        Err(error(
             req,
-            "Error",
             "Direct instantiation of WeakReference is not allowed, use WeakReference::create instead",
         ))
     }
@@ -874,16 +868,12 @@ impl WeakReference {
                 })
             });
         if let Some(at) = existing
-            && let Some(reference) = stored(req, at)
+            && let Some(reference) = req.stored_object(at)
         {
             return Ok(Owner::take(req, reference).into_instance());
         }
         let Some(class) = req.class_named(Bare::resolved(b"WeakReference")) else {
-            return Err(throw_error(
-                req,
-                "Error",
-                "Class \"WeakReference\" not found",
-            ));
+            return Err(error(req, "Class \"WeakReference\" not found"));
         };
         let reference = req.new_object_with(
             class,
@@ -898,11 +888,7 @@ impl WeakReference {
     /// `WeakReference::get(): ?object`: the referent with one more owner,
     /// or `null` once it is gone.
     fn get(req: &mut Request, this: This<Self>) -> Option<PhpObject> {
-        let referent = this
-            .object()
-            .native::<WeakRef>(req)
-            .and_then(|payload| payload.referent)?;
-        Some(referent)
+        this.object().native::<WeakRef>(req)?.referent
     }
 }
 

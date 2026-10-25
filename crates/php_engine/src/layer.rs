@@ -59,6 +59,14 @@ pub struct StreamHooks {
     /// extension's own
     /// ([`ExtensionBuilder::resolve_path`](crate::api::abi::ExtensionBuilder::resolve_path)).
     pub resolve_path: fn(&mut Request, &[u8]) -> Result<Vec<u8>, Unresolved>,
+    /// opcache's `zend_get_stream_timestamp`
+    /// (`Z/ext/opcache/ZendAccelerator.c:944-978`): the stat of the file a
+    /// wrapper's path names, as its wrapper's `url_stat` reports it asked
+    /// quietly, laid out as `php_fstat` lays it out, which the unit cache
+    /// stamps and validates a file it holds by; `st_mtime` one and the
+    /// rest zero for a wrapper with no `url_stat`, and `None` where the
+    /// stat failed.
+    pub timestamp: fn(&mut Request, &[u8]) -> Option<[i64; 13]>,
     /// The stream opcache's `zend_stream_open` of a file it holds makes
     /// and frees: its resource's number spent.
     pub spend: fn(&mut Request),

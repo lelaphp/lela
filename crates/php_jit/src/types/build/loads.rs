@@ -98,7 +98,7 @@ impl Builder<'_> {
             match op {
                 // Entering a call frees every register of the frame it
                 // leaves whose value is still to be read.
-                Op::Enter { frame } => {
+                Op::Enter { frame, .. } => {
                     let live = ends.is_none_or(|ends| at < ends);
                     if current == Frame::ROOT && live && !last_use {
                         return false;

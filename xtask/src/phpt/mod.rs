@@ -188,6 +188,7 @@ use crate::sources;
 use crate::sysv;
 use crate::tally::{self, Outcome};
 use adapter::Adapter;
+use file::Phpt;
 use target::{Measure, Target};
 
 /// The instrument's name, the reading's `instrument` field.
@@ -244,27 +245,51 @@ impl Lane {
     pub(crate) const FEATURE: &str = "jit";
 }
 
-/// One directory of the corpus: where it stands in the pinned tree, and
-/// where it stands on this machine.
+/// One directory of the corpus: where it stands in the pinned tree, where
+/// it stands on this machine, and the extension its tests must name to be
+/// the subset's, where only those are.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Dir {
     /// The directory, relative to the pinned php-src tree.
     pub under: PathBuf,
     /// The same directory on this machine.
-    pub dir: PathBuf,
+    pub path: PathBuf,
+    /// The extension a test of the directory names in `--EXTENSIONS--`
+    /// to be the subset's: a row's `needed_in` (#3309). None holds all.
+    pub needs: Option<String>,
 }
 
 impl Dir {
     fn at(source: &Path, under: PathBuf) -> Dir {
         Dir {
-            dir: source.join(&under),
+            path: source.join(&under),
             under,
+            needs: None,
         }
+    }
+
+    /// The same directory of the tree at `root`.
+    fn moved(&self, root: &Path) -> Dir {
+        Dir {
+            needs: self.needs.clone(),
+            ..Dir::at(root, self.under.clone())
+        }
+    }
+
+    /// Whether the test at `path` is the subset's: every one, or one whose
+    /// `--EXTENSIONS--` names the extension as run-tests.php reads it
+    /// ([`Phpt::extensions`]), so only a binary that loads it runs it; a
+    /// file that does not parse names none.
+    fn admits(&self, path: &Path) -> bool {
+        let Some(needs) = &self.needs else {
+            return true;
+        };
+        Phpt::load(path).is_ok_and(|phpt| phpt.extensions().contains(needs))
     }
 
     /// Where the test stands inside this directory.
     fn inside<'a>(&self, test: &'a Path) -> &'a Path {
-        test.strip_prefix(&self.dir).unwrap_or(test)
+        test.strip_prefix(&self.path).unwrap_or(test)
     }
 }
 
@@ -443,11 +468,10 @@ impl Subset {
         holds: Holds,
     ) -> Subset {
         let dirs = unders.into_iter().map(|under| Dir::at(root, under));
-        let root = root.to_path_buf();
         Subset {
             scope,
             dirs: dirs.collect(),
-            root,
+            root: root.to_path_buf(),
             holds,
         }
     }
@@ -458,17 +482,31 @@ impl Subset {
     /// a reading that says so, since dropping it quietly would leave
     /// `done` asking a crate for a phpt reading nothing could write, which
     /// is the hole #18 closed.
+    ///
+    /// Beside them, the tests of each directory its row's `needed_in`
+    /// names that name the extension (#3309).
     pub(crate) fn of(source: &Path, krate: &Crate) -> Option<Subset> {
         let unders = krate.subsets();
-        (!unders.is_empty()).then(|| Subset::over(krate.name.clone(), source, unders, Holds::Every))
+        let mut subset = (!unders.is_empty())
+            .then(|| Subset::over(krate.name.clone(), source, unders, Holds::Every))?;
+        if let Some(extension) = krate.extension() {
+            subset.dirs.extend(krate.needed_in.iter().map(|under| Dir {
+                needs: Some(extension.to_owned()),
+                ..Dir::at(source, PathBuf::from(under))
+            }));
+        }
+        Some(subset)
     }
 
     /// The same subset standing in the tree at `root`, a copy of the one
     /// it was resolved in: its directories at their places there, and its
     /// programs run from there.
     pub(crate) fn rooted(&self, root: &Path) -> Subset {
-        let unders = self.dirs.iter().map(|place| place.under.clone());
-        Subset::over(self.scope.clone(), root, unders, self.holds)
+        Subset {
+            dirs: self.dirs.iter().map(|place| place.moved(root)).collect(),
+            root: root.to_path_buf(),
+            ..self.clone()
+        }
     }
 
     /// Whether the subset's tests make System V objects naming no process,
@@ -485,7 +523,7 @@ impl Subset {
     pub(crate) fn absent(&self) -> Vec<&Path> {
         self.dirs
             .iter()
-            .filter(|place| !place.dir.is_dir())
+            .filter(|place| !place.path.is_dir())
             .map(|place| place.under.as_path())
             .collect()
     }
@@ -530,7 +568,7 @@ impl Subset {
                 subset
                     .dirs
                     .iter()
-                    .any(|place| tally::any_file_under(&place.dir, is_phpt))
+                    .any(|place| tally::any_file_under(&place.path, is_phpt))
             })
             .collect()
     }
@@ -541,9 +579,9 @@ impl Subset {
         let mut all = Vec::new();
         for place in &self.dirs {
             let mut found = Vec::new();
-            tally::files_under(&place.dir, &mut found)
-                .with_context(|| format!("listing the subset at {}", place.dir.display()))?;
-            found.retain(|path| self.holds.admits(path));
+            tally::files_under(&place.path, &mut found)
+                .with_context(|| format!("listing the subset at {}", place.path.display()))?;
+            found.retain(|path| self.holds.admits(path) && place.admits(path));
             found.sort();
             all.append(&mut found);
         }
@@ -591,7 +629,7 @@ impl Subset {
 
     /// The directory of the subset the test was found under.
     fn found_in(&self, test: &Path) -> Option<&Dir> {
-        self.dirs.iter().find(|place| test.starts_with(&place.dir))
+        self.dirs.iter().find(|place| test.starts_with(&place.path))
     }
 
     /// The reading's scope: the subset's, and what the run was beside it,

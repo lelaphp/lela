@@ -201,7 +201,7 @@ impl Request {
 
     /// A callback and its arguments given up where no entry was made of
     /// them.
-    fn drop_callback(&mut self, callback: Owner<Callable>, arguments: Vec<Value>) {
+    pub(super) fn drop_callback(&mut self, callback: Owner<Callable>, arguments: Vec<Value>) {
         callback.give_up(self);
         for value in arguments {
             self.release(value);

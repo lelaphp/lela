@@ -15,9 +15,10 @@
 
 use std::sync::Arc;
 
+use php_heap::ZvalType;
 use php_link::LinkedClass;
-use php_unit::decl::Parameter;
-use php_unit::{CacheSlot, MapPtrOffset, OpArray, OplineIdx};
+use php_unit::decl::{Parameter, Type};
+use php_unit::{CacheSlot, MapPtrOffset, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::published::SEALED;
 use super::{FrameRef, Request, SafepointIdx, Word};
@@ -183,8 +184,10 @@ impl<'a> Held<'a> {
         Held(code)
     }
 
-    /// The op array itself, for the engine's own loop.
-    pub(crate) fn code(self) -> &'a OpArray {
+    /// The op array itself: what the engine's own loop runs, and what a
+    /// tier reads of the code of a frame it goes on in ([`served`]).
+    #[must_use]
+    pub fn code(self) -> &'a OpArray {
         self.0
     }
 
@@ -292,6 +295,48 @@ fn held(req: &Request, frame: FrameRef) -> Option<&super::published::Func> {
     own_row(req, header).or_else(|| row(req, req.served_op_array(frame)?.runtime_cache))
 }
 
+/// The oplines the opline at `at` of `code` may jump to, past falling
+/// through to the next one, as `zend_dump_op` prints them and
+/// `zend_build_cfg` draws its edges: each target of a `SWITCH_LONG`,
+/// `SWITCH_STRING` or `MATCH`'s table, its `CONST` `op2`, in the table's
+/// order, then the one field `zend_vm_opcodes_flags` shapes `JMP_ADDR`
+/// ([`php_unit::Opline::jump_target`]): `op1` for a `JMP` or a
+/// `FAST_CALL`, `op2` for a conditional jump, a `FE_RESET_*` or a `CATCH`
+/// that is not its try's last, and `extended_value` for a `FE_FETCH_*`
+/// or a table's default. None for an opline that jumps nowhere, and past
+/// the last.
+pub fn jump_targets(code: &OpArray, at: OplineIdx) -> impl Iterator<Item = OplineIdx> + use<'_> {
+    let op = code.oplines.get(at.0 as usize);
+    let table = op
+        .filter(|op| {
+            matches!(
+                op.opcode,
+                Opcode::SwitchLong | Opcode::SwitchString | Opcode::Match
+            ) && op.op2_type == OperandKind::Const
+        })
+        .and_then(|op| code.literals.get(op.op2 as usize))
+        .and_then(|zval| zval.as_arr());
+    let cases = table.into_iter().flat_map(|table| {
+        table.iter().filter_map(|(_, target)| {
+            target
+                .as_long()
+                .and_then(|at| u32::try_from(at).ok())
+                .map(OplineIdx)
+        })
+    });
+    cases.chain(op.and_then(Opline::jump_target))
+}
+
+/// The op array `frame` serves, as the epoch `req` started in holds it,
+/// for as long as the request: what a tier reads where the interpreter
+/// goes on in a frame whose op array the loop does not hand it, a
+/// return's caller (`jit-design.md` §4.9). None for a request's op array
+/// and a frame that serves none.
+#[must_use]
+pub fn served(req: &Request, frame: FrameRef) -> Option<Held<'_>> {
+    held(req, frame)?.op_array().map(Held)
+}
+
 /// The landing word of opline `at` of the op array `frame` serves, what
 /// the tier reads where a return lands there ([`Epoch::landing`]): the
 /// sealed word until a tier armed it, and for an op array no epoch holds.
@@ -310,6 +355,119 @@ pub struct MapPtrRaw {
     pub slot: u32,
 }
 
+/// Where one slot of a held op array's runtime cache stands in one
+/// request ([`touch`]): the engine's slot itself, which compiled code
+/// reads in place past [`PLACE`](super::PLACE), standing there for as long
+/// as the request runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CachedSlot(std::ptr::NonNull<u8>);
+
+impl CachedSlot {
+    /// The slot's address, its provenance exposed, as compiled code is
+    /// handed it.
+    #[must_use]
+    pub fn address(self) -> usize {
+        self.0.as_ptr().expose_provenance()
+    }
+}
+
+/// The touch (`jit-design.md` §4.6, #2957's note): where slot `raw` of
+/// the runtime cache of the op array `epoch` holds at its offset stands
+/// in `req`, where the request has laid that cache down. php lays a
+/// function's cache at the first `INIT_*` that pushes its call in the
+/// request (`init_func_run_time_cache`, `Z/Zend/zend_vm_def.h:4072`),
+/// and so does the engine's `push_call`, so a
+/// trace entered before its inlined callee's first call finds none, and
+/// the touch lays nothing down: the slot is answered none, its opline is
+/// its handler's until the call's `INIT_*` lays the cache, and a later
+/// entry touches it again. A function's cache stands where it was laid
+/// for as long as the request is served, so compiled code that was handed
+/// the slot reads it for as long as it may. None also for a file's own
+/// code, whose every activation lays a fresh cache, for an op array the
+/// epoch holds no row for, and for a slot past its cache.
+#[must_use]
+pub fn touch(req: &Request, epoch: &Epoch, raw: MapPtrRaw) -> Option<CachedSlot> {
+    let code = touched_code(epoch, raw)?;
+    let at = crate::exec::CacheAt::of(code.runtime_cache);
+    let slot = req.touch_cache(at, CacheSlot(raw.slot))?;
+    Some(CachedSlot(slot.cast()))
+}
+
+/// Whether [`touch`] can ever answer slot `raw` in a request: not for a
+/// file's own code, an op array the epoch holds no row for, or a slot past
+/// its cache, which no call lays down.
+#[must_use]
+pub fn touchable(epoch: &Epoch, raw: MapPtrRaw) -> bool {
+    touched_code(epoch, raw)
+        .is_some_and(|code| crate::exec::CacheSize::of(code).holds(CacheSlot(raw.slot)))
+}
+
+/// The op array of a function's whose cache slot `raw` names, which the
+/// touch reads.
+fn touched_code(epoch: &Epoch, raw: MapPtrRaw) -> Option<&OpArray> {
+    (epoch.func(FuncRef(MapPtrOffset::Engine(raw.offset))))
+        .filter(|func| !func.is_main())
+        .and_then(|func| func.op_array())
+}
+
+/// Where a property opline over a constant name finds the property on an
+/// object of one published class, from one op array
+/// ([`UnitView::hold_place`]): the declared slot, `OBJ_PROP_NUM`, and
+/// whether the property carries a type, whose write, compound write and
+/// step php's code generator serves through `zend_jit_assign_to_typed_prop`
+/// and its kin and this tier through the handler, a `readonly` one and one
+/// of a set visibility among them.
+///
+/// For a request-scoped class, whose id and slots are the request's, the
+/// place is the one the recording's request found, by which the trace
+/// decides how it serves the opline, and compiled code reads the place
+/// of the request it runs in from that request's cache slot
+/// ([`PropertySlot::cached`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropertySlot {
+    func: FuncRef,
+    at: OplineIdx,
+    class: ClassId,
+    slot: u32,
+    typed: bool,
+    admits: u16,
+    cached: Option<MapPtrRaw>,
+}
+
+impl PropertySlot {
+    /// The runtime-cache slot compiled code reads the place from, in the
+    /// request it runs in, for a request-scoped class, as php's code reads
+    /// `CACHED_PTR(cache_slot)` for a class that is not immutable
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`); none for a
+    /// published class, whose place is this one in every request.
+    #[must_use]
+    pub fn cached(self) -> Option<MapPtrRaw> {
+        self.cached
+    }
+
+    /// The declared slot, by its number among the object's slots.
+    #[must_use]
+    pub fn slot(self) -> u32 {
+        self.slot
+    }
+
+    /// Whether the property carries a type.
+    #[must_use]
+    pub fn typed(self) -> bool {
+        self.typed
+    }
+
+    /// Whether a write of a scalar of `kind` lands in the slot as it
+    /// stands, with nothing to verify or convert, as the handler's inline
+    /// path writes it: any scalar of an untyped slot, one its type's mask
+    /// holds of a typed one, none of a `readonly` one or one of a set
+    /// visibility the scope lacks.
+    #[must_use]
+    pub fn admits(self, kind: ZvalType) -> bool {
+        (self.admits >> (kind as u16 & 15)) & 1 != 0
+    }
+}
+
 /// What a trace may read of the op arrays, literals and published
 /// classes it touched (`jit-design.md` §4.1, §5.3): built by the recorder
 /// from the request, it holds the request's epoch once and the ids it
@@ -324,8 +482,14 @@ pub struct UnitView {
     classes: Vec<ClassId>,
     /// The plain calls the recording took ([`UnitView::hold_call`]).
     calls: Vec<super::PlainCall>,
+    /// The property places the recording took ([`UnitView::hold_place`]).
+    places: Vec<PropertySlot>,
     /// Whether an observer of calls was declared ([`UnitView::observed`]).
     observed: bool,
+    /// What the natives of the frameless calls the recording served
+    /// declare they return, by their row of the engine's frameless table
+    /// ([`UnitView::hold_frameless`]).
+    frameless: Vec<(u32, Option<Type>)>,
 }
 
 /// A view and an epoch hold leave the request's thread with a claim and
@@ -347,7 +511,9 @@ impl UnitView {
             funcs: Vec::new(),
             classes: Vec::new(),
             calls: Vec::new(),
+            places: Vec::new(),
             observed: crate::observer::observing(req),
+            frameless: Vec::new(),
         }
     }
 
@@ -379,6 +545,128 @@ impl UnitView {
         true
     }
 
+    /// Take the place the property opline at `at` of the op array `frame`
+    /// serves names on an object of `class`, a declared slot, as the
+    /// engine's runtime cache holds it after a pass of the handler
+    /// ([`Request::cached_property`]), so a trace that recorded the opline
+    /// reads and writes the slot in place under a guard on the object's
+    /// class, as php's code generator does for a property its
+    /// `zend_get_known_property_info` finds on an immutable class
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14313-14340`). Taken only where
+    /// every frame that runs the op array finds the place one way: the
+    /// frame reads its op array's own cache, so it is no closure's and no
+    /// trait method's copy's, and the op array runs in one scope
+    /// ([`super::published::Func::fixes_scope`]), which is what the
+    /// placement asks of the frame. A published class's id names one
+    /// linked, immutable class in every request of the epoch, whose slots
+    /// and their types are that record's; a request-scoped one, a class a
+    /// request linked over one of its own (`zend_lazy_class_load`'s copy),
+    /// every enum and an evaluated class, has an id and slots of the
+    /// request's, so its place is read where compiled code runs from that
+    /// request's slot ([`PropertySlot::cached`]), as php's code reads it
+    /// for a class that is not immutable (`:14341-14370`). `false`, taking
+    /// nothing, for any other, and where the cache names no declared slot.
+    pub fn hold_place(
+        &mut self,
+        req: &Request,
+        frame: FrameRef,
+        at: OplineIdx,
+        class: ClassId,
+    ) -> bool {
+        let Some(header) = req.vm().at(frame) else {
+            return false;
+        };
+        let Some(func) = own_row(req, header).filter(|func| func.fixes_scope()) else {
+            return false;
+        };
+        let f = FuncRef(header.runtime_cache().offset());
+        let Some(op) = func
+            .op_array()
+            .and_then(|code| code.oplines.get(at.0 as usize))
+        else {
+            return false;
+        };
+        // `CACHE_ADDR(opline->extended_value & ~ZEND_FETCH_OBJ_FLAGS)`, an
+        // `ASSIGN_OBJ_OP`'s its `OP_DATA`'s: a `_W` fetch carries php's two
+        // fetch flags beside the slot, and the rest none.
+        let flags = crate::handlers::FETCH_REF | crate::handlers::FETCH_DIM_WRITE;
+        let slot = match op.opcode {
+            Opcode::FetchObjW => CacheSlot(op.extended_value & !flags),
+            Opcode::FetchObjR
+            | Opcode::AssignObj
+            | Opcode::PreIncObj
+            | Opcode::PreDecObj
+            | Opcode::PostIncObj
+            | Opcode::PostDecObj => CacheSlot(op.extended_value),
+            Opcode::AssignObjOp => match func
+                .op_array()
+                .and_then(|code| code.oplines.get(at.0 as usize + 1))
+            {
+                Some(data) => CacheSlot(data.extended_value),
+                None => return false,
+            },
+            _ => return false,
+        };
+        if op.op2_type != OperandKind::Const || !self.hold(req, f) {
+            return false;
+        }
+        // A request-scoped class's place is read from the cache slot of
+        // the request compiled code runs in.
+        let cached = if class.is_published() {
+            if !self.hold_class(req, class) {
+                return false;
+            }
+            None
+        } else {
+            match self.cache_slot(f, slot) {
+                Some(raw) => Some(raw),
+                None => return false,
+            }
+        };
+        let Some(crate::exec::PropertyOffset::Declared { slot, ty }) =
+            req.cached_property(frame, slot, class)
+        else {
+            return false;
+        };
+        // The scalars a write lands as they stand, by the slot type's own
+        // test ([`crate::exec::SlotType::admits`]): none of a guarded
+        // slot, `readonly` or of a set visibility the scope lacks.
+        let scalars = [
+            php_heap::Zval::null(),
+            php_heap::Zval::bool(false),
+            php_heap::Zval::bool(true),
+            php_heap::Zval::long(0),
+            php_heap::Zval::double(0.0),
+        ];
+        let admits = scalars
+            .into_iter()
+            .filter(|z| ty.admits(*z))
+            .fold(0u16, |kinds, z| kinds | 1 << (z.kind() as u16));
+        let place = PropertySlot {
+            func: f,
+            at,
+            class,
+            slot,
+            typed: ty.typed(),
+            admits,
+            cached,
+        };
+        if !self.places.contains(&place) {
+            self.places.push(place);
+        }
+        true
+    }
+
+    /// The declared slot the property opline at `at` of the op array `f`
+    /// names on an object of `class`; none unless
+    /// [`UnitView::hold_place`] took it.
+    #[must_use]
+    pub fn place(&self, f: FuncRef, at: OplineIdx, class: ClassId) -> Option<PropertySlot> {
+        (self.places.iter())
+            .find(|place| place.func == f && place.at == at && place.class == class)
+            .copied()
+    }
+
     /// Whether an observer of calls was declared for the engine, which
     /// compiled code tells of every call and return its trace makes, so
     /// that it leaves no frame in place (design §4.3 seam 9).
@@ -395,7 +683,9 @@ impl UnitView {
         let Some(plain) = super::plain_call(req, call) else {
             return false;
         };
-        if !self.hold(req, plain.callee()) {
+        if let Some(callee) = plain.callee()
+            && !self.hold(req, callee)
+        {
             return false;
         }
         if !self.calls.contains(&plain) {
@@ -404,13 +694,52 @@ impl UnitView {
         true
     }
 
+    /// Take what the native of row `index` of the engine's frameless
+    /// table, the one a `FRAMELESS_ICALL_*` whose `extended_value` is
+    /// `index` calls (`ZEND_FLF_FUNC`), declares it returns: none where it
+    /// declares nothing or returns by reference. php's trace types what
+    /// such a call writes by it, through the call map it builds for every
+    /// op array a trace runs through, a file's own code among them
+    /// (`zend_jit_trace_build_ssa`, `Z/ext/opcache/jit/zend_jit_trace.c:555-557`;
+    /// `zend_get_func_info`, `Z/Zend/Optimizer/zend_func_info.c:132-150`),
+    /// as it types a `DO_ICALL`'s by the function its record names.
+    pub fn hold_frameless(&mut self, req: &Request, index: u32) {
+        if self.frameless.iter().any(|(held, _)| *held == index) {
+            return;
+        }
+        let returns = req
+            .frameless_entry(index)
+            .and_then(|(function, _)| req.symbols().function_decl(function))
+            .filter(|decl| !decl.returns_by_ref)
+            .and_then(|decl| decl.return_type.clone());
+        self.frameless.push((index, returns));
+    }
+
+    /// What the native of row `index` of the engine's frameless table
+    /// declares it returns; none unless [`UnitView::hold_frameless`] took
+    /// it, where it declares nothing, and where it returns by reference.
+    #[must_use]
+    pub fn frameless_returns(&self, index: u32) -> Option<&Type> {
+        (self.frameless.iter())
+            .find(|(held, _)| *held == index)
+            .and_then(|(_, returns)| returns.as_ref())
+    }
+
     /// The plain call to the op array `f` names with `count` arguments;
     /// none unless [`UnitView::hold_call`] took one.
     #[must_use]
     pub fn call(&self, f: FuncRef, count: u32) -> Option<&super::PlainCall> {
         self.calls
             .iter()
-            .find(|call| call.callee() == f && call.count() == count)
+            .find(|call| call.callee() == Some(f) && call.count() == count)
+    }
+
+    /// The plain call to the native named `name`, lowered, with `count`
+    /// arguments; none unless [`UnitView::hold_call`] took one.
+    #[must_use]
+    pub fn native_call(&self, name: &[u8], count: u32) -> Option<&super::PlainCall> {
+        (self.calls.iter())
+            .find(|call| call.callee().is_none() && call.name() == name && call.count() == count)
     }
 
     /// The op array `f` names; none unless [`UnitView::hold`] accepted it.

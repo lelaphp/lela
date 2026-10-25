@@ -35,7 +35,9 @@
 //! function table once a `DECLARE_FUNCTION` bound it.
 
 use php_link::Row;
-use php_unit::decl::{ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation};
+use php_unit::decl::{
+    Attribute, ClassDecl, ConstExpr, FunctionDecl, PropertyDecl, TraitAdaptation, Visibility,
+};
 use php_unit::{OpArray, Unit};
 
 use super::Request;
@@ -88,6 +90,17 @@ const CLASS_NAME: usize = 16;
 const PRECEDENCE: usize = 32;
 /// `sizeof(zend_trait_alias)`.
 const ALIAS: usize = 32;
+/// `sizeof(HashTable)`, a holder's `attributes`.
+const HASH_TABLE: usize = 56;
+/// `ZEND_ATTRIBUTE_SIZE(0)`, a `zend_attribute` with no argument.
+const ATTRIBUTE: usize = 40;
+/// `sizeof(zend_attribute_arg)`, what each argument adds to it.
+const ATTRIBUTE_ARG: usize = 24;
+/// `HT_HASH_SIZE(HT_MIN_MASK)`, the two hash slots a packed table keeps
+/// before its elements.
+const PACKED_HASH: usize = 8;
+/// The size `zend_add_attribute` inits a holder's `attributes` with.
+const ATTRIBUTES: usize = 8;
 
 /// php's blocks for what one request-only unit declares.
 #[derive(Default)]
@@ -248,6 +261,31 @@ impl Copied {
 }
 
 impl ClassBlocks {
+    /// A class's blocks as `lay` lays them into its three tables, each
+    /// `zend_initialize_class_data`'s, given back where it fails.
+    fn laid(
+        req: &mut Request,
+        lay: impl FnOnce(&mut Request, &mut ClassBlocks) -> Result<(), Thrown>,
+    ) -> Result<ClassBlocks, Thrown> {
+        let mut blocks = ClassBlocks {
+            functions: php_heap::EmbeddedArr::new(CLASS_TABLE),
+            properties: php_heap::EmbeddedArr::new(CLASS_TABLE),
+            constants: php_heap::EmbeddedArr::new(CLASS_TABLE),
+            defaults: Slots::default(),
+            statics: Slots::default(),
+            interfaces: None,
+            emalloced: Vec::new(),
+            copies: Vec::new(),
+        };
+        match lay(req, &mut blocks) {
+            Ok(()) => Ok(blocks),
+            Err(thrown) => {
+                blocks.into_blocks().free(req);
+                Err(thrown)
+            }
+        }
+    }
+
     /// The `HashTable` inside the `zend_class_entry` that is `table`.
     fn table(&self, table: Table) -> php_heap::Arr {
         match table {
@@ -310,6 +348,7 @@ impl ClassBlocks {
         if let Some(parent) = &linking.parent {
             self.defaults.inherit(req, parent.slots.instance)?;
             self.statics.inherit(req, parent.slots.statics)?;
+            self.defaults.grow(req, linking.hooked_slots)?;
             // As `zend_do_inheritance_ex` walks them, each only where the
             // parent's table has rows.
             for table in [Table::Properties, Table::Constants, Table::Methods] {
@@ -442,6 +481,10 @@ pub(super) struct Linking {
     /// The slots the traits' properties take.
     trait_slots: SlotCounts,
     parent: Option<Inherited>,
+    /// The slots `do_inherit_property` adds, one `perealloc` each, for a
+    /// virtual property with hooks the class declares over a parent's
+    /// backed one with none (`use_child_prop`).
+    hooked_slots: usize,
     /// Rows after the parent's: the traits' abstract methods and the
     /// interfaces' members.
     last: Members,
@@ -627,10 +670,10 @@ impl Declared {
     /// $m = memory_get_usage(); $i = $o(); unset($o, $i); echo memory_get_usage() - $m, "\n";
     /// ```
     /// ```expect regime=jit-off
-    /// 392
+    /// 400
     /// 0
-    /// 976
-    /// -976
+    /// 992
+    /// -992
     /// ```
     fn settle(&mut self, over: bool, dead: &mut Vec<Gone>) {
         if self.dynamic.is_empty() {
@@ -702,7 +745,7 @@ impl Declared {
 /// ```expect regime=jit-off
 /// 1152
 /// 5904
-/// 1600
+/// 1616
 /// ```
 fn op_array(
     req: &mut Request,
@@ -712,6 +755,17 @@ fn op_array(
 ) -> Result<(), Thrown> {
     let args = declared.map_or(0, |(decl, method)| arg_infos(decl, method));
     blocks.emalloced.push(Emalloc::new(req, REFCOUNT)?);
+    // `op_array->attributes`, the function's and its parameters' in one
+    // table (`zend_compile_params`' offset).
+    if let Some((decl, _)) = declared {
+        let parameters = decl.parameters.iter().flat_map(|p| &p.attributes);
+        attributes(
+            req,
+            &mut blocks.emalloced,
+            decl.attributes.iter().chain(parameters),
+            false,
+        )?;
+    }
     // `get_next_op` grows the oplines fourfold from
     // `INITIAL_OP_ARRAY_SIZE`, and `pass_two` reallocates them to the
     // oplines with the constants after them, aligned to 16
@@ -782,6 +836,91 @@ pub(super) fn arg_infos(decl: &FunctionDecl, method: bool) -> usize {
     let returns =
         decl.return_type.is_some() || (method && decl.name.0.eq_ignore_ascii_case(b"__tostring"));
     decl.parameters.len() + usize::from(returns)
+}
+
+/// What `zend_compile_attributes` lays on the request's heap for the
+/// attributes of one holder (`zend_add_attribute`): a function's with
+/// its parameters', a class's, a property's, a class constant's, or a
+/// `const` statement's, which `DECLARE_ATTRIBUTED_CONST` hands the
+/// constant it declares (`zend_constant_add_attributes`). That is the
+/// `attributes` table, `zend_hash_init(…, 8, …)` and packed as each is
+/// appended, and per attribute its `zend_attribute`, its name as
+/// resolved where it is a string of its own ([`Attribute::own_name`]),
+/// its lowered name where lowering changes it (`zend_string_tolower_ex`),
+/// each argument's name, and the tree `zend_const_expr_to_zval` copies
+/// for an argument that folds to no value ([`AstCopy`]); a value that
+/// folds is the unit's, a string the scanner's. A string of one byte is
+/// the scanner's `ZSTR_CHAR`. A promoted parameter's property holds its
+/// list `again`, the arguments' names the parameter's strings. An
+/// uncached include's and an `eval`'s alike (the program under the
+/// recipe's `TMPDIR`, written into the past, the includes written during
+/// the request):
+///
+/// ```php
+/// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+/// $f = $put('w3322-attributes.inc', <<<'PHP'
+/// <?php
+/// ini_set('opcache.file_update_protection', '2');
+/// function inc($name, $src) { $f = sys_get_temp_dir() . "/w3322-$name.inc"; file_put_contents($f, $src); $m = memory_get_usage(); include $f; $d = memory_get_usage() - $m; unlink($f); return $d; }
+/// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+/// inc('w0', '<?php class W {} $q0 = 1;'); m('$q1 = 1;'); m('function w1() {}');
+/// echo inc('class', '<?php #[Attribute] class Az1 { }'), " ", m('#[Attribute] class Ez1 { }'), "\n";
+/// echo inc('fn', '<?php #[Az1] function az1() {}'), " ", m('#[Az1] function ez1() {}'), "\n";
+/// echo inc('arg', '<?php #[Az1("y")] function az2() {}'), "\n";
+/// echo inc('prop', '<?php class Az3 { #[Az1] public $p; }'), "\n";
+/// echo inc('param', '<?php function az4(#[SensitiveParameter] $p) {}'), " ", m('function ez4(#[SensitiveParameter] $p) {}'), "\n";
+/// echo m('#[Az1(name: "abcdefgh", v: [1, 2], w: X1 . "y")] #[az1, A] function ez5(#[Az1] $a, #[Az1] $b) {}'), "\n";
+/// echo m('class Ez6 { #[Az1] const C = 1; #[Az1] function m(#[Az1] $p) {} }'), "\n";
+/// $junk = array_fill(0, 1000, str_repeat("x", 100));
+/// echo count((new ReflectionFunction('ez5'))->getAttributes()), count((new ReflectionClass('Ez6'))->getMethod('m')->getAttributes()), "\n";
+/// PHP);
+/// include $f;
+/// unlink($f);
+/// ```
+/// ```expect regime=jit-off
+/// 496 512
+/// 496 528
+/// 520
+/// 816
+/// 624 640
+/// 1496
+/// 1672
+/// 31
+/// ```
+pub(super) fn attributes<'a>(
+    req: &mut Request,
+    emalloced: &mut Vec<Emalloc>,
+    attributes: impl Iterator<Item = &'a Attribute>,
+    again: bool,
+) -> Result<(), Thrown> {
+    let string = |bytes: &[u8]| (bytes.len() > 1).then_some(STRING_HEADER + bytes.len() + 1);
+    let mut count = 0;
+    for attribute in attributes {
+        let name = &attribute.name.0;
+        let lowered = name.iter().any(u8::is_ascii_uppercase);
+        let mut lens = vec![ATTRIBUTE + attribute.arguments.len() * ATTRIBUTE_ARG];
+        lens.extend(string(name).filter(|_| attribute.own_name));
+        lens.extend(lowered.then_some(STRING_HEADER + name.len() + 1));
+        for argument in &attribute.arguments {
+            let named = argument.name.as_ref().filter(|_| !again);
+            lens.extend(named.and_then(|name| string(&name.0)));
+            if !super::linking::is_literal(&argument.value) {
+                lens.extend(AstCopy::of(&argument.value).blocks());
+            }
+        }
+        for len in lens {
+            emalloced.push(Emalloc::new(req, len)?);
+        }
+        count += 1;
+    }
+    if count > 0 {
+        // `HT_PACKED_SIZE_EX(nTableSize, HT_MIN_MASK)`, doubled from 8 as
+        // `zend_hash_packed_grow` doubles it.
+        let slots = count.max(ATTRIBUTES).next_power_of_two();
+        emalloced.push(Emalloc::new(req, HASH_TABLE)?);
+        emalloced.push(Emalloc::new(req, slots * ZVAL + PACKED_HASH)?);
+    }
+    Ok(())
 }
 
 /// What `zend_ast_copy` lays for one constant expression, as php's
@@ -896,14 +1035,36 @@ impl AstCopy {
     }
 
     /// `zend_ast_tree_size` over `expr`'s node in php's tree, and the
-    /// strings it holds.
+    /// strings it holds. A trait's `self::class` and `parent::class` stay
+    /// a `ZEND_AST_CLASS_NAME` the using class evaluates, a node with no
+    /// child and no string (the file under the recipe's `TMPDIR`):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3310-trait-class-name.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('trait TT { const K = self::class; public $p = self::class; function g($a = self::class) { return [$a, self::K, $this->p]; } } class UT { use TT; } function ft() { return (new UT)->g(); }'), "\n";
+    /// echo m('trait TP { const K = parent::class; } class BP {} class CP extends BP { use TP; }'), "\n";
+    /// $junk = array_fill(0, 1000, str_repeat("x", 100));
+    /// echo json_encode(eval('return [ft(), CP::K];')), "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 3704
+    /// 1048
+    /// [["UT","UT","UT"],"BP"]
+    /// ```
     fn expr(&mut self, expr: &ConstExpr) {
         match expr {
             ConstExpr::Null
             | ConstExpr::Bool(_)
             | ConstExpr::Long { .. }
             | ConstExpr::Double(_)
-            | ConstExpr::ImmutableArray(_) => self.tree += AST_ZVAL,
+            | ConstExpr::UnitValue(_) => self.tree += AST_ZVAL,
             ConstExpr::Str(bytes) => self.string(bytes),
             ConstExpr::Constant { name, .. } => self.string(&name.resolved().0),
             ConstExpr::ClassConstant { class, name, .. } => {
@@ -917,9 +1078,15 @@ impl AstCopy {
                 self.expr(name);
             }
             ConstExpr::EnumCase { .. } => self.enum_init(),
+            // `self::class` and `parent::class` keep the fetch type in
+            // the node's `attr` and no child (`zend_compile_const_expr_class_name`).
             ConstExpr::ClassName { class, .. } => {
                 self.node(1);
-                self.string(&class.0);
+                if !(class.0.eq_ignore_ascii_case(b"self")
+                    || class.0.eq_ignore_ascii_case(b"parent"))
+                {
+                    self.string(&class.0);
+                }
             }
             ConstExpr::Unary { operand, .. }
             | ConstExpr::Unpack(operand)
@@ -1027,23 +1194,98 @@ impl AstCopy {
 /// 1600
 /// ```
 fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
-    let mut blocks = ClassBlocks {
-        functions: php_heap::EmbeddedArr::new(CLASS_TABLE),
-        properties: php_heap::EmbeddedArr::new(CLASS_TABLE),
-        constants: php_heap::EmbeddedArr::new(CLASS_TABLE),
-        defaults: Slots::default(),
-        statics: Slots::default(),
-        interfaces: None,
-        emalloced: Vec::new(),
-        copies: Vec::new(),
-    };
-    match lay_class(req, &mut blocks, class) {
-        Ok(()) => Ok(blocks),
-        Err(thrown) => {
-            blocks.into_blocks().free(req);
-            Err(thrown)
+    ClassBlocks::laid(req, |req, blocks| lay_class(req, blocks, class))
+}
+
+/// `zend_lazy_class_load`'s copy of a class of a file the cache keeps,
+/// which php links in each request that declares it where the
+/// inheritance cache cannot keep the link (an enum, whose link adds its
+/// `cases`, `from` and `tryFrom`, and a class whose link took a class
+/// the request declared): its default tables at their counts, and each
+/// table its compile filled at the size it was compiled to, the
+/// `zend_class_entry`, its members and their types in the compile's
+/// arena. A cached file's enum costs its copy and its link, and a cached
+/// class over an `eval`'d parent its copy and the parent's rows, one
+/// using an `eval`'d trait its own and the trait's properties' (the
+/// program under the recipe's `TMPDIR`, written into the past so opcache
+/// keeps it):
+///
+/// ```php
+/// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/w3325-$name.inc"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+/// ini_set('opcache.file_update_protection', '0');
+/// include $put('w0', '<?php class W {} $q0 = 1;');
+/// eval('class EvP { public $a = 1; function f() {} } trait EvT { public $t = 1; public $u = 2; public $v = 3; }');
+/// $fs = [
+///     $put('unit', '<?php enum E1 { case A; case B; }'),
+///     $put('string', '<?php enum Ez: string { case A = "a"; }'),
+///     $put('methods', '<?php enum E3: string { case A = "a"; const K = 1; function m() { return 1; } static function s() {} }'),
+///     $put('implements', '<?php interface I4 { function i(); } enum E4: string implements I4 { case A = "a"; function i() {} }'),
+///     $put('trait', '<?php trait T5 { function t() {} } enum E5 { use T5; case A; }'),
+///     $put('nine', '<?php enum E6 { case A; case B; case C; case D; case E; case F; case G; case H; case I; }'),
+///     $put('child', '<?php class M1 extends EvP { public $b = 2; function g() {} const K = 1; }'),
+///     $put('empty', '<?php class M2 extends EvP { }'),
+///     $put('traited', '<?php class M3 { use EvT; public $o = 0; }'),
+/// ];
+/// $costs = [];
+/// foreach ($fs as $f) { $m = memory_get_usage(); include $f; $costs[] = memory_get_usage() - $m; }
+/// echo implode(" ", $costs), "\n";
+/// $junk = array_fill(0, 1000, str_repeat("x", 100));
+/// echo Ez::from("a")->name, E3::A->m(), E4::tryFrom("z") === null ? "-" : "+", E5::A->t(), count(E6::cases()), (new M1)->a, (new M2)->f(), (new M3)->v, "\n";
+/// foreach ($fs as $f) { unlink($f); }
+/// ```
+/// ```expect regime=jit-off
+/// 1088 1112 1112 1120 1088 1408 1408 752 480
+/// A1-913
+/// ```
+fn lazy_copy(req: &mut Request, compiled: Compiled) -> Result<ClassBlocks, Thrown> {
+    ClassBlocks::laid(req, |req, blocks| lay_tables(req, blocks, compiled))
+}
+
+/// What a class's compile fills its tables with: the rows its
+/// declarations write, an enum's `cases`, `from` and `tryFrom` being its
+/// link's, and the slots of its default tables.
+#[derive(Clone, Copy)]
+struct Compiled {
+    written: Members,
+    slots: SlotCounts,
+}
+
+impl Compiled {
+    /// What `class`'s compile fills.
+    fn of(class: &ClassDecl) -> Compiled {
+        Compiled {
+            written: Members {
+                methods: php_unit::written_methods(class).len(),
+                constants: class.constants.len(),
+                properties: class.properties.len(),
+            },
+            slots: SlotCounts::of(&class.properties),
         }
     }
+}
+
+/// The three tables of a class as its declarations fill them, and its
+/// default values, reallocated one at a time
+/// (`zend_declare_typed_property`), which leaves the bin of the last.
+fn lay_tables(
+    req: &mut Request,
+    blocks: &mut ClassBlocks,
+    compiled: Compiled,
+) -> Result<(), Thrown> {
+    let Compiled { written, slots } = compiled;
+    for table in Table::ALL {
+        add_rows(req, blocks.table(table), written.of(table))?;
+    }
+    for (table, count) in [
+        (&mut blocks.defaults, slots.instance),
+        (&mut blocks.statics, slots.statics),
+    ] {
+        if count > 0 {
+            table.block = Some(Emalloc::new(req, count * ZVAL)?);
+            table.count = count;
+        }
+    }
+    Ok(())
 }
 
 /// [`class`]'s blocks, laid into `blocks`: a class's adaptations of
@@ -1059,26 +1301,16 @@ fn class(req: &mut Request, class: &ClassDecl) -> Result<ClassBlocks, Thrown> {
 /// 936
 /// ```
 fn lay_class(req: &mut Request, blocks: &mut ClassBlocks, class: &ClassDecl) -> Result<(), Thrown> {
-    // An enum's `cases`, `from` and `tryFrom` are its link's.
-    let written = Members {
-        methods: php_unit::written_methods(class).len(),
-        constants: class.constants.len(),
-        properties: class.properties.len(),
-    };
-    for table in Table::ALL {
-        add_rows(req, blocks.table(table), written.of(table))?;
-    }
-    // The default values, reallocated one at a time
-    // (`zend_declare_typed_property`), which leaves the bin of the last.
-    let slots = SlotCounts::of(&class.properties);
-    for (table, count) in [
-        (&mut blocks.defaults, slots.instance),
-        (&mut blocks.statics, slots.statics),
-    ] {
-        if count > 0 {
-            table.block = Some(Emalloc::new(req, count * ZVAL)?);
-            table.count = count;
-        }
+    lay_tables(req, blocks, Compiled::of(class))?;
+    // `ce->attributes`, and each property's and constant's own.
+    attributes(req, &mut blocks.emalloced, class.attributes.iter(), false)?;
+    let properties = class
+        .properties
+        .iter()
+        .map(|p| (&p.attributes, p.is_promoted));
+    let constants = class.constants.iter().map(|c| (&c.attributes, false));
+    for (held, again) in properties.chain(constants) {
+        attributes(req, &mut blocks.emalloced, held.iter(), again)?;
     }
     // Each constant expression, copied out of the compile's arena as its
     // constant's or its property's value (`zend_const_expr_to_zval`'s
@@ -1273,20 +1505,29 @@ impl Table {
 impl Request {
     /// `zend_do_link_class`'s blocks for `class` as it binds
     /// ([`ClassBlocks::link`]), where a unit the request compiled for
-    /// itself declared it; nothing for any other class. The `Err` is the
-    /// memory limit's fatal.
+    /// itself declared it, and where a file the cache keeps did, over
+    /// `zend_lazy_class_load`'s copy ([`lazy_copy`]), which the request
+    /// holds to its end; the request binds no other class of its own. The
+    /// `Err` is the memory limit's fatal.
     pub(super) fn link_blocks(&mut self, class: ClassId) -> Result<(), Thrown> {
-        if self.unit_strings.is_empty() {
-            return Ok(());
-        }
         let Some((unit, at)) = self
             .declared_row(class)
             .map(|row| (php_unit::PublishedUnit::as_ptr(&row.unit), row.at as usize))
         else {
             return Ok(());
         };
-        let Some(mut blocks) = self.unit_strings.class_blocks(unit, at) else {
-            return Ok(());
+        let cached = !self.unit_strings.holds(unit);
+        let mut blocks = match self.unit_strings.class_blocks(unit, at) {
+            Some(blocks) => blocks,
+            // The class as its unit wrote it, before its traits composed it.
+            None if cached => match (self.declared_row(class))
+                .and_then(|row| row.unit.classes.get(row.at as usize))
+                .map(Compiled::of)
+            {
+                Some(compiled) => lazy_copy(self, compiled)?,
+                None => return Ok(()),
+            },
+            None => return Ok(()),
         };
         let linked = match self.linking(class) {
             Some(linking) => blocks.link(self, &linking),
@@ -1294,6 +1535,7 @@ impl Request {
         };
         match self.unit_strings.class_slot(unit, at) {
             Some(slot) => *slot = Some(blocks),
+            None if cached => self.unit_strings.keep_copied(blocks.into_blocks()),
             None => blocks.into_blocks().free(self),
         }
         linked?;
@@ -1526,10 +1768,24 @@ impl Request {
                 .saturating_sub(decl.properties.len() + taken.properties),
         };
         let interfaces = self.interface_sizes(decl, written);
+        let above = (decl.parent.as_ref()).and_then(|name| self.class_named(name.into()));
+        let backed_above = |name: &[u8]| {
+            let above = above.map_or(&[][..], |above| self.placed_properties(above));
+            (above.iter().filter_map(|info| self.property_decl(*info))).any(|property| {
+                *property.name.0 == *name
+                    && property.visibility != Visibility::Private
+                    && property.hooks.is_none()
+            })
+        };
+        let hooked_slots = (written.properties.iter())
+            .filter(|property| property.is_instance && property.is_virtual)
+            .filter(|property| property.hooks.is_some() && backed_above(&property.name.0))
+            .count();
         Some(Linking {
             first,
             trait_slots,
             parent,
+            hooked_slots,
             last,
             interfaces,
         })

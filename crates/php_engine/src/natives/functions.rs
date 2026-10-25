@@ -8,12 +8,12 @@ use php_macros::php_function;
 use php_unit::decl::Bare;
 
 use crate::api::abi::{OrFalse, Passed};
-use crate::api::raising::{Thrown, arg_value_error, deprecated, throw_error};
+use crate::api::raising::{Thrown, arg_value_error, deprecated, error};
 use crate::api::request::{NativeCaller, Request};
 use crate::api::values::{Owner, PhpArray, PhpString, Resource, TypeTag, Value};
 
 /// `ZEND_VERSION` at the pin (`Z/Zend/zend.h:23`).
-pub(crate) const ZEND_VERSION: &str = "4.5.9";
+pub(crate) const ZEND_VERSION: &str = "4.5.12";
 
 /// `zend_version(): string`, php's `ZEND_FUNCTION(zend_version)`
 /// (`Z/Zend/zend_builtin_functions.c:146`).
@@ -22,7 +22,7 @@ pub(crate) const ZEND_VERSION: &str = "4.5.9";
 /// var_dump(zend_version());
 /// ```
 /// ```expect
-/// string(5) "4.5.9"
+/// string(6) "4.5.12"
 /// ```
 #[php_function]
 fn zend_version(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
@@ -36,7 +36,7 @@ fn zend_version(req: &mut Request) -> Result<Owner<PhpString>, Thrown> {
 fn caller_arguments(req: &mut Request, name: &str, what: &str) -> Result<Vec<Value>, Thrown> {
     match req.native_caller() {
         NativeCaller::Function(_, arguments) => Ok(arguments),
-        NativeCaller::Code(_) => Err(throw_error(req, "Error", &format!("{name}() {what}"))),
+        NativeCaller::Code(_) => Err(error(req, &format!("{name}() {what}"))),
         NativeCaller::Native => Err(req.dynamic_call()),
     }
 }
@@ -475,11 +475,7 @@ fn get_defined_vars(req: &mut Request) -> Result<Owner<PhpArray>, Thrown> {
     let frame = match req.native_caller() {
         NativeCaller::Function(frame, _) | NativeCaller::Code(frame) => frame,
         NativeCaller::Native => {
-            return Err(throw_error(
-                req,
-                "Error",
-                "Cannot call get_defined_vars() dynamically",
-            ));
+            return Err(error(req, "Cannot call get_defined_vars() dynamically"));
         }
     };
     let made = req.defined_vars(frame);

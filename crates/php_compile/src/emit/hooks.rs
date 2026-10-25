@@ -299,7 +299,12 @@ impl Emit<'_> {
             is_abstract,
             ..FnFlags::default()
         };
-        let saved = self.begin_body(&name, true, flags);
+        let at = crate::FunctionAt::Hook {
+            class: hooked.class as usize,
+            property: hooked.property as usize,
+            kind,
+        };
+        let saved = self.begin_body(super::ActiveFunction::at(&name, at), true, flags);
         self.active_property = Some(hooked.name.to_vec());
         self.active_hook = Some(kind);
         let outcome =

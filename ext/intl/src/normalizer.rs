@@ -9,6 +9,7 @@ use php_ext::request::Request;
 use php_ext::values::{Owner, PhpString};
 
 use crate::error;
+use crate::ffi::heap::Block;
 use crate::ffi::normalizer::{Form, Normalizer as Icu};
 use crate::ffi::{self, Code};
 use crate::utf8;
@@ -116,6 +117,20 @@ fn failed<T>(req: &mut Request, code: Code, message: &str) -> Result<OrFalse<T>,
 /// bool(false)
 /// string(85) "normalizer_normalize(): Error converting input string to UTF-16: U_INVALID_CHAR_FOUND"
 /// ```
+///
+/// Since 8.5.12 the destination is asked for fallibly, so a text whose
+/// UTF-16 copy met the memory limit is refused its destination and the
+/// limit's fatal is raised as the call returns; `Normalizer::normalize`
+/// is the same body:
+///
+/// ```php
+/// ini_set('memory_limit', '8M');
+/// var_dump(normalizer_normalize(str_repeat("A", 2 << 20), Normalizer::FORM_D), "unreached");
+/// ```
+/// ```expect exit=255
+///
+/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 3
+/// ```
 #[php_function(before_args = error::reset)]
 fn normalizer_normalize(
     req: &mut Request,
@@ -131,19 +146,84 @@ fn normalize(
     form: i64,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let form = checked_form(req, form)?;
-    let text = match ffi::to_utf16(string.as_bytes()) {
-        Ok(text) => text,
+    let expansion = match form {
+        Form::D | Form::Kd => 3,
+        Form::C | Form::Kc | Form::KcCasefold => 1,
+    };
+    let (input, len) = match ffi::to_utf16_block(req, string.as_bytes())? {
+        Ok(input) => input,
         Err(code) => return failed(req, code, "Error converting input string to UTF-16"),
     };
-    // php sets the message alone here, the code left as it was.
-    let Ok(normalized) = Icu::of(form).and_then(|norm| norm.normalize(&text)) else {
-        error::set_custom_msg(req, "Error normalizing string")?;
-        return Ok(OrFalse::False);
+    let answered = normalized(req, form, &input.as_slice()[..len], len * expansion);
+    input.give_back(req);
+    let (out, len) = match answered? {
+        Normalized::Text(out, len) => (out, len),
+        Normalized::Failed => {
+            // php sets the message alone here, the code left as it was.
+            error::set_custom_msg(req, "Error normalizing string")?;
+            return Ok(OrFalse::False);
+        }
+        // RETURN_OOM()
+        Normalized::Refused => return Ok(OrFalse::False),
     };
-    match ffi::to_utf8(&normalized) {
-        Ok(bytes) => Ok(OrFalse::Value(PhpString::new(req, &bytes)?)),
+    // `intl_convert_utf16_to_utf8`'s string is made while the block is
+    // held, as php frees `uret_buf` after it.
+    let answered = match ffi::to_utf8(&out.as_slice()[..len]) {
+        Ok(bytes) => Ok(PhpString::new(req, &bytes).map(OrFalse::Value)),
+        Err(code) => Err(code),
+    };
+    out.give_back(req);
+    match answered {
+        Ok(made) => made,
         Err(code) => failed(req, code, "error converting normalized text UTF-8"),
     }
+}
+
+/// What `intl_normalize` into php's destination came to.
+enum Normalized {
+    /// The destination and the length of its text.
+    Text(Block<u16>, usize),
+    /// ICU failed.
+    Failed,
+    /// The memory limit refused a destination (`RETURN_OOM()`).
+    Refused,
+}
+
+/// `intl_normalize` into a block of `room + 1` units asked for fallibly
+/// (`safe_femalloc` since 8.5.12), and once more, of the length it
+/// needed, where that was more.
+fn normalized(
+    req: &mut Request,
+    form: Form,
+    input: &[u16],
+    room: usize,
+) -> Result<Normalized, Thrown> {
+    let Some(mut out) = Block::<u16>::ask(req, room + 1, true)? else {
+        return Ok(Normalized::Refused);
+    };
+    let Ok(norm) = Icu::of(form) else {
+        out.give_back(req);
+        return Ok(Normalized::Failed);
+    };
+    let (needed, status) = norm.normalize_into(input, out.as_mut_slice());
+    if status.is_failure() && status != Code::BUFFER_OVERFLOW {
+        out.give_back(req);
+        return Ok(Normalized::Failed);
+    }
+    let needed = usize::try_from(needed).unwrap_or(0);
+    if needed > room {
+        out.give_back(req);
+        let Some(mut grown) = Block::<u16>::ask(req, needed + 1, true)? else {
+            return Ok(Normalized::Refused);
+        };
+        let (_, status) = norm.normalize_into(input, grown.as_mut_slice());
+        if status.is_failure() {
+            grown.give_back(req);
+            return Ok(Normalized::Failed);
+        }
+        out = grown;
+    }
+    Ok(Normalized::Text(out, needed))
 }
 
 /// `normalizer_is_normalized(string $string, int $form = Normalizer::FORM_C): bool`.

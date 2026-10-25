@@ -61,9 +61,10 @@ const ZEND_CONSTANT: usize = 40;
 /// registered.
 struct ConstantRow {
     /// php's `zend_constant` on the request's heap, which the row is in
-    /// the engine's own shape; none where the memory limit refused it,
-    /// whose fatal ends the request.
-    room: Option<Emalloc>,
+    /// the engine's own shape, and an attributed one's `attributes` with
+    /// what they hold ([`super::declared_bytes::attributes`]); none where
+    /// the memory limit refused it, whose fatal ends the request.
+    room: Vec<Emalloc>,
     /// `c->name`, released with the row: a host's or an extension's
     /// name through `zend_string_init_interned` ([`Request::interned`]),
     /// and for `define()`'s and `const`'s one more owner of the
@@ -71,6 +72,11 @@ struct ConstantRow {
     /// holds for the bytes where any does ([`Request::declared_string`]);
     /// none where the memory limit refused it.
     named: Option<Owner<PhpString>>,
+    /// `zend_register_constant`'s `lowercase_name` for a name with a
+    /// namespace, the table's key, released with the row: a string of its
+    /// own, or the interned one where opcache holds the bytes; none where
+    /// `c->name` is the key.
+    keyed: Option<Owner<PhpString>>,
     owner: ConstantOwner,
     /// The key `EG(zend_constants)` holds the row under: the name with
     /// its namespace lowered, which every lookup compares against.
@@ -80,27 +86,6 @@ struct ConstantRow {
     value: Value,
     attributes: Vec<Attribute>,
     deprecated: bool,
-}
-
-impl ConstantRow {
-    fn new(
-        room: Option<Emalloc>,
-        named: Option<Owner<PhpString>>,
-        owner: ConstantOwner,
-        name: Vec<u8>,
-        value: Value,
-    ) -> ConstantRow {
-        ConstantRow {
-            room,
-            named,
-            owner,
-            given: name.clone(),
-            name,
-            value,
-            attributes: Vec::new(),
-            deprecated: false,
-        }
-    }
 }
 
 /// The request's rows of `EG(zend_constants)` and `PHP_SAPI`, whose
@@ -222,14 +207,19 @@ impl Request {
     /// `zend_constant` freed, `free_zend_constant`.
     fn free_row(&mut self, row: ConstantRow) {
         self.release(row.value);
-        if let Some(room) = row.room {
+        let mut arrays = Vec::new();
+        php_compile::values::attribute_values(&row.attributes, &mut |z| arrays.push(z));
+        for z in arrays {
+            self.release(Value::of_slot(z));
+        }
+        for room in row.room {
             room.free(self);
         }
         let file = match row.owner {
             ConstantOwner::User(file) => file,
             ConstantOwner::Core | ConstantOwner::Extension(_) => None,
         };
-        for string in [row.named, file].into_iter().flatten() {
+        for string in [row.named, row.keyed, file].into_iter().flatten() {
             string.give_up(self);
         }
     }
@@ -362,6 +352,38 @@ impl Request {
     /// `CONST_DEPRECATED` raised from them. `false`, nothing hung, the
     /// warning raised and the value given up, where the name stands
     /// already.
+    ///
+    /// A name with a namespace is keyed by a string of its own, the name
+    /// with its namespace lowered, `zend_register_constant`'s
+    /// `lowercase_name`, even where lowering changes nothing; one opcache
+    /// holds is the interned string, `zend_new_interned_string`'s (the
+    /// program under the recipe's
+    /// `TMPDIR`, written into the past so opcache keeps it):
+    ///
+    /// ```php
+    /// $put = function ($name, $src) { $f = sys_get_temp_dir() . "/$name"; file_put_contents("$f.tmp", $src); touch("$f.tmp", time() - 10); rename("$f.tmp", $f); return $f; };
+    /// $f = $put('w3316-namespaced-constant.inc', <<<'PHP'
+    /// <?php
+    /// function m($c) { $m = memory_get_usage(); eval($c); return memory_get_usage() - $m; }
+    /// m('class W {}'); m('$q0 = 1;');
+    /// echo m('namespace NSq; const NK = 1;'), "\n";
+    /// echo m('namespace nsr; const nk = 1;'), "\n";
+    /// echo m('define("NSs\\\\DK", 1);'), "\n";
+    /// echo m('const GK = 1;'), "\n";
+    /// echo m('define("Cached\\\\Name", 1);'), "\n";
+    /// echo GK, \Cached\Name, "\n";
+    /// PHP);
+    /// include $f;
+    /// unlink($f);
+    /// ```
+    /// ```expect regime=jit-off
+    /// 232
+    /// 232
+    /// 232
+    /// 168
+    /// 168
+    /// 11
+    /// ```
     pub(crate) fn define_attributed_constant(
         &mut self,
         name: &[u8],
@@ -387,12 +409,23 @@ impl Request {
             .and_then(crate::exec::FrameAt::code)
             .map(|code| code.filename.0.clone());
         let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
-        let room = self.constant_room();
+        // `zend_constant_add_attributes`: an owner of the table, which
+        // outlives the op array that declared it.
+        php_compile::values::attribute_values(&attributes, &mut |z| self.heap.addref(z));
+        let mut room = Vec::from_iter(self.constant_room());
+        // The memory limit's fatal is recorded and ends the request.
+        super::declared_bytes::attributes(self, &mut room, attributes.iter(), false).ok();
         let named = self.declared_string(given).ok();
+        let keyed = (given.contains(&b'\\'))
+            // `zend_new_interned_string` of the lowered `zend_string_init`
+            // (`Z/Zend/zend_constants.c:524-526`).
+            .then(|| self.new_interned(name).ok())
+            .flatten();
         let file = file.and_then(|file| self.executed_file_string(&file).ok());
         self.constants.push(ConstantRow {
             room,
             named,
+            keyed,
             owner: ConstantOwner::User(file),
             name: name.to_vec(),
             given: given.to_vec(),
@@ -426,15 +459,32 @@ impl Request {
     /// `Core`'s group and before what the program defines. A sink: the
     /// row takes the value's owner.
     pub(crate) fn register_host_constant(&mut self, name: &'static [u8], value: Owner<Value>) {
+        self.push_native_constant(ConstantOwner::Core, name, value, Vec::new());
+    }
+
+    /// A row of a native constant pushed, its key the name it was given,
+    /// taking the value's owner.
+    fn push_native_constant(
+        &mut self,
+        owner: ConstantOwner,
+        name: &[u8],
+        value: Owner<Value>,
+        attributes: Vec<Attribute>,
+    ) {
+        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
         let named = self.constant_name(name);
-        let room = self.constant_room();
-        self.constants.push(ConstantRow::new(
+        let room = Vec::from_iter(self.constant_room());
+        self.constants.push(ConstantRow {
             room,
             named,
-            ConstantOwner::Core,
-            name.to_vec(),
-            value.hand_on(),
-        ));
+            keyed: None,
+            owner,
+            name: name.to_vec(),
+            given: name.to_vec(),
+            value: value.hand_on(),
+            attributes,
+            deprecated,
+        });
     }
 
     /// `PHP_CLI_PROCESS_TITLE`, which `do_cli` registers after
@@ -787,8 +837,7 @@ impl Symbols<&mut Request> {
     /// request, each name a string of the request's.
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn constants(self) -> Result<Owner<PhpArray>, Thrown> {
-        let made = self.0.constants_made();
-        adopted(made)
+        adopted(self.0.constants_made())
     }
 
     /// `REGISTER_STRINGL_CONSTANT` and its kin while a request runs:
@@ -826,19 +875,8 @@ impl Symbols<&mut Request> {
             self.0.refuse_constant(name, value);
             return false;
         }
-        let deprecated = crate::attributes::Flags::of(&attributes).deprecated;
-        let named = self.0.constant_name(name);
-        let room = self.0.constant_room();
-        self.0.constants.push(ConstantRow {
-            room,
-            named,
-            owner: ConstantOwner::Extension(extension),
-            name: name.to_vec(),
-            given: name.to_vec(),
-            value: value.hand_on(),
-            attributes,
-            deprecated,
-        });
+        let owner = ConstantOwner::Extension(extension);
+        self.0.push_native_constant(owner, name, value, attributes);
         true
     }
 }

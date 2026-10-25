@@ -1059,6 +1059,10 @@ pub(crate) enum Outcome {
     /// Blacklisted now, whatever the count: php's stops past
     /// `COMPILER_ERROR`, which no attempt recovers.
     Blacklist(Stop),
+    /// Blacklisted now, with no attempt and no stop: a loop php counts
+    /// no heat of (`record::counts`), whose header's handler php never
+    /// swaps, so the word is visited for nothing from now on.
+    Uncounted,
     /// Cold again with no attempt counted: the recording became the trace
     /// of another word, a loop php unrolled and rooted the trace at
     /// (`zend_jit_trace_subtrace`), and a root's heat starts again as
@@ -1393,7 +1397,7 @@ impl Claim {
                     (u32::from(stop.code()) << ID_SHIFT) | COLD
                 }
             }
-            Outcome::Blacklist(_) => BLACKLISTED,
+            Outcome::Blacklist(_) | Outcome::Uncounted => BLACKLISTED,
             Outcome::Released => {
                 // A root's count starts again; an exit's firing counts
                 // nothing, as php's exit count does not move for it.

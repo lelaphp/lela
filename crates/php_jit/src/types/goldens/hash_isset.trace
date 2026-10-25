@@ -1,0 +1,11 @@
+start loop
+root e2
+op e2 14 long long - taken
+op e2 6 array - - fell
+op e2 8 long - - -
+op e2 9 array string - -
+op e2 10 array long - -
+op e2 11 true false - -
+op e2 12 long long - -
+op e2 13 long - - -
+stop loop

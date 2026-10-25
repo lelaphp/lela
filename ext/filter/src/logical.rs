@@ -6,7 +6,7 @@
 
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, numeric_string, to_double, to_long};
-use php_ext::raising::{Thrown, fatal, throw_error};
+use php_ext::raising::{Thrown, fatal};
 use php_ext::request::Request;
 use php_ext::values::{Owner, Value, ValueRef};
 use php_ext_pcre::Regex;
@@ -46,7 +46,7 @@ fn string_option(run: &Run, name: &[u8]) -> Option<Vec<u8>> {
 
 /// `zend_value_error("%s(): ...", get_active_function_name())`.
 fn value_error(req: &mut Request, run: &Run, message: &str) -> Thrown {
-    throw_error(req, "ValueError", &format!("{}(): {message}", run.native))
+    php_ext::raising::value_error(req, &format!("{}(): {message}", run.native))
 }
 
 /// The string unchanged, as a validator that passed leaves it.

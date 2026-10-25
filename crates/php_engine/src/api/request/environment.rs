@@ -373,7 +373,7 @@ impl Environment<&mut Request> {
             .environment_mut()
             .realpath(dir.as_os_str().as_bytes());
         self.0.cwd = real.unwrap_or_else(|| dir.to_path_buf());
-        Ok(())
+        self.0.accel_chdir()
     }
 
     /// `umask(int)`: the previous mask.

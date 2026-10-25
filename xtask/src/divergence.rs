@@ -13,12 +13,16 @@
 //! `covers` may also name `witness:` ids, the fences that pin the engine's
 //! side of the row: such a fence is held to its pinned `expect` against
 //! the engine alone, so the row accepts no difference for it
-//! ([`Registry::pinning`]; harness §4.3, #1650). A person
+//! ([`Registry::pinning`]; harness §4.3, #1650). A row may name the
+//! [`Digests`] of both sides' lines it was ruled on, and accepts its
+//! difference only while both stand; a `trace:dump/` row must (#3291's
+//! ruling). A person
 //! writes a row and its reason; `compare`'s caller or the fuzzer may propose
 //! one with status `open` and an empty reason; the `divergence-reason`
 //! instrument fails an accepted row without a reason, a `by-design` row
 //! whose reason cites no design section or ADR, and an `oracle-build` row
-//! that names nothing it retires at. The TOML is the truth;
+//! that names nothing it retires at, and an accepted `trace:dump/` row
+//! that names no digests. The TOML is the truth;
 //! `status --section divergence` is the rendering.
 
 use std::borrow::Borrow;
@@ -34,12 +38,16 @@ use serde::{Deserialize, Serialize};
 use crate::key::Snapshot;
 use crate::manifest::Manifest;
 use crate::reading::{self, Reading};
+use crate::sha256::Sha256;
 
 /// The registry's path, relative to the workspace root.
 pub const FILE: &str = "docs/divergence.toml";
 /// The instrument that holds the registry to its rule: the subcommand, the
 /// reading's `instrument`, and what the manifest's `check` predicate names.
 pub const INSTRUMENT: &str = "divergence-reason";
+/// What a trace dump's id starts with, `trace:dump/<kernel>`, a `trace:`
+/// id: a row holding one must name its [`Digests`] (#3291's ruling).
+pub(crate) const DUMP_PREFIX: &str = "trace:dump/";
 
 /// One divergence key: `witness:<hash>`, `phpt:<path>`, `compile:<path>`,
 /// `crosscheck:<name>`, `trace:<site>`, `wire:<suite>/<case>` or
@@ -119,6 +127,117 @@ pub struct Divergence {
     /// the row's own id is (harness-design.md §4.3, revision 62); empty
     /// on a row that holds for its own id alone.
     pub covers: BTreeSet<Id>,
+    /// Both sides' lines as the row was ruled on, where it names them:
+    /// the difference it accepts is that one alone (#3291).
+    pub digests: Option<Digests>,
+}
+
+/// The two sides a comparison holds lines of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    /// The pinned php's.
+    Oracle,
+    /// The engine's.
+    Engine,
+}
+
+impl Side {
+    /// The side's name: its digest's key in a row, and what a message
+    /// and a file kept for it call it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Side::Oracle => "oracle",
+            Side::Engine => "engine",
+        }
+    }
+}
+
+/// The digests of both sides' lines, the oracle's and the engine's: what
+/// an accepted row pins of the difference it was ruled on, so a pin bump
+/// that moves php's lines or a change that moves the engine's is a
+/// difference nobody ruled on (#3291). A re-pin is a changed value, a
+/// person's hand edit, as a new acceptance is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Digests {
+    /// The expected side's: the oracle's lines, where a lane holds the
+    /// engine's to them.
+    pub oracle: Sha256,
+    /// The engine's lines.
+    pub engine: Sha256,
+}
+
+impl Digests {
+    /// The digests of the lines a comparison held, the expected side's
+    /// and the engine's `actual`: the one place a row's digests are
+    /// computed, for the check and for the row proposed.
+    pub fn of(expected: &[u8], actual: &[u8]) -> Digests {
+        Digests {
+            oracle: Sha256::of(expected),
+            engine: Sha256::of(actual),
+        }
+    }
+
+    fn of_side(&self, side: Side) -> Sha256 {
+        match side {
+            Side::Oracle => self.oracle,
+            Side::Engine => self.engine,
+        }
+    }
+}
+
+impl fmt::Display for Digests {
+    /// The two as a row spells them.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "oracle = \"{}\", engine = \"{}\"",
+            self.oracle, self.engine
+        )
+    }
+}
+
+/// An accepted row whose digests the lines held no longer match: the
+/// difference it accepted is not the one compared now (#3291).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Moved {
+    /// The row's id.
+    pub id: Id,
+    /// The digests the row pins.
+    pub pinned: Digests,
+    /// The digests of the lines compared now.
+    pub now: Digests,
+}
+
+impl Moved {
+    /// The sides whose lines are not the ones the row pins, the oracle's
+    /// first; empty where both stand.
+    pub(crate) fn sides(&self) -> Vec<Side> {
+        let moved = |side: &Side| self.pinned.of_side(*side) != self.now.of_side(*side);
+        [Side::Oracle, Side::Engine]
+            .into_iter()
+            .filter(moved)
+            .collect()
+    }
+}
+
+impl fmt::Display for Moved {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} accepts the difference it was ruled on, and", self.id)?;
+        for (n, side) in self.sides().into_iter().enumerate() {
+            let and = if n == 0 { "" } else { " and" };
+            write!(
+                f,
+                "{and} the {}'s lines moved: the row pins {}, they are {} now",
+                side.name(),
+                self.pinned.of_side(side),
+                self.now.of_side(side)
+            )?;
+        }
+        write!(
+            f,
+            "; a re-pin is a new acceptance, a person's edit of the row (#3291)"
+        )
+    }
 }
 
 impl Divergence {
@@ -152,6 +271,10 @@ struct Row {
     since: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     covers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    oracle: Option<Sha256>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    engine: Option<Sha256>,
 }
 
 impl TryFrom<Row> for Divergence {
@@ -172,6 +295,13 @@ impl TryFrom<Row> for Divergence {
                 bail!("the id {text:?} is named twice in the row {id}");
             }
         }
+        let digests = match (row.oracle, row.engine) {
+            (Some(oracle), Some(engine)) => Some(Digests { oracle, engine }),
+            (None, None) => None,
+            _ => bail!(
+                "the row {id} names one side's digest and not the other's; a row pins both, `oracle` and `engine`, or neither (#3291)"
+            ),
+        };
         Ok(Divergence {
             id,
             kind,
@@ -181,6 +311,7 @@ impl TryFrom<Row> for Divergence {
             status: row.status,
             since: row.since,
             covers,
+            digests,
         })
     }
 }
@@ -196,6 +327,8 @@ impl From<Divergence> for Row {
             status: row.status,
             since: row.since,
             covers: row.covers.into_iter().map(|id| id.0).collect(),
+            oracle: row.digests.map(|d| d.oracle),
+            engine: row.digests.map(|d| d.engine),
         }
     }
 }
@@ -558,6 +691,7 @@ impl Registry {
             status: Status::Open,
             since,
             covers: BTreeSet::new(),
+            digests: None,
         };
         let text = toml::to_string(&Rows {
             divergence: std::slice::from_ref(&row),
@@ -607,11 +741,13 @@ pub(crate) enum Lack {
     Citation,
     /// An `oracle-build` row that names nothing it retires at.
     Retires,
+    /// A `trace:dump/` row that names no digests (#3291).
+    Digests,
 }
 
 impl Lack {
     /// Each lack, in the order the guard's message names them.
-    const ALL: [Lack; 3] = [Lack::Reason, Lack::Citation, Lack::Retires];
+    const ALL: [Lack; 4] = [Lack::Reason, Lack::Citation, Lack::Retires, Lack::Digests];
 
     /// The reading's number counting the rows that lack it.
     fn number(self) -> &'static str {
@@ -619,6 +755,7 @@ impl Lack {
             Lack::Reason => "unreasoned",
             Lack::Citation => "uncited",
             Lack::Retires => "unretired",
+            Lack::Digests => "unpinned",
         }
     }
 
@@ -628,13 +765,24 @@ impl Lack {
             Lack::Reason => "without a reason",
             Lack::Citation => "of cause by-design whose reason cites no design section (§) or ADR",
             Lack::Retires => "of cause oracle-build that carries no `retires`",
+            Lack::Digests => {
+                "of a trace dump that pins neither side's lines, its `oracle` and `engine` digests"
+            }
         }
     }
 }
 
 impl Divergence {
+    /// Whether the row accepts its difference only as its [`Digests`]
+    /// pin it: a row holding a `trace:dump/` id, its own or one it covers,
+    /// as #3291 ruled. Which other kinds must is a later ruling; a row of
+    /// any kind that names digests is held to them.
+    pub(crate) fn must_pin(&self) -> bool {
+        self.ids().any(|id| id.as_str().starts_with(DUMP_PREFIX))
+    }
+
     /// What the guard finds missing from the row were it accepted: a
-    /// reason, then what its cause asks for.
+    /// reason, then what its cause asks for, then a dump's digests.
     fn lack(&self) -> Option<Lack> {
         if self.reason.trim().is_empty() {
             Some(Lack::Reason)
@@ -642,6 +790,8 @@ impl Divergence {
             Some(Lack::Citation)
         } else if self.cause == Cause::OracleBuild && self.retires.is_none() {
             Some(Lack::Retires)
+        } else if self.must_pin() && self.digests.is_none() {
+            Some(Lack::Digests)
         } else {
             None
         }
@@ -724,7 +874,7 @@ impl Counts {
 /// The `divergence-reason` instrument's reading over the workspace: fail
 /// when an accepted row lacks what the guard asks ([`Lack`]): a reason,
 /// a design citation on a `by-design` row, a `retires` on an
-/// `oracle-build` row. It names each such row, how many ids it covers
+/// `oracle-build` row, the digests of a `trace:dump/` row. It names each such row, how many ids it covers
 /// where it covers any, and prints the text of the manifest rule whose
 /// `check` predicate names this instrument. A covering row is held to the
 /// rule once, as one reason. The counts are the numbers.
@@ -769,7 +919,7 @@ pub fn reason(registry: &Registry, manifest: &Manifest, root: &Path) -> Result<R
     if failures.is_empty() {
         reading.status = reading::Status::Pass;
         reading.message = format!(
-            "{FILE}: {rows} rows holding {} ids, every accepted row has a reason, every by-design row a citation and every oracle-build row a `retires`",
+            "{FILE}: {rows} rows holding {} ids, every accepted row has a reason, every by-design row a citation, every oracle-build row a `retires` and every trace dump its digests",
             counts.ids
         );
     } else {

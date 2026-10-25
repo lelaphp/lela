@@ -19,14 +19,15 @@
 //! unconsumed it leaks nothing, so nothing records it. Nor does an owner
 //! of a huge block, which heads a mapping of its own with no header to
 //! reach the record by; the request leak sensor names that block where
-//! the request ends. A release build keeps none of this.
+//! the request ends. Nor does any block of a tracked heap, which is the
+//! system's (`mm::tracked`). A release build keeps none of this.
 
 use std::collections::HashMap;
 use std::panic::Location;
 use std::ptr::NonNull;
 
 use crate::Zval;
-use crate::mm::{CHUNK_SIZE, freed};
+use crate::mm::{CHUNK_SIZE, freed, tracked};
 use crate::sensed::Sensed;
 
 /// The lines that made the owners of one block that stand, in the order
@@ -79,7 +80,9 @@ fn block(z: Zval) -> Option<NonNull<u8>> {
         return None;
     }
     let at = z.counted()?.block();
-    (at.as_ptr().addr() & (CHUNK_SIZE - 1) != 0).then_some(at)
+    // A tracked heap's blocks are the system's and sit in no chunk.
+    let in_chunk = at.as_ptr().addr() & (CHUNK_SIZE - 1) != 0 && !tracked::chosen();
+    in_chunk.then_some(at)
 }
 
 /// An owner of `z` made at `site`: the engine's owner type as it makes

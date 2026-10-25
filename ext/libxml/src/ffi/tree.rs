@@ -472,6 +472,19 @@ impl Node {
             .map(owned)
     }
 
+    /// `((xmlAttributePtr) node)->defaultValue`: the value an attribute's
+    /// DTD declaration gives an element that does not carry it; none for
+    /// any other node.
+    pub fn attribute_decl_default(self) -> Option<Vec<u8>> {
+        if self.kind() != Kind::AttributeDecl {
+            return None;
+        }
+        // SAFETY: an attribute declaration is an `xmlAttribute`, live by
+        // the invariant.
+        let p = unsafe { &*self.0.as_ptr().cast::<sys::xmlAttribute>() }.defaultValue;
+        (!p.is_null()).then(|| owned(p))
+    }
+
     // ---- libxml2's tree calls
 
     /// `xmlUnlinkNode`.
@@ -1660,8 +1673,12 @@ impl Node {
     /// the declaration of `href` and `prefix` on `parent`, typed `XML_NAMESPACE_DECL`,
     /// named by the prefix (or `xmlns`), its content the href, owning a
     /// copy of the declaration; the object that stands for it frees it.
+    /// It is made in `doc`, the document of `parent` or, with no parent
+    /// as for the clone of one whose element is gone, the original's (php
+    /// 8.5.12's `fallback_doc`), and then stands under no element.
     pub fn fake_namespace_decl(
-        parent: Node,
+        parent: Option<Node>,
+        doc: Option<Node>,
         href: Option<&[u8]>,
         prefix: Option<&[u8]>,
     ) -> Option<Node> {
@@ -1674,10 +1691,10 @@ impl Node {
             copy.write(|n| n.prefix = owned);
         }
         let name = prefix.unwrap_or(b"xmlns");
-        let node = Node::new_element(parent.doc(), None, name, href)?;
+        let node = Node::new_element(doc, None, name, href)?;
         node.write(|n| {
             n.type_ = sys::XML_NAMESPACE_DECL;
-            n.parent = parent.raw();
+            n.parent = parent.map_or(ptr::null_mut(), Node::raw);
             n.ns = copy.raw();
         });
         Some(node)

@@ -23,13 +23,14 @@
 
 use std::fmt::{self, Write as _};
 
+use php_engine::tier;
 use php_heap::ZvalType;
 
 use crate::record::func_name as func;
 use crate::types::{
-    Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Interrupt, Landing,
-    Layout, Op, OpId, Operand, Place, Read, Repeat, Slot, Store, Stored, TraceIr, Types, Unwind,
-    ValueId,
+    Check, Constant, Def, End, ExitSpec, Form, Grows, Guard, GuardAt, Home, Imm, Interrupt,
+    Landing, Layout, Object, Op, OpId, Operand, Owners, Place, Pointee, Read, Repeat, Returned,
+    Slot, Slotted, Store, Stored, TraceIr, Types, Unwind, ValueId,
 };
 
 /// The text of `ir`.
@@ -82,6 +83,7 @@ impl<'a> Dump<'a> {
                 let interrupt = match header.interrupt {
                     Interrupt::Exit(exit) => format!("exit {}", exit.0),
                     Interrupt::Stub(_) => "stub".to_owned(),
+                    Interrupt::None => "none".to_owned(),
                 };
                 writeln!(text, "loop at {}, {repeat}, interrupt {interrupt}", at.0)?;
                 for (id, value) in ids(self.ir) {
@@ -174,6 +176,7 @@ impl<'a> Dump<'a> {
                     Form::Step => "step",
                 };
                 write!(text, " {form}")?;
+                in_place(text, line.imm)?;
                 if let Some(map) = line.map_ptr {
                     write!(text, " map {map}")?;
                 }
@@ -200,13 +203,18 @@ impl<'a> Dump<'a> {
                     began.word()
                 )
             }
-            Op::Enter { frame } => {
+            Op::Enter { frame, stores } => {
                 let named = self
                     .ir
                     .frames
                     .get(usize::from(frame.0))
                     .map_or("?".to_owned(), |info| func(info.func));
-                writeln!(text, "     f{} enter {named}", frame.0)
+                let mut listed = String::new();
+                for (at, value) in stores.iter().enumerate() {
+                    let lead = if at == 0 { " storing" } else { "" };
+                    write!(listed, "{lead} #{}", value.0)?;
+                }
+                writeln!(text, "     f{} enter {named}{listed}", frame.0)
             }
             Op::Back {
                 frame,
@@ -229,16 +237,19 @@ impl<'a> Dump<'a> {
         let opline = exit
             .opline
             .map_or("where it stands".to_owned(), |at| format!("{:04}", at.0));
-        let landing = match exit.landing {
-            Landing::Plain => "plain".to_owned(),
-            Landing::RestoreCall => "restore call".to_owned(),
-            Landing::FreeTemps { op1, op2 } => {
-                let freed: Vec<&str> = [(op1, "op1"), (op2, "op2")]
-                    .into_iter()
-                    .filter_map(|(on, name)| on.then_some(name))
-                    .collect();
-                format!("free {}", freed.join(" "))
-            }
+        let Landing {
+            frees,
+            restores_call,
+        } = exit.landing;
+        let freed: Vec<&str> = [(frees.op1, "op1"), (frees.op2, "op2")]
+            .into_iter()
+            .filter_map(|(on, name)| on.then_some(name))
+            .collect();
+        let landing = match (restores_call, freed.is_empty()) {
+            (false, true) => "plain".to_owned(),
+            (true, true) => "restore call".to_owned(),
+            (false, false) => format!("free {}", freed.join(" ")),
+            (true, false) => format!("restore call free {}", freed.join(" ")),
         };
         write!(text, "exit {at}: f{} {opline} {landing}", exit.frame.0)?;
         self.stores(text, &exit.stores)?;
@@ -276,6 +287,12 @@ impl<'a> Dump<'a> {
                 Stored::Copied { value, read } => match read {
                     Read::InPlace => format!("copied #{}", value.0),
                     Read::Through => format!("copied #{} through a reference", value.0),
+                    Read::Indirect(Pointee::Value) => {
+                        format!("copied #{} through an indirect", value.0)
+                    }
+                    Read::Indirect(Pointee::Reference) => {
+                        format!("copied #{} through an indirect reference", value.0)
+                    }
                 },
             };
             write!(text, " {}={from}", self.slot(store.slot))?;
@@ -332,14 +349,36 @@ fn operand(operand: Operand) -> Option<String> {
     })
 }
 
+/// How a guard names what an indirect `VAR` is read as.
+fn pointee_of(pointee: Pointee) -> &'static str {
+    match pointee {
+        Pointee::Value => "ind to ",
+        Pointee::Reference => "ind ref to ",
+    }
+}
+
 fn check(check: Check) -> String {
     let tag = |tag: ZvalType| Types::of_tag(tag).to_string();
     match check {
         Check::Type { value, tag: t } => format!("#{} {}", value.0, tag(t)),
         Check::Deref { value, tag: t } => format!("#{} ref to {}", value.0, tag(t)),
-        Check::Layout { value, layout } => format!(
-            "#{} {}",
+        Check::Indirect {
+            value,
+            tag: t,
+            pointee,
+        } => format!("#{} {}{}", value.0, pointee_of(pointee), tag(t)),
+        Check::Layout {
+            value,
+            layout,
+            read,
+        } => format!(
+            "#{} {}{}",
             value.0,
+            match read {
+                Read::InPlace => "",
+                Read::Through => "ref to ",
+                Read::Indirect(pointee) => pointee_of(pointee),
+            },
             match layout {
                 Layout::Packed => "packed",
                 Layout::Hash => "hash",
@@ -351,5 +390,45 @@ fn check(check: Check) -> String {
         Check::Stands { func: f, opline } => format!("stands {} {:04}", func(f), opline.0),
         Check::Arm { opline } => format!("arm {:04}", opline.0),
         Check::Room { bytes } => format!("room {bytes}"),
+        Check::Class { object, class } => {
+            let of = match object {
+                Object::This(frame) => format!("f{}.this", frame.0),
+                Object::Value(value) => format!("#{}", value.0),
+            };
+            format!("{of} class {}", tier::class_number(class))
+        }
+    }
+}
+
+/// What compiled code makes or leaves in place at a line whose immediate
+/// is `imm`: a call made, and a leave's value, where it is no scalar, and
+/// the variables it frees.
+fn in_place(text: &mut String, imm: Imm) -> fmt::Result {
+    let (value, owners) = match imm {
+        Imm::Make { .. } => return write!(text, " in-place"),
+        Imm::Property {
+            slot: Slotted::Declared(slot),
+            ..
+        } => return write!(text, " slot {slot}"),
+        Imm::Property {
+            slot: Slotted::Cached,
+            ..
+        } => return write!(text, " cached"),
+        Imm::Leave { value, owners } => (value, owners),
+        _ => return Ok(()),
+    };
+    match value {
+        Returned::Scalar => write!(text, " in-place")?,
+        Returned::Constant(_) => write!(text, " in-place constant")?,
+        Returned::Moved => write!(text, " in-place moved")?,
+    }
+    // The variables a leave frees, `zend_jit_free_cv`'s.
+    match owners {
+        Owners::Each(vars) => {
+            let vars: Vec<String> = vars.iter().map(|var| format!("CV{var}")).collect();
+            write!(text, " frees {}", vars.join(","))
+        }
+        Owners::Kernel => write!(text, " frees by kernel"),
+        Owners::Uncounted => Ok(()),
     }
 }

@@ -782,13 +782,14 @@ impl Emit<'_> {
         let Some(haystack) = haystack.tree() else {
             return Ok(None);
         };
-        let Some(keys) = self
-            .array_entries(haystack)?
-            .and_then(|entries| in_array_keys(&entries, strict))
-        else {
+        let Some(entries) = self.array_entries(haystack)? else {
             return Ok(None);
         };
-        let table = self.lay_array(&keys)?;
+        let Some(keys) = in_array_keys(&entries, strict) else {
+            return Ok(None);
+        };
+        // `zend_new_array(zend_hash_num_elements(src))`.
+        let table = self.lay_array(&keys, Vec::new(), entries.len())?.value();
         let needle = self.source(needle)?;
         Ok(Some(self.emit_binary(
             Opcode::InArray,
@@ -939,7 +940,7 @@ impl Emit<'_> {
                 let (Some(a), Some(b)) = (self.written(lhs)?, self.written(rhs)?) else {
                     return Ok(None);
                 };
-                self.concat_fold(a, b)
+                self.concat_fold(a, b, crate::emit::ConcatFold::Parser)
             }
             _ => Ok(None),
         }

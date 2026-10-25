@@ -14,7 +14,8 @@ use php_ext::call::{Function, autoload, known_method, lookup_class, new_object};
 use php_ext::coerce::{c_str, value_name};
 use php_ext::decl::Name;
 use php_ext::raising::{
-    Thrown, argument_error, deprecated, pending, throw, throw_error, throwing_warnings,
+    Thrown, argument_error, deprecated, pending, throw_error, throw_exception_ex,
+    throwing_warnings, type_error, value_error,
 };
 use php_ext::request::{OwnedStream as _, Request, Streams as _};
 use php_ext::values::walk::{self, Hold};
@@ -126,6 +127,11 @@ pub(crate) struct DbhState {
     /// every `PDO` asking its key shares in place of its own, as
     /// `pdo_obj->inner = pdbh` shares it.
     shares: Option<usize>,
+    /// Of a persistent `pdo_dbh_t` the request holds, the `PDO` objects
+    /// sharing it: php's `refcount` less the one `EG(persistent_list)`
+    /// keeps, which `pdo_dbh_free_storage` reads to roll back only as the
+    /// last of them goes (GH-23962).
+    holders: usize,
     /// `dbh->query_stmt`: the statement a failed `query()` left, whose
     /// error state `errorCode()` and `errorInfo()` read.
     query_stmt: Option<Owner<PhpObject>>,
@@ -162,16 +168,25 @@ pub(crate) fn state(req: &mut Request, object: PhpObject) -> Option<&mut DbhStat
     }
 }
 
+/// The object's own `pdo_dbh_t` taken off its payload, which shares
+/// nothing until [`share`] points it at the persistent one.
+fn detach(req: &mut Request, object: PhpObject) -> Option<Dbh> {
+    object.native_mut::<Dbh>(req).map(std::mem::take)
+}
+
 /// An object's payload switched over to the persistent `pdo_dbh_t` the
-/// request holds at `at`, `pdo_obj->inner = pdbh`: what it held before
-/// handed back.
-fn share(req: &mut Request, object: PhpObject, at: usize) -> Option<Dbh> {
-    let payload = object.native_mut::<Dbh>(req)?;
-    let shared = DbhState {
-        shares: Some(at),
-        ..DbhState::default()
-    };
-    Some(std::mem::replace(payload, Box::new(shared)))
+/// request holds at `at`, `pdo_obj->inner = pdbh`, which counts the
+/// object among its holders, `pdbh->refcount++`.
+fn share(req: &mut Request, object: PhpObject, at: usize) {
+    if let Some(payload) = object.native_mut::<Dbh>(req) {
+        **payload = DbhState {
+            shares: Some(at),
+            ..DbhState::default()
+        };
+    }
+    if let Some(held) = req.state::<Persistent>().lent.get_mut(at) {
+        held.holders += 1;
+    }
 }
 
 /// `EG(persistent_list)` as far as PDO reaches it (design §4.10): the
@@ -294,20 +309,42 @@ impl ObjectHandlers for Handlers {
     /// `pdo_dbh_free_storage`: a transaction still open rolled back,
     /// `zend_object_std_dtor`, and then `dbh_free`: the failed statement
     /// given up, the connection closed and the constructor arguments
-    /// released.
+    /// released. Over a persistent connection the rollback waits for the
+    /// last object sharing it (GH-23962):
+    ///
+    /// ```php
+    /// $a = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// $b = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// $b->beginTransaction();
+    /// unset($a);
+    /// var_dump($b->inTransaction(), $b->commit());
+    /// $b->beginTransaction();
+    /// $b->exec('CREATE TABLE t (a)');
+    /// unset($b);
+    /// $c = new PDO('sqlite::memory:', null, null, [PDO::ATTR_PERSISTENT => true]);
+    /// var_dump($c->inTransaction(), $c->query("SELECT count(*) FROM sqlite_master WHERE name = 't'")->fetchColumn());
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// bool(true)
+    /// bool(false)
+    /// int(0)
+    /// ```
     fn free_obj(&self, req: &mut Request, object: PhpObject) {
         if object
             .native::<Dbh>(req)
             .is_some_and(|d| d.shares.is_some())
         {
-            // Over a persistent `pdo_dbh_t`: the transaction rolled back,
-            // `persistent_shutdown`, and `dbh_free`'s `--dbh->refcount`,
-            // which leaves the connection held.
-            let Some(tracked) = dbh_ref(req, object, |d| d.in_txn) else {
+            // Over a persistent `pdo_dbh_t`: the transaction rolled back
+            // where no other object shares the connection (php 8.5.12's
+            // `refcount <= 2`, GH-23962), `persistent_shutdown`, and
+            // `dbh_free`'s `--dbh->refcount`, which leaves the connection
+            // held.
+            let Some((tracked, last)) = dbh_ref(req, object, |d| (d.in_txn, d.holders <= 1)) else {
                 return;
             };
             let rolled = with_connection(req, object, |req, conn| {
-                let rolled = roll_back_open(req, conn, tracked);
+                let rolled = last && roll_back_open(req, conn, tracked);
                 conn.persistent_shutdown(req);
                 Ok(rolled)
             });
@@ -315,6 +352,12 @@ impl ObjectHandlers for Handlers {
                 if rolled.unwrap_or(false) {
                     d.in_txn = false;
                 }
+                // php leaves the objects sharing a dead connection on it
+                // and counts a new one from the factory's object alone; the
+                // engine replaces the dead one in place (`hold`), so those
+                // objects share the new one uncounted, and what their frees
+                // take off the count stops at zero.
+                d.holders = d.holders.saturating_sub(1);
                 d.query_stmt.take()
             });
             Std.free_obj(req, object);
@@ -538,7 +581,11 @@ fn construct_driver(
     let colon = source.iter().position(|b| *b == b':').unwrap_or(0);
     let scheme = &source[..colon];
     let Some(driver) = crate::drivers(req).find(|d| d.name().as_bytes() == scheme) else {
-        return Err(throw(req, "PDOException", "could not find driver"));
+        return Err(throw_exception_ex(
+            req,
+            "PDOException",
+            "could not find driver",
+        ));
     };
     let fresh = specific_object(req, driver, called, current.is_none())?;
     let object = match (&fresh, current) {
@@ -603,7 +650,7 @@ fn resolve_dsn(req: &mut Request, mut source: Vec<u8>) -> Result<Vec<u8>, Thrown
         };
         if !found.contains(&b':') {
             let alias = String::from_utf8_lossy(&alias).into_owned();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "PDOException",
                 &format!("invalid data source name (via INI: {alias})"),
@@ -810,7 +857,7 @@ fn alive(req: &mut Request, conn: Conn) -> (bool, Conn) {
 /// opened for `object` held by the request under `key`, in place of the
 /// dead one at `dead`, and the object switched over to it.
 fn hold(req: &mut Request, object: PhpObject, key: Vec<u8>, dead: Option<usize>) {
-    let Some(dbh) = share(req, object, usize::MAX) else {
+    let Some(dbh) = detach(req, object) else {
         return;
     };
     let lent = &mut req.state::<Persistent>().lent;
@@ -887,7 +934,7 @@ fn specific_object(
     let wrong = |req: &mut Request, own: ClassId| {
         let own = crate::class_name(req, own);
         let name = driver.name();
-        throw(
+        throw_exception_ex(
             req,
             "PDOException",
             &format!(
@@ -897,7 +944,7 @@ fn specific_object(
     };
     if based_on_called {
         let Some(own) = own else {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "PDOException",
                 &format!(
@@ -994,9 +1041,8 @@ fn attribute_set(
                 ValueRef::Int(n) => n != 0,
                 _ => {
                     let given = value_name(req, value);
-                    return Err(throw_error(
+                    return Err(type_error(
                         req,
-                        "TypeError",
                         &format!(
                             "Attribute value must be of type bool for selected attribute, {given} given"
                         ),
@@ -1118,6 +1164,24 @@ fn set_statement_class(
 /// load Lazy
 /// Lazy
 /// ```
+///
+/// Constructor arguments that are not an array are named by their own
+/// type, and a refused value leaves the class set before it:
+///
+/// ```php
+/// $db = new PDO('sqlite::memory:');
+/// try { $db->setAttribute(PDO::ATTR_STATEMENT_CLASS, ['PDOStatement', 'x']); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// try { $db->prepare('SELECT 1', [PDO::ATTR_STATEMENT_CLASS => ['PDOStatement', 1]]); } catch (TypeError $e) { echo $e->getMessage(), "\n"; }
+/// var_dump($db->getAttribute(PDO::ATTR_STATEMENT_CLASS));
+/// ```
+/// ```expect
+/// PDO::setAttribute(): Argument #2 ($value) PDO::ATTR_STATEMENT_CLASS constructor_args must be of type ?array, string given
+/// PDO::ATTR_STATEMENT_CLASS constructor_args must be of type ?array, int given
+/// array(1) {
+///   [0]=>
+///   string(12) "PDOStatement"
+/// }
+/// ```
 pub(super) fn statement_class(
     req: &mut Request,
     value: &Value,
@@ -1125,7 +1189,7 @@ pub(super) fn statement_class(
 ) -> Result<(ClassId, Option<PhpArray>), Thrown> {
     let type_error = |req: &mut Request, tail: &str| match arg {
         Some(at) => argument_error(req, "TypeError", at, tail),
-        None => throw_error(req, "TypeError", tail),
+        None => type_error(req, tail),
     };
     let Some(array) = value.as_array() else {
         let given = value_name(req, value);
@@ -1138,7 +1202,7 @@ pub(super) fn statement_class(
         let tail = "PDO::ATTR_STATEMENT_CLASS value must be an array with the format array(classname, constructor_args)";
         return Err(match arg {
             Some(at) => argument_error(req, "ValueError", at, tail),
-            None => throw_error(req, "ValueError", tail),
+            None => value_error(req, tail),
         });
     };
     let class = match first.deref().as_str_bytes().map(<[u8]>::to_vec) {
@@ -1168,7 +1232,8 @@ pub(super) fn statement_class(
             if let Some(args) = args.deref().as_array() {
                 Some(args)
             } else {
-                let given = value_name(req, value);
+                // php 8.5.12 names the element, where 8.5.9 named the pair.
+                let given = value_name(req, &args.deref());
                 return Err(type_error(
                     req,
                     &format!(
@@ -1300,7 +1365,11 @@ fn end_transaction(
 ) -> Result<bool, Thrown> {
     constructed(req, this)?;
     if !in_txn(req, this)? {
-        return Err(throw(req, "PDOException", "There is no active transaction"));
+        return Err(throw_exception_ex(
+            req,
+            "PDOException",
+            "There is no active transaction",
+        ));
     }
     match transaction(req, this, false, call)? {
         Ok(done) => Ok(done),
@@ -1570,7 +1639,7 @@ impl PDO {
         let this = this.object();
         constructed(req, this)?;
         if in_txn(req, this)? {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "PDOException",
                 "There is already an active transaction",
@@ -1578,7 +1647,7 @@ impl PDO {
         }
         match transaction(req, this, true, super::connector::Connection::begin)? {
             Ok(done) => Ok(done),
-            Err(()) => Err(throw(
+            Err(()) => Err(throw_exception_ex(
                 req,
                 "PDOException",
                 "This driver doesn't support transactions",
@@ -1997,7 +2066,7 @@ impl PDO {
         let this = this.object();
         let sql = query.as_bytes().to_vec();
         let mode = fetchMode;
-        let extra: Vec<Value> = fetchModeArgs.0.iter().map(Value::deref).collect();
+        let extra: Vec<Value> = fetchModeArgs.iter().map(Value::deref).collect();
         constructed(req, this)?;
         if sql.is_empty() {
             return Err(argument_error(req, "ValueError", 1, "must not be empty"));
@@ -2090,7 +2159,7 @@ impl PDO {
         clear_error(req, this);
         let mode = dbh_ref(req, this, |d| d.error_mode).unwrap_or_default();
         match on_connection(req, this, |req, conn| conn.quote(req, &text, ty, mode))? {
-            Ok(Some(quoted)) => PhpString::new(req, &quoted).map(OrFalse::Value),
+            Ok(Some(quoted)) => Ok(OrFalse::Value(quoted)),
             Ok(None) => Ok(OrFalse::False),
             Err(()) => {
                 unsupported(req, this, "driver does not support quoting").map(|()| OrFalse::False)

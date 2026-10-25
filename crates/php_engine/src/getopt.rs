@@ -126,12 +126,7 @@ impl<'a> Getopt<'a> {
         }
         // Several letters written as one.
         if arg_start >= 2 && !long {
-            if word.get(self.optchr + 1).is_none() {
-                self.dash = false;
-                self.optind += 1;
-            } else {
-                self.optchr += 1;
-            }
+            self.past_letter(word);
         } else {
             self.optind += 1;
         }
@@ -176,13 +171,19 @@ impl<'a> Getopt<'a> {
             return Ok(row);
         }
         let at = (self.optind, self.optchr);
+        self.past_letter(word);
+        Err((at.0, at.1, OptError::NotFound))
+    }
+
+    /// Past the letter at `optchr` of a cluster: the next letter, or past
+    /// the word where it was the last.
+    fn past_letter(&mut self, word: &[u8]) {
         if word.get(self.optchr + 1).is_none() {
             self.dash = false;
             self.optind += 1;
         } else {
             self.optchr += 1;
         }
-        Err((at.0, at.1, OptError::NotFound))
     }
 
     /// The value of a row that wants one: attached, after `=`, or the

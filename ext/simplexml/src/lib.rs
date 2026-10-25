@@ -431,6 +431,21 @@ impl SimpleXMLElement {
     /// int(2032)
     /// int(2032)
     /// ```
+    ///
+    /// Since 8.5.12 the array is asked for fallibly and the nodes stop once
+    /// the memory limit was met: `null`, `RETURN_OOM()`, the limit's fatal
+    /// raised as the call returns.
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '4M');
+    /// $x = simplexml_load_string('<r>' . str_repeat('<a/>', 100000) . '</r>');
+    /// $n = $x->xpath('//a');
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2113536 bytes) in %s on line 4
+    /// ```
     #[php(tentative)]
     fn xpath(req: &mut Request, this: This<Self>, expression: PhpString) -> Result<Found, Thrown> {
         let this = this.object();
@@ -476,7 +491,15 @@ impl SimpleXMLElement {
             }
         };
         let size = u32::try_from(items.len()).unwrap_or(u32::MAX);
-        let mut out = PhpArray::sized(req, size, Layout::Packed)?;
+        // `zend_hash_real_finit_packed(..., fallible: true)` since 8.5.12,
+        // and `goto oom` where it is refused or the memory limit was met
+        // adding a row: `null`, `RETURN_OOM()`.
+        let Some(mut out) = req
+            .memory_mut()
+            .fallible(|req| PhpArray::sized(req, size, Layout::Packed))?
+        else {
+            return Ok(None);
+        };
         for item in items {
             let Item::Node(n) = item else { continue };
             let (target, walk, ns) = match n.kind() {
@@ -492,6 +515,10 @@ impl SimpleXMLElement {
             if let Some(target) = target {
                 let made = wrap(req, this, target, walk, ns)?;
                 out.append(req, made.into_value())?;
+                if req.memory().has_oom() {
+                    out.give_up(req);
+                    return Ok(None);
+                }
             }
         }
         Ok(Some(OrFalse::Value(out)))
@@ -812,6 +839,28 @@ impl SimpleXMLElement {
     /// NULL
     /// SimpleXMLElement::addChild(): Argument #1 ($qualifiedName) must not be empty
     /// ```
+    ///
+    /// The element answered is filtered by the prefix its namespace took,
+    /// so what is added under it lands in that namespace and reads back:
+    ///
+    /// ```php
+    /// $x = new SimpleXMLElement('<r xmlns:a="urn:a"/>');
+    /// $c = $x->addChild('kid', null, 'urn:a');
+    /// $c->addChild('inner', 'v');
+    /// $c->addAttribute('id', '8');
+    /// echo $x->asXML();
+    /// var_dump((string) $c->inner, isset($c['id']));
+    /// $e = (new SimpleXMLElement('<r/>'))->addChild('a:kid');
+    /// $e->addChild('inner', 'z');
+    /// var_dump(isset($e->inner));
+    /// ```
+    /// ```expect
+    /// <?xml version="1.0"?>
+    /// <r xmlns:a="urn:a"><a:kid id="8"><a:inner>v</a:inner></a:kid></r>
+    /// string(1) "v"
+    /// bool(false)
+    /// bool(true)
+    /// ```
     #[php(tentative)]
     fn addChild(
         req: &mut Request,
@@ -844,6 +893,7 @@ impl SimpleXMLElement {
         let Some(made) = node.new_child(None, &local, content) else {
             return Ok(None);
         };
+        let named_ns = prefix.is_some() || namespace.is_some();
         if let Some(uri) = namespace {
             let uri = c_name(uri.as_bytes());
             if uri.is_empty() {
@@ -856,7 +906,15 @@ impl SimpleXMLElement {
                 made.set_ns(ns);
             }
         }
-        let ns = Ns::of(prefix.as_deref(), false);
+        // The element answered filters by the prefix its namespace took,
+        // as a prefix (php 8.5.12), so what is added under it lands in its
+        // namespace and reads back through it.
+        let taken = if named_ns {
+            made.ns().and_then(php_ext_libxml::ffi::Ns::prefix)
+        } else {
+            None
+        };
+        let ns = Ns::of(taken.as_deref(), true);
         wrap(req, this, made, Walk::Node, ns).map(|o| Some(o.into_instance()))
     }
 
@@ -940,12 +998,35 @@ impl SimpleXMLElement {
     /// string(1) "a"
     /// string(0) ""
     /// ```
+    ///
+    /// The name is asked for fallibly since 8.5.12, `RETURN_OOM()` where the
+    /// memory limit refused it.
+    ///
+    /// ```php
+    /// $x = simplexml_load_string('<' . str_repeat('a', 3 << 20) . '/>', null, LIBXML_PARSEHUGE);
+    /// ini_set('memory_limit', '2M');
+    /// $n = $x->getName();
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 4
+    /// ```
     #[php(tentative)]
     fn getName(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let view = View::of(req, this.object());
         let base = view.node(req)?;
         let name = view.first(base).map(Node::name).unwrap_or_default();
-        PhpString::new(req, &name)
+        // `zend_string_finit_fast(..., fallible: true)`
+        // (`Z/ext/simplexml/simplexml.c:1677` at 8.5.12), `RETURN_OOM()`
+        // where the memory limit refused it.
+        match req
+            .memory_mut()
+            .fallible(|req| PhpString::fast(req, &name))?
+        {
+            Some(name) => Ok(name),
+            None => PhpString::new(req, b""), // RETURN_OOM()
+        }
     }
 
     /// `__toString(): string`: the text of the walk's first node.
@@ -959,9 +1040,31 @@ impl SimpleXMLElement {
     /// string(1) "x"
     /// string(0) ""
     /// ```
+    ///
+    /// The string is asked for fallibly since 8.5.12, and the limit's fatal
+    /// is raised as the call returns where it is refused:
+    ///
+    /// ```php
+    /// $x = simplexml_load_string('<r>' . str_repeat('x', 3 << 20) . '</r>', null, LIBXML_PARSEHUGE);
+    /// ini_set('memory_limit', '2M');
+    /// $s = $x->__toString(); var_dump(strlen($s));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 4
+    /// ```
     fn __toString(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         let text = sxe::cast_text(req, this.object())?.unwrap_or_default();
-        PhpString::new(req, &text)
+        // `cast_object`'s `ZVAL_FSTRINGL` since 8.5.12: where the memory
+        // limit refused it the cast fails and the answer is the empty
+        // string.
+        match req
+            .memory_mut()
+            .fallible(|req| PhpString::new(req, &text))?
+        {
+            Some(text) => Ok(text),
+            None => PhpString::new(req, b""),
+        }
     }
 
     /// `__debugInfo(): ?array`: what `var_dump` shows, the attributes under
@@ -1076,10 +1179,32 @@ impl SimpleXMLElement {
     /// Iterator not initialized or already consumed
     /// string(1) "a"
     /// ```
+    ///
+    /// The string is asked for fallibly since 8.5.12, and the limit's fatal
+    /// is raised as the call returns where it is refused:
+    ///
+    /// ```php
+    /// $x = new SimpleXMLIterator('<r><' . str_repeat('a', 3 << 20) . '/></r>', LIBXML_PARSEHUGE);
+    /// $x->rewind();
+    /// ini_set('memory_limit', '2M');
+    /// $k = $x->key(); var_dump(strlen($k));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 3162112 bytes) in %s on line 5
+    /// ```
     #[php(tentative)]
     fn key(req: &mut Request, this: This<Self>) -> Result<Owner<PhpString>, Thrown> {
         match sxe::current_name(req, this.object()) {
-            Some(name) => PhpString::new(req, &name),
+            // `RETURN_FSTRINGL` since 8.5.12: `RETURN_OOM()` where the
+            // memory limit refused it.
+            Some(name) => match req
+                .memory_mut()
+                .fallible(|req| PhpString::new(req, &name))?
+            {
+                Some(name) => Ok(name),
+                None => PhpString::new(req, b""), // RETURN_OOM()
+            },
             None => Err(throw_error(
                 req,
                 "Error",

@@ -151,6 +151,60 @@ fn visit_as_a_table_over_state_and_start() {
     assert_eq!(policy::read(&sealed), State::Blacklisted);
 }
 
+/// A loop root's word, visited where a return or an exit goes on at the
+/// root, is entered where compiled and otherwise neither bumped nor
+/// claimed, however hot: the loop's back edge counts its heat once a
+/// turn, as php's header counts each arrival once, so a body that ends in
+/// a call is not counted twice a turn (#3318).
+#[test]
+fn a_loop_roots_word_is_entered_from_a_landing_and_never_counted_there() {
+    let tracing = testing::policy(&[("opcache.jit", "tracing"), ("opcache.jit_hot_loop", "2")]);
+    let (epoch, func) = fixture();
+    let word = epoch.word(func, SafepointIdx(1));
+    for _ in 0..300 {
+        let visited = super::Goes::Header.visit(word, &tracing, true, || root(&epoch, func, 1));
+        assert_eq!(decided(visited), "continue");
+    }
+    assert_eq!((policy::read(word), heat(word)), (State::Cold, 0));
+    if let Some(claim) = root(&epoch, func, 1).and_then(|h| policy::claim(h, &tracing, Start::Loop))
+    {
+        policy::settle(claim, &Outcome::Published(trace(3)));
+    }
+    let visited = super::Goes::Header.visit(word, &tracing, true, || root(&epoch, func, 1));
+    assert_eq!(decided(visited), "enter 3");
+}
+
+/// A loop whose body ends in a call counts its heat once a turn, as one
+/// whose body does not: under `opcache.jit_hot_loop=8` neither roots in
+/// seven turns and each roots in eight, where a return landing on the
+/// condition that counted too rooted the first in four (#3318's review).
+/// php counts the `JMP` into the loop as an arrival as well and roots both
+/// in seven, which this engine, with no site at the condition (revision
+/// 70), does not see.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_loop_whose_body_ends_in_a_call_counts_once_a_turn() {
+    let ini = [
+        ("opcache.jit", "tracing"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+        ("opcache.jit_hot_loop", "8"),
+        ("opcache.jit_hot_func", "255"),
+    ];
+    let scratch = testing::Scratch::new();
+    let rooted = |body: &str, turns: u32| {
+        let engine = testing::engine::<Lane>(&ini);
+        let program = format!("function g() {{}} $i = 0; while ($i < {turns}) {{ {body} }}");
+        let served = scratch.serve(&engine, &program);
+        (lines(&served).iter())
+            .filter(|line| line.contains("start (loop)"))
+            .count()
+    };
+    for body in ["$i++; g();", "g(); $i++;"] {
+        assert_eq!((rooted(body, 7), rooted(body, 8)), (0, 1), "{body}");
+    }
+}
+
 /// With the request recording, a visit that crosses the
 /// threshold answers `Continue` and leaves the word bumped and cold, as
 /// php's `zend_jit_loop_trace_counter_handler` bumps and returns while
@@ -799,7 +853,7 @@ mod ran {
         self, Extension, ExtensionBuilder, Fatal, Flow, FrameRef, Request, Site, Tier,
     };
 
-    use super::super::run;
+    use super::super::run_lent;
     use crate::enter::tests::entered::numbered;
     use crate::policy::{self, Holder, Outcome, State};
     use crate::record::Start;
@@ -854,16 +908,16 @@ mod ran {
             };
             let number = (numbered::number as *const ()).addr();
             let body = |at: u32| answering(calling(number, at, &[], true), 0);
-            let cold = compiled(&body(1), vec![landing(2, Landing::Plain)]);
+            let cold = compiled(&body(1), vec![landing(2, Landing::PLAIN)]);
             let Ok(cold) = table.publish(cold, Start::Enter) else {
                 return Flow::Bail(Fatal::error("the cold trace was not published"));
             };
-            let mut linked = landing(1, Landing::Plain);
+            let mut linked = landing(1, Landing::PLAIN);
             linked.link = Some(cold);
             let Ok(linking) = table.publish(compiled(&body(0), vec![linked]), Start::Enter) else {
                 return Flow::Bail(Fatal::error("the linking trace was not published"));
             };
-            let flow = run(req, frame, linking, &shared);
+            let flow = run_lent(req, frame, linking);
             let resumed = match flow {
                 Flow::Resume(at) => tier::frame(req, at).map(|view| (at == frame, view.opline().0)),
                 _ => None,
@@ -954,7 +1008,7 @@ mod ran {
         };
         let number = (numbered::number as *const ()).addr();
         let body = |at: u32| answering(calling(number, at, &[], true), 0);
-        let root = compiled(&body(0), vec![landing(1, Landing::Plain)]);
+        let root = compiled(&body(0), vec![landing(1, Landing::PLAIN)]);
         let Ok(root) = table.publish(root, Start::Enter) else {
             return Flow::Bail(Fatal::error("the root was not published"));
         };
@@ -963,7 +1017,7 @@ mod ran {
             exit: ExitId(0),
         };
         let side = if published {
-            let side = compiled(&body(1), vec![landing(2, Landing::Plain)]);
+            let side = compiled(&body(1), vec![landing(2, Landing::PLAIN)]);
             match table.publish(side, grew) {
                 Ok(side) => side,
                 Err(_) => return Flow::Bail(Fatal::error("the side was not published")),
@@ -980,7 +1034,7 @@ mod ran {
             return Flow::Bail(Fatal::error("the root's exit was not claimed"));
         };
         policy::settle(claim, &Outcome::Published(side));
-        let flow = run(req, frame, root, &shared);
+        let flow = run_lent(req, frame, root);
         let resumed = match flow {
             Flow::Resume(at) => tier::frame(req, at).map(|view| (at == frame, view.opline().0)),
             _ => None,

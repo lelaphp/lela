@@ -43,7 +43,9 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use php_engine::tier::{self, Epoch, FuncRef, MapPtrRaw, PlainCall, Request, Word};
 use php_unit::OplineIdx;
 
-use crate::lower::{Compiled, Fuzzed, Mark};
+use crate::lower::{
+    Compiled, Entrance, EntrySlots, Fuzzed, LandingSlots, Linked, Mark, Stands, engine_offset,
+};
 use crate::policy::{Place, Policy};
 use crate::record::{Entered, Start, Stop};
 use crate::types::{ExitId, Grows, Landing};
@@ -98,8 +100,9 @@ impl TraceId {
         self.0
     }
 
-    /// Its place in a table: the segment, and the slot in it.
-    fn slot(self) -> (usize, usize) {
+    /// Its place in a table, and in a request's rows of a table's traces
+    /// (`enter::Rows`): the segment, and the slot in it.
+    pub(crate) fn slot(self) -> (usize, usize) {
         let n = self.0 as usize;
         (n / SEGMENT, n % SEGMENT)
     }
@@ -149,6 +152,18 @@ pub(crate) enum Kind {
 pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) code: Code<P>,
     entry_offset: usize,
+    body_offset: usize,
+    /// How a jump from another trace enters it: its body and its number,
+    /// which an entry slot of the exit it grew from names once it is
+    /// published (`lower::EntrySlots`).
+    pub(crate) entrance: Entrance,
+    /// One entry slot per exit, which its code reads where the exit jumps
+    /// to its side trace, and which the publish of that side writes.
+    pub(crate) slots: EntrySlots,
+    /// Its landing slots, which its code reads where it escapes, and
+    /// which the crossing writes as it enters a trace at a landing it
+    /// escaped to (`lower::LandingSlots`).
+    pub(crate) landings: LandingSlots,
     pub(crate) id: TraceId,
     #[cfg_attr(
         not(test),
@@ -161,6 +176,9 @@ pub(crate) struct Trace<P: Pages = Native> {
     pub(crate) exits: Box<[Exit]>,
     /// The exit it ends through where it does not loop.
     pub(crate) leaves: Option<ExitId>,
+    /// Whether a side trace's link to it tests the interrupt first
+    /// (`lower::Compiled::checks_interrupt`).
+    pub(crate) checks_interrupt: bool,
     /// Where a loop whose interrupt test takes php's stub stands its
     /// frame as it answers `lower::INTERRUPTED`: its header's opline.
     pub(crate) stub: Option<OplineIdx>,
@@ -172,13 +190,8 @@ pub(crate) struct Trace<P: Pages = Native> {
     /// Where it is entered at a loop's body too, the opline its back edge
     /// lands on.
     pub(crate) body: Option<OplineIdx>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "enter lays them down once lower reads past the request's map base"
-        )
-    )]
+    /// The runtime-cache slots its code reads, which `enter` touches on a
+    /// request's first entry of it.
     pub(crate) map_ptrs: Box<[MapPtrRaw]>,
     #[cfg_attr(
         not(test),
@@ -207,11 +220,40 @@ pub(crate) struct Trace<P: Pages = Native> {
 }
 
 impl<P: Pages> Trace<P> {
-    /// The address the trace is entered at, in the executable view.
+    /// The address the trace is entered at, in the executable view: its
+    /// prologue, which `enter` calls.
     pub(crate) fn entry(&self) -> std::ptr::NonNull<u8> {
         self.code
             .entry()
             .map_addr(|addr| addr.saturating_add(self.entry_offset))
+    }
+
+    /// The address of its body, in the executable view, which its prologue
+    /// calls and a jump from another trace enters.
+    pub(crate) fn body(&self) -> std::ptr::NonNull<u8> {
+        self.code
+            .entry()
+            .map_addr(|addr| addr.saturating_add(self.body_offset))
+    }
+
+    /// What a link to it jumps to (`lower::Linked`), from a trace that
+    /// `start` grew: its entrance, and whether the jump tests the
+    /// interrupt first, which php's does where a side trace links to its
+    /// own root and the root loops other than by recursive returns
+    /// (`zend_jit_trace.c:7209-7212`, `:7285-7303`).
+    pub(crate) fn linked(&self, from_root: Option<TraceId>) -> Linked {
+        let opens = self.opens.and_then(|(func, opline)| {
+            Some(Stands {
+                func: engine_offset(func)?,
+                opline: opline.0,
+            })
+        });
+        Linked {
+            body: self.entrance.body,
+            trace: self.entrance.trace,
+            interrupt: from_root == Some(self.id) && self.checks_interrupt,
+            opens,
+        }
     }
 }
 
@@ -642,7 +684,9 @@ impl<P: Pages> TraceTable<P> {
             .ok_or(Unpublished::Malformed("more exits than an ExitId names"))?;
         let next = self.next.load(Ordering::Relaxed);
         let admitted = writer.counts.admit(self.bounds, next, start, exits)?;
-        if compiled.entry_offset >= compiled.bytes.len() {
+        if compiled.entry_offset >= compiled.bytes.len()
+            || compiled.body_offset >= compiled.bytes.len()
+        {
             return Err(Unpublished::Malformed("an entry past the trace's bytes"));
         }
         if compiled
@@ -695,15 +739,27 @@ impl<P: Pages> TraceTable<P> {
             .perf
             .published(id, &compiled.name, entry, &compiled.bytes);
         let (bytes, oplines) = (compiled.bytes.len(), compiled.marks.len());
+        let body = entry
+            .as_ptr()
+            .expose_provenance()
+            .saturating_add(compiled.body_offset);
         let trace = Box::new(Trace {
             code,
             entry_offset: compiled.entry_offset,
+            body_offset: compiled.body_offset,
+            entrance: Entrance {
+                body,
+                trace: id.get(),
+            },
+            slots: compiled.slots,
+            landings: compiled.landings,
             id,
             kind: Kind::Trace,
             start,
             root: admitted.root,
             exits: built,
             leaves: compiled.leaves,
+            checks_interrupt: compiled.checks_interrupt,
             stub: compiled.stub,
             opens: compiled.opens,
             entry_stood: compiled.entry_stood,
@@ -716,11 +772,44 @@ impl<P: Pages> TraceTable<P> {
             links: links.into_boxed_slice(),
         });
         self.fill(id, trace)?;
+        self.open(start, id);
         writer.counts.count(admitted, exits);
         writer.perf.counted(bytes, oplines);
         self.next
             .store(id.get().saturating_add(1), Ordering::Release);
         Ok(id)
+    }
+
+    /// The entry slot of the exit `start` grew the trace `id` from set to
+    /// the trace's entrance, with release, once the trace is in its slot
+    /// (#3229's ruling, `jit-design.md` §4.5): its parent's code jumps to
+    /// it from then on. The parent is this table's, so the slot and the
+    /// entrance it names are dropped together, with the table. A root
+    /// grows from no exit, and a slot set already is left as it is.
+    fn open(&self, start: Start, id: TraceId) {
+        let Some((parent, exit)) = start.grew() else {
+            return;
+        };
+        if let (Some(parent), Some(side)) = (self.get(parent), self.get(id)) {
+            parent.slots.open(exit, &side.entrance);
+        }
+    }
+
+    /// How many segments of slots the table holds, which a request's rows
+    /// of its traces hold as many of (`enter::Rows`).
+    pub(crate) fn segments(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// What the link of a trace `start` grows, linking to `link`, jumps
+    /// to: none where `link` has no code.
+    pub(crate) fn linked(&self, link: TraceId, start: Start) -> Option<Linked> {
+        let to = self.get(link)?;
+        let root = start
+            .grew()
+            .and_then(|(parent, _)| self.get(parent))
+            .map(|parent| parent.root);
+        Some(to.linked(root))
     }
 
     /// Whether the slot `id` names stands unwritten, so [`TraceTable::fill`]
@@ -750,9 +839,10 @@ impl<P: Pages> TraceTable<P> {
 
 /// The trace table of the epoch `req` started in, made the first time a
 /// request of it asks, over `policy`'s bounds; none only where the
-/// epoch's slot holds another tier's value.
+/// epoch's slot holds another tier's value. The slot holds it shared, so
+/// a request can keep it for as long as it serves (`enter::lent`).
 pub(crate) fn of<'r>(req: &'r Request, policy: &Policy, outputs: &Outputs) -> Option<&'r Table> {
-    tier::epoch_state(req, || Table::new(policy, outputs))
+    tier::epoch_state(req, || Arc::new(Table::new(policy, outputs))).map(Arc::as_ref)
 }
 
 /// A hold on the epoch `req` started in, its trace table made as [`of`]
@@ -765,7 +855,12 @@ pub(crate) fn holding(req: &Request, policy: &Policy, outputs: &Outputs) -> Epoc
 
 /// The trace table `epoch` keeps, where a request of it made one.
 pub(crate) fn of_epoch(epoch: &Epoch) -> Option<&Table> {
-    epoch.tier_state::<Table>()
+    shared_of_epoch(epoch).map(Arc::as_ref)
+}
+
+/// [`of_epoch`], shared, for a request that keeps it.
+pub(crate) fn shared_of_epoch(epoch: &Epoch) -> Option<&Arc<Table>> {
+    epoch.tier_state::<Arc<Table>>()
 }
 
 /// The word of exit `exit` of trace `trace` in `epoch`'s table; the

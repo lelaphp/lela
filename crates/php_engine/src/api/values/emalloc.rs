@@ -98,6 +98,27 @@ impl Emalloc {
         })
     }
 
+    /// `ferealloc(ptr, len, true)` and its kin, as php 8.5.12 grows a
+    /// buffer it keeps where the growth is refused: [`Emalloc::resize`],
+    /// with the allocation handed back as it stood beside the `Err`, the
+    /// refusal [`Memory::fallible`] carries out of its scope or the memory
+    /// limit's fatal.
+    ///
+    /// [`Memory::fallible`]: crate::api::request::Memory::fallible
+    pub(crate) fn try_resize(
+        self,
+        req: &mut Request,
+        len: usize,
+    ) -> Result<Emalloc, (Emalloc, Thrown)> {
+        match req.heap_mut().block_try_resize(self.block, len) {
+            Ok(block) => Ok(Emalloc { block }),
+            Err((block, fatal)) => {
+                let thrown = req.fatal_of::<()>(Err(fatal)).err();
+                Err((Emalloc { block }, thrown.unwrap_or(Thrown::of(None))))
+            }
+        }
+    }
+
     /// `efree(ptr)`: the allocation back to the heap.
     pub fn free(self, req: &mut Request) {
         req.heap_mut().free_block(self.block);

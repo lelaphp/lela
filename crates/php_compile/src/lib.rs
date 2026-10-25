@@ -31,8 +31,21 @@ pub mod multibyte;
 mod skip;
 mod special;
 mod stack;
+pub mod values;
 
+pub use emit::is_reserved_class_name;
 pub use stack::{Reentered, StackLimit};
+
+/// `MAXPATHLEN` (`Z/Zend/zend_virtual_cwd.h:39`), the host's
+/// `PATH_MAX`: 4096 on Linux, 1024 on macOS and the BSDs. The room
+/// `__DIR__` takes where the directory is the working one, and the one
+/// value the engine's path checks, `open_basedir`, `include` and `dl()`
+/// read and `PHP_MAXPATHLEN` says.
+pub const MAXPATHLEN: usize = if cfg!(target_os = "linux") {
+    4096
+} else {
+    1024
+};
 
 /// The token stream and the tree (design §4.9), handed up for
 /// `php_engine::api::syntax` and nothing of the compiler's own: the
@@ -51,12 +64,14 @@ pub mod syntax {
 }
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 
-use php_heap::{Fatal, FatalReason, Intern};
+use php_heap::{Fatal, FatalReason, Intern, Sizing};
 use php_link::{Exact, Folded, Indexed};
 use php_syntax::{Arena, Parsed};
-use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, Visibility};
+use php_unit::decl::{ClassDecl, ConstDecl, FunctionDecl, HookKind, Visibility};
 use php_unit::{Diagnostic, Level, Unit};
+use values::Holder;
 
 /// What the compiler is told beside the source (design §4.1).
 #[allow(clippy::struct_excessive_bools)] // php's compile-time ini entries and compiler options, each one fact
@@ -544,6 +559,7 @@ impl Refused {
     pub fn bailed(&self) -> bool {
         match self.raise {
             Raise::Fatal => self.level != Level::Parse,
+            Raise::HardLimit { .. } => true,
             Raise::Thrown | Raise::Unread => false,
         }
     }
@@ -571,6 +587,15 @@ pub enum Raise {
     /// for the compile to read or refuse, as it leaves a node that is no
     /// constant.
     Unread,
+    /// The heap met php 8.5.12's hard limit as the compile asked for
+    /// memory (`zend_mm_hard_limit_error`): the process ends where it
+    /// stands, which no `try` and no shutdown sees.
+    HardLimit {
+        /// `heap->hard_limit`.
+        limit: usize,
+        /// The bytes asked for past what the chunks held.
+        asked: usize,
+    },
 }
 
 /// What php's compile of a source had added to `CG(function_table)` and
@@ -908,20 +933,25 @@ fn compile_scanned<'p>(
 
 /// A compile's refusal with `raised`, what was raised before the compile
 /// began, standing before every diagnostic the compiler raised, and the
-/// names of the functions it declared made as a file's are
-/// ([`intern_names`]); a declared unit whose names the heap refused is
-/// not handed back.
+/// names of what it declared handed over ([`Parts::intern`]): those
+/// it made as it went, `own`, and for a file every other as a file's are
+/// made ([`intern_names`]); a declared unit whose names the heap refused
+/// is not handed back.
 pub(crate) fn refused_after(
     mut refused: CompileError,
     mut raised: Vec<Diagnostic>,
     options: &Options<'_>,
+    own: &[(Named, php_heap::Str)],
     strings: &mut dyn Intern,
 ) -> CompileError {
     if let Some(declared) = &mut refused.declared {
         for before in &mut declared.raised_before {
             *before += raised.len();
         }
-        if options.kind == SourceKind::File && intern_names(&declared.unit, strings).is_err() {
+        if Parts::of(&declared.unit)
+            .intern(Making::refused(options.kind), own, strings)
+            .is_err()
+        {
             refused.declared = None;
         }
     }
@@ -960,71 +990,116 @@ impl<'u> Parts<'u> {
         }
     }
 
-    /// What [`intern_names`] interns, or [`intern_declared`] where `kind`
-    /// is an `eval`'s.
-    pub(crate) fn intern(self, kind: SourceKind, strings: &mut dyn Intern) -> Result<(), Fatal> {
-        if kind == SourceKind::File {
-            for name in self.names() {
-                strings.intern(name)?;
-            }
-        }
-        self.intern_declared(strings)
-    }
-
-    /// [`op_array_names`].
-    fn names(self) -> impl Iterator<Item = &'u [u8]> {
-        let functions = self
-            .functions
-            .iter()
-            .chain(self.dynamic)
-            .map(|(decl, _)| decl);
-        let methods = self.classes.iter().flat_map(|class| {
-            let hooks = class
-                .properties
-                .iter()
-                .filter_map(|property| property.hooks.as_deref())
-                .flat_map(|hooks| hooks.get.iter().chain(&hooks.set));
-            // An enum's `cases`, `from` and `tryFrom` are php's internal
-            // functions, named by its known strings.
-            php_unit::written_methods(class)
-                .iter()
-                .chain(hooks)
-                .map(|method| &method.function)
-        });
-        std::iter::once(self.file)
-            .chain(functions.chain(methods).map(|decl| &decl.name))
-            .chain(self.classes.iter().map(|class| &class.name))
-            .map(|name| &*name.0)
-    }
-
-    /// [`intern_declared`].
-    fn intern_declared(self, strings: &mut dyn Intern) -> Result<(), Fatal> {
-        for var in self.main_vars {
-            strings.intern(&var.0)?;
-        }
-        // An `eval` that declares nothing, the most of them, walks no
-        // declaration.
-        if self.functions.is_empty()
-            && self.dynamic.is_empty()
-            && self.methods.is_empty()
-            && self.hooks.is_empty()
-            && self.classes.is_empty()
-        {
-            return Ok(());
-        }
-        for name in self.declared_names() {
-            strings.intern(&name)?;
+    /// Each name the unit's declarations own handed to `strings`
+    /// ([`Intern::hand_name`]) in the order [`named`] walks them: the
+    /// string the compile made for it as it went, `own`'s, else one made
+    /// here where `making` makes it, else none.
+    pub(crate) fn intern(
+        self,
+        making: Making,
+        own: &[(Named, php_heap::Str)],
+        strings: &mut dyn Intern,
+    ) -> Result<(), Fatal> {
+        let own: HashMap<Named, php_heap::Str> = own.iter().copied().collect();
+        for (named, bytes) in self.walk() {
+            let made = match (own.get(&named), making, named) {
+                (Some(own), ..) => Some(*own),
+                (None, Making::All | Making::Read, Named::Read(_))
+                | (None, Making::All, Named::File | Named::Function(_) | Named::Class(_)) => {
+                    let sizing = named.sizing_among(self.classes, &bytes);
+                    Some(strings.intern_marked(&bytes, false, sizing)?)
+                }
+                (None, ..) => None,
+            };
+            strings.hand_name(made);
         }
         Ok(())
     }
 
-    /// [`declared_names`].
-    fn declared_names(self) -> impl Iterator<Item = Cow<'u, [u8]>> {
-        let bodies = (self.functions.iter().chain(self.dynamic))
-            .map(|(_, body)| body)
-            .chain(self.methods.iter().map(|method| &method.body))
-            .chain(self.hooks.iter().map(|hook| &hook.body));
-        let vars = bodies.flat_map(|body| body.vars.iter().map(|var| Cow::Borrowed(&*var.0)));
+    /// [`named`]: the file's, each function's, dynamic definition's,
+    /// method's, hook's and class's, as [`intern_names`] interns them;
+    /// the lowered keys; then the main op array's variables' and the
+    /// names the declarations are read by.
+    fn walk(self) -> impl Iterator<Item = (Named, Cow<'u, [u8]>)> {
+        let functions = (self.functions.iter().enumerate())
+            .map(|(at, (decl, _))| (FunctionAt::Top(at), &decl.name));
+        let dynamic = (self.dynamic.iter().enumerate())
+            .map(|(at, (decl, _))| (FunctionAt::Dynamic(at), &decl.name));
+        let members = (self.classes.iter().enumerate()).flat_map(|(class, decl)| {
+            // An enum's `cases`, `from` and `tryFrom` are php's internal
+            // functions, named by its known strings.
+            let methods = (php_unit::written_methods(decl).iter().enumerate())
+                .map(move |(method, m)| (FunctionAt::Method { class, method }, &m.function.name));
+            let hooks = (decl.properties.iter().enumerate())
+                .filter_map(|(property, p)| Some((property, p.hooks.as_deref()?)))
+                .flat_map(move |(property, hooks)| {
+                    let get = hooks.get.iter().map(|m| (HookKind::Get, m));
+                    get.chain(hooks.set.iter().map(|m| (HookKind::Set, m)))
+                        .map(move |(kind, m)| {
+                            let at = FunctionAt::Hook {
+                                class,
+                                property,
+                                kind,
+                            };
+                            (at, &m.function.name)
+                        })
+                });
+            methods.chain(hooks)
+        });
+        let functions =
+            (functions.chain(dynamic).chain(members)).map(|(at, name)| (Named::Function(at), name));
+        let classes =
+            (self.classes.iter().enumerate()).map(|(at, class)| (Named::Class(at), &class.name));
+        let names = (std::iter::once((Named::File, self.file))
+            .chain(functions)
+            .chain(classes))
+        .map(|(named, name)| (named, Cow::Borrowed(&*name.0)));
+        names.chain(self.keys()).chain(
+            self.reads()
+                .map(|(holder, name)| (Named::Read(holder), name)),
+        )
+    }
+
+    /// The lowered key each declaration is bound under where it is not
+    /// its name (`zend_string_tolower`): a function's, one a
+    /// `DECLARE_FUNCTION` binds among them, a class's, which the
+    /// `class_table` keeps however it was bound, and a method's, the
+    /// class's `function_table` key. A closure has none.
+    fn keys(self) -> impl Iterator<Item = (Named, Cow<'u, [u8]>)> {
+        let functions = (self.functions.iter().enumerate())
+            .map(|(at, (decl, _))| (Named::FunctionKey(at), &decl.name));
+        let dynamic = (self.dynamic.iter().enumerate())
+            .filter(|(_, (decl, _))| !decl.name.0.starts_with(b"{"))
+            .map(|(at, (decl, _))| (Named::DefinitionKey(at), &decl.name));
+        let classes =
+            (self.classes.iter().enumerate()).map(|(at, class)| (Named::ClassKey(at), &class.name));
+        let methods = (self.classes.iter().enumerate()).flat_map(|(class, decl)| {
+            (php_unit::written_methods(decl).iter().enumerate())
+                .map(move |(method, m)| (Named::MethodKey { class, method }, &m.function.name))
+        });
+        (functions.chain(dynamic).chain(classes).chain(methods))
+            .filter(|(_, name)| name.0.iter().any(u8::is_ascii_uppercase))
+            .map(|(named, name)| (named, Cow::Owned(name.0.to_ascii_lowercase())))
+    }
+
+    /// The names the declarations are read by, beside what holds each
+    /// ([`named`]'s [`Named::Read`]).
+    fn reads(self) -> impl Iterator<Item = (Holder, Cow<'u, [u8]>)> {
+        let main = (self.main_vars.iter()).map(|var| (Holder::Main, Cow::Borrowed(&*var.0)));
+        let bodies = (self.functions.iter().map(|(_, body)| (Holder::Unit, body)))
+            .chain(
+                (self.dynamic.iter().enumerate())
+                    .map(|(at, (_, body))| (Holder::Dynamic(at), body)),
+            )
+            .chain(
+                self.methods
+                    .iter()
+                    .map(|method| (Holder::Unit, &method.body)),
+            )
+            .chain(self.hooks.iter().map(|hook| (Holder::Unit, &hook.body)));
+        let vars = bodies.flat_map(|(holder, body)| {
+            (body.vars.iter()).map(move |var| (holder, Cow::Borrowed(&*var.0)))
+        });
         let properties = self.classes.iter().flat_map(|class| {
             class.properties.iter().flat_map(move |property| {
                 let mangled = mangling(property.visibility, &class.name.0)
@@ -1036,12 +1111,174 @@ impl<'u> Parts<'u> {
         // key `zend_compile_class_const_decl` and `zend_compile_enum_case`
         // intern (`zval_make_interned_string`).
         let constants = (self.classes.iter()).flat_map(|class| {
-            class
-                .constants
-                .iter()
-                .map(|constant| Cow::Borrowed(&*constant.name.0))
+            (class.constants.iter()).map(|constant| Cow::Borrowed(&*constant.name.0))
         });
-        vars.chain(properties).chain(constants)
+        let declared = properties.chain(constants).map(|name| (Holder::Unit, name));
+        main.chain(vars).chain(declared)
+    }
+}
+
+/// What [`Parts::intern`] makes of the names the compile made none of as
+/// it went.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Making {
+    /// Every op array's and the file's, and those the declarations are
+    /// read by: a file's, whose names opcache persists beside it.
+    All,
+    /// Those the declarations are read by: an `eval`'s, whose op arrays'
+    /// names the engine makes as it notes the unit.
+    Read,
+    /// None: a refused `eval`'s, which hands over only what it made.
+    None,
+}
+
+impl Making {
+    /// What a compile of `kind` that ends in a unit makes.
+    pub(crate) fn of(kind: SourceKind) -> Making {
+        match kind {
+            SourceKind::File => Making::All,
+            SourceKind::Eval(_) => Making::Read,
+        }
+    }
+
+    /// What a refused compile of `kind` that declared something makes.
+    pub(crate) fn refused(kind: SourceKind) -> Making {
+        match kind {
+            SourceKind::File => Making::All,
+            SourceKind::Eval(_) => Making::None,
+        }
+    }
+}
+
+/// What a name a compile hands its home names ([`Intern::hand_name`]), in
+/// the order [`named`] walks them: one string a declaration owns, given
+/// to what holds it ([`Named::holder`]) by what it names, never told by
+/// its bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Named {
+    /// The unit's file's, `op_array->filename`.
+    File,
+    /// A function's, a closure's, a method's or a hook's,
+    /// `function_name`.
+    Function(FunctionAt),
+    /// The class's at this place of [`Unit::classes`], `ce->name`.
+    Class(usize),
+    /// The lowered key the top-level function at this place of
+    /// [`Unit::functions`] is bound under where lowering changes its
+    /// name, the function table's: `zend_begin_func_decl`'s
+    /// `zend_string_tolower`.
+    FunctionKey(usize),
+    /// The lowered key the dynamic definition at this place of
+    /// [`Unit::dynamic`] is bound under where lowering changes its
+    /// name, its `DECLARE_FUNCTION`'s constant.
+    DefinitionKey(usize),
+    /// The lowered key the class at this place is bound under where
+    /// lowering changes its name, which php's compile interns
+    /// (`zend_new_interned_string`).
+    ClassKey(usize),
+    /// The lowered key the method at `method` of the class at `class` is
+    /// bound under where lowering changes its name, which
+    /// `zend_begin_method_decl` interns.
+    MethodKey { class: usize, method: usize },
+    /// A name a declaration is read by: a variable's, a declared
+    /// property's and a class constant's or enum case's.
+    Read(Holder),
+}
+
+impl Named {
+    /// What holds the name: the dynamic definition it is the name, the
+    /// key or a variable of, the main op array a variable of, and the
+    /// unit any other.
+    #[must_use]
+    pub fn holder(self) -> Holder {
+        match self {
+            Named::Function(FunctionAt::Dynamic(at)) | Named::DefinitionKey(at) => {
+                Holder::Dynamic(at)
+            }
+            Named::Read(holder) => holder,
+            Named::File
+            | Named::Function(_)
+            | Named::Class(_)
+            | Named::FunctionKey(_)
+            | Named::ClassKey(_)
+            | Named::MethodKey { .. } => Holder::Unit,
+        }
+    }
+}
+
+/// Where a function's op array stands in its unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FunctionAt {
+    /// The top-level function at this place of [`Unit::functions`].
+    Top(usize),
+    /// The dynamic definition at this place of [`Unit::dynamic`], a
+    /// closure among them.
+    Dynamic(usize),
+    /// The method at `method` of the class at `class`.
+    Method { class: usize, method: usize },
+    /// The `kind` hook of the property at `property` of the class at
+    /// `class`.
+    Hook {
+        class: usize,
+        property: usize,
+        kind: HookKind,
+    },
+}
+
+impl FunctionAt {
+    /// The size php lays the name of the function here, called `name`,
+    /// at: `zend_string_finit`'s ([`Sizing::Finit`]) for a name php
+    /// prints with `zend_strpprintf`, whose `smart_str_extract`
+    /// php-8.5.12 trims to it, a closure's `{closure:…}`
+    /// (`zend_begin_func_decl`, `Z/Zend/zend_compile.c:8379`), which no
+    /// written name can begin as, and a property hook's `$name::get`
+    /// (`zend_compile_property_hooks`, `:8782`); the scanner's,
+    /// `zend_string_init`'s, for every other.
+    #[must_use]
+    pub fn sizing(self, name: &[u8]) -> Sizing {
+        match self {
+            FunctionAt::Hook { .. } => Sizing::Finit,
+            FunctionAt::Dynamic(_) if name.starts_with(b"{") => Sizing::Finit,
+            FunctionAt::Dynamic(_) | FunctionAt::Top(_) | FunctionAt::Method { .. } => {
+                Sizing::Alloc
+            }
+        }
+    }
+}
+
+impl Named {
+    /// The size php lays the name at, called `name` in `unit`: a
+    /// function's as [`FunctionAt::sizing`] says, an anonymous class's
+    /// `class@anonymous…` at `zend_strpprintf`'s
+    /// (`zend_generate_anon_class_name`, `:9219`), and every other at
+    /// `zend_string_init`'s.
+    #[must_use]
+    pub fn sizing(self, unit: &Unit, name: &[u8]) -> Sizing {
+        self.sizing_among(&unit.classes, name)
+    }
+
+    /// [`Named::sizing`] of a unit whose classes are `classes`.
+    fn sizing_among(self, classes: &[ClassDecl], name: &[u8]) -> Sizing {
+        match self {
+            Named::Function(at) => at.sizing(name),
+            Named::Class(at) => class_sizing(
+                classes
+                    .get(at)
+                    .is_some_and(|class| class.flags.is_anonymous),
+            ),
+            _ => Sizing::Alloc,
+        }
+    }
+}
+
+/// The size php lays a class's name at: an anonymous one's at
+/// `zend_strpprintf`'s, `zend_string_finit`'s, and a written one's at the
+/// scanner's.
+pub(crate) fn class_sizing(anonymous: bool) -> Sizing {
+    if anonymous {
+        Sizing::Finit
+    } else {
+        Sizing::Alloc
     }
 }
 
@@ -1073,11 +1310,19 @@ impl<'u> Parts<'u> {
 /// cache's unit is read back with its names interned again, as its
 /// constants are.
 pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
-    Parts::of(unit).intern(SourceKind::File, strings)
+    Parts::of(unit).intern(Making::All, &[], strings)
 }
 
-/// The names php's compile interns into whichever home it compiles
-/// into, an `eval`'s among them: each op array's variables, which
+/// Every name `unit`'s declarations own, in the order a compile hands
+/// them to its home ([`Intern::hand_name`]), each beside what it names
+/// ([`Named`]), so the home gives each to what holds it by its place
+/// and never by its bytes: the file's, `op_array->filename`, each
+/// function's, dynamic definition's, method's and hook's,
+/// `function_name`, and each class's, `ce->name` ([`intern_names`]);
+/// each lowered key a declaration is bound under where it is not its
+/// name; then the names php's compile interns into whichever home it
+/// compiles into, an `eval`'s among them. Those are each op array's
+/// variables, the main one's first, which
 /// `zend_try_compile_cv` interns (`zval_make_interned_string`) before
 /// `lookup_cv` keeps them in `op_array->vars`, each declared
 /// property's name with the key `zend_declare_typed_property` interns
@@ -1109,8 +1354,8 @@ pub fn intern_names(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> 
 /// 32
 /// 32
 /// ```
-pub fn intern_declared(unit: &Unit, strings: &mut dyn Intern) -> Result<(), Fatal> {
-    Parts::of(unit).intern_declared(strings)
+pub fn named(unit: &Unit) -> impl Iterator<Item = (Named, Cow<'_, [u8]>)> {
+    Parts::of(unit).walk()
 }
 
 /// `zend_mangle_property_name`'s prefix (`Z/Zend/zend_compile.c`) for a
@@ -1127,25 +1372,6 @@ pub fn mangling(visibility: Visibility, class: &[u8]) -> Option<Vec<u8>> {
     }
 }
 
-/// The names a unit's op arrays carry, the ones [`intern_names`]
-/// interns: its file's, `op_array->filename`, each function's, method's,
-/// hook's and closure's, `function_name`, and each class's, `ce->name`.
-/// A name two op arrays share stands once for each.
-pub fn op_array_names(unit: &Unit) -> impl Iterator<Item = &[u8]> {
-    Parts::of(unit).names()
-}
-
-/// The names `unit`'s declarations are read by beside their op arrays'
-/// ([`op_array_names`]), as [`intern_declared`] interns them after the
-/// main op array's variables: each declared function's, closure's,
-/// method's and hook's variables (`op_array->vars`), each declared
-/// property's, with the key `prop_info->name` is under too, mangled for
-/// a protected or a private one ([`mangling`]), and each class
-/// constant's and enum case's.
-pub fn declared_names(unit: &Unit) -> impl Iterator<Item = Cow<'_, [u8]>> {
-    Parts::of(unit).declared_names()
-}
-
 /// php's level for what the scanner or the parser raised: the same
 /// `E_*` under the unit's name for it.
 fn level_of(level: php_syntax::Level) -> Level {
@@ -1157,12 +1383,20 @@ fn level_of(level: php_syntax::Level) -> Level {
     }
 }
 
-/// The sentence a compile ends in where the heap refused it a fatal:
-/// the fatal's own message, and php's `Out of memory` for the limit.
-pub(crate) fn fatal_message(fatal: Fatal) -> String {
+/// How a compile the heap refused ends, and its sentence: the fatal's
+/// own message, php's `Out of memory` for the system's refusal, and the
+/// hard limit's end of the process, whose line the request writes.
+pub(crate) fn fatal_refusal(fatal: Fatal) -> (Raise, String) {
     match fatal.into_reason() {
-        FatalReason::Error(message) => message,
-        FatalReason::OutOfMemory(_) => String::from("Out of memory"),
+        FatalReason::Error(message) => (Raise::Fatal, message),
+        FatalReason::OutOfMemory(_) => (Raise::Fatal, String::from("Out of memory")),
+        FatalReason::Refused => (
+            Raise::Fatal,
+            String::from("InternalError: a fallible refusal reached the compiler"),
+        ),
+        FatalReason::HardLimit { limit, asked } => {
+            (Raise::HardLimit { limit, asked }, String::new())
+        }
     }
 }
 

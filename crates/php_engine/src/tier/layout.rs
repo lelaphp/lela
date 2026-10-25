@@ -57,6 +57,7 @@ pub struct FrameLayout {
     this: u32,
     closure: u32,
     leaves_by_kernel: u32,
+    send_by_ref: u32,
     caller_loop: u32,
     numbered_from: u32,
     top: u32,
@@ -89,6 +90,7 @@ pub const FRAME: FrameLayout = FrameLayout {
     this: word(HEADER_AT + Header::THIS_AT),
     closure: word(HEADER_AT + Header::CLOSURE_AT),
     leaves_by_kernel: CallInfo::LEAVES_BY_KERNEL,
+    send_by_ref: CallInfo::SEND_BY_REF,
     caller_loop: Header::CALLER_LOOP,
     numbered_from: Header::NUMBERED_FROM,
     top: word(STACK.top),
@@ -228,6 +230,15 @@ impl FrameLayout {
         self.leaves_by_kernel
     }
 
+    /// The bit of a call being built that says the argument its last
+    /// `CHECK_FUNC_ARG` checked is taken by reference, php's
+    /// `ZEND_CALL_SEND_ARG_BY_REF`, which the `_FUNC_ARG` fetch and the
+    /// `SEND_FUNC_ARG` after it read.
+    #[must_use]
+    pub const fn send_by_ref(&self) -> u32 {
+        self.send_by_ref
+    }
+
     /// The caller's bit that says the call was served from outside the
     /// loop, which the leave kernel serves.
     #[must_use]
@@ -315,27 +326,148 @@ impl FrameLayout {
     }
 }
 
+/// Where a runtime-cache slot keeps a property's place, as compiled code
+/// reads it in the request's own slot (`jit-design.md` §4.3, #3346), as
+/// php's code reads `CACHED_PTR(cache_slot)` and the offset past it for a
+/// class that is not immutable (`zend_jit_fetch_obj`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`): offsets in bytes into
+/// one slot ([`touch`](super::touch)), the tags compiled code tests before
+/// it reads past them, and the bit of a slot's type that says it has
+/// none. One value, [`PLACE`], every offset `offset_of!` over the
+/// interpreter's own types and RFC 2195's mirror of their variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaceLayout {
+    tag: u32,
+    unprimed: u32,
+    property: u32,
+    class: u32,
+    offset_tag: u32,
+    declared: u8,
+    ty: u32,
+    slot: u32,
+    untyped: u32,
+}
+
+/// The engine's runtime-cache slot layout.
+pub const PLACE: PlaceLayout = {
+    use crate::exec::{Cached, PropertyOffset, PropertyPlace, SlotType};
+    let offset = Cached::PLACE_AT + PropertyPlace::OFFSET_AT;
+    PlaceLayout {
+        tag: word(Cached::TAG_AT),
+        unprimed: crate::exec::UNPRIMED,
+        property: crate::exec::PROPERTY,
+        class: word(Cached::PLACE_AT + PropertyPlace::CLASS_AT),
+        offset_tag: word(offset + PropertyOffset::TAG_AT),
+        declared: PropertyOffset::DECLARED,
+        ty: word(offset + PropertyOffset::TY_AT),
+        slot: word(offset + PropertyOffset::SLOT_AT),
+        untyped: SlotType::NO_TYPE as u32,
+    }
+};
+
+impl PlaceLayout {
+    /// Where the slot's tag is, four bytes.
+    #[must_use]
+    pub const fn tag(&self) -> u32 {
+        self.tag
+    }
+
+    /// The tag of a slot nothing was written to.
+    #[must_use]
+    pub const fn unprimed(&self) -> u32 {
+        self.unprimed
+    }
+
+    /// The tag of a slot that holds a property's place.
+    #[must_use]
+    pub const fn property(&self) -> u32 {
+        self.property
+    }
+
+    /// Where a property's place keeps the class it was found on, a
+    /// half-word, the number `php_heap::Obj::CLASS_AT` holds.
+    #[must_use]
+    pub const fn class(&self) -> u32 {
+        self.class
+    }
+
+    /// Where the place keeps its offset's tag, a byte.
+    #[must_use]
+    pub const fn offset_tag(&self) -> u32 {
+        self.offset_tag
+    }
+
+    /// The offset's tag of a declared slot, php's offset past
+    /// `ZEND_FIRST_PROPERTY_OFFSET`.
+    #[must_use]
+    pub const fn declared(&self) -> u8 {
+        self.declared
+    }
+
+    /// Where a declared slot's type is, sixteen bits: [`PlaceLayout::untyped`]
+    /// for a property with no type, else one bit per kind of value that
+    /// lands in it as it stands ([`PlaceLayout::kind`]), none for a
+    /// `readonly` slot and one of a set visibility the scope lacks.
+    #[must_use]
+    pub const fn ty(&self) -> u32 {
+        self.ty
+    }
+
+    /// Where a declared slot's number is, a half-word: `OBJ_PROP_NUM`.
+    #[must_use]
+    pub const fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    /// The bit of a slot's type that admits a value of `kind` as it
+    /// stands, the one [`PlaceLayout::ty`] keeps for it.
+    #[must_use]
+    pub const fn kind(&self, kind: php_heap::ZvalType) -> u32 {
+        crate::exec::SlotType::bit(kind) as u32
+    }
+
+    /// The bit of a slot's type that says the property has none; every
+    /// kind's bit is set beside it.
+    #[must_use]
+    pub const fn untyped(&self) -> u32 {
+        self.untyped
+    }
+}
+
+// What compiled code reads of a slot, each at its own alignment.
+const _: () = {
+    assert!(PLACE.class.is_multiple_of(4) && PLACE.slot.is_multiple_of(4));
+    assert!(PLACE.ty.is_multiple_of(2) && PLACE.unprimed != PLACE.property);
+};
+
 /// A call to a user function as `push_call` laid it down and as a
-/// `DO_*CALL`'s inline path activates it, taken by a recording where the
-/// call stood built: what compiled code writes in place for the same
-/// callee and argument count, as php's trace writes a recorded `func`'s
-/// call. Its header is the one [`call_image`] lays out for the request
-/// the code runs in, since the function's number and its record are the
-/// request's.
+/// `DO_*CALL`'s inline path activates it, or to a native as `INIT_FCALL`
+/// pushes it, taken by a recording where the call stood built: what
+/// compiled code writes in place for the same callee and argument count,
+/// as php's trace writes a recorded `func`'s call
+/// (`zend_jit_push_call_frame`, `Z/ext/opcache/jit/zend_jit_ir.c:8466-8650`, which pushes a native's as a user
+/// function's). Its header is the one [`call_image`] lays out for the
+/// request the code runs in, since the function's number and its record
+/// are the request's.
 #[derive(Debug, Clone)]
 pub struct PlainCall {
-    callee: FuncRef,
+    /// The op array a user function's call serves; none for a native's,
+    /// which its name names.
+    callee: Option<FuncRef>,
     count: u32,
     /// The function's name as the function table holds it, lowered.
     name: Box<[u8]>,
     slots: u32,
     activation: Option<Activation>,
+    checks: bool,
 }
 
-/// Two calls of one callee and one argument count are the same call.
+/// Two calls of one callee and one argument count are the same call: a
+/// user function by its op array, a native by its name.
 impl PartialEq for PlainCall {
     fn eq(&self, other: &PlainCall) -> bool {
         (self.callee, self.count) == (other.callee, other.count)
+            && (self.callee.is_some() || self.name == other.name)
     }
 }
 
@@ -383,10 +515,16 @@ impl Activation {
 }
 
 impl PlainCall {
-    /// The op array the call serves.
+    /// The op array the call serves; none for a native's call.
     #[must_use]
-    pub fn callee(&self) -> FuncRef {
+    pub fn callee(&self) -> Option<FuncRef> {
         self.callee
+    }
+
+    /// The callee's name as the function table holds it, lowered.
+    #[must_use]
+    pub fn name(&self) -> &[u8] {
+        &self.name
     }
 
     /// How many arguments its `INIT_*` says are passed.
@@ -402,18 +540,28 @@ impl PlainCall {
     }
 
     /// What the call's activation writes, where a `DO_*CALL`'s inline
-    /// path makes it with no `RECV*` to serve; none where the callee's
-    /// activation serves its prologue or reads a cache of its own.
+    /// path makes it with no `RECV*` to serve, or with `RECV`s that only
+    /// check ([`PlainCall::checks`]); none where the callee's activation
+    /// serves its prologue or reads a cache of its own.
     #[must_use]
     pub fn activation(&self) -> Option<Activation> {
         self.activation
     }
+
+    /// Whether the activation passes over `RECV` oplines that check the
+    /// types the parameters declare, which compiled code makes in place
+    /// only where it knows each argument is of the type its parameter
+    /// declares, so no check would refuse or coerce it.
+    #[must_use]
+    pub fn checks(&self) -> bool {
+        self.checks
+    }
 }
 
 /// The plain call `call` is, the record on top of the stack being built:
-/// a call to a user function whose `INIT_*` found its entry plain and gave
-/// it no receiver, closure, scope or annex, with no observer declared;
-/// none for any other.
+/// a call to a user function whose `INIT_*` found its entry plain, or to a
+/// native of the engine's table, given no receiver, closure, scope or
+/// annex, with no observer declared; none for any other.
 #[must_use]
 pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let (top, laid) = req.vm().stack.top()?;
@@ -421,7 +569,6 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     let function = header.function?;
     let plain = top == call
         && header.info.building()
-        && header.info.plain_entry()
         && header.this().is_none()
         && header.closure.is_none()
         && header.called_scope().is_none()
@@ -430,19 +577,45 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
     if !plain {
         return None;
     }
-    let user = req.user_function(function)?;
+    let name = || {
+        let decl = req.symbols().function_decl(function)?;
+        Some(decl.name.0.to_ascii_lowercase().into_boxed_slice())
+    };
+    let Some(user) = req.user_function(function) else {
+        // A native's call: its arguments' room and its record, as
+        // `INIT_FCALL` pushes `fbc` (`init_native`).
+        req.native_entry(function)?;
+        req.shared.native_callee(function)?;
+        return Some(PlainCall {
+            callee: None,
+            count: header.num_args,
+            name: name()?,
+            slots: u32::try_from(laid.len()).ok()?,
+            activation: None,
+            checks: false,
+        });
+    };
+    if !header.info.plain_entry() {
+        return None;
+    }
     let code = crate::exec::body_of(&user.unit, user.body)?;
-    let name = req
-        .symbols()
-        .function_decl(function)?
-        .name
-        .0
-        .to_ascii_lowercase();
+    let name = name()?;
     let shape = user.shape;
     let slots = u32::try_from(laid.len()).ok()?;
     let count = header.num_args;
     let opline = crate::exec::skipped_recv(count, shape.parameters, shape.typed, shape.entry);
-    let enters = count <= shape.parameters && slots >= shape.slots && opline == Some(shape.entry);
+    // A function that declares a type keeps its `RECV*`, each a check; with
+    // every parameter passed and one `RECV` each, the checks are all its
+    // prologue does to an argument of the type declared, which compiled
+    // code that knows the argument's type makes in place of them, as
+    // php's trace compiles `zend_jit_recv` with no check where its stack
+    // map knows the argument of a type the declaration holds
+    // (`Z/ext/opcache/jit/zend_jit_ir.c:10825-10873`, the skip in
+    // `zend_jit_verify_arg_type` at `:10773-10781`).
+    let checks = shape.typed && count == shape.parameters && shape.entry == count;
+    let enters = count <= shape.parameters
+        && slots >= shape.slots
+        && (opline == Some(shape.entry) || checks);
     let activation = match shape.cache.offset() {
         MapPtrOffset::Engine(cache) if enters => {
             // What `enter_call` writes into the flags, applied to all of
@@ -467,11 +640,12 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
         _ => None,
     };
     Some(PlainCall {
-        callee: FuncRef::at(code.runtime_cache),
+        callee: Some(FuncRef::at(code.runtime_cache)),
         count,
-        name: name.into_boxed_slice(),
+        name,
         slots,
         activation,
+        checks,
     })
 }
 
@@ -483,15 +657,21 @@ pub fn plain_call(req: &Request, call: FrameRef) -> Option<PlainCall> {
 #[must_use]
 pub fn call_image(req: &Request, call: &PlainCall) -> Option<HeaderImage> {
     let function = req.function_named(Bare::resolved(&call.name))?;
-    let user = req.user_function(function)?;
-    let code = crate::exec::body_of(&user.unit, user.body)?;
-    if FuncRef::at(code.runtime_cache) != call.callee {
+    let served = if let Some(user) = req.user_function(function) {
+        let code = crate::exec::body_of(&user.unit, user.body)?;
+        Some(FuncRef::at(code.runtime_cache))
+    } else {
+        req.native_entry(function)?;
+        None
+    };
+    if served != call.callee {
         return None;
     }
     let (_, header) = req.laid_call(Header::call(function, call.count))?;
     // A header with no record of its callee is one `push_call` completes
     // as it lays it down, and so not one to copy.
-    if !header.info.plain_entry() || header.callee.is_none() {
+    let plain = call.callee.is_none() || header.info.plain_entry();
+    if !plain || header.callee.is_none() {
         return None;
     }
     HeaderImage::of(&header)
