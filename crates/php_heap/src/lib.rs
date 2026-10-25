@@ -367,7 +367,7 @@ impl Heap {
     /// A request-scoped string of `bytes`, php's `zend_string_init`:
     /// one allocation out of this heap, one owner, and the bytes as
     /// given.
-    #[inline]
+    #[inline] // `zend_string_init` is `zend_always_inline`
     pub fn string(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
         let at = self.mm.alloc(Str::allocation_size(bytes.len()))?;
         // SAFETY: the allocation is exactly the header, the bytes and the

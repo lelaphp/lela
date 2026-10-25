@@ -1011,7 +1011,7 @@ impl Mm {
 
     /// `zend_mm_alloc_small` (`Z/Zend/zend_alloc.c:1392`): the head of the
     /// bin's free list, or a fresh `run` when the list is empty.
-    #[inline]
+    #[inline] // `zend_always_inline`, its slow arm out of line
     fn alloc_small(&mut self, bin_num: usize) -> Result<NonNull<u8>, Fatal> {
         self.size += BIN_DATA_SIZE[bin_num];
         self.peak = self.peak.max(self.size);
@@ -1445,7 +1445,7 @@ impl Mm {
     /// carry past the top of memory is php's `E_ERROR` before any of
     /// that, the limit not consulted.
     #[cold]
-    #[inline(never)] // as `alloc_large`
+    #[inline(never)] // off the bins' path, as `alloc_large` is
     fn alloc_huge(&mut self, size: usize) -> Result<NonNull<u8>, Fatal> {
         let page = real_page_size();
         let Some(new_size) = size.checked_next_multiple_of(page) else {
