@@ -19,7 +19,7 @@
 //! at the hard limit.
 
 use crate::api::abi::{Encoding, Multibyte};
-use crate::api::raising::{Level, Thrown, docref, throw};
+use crate::api::raising::{Cause, Level, Thrown, docref, throw};
 use crate::api::request::temporary::TemporaryGuard;
 use crate::api::request::{BodyLimits, Input, Request, Upload};
 use crate::api::values::{Emalloc, Owner, PhpArray, PhpString, Value};
@@ -980,10 +980,20 @@ pub(crate) fn post_handler(
         upload_max_filesize,
     };
     let served = (|| {
-        if req.upload_event(&Upload::Start { content_length })? && !req.has_oom() {
-            parts(req, &mut upload, &mut mbuff, limits, translation.as_ref())?;
+        let parsed = if req.upload_event(&Upload::Start { content_length })? && !req.has_oom() {
+            parts(req, &mut upload, &mut mbuff, limits, translation.as_ref())
+        } else {
+            Ok(())
+        };
+        // A throwable a callback left is pending in php, which goes on to
+        // `fileupload_done` all the same; a fatal or an exit leaves.
+        if let Err(thrown) = &parsed
+            && !matches!(thrown.cause(req), Cause::Throwable(_))
+        {
+            return parsed;
         }
         mbuff.warn_past_limit(req);
+        parsed?;
         let read = req.post_bytes_read();
         req.upload_event(&Upload::End { read })?;
         Ok(())

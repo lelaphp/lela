@@ -387,7 +387,10 @@ impl Request {
 
     /// `SG(rfc1867_uploaded_files)` as `rfc1867_post_handler` lays it
     /// down before it reads a part (`Z/main/rfc1867.c:795`): the table on
-    /// the request's heap, laid once.
+    /// the request's heap, laid once. php lays a fresh one each time the
+    /// handler parses a body and forgets the last, its files with it; a
+    /// second parse in one request keeps the first table here, so every
+    /// file an upload wrote is still removed at the request's end.
     pub(crate) fn uploaded_files(&mut self) -> Result<PhpArray, Thrown> {
         if let Some(table) = self.post.uploaded {
             return Ok(table);
@@ -470,7 +473,10 @@ impl Variables<&Request> {
     /// `move_uploaded_file()` has moved, `SG(rfc1867_uploaded_files)`.
     #[must_use]
     pub fn is_uploaded_file(self, path: &[u8]) -> bool {
-        self.0.uploaded_name(path).is_some()
+        self.0
+            .post
+            .uploaded
+            .is_some_and(|table| table.find(path).is_some())
     }
 }
 
