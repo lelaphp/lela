@@ -1129,10 +1129,12 @@ enum Time {
 
 /// What the end of an unchanged entry's data, `data` as it decoded,
 /// finds as `add_data` copies it: `ZIP_ER_DATA_LENGTH` for stored data
-/// whose size is not its compressed size, from the stat of its CRC layer
+/// whose length is not the entry's size, from the stat of its CRC layer
 /// after the copy, which no decompressor below has given the size it
-/// made; otherwise `ZIP_ER_CRC` from `zip_source_zip_file_create`'s CRC
-/// layer at the end of the data, where the entry has a CRC to hold it to.
+/// made (a decryption layer takes its header off the compressed size
+/// alone); otherwise `ZIP_ER_CRC` from `zip_source_zip_file_create`'s
+/// CRC layer at the end of the data, where the entry has a CRC to hold
+/// it to.
 ///
 /// ```php
 /// function crafted($f, $method, $comp, $size, $crc) {
@@ -1154,6 +1156,13 @@ enum Time {
 ///     echo "$name: ", var_export($r, true), " $z->status ", $z->getStatusString(), "\n";
 ///     if ($r) { $z->open('end-witness.zip'); echo '  ', $z->statIndex(0)['size'], ' ', $z->getFromIndex(0), "\n"; $z->close(); }
 /// }
+/// foreach ([ZipArchive::EM_TRAD_PKWARE, ZipArchive::EM_AES_256] as $em) {
+///     $z = new ZipArchive; $z->open('end-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+///     $z->addFromString('c', str_repeat('secret ', 10)); $z->setCompressionName('c', ZipArchive::CM_STORE); $z->setEncryptionName('c', $em, 'pw'); $z->close();
+///     $z->open('end-witness.zip'); $z->setPassword('pw'); $z->setEncryptionName('c', ZipArchive::EM_NONE); $r = @$z->close();
+///     echo "stored, encrypted $em, decrypted: ", var_export($r, true), " $z->status ", $z->getStatusString(), "\n";
+///     $z->open('end-witness.zip'); $s = $z->statIndex(0); echo "  {$s['encryption_method']} {$s['size']} {$s['comp_size']} ", strlen($z->getFromIndex(0)), "\n"; $z->close();
+/// }
 /// unlink('end-witness.zip');
 /// ```
 /// ```expect capture
@@ -1164,9 +1173,13 @@ enum Time {
 /// deflated, its size long: true 0 No error
 ///   5 hello
 /// deflated, its size long and its CRC wrong: false 7 CRC error
+/// stored, encrypted 1, decrypted: true 0 No error
+///   0 70 70 70
+/// stored, encrypted 259, decrypted: true 0 No error
+///   0 70 70 70
 /// ```
 fn data_end(orig: &Dirent, data: &[u8]) -> Result<(), Status> {
-    if actual(orig.comp_method) == 0 && orig.uncomp_size != orig.comp_size {
+    if actual(orig.comp_method) == 0 && data.len() as u64 != orig.uncomp_size {
         return Err(Status::new(Er::DataLength));
     }
     if orig.crc_valid && crc32fast::hash(data) != orig.crc {
