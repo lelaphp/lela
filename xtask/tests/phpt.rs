@@ -1562,9 +1562,10 @@ fn on_linux_a_run_outside_a_namespace_removes_the_queue_its_test_leaves() {
     let key = (0x5c00_0000 + pid.trim().parse::<i64>().unwrap()).to_string();
     let stood = keys().contains(&key);
     if stood {
-        let _ = Command::new("ipcrm")
+        Command::new("ipcrm")
             .args(["-Q", &format!("0x{:08x}", key.parse::<i64>().unwrap())])
-            .status();
+            .status()
+            .ok();
     }
     assert_eq!(reading.status, Status::Pass, "{reading:#?}");
     assert!(!stood, "the run left the queue of key {key}: {reading:#?}");
