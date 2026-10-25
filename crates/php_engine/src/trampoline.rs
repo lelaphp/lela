@@ -391,7 +391,7 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Owner<Value>, Thro
     let called = this.map(|this| this.class()).or(called);
     let served = match called {
         Some(called) => req.serve_method_made(magic, this, called, &arguments, &[]),
-        None => req.serve_function(magic, &arguments, &[]),
+        None => req.serve_function(magic, crate::api::request::Family::Fcall, &arguments, &[]),
     };
     name.give_up(req);
     packed.give_up(req);

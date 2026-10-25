@@ -285,6 +285,31 @@ args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
 files = { "t.php" = "<?php\nfunction f(int $a = null) {}\necho \"hi\\n\";\n", "init" = "ev 42\n" }
 stdin = "ev 5\nq\n"
 
+# Once an init file's `ev` met the memory limit, php 8.5.12 keeps
+# `ZEND_HAS_OOM()` until the request's shutdown, so `zend_call_function`
+# refuses every call (`Z/Zend/zend_execute_API.c:838`), and
+# `zend_call_known_function` answers the refusal with `E_CORE_ERROR`
+# `Couldn't execute method` where nothing is pending
+# (`Z/Zend/zend_execute_API.c:1136-1143`): `var_dump`'s `__debugInfo`
+# (#3452).
+[[line]]
+name = "a-known-function-call-refused-at-the-memory-limit-is-a-core-fatal"
+args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"hi\\n\";\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
+stdin = "ev 0\nev (function(){ class A { function __debugInfo() { return [\"d\"=>2]; } } return 1; })()\nev var_dump(new A)\nq\n"
+
+# The same fatal for the other ways in through `zend_call_known_function`:
+# a constructor `ReflectionClass::newInstance` serves, `__toString`, and
+# `Closure::__invoke`'s `zend_call_known_fcc`, and a function `register`
+# named, which `phpdbg_call_register` calls so. A call compiled as
+# `INIT_USER_CALL`, `call_user_func` over a native, makes no
+# `zend_call_function` and is served (#3452).
+[[line]]
+name = "the-known-function-calls-refused-at-the-memory-limit-are-core-fatals"
+args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\necho \"hi\\n\";\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
+stdin = "ev 0\nev var_dump(call_user_func(\"strlen\", \"abc\"))\nev (new ReflectionClass(\"ArrayObject\"))->newInstance()\nev (function(){ class B { function __toString() { return \"b\"; } } return 1; })()\nev strlen(new B)\nev (function(){ return 1; })->__invoke()\nregister strlen\nstrlen abc\nev 1\nq\n"
+
 # `print exec` in the init file compiles the context there, with its notice,
 # once a cycle, and the context's own compile after the file writes it again.
 [[line]]

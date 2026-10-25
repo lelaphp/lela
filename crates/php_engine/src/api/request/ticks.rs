@@ -83,7 +83,7 @@ impl Request {
             }
             entry.calling = true;
             let (callback, arguments) = ((*entry.callback).clone(), entry.arguments.clone());
-            let called = crate::api::call::call_made(self, &callback, &arguments);
+            let called = crate::api::call::call_known_made(self, &callback, &arguments);
             if let Some(entry) = self
                 .ticks
                 .tick_functions

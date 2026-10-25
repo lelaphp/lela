@@ -647,7 +647,7 @@ impl Request {
                 (_, None) => {}
             }
         }
-        let served = crate::api::call::call_made(self, &initializer, &[object.as_value()]);
+        let served = crate::api::call::call_known_made(self, &initializer, &[object.as_value()]);
         let outcome = match served {
             Err(thrown) => {
                 self.lazy_revert(o, snapshot, table);
@@ -719,7 +719,7 @@ impl Request {
         };
         self.addref(&object.as_value());
         o.set_laziness(Laziness::Eager);
-        let served = crate::api::call::call_made(self, &initializer, &[object.as_value()]);
+        let served = crate::api::call::call_known_made(self, &initializer, &[object.as_value()]);
         let outcome = match served {
             Err(thrown) => {
                 o.set_laziness(Laziness::Proxy);

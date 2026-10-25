@@ -24,7 +24,7 @@ use crate::api::values::{
 use frames::Link;
 
 use super::Frames;
-use super::calls::Retval;
+use super::calls::{Callee, Family, Retval};
 use super::{DeclaredSlot, Hooks, PropertyInfo, Request, RowPlace, frames};
 
 /// `IN_GET`, `IN_SET`, `IN_UNSET` and `IN_ISSET`
@@ -2626,8 +2626,8 @@ impl Request {
         let mut sent = Vec::with_capacity(arguments.len().saturating_add(1));
         sent.push(Value::string(*name));
         sent.extend_from_slice(arguments);
-        let served =
-            self.serve_method_into(retval, accessor, Some(object), object.class(), &sent, &[]);
+        let method = Callee::method(accessor, Some(object), object.class());
+        let served = self.serve_method_into(retval, Family::Known, method, &sent, &[]);
         name.give_up(self);
         served
     }

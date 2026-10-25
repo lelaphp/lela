@@ -418,9 +418,9 @@ impl Request {
     }
 
     /// The function named `name` called with `arguments`, each given
-    /// up after, as `zend_call_function` calls one by name.
+    /// up after, as `zend_call_known_function` calls one by name.
     pub(crate) fn call_named(&mut self, name: &[u8], arguments: &[Value]) -> Result<Value, Thrown> {
-        self.call_named_by(name, arguments, crate::api::call::call_made)
+        self.call_named_by(name, arguments, crate::api::call::call_known_made)
     }
 
     /// [`Request::call_named`] where php calls the function's C directly
@@ -491,7 +491,8 @@ impl Request {
         }
     }
 
-    /// The call from wherever the request stands.
+    /// The call from wherever the request stands, as
+    /// `zend_call_known_function` makes it.
     fn call_by_name_here(&mut self, name: &[u8], arguments: &[crate::tier::Argument]) -> Called {
         let mut values = Vec::with_capacity(arguments.len());
         for argument in arguments {
