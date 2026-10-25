@@ -34,12 +34,18 @@ use crate::{zlog, zlog_sys};
 /// `sapi_module.name`: what `php_sapi_name()` answers.
 pub(crate) const NAME: &str = "fpm-fcgi";
 
+/// `SAPI_POST_BLOCK_SIZE` (`Z/main/SAPI.h:28`): what the drain of a body
+/// asks for at a time.
+const POST_BLOCK_SIZE: usize = 0x4000;
+
 /// What a request writes through: the connection, the request's output
-/// buffer, and what the access log reads of the response afterwards.
+/// buffer, how much of its body the request may still be handed, and
+/// what the access log reads of the response afterwards.
 struct Wire {
     conn: Option<Conn>,
     out: Outgoing,
     input: Input,
+    unread: u64,
     keep: bool,
     /// `CGIG(fcgi_logging_request_started)`.
     stderr_started: bool,
@@ -47,6 +53,41 @@ struct Wire {
 }
 
 impl Wire {
+    /// `sapi_cgi_read_post`'s read of the request's `FCGI_STDIN` records
+    /// (`Z/sapi/fpm/fpm/fpm_main.c:429`): up to `buf.len()` bytes of the
+    /// body, no more than `CONTENT_LENGTH` leaves; fewer where they end,
+    /// and none past a read that fails, after which the connection is not
+    /// kept.
+    fn read_body(&mut self, buf: &mut [u8]) -> usize {
+        let want = usize::try_from(self.unread).map_or(buf.len(), |unread| unread.min(buf.len()));
+        let Some(conn) = &mut self.conn else {
+            return 0;
+        };
+        let mut read = 0;
+        while read < want {
+            match self.input.read(conn, &mut buf[read..want]) {
+                Ok(n) if n > 0 => read += n,
+                Ok(_) => break,
+                Err(_) => {
+                    self.keep = false;
+                    break;
+                }
+            }
+        }
+        self.unread = self
+            .unread
+            .saturating_sub(u64::try_from(read).unwrap_or(u64::MAX));
+        read
+    }
+
+    /// `sapi_deactivate_module`'s read of what the request left of its
+    /// body (`Z/main/SAPI.c:508`), so the records that carry it are off
+    /// the connection before the next request is read from it.
+    fn drain_body(&mut self) {
+        let mut block = vec![0; POST_BLOCK_SIZE];
+        while self.read_body(&mut block) == POST_BLOCK_SIZE {}
+    }
+
     /// `fcgi_write`, the connection kept no longer where it fails.
     /// `fcgi_write`: whether the bytes went, which a connection the
     /// web server closed refuses; none open takes them silently.
@@ -85,9 +126,7 @@ struct Response {
 
 impl Response {
     fn wire(&self) -> std::sync::MutexGuard<'_, Wire> {
-        self.wire
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        lock(&self.wire)
     }
 }
 
@@ -555,6 +594,7 @@ impl Worker {
                 conn: Some(conn),
                 out: Outgoing::new(begun.id),
                 input: Input::default(),
+                unread: 0,
                 keep: begun.keep,
                 stderr_started: false,
                 head: None,
@@ -731,6 +771,7 @@ impl Worker {
         if served.start_failed {
             return Served::StartFailed;
         }
+        lock(wire).drain_body();
         let (status, headers) = wire
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -982,10 +1023,7 @@ impl Worker {
                     .map(|(k, v)| (k, v, IniOrigin::PerDir)),
             );
         }
-        let mut body = Body::default();
-        if info.content_length > 0 {
-            body = read_body(env, info.content_length, wire);
-        }
+        let body = body(env, info.content_length, wire);
         let settings_fix = self.flag(b"cgi.fix_pathinfo", true);
         let settings = Settings {
             fix_pathinfo: settings_fix,
@@ -1025,11 +1063,14 @@ impl Worker {
     }
 }
 
-/// `sapi_cgi_read_post`: the body, up to its length, from
-/// `REQUEST_BODY_FILE` where the server names one and otherwise from
-/// the request's `FCGI_STDIN` records; a file that does not open is
-/// refused with php's warning, which the request raises where php reads
-/// the body.
+/// `sapi_cgi_read_post`: the body, as the request pulls it, up to what
+/// `CONTENT_LENGTH` leaves as a `size_t`, which a negative length wraps
+/// (`Z/sapi/fpm/fpm/fpm_main.c:433`), so such a body is read to its end,
+/// held to `post_max_size` by the readers that pull it (#3457): from
+/// `REQUEST_BODY_FILE` where the server names one and otherwise from the
+/// request's `FCGI_STDIN` records. A file that does not open is refused
+/// with php's warning, which the request raises where php reads the
+/// body.
 ///
 /// ```php
 /// var_dump(file_get_contents("php://input"), error_get_last()["message"]);
@@ -1048,52 +1089,40 @@ impl Worker {
 /// string(0) ""
 /// string(82) "REQUEST_BODY_FILE: open('/nonexistent/body') failed: No such file or directory (2)"
 /// ```
-fn read_body(env: &Environment, length: i64, wire: &Arc<Mutex<Wire>>) -> Body {
-    let length = usize::try_from(length).unwrap_or(0);
-    let mut body = vec![0u8; length];
-    let mut read = 0;
-    if let Some(file) = env.get(b"REQUEST_BODY_FILE").filter(|f| !f.is_empty()) {
-        match std::fs::File::open(crate::conf::path(file)) {
-            Ok(mut file) => {
-                while read < length {
-                    match file.read(&mut body[read..]) {
-                        Ok(n) if n > 0 => read += n,
-                        _ => break,
-                    }
-                }
-            }
-            Err(e) => {
-                return Body::Refused(format!(
-                    "REQUEST_BODY_FILE: open('{}') failed: {} ({})",
-                    String::from_utf8_lossy(file),
-                    php_sapi::strerror(&e),
-                    crate::conf::errno(&e) as i32
-                ));
-            }
-        }
-        body.truncate(read);
-        return Body::from(body);
+fn body(env: &Environment, content_length: i64, wire: &Arc<Mutex<Wire>>) -> Body {
+    let unread = content_length.cast_unsigned();
+    // Nothing to read opens no file and warns of none.
+    if unread == 0 {
+        return Body::default();
     }
-    let mut guard = wire
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let Wire {
-        conn, input, keep, ..
-    } = &mut *guard;
-    if let Some(conn) = conn {
-        while read < length {
-            match input.read(conn, &mut body[read..]) {
-                Ok(n) if n > 0 => read += n,
-                Ok(_) => break,
-                Err(_) => {
-                    *keep = false;
-                    break;
-                }
-            }
-        }
+    let Some(file) = env.get(b"REQUEST_BODY_FILE").filter(|f| !f.is_empty()) else {
+        lock(wire).unread = unread;
+        return Body::Stream(Box::new(Stdin(Arc::clone(wire))));
+    };
+    match std::fs::File::open(crate::conf::path(file)) {
+        Ok(opened) => Body::Stream(Box::new(opened.take(unread))),
+        Err(e) => Body::Refused(format!(
+            "REQUEST_BODY_FILE: open('{}') failed: {} ({})",
+            String::from_utf8_lossy(file),
+            php_sapi::strerror(&e),
+            crate::conf::errno(&e) as i32
+        )),
     }
-    body.truncate(read);
-    Body::from(body)
+}
+
+/// The wire, held for one read or write.
+fn lock(wire: &Mutex<Wire>) -> std::sync::MutexGuard<'_, Wire> {
+    wire.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The request's body as the request pulls it, [`Wire::read_body`].
+struct Stdin(Arc<Mutex<Wire>>);
+
+impl Read for Stdin {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        Ok(lock(&self.0).read_body(buf))
+    }
 }
 
 /// A program that did not open with `error`
