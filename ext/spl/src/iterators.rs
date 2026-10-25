@@ -1488,7 +1488,8 @@ impl CachingIterator {
         if let Some(value) = cache.get(&key) {
             return Ok(value.deref());
         }
-        // `Undefined array key "%s"`: the key to its first NUL.
+        // `Undefined array key "%s"` over the key as given, quoted
+        // whatever it reads as: the string to its first NUL.
         let shown = match &key {
             Key::Int(n) => n.to_string().into_bytes(),
             Key::Str(s) => php_ext::coerce::c_str(s.as_bytes()).to_vec(),

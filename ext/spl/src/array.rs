@@ -1727,10 +1727,7 @@ fn read(req: &mut Request, object: PhpObject, offset: &Value, warn: bool) -> Res
         Ok(value.deref())
     } else {
         if warn {
-            warning(
-                req,
-                &[b"Undefined array key ".as_slice(), &shown(&key)].concat(),
-            );
+            undefined_key(req, &key);
         }
         Ok(Value::null())
     }
@@ -1773,10 +1770,7 @@ fn place(
         match read {
             DimensionRead::Unset => return Ok(None),
             DimensionRead::ReadWrite => {
-                warning(
-                    req,
-                    &[b"Undefined array key ".as_slice(), &shown(&key)].concat(),
-                );
+                undefined_key(req, &key);
             }
             _ => {}
         }
@@ -1893,6 +1887,16 @@ fn shown(key: &Key) -> Vec<u8> {
         // `"%s"`: the key to its first NUL, its bytes as they stand.
         Key::Str(s) => [b"\"", php_ext::coerce::c_str(s.as_bytes()), b"\""].concat(),
     }
+}
+
+/// `Undefined array key %ld` and `Undefined array key "%s"`, the warning
+/// `spl_array_get_dimension_ptr` raises for a key the storage does not
+/// hold ([`shown`]).
+fn undefined_key(req: &mut Request, key: &Key) {
+    warning(
+        req,
+        &[b"Undefined array key ".as_slice(), &shown(key)].concat(),
+    );
 }
 
 /// `spl_array_write_dimension_ex` without the overrides; the value is
@@ -2286,10 +2290,7 @@ impl ObjectHandlers for Handlers {
         let table = table(req, object)?;
         if table.get(req, &key)?.is_none() {
             if fetch == DimensionRead::ReadWrite {
-                warning(
-                    req,
-                    &[b"Undefined array key ".as_slice(), &shown(&key)].concat(),
-                );
+                undefined_key(req, &key);
             }
             table.set(req, &key, Owner::null())?;
         }
