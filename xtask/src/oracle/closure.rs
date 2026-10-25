@@ -512,6 +512,23 @@ mod tests {
         let err = closure(&record).held(&[&php]).unwrap_err().to_string();
         assert!(err.contains("zstd is 1.5.7_1, recorded 1.5.6"), "{err}");
         assert!(err.ends_with("`brew pin ca-certificates zip`"), "{err}");
+        // So is one loaded by nothing, installed at another version or not
+        // at all: brew refuses the pin of a keg not installed.
+        let mut record = RECORD;
+        record[0].1 = "2026-08-01";
+        let err = closure(&record).held(&[&php]).unwrap_err().to_string();
+        assert!(
+            err.contains("ca-certificates is 2026-09-25, recorded 2026-08-01"),
+            "{err}"
+        );
+        assert!(err.ends_with("`brew pin zip zstd`"), "{err}");
+        fs::remove_file(root.join("opt/ca-certificates")).unwrap();
+        let err = closure(&RECORD).held(&[&php]).unwrap_err().to_string();
+        assert!(
+            err.contains("ca-certificates is not installed, recorded 2026-09-25"),
+            "{err}"
+        );
+        assert!(err.ends_with("`brew pin zip zstd`"), "{err}");
     }
 
     #[test]
