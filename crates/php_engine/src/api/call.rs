@@ -424,6 +424,23 @@ pub(crate) fn call_made(
     serve(req, callable.target(), arguments, &[])
 }
 
+/// [`call_made`] where php calls the callee's C directly rather than
+/// through `zend_call_function`: a native function served past the
+/// memory limit's refusal of every call once it was met
+/// ([`Request::serve_function_from_c`]); any other callee as
+/// [`call_made`] serves it.
+pub(crate) fn call_made_from_c(
+    req: &mut Request,
+    callable: &Callable,
+    arguments: &[Value],
+) -> Result<Value, Thrown> {
+    let served = match callable.target() {
+        Target::Function(function) => req.serve_function_from_c(function, arguments),
+        target => return serve(req, target, arguments, &[]),
+    };
+    without_frame(req, served)
+}
+
 /// `zend_call_function` with named arguments after the positional ones,
 /// as its walk of `fci->named_params` places them
 /// (`Z/Zend/zend_execute_API.c:894`): each one at the offset the callee
