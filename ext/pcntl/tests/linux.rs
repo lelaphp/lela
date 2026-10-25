@@ -149,3 +149,21 @@ bool(true)";
     assert_eq!(served(&source), want);
     Ok(())
 }
+
+/// `Pcntl\QosClass` is declared off Apple's platforms too, as php's MINIT
+/// registers it there, without the two functions that take and give it.
+#[test]
+fn the_qos_enum_is_declared_without_its_functions() {
+    let source = r"<?php
+$cases = Pcntl\QosClass::cases();
+var_dump(enum_exists('Pcntl\QosClass'), $cases[2], $cases[4], isset($cases[5]));
+var_dump(function_exists('pcntl_getqos_class'), function_exists('pcntl_setqos_class'));
+";
+    let want = "bool(true)
+enum(Pcntl\\QosClass::Default)
+enum(Pcntl\\QosClass::Background)
+bool(false)
+bool(false)
+bool(false)";
+    assert_eq!(served(source), want);
+}

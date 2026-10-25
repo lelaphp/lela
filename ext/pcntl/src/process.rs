@@ -12,7 +12,6 @@ use std::ops::ControlFlow;
 
 use nix::errno::Errno;
 use php_ext::abi::{False, OrFalse, Passed, Path, Ref, Untyped};
-#[cfg(target_vendor = "apple")]
 use php_ext::attr::php_class;
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, with_string};
@@ -877,6 +876,8 @@ fn strerror(errno: i32) -> String {
 }
 
 /// `enum Pcntl\QosClass`, Apple's `QoS` classes, a thread's scheduling class.
+/// php's MINIT registers it on every platform, where the two functions
+/// that take and give it are Apple's alone.
 ///
 /// ```php
 /// var_dump(Pcntl\QosClass::cases()[0], count(Pcntl\QosClass::cases()));
@@ -885,7 +886,6 @@ fn strerror(errno: i32) -> String {
 /// enum(Pcntl\QosClass::UserInteractive)
 /// int(5)
 /// ```
-#[cfg(target_vendor = "apple")]
 #[php_class(namespace(Pcntl))]
 pub(crate) enum QosClass {
     UserInteractive,
@@ -895,7 +895,6 @@ pub(crate) enum QosClass {
     Background,
 }
 
-#[cfg(target_vendor = "apple")]
 #[php_class]
 impl QosClass {}
 
