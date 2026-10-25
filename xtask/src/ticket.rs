@@ -426,10 +426,10 @@ impl Successors {
             let issue = gh
                 .view(root, successor)
                 .with_context(|| format!("opens {successor}"))?;
-            if issue.state == State::Closed && successor.number() < closed.number {
+            let succeeds = Ticket::new(closed.number);
+            if issue.state == State::Closed && successor < succeeds {
                 bail!(
-                    "opens {successor}, which is closed and was filed before #{}; a closed ticket is a successor only where the work filed it",
-                    closed.number
+                    "opens {successor}, which is closed and was filed before {succeeds}; a closed successor is one filed after the ticket it succeeds"
                 );
             }
             let Some(first) = first else { continue };

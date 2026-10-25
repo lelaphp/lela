@@ -1283,8 +1283,8 @@ fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_no
 /// (#3390): t3398's ready record named #3409 and #3412, both filed by that
 /// work and both closed as done before the merge, and the close refused
 /// them as closed. A closed ticket filed after the one it succeeds is held
-/// as an open one is, its edge set and the close made, at ready and at
-/// close alike.
+/// as an open one is, its edge set and the close made; ready holds its
+/// successors through the same `Successors::held`.
 #[test]
 fn a_successor_filed_by_the_work_and_closed_since_is_still_its_successor() {
     let tracker = Tracker::empty("successor-closed");
