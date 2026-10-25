@@ -6,7 +6,9 @@ mod mysql;
 mod support;
 
 use mysql::{MysqlRelay, MysqlServer};
-use php_ext::test::{Capture, Engine, Files};
+#[cfg(debug_assertions)]
+use php_ext::test::Files;
+use php_ext::test::{Capture, Engine};
 
 #[test]
 fn the_extension_is_loaded() {
