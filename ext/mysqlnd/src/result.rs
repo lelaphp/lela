@@ -558,7 +558,8 @@ impl Res {
     /// ```
     ///
     /// Rows larger than `memory_limit` allows end the request in the
-    /// limit's fatal, at the block the arena asks for:
+    /// limit's fatal, at the block the arena asks for, which php 8.5.12
+    /// names at its page-rounded size:
     ///
     /// ```php
     /// ini_set('memory_limit', '4M');
@@ -568,7 +569,8 @@ impl Res {
     /// echo "not reached\n";
     /// ```
     /// ```expect mysql exit=255
-    /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3000032 bytes) in %s on line 5
+    ///
+    /// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 3014656 bytes) in %s on line 5
     /// ```
     pub(crate) fn store(
         &mut self,
