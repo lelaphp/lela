@@ -239,6 +239,52 @@ args = ["-qb", "-n", "-i{dir}/init", "{dir}/t.php"]
 files = { "t.php" = "<?php\n$a = 1;\necho \"prog \", $x ?? \"unset\", \"\\n\";\n$b =\n", "init" = "b 3\nev $x = 3\nprint exec\n" }
 stdin = "ev $x\nprint exec\nc\nr\nq\n"
 
+# A context that compiles is compiled after the init files too
+# (`phpdbg_compile` after `phpdbg_init`, `Z/sapi/phpdbg/phpdbg.c:1502-1553`),
+# though the engine compiles it as its request starts: what that compile
+# displays is held until the init files have run, and where they leave an
+# exit pending, `php_stream_open_for_zend_ex` refuses the file, so nothing
+# compiles and nothing is displayed but `Could not open file` (#3450).
+[[line]]
+name = "a-context-that-compiles-is-compiled-after-an-init-file-s-exit"
+args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\necho \"hi\\n\";\n", "init" = "ev exit(3)\n" }
+stdin = "ev 5\nev 6\nq\n"
+
+# The same under `-r`: the auto compile's `Could not open file` is written
+# nowhere under `PHPDBG_DISCARD_OUTPUT`, and the run asks to restart (#3450).
+[[line]]
+name = "under-r-a-context-that-compiles-is-compiled-after-an-init-file-s-exit"
+args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\necho \"hi\\n\";\n", "init" = "ev exit(3)\n" }
+stdin = "ev 5\nev 6\nq\n"
+
+# An init file whose `ev` meets the memory limit leaves the unwind exit
+# pending alike, and the context that compiles is not opened (#3450).
+[[line]]
+name = "a-context-that-compiles-is-compiled-after-an-init-file-at-the-memory-limit"
+args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\necho \"hi\\n\";\n", "init" = "ev ini_set(\"memory_limit\", \"2M\")\nev str_repeat(\"x\", 4 << 20)\n" }
+stdin = "ev 5\nq\n"
+
+# Where the init files leave nothing pending, the compile's deprecation, its
+# log and its display, comes after what they wrote and before the compile's
+# notice (#3450).
+[[line]]
+name = "a-context-that-compiles-displays-after-the-init-files"
+args = ["-qb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\necho \"hi\\n\";\n", "init" = "ev 42\n" }
+stdin = "ev 5\nr\nq\n"
+
+# Under `-r`, the startup run's compile after the init files and every later
+# cycle's come under `PHPDBG_DISCARD_OUTPUT`: the deprecation is displayed
+# and its log is written nowhere (#3450).
+[[line]]
+name = "under-r-a-context-that-compiles-displays-after-the-init-files-unlogged"
+args = ["-qrb", "-n", "-d", "display_errors=1", "-i{dir}/init", "{dir}/t.php"]
+files = { "t.php" = "<?php\nfunction f(int $a = null) {}\necho \"hi\\n\";\n", "init" = "ev 42\n" }
+stdin = "ev 5\nq\n"
+
 # `print exec` in the init file compiles the context there, with its notice,
 # once a cycle, and the context's own compile after the file writes it again.
 [[line]]

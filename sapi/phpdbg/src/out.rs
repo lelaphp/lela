@@ -142,6 +142,37 @@ pub struct Out {
     /// A write of the debugger's own through the program's output is
     /// under way, [`interruptible`].
     interruptible: bool,
+    /// What the execution context's compile wrote, which php writes
+    /// after the init files, [`Out::hold`].
+    compile: Compile,
+}
+
+/// Where a cycle's compile of the execution context writes. php runs
+/// the init files first and compiles after them (`phpdbg_init`, then
+/// `phpdbg_compile`, `Z/sapi/phpdbg/phpdbg.c:1502-1553`); the engine
+/// compiles a context that compiles as its request starts, before the
+/// init files run at its first opline, so what that compile writes is
+/// held until they have, and written then, or dropped where php's
+/// compile after them never comes.
+#[derive(Debug, Default)]
+enum Compile {
+    /// Through, as written.
+    #[default]
+    Through,
+    /// The request has started and its program is not yet entered: what
+    /// the sink is given is the compile's, and is kept.
+    Holding(Vec<Held>),
+    /// The program is entered, and what its compile wrote waits for its
+    /// place after the init files.
+    Waiting(Vec<Held>),
+}
+
+/// One thing the sink was given while the compile was held.
+#[derive(Debug)]
+enum Held {
+    Program(Vec<u8>),
+    Log(Vec<u8>),
+    Stderr(Vec<u8>),
 }
 
 impl Default for Out {
@@ -153,6 +184,7 @@ impl Default for Out {
             in_log: false,
             stuck: false,
             interruptible: false,
+            compile: Compile::Through,
         }
     }
 }
@@ -189,7 +221,67 @@ pub fn interruptible(req: &mut Request, f: impl FnOnce(&mut Request)) {
     }
 }
 
+/// What the cycle's compile wrote, written where php's compile after
+/// the init files writes it: its log under `PHPDBG_DISCARD_OUTPUT` where
+/// `discard` says php's `settings || phpdbg_startup_run > 0` holds, that
+/// is past the first cycle or before a startup run, its displays
+/// whatever it says.
+pub fn compiled(s: &mut Session, discard: bool) {
+    let held = s.out.unhold();
+    if held.is_empty() {
+        return;
+    }
+    let outer = s.out.discarding;
+    s.out.discarding |= discard;
+    for written in held {
+        match written {
+            Held::Program(bytes) => s.out.program(&bytes),
+            Held::Log(entry) => s.out.log(&entry),
+            Held::Stderr(bytes) => {
+                std::io::stderr().lock().write_all(&bytes).ok();
+            }
+        }
+    }
+    s.out.discarding = outer;
+}
+
 impl Out {
+    /// From here until the program is entered, what the sink is given is
+    /// the compile's, and is held ([`Compile`]).
+    pub fn hold(&mut self) {
+        self.compile = Compile::Holding(Vec::new());
+    }
+
+    /// The program is entered: the sink writes through again, and what
+    /// the compile wrote waits for [`compiled`].
+    pub fn entered(&mut self) {
+        if let Compile::Holding(held) = &mut self.compile {
+            self.compile = Compile::Waiting(std::mem::take(held));
+        }
+    }
+
+    /// What the compile wrote, let go: where php's compile after the init
+    /// files never comes, because they quit or left something pending.
+    pub fn drop_compiled(&mut self) {
+        self.compile = Compile::Through;
+    }
+
+    /// What is held, taken, the sink writing through from here.
+    fn unhold(&mut self) -> Vec<Held> {
+        match std::mem::take(&mut self.compile) {
+            Compile::Through => Vec::new(),
+            Compile::Holding(held) | Compile::Waiting(held) => held,
+        }
+    }
+
+    /// What the sink keeps while the compile is held.
+    fn holding(&mut self) -> Option<&mut Vec<Held>> {
+        match &mut self.compile {
+            Compile::Holding(held) => Some(held),
+            Compile::Through | Compile::Waiting(_) => None,
+        }
+    }
+
     /// Whether a prompt inside the host's log stands, or the log's guard
     /// was left set.
     pub fn logging(&self) -> bool {
@@ -362,7 +454,10 @@ impl OutputSink for Sink {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted> {
         match &mut self.session {
             Some(s) if s.out.interruptible && s.stopped == Some(Stop::Quit) => {}
-            Some(s) => s.out.program(bytes),
+            Some(s) => match s.out.holding() {
+                Some(held) => held.push(Held::Program(bytes.to_vec())),
+                None => s.out.program(bytes),
+            },
             None => raw(bytes),
         }
         Ok(())
@@ -378,12 +473,19 @@ impl OutputSink for Sink {
     /// [`crate::debugger::fatal_logged`].
     fn log(&mut self, entry: &[u8]) {
         match &mut self.session {
-            Some(s) => s.out.log(entry),
+            Some(s) => match s.out.holding() {
+                Some(held) => held.push(Held::Log(entry.to_vec())),
+                None => s.out.log(entry),
+            },
             None => Out::default().log(entry),
         }
     }
 
     fn write_stderr(&mut self, bytes: &[u8]) {
+        if let Some(held) = self.session.as_mut().and_then(|s| s.out.holding()) {
+            held.push(Held::Stderr(bytes.to_vec()));
+            return;
+        }
         std::io::stderr().lock().write_all(bytes).ok();
     }
 }

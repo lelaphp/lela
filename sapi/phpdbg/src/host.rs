@@ -87,9 +87,24 @@ pub fn serve(engine: &Engine, mut s: Session) -> i32 {
         s.plan = Some(plan);
         s.standing = None;
         s.thrown_into = None;
+        // A cycle's compile of a context that compiles comes as its request
+        // starts, and php's after the init files: what it writes is held
+        // for them.
+        if matches!(plan, Plan::Hold | Plan::Run) && s.init_due {
+            s.out.hold();
+        }
         let description = describe(&s, plan);
         let sink = Box::new(Sink { session: Some(s) });
         let (observed, mut sink) = engine.serve(description, sink, |_| HostServes::Program);
+        // A request that never entered its program writes what it held as
+        // it was written.
+        let any: &mut dyn std::any::Any = sink.as_mut();
+        if let Some(back) = any
+            .downcast_mut::<Sink>()
+            .and_then(|sink| sink.session.as_mut())
+        {
+            out::compiled(back, false);
+        }
         if observed.start_failed {
             return start_failed(sink.as_mut());
         }
