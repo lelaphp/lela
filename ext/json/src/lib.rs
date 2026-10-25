@@ -354,7 +354,10 @@ fn depth_within(req: &mut Request, depth: i64, position: u32) -> Result<(), Thro
 /// stops at its next value or escaped byte once the memory limit was
 /// met, so a buffer the limit refused, or one an escaped string, a value
 /// or a key has grown past it, ends the call with the limit's fatal as it
-/// returns rather than growing on to the hard limit:
+/// returns rather than growing on to the hard limit. Each case crosses the
+/// limit where a new chunk is asked for, whose figure is the chunk's in any
+/// layout; a huge block's growth in place names a figure the address space
+/// decides, in php's process as in the engine's (#3442):
 ///
 /// ```php
 /// ini_set('memory_limit', '4M');
@@ -368,23 +371,23 @@ fn depth_within(req: &mut Request, depth: i64, position: u32) -> Result<(), Thro
 /// ```
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// $j = json_encode(str_repeat("\0", 2 << 20));
+/// ini_set('memory_limit', '4M');
+/// $j = json_encode(str_repeat("\0", 500000));
 /// var_dump("unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16384 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// $j = json_encode([str_repeat("\x01", 2 << 20) => 1]);
+/// ini_set('memory_limit', '4M');
+/// $j = json_encode([str_repeat("\x01", 500000) => 1]);
 /// var_dump("unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16384 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn json_encode(
