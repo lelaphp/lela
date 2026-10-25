@@ -18,7 +18,7 @@ use php_heap::{Obj, ZvalType};
 use php_unit::Opcode;
 
 use super::{Emit, KIND, Kind, Refuse, SLOT, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
-use crate::lower::CACHES_AT;
+use crate::lower::IMAGES_AT;
 use crate::types::{Abort, ExitId, Imm, Line, Object, OpId, Operand, Slotted};
 
 /// The engine's runtime-cache slot layout, as the guard on a request's own
@@ -193,7 +193,7 @@ impl Emit<'_> {
     }
 
     /// The one guard on a slot of the request's own runtime cache, the
-    /// one `line` reads ([`CACHES_AT`]): refused to `refuse` unless the
+    /// one `line` reads ([`IMAGES_AT`]): refused to `refuse` unless the
     /// slot's tag is `tag` and the class it names at `class_at` is the
     /// object's, as php's code compares `CACHED_PTR(cache_slot)` with
     /// `obj->ce` before it reads past it for a class that is not immutable
@@ -213,10 +213,13 @@ impl Emit<'_> {
         let cx = self
             .cx
             .ok_or_else(|| mismatch("a cache slot read before the entry"))?;
-        let caches = self.b.ins().load(I64, trusted(), cx, CACHES_AT);
-        let map = i32::try_from(map * size_of::<usize>())
-            .map_err(|_| mismatch("a cache slot past an immediate"))?;
-        let place = self.b.ins().load(I64, trusted(), caches, map);
+        // The slots stand past the trace's calls' headers ([`IMAGES_AT`]).
+        let addresses = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+        let at = (self.held.len().checked_add(map))
+            .and_then(|at| at.checked_mul(size_of::<usize>()))
+            .and_then(|at| i32::try_from(at).ok())
+            .ok_or_else(|| mismatch("a cache slot past an immediate"))?;
+        let place = self.b.ins().load(I64, trusted(), addresses, at);
         let held = self
             .b
             .ins()

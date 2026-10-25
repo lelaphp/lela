@@ -87,10 +87,9 @@ impl Crossed for Request {
 /// `at` at [`lower::ENTRY_AT`], `stood` at [`lower::STOOD_AT`], `stack` at
 /// [`lower::STACK_AT`], `images` at [`lower::IMAGES_AT`], `root` at
 /// [`lower::ROOT_AT`], `ready` at [`lower::READY_AT`], `rows` at
-/// [`lower::ROWS_AT`], `trace` at [`lower::TRACE_AT`] and `caches` at
-/// [`lower::CACHES_AT`], and nothing else; a jump to another trace writes
-/// the entry fields, `at` to `ready`, `trace` and `caches`, as `enter`
-/// writes them (`lower`'s *The entry*);
+/// [`lower::ROWS_AT`] and `trace` at [`lower::TRACE_AT`], and nothing
+/// else; a jump to another trace writes the entry fields, `at` to
+/// `ready` and `trace`, as `enter` writes them (`lower`'s *The entry*);
 /// `pending` has no C layout
 /// and is the wrappers' alone. It borrows the request mutably for `'a`,
 /// so the request outlives it and nothing else touches the request
@@ -109,8 +108,8 @@ pub(crate) struct ExitCtx<'a, R = Request> {
     /// call in place moves the words of (`tier::stack`); null for a
     /// stand-in request.
     stack: *mut u8,
-    /// The request's headers of the calls the trace pushes in place, one
-    /// address a call ([`Images`]).
+    /// The request's addresses the trace's code reads, the headers of the
+    /// calls it pushes in place and the cache slots it reads ([`Images`]).
     images: *const usize,
     /// The place on the stack of the frame the trace is entered on.
     root: u32,
@@ -124,9 +123,6 @@ pub(crate) struct ExitCtx<'a, R = Request> {
     /// The number of the trace entered: the one `enter` calls, and then
     /// whichever a jump entered, which answers.
     trace: u32,
-    /// The request's addresses of the runtime-cache slots the trace reads
-    /// ([`Touched`]); null for a trace that reads none.
-    caches: *const usize,
     pending: Option<Pending>,
     /// The epoch the trace was taken from, which holds every op array it
     /// recorded: what a kernel serves those op arrays out of
@@ -173,10 +169,6 @@ const _: () = assert!(
     lower::TRACE_AT >= 0
         && offset_of!(ExitCtx<'static>, trace) == lower::TRACE_AT.unsigned_abs() as usize
 );
-const _: () = assert!(
-    lower::CACHES_AT >= 0
-        && offset_of!(ExitCtx<'static>, caches) == lower::CACHES_AT.unsigned_abs() as usize
-);
 
 impl<'a, R: Crossed> ExitCtx<'a, R> {
     /// The `ExitCtx` over `req`, which it borrows for as long as it lives,
@@ -195,7 +187,6 @@ impl<'a, R: Crossed> ExitCtx<'a, R> {
             ready: 0,
             rows: NO_ROWS.as_ptr(),
             trace: 0,
-            caches: ptr::null(),
             pending: None,
             holding: None,
             lent: PhantomData,
@@ -1019,9 +1010,9 @@ pub(crate) fn enter<'t>(
     // The stack the trace's calls in place are made on, their headers in
     // this request, and whether they are made in place, laid down in the
     // trace's row for the jumps to it.
-    let touched = Touched::of(req, (epoch, trace));
+    let caches = touched(req, (epoch, trace));
     let stack = tier::stack(req).as_ptr();
-    let (images, rows) = Images::of(req, (epoch, trace), touched.kept());
+    let (images, rows) = Images::of(req, (epoch, trace), caches);
     let ready = images.ready();
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
@@ -1030,7 +1021,6 @@ pub(crate) fn enter<'t>(
     (cx.stack, cx.images) = (stack, images.addresses());
     (cx.root, cx.ready) = (frame.0, u32::from(ready));
     (cx.rows, cx.trace) = (rows, trace.id.get());
-    cx.caches = touched.addresses();
     if let Some(stood) = stood {
         cx.stood = stood;
     }
@@ -1092,152 +1082,119 @@ pub(crate) fn enter<'t>(
     Ok(Answered { left, by })
 }
 
-/// The addresses of the runtime-cache slots a trace's code reads in a
-/// request, one a slot of `Trace.map_ptrs`, each found by the touch on the
-/// request's first entry of the trace, which lays its cache down
-/// (`jit-design.md` §4.6, #2957's note; [`tier::touch`]): what a request
-/// keeps for every trace it entered ([`Headers`]), or, for a request that
-/// keeps no state of the tier's, made for the one entry. A slot the touch
-/// answers none for reads [`NO_PLACE`], a tag no place has.
-enum Touched {
-    None,
-    Kept(*const usize),
-    Own(Box<[usize]>),
-}
-
 /// What compiled code reads for a cache slot the touch found none for: a
 /// tag that names no place, which the guard refuses before it reads past
 /// it.
 static NO_PLACE: u32 = tier::PLACE.unprimed();
 
-impl Touched {
-    /// The slots `trace` reads in `req`, touched on the request's first
-    /// entry of it. A cache the memory limit would not lay down reads as
-    /// none, the opline its handler's, as before the touch.
-    fn of(req: &mut Request, (epoch, trace): (&Epoch, &Trace)) -> Touched {
-        if trace.map_ptrs.is_empty() {
-            return Touched::None;
-        }
-        if let Some(at) =
-            tier::state::<crate::JitRequest>(req).and_then(|state| state.headers.touched(trace.id))
-        {
-            return Touched::Kept(at);
-        }
-        let none = ptr::from_ref(&NO_PLACE).expose_provenance();
-        let addresses: Box<[usize]> = (trace.map_ptrs.iter())
+/// The touch (`jit-design.md` §4.6, #2957's note; [`tier::touch`]): the
+/// addresses of the runtime-cache slots `trace`'s code reads in `req`,
+/// one a slot of `Trace.map_ptrs`, each cache laid down first, on the
+/// request's first entry of the trace; none for a trace that reads none
+/// or that the request entered before, which keeps them ([`Headers`]). A
+/// slot the touch answers none for reads [`NO_PLACE`], and so does one a
+/// memory limit would not lay down, the opline its handler's as before.
+fn touched(req: &mut Request, (epoch, trace): (&Epoch, &Trace)) -> Option<Box<[usize]>> {
+    if trace.map_ptrs.is_empty()
+        || tier::state::<crate::JitRequest>(req).is_some_and(|state| state.headers.knows(trace.id))
+    {
+        return None;
+    }
+    let none = ptr::from_ref(&NO_PLACE).expose_provenance();
+    Some(
+        (trace.map_ptrs.iter())
             .map(|raw| match tier::touch(req, epoch, *raw) {
                 Ok(Some(slot)) => CachedSlot::address(slot),
                 Ok(None) | Err(_) => none,
             })
-            .collect();
-        match tier::state::<crate::JitRequest>(req) {
-            Some(state) => match state.headers.keep_touched(trace.id, addresses) {
-                Ok(at) => Touched::Kept(at),
-                Err(addresses) => Touched::Own(addresses),
-            },
-            None => Touched::Own(addresses),
-        }
-    }
-
-    /// Where compiled code reads the addresses, null where it reads none.
-    fn addresses(&self) -> *const usize {
-        match self {
-            Touched::None => ptr::null(),
-            Touched::Kept(at) => *at,
-            Touched::Own(addresses) => addresses.as_ptr(),
-        }
-    }
-
-    /// Where the request keeps the addresses for as long as it runs, which
-    /// a jump to the trace reads: null for a trace that reads none, and
-    /// none for addresses made for this entry alone.
-    fn kept(&self) -> Option<*const usize> {
-        match self {
-            Touched::None => Some(ptr::null()),
-            Touched::Kept(at) => Some(*at),
-            Touched::Own(_) => None,
-        }
-    }
+            .collect(),
+    )
 }
 
-/// The request's headers of the calls a trace pushes in place, one address
-/// a call in its order (`lower::Compiled::calls`), each the header
-/// `push_call` lays down for the call in this request
-/// ([`tier::call_image`]), since the function's number and its record are
-/// the request's, and whether its code makes them in place: every header
-/// laid out and the cache of every callee it enters laid down
-/// ([`Trace::callee_caches`]). A request keeps what it laid out for every
-/// trace it entered ([`Headers`]); the stand-in tiers of the tests, which
-/// keep no state of the tier's, lay them out for the one entry.
+/// The request's addresses a trace's code reads: the headers of the calls
+/// it pushes in place, one address a call in its order
+/// (`lower::Compiled::calls`), each the header `push_call` lays down for
+/// the call in this request ([`tier::call_image`]), since the function's
+/// number and its record are the request's; then the runtime-cache slots it
+/// reads, one a slot of `Trace.map_ptrs` ([`touched`]); and whether its
+/// code makes its calls in place: every header laid out and the cache of
+/// every callee it enters laid down ([`Trace::callee_caches`]). A header a
+/// call's function is not the request's yet for reads zero, and the calls
+/// are served through the kernels until it is. A request keeps what it
+/// laid out for every trace it entered ([`Headers`]); the stand-in tiers
+/// of the tests, which keep no state of the tier's, lay them out for the
+/// one entry.
 enum Images {
-    /// None to read: the trace pushes nothing in place.
+    /// None to read: the trace pushes nothing in place and reads no slot.
     None,
     /// The request's, kept in its state for as long as it runs.
     Kept { at: *const usize, laid: bool },
     /// Laid out for this entry alone: the headers, held while the code
-    /// reads them, and their addresses.
+    /// reads them, and the addresses.
     Own {
         #[expect(dead_code, reason = "read by the code alone")]
         images: Box<[HeaderImage]>,
         addresses: Box<[usize]>,
         laid: bool,
     },
-    /// A call's function is not the request's yet: the calls are served
-    /// through the kernels.
-    Unready,
 }
 
 impl Images {
-    /// The headers of `trace`'s calls in place as `req` lays them out, and
-    /// the request's rows with the trace's laid down as they say, which a
-    /// jump to the trace reads ([`Rows`]); a request that keeps no state of
-    /// the tier's keeps no rows, and its rows are [`NO_ROWS`].
+    /// What `trace`'s code reads in `req`, the touched cache slots `caches`
+    /// beside the headers on the request's first entry, and the request's
+    /// rows with the trace's laid down as they say, which a jump to the
+    /// trace reads ([`Rows`]); a request that keeps no state of the tier's
+    /// keeps no rows, and its rows are [`NO_ROWS`].
     fn of(
         req: &Request,
         (epoch, trace): (&Epoch, &Trace),
-        caches: Option<*const usize>,
+        caches: Option<Box<[usize]>>,
     ) -> (Images, *const usize) {
         if let Some(state) = tier::state::<crate::JitRequest>(req) {
-            let images = if trace.calls.is_empty() {
+            let images = if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
                 Images::None
             } else {
-                (state.headers.entered(req, trace))
-                    .map_or(Images::Unready, |(at, laid)| Images::Kept { at, laid })
+                (state.headers.entered(req, trace, caches)).map_or_else(
+                    || Images::own(req, trace, &[]),
+                    |(at, laid)| Images::Kept { at, laid },
+                )
             };
             let rows = (state.headers).rows(|| {
                 crate::table::of_epoch(epoch).map_or(0, crate::table::TraceTable::segments)
             });
-            // A jump enters the trace only where the request keeps the cache
-            // slots its code reads.
-            let touched = caches.is_some() || trace.map_ptrs.is_empty();
-            let caches = caches.unwrap_or(ptr::null());
-            rows.lay(
-                trace.id,
-                (images.addresses(), caches),
-                images.ready() && touched,
-            );
+            // A jump enters a trace only through the request's own addresses
+            // for it, never those made for one entry alone.
+            let kept = !matches!(images, Images::Own { .. });
+            rows.lay(trace.id, images.addresses(), images.ready() && kept);
             return (images, rows.base());
         }
-        (Images::own(req, trace), NO_ROWS.as_ptr())
+        if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
+            return (Images::None, NO_ROWS.as_ptr());
+        }
+        (
+            Images::own(req, trace, caches.as_deref().unwrap_or(&[])),
+            NO_ROWS.as_ptr(),
+        )
     }
 
-    /// The headers of `trace`'s calls laid out for one entry, by a request
-    /// that keeps no state of the tier's.
-    fn own(req: &Request, trace: &Trace) -> Images {
-        if trace.calls.is_empty() {
-            return Images::None;
-        }
-        let Some(images) = (trace.calls.iter())
+    /// What `trace`'s code reads laid out for one entry, by a request that
+    /// keeps no state of the tier's.
+    fn own(req: &Request, trace: &Trace, caches: &[usize]) -> Images {
+        let images: Vec<Option<HeaderImage>> = (trace.calls.iter())
             .map(|call| tier::call_image(req, call))
-            .collect::<Option<Box<[HeaderImage]>>>()
-        else {
-            return Images::Unready;
-        };
-        let addresses = images.iter().map(HeaderImage::address).collect();
+            .collect();
+        let missing = images.iter().any(Option::is_none);
+        // A slot the touch did not answer for this entry reads no place.
+        let none = ptr::from_ref(&NO_PLACE).expose_provenance();
+        let slots = (0..trace.map_ptrs.len()).map(|at| caches.get(at).copied().unwrap_or(none));
+        let addresses = (images.iter())
+            .map(|image| image.as_ref().map_or(0, HeaderImage::address))
+            .chain(slots)
+            .collect();
         Images::Own {
-            images,
+            images: images.into_iter().flatten().collect(),
             addresses,
-            laid: callees_laid(req, trace),
+            laid: !missing && callees_laid(req, trace),
         }
     }
 
@@ -1246,7 +1203,6 @@ impl Images {
         match self {
             Images::None => true,
             Images::Kept { laid, .. } | Images::Own { laid, .. } => *laid,
-            Images::Unready => false,
         }
     }
 
@@ -1255,7 +1211,7 @@ impl Images {
         match self {
             Images::Kept { at, .. } => *at,
             Images::Own { addresses, .. } => addresses.as_ptr(),
-            Images::None | Images::Unready => ptr::null(),
+            Images::None => ptr::null(),
         }
     }
 }
@@ -1292,86 +1248,79 @@ type CallKey = (Option<FuncRef>, Box<[u8]>, u32);
 struct HeadersKept {
     calls: std::collections::HashMap<CallKey, HeaderImage>,
     traces: Vec<Option<Entered>>,
-    /// Per trace, by its number, the cache slots it reads ([`Touched`]).
-    touched: Vec<Option<Box<[usize]>>>,
 }
 
-/// What a request keeps of one trace it entered ([`Headers`]).
+/// What a request keeps of one trace it entered ([`Headers`]): the
+/// addresses its code reads, whether a call's header is missing yet, and
+/// whether its calls are made in place.
 #[derive(Debug)]
 struct Entered {
     addresses: Box<[usize]>,
+    missing: bool,
     laid: bool,
 }
 
 impl Headers {
-    /// The addresses of `trace`'s headers in `req`, laid out the first time
-    /// the request enters it, and whether its calls are made in place:
-    /// none while a call's function is not the request's.
-    fn entered(&self, req: &Request, trace: &Trace) -> Option<(*const usize, bool)> {
+    /// Whether the request entered trace `id` before.
+    fn knows(&self, id: crate::table::TraceId) -> bool {
+        let kept = self.kept.borrow();
+        usize::try_from(id.get())
+            .ok()
+            .and_then(|row| kept.traces.get(row))
+            .is_some_and(Option::is_some)
+    }
+
+    /// The addresses `trace`'s code reads in `req` ([`Images`]), laid out
+    /// the first time the request enters it with the cache slots `caches`
+    /// the touch answered, and whether its calls are made in place; a
+    /// header missing before is laid out once its function is the
+    /// request's, in place. None for a number no row holds.
+    fn entered(
+        &self,
+        req: &Request,
+        trace: &Trace,
+        caches: Option<Box<[usize]>>,
+    ) -> Option<(*const usize, bool)> {
         let mut kept = self.kept.borrow_mut();
         let row = usize::try_from(trace.id.get()).ok()?;
-        if let Some(Some(entered)) = kept.traces.get_mut(row) {
+        let HeadersKept { calls, traces } = &mut *kept;
+        if let Some(Some(entered)) = traces.get_mut(row) {
             if !entered.laid {
-                entered.laid = callees_laid(req, trace);
+                if entered.missing {
+                    entered.missing = false;
+                    for (call, at) in trace.calls.iter().zip(entered.addresses.iter_mut()) {
+                        if *at == 0 {
+                            *at = header_of(calls, req, call).unwrap_or(0);
+                            entered.missing |= *at == 0;
+                        }
+                    }
+                }
+                entered.laid = !entered.missing && callees_laid(req, trace);
             }
             return Some((entered.addresses.as_ptr(), entered.laid));
         }
-        let mut addresses = Vec::with_capacity(trace.calls.len());
+        let mut addresses = Vec::with_capacity(trace.calls.len() + trace.map_ptrs.len());
         for call in &trace.calls {
-            let named = if call.callee().is_none() {
-                call.name()
-            } else {
-                &[]
-            };
-            let key = (call.callee(), Box::<[u8]>::from(named), call.count());
-            let address = if let Some(image) = kept.calls.get(&key) {
-                image.address()
-            } else {
-                let image = tier::call_image(req, call)?;
-                let address = image.address();
-                kept.calls.insert(key, image);
-                address
-            };
-            addresses.push(address);
+            addresses.push(header_of(calls, req, call).unwrap_or(0));
         }
+        let missing = addresses.contains(&0);
+        // The slots the touch answered on this, the first entry; none reads
+        // no place.
+        let none = ptr::from_ref(&NO_PLACE).expose_provenance();
+        let caches = caches.unwrap_or_default();
+        addresses
+            .extend((0..trace.map_ptrs.len()).map(|at| caches.get(at).copied().unwrap_or(none)));
         let entered = Entered {
             addresses: addresses.into_boxed_slice(),
-            laid: callees_laid(req, trace),
+            missing,
+            laid: !missing && callees_laid(req, trace),
         };
         let found = (entered.addresses.as_ptr(), entered.laid);
-        if kept.traces.len() <= row {
-            kept.traces.resize_with(row + 1, || None);
+        if traces.len() <= row {
+            traces.resize_with(row + 1, || None);
         }
-        kept.traces[row] = Some(entered);
+        traces[row] = Some(entered);
         Some(found)
-    }
-
-    /// Where the cache slots trace `id` reads are kept in the request,
-    /// none before its first entry.
-    fn touched(&self, id: crate::table::TraceId) -> Option<*const usize> {
-        let kept = self.kept.borrow();
-        let row = usize::try_from(id.get()).ok()?;
-        Some(kept.touched.get(row)?.as_ref()?.as_ptr())
-    }
-
-    /// `addresses`, the cache slots trace `id` reads, kept for the
-    /// request, and where they are kept; handed back for a number no row
-    /// holds.
-    fn keep_touched(
-        &self,
-        id: crate::table::TraceId,
-        addresses: Box<[usize]>,
-    ) -> Result<*const usize, Box<[usize]>> {
-        let mut kept = self.kept.borrow_mut();
-        let at = addresses.as_ptr();
-        let Ok(row) = usize::try_from(id.get()) else {
-            return Err(addresses);
-        };
-        if kept.touched.len() <= row {
-            kept.touched.resize_with(row + 1, || None);
-        }
-        kept.touched[row] = Some(addresses);
-        Ok(at)
     }
 
     /// The request's rows, laid down the first time a trace is entered,
@@ -1380,6 +1329,29 @@ impl Headers {
     fn rows(&self, segments: impl FnOnce() -> usize) -> &Rows {
         self.rows.get_or_init(|| Rows::new(segments()))
     }
+}
+
+/// The address of the request's header for `call`, laid out once per
+/// callee and argument count; none while the call's function is not the
+/// request's.
+fn header_of(
+    calls: &mut std::collections::HashMap<CallKey, HeaderImage>,
+    req: &Request,
+    call: &tier::PlainCall,
+) -> Option<usize> {
+    let named = if call.callee().is_none() {
+        call.name()
+    } else {
+        &[]
+    };
+    let key = (call.callee(), Box::<[u8]>::from(named), call.count());
+    if let Some(image) = calls.get(&key) {
+        return Some(image.address());
+    }
+    let image = tier::call_image(req, call)?;
+    let address = image.address();
+    calls.insert(key, image);
+    Some(address)
 }
 
 /// A request's rows (`jit-design.md` §4.6, `lower::ROWS_AT`): per trace
@@ -1403,15 +1375,13 @@ struct Rows {
 struct Row {
     images: std::cell::Cell<usize>,
     ready: std::cell::Cell<u32>,
-    caches: std::cell::Cell<usize>,
 }
 
 const _: () = assert!(
-    size_of::<Row>() == 24
-        && lower::ROW_BYTES == 24
+    size_of::<Row>() == 16
+        && lower::ROW_BYTES == 16
         && offset_of!(Row, images) == lower::ROW_IMAGES.unsigned_abs() as usize
         && offset_of!(Row, ready) == lower::ROW_READY.unsigned_abs() as usize
-        && offset_of!(Row, caches) == lower::ROW_CACHES.unsigned_abs() as usize
         && size_of::<std::cell::Cell<usize>>() == size_of::<usize>()
 );
 
@@ -1429,15 +1399,10 @@ impl Rows {
         }
     }
 
-    /// The row of the trace `id` names: where its calls' headers are,
-    /// `images`, and the cache slots it reads, `caches`, and whether its
-    /// calls are `ready`; nothing for a number past the segments.
-    fn lay(
-        &self,
-        id: crate::table::TraceId,
-        (images, caches): (*const usize, *const usize),
-        ready: bool,
-    ) {
+    /// The row of the trace `id` names: where the addresses its code reads
+    /// are, `images`, and whether its calls are `ready`; nothing for a
+    /// number past the segments.
+    fn lay(&self, id: crate::table::TraceId, images: *const usize, ready: bool) {
         let (segment, at) = id.slot();
         let (Some(cell), Some(first)) = (self.segments.get(segment), self.firsts.get(segment))
         else {
@@ -1448,7 +1413,6 @@ impl Rows {
         if let Some(row) = rows.get(at) {
             row.images.set(images.expose_provenance());
             row.ready.set(u32::from(ready));
-            row.caches.set(caches.expose_provenance());
         }
     }
 
