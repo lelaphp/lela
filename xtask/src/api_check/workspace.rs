@@ -24,7 +24,7 @@ pub struct Present {
     pub deps: Vec<Dep>,
     /// The packages from outside the workspace it depends on, of every
     /// kind, by package name (`openssl-sys`).
-    pub packages: BTreeSet<String>,
+    pub external: BTreeSet<String>,
     /// Whether its `Cargo.toml` carries `[lints] workspace = true`, the one
     /// way the root manifest's `[workspace.lints]` reaches a member (#2111).
     pub inherits_lints: bool,
@@ -117,11 +117,11 @@ impl Crates {
                 .and_then(|lints| lints.get("workspace"))
                 .and_then(Value::as_bool)
                 == Some(true);
-            let (deps, packages) = deps(&table, &dir, root, &layout);
+            let (deps, external) = dependencies(&table, &dir, root, &layout);
             present.push(Present {
                 name: row.name.clone(),
                 deps,
-                packages,
+                external,
                 inherits_lints,
                 dir,
                 package,
@@ -154,7 +154,7 @@ impl Crates {
 /// The workspace dependencies of one `Cargo.toml`, of every kind, one
 /// entry per crate depended on: linked when any of its entries is; and
 /// beside them every other package it depends on, by name.
-fn deps(
+fn dependencies(
     table: &toml::Table,
     dir: &Path,
     root: &Path,
@@ -176,11 +176,11 @@ fn deps(
             sections.extend(at.get(key).and_then(Value::as_table).map(|s| (s, linked)));
         }
     }
-    let (mut out, mut packages): (Vec<Dep>, BTreeSet<String>) = Default::default();
+    let (mut out, mut external): (Vec<Dep>, BTreeSet<String>) = Default::default();
     for (section, linked) in sections {
         for (key, value) in section {
             let Some(name) = dep_crate(key, value, dir, root, layout) else {
-                packages.insert(package_of(key, value).to_owned());
+                external.insert(package_of(key, value).to_owned());
                 continue;
             };
             let alias = key.replace('-', "_");
@@ -194,7 +194,7 @@ fn deps(
             }
         }
     }
-    (out, packages)
+    (out, external)
 }
 
 /// The package one dependency entry names: its `package`, or its key.

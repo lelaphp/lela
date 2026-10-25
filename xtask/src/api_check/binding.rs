@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 
+use super::surfaces::Held;
 use super::workspace::Present;
 use crate::generated::cargo_env;
 use crate::manifest::Manifest;
@@ -29,7 +30,7 @@ use crate::oracle::Own;
 
 /// A package that links a native library the oracle links too: the
 /// `[env]` variable that points its build at the library, bare or after
-/// a target's name (`AARCH64_APPLE_DARWIN_OPENSSL_DIR`), and the library
+/// the target's name (`AARCH64_APPLE_DARWIN_OPENSSL_DIR`), and the library
 /// php loads, by its file's stem.
 struct Native {
     package: &'static str,
@@ -39,7 +40,7 @@ struct Native {
 
 /// The packages the workspace links a native library of the oracle's
 /// through, each read where `.cargo/config.toml` binds it.
-const NATIVES: [Native; 3] = [
+static NATIVES: [Native; 3] = [
     Native {
         package: "openssl-sys",
         variable: "OPENSSL_DIR",
@@ -58,25 +59,35 @@ const NATIVES: [Native; 3] = [
 ];
 
 impl Native {
-    /// Whether `variable` is this package's, bare or after a target.
+    /// Whether `variable` is this package's on the target the harness is
+    /// built for, the one the engine's build is: bare, or after that
+    /// target's name as openssl-sys and curl-sys read it, so another
+    /// target's binding is not held to this machine's php.
     fn names(&self, variable: &str) -> bool {
-        let before = variable.strip_suffix(self.variable);
-        before.is_some_and(|before| before.is_empty() || before.ends_with('_'))
+        let host = env!("XTASK_TARGET").to_uppercase().replace('-', "_");
+        variable == self.variable
+            || variable.strip_prefix(&host) == Some(&format!("_{}", self.variable))
     }
+}
+
+/// One `[env]` entry that binds a native: the configuration it is in, the
+/// variable, and the directory it names.
+pub(super) struct Bound {
+    config: &'static str,
+    variable: String,
+    path: PathBuf,
+    native: &'static Native,
 }
 
 /// What a crate's bindings are held to on this machine.
 pub(super) enum Bindings {
     /// No pin, or a pinned php under no Homebrew Cellar here.
     Unheld,
-    /// The pinned php's own loads could not be read, as the sentence says.
-    Unread(String),
-    /// The pinned php's own loads, and every `[env]` entry as a path,
-    /// each with its configuration's path and its variable.
-    Held {
-        own: Own,
-        env: Vec<(&'static str, String, PathBuf)>,
-    },
+    /// The pinned php's own loads, which could not be read.
+    Unread(anyhow::Error),
+    /// The pinned php's own loads, and each `[env]` entry that binds a
+    /// native on this target.
+    Read { own: Own, bound: Vec<Bound> },
 }
 
 impl Bindings {
@@ -89,61 +100,101 @@ impl Bindings {
         let own = match Own::of(&pin.oracle.path) {
             Ok(Some(own)) => own,
             Ok(None) => return Ok(Bindings::Unheld),
-            Err(err) => return Ok(Bindings::Unread(format!("{err:#}"))),
+            Err(err) => return Ok(Bindings::Unread(err)),
         };
-        let mut env = Vec::new();
+        let mut bound = Vec::new();
         for (config, entries) in cargo_env(root)? {
-            let paths = entries.into_iter();
-            env.extend(paths.map(|(variable, entry)| (config, variable, entry.path(root))));
+            for (variable, entry) in entries {
+                let Some(native) = NATIVES.iter().find(|n| n.names(&variable)) else {
+                    continue;
+                };
+                let path = entry.path(root);
+                bound.push(Bound {
+                    config,
+                    variable,
+                    path,
+                    native,
+                });
+            }
         }
-        Ok(Bindings::Held { own, env })
+        Ok(Bindings::Read { own, bound })
     }
 
     /// What `krate`'s links to the natives come to: each binding that
     /// does not hold, and a note for each that does.
-    pub(super) fn hold(&self, krate: &Present) -> (Vec<String>, Vec<String>) {
-        let (mut problems, mut notes) = (Vec::new(), Vec::new());
-        for native in NATIVES
+    pub(super) fn hold(&self, krate: &Present) -> Held {
+        let mut held = Held::default();
+        let linked = NATIVES
             .iter()
-            .filter(|n| krate.packages.contains(n.package))
-        {
+            .filter(|n| krate.external.contains(n.package));
+        let (own, bound) = match self {
+            Bindings::Unheld => return held,
+            Bindings::Unread(why) => {
+                held.problems.extend(linked.map(|native| format!(
+                    "{} links {}, whose binding is held to the libraries the pinned php loads, and those are unread: {why:#}",
+                    krate.name, native.package
+                )));
+                return held;
+            }
+            Bindings::Read { own, bound } => (own, bound),
+        };
+        for native in linked {
             let (name, package, library) = (&krate.name, native.package, native.library);
-            let (own, env) = match self {
-                Bindings::Unheld => continue,
-                Bindings::Unread(why) => {
-                    problems.push(format!(
-                        "{name} links {package}, whose binding is held to the libraries the pinned php loads, and those are unread: {why}"
-                    ));
-                    continue;
-                }
-                Bindings::Held { own, env } => (own, env),
-            };
             let Some(loaded) = own.keg_loading(library) else {
-                problems.push(format!(
+                held.problems.push(format!(
                     "{name} links {package}, and the pinned php loads no {library} of its own, so no keg holds the binding (#3458)"
                 ));
                 continue;
             };
-            let bound: Vec<_> = env.iter().filter(|(_, v, _)| native.names(v)).collect();
-            if bound.is_empty() {
-                problems.push(format!(
+            let mut binds = bound
+                .iter()
+                .filter(|b| b.native.package == native.package)
+                .peekable();
+            if binds.peek().is_none() {
+                held.problems.push(format!(
                     "{name} links {package}, and no cargo configuration's [env] names its {}, so its build links the first {library} a search finds where the pinned php loads {loaded}'s (#3458)",
                     native.variable
                 ));
             }
-            for (config, variable, path) in bound {
+            for Bound {
+                config,
+                variable,
+                path,
+                ..
+            } in binds
+            {
                 match own.keg_at(path) {
-                    Some(keg) if keg == loaded => notes.push(format!(
+                    Some(keg) if keg == loaded => held.notes.push(format!(
                         "{package} bound to {keg}, the keg the pinned php loads {library} from"
                     )),
-                    keg => problems.push(format!(
+                    keg => held.problems.push(format!(
                         "{config}'s {variable} binds {package} to {}, and the pinned php loads {library} from {loaded}: the binding moves with the oracle (#3414, #3458)",
                         keg.unwrap_or_else(|| format!("{}, no keg of the pinned php's Homebrew", path.display()))
                     )),
                 }
             }
         }
-        (problems, notes)
+        held
+    }
+}
+
+#[cfg(test)]
+mod names {
+    use super::NATIVES;
+
+    /// A native's variable binds bare or after the name of the target the
+    /// harness is built for, the form `.cargo/config.toml` writes
+    /// (`AARCH64_APPLE_DARWIN_OPENSSL_DIR`), and not after another
+    /// target's name or any other prefix.
+    #[test]
+    fn a_variable_binds_bare_or_after_this_target_alone() {
+        let openssl = &NATIVES[0];
+        let host = env!("XTASK_TARGET").to_uppercase().replace('-', "_");
+        assert!(openssl.names("OPENSSL_DIR"));
+        assert!(openssl.names(&format!("{host}_OPENSSL_DIR")));
+        assert!(!openssl.names("POWERPC64_IBM_AIX_OPENSSL_DIR"));
+        assert!(!openssl.names("DEP_OPENSSL_DIR"));
+        assert!(!openssl.names(&format!("{host}_OPENSSL_LIB_DIR")));
     }
 }
 
@@ -153,7 +204,7 @@ mod tests {
     use std::fs;
 
     use crate::manifest::Manifest;
-    use crate::oracle::macho;
+    use crate::oracle::stand_in::macho;
     use crate::reading::Status;
     use crate::scratch::{Tree, repository};
 
@@ -191,7 +242,7 @@ mod tests {
         assert_eq!(moved.status, Status::Fail, "{}", moved.message);
         assert!(
             moved.message.starts_with(
-                ".cargo/config.toml's AARCH64_APPLE_DARWIN_OPENSSL_DIR binds openssl-sys to openssl@4, \
+                ".cargo/config.toml's OPENSSL_DIR binds openssl-sys to openssl@4, \
                  and the pinned php loads libssl from openssl@5: the binding moves with the oracle"
             ),
             "{}",

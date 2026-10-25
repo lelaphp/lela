@@ -54,8 +54,9 @@ pub(crate) struct Surfaces {
     pinned: Pinned,
 }
 
-/// What the hold makes of one extension: problems, which fail the reading,
-/// and notes, which it carries either way.
+/// What a hold makes of one crate, its surface's or its bindings'
+/// (`binding`): problems, which fail the reading, and notes, which it
+/// carries either way.
 #[derive(Debug, Default)]
 pub(crate) struct Held {
     pub(crate) problems: Vec<String>,

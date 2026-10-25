@@ -75,8 +75,8 @@
 //! measured. Beside them `carried-and-accepted.json`: a file whose old
 //! verdict a measured commit carries and whose new one an `--accept
 //! --item` recorded, permitted since each hit is read against every kind
-//! of evidence on its own, and denied once the new status is typed over
-//! (#3441). No case of this row can be one that never fires, since what
+//! of evidence on its own, and `carried-and-typed.json`, the new status
+//! typed over, denied (#3441). No case of this row can be one that never fires, since what
 //! decides is the evidence and not the shape of the call (#134).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -257,7 +257,7 @@ fn stores(root: &Path) -> Vec<Store> {
 /// One hit of the row's pattern in a text: its line, by which a fence's
 /// verdict is read, and its block, the line and the lines on either side
 /// up to the nearest blank one, by which a commit carries it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 struct Hit {
     line: usize,
     block: String,

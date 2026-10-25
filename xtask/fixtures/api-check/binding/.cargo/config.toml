@@ -1,5 +1,7 @@
 # The fixture's binding (#3458): ext/openssl's openssl-sys pointed at
-# openssl@4, as the workspace's own configuration points it, the path
-# relative to this fixture as cargo reads `relative = true`.
+# openssl@4, bare so it binds on every host the test runs on, the path
+# relative to this fixture as cargo reads `relative = true`; and another
+# target's binding, to a directory no machine has, which is not held here.
 [env]
-AARCH64_APPLE_DARWIN_OPENSSL_DIR = { value = "brew/Cellar/openssl@4/4.0.3", relative = true, force = true }
+OPENSSL_DIR = { value = "brew/Cellar/openssl@4/4.0.3", relative = true, force = true }
+POWERPC64_IBM_AIX_OPENSSL_DIR = { value = "/nowhere/openssl@9", force = true }

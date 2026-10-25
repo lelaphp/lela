@@ -1835,9 +1835,9 @@ fn a_verdict_an_item_run_accepted_is_captured_and_one_typed_over_it_is_not() {
 /// record `--accept --item` wrote, and neither kind covers both, so the
 /// file is permitted only where the hits are read one by one, as
 /// `Request::debug_info`'s three new fences beside the file's carried ones
-/// were not on t3260 at eee22a4e0. The control: the new verdict's status
-/// typed over by hand is a block no record names and no commit carries,
-/// and is still denied.
+/// were not on t3260 at eee22a4e0. The control, `carried-and-typed.json`:
+/// the new verdict's status typed over by hand is a block no record names
+/// and no commit carries, and is still denied.
 #[test]
 fn a_file_of_carried_verdicts_and_one_an_item_run_accepted_is_captured_and_a_typed_one_is_not() {
     let root = scratch("carried-and-accepted");
@@ -1858,7 +1858,7 @@ fn a_file_of_carried_verdicts_and_one_an_item_run_accepted_is_captured_and_a_typ
     let out = xtask(&root, &["permit", "--diff"]).ok();
     assert!(!out.contains("deny "), "{out}");
 
-    write(&root, FILE, &both.replace("exit=3", "exit=4"));
+    write(&root, FILE, &fixture_text("carried-and-typed.json"));
     repo.git(&["add", "--", FILE]);
     let ran = xtask(&root, &["permit", "--diff"]);
     assert_eq!(ran.code(), 1, "{ran}");

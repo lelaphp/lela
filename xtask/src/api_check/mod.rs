@@ -761,9 +761,9 @@ fn crate_reading(
 
     // Its links to a native library, each held to the keg the pinned php
     // loads that library from (#3458).
-    let (unheld, held) = bindings.hold(krate);
-    problems.extend(unheld);
-    notes.extend(held);
+    let held = bindings.hold(krate);
+    problems.extend(held.problems);
+    notes.extend(held.notes);
 
     if problems.is_empty() {
         reading.status = Status::Pass;
