@@ -1237,17 +1237,18 @@ fn opens_nothing_is_an_assertion_the_reading_carries_with_its_session() {
     );
 }
 
-/// A successor that is closed, missing or unreadable refuses the close,
-/// and the tracker is asked nothing but `issue view` (#29).
+/// A successor that is closed and was filed before the ticket it would
+/// succeed, missing or unreadable refuses the close, and the tracker is
+/// asked nothing but `issue view` (#29).
 #[test]
 fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_nothing() {
     let tracker = Tracker::empty("successor");
     tracker.with_issue(&with_body(8, TICKED));
-    tracker.with_issue(&closed(9, "done already"));
+    tracker.with_issue(&closed(7, "done already"));
     tracker.with_answer(11, "not an issue");
     tracker.none(404);
     for (successor, expected) in [
-        (9, "#9, which is closed"),
+        (7, "#7, which is closed and was filed before #8"),
         (404, "#404 could not be read from the tracker"),
         (11, "#11: gh's answer is not an issue"),
     ] {
@@ -1276,6 +1277,33 @@ fn close_refuses_a_successor_that_is_closed_missing_or_unreadable_and_changes_no
         );
     }
     assert!(tracker.calls().is_empty(), "{:?}", tracker.calls());
+}
+
+/// A successor the work filed stays its successor however it ended
+/// (#3390): t3398's ready record named #3409 and #3412, both filed by that
+/// work and both closed as done before the merge, and the close refused
+/// them as closed. A closed ticket filed after the one it succeeds is held
+/// as an open one is, its edge set and the close made, at ready and at
+/// close alike.
+#[test]
+fn a_successor_filed_by_the_work_and_closed_since_is_still_its_successor() {
+    let tracker = Tracker::empty("successor-closed");
+    tracker.with_issue(&with_body(8, TICKED));
+    tracker.with_issue(&closed(9, "filed by #8's work and done since"));
+    let reading = run(
+        workspace(),
+        &manifest(),
+        &tracker.gh(),
+        done(Successors::Tickets(vec![Ticket::new(9)])),
+        Ticket::new(8),
+        None,
+    )
+    .unwrap();
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    assert!(reading.message.contains("opens #9"), "{}", reading.message);
+    let calls = tracker.calls();
+    assert_eq!(calls[0], "issue edit 8 --add-blocking 9", "{calls:?}");
+    assert!(calls[1].starts_with("issue close 8 "), "{calls:?}");
 }
 
 /// The edge is set before the close: a tracker that refuses the edge

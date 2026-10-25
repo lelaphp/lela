@@ -80,8 +80,10 @@
 //! `--opens <n>` for each ticket filed, repeatable, or `--opens-nothing`,
 //! and a close that names neither is refused before the tracker is asked
 //! anything ([`Successors::named`]). Each successor is fetched and must be
-//! open; one that is closed, missing or unreadable refuses the close with
-//! nothing changed. Whose the successor is is not held, `for-a-person`
+//! open, or closed and filed after the ticket it succeeds, since what the
+//! work filed stays its successor however it ended (#3390); one closed and
+//! filed before, missing or unreadable refuses the close with nothing
+//! changed. Whose the successor is is not held, `for-a-person`
 //! as good as `ready-for-agent`: the bar is that it was filed. Which
 //! track's it is, is held (#141): a ticket carrying no `track:` label is
 //! `main`'s (ADR-0009, CONTEXT.md, Track), so a close of a ticket whose
@@ -400,9 +402,12 @@ impl Successors {
         }
     }
 
-    /// Each successor exists at the tracker, is open, and shares one of
-    /// the tracks of `closed`, the ticket that opens it, where those are
-    /// not `main`'s; the first that is not is the refusal.
+    /// Each successor exists at the tracker, is open or was filed after
+    /// `closed`, the ticket that opens it, and shares one of its tracks,
+    /// where those are not `main`'s; the first that is not is the refusal.
+    /// A successor the work filed stays one however it ended (#3390): the
+    /// tracker numbers issues as it files them, so one closed since and
+    /// numbered after `closed` was filed after it.
     fn held(&self, gh: &Gh, root: &Path, closed: &Issue) -> Result<()> {
         let tracks = &tracks_of(closed.labels.iter().map(|l| l.name.as_str()))[..];
         if let Successors::Tickets(tickets) = self
@@ -421,8 +426,11 @@ impl Successors {
             let issue = gh
                 .view(root, successor)
                 .with_context(|| format!("opens {successor}"))?;
-            if issue.state == State::Closed {
-                bail!("opens {successor}, which is closed; a successor is an open ticket");
+            if issue.state == State::Closed && successor.number() < closed.number {
+                bail!(
+                    "opens {successor}, which is closed and was filed before #{}; a closed ticket is a successor only where the work filed it",
+                    closed.number
+                );
             }
             let Some(first) = first else { continue };
             let its = tracks_of(issue.labels.iter().map(|l| l.name.as_str()));
