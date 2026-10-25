@@ -7019,6 +7019,25 @@ fn function_string(req: &mut Request, function: Function, indent: &str) -> Strin
 ///   - Return [ string ]
 /// }
 /// ```
+///
+/// A closure written in a class's method has the class for its scope, so
+/// it is a `public method`, and `static` before it where it is one:
+///
+/// ```php
+/// class K { function m() { return function () {}; } static function s() { return static fn () => 1; } }
+/// echo new ReflectionFunction((new K)->m()), new ReflectionFunction(K::s()), new ReflectionFunction(Closure::bind(function () {}, null, K::class));
+/// ```
+/// ```expect
+/// Closure [ <user> public method {closure:K::m():2} ] {
+///   @@ %s 2 - 2
+/// }
+/// Closure [ <user> static public method {closure:K::s():2} ] {
+///   @@ %s 2 - 2
+/// }
+/// Closure [ <user> public method {closure:%s:3} ] {
+///   @@ %s 3 - 3
+/// }
+/// ```
 fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result<String, Thrown> {
     let Some(decl) = signature::closure_decl(req, closure) else {
         return Ok(String::new());
@@ -7028,13 +7047,20 @@ fn closure_string(req: &mut Request, closure: PhpObject, indent: &str) -> Result
         bound.push(name.as_bytes().to_vec());
         name.give_up(req);
     }
-    let module = closure
-        .closure(req)
+    let info = closure.closure(req);
+    let module = info
+        .as_ref()
         .and_then(|info| req.extensions().function_extension(info.function))
         .and_then(|e| req.extensions().name(e))
         .map(str::to_owned);
+    let header = Header::Closure {
+        is_static: info
+            .as_ref()
+            .is_some_and(|info| req.symbols().closure_refuses_receiver(info)),
+        scoped: info.as_ref().is_some_and(|info| info.scope.is_some()),
+    };
     let mut out = String::new();
-    function_header(&mut out, &decl, module.as_deref(), Header::Closure, indent);
+    function_header(&mut out, &decl, module.as_deref(), header, indent);
     let arg_info = ArgInfo::of(&decl);
     function_body(req, &mut out, &decl, false, arg_info, &bound, indent);
     Ok(out)
@@ -7150,7 +7176,14 @@ fn method_string(req: &mut Request, method: &LinkedMethod, ce: ClassId, indent: 
 #[derive(Clone, Copy)]
 enum Header<'a> {
     Function,
-    Closure,
+    /// A closure: whether it is `static` (`ZEND_ACC_STATIC`) and
+    /// whether its function has a scope, the class it was made or bound
+    /// in (`fptr->common.scope`), which `_function_string` prints as a
+    /// `public method`, every closure being public.
+    Closure {
+        is_static: bool,
+        scoped: bool,
+    },
     Method(&'a MethodDecl, &'a [String]),
 }
 
@@ -7168,7 +7201,7 @@ fn function_header(
 ) {
     let method = match header {
         Header::Method(method, words) => Some((method, words)),
-        Header::Function | Header::Closure => None,
+        Header::Function | Header::Closure { .. } => None,
     };
     if let Some(doc) = &decl.doc_comment {
         out.push_str(indent);
@@ -7181,7 +7214,7 @@ fn function_header(
     // (`Z/ext/reflection/php_reflection.c:905`).
     out.push_str(match header {
         Header::Method(..) => "Method [ ",
-        Header::Closure => "Closure [ ",
+        Header::Closure { .. } => "Closure [ ",
         Header::Function => "Function [ ",
     });
     let internal = decl.file.0.is_empty();
@@ -7213,6 +7246,17 @@ fn function_header(
             out.push_str("static ");
         }
         write!(out, "{} method ", visibility_word(method.visibility)).ok();
+    } else if let Header::Closure { is_static, scoped } = header {
+        // `ZEND_ACC_STATIC`, then `fptr->common.scope`'s `public method`
+        // (`Z/ext/reflection/php_reflection.c:941-962`).
+        if is_static {
+            out.push_str("static ");
+        }
+        out.push_str(if scoped {
+            "public method "
+        } else {
+            "function "
+        });
     } else {
         out.push_str("function ");
     }
