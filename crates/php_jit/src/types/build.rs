@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use php_engine::tier::{ClassId, FuncRef, MapPtrRaw, PlainCall, PropertySlot, Sample, UnitView};
 use php_heap::ZvalType;
 use php_unit::decl::Parameter;
-use php_unit::{CacheSlot, Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
+use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::opcodes::{
@@ -22,8 +22,8 @@ use super::opcodes::{
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
     Fused, Grows, Guard, GuardAt, Home, Imm, Interrupt, Known, Landing, Layout, Leave, Line,
-    LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Store,
-    Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
+    LoopHeader, Object, Op, OpId, Operand, Owners, Place, Read, Repeat, Returned, Slot, Slotted,
+    Store, Stored, TraceIr, Unwind, UnwindId, Value, ValueId, Vars, on_declared_slot,
 };
 use crate::record::{self, Began, Callee, Event, Landed, Start, Stop, TraceRecord};
 use crate::table::TraceId;
@@ -662,14 +662,19 @@ impl<'a> Builder<'a> {
             (opcode, None) if on_declared_slot(opcode) => Form::Step,
             _ => form,
         };
-        if let (Form::Inline, Some(property)) = (form, property) {
+        if let (Form::Inline, Some(property)) = (form, property)
+            && property.slot.cached().is_none()
+        {
             self.class_guard(idx, frame, at, property);
         }
         let in_place = (form == Form::Inline)
             .then(|| self.in_place(frame, &op, next))
             .flatten();
         self.sampled.insert(idx, samples);
-        let map_ptr = self.map_ptr(func, &op, form);
+        let map_ptr = match property.and_then(|property| property.slot.cached()) {
+            Some(raw) if form == Form::Inline => Some(self.map_ptr_of(raw)),
+            _ => None,
+        };
         self.record_send(frame, &op, op1);
         if !keeps_temporaries(op.opcode) {
             // The opline frees every temporary it reads, as its handler
@@ -728,7 +733,10 @@ impl<'a> Builder<'a> {
                 },
                 _ if let Some(property) = property.filter(|_| form == Form::Inline) => {
                     Imm::Property {
-                        slot: property.slot.slot(),
+                        slot: match property.slot.cached() {
+                            Some(_) => Slotted::Cached,
+                            None => Slotted::Declared(property.slot.slot()),
+                        },
                         binary: (op.opcode == Opcode::AssignObjOp)
                             .then(|| lattice::binary_of(op.extended_value))
                             .flatten(),
@@ -1945,15 +1953,20 @@ impl<'a> Builder<'a> {
         };
         let temporary = slot.var >= self.meta(slot.frame).code.num_cvs;
         // An indirect `VAR` is followed to what it points at, as php's
-        // `zend_jit_fetch_indirect_var` follows it, and a variable's
-        // reference to what it refers to; one that points at a reference,
-        // and a temporary that is one, are the handler's.
-        let read = Read::sampled(sample)?;
+        // `zend_jit_fetch_indirect_var` follows it, and on to what that
+        // refers to where it is a reference, as `zend_jit_fetch_reference`
+        // follows it, and a variable's reference to what it refers to; a
+        // temporary that is a reference is the handler's.
+        let read = Read::sampled(sample);
         let check = match (read, temporary) {
             (Read::InPlace, _) => None,
-            (Read::Indirect, true) => Some(Check::Indirect { value, tag }),
+            (Read::Indirect(pointee), true) => Some(Check::Indirect {
+                value,
+                tag,
+                pointee,
+            }),
             (Read::Through, false) => Some(Check::Deref { value, tag }),
-            (Read::Indirect | Read::Through, _) => return None,
+            (Read::Indirect(_) | Read::Through, _) => return None,
         };
         if let Some(check) = check {
             self.guards.push(Placed { check, ..before });
@@ -2396,23 +2409,14 @@ impl<'a> Builder<'a> {
         }
     }
 
-    /// The runtime cache slot an inline call's `INIT_*` reads its callee
-    /// from, `result.num`.
-    fn map_ptr(&mut self, func: FuncRef, op: &Opline, form: Form) -> Option<usize> {
-        if form != Form::Inline
-            || !matches!(
-                op.opcode,
-                Opcode::InitFcall | Opcode::InitFcallByName | Opcode::InitNsFcallByName
-            )
-        {
-            return None;
-        }
-        let raw = self.view.cache_slot(func, CacheSlot(op.out))?;
+    /// The slot of [`TraceIr::map_ptrs`] that holds `raw`, taken where
+    /// none does.
+    fn map_ptr_of(&mut self, raw: MapPtrRaw) -> usize {
         if let Some(at) = self.map_ptrs.iter().position(|held| *held == raw) {
-            return Some(at);
+            return at;
         }
         self.map_ptrs.push(raw);
-        Some(self.map_ptrs.len() - 1)
+        self.map_ptrs.len() - 1
     }
 
     // ------------------------------------------------------------ the end
@@ -3485,7 +3489,7 @@ fn dim_inline(
     code: &OpArray,
 ) -> bool {
     let array = t1.tag() == Some(ZvalType::Array);
-    let written = op.op1_type == OperandKind::Cv || read1 == Read::Indirect;
+    let written = op.op1_type == OperandKind::Cv || matches!(read1, Read::Indirect(_));
     match op.opcode {
         Opcode::FetchDimR | Opcode::FetchDimIs => fetched_inline(op, t1, t2),
         Opcode::IssetIsemptyDimObj => {
@@ -3852,7 +3856,7 @@ fn stack_type(check: Check) -> Option<(ValueId, ZvalType)> {
             ..
         } => Some((value, ZvalType::Array)),
         Check::Layout {
-            read: Read::Through | Read::Indirect,
+            read: Read::Through | Read::Indirect(_),
             ..
         }
         | Check::Deref { .. }

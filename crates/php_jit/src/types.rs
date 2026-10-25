@@ -361,12 +361,27 @@ pub(crate) enum Imm {
     /// is placed at on objects of the class a guard before it holds
     /// (`zend_jit_fetch_obj`, `zend_jit_assign_obj`, `zend_jit_assign_obj_op`,
     /// `zend_jit_incdec_obj`, `Z/ext/opcache/jit/zend_jit_ir.c:14206-15700`
-    /// over a known `prop_info`): the slot, by its number, and an
+    /// over a known `prop_info`): where it finds the slot, and an
     /// `ASSIGN_OBJ_OP`'s operator.
     Property {
-        slot: u32,
+        slot: Slotted,
         binary: Option<Opcode>,
     },
+}
+
+/// Where a property opline compiled in place finds its declared slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Slotted {
+    /// By its number, on objects of the published class a guard before
+    /// the opline holds.
+    Declared(u32),
+    /// In the request's own runtime-cache slot the opline reads
+    /// ([`Line::map_ptr`]), under the guard compiled code holds there on
+    /// its tag and its class, as php's code reads `CACHED_PTR(cache_slot)`
+    /// and the offset past it for a class that is not immutable
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`): a request-scoped
+    /// class's, whose id and slots are the request's.
+    Cached,
 }
 
 /// The object a property opline reads and a class guard holds: `$this`
@@ -501,9 +516,16 @@ pub(crate) enum Check {
     /// the `VAR`'s own type is tested where its value may be other than
     /// [`Types::INDIRECT`], where php's `add_indirect_guard` is set, the
     /// `indirect_reference` mark past an inline fetch for writing clear
-    /// (`Z/ext/opcache/jit/zend_jit_trace.c:5951`), a type here; the exit
-    /// goes back to the opline.
-    Indirect { value: ValueId, tag: ZvalType },
+    /// (`Z/ext/opcache/jit/zend_jit_trace.c:5951`), a type here. Where the
+    /// zval it points at is a reference, the guard holds it one and the
+    /// value it refers to of this type, as php's `zend_jit_fetch_reference`
+    /// follows it after (`Z/ext/opcache/jit/zend_jit_ir.c:17021-17085`); the
+    /// exit goes back to the opline.
+    Indirect {
+        value: ValueId,
+        tag: ZvalType,
+        pointee: Pointee,
+    },
     /// The array is laid out so, held in the slot or through the
     /// reference the slot holds: php's packed guard.
     Layout {
@@ -646,26 +668,36 @@ pub(crate) enum Stored {
 }
 
 /// How a zval is read: in place, through the reference it is, or
-/// through the address an indirect `VAR` holds ([`Check::Indirect`]): a
-/// fetched element, the array a layout guard holds, and the array an
-/// element write writes.
+/// through the address an indirect `VAR` holds ([`Check::Indirect`]), to
+/// the zval there or the value of the reference it is: a fetched element,
+/// the array a layout guard holds, and the array an element write writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Read {
     InPlace,
     Through,
-    Indirect,
+    Indirect(Pointee),
+}
+
+/// What an indirect `VAR` is read as: the zval it points at, or the value
+/// of the reference that zval is, as php follows `zend_jit_fetch_indirect_var`
+/// with `zend_jit_fetch_reference` where the recorder saw both
+/// (`Z/ext/opcache/jit/zend_jit_ir.c:17087-17141`, `:17021-17085`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum Pointee {
+    Value,
+    Reference,
 }
 
 impl Read {
     /// How the recorder reached the zval it sampled: through an
-    /// `IS_INDIRECT`, through an `IS_REFERENCE`, or in place; none for
-    /// both, a slot that points at a reference.
-    pub(crate) fn sampled(sample: php_engine::tier::Sample) -> Option<Read> {
+    /// `IS_INDIRECT`, then through the `IS_REFERENCE` it points at where
+    /// it is one, through an `IS_REFERENCE`, or in place.
+    pub(crate) fn sampled(sample: php_engine::tier::Sample) -> Read {
         match (sample.indirect, sample.reference) {
-            (false, false) => Some(Read::InPlace),
-            (false, true) => Some(Read::Through),
-            (true, false) => Some(Read::Indirect),
-            (true, true) => None,
+            (false, false) => Read::InPlace,
+            (false, true) => Read::Through,
+            (true, false) => Read::Indirect(Pointee::Value),
+            (true, true) => Read::Indirect(Pointee::Reference),
         }
     }
 }

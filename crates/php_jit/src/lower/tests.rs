@@ -18,8 +18,9 @@ use crate::table::TraceName;
 use crate::testing::goldens::{
     self, ARRAY_WRITE, BINARY_TREES_CHECK, BINARY_TREES_MAKE, DIM_AND, DIM_CONCAT, DIM_DIV,
     DIM_MOD, DIM_OR, DIM_SL, DIM_SR, DIM_XOR, FIB, Fixture, HASH_FETCH_W, HASH_IS, HASH_ISSET,
-    HASH_READ, HASH_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ, NESTED_WRITE, OBJECT_THIS,
-    OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE, SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
+    HASH_READ, HASH_WRITE, INDIRECT_REF_WRITE, MANDELBROT, NATIVE_CALL, NBODY, NESTED_READ,
+    NESTED_WRITE, OBJECT_SCOPED, OBJECT_THIS, OBJECT_VALUE, OWNING_LEAVE, REF_WRITE, SIEVE,
+    SPECTRALNORM, STRING_BUILD, STRING_MATCH, held,
 };
 use crate::testing::{self, Lane, policy};
 use crate::types::{
@@ -933,7 +934,7 @@ fn a_link_jumps_to_the_trace_it_links_to() -> Result<(), String> {
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn properties_lower_in_place_under_their_class_guard() -> Result<(), String> {
-    for fixture in [OBJECT_THIS, OBJECT_VALUE] {
+    for fixture in [OBJECT_THIS, OBJECT_VALUE, OBJECT_SCOPED] {
         lowered(fixture)?;
         let clif = std::fs::read_to_string(goldens_dir().join(format!("{}.clif", fixture.name)))
             .map_err(|e| e.to_string())?;
@@ -980,6 +981,82 @@ fn a_class_the_next_request_declares_fails_the_class_guard() {
     assert_eq!(testing::stdout(&second), "104 64\n");
     let lines = String::from_utf8_lossy(&second.stderr);
     assert!(lines.contains("TRACE 1 exit"), "{lines}");
+}
+
+/// A trace over a request-scoped class's properties, entered on a request
+/// that has not yet called the function whose property oplines it inlines:
+/// the touch lays that function's cache down as the trace enters, so its
+/// code reads the slot where the function's first call will find it, and
+/// the read leaves for the interpreter once, where the slot is not primed
+/// yet, and reads its place in place on every turn after (#3346, #2957's
+/// note).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_trace_entered_before_its_callee_ran_reads_the_slot_the_touch_laid() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ]);
+    let program = "eval('class Base { public $x = 1; }');
+        class C extends Base { }
+        function g($o) { return $o->x; }
+        function k($o, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { if ($i > 0) { $t += g($o); } $o->x = $i; } return $t; }
+        echo k(new C, 20), \"\\n\";";
+    let first = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&first), "171\n");
+    let second = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&second), "171\n");
+    let lines = String::from_utf8_lossy(&second.stderr);
+    let exits = lines.lines().filter(|line| line.contains(" exit ")).count();
+    assert!(exits <= 2, "{lines}");
+}
+
+/// A trace over a request-scoped class's properties serves an object of
+/// another class through its handler where the request's cache slot names
+/// the class it placed the name on last, and in place once the slot names
+/// the object's own: the write is the handler's, and the read leaves for
+/// the interpreter, as php's code goes to its slow path where
+/// `CACHED_PTR(cache_slot)` is not `obj->ce` (#3346).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_cache_slot_that_names_another_class_sends_the_opline_to_its_handler() {
+    let scratch = testing::Scratch::new();
+    let engine = testing::engine::<Lane>(&[
+        ("jit.mode", "force"),
+        ("jit.compile", "inline"),
+        ("opcache.jit_debug", "258048"),
+    ]);
+    let program = "eval('class A { public $x = 1; public $y = 2; } class B { public $y = 7; public $x = 5; }');
+        function k($o, $p, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { $t += $o->x; $o->y = $i; $o = $i % 2 ? $p : $o; } return $t; }
+        echo k(new A, new B, 10), ' ', k(new B, new B, 10), \"\\n\";";
+    let served = scratch.serve(&engine, program);
+    assert_eq!(testing::stdout(&served), "42 50\n");
+}
+
+/// A slot of `true` alone, met through a request-scoped class's cache
+/// slot after an untyped one, takes `true` and sends `false` to the
+/// handler's `TypeError`, at the fourth pass as php's interpreter raises it
+/// (#3346). php 8.5.12's own compiled tier raises it on the first pass
+/// here under the oracle's hot counters, so the interpreter's answer is
+/// held, not the oracle's, and the program is no witness.
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_slot_of_true_alone_refuses_false_to_its_handler() {
+    let scratch = testing::Scratch::new();
+    for mode in ["force", "exit-fuzz"] {
+        let engine = testing::engine::<Lane>(&[("jit.mode", mode), ("jit.compile", "inline")]);
+        let program = "eval('class A { public $t = 0; } class B { public true $t = true; }');
+            function f($o, $m) { for ($i = 0; $i < $m; $i++) { try { $o->t = $i < 3; } catch (TypeError $e) { echo $i, ' ', $e->getMessage(), \"\\n\"; return; } } echo 'done ', $o->t ? 'true' : 'false', \"\\n\"; }
+            f(new A, 10); f(new B, 10); f(new A, 2);";
+        let served = scratch.serve(&engine, program);
+        assert_eq!(
+            testing::stdout(&served),
+            "done false\n3 Cannot assign false to property B::$t of type true\ndone true\n",
+            "{mode}"
+        );
+    }
 }
 
 /// The hash slice's dimension oplines lowered, each element reached
@@ -1032,7 +1109,7 @@ fn a_hashs_dimension_oplines_lower_through_the_lookup_kernels() -> Result<(), St
 #[test]
 fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
 -> Result<(), String> {
-    let kernels: [(Fixture, &[(Kernel, usize)]); 3] = [
+    let kernels: [(Fixture, &[(Kernel, usize)]); 4] = [
         (
             NESTED_READ,
             &[
@@ -1055,6 +1132,9 @@ fn a_dimension_over_a_temporary_an_indirect_var_or_a_reference_lowers_in_place()
             REF_WRITE,
             &[(Kernel::Lookup, 2), (Kernel::Handle, 2), (Kernel::Step, 0)],
         ),
+        // #3410: through a `VAR` that points at a reference, as through
+        // one that points at the array.
+        (INDIRECT_REF_WRITE, &[(Kernel::Step, 0)]),
     ];
     for (fixture, calls) in kernels {
         lowered(fixture)?;

@@ -497,9 +497,13 @@ pub(crate) const STOOD_AT: i32 = 24;
 pub(crate) const STACK_AT: i32 = 56;
 
 /// Where compiled code reads, in the `ExitCtx`, the address of the
-/// request's headers for the calls it pushes in place, one address a call
-/// in [`Compiled::calls`]' order, each `php_engine::tier::FRAME`'s
-/// `header_bytes` long (`php_engine::tier::call_image`).
+/// request's addresses its code reads: the headers for the calls it pushes
+/// in place, one address a call in [`Compiled::calls`]' order, each
+/// `php_engine::tier::FRAME`'s `header_bytes` long
+/// (`php_engine::tier::call_image`), then the runtime-cache slots it reads,
+/// one a slot of [`Compiled::map_ptrs`], each laid down by the touch on the
+/// request's first entry of the trace (`jit-design.md` §4.6,
+/// `php_engine::tier::touch`).
 pub(crate) const IMAGES_AT: i32 = 64;
 
 /// Where compiled code reads, in the `ExitCtx`, the place on the stack of

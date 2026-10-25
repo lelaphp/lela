@@ -13,12 +13,17 @@
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::types::{I8, I32, I64};
 use cranelift_codegen::ir::{InstBuilder, Value};
-use php_engine::tier::{self, ClassId, FRAME};
+use php_engine::tier::{self, ClassId, FRAME, PLACE, PlaceLayout};
 use php_heap::{Obj, ZvalType};
 use php_unit::Opcode;
 
-use super::{Emit, KIND, SLOT, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
-use crate::types::{Abort, ExitId, Imm, Line, Object, OpId, Operand};
+use super::{Emit, KIND, Kind, Refuse, SLOT, Scalar, TYPE_AT, imm, mismatch, tag, trusted};
+use crate::lower::IMAGES_AT;
+use crate::types::{Abort, ExitId, Imm, Line, Object, OpId, Operand, Slotted};
+
+/// The engine's runtime-cache slot layout, as the guard on a request's own
+/// slot reads it.
+const P: PlaceLayout = PLACE;
 
 impl Emit<'_> {
     /// The object `object` names, a `zend_object *`: `$this` of its frame,
@@ -75,8 +80,65 @@ impl Emit<'_> {
     }
 
     /// The address of the declared slot `line` serves in place, on the
-    /// object its `op1` names, `$this` where it names none.
-    fn property(&mut self, line: &Line) -> Result<Value, Abort> {
+    /// object its `op1` names, `$this` where it names none: by its number
+    /// on a published class, or read from the request's cache slot where
+    /// it holds a declared slot of the object's class whose type has a bit
+    /// of `kinds` (each of them, none tested where `kinds` is none), as
+    /// php's code reads it for a class that is not
+    /// immutable, and refused to `refuse` otherwise
+    /// (`zend_jit_fetch_obj`, `Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`;
+    /// `zend_jit_assign_obj`, `:14874-14895`).
+    ///
+    /// `zend_lazy_class_load`'s copy of a class linked over one the
+    /// request evaluated, whose trace then serves an evaluated class whose
+    /// slots stand elsewhere and whose `$n` takes a float, a published
+    /// class, and a fresh object of the first again, and an enum's
+    /// `value` and `name` read for two cases, under force and where every
+    /// guard fails once:
+    ///
+    /// ```php
+    /// eval('class Base { public $x = 1; public $y = 0; public int $n = 0; }');
+    /// class Child extends Base { }
+    /// eval('class E { public $w = 0; public $x = 10; public $y = 0; public float $n = 0.5; }');
+    /// class P { public $y = 0; public $x = 3; public int $n = 0; }
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function f($o, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { $t += $o->x; $o->y = $i; $o->x += 1; $o->y++; $o->n = $i; } return "$t {$o->y} " . var_export($o->n, true); }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// echo f(new Child, 10), "\n", f(new E, 10), "\n", f(new P, 10), "\n", f(new Child, 4), "\n";
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n";
+    /// ```
+    /// ```expect regime=jit-force process
+    /// 55 10 9
+    /// 145 10 9.0
+    /// 75 10 9
+    /// 10 4 3
+    /// hHhHhH sSsS
+    /// ```
+    ///
+    /// ```php
+    /// eval('class Base { public $x = 1; public $y = 0; public int $n = 0; }');
+    /// class Child extends Base { }
+    /// eval('class E { public $w = 0; public $x = 10; public $y = 0; public float $n = 0.5; }');
+    /// class P { public $y = 0; public $x = 3; public int $n = 0; }
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function f($o, $m) { $t = 0; for ($i = 0; $i < $m; $i++) { $t += $o->x; $o->y = $i; $o->x += 1; $o->y++; $o->n = $i; } return "$t {$o->y} " . var_export($o->n, true); }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// echo f(new Child, 10), "\n", f(new E, 10), "\n", f(new P, 10), "\n", f(new Child, 4), "\n";
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n";
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// 55 10 9
+    /// 145 10 9.0
+    /// 75 10 9
+    /// 10 4 3
+    /// hHhHhH sSsS
+    /// ```
+    fn property(
+        &mut self,
+        line: &Line,
+        kinds: Option<u32>,
+        refuse: Refuse,
+    ) -> Result<Value, Abort> {
         let Imm::Property { slot, .. } = line.imm else {
             return Err(mismatch("a property opline with no slot"));
         };
@@ -86,8 +148,95 @@ impl Emit<'_> {
             Operand::Constant(_) => return Err(mismatch("a property of a constant")),
         };
         let obj = self.object(object)?;
-        let at = i64::from(imm(Obj::SLOTS_AT)) + SLOT * i64::from(slot);
-        Ok(self.b.ins().iadd_imm_s(obj, at))
+        let slots = i64::from(imm(Obj::SLOTS_AT));
+        match slot {
+            Slotted::Declared(slot) => {
+                Ok(self.b.ins().iadd_imm_s(obj, slots + SLOT * i64::from(slot)))
+            }
+            Slotted::Cached => {
+                let place = self.cache_guard(line, (P.property(), P.class()), obj, refuse)?;
+                self.declared_in(place, kinds, refuse)?;
+                let number = (self.b.ins()).uload32(trusted(), place, imm(P.slot() as usize));
+                let offset = self.b.ins().imul_imm_u(number, SLOT);
+                let slot = self.b.ins().iadd(obj, offset);
+                Ok(self.b.ins().iadd_imm_s(slot, slots))
+            }
+        }
+    }
+
+    /// Refused to `refuse` unless the property's place at `place` is a
+    /// declared slot whose type holds every bit of `kinds`, where the
+    /// opline writes: `zend_get_property_offset`'s offset past
+    /// `ZEND_FIRST_PROPERTY_OFFSET` and the `prop_info` php's code reads at
+    /// `cache_slot + 2` before it writes in place
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14370`, `:14417`, `:14947`,
+    /// `:14963`).
+    fn declared_in(
+        &mut self,
+        place: Value,
+        kinds: Option<u32>,
+        refuse: Refuse,
+    ) -> Result<(), Abort> {
+        let offset = (self.b.ins()).load(I8, trusted(), place, imm(P.offset_tag() as usize));
+        let declared = i64::from(P.declared());
+        let mut refused = self.b.ins().icmp_imm_u(IntCC::NotEqual, offset, declared);
+        if let Some(kinds) = kinds {
+            let ty = (self.b.ins()).uload16(I32, trusted(), place, imm(P.ty() as usize));
+            let held = self.b.ins().band_imm_u(ty, i64::from(kinds));
+            let short = self
+                .b
+                .ins()
+                .icmp_imm_u(IntCC::NotEqual, held, i64::from(kinds));
+            refused = self.b.ins().bor(refused, short);
+        }
+        self.refuse_if(refused, refuse)
+    }
+
+    /// The one guard on a slot of the request's own runtime cache, the
+    /// one `line` reads ([`IMAGES_AT`]): refused to `refuse` unless the
+    /// slot's tag is `tag` and the class it names at `class_at` is the
+    /// object's, as php's code compares `CACHED_PTR(cache_slot)` with
+    /// `obj->ce` before it reads past it for a class that is not immutable
+    /// (`Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`, and a method's
+    /// call, `zend_jit_init_method_call`, `:9025-9056`). The tag is tested
+    /// before anything past it is read; the slot's address is answered.
+    fn cache_guard(
+        &mut self,
+        line: &Line,
+        (tag, class_at): (u32, u32),
+        obj: Value,
+        refuse: Refuse,
+    ) -> Result<Value, Abort> {
+        let map = line
+            .map_ptr
+            .ok_or_else(|| mismatch("a cached place with no cache slot"))?;
+        let cx = self
+            .cx
+            .ok_or_else(|| mismatch("a cache slot read before the entry"))?;
+        // The slots stand past the trace's calls' headers ([`IMAGES_AT`]).
+        let addresses = self.b.ins().load(I64, trusted(), cx, IMAGES_AT);
+        let at = (self.held.len().checked_add(map))
+            .and_then(|at| at.checked_mul(size_of::<usize>()))
+            .and_then(|at| i32::try_from(at).ok())
+            .ok_or_else(|| mismatch("a cache slot past an immediate"))?;
+        let place = self.b.ins().load(I64, trusted(), addresses, at);
+        let held = self
+            .b
+            .ins()
+            .load(I32, trusted(), place, imm(P.tag() as usize));
+        let other = self
+            .b
+            .ins()
+            .icmp_imm_u(IntCC::NotEqual, held, i64::from(tag));
+        self.refuse_if(other, refuse)?;
+        let class = self
+            .b
+            .ins()
+            .load(I32, trusted(), place, imm(class_at as usize));
+        let of = self.b.ins().load(I32, trusted(), obj, imm(Obj::CLASS_AT));
+        let other = self.b.ins().icmp(IntCC::NotEqual, class, of);
+        self.refuse_if(other, refuse)?;
+        Ok(place)
     }
 
     /// `FETCH_OBJ_R` of a declared slot: a slot nothing holds leaves for
@@ -151,7 +300,7 @@ impl Emit<'_> {
         let out = line
             .out
             .ok_or_else(|| mismatch("a property fetch that writes nothing"))?;
-        let zval = self.property(line)?;
+        let zval = self.property(line, None, Refuse::Exit(exit))?;
         let byte = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
         let undef = self
             .b
@@ -210,7 +359,7 @@ impl Emit<'_> {
         let out = line
             .out
             .ok_or_else(|| mismatch("a property fetch that writes nothing"))?;
-        let zval = self.property(line)?;
+        let zval = self.property(line, Some(P.untyped()), Refuse::Exit(exit))?;
         let byte = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
         let undef = self
             .b
@@ -279,13 +428,14 @@ impl Emit<'_> {
     /// [5,null,5,1,6]
     /// ```
     pub(super) fn assign_obj(&mut self, at: OpId, line: &Line) -> Result<(), Abort> {
-        let value = match self.scalar_kind(line.data)? {
+        let kind = self.scalar_kind(line.data)?;
+        let value = match kind {
             Some(_) => Some(self.scalar(at, line.data)?),
             None => None,
         };
-        let zval = self.property(line)?;
         let handled = self.b.create_block();
         let done = self.b.create_block();
+        let zval = self.property(line, Some(kinds_of(kind)), Refuse::To(handled))?;
         let old = self.b.ins().load(I32, trusted(), zval, TYPE_AT);
         let kind = self.b.ins().band_imm_u(old, KIND);
         let undef = self
@@ -376,11 +526,27 @@ impl Emit<'_> {
             }
             _ => return Err(mismatch("a property's compound write with no operator")),
         };
-        let zval = self.property(line)?;
         let handled = self.b.create_block();
         let done = self.b.create_block();
+        let zval = self.property(line, Some(P.untyped()), Refuse::To(handled))?;
         let kind = self.b.ins().load(I8, trusted(), zval, TYPE_AT);
         self.compound_at((zval, kind), (binary, by, false), (handled, done))?;
         self.handled_then(at, line, (handled, done))
+    }
+}
+
+/// The bits of a slot's type a write of a scalar of `kind` lands in as it
+/// stands, by the handler's own test (`SlotType::admits`): its kind's, both
+/// booleans' for one the value says, so a slot of `true` or of `false`
+/// alone refuses it, or a slot with no type's for a value no scalar.
+fn kinds_of(kind: Option<Kind>) -> u32 {
+    match kind {
+        Some(Kind::Long) => P.kind(ZvalType::Long),
+        Some(Kind::Double) => P.kind(ZvalType::Double),
+        Some(Kind::Null) => P.kind(ZvalType::Null),
+        Some(Kind::False) => P.kind(ZvalType::False),
+        Some(Kind::True) => P.kind(ZvalType::True),
+        Some(Kind::Bool) => P.kind(ZvalType::False) | P.kind(ZvalType::True),
+        None => P.untyped(),
     }
 }

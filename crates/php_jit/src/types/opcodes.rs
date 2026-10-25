@@ -264,7 +264,7 @@ pub(super) fn out_types(
         Opcode::FetchDimW
             if t1.tag() == Some(ZvalType::Array)
                 && keyed(op, t2)
-                && (op.op1_type == OperandKind::Cv || read1 == Read::Indirect) =>
+                && (op.op1_type == OperandKind::Cv || matches!(read1, Read::Indirect(_))) =>
         {
             Types::INDIRECT
         }

@@ -13,7 +13,7 @@ loop at 0, recursive call, interrupt stub
 0002 f0 TYPE_CHECK #2 fused inline unwinds -> unwind 0
   checks direction taken -> exit 3
   guard room 224 -> exit 4
-0005 f0 INIT_FCALL_BY_NAME const#2 inline map 0
+0005 f0 INIT_FCALL_BY_NAME const#2 inline
      f0 init e2 in-place
 0006 f0 CHECK_FUNC_ARG inline
 0007 f0 FETCH_DIM_R #1, int(0) inline leaves -> exit 5
@@ -30,7 +30,7 @@ loop at 0, recursive call, interrupt stub
 0002 f1 TYPE_CHECK #5 fused inline unwinds -> unwind 0
   checks direction taken -> exit 3
   guard room 224 -> exit 4
-0005 f1 INIT_FCALL_BY_NAME const#2 inline map 0
+0005 f1 INIT_FCALL_BY_NAME const#2 inline
      f1 init e2 in-place
 0006 f1 CHECK_FUNC_ARG inline
 0007 f1 FETCH_DIM_R #4, int(0) inline leaves -> exit 5
@@ -50,4 +50,3 @@ exit 4: f0 0005 plain f0.CV0:array to vm
 exit 5: f0 0007 restore call f0.CV0:array to vm
 exit 6: f0 0007 restore call f0.CV0:array
 unwind 0:
-map 0: offset 2 slot 0

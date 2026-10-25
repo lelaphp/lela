@@ -326,6 +326,120 @@ impl FrameLayout {
     }
 }
 
+/// Where a runtime-cache slot keeps a property's place, as compiled code
+/// reads it in the request's own slot (`jit-design.md` §4.3, #3346), as
+/// php's code reads `CACHED_PTR(cache_slot)` and the offset past it for a
+/// class that is not immutable (`zend_jit_fetch_obj`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:14341-14370`): offsets in bytes into
+/// one slot ([`touch`](super::touch)), the tags compiled code tests before
+/// it reads past them, and the bit of a slot's type that says it has
+/// none. One value, [`PLACE`], every offset `offset_of!` over the
+/// interpreter's own types and RFC 2195's mirror of their variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlaceLayout {
+    tag: u32,
+    unprimed: u32,
+    property: u32,
+    class: u32,
+    offset_tag: u32,
+    declared: u8,
+    ty: u32,
+    slot: u32,
+    untyped: u32,
+}
+
+/// The engine's runtime-cache slot layout.
+pub const PLACE: PlaceLayout = {
+    use crate::exec::{Cached, PropertyOffset, PropertyPlace, SlotType};
+    let offset = Cached::PLACE_AT + PropertyPlace::OFFSET_AT;
+    PlaceLayout {
+        tag: word(Cached::TAG_AT),
+        unprimed: crate::exec::UNPRIMED,
+        property: crate::exec::PROPERTY,
+        class: word(Cached::PLACE_AT + PropertyPlace::CLASS_AT),
+        offset_tag: word(offset + PropertyOffset::TAG_AT),
+        declared: PropertyOffset::DECLARED,
+        ty: word(offset + PropertyOffset::TY_AT),
+        slot: word(offset + PropertyOffset::SLOT_AT),
+        untyped: SlotType::NO_TYPE as u32,
+    }
+};
+
+impl PlaceLayout {
+    /// Where the slot's tag is, four bytes.
+    #[must_use]
+    pub const fn tag(&self) -> u32 {
+        self.tag
+    }
+
+    /// The tag of a slot nothing was written to.
+    #[must_use]
+    pub const fn unprimed(&self) -> u32 {
+        self.unprimed
+    }
+
+    /// The tag of a slot that holds a property's place.
+    #[must_use]
+    pub const fn property(&self) -> u32 {
+        self.property
+    }
+
+    /// Where a property's place keeps the class it was found on, a
+    /// half-word, the number `php_heap::Obj::CLASS_AT` holds.
+    #[must_use]
+    pub const fn class(&self) -> u32 {
+        self.class
+    }
+
+    /// Where the place keeps its offset's tag, a byte.
+    #[must_use]
+    pub const fn offset_tag(&self) -> u32 {
+        self.offset_tag
+    }
+
+    /// The offset's tag of a declared slot, php's offset past
+    /// `ZEND_FIRST_PROPERTY_OFFSET`.
+    #[must_use]
+    pub const fn declared(&self) -> u8 {
+        self.declared
+    }
+
+    /// Where a declared slot's type is, sixteen bits: [`PlaceLayout::untyped`]
+    /// for a property with no type, else one bit per kind of value that
+    /// lands in it as it stands ([`PlaceLayout::kind`]), none for a
+    /// `readonly` slot and one of a set visibility the scope lacks.
+    #[must_use]
+    pub const fn ty(&self) -> u32 {
+        self.ty
+    }
+
+    /// Where a declared slot's number is, a half-word: `OBJ_PROP_NUM`.
+    #[must_use]
+    pub const fn slot(&self) -> u32 {
+        self.slot
+    }
+
+    /// The bit of a slot's type that admits a value of `kind` as it
+    /// stands, the one [`PlaceLayout::ty`] keeps for it.
+    #[must_use]
+    pub const fn kind(&self, kind: php_heap::ZvalType) -> u32 {
+        crate::exec::SlotType::bit(kind) as u32
+    }
+
+    /// The bit of a slot's type that says the property has none; every
+    /// kind's bit is set beside it.
+    #[must_use]
+    pub const fn untyped(&self) -> u32 {
+        self.untyped
+    }
+}
+
+// What compiled code reads of a slot, each at its own alignment.
+const _: () = {
+    assert!(PLACE.class.is_multiple_of(4) && PLACE.slot.is_multiple_of(4));
+    assert!(PLACE.ty.is_multiple_of(2) && PLACE.unprimed != PLACE.property);
+};
+
 /// A call to a user function as `push_call` laid it down and as a
 /// `DO_*CALL`'s inline path activates it, or to a native as `INIT_FCALL`
 /// pushes it, taken by a recording where the call stood built: what
