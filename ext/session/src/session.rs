@@ -551,37 +551,14 @@ pub(super) fn initialize(req: &mut Request) -> Result<bool, Thrown> {
         Some(id) if !c_str(&id).is_empty() => {
             if ini_bool(req, b"session.use_strict_mode") {
                 let valid = validate_sid(req, module, &id);
-                if !absorb(req, valid)?.unwrap_or(false) {
-                    let made = create_sid(req, module);
-                    let made = match absorb(req, made)?.flatten() {
-                        Some(made) => Some(made),
-                        None => create_id(req),
-                    };
-                    req.state::<State>().id = made;
-                    if ini_bool(req, b"session.use_cookies") {
-                        req.state::<State>().send_cookie = true;
-                    }
+                if !absorb(req, valid)?.unwrap_or(false) && !made_id(req, module, &path)? {
+                    return Ok(false);
                 }
             }
         }
         _ => {
-            let made = create_sid(req, module);
-            let Some(made) = absorb(req, made)?.flatten() else {
-                abort(req)?;
-                if !pending(req) {
-                    throw_error(
-                        req,
-                        &format!(
-                            "Failed to create session ID: {} (path: {path})",
-                            module.name()
-                        ),
-                    );
-                }
+            if !made_id(req, module, &path)? {
                 return Ok(false);
-            };
-            req.state::<State>().id = Some(made);
-            if ini_bool(req, b"session.use_cookies") {
-                req.state::<State>().send_cookie = true;
             }
         }
     }
@@ -612,6 +589,50 @@ pub(super) fn initialize(req: &mut Request) -> Result<bool, Thrown> {
     let file = req.frames().current_file().map(<[u8]>::to_vec);
     let line = req.frames().current_line();
     req.state::<State>().started_at = file.map(|f| (f, line));
+    Ok(true)
+}
+
+/// `PS(id) = PS(mod)->s_create_sid(...)` in `php_session_initialize`,
+/// for no id and for one `use_strict_mode` refused: the id made, and the cookie
+/// to send for it; where none was made the session aborted and, unless
+/// the handler threw, php's `Error`, and `false`. An id `use_strict_mode`
+/// had remade fails as the first does since 8.5.12, where 8.5.9 fell back
+/// to php's own id.
+///
+/// ```php
+/// class F implements SessionHandlerInterface, SessionIdInterface {
+///   function open($p, $n): bool { return true; } function close(): bool { return true; } function read($id): string|false { return ""; }
+///   function write($id, $d): bool { return true; } function destroy($id): bool { return true; } function gc($l): int|false { return 0; }
+///   function create_sid(): string { throw new RuntimeException("create_sid failed"); } function validateId($id): bool { return false; } }
+/// session_set_save_handler(new F, true); session_id(str_repeat("a", 32));
+/// try { var_dump(session_start(["use_strict_mode" => true, "use_cookies" => 0, "cache_limiter" => ""])); } catch (Throwable $e) { echo get_class($e), ": ", $e->getMessage(), "\n"; }
+/// var_dump(session_status() === PHP_SESSION_ACTIVE, defined("SID"));
+/// ```
+/// ```expect
+/// RuntimeException: create_sid failed
+/// bool(false)
+/// bool(false)
+/// ```
+fn made_id(req: &mut Request, module: Module, path: &str) -> Result<bool, Thrown> {
+    req.state::<State>().id = None;
+    let made = create_sid(req, module);
+    let Some(made) = absorb(req, made)?.flatten() else {
+        abort(req)?;
+        if !pending(req) {
+            throw_error(
+                req,
+                &format!(
+                    "Failed to create session ID: {} (path: {path})",
+                    module.name()
+                ),
+            );
+        }
+        return Ok(false);
+    };
+    req.state::<State>().id = Some(made);
+    if ini_bool(req, b"session.use_cookies") {
+        req.state::<State>().send_cookie = true;
+    }
     Ok(true)
 }
 
@@ -959,6 +980,29 @@ fn now() -> i64 {
 ///
 /// int(1)
 /// ```
+///
+/// A cookie the host refuses fails the start, as `sapi_add_header_ex`
+/// answers since 8.5.12:
+///
+/// ```php
+/// ob_start();
+/// set_error_handler(function ($n, $s) { echo "handler: $s\n"; return true; });
+/// session_set_cookie_params(["path" => "/\r\nX-Injected: yes"]);
+/// session_save_path(__DIR__);
+/// var_dump(session_start(["cache_limiter" => ""]), session_status() === PHP_SESSION_NONE);
+/// ```
+/// ```request
+/// --GET--
+/// q=1
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.12
+/// Content-type: text/html; charset=UTF-8
+///
+/// handler: Header may not contain more than a single header, new line detected
+/// bool(false)
+/// bool(true)
+/// ```
 fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
     if headers_sent(req) {
         sent_error(
@@ -1019,8 +1063,9 @@ fn send_cookie(req: &mut Request, id: &[u8]) -> bool {
     prefix.push(b'=');
     req.response_mut()
         .header_remove_prefix(&prefix, b"Set-Cookie".len());
-    req.response_mut().header_add(&cookie, false, 0);
-    true
+    // What `sapi_add_header_ex` answers, since 8.5.12: a header the host
+    // refuses, one with a newline in it, fails the cookie and the start.
+    req.response_mut().header_add(&cookie, false, 0)
 }
 
 /// `php_session_cache_limiter`: the headers of `session.cache_limiter`,
