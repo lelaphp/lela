@@ -29,7 +29,7 @@ use crate::api::abi::{
 };
 use crate::api::call::{Function, Target, write_prop};
 use crate::api::raising::{Printing, Thrown, error, throw, throw_over_pending, warning};
-use crate::api::request::{Refusal, Request};
+use crate::api::request::{Family, Refusal, Request};
 use crate::api::values::{
     ClassId, ClosureInfo, Key, Owner, PhpArray, PhpObject, PhpString, Value, adopted, adopted_some,
 };
@@ -1050,12 +1050,8 @@ impl Closure {
                 info.called_scope,
                 Some(newThis),
             )?;
-            let served = req.serve_closure(
-                made,
-                crate::api::request::Family::Fcall,
-                &placed.arguments,
-                &placed.extra_named,
-            );
+            let served =
+                req.serve_closure(made, Family::Fcall, &placed.arguments, &placed.extra_named);
             // `GC_DELREF(&closure->std)`: the generator holds its own.
             req.release(made.as_value());
             served?
@@ -1445,7 +1441,7 @@ pub(crate) fn closure_invoke(req: &mut Request) -> Result<Owner<Value>, Thrown> 
         .filter_map(|position| req.frames().argument(position))
         .collect();
     let named = req.named_arguments();
-    let served = req.serve_closure(this, crate::api::request::Family::Known, &arguments, &named);
+    let served = req.serve_closure(this, Family::Known, &arguments, &named);
     adopted(served)
 }
 

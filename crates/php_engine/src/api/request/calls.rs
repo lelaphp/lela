@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use crate::api::call::{ClassNative, Function};
 use crate::api::raising::Thrown;
 use crate::api::values::{
-    ClassId, ClosureInfo, Owner, PhpObject, PhpRef, PhpString, Value, ValueRef, adopted,
+    ClassId, ClosureInfo, Owner, PhpObject, PhpRef, PhpString, Value, ValueRef,
 };
 use crate::engine::{MethodAt, NativeMethod};
 use crate::exec;
@@ -96,14 +96,15 @@ impl Callee {
 /// two families answer that refusal differently ([`Request::serve_call`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Family {
-    /// `zend_call_function`'s own callers (`call_user_func`, `array_map`,
-    /// an error handler, a user stream wrapper's method): `FAILURE` with
+    /// `zend_call_function`'s own callers (`array_map`, `usort`, an error
+    /// handler, an `ob_start` callback): `FAILURE` with
     /// `retval` left `UNDEF`, which they go on past with no value.
     Fcall,
     /// `zend_call_known_function` and what goes through it,
     /// `zend_call_method`, `zend_call_known_instance_method*` and
     /// `zend_call_known_fcc`: the magic methods, a property's hooks,
-    /// constructors, `Closure::__invoke`, a lazy object's initializer and
+    /// constructors, `Closure::__invoke`, a lazy object's initializer, a
+    /// user stream wrapper's methods (`zend_call_method_if_exists`) and
     /// what `register_tick_function` and `register_shutdown_function`
     /// named. Where no throwable or exit is pending, the refusal is `E_CORE_ERROR` `Couldn't execute method`
     /// (`Z/Zend/zend_execute_API.c:1136-1143`).
@@ -134,20 +135,8 @@ impl Request {
     /// entry served, and the frame popped whether it returned or threw.
     /// `extra_named` is what `zend_handle_named_arg` collected for a
     /// variadic callee, carried on the call as
-    /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`.
-    #[cfg_attr(debug_assertions, track_caller)]
-    pub(crate) fn serve_method(
-        &mut self,
-        function: Function,
-        this: Option<PhpObject>,
-        called_scope: ClassId,
-        arguments: &[Value],
-        extra_named: &[(PhpString, Value)],
-    ) -> Result<Owner<Value>, Thrown> {
-        adopted(self.serve_method_made(function, this, called_scope, arguments, extra_named))
-    }
-
-    /// What [`serve_method`](Self::serve_method) makes, its one owner not yet named.
+    /// `ZEND_CALL_HAS_EXTRA_NAMED_PARAMS`. What it makes is one owner
+    /// not yet named.
     pub(crate) fn serve_method_made(
         &mut self,
         function: Function,
@@ -226,11 +215,7 @@ impl Request {
         let function = self.parent_hook_trampoline(kind);
         let carried = Carried::HookTrampoline(name, kind);
         self.serve_call(
-            Callee {
-                function,
-                this: Some(object),
-                called_scope: Some(scope),
-            },
+            Callee::method(function, Some(object), scope),
             carried,
             Retval::Native,
             Family::Known,
@@ -344,11 +329,7 @@ impl Request {
             (payload.info.scope.replace(scope), cache)
         });
         let served = self.serve_call(
-            Callee {
-                function: closure.function,
-                this: Some(this),
-                called_scope: Some(scope),
-            },
+            Callee::method(closure.function, Some(this), scope),
             Carried::Closure(object),
             Retval::Native,
             Family::Fcall,
@@ -438,7 +419,7 @@ impl Request {
         None
     }
 
-    /// `zend_call_function` over a native function: [`Request::serve_method`]
+    /// `zend_call_function` over a native function: [`Request::serve_method_made`]
     /// with no receiver and no called scope, what `Closure::__invoke`
     /// serves for a closure over a function.
     pub(crate) fn serve_function(
@@ -491,7 +472,7 @@ impl Request {
         // memory limit was met, its fatal raised here if no safepoint has.
         if self.has_oom() {
             self.handle_delayed_oom();
-            return self.refused(family, target.function);
+            return self.answer_refusal(family, target.function);
         }
         // `EG(fake_scope) = NULL` for the call and put back after it: a
         // destructor or a `__toString` a scoped write serves stands in its
@@ -506,7 +487,7 @@ impl Request {
     /// for `zend_call_known_function`'s, the throwable or exit pending,
     /// or else `E_CORE_ERROR` `Couldn't execute method`, which ends the
     /// request where nothing catches it, as phpdbg's `ev` does.
-    fn refused(&mut self, family: Family, function: Function) -> Result<Value, Thrown> {
+    fn answer_refusal(&mut self, family: Family, function: Function) -> Result<Value, Thrown> {
         match family {
             Family::Fcall => Ok(Value::null()),
             Family::Known => {

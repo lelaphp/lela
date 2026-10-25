@@ -23,7 +23,7 @@ use php_unit::decl::{
 
 use crate::api::call::Function;
 use crate::api::raising::Thrown;
-use crate::api::request::Request;
+use crate::api::request::{Family, Request};
 use crate::api::values::{Key, Owner, PhpArray, Value, adopted};
 
 /// Where the trampolines' function numbers begin: among the request's
@@ -391,7 +391,7 @@ pub(crate) fn closure_call_magic(req: &mut Request) -> Result<Owner<Value>, Thro
     let called = this.map(|this| this.class()).or(called);
     let served = match called {
         Some(called) => req.serve_method_made(magic, this, called, &arguments, &[]),
-        None => req.serve_function(magic, crate::api::request::Family::Fcall, &arguments, &[]),
+        None => req.serve_function(magic, Family::Fcall, &arguments, &[]),
     };
     name.give_up(req);
     packed.give_up(req);
