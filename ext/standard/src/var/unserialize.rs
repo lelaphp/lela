@@ -1810,8 +1810,18 @@ impl State<'_> {
         // `array_init_size` and `zend_hash_real_init_mixed`: "we can't
         // convert from packed to hash during unserialization"; and
         // `ZVAL_EMPTY_ARRAY` for none, which costs the request nothing.
+        // `array_finit_size_mixed` since 8.5.12: `return 0` where the
+        // memory limit refused it.
         let made = match u32::try_from(elements) {
-            Ok(size) if size > 0 => PhpArray::sized(req, size, Layout::Hash)?,
+            Ok(size) if size > 0 => {
+                let laid = req
+                    .memory_mut()
+                    .fallible(|req| PhpArray::sized(req, size, Layout::Hash))?;
+                let Some(laid) = laid else {
+                    return Ok(false);
+                };
+                laid
+            }
             _ => Owner::take(req, PhpArray::empty()),
         };
         let array = *made;
@@ -1854,6 +1864,22 @@ impl State<'_> {
     /// ```expect
     /// int(0)
     /// ```
+    ///
+    /// Since 8.5.12 the elements stop once the memory limit was met, the
+    /// unserialization failing there and the limit's fatal raised as the
+    /// call returns:
+    ///
+    /// ```php
+    /// ini_set('memory_limit', '8M');
+    /// $ser = 'a:40000:{';
+    /// for ($i = 0; $i < 40000; $i++) { $ser .= 'i:' . $i . ';a:1:{i:0;i:0;}'; }
+    /// $u = unserialize($ser . '}');
+    /// var_dump("unreached");
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 5
+    /// ```
     fn array_body(
         &mut self,
         req: &mut Request,
@@ -1895,6 +1921,10 @@ impl State<'_> {
                 self.p -= 1;
                 return Ok(false);
             }
+            // `goto failure` once the memory limit was met, since 8.5.12.
+            if req.memory().has_oom() {
+                return Ok(false);
+            }
         }
         Ok(true)
     }
@@ -1929,6 +1959,21 @@ impl State<'_> {
     /// 1528
     /// 96
     /// 752
+    /// ```
+    ///
+    /// The name's copy and its lowered copy are asked for fallibly since
+    /// 8.5.12; the limit is set from what the request holds, which the
+    /// engines answer differently, so its figure is `%d`:
+    ///
+    /// ```php
+    /// $name = str_repeat('A', 4 << 20);
+    /// $payload = 'O:' . strlen($name) . ':"' . $name . '":0:{}';
+    /// ini_set('memory_limit', memory_get_usage() + (6 << 20));
+    /// var_dump(gettype(unserialize($payload)));
+    /// ```
+    /// ```expect exit=255
+    ///
+    /// Fatal error: Allowed memory size of %d bytes exhausted (tried to allocate 4210688 bytes) in %s on line 5
     /// ```
     // php's rule is one block; its checks stay in its order.
     #[allow(clippy::too_many_lines)]
@@ -1965,7 +2010,28 @@ impl State<'_> {
         if name[0] == 0 || name[0] == b'\\' {
             return Ok(false);
         }
+        // `zend_string_finit_existing_interned` of the name and
+        // `zend_string_ftolower` of it, both asked for fallibly since
+        // 8.5.12, the copy held while the lowered one is asked: `return
+        // 0` where the memory limit refused either.
+        let Some(held) = req
+            .memory_mut()
+            .fallible(|req| PhpString::existing_interned(req, &name))?
+        else {
+            return Ok(false);
+        };
         let lower = name.to_ascii_lowercase();
+        if lower != name {
+            let lowered = req
+                .memory_mut()
+                .fallible(|req| PhpString::new(req, &lower))?;
+            let Some(lowered) = lowered else {
+                held.give_up(req);
+                return Ok(false);
+            };
+            lowered.give_up(req);
+        }
+        held.give_up(req);
         let allowed = self.hash.allowed.admits(&lower);
         let mut incomplete = false;
         let class = if allowed {
@@ -2067,7 +2133,15 @@ impl State<'_> {
             }
             // `array_init_size` and `zend_hash_real_init_mixed`, "Avoid
             // reallocation due to packed -> mixed conversion".
-            let array = PhpArray::sized(req, u32::try_from(elements).unwrap_or(0), Layout::Hash)?;
+            // `array_finit_size_mixed` since 8.5.12.
+            let size = u32::try_from(elements).unwrap_or(0);
+            let laid = req
+                .memory_mut()
+                .fallible(|req| PhpArray::sized(req, size, Layout::Hash))?;
+            let Some(array) = laid else {
+                object.mark_destructor_called();
+                return Ok(false);
+            };
             match self.array_elements(req, *array, elements) {
                 Ok(true) => {}
                 Ok(false) => {
@@ -2369,6 +2443,10 @@ impl State<'_> {
             }
             if elements > 0 && !matches!(self.at(self.p - 1), b';' | b'}') {
                 self.p -= 1;
+                return Ok(false);
+            }
+            // `goto failure` once the memory limit was met, since 8.5.12.
+            if req.memory().has_oom() {
                 return Ok(false);
             }
         }
