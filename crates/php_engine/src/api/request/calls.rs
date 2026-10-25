@@ -13,7 +13,7 @@ use std::sync::atomic::Ordering;
 use crate::api::call::{ClassNative, Function};
 use crate::api::raising::Thrown;
 use crate::api::values::{
-    ClassId, ClosureInfo, Owner, PhpObject, PhpString, Value, ValueRef, adopted,
+    ClassId, ClosureInfo, Owner, PhpObject, PhpRef, PhpString, Value, ValueRef, adopted,
 };
 use crate::engine::{MethodAt, NativeMethod};
 use crate::exec;
@@ -490,34 +490,21 @@ impl Request {
         let caller = self
             .current_user_frame()
             .map_or(exec::Caller::Outside, exec::Caller::Loop);
-        // `zend_call_function`: the deprecation before the arguments
-        // are placed, and no call where a handler threw.
+        // `zend_call_function`: the deprecation before the arguments are
+        // placed, and no call where a handler threw. php raises it with
+        // the call pushed but not yet `EG(current_execute_data)`, so a
+        // handler's backtrace and its file and line are the caller's;
+        // here a pushed call is on the chain a backtrace reads, so the
+        // deprecation and the warnings below are raised before the push.
         if self.function_flags(function).deprecated {
             crate::attributes::deprecated_function(self, function)?;
         }
-        let wrapped = self.values_for_references(function, arguments)?;
-        let via_trampoline = self.via_trampoline(function);
-        let mut sent = arguments.to_vec();
-        for (at, argument) in sent.iter_mut().enumerate() {
-            // A reference handed to a parameter taking a value is
-            // followed, "don't separate references for __call" but for a
-            // trampoline, which takes it as it is.
-            if !via_trampoline
-                && argument.as_php_ref().is_some()
-                && !self
-                    .arg_send_mode(function, u32::try_from(at + 1).unwrap_or(u32::MAX))
-                    .0
-            {
-                *argument = argument.deref();
-            }
-            self.addref(argument);
-            if wrapped.contains(&at) {
-                // `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`: the
-                // owner just taken is the new cell's, and the frame
-                // holds the cell.
-                *argument = self.reference(*argument)?.as_value();
-            }
-        }
+        let wrapped = self.wrapped_positions(function, arguments);
+        let prepared = if wrapped.is_empty() {
+            None
+        } else {
+            Some(self.prepare_arguments(function, arguments, &wrapped)?)
+        };
         for (extra, value) in extra_named {
             self.addref(&Value::string(*extra));
             self.addref(value);
@@ -526,7 +513,7 @@ impl Request {
         // `ZEND_CALL_RELEASE_THIS`, the caller keeping the object.
         let receiver = this.map(exec::Receiver::lent);
         // `ZEND_CALL_MAY_HAVE_UNDEF`: a named argument skipped a slot.
-        let may_have_undef = sent
+        let may_have_undef = arguments
             .iter()
             .any(|argument| matches!(argument.as_ref(), ValueRef::Undef));
         // `zend_call_function` names the callee by
@@ -541,11 +528,11 @@ impl Request {
         if let Some(closure) = closure {
             self.addref(&closure.as_value());
         }
-        // `zend_vm_stack_push_call_frame`, the arguments copied into its
-        // slots, the call served from here (`EG(current_execute_data)`
-        // is it while an undefined argument's default is found).
+        // `zend_vm_stack_push_call_frame`, the call served from here
+        // (`EG(current_execute_data)` is it while an undefined argument's
+        // default is found).
         let mut header =
-            exec::Header::call(function, u32::try_from(sent.len()).unwrap_or(u32::MAX));
+            exec::Header::call(function, u32::try_from(arguments.len()).unwrap_or(u32::MAX));
         header.set_receiver(receiver);
         header.set_called_scope(called_scope);
         header.closure = closure;
@@ -553,20 +540,19 @@ impl Request {
         let call = match self.push_call(header) {
             Ok(call) => call,
             Err(fatal) => {
-                self.give_up_unpushed(sent, extra_named, receiver, closure);
+                for argument in prepared.into_iter().flatten() {
+                    self.release(argument);
+                }
+                self.give_up_unpushed(extra_named, receiver, closure);
                 return self.fatal_of(Err(fatal));
             }
         };
-        if let Some(frame) = self.vm.stack.frame_mut(call) {
-            for (slot, argument) in frame.slots_mut().iter_mut().zip(sent) {
-                *slot = argument.to_zval();
-            }
-        }
         if extra_named.carries_any()
             && let Some(annex) = self.annex_mut(call)
         {
             annex.extra_named = extra_named;
         }
+        self.place_arguments(call, function, arguments, prepared);
         // The trampoline's record, made once its call stands, where php
         // makes it before the call (`zend_get_property_hook_trampoline`):
         // only the memory limit could tell the two orders apart, and its
@@ -584,14 +570,21 @@ impl Request {
             self.pop_call();
             return Err(thrown);
         }
-        let function = match crate::trampoline::hand_to_magic(self, function) {
-            Ok(function) => function,
-            Err(thrown) => {
-                self.pop_call();
-                return Err(thrown);
+        // A user function is no trampoline, so it is served as itself;
+        // a trampoline hands its call to the magic method it stands for.
+        let user = self.user_function(function).is_some();
+        let function = if user {
+            function
+        } else {
+            match crate::trampoline::hand_to_magic(self, function) {
+                Ok(function) => function,
+                Err(thrown) => {
+                    self.pop_call();
+                    return Err(thrown);
+                }
             }
         };
-        if self.user_function(function).is_some() {
+        if user || self.user_function(function).is_some() {
             let served = self.serve_user(call, caller, retval);
             return self.checked_after_call(served);
         }
@@ -602,19 +595,152 @@ impl Request {
         self.checked_after_call(served)
     }
 
+    /// `zend_call_function`'s walk of `fci->params`
+    /// (`Z/Zend/zend_execute_API.c:898-944`) where an argument is to be
+    /// wrapped: each argument in turn followed where its parameter takes
+    /// a value ("don't separate references for __call" but for a
+    /// trampoline), one owner taken, and each position of `wrapped`
+    /// warned of (`zend_param_must_be_ref`) and given a reference of its
+    /// own, `Z_TRY_ADDREF_P(arg); ZVAL_NEW_REF(param, arg)`, before the
+    /// next is reached. So the second argument's warning is raised with
+    /// the first one's cell made, 32 bytes, as php raises it:
+    ///
+    /// ```php
+    /// function f(&$a, &$b) { return 'f'; }
+    /// $seen = array_fill(0, 2, 0); $i = 0;
+    /// set_error_handler(function () use (&$seen, &$i) { $seen[$i++] = memory_get_usage(); return true; });
+    /// array_map('f', [1], [2]);
+    /// echo $seen[1] - $seen[0], "\n";
+    /// ```
+    /// ```expect
+    /// 32
+    /// ```
+    ///
+    /// A warning a handler turned into a throw stops the walk there, as
+    /// php's `cleanup_args` does, and a cell the memory limit refuses is
+    /// the fatal, each with what was taken before it given up.
+    fn prepare_arguments(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+        wrapped: &[usize],
+    ) -> Result<Vec<Value>, Thrown> {
+        let mut prepared = Vec::with_capacity(arguments.len());
+        let walked = self.walk_wrapped(function, arguments, wrapped, &mut prepared);
+        if walked.is_err() {
+            for argument in prepared.drain(..) {
+                self.release(argument);
+            }
+        }
+        walked.map(|()| prepared)
+    }
+
+    /// [`Request::prepare_arguments`]'s walk, each argument it took pushed
+    /// onto `prepared`.
+    fn walk_wrapped(
+        &mut self,
+        function: Function,
+        arguments: &[Value],
+        wrapped: &[usize],
+        prepared: &mut Vec<Value>,
+    ) -> Result<(), Thrown> {
+        for (at, argument) in arguments.iter().enumerate() {
+            let mut argument = self.followed(function, at, *argument);
+            let wrap = wrapped.contains(&at);
+            if wrap {
+                self.param_must_be_ref(function, u32::try_from(at + 1).unwrap_or(u32::MAX));
+                if self.is_pending() {
+                    return Err(Thrown::of(self.take_pending_view()));
+                }
+            }
+            self.addref(&argument);
+            if wrap {
+                // The owner just taken is the new cell's, and the call
+                // holds the cell.
+                match self.heap.reference(argument.into_zval()) {
+                    Ok(made) => argument = PhpRef::of(made).as_value(),
+                    Err(fatal) => {
+                        self.release(argument);
+                        return self.fatal_of(Err(fatal));
+                    }
+                }
+            }
+            prepared.push(argument);
+        }
+        Ok(())
+    }
+
+    /// `argument` at `at` as `zend_call_function` copies it: followed
+    /// where it is a reference handed to a parameter taking a value,
+    /// "don't separate references for __call" but for a trampoline,
+    /// which takes it as it is.
+    fn followed(&self, function: Function, at: usize, argument: Value) -> Value {
+        if !self.via_trampoline(function)
+            && argument.as_php_ref().is_some()
+            && !self
+                .arg_send_mode(function, u32::try_from(at + 1).unwrap_or(u32::MAX))
+                .0
+        {
+            return argument.deref();
+        }
+        argument
+    }
+
+    /// The arguments copied into the slots of the call `call`, which
+    /// stands: those [`Request::prepare_arguments`] made, moved, where an
+    /// argument was wrapped; otherwise each followed ([`Request::followed`])
+    /// and copied, `ZVAL_COPY(param, arg)`. The slots are the frame's, so
+    /// a callback's arguments are copied once and no list of them is made
+    /// beside it; a user function that takes nothing by reference, the
+    /// callback nearly every native serves, finds the frame's slots once.
+    fn place_arguments(
+        &mut self,
+        call: FrameRef,
+        function: Function,
+        arguments: &[Value],
+        prepared: Option<Vec<Value>>,
+    ) {
+        if let Some(prepared) = prepared {
+            if let Some(frame) = self.vm.stack.frame_mut(call) {
+                for (slot, argument) in frame.slots_mut().iter_mut().zip(prepared) {
+                    *slot = argument.into_zval();
+                }
+            }
+            return;
+        }
+        if self.takes_nothing_by_ref(function) {
+            let heap = &self.heap;
+            if let Some(frame) = self.vm.stack.frame_mut(call) {
+                for (slot, argument) in frame.slots_mut().iter_mut().zip(arguments) {
+                    let argument = argument.deref().to_zval();
+                    heap.addref(argument);
+                    *slot = argument;
+                }
+            }
+            return;
+        }
+        for (at, argument) in arguments.iter().enumerate() {
+            let argument = self.followed(function, at, *argument);
+            self.addref(&argument);
+            let slot =
+                (self.vm.stack.frame_mut(call)).and_then(|frame| frame.slots_mut().get_mut(at));
+            if let Some(slot) = slot {
+                *slot = argument.to_zval();
+            }
+        }
+    }
+
     /// What [`Request::serve_call_body`] took for a call whose frame
-    /// `zend_vm_stack_push_call_frame` refused, given back: each argument,
-    /// the extra named ones, the receiver and the closure.
+    /// `zend_vm_stack_push_call_frame` refused, given back: the extra
+    /// named arguments, the receiver and the closure; the arguments a
+    /// wrap prepared are given up by the caller, and the others are
+    /// placed only once the call stands ([`Request::place_arguments`]).
     fn give_up_unpushed(
         &mut self,
-        sent: Vec<Value>,
         extra_named: exec::ExtraNamed,
         receiver: Option<exec::Receiver>,
         closure: Option<PhpObject>,
     ) {
-        for argument in sent {
-            self.release(argument);
-        }
         self.release_named(extra_named);
         if let Some(receiver) = receiver {
             self.give_up_receiver(receiver);
@@ -715,17 +841,17 @@ impl Request {
         }
     }
 
-    /// `zend_call_function`'s walk of `fci->params`
-    /// (`Z/Zend/zend_execute_API.c:883-902`) over the by-reference
-    /// parameters: an argument that is no reference, handed to a
-    /// parameter `ARG_SHOULD_BE_SENT_BY_REF` and not
-    /// `ARG_MAY_BE_SENT_BY_REF`, is `zend_param_must_be_ref`'s warning,
-    /// and the call goes on with the value wrapped in a reference of its
-    /// own, so what the callee writes through it is lost. The positions
-    /// to wrap come back; a warning a handler turned into a throw stops
-    /// the call before it is made, as php's `cleanup_args` does, and is
-    /// the `Err`. The parameter is named where it is one of the declared
-    /// ones, `get_function_arg_name`, and a variadic's is not.
+    /// The positions of `arguments` that `zend_call_function`'s walk of
+    /// `fci->params` (`Z/Zend/zend_execute_API.c:898-944`) wraps in a
+    /// reference of their own: an argument that is no reference, handed
+    /// to a parameter `ARG_SHOULD_BE_SENT_BY_REF` and not
+    /// `ARG_MAY_BE_SENT_BY_REF`, which is `zend_param_must_be_ref`'s
+    /// warning as the walk reaches it ([`Request::place_arguments`]), and
+    /// the call goes on with the value wrapped, so what the callee writes
+    /// through it is lost; a warning a handler turned into a throw stops
+    /// the call there, as php's `cleanup_args` does. The parameter is
+    /// named where it is one of the declared ones,
+    /// `get_function_arg_name`, and a variadic's is not.
     ///
     /// ```php
     /// function f(&$v) { $v = 1; return 'f'; }
@@ -747,16 +873,15 @@ impl Request {
     /// }
     /// string(1) "m"
     /// ```
-    fn values_for_references(
-        &mut self,
-        function: Function,
-        arguments: &[Value],
-    ) -> Result<Vec<usize>, Thrown> {
+    fn wrapped_positions(&self, function: Function, arguments: &[Value]) -> Vec<usize> {
+        if self.takes_nothing_by_ref(function) {
+            return Vec::new();
+        }
         let Some(decl) = self.symbols().function_decl(function) else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
         let variadic = decl.parameters.last().filter(|last| last.variadic);
-        let wrapped: Vec<usize> = arguments
+        arguments
             .iter()
             .enumerate()
             .filter(|(_, argument)| {
@@ -769,14 +894,7 @@ impl Request {
                     .is_some_and(|parameter| parameter.by_ref && !parameter.prefer_ref)
             })
             .map(|(at, _)| at)
-            .collect();
-        for at in &wrapped {
-            self.param_must_be_ref(function, u32::try_from(*at + 1).unwrap_or(u32::MAX));
-            if self.is_pending() {
-                return Err(Thrown::of(self.take_pending_view()));
-            }
-        }
-        Ok(wrapped)
+            .collect()
     }
 
     /// `ZEND_ARG_SEND_MODE` (`Z/Zend/zend_compile.h:1141`) over
@@ -787,13 +905,20 @@ impl Request {
     /// handlers that ask it, and the declaration is read out of line.
     #[inline(always)] // once per `SEND_*_EX`, in the loop's arms
     pub(crate) fn arg_send_mode(&self, function: Function, number: u32) -> (bool, bool) {
-        if self
-            .user_function(function)
-            .is_some_and(|user| !user.shape.by_ref)
-        {
+        if self.takes_nothing_by_ref(function) {
             return (false, false);
         }
         self.declared_send_mode(function, number)
+    }
+
+    /// Whether `function` is a user function none of whose parameters
+    /// takes its argument by reference, as its shape says without its
+    /// declaration read: no argument of a call to it is wrapped or
+    /// followed but by value.
+    #[inline(always)] // in the `SEND_*_EX` arms, as `arg_send_mode`
+    fn takes_nothing_by_ref(&self, function: Function) -> bool {
+        self.user_function(function)
+            .is_some_and(|user| !user.shape.by_ref)
     }
 
     /// [`Request::arg_send_mode`] read off the declaration.
@@ -1178,10 +1303,11 @@ impl Request {
     /// what the callee's declaration raised where it was linked, none
     /// for an enum's own method and the pass function.
     pub(crate) fn function_flags(&self, function: Function) -> crate::attributes::Flags {
-        let function = self.served_native(function);
+        // A user function is no class native, so it serves as itself.
         if let Some(user) = self.user_function(function) {
             return user.flags;
         }
+        let function = self.served_native(function);
         if let Some(method) = self.native_method(function) {
             return method.flags;
         }

@@ -71,6 +71,7 @@ pub use frames::{
     Argument, Aside, Called, Compiled, Evaluated, Under, begin, below, call, catches, compile,
     entry, evaluate, evaluate_code, exit, frame, restore, set_argv, set_aside, set_stdin,
 };
+pub(crate) use held::UnitsLeft;
 use held::{Entered, Kept, Scope, Units};
 pub use layout::{
     Activation, FRAME, FrameLayout, PLACE, PlaceLayout, PlainCall, call_image, plain_call,
@@ -962,13 +963,16 @@ fn refused_at_entry(req: &mut Request) -> bool {
 /// its own units go for it.
 fn serve_frame<T: Tier, D: Telling>(req: &mut Request, first: Stepped) -> Result<(), Fatal> {
     let mut stepped = first;
-    let mut units = Units::default();
+    let mut units = req.units_left.take();
     loop {
         let served = serve_held::<T, D>(req, stepped, &units, Scope::Whole)?;
-        units.give_back(req);
-        match served {
-            Some(again) => stepped = again,
-            None => return Ok(()),
+        if let Some(again) = served {
+            units.give_back(req);
+            stepped = again;
+        } else {
+            units.leave(req);
+            req.units_left.put(units);
+            return Ok(());
         }
     }
 }

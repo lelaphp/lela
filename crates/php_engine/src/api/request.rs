@@ -261,6 +261,9 @@ pub struct Request {
     /// field or a write over it anywhere else fails to compile; a write
     /// over the whole request does not ([`crate::tier::TierState`]).
     tier: crate::tier::TierState,
+    /// The units the loop's servings held, kept with their shares for the
+    /// next serving ([`crate::tier::UnitsLeft`]).
+    pub(crate) units_left: crate::tier::UnitsLeft,
     description: RequestDescription,
     /// The uncaught throwable kept for a host that renders it ([`inspect::Inspected`]).
     inspect: inspect::Inspected,
@@ -1117,6 +1120,7 @@ impl Request {
             _inside: crate::fork::Inside::enter(),
             limits: limits::LimitsState::new(&shared.timer),
             tier: crate::tier::TierState::laid(&shared),
+            units_left: crate::tier::UnitsLeft::default(),
             shared,
             description,
             inspect: inspect::Inspected::default(),

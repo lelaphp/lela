@@ -836,7 +836,12 @@ impl Handler {
     }
 
     /// A string value registered into `$_FILES`
-    /// (`register_http_post_files_variable`).
+    /// (`register_http_post_files_variable`), made as
+    /// `php_register_variable_safe`'s `ZVAL_STRINGL_FAST` makes it
+    /// ([`PhpString::fast`]): past one byte `zend_string_finit`'s ask,
+    /// the bytes past the empty string's aligned header, so a name of
+    /// five bytes takes the 40-byte bin where `zend_string_alloc` would
+    /// take 32.
     fn file_string(
         &self,
         req: &mut Request,
@@ -844,7 +849,7 @@ impl Handler {
         value: &[u8],
         override_protection: bool,
     ) -> Result<bool, Thrown> {
-        let value = PhpString::new(req, value)?.into_value();
+        let value = PhpString::fast(req, value)?.into_value();
         self.register(req, self.files, name, value, override_protection)
     }
 
