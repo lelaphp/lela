@@ -438,7 +438,7 @@ pub fn judge(
         match condition {
             Condition::Fresh => {
                 for krate in &crates {
-                    let now = KeyNow::of(snapshot, krate, &crates)?;
+                    let now = KeyNow::of(snapshot, krate, &crates, &paths)?;
                     fresh_readings(
                         &asking,
                         krate,
@@ -789,7 +789,15 @@ struct KeyNow {
 }
 
 impl KeyNow {
-    fn of(snapshot: &Snapshot, krate: &Crate, touched: &[&Crate]) -> Result<KeyNow> {
+    /// The key of `krate` now, and what of `touched` and of the diff's
+    /// `paths` it covers: the crates of its closure, and the files rustc
+    /// is built under ([`key::BUILT_UNDER`]).
+    fn of(
+        snapshot: &Snapshot,
+        krate: &Crate,
+        touched: &[&Crate],
+        paths: &[&str],
+    ) -> Result<KeyNow> {
         let closure = key::Graph::of(snapshot.root())?.paths(&krate.path());
         let mut names = vec![krate.name.as_str()];
         names.extend(
@@ -797,6 +805,12 @@ impl KeyNow {
                 .iter()
                 .filter(|t| t.name != krate.name && closure.contains(&t.path()))
                 .map(|t| t.name.as_str()),
+        );
+        names.extend(
+            paths
+                .iter()
+                .copied()
+                .filter(|p| key::BUILT_UNDER.contains(p)),
         );
         let changed = match names.split_last() {
             Some((last, rest)) if !rest.is_empty() => format!("{} or {last}", rest.join(", ")),

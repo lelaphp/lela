@@ -32,6 +32,14 @@
 //! stand over code it never ran. The hash is one listing over the union
 //! of the closure's files, so a crate with no workspace dependency keeps
 //! the key its own tree gave it.
+//!
+//! A crate's key also covers the files outside every crate that decide
+//! how rustc compiles it, [`BUILT_UNDER`]: the toolchain, and
+//! `.cargo/config.toml`, whose rustflags table passes LLVM's
+//! `--cgp-max-address-users-to-scan` to every profile (design §10
+//! Profiles, #3372). A reading taken under another toolchain or other
+//! rustflags measured another build, so it is stale, as one taken before
+//! a crate of the closure changed is.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -246,7 +254,8 @@ impl Snapshot {
     /// The key of the sources under `path`, relative to the root: one
     /// hash over the files of the path and, when the path is a workspace
     /// crate's directory, of the directories of its dependency closure
-    /// ([`Graph::paths`]). The graph is read only for a directory with a
+    /// ([`Graph::paths`]) and of the files rustc is built under
+    /// ([`BUILT_UNDER`]). The graph is read only for a directory with a
     /// manifest, the one kind of path it can widen. A path outside what a
     /// [`Snapshot::disk_over`] was read under is refused.
     pub fn key(&self, path: &Path) -> Result<String> {
@@ -311,12 +320,25 @@ impl Snapshot {
     }
 }
 
+/// The files outside every crate that decide how rustc compiles each
+/// one, under every crate's key: the toolchain, in either spelling
+/// rustup reads, and the cargo configuration, whose rustflags table every
+/// profile passes (design §10 Profiles, #3372).
+pub(crate) const BUILT_UNDER: [&str; 3] = [
+    "rust-toolchain.toml",
+    "rust-toolchain",
+    ".cargo/config.toml",
+];
+
 /// The paths the key of `path` is taken over: the path alone, or a
-/// workspace crate's directory and its closure's, the graph read only for
-/// a directory with a manifest, the one kind of path it can widen.
+/// workspace crate's directory, its closure's and [`BUILT_UNDER`], the
+/// graph read only for a directory with a manifest, the one kind of path
+/// it can widen.
 fn closure(root: &Path, path: &Path) -> Result<Vec<PathBuf>> {
     if !whole(path) && root.join(path).join("Cargo.toml").is_file() {
-        Ok(Graph::of(root)?.paths(path))
+        let mut paths = Graph::of(root)?.paths(path);
+        paths.extend(BUILT_UNDER.map(PathBuf::from));
+        Ok(paths)
     } else {
         Ok(vec![path.to_path_buf()])
     }
@@ -535,7 +557,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{Graph, Snapshot};
+    use super::{BUILT_UNDER, Graph, Snapshot};
     use crate::built_root;
     use crate::git::{self, tracked_hash, tree_hash};
     use crate::scratch::committing;
@@ -543,10 +565,9 @@ mod tests {
     /// The scopes a snapshot is held to the tree hash over: the whole
     /// tree, a crate's closure, a crate, a directory and one file.
     fn scopes(root: &Path, file: &str) -> Vec<Vec<PathBuf>> {
-        let graph = Graph::of(root).unwrap();
         vec![
             vec![PathBuf::from(".")],
-            graph.paths(Path::new("ext/reflection")),
+            super::closure(root, Path::new("ext/reflection")).unwrap(),
             vec![PathBuf::from("crates/php_engine")],
             vec![PathBuf::from("ext")],
             vec![PathBuf::from(file)],
@@ -607,7 +628,7 @@ mod tests {
             now.key(Path::new("ext/reflection")).unwrap(),
             tree_hash(
                 root,
-                &Graph::of(root).unwrap().paths(Path::new("ext/reflection"))
+                &super::closure(root, Path::new("ext/reflection")).unwrap()
             )
             .unwrap()
         );
@@ -640,10 +661,49 @@ mod tests {
             now.key(Path::new(".")).unwrap(),
             tree_hash(&root, &[PathBuf::from(".")]).unwrap()
         );
-        let json = Graph::of(&root).unwrap().paths(Path::new("ext/json"));
+        let json = super::closure(&root, Path::new("ext/json")).unwrap();
         assert_eq!(
             now.key(Path::new("ext/json")).unwrap(),
             tree_hash(&root, &json).unwrap()
+        );
+    }
+
+    /// A crate's key moves with the toolchain and with the cargo
+    /// configuration, whose rustflags every profile passes (#3372), and
+    /// not with a file outside every crate that rustc never reads; a key
+    /// over a file outside every crate is that file's alone.
+    #[test]
+    fn a_crates_key_moves_with_what_rustc_is_built_under() {
+        let tree = super::fixture("built-under");
+        let ctype = Path::new("ext/ctype");
+        let key = |tree: &Path| Snapshot::disk(tree).unwrap().key(ctype).unwrap();
+        let before = key(&tree);
+        fs::write(tree.join("README.md"), "read by no rustc\n").unwrap();
+        assert_eq!(key(&tree), before);
+        let mut seen = vec![before];
+        for file in BUILT_UNDER {
+            let path = tree.join(file);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, format!("# {file}\n")).unwrap();
+            let now = key(&tree);
+            assert!(
+                !seen.contains(&now),
+                "{file} left ext/ctype's key where it was"
+            );
+            assert_eq!(
+                Snapshot::disk_over(&tree, ctype)
+                    .unwrap()
+                    .key(ctype)
+                    .unwrap(),
+                now,
+                "{file}"
+            );
+            seen.push(now);
+        }
+        let file = Path::new(".cargo/config.toml");
+        assert_eq!(
+            Snapshot::disk(&tree).unwrap().key(file).unwrap(),
+            tree_hash(&tree, &[file.to_path_buf()]).unwrap()
         );
     }
 
