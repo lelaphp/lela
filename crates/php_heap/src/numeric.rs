@@ -323,6 +323,11 @@ pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> Doubl
     gcvt(value, if precision == 0 { 1 } else { precision }, exponent)
 }
 
+/// The room [`gcvt`] leaves before `zend_dtoa`'s first digit: a sign,
+/// and the `0.` and three zeros the fixed form writes before a point
+/// that stands up to three places before the digits.
+const ROOM: usize = 6;
+
 /// `zend_gcvt(value, ndigit, '.', exponent, buf)` (`Z/Zend/zend_strtod.c:4509`)
 /// at the `ndigit` its caller hands it, as `serialize`, `json_encode` and
 /// soap's `to_xml_double` hand it `serialize_precision` or `precision` as
@@ -434,7 +439,7 @@ pub fn gcvt(value: f64, ndigit: i32, exponent: Exponent) -> DoubleText {
     // sign, and `0.` with three zeros, the most the fixed form puts before
     // its first digit. Each form then lays its point and zeros where the
     // digits stand, as `zend_gcvt` copies them into its `buf`.
-    let mut text = DoubleText::at(6);
+    let mut text = DoubleText::at(ROOM);
     let point = dtoa::dtoa(value.abs(), dtoa::Digits::at(ndigit), &mut text);
     let digits = text.len();
     if (point >= 0 && point > form_ndigit) || point < -3 {

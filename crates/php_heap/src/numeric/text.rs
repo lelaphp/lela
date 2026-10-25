@@ -1,7 +1,7 @@
 //! A number's text laid in a buffer on the stack, as php lays it before
 //! one `zend_string_init` copies it into a request's string:
 //! `zend_long_to_str` prints a long backwards from the end of a
-//! `char buf[MAX_LENGTH_OF_LONG + 1]` (`Z/Zend/zend_operators.c:3533`),
+//! `char buf[MAX_LENGTH_OF_LONG + 1]` (`Z/Zend/zend_operators.c:3532`),
 //! and `zend_double_to_str` and `smart_str_append_double` hand
 //! `zend_gcvt` a `char buf[ZEND_DOUBLE_MAX_LENGTH]`
 //! (`Z/Zend/zend_operators.c:3618`, `Z/Zend/zend_smart_str.c:158`). No
@@ -74,12 +74,14 @@ impl<const N: usize> NumberText<N> {
     #[inline]
     pub fn as_str(&self) -> &str {
         // SAFETY: every byte between `start` and `end` was written by
-        // `push`, `push_front`, `set_last` or `open_point`, so the range is
+        // `push`, `push_front`, `set_last`, `open_point` or
+        // `LongText::long`, and each keeps the range written, so it is
         // initialised.
         let written = unsafe { self.buf[self.start..self.end].assume_init_ref() };
-        // SAFETY: each byte written is ASCII: the writers are this
-        // crate's, and each hands them a digit, a sign, a point, an
-        // exponent's letter or a letter of `INF` or `NAN`.
+        // SAFETY: each byte written is ASCII: `push`, `push_front` and
+        // `set_last` refuse any other, `open_point` writes a point and
+        // moves written bytes, and `LongText::long` writes digits and a
+        // sign.
         unsafe { str::from_utf8_unchecked(written) }
     }
 
@@ -97,6 +99,9 @@ impl<const N: usize> NumberText<N> {
     /// writes outgrows it; a byte past it is dropped.
     pub(crate) fn push(&mut self, byte: u8) {
         debug_assert!(byte.is_ascii() && self.end < N, "{byte} at {}", self.end);
+        if !byte.is_ascii() {
+            return;
+        }
         if let Some(slot) = self.buf.get_mut(self.end) {
             *slot = MaybeUninit::new(byte);
             self.end += 1;
@@ -110,6 +115,9 @@ impl<const N: usize> NumberText<N> {
             "{byte} at {}",
             self.start
         );
+        if !byte.is_ascii() {
+            return;
+        }
         if let Some(at) = self.start.checked_sub(1) {
             self.buf[at] = MaybeUninit::new(byte);
             self.start = at;
@@ -130,7 +138,7 @@ impl<const N: usize> NumberText<N> {
     /// empty.
     pub(crate) fn set_last(&mut self, byte: u8) {
         debug_assert!(byte.is_ascii(), "{byte}");
-        if self.end > self.start {
+        if byte.is_ascii() && self.end > self.start {
             self.buf[self.end - 1] = MaybeUninit::new(byte);
         }
     }
