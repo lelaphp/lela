@@ -3805,6 +3805,7 @@ pub(crate) fn do_fcall<T: Tier>(
 /// ```php
 /// class D { function __construct(public string $s) {} function __destruct() { throw new Exception("dtor"); } function __toString(): string { return $this->s; } }
 /// file_put_contents(__DIR__ . '/ran.php', "<?php echo 'ran';");
+/// try { include new D(__DIR__ . '/ran.php'); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
 /// try { require new D(__DIR__ . '/ran.php'); echo "after\n"; } catch (Exception $e) { echo "caught ", $e->getMessage(), "\n"; }
 /// try { eval(new D("echo 'ran';")); } catch (Exception $e) { echo $e->getTraceAsString(), "\n"; }
 /// var_dump(eval(new D("try { echo 'ran'; } catch (Exception \$e) { echo 'inner ', \$e->getMessage(), ' '; } return 5;")));
@@ -3812,8 +3813,9 @@ pub(crate) fn do_fcall<T: Tier>(
 /// ```
 /// ```expect
 /// caught dtor
-/// #0 %s(5) : eval()'d code(1): D->__destruct()
-/// #1 %s(5): eval()
+/// caught dtor
+/// #0 %s(6) : eval()'d code(1): D->__destruct()
+/// #1 %s(6): eval()
 /// #2 {main}
 /// inner dtor int(5)
 /// ```
