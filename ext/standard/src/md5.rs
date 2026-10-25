@@ -297,23 +297,38 @@ fn md5(
 /// NULL)` opens it, and each read of up to 1024 bytes read into one
 /// buffer on the stack and handed to `update`, as php's `buf[1024]`
 /// holds one read at a time, so hashing a file allocates nothing for it.
-/// `false` after the warning the open left, or where the reads stopped
-/// short of the end.
+/// `None` after the warning the open left; otherwise how the reads
+/// ended.
 pub(super) fn digest_file(
     req: &mut Request,
     filename: PhpString,
     mut update: impl FnMut(&[u8]),
-) -> Result<bool, Thrown> {
+) -> Result<Option<Ended>, Thrown> {
     let Some(stream) = req.open_stream(filename.as_bytes(), b"rb", false)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let mut buf = [0u8; 1024];
-    while let Some(n @ 1..) = stream.read_into(req, &mut buf) {
-        update(&buf[..n]);
-    }
-    let complete = stream.eof(req);
+    let failed = loop {
+        match stream.read_into(req, &mut buf) {
+            Some(0) => break false,
+            Some(n) => update(&buf[..n]),
+            None => break true,
+        }
+    };
+    let ended = Ended {
+        at_eof: stream.eof(req),
+        failed,
+    };
     stream.free(req);
-    Ok(complete)
+    Ok(Some(ended))
+}
+
+/// How [`digest_file`]'s reads ended: at the stream's end or short of
+/// it, `php_stream_eof`, and whether the last of them failed, php's
+/// `n < 0`, which 8.5.12's `sha1_file` reads and `md5_file` does not.
+pub(super) struct Ended {
+    pub(super) at_eof: bool,
+    pub(super) failed: bool,
 }
 
 /// `md5_file(string $filename, bool $binary = false): string|false`.
@@ -373,7 +388,9 @@ fn md5_file(
     #[php(default = false)] binary: bool,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut context = Md5::new();
-    if !digest_file(req, filename.0, |read| context.update(read))? {
+    // `if (!php_stream_eof(stream)) RETURN_FALSE;`, a failed read
+    // passed over as 8.5.12's md5.c passes over it.
+    if !digest_file(req, filename.0, |read| context.update(read))?.is_some_and(|e| e.at_eof) {
         return Ok(OrFalse::False);
     }
     let digest = context.finish();

@@ -183,6 +183,16 @@ fn sha1(
 }
 
 /// `sha1_file(string $filename, bool $binary = false): string|false`.
+/// A read that fails is `false`, as 8.5.12 reads its `n < 0`, though the
+/// stream stands at its end after it, a directory's for one:
+///
+/// ```php
+/// var_dump(@sha1_file(__DIR__), @md5_file(__DIR__));
+/// ```
+/// ```expect
+/// bool(false)
+/// string(32) "d41d8cd98f00b204e9800998ecf8427e"
+/// ```
 ///
 /// ```php
 /// $p = __DIR__ . '/sha1.txt'; $f = fopen($p, 'w'); fwrite($f, str_repeat("xyz", 999)); fclose($f);
@@ -216,7 +226,9 @@ fn sha1_file(
     #[php(default = false)] binary: bool,
 ) -> Result<OrFalse<Owner<PhpString>>, Thrown> {
     let mut context = Sha1::new();
-    if !digest_file(req, filename.0, |read| context.update(read))? {
+    // 8.5.12's `failed = n < 0 || !php_stream_eof(stream)`.
+    let ended = digest_file(req, filename.0, |read| context.update(read))?;
+    if !ended.is_some_and(|e| e.at_eof && !e.failed) {
         return Ok(OrFalse::False);
     }
     digest_value(req, &context.finish(), binary).map(OrFalse::Value)
