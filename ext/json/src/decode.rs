@@ -56,7 +56,9 @@ enum Token {
     /// accepts in the same two places, with the string the scanner made.
     Str(Text),
     Eoi,
-    /// `PHP_JSON_T_ERROR`: the scanner has written its code.
+    /// `PHP_JSON_T_ERROR`: the scanner has written its code, or none
+    /// where the memory limit refused a string, which the grammar's
+    /// `yyerror` makes the syntax error.
     Error,
 }
 
@@ -66,12 +68,19 @@ enum Token {
 /// scanned and hands on `UNDEF`.
 type Text = Option<Owner<PhpString>>;
 
+/// The string `text` holds given up, where it holds one.
+fn give_up_text(req: &mut Request, text: Text) {
+    if let Some(string) = text {
+        string.give_up(req);
+    }
+}
+
 impl Token {
     /// The token discarded, bison's `%destructor` over its value: the
     /// string a string token holds given up.
     fn give_up(self, req: &mut Request) {
-        if let Token::Str(Some(string)) = self {
-            string.give_up(req);
+        if let Token::Str(text) = self {
+            give_up_text(req, text);
         }
     }
 }
@@ -519,9 +528,7 @@ impl Open {
                 None => Owner::null(),
             },
             Open::Object { holder, key, .. } => {
-                if let Some(key) = key {
-                    key.give_up(req);
-                }
+                give_up_text(req, key);
                 holder.into_value()
             }
         }
@@ -536,9 +543,7 @@ impl Open {
                 }
             }
             Open::Object { holder, key, .. } => {
-                if let Some(key) = key {
-                    key.give_up(req);
-                }
+                give_up_text(req, key);
                 holder.give_up(req);
             }
         }
@@ -762,11 +767,13 @@ impl Parser<'_> {
                 return Ok(Begun::Refused);
             }
             if let Open::Object { holder, .. } = &mut frame {
-                let Some(made) = self.holder(req)? else {
-                    frame.give_up(req);
-                    return Ok(Begun::Refused);
-                };
-                *holder = made;
+                match self.holder(req) {
+                    Ok(Some(made)) => *holder = made,
+                    made => {
+                        frame.give_up(req);
+                        return made.map(|_| Begun::Refused);
+                    }
+                }
             }
             return Ok(self.close(frame, req)?.map_or(Begun::Refused, Begun::Value));
         }
@@ -802,9 +809,7 @@ impl Parser<'_> {
         match self.colon(req) {
             Ok(true) => Ok(Some(key)),
             shifted => {
-                if let Some(key) = key {
-                    key.give_up(req);
-                }
+                give_up_text(req, key);
                 shifted.map(|_| None)
             }
         }
@@ -904,9 +909,7 @@ impl Parser<'_> {
                         }
                     }
                     (Holder::Nothing, name) => {
-                        if let Some(name) = name {
-                            name.give_up(req);
-                        }
+                        give_up_text(req, name);
                         value.give_up(req);
                     }
                     (Holder::Array(_) | Holder::Object(_), None) => {
@@ -1051,10 +1054,7 @@ fn parse(
         stack: 1,
         validating,
     };
-    let parsed = match parser.advance(req) {
-        Ok(()) => parser.value(req),
-        Err(thrown) => Err(thrown),
-    };
+    let parsed = parser.advance(req).and_then(|()| parser.value(req));
     // The lookahead the parse stopped at, discarded as bison's cleanup
     // discards it.
     let lookahead = std::mem::replace(&mut parser.token, Token::Eoi);
