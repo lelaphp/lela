@@ -1,16 +1,10 @@
-//! A host's link held to the macOS the pinned php is linked for (#3356).
-//! Where no deployment target is named, rustc links for macOS 11.0 on
-//! aarch64-apple-darwin, and ld64 writes the rebase and bind opcodes of
-//! `LC_DYLD_INFO_ONLY`, which dyld applies at launch, dirtying every page
-//! of `__DATA_CONST`; linked for the oracle's macOS, a host takes
-//! `LC_DYLD_CHAINED_FIXUPS` as php does, which the kernel applies as each
-//! page comes in. The macOS is the `[env]`'s `MACOSX_DEPLOYMENT_TARGET`,
-//! which rustc reads, and `cc` in each `build.rs`; it is held in each host's
-//! api-check reading to the `minos` the pinned php's load commands carry,
-//! so a pin linked for another macOS fails each host's reading naming
-//! both, as [`super::binding`] holds a native's keg. Where the pinned php
-//! is not on the machine or is no macOS Mach-O file, a Linux runner's
-//! build, nothing is held.
+//! A host's link held to the macOS the pinned php is linked for (#3356):
+//! the `[env]`'s `MACOSX_DEPLOYMENT_TARGET`, whose `.cargo/config.toml`
+//! entry says why it is named, is the `minos` the pinned php's load
+//! commands carry, so a pin linked for another macOS fails each host's
+//! api-check reading naming both, as [`super::binding`] holds a native's
+//! keg. Where the pinned php is not on the machine or is no macOS Mach-O
+//! file, a Linux runner's build, nothing is held.
 
 use std::path::Path;
 
@@ -25,18 +19,24 @@ use crate::oracle::hosts::{HOSTS, MAKALA};
 /// The variable that names the macOS a link is for.
 const VARIABLE: &str = "MACOSX_DEPLOYMENT_TARGET";
 
-/// What a host's link is held to on this machine.
+/// What a host's link is held to on this machine, each arm with the macOS
+/// the pinned php is linked for where it was read.
 pub(super) enum Target {
     /// No pin, or a pinned php not on this machine or no macOS Mach-O file.
     Unheld,
     /// The pinned php's load commands, which could not be read.
     Unread(anyhow::Error),
-    /// The macOS the pinned php is linked for, and the first `[env]`
-    /// entry that names [`VARIABLE`], by its configuration and value.
-    Read {
+    /// The first `[env]` entry naming [`VARIABLE`] names the pinned php's.
+    Agrees(Minos),
+    /// It names another macOS, or a value that names none: the
+    /// configuration it is in and the value as written.
+    Differs {
         minos: Minos,
-        named: Option<(&'static str, String)>,
+        config: &'static str,
+        value: String,
     },
+    /// No `[env]` names it, so rustc links for its own default.
+    Unnamed(Minos),
 }
 
 impl Target {
@@ -59,7 +59,21 @@ impl Target {
             .find_map(|(config, mut entries)| {
                 Some((config, entries.remove(VARIABLE)?.value().to_owned()))
             });
-        Ok(Target::Read { minos, named })
+        Ok(Target::named(minos, named))
+    }
+
+    /// The pinned php's `minos` against the `[env]` entry naming
+    /// [`VARIABLE`], by its configuration and value, decoded once.
+    fn named(minos: Minos, named: Option<(&'static str, String)>) -> Target {
+        match named {
+            None => Target::Unnamed(minos),
+            Some((_, value)) if Minos::parse(&value) == Some(minos) => Target::Agrees(minos),
+            Some((config, value)) => Target::Differs {
+                minos,
+                config,
+                value,
+            },
+        }
     }
 
     /// What the link of the crate `name` comes to: nothing for a crate
@@ -73,16 +87,20 @@ impl Target {
         match self {
             Target::Unheld => {}
             Target::Unread(why) => held.problems.push(format!(
-                "{name} links a host, whose {VARIABLE} is held to the macOS the pinned php is linked for, and its load commands are unread: {why:#}"
+                "{name} is a host, whose {VARIABLE} is held to the macOS the pinned php is linked for, and its load commands are unread: {why:#}"
             )),
-            Target::Read { minos, named: Some((_, value)) } if Minos::parse(value) == Some(*minos) => {
-                held.notes.push(format!("linked for macOS {minos}, the pinned php's minos"));
-            }
-            Target::Read { minos, named: Some((config, value)) } => held.problems.push(format!(
+            Target::Agrees(minos) => held
+                .notes
+                .push(format!("linked for macOS {minos}, the pinned php's minos")),
+            Target::Differs {
+                minos,
+                config,
+                value,
+            } => held.problems.push(format!(
                 "{config}'s {VARIABLE} is {value}, and the pinned php is linked for macOS {minos}: the target moves with the oracle (#3356)"
             )),
-            Target::Read { minos, named: None } => held.problems.push(format!(
-                "{name} links a host, and no cargo configuration's [env] names {VARIABLE}, so rustc links it for its own default where the pinned php is linked for macOS {minos} (#3356)"
+            Target::Unnamed(minos) => held.problems.push(format!(
+                "{name} is a host, and no cargo configuration's [env] names {VARIABLE}, so rustc links it for its own default where the pinned php is linked for macOS {minos} (#3356)"
             )),
         }
         held
@@ -94,14 +112,16 @@ mod tests {
     use super::{Minos, Target};
 
     /// A host's link holds where the `[env]` names the pinned php's
-    /// `minos`, and fails naming both where it names another macOS or
-    /// none; a crate that is no host is not held.
+    /// `minos` written either way, and fails naming both where it names
+    /// another macOS, a value that is none, or nothing; a crate that is no
+    /// host is not held.
     #[test]
     fn a_host_is_linked_for_the_macos_the_pinned_php_is() {
-        let target = |value: Option<&str>| Target::Read {
-            minos: Minos::parse("15.0").unwrap(),
-            named: value.map(|value| (".cargo/config.toml", value.to_owned())),
+        let target = |value: Option<&str>| {
+            let named = value.map(|value| (".cargo/config.toml", value.to_owned()));
+            Target::named(Minos::parse("15.0").unwrap(), named)
         };
+        assert!(target(Some("15")).hold("sapi/cli").problems.is_empty());
         let same = target(Some("15.0")).hold("sapi/cli");
         assert!(same.problems.is_empty(), "{:?}", same.problems);
         assert_eq!(
@@ -119,6 +139,11 @@ mod tests {
         assert!(
             unnamed[0].contains("no cargo configuration's [env] names MACOSX_DEPLOYMENT_TARGET"),
             "{unnamed:?}"
+        );
+        let unread = target(Some("fifteen")).hold("sapi/cgi").problems;
+        assert!(
+            unread[0].contains("MACOSX_DEPLOYMENT_TARGET is fifteen"),
+            "{unread:?}"
         );
         let library = target(None).hold("crates/php_engine");
         assert!(library.problems.is_empty() && library.notes.is_empty());
