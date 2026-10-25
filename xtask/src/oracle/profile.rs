@@ -86,8 +86,9 @@ pub(crate) fn build(
 /// the engine's own runs, never a correctness lane's build (#2351); under
 /// `into` as [`build`]'s, the engine with the tier's feature beside the
 /// lanes' build of it ([`featured`]); and with `cfg` set where one is
-/// named, a cfg only a bench build sets, through `RUSTFLAGS`, which is why
-/// such a build goes into a directory of its own (#2946).
+/// named, a cfg only a bench build sets, added to the workspace's
+/// rustflags ([`Added`]), which is why such a build goes into a directory
+/// of its own (#2946).
 pub(crate) fn released(
     root: &Path,
     (package, binary): (&str, &str),
@@ -107,21 +108,22 @@ fn built(
     (into, cfg): (Option<&Path>, Option<&str>),
 ) -> Result<PathBuf> {
     let mut cargo = Command::new(cargo());
+    cargo.args([
+        "build",
+        "--quiet",
+        "--profile",
+        profile.name(),
+        "--package",
+        package,
+        "--bin",
+        binary,
+    ]);
+    let mut added = Added::inherited();
     if let Some(cfg) = cfg {
-        let inherited = std::env::var("RUSTFLAGS").unwrap_or_default();
-        cargo.env("RUSTFLAGS", format!("{inherited} --cfg {cfg}").trim_start());
+        added = added.with_cfg(cfg);
     }
+    added.onto(&mut cargo);
     let status = cargo
-        .args([
-            "build",
-            "--quiet",
-            "--profile",
-            profile.name(),
-            "--package",
-            package,
-            "--bin",
-            binary,
-        ])
         .args(features.into_iter().flat_map(|names| ["--features", names]))
         .args(
             into.into_iter()
@@ -178,8 +180,10 @@ pub(crate) fn hosts() -> Vec<String> {
 /// Every host built in `root` by [`hosts`]' line, what cargo prints on
 /// the harness's streams.
 pub(crate) fn build_hosts(root: &Path) -> Result<()> {
-    let status = Command::new(cargo())
-        .args(hosts())
+    let mut cargo = Command::new(cargo());
+    cargo.args(hosts());
+    Added::inherited().onto(&mut cargo);
+    let status = cargo
         .current_dir(root)
         .status()
         .context("running cargo to build the hosts")?;
@@ -190,6 +194,70 @@ pub(crate) fn build_hosts(root: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The key of the workspace's rustflags table in `.cargo/config.toml`, as
+/// a `--config` line names it: `cfg(all())` holds for every target, and
+/// the table is the one that passes LLVM's
+/// `--cgp-max-address-users-to-scan` to every profile (design §10
+/// Profiles, #3372).
+pub(crate) const RUSTFLAGS_TABLE: &str = "target.'cfg(all())'.rustflags";
+
+/// What a build the harness runs adds to the workspace's rustflags table
+/// ([`RUSTFLAGS_TABLE`]). Cargo joins a `--config` line's array for that
+/// key to the file's, where a `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS`
+/// variable replaces the table whole and the LLVM option with it; so what
+/// the harness's own environment carries in either is taken into the
+/// line, and neither variable is handed on. A build adds and never
+/// replaces.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Added(Vec<String>);
+
+impl Added {
+    /// What the harness's environment carries, read as cargo reads it.
+    pub(crate) fn inherited() -> Added {
+        let var = |name| std::env::var(name).ok();
+        Added::carried(
+            var("CARGO_ENCODED_RUSTFLAGS").as_deref(),
+            var("RUSTFLAGS").as_deref(),
+        )
+    }
+
+    /// The flags of `encoded`, split at `0x1f`, where it is set, which
+    /// cargo reads before `plain`; else `plain`'s, split at whitespace.
+    fn carried(encoded: Option<&str>, plain: Option<&str>) -> Added {
+        let flags: Vec<String> = match (encoded, plain) {
+            (Some(encoded), _) => encoded.split('\x1f').map(str::to_owned).collect(),
+            (None, Some(plain)) => plain.split_whitespace().map(str::to_owned).collect(),
+            (None, None) => Vec::new(),
+        };
+        Added(flags.into_iter().filter(|f| !f.is_empty()).collect())
+    }
+
+    /// These and `--cfg <cfg>` after them.
+    pub(crate) fn with_cfg(mut self, cfg: &str) -> Added {
+        self.0.extend(["--cfg".to_owned(), cfg.to_owned()]);
+        self
+    }
+
+    /// The `--config` value that adds these to the table, or none where
+    /// nothing is added.
+    pub(crate) fn line(&self) -> Option<String> {
+        if self.0.is_empty() {
+            return None;
+        }
+        let flags = self.0.iter().cloned().map(toml::Value::String).collect();
+        Some(format!("{RUSTFLAGS_TABLE}={}", toml::Value::Array(flags)))
+    }
+
+    /// `cargo` handed [`Added::line`] and neither variable.
+    pub(crate) fn onto(&self, cargo: &mut Command) {
+        cargo.env_remove("RUSTFLAGS");
+        cargo.env_remove("CARGO_ENCODED_RUSTFLAGS");
+        if let Some(line) = self.line() {
+            cargo.arg("--config").arg(line);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -312,6 +380,123 @@ mod tests {
             "{}",
             built.display()
         );
+    }
+
+    /// A cfg a bench build names reaches rustc beside the flags of the
+    /// workspace's own rustflags table, which a `RUSTFLAGS` variable would
+    /// have replaced (#3372): the probe's `build.rs` writes the flags
+    /// cargo hands it, and the binary prints them.
+    #[test]
+    fn a_cfg_the_harness_names_is_added_to_the_workspaces_rustflags() {
+        let root = crate::scratch::Tree::new("profile-rustflags").unwrap();
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"probe\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[workspace]\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join(".cargo")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join(".cargo/config.toml"),
+            "[target.'cfg(all())']\nrustflags = [\"--cfg\", \"from_the_table\"]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("build.rs"),
+            "fn main() {\n    let flags = std::env::var(\"CARGO_ENCODED_RUSTFLAGS\").unwrap();\n    let out = std::env::var(\"OUT_DIR\").unwrap();\n    std::fs::write(format!(\"{out}/flags\"), flags.replace('\\x1f', \" \")).unwrap();\n}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/main.rs"),
+            "fn main() {\n    print!(\"{}\", include_str!(concat!(env!(\"OUT_DIR\"), \"/flags\")));\n}\n",
+        )
+        .unwrap();
+        let built = released(
+            &root,
+            ("probe", "probe"),
+            None,
+            (None, Some("from_the_line")),
+        )
+        .unwrap();
+        let out = Command::new(&built).output().unwrap();
+        let printed = String::from_utf8(out.stdout).unwrap();
+        assert!(
+            printed.contains("--cfg from_the_table") && printed.contains("--cfg from_the_line"),
+            "{printed}"
+        );
+    }
+
+    /// What the environment carries is read as cargo reads it, the
+    /// encoded variable before `RUSTFLAGS`, and goes into the `--config`
+    /// line, which parses as the table's key; neither variable reaches
+    /// the cargo the harness runs.
+    #[test]
+    fn what_the_environment_carries_is_added_and_handed_on_in_no_variable() {
+        let added = Added::carried(Some("-C\x1fdebuginfo=1"), Some("--cfg ignored"));
+        assert_eq!(added, Added(vec!["-C".into(), "debuginfo=1".into()]));
+        let added = Added::carried(None, Some(" --cfg  a ")).with_cfg("dispatch=\"tailcall\"");
+        let line = added.line().unwrap();
+        let parsed: toml::Table = line.parse().unwrap();
+        let flags = &parsed["target"]["cfg(all())"]["rustflags"];
+        assert_eq!(
+            flags.as_array().unwrap(),
+            &["--cfg", "a", "--cfg", "dispatch=\"tailcall\""]
+                .map(|f| toml::Value::String(f.into()))
+        );
+        assert_eq!(Added::default().line(), None);
+        let mut cargo = Command::new("cargo");
+        added.onto(&mut cargo);
+        let removed: Vec<_> = cargo
+            .get_envs()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k)
+            .collect();
+        assert_eq!(removed, ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS"]);
+        let args: Vec<_> = cargo.get_args().collect();
+        assert_eq!(args, [std::ffi::OsStr::new("--config"), line.as_ref()]);
+    }
+
+    /// The lane that holds the threaded dispatch adds its cfg as the
+    /// harness does, through a `--config` line on each cargo line it runs,
+    /// and sets no rustflags variable, which would replace the workspace's
+    /// table (#3372): the line it names parses to the flags [`Added`]
+    /// would add for the cfg.
+    #[cfg(tracked)]
+    #[test]
+    fn the_threaded_dispatchs_lane_adds_its_cfg_through_a_config_line() {
+        let text = std::fs::read_to_string(workspace().join("scripts/ci/tailcall.sh")).unwrap();
+        let code: Vec<&str> = text
+            .lines()
+            .map(str::trim_start)
+            .filter(|line| !line.starts_with('#'))
+            .collect();
+        for line in &code {
+            assert!(
+                !line.contains("RUSTFLAGS=") && !line.starts_with("export RUSTFLAGS"),
+                "tailcall.sh sets a rustflags variable: {line}"
+            );
+        }
+        let cfg = code
+            .iter()
+            .find_map(|line| line.strip_prefix("cfg=(--config \"")?.strip_suffix("\")"))
+            .expect("tailcall.sh names its --config line as cfg=(--config \"...\")")
+            .replace("\\\"", "\"");
+        let parsed: toml::Table = cfg.parse().unwrap();
+        let wanted: toml::Table = Added::default()
+            .with_cfg("dispatch=\"tailcall\"")
+            .line()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(parsed, wanted, "{cfg}");
+        let cargo: Vec<&&str> = code
+            .iter()
+            .filter(|l| l.starts_with("cargo \"+$TOOLCHAIN\""))
+            .collect();
+        assert_eq!(cargo.len(), 2, "the check and the build: {cargo:#?}");
+        for line in cargo {
+            assert!(line.ends_with("\"${cfg[@]}\""), "{line}");
+        }
     }
 
     /// The lanes' build is looked for first, and `dev`'s directory is
