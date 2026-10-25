@@ -215,6 +215,13 @@ fn staged_files(root: &Path) -> Result<Vec<Diffed>> {
     let mut files = Vec::new();
     for git::Change { path, .. } in staged {
         if binary.contains(&path) {
+            // A binary the merge takes whole from the merged parent is
+            // that parent's, as a text file is.
+            if let Some(theirs) = &theirs
+                && git::show_bytes(root, theirs, &path)? == git::show_bytes(root, "", &path)?
+            {
+                continue;
+            }
             files.push(Diffed {
                 path,
                 content: Content::Binary,

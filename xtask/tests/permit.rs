@@ -904,6 +904,26 @@ fn diff_judges_a_staged_binary_file_by_its_path_alone() {
     assert!(out.contains("harness.self"), "{out}");
 }
 
+/// A binary the merge takes whole from the merged branch is that
+/// branch's, as a text file is (#1312): a stand-in at a harness path the
+/// branch committed is judged at the branch's own commits, so the merge
+/// carrying it notes nothing.
+#[test]
+fn a_binary_the_merge_takes_whole_is_the_merged_branchs() {
+    let root = scratch("merge-binary");
+    let repo = Repo::at(&root);
+    let stand_in = ".claude/hooks/stand-in";
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "the base"]);
+    repo.git(&["checkout", "-q", "-b", "branch"]);
+    repo.write(stand_in, BINARY).git(&["add", "--", stand_in]);
+    repo.git(&["commit", "-q", "-m", "the stand-in"]);
+    repo.git(&["checkout", "-q", "-"]);
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "main moves on"]);
+    repo.git(&["merge", "-q", "--no-ff", "--no-commit", "branch"]);
+    let out = permit(&root, "", &["--diff"]).ok();
+    assert!(!out.contains("stand-in"), "{out}");
+}
+
 /// The hook's stdin carries `session_id`; a reading carries it, so the
 /// `permits` section can count denials per session (harness-design.md
 /// §4.6, §10 rule 6).
