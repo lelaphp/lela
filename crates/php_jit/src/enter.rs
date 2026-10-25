@@ -24,12 +24,10 @@
 //! it serves through, which `api-check` writes into `tier.lock`'s kernels
 //! section where the face does not list it already (§5.3).
 //!
-//! **What `enter` does not do yet.** It touches no map pointer on a
-//! request's first entry: `lower` lowers no read of a runtime-cache slot
-//! past the request's map base, so there is nothing to lay down until it
-//! does. A call `push_call` began is on the engine's stack, pushed by
-//! the engine, where php's compiled code keeps it in a register until an exit's
-//! `RESTORE_CALL` links it, so `Landing::RestoreCall` restores nothing.
+//! **What `enter` does not do yet.** A call `push_call` began is on the
+//! engine's stack, pushed by the engine, where php's compiled code keeps
+//! it in a register until an exit's `RESTORE_CALL` links it, so
+//! `Landing::RestoreCall` restores nothing.
 //!
 //! `ExitCtx` is generic over the request it carries, so that the bench
 //! bar and the wrappers' own tests cross it over a stand-in with no
@@ -496,6 +494,7 @@ kernels! {
         Concat => concat(a: u64, a_info: u32, b: u64, b_info: u32, kinds: u32) -> Zval = tier::concat;
         Find => find(array: u64, key: u64, key_info: u32, constant: u32) -> Zval;
         Lookup => lookup(array: u64, key: u64, key_info: u32, constant: u32) -> Zval = tier::lookup_element;
+        Leave => leave(word: u64, type_info: u32) -> u64 = tier::return_entry;
     }
 }
 
@@ -520,6 +519,23 @@ fn handle(req: &mut Request, on: On<'_, '_>, func: u32) -> Result<(), Fatal> {
     let frame = standing(req, on.room, on.at)?;
     let (held, _) = held(on, func)?;
     tier::dispatch_held(req, frame, held)
+}
+
+/// The `leave` kernel: the value the `RETURN` at `at`, which a trace ends
+/// at, hands over, in a frame served from outside the loop, set as the
+/// serving's return value where the frame is the serving's entry
+/// ([`tier::return_entry`]), as the handler's `RETURN` of such a frame sets
+/// it and ends the serving, answered one; zero, with nothing done, for any
+/// other frame, which the trace's end exit leaves to the interpreter. php's
+/// `zend_jit_leave_func` returns `ZEND_VM_RETURN` to `execute_ex` for such
+/// a frame, `ZEND_CALL_TOP`.
+fn leave(req: &mut Request, on: On<'_, '_>, word: u64, type_info: u32) -> Result<u64, Fatal> {
+    let frame = standing(req, on.room, on.at)?;
+    Ok(u64::from(tier::return_entry(
+        req,
+        frame,
+        zval(word, type_info),
+    )))
 }
 
 /// The `push_call` kernel (`jit-design.md` §4.3): the `INIT_*` at `at`
@@ -914,6 +930,10 @@ pub(crate) enum Left {
     /// trace's lowest frame left the frame that stands at an opline the
     /// trace does not go on at, whose handler the interpreter runs.
     Escaped(FrameRef),
+    /// Through the `RETURN` of the serving's entry frame, which takes no
+    /// exit: the serving is over and its return value set
+    /// ([`lower::RETURNED`]), as php's `ZEND_VM_RETURN` ends `execute_ex`.
+    Returned,
     /// Entered at its loop's body, the trace found the frame holding
     /// other than it knows there: nothing ran and the frame stands where
     /// it stood, so `dispatch` goes on to the loop's header and enters the
@@ -1010,9 +1030,8 @@ pub(crate) fn enter<'t>(
     // The stack the trace's calls in place are made on, their headers in
     // this request, and whether they are made in place, laid down in the
     // trace's row for the jumps to it.
-    let caches = touched(req, (epoch, trace));
     let stack = tier::stack(req).as_ptr();
-    let (images, rows) = Images::of(req, (epoch, trace), caches);
+    let (images, rows) = Images::of(req, (epoch, trace));
     let ready = images.ready();
     let before = tier::trace_num(req);
     tier::set_trace_num(req, TraceNum::from_raw(trace.id.get()));
@@ -1073,6 +1092,7 @@ pub(crate) fn enter<'t>(
                 tier::current(req).ok_or_else(|| internal("a trace left no frame standing"))?;
             Left::Escaped(frame)
         }
+        Answer::Returned => Left::Returned,
         Answer::Abandoned => {
             return Err(internal(
                 "a trace left through no exit of its own and kept nothing",
@@ -1087,28 +1107,82 @@ pub(crate) fn enter<'t>(
 /// it.
 static NO_PLACE: u32 = tier::PLACE.unprimed();
 
+/// The address compiled code reads for a slot the touch has not answered,
+/// [`NO_PLACE`]'s.
+fn no_place() -> usize {
+    ptr::from_ref(&NO_PLACE).expose_provenance()
+}
+
+/// Whether slot `raw`, whose address the request keeps as `at`, is one a
+/// later entry touches again: the touch has not answered it, and a call
+/// can lay its cache, where a file's own code's or one past its cache
+/// never is ([`tier::touchable`]).
+fn untouched(epoch: &Epoch, raw: tier::MapPtrRaw, at: usize) -> bool {
+    at == no_place() && tier::touchable(epoch, raw)
+}
+
 /// The touch (`jit-design.md` §4.6, #2957's note; [`tier::touch`]): the
-/// addresses of the runtime-cache slots `trace`'s code reads in `req`,
-/// one a slot of `Trace.map_ptrs`, each cache laid down first, on the
-/// request's first entry of the trace; none for a trace that reads none
-/// or that the request entered before, which keeps them ([`Headers`]). A
-/// slot the touch answers none for reads [`NO_PLACE`], and so does one a
-/// memory limit would not lay down, the opline its handler's as before.
-fn touched(req: &mut Request, (epoch, trace): (&Epoch, &Trace)) -> Option<Box<[usize]>> {
-    if trace.map_ptrs.is_empty()
-        || tier::state::<crate::JitRequest>(req).is_some_and(|state| state.headers.knows(trace.id))
-    {
-        return None;
-    }
-    let none = ptr::from_ref(&NO_PLACE).expose_provenance();
-    Some(
-        (trace.map_ptrs.iter())
-            .map(|raw| match tier::touch(req, epoch, *raw) {
-                Ok(Some(slot)) => CachedSlot::address(slot),
-                Ok(None) | Err(_) => none,
-            })
-            .collect(),
-    )
+/// address of each runtime-cache slot `trace`'s code reads in `req`, one
+/// a slot of `Trace.map_ptrs`, where the request laid its cache down, and
+/// [`NO_PLACE`]'s where it has not yet, since php lays a callee's cache at
+/// its call's `INIT_*` and no sooner: the opline is its handler's until
+/// then, and a later entry touches the slot again ([`Entered::untouched`]).
+///
+/// So a request that enters a trace an earlier request published, before
+/// the trace's inlined method was called in it, finds that method's cache
+/// not laid down, as php's does: a closure a reflector makes over the
+/// method there takes a cache of its own (`zend_create_closure_ex`), where
+/// one made once the call laid the cache shares it. Two requests of one
+/// built-in server, each of the program the snippet writes:
+///
+/// ```php
+/// $d = sys_get_temp_dir() . '/touch' . getmypid(); @mkdir($d);
+/// file_put_contents("$d/r.php", '<?php eval(\'class Base { public $x = 1; }\'); class C extends Base { function m() { return $this->x; } }
+/// function size($o) { $m = memory_get_usage(); $c = (new ReflectionMethod("C", "m"))->getClosure($o); $grew = memory_get_usage() - $m; unset($c); return $grew; }
+/// function fcc($o) { $m = memory_get_usage(); $c = $o->m(...); $grew = memory_get_usage() - $m; unset($c); return $grew; }
+/// function k($o, $n) { $t = 0; $w = $f = 0; for ($i = 0; $i < $n; $i++) { if ($i == 0) { $w = size($o); $f = fcc($o); } $t += $o->m(); } return $t . " " . ($w > size($o) ? "own" : "shared") . " " . ($f > fcc($o) ? "own" : "shared"); }
+/// echo k(new C, 20), "\n";');
+/// $s = stream_socket_server('tcp://127.0.0.1:0'); $port = parse_url(stream_socket_get_name($s, false), PHP_URL_PORT); fclose($s);
+/// $ini = ['opcache.enable=1', 'opcache.enable_cli=1', 'opcache.jit=tracing', 'opcache.jit_buffer_size=64M', 'opcache.jit_hot_loop=1', 'opcache.jit_hot_func=1', 'opcache.jit_hot_side_exit=1', 'opcache.file_update_protection=0'];
+/// if (($mode = ini_get('jit.mode')) !== false) { $ini[] = "jit.mode=$mode"; }
+/// $cmd = [PHP_BINARY, '-n']; foreach ($ini as $i) { $cmd[] = '-d'; $cmd[] = $i; } array_push($cmd, '-S', "127.0.0.1:$port", '-t', $d);
+/// $p = proc_open($cmd, [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+/// for ($n = 0; $n < 250 && !@fsockopen('127.0.0.1', $port); $n++) { usleep(20000); }
+/// for ($r = 0; $r < 2; $r++) { echo file_get_contents("http://127.0.0.1:$port/r.php"); }
+/// proc_terminate($p); proc_close($p); unlink("$d/r.php"); rmdir($d);
+/// ```
+/// ```expect regime=jit-force process
+/// 20 own shared
+/// 20 own shared
+/// ```
+///
+/// ```php
+/// $d = sys_get_temp_dir() . '/touch' . getmypid(); @mkdir($d);
+/// file_put_contents("$d/r.php", '<?php eval(\'class Base { public $x = 1; }\'); class C extends Base { function m() { return $this->x; } }
+/// function size($o) { $m = memory_get_usage(); $c = (new ReflectionMethod("C", "m"))->getClosure($o); $grew = memory_get_usage() - $m; unset($c); return $grew; }
+/// function fcc($o) { $m = memory_get_usage(); $c = $o->m(...); $grew = memory_get_usage() - $m; unset($c); return $grew; }
+/// function k($o, $n) { $t = 0; $w = $f = 0; for ($i = 0; $i < $n; $i++) { if ($i == 0) { $w = size($o); $f = fcc($o); } $t += $o->m(); } return $t . " " . ($w > size($o) ? "own" : "shared") . " " . ($f > fcc($o) ? "own" : "shared"); }
+/// echo k(new C, 20), "\n";');
+/// $s = stream_socket_server('tcp://127.0.0.1:0'); $port = parse_url(stream_socket_get_name($s, false), PHP_URL_PORT); fclose($s);
+/// $ini = ['opcache.enable=1', 'opcache.enable_cli=1', 'opcache.jit=tracing', 'opcache.jit_buffer_size=64M', 'opcache.jit_hot_loop=1', 'opcache.jit_hot_func=1', 'opcache.jit_hot_side_exit=1', 'opcache.file_update_protection=0'];
+/// if (($mode = ini_get('jit.mode')) !== false) { $ini[] = "jit.mode=$mode"; }
+/// $cmd = [PHP_BINARY, '-n']; foreach ($ini as $i) { $cmd[] = '-d'; $cmd[] = $i; } array_push($cmd, '-S', "127.0.0.1:$port", '-t', $d);
+/// $p = proc_open($cmd, [1 => ['file', '/dev/null', 'w'], 2 => ['file', '/dev/null', 'w']], $pipes);
+/// for ($n = 0; $n < 250 && !@fsockopen('127.0.0.1', $port); $n++) { usleep(20000); }
+/// for ($r = 0; $r < 2; $r++) { echo file_get_contents("http://127.0.0.1:$port/r.php"); }
+/// proc_terminate($p); proc_close($p); unlink("$d/r.php"); rmdir($d);
+/// ```
+/// ```expect regime=jit-exit-fuzz process
+/// 20 own shared
+/// 20 own shared
+/// ```
+fn touched(req: &Request, (epoch, trace): (&Epoch, &Trace)) -> impl Iterator<Item = usize> {
+    (trace.map_ptrs.iter()).map(move |raw| touch_one(req, epoch, *raw))
+}
+
+/// [`touched`] of the one slot `raw`.
+fn touch_one(req: &Request, epoch: &Epoch, raw: tier::MapPtrRaw) -> usize {
+    tier::touch(req, epoch, raw).map_or_else(no_place, CachedSlot::address)
 }
 
 /// The request's addresses a trace's code reads: the headers of the calls
@@ -1140,22 +1214,18 @@ enum Images {
 }
 
 impl Images {
-    /// What `trace`'s code reads in `req`, the touched cache slots `caches`
-    /// beside the headers on the request's first entry, and the request's
+    /// What `trace`'s code reads in `req`, the touched cache slots beside
+    /// the headers ([`touched`]), and the request's
     /// rows with the trace's laid down as they say, which a jump to the
     /// trace reads ([`Rows`]); a request that keeps no state of the tier's
     /// keeps no rows, and its rows are [`NO_ROWS`].
-    fn of(
-        req: &Request,
-        (epoch, trace): (&Epoch, &Trace),
-        caches: Option<Box<[usize]>>,
-    ) -> (Images, *const usize) {
+    fn of(req: &Request, (epoch, trace): (&Epoch, &Trace)) -> (Images, *const usize) {
         if let Some(state) = tier::state::<crate::JitRequest>(req) {
             let images = if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
                 Images::None
             } else {
-                (state.headers.entered(req, trace, caches)).map_or_else(
-                    || Images::own(req, trace, &[]),
+                (state.headers.entered(req, (epoch, trace))).map_or_else(
+                    || Images::own(req, (epoch, trace)),
                     |(at, laid)| Images::Kept { at, laid },
                 )
             };
@@ -1171,25 +1241,19 @@ impl Images {
         if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
             return (Images::None, NO_ROWS.as_ptr());
         }
-        (
-            Images::own(req, trace, caches.as_deref().unwrap_or(&[])),
-            NO_ROWS.as_ptr(),
-        )
+        (Images::own(req, (epoch, trace)), NO_ROWS.as_ptr())
     }
 
     /// What `trace`'s code reads laid out for one entry, by a request that
     /// keeps no state of the tier's.
-    fn own(req: &Request, trace: &Trace, caches: &[usize]) -> Images {
+    fn own(req: &Request, (epoch, trace): (&Epoch, &Trace)) -> Images {
         let images: Vec<Option<HeaderImage>> = (trace.calls.iter())
             .map(|call| tier::call_image(req, call))
             .collect();
         let missing = images.iter().any(Option::is_none);
-        // A slot the touch did not answer for this entry reads no place.
-        let none = ptr::from_ref(&NO_PLACE).expose_provenance();
-        let slots = (0..trace.map_ptrs.len()).map(|at| caches.get(at).copied().unwrap_or(none));
         let addresses = (images.iter())
             .map(|image| image.as_ref().map_or(0, HeaderImage::address))
-            .chain(slots)
+            .chain(touched(req, (epoch, trace)))
             .collect();
         Images::Own {
             images: images.into_iter().flatten().collect(),
@@ -1251,35 +1315,28 @@ struct HeadersKept {
 }
 
 /// What a request keeps of one trace it entered ([`Headers`]): the
-/// addresses its code reads, whether a call's header is missing yet, and
-/// whether its calls are made in place.
+/// addresses its code reads, whether a call's header is missing yet,
+/// whether its calls are made in place, and whether a cache slot it
+/// reads was not laid down yet, which each entry after touches again.
 #[derive(Debug)]
 struct Entered {
     addresses: Box<[usize]>,
     missing: bool,
     laid: bool,
+    untouched: bool,
 }
 
 impl Headers {
-    /// Whether the request entered trace `id` before.
-    fn knows(&self, id: crate::table::TraceId) -> bool {
-        let kept = self.kept.borrow();
-        usize::try_from(id.get())
-            .ok()
-            .and_then(|row| kept.traces.get(row))
-            .is_some_and(Option::is_some)
-    }
-
     /// The addresses `trace`'s code reads in `req` ([`Images`]), laid out
-    /// the first time the request enters it with the cache slots `caches`
-    /// the touch answered, and whether its calls are made in place; a
-    /// header missing before is laid out once its function is the
-    /// request's, in place. None for a number no row holds.
+    /// the first time the request enters it, the cache slots among them
+    /// as the touch answers them ([`touched`]), and whether its calls are
+    /// made in place; a header missing before is laid out once its
+    /// function is the request's, and a slot whose cache was not laid
+    /// down is touched again, in place. None for a number no row holds.
     fn entered(
         &self,
         req: &Request,
-        trace: &Trace,
-        caches: Option<Box<[usize]>>,
+        (epoch, trace): (&Epoch, &Trace),
     ) -> Option<(*const usize, bool)> {
         let mut kept = self.kept.borrow_mut();
         let row = usize::try_from(trace.id.get()).ok()?;
@@ -1297,6 +1354,19 @@ impl Headers {
                 }
                 entered.laid = !entered.missing && callees_laid(req, trace);
             }
+            if entered.untouched {
+                let slots = entered
+                    .addresses
+                    .get_mut(trace.calls.len()..)
+                    .unwrap_or_default();
+                entered.untouched = false;
+                for (raw, at) in trace.map_ptrs.iter().zip(slots) {
+                    if *at == no_place() {
+                        *at = touch_one(req, epoch, *raw);
+                        entered.untouched |= untouched(epoch, *raw, *at);
+                    }
+                }
+            }
             return Some((entered.addresses.as_ptr(), entered.laid));
         }
         let mut addresses = Vec::with_capacity(trace.calls.len() + trace.map_ptrs.len());
@@ -1304,16 +1374,16 @@ impl Headers {
             addresses.push(header_of(calls, req, call).unwrap_or(0));
         }
         let missing = addresses.contains(&0);
-        // The slots the touch answered on this, the first entry; none reads
-        // no place.
-        let none = ptr::from_ref(&NO_PLACE).expose_provenance();
-        let caches = caches.unwrap_or_default();
-        addresses
-            .extend((0..trace.map_ptrs.len()).map(|at| caches.get(at).copied().unwrap_or(none)));
+        let headers = addresses.len();
+        addresses.extend(touched(req, (epoch, trace)));
+        let retouch = (addresses.get(headers..).unwrap_or_default().iter())
+            .zip(&trace.map_ptrs)
+            .any(|(at, raw)| untouched(epoch, *raw, *at));
         let entered = Entered {
             addresses: addresses.into_boxed_slice(),
             missing,
             laid: !missing && callees_laid(req, trace),
+            untouched: retouch,
         };
         let found = (entered.addresses.as_ptr(), entered.laid);
         if traces.len() <= row {
@@ -1438,7 +1508,7 @@ pub(crate) fn remembered(req: &Request, frame: FrameRef, escaped: &Trace, landed
 
 /// What compiled code answered `enter`, decoded once: an exit of the
 /// trace's, [`lower::UNWOUND`], [`lower::INTERRUPTED`], [`lower::DECLINED`],
-/// [`lower::ESCAPED`], or anything else, [`lower::ABANDONED`]
+/// [`lower::ESCAPED`], [`lower::RETURNED`], or anything else, [`lower::ABANDONED`]
 /// with nothing kept among it, which no trace answers but by a defect.
 enum Answer {
     Exit(ExitId),
@@ -1446,6 +1516,7 @@ enum Answer {
     Interrupted,
     Declined,
     Escaped,
+    Returned,
     Abandoned,
 }
 
@@ -1458,6 +1529,7 @@ impl Answer {
             _ if word == lower::INTERRUPTED => Answer::Interrupted,
             _ if word == lower::DECLINED => Answer::Declined,
             _ if word == lower::ESCAPED => Answer::Escaped,
+            _ if word == lower::RETURNED => Answer::Returned,
             _ => Answer::Abandoned,
         }
     }
