@@ -26,7 +26,9 @@ const CDENTRYSIZE: usize = 46;
 const LENTRYSIZE: usize = 30;
 /// `CDBUFSIZE`: `MAXCOMLEN + EOCDLEN + EOCD64LOCLEN`, the tail
 /// `_zip_find_central_dir` reads.
-pub(crate) const CDBUFSIZE: u64 = 65_536 + 22 + 20;
+pub(crate) const CDBUFSIZE: u64 = (MAXCOMLEN + EOCDLEN + EOCD64LOCLEN) as u64;
+/// `MAXCOMLEN`.
+const MAXCOMLEN: usize = 65_536;
 /// `MAX_DATA_DESCRIPTOR_LENGTH`.
 const MAX_DATA_DESCRIPTOR_LENGTH: usize = 24;
 /// `EFBIG`, the `errno` of a seek past `ZIP_INT64_MAX`.
@@ -40,6 +42,9 @@ pub(crate) struct Cdir {
     pub(crate) offset: u64,
     pub(crate) bytes: Vec<u8>,
     pub(crate) comment: Vec<u8>,
+    /// Whether a Zip64 end record gave it, which sizes the records after
+    /// the data `_zip_checkcons` reads.
+    pub(crate) is_zip64: bool,
 }
 
 /// `zip_cdir_t` before its entries: what an end record says.
@@ -59,7 +64,7 @@ struct End {
 /// failed.
 enum Candidate {
     Passed(Option<Status>),
-    Taken(Result<(Cdir, bool), Status>),
+    Taken(Result<Cdir, Status>),
 }
 
 /// `cdir_status_t`, what `_zip_read_eocd64` returns.
@@ -107,9 +112,9 @@ pub(crate) fn find(file: &mut File, len: u64, flags: u32) -> Result<Cdir, Status
             Candidate::Passed(None) => {}
             Candidate::Passed(Some(e)) => error = e,
             Candidate::Taken(read) => {
-                let (cd, is_zip64) = read?;
+                let cd = read?;
                 if flags & CHECKCONS != 0 {
-                    return checkcons(file, cd, is_zip64);
+                    return checkcons(file, cd);
                 }
                 return Ok(cd);
             }
@@ -177,7 +182,7 @@ fn read_cdir(file: &mut File, buf: &[u8], buf_offset: u64, at: usize, flags: u32
     if let Err(e) = check_eocd(&cd, flags) {
         return Taken(Err(e));
     }
-    Taken(read_entries(file, buf, buf_offset, at, &cd, flags).map(|c| (c, cd.is_zip64)))
+    Taken(read_entries(file, buf, buf_offset, at, &cd, flags))
 }
 
 /// `_zip_read_cdir` past `check_eocd`: the comment, and the records of the
@@ -203,18 +208,21 @@ fn read_entries(
     }
     let comment = tail[..comment_len].to_vec();
     let size = usize::try_from(cd.size).map_err(|_| Status::of(Er::Memory, 0))?;
-    let (src, origin) = if cd.offset >= buf_offset {
+    let (mut src, origin) = if cd.offset >= buf_offset {
         let start = usize::try_from(cd.offset - buf_offset).unwrap_or(usize::MAX);
         let Some(data) = buf.get(start..start.saturating_add(size)) else {
             return Err(Status::bare(Detail::CdirLengthInvalid));
         };
         (data.to_vec(), Origin::Directory)
     } else {
-        let rest = usize::try_from(buf_offset + buf.len() as u64 - cd.offset).unwrap_or(0);
-        (read_at(file, cd.offset, rest)?, Origin::File)
+        (read_at(file, cd.offset, size)?, Origin::File)
     };
-    let mut entries =
-        Vec::with_capacity(usize::try_from(cd.num_entries.min(cd.size / 46)).unwrap_or(0));
+    // The file past the directory, read a record's most at a time where
+    // the records are read from it, as libzip reads each from its source.
+    let file_end = buf_offset + buf.len() as u64;
+    let mut entries = Vec::with_capacity(
+        usize::try_from(cd.num_entries.min(cd.size / CDENTRYSIZE as u64)).unwrap_or(0),
+    );
     let mut nentry = cd.num_entries;
     let mut left = cd.size;
     let mut pos = 0usize;
@@ -231,6 +239,15 @@ fn read_entries(
             grown = true;
         }
         let index = entries.len();
+        if let Origin::File = origin {
+            let want = pos + CDENTRYSIZE + 3 * usize::from(u16::MAX);
+            let have = cd.offset + src.len() as u64;
+            if src.len() < want && have < file_end {
+                let more =
+                    usize::try_from(file_end - have).map_or(want, |m| m.min(want - src.len()));
+                src.extend(read_at(file, have, more)?);
+            }
+        }
         let read = dirent(
             &src[pos.min(src.len())..],
             false,
@@ -264,6 +281,7 @@ fn read_entries(
         offset: cd.offset,
         bytes: src[..pos.min(src.len())].to_vec(),
         comment,
+        is_zip64: cd.is_zip64,
     })
 }
 
@@ -400,7 +418,7 @@ fn check_magic(offset: u64, buf: &[u8], buf_offset: u64, file: &mut File, magic:
     if buf_offset <= offset {
         usize::try_from(offset - buf_offset)
             .ok()
-            .and_then(|at| buf.get(at..at + 4))
+            .and_then(|at| buf.get(at..at.checked_add(4)?))
             == Some(&magic[..])
     } else {
         read_at(file, offset, 4).is_ok_and(|r| r == magic)
@@ -409,7 +427,8 @@ fn check_magic(offset: u64, buf: &[u8], buf_offset: u64, file: &mut File, magic:
 
 /// `_zip_checkcons`: every entry's local header within the archive before
 /// its central directory, read, and matching its central record.
-fn checkcons(file: &mut File, mut cd: Cdir, is_zip64: bool) -> Result<Cdir, Status> {
+fn checkcons(file: &mut File, mut cd: Cdir) -> Result<Cdir, Status> {
+    let is_zip64 = cd.is_zip64;
     let first = cd.entries.first().map_or(0, |e| e.offset);
     let (mut min, mut max) = (first, first);
     for (i, e) in cd.entries.iter_mut().enumerate() {
@@ -719,7 +738,13 @@ fn utf8_field(
         return Ok(s);
     };
     if check && s.as_ref().map(|s| &s.raw) != Some(&found.raw) && found.raw.is_ascii() {
-        return Err(Status::bare(mismatch));
+        // `_zip_dirent_read` refuses the mismatch of a string it has; no
+        // string stays none.
+        return if s.is_some() {
+            Err(Status::bare(mismatch))
+        } else {
+            Ok(None)
+        };
     }
     Ok(Some(ZStr {
         known: Some(Enc::Utf8Known),
