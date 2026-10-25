@@ -8,21 +8,21 @@
 //! as the operation ends.
 //!
 //! Here the stream is its resource's payload, a [`Slot`], and an
-//! operation, an [`Op`], holds an owner of the resource and counts itself
+//! operation, an [`StreamOp`], holds an owner of the resource and counts itself
 //! in the slot's `holds` for its length, php's `GC_ADDREF` of what it
-//! works on. It borrows the stream in segments ([`Op::with`]) through the
+//! works on. It borrows the stream in segments ([`StreamOp::with`]) through the
 //! request, each a closure handed the stream and no request, so no
 //! segment serves PHP code and the borrow checker holds every call into
 //! PHP code outside one. A destructor that finds the stream held moves it
 //! to the request's closed streams, where the operation still reaches it
 //! and the last to end frees it. A part of the stream that is called with
-//! the request, its kind above all ([`Op::kind`]), is lent out of the
+//! the request, its kind above all ([`StreamOp::kind`]), is lent out of the
 //! stream for its call and put back after, so PHP code that reaches the
 //! same stream meanwhile finds the stream there and the part in use,
 //! php's `in_free` answer for an operation it cannot take.
 //!
 //! The one shared count beside the resource's is a socket's `Arc<Sock>`:
-//! a crypto layer's call (`Op::with_crypto`) borrows the socket's fd for
+//! a crypto layer's call (`StreamOp::with_crypto`) borrows the socket's fd for
 //! its length while the socket stays in the stream and PHP code reaches
 //! it, so the call holds its own clone of the socket, made as the layer
 //! sets up, enables, connects or reads its meta data, and never per read
@@ -83,6 +83,11 @@ impl Slot {
     pub(crate) const fn new(stream: PhpStream) -> Slot {
         Slot { stream, holds: 0 }
     }
+
+    /// Whether an operation holds the stream.
+    pub(crate) const fn is_held(&self) -> bool {
+        self.holds > 0
+    }
 }
 
 /// The slot of the stream `res` names: its payload while it is open, and
@@ -102,7 +107,7 @@ fn slot_mut(req: &mut Request, res: Resource) -> Option<&mut Slot> {
 /// The slot a destructor took off a closed resource: freed where nothing
 /// holds it, and kept among the request's closed streams for the
 /// operations that do, the last of which frees it ([`let_go`]).
-pub(super) fn closed(req: &mut Request, res: Resource, slot: Slot) {
+pub(super) fn release_slot(req: &mut Request, res: Resource, slot: Slot) {
     if slot.holds == 0 {
         super::finish(req, slot.stream);
     } else {
@@ -138,25 +143,25 @@ fn let_go(req: &mut Request, res: Owner<Resource>) {
 
 /// Where an operation's stream is: in a resource it holds, or its own,
 /// the stream no resource holds any longer, which its free runs over.
-enum Place {
+enum Place<'r> {
     Held(Owner<Resource>),
-    Owned(PhpStream),
+    Owned(&'r mut PhpStream),
 }
 
 /// One operation on a stream: the request beside the stream, held for the
 /// operation's length, so neither the stream nor the resource it reads as
 /// goes while PHP code the operation serves lets go of them.
-pub(crate) struct Op<'r> {
+pub(crate) struct StreamOp<'r> {
     pub(crate) req: &'r mut Request,
-    place: Place,
+    place: Place<'r>,
 }
 
-impl<'r> Op<'r> {
+impl<'r> StreamOp<'r> {
     /// The operation on the stream `stream`'s resource holds, `None`
     /// where it is closed or is not a stream's.
-    pub(super) fn begin(req: &'r mut Request, stream: Stream) -> Option<Op<'r>> {
+    pub(super) fn begin(req: &'r mut Request, stream: Stream) -> Option<StreamOp<'r>> {
         let res = hold(req, stream.resource())?;
-        Some(Op {
+        Some(StreamOp {
             req,
             place: Place::Held(res),
         })
@@ -186,7 +191,17 @@ impl<'r> Op<'r> {
     pub(crate) fn kind<R>(&mut self, f: impl FnOnce(&mut Request, &mut dyn Ops) -> R) -> Option<R> {
         let mut kind = self.with(|s| s.ops.lend())??;
         let out = f(self.req, kind.as_mut());
-        self.with(|s| s.ops = Kind::In(kind));
+        let mut back = Some(kind);
+        self.with(|s| {
+            if let Some(kind) = back.take() {
+                s.ops = Kind::In(kind);
+            }
+        });
+        // A kind with no stream left to go back to, which a hold keeps
+        // from happening, is closed rather than dropped.
+        if let Some(mut unplaced) = back {
+            unplaced.close(self.req);
+        }
         Some(out)
     }
 
@@ -199,22 +214,16 @@ impl<'r> Op<'r> {
 }
 
 /// `f` over a stream no resource holds, as its free runs the generic
-/// half's flush on it before it closes the kind: the stream back where
-/// `f` is done with it, which no segment can move.
+/// half's flush on it before it closes the kind.
 pub(super) fn owned<'r>(
     req: &'r mut Request,
-    stream: PhpStream,
-    f: impl FnOnce(&mut Op<'r>),
-) -> Option<PhpStream> {
-    let mut op = Op {
+    stream: &'r mut PhpStream,
+    f: impl FnOnce(&mut StreamOp<'r>),
+) {
+    f(&mut StreamOp {
         req,
         place: Place::Owned(stream),
-    };
-    f(&mut op);
-    match op.place {
-        Place::Owned(stream) => Some(stream),
-        Place::Held(_) => None,
-    }
+    });
 }
 
 /// `f` with each of `streams` that is open held, as
@@ -238,7 +247,7 @@ pub(super) fn hold_each<R>(
 }
 
 /// `stream->ops` with its `abstract`: the kind in the stream, or out of
-/// it for a call that is called with the request ([`Op::kind`]), its
+/// it for a call that is called with the request ([`StreamOp::kind`]), its
 /// place answering for it meanwhile. Either way it reads as the kind's
 /// operations, so a segment asks `s.ops` the kind's questions alike.
 pub(crate) enum Kind {

@@ -26,7 +26,7 @@ use crate::state::EngineState;
 
 use super::held::Payload;
 use super::sockets::Socket;
-use super::{Op, PhpStream, Request, Stream};
+use super::{PhpStream, Request, Stream, StreamOp};
 use crate::api::raising::Thrown;
 use crate::api::request::{OptionAnswer, OwnedStream, StreamOption};
 use crate::api::values::{Owner, Resource};
@@ -261,10 +261,18 @@ pub(crate) fn keep(req: &mut Request, stream: Owner<Stream>) -> Option<Entry> {
         stream.free(req);
         return None;
     }
-    req.stream_op(*stream, Op::flush_owed);
+    req.stream_op(*stream, StreamOp::flush_owed);
     let taken = res.native_mut::<Payload>(req).and_then(Option::take);
     res.close(req);
     req.drop_persistent(res);
+    // A stream an operation holds is that operation's to free.
+    let taken = match taken {
+        Some(slot) if slot.is_held() => {
+            super::held::release_slot(req, res, slot);
+            None
+        }
+        taken => taken,
+    };
     let kept = taken.and_then(|slot| {
         let mut taken = slot.stream;
         let mut socket = taken.ops.as_socket()?.detach();
@@ -311,16 +319,19 @@ pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
 /// [`dtor`]'s work on the stream once nothing holds it: a stream held
 /// under its key keeps its socket idle there, and every other is freed;
 /// what the kind's close answered.
-pub(crate) fn finish(req: &mut Request, mut stream: PhpStream) -> i32 {
-    let held = stream.res.and_then(|r| {
+pub(crate) fn finish(req: &mut Request, stream: PhpStream) -> i32 {
+    // Where the entry stands is asked each time it is used: closing the
+    // filters' resources and flushing the write chain may serve PHP code
+    // that changes the list.
+    let held_at = |req: &mut Request, stream: &PhpStream| {
+        let r = stream.res?;
         req.streams()
             .persistent
             .iter()
             .position(|held| matches!(held.state, State::InResource(res) if res == r))
-    });
-    if let Some(at) = held
-        && stream.ops.as_socket().is_some()
-    {
+    };
+    let mut stream = stream;
+    if held_at(req, &stream).is_some() && stream.ops.as_socket().is_some() {
         // php's destructor is `NULL`: nothing is flushed and the filters
         // stay on the stream, to end with it at the engine's end
         // ([`engine_end`]) or travel with it to the request that asks
@@ -334,15 +345,14 @@ pub(crate) fn finish(req: &mut Request, mut stream: PhpStream) -> i32 {
                 .map(|path| path.into_persistent(req)),
             filters,
         });
-        if let Some(entry) = entry {
+        if let Some(entry) = entry
+            && let Some(at) = held_at(req, &stream)
+        {
             req.streams().persistent[at].state = State::Idle(entry);
         }
     } else {
-        let Some(flushed) = super::held::owned(req, stream, Op::flush_owed) else {
-            return 0;
-        };
-        stream = flushed;
-        if let Some(at) = held {
+        super::held::owned(req, &mut stream, StreamOp::flush_owed);
+        if let Some(at) = held_at(req, &stream) {
             req.streams().persistent.remove(at);
         }
     }

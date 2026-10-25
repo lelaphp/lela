@@ -29,7 +29,7 @@ use crate::api::coerce::atoi;
 use crate::api::layer::{Readiness, SockOpt};
 use crate::api::values::{Emalloc, Owner};
 
-use super::{CastTarget, MetaData, Op, Ops, PhpStream, Ret, StatBuf, stat_buf, strerror};
+use super::{CastTarget, MetaData, Ops, PhpStream, Ret, StatBuf, StreamOp, stat_buf, strerror};
 use crate::api::raising::{Level, Thrown, raise, warning};
 use crate::api::request::{
     BindTo, Cast, Crypto, CryptoSocket, Handshake, Ini, OptionAnswer, OwnedStream, Request,
@@ -182,7 +182,7 @@ pub(crate) struct Socket {
     /// [`Ops::lay_down`] to the close; none for a persistent stream's,
     /// which php allocates persistent.
     data: Vec<Emalloc>,
-    crypto: Option<Box<dyn Crypto>>,
+    crypto: CryptoLayer,
     context: Option<StreamCtx>,
     own: Option<Stream>,
     /// The socket, shared with a crypto layer's call that runs over it
@@ -195,6 +195,53 @@ pub(crate) struct Socket {
     role: Role,
     /// `PHP_STREAM_FLAG_SUPPRESS_ERRORS`: a failed send raises no notice.
     suppress_errors: bool,
+}
+
+/// A socket's crypto layer: none, the layer, or the layer out for a
+/// call that runs with the request ([`StreamOp::with_crypto`]), which PHP code
+/// the call serves finds in use.
+enum CryptoLayer {
+    Absent,
+    On(Box<dyn Crypto>),
+    Lent,
+}
+
+impl CryptoLayer {
+    fn on(&self) -> Option<&dyn Crypto> {
+        match self {
+            CryptoLayer::On(layer) => Some(layer.as_ref()),
+            CryptoLayer::Absent | CryptoLayer::Lent => None,
+        }
+    }
+
+    fn on_mut(&mut self) -> Option<&mut dyn Crypto> {
+        match self {
+            CryptoLayer::On(layer) => Some(layer.as_mut()),
+            CryptoLayer::Absent | CryptoLayer::Lent => None,
+        }
+    }
+
+    /// The layer taken out for a call, its place marked in use; `None`
+    /// for a socket with none or one out already.
+    fn lend(&mut self) -> Option<Box<dyn Crypto>> {
+        match std::mem::replace(self, CryptoLayer::Lent) {
+            CryptoLayer::On(layer) => Some(layer),
+            other => {
+                *self = other;
+                None
+            }
+        }
+    }
+
+    const fn is_lent(&self) -> bool {
+        matches!(self, CryptoLayer::Lent)
+    }
+}
+
+impl From<Option<Box<dyn Crypto>>> for CryptoLayer {
+    fn from(layer: Option<Box<dyn Crypto>>) -> CryptoLayer {
+        layer.map_or(CryptoLayer::Absent, CryptoLayer::On)
+    }
 }
 
 /// Whether a socket stream is a server's: `PHP_STREAM_FLAG_NO_IO`, which
@@ -213,7 +260,7 @@ impl Socket {
     fn new(sock: Option<Sock>, label: &'static str, timeout: Option<Duration>) -> Socket {
         Socket {
             data: Vec::new(),
-            crypto: None,
+            crypto: CryptoLayer::Absent,
             context: None,
             own: None,
             sock: sock.map(Arc::new),
@@ -229,7 +276,7 @@ impl Socket {
     /// Whether the crypto layer reads and writes in the socket's place,
     /// `ssl_active`.
     fn crypto_active(&self) -> bool {
-        self.crypto.as_ref().is_some_and(|layer| layer.active())
+        self.crypto.on().is_some_and(Crypto::active)
     }
 
     /// The crypto layer and the socket it runs over, lent for one call,
@@ -251,7 +298,7 @@ impl Socket {
             timeout_event,
             ..
         } = self;
-        let layer = crypto.as_deref_mut()?;
+        let layer = crypto.on_mut()?;
         let sock = sock.as_ref()?;
         let mut lent = CryptoSocket {
             fd: sock.fd(),
@@ -271,15 +318,15 @@ impl Socket {
 
     /// The crypto layer, where the socket has one.
     pub(crate) fn crypto_layer(&mut self) -> Option<&mut dyn Crypto> {
-        self.crypto.as_deref_mut()
+        self.crypto.on_mut()
     }
 
     /// `SSL_pending` of an active layer, `0` for every other socket.
     pub(crate) fn crypto_pending(&self) -> usize {
         self.crypto
-            .as_ref()
+            .on()
             .filter(|layer| layer.active())
-            .map_or(0, |layer| layer.pending())
+            .map_or(0, Crypto::pending)
     }
 
     /// `PHP_STREAM_CONTEXT(stream)`, as the stream set it, for the layer.
@@ -313,7 +360,7 @@ impl Socket {
     }
 }
 
-impl Op<'_> {
+impl StreamOp<'_> {
     /// The socket's crypto layer lent out for `f` over the socket, which
     /// stays in the stream, so PHP code the layer serves, an error handler
     /// a warning of the handshake calls or a callback of the layer's,
@@ -328,7 +375,7 @@ impl Op<'_> {
         let (mut layer, sock, fields) = self.with(|s| {
             let socket = s.ops.as_socket()?;
             let sock = Arc::clone(socket.sock.as_ref()?);
-            let layer = socket.crypto.take()?;
+            let layer = socket.crypto.lend()?;
             let fields = (socket.is_blocked, socket.timeout, socket.timeout_event);
             Some((layer, sock, (fields, socket.context, socket.own)))
         })??;
@@ -345,20 +392,38 @@ impl Op<'_> {
             live,
         };
         let out = f(self.req, layer.as_mut(), &mut lent);
-        let (blocked, timed_out) = (lent.blocked, lent.timed_out);
+        // `is_blocked` went through as the layer set it; `timeout_event`
+        // goes back only where the layer set it, so what PHP code the call
+        // served did to either stands.
+        let set_timed_out = (lent.timed_out != timed_out).then_some(lent.timed_out);
         self.with(|s| {
             if let Some(socket) = s.ops.as_socket() {
-                socket.crypto = Some(layer);
-                socket.is_blocked = blocked;
-                socket.timeout_event = timed_out;
+                socket.crypto = CryptoLayer::On(layer);
+                if let Some(timed_out) = set_timed_out {
+                    socket.timeout_event = timed_out;
+                }
             }
         });
         Some(out)
     }
 
+    /// Whether the socket's crypto layer is out for a call further out,
+    /// which PHP code that call serves asks to set up or enable again,
+    /// and which fails as php's `in_free` answer does.
+    fn crypto_in_use(&mut self) -> bool {
+        self.with(|s| {
+            s.ops
+                .as_socket()
+                .is_some_and(|socket| socket.crypto.is_lent())
+        }) == Some(true)
+    }
+
     /// `STREAM_XPORT_CRYPTO_OP_SETUP`: `None` for a socket with no crypto
     /// layer, php's `PHP_STREAM_OPTION_RETURN_NOTIMPL`.
     fn crypto_setup(&mut self, method: i64, session: Option<Stream>) -> Option<bool> {
+        if self.crypto_in_use() {
+            return Some(false);
+        }
         let setup = self.with_crypto(|req, layer, lent| layer.setup(req, lent, method, session))?;
         Some(setup.unwrap_or_else(|thrown| {
             super::filters::defer(self.req, thrown);
@@ -369,6 +434,9 @@ impl Op<'_> {
     /// `STREAM_XPORT_CRYPTO_OP_ENABLE`: `None` for a socket with no crypto
     /// layer.
     fn crypto_enable(&mut self, activate: bool) -> Option<Handshake> {
+        if self.crypto_in_use() {
+            return Some(Handshake::Failed);
+        }
         let enabled = self.with_crypto(|req, layer, lent| layer.enable(req, lent, activate))?;
         Some(enabled.unwrap_or_else(|thrown| {
             super::filters::defer(self.req, thrown);
@@ -568,7 +636,7 @@ impl Ops for Socket {
     /// crypto layer's own close, `SSL_shutdown` and free, which its drop
     /// is.
     fn close(&mut self, req: &mut Request) -> i32 {
-        self.crypto = None;
+        self.crypto = CryptoLayer::Absent;
         self.sock = None;
         for data in std::mem::take(&mut self.data) {
             data.free(req);
@@ -592,8 +660,8 @@ impl Ops for Socket {
     fn lay_down(&mut self, req: &mut Request) -> Result<(), Thrown> {
         let sizes = self
             .crypto
-            .as_ref()
-            .map_or_else(|| vec![NETSTREAM_DATA_SIZE], |layer| layer.allocations());
+            .on()
+            .map_or_else(|| vec![NETSTREAM_DATA_SIZE], Crypto::allocations);
         for size in sizes {
             self.data.push(Emalloc::new(req, size)?);
         }
@@ -886,7 +954,7 @@ impl Socket {
         };
         let mut accepted = Socket::new(Some(client), self.label, self.timeout);
         accepted.is_blocked = self.is_blocked;
-        accepted.crypto = self.crypto.as_ref().map(|layer| layer.accepted());
+        accepted.crypto = self.crypto.on().map(Crypto::accepted).into();
         Ok((accepted, want_peer.then_some(peer)))
     }
 }
@@ -1395,7 +1463,7 @@ impl Transports for Request {
         };
         let mut kind = Socket::new(Some(sock), label, default_timeout(self));
         kind.is_blocked = blocking;
-        kind.crypto = crypto;
+        kind.crypto = crypto.into();
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         stream.flags.no_seek = true;
         let stream = self.stream_alloc(stream)?;
@@ -1487,7 +1555,7 @@ impl Transports for Request {
         };
         let mut kind = Socket::new(sock, label, default_timeout(self));
         kind.role = role;
-        kind.crypto = crypto;
+        kind.crypto = crypto.into();
         let mut stream = PhpStream::new(Box::new(kind), b"r+");
         stream.flags.no_seek = true;
         // `pestrdup(name, persistent_id ? 1 : 0)`.
@@ -1502,7 +1570,7 @@ impl Transports for Request {
         stream.set_ctx(self, context);
         if role == Role::Peer && connected {
             let connected = self
-                .stream_op(*stream, Op::crypto_connected)
+                .stream_op(*stream, StreamOp::crypto_connected)
                 .unwrap_or(Ok(()));
             if connected.is_err() {
                 stream.free(self);
@@ -1585,7 +1653,7 @@ impl Stream {
         let context = self.ctx(req);
         client.set_ctx(req, context);
         let connected = req
-            .stream_op(*client, Op::crypto_connected)
+            .stream_op(*client, StreamOp::crypto_connected)
             .unwrap_or(Ok(()));
         if let Err(text) = connected {
             client.free(req);

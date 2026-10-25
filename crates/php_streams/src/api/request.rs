@@ -28,7 +28,7 @@ pub use scanner_file::ScannerFile;
 use crate::state::Layer;
 use crate::streams::filters::FilterLayer;
 use crate::streams::sockets::Transports;
-use crate::streams::{Op, PhpStream, StreamLayer};
+use crate::streams::{PhpStream, StreamLayer, StreamOp};
 use crate::supplied::Supplied;
 use crate::wrapper::PlainFiles;
 pub use crate::zend::STREAM_HOOKS;
@@ -472,7 +472,7 @@ impl Stream {
     /// `ctime`, `blksize` and `blocks`, or `None` where the stream has
     /// no stat (`fstat` answers `false`).
     pub fn stat(self, req: &mut Request) -> Option<[i64; 13]> {
-        req.stream_op(self, Op::stat).flatten()
+        req.stream_op(self, StreamOp::stat).flatten()
     }
 
     /// `php_stream_truncate_set_size` behind
@@ -683,7 +683,7 @@ impl Stream {
     /// give up, and one that hands a name to a program, as `readdir`
     /// does, makes the string.
     pub fn read_dir(self, req: &mut Request) -> Result<Option<Vec<u8>>, Thrown> {
-        Ok(req.stream_op(self, Op::read_dir).flatten())
+        Ok(req.stream_op(self, StreamOp::read_dir).flatten())
     }
 
     /// `php_stream_tell`: the position, `-1` for a stream that has none.
@@ -718,12 +718,12 @@ impl Stream {
     /// bool(true)
     /// ```
     pub fn eof(self, req: &mut Request) -> bool {
-        req.stream_op(self, Op::eof).unwrap_or(false)
+        req.stream_op(self, StreamOp::eof).unwrap_or(false)
     }
 
     /// `php_stream_flush`: `true` for php's `0`.
     pub fn flush(self, req: &mut Request) -> bool {
-        req.stream_op(self, Op::flush).unwrap_or(false)
+        req.stream_op(self, StreamOp::flush).unwrap_or(false)
     }
 
     /// `php_stream_free(stream, PHP_STREAM_FREE_KEEP_RSRC |

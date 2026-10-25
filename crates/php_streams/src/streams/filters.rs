@@ -20,7 +20,7 @@
 
 use std::collections::VecDeque;
 
-use super::{Op, PhpStream};
+use super::{PhpStream, StreamOp};
 use crate::api::raising::{Thrown, warning};
 use crate::api::request::{
     Brigade, FilterChain as Chain, FilterFactory, FilterFlags, FilterStatus, Request, Stream,
@@ -56,12 +56,12 @@ pub(crate) struct Attached {
 }
 
 /// `filter->fops` with what the factory made: on its chain, or lent out
-/// for its call ([`Op::run_filter`]), the place on the chain marked with
+/// for its call ([`StreamOp::run_filter`]), the place on the chain marked with
 /// the call's number so the filter comes back to it wherever PHP code
 /// the call served moved the chain.
 enum FilterOps {
     On(Box<dyn StreamFilter>),
-    Lent(u64),
+    Lent(Lend),
 }
 
 impl FilterOps {
@@ -81,6 +81,19 @@ impl FilterOps {
 pub(crate) struct Chains {
     read: Vec<Attached>,
     write: Vec<Attached>,
+}
+
+/// The number of one filter call, which marks the lent filter's place on
+/// its chain ([`FilterOps::Lent`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Lend(u64);
+
+impl crate::state::State {
+    /// The next filter call's number.
+    fn next_lend(&mut self) -> Lend {
+        self.filter_lends += 1;
+        Lend(self.filter_lends)
+    }
 }
 
 /// The payload of a `stream filter` resource: the stream the filter is
@@ -129,7 +142,12 @@ impl PhpStream {
     /// The filter at `at` of `chain` lent out for its call under the
     /// call's number `lend`, `None` where there is none there or it is
     /// out already.
-    fn lend_filter(&mut self, chain: Chain, at: usize, lend: u64) -> Option<Box<dyn StreamFilter>> {
+    fn lend_filter(
+        &mut self,
+        chain: Chain,
+        at: usize,
+        lend: Lend,
+    ) -> Option<Box<dyn StreamFilter>> {
         let attached = self.chain_mut(chain).get_mut(at)?;
         if matches!(attached.ops, FilterOps::Lent(_)) {
             return None;
@@ -145,7 +163,7 @@ impl PhpStream {
     /// served took the place off.
     fn put_filter(
         &mut self,
-        lend: u64,
+        lend: Lend,
         ops: Box<dyn StreamFilter>,
     ) -> Option<Box<dyn StreamFilter>> {
         let place = self
@@ -215,7 +233,7 @@ impl PhpStream {
     }
 }
 
-impl Op<'_> {
+impl StreamOp<'_> {
     /// One `fops->filter` call of the filter at `at` of `chain`, the
     /// filter lent out of its chain for the call, or a filter shared for
     /// it where the filter can be re-entered, and the stream where it
@@ -351,14 +369,11 @@ impl Op<'_> {
         if self.req.diagnostics_mut().stream_thrown().is_some() {
             return FilterStatus::ErrFatal;
         }
-        let lend = {
-            let state = self.req.streams();
-            state.filter_lends += 1;
-            state.filter_lends
+        let Some(stream) = self.with(|s| s.res.map(Stream::of)).flatten() else {
+            return FilterStatus::ErrFatal;
         };
-        let Some((Some(filter), Some(stream))) =
-            self.with(|s| (s.lend_filter(chain, at, lend), s.res.map(Stream::of)))
-        else {
+        let lend = self.req.streams().next_lend();
+        let Some(filter) = self.with(|s| s.lend_filter(chain, at, lend)).flatten() else {
             return FilterStatus::ErrFatal;
         };
         // A filter that can be re-entered is called through a filter shared
@@ -385,9 +400,16 @@ impl Op<'_> {
         }
     }
 
+    /// How many filters `chain` has as the stream stands now, which PHP
+    /// code a filter served may have changed, as php's walk follows
+    /// `filter->next` as it stands.
+    fn filters_on(&mut self, chain: Chain) -> usize {
+        self.with(|s| s.filter_count(chain)).unwrap_or(0)
+    }
+
     /// A filter back from its call to its place on the chain marked
     /// `lend`; one whose place is gone, or shared for the call, closed.
-    fn put_back(&mut self, lend: u64, filter: Box<dyn StreamFilter>) {
+    fn put_back(&mut self, lend: Lend, filter: Box<dyn StreamFilter>) {
         let unplaced = self.with(|s| s.put_filter(lend, filter)).flatten();
         if let Some(mut unplaced) = unplaced
             && let Err(thrown) = unplaced.close(self.req)
@@ -416,9 +438,7 @@ impl Op<'_> {
         while self.with(|s| !s.eof && s.writepos - s.readpos < to_read_now) == Some(true) {
             let justread = self.read_kind(&mut chunk);
             self.count_progress(justread.unwrap_or(0));
-            let Some((empty, eof, len)) =
-                self.with(|s| (s.writepos == s.readpos, s.eof, s.filter_count(Chain::Read)))
-            else {
+            let Some((empty, eof)) = self.with(|s| (s.writepos == s.readpos, s.eof)) else {
                 return false;
             };
             if justread.is_none() && empty {
@@ -437,8 +457,10 @@ impl Op<'_> {
                 _ => FilterFlags::FlushInc,
             };
             let mut status = FilterStatus::ErrFatal;
-            for at in 0..len {
+            let mut at = 0;
+            while at < self.filters_on(Chain::Read) {
                 status = self.run_filter(Chain::Read, at, (&mut inp, &mut outp), None, flags);
+                at += 1;
                 if status != FilterStatus::PassOn {
                     break;
                 }
@@ -485,7 +507,7 @@ impl Op<'_> {
     /// bucket's length where it has not the room, as php's
     /// `readbuflen += bucket->buflen` and `perealloc` grow it; `false` is
     /// the memory limit's fatal, rendered.
-    fn append_read(&mut self, bucket: &[u8]) -> bool {
+    pub(super) fn append_read(&mut self, bucket: &[u8]) -> bool {
         let Some((room, len)) = self.with(|s| (s.readbuf.len() - s.writepos, s.readbuf.len()))
         else {
             return false;
@@ -513,10 +535,11 @@ impl Op<'_> {
         }
         let mut consumed = 0usize;
         let mut status = FilterStatus::ErrFatal;
-        let len = self.with(|s| s.filter_count(Chain::Write)).unwrap_or(0);
-        for at in 0..len {
+        let mut at = 0;
+        while at < self.filters_on(Chain::Write) {
             let counted = (at == 0).then_some(&mut consumed);
             status = self.run_filter(Chain::Write, at, (&mut inp, &mut outp), counted, flags);
+            at += 1;
             if status != FilterStatus::PassOn {
                 break;
             }
@@ -583,10 +606,10 @@ impl Op<'_> {
                 return false;
             }
             FilterStatus::FeedMe => {
-                self.with(|s| (s.readpos, s.writepos) = (0, 0));
+                self.with(PhpStream::drop_buffer);
             }
             FilterStatus::PassOn => {
-                self.with(|s| (s.readpos, s.writepos) = (0, 0));
+                self.with(PhpStream::drop_buffer);
                 while let Some(bucket) = outp.pop_front() {
                     if !self.append_read(&bucket) {
                         return false;
@@ -612,9 +635,11 @@ impl Op<'_> {
         } else {
             FilterFlags::FlushInc
         };
-        let len = self.with(|s| s.chain_mut(chain).len()).unwrap_or(0);
-        for current in at..len {
-            match self.run_filter(chain, current, (&mut inp, &mut outp), None, flags) {
+        let mut current = at;
+        while current < self.filters_on(chain) {
+            let status = self.run_filter(chain, current, (&mut inp, &mut outp), None, flags);
+            current += 1;
+            match status {
                 FilterStatus::FeedMe => return true,
                 FilterStatus::ErrFatal => return false,
                 FilterStatus::PassOn => {}

@@ -11,7 +11,7 @@
 //! resource's destructor, [`dtor`], is `php_stream_free` under
 //! `PHP_STREAM_FREE_RSRC_DTOR`. The stream stays in its resource for the
 //! length of every operation on it, which holds it as php's `GC_ADDREF`
-//! does and borrows it in segments ([`Op`], `held.rs`); a kind is called
+//! does and borrows it in segments ([`StreamOp`], `held.rs`); a kind is called
 //! with the request, lent out of the stream for the call, which is what
 //! lets `php://temp` read through the memory stream it encloses and the
 //! plain files kind raise php's notice on a failed read while PHP code
@@ -51,7 +51,7 @@ pub(crate) mod sockets;
 use crate::state::Layer;
 use crate::wrapper::PlainFiles;
 use held::Kind;
-pub(crate) use held::{Op, Slot};
+pub(crate) use held::{Slot, StreamOp};
 use persistent::Persistent;
 use sockets::Transports;
 pub(crate) mod userspace;
@@ -729,6 +729,11 @@ impl PhpStream {
         self.mode = Mode::of(mode);
     }
 
+    /// The read buffer's bytes dropped, both cursors at its start.
+    const fn drop_buffer(&mut self) {
+        (self.readpos, self.writepos) = (0, 0);
+    }
+
     /// The bytes after `readpos` moved to the front of the read buffer.
     fn compact(&mut self) {
         self.readbuf.copy_within(self.readpos..self.writepos, 0);
@@ -736,9 +741,10 @@ impl PhpStream {
         self.readpos = 0;
     }
 
-    /// The read buffer lent out for a call that is called with the
-    /// request, with its two cursors; the stream reads as holding no
-    /// bytes until it is back ([`PhpStream::put_readbuf`]).
+    /// The read buffer lent out, with its two cursors, for the
+    /// reallocation [`StreamOp::resize_readbuf`] makes with the request, which
+    /// serves no PHP code; the stream reads as holding no bytes until it
+    /// is back ([`PhpStream::put_readbuf`]).
     fn lend_readbuf(&mut self) -> (ReadBuf, usize, usize) {
         let lent = (
             std::mem::take(&mut self.readbuf),
@@ -868,11 +874,9 @@ impl PhpStream {
     /// runs, so `fclose`, the last owner's release and the shutdown walk
     /// are one path: the owed flush, then the kind closed, then the
     /// stream dropped.
-    fn free(self, req: &mut Request) -> i32 {
-        match held::owned(req, self, Op::flush_owed) {
-            Some(stream) => stream.release(req),
-            None => 0,
-        }
+    fn free(mut self, req: &mut Request) -> i32 {
+        held::owned(req, &mut self, StreamOp::flush_owed);
+        self.release(req)
     }
 
     /// `_php_stream_free` past the flush: the kind closed, then each
@@ -953,7 +957,7 @@ impl PhpStream {
         let taken = res.native_mut::<held::Payload>(req).and_then(Option::take);
         res.close(req);
         if let Some(slot) = taken {
-            held::closed(req, res, slot);
+            held::release_slot(req, res, slot);
         }
         // `PHP_STREAM_FREE_CLOSE_PERSISTENT`: a persistent stream closed
         // is gone from the list for every holder.
@@ -963,7 +967,7 @@ impl PhpStream {
 
 /// A stream whose resource closed and which nothing holds any longer
 /// freed: by its resource's destructor, by `fclose`, or as the
-/// operation that held it past either ends ([`Op::end`]). A stream
+/// operation that held it past either ends ([`StreamOp::end`]). A stream
 /// `fclose` flushed is released, one of the `persistent stream` type is
 /// what its destructor makes of it ([`persistent::finish`]), and every
 /// other is freed, owed flush and all; what its kind's close answered is
@@ -979,7 +983,7 @@ pub(crate) fn finish(req: &mut Request, stream: PhpStream) {
     req.streams().pclose_ret = ret;
 }
 
-impl Op<'_> {
+impl StreamOp<'_> {
     /// `stream->orig_path = pestrdup(path, 0)` over the one it held,
     /// which is given back first.
     pub(crate) fn set_orig_path(&mut self, path: &[u8]) -> Result<(), Thrown> {
@@ -1048,7 +1052,7 @@ impl Op<'_> {
 
     /// `_php_stream_fill_read_buffer` (`Z/main/streams/streams.c:564`):
     /// through the filter chain where the stream has one, else as
-    /// [`Op::fill_unfiltered`] does; a fill that changed `eof`
+    /// [`StreamOp::fill_unfiltered`] does; a fill that changed `eof`
     /// notifies `PHP_STREAM_NOTIFY_COMPLETED`.
     fn fill_read_buffer(&mut self, size: usize) -> bool {
         let Some((old_eof, filtered)) = self.with(|s| (s.eof, s.has_filters(Chain::Read))) else {
@@ -1089,21 +1093,30 @@ impl Op<'_> {
         {
             return false;
         }
-        let Some(mut lent) = self.with(PhpStream::lend_readbuf) else {
+        // The kind reads into the request's scratch, not the buffer, so PHP
+        // code its read serves finds the buffer and its cursors as they
+        // stand; what it read goes in after `writepos` as it is then.
+        let Some(room) = self.with(|s| s.readbuf.len() - s.writepos) else {
             return false;
         };
-        let writepos = lent.2;
-        let read = self.read_kind(lent.0.get_mut(writepos..).unwrap_or_default());
-        if let Some(justread) = read {
-            lent.2 += justread;
+        let mut scratch = std::mem::take(&mut self.req.streams().read_scratch);
+        if scratch.len() < room {
+            scratch.resize(room, 0);
         }
-        self.with(|s| s.put_readbuf(lent));
+        let read = self.read_kind(scratch.get_mut(..room).unwrap_or_default());
+        let kept = match read {
+            Some(justread) if justread > 0 => {
+                self.append_read(scratch.get(..justread).unwrap_or_default())
+            }
+            _ => true,
+        };
+        self.req.streams().read_scratch = scratch;
         match read {
-            Some(justread) => {
+            Some(justread) if kept => {
                 self.count_progress(justread);
                 true
             }
-            None => false,
+            _ => false,
         }
     }
 
@@ -1213,7 +1226,7 @@ impl Op<'_> {
     }
 
     /// `_php_stream_write_buffer` (`Z/main/streams/streams.c:1189`): the
-    /// kind written past the filters, as [`Op::write`] describes.
+    /// kind written past the filters, as [`StreamOp::write`] describes.
     fn write_buffer(&mut self, buf: &[u8]) -> Option<usize> {
         let old_eof = self.with(|s| s.eof)?;
         let wrote = self.write_kind(buf);
@@ -1247,7 +1260,7 @@ impl Op<'_> {
         sought
     }
 
-    /// The body of [`Op::write_buffer`]: the kind written until
+    /// The body of [`StreamOp::write_buffer`]: the kind written until
     /// every byte is taken or one write takes none.
     fn write_kind(&mut self, buf: &[u8]) -> Option<usize> {
         if buf.is_empty() {
@@ -1258,7 +1271,7 @@ impl Op<'_> {
         let (reseek, chunk) = self.with(|s| {
             let reseek = !s.flags.no_seek && s.readpos != s.writepos;
             if reseek {
-                (s.readpos, s.writepos) = (0, 0);
+                s.drop_buffer();
             }
             let chunk = if s.ops.is_userspace() {
                 s.chunk_size().max(1)
@@ -1350,7 +1363,7 @@ impl Op<'_> {
                         s.eof = false;
                         s.fatal_error = false;
                     }
-                    (s.readpos, s.writepos) = (0, 0);
+                    s.drop_buffer();
                     true
                 });
                 if settled == Some(true) {
@@ -1452,7 +1465,7 @@ impl Op<'_> {
     ///
     /// A fill a read filter broke (`PSFS_ERR_FATAL`, `fatal_error`) ends
     /// the line with nothing, what was gathered dropped, and so does
-    /// [`Op::get_record`]'s (GH-13264):
+    /// [`StreamOp::get_record`]'s (GH-13264):
     ///
     /// ```php
     /// $s = fopen('php://memory', 'r+'); $z = gzcompress(str_repeat("line\n", 3000)); fwrite($s, substr($z, 0, -1) . "1"); rewind($s);
@@ -1712,7 +1725,7 @@ impl Op<'_> {
         };
         let mut dummy = 0;
         let _ = self.kind(|req, ops| ops.seek(req, position, Some(Whence::Set), &mut dummy));
-        self.with(|s| (s.readpos, s.writepos) = (0, 0));
+        self.with(PhpStream::drop_buffer);
     }
 
     /// The fd [`Stream::dup_fd`] copies: the stream flushed, and sought
@@ -2374,7 +2387,7 @@ impl Ops for Temp {
     /// `php_stream_temp_flush` (`Z/main/streams/memory.c:418`).
     fn flush(&mut self, req: &mut Request) -> bool {
         self.inner()
-            .and_then(|inner| req.stream_op(inner, Op::flush))
+            .and_then(|inner| req.stream_op(inner, StreamOp::flush))
             .unwrap_or(false)
     }
 
@@ -2408,7 +2421,7 @@ impl Ops for Temp {
     /// `php_stream_temp_stat` (`Z/main/streams/memory.c:510`): the inner
     /// stream's.
     fn stat(&mut self, req: &mut Request) -> Option<StatBuf> {
-        req.stream_op(self.inner()?, Op::stat).flatten()
+        req.stream_op(self.inner()?, StreamOp::stat).flatten()
     }
 
     /// `php_stream_temp_set_option`'s default arm: the inner stream's.
@@ -3797,7 +3810,7 @@ pub(crate) trait StreamLayer {
     fn stream_op<'r, R>(
         &'r mut self,
         stream: Stream,
-        f: impl FnOnce(&mut Op<'r>) -> R,
+        f: impl FnOnce(&mut StreamOp<'r>) -> R,
     ) -> Option<R>;
     fn streams_held<R>(&mut self, streams: &[Stream], wait: impl FnOnce(&mut Request) -> R) -> R;
     fn stream_with<R>(&mut self, stream: Stream, f: impl FnOnce(&mut PhpStream) -> R) -> Option<R>;
@@ -4517,7 +4530,7 @@ impl StreamLayer for Request {
             }
             head
         } else {
-            let Some(eof) = self.stream_op(stream, Op::eof) else {
+            let Some(eof) = self.stream_op(stream, StreamOp::eof) else {
                 if let Some(crypto) = crypto {
                     crypto.give_up(self);
                 }
@@ -4614,7 +4627,7 @@ impl StreamLayer for Request {
     /// What a socket's active crypto layer shows under `crypto`, ahead of
     /// the three the socket shows.
     fn crypto_meta(&mut self, stream: Stream) -> Result<Option<Owner<Value>>, Thrown> {
-        let meta = self.stream_op(stream, Op::crypto_meta).flatten();
+        let meta = self.stream_op(stream, StreamOp::crypto_meta).flatten();
         match meta {
             Some(Ok(Some(array))) => Ok(Some(array.into_value())),
             Some(Err(thrown)) => Err(thrown),
@@ -4727,7 +4740,7 @@ impl StreamLayer for Request {
         Ok(owner.into_typed(Stream::of))
     }
 
-    /// One operation on a stream ([`Op`]): the stream held where its
+    /// One operation on a stream ([`StreamOp`]): the stream held where its
     /// resource keeps it for the length of `f`, which borrows it in
     /// segments and serves PHP code between them. `None` is a resource
     /// that is closed or is not a stream. A stream whose resource PHP
@@ -4736,9 +4749,9 @@ impl StreamLayer for Request {
     fn stream_op<'r, R>(
         &'r mut self,
         stream: Stream,
-        f: impl FnOnce(&mut Op<'r>) -> R,
+        f: impl FnOnce(&mut StreamOp<'r>) -> R,
     ) -> Option<R> {
-        let mut op = Op::begin(self, stream)?;
+        let mut op = StreamOp::begin(self, stream)?;
         let out = f(&mut op);
         op.end();
         Some(out)
@@ -4970,7 +4983,7 @@ impl Stream {
     /// persistent stream, which nothing touches between requests. `None`
     /// for a kind with no fd.
     pub fn dup_fd(self, req: &mut Request) -> Option<OwnedFd> {
-        let fd = req.stream_op(self, Op::keep_fd).flatten()?;
+        let fd = req.stream_op(self, StreamOp::keep_fd).flatten()?;
         crate::api::layer::dup_fd(fd).ok()
     }
 
@@ -5321,7 +5334,7 @@ impl Ops for Listing {
 )]
 pub(crate) fn dtor(req: &mut Request, r: Resource) -> Result<(), Thrown> {
     if let Some(slot) = r.native_mut::<held::Payload>(req).and_then(Option::take) {
-        held::closed(req, r, slot);
+        held::release_slot(req, r, slot);
     }
     Ok(())
 }
