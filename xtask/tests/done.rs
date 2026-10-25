@@ -2199,57 +2199,53 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
 #[test]
 fn a_withdrawal_is_renewed_by_a_read_past_a_later_commit_and_a_refused_one_is_not() {
     use xtask::ticket::{Act, Reach, Successors, Verdict as Close};
-    let root = scratch("withdrawn-then-commit");
-    let repo = Repo::at(&root);
-    repo.git(&["config", "branch.main.ticket", "31"]);
-    let withdrawn = |reason: &str| {
-        let reach = Reach::of(&root).unwrap();
+    let withdrawn = |root: &Path, reason: &str| {
+        let reach = Reach::of(root).unwrap();
         Act::Close(
             Close::Withdrawn(reason.to_owned()),
             Successors::Nothing,
             reach,
         )
     };
-    let commit = |name: &str| {
+    let commit = |root: &Path, name: &str| {
         std::fs::write(root.join(name), "another ticket's work\n").unwrap();
+        let repo = Repo::at(root);
         repo.git(&["add", "--", name]);
         repo.git(&["commit", "-q", "-m", name]);
     };
     // The tracker after the close: the ticket closed. A read asks it
     // nothing else, the withdrawal being the store's.
-    let read_closed = |body: &str| {
+    let read_closed = |root: &Path| {
         let tracker = Tracker::empty("done-withdrawn");
         tracker.with_issue(&xtask::ticket::Issue {
-            body: std::fs::read_to_string(fixtures().join("done/ticket").join(body)).unwrap(),
+            body: std::fs::read_to_string(fixtures().join("done/ticket/withdrawn.md")).unwrap(),
             state: xtask::ticket::State::Closed,
             ..issue(31)
         });
         let reading = xtask::ticket::run(
-            &root,
-            &xtask::manifest::Manifest::load(&root).unwrap(),
+            root,
+            &xtask::manifest::Manifest::load(root).unwrap(),
             &tracker.gh(),
             Act::Read,
             xtask::track::Ticket::new(31),
             None,
         )
         .unwrap();
-        Store::of_workspace(&root)
+        Store::of_workspace(root)
             .record(std::slice::from_ref(&reading))
             .unwrap();
         reading
     };
 
-    let reading = ticket_act(
-        &root,
-        31,
-        "withdrawn.md",
-        withdrawn("measured on HEAD: not in the tree"),
-    );
+    let root = scratch("withdrawn-then-commit");
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
+    let measured = withdrawn(&root, "measured on HEAD: not in the tree");
+    let reading = ticket_act(&root, 31, "withdrawn.md", measured);
     assert_eq!(reading.status, Status::Pass, "{}", reading.message);
-    commit("after-the-withdrawal.txt");
+    commit(&root, "after-the-withdrawal.txt");
     let lines = about_the_ticket(&judge(&root));
     assert!(lines.len() == 1 && lines[0].contains("stale"), "{lines:?}");
-    let read = read_closed("withdrawn.md");
+    let read = read_closed(&root);
     assert_eq!(read.status, Status::Pass, "{}", read.message);
     assert_eq!(read.numbers["withdrawn"], 1.into(), "{read:#?}");
     let said = format!("withdrawn by the close at {}: ", reading.commit);
@@ -2258,21 +2254,24 @@ fn a_withdrawal_is_renewed_by_a_read_past_a_later_commit_and_a_refused_one_is_no
         "{}",
         read.message
     );
-    let verdict = judge(&root);
-    assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
-    commit("after-the-read.txt");
-    let again = read_closed("withdrawn.md");
+    assert!(about_the_ticket(&judge(&root)).is_empty());
+    // A read after the read, and after a withdrawal refused since,
+    // still says the close.
+    commit(&root, "after-the-read.txt");
+    let again = ticket_act(&root, 31, "unticked.md", withdrawn(&root, "nothing here"));
+    assert_eq!(again.status, Status::Fail, "{}", again.message);
+    let again = read_closed(&root);
     assert_eq!(again.status, Status::Pass, "{}", again.message);
-    assert_eq!(
-        again.message, read.message,
-        "a read after a read says the close"
-    );
+    assert_eq!(again.message, read.message, "the close is said again");
     assert!(about_the_ticket(&judge(&root)).is_empty());
 
-    let reading = ticket_act(&root, 31, "unticked.md", withdrawn("nothing here"));
-    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
-    commit("after-the-refusal.txt");
-    let read = read_closed("withdrawn.md");
+    // A withdrawal refused and none taken: the read holds the boxes.
+    let root = scratch("withdrawn-refused");
+    Repo::at(&root).git(&["config", "branch.main.ticket", "31"]);
+    let refused = ticket_act(&root, 31, "unticked.md", withdrawn(&root, "nothing here"));
+    assert_eq!(refused.status, Status::Fail, "{}", refused.message);
+    commit(&root, "after-the-refusal.txt");
+    let read = read_closed(&root);
     assert_eq!(read.status, Status::Fail, "{}", read.message);
     let lines = about_the_ticket(&judge(&root));
     assert!(

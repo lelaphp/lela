@@ -1475,27 +1475,25 @@ fn counted(
     Ok(())
 }
 
-/// What the store's reading over `ticket` says of a withdrawal the
-/// instrument made, where it is one: a close that withdrew the ticket,
-/// said with the commit it closed at, or a read that carried one before,
-/// said as it said it, so a read after a read says what the close did;
-/// none for a close refused, a reading of anything else, or no reading,
-/// as in a checkout that never saw the close.
+/// The withdrawal of `ticket` the store's log holds, said with the commit
+/// it closed at and its message: the last close of the ticket that
+/// withdrew it ([`Closed::of`]), so neither a read after it nor a close
+/// refused after it, as closed already, hides it; none where the log holds
+/// no such close, as in a checkout that never saw it.
 fn withdrawn_before(root: &Path, ticket: Ticket, criteria: &Criteria) -> Result<Option<String>> {
-    let store = crate::reading::Store::of_workspace(root);
-    let Some(before) = store.read(INSTRUMENT, &scope(ticket))? else {
-        return Ok(None);
-    };
-    let withdrew = before.status == Status::Pass && before.int(WITHDRAWN).is_some_and(|n| n > 0);
-    Ok(withdrew.then(|| match Closed::of(&before) {
-        Some(_) => format!(
+    let log = crate::reading::Store::of_workspace(root).history(INSTRUMENT)?;
+    let at = scope(ticket);
+    let close = (log.readings.iter().rev())
+        .filter(|r| r.scope == at)
+        .find(|r| Closed::of(r).is_some_and(|closed| closed.withdrawn));
+    Ok(close.map(|close| {
+        format!(
             "{ticket}: {} of {} criteria ticked; withdrawn by the close at {}: {}",
             criteria.ticked.len(),
             criteria.count(),
-            before.commit,
-            before.message
-        ),
-        None => before.message,
+            close.commit,
+            close.message
+        )
     }))
 }
 
