@@ -13,7 +13,7 @@ use std::io::{self, Read};
 use std::os::unix::fs::FileExt;
 
 use crate::codec::{PkwareKeys, WinzipAes};
-use crate::error::{DETAIL_INVALID_FILE_LENGTH, Er, Status};
+use crate::error::{Detail, Er, Status};
 
 /// `BUFSIZE`: what a decompressor reads from the layer below at once.
 const BUFSIZE: usize = 8192;
@@ -1457,7 +1457,10 @@ impl Reader {
     /// `zip_source_zip_file_create` past the stat, for an unchanged
     /// entry read whole: decryption, then decompression, then the CRC,
     /// each opened as libzip opens it.
-    pub(crate) fn decoded(window: Window, l: &Layers<'_>) -> Result<Reader, Status> {
+    pub(crate) fn decoded(
+        window: impl FnOnce() -> Result<Window, Status>,
+        l: &Layers<'_>,
+    ) -> Result<Reader, Status> {
         let decrypt = l.password.is_some();
         if decrypt
             && !matches!(
@@ -1472,6 +1475,16 @@ impl Reader {
         }
         if !matches!(l.method, 0 | 8 | 12 | 14 | 93 | 95) {
             return Err(Status::of(Er::Compnotsupp, 0));
+        }
+        // The decryption layer's refusal as libzip 1.12 creates it, before
+        // the empty data's shortcut: twelve bytes of PKWARE header, and
+        // WinZip AES's salt, check and code.
+        let least = match l.encryption {
+            crate::archive::EM_TRAD_PKWARE => 12,
+            e => 4 * u64::from((e & 0xff) as u8) + 16,
+        };
+        if decrypt && l.comp_size < least {
+            return Err(Status::of(Er::Opnotsupp, 0));
         }
         let crc = l.crc.map(|c| (c, l.size));
         let empty = if decrypt || l.method != 0 {
@@ -1489,6 +1502,7 @@ impl Reader {
                 false,
             ));
         }
+        let window = window()?;
         let raw = match l.password {
             None => Raw::Plain(window),
             Some(p) if l.encryption == crate::archive::EM_TRAD_PKWARE => {
@@ -1576,20 +1590,39 @@ impl Reader {
 
     /// `crc_read` on `ZIP_SOURCE_READ`: the body's bytes, the CRC and the
     /// length held to the stat's at their end.
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('seek-len-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// $z->addFromString('a', str_repeat('a', 100)); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->close();
+    /// $b = file_get_contents('seek-len-witness.zip'); $c = strpos($b, "PK\1\2");
+    /// file_put_contents('seek-len-witness.zip', substr_replace($b, pack('V', 120), $c + 24, 4));
+    /// $z->open('seek-len-witness.zip'); $f = $z->getStream('a');
+    /// var_dump(fseek($f, 50), strlen(fread($f, 8192)), fread($f, 8192));
+    /// $z->close(); unlink('seek-len-witness.zip');
+    /// ```
+    /// ```expect
+    ///
+    /// Warning: fread(): Zip stream error: Zip archive inconsistent: file length in header doesn't match actual file length in %s on line %d
+    /// int(0)
+    /// int(50)
+    /// bool(false)
+    /// ```
     fn read_layer(&mut self, buf: &mut [u8]) -> Result<usize, Status> {
         let n = self.body.read_some(buf)?;
         let Some(c) = &mut self.crc else {
             return Ok(n);
         };
         if n == 0 {
+            // `validate_crc` (libzip 1.12): the CRC where the whole data
+            // was hashed, and the length at every end of the data.
             if c.hashed == c.position {
                 c.complete = true;
                 if c.hasher.clone().finalize() != c.expect {
                     return Err(Status::of(Er::Crc, 0));
                 }
-                if c.position != c.size {
-                    return Err(Status::of(Er::Incons, DETAIL_INVALID_FILE_LENGTH));
-                }
+            }
+            if c.position != c.size {
+                return Err(Status::incons(Detail::InvalidFileLength, None));
             }
         } else if !c.complete && c.position <= c.hashed {
             let skip = usize::try_from(c.hashed - c.position).unwrap_or(usize::MAX);

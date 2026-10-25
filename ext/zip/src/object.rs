@@ -427,7 +427,7 @@ fn string(req: &mut Request, bytes: &[u8]) -> Result<Owner<PhpString>, Thrown> {
 /// `RETURN_SB`.
 fn stat_array(req: &mut Request, st: &za::Stat) -> Result<Owner<PhpArray>, Thrown> {
     let mut out = PhpArray::new(req)?;
-    let name = string(req, &st.name)?;
+    let name = string(req, c_str(&st.name))?;
     let rows: [(&[u8], Value); 8] = [
         (b"name", Value::string(*name)),
         (b"index", Value::int(c::long(st.index))),
@@ -2627,7 +2627,8 @@ fn get_stream(req: &mut Rq, this: Z, which: &Union<i64, Vec<u8>>, flags: i64) ->
     let Some(id) = archive_id(req, this.object()) else {
         return Ok(Untyped(OrFalse::False));
     };
-    let stream = crate::stream::open_entry(req, zf, Some((&st.name, id)), b"rb", None, None)?;
+    let name = c_str(&st.name);
+    let stream = crate::stream::open_entry(req, zf, Some((name, id)), b"rb", None, None)?;
     Ok(Untyped(stream.map_or(OrFalse::False, |s| {
         OrFalse::Value(s.into_resource())
     })))

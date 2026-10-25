@@ -9,7 +9,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
 use crate::dostime::{DosTime, TORRENTZIP, Zone};
-use crate::error::{Done, Er, Failed, Status};
+use crate::error::{Detail, Done, Er, Failed, Status};
 use crate::read::{Layers, Reader, Stdio, Window};
 use crate::strings::{self, Enc, FL_ENC_RAW, FL_ENC_STRICT, FL_ENC_UTF_8, ZStr};
 
@@ -353,6 +353,8 @@ pub(crate) struct Stat {
 pub(crate) struct Data {
     pub(crate) file: File,
     pub(crate) mode: u32,
+    /// Its size at the open, which libzip's file source stats once.
+    pub(crate) size: u64,
     /// The stdio `FILE` libzip reads it through, lent to the archive while
     /// the archive's object lends it out to its entries' streams.
     pub(crate) stdio: Option<Stdio>,
@@ -496,6 +498,16 @@ impl Archive {
         let mut at = 0usize;
         while cdir.get(at..at + 4) == Some(b"PK\x01\x02") {
             let (de, used) = parse_central(&cdir[at..], base).ok_or(Status::of(Er::Incons, 0))?;
+            // `_zip_dirent_read` under `ZIP_CHECKCONS` (libzip 1.12): a
+            // name holding a NUL refused, at the entry `zip_open` reads.
+            if self.open_flags & CHECKCONS != 0
+                && de.filename.as_ref().is_some_and(|f| f.raw.contains(&0))
+            {
+                return Err(Status::incons(
+                    Detail::NulInFilename,
+                    Some(self.entries.len()),
+                ));
+            }
             self.entries.push(Entry {
                 orig: Some(de),
                 ..Entry::default()
@@ -516,7 +528,12 @@ impl Archive {
             .try_clone()
             .map(|f| self.replay(Stdio::new(f), len, start, &cdir[..at]))
             .ok();
-        self.data = Some(Data { file, mode, stdio });
+        self.data = Some(Data {
+            file,
+            mode,
+            size: len,
+            stdio,
+        });
         if self.open_flags & CHECKCONS != 0 {
             for i in 0..self.entries.len() {
                 self.local_header(i)
@@ -653,7 +670,26 @@ impl Archive {
         }
     }
 
-    /// `_zip_name_locate`, its error the code it would set.
+    /// `_zip_name_locate`, its error the code it would set; each name
+    /// compared as C reads it, a NUL it holds ending it, which libzip 1.12
+    /// keeps and `ZIP_CHECKCONS` refuses at the open:
+    ///
+    /// ```php
+    /// $l = "PK\3\4" . pack('vvvvvVVVvv', 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 3, 0) . "a\0b" . 'hello';
+    /// $c = "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 3, 0, 0, 0, 0, 0x81a40000, 0) . "a\0b";
+    /// file_put_contents('nul-witness.zip', $l . $c . "PK\5\6" . pack('vvvvVVv', 0, 0, 1, 1, strlen($c), strlen($l), 0));
+    /// $z = new ZipArchive; var_dump($z->open('nul-witness.zip', ZipArchive::CHECKCONS), $z->open('nul-witness.zip'));
+    /// var_dump($z->getNameIndex(0), $z->statIndex(0)['name'], $z->locateName('a'), $z->getFromName('a'));
+    /// $z->close(); unlink('nul-witness.zip');
+    /// ```
+    /// ```expect
+    /// int(21)
+    /// bool(true)
+    /// string(1) "a"
+    /// string(1) "a"
+    /// int(0)
+    /// string(5) "hello"
+    /// ```
     fn locate(&self, fname: &[u8], flags: u32) -> Result<usize, Er> {
         if fname.len() > 0xffff {
             return Err(Er::Inval);
@@ -672,6 +708,9 @@ impl Archive {
             let Ok(name) = self.name_of(i, name_flags) else {
                 continue;
             };
+            // `strcmp` on the name as C reads it: libzip 1.12 keeps a NUL
+            // a name holds, where 1.11.4 made it a space.
+            let name = php_ext::coerce::c_str(&name).to_vec();
             if !linear && flags & FL_UNCHANGED == 0 && self.entries[i].deleted {
                 continue;
             }
@@ -1281,7 +1320,7 @@ impl Archive {
         let size = self.entries[idx].orig.as_ref().map_or(0, |o| o.comp_size);
         let (start, _) = self
             .local_header(idx)
-            .map_err(|()| Status::of(Er::Incons, 0))?;
+            .map_err(|()| Status::bare(Detail::CdirEntryInvalid))?;
         let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
         data.through(|f| {
             f.seek(start);
@@ -1302,10 +1341,35 @@ impl Archive {
     }
 
     /// The window on the archive's file that entry `idx`'s data is, past
-    /// its local header (`_zip_file_get_offset`): the header's name and
-    /// extra field lengths are read through the archive's `FILE`, a seek to
-    /// the header and one past its signature, and a file too short for
-    /// them is `ZIP_ER_EOF`.
+    /// its local header (`_zip_file_get_offset`), as libzip 1.12 makes it:
+    /// refused with `ZIP_ER_INVAL` where the data would pass the archive's
+    /// size at its open, then the whole header read through the archive's
+    /// `FILE` from a seek to it, a file too short for it `ZIP_ER_EOF` and a
+    /// header without its signature the bare detail `central header
+    /// invalid`. Data that is empty takes no window, nor does a
+    /// decryption layer's own refusal (`Reader::decoded`):
+    ///
+    /// ```php
+    /// function zip1($data, $flags = 0, $magic = "PK\3\4", $csize = null) {
+    ///     $l = $magic . pack('vvvvvVVVvv', 20, $flags, 0, 0, 0x21, crc32($data), strlen($data), strlen($data), 1, 0) . 'a' . $data;
+    ///     $c = "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, $flags, 0, 0, 0x21, crc32($data), $csize ?? strlen($data), strlen($data), 1, 0, 0, 0, 0, 0x81a40000, 0) . 'a';
+    ///     return $l . $c . "PK\5\6" . pack('vvvvVVv', 0, 0, 1, 1, strlen($c), strlen($l), 0);
+    /// }
+    /// $cases = ['bad magic' => zip1('hello', 0, "XX\3\4"), 'past the end' => zip1('hello', 0, "PK\3\4", 100000),
+    ///     'short pkware' => zip1('hello', 1), 'empty pkware' => zip1('', 1)];
+    /// foreach ($cases as $label => $bytes) {
+    ///     file_put_contents('window-witness.zip', $bytes); $z = new ZipArchive; $z->open('window-witness.zip'); $z->setPassword('pw');
+    ///     $r = @$z->getFromName('a'); echo $label, ': ', var_export($r, true), ' ', $z->getStatusString(), ' ', var_export(@$z->getStream('a'), true), "\n";
+    ///     $z->close();
+    /// }
+    /// unlink('window-witness.zip');
+    /// ```
+    /// ```expect
+    /// bad magic: false Zip archive inconsistent: entry 0: central header invalid false
+    /// past the end: false Invalid argument false
+    /// short pkware: false Operation not supported false
+    /// empty pkware: false Operation not supported false
+    /// ```
     fn window(&mut self, idx: usize) -> Result<Window, Status> {
         let orig = self.entries[idx]
             .orig
@@ -1313,24 +1377,33 @@ impl Archive {
             .ok_or(Status::of(Er::Internal, 0))?;
         let (offset, size) = (orig.offset, orig.comp_size);
         let data = self.data.as_mut().ok_or(Status::of(Er::Internal, 0))?;
+        // `_zip_source_window_new` (libzip 1.12): data past the archive's
+        // size at its open is refused as the window is made.
+        if size > data.size {
+            return Err(Status::of(Er::Inval, 0));
+        }
         let mut own = data
             .file
             .try_clone()
             .map(Stdio::new)
             .map_err(|e| Status::of(Er::Open, e.raw_os_error().unwrap_or(0)))?;
         let f = data.stdio.as_mut().unwrap_or(&mut own);
-        let mut lens = [0u8; 4];
+        // `_zip_dirent_size` (libzip 1.12): the whole local header read and
+        // its magic held, where 1.11.4 read the two lengths alone.
+        let mut head = [0u8; 30];
         f.seek(offset);
-        f.seek(offset + 26);
-        match f.read(&mut lens) {
-            Ok(4) => {}
+        match f.read(&mut head) {
+            Ok(30) => {}
             Ok(_) => return Err(Status::of(Er::Eof, 0)),
             Err(e) => return Err(Status::of(Er::Read, e.raw_os_error().unwrap_or(0))),
         }
+        if head[..4] != *b"PK\x03\x04" {
+            return Err(Status::bare(Detail::CdirEntryInvalid));
+        }
         let start = offset
             + 30
-            + u64::from(u16::from_le_bytes([lens[0], lens[1]]))
-            + u64::from(u16::from_le_bytes([lens[2], lens[3]]));
+            + u64::from(u16::from_le_bytes([head[26], head[27]]))
+            + u64::from(u16::from_le_bytes([head[28], head[29]]));
         Ok(Window::new(own, start, size, true))
     }
 
@@ -1359,8 +1432,7 @@ impl Archive {
             bitflags,
             check: self.open_flags & CHECKCONS != 0,
         };
-        let window = self.window(idx)?;
-        Reader::decoded(window, &layers)
+        Reader::decoded(|| self.window(idx), &layers)
     }
 
     /// An unchanged entry's data, decrypted with `password` and
