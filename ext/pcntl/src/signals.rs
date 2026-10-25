@@ -228,6 +228,20 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
     Ok(true)
 }
 
+/// `pcntl_interrupt_function` (`pcntl.c:1922-1927`), pcntl's link of
+/// `zend_interrupt_function`: the signals taken dispatched
+/// ([`dispatch`]), what a handler threw left pending, and then the one it
+/// saved served.
+pub(crate) fn interrupt(
+    req: &mut Request,
+    beneath: Beneath<'_, chain::Interrupt>,
+) -> Result<(), Thrown> {
+    if let Err(thrown) = dispatch(req) {
+        leave_pending(req, thrown);
+    }
+    beneath.serve(req)
+}
+
 /// `pcntl_signal_dispatch()` the function (`pcntl.c:1366`): every signal
 /// posted under a number the table holds, taken off the record in the
 /// order it arrived, and its handler called with the number and the
@@ -263,9 +277,10 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
 /// thrown
 /// USR1, USR2, HUP
 /// ```
-/// No fiber may
-/// switch while the handlers play, `zend_fiber_switch_block`, so a
-/// handler served inside a fiber cannot suspend it:
+///
+/// No fiber may switch while the handlers play,
+/// `zend_fiber_switch_block`, so a handler served inside a fiber cannot
+/// suspend it:
 ///
 /// ```php
 /// pcntl_signal(SIGUSR1, function () {
@@ -280,20 +295,6 @@ pub(crate) fn pcntl_signal_dispatch(req: &mut Request) -> Result<bool, Thrown> {
 /// Cannot switch fibers in current execution context
 /// end
 /// ```
-/// `pcntl_interrupt_function` (`pcntl.c:1922-1927`), pcntl's link of
-/// `zend_interrupt_function`: the signals taken dispatched
-/// ([`dispatch`]), what a handler threw left pending, and then the one it
-/// saved served.
-pub(crate) fn interrupt(
-    req: &mut Request,
-    beneath: Beneath<'_, chain::Interrupt>,
-) -> Result<(), Thrown> {
-    if let Err(thrown) = dispatch(req) {
-        leave_pending(req, thrown);
-    }
-    beneath.serve(req)
-}
-
 pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
     let table = &mut req.state::<State>().signals;
     if table.dispatching || table.handlers.is_empty() {
@@ -318,16 +319,15 @@ pub(crate) fn dispatch(req: &mut Request) -> Result<(), Thrown> {
         .code_mut()
         .with_fiber_switch_blocked(|req| play(req, &mut queue));
     let table = &mut req.state::<State>().signals;
-    if !queue.is_empty() {
-        // "Put back what the throwing handler did not get to, instead of
-        // dropping it, and ask the engine to come back once the
-        // exception has been handled."
-        table.held = queue;
-        if matches!(table.delivery, Delivery::Asynchronous { .. }) {
-            req.limits().interrupt().raise();
-        }
+    table.dispatching = false;
+    // "Put back what the throwing handler did not get to, instead of
+    // dropping it, and ask the engine to come back once the exception
+    // has been handled."
+    let come_back = !queue.is_empty() && matches!(table.delivery, Delivery::Asynchronous { .. });
+    table.held = queue;
+    if come_back {
+        req.limits().interrupt().raise();
     }
-    req.state::<State>().signals.dispatching = false;
     if masked {
         sigprocmask(SigmaskHow::SIG_SETMASK, Some(&unmasked), None).ok();
     }
