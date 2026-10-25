@@ -7,7 +7,9 @@ use php_ext::abi::{Callable, GcTable, Instance, Passed, Path, Raw, Refusals, Std
 use php_ext::attr::php_class;
 use php_ext::call::call;
 use php_ext::coerce::{callable_checked, to_callable, with_string};
-use php_ext::raising::{Level, Thrown, arg_type_error, arg_value_error, docref, throw_error};
+use php_ext::raising::{
+    Level, Thrown, arg_type_error, arg_value_error, docref, throw_error, type_error,
+};
 use php_ext::request::{Foreign, Request};
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
@@ -638,7 +640,7 @@ fn dispatch(
                 ));
             };
             let Operand::Str(name) = first else {
-                return Err(throw_error(req, "TypeError", NOT_A_NAME));
+                return Err(type_error(req, NOT_A_NAME));
             };
             (None, name, operands.collect::<Vec<_>>())
         }
@@ -699,9 +701,8 @@ fn dispatch(
         ValueRef::Bool(b) => Ok(Returned::Bool(b)),
         ValueRef::Object(_) => {
             answer.give_up(req);
-            return Err(throw_error(
+            return Err(type_error(
                 req,
-                "TypeError",
                 "Only objects that are instances of DOM nodes can be converted to an XPath expression",
             ));
         }

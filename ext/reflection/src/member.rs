@@ -17,7 +17,9 @@ use php_ext::call::{
 use php_ext::decl::{
     ClassConstDecl, ClassKind, HookKind, MethodDecl, PropertyDecl, Type, Visibility,
 };
-use php_ext::raising::{Thrown, arg_count_error, arg_type_error, deprecated, throw, throw_error};
+use php_ext::raising::{
+    Thrown, arg_count_error, arg_type_error, deprecated, throw, throw_error, throw_exception_ex,
+};
 use php_ext::request::Request;
 use php_ext::values::{ClassId, Owner, PhpArray, PhpObject, PhpString, Value, ValueRef};
 
@@ -204,7 +206,7 @@ fn this_constant(
     let class = class_named(req, &class)?;
     let Some((scope, decl)) = class_constant_named(req, class, &name) else {
         let named = class_name_of(req, class);
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "ReflectionException",
             &format!(
@@ -467,7 +469,7 @@ impl ReflectionProperty {
             }
             None => {
                 let class = class_name_of(req, class);
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "ReflectionException",
                     &format!(
@@ -1954,7 +1956,7 @@ impl ReflectionClassConstant {
         let name = constant.as_bytes().to_vec();
         let Some((declaring, _)) = class_constant_named(req, class, &name) else {
             let class = class_name_of(req, class);
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(
@@ -2330,7 +2332,7 @@ impl ReflectionConstant {
         let name = name.as_bytes().to_vec();
         let lowered = constant_key(&name);
         if constant(req, &lowered)?.is_none() {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "ReflectionException",
                 &format!(

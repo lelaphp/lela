@@ -8,7 +8,7 @@ use std::net::Ipv4Addr;
 use php_ext::abi::{Instance, OrFalse, Union, Untyped};
 use php_ext::attr::php_function;
 use php_ext::coerce::{to_long, to_string, truthy, value_name};
-use php_ext::raising::{Thrown, arg_type_error, arg_value_error, argument_error, throw_error};
+use php_ext::raising::{Thrown, arg_type_error, arg_value_error, argument_error, value_error};
 use php_ext::request::Request;
 use php_ext::values::walk;
 use php_ext::values::{Owner, PhpArray, Value, ValueRef};
@@ -300,11 +300,7 @@ fn if_index(req: &mut Request, value: &Value) -> Result<Option<u32>, Thrown> {
     if let ValueRef::Int(n) = value.as_ref() {
         return match u32::try_from(n) {
             Ok(index) => Ok(Some(index)),
-            Err(_) => Err(throw_error(
-                req,
-                "ValueError",
-                "Index must be between 0 and 4294967295",
-            )),
+            Err(_) => Err(value_error(req, "Index must be between 0 and 4294967295")),
         };
     }
     let name = to_string(req, value)?;
@@ -390,7 +386,7 @@ fn mcast_addr(
 ) -> Result<Option<Addr>, Thrown> {
     let Some(value) = find(table, key) else {
         let text = format!("No key \"{key}\" passed in optval");
-        return Err(throw_error(req, "ValueError", &text));
+        return Err(value_error(req, &text));
     };
     let text = to_string(req, &value)?;
     let family = match sock(req, socket) {
@@ -506,7 +502,7 @@ fn mreq(
                 "MCAST_LEAVE_GROUP"
             };
             let text = format!("Option {which} is inapplicable to this socket type");
-            Err(throw_error(req, "ValueError", &text))
+            Err(value_error(req, &text))
         }
     }
 }

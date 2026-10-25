@@ -96,7 +96,7 @@ pub use stack::{
     HeaderImage, ROOM_BYTES, Slot, StackLayout, VmStack,
 };
 pub use standalone::StandaloneHeap;
-pub use string::{FreshStr, Intern, Made, Pending, Str, Strings};
+pub use string::{FreshStr, Intern, Made, Pending, Sizing, Str, Strings};
 pub use zval::{PropBit, Zval, ZvalRef, ZvalType};
 
 use gc::Counted;

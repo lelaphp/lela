@@ -9,7 +9,7 @@
 use php_heap::{FrameRef, Slot, Zval};
 
 use crate::api::call::Function;
-use crate::api::raising::{Thrown, throw_error};
+use crate::api::raising::{Thrown, argument_count_error};
 use crate::api::values::{ClassId, Owner, PhpObject, PhpString, TypeTag, Value};
 use crate::exec;
 
@@ -163,7 +163,7 @@ impl Request {
         }
         let native = self.active_native();
         let message = format!("{native}() does not accept unknown named parameters");
-        Err(throw_error(self, "ArgumentCountError", &message))
+        Err(argument_count_error(self, &message))
     }
 
     /// `Z_PARAM_VARIADIC_WITH_NAMED`'s named half: the extra named

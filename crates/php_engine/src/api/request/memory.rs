@@ -11,7 +11,7 @@ use std::sync::Arc;
 /// the request's is allocated from (`zend_test_gh18756`).
 pub use php_heap::StandaloneHeap;
 pub use php_heap::{Allocation, AllocationObserverId, ObserveAllocations};
-use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, SortEntry, Str, Zval, ZvalRef};
+use php_heap::{Arr, Fatal, Heap, Intern, Key, Ref, Sizing, SortEntry, Str, Zval, ZvalRef};
 pub use php_heap::{ecalloc, efree, emalloc, erealloc};
 
 use crate::api::abi::{Beneath, chain};
@@ -133,7 +133,15 @@ impl RequestStrings<'_> {
 }
 
 impl Intern for RequestStrings<'_> {
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
+    /// The frozen string of no byte or one, the engine's where the table
+    /// is asked and holds it, else one laid on the request's heap at
+    /// `sizing`'s size, which the unit takes.
+    fn intern_marked(
+        &mut self,
+        bytes: &[u8],
+        valid_utf8: bool,
+        sizing: Sizing,
+    ) -> Result<Str, Fatal> {
         if bytes.len() <= 1
             && let Some(frozen) = self.shared.permanent(bytes)
         {
@@ -144,7 +152,10 @@ impl Intern for RequestStrings<'_> {
         {
             return Ok(held);
         }
-        let s = self.heap.string(bytes)?;
+        let s = match sizing {
+            Sizing::Alloc => self.heap.string(bytes),
+            Sizing::Finit => self.heap.string_finit(bytes),
+        }?;
         if valid_utf8 {
             s.mark_valid_utf8();
         }
@@ -589,6 +600,14 @@ impl Request {
     pub(crate) fn array(&mut self) -> Result<PhpArray, Thrown> {
         let allocated = self.heap.array();
         self.fatal_of(allocated).map(PhpArray::of)
+    }
+
+    /// An empty array whose first write makes room for one element,
+    /// php's `array_init_singleton` ([`php_heap::Heap::array_singleton`]),
+    /// one owner the caller's.
+    pub(crate) fn array_singleton(&mut self) -> Result<Owner<PhpArray>, Thrown> {
+        let allocated = self.heap.array_singleton();
+        adopted(self.fatal_of(allocated).map(PhpArray::of))
     }
 
     /// `zend_new_array(size)`, what `INIT_ARRAY` lays down for the

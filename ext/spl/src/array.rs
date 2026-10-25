@@ -29,7 +29,8 @@ use php_ext::attr::php_class;
 use php_ext::call::{autoload, call, call_method, clone_with, instantiate, lookup_class};
 use php_ext::coerce::{callable_checked, compare, to_long, truthy};
 use php_ext::raising::{
-    Level, Thrown, deprecated, illegal_container_offset, throw, throw_error, warning,
+    Level, Thrown, deprecated, illegal_container_offset, throw, throw_error, throw_exception_ex,
+    warning,
 };
 use php_ext::request::Request;
 use php_ext::values::walk;
@@ -830,7 +831,7 @@ impl ArrayObject {
         if let Some(name) = class.and_then(|c| c.as_str_bytes().map(<[u8]>::to_vec)) {
             let shown = String::from_utf8_lossy(&name).into_owned();
             let Some(found) = autoload(req, &name)? else {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "UnexpectedValueException",
                     &format!(
@@ -839,7 +840,7 @@ impl ArrayObject {
                 ));
             };
             if !crate::is_a(req, found, b"Iterator") {
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "UnexpectedValueException",
                     &format!(
@@ -1192,7 +1193,7 @@ impl ArrayIterator {
                 return Ok(());
             }
         }
-        Err(throw(
+        Err(throw_exception_ex(
             req,
             "OutOfBoundsException",
             &format!("Seek position {position} is out of range"),
@@ -2686,7 +2687,7 @@ fn set_array(
                     crate::class_name(req, other.class()),
                     crate::class_name(req, object.class()),
                 );
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "InvalidArgumentException",
                     &format!(
@@ -2699,7 +2700,7 @@ fn set_array(
             if crate::is_a(req, other.class(), b"UnitEnum") {
                 let class =
                     String::from_utf8_lossy(&crate::class_name(req, object.class())).into_owned();
-                return Err(throw(
+                return Err(throw_exception_ex(
                     req,
                     "InvalidArgumentException",
                     &format!("Enums are not compatible with {class}"),

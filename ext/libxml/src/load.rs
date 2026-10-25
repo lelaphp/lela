@@ -7,7 +7,7 @@
 
 use php_ext::abi::Callable;
 use php_ext::call::{call, closure_from_callable};
-use php_ext::raising::{Level, Thrown, docref, throw_error};
+use php_ext::raising::{Level, Thrown, docref, type_error};
 use php_ext::request::{Request, Stream, StreamCtx, Streams as _, UrlStat};
 use php_ext::values::{Owner, PhpArray, PhpString, Value, ValueRef};
 
@@ -219,7 +219,7 @@ fn read_answer(req: &mut Request, retval: &Value, callable: &Callable, loader: &
                 "{}(): The user entity loader callback \"{name}\" has returned a resource, but it is not a stream",
                 req.frames().active_function_name()
             );
-            Resolved::Thrown(throw_error(req, "TypeError", &text))
+            Resolved::Thrown(type_error(req, &text))
         }
         _ => match php_ext::coerce::with_string(req, &retval, <[u8]>::to_vec) {
             Ok(path) => Resolved::Path(path),

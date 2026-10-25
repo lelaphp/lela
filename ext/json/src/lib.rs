@@ -345,8 +345,8 @@ fn depth_within(req: &mut Request, depth: i64, position: u32) -> Result<(), Thro
 /// pk(fn () => json_encode([$long, $long]));
 /// ```
 /// ```expect
+/// 304 48
 /// 296 40
-/// 288 32
 /// 4312 640
 /// ```
 #[php_function]

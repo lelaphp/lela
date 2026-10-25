@@ -12,7 +12,7 @@ use php_ext::attr::php_function;
 use php_ext::call::call_method;
 use php_ext::coerce::{Exponent, float_format, with_string};
 use php_ext::decl::Visibility;
-use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw, throw_error};
+use php_ext::raising::{Level, Thrown, call_stack_limit, docref, throw_exception_ex, type_error};
 use php_ext::request::Request;
 use php_ext::values::walk::{self, Hold};
 use php_ext::values::{Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, ValueRef};
@@ -551,9 +551,8 @@ fn serialized_data(
     let Some(array) = data.as_array() else {
         data.give_up(req);
         let shown = String::from_utf8_lossy(name).into_owned();
-        return Err(throw_error(
+        return Err(type_error(
             req,
-            "TypeError",
             &format!("{shown}::__serialize() must return an array"),
         ));
     };
@@ -575,7 +574,7 @@ fn object_value(
     hash: &mut Serializer,
 ) -> Result<(), Thrown> {
     if let Some(shown) = not_serializable(req, object.class()) {
-        return Err(throw(
+        return Err(throw_exception_ex(
             req,
             "Exception",
             &format!("Serialization of '{shown}' is not allowed"),
@@ -820,7 +819,7 @@ fn custom(
         return Ok(());
     }
     let shown = String::from_utf8_lossy(name).into_owned();
-    Err(throw(
+    Err(throw_exception_ex(
         req,
         "Exception",
         &format!("{shown}::serialize() must return a string or NULL"),

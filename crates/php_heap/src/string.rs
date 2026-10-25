@@ -770,6 +770,27 @@ impl std::fmt::Debug for Str {
     }
 }
 
+/// Which of php-8.5.12's two sizes a string of the request's is laid at
+/// for its length, the one thing about a string php's constructors and
+/// its in-place reallocations disagree on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Sizing {
+    /// `zend_string_alloc`'s and `zend_string_init`'s: the header, the
+    /// bytes and the NUL rounded together,
+    /// `ZEND_MM_ALIGNED_SIZE(_ZSTR_STRUCT_SIZE(len))` ([`crate::Heap::string`]).
+    #[default]
+    Alloc,
+    /// `zend_string_finit`'s, and what `zend_string_realloc`, `_extend`
+    /// and `_truncate` grow or cut a string to where it stands: `len`
+    /// past the empty string's aligned header (`Z/Zend/zend_string.h:217`,
+    /// `:279`), up to seven bytes more ([`crate::Heap::string_finit`]). The
+    /// parser's `.` of two written values grows its left one so
+    /// (`zend_ast_create_concat_op`, `Z/Zend/zend_ast.c:489`), and a name
+    /// the compile prints with `zend_strpprintf` is trimmed so by
+    /// `smart_str_extract` (`Z/Zend/zend_smart_str.h:119`).
+    Finit,
+}
+
 /// A home for interned strings: php's `zend_new_interned_string` behind
 /// its two handlers (`Z/Zend/zend_string.c:363-373`), which the compiler
 /// and the engine call without knowing which home answers.
@@ -785,7 +806,7 @@ pub trait Intern {
     /// ask, and the fatal the allocator raised when there is no memory
     /// for it.
     fn intern(&mut self, bytes: &[u8]) -> Result<Str, Fatal> {
-        self.intern_marked(bytes, false)
+        self.intern_marked(bytes, false, Sizing::Alloc)
     }
 
     /// [`Intern::intern`] of bytes the asker knows to be valid UTF-8 when
@@ -793,8 +814,15 @@ pub trait Intern {
     /// string carrying `IS_STR_VALID_UTF8`: a string this ask lays down
     /// is marked before the table takes it, and one the home already
     /// holds is handed back as it stands, with its own flags, as
-    /// `zend_interned_string_ht_lookup` finds it.
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal>;
+    /// `zend_interned_string_ht_lookup` finds it. A string laid on a
+    /// request's heap is laid at `sizing`'s size; a home that lays none
+    /// there has no use for it.
+    fn intern_marked(
+        &mut self,
+        bytes: &[u8],
+        valid_utf8: bool,
+        sizing: Sizing,
+    ) -> Result<Str, Fatal>;
 
     /// [`Intern::intern`] of a string laid as a string of `room` bytes and
     /// cut to `bytes` where it stands (`ZSTR_LEN(s) = len`), which keeps
@@ -804,7 +832,7 @@ pub trait Intern {
     /// the bytes as any other.
     fn intern_in(&mut self, bytes: &[u8], room: usize) -> Result<Str, Fatal> {
         let _ = room;
-        self.intern_marked(bytes, false)
+        self.intern_marked(bytes, false, Sizing::Alloc)
     }
 
     /// [`Intern::intern_marked`] of a string the asker alone will hold
@@ -813,8 +841,13 @@ pub trait Intern {
     /// `zend_eval_const_expr` destroys a child's zval once the node it
     /// folds into stands. The [`Made`] is the claim; dropped instead of
     /// given back, the string is kept as any other this home made.
-    fn intern_made(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Made, Fatal> {
-        (self.intern_marked(bytes, valid_utf8)).map(|s| Made(Zval::string(s)))
+    fn intern_made(
+        &mut self,
+        bytes: &[u8],
+        valid_utf8: bool,
+        sizing: Sizing,
+    ) -> Result<Made, Fatal> {
+        (self.intern_marked(bytes, valid_utf8, sizing)).map(|s| Made(Zval::string(s)))
     }
 
     /// The next of the names a compile hands over once its unit is
@@ -1022,8 +1055,8 @@ impl Intern for Strings {
     /// php's `zend_string_init_interned_permanent`
     /// (`Z/Zend/zend_string.c:267-280`): the frozen table, then this one,
     /// then a string on the system allocator, hashed and flagged before
-    /// it is published.
-    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool) -> Result<Str, Fatal> {
+    /// it is published; a string of the engine's, so no request's size.
+    fn intern_marked(&mut self, bytes: &[u8], valid_utf8: bool, _: Sizing) -> Result<Str, Fatal> {
         if let Some(frozen) = frozen_string(bytes) {
             return Ok(frozen);
         }

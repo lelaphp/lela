@@ -1429,9 +1429,8 @@ fn mb_ord(
     let enc = self::encoding(req, encoding, 2)?;
     if is_unsupported(enc) {
         let name = String::from_utf8_lossy(enc.name());
-        return Err(throw_error(
+        return Err(php_ext::raising::value_error(
             req,
-            "ValueError",
             &format!("mb_ord() does not support the \"{name}\" encoding"),
         ));
     }
@@ -1469,9 +1468,8 @@ fn mb_chr(
     let enc = self::encoding(req, encoding, 2)?;
     if is_unsupported(enc) {
         let name = String::from_utf8_lossy(enc.name());
-        return Err(throw_error(
+        return Err(php_ext::raising::value_error(
             req,
-            "ValueError",
             &format!("mb_chr() does not support the \"{name}\" encoding"),
         ));
     }

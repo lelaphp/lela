@@ -1515,9 +1515,8 @@ pub(crate) fn soap_create_typemap(
         let tmp = row.value().deref();
         let ValueRef::Array(entry) = tmp.as_ref() else {
             let given = php_ext::coerce::value_name(req, &tmp);
-            return Err(php_ext::raising::throw(
+            return Err(php_ext::raising::type_error(
                 req,
-                "TypeError",
                 &format!(
                     "SoapHeader::__construct(): \"typemap\" option must be of type array, {given} given"
                 ),

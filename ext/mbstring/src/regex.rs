@@ -375,7 +375,7 @@ fn parse_options(req: &mut Request, text: &[u8]) -> Result<(u32, Syntax), Thrown
             c => {
                 let Some((_, s)) = Syntax::ALL.iter().find(|(l, _)| *l == c) else {
                     let text = format!("Option \"{}\" is not supported", char::from(c));
-                    return Err(throw_error(req, "ValueError", &text));
+                    return Err(php_ext::raising::value_error(req, &text));
                 };
                 syntax = *s;
             }

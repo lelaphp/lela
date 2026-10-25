@@ -100,7 +100,7 @@ use php_ext::abi::{ConstValue, Instance, OrFalse, Passed, Ref, This, Untyped};
 use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{autoload, call_method, lookup_class, new_object, write_prop};
 use php_ext::coerce::{is_callable, to_long};
-use php_ext::raising::{Level, Thrown, arg_value_error, docref, throw_error};
+use php_ext::raising::{Level, Thrown, arg_value_error, docref, type_error};
 use php_ext::request::{
     Brigade, FilterFlags, FilterStatus, Request, Stream, StreamFilter, Streams as _,
 };
@@ -686,7 +686,7 @@ fn brigade_of(req: &mut Request, res: Resource, native: &str) -> Result<Resource
         let text = format!(
             "{native}(): supplied resource is not a valid userfilter.bucket brigade resource"
         );
-        return Err(throw_error(req, "TypeError", &text));
+        return Err(type_error(req, &text));
     }
     Ok(res)
 }
@@ -786,7 +786,7 @@ fn bucket_attach(
             "argument"
         };
         let text = format!("{native}(): supplied {what} is not a valid userfilter.bucket resource");
-        return Err(throw_error(req, "TypeError", &text));
+        return Err(type_error(req, &text));
     };
     if let Some(data) = object.prop(req, b"data").map(|value| value.deref())
         && let Some(bytes) = data.as_php_string().map(|s| s.as_bytes().to_vec())
@@ -1118,9 +1118,8 @@ fn stream_filter_append(
 fn stream_filter_remove(req: &mut Request, stream_filter: Resource) -> Result<bool, Thrown> {
     match req.remove_filter(stream_filter)? {
         Some(removed) => Ok(removed),
-        None => Err(throw_error(
+        None => Err(type_error(
             req,
-            "TypeError",
             "stream_filter_remove(): supplied resource is not a valid stream filter resource",
         )),
     }

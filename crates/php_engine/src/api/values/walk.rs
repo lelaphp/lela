@@ -52,7 +52,7 @@ use std::ops::ControlFlow;
 use php_heap::{Arr, PropertyTable, Str, TableRow, Zval};
 
 use crate::api::abi::Ref;
-use crate::api::raising::{Thrown, fatal, throw_error_chained, type_error};
+use crate::api::raising::{Thrown, fatal, type_error};
 use crate::api::request::{HookedBuild, HookedDeclared, HookedRows, Request};
 use crate::api::values::{
     HeldProperties, Key, Owner, PhpArray, PhpObject, PhpRef, PhpString, Value, View,
@@ -1290,7 +1290,8 @@ fn steps<B>(
         if thrown.exception().is_some() && now.as_array().is_none() && now.as_object().is_none() {
             // `zend_type_error`, its `zend_vspprintf` buffer standing
             // across the throw.
-            return Err(throw_error_chained(req, thrown, "TypeError", NO_TABLE));
+            let now = type_error(req, NO_TABLE);
+            return Err(thrown.chain(req, now));
         }
         return Err(thrown);
     }

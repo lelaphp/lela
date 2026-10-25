@@ -15,7 +15,7 @@ use super::{Request, SocketOptions};
 use crate::api::call::call;
 use crate::api::coerce::{callable_checked, to_long, truthy};
 use crate::api::layer::Face as _;
-use crate::api::raising::{Level, Thrown, docref, throw_error};
+use crate::api::raising::{Level, Thrown, docref, type_error};
 use crate::api::request::BindTo;
 use crate::api::values::{
     Emalloc, Key, Owner, PhpArray, PhpString, Resource, ResourceView, Value, ValueRef,
@@ -252,7 +252,7 @@ impl StreamCtx {
             "{}(): supplied resource is not a valid Stream-Context resource",
             req.frames().active_function_name()
         );
-        Err(throw_error(req, "TypeError", &text))
+        Err(type_error(req, &text))
     }
 
     /// `zend_fetch_resource_ex(res, NULL, php_le_stream_context())`: the

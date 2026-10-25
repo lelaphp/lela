@@ -11,7 +11,7 @@ use php_ext::attr::{php_class, php_const, php_function};
 use php_ext::call::{lookup_class, new_object};
 use php_ext::coerce::value_name;
 use php_ext::raising::{
-    Thrown, arg_type_error, arg_value_error, throw, throw_error, while_pending,
+    Thrown, arg_type_error, arg_value_error, throw, throw_error, throw_exception_ex, while_pending,
 };
 use php_ext::request::{OwnedStream as _, Request, Stream, StreamCtx, Streams as _};
 use php_ext::values::walk::{self, Hold};
@@ -1737,7 +1737,7 @@ impl HashContext {
             .map_or((None, Flags::default()), |c| (c.algo, c.flags));
         let name = algo.map_or("", |a| a.label);
         let cannot = |req: &mut Request| {
-            throw(
+            throw_exception_ex(
                 req,
                 "Exception",
                 &format!("HashContext for algorithm \"{name}\" cannot be serialized"),
@@ -1834,7 +1834,7 @@ impl HashContext {
             return Err(throw(req, "Exception", "Unknown hash algorithm"));
         };
         let Some(want) = algo.magic else {
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!("Hash algorithm \"{}\" cannot be unserialized", algo.label),
@@ -1851,7 +1851,7 @@ impl HashContext {
         }
         if let Err(refusal) = written {
             let code = refusal.code();
-            return Err(throw(
+            return Err(throw_exception_ex(
                 req,
                 "Exception",
                 &format!(

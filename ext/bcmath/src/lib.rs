@@ -29,7 +29,7 @@ use php_ext::abi::{Extension, ExtensionBuilder, Instance};
 use php_ext::attr::{php_class, php_function};
 use php_ext::call::read_prop;
 use php_ext::decl::{IniDecl, Name};
-use php_ext::raising::{Thrown, argument_error, throw, throw_error};
+use php_ext::raising::{Thrown, argument_error, throw_exception_ex};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpString, Value};
 
@@ -436,11 +436,9 @@ fn bcpowmod(
 fn raisemod_error(req: &mut Request, error: RaiseModError, method: bool) -> Thrown {
     let shift = u32::from(method);
     match error {
-        RaiseModError::BaseHasFractional if method => throw_error(
-            req,
-            "ValueError",
-            "Base number cannot have a fractional part",
-        ),
+        RaiseModError::BaseHasFractional if method => {
+            php_ext::raising::value_error(req, "Base number cannot have a fractional part")
+        }
         RaiseModError::BaseHasFractional => value_error(req, 1, "cannot have a fractional part"),
         RaiseModError::ExpoHasFractional => {
             value_error(req, 2 - shift, "cannot have a fractional part")
@@ -503,10 +501,10 @@ fn raise_error(req: &mut Request, error: RaiseError, position: Option<u32>) -> T
     const OVERFLOW: &str = "exponent is too large, the number of digits overflowed";
     match (error, position) {
         (RaiseError::DivideByZero, _) => {
-            throw(req, "DivisionByZeroError", "Negative power of zero")
+            throw_exception_ex(req, "DivisionByZeroError", "Negative power of zero")
         }
         (RaiseError::Overflow, Some(position)) => value_error(req, position, OVERFLOW),
-        (RaiseError::Overflow, None) => throw_error(req, "ValueError", OVERFLOW),
+        (RaiseError::Overflow, None) => php_ext::raising::value_error(req, OVERFLOW),
     }
 }
 
@@ -715,10 +713,10 @@ fn bcround(
 
 /// "Division by zero".
 fn division_by_zero(req: &mut Request) -> Thrown {
-    throw(req, "DivisionByZeroError", "Division by zero")
+    throw_exception_ex(req, "DivisionByZeroError", "Division by zero")
 }
 
 /// "Modulo by zero".
 fn modulo_by_zero(req: &mut Request) -> Thrown {
-    throw(req, "DivisionByZeroError", "Modulo by zero")
+    throw_exception_ex(req, "DivisionByZeroError", "Modulo by zero")
 }
