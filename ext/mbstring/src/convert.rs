@@ -290,6 +290,23 @@ fn convert_array(
 /// reentered
 /// 2
 /// ```
+///
+/// A surrogate codepoint, from UCS-2, UCS-4 or a numeric entity, is not
+/// UTF-8: libmbfl's `mb_wchar_to_utf8` writes the substitute for it as
+/// php 8.5.12's does, and only a search's internal UTF-8 keeps it, so
+/// two surrogates stay apart there.
+///
+/// ```php
+/// echo bin2hex(mb_convert_encoding("\x00\x00\x00A\x00\x00\xD8\x00", 'UTF-8', 'UCS-4')), ' ', bin2hex(mb_convert_encoding('&#xD800;', 'UTF-8', 'HTML-ENTITIES')), "\n";
+/// mb_substitute_character('long');
+/// echo bin2hex(mb_convert_encoding("\xDF\xFF", 'UTF-8', 'UCS-2')), "\n";
+/// var_dump(mb_strpos("\xD8\x3D\xDE\x00\xD8\x3D\xDE\x01", "\xD8\x3D\xDE\x01", 0, 'UCS-2'));
+/// ```
+/// ```expect
+/// 413f 3f
+/// 552b44464646
+/// int(2)
+/// ```
 #[php_function]
 // The declared `array|string|false`, each fresh value an owner.
 ///

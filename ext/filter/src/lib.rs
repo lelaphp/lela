@@ -137,9 +137,53 @@ impl State {
 /// ```expect regime=jit-off
 /// x= 408
 /// x=1 408
-/// x=12 440
+/// x=12 448
 /// 1=1 248
 /// x=1&y=2 408
+/// ```
+///
+/// Both strings are `zend_string_finit`'s, the bytes past the aligned
+/// header of the empty string, so a `$_SERVER` row the CLI names after
+/// the file it runs, `PHP_SELF`, `SCRIPT_NAME`, `SCRIPT_FILENAME` and
+/// `PATH_TRANSLATED`, takes a bin more at 9 bytes than at 8, twice each,
+/// where `zend_string_init`'s would not until 17:
+///
+/// ```php
+/// $d = sprintf('%s/sf%010d', sys_get_temp_dir(), getmypid()); @mkdir($d);
+/// $read = function (int $n) use ($d) {
+///     $f = str_repeat('x', $n - 4) . '.php';
+///     file_put_contents("$d/$f", '<?php echo memory_get_usage();');
+///     $p = proc_open([PHP_BINARY, '-n', '-d', 'opcache.enable_cli=1', '-d', 'opcache.jit=off', '-d', 'opcache.file_update_protection=0', $f], [1 => ['pipe', 'w']], $pipes, $d, []);
+///     $out = stream_get_contents($pipes[1]); proc_close($p); unlink("$d/$f"); return (int) $out;
+/// };
+/// $base = $read(8);
+/// foreach ([9, 15, 16, 17] as $n) echo $n, ' ', $read($n) - $base, "\n";
+/// rmdir($d);
+/// ```
+/// ```expect process
+/// 9 64
+/// 15 64
+/// 16 80
+/// 17 160
+/// ```
+///
+/// `parse_str()`'s value is what the filter answered read as a string,
+/// so under `filter.default=int` a number is its digits and a refusal,
+/// `false`, the empty string:
+///
+/// ```php
+/// $p = proc_open([PHP_BINARY, '-n', '-d', 'filter.default=int', '-r', 'parse_str("a=1&b=notint", $o); var_dump($o);'], [1 => ['pipe', 'w'], 2 => ['pipe', 'w']], $pipes);
+/// echo stream_get_contents($pipes[1]); proc_close($p);
+/// ```
+/// ```expect process
+///
+/// Deprecated: The filter.default ini setting is deprecated in Unknown on line 0
+/// array(2) {
+///   ["a"]=>
+///   string(1) "1"
+///   ["b"]=>
+///   string(0) ""
+/// }
 /// ```
 ///
 /// Since 8.5.12 both strings are asked for fallibly and the variable is
@@ -176,13 +220,14 @@ fn sapi_filter(
         .state::<State>()
         .slot(input)
         .and_then(|slot| slot.as_deref().copied());
-    // `ZVAL_STRINGL`, `zend_string_init`, which makes even an empty or
-    // a one-byte value a string of its own, for the raw copy, and for the
-    // value handed on where it has a byte, `ZVAL_EMPTY_STRING` where not.
+    // `ZVAL_FSTRINGL`, `zend_string_finit` (`Z/ext/filter/filter.c:362`,
+    // `:373`), which makes even an empty or a one-byte value a string of
+    // its own, for the raw copy, and for the value handed on where it has
+    // a byte, `ZVAL_EMPTY_STRING` where not.
     // Both asked for fallibly since 8.5.12, `return 0` where one is
     // refused or the memory limit was met registering the raw copy.
     if let Some(array) = kept {
-        let Some(raw) = req.memory_mut().fallible(|req| string_init(req, value))? else {
+        let Some(raw) = req.memory_mut().fallible(|req| string_finit(req, value))? else {
             return Ok(None);
         };
         req.variables_mut().register_variable(array, name, raw)?;
@@ -193,7 +238,7 @@ fn sapi_filter(
     let raw = if value.is_empty() {
         string_value(req, value)?
     } else {
-        let Some(raw) = req.memory_mut().fallible(|req| string_init(req, value))? else {
+        let Some(raw) = req.memory_mut().fallible(|req| string_finit(req, value))? else {
             return Ok(None);
         };
         raw
@@ -232,15 +277,22 @@ fn sapi_filter(
     if input != Input::String {
         return Ok(Some(handed));
     }
-    // `parse_str()`'s variable php hands back as bytes, `retval` 1 and
-    // `*val = estrndup(Z_STRVAL(new_var), ...)`, for
-    // `php_default_treat_data` to register with
+    // `parse_str()`'s variable php hands back as bytes, `retval` 1: the
+    // filter's answer read as `zval_get_tmp_string` reads it, a string as
+    // it is and anything else, `filter.default=int`'s int or its `false`,
+    // as its string, copied into `*val` (`Z/ext/filter/filter.c:391-414`),
+    // for `php_default_treat_data` to register with
     // `php_register_variable_safe`'s `ZVAL_STRINGL_FAST`: a value of one
-    // byte is the process's string, and allocates nothing.
-    let ValueRef::Str(filtered) = handed.as_ref() else {
-        return Ok(Some(handed));
-    };
-    let fast = string_value(req, filtered.as_bytes());
+    // byte is the process's string and allocates nothing, and a longer one
+    // is php-8.5.12's `zend_string_finit`. A string answer is read in place
+    // rather than copied first, as `*val`'s copy is a temporary.
+    let fast = match handed.as_ref() {
+        ValueRef::Str(filtered) => PhpString::fast(req, filtered.as_bytes()),
+        _ => {
+            with_string(req, &handed, <[u8]>::to_vec).and_then(|bytes| PhpString::fast(req, &bytes))
+        }
+    }
+    .map(Owner::into_value);
     handed.give_up(req);
     fast.map(Some)
 }
@@ -608,10 +660,10 @@ fn string_value(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown>
     Ok(PhpString::new(req, bytes)?.into_value())
 }
 
-/// `ZVAL_STRINGL`: a string of the bytes out of the request's heap,
-/// `zend_string_init`, whatever their length.
-fn string_init(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
-    Ok(PhpString::filled(req, bytes.len(), |into| into.copy_from_slice(bytes))?.into_value())
+/// `ZVAL_FSTRINGL`: a string of the bytes out of the request's heap,
+/// php-8.5.12's `zend_string_finit`, whatever their length.
+fn string_finit(req: &mut Request, bytes: &[u8]) -> Result<Owner<Value>, Thrown> {
+    Ok(PhpString::finit(req, bytes)?.into_value())
 }
 
 /// The bytes as C's `%s` prints them, up to the first NUL.

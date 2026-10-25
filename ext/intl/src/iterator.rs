@@ -50,17 +50,24 @@ pub(crate) trait Walk: Send {
     fn release(&mut self, req: &mut Request) {
         let _ = req;
     }
+
+    /// Whether the cursor holds the object it is the cursor of, php's
+    /// `wrapping_obj`: a `StringEnumeration`'s does; a parts iterator's
+    /// is `UNDEF` since php 8.5.12, so that object is freed by its count.
+    fn wraps_object(&self) -> bool {
+        true
+    }
 }
 
 /// The position over a [`Walk`]: `zoi_with_current`'s `current` and
 /// `wrapping_obj`, and the iterator's `index`. `wrapping` is one owner of
-/// the object that holds the cursor, as php's `wrapping_obj` is, so an
-/// object nothing else owns is a cycle the collector finds through
-/// [`Handlers::get_gc`] and counts.
+/// the object that holds the cursor where the walk wraps it, as php's
+/// `wrapping_obj` is, so an object nothing else owns is a cycle the
+/// collector finds through [`Handlers::get_gc`] and counts.
 pub(crate) struct Cursor {
     walk: Box<dyn Walk>,
     current: Option<Owner<Value>>,
-    wrapping: Owner<PhpObject>,
+    wrapping: Option<Owner<PhpObject>>,
     index: i64,
 }
 
@@ -228,8 +235,9 @@ fn rewind(req: &mut Request, object: PhpObject, cursor: &mut Cursor) -> Result<(
     Ok(())
 }
 
-/// `IntlIterator_objects_dtor`: `destroy_it`, then the iterator freed,
-/// its element and `zoi_with_current_dtor`'s wrapping object given up.
+/// `IntlIterator_objects_dtor`: the iterator released, which is
+/// `zoi_with_current_dtor` since php 8.5.12: `invalidate_current`, then
+/// `destroy_it`, then the wrapping object given up.
 fn release(req: &mut Request, cursor: Cursor) {
     let Cursor {
         mut walk,
@@ -237,11 +245,13 @@ fn release(req: &mut Request, cursor: Cursor) {
         wrapping,
         ..
     } = cursor;
-    walk.release(req);
     if let Some(old) = current {
         old.give_up(req);
     }
-    wrapping.give_up(req);
+    walk.release(req);
+    if let Some(wrapping) = wrapping {
+        wrapping.give_up(req);
+    }
 }
 
 /// The object's cursor taken and released, `ii->iterator = NULL`.
@@ -265,10 +275,11 @@ pub(crate) fn made(
         return Err(fatal(req, "InternalError: IntlIterator is not linked"));
     };
     let object = new_object(req, id)?;
+    let wrapping = walk.wraps_object().then(|| Owner::take(req, *object));
     let cursor = Box::new(Cursor {
         walk,
         current: None,
-        wrapping: Owner::take(req, *object),
+        wrapping,
         index: 0,
     });
     match object.native_mut::<IteratorObject>(req) {
@@ -363,7 +374,9 @@ impl ObjectHandlers for Handlers {
 
     /// `IntlIterator_object_get_gc` through `zoi_with_current_get_gc`:
     /// the wrapping object alone, which is the object itself, so one
-    /// nothing else owns is garbage, counted once as php counts it.
+    /// nothing else owns is garbage, counted once as php counts it; a
+    /// parts iterator wraps nothing since php 8.5.12, so its count frees
+    /// it and the collector finds none.
     ///
     /// ```php
     /// function cycle() {
@@ -380,7 +393,7 @@ impl ObjectHandlers for Handlers {
     /// ```expect
     /// int(1)
     /// int(1)
-    /// int(1)
+    /// int(0)
     /// ```
     fn get_gc(
         &self,
@@ -388,8 +401,8 @@ impl ObjectHandlers for Handlers {
         object: PhpObject,
         visit: &mut dyn FnMut(Value),
     ) -> GcTable {
-        if let Some(cursor) = cursor(req, object) {
-            visit(cursor.wrapping.as_value());
+        if let Some(wrapping) = cursor(req, object).and_then(|c| c.wrapping.as_ref()) {
+            visit(wrapping.as_value());
         }
         GcTable::Properties
     }
