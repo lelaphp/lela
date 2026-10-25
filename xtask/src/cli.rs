@@ -356,7 +356,7 @@ pub(crate) enum Command {
     /// `.cargo/config.toml`. A site is an `add xN, <request>, #C` whose
     /// sum the next instruction naming `xN` loads or stores through at
     /// an offset `[<request>, #C + offset]` could encode, the shape #3345
-    /// found; `aarch64` alone, a skip elsewhere.
+    /// found; an `aarch64` Mac alone, a skip elsewhere.
     Fold(crate::fold::Ask),
     /// Hold makala to the pinned php-fpm: each request of the HTTP-served
     /// subset served by both, the status, header lines and body compared;

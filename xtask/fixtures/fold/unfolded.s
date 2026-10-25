@@ -1,7 +1,7 @@
 # The negative control of xtask fold (#3384): lines 1-17 and 835-850 of
 # objdump --disassemble-symbols over the hot serve_frame instantiation of
-# t3345's c1 build at 037f359d8, without --cgp-max-address-users-to-scan
-# (_coordinator/s53d3/runs/t3345/c1-sf.s): x27 and x28 hold the frame
+# #3345's c1 build at 037f359d8, without --cgp-max-address-users-to-scan
+# (c1-sf.s, on #3345's build): x27 and x28 hold the frame
 # table's two words apart from x19.
 
 bin/php-c1:	file format mach-o arm64

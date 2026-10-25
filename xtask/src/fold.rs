@@ -28,7 +28,7 @@
 //! keyed over its closure and the files rustc is built under
 //! ([`crate::key::BUILT_UNDER`]), and `done` asks for it fresh and passing
 //! on a diff that changes one of those files (harness §4.5). The sensor
-//! reads `aarch64` alone, the machines the bench runs on; elsewhere the
+//! reads `llvm-objdump` on an `aarch64` Mac alone, the machines the bench runs on; elsewhere the
 //! reading is a skip.
 
 use std::collections::BTreeMap;
@@ -79,11 +79,12 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Reading
         Some(_) => Reading::new(INSTRUMENT, SCOPE),
         None => Reading::for_crate(INSTRUMENT, krate, &Snapshot::disk(root)?)?,
     };
-    if !cfg!(target_arch = "aarch64") {
+    if !cfg!(all(target_arch = "aarch64", target_os = "macos")) {
         reading.status = Status::Skip;
         reading.message = format!(
-            "{SCOPE}: not held; the sensor reads AArch64's instructions and this host is {}",
-            std::env::consts::ARCH
+            "{SCOPE}: not held; the sensor reads llvm-objdump's aarch64 Mach-O disassembly and this host is {} {}",
+            std::env::consts::ARCH,
+            std::env::consts::OS
         );
         return Ok(reading);
     }
@@ -92,12 +93,17 @@ pub(crate) fn run(root: &Path, manifest: &Manifest, ask: &Ask) -> Result<Reading
         None => profile::released(root, (&CLI.package(), CLI.binary), None, (None, None))?,
     };
     let instantiations = instantiations(&binary)?;
-    let held = held(&disassembled(&binary, &instantiations)?)?;
     let over = match &ask.binary {
         Some(binary) => format!("{}, a binary the tree did not build here", binary.display()),
         None => format!("the release {}", CLI.binary),
     };
-    said(&mut reading, &over, &instantiations, &held);
+    match judged(&disassembled(&binary, &instantiations)?) {
+        Ok(held) => said(&mut reading, &over, &instantiations, &held),
+        Err(why) => {
+            reading.status = Status::Fail;
+            reading.message = format!("{SCOPE}: {over} could not be held: {why:#}");
+        }
+    }
     Ok(reading)
 }
 
@@ -274,7 +280,7 @@ pub(crate) struct Site {
 /// [`Held`] per function it heads with `<address> <symbol>:`. A function
 /// whose prologue copies no register from `x0` is refused, since then
 /// nothing says which register holds the request.
-pub(crate) fn held(text: &str) -> Result<Vec<Held>> {
+pub(crate) fn judged(text: &str) -> Result<Vec<Held>> {
     let mut functions: Vec<(String, Vec<Instruction>)> = Vec::new();
     for line in text.lines() {
         if let Some(name) = heading(line) {
@@ -301,7 +307,7 @@ pub(crate) fn held(text: &str) -> Result<Vec<Held>> {
             Ok(Held {
                 folded: body
                     .iter()
-                    .filter(|i| i.memory().is_some_and(|m| m.base == Gpr::X(request) && !m.indexed))
+                    .filter(|i| i.memory().is_some_and(|m| m.at(Gpr::X(request)).is_some()))
                     .count(),
                 hoisted: unfolded,
                 escaped: through_a_call,
@@ -332,7 +338,6 @@ fn request(body: &[Instruction]) -> Option<u8> {
             && let [to, from] = &instruction.operands[..]
             && Gpr::of(from) == Some(Gpr::X(0))
             && let Some(Gpr::X(n)) = Gpr::of(to)
-            && to.starts_with('x')
         {
             return Some(n);
         }
@@ -342,20 +347,23 @@ fn request(body: &[Instruction]) -> Option<u8> {
 
 /// Each access in `body` through an address `add xN, x<request>, #C`
 /// made, where the access could have encoded `[x<request>, #C + offset]`,
-/// and each such address handed to a call in an argument register.
+/// the address followed through a spill to the stack and back, and each
+/// such address handed to a call in an argument register.
 fn hoisted(body: &[Instruction], request: u8) -> (Vec<Site>, Vec<Escape>) {
     // What each register holds: the request plus an offset, and the `add`.
-    let mut held: BTreeMap<u8, (i64, &Instruction)> = BTreeMap::new();
+    let mut holding: BTreeMap<u8, (i64, &Instruction)> = BTreeMap::new();
+    // What each stack slot holds of the same, by base and offset.
+    let mut spilled: BTreeMap<(Gpr, i64), (i64, &Instruction)> = BTreeMap::new();
     let mut sites = Vec::new();
     let mut escapes = Vec::new();
     for instruction in body {
-        if let Some(memory) = instruction.memory()
-            && let Gpr::X(base) = memory.base
-            && let Some((offset, add)) = held.get(&base)
-            && let Some(size) = instruction.single_access()
-            && !memory.indexed
-            && !memory.writes_back
-            && encodable(offset + memory.offset, size)
+        let memory = instruction.memory();
+        let size = instruction.single_access();
+        if let (Some(memory), Some(size)) = (memory, size)
+            && let Some(n) = memory.base.number()
+            && let Some((offset, add)) = holding.get(&n)
+            && let Some(at) = memory.at(Gpr::X(n))
+            && encodable(offset + at, size)
         {
             sites.push(Site {
                 offset: *offset,
@@ -364,21 +372,43 @@ fn hoisted(body: &[Instruction], request: u8) -> (Vec<Site>, Vec<Escape>) {
                 access: instruction.text.clone(),
             });
         }
+        // A held address spilled to the stack, a slot written over, and a
+        // spilled one loaded back into a register.
+        let mut reloaded = None;
+        let stack = [Gpr::Sp, Gpr::X(29)];
+        if let Some(memory) = memory
+            && let Some((base, at)) = stack.iter().find_map(|b| Some((*b, memory.at(*b)?)))
+        {
+            let slot = (base, at);
+            let data = instruction.operands.first().and_then(|o| Gpr::of(o));
+            if instruction.mnemonic.starts_with("st") {
+                spilled.remove(&slot);
+                if let (Some(_), Some(Gpr::X(n))) = (size, data)
+                    && let Some(kept) = holding.get(&n)
+                {
+                    spilled.insert(slot, *kept);
+                }
+            } else if let (Some(8), Some(Gpr::X(n))) = (size, data) {
+                reloaded = spilled.get(&slot).map(|kept| (n, *kept));
+            }
+        }
         for named in instruction.registers() {
-            held.remove(&named);
+            holding.remove(&named);
+        }
+        if let Some((n, kept)) = reloaded {
+            holding.insert(n, kept);
         }
         if instruction.calls() {
-            // x0 to x7 carry a call's arguments.
-            escapes.extend(held.range(..8).map(|(_, (offset, _))| Escape {
+            escapes.extend(holding.range(..ARGUMENTS).map(|(_, (offset, _))| Escape {
                 offset: *offset,
                 call: instruction.callee().to_owned(),
             }));
-            held.retain(|n, _| *n >= 19 && *n != 30);
+            holding.retain(|n, _| *n >= CALLEE_SAVED && *n != LINK);
         } else if instruction.ends_flow() {
-            held.retain(|n, _| *n >= 19);
+            holding.retain(|n, _| *n >= CALLEE_SAVED);
         }
         if let Some((to, offset)) = instruction.field_address(request) {
-            held.insert(to, (offset, instruction));
+            holding.insert(to, (offset, instruction));
         }
     }
     (sites, escapes)
@@ -393,10 +423,12 @@ fn encodable(offset: i64, size: i64) -> bool {
 }
 
 /// A general-purpose register as an operand names it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Gpr {
-    /// `xN` or `wN`, N from 0 to 30.
+    /// `xN`, N from 0 to 30, the whole register.
     X(u8),
+    /// `wN`, its low half.
+    W(u8),
     /// `sp` or `wsp`.
     Sp,
     /// `xzr` or `wzr`.
@@ -411,21 +443,63 @@ impl Gpr {
             "fp" => Some(Gpr::X(29)),
             "lr" => Some(Gpr::X(30)),
             _ => {
-                let n: u8 = word.strip_prefix(['x', 'w'])?.parse().ok()?;
-                (n <= 30).then_some(Gpr::X(n))
+                let (whole, n) = match word.split_at_checked(1)? {
+                    ("x", n) => (true, n),
+                    ("w", n) => (false, n),
+                    _ => return None,
+                };
+                let n: u8 = n.parse().ok().filter(|n| *n <= LINK)?;
+                Some(if whole { Gpr::X(n) } else { Gpr::W(n) })
             }
+        }
+    }
+
+    /// The register's number, whichever half is named.
+    fn number(self) -> Option<u8> {
+        match self {
+            Gpr::X(n) | Gpr::W(n) => Some(n),
+            Gpr::Sp | Gpr::Zero => None,
         }
     }
 }
 
-/// A memory operand: its base, its immediate offset, whether a register
-/// indexes it and whether the access writes the base back.
+/// The registers a call hands its arguments in, `x0` to `x7`, as AAPCS64
+/// names them.
+const ARGUMENTS: u8 = 8;
+
+/// The first register a callee keeps, `x19`; `x19` to `x28` are kept.
+const CALLEE_SAVED: u8 = 19;
+
+/// The link register, `x30`, which a call writes.
+const LINK: u8 = 30;
+
+/// A memory operand: its base, what is added to it, and whether the
+/// access writes the base back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Memory {
     base: Gpr,
-    offset: i64,
-    indexed: bool,
+    offset: Offset,
     writes_back: bool,
+}
+
+/// What a memory operand adds to its base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Offset {
+    /// An immediate, zero where none is written.
+    Imm(i64),
+    /// A register, which no field's address folds into.
+    Indexed,
+}
+
+impl Memory {
+    /// The immediate added to `base`, where the base is `base` and no
+    /// register indexes it and the base is not written back.
+    fn at(&self, base: Gpr) -> Option<i64> {
+        match self.offset {
+            Offset::Imm(offset) if self.base == base && !self.writes_back => Some(offset),
+            _ => None,
+        }
+    }
 }
 
 /// One instruction of the disassembly.
@@ -492,15 +566,14 @@ impl Instruction {
             .strip_suffix(']')?;
         let mut parts = inner.split(',').map(str::trim);
         let base = Gpr::of(parts.next()?)?;
-        let (offset, indexed) = match parts.next() {
-            None => (0, false),
-            Some(imm) if imm.starts_with('#') => (immediate(imm)?, false),
-            Some(_) => (0, true),
+        let offset = match parts.next() {
+            None => Offset::Imm(0),
+            Some(imm) if imm.starts_with('#') => Offset::Imm(immediate(imm)?),
+            Some(_) => Offset::Indexed,
         };
         Some(Memory {
             base,
             offset,
-            indexed,
             writes_back,
         })
     }
@@ -511,42 +584,30 @@ impl Instruction {
     /// exclusive or acquiring access, a vector one and a prefetch are
     /// none of these.
     fn single_access(&self) -> Option<i64> {
-        let by_mnemonic = match self.mnemonic.as_str() {
-            "ldrb" | "strb" | "ldrsb" | "ldurb" | "sturb" | "ldursb" => 1,
-            "ldrh" | "strh" | "ldrsh" | "ldurh" | "sturh" | "ldursh" => 2,
-            "ldrsw" | "ldursw" => 4,
-            "ldr" | "str" | "ldur" | "stur" => 0,
-            _ => return None,
-        };
-        if by_mnemonic > 0 {
-            return Some(by_mnemonic);
-        }
-        match self.operands.first()?.chars().next()? {
-            'x' | 'd' => Some(8),
-            'w' | 's' => Some(4),
-            'q' => Some(16),
-            'h' => Some(2),
-            'b' => Some(1),
+        match self.mnemonic.as_str() {
+            "ldrb" | "strb" | "ldrsb" | "ldurb" | "sturb" | "ldursb" => Some(1),
+            "ldrh" | "strh" | "ldrsh" | "ldurh" | "sturh" | "ldursh" => Some(2),
+            "ldrsw" | "ldursw" => Some(4),
+            "ldr" | "str" | "ldur" | "stur" => width(self.operands.first()?),
             _ => None,
         }
     }
 
-    /// `add xN, x<request>, #C`, the address of a request field made into
-    /// a register of its own: `N` and `C`.
+    /// `add xN, x<request>, #C`, or `#C, lsl #12`, the address of a
+    /// request field made into a register of its own: `N` and the offset.
     fn field_address(&self, request: u8) -> Option<(u8, i64)> {
         if self.mnemonic != "add" {
             return None;
         }
-        let [to, from, imm] = &self.operands[..] else {
-            return None;
+        let (to, from, offset) = match &self.operands[..] {
+            [to, from, imm] => (to, from, immediate(imm)?),
+            [to, from, imm, shift] if shift == "lsl #12" => (to, from, immediate(imm)? << 12),
+            _ => return None,
         };
-        if !to.starts_with('x') || Gpr::of(from) != Some(Gpr::X(request)) {
-            return None;
+        match (Gpr::of(to)?, Gpr::of(from)?) {
+            (Gpr::X(to), Gpr::X(from)) if from == request && to != request => Some((to, offset)),
+            _ => None,
         }
-        let Some(Gpr::X(to)) = Gpr::of(to) else {
-            return None;
-        };
-        (to != request).then_some((to, immediate(imm)?))
     }
 
     /// Every general-purpose register the instruction names, `xN` and
@@ -555,10 +616,7 @@ impl Instruction {
         self.operands
             .iter()
             .flat_map(|o| o.split(|c: char| !c.is_ascii_alphanumeric()))
-            .filter_map(|word| match Gpr::of(word) {
-                Some(Gpr::X(n)) => Some(n),
-                _ => None,
-            })
+            .filter_map(|word| Gpr::of(word)?.number())
             .collect()
     }
 
@@ -600,6 +658,20 @@ impl Instruction {
     }
 }
 
+/// The bytes a load or store moves through `register`, by the letter its
+/// name starts with: a general register's either half, or a vector
+/// register's byte, half, single, double or quad view.
+fn width(register: &str) -> Option<i64> {
+    match register.chars().next()? {
+        'x' | 'd' => Some(8),
+        'w' | 's' => Some(4),
+        'q' => Some(16),
+        'h' => Some(2),
+        'b' => Some(1),
+        _ => None,
+    }
+}
+
 /// The value of an immediate operand, `#0x5c8`, `#-8` or `#16`.
 fn immediate(operand: &str) -> Option<i64> {
     let digits = operand.strip_prefix('#')?;
@@ -620,7 +692,7 @@ mod tests {
     const HEAD: &str = "\nbin/php:\tfile format mach-o arm64\n\nDisassembly of section __TEXT,__text:\n\n0000000100001000 <__ZN10php_engine4tier11serve_frame17h0123456789abcdefE>:\n100001000:     \tstp\tx20, x19, [sp, #-0x20]!\n100001004:     \tmov\tx19, x0\n";
 
     fn one(body: &str) -> Held {
-        let mut held = held(&format!("{HEAD}{body}")).unwrap();
+        let mut held = judged(&format!("{HEAD}{body}")).unwrap();
         assert_eq!(held.len(), 1, "{held:#?}");
         held.remove(0)
     }
@@ -716,6 +788,26 @@ mod tests {
         );
     }
 
+    /// An address spilled to the stack and loaded back is followed, as
+    /// the allocator may hold an unfolded field (#3345); a slot written
+    /// over in between holds it no longer.
+    #[test]
+    fn a_spilled_address_is_followed_back_from_its_slot() {
+        let held = one(concat!(
+            "100001008:     \tadd\tx8, x19, #0x5c8\n",
+            "10000100c:     \tstr\tx8, [sp, #0x10]\n",
+            "100001010:     \tstur\tx8, [x29, #-0x18]\n",
+            "100001014:     \tbl\t0x100002000 <_callee>\n",
+            "100001018:     \tldr\tx9, [sp, #0x10]\n",
+            "10000101c:     \tldr\tx10, [x9]\n",
+            "100001020:     \tstr\txzr, [x29, #-0x18]\n",
+            "100001024:     \tldur\tx11, [x29, #-0x18]\n",
+            "100001028:     \tldr\tx12, [x11]\n",
+        ));
+        assert_eq!(held.hoisted.len(), 1, "{held:#?}");
+        assert_eq!(held.hoisted[0].access, "ldr x10, [x9]");
+    }
+
     /// A register the callee keeps is followed across a call and a
     /// branch; one it does not is dropped at the branch.
     #[test]
@@ -737,28 +829,43 @@ mod tests {
     #[test]
     fn a_function_with_no_register_for_the_request_is_refused() {
         let text = HEAD.replace("mov\tx19, x0", "mov\tx19, x1");
-        let err = held(&format!("{text}100001008:     \tret\n")).unwrap_err();
+        let err = judged(&format!("{text}100001008:     \tret\n")).unwrap_err();
         assert!(
             err.to_string().contains("copies no register from x0"),
             "{err}"
         );
     }
 
-    /// The negative control and its pair, from #3345's disassemblies at
-    /// 037f359d8 (`_coordinator/s53d3/runs/t3345/`): the hot instantiation
-    /// built without the option holds sites, and built with it holds none.
+    /// The negative controls and their pair: #3345's instantiation at
+    /// 037f359d8 built without the option, and main e61851ebe's, hold sites;
+    /// this branch's, built with it, holds none and one escape.
     #[test]
     fn the_build_without_the_option_fails_and_the_one_with_it_passes() {
         let dir = crate::package_dir().join("fixtures/fold");
         let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
-        let unfolded = held(&read("unfolded.s")).unwrap();
+        let unfolded = judged(&read("unfolded.s")).unwrap();
         assert!(
             unfolded.iter().any(|h| !h.hoisted.is_empty()),
             "{unfolded:#?}"
         );
-        let folded = held(&read("folded.s")).unwrap();
+        let folded = judged(&read("folded.s")).unwrap();
         assert!(folded.iter().all(|h| h.hoisted.is_empty()), "{folded:#?}");
         assert!(folded.iter().all(|h| h.folded > 0), "{folded:#?}");
+        assert!(folded.iter().any(|h| !h.escaped.is_empty()), "{folded:#?}");
+        // main e61851ebe without the option: the second word hoisted, the
+        // first escaped.
+        let main = judged(&read("main-unfolded.s")).unwrap();
+        let hoisted: Vec<i64> = main
+            .iter()
+            .flat_map(|h| &h.hoisted)
+            .map(|s| s.offset)
+            .collect();
+        let escaped: Vec<i64> = main
+            .iter()
+            .flat_map(|h| &h.escaped)
+            .map(|s| s.offset)
+            .collect();
+        assert_eq!((hoisted, escaped), (vec![0x920], vec![0x918]), "{main:#?}");
 
         let sizes = [("serve_frame".to_owned(), 64)];
         let mut reading = Reading::new(INSTRUMENT, SCOPE);

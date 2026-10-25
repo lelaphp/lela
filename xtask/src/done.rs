@@ -548,7 +548,7 @@ fn folded(
     }
     match reading {
         Some(reading) if reading.status == Status::Pass => {}
-        // The sensor reads `aarch64` alone: a host it cannot read has
+        // The sensor reads an `aarch64` Mac alone: a host it cannot read has
         // nothing to hold, and says so.
         Some(reading) if reading.status == Status::Skip => notes.push(format!(
             "{instrument}: {scope} not held on this host: {}",
