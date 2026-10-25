@@ -154,9 +154,10 @@ fn skipped(oracle: &Oracle<'_>, tree: &Path, entry: &Entry) -> Result<Option<Str
     let beside = tree.join(&entry.id);
     let ran = oracle.run_under(&Invocation {
         cwd: beside.parent(),
+        raw: true,
         ..Invocation::new(php, Program::Beside(&program))
     })?;
-    Ok(match Said::of(&Said::written(&ran)) {
+    Ok(match Said::ran(ran) {
         Said::Skip(why) => Some(why),
         Said::Bork(said) => Some(format!("invalid output from SKIPIF: {said}")),
         Said::XFail(_) | Said::Warn(_) | Said::Run => None,

@@ -198,11 +198,13 @@ impl<'a> Adapter<'a> {
                 return Ok(borked(&id, &name, why));
             }
         };
-        // A CGI run's headers stand before its body, parted before the
-        // body is normalised (run-tests.php:2530-2543).
+        // What ran is normalised as upstream trims it, after its
+        // `Termsig=` line; a CGI run's headers stand before its body,
+        // parted before the body is normalised (run-tests.php:2530-2543).
+        let rules = &self.oracle.pin().recipe.normalise;
         let (headers, actual) = match &request {
-            Some(_) => cgi::parted(&actual, &self.oracle.pin().recipe.normalise),
-            None => (Vec::new(), actual),
+            Some(_) => cgi::parted(&actual, rules),
+            None => (Vec::new(), oracle::normalise(rules, actual)),
         };
         if let Some(construct) = unread(&actual) {
             let miss = Miss::unread(&construct);
@@ -293,7 +295,7 @@ impl<'a> Adapter<'a> {
             let shown = SKIPIF_SHOWS.map(String::from);
             let section = ("skip", body, &shown[..]);
             let out = self.run_section(subset, test, &env, section, phpt.has("PHPDBG"))?;
-            match Said::of(&Said::written(&out)) {
+            match Said::ran(out) {
                 Said::Skip(why) => return Ok(Err(Judged::new(id, name, Judgement::Skip, why))),
                 Said::Bork(said) => {
                     return Ok(Err(borked(
@@ -318,8 +320,9 @@ impl<'a> Adapter<'a> {
     /// The test's program, written where upstream writes it, run through
     /// the binary under test with the sections that shape one run, and
     /// taken away after; then `CLEAN`, which takes away what the test
-    /// left. What it wrote, or the verdict it came to without an
-    /// expectation to hold it to: a file already standing where the
+    /// left. What it wrote as it wrote it, with upstream's `Termsig=` line
+    /// ([`handed_back`]) and not yet normalised, or the verdict it came to
+    /// without an expectation to hold it to: a file already standing where the
     /// program goes borks the test rather than being overwritten, and a
     /// program still running at the recipe's limit fails it, since a hang
     /// is the engine's failure on this test as a wrong answer is and not
@@ -367,6 +370,7 @@ impl<'a> Adapter<'a> {
                 merged: capture.stdout && capture.stderr,
             },
             cwd: Some(&subset.root),
+            raw: true,
             ..Invocation::new(self.binary, Program::Beside(&program))
         };
         let (dbg_flags, commands) = (phpdbg::FLAGS.map(String::from), phpdbg::stdin(phpt));
@@ -399,12 +403,11 @@ impl<'a> Adapter<'a> {
                         .stdin
                         .as_deref()
                         .map_or(invocation.stdin, Stdin::File),
-                    raw: true,
                     ..invocation
                 }),
                 _ => self.oracle.run_under(&invocation),
             }
-            .map(|ran| ran.stdout)
+            .map(handed_back)
         };
         drop(written);
         let output = match ran {
@@ -437,7 +440,8 @@ impl<'a> Adapter<'a> {
     /// an empty pipe on stdin, as upstream's does. A `--PHPDBG--` test's
     /// run under the pinned phpdbg with `-rr` (`debugger`), as upstream's
     /// run under the debugger it hosts the test through, where the pin
-    /// names one.
+    /// names one. What a section wrote is handed back as it wrote it, which
+    /// a `SKIPIF`'s reader trims as upstream trims it ([`Said::ran`]).
     fn run_section(
         &self,
         subset: &Subset,
@@ -467,6 +471,7 @@ impl<'a> Adapter<'a> {
                 stdin: Stdin::Pipe(&[]),
                 streams: Streams::Pipes { merged: false },
                 cwd: Some(&subset.root),
+                raw: true,
                 ..Invocation::new(pinned, Program::Beside(&program))
             })
             .with_context(|| format!("running the {kind} section of {}", test.file.display()))?;
@@ -852,7 +857,13 @@ pub(crate) enum Said {
 }
 
 impl Said {
-    /// What `written` says: what a `SKIPIF` wrote, as [`Said::written`]
+    /// What a `SKIPIF`'s run says, read as upstream reads what its
+    /// `system_with_timeout` handed back ([`handed_back`]).
+    pub(crate) fn ran(out: Observation) -> Said {
+        Said::of(&String::from_utf8_lossy(&handed_back(out)))
+    }
+
+    /// What `written` says: what a `SKIPIF` wrote, as [`handed_back`]
     /// hands it back.
     pub(crate) fn of(written: &str) -> Said {
         let said = written.trim_matches(TRIM);
@@ -876,24 +887,32 @@ impl Said {
             _ => Said::Bork(said.to_owned()),
         }
     }
+}
 
-    /// What upstream's `system_with_timeout` hands back of a `SKIPIF`'s
-    /// run: its stdout, and a `Termsig=` line where it exited 129 to 159
-    /// (run-tests.php:1227-1233), which borks a test whose `SKIPIF`
-    /// crashed having written nothing. Upstream's command line opens with
-    /// `unset`s (run-tests.php:2123), so the shell forks php and exits
-    /// with 128 and the signal that ended it: the oracle's
-    /// `proc_get_status` over that shape with a php that killed itself
-    /// with 11 answers `signaled` false and an exit of 139, and the line
-    /// reads `Termsig=11`, as it does here for a php a signal ended.
-    pub(crate) fn written(out: &Observation) -> String {
-        let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
-        if let Ended::Signal(n) | Ended::Status(n @ 129..=159) = out.exit {
-            // The signal, or the shell's 128 over it.
-            write!(said, "\nTermsig={}\n", n % 128).ok();
-        }
-        said
+/// What upstream's `system_with_timeout` hands back of a run, the test's
+/// program and its `SKIPIF` alike: what it wrote, as it wrote it, and a
+/// `Termsig=` line where a signal ended it or it exited 129 to 159
+/// (run-tests.php:1235-1239), which upstream trims with the rest, so the
+/// run is taken `raw` and normalised after. So a php that `_exit(137)`s at its hard
+/// memory limit (`zend_mm_hard_limit_error`) reads `Termsig=9`, as an
+/// expectation that ends in it wants, and a `SKIPIF` that crashed having
+/// written nothing borks. Upstream's `SKIPIF` command line opens with
+/// `unset`s (run-tests.php:2123), so the shell forks php and exits with
+/// 128 and the signal that ended it: the oracle's `proc_get_status` over
+/// that shape with a php that killed itself with 11 answers `signaled`
+/// false and an exit of 139, and the line reads `Termsig=11`, as it does
+/// here for a php a signal ended.
+fn handed_back(out: Observation) -> Vec<u8> {
+    let mut said = out.stdout;
+    let termsig = match out.exit {
+        Ended::Signal(n) => Some(n),
+        Ended::Status(n @ 129..=159) => Some(n - 128),
+        Ended::Status(_) => None,
+    };
+    if let Some(n) = termsig {
+        said.extend_from_slice(format!("\nTermsig={n}\n").as_bytes());
     }
+    said
 }
 
 /// The reason upstream's `pattern` reads out of what a `SKIPIF` said, its
@@ -989,27 +1008,37 @@ mod tests {
         }
     }
 
-    /// A `SKIPIF` a signal ended, or one that exited as a shell says a
-    /// signal ended its child, reads as upstream's `Termsig=` line after
-    /// what it wrote, and borks where it wrote nothing (run-tests.php:1227).
+    /// A run a signal ended, or one that exited as a shell says a signal
+    /// ended its child, reads as upstream's `Termsig=` line after what it
+    /// wrote, the test's program as its `SKIPIF`, and a `SKIPIF` borks
+    /// where it wrote nothing (run-tests.php:1235-1239).
     #[test]
-    fn a_skipif_a_signal_ended_is_read_with_upstreams_termsig_line() {
-        let written = |stdout: &str, exit| {
-            Said::written(&Observation {
+    fn a_run_a_signal_ended_is_handed_back_with_upstreams_termsig_line() {
+        let back = |stdout: &str, exit| {
+            let out = handed_back(Observation {
                 stdout: stdout.into(),
                 stderr: Vec::new(),
                 exit,
                 wall: std::time::Duration::ZERO,
-            })
+            });
+            String::from_utf8(out).unwrap()
         };
-        assert_eq!(written("", Ended::Signal(11)), "\nTermsig=11\n");
+        assert_eq!(back("", Ended::Signal(11)), "\nTermsig=11\n");
+        assert_eq!(back("skip x", Ended::Status(139)), "skip x\nTermsig=11\n");
+        // php's `_exit(137)` at its hard memory limit, the FILE run's case:
+        // the line's own newline is kept, so trimmed with the rest it
+        // stands a blank line above `Termsig=9`, as the expectation has it.
+        let fatal = "Hard memory limit of 2097152 bytes exhausted in x on line 3\n";
         assert_eq!(
-            written("skip x", Ended::Status(139)),
-            "skip x\nTermsig=11\n"
+            back(fatal, Ended::Status(137)),
+            format!("{fatal}\nTermsig=9\n")
         );
-        assert_eq!(written("skip x", Ended::Status(1)), "skip x");
-        assert_eq!(written("", Ended::Status(160)), "");
-        let said = Said::of(&written("", Ended::Signal(9)));
+        assert_eq!(back("x", Ended::Status(129)), "x\nTermsig=1\n");
+        assert_eq!(back("x", Ended::Status(159)), "x\nTermsig=31\n");
+        for plain in [0, 1, 128, 160, 255] {
+            assert_eq!(back("x", Ended::Status(plain)), "x", "{plain}");
+        }
+        let said = Said::of(&back("", Ended::Signal(9)));
         assert_eq!(said, Said::Bork("Termsig=9".to_owned()));
     }
 
