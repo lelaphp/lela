@@ -232,9 +232,12 @@ pub(super) struct Properties {
     /// after its declared properties; an object here carries what the
     /// heap lays down and nothing more, so the words are the request's,
     /// named by `spl_object_id()` and the property's name. A row is
-    /// dropped the moment its word empties, which is before the object
-    /// can die, so an index the store gives out again is never one an
-    /// old row still names.
+    /// dropped the moment its word empties, and every word is taken under
+    /// a hold of its object that is given up only after the word is
+    /// given back ([`Request::guarded`], [`LentGuard`](super::lazy::LentGuard)),
+    /// so no row outlives its object and an index the store gives out
+    /// again is never one an old row still names, as php's guards, which
+    /// live in the object, die with it.
     guards: Vec<((php_heap::ObjectId, Vec<u8>), u32)>,
     /// The recursion guards of objects whose class uses guards, one row
     /// per walk inside one object (`ZEND_GUARD_RECURSION_*` on the
@@ -2440,8 +2443,13 @@ impl Request {
     }
 
     /// `(*guard) |= bit`, the row laid down by the first accessor to
-    /// take it.
+    /// take it, on an object the taker holds across the window
+    /// ([`Request::guarded`]).
     pub(super) fn guard_take(&mut self, object: PhpObject, name: &[u8], bit: u32) {
+        debug_assert!(
+            object.heap().refcount() >= 2,
+            "a property guard taken on an object nothing holds across it"
+        );
         let id = object.heap().id();
         if let Some((_, word)) = self
             .properties
@@ -2532,9 +2540,25 @@ impl Request {
         name: &[u8],
         arguments: &[Value],
     ) -> Result<Value, Thrown> {
+        self.guarded(object, name, bit, |req| {
+            req.serve_accessor(object, accessor, name, arguments)
+        })
+    }
+
+    /// `serve` under `bit` of `object`'s guard for `name`, the object held
+    /// across the window (`GC_ADDREF` before `(*guard) |= bit`,
+    /// `OBJ_RELEASE` after `(*guard) &= ~bit`), so the row is given back
+    /// before the object can die.
+    pub(super) fn guarded<T>(
+        &mut self,
+        object: PhpObject,
+        name: &[u8],
+        bit: u32,
+        serve: impl FnOnce(&mut Request) -> T,
+    ) -> T {
         let held = Owner::take(self, object.as_value());
         self.guard_take(object, name, bit);
-        let served = self.serve_accessor(object, accessor, name, arguments);
+        let served = serve(self);
         self.guard_drop(object, name, bit);
         held.give_up(self);
         served
@@ -2759,10 +2783,9 @@ impl Request {
             let instance = self.lazy_init(object)?;
             let guarded = getter.is_some() || issetter.is_some();
             if guarded && self.guard_word(instance, name) & guard_bit == 0 {
-                self.guard_take(instance, name, guard_bit);
-                let read = self.read_property(instance, name, read);
-                self.guard_drop(instance, name, guard_bit);
-                return read;
+                return self.guarded(instance, name, guard_bit, |req| {
+                    req.read_property(instance, name, read)
+                });
             }
             return self.read_property(instance, name, read);
         }
@@ -3462,10 +3485,9 @@ impl Request {
         };
         let bytes = name.as_bytes().to_vec();
         if guarded && self.guard_word(instance, &bytes) & IN_SET == 0 {
-            self.guard_take(instance, &bytes, IN_SET);
-            let written = self.write_property(instance, name, value);
-            self.guard_drop(instance, &bytes, IN_SET);
-            return written;
+            return self.guarded(instance, &bytes, IN_SET, |req| {
+                req.write_property(instance, name, value)
+            });
         }
         self.write_property(instance, name, value)
     }
@@ -4862,12 +4884,9 @@ impl Request {
         // `OBJ_RELEASE` after the guard is down), so an `__isset` that
         // gives up every other owner does not free the object the
         // `__get` is served on.
-        self.guard_take(object, name, IN_ISSET);
-        let held = Owner::take(self, object.as_value());
-        let answered = self.isset_then_truth(object, name, test, issetter);
-        self.guard_drop(object, name, IN_ISSET);
-        held.give_up(self);
-        answered
+        self.guarded(object, name, IN_ISSET, |req| {
+            req.isset_then_truth(object, name, test, issetter)
+        })
     }
 
     /// `zend_std_has_property`'s `/* have issetter - try with it! */`
@@ -4948,10 +4967,9 @@ impl Request {
         if self.serves_accessor(instance.class(), Accessor::Isset)
             && self.guard_word(instance, name) & IN_ISSET == 0
         {
-            self.guard_take(instance, name, IN_ISSET);
-            let held = self.has_property(instance, name, test);
-            self.guard_drop(instance, name, IN_ISSET);
-            return held;
+            return self.guarded(instance, name, IN_ISSET, |req| {
+                req.has_property(instance, name, test)
+            });
         }
         self.has_property(instance, name, test)
     }
@@ -5142,10 +5160,9 @@ impl Request {
         if o.laziness() != php_heap::Laziness::Eager {
             let instance = self.lazy_init(object)?;
             if unsetter.is_some() && self.guard_word(instance, name) & IN_UNSET == 0 {
-                self.guard_take(instance, name, IN_UNSET);
-                let unset = self.unset_property(instance, name);
-                self.guard_drop(instance, name, IN_UNSET);
-                return unset;
+                return self.guarded(instance, name, IN_UNSET, |req| {
+                    req.unset_property(instance, name)
+                });
             }
             return self.unset_property(instance, name);
         }

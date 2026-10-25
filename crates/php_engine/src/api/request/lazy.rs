@@ -73,6 +73,9 @@ pub(crate) struct Table {
 pub(crate) struct LentGuard {
     instance: PhpObject,
     name: Vec<u8>,
+    /// The hold of the instance across the window, given up after the
+    /// guard, as [`Request::guarded`] holds one.
+    held: Owner<Value>,
 }
 
 /// The write [`Request::lazy_skip`] makes while the slot does not wait,
@@ -557,10 +560,12 @@ impl Request {
             && self.uses_guards(instance.class())
             && self.guard_word(instance, name) & IN_GET == 0
         {
+            let held = Owner::take(self, instance.as_value());
             self.guard_take(instance, name, IN_GET);
             let lent = LentGuard {
                 instance,
                 name: name.to_vec(),
+                held,
             };
             return Ok((instance, Some(lent)));
         }
@@ -570,8 +575,14 @@ impl Request {
     /// The `IN_GET` a [`LentGuard`] took on the instance, given back once
     /// the place is resolved.
     pub(crate) fn give_back_guard(&mut self, lent: Option<LentGuard>) {
-        if let Some(LentGuard { instance, name }) = lent {
+        if let Some(LentGuard {
+            instance,
+            name,
+            held,
+        }) = lent
+        {
             self.guard_drop(instance, &name, IN_GET);
+            held.give_up(self);
         }
     }
 
