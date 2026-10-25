@@ -16,59 +16,59 @@ loop at 0, loop, interrupt stub
   #5 f0.CV14 [undef, ref, any] = phi(#4, #21)
   #7 f0.CV15 [undef, ref, any] = phi(#6, #23)
   #9 f0.CV17 [undef, ref, any] = phi(#8, #26)
-  guard #10 long -> exit 0
   guard #9 long -> exit 0
+  guard #10 long -> exit 0
 0045 f0 IS_SMALLER #9, #10 fused inline
   checks direction taken -> exit 1
   guard #1 double -> exit 2
 0028 f0 MUL #1, float(2) inline
   -> #11 f0.T25 [double]
+  guard #3 double -> exit 3
   guard #11 double -> exit 3
-  guard #3 double -> exit 4
 0029 f0 MUL #3, #11 inline
   -> #12 f0.T26 [double]
+  guard #12 double -> exit 4
   guard #13 double -> exit 5
-  guard #12 double -> exit 5
 0030 f0 ADD #12, #13 inline
   -> #14 f0.T27 [double]
   guard #14 double -> exit 6
   guard #3 double -> exit 7
 0031 f0 ASSIGN #3, #14 inline
   -> #15 f0.CV13 [undef, ref, any]
-  guard #7 double -> exit 8
   guard #5 double -> exit 8
+  guard #7 double -> exit 8
 0032 f0 SUB #5, #7 inline
   -> #16 f0.T29 [double]
-  guard #17 double -> exit 9
   guard #16 double -> exit 9
+  guard #17 double -> exit 10
 0033 f0 ADD #16, #17 inline
   -> #18 f0.T30 [double]
-  guard #18 double -> exit 10
-  guard #1 double -> exit 11
+  guard #18 double -> exit 11
+  guard #1 double -> exit 12
 0034 f0 ASSIGN #1, #18 inline
   -> #19 f0.CV12 [undef, ref, any]
-  guard #19 double -> exit 12
-  guard #19 double -> exit 12
+  guard #19 double -> exit 13
+  guard #19 double -> exit 13
 0035 f0 MUL #19, #19 inline
   -> #20 f0.T32 [double]
-  guard #20 double -> exit 13
-  guard #5 double -> exit 14
+  guard #20 double -> exit 14
+  guard #5 double -> exit 15
 0036 f0 ASSIGN #5, #20 inline
   -> #21 f0.CV14 [undef, ref, any]
-  guard #15 double -> exit 15
-  guard #15 double -> exit 15
+  guard #15 double -> exit 16
+  guard #15 double -> exit 16
 0037 f0 MUL #15, #15 inline
   -> #22 f0.T34 [double]
-  guard #22 double -> exit 16
-  guard #7 double -> exit 17
+  guard #22 double -> exit 17
+  guard #7 double -> exit 18
 0038 f0 ASSIGN #7, #22 inline
   -> #23 f0.CV15 [undef, ref, any]
-  guard #23 double -> exit 18
-  guard #21 double -> exit 18
+  guard #21 double -> exit 19
+  guard #23 double -> exit 19
 0039 f0 ADD #21, #23 inline
   -> #24 f0.T36 [double]
-  guard #24 double -> exit 19
   guard #25 double -> exit 20
+  guard #24 double -> exit 20
 0040 f0 IS_SMALLER #25, #24 fused inline
   checks direction taken -> exit 21
   guard #9 long -> exit 22
@@ -79,22 +79,22 @@ exit 0: f0 0045 plain
 exit 1: f0 0047 plain
 exit 2: f0 0028 plain
 exit 3: f0 0029 plain
-exit 4: f0 0029 plain f0.T25:double
-exit 5: f0 0030 plain
+exit 4: f0 0030 plain
+exit 5: f0 0030 plain f0.T26:double
 exit 6: f0 0031 plain
 exit 7: f0 0031 plain f0.T27:double
 exit 8: f0 0032 plain
 exit 9: f0 0033 plain
-exit 10: f0 0034 plain
-exit 11: f0 0034 plain f0.T30:double
-exit 12: f0 0035 plain
-exit 13: f0 0036 plain
-exit 14: f0 0036 plain f0.T32:double
-exit 15: f0 0037 plain
-exit 16: f0 0038 plain
-exit 17: f0 0038 plain f0.T34:double
-exit 18: f0 0039 plain
-exit 19: f0 0040 plain
-exit 20: f0 0040 plain f0.T36:double
+exit 10: f0 0033 plain f0.T29:double
+exit 11: f0 0034 plain
+exit 12: f0 0034 plain f0.T30:double
+exit 13: f0 0035 plain
+exit 14: f0 0036 plain
+exit 15: f0 0036 plain f0.T32:double
+exit 16: f0 0037 plain
+exit 17: f0 0038 plain
+exit 18: f0 0038 plain f0.T34:double
+exit 19: f0 0039 plain
+exit 20: f0 0040 plain
 exit 21: f0 0042 plain f0.T36:double
 exit 22: f0 0044 plain

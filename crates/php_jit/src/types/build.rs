@@ -13,11 +13,11 @@ use php_unit::{Effects, OpArray, Opcode, OperandKind, Opline, OplineIdx};
 
 use super::lattice::{self, Types};
 use super::opcodes::{
-    Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, compiled_inline,
-    compound_in_place, constant, constant_types, goes_one_way, guard_sites, held_as_is,
-    inline_may_leave, is_call, keeps_temporaries, keyed, may_exit, op1_types, out_types,
-    packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced, slot_of,
-    within, writes, written, written_after_entry, written_through,
+    Declared, ISEMPTY, MAX_ARG_FLAG_NUM, Within, arith, assigned, check_sites, checked_order,
+    compiled_inline, compound_in_place, constant, constant_types, goes_one_way, guard_sites,
+    held_as_is, inline_may_leave, is_call, keeps_temporaries, keyed, may_exit, op1_types,
+    out_types, packed_guard, param_types, params, reads, reads_by_name, recv_exits, referenced,
+    slot_of, within, writes, written, written_after_entry, written_through,
 };
 use super::{
     Abort, BodyEntry, Check, Constant, Def, End, Entry, ExitId, ExitSpec, Form, Frame, FrameInfo,
@@ -1823,7 +1823,10 @@ impl<'a> Builder<'a> {
         let t1 = self.types_of(frame, operands[0]);
         let mut held: [Option<(Types, Read)>; 3] = [None; 3];
         let sites = guard_sites(op, data_line, samples, t1, self.meta(frame).code);
-        for site in &sites {
+        for site in checked_order(op.opcode)
+            .iter()
+            .filter(|site| sites.contains(site))
+        {
             let at = *site as usize;
             // php follows an indirect `VAR` for the element writes alone.
             let sample = samples[at].filter(|s| !s.indirect || written_through(op.opcode));
@@ -2746,6 +2749,7 @@ impl<'a> Builder<'a> {
                 (GuardAt::Before(op), Check::Layout { .. }) => Order::At(op, Stage::Inside),
                 (GuardAt::Before(op), Check::Room { .. }) => Order::At(op, Stage::Pushes),
                 (GuardAt::Before(op), _) => Order::At(op, Stage::Before),
+                (GuardAt::Within(op), Check::Direction { .. }) => Order::At(op, Stage::Branches),
                 (GuardAt::Within(op), _) => Order::At(op, Stage::Within),
             };
             order.push((key, Source::Guard(at)));
@@ -3780,7 +3784,13 @@ enum Order {
 }
 
 /// What happens at an op, in the order php's code generator takes its
-/// exits: the guards before it on its operands' types; the exit an
+/// exits: the guards before it on its operands' types; the exit the way
+/// the trace did not go leaves through, which php takes before it emits
+/// the op's code, its smart branch's or `FE_FETCH_R`'s
+/// (`Z/ext/opcache/jit/zend_jit_trace.c`'s `zend_jit_trace_get_exit_point`
+/// before `zend_jit_cmp`, `zend_jit_isset_isempty_dim` or
+/// `zend_jit_fe_fetch`, whose packed guard follows it,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:13839-13843`); the exit an
 /// inline fetch opens its code with, php's `ZEND_JIT_EXIT_TO_VM` that
 /// `zend_jit_fetch_dim_read` takes first (`Z/ext/opcache/jit/zend_jit_ir.c:12540-12547`);
 /// the layout guard php takes inside the op's code, after it
@@ -3793,6 +3803,7 @@ enum Order {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Stage {
     Before,
+    Branches,
     Opens,
     Inside,
     Within,

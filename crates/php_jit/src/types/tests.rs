@@ -820,6 +820,87 @@ fn a_natives_call_returns_what_it_declares() -> Result<(), String> {
     Ok(())
 }
 
+/// php's code generator holds an `ASSIGN_DIM`'s variable before the
+/// value its `OP_DATA` writes (`CHECK_OP1_TRACE_TYPE`, then
+/// `CHECK_OP1_DATA_TRACE_TYPE`, `Z/ext/opcache/jit/zend_jit_trace.c:5064-5101`),
+/// where its TSSA marks them the other way round. In a file's own code
+/// the variable's guard leaves no type known, so the guard on the value
+/// after it leaves through the same exit: the pinned php's trace of this
+/// loop takes one exit, `exit_2: 0010/----/0`, at `$a[0] = class_exists($c)`
+/// for both, where holding the value first took two (#3438).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn an_element_writes_guards_are_held_in_phps_order() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", ""), ("record.start", "loop")],
+        "$a = [1, 2];
+        $c = $argc > 5 ? 'q' : 'stdClass';
+        for ($i = 0; $i < 10; $i++) { $a[0] = class_exists($c); }
+        echo $a[0], \"\\n\";",
+    )?;
+    let at = (ir.ops.iter())
+        .position(|op| matches!(op, Op::Line(line) if line.opcode == Opcode::AssignDim))
+        .and_then(|at| u32::try_from(at).ok())
+        .map(OpId)
+        .ok_or_else(|| format!("no ASSIGN_DIM:\n{}", dump::render(&ir)))?;
+    let Some(Op::Line(write)) = ir.ops.get(at.index()) else {
+        return Err("no ASSIGN_DIM".to_owned());
+    };
+    let held: Vec<(Operand, ExitId)> = (ir.guards.iter())
+        .filter(|guard| guard.at == GuardAt::Before(at))
+        .filter_map(|guard| match guard.check {
+            Check::Type { value, .. } => Some((Operand::Value(value), guard.exit)),
+            _ => None,
+        })
+        .collect();
+    let exit = held.first().map(|(_, exit)| *exit);
+    assert_eq!(
+        held,
+        exit.map(|exit| vec![(write.op1, exit), (write.data, exit)])
+            .unwrap_or_default(),
+        "{}",
+        dump::render(&ir)
+    );
+    Ok(())
+}
+
+/// `FE_FETCH_R` takes the exit the way out of the loop leaves through
+/// before its array's packed guard, as php's code generator takes it
+/// before `zend_jit_fe_fetch`, whose packed guard follows
+/// (`Z/ext/opcache/jit/zend_jit_trace.c:6320-6350`,
+/// `Z/ext/opcache/jit/zend_jit_ir.c:13839-13843`): the pinned php's trace
+/// through this `foreach` takes `exit_8: 0005` before `exit_9: 0002`
+/// (#3438).
+#[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
+#[test]
+fn a_foreach_leaves_its_loop_before_it_holds_the_arrays_layout() -> Result<(), String> {
+    let ir = built(
+        &[("record.function", ""), ("record.start", "loop")],
+        "function f($a) { foreach ($a as $v) { return $v; } return 0; }
+        $x = [[1, 2], [3]];
+        for ($i = 0; $i < 4; $i++) { echo f($x[$i % 2]), \"\\n\"; }",
+    )?;
+    let at = inline_at(&ir, Opcode::FeFetchR)?;
+    let exit_of = |held: fn(&Check) -> bool| {
+        (ir.guards.iter())
+            .find(|guard| {
+                matches!(guard.at, GuardAt::Before(op) | GuardAt::Within(op) if op == at)
+                    && held(&guard.check)
+            })
+            .map(|guard| guard.exit)
+    };
+    let direction = exit_of(|check| matches!(check, Check::Direction { .. }));
+    let layout = exit_of(|check| matches!(check, Check::Layout { .. }));
+    let (Some(direction), Some(layout)) = (direction, layout) else {
+        return Err(format!(
+            "no direction and layout at the fetch:\n{}",
+            dump::render(&ir)
+        ));
+    };
+    assert!(direction.0 < layout.0, "{}", dump::render(&ir));
+    Ok(())
+}
+
 /// The place of the first stepped opline of `opcode`.
 fn stepped(ir: &TraceIr, opcode: Opcode) -> Result<OpId, String> {
     ir.ops
