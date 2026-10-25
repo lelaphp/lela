@@ -53,7 +53,7 @@ fn of(req: &mut Request, object: PhpObject) -> Result<(DocId, ffi::Node), Thrown
             "tidyNode object is not initialized",
         ));
     };
-    if at.generation != generation(req, id) {
+    if generation(req, id) != Some(at.generation) {
         return Err(throw_error(
             req,
             "Error",
@@ -89,8 +89,13 @@ pub(crate) fn create(
 ) -> Result<Owner<PhpObject>, Thrown> {
     let class = lookup_class(req, b"tidyNode")?;
     let class = class.ok_or_else(|| fatal(req, "InternalError: tidyNode is not linked"))?;
+    let Some(generation) = generation(req, id) else {
+        return Err(fatal(
+            req,
+            "InternalError: a tidyNode of a document no slot holds",
+        ));
+    };
     let object = new_object(req, class)?;
-    let generation = generation(req, id);
     if let Some(obj) = object.native_mut::<Obj>(req) {
         obj.doc = Some(id);
         obj.node = Some(NodeAt { node, generation });

@@ -325,9 +325,10 @@ pub(crate) fn set_initialized(req: &mut Request, id: DocId) {
     }
 }
 
-/// The parse the document's tree is from, `ptdoc->parse_generation`.
-pub(crate) fn generation(req: &mut Request, id: DocId) -> Generation {
-    slot(req, id).map_or_else(Generation::default, |slot| slot.generation)
+/// The parse the document's tree is from, `ptdoc->parse_generation`;
+/// `None` for a document no slot holds.
+pub(crate) fn generation(req: &mut Request, id: DocId) -> Option<Generation> {
+    slot(req, id).map(|slot| slot.generation)
 }
 
 /// One parse more, `ptdoc->parse_generation++`, before libtidy frees
