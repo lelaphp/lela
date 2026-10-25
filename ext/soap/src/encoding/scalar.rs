@@ -3,7 +3,7 @@
 
 use php_ext::call::call;
 use php_ext::coerce::{
-    Exponent, callable_checked, float_format, numeric_string, to_double, to_long, to_string, truthy,
+    Exponent, callable_checked, gcvt, numeric_string, to_double, to_long, to_string, truthy,
 };
 use php_ext::decl::{ClassKind, EnumBacking};
 use php_ext::request::Request;
@@ -487,7 +487,35 @@ pub(super) fn to_xml_long(
     Ok(ret)
 }
 
-/// `to_xml_double`.
+/// `to_xml_double`: `zend_gcvt` at `EG(precision)` as the entry stands
+/// (`Z/ext/soap/php_encoding.c:1110`), with none of the `precision ?
+/// precision : 1` that `echo` reads it through, so under `precision = 0`
+/// the one digit is written exponentially once the point stands past it
+/// and a non-finite double is no text at all, while `1` cuts its word to
+/// one character:
+///
+/// ```php
+/// class C extends SoapClient {
+///     function __doRequest(string $req, string $loc, string $act, int $ver, bool $one = false, ?string $u = null): ?string {
+///         preg_match_all('~<param\d xsi:type="xsd:double">([^<]*)</param\d>~', $req, $m);
+///         echo ini_get('precision'), ": ", implode("|", $m[1]), "\n";
+///         throw new Exception();
+///     }
+/// }
+/// $c = new C(null, ['location' => 'http://x/', 'uri' => 'urn:x']);
+/// foreach ([0, 1, -1, 3] as $p) {
+///     ini_set('precision', $p);
+///     try {
+///         $c->f(...array_map(fn($d) => new SoapVar($d, XSD_DOUBLE), [10/3, 0.25, 0.0, -1.5, 1e25, INF, -INF, NAN]));
+///     } catch (Exception) {}
+/// }
+/// ```
+/// ```expect
+/// 0: 3.0E+0|0.2|0.0E+0|-2.0E+0|1.0E+25|||
+/// 1: 3|0.2|0|-2|1.0E+25|I|-|N
+/// -1: 3.3333333333333335|0.25|0|-1.5|1.0E+25|INF|-INF|NAN
+/// 3: 3.33|0.25|0|-1.5|1.0E+25|INF|-IN|NAN
+/// ```
 pub(super) fn to_xml_double(
     req: &mut Request,
     e: &Enc,
@@ -500,7 +528,7 @@ pub(super) fn to_xml_double(
         return Ok(ret);
     }
     let d = to_double(req, &data)?;
-    let s = float_format(d, req.ini().precision(), Exponent::Upper);
+    let s = gcvt(d, req.ini().precision(), Exponent::Upper);
     ret.set_content_len(s.as_bytes());
     if style == Use::Encoded {
         set_ns_and_type(req, ret, &e.e);

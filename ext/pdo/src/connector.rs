@@ -438,16 +438,19 @@ pub trait Connection: Any + Send {
     /// `doer`: `sql` served for its effect, the rows it changed.
     fn exec(&mut self, req: &mut Request, sql: &[u8]) -> Result<i64, Failure>;
 
-    /// `quoter`: `text` quoted as a string of the connector's SQL.
-    /// `raises` is the connection's error handling, which a quoter that raises
-    /// by itself reads, as `sqlite_handle_quoter` does.
+    /// `quoter`: `text` quoted as a string of the connector's SQL, made
+    /// on the request's heap as the connector's quoter makes it, so
+    /// `PDO::quote()` hands it out and the emulated parser holds it as php
+    /// holds `plc->quoted`. `raises` is the connection's error handling,
+    /// which a quoter that raises by itself reads, as
+    /// `sqlite_handle_quoter` does.
     fn quote(
         &mut self,
         req: &mut Request,
         text: &[u8],
         ty: BindType,
         raises: OnError,
-    ) -> Result<Vec<u8>, Failure> {
+    ) -> Result<Owner<PhpString>, Failure> {
         let _ = (req, text, ty, raises);
         Err(Failure::unsupported())
     }
@@ -642,17 +645,20 @@ pub trait Statement: Any + Send {
         Err(Failure::unsupported())
     }
 
-    /// `next_rowset`: the next rowset's column count, and its row count
-    /// where the connector sets `stmt->row_count`.
-    fn next_rowset(&mut self, req: &mut Request) -> Result<Executed, Failure> {
-        let _ = req;
-        Err(Failure::unsupported())
+    /// `stmt->methods->next_rowset`, a slot php tests for `NULL` before
+    /// PDO acts on the statement (`nextRowset()` refuses with `IM001`
+    /// before it resets the columns, and `closeCursor()`'s emulation stops
+    /// after the first rowset). A connector with the slot answers itself.
+    fn rowsets(&mut self) -> Option<&mut dyn Rowsets> {
+        None
     }
 
-    /// `cursor_closer`.
-    fn close_cursor(&mut self, req: &mut Request) -> Result<(), Failure> {
-        let _ = req;
-        Err(Failure::unsupported())
+    /// `stmt->methods->cursor_closer`, a slot php tests for `NULL` before
+    /// PDO acts (`closeCursor()` clears the error only where there is one,
+    /// and emulates it by fetching every row of every rowset where there
+    /// is none). A connector with the slot answers itself.
+    fn cursor_closer(&mut self) -> Option<&mut dyn CursorCloser> {
+        None
     }
 
     /// `dtor`: what the statement holds of the request's or of its
@@ -660,6 +666,21 @@ pub trait Statement: Any + Send {
     fn close(&mut self, req: &mut Request) {
         let _ = req;
     }
+}
+
+/// `next_rowset`, the slot [`Statement::rowsets`] answers.
+pub trait Rowsets {
+    /// `next_rowset`: the next rowset's column count, and its row count
+    /// where the connector sets `stmt->row_count`; the `Err` where there is
+    /// none or the connector failed.
+    fn next_rowset(&mut self, req: &mut Request) -> Result<Executed, Failure>;
+}
+
+/// `cursor_closer`, the slot [`Statement::cursor_closer`] answers.
+pub trait CursorCloser {
+    /// `cursor_closer`: the rows of the start before given back, so the
+    /// statement can start again.
+    fn close_cursor(&mut self, req: &mut Request) -> Result<(), Failure>;
 }
 
 /// `enum pdo_error_mode`: what PDO does with an error.
@@ -734,7 +755,9 @@ pub struct Rewritten {
 /// until `php_pdo_free_statement` destroys it. A parameter bound by
 /// position over the rewritten query takes one more owner of its name
 /// (`rewrite_name_to_position`'s `zend_string_copy`), so its name costs
-/// nothing of its own:
+/// nothing of its own. The last statement names its column with `AS v`,
+/// so the name mysqlnd interns is one the compiled program already holds,
+/// opcache or not:
 ///
 /// ```php
 /// $p = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '', [PDO::ATTR_EMULATE_PREPARES => false]);
@@ -752,7 +775,7 @@ pub struct Rewritten {
 /// unset($s);
 /// echo memory_get_usage() - $m, "\n";
 /// $q = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', '');
-/// $s = $q->prepare('SELECT ?');
+/// $s = $q->prepare('SELECT ? AS v');
 /// $m = memory_get_usage();
 /// $s->execute([12345]);
 /// echo memory_get_usage() - $m, "\n";
@@ -762,7 +785,7 @@ pub struct Rewritten {
 /// 22200
 /// 776
 /// 0
-/// 16984
+/// 16960
 /// ```
 pub struct ParameterMap {
     table: Owner<PhpArray>,

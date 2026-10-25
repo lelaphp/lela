@@ -172,4 +172,9 @@ impl StreamFilter for SuppliedFilter {
         req.code_mut()
             .serve_supplied(self.by, |req| filter.close(req))
     }
+
+    fn share(&self, req: &mut Request) -> Option<Box<dyn StreamFilter>> {
+        let shared = self.filter.share(req)?;
+        Some(filter(self.by, shared))
+    }
 }

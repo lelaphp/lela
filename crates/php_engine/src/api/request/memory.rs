@@ -152,10 +152,7 @@ impl Intern for RequestStrings<'_> {
         {
             return Ok(held);
         }
-        let s = match sizing {
-            Sizing::Alloc => self.heap.string(bytes),
-            Sizing::Finit => self.heap.string_finit(bytes),
-        }?;
+        let s = self.heap.string_sized(bytes, sizing)?;
         if valid_utf8 {
             s.mark_valid_utf8();
         }
@@ -173,7 +170,9 @@ impl Intern for RequestStrings<'_> {
         {
             return Ok(held);
         }
-        let mut laid = self.heap.string_fresh(room.max(bytes.len()))?;
+        let mut laid = self
+            .heap
+            .string_fresh(room.max(bytes.len()), Sizing::Alloc)?;
         laid.bytes_mut()[..bytes.len()].copy_from_slice(bytes);
         laid.set_len(bytes.len());
         let s = laid.finish();
@@ -424,7 +423,17 @@ impl Request {
     /// length, php-8.5.12's `zend_string_finit`
     /// ([`php_heap::Heap::string_finit`]).
     pub(crate) fn string_finit(&mut self, bytes: &[u8]) -> Result<PhpString, Thrown> {
-        let allocated = self.heap.string_finit(bytes);
+        self.string_sized(bytes, Sizing::Finit)
+    }
+
+    /// A string of `bytes` out of this request's heap whatever their
+    /// length, laid at `sizing`'s size ([`php_heap::Heap::string_sized`]).
+    pub(crate) fn string_sized(
+        &mut self,
+        bytes: &[u8],
+        sizing: Sizing,
+    ) -> Result<PhpString, Thrown> {
+        let allocated = self.heap.string_sized(bytes, sizing);
         self.allocated(allocated)
     }
 

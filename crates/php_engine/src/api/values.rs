@@ -2692,6 +2692,12 @@ pub use php_link::NameHasher;
 /// `lazy proxy ` before `object(` ([`PhpObject::laziness`]).
 pub use php_heap::Laziness;
 
+/// Which of php's string constructors a string is laid as, for its size:
+/// `zend_string_alloc`'s ([`Sizing::Alloc`]), `zend_string_finit`'s
+/// ([`Sizing::Finit`]) or `zend_string_safe_alloc`'s
+/// ([`Sizing::SafeAlloc`]), what [`FreshString::sized`] is given.
+pub use php_heap::Sizing;
+
 /// What an object's property table holds of its declared properties
 /// (design §5.4): the slots standing for them, or copies of them the
 /// table holds as plain values ([`PhpObject::declared_rows`]).

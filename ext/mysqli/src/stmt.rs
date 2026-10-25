@@ -424,7 +424,31 @@ pub(crate) fn execute_query(
 }
 
 /// `mysqli_stmt_fetch`: `true` for a row, `null` past the last, `false`
-/// on a failure, reported.
+/// on a failure, reported. A bound temporal or zero-filled column's value
+/// is the string mysqlnd's `zend_strpprintf` makes, at
+/// `zend_string_finit`'s size under php-8.5.12:
+///
+/// ```php
+/// $m = new mysqli('127.0.0.1', 'root', '', 'test');
+/// $m->query('CREATE TEMPORARY TABLE tz (d DATE, t TIME(3), dt DATETIME, z SMALLINT(7) UNSIGNED ZEROFILL)');
+/// $m->query("INSERT INTO tz VALUES ('2026-10-24', '12:34:56.5', '2026-10-24 12:34:56', 42)");
+/// foreach (['d', 't', 'dt', 'z'] as $c) {
+///     $s = $m->prepare("SELECT $c FROM tz");
+///     $s->execute();
+///     $s->bind_result($v);
+///     $before = memory_get_usage();
+///     $s->fetch();
+///     $used = memory_get_usage() - $before;
+///     echo $c, ' ', $v, ' ', $used, "\n";
+///     $s->close();
+/// }
+/// ```
+/// ```expect mysql
+/// d 2026-10-24 816
+/// t 12:34:56.500 768
+/// dt 2026-10-24 12:34:56 776
+/// z 0000042 752
+/// ```
 pub(crate) fn fetch(req: &mut Request, on: On) -> Result<Option<bool>, Thrown> {
     with_stmt(req, on.object, Need::Open, |req, s| {
         match s.stmt.fetch(req)? {

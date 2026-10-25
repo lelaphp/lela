@@ -2159,7 +2159,7 @@ impl PDO {
         clear_error(req, this);
         let mode = dbh_ref(req, this, |d| d.error_mode).unwrap_or_default();
         match on_connection(req, this, |req, conn| conn.quote(req, &text, ty, mode))? {
-            Ok(Some(quoted)) => PhpString::new(req, &quoted).map(OrFalse::Value),
+            Ok(Some(quoted)) => Ok(OrFalse::Value(quoted)),
             Ok(None) => Ok(OrFalse::False),
             Err(()) => {
                 unsupported(req, this, "driver does not support quoting").map(|()| OrFalse::False)

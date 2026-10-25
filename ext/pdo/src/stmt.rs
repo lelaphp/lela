@@ -1219,15 +1219,71 @@ fn bind(
 
 // ---- executing
 
-/// `closeCursor()`'s emulation for a connector with no `cursor_closer`:
-/// every row fetched and discarded.
+/// `closeCursor()`'s emulation for a connector with no `cursor_closer`,
+/// and `pdo_stmt_invalidate_result`'s: every row of every rowset fetched
+/// and discarded, a rowset at a time through [`do_next_rowset`], stopping
+/// where the connector has no `next_rowset` or found no further rowset.
+/// A failure of the connector's is recorded on the statement, as php's
+/// connector writes `stmt->error_code` itself, and is not handled: php's
+/// loop has no `PDO_HANDLE_STMT_ERR`. A throwable it carried is handed on.
 fn drain(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
-    while with_driver(req, stmt, |req, driver| {
-        driver.fetch(req, crate::connector::Orientation::Forward, 0)
-    })?
-    .unwrap_or(false)
-    {}
-    Ok(())
+    loop {
+        loop {
+            let fetched = with_driver(req, stmt, |req, driver| {
+                driver.fetch(req, crate::connector::Orientation::Forward, 0)
+            })?;
+            match fetched {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(failure) => {
+                    record(req, stmt, failure)?;
+                    break;
+                }
+            }
+        }
+        if !with_driver(req, stmt, |_, driver| driver.rowsets().is_some())? {
+            return Ok(());
+        }
+        if let Err(failure) = do_next_rowset(req, stmt)? {
+            return record(req, stmt, failure);
+        }
+    }
+}
+
+/// `pdo_stmt_do_next_rowset`, for a connector whose statement has the
+/// `next_rowset` slot: the columns reset (`pdo_stmt_reset_columns`), the
+/// connector asked for the next rowset, and its columns counted and
+/// described. Where there is none, or the connector failed, the statement
+/// is no longer executed, so the next start describes its columns again,
+/// and the connector's failure comes back for the caller to settle or
+/// drop.
+fn do_next_rowset(req: &mut Request, stmt: PhpObject) -> Result<Result<(), Failure>, Thrown> {
+    let reset = write(req, stmt, |s| {
+        s.column_count = 0;
+        s.columns.take()
+    });
+    if let Some(columns) = reset.flatten() {
+        columns.free(req);
+    }
+    let answer = with_driver(req, stmt, |req, driver| {
+        driver
+            .rowsets()
+            .map_or_else(|| Err(Failure::unsupported()), |r| r.next_rowset(req))
+    })?;
+    match answer {
+        Ok(done) => {
+            set_column_count(req, stmt, done.columns);
+            if let Some(rows) = done.rows {
+                write(req, stmt, |s| s.row_count = rows);
+            }
+            describe_columns(req, stmt)?;
+            Ok(Ok(()))
+        }
+        Err(failure) => {
+            write(req, stmt, |s| s.executed = false);
+            Ok(Err(failure))
+        }
+    }
 }
 
 /// `pdo_stmt_invalidate_result`, php 8.5.12's: the rows of the start
@@ -1266,22 +1322,21 @@ fn drain(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
 /// }
 /// ```
 fn invalidate_result(req: &mut Request, stmt: PhpObject) -> Result<(), Thrown> {
-    match with_driver(req, stmt, |req, driver| driver.close_cursor(req))? {
-        Err(Failure {
-            cause: Cause::Unsupported,
-            thrown: None,
-        }) => drain(req, stmt)?,
-        Err(Failure {
+    let closed = with_driver(req, stmt, |req, driver| {
+        driver
+            .cursor_closer()
+            .map(|closer| closer.close_cursor(req))
+    })?;
+    let handed = match closed {
+        None => drain(req, stmt).err(),
+        Some(Err(Failure {
             thrown: Some(thrown),
             ..
-        }) => {
-            write(req, stmt, |s| s.executed = false);
-            return Err(thrown);
-        }
-        Ok(()) | Err(Failure { thrown: None, .. }) => {}
-    }
+        })) => Some(thrown),
+        Some(Ok(()) | Err(Failure { thrown: None, .. })) => None,
+    };
     write(req, stmt, |s| s.executed = false);
-    Ok(())
+    handed.map_or(Ok(()), Err)
 }
 
 // ---- attributes, metadata and cursors
@@ -1310,13 +1365,20 @@ fn on_driver<T>(
             thrown: None,
         }) => Ok(Err(())),
         Err(failure) => {
-            let pending = failure.thrown.is_some();
-            let recorded = record(req, stmt, failure);
-            handle_error(req, stmt, pending)?;
-            recorded?;
+            settle(req, stmt, failure)?;
             Ok(Ok(None))
         }
     }
+}
+
+/// A connector's failure recorded on the statement and handled as its
+/// error handling says, `PDO_HANDLE_STMT_ERR`, a throwable it carried
+/// handed on.
+fn settle(req: &mut Request, stmt: PhpObject, failure: Failure) -> Result<(), Thrown> {
+    let pending = failure.thrown.is_some();
+    let recorded = record(req, stmt, failure);
+    handle_error(req, stmt, pending)?;
+    recorded
 }
 
 // ---- the class
@@ -1502,11 +1564,21 @@ impl PDOStatement {
     fn closeCursor(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (stmt, _) = this_stmt(req, this.object())?;
         refuse_in_param_event(req, stmt)?;
+        // The emulation clears no error: php's `PDO_STMT_CLEAR_ERR` comes
+        // after it, on the `cursor_closer` path alone.
+        if !with_driver(req, stmt, |_, driver| driver.cursor_closer().is_some())? {
+            let drained = drain(req, stmt);
+            write(req, stmt, |s| s.executed = false);
+            return drained.map(|()| true);
+        }
         clear_error(req, stmt);
-        match on_driver(req, stmt, |req, driver| driver.close_cursor(req))? {
-            Ok(Some(())) => {}
-            Ok(None) => return Ok(false),
-            Err(()) => drain(req, stmt)?,
+        let closed = on_driver(req, stmt, |req, driver| {
+            driver
+                .cursor_closer()
+                .map_or_else(|| Err(Failure::unsupported()), |c| c.close_cursor(req))
+        })?;
+        if !matches!(closed, Ok(Some(()))) {
+            return Ok(false);
         }
         write(req, stmt, |s| s.executed = false);
         Ok(true)
@@ -2069,32 +2141,38 @@ impl PDOStatement {
     /// ```expect
     /// SQLSTATE[IM001]: Driver does not support this function: driver does not support multiple rowsets
     /// ```
+    ///
+    /// php tests for the connector's `next_rowset` before it touches the
+    /// statement, so where `pdo_sqlite` has none, the columns and the rows
+    /// stand as they were (#3391):
+    ///
+    /// ```php
+    /// $db = new PDO('sqlite::memory:', null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_SILENT]);
+    /// $s = $db->query('SELECT 1 AS a, 2 AS b');
+    /// var_dump(@$s->nextRowset(), $s->errorCode(), $s->columnCount(), $s->fetch(PDO::FETCH_NUM));
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(5) "IM001"
+    /// int(2)
+    /// array(2) {
+    ///   [0]=>
+    ///   int(1)
+    ///   [1]=>
+    ///   int(2)
+    /// }
+    /// ```
     #[php(tentative)]
     fn nextRowset(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (stmt, dbh) = this_stmt(req, this.object())?;
-        let reset = write(req, stmt, |s| {
-            s.column_count = 0;
-            s.columns.take()
-        });
-        if let Some(columns) = reset.flatten() {
-            columns.free(req);
+        if !with_driver(req, stmt, |_, driver| driver.rowsets().is_some())? {
+            return unsupported(req, stmt, dbh, "driver does not support multiple rowsets")
+                .map(|()| false);
         }
         clear_error(req, stmt);
-        match on_driver(req, stmt, |req, driver| driver.next_rowset(req))? {
-            Ok(Some(done)) => {
-                set_column_count(req, stmt, done.columns);
-                if let Some(rows) = done.rows {
-                    write(req, stmt, |s| s.row_count = rows);
-                }
-                describe_columns(req, stmt)?;
-                Ok(true)
-            }
-            Ok(None) => {
-                write(req, stmt, |s| s.executed = false);
-                Ok(false)
-            }
-            Err(()) => unsupported(req, stmt, dbh, "driver does not support multiple rowsets")
-                .map(|()| false),
+        match do_next_rowset(req, stmt)? {
+            Ok(()) => Ok(true),
+            Err(failure) => settle(req, stmt, failure).map(|()| false),
         }
     }
 

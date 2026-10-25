@@ -1222,9 +1222,12 @@ impl Request {
                 // `zend_strpprintf`'s, trimmed to `zend_string_finit`'s
                 // size (`Named::sizing`).
                 let owner = named.holder();
-                let lay = match named.sizing(unit, &name) {
-                    Sizing::Alloc => Request::string,
-                    Sizing::Finit => Request::string_finit,
+                let sizing = named.sizing(unit, &name);
+                // At `zend_string_init`'s size the empty string and one
+                // byte are the process's interned strings.
+                let lay = move |req: &mut Request, bytes: &[u8]| match sizing {
+                    Sizing::Alloc => req.string(bytes),
+                    sizing => req.string_sized(bytes, sizing),
                 };
                 self.hold_made(at, &name, lay, |held, made| {
                     held.names_of(owner).push(made);
@@ -1323,7 +1326,7 @@ impl Request {
         &mut self,
         at: usize,
         name: &[u8],
-        lay: fn(&mut Request, &[u8]) -> Result<PhpString, Thrown>,
+        lay: impl FnOnce(&mut Request, &[u8]) -> Result<PhpString, Thrown>,
         give: impl FnOnce(&mut Held, PhpString),
     ) -> Result<(), Thrown> {
         let made = lay(self, name)?;

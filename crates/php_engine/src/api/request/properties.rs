@@ -13,7 +13,7 @@ use php_heap::{Fatal, Heap, Obj, Ref, TableRow, Zval};
 use php_link::Row;
 use php_unit::decl::{PropertyDecl, Visibility};
 
-use crate::api::abi::{PropertyRead, PropertyTest};
+use crate::api::abi::{ObjectHandlers, PropertyAccess, PropertyRead, PropertyTest};
 use crate::api::call::Function;
 use crate::api::raising::{Level, Thrown, none_pending};
 use crate::api::values::walk::{self, ObjectTable, Table};
@@ -470,17 +470,86 @@ impl Request {
     /// 0
     /// 1
     /// ```
+    ///
+    /// An enum's `name` and `value` are cached as any class's, its table
+    /// serving properties as `Std` does: read in place, written through
+    /// the readonly slot's refusal, and a name it does not declare refused
+    /// on every pass, interpreted, under force and where every guard fails
+    /// once:
+    ///
+    /// ```php
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// function w($e) { foreach (['value', 'name', 'foo'] as $p) { try { $e->$p = 1; } catch (Error $x) { echo $x->getMessage(), "\n"; } } try { $e->value .= 'x'; } catch (Error $x) { echo $x->getMessage(), "\n"; } }
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n"; w(Suit::H); w(Suit::S);
+    /// ```
+    /// ```expect
+    /// hHhHhH sSsS
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// ```
+    ///
+    /// ```php
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// function w($e) { foreach (['value', 'name', 'foo'] as $p) { try { $e->$p = 1; } catch (Error $x) { echo $x->getMessage(), "\n"; } } try { $e->value .= 'x'; } catch (Error $x) { echo $x->getMessage(), "\n"; } }
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n"; w(Suit::H); w(Suit::S);
+    /// ```
+    /// ```expect regime=jit-force process
+    /// hHhHhH sSsS
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// ```
+    ///
+    /// ```php
+    /// enum Suit: string { case H = 'h'; case S = 's'; }
+    /// function g($e, $m) { $s = ''; for ($i = 0; $i < $m; $i++) { $s .= $e->value . $e->name; } return $s; }
+    /// function w($e) { foreach (['value', 'name', 'foo'] as $p) { try { $e->$p = 1; } catch (Error $x) { echo $x->getMessage(), "\n"; } } try { $e->value .= 'x'; } catch (Error $x) { echo $x->getMessage(), "\n"; } }
+    /// echo g(Suit::H, 3), " ", g(Suit::S, 2), "\n"; w(Suit::H); w(Suit::S);
+    /// ```
+    /// ```expect regime=jit-exit-fuzz process
+    /// hHhHhH sSsS
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$value
+    /// Cannot modify readonly property Suit::$name
+    /// Cannot create dynamic property Suit::$foo
+    /// Cannot modify readonly property Suit::$value
+    /// ```
     pub(crate) fn cacheable_offset(
         &self,
         object: PhpObject,
         name: &[u8],
     ) -> Option<crate::exec::PropertyOffset> {
         let class = object.class();
-        if self.own_handlers(class).is_some() {
+        let table = self.own_handlers(class).map(ObjectHandlers::properties);
+        if table == Some(PropertyAccess::Own) {
             return None;
         }
         let found = self.find_property_info(class, name);
-        self.offset_of(class, name, found, self.class_hooks(class))
+        let offset = self.offset_of(class, name, found, self.class_hooks(class));
+        // A table of its own that serves properties as `Std` does, an
+        // enum's (`zend_enum_object_handlers`, std's but for `clone_obj`
+        // and `compare`, `Z/Zend/zend_enum.c:168-170`), caches a name it
+        // declares; one it does not is placed on every pass.
+        if table.is_some() && offset == Some(crate::exec::PropertyOffset::Dynamic) {
+            return None;
+        }
+        offset
     }
 
     /// `zend_get_property_offset`'s answer a fetch may keep, from what
