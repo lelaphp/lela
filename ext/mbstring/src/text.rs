@@ -895,15 +895,16 @@ pub(crate) fn must_not_be_empty(req: &mut Request, arg: u32) -> Thrown {
 ///
 /// Since 8.5.12 a conversion's buffer grows fallibly, so a needle whose UTF-8
 /// is past the memory limit is refused its growth, and the limit's fatal is
-/// raised as the call returns:
+/// raised as the call returns. The case crosses the limit where a new chunk
+/// is asked for, whose figure holds in any layout (#3442):
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(mb_substr_count("abc", str_repeat("\x80", 2 << 20), "CP1252"), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(mb_substr_count("abc", str_repeat("\x80", 400000), "CP1252"), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 1572864 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn mb_substr_count(
@@ -1077,12 +1078,12 @@ fn mb_substr(
 /// raised as the call returns:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(strlen(mb_strcut(str_repeat("_", 2 << 20), 0, 2 << 20, "UTF-7")), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_strcut(str_repeat("_", 500000), 0, 500000, "UTF-7")), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 16384 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 fn mb_strcut(

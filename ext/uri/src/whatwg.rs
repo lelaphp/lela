@@ -65,17 +65,20 @@ fn reported(kind: ErrorKind) -> (UrlValidationErrorType, bool) {
 /// php pops them, and the reason a message names, the case of the last
 /// failure popped.
 ///
-/// Since 8.5.12 the errors stop once the memory limit was met:
+/// Since 8.5.12 the errors stop once the memory limit was met. The case
+/// crosses the limit where a new chunk is asked for, whose figure holds in
+/// any layout, where a huge block's growth names one the address space
+/// decides (#3442):
 ///
 /// ```php
-/// ini_set('memory_limit', '16M');
+/// ini_set('memory_limit', '4M');
 /// $errors = null;
-/// new Uri\WhatWg\Url("https://example.com/" . str_repeat("%", 100 * 1024), null, $errors);
+/// new Uri\WhatWg\Url("https://example.com/" . str_repeat("%", 10 * 1024), null, $errors);
 /// echo "not reached\n";
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 16777216 bytes exhausted (tried to allocate 32768 bytes) in %s on line 4
+/// Fatal error: Allowed memory size of 4194304 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
 /// ```
 fn fill_errors(
     req: &mut Request,

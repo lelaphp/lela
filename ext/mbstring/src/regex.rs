@@ -846,12 +846,12 @@ fn replaced(
 /// limit's fatal is raised as the call returns:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(strlen(mb_ereg_replace("a", "bbbbbbbbbb", str_repeat("a", 2 << 20))), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_ereg_replace("a", "bbbbbbbbbb", str_repeat("a", 400000))), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 pub(crate) fn mb_ereg_replace(
@@ -884,12 +884,12 @@ pub(crate) fn mb_ereg_replace(
 /// met:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(strlen(mb_eregi_replace("a", "bbbbbbbbbb", str_repeat("a", 2 << 20))), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(strlen(mb_eregi_replace("a", "bbbbbbbbbb", str_repeat("a", 400000))), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 pub(crate) fn mb_eregi_replace(
@@ -966,12 +966,12 @@ pub(crate) fn mb_ereg_replace_callback(
 /// failure stops it, and the limit's fatal is raised as the call returns:
 ///
 /// ```php
-/// ini_set('memory_limit', '8M');
-/// var_dump(count(mb_split("a", str_repeat("a", 2 << 20))), "unreached");
+/// ini_set('memory_limit', '2M');
+/// var_dump(count(mb_split("a", str_repeat("a", 400000))), "unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 8388608 bytes exhausted (tried to allocate 2113536 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 2097152 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 3
 /// ```
 #[php_function]
 pub(crate) fn mb_split(
