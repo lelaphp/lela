@@ -3867,10 +3867,7 @@ pub(crate) fn include_or_eval<T: Tier>(
             req.release(Value::string(string));
             made
         }
-        Err(thrown) => {
-            req.leave_pending(&thrown);
-            Ok(Included::Threw(frame))
-        }
+        Err(thrown) => Ok(Included::threw(req, frame, &thrown)),
     };
     // `FREE_OP1()`: the operand stands while the file is opened and its
     // frame pushed. Where the frame was entered it goes with that frame
@@ -3898,6 +3895,14 @@ enum Included {
     Entered(FrameRef),
     /// A throwable left pending on this frame.
     Threw(FrameRef),
+}
+
+impl Included {
+    /// `thrown` left pending on `frame`, as [`threw`] leaves it.
+    fn threw(req: &mut Request, frame: FrameRef, thrown: &Thrown) -> Included {
+        req.leave_pending(thrown);
+        Included::Threw(frame)
+    }
 }
 
 /// `zend_include_or_eval` over the path or the code `written`, and the
@@ -3961,8 +3966,7 @@ fn included(
         Ok(Opened::Already) => return Ok(answered(req, returns_to, Value::bool(true))),
         Ok(Opened::Failed) => return Ok(answered(req, returns_to, Value::bool(false))),
         Err(thrown) => {
-            req.leave_pending(&thrown);
-            return Ok(Included::Threw(frame));
+            return Ok(Included::threw(req, frame, &thrown));
         }
     };
     let source = match kind {
@@ -3977,8 +3981,7 @@ fn included(
     let copy = match crate::api::values::Emalloc::new(req, exec::OP_ARRAY_SIZE) {
         Ok(copy) => copy,
         Err(thrown) => {
-            req.leave_pending(&thrown);
-            return Ok(Included::Threw(frame));
+            return Ok(Included::threw(req, frame, &thrown));
         }
     };
     let main = exec::code_of(&unit);
@@ -3997,8 +4000,7 @@ fn included(
     let callee = req.push_code_frame(unit, CodeFrom::Nested(frame, returns_to))?;
     crate::observer::call(req, callee);
     if let Err(thrown) = req.hold_op_array(callee, copy) {
-        req.leave_pending(&thrown);
-        return Ok(Included::Threw(callee));
+        return Ok(Included::threw(req, callee, &thrown));
     }
     Ok(Included::Entered(callee))
 }
