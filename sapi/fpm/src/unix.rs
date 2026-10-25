@@ -16,9 +16,10 @@ fn is_id(name: &[u8]) -> bool {
     name.iter().all(u8::is_ascii_digit)
 }
 
-/// Whose ID [`id`] reads: `fpm_unix_parse_uid`'s or `_gid`'s.
+/// Whose ID [`id`] reads, a user's or a group's: `fpm_unix_parse_uid`'s
+/// or `_gid`'s.
 #[derive(Clone, Copy)]
-enum Id {
+enum Whose {
     User,
     Group,
 }
@@ -28,7 +29,7 @@ enum Id {
 /// run past `uintmax_t` or past a `uid_t`'s or `gid_t`'s range, the
 /// `(uid_t) -1` that means none among them, with the log line naming the
 /// pool and the ID as written.
-fn id(pool: &[u8], name: &[u8], kind: Id) -> Option<u32> {
+fn id(pool: &[u8], name: &[u8], kind: Whose) -> Option<u32> {
     let value = std::str::from_utf8(name)
         .ok()
         .and_then(|n| n.parse::<u64>().ok());
@@ -38,8 +39,8 @@ fn id(pool: &[u8], name: &[u8], kind: Id) -> Option<u32> {
         return Some(value);
     }
     let (what, function, line) = match kind {
-        Id::User => ("user", "fpm_unix_parse_uid", 69),
-        Id::Group => ("group", "fpm_unix_parse_gid", 87),
+        Whose::User => ("user", "fpm_unix_parse_uid", 69),
+        Whose::Group => ("group", "fpm_unix_parse_gid", 87),
     };
     let text = format!(
         "[pool {}] {what} ID '{}' is out of range",
@@ -105,12 +106,12 @@ pub(crate) fn test_config(config: &PoolConfig, domain: Domain) -> bool {
     // php 8.5.12: an empty name passes, and an ID is read in range.
     let check_passwd = |user: &Option<Vec<u8>>, sys: bool| match user.as_deref() {
         None | Some([]) => true,
-        Some(u) if is_id(u) => id(name, u, Id::User).is_some(),
+        Some(u) if is_id(u) => id(name, u, Whose::User).is_some(),
         Some(u) => passwd(name, u, Level::Error, sys).is_some(),
     };
     let check_group = |g: &Option<Vec<u8>>, sys: bool| match g.as_deref() {
         None | Some([]) => true,
-        Some(g) if is_id(g) => id(name, g, Id::Group).is_some(),
+        Some(g) if is_id(g) => id(name, g, Whose::Group).is_some(),
         Some(g) => group(name, g, Level::Error, sys).is_some(),
     };
     check_passwd(&config.user, false)
@@ -159,7 +160,7 @@ pub(crate) fn socket_permissions(config: &PoolConfig) -> Option<Permissions> {
     }
     if let Some(owner) = config.listen_owner.as_deref().filter(|o| !o.is_empty()) {
         if is_id(owner) {
-            permissions.uid = Some(id(&config.name, owner, Id::User)?);
+            permissions.uid = Some(id(&config.name, owner, Whose::User)?);
         } else {
             let user = passwd(&config.name, owner, Level::Error, true)?;
             permissions.uid = Some(user.uid.as_raw());
@@ -168,7 +169,7 @@ pub(crate) fn socket_permissions(config: &PoolConfig) -> Option<Permissions> {
     }
     if let Some(g) = config.listen_group.as_deref().filter(|g| !g.is_empty()) {
         if is_id(g) {
-            permissions.gid = Some(id(&config.name, g, Id::Group)?);
+            permissions.gid = Some(id(&config.name, g, Whose::Group)?);
         } else {
             permissions.gid = Some(group(&config.name, g, Level::Error, true)?.gid.as_raw());
         }
@@ -223,7 +224,7 @@ pub(crate) fn conf_pool(config: &PoolConfig, run_as_root: bool) -> Option<Creden
     if Uid::effective().is_root() {
         if let Some(user) = config.user.as_deref().filter(|u| !u.is_empty()) {
             if is_id(user) {
-                credentials.set_uid = id(&config.name, user, Id::User)?;
+                credentials.set_uid = id(&config.name, user, Whose::User)?;
                 if let Ok(Some(pwd)) = User::from_uid(Uid::from_raw(credentials.set_uid)) {
                     credentials.set_gid = pwd.gid.as_raw();
                     credentials.set_user = Some(pwd.name.into_bytes());
@@ -238,7 +239,7 @@ pub(crate) fn conf_pool(config: &PoolConfig, run_as_root: bool) -> Option<Creden
         }
         if let Some(g) = config.group.as_deref().filter(|g| !g.is_empty()) {
             credentials.set_gid = if is_id(g) {
-                id(&config.name, g, Id::Group)?
+                id(&config.name, g, Whose::Group)?
             } else {
                 group(&config.name, g, Level::Error, false)?.gid.as_raw()
             };
