@@ -97,6 +97,19 @@ fn sent(
     body: &[u8],
     program: &str,
 ) -> (String, usize) {
+    let length = i64::try_from(body.len()).unwrap_or(i64::MAX);
+    streamed(engine, (method, length), content_type, body, program)
+}
+
+/// [`sent`] with the `Content-Length` the host declares, which need not
+/// be the body's.
+fn streamed(
+    engine: &Engine,
+    (method, content_length): (Method, i64),
+    content_type: &str,
+    body: &[u8],
+    program: &str,
+) -> (String, usize) {
     let (feed, arriving) = sync_channel(1);
     let reads = Arc::new(AtomicUsize::new(0));
     let description = RequestDescription {
@@ -107,7 +120,7 @@ fn sent(
         web: Some(WebRequest {
             method: Some(method),
             content_type: Some(content_type.as_bytes().to_vec()),
-            content_length: i64::try_from(body.len()).unwrap_or(i64::MAX),
+            content_length,
             body: Body::Stream(Box::new(Pieces {
                 arriving,
                 held: Vec::new(),
@@ -304,6 +317,67 @@ fn a_body_parse_refused_by_a_limit_gives_back_what_its_part_held() {
     assert_eq!(
         sent(&engine, Method::Put, multipart, fields, program).0,
         "Input variables exceeded 1. To increase the limit change max_input_vars in php.ini.\nnone\n"
+    );
+}
+
+/// A multipart body read past `post_max_size` is filled no further, as
+/// php 8.5.12's `fill_buffer` stops it, and `fileupload_done` warns of it,
+/// whatever its `Content-Length` declared: the field the buffer held is
+/// cut where the read stopped and the part after it never read. The
+/// lines are php-cgi 8.5.12's under `-n -d post_max_size=10K -d
+/// html_errors=0` for the same body on its standard input with
+/// `CONTENT_LENGTH=-1`, which its `sapi_cgi_read_post` reads to the end.
+#[test]
+fn a_multipart_body_read_past_post_max_size_stops_filling_and_warns() {
+    let engine = Engine::cli_builder()
+        .ini("post_max_size", "10K")
+        .extensions(&[input()])
+        .build();
+    let mut body = b"--b\r\nContent-Disposition: form-data; name=\"a\"\r\n\r\n".to_vec();
+    body.resize(body.len() + 20_000, b'x');
+    body.extend_from_slice(
+        b"\r\n--b\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\nlate\r\n--b--\r\n",
+    );
+    let program = "<?php echo isset($_POST['a']) ? strlen($_POST['a']) : 'none', ' ', $_POST['b'] ?? 'none', \"\\n\";";
+    let (stdout, _) = streamed(
+        &engine,
+        (Method::Post, -1),
+        "multipart/form-data; boundary=b",
+        &body,
+        program,
+    );
+    assert_eq!(
+        stdout,
+        "\nWarning: Actual POST length does not match Content-Length, and exceeds 10240 bytes in Unknown on line 0\n10239 none\n"
+    );
+}
+
+/// Under `request_parse_body()` each refusal is a `RequestParseBodyException`
+/// thrown as the parse goes on, so a second one in the same body leaves
+/// with the first as its previous, as `zend_throw_exception_ex` chains
+/// over a pending one. The two lines are php-cgi 8.5.12's for the same
+/// `PUT` body under `-n -d max_input_vars=1 -d max_file_uploads=1 -d
+/// max_multipart_body_parts=10`.
+#[test]
+fn two_refusals_in_one_request_parse_body_chain_as_php_chains_them() {
+    let engine = Engine::cli_builder()
+        .ini("max_input_vars", "1")
+        .ini("max_file_uploads", "1")
+        .ini("max_multipart_body_parts", "10")
+        .extensions(&[input()])
+        .build();
+    let body = b"--b\r\nContent-Disposition: form-data; name=\"field1\"\r\n\r\none\r\n--b\r\nContent-Disposition: form-data; name=\"field2\"\r\n\r\ntwo\r\n--b\r\nContent-Disposition: form-data; name=\"file1\"; filename=\"file1.txt\"\r\nContent-Type: text/plain\r\n\r\nfile data\r\n--b\r\nContent-Disposition: form-data; name=\"file2\"; filename=\"file2.txt\"\r\nContent-Type: text/plain\r\n\r\nfile data\r\n--b--\r\n";
+    let program = "<?php try { parse_body(); echo \"parsed\\n\"; } catch (RequestParseBodyException $e) { do { echo get_class($e), ': ', $e->getMessage(), \"\\n\"; } while ($e = $e->getPrevious()); }";
+    let (stdout, _) = sent(
+        &engine,
+        Method::Put,
+        "multipart/form-data; boundary=b",
+        body,
+        program,
+    );
+    assert_eq!(
+        stdout,
+        "RequestParseBodyException: Maximum number of allowable file uploads has been exceeded\nRequestParseBodyException: Input variables exceeded 1. To increase the limit change max_input_vars in php.ini.\n"
     );
 }
 
