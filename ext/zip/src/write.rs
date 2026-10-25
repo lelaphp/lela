@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 
 use crate::archive::{
     AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE, AFL_IS_TORRENTZIP, Archive, CM_BZIP2, CM_DEFAULT,
-    CM_DEFLATE, CM_LZMA, D_ATTRIBUTES, D_COMMENT, D_COMP_METHOD, D_ENCRYPTION_METHOD,
+    CM_DEFLATE, CM_LZMA, CM_STORE, D_ATTRIBUTES, D_COMMENT, D_COMP_METHOD, D_ENCRYPTION_METHOD,
     D_EXTRA_FIELD, D_FILENAME, D_LAST_MOD, D_PASSWORD, Dirent, EM_NONE, EM_TRAD_PKWARE, Encryption,
     GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, TRUNCATE, actual, is_default,
 };
 use crate::cdir::Kind;
 use crate::codec;
-use crate::dostime::TORRENTZIP;
+use crate::dostime::{DosTime, TORRENTZIP};
 use crate::error::{Done, Er, Failed, Status};
 use crate::strings::{Enc, ZStr};
 
@@ -149,8 +149,14 @@ struct Attributes {
 /// `ZIP_FILE_ATTRIBUTES_GENERAL_PURPOSE_BIT_FLAGS_ALLOWED_MASK`.
 const BITS_ALLOWED: u16 = 0x083e;
 
-/// `_zip_dirent_apply_attributes`.
-fn apply_attributes(de: &mut Dirent, a: &Attributes) {
+/// `_zip_dirent_apply_attributes`: whether it changed the dirent.
+fn apply_attributes(de: &mut Dirent, a: &Attributes) -> bool {
+    let before = (
+        de.bitflags,
+        de.ext_attrib,
+        de.version_needed,
+        de.version_madeby,
+    );
     if let Some((flags, mask)) = a.bits {
         let mask = mask & BITS_ALLOWED;
         de.bitflags = (de.bitflags & !mask) | (flags & mask);
@@ -189,6 +195,13 @@ fn apply_attributes(de: &mut Dirent, a: &Attributes) {
         madeby = (madeby & 0xff) | (u16::from(host) << 8);
     }
     de.version_madeby = madeby;
+    before
+        != (
+            de.bitflags,
+            de.ext_attrib,
+            de.version_needed,
+            de.version_madeby,
+        )
 }
 
 /// `_zip_dirent_needs_zip64`.
@@ -545,11 +558,10 @@ fn write_all(
         for (n, chunk) in entry.data.chunks(8192).enumerate() {
             out.write(chunk)?;
             done += chunk.len();
-            let at = match entry.pace {
-                Pace::Copy => Some(done as f64 / total),
-                Pace::Add { size } => {
-                    (chunk.len() == 8192 && n + 1 < chunks).then(|| done as f64 / size)
-                }
+            let at = match &entry.route {
+                Route::Copy => Some(done as f64 / total),
+                Route::Add(settled) => (chunk.len() == 8192 && n + 1 < chunks)
+                    .then(|| done as f64 / settled.size.max(1) as f64),
             };
             if at.is_some_and(|at| progress.update(program, at)) {
                 return Err(program.cancelled());
@@ -561,21 +573,50 @@ fn write_all(
 }
 
 /// One surviving entry as `zip_close`'s loop writes it before its data's
-/// progress points: its local header and its data.
+/// progress points: its local header, its data and the way they came.
 struct Written {
     header: Vec<u8>,
     data: Vec<u8>,
-    pace: Pace,
+    route: Route,
 }
 
-/// When the progress callback hears of an entry's data written.
-#[derive(Clone, Copy)]
-enum Pace {
-    /// `copy_data`: after each buffer, as the share of the data written.
+/// How an entry's data reaches the file, which says when the progress
+/// callback hears of it and what follows it.
+enum Route {
+    /// `copy_data`: copied as it stands, the progress callback told after
+    /// each buffer the share of the data written.
     Copy,
-    /// `add_data`: after each full buffer but the last, as the share of
-    /// the uncompressed `size` the buffers so far make.
-    Add { size: f64 },
+    /// `add_data`: read from a source, the progress callback told after
+    /// each full buffer but the last the share of the uncompressed size
+    /// the buffers so far make; the dirent settled after.
+    Add(Settled),
+}
+
+/// What `add_data`'s `zip_source_stat` of its final source says once the
+/// data is written, and the attributes that source gives.
+struct Settled {
+    method: u16,
+    crc: u32,
+    size: u64,
+    comp_size: u64,
+    attributes: Attributes,
+}
+
+impl Settled {
+    /// The dirent given the method, CRC and sizes the data settled on, and
+    /// whether any differed from what it held: the first part of
+    /// `add_data`'s `dirent_changed`.
+    fn settle(&self, de: &mut Dirent) -> bool {
+        let changed = actual(de.comp_method) != self.method
+            || de.crc != self.crc
+            || de.uncomp_size != self.size
+            || de.comp_size != self.comp_size;
+        de.comp_method = i32::from(self.method);
+        de.crc = self.crc;
+        de.uncomp_size = self.size;
+        de.comp_size = self.comp_size;
+        changed
+    }
 }
 
 impl Archive {
@@ -645,15 +686,19 @@ impl Archive {
         Ok(Written {
             header,
             data,
-            pace: Pace::Copy,
+            route: Route::Copy,
         })
     }
 
     /// What follows entry `i`'s data, `written` at `at`, made of its
     /// dirent as the callbacks during the data left it, as libzip's `de` is
-    /// `entry->changes`: an added entry's local header written again where
-    /// it changed, as `add_data` writes it again, then the
-    /// `write_data_descriptor` record where the dirent's bits ask for one.
+    /// `entry->changes`: an added entry's dirent settled on its data, its
+    /// local header written again where `add_data`'s `dirent_changed`
+    /// holds, then the `write_data_descriptor` record where the dirent's
+    /// bits ask for one.
+    ///
+    /// A buffer's source knows no CRC, so the preliminary header is
+    /// written again, with the time a callback set:
     ///
     /// ```php
     /// $z = new ZipArchive; $z->open('finish-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
@@ -665,6 +710,26 @@ impl Archive {
     /// ```expect
     /// bool(true)
     /// 00002128 00002128
+    /// ```
+    ///
+    /// An unchanged entry stored anew knows its CRC and sizes before its
+    /// data, so nothing settles otherwise and its local header keeps the
+    /// time it was written with, while the central record has the one a
+    /// callback set:
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('dirent-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// $z->addFromString('a', str_repeat('a', 40000)); $z->setMtimeName('a', 315532800); $z->close();
+    /// $z->open('dirent-witness.zip'); $z->setCompressionName('a', ZipArchive::CM_STORE);
+    /// $z->registerProgressCallback(0.1, function ($r) use ($z) { static $d; if ($r > 0.1 && !$d) { $d = 1; $z->setMtimeName('a', 946684800); } });
+    /// var_dump($z->close()); $b = file_get_contents('dirent-witness.zip');
+    /// echo bin2hex(substr($b, 10, 4)), ' ', bin2hex(substr($b, strpos($b, "PK\1\2") + 12, 4)), "\n";
+    /// $z->open('dirent-witness.zip'); var_dump(strlen($z->getFromName('a'))); $z->close(); unlink('dirent-witness.zip');
+    /// ```
+    /// ```expect capture
+    /// bool(true)
+    /// 00002100 00002128
+    /// int(40000)
     /// ```
     fn finish(
         &mut self,
@@ -678,10 +743,17 @@ impl Archive {
             self.error.set(Er::Internal);
             return Err(self.error);
         };
-        if let Pace::Add { .. } = written.pace {
-            let header = dirent_bytes(de, Kind::Local, torrentzip)?;
-            if header != written.header {
-                out.rewrite(at, &header)?;
+        if let Route::Add(settled) = &written.route {
+            let mut changed = settled.settle(de);
+            if !torrentzip {
+                // `dirent_changed`'s mtime half never holds: a source
+                // states one mtime, a buffer's when it was made and a
+                // file's when it was added, so the stat after the copy
+                // gives the one before it.
+                changed |= apply_attributes(de, &settled.attributes);
+            }
+            if changed {
+                out.rewrite(at, &dirent_bytes(de, Kind::Local, torrentzip)?)?;
             }
         }
         if de.bitflags & GPBF_DATA_DESCRIPTOR != 0 {
@@ -858,37 +930,24 @@ impl Archive {
     /// l 8 3071 132000
     /// e 8 2837 132000
     /// ```
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "add_data's progress as libzip's doubles"
-    )]
     fn add_data(&mut self, i: usize, de: &mut Dirent, torrentzip: bool) -> Result<Written, Status> {
-        // The data as `add_data`'s source gives it: a new source's bytes,
-        // or the unchanged entry through `zip_source_zip_file_create(za, i,
-        // ZIP_FL_UNCHANGED, ...)`, decrypted with the default password,
-        // decompressed and its CRC checked. Either stats as stored and
-        // unencrypted.
-        let (data, st_mtime, st_dostime, st_attr) = if let Some(s) = &mut self.entries[i].source {
-            let (mtime, attr) = (s.stat().mtime, s.attributes());
-            let data = s.read_all().inspect_err(|s| self.error = *s)?;
-            (data, mtime, None, attr)
-        } else {
-            let Some(last_mod) = self.entries[i].orig.as_ref().map(|o| o.last_mod) else {
-                return Err(Status::new(Er::Internal));
-            };
-            let password = self.default_password.clone();
-            let (data, fault) = self
-                .decoded(i, password.as_deref())
-                .inspect_err(|s| self.error = *s)?;
-            if let Some(fault) = fault {
-                self.error = fault;
-                return Err(fault);
-            }
-            (data, 0, Some(last_mod), None)
-        };
+        let (data, before) = self.source_data(i)?;
+        // The preliminary dirent, written before the data: what the stat
+        // knows, a stored entry's compressed size its size, and what it
+        // does not know as the dirent held it.
         de.bitflags &= !GPBF_DATA_DESCRIPTOR;
+        if de.comp_method == CM_STORE {
+            de.comp_size = before.size;
+        }
+        if let Some(crc) = before.crc {
+            de.crc = crc;
+        }
+        de.uncomp_size = before.size;
         if de.changed & D_LAST_MOD == 0 {
-            de.last_mod = st_dostime.unwrap_or_else(|| self.zone.u2d(st_mtime));
+            de.last_mod = match before.time {
+                Time::Dos(dos) => dos,
+                Time::Mtime(mtime) => self.zone.u2d(mtime),
+            };
         }
         // `needs_compress`: what is stored needs no decompression, and a
         // method other than store is a recompression (`needs_recompress`).
@@ -897,8 +956,8 @@ impl Archive {
         let crc = crc32fast::hash(&data);
         let size = data.len() as u64;
         let (mut data, mut method) = (data, 0u16);
-        let mut attrs = Attributes {
-            host: st_attr,
+        let mut attributes = Attributes {
+            host: before.host,
             ..Attributes::default()
         };
         if compress {
@@ -911,8 +970,8 @@ impl Archive {
             .inspect_err(|s| self.error = *s)?;
             data = c.data;
             method = c.method;
-            attrs.version_needed = Some(c.version_needed);
-            attrs.bits = Some((c.bitflags, BITS_ALLOWED));
+            attributes.version_needed = Some(c.version_needed);
+            attributes.bits = Some((c.bitflags, BITS_ALLOWED));
         }
         if encrypt {
             let password = de
@@ -927,12 +986,12 @@ impl Archive {
                 Encryption::Pkware => {
                     de.bitflags |= GPBF_DATA_DESCRIPTOR;
                     data = codec::pkware(&data, &password, de.last_mod.time)?;
-                    attrs.version_needed = Some(20);
-                    attrs.bits = Some((GPBF_DATA_DESCRIPTOR, GPBF_DATA_DESCRIPTOR));
+                    attributes.version_needed = Some(20);
+                    attributes.bits = Some((GPBF_DATA_DESCRIPTOR, GPBF_DATA_DESCRIPTOR));
                 }
                 Encryption::Aes(strength) => {
                     data = codec::winzip_aes(&data, &password, strength)?;
-                    attrs.version_needed = Some(51);
+                    attributes.version_needed = Some(51);
                 }
                 Encryption::None | Encryption::Unknown => {
                     self.error.set(Er::Encrnotsupp);
@@ -940,21 +999,77 @@ impl Archive {
                 }
             }
         }
-        de.comp_method = i32::from(method);
-        de.crc = crc;
-        de.uncomp_size = size;
-        de.comp_size = data.len() as u64;
         if !torrentzip {
-            apply_attributes(de, &attrs);
+            apply_attributes(de, &attributes);
         }
         Ok(Written {
             header: dirent_bytes(de, Kind::Local, torrentzip)?,
+            route: Route::Add(Settled {
+                method,
+                crc,
+                size,
+                comp_size: data.len() as u64,
+                attributes,
+            }),
             data,
-            pace: Pace::Add {
-                size: size.max(1) as f64,
-            },
         })
     }
+
+    /// The data as `add_data`'s source gives it and what its stat says
+    /// before the copy: a new source's bytes, or the unchanged entry through `zip_source_zip_file_create(za, i,
+    /// ZIP_FL_UNCHANGED, ...)`, decrypted with the default password and
+    /// decompressed, whose stat carries the entry's size and CRC. Either
+    /// stats as stored and unencrypted.
+    fn source_data(&mut self, i: usize) -> Result<(Vec<u8>, Before), Status> {
+        Ok(if let Some(s) = &mut self.entries[i].source {
+            let st = s.stat();
+            let before = Before {
+                size: st.size,
+                crc: None,
+                time: Time::Mtime(st.mtime),
+                host: s.attributes(),
+            };
+            let data = s.read_all().inspect_err(|s| self.error = *s)?;
+            (data, before)
+        } else {
+            let password = self.default_password.clone();
+            let (data, fault) = self
+                .decoded(i, password.as_deref())
+                .inspect_err(|s| self.error = *s)?;
+            if let Some(fault) = fault {
+                self.error = fault;
+                return Err(fault);
+            }
+            let Some(o) = self.entries[i].orig.as_ref() else {
+                return Err(Status::new(Er::Internal));
+            };
+            let before = Before {
+                size: o.uncomp_size,
+                crc: Some(o.crc),
+                time: Time::Dos(o.last_mod),
+                host: None,
+            };
+            (data, before)
+        })
+    }
+}
+
+/// What `add_data`'s `zip_source_stat` of its source says before the
+/// copy: the size, the CRC where the source knows one, the time the
+/// dirent takes where none was set, and the host and attributes of a file.
+struct Before {
+    size: u64,
+    crc: Option<u32>,
+    time: Time,
+    host: Option<(u8, u32)>,
+}
+
+/// The time a source gives an entry: an unchanged entry's DOS time as it
+/// stands, or a source's mtime, converted (`zip_source_get_dos_time`, or
+/// `_zip_u2d_time` of `st.mtime`).
+enum Time {
+    Dos(DosTime),
+    Mtime(i64),
 }
 
 /// `_zip_dirent_merge`: what the changes did not change, from the

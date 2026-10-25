@@ -34,6 +34,7 @@ pub(crate) const AFL_WANT_TORRENTZIP: u32 = 8;
 pub(crate) const AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE: u32 = 16;
 // Compression methods.
 pub(crate) const CM_DEFAULT: i32 = -1;
+pub(crate) const CM_STORE: i32 = 0;
 pub(crate) const CM_DEFLATE: i32 = 8;
 pub(crate) const CM_BZIP2: i32 = 12;
 pub(crate) const CM_LZMA: i32 = 14;
