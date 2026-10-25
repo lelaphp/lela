@@ -20,13 +20,12 @@ workspace = true
 php_ext = { path = "../../crates/php_ext" }
 php_ext_standard = { path = "../standard" }
 php_ext_pcre = { path = "../pcre" }
-# libzip's behaviour re-derived over the pure-Rust zip crate (design §7.2,
-# revision 70; #1515): the zip crate finds the central directory, and the
-# codecs and ciphers it reads with read and write each entry, a buffer at
-# a time (#1545); deflate alone is written through the platform's zlib,
-# bound in `src/ffi/` over the libz-sys ext/zlib binds, at libzip's
-# memLevel (#1657, #1651).
-zip = { workspace = true }
+# libzip's behaviour re-derived in pure Rust (design §7.2, revision 70;
+# #1515): ext/zip finds and reads the central directory as libzip's
+# zip_open does (#3380), and the codecs and ciphers below read and write
+# each entry, a buffer at a time (#1545); deflate alone is written through
+# the platform's zlib, bound in `src/ffi/` over the libz-sys ext/zlib
+# binds, at libzip's memLevel (#1657, #1651).
 flate2 = { workspace = true }
 libz-sys = { workspace = true }
 libc = { workspace = true }

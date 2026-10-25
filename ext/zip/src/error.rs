@@ -86,6 +86,17 @@ impl Status {
         Status::of(Er::Incons, detail as i32)
     }
 
+    /// `ADD_INDEX_TO_DETAIL(detail, entry)` on an inconsistency, which
+    /// `_zip_read_cdir` and `_zip_checkcons` make of what
+    /// `_zip_dirent_read` set; any other code as it stands.
+    pub(crate) fn at_entry(self, entry: usize) -> Status {
+        if self.zip != Er::Incons as i32 {
+            return self;
+        }
+        let index = i32::try_from(entry).map_or(MAX_DETAIL_INDEX, |i| i.min(MAX_DETAIL_INDEX));
+        Status::of(Er::Incons, (index << 8) | (self.sys & 0xff))
+    }
+
     /// `zip_error_strerror`: the sentence, then `: ` and the `errno`'s
     /// text, zlib's `zError`, or libzip's detail, for a code whose kind
     /// has one.
@@ -112,9 +123,32 @@ impl Status {
 /// libzip's number.
 #[derive(Clone, Copy)]
 pub(crate) enum Detail {
+    CdirOverlapsEocd = 1,
+    CommentLengthInvalid = 2,
+    CdirLengthInvalid = 3,
     CdirEntryInvalid = 4,
+    CdirWrongEntriesCount = 5,
+    EntryHeaderMismatch = 6,
+    EocdLengthInvalid = 7,
+    Eocd64OverlapsEocd = 8,
+    Eocd64WrongMagic = 9,
+    Eocd64Mismatch = 10,
+    CdirInvalid = 11,
+    VariableSizeOverflow = 12,
+    InvalidUtf8InFilename = 13,
+    InvalidUtf8InComment = 14,
+    InvalidZip64Ef = 15,
+    InvalidWinzipaesEf = 16,
+    EfTrailingGarbage = 17,
+    InvalidEfLength = 18,
     InvalidFileLength = 19,
+    StoredSizeMismatch = 20,
+    DataDescriptorMismatch = 21,
+    Eocd64LocatorMismatch = 22,
+    Utf8FilenameMismatch = 23,
+    Utf8CommentMismatch = 24,
     NulInFilename = 26,
+    MissingZip64Ef = 27,
 }
 
 /// `MAX_DETAIL_INDEX`, the index of a detail that names no entry.

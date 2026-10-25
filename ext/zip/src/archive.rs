@@ -2,12 +2,13 @@
 //! `zip_dirent_t`): the entries as the file had them and as the program
 //! changed them, the changes held until `close` writes them, each call
 //! failing with libzip's code where libzip's fails. The central directory
-//! is read here, every entry's data through the zip crate.
+//! is read by [`crate::cdir`], every entry's data by [`crate::read`].
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
+use crate::cdir;
 use crate::dostime::{DosTime, TORRENTZIP, Zone};
 use crate::error::{Detail, Done, Er, Failed, Status};
 use crate::read::{Layers, Reader, Stdio, Window};
@@ -62,7 +63,7 @@ pub(crate) const EXT_ATTRIB_DEFAULT_DIR: u32 = 0o40_777 << 16;
 /// encryption and UTF-8.
 pub(crate) const GPBF_ENCRYPTED: u16 = 0x0001;
 pub(crate) const GPBF_DATA_DESCRIPTOR: u16 = 0x0008;
-const GPBF_STRONG_ENCRYPTION: u16 = 0x0040;
+pub(crate) const GPBF_STRONG_ENCRYPTION: u16 = 0x0040;
 pub(crate) const GPBF_ENCODING_UTF_8: u16 = 0x0800;
 
 /// `method == ZIP_CM_DEFAULT`: libzip 1.12 dropped
@@ -443,11 +444,10 @@ impl Archive {
         Ok(za)
     }
 
-    /// `_zip_open` past the stat: the central directory through the zip
-    /// crate, each record read again here for what libzip keeps of it.
-    /// A file with no end record is `ER_TRUNCATED_ZIP` when its first four
-    /// bytes are a local header, read from offset 0 as `_is_truncated_zip`
-    /// seeks there:
+    /// `_zip_open` past the stat: the central directory found and read as
+    /// `_zip_find_central_dir` reads it ([`cdir`]). A file with no end
+    /// record is `ER_TRUNCATED_ZIP` when its first four bytes are a local
+    /// header, read from offset 0 as `_is_truncated_zip` seeks there:
     ///
     /// ```php
     /// $z = new ZipArchive; $z->open('nocd-witness.zip', ZipArchive::CREATE|ZipArchive::OVERWRITE);
@@ -459,74 +459,38 @@ impl Archive {
     /// int(35)
     /// ```
     fn read_cdir(&mut self, mut file: File, len: u64, mode: u32) -> Result<(), Status> {
-        let sys = |e: &std::io::Error| e.raw_os_error().unwrap_or(0);
-        let reader = file
-            .try_clone()
-            .map_err(|e| Status::of(Er::Open, sys(&e)))?;
-        let zip = zip::ZipArchive::new(reader).map_err(|e| match e {
-            zip::result::ZipError::Io(e) => Status::of(Er::Read, sys(&e)),
-            zip::result::ZipError::InvalidArchive(m) if !m.contains("EOCD") && len >= 22 => {
-                Status::of(Er::Incons, 0)
-            }
-            zip::result::ZipError::UnsupportedArchive(_) => Status::of(Er::Multidisk, 0),
-            _ => {
-                let mut head = [0u8; 4];
-                let truncated = file.seek(SeekFrom::Start(0)).is_ok()
-                    && file.read_exact(&mut head).is_ok()
-                    && head == *b"PK\x03\x04";
-                Status::of(
-                    if truncated {
-                        Er::TruncatedZip
-                    } else {
-                        Er::Nozip
-                    },
-                    0,
-                )
+        let cd = cdir::find(&mut file, len, self.open_flags).map_err(|e| {
+            let mut head = [0u8; 4];
+            let truncated = e.zip == Er::Nozip as i32
+                && file.seek(SeekFrom::Start(0)).is_ok()
+                && file.read_exact(&mut head).is_ok()
+                && head == *b"PK\x03\x04";
+            if truncated {
+                Status::of(Er::TruncatedZip, 0)
+            } else {
+                e
             }
         })?;
-        let base = zip.offset();
-        let start = zip.central_directory_start();
-        let comment = zip.comment().to_vec();
-        let mut cdir = Vec::new();
-        file.seek(SeekFrom::Start(start))
-            .and_then(|_| {
-                file.by_ref()
-                    .take(len.saturating_sub(start))
-                    .read_to_end(&mut cdir)
-            })
-            .map_err(|e| Status::of(Er::Read, sys(&e)))?;
-        let mut at = 0usize;
-        while cdir.get(at..at + 4) == Some(b"PK\x01\x02") {
-            let (de, used) = parse_central(&cdir[at..], base).ok_or(Status::of(Er::Incons, 0))?;
-            // `_zip_dirent_read` under `ZIP_CHECKCONS` (libzip 1.12): a
-            // name holding a NUL refused, at the entry `zip_open` reads.
-            if self.open_flags & CHECKCONS != 0
-                && de.filename.as_ref().is_some_and(|f| f.raw.contains(&0))
-            {
-                return Err(Status::incons(
-                    Detail::NulInFilename,
-                    Some(self.entries.len()),
-                ));
-            }
-            self.entries.push(Entry {
-                orig: Some(de),
-                ..Entry::default()
-            });
-            at += used;
-        }
-        let cdir_bytes = &cdir[..at];
-        if is_torrentzip(&comment, cdir_bytes) {
+        if is_torrentzip(&cd.comment, &cd.bytes) {
             self.flags |= AFL_IS_TORRENTZIP;
-        } else if let Ok(c) = ZStr::new(&comment, 0) {
+        } else if let Ok(c) = ZStr::new(&cd.comment, 0) {
             self.comment_orig = c;
         }
+        self.entries = cd
+            .entries
+            .into_iter()
+            .map(|de| Entry {
+                orig: Some(de),
+                ..Entry::default()
+            })
+            .collect();
         self.ch_flags = self.flags;
         if self.open_flags & CHECKCONS != 0 {
             self.check_names()?;
         }
         let stdio = file
             .try_clone()
-            .map(|f| self.replay(Stdio::new(f), len, start, &cdir[..at]))
+            .map(|f| self.replay(Stdio::new(f), len, cd.offset, &cd.bytes))
             .ok();
         self.data = Some(Data {
             file,
@@ -534,12 +498,6 @@ impl Archive {
             size: len,
             stdio,
         });
-        if self.open_flags & CHECKCONS != 0 {
-            for i in 0..self.entries.len() {
-                self.local_header(i)
-                    .map_err(|()| Status::of(Er::Incons, 0))?;
-            }
-        }
         Ok(())
     }
 
@@ -561,7 +519,7 @@ impl Archive {
     /// string(8) "No error"
     /// ```
     fn replay(&self, mut f: Stdio, len: u64, start: u64, cdir: &[u8]) -> Stdio {
-        let tail = len.min(65_577);
+        let tail = len.min(cdir::CDBUFSIZE);
         f.seek(len - tail);
         f.read(&mut vec![0; usize::try_from(tail).unwrap_or(0)])
             .ok();
@@ -1563,21 +1521,21 @@ fn unchange_data(e: &mut Entry) {
     e.deleted = false;
 }
 
-fn u16_at(b: &[u8], at: usize) -> Option<u16> {
+pub(crate) fn u16_at(b: &[u8], at: usize) -> Option<u16> {
     Some(u16::from_le_bytes(b.get(at..at + 2)?.try_into().ok()?))
 }
 
-fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+pub(crate) fn u32_at(b: &[u8], at: usize) -> Option<u32> {
     Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
 
-fn u64_at(b: &[u8], at: usize) -> Option<u64> {
+pub(crate) fn u64_at(b: &[u8], at: usize) -> Option<u64> {
     Some(u64::from_le_bytes(b.get(at..at + 8)?.try_into().ok()?))
 }
 
 /// The extra fields libzip makes itself and drops on reading: Zip64,
 /// the two UTF-8 fields and `WinZip` AES (`_zip_ef_remove_internal`).
-fn strip_internal(ef: &[u8]) -> Vec<u8> {
+pub(crate) fn strip_internal(ef: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut at = 0;
     while let (Some(id), Some(len)) = (u16_at(ef, at), u16_at(ef, at + 2)) {
@@ -1594,7 +1552,7 @@ fn strip_internal(ef: &[u8]) -> Vec<u8> {
 }
 
 /// The data of extra field `id`.
-fn find_ef(ef: &[u8], id: u16) -> Option<&[u8]> {
+pub(crate) fn find_ef(ef: &[u8], id: u16) -> Option<&[u8]> {
     let mut at = 0;
     while let (Some(fid), Some(len)) = (u16_at(ef, at), u16_at(ef, at + 2)) {
         let data = ef.get(at + 4..at + 4 + usize::from(len))?;
@@ -1604,90 +1562,6 @@ fn find_ef(ef: &[u8], id: u16) -> Option<&[u8]> {
         at += 4 + usize::from(len);
     }
     None
-}
-
-/// `_zip_dirent_read` of a central record: the dirent, and the bytes it
-/// took.
-fn parse_central(b: &[u8], base: u64) -> Option<(Dirent, usize)> {
-    let nlen = usize::from(u16_at(b, 28)?);
-    let elen = usize::from(u16_at(b, 30)?);
-    let clen = usize::from(u16_at(b, 32)?);
-    let name = b.get(46..46 + nlen)?;
-    let ef = b.get(46 + nlen..46 + nlen + elen)?;
-    let comment = b.get(46 + nlen + elen..46 + nlen + elen + clen)?;
-    let bitflags = u16_at(b, 8)?;
-    let mut de = Dirent {
-        version_madeby: u16_at(b, 4)?,
-        version_needed: u16_at(b, 6)?,
-        bitflags,
-        comp_method: i32::from(u16_at(b, 10)?),
-        last_mod: DosTime {
-            time: u16_at(b, 12)?,
-            date: u16_at(b, 14)?,
-        },
-        crc: u32_at(b, 16)?,
-        comp_size: u64::from(u32_at(b, 20)?),
-        uncomp_size: u64::from(u32_at(b, 24)?),
-        disk_number: u32::from(u16_at(b, 34)?),
-        int_attrib: u16_at(b, 36)?,
-        ext_attrib: u32_at(b, 38)?,
-        offset: u64::from(u32_at(b, 42)?),
-        extra_local: None,
-        extra_central: strip_internal(ef),
-        ..Dirent::default()
-    };
-    let utf8 = bitflags & GPBF_ENCODING_UTF_8 != 0;
-    let known = if utf8 { Some(Enc::Utf8Known) } else { None };
-    de.filename = (!name.is_empty()).then(|| ZStr {
-        raw: name.to_vec(),
-        known,
-    });
-    de.comment = (!comment.is_empty()).then(|| ZStr {
-        raw: comment.to_vec(),
-        known,
-    });
-    for (id, target) in [(0x7075u16, &mut de.filename), (0x6375, &mut de.comment)] {
-        if let Some(f) = find_ef(ef, id)
-            && f.first() == Some(&1)
-            && let Some(s) = target.as_ref()
-            && u32_at(f, 1) == Some(crc32fast::hash(&s.raw))
-        {
-            *target = Some(ZStr {
-                raw: f[5..].to_vec(),
-                known: Some(Enc::Utf8Known),
-            });
-        }
-    }
-    if let Some(z64) = find_ef(ef, 0x0001) {
-        let mut at = 0;
-        if de.uncomp_size == 0xffff_ffff {
-            de.uncomp_size = u64_at(z64, at)?;
-            at += 8;
-        }
-        if de.comp_size == 0xffff_ffff {
-            de.comp_size = u64_at(z64, at)?;
-            at += 8;
-        }
-        if de.offset == 0xffff_ffff {
-            de.offset = u64_at(z64, at)?;
-        }
-    }
-    de.offset += base;
-    if de.comp_method == 99 {
-        let aes = find_ef(ef, 0x9901)?;
-        if u16_at(aes, 0)? == 2 {
-            de.crc_valid = false;
-        }
-        de.encryption_method = 0x0100 | u16::from(*aes.get(4)?);
-        de.comp_method = i32::from(u16_at(aes, 5)?);
-    } else if bitflags & GPBF_ENCRYPTED != 0 {
-        de.encryption_method = if bitflags & GPBF_STRONG_ENCRYPTION != 0 {
-            EM_UNKNOWN
-        } else {
-            EM_TRAD_PKWARE
-        };
-    }
-    Some((de, 46 + nlen + elen + clen))
 }
 
 /// `zip_check_torrentzip`: the comment `TORRENTZIPPED-` and the central

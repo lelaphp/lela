@@ -6,8 +6,8 @@
 //! [`write`]) by the object and its entries' streams together
 //! ([`holder`]), libzip's codes and sentences ([`error`]), its strings
 //! ([`strings`]) and DOS times ([`dostime`]); the central directory
-//! found by the pure-Rust zip crate, every entry read as its stream is
-//! read through libzip's layers over the crate's codecs and ciphers
+//! found and read as libzip's `zip_open` reads it ([`cdir`]), every entry
+//! read as its stream is read through libzip's layers over pure-Rust codecs and ciphers
 //! ([`read`]), and written through them ([`codec`]), deflate alone
 //! through the platform's zlib at libzip's memLevel ([`ffi`], the
 //! crate's one binding and its one home of `unsafe`; #1657). The phpt
@@ -26,6 +26,7 @@
 #![allow(rustdoc::invalid_codeblock_attributes)]
 
 mod archive;
+mod cdir;
 mod codec;
 mod dostime;
 mod error;
