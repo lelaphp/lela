@@ -1457,27 +1457,28 @@ impl Reader {
         window: impl FnOnce() -> Result<Window, Status>,
         l: &Layers<'_>,
     ) -> Result<Reader, Status> {
-        let decrypt = l.password.is_some();
-        if decrypt
-            && !matches!(
-                l.encryption,
-                crate::archive::EM_TRAD_PKWARE
-                    | crate::archive::EM_AES_128
-                    | crate::archive::EM_AES_192
-                    | crate::archive::EM_AES_256
-            )
-        {
-            return Err(Status::new(Er::Encrnotsupp));
-        }
+        let encryption = Encryption::of(l.encryption);
+        // The password the decryption layer is opened with, where one is
+        // given; a method it has no layer for is refused.
+        let key = match (l.password, encryption) {
+            (None, _) => None,
+            (Some(p), Encryption::Pkware | Encryption::Aes(_)) => Some(p),
+            (Some(_), Encryption::None | Encryption::Unknown) => {
+                return Err(Status::new(Er::Encrnotsupp));
+            }
+        };
+        let decrypt = key.is_some();
         if !matches!(l.method, 0 | 8 | 12 | 14 | 93 | 95) {
             return Err(Status::new(Er::Compnotsupp));
         }
         // The decryption layer's refusal as libzip 1.12 creates it, before
         // the empty data's shortcut: twelve bytes of PKWARE header, and
         // WinZip AES's salt, check and code.
-        let encryption = Encryption::of(l.encryption);
-        let least = encryption.overhead().unwrap_or(0);
-        if decrypt && l.comp_size < least {
+        if decrypt
+            && encryption
+                .overhead()
+                .is_some_and(|least| l.comp_size < least)
+        {
             return Err(Status::new(Er::Opnotsupp));
         }
         let crc = l.crc.map(|c| (c, l.size));
@@ -1497,12 +1498,10 @@ impl Reader {
             ));
         }
         let window = window()?;
-        let raw = match l.password {
-            None => Raw::Plain(window),
-            Some(p) if l.encryption == crate::archive::EM_TRAD_PKWARE => {
-                Raw::pkware(window, p, l.crc.map(|c| (l.dostime, c)))?
-            }
-            Some(p) => Raw::aes(window, p, encryption.aes().unwrap_or(0), l.comp_size)?,
+        let raw = match (key, encryption) {
+            (Some(p), Encryption::Pkware) => Raw::pkware(window, p, l.crc.map(|c| (l.dostime, c)))?,
+            (Some(p), Encryption::Aes(strength)) => Raw::aes(window, p, strength, l.comp_size)?,
+            _ => Raw::Plain(window),
         };
         if l.method == 0 {
             return Ok(match raw {

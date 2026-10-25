@@ -10,9 +10,9 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 
 use crate::archive::{
-    CHECKCONS, Dirent, EM_AES_128, EM_AES_192, EM_AES_256, EM_NONE, EM_TRAD_PKWARE, EM_UNKNOWN,
-    Encryption, GPBF_DATA_DESCRIPTOR, GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, GPBF_STRONG_ENCRYPTION,
-    find_ef, strip_internal, u16_at, u32_at, u64_at,
+    CHECKCONS, Dirent, EM_NONE, EM_TRAD_PKWARE, EM_UNKNOWN, Encryption, GPBF_DATA_DESCRIPTOR,
+    GPBF_ENCODING_UTF_8, GPBF_ENCRYPTED, GPBF_STRONG_ENCRYPTION, find_ef, strip_internal, u16_at,
+    u32_at, u64_at,
 };
 use crate::dostime::DosTime;
 use crate::error::{Detail, Er, Status};
@@ -934,11 +934,8 @@ fn winzip_aes(de: &mut Dirent, ef: &[u8]) -> Result<(), Status> {
     if &aes[2..4] != b"AE" {
         return Err(Status::new(Er::Encrnotsupp));
     }
-    let method = match aes[4] {
-        1 => EM_AES_128,
-        2 => EM_AES_192,
-        3 => EM_AES_256,
-        _ => return Err(Status::new(Er::Encrnotsupp)),
+    let Some(method) = Encryption::Aes(aes[4]).method() else {
+        return Err(Status::new(Er::Encrnotsupp));
     };
     if aes.len() != 7 {
         return Err(Status::bare(Detail::InvalidWinzipaesEf));

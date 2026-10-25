@@ -51,11 +51,11 @@ pub(crate) enum Er {
 
 /// `zip_error_system_type`: what a code's system half is.
 #[derive(Clone, Copy)]
-enum Kind {
+enum System {
     /// `ZIP_ET_NONE`: nothing.
     None,
     /// `ZIP_ET_SYS`: an `errno`.
-    Sys,
+    Errno,
     /// `ZIP_ET_ZLIB`: zlib's return code.
     Zlib,
     /// `ZIP_ET_LIBZIP`: one of libzip's details.
@@ -70,43 +70,43 @@ impl Er {
 
     /// `_zip_err_str`'s row, as libzip's build generates it from `zip.h`'s
     /// comments: the kind of the code's system half and its sentence.
-    fn row(self) -> (Kind, &'static str) {
+    fn row(self) -> (System, &'static str) {
         match self {
-            Er::Ok => (Kind::None, "No error"),
-            Er::Multidisk => (Kind::None, "Multi-disk zip archives not supported"),
-            Er::Rename => (Kind::Sys, "Renaming temporary file failed"),
-            Er::Seek => (Kind::Sys, "Seek error"),
-            Er::Read => (Kind::Sys, "Read error"),
-            Er::Write => (Kind::Sys, "Write error"),
-            Er::Crc => (Kind::None, "CRC error"),
-            Er::Zipclosed => (Kind::None, "Containing zip archive was closed"),
-            Er::Noent => (Kind::None, "No such file"),
-            Er::Exists => (Kind::None, "File already exists"),
-            Er::Open => (Kind::Sys, "Can't open file"),
-            Er::Tmpopen => (Kind::Sys, "Failure to create temporary file"),
-            Er::Zlib => (Kind::Zlib, "Zlib error"),
-            Er::Memory => (Kind::None, "Malloc failure"),
-            Er::Changed => (Kind::None, "Entry has been changed"),
-            Er::Compnotsupp => (Kind::None, "Compression method not supported"),
-            Er::Eof => (Kind::None, "Premature end of file"),
-            Er::Inval => (Kind::None, "Invalid argument"),
-            Er::Nozip => (Kind::None, "Not a zip archive"),
-            Er::Internal => (Kind::None, "Internal error"),
-            Er::Incons => (Kind::Libzip, "Zip archive inconsistent"),
-            Er::Remove => (Kind::Sys, "Can't remove file"),
-            Er::Deleted => (Kind::None, "Entry has been deleted"),
-            Er::Encrnotsupp => (Kind::None, "Encryption method not supported"),
-            Er::Rdonly => (Kind::None, "Read-only archive"),
-            Er::Nopasswd => (Kind::None, "No password provided"),
-            Er::Wrongpasswd => (Kind::None, "Wrong password provided"),
-            Er::Opnotsupp => (Kind::None, "Operation not supported"),
-            Er::Inuse => (Kind::None, "Resource still in use"),
-            Er::CompressedData => (Kind::None, "Compressed data invalid"),
-            Er::Cancelled => (Kind::None, "Operation cancelled"),
-            Er::DataLength => (Kind::None, "Unexpected length of data"),
-            Er::NotAllowed => (Kind::None, "Not allowed in torrentzip"),
-            Er::TruncatedZip => (Kind::None, "Possibly truncated or corrupted zip archive"),
-            Er::EfTooLarge => (Kind::None, "Extra fields too large"),
+            Er::Ok => (System::None, "No error"),
+            Er::Multidisk => (System::None, "Multi-disk zip archives not supported"),
+            Er::Rename => (System::Errno, "Renaming temporary file failed"),
+            Er::Seek => (System::Errno, "Seek error"),
+            Er::Read => (System::Errno, "Read error"),
+            Er::Write => (System::Errno, "Write error"),
+            Er::Crc => (System::None, "CRC error"),
+            Er::Zipclosed => (System::None, "Containing zip archive was closed"),
+            Er::Noent => (System::None, "No such file"),
+            Er::Exists => (System::None, "File already exists"),
+            Er::Open => (System::Errno, "Can't open file"),
+            Er::Tmpopen => (System::Errno, "Failure to create temporary file"),
+            Er::Zlib => (System::Zlib, "Zlib error"),
+            Er::Memory => (System::None, "Malloc failure"),
+            Er::Changed => (System::None, "Entry has been changed"),
+            Er::Compnotsupp => (System::None, "Compression method not supported"),
+            Er::Eof => (System::None, "Premature end of file"),
+            Er::Inval => (System::None, "Invalid argument"),
+            Er::Nozip => (System::None, "Not a zip archive"),
+            Er::Internal => (System::None, "Internal error"),
+            Er::Incons => (System::Libzip, "Zip archive inconsistent"),
+            Er::Remove => (System::Errno, "Can't remove file"),
+            Er::Deleted => (System::None, "Entry has been deleted"),
+            Er::Encrnotsupp => (System::None, "Encryption method not supported"),
+            Er::Rdonly => (System::None, "Read-only archive"),
+            Er::Nopasswd => (System::None, "No password provided"),
+            Er::Wrongpasswd => (System::None, "Wrong password provided"),
+            Er::Opnotsupp => (System::None, "Operation not supported"),
+            Er::Inuse => (System::None, "Resource still in use"),
+            Er::CompressedData => (System::None, "Compressed data invalid"),
+            Er::Cancelled => (System::None, "Operation cancelled"),
+            Er::DataLength => (System::None, "Unexpected length of data"),
+            Er::NotAllowed => (System::None, "Not allowed in torrentzip"),
+            Er::TruncatedZip => (System::None, "Possibly truncated or corrupted zip archive"),
+            Er::EfTooLarge => (System::None, "Extra fields too large"),
         }
     }
 }
@@ -155,7 +155,9 @@ impl At {
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub(crate) struct Status {
     pub(crate) er: Er,
-    pub(crate) sys: Sys,
+    /// Private, so a status is built by the constructors below, each
+    /// giving its code the half its kind reads.
+    sys: Sys,
 }
 
 impl Status {
@@ -245,16 +247,18 @@ impl Status {
             Sys::None | Sys::Detail(..) => 0,
         };
         match (kind, self.sys) {
-            (Kind::Sys, _) => format!("{sentence}: {}", req.environment().os_error_text(number)),
-            (Kind::Zlib, _) => format!("{sentence}: {}", z_error(number)),
-            (Kind::Libzip, Sys::Detail(detail, at)) => {
+            (System::Errno, _) => {
+                format!("{sentence}: {}", req.environment().os_error_text(number))
+            }
+            (System::Zlib, _) => format!("{sentence}: {}", z_error(number)),
+            (System::Libzip, Sys::Detail(detail, at)) => {
                 let (scope, description) = detail.row();
                 match (scope, at) {
                     (Scope::Entry, At::Entry(i)) => format!("{sentence}: entry {i}: {description}"),
                     _ => format!("{sentence}: {description}"),
                 }
             }
-            (Kind::None | Kind::Libzip, _) => sentence.to_owned(),
+            (System::None | System::Libzip, _) => sentence.to_owned(),
         }
     }
 }

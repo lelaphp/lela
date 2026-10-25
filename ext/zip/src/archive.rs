@@ -82,6 +82,18 @@ impl Encryption {
         }
     }
 
+    /// The method's number, `ZIP_EM_*`.
+    pub(crate) fn method(self) -> Option<u16> {
+        match self {
+            Encryption::None => Some(EM_NONE),
+            Encryption::Pkware => Some(EM_TRAD_PKWARE),
+            Encryption::Aes(1) => Some(EM_AES_128),
+            Encryption::Aes(2) => Some(EM_AES_192),
+            Encryption::Aes(3) => Some(EM_AES_256),
+            Encryption::Aes(_) | Encryption::Unknown => None,
+        }
+    }
+
     /// The `WinZip` AES strength, for an AES method.
     pub(crate) fn aes(self) -> Option<u8> {
         match self {
