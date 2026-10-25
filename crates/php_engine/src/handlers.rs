@@ -24420,8 +24420,7 @@ fn inline_return(
 /// named, or released where the caller reads nothing.
 fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
     if req.stack_mut().entry() == frame {
-        req.entry_returned(frame, returned);
-        return Ok(Stepped::Done.into());
+        return entry_returned(req, frame, returned);
     }
     crate::observer::returned(req, frame, Some(&returned));
     let (caller, returns_to) = req.returning(frame);
@@ -24433,6 +24432,16 @@ fn returned_to_caller(req: &mut Request, frame: FrameRef, returned: Value) -> Ed
     // goes on from the one after it.
     req.vm_mut().advance(caller);
     Ok(Stepped::Popped(caller).into())
+}
+
+/// [`returned_to_caller`]'s return of the serving's entry frame
+/// ([`Request::entry_returned`]), out of line: the interpreter's `RETURN`
+/// meets it once per serving, where every other return pops a frame.
+#[cold]
+#[inline(never)]
+fn entry_returned(req: &mut Request, frame: FrameRef, returned: Value) -> Edge {
+    req.entry_returned(frame, returned);
+    Ok(Stepped::Done.into())
 }
 
 /// What a call returned, handed to the frame that made the call: into
