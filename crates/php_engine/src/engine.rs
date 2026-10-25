@@ -553,8 +553,17 @@ pub trait OutputSink: Any {
     fn write(&mut self, bytes: &[u8]) -> Result<(), Aborted>;
     /// The host may push what it has.
     fn flush(&mut self);
-    /// The response's head, once, before the first body byte.
-    fn send_headers(&mut self, head: &ResponseHead);
+    /// The response's head, once, before the first body byte, and
+    /// whether the host sent it: [`Aborted`] where the block did not
+    /// reach the client, php's `SAPI_HEADER_SEND_FAILED`, as the built-in
+    /// server answers a client that reset the connection (GH-23425), so
+    /// `headers_sent()` stays false and `php_output_header` sets
+    /// `PHP_OUTPUT_DISABLED` (`Z/main/SAPI.c:943-946`).
+    ///
+    /// # Errors
+    ///
+    /// [`Aborted`], a header block the host could not send.
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), Aborted>;
     /// One entry for the host's log, whole: what `php_log_err` was
     /// given where `error_log` names no file it could open
     /// (`sapi_module.log_message`), a diagnostic in its log form with
@@ -5943,7 +5952,7 @@ impl Engine {
         // layer's deactivation makes if nothing had; one it refused, for
         // the memory limit, is handed over now.
         if !req.output().headers_sent() {
-            req.send_header_block();
+            req.send_header_block().ok();
         }
         let sink = req.release_sink();
         // What the request entered, taken last, so a destructor or a

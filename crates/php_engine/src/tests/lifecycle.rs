@@ -1041,7 +1041,12 @@ impl crate::engine::OutputSink for Left {
 
     fn flush(&mut self) {}
 
-    fn send_headers(&mut self, _: &crate::engine::ResponseHead) {}
+    fn send_headers(
+        &mut self,
+        _: &crate::engine::ResponseHead,
+    ) -> Result<(), crate::engine::Aborted> {
+        Ok(())
+    }
 
     fn log(&mut self, entry: &[u8]) {
         let mut log = (self.log.lock()).unwrap_or_else(std::sync::PoisonError::into_inner);

@@ -467,7 +467,9 @@ impl OutputSink for Sink {
         std::io::stdout().lock().flush().ok();
     }
 
-    fn send_headers(&mut self, _head: &ResponseHead) {}
+    fn send_headers(&mut self, _head: &ResponseHead) -> Result<(), Aborted> {
+        Ok(())
+    }
 
     /// `php_sapi_phpdbg_log_message`: what follows a fatal's entry is
     /// [`crate::debugger::fatal_logged`].
@@ -503,7 +505,9 @@ impl OutputSink for Unwritten {
 
     fn flush(&mut self) {}
 
-    fn send_headers(&mut self, _: &ResponseHead) {}
+    fn send_headers(&mut self, _: &ResponseHead) -> Result<(), Aborted> {
+        Ok(())
+    }
 
     fn log(&mut self, _: &[u8]) {}
 

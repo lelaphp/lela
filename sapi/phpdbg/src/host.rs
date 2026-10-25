@@ -581,7 +581,9 @@ mod tests {
             Ok(())
         }
         fn flush(&mut self) {}
-        fn send_headers(&mut self, _head: &ResponseHead) {}
+        fn send_headers(&mut self, _head: &ResponseHead) -> Result<(), Aborted> {
+            Ok(())
+        }
         fn log(&mut self, _entry: &[u8]) {}
         fn write_stderr(&mut self, _bytes: &[u8]) {}
     }

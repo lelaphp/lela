@@ -156,11 +156,12 @@ impl OutputSink for Response {
     ///
     /// x
     /// ```
-    fn send_headers(&mut self, head: &ResponseHead) {
+    fn send_headers(&mut self, head: &ResponseHead) -> Result<(), Aborted> {
         let block = php_sapi::cgi::head(head);
         let mut wire = self.wire();
         wire.head = Some(head.clone());
         let _ = wire.write(Kind::Stdout, &block);
+        Ok(())
     }
 
     /// `sapi_cgi_log_message`: `PHP message: ` and the entry, through the
