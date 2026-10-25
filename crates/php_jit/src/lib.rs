@@ -34,8 +34,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use php_engine::api::raising::{self, Level};
 use php_engine::api::request::TierStatus;
 use php_engine::tier::{
-    self, Extension, ExtensionBuilder, Flow, FrameRef, Refusal, Request, Site, Start, Started,
-    StartupIni, Thrown, Tier,
+    self, Bound, Extension, ExtensionBuilder, Flow, FrameRef, Laid, Refusal, Request, Site, Start,
+    Started, StartupIni, Thrown, Tier,
 };
 use php_unit::Opcode;
 
@@ -82,15 +82,17 @@ impl Tier for Jit {
         dispatch::safepoint(req, frame, site, held)
     }
 
-    /// The engine binds `Jit`'s loop only where the tier may compile a trace
-    /// ([`policy::Bound`]), from the start or once a request turns
-    /// `opcache.jit` on; where it never can, it binds `Nop`'s, so the
+    /// The engine binds `Jit`'s loop where the tier runs from the start,
+    /// both loops where it is set up and off and a request may turn
+    /// `opcache.jit` on, and `Nop`'s alone where it never can, so the
     /// loop pays nothing at a safepoint, as php's VM keeps its own
-    /// handlers where its compiled tier does not start.
-    fn asked(started: &Started<'_>) -> bool {
+    /// handlers where its compiled tier does not start
+    /// ([`policy::Policy::bound`]); `Nop`'s where the engine built no
+    /// [`JitEngine`].
+    fn bound(started: &Started<'_>) -> Bound {
         started
             .engine::<JitEngine>()
-            .is_some_and(|engine| engine.shared.bound.asked())
+            .map_or(Bound::Never, |engine| engine.shared.bound)
     }
 
     /// [`JitRequest`], laid with each request of an engine that binds
@@ -110,22 +112,17 @@ impl Tier for Jit {
         };
         let epoch = tier::epoch(req);
         let used = table::of_epoch(&epoch).map_or(0, |table| table.usage().bytes);
-        engine.shared.policy.status(used, setting(req))
+        engine.shared.policy.status(used, jit_g(req))
     }
 
-    /// Whether a unit published now counts ([`policy::Policy::counts`]):
-    /// as `req`'s `opcache.jit` says, the startup's where the engine
-    /// publishes it for no request; none where the engine built no
-    /// [`JitEngine`].
-    fn counts(started: &Started<'_>, req: Option<&Request>) -> bool {
+    /// How a unit published now lays its words ([`policy::Policy::laid`]):
+    /// as `req`'s `JIT_G` says, the startup's where the engine publishes
+    /// it for no request; sealed where the engine built no [`JitEngine`].
+    fn laid(started: &Started<'_>, req: Option<&Request>) -> Laid {
         let Some(engine) = started.engine::<JitEngine>() else {
-            return false;
+            return Laid::Sealed;
         };
-        let policy = &engine.shared.policy;
-        req.map_or_else(
-            || policy.counts_at_start(),
-            |req| policy.counts(setting(req)),
-        )
+        engine.shared.policy.laid(req.and_then(jit_g))
     }
 
     /// The tier's state (`jit-design.md` §4): its two directives and
@@ -146,11 +143,11 @@ impl Tier for Jit {
     }
 }
 
-/// `opcache.jit` as `req` has it now, php's `JIT_G` as `zend_jit_config`
-/// left it after the request's last `ini_set`; none where no extension
-/// declares the directive.
-fn setting(req: &Request) -> Option<&[u8]> {
-    req.ini().get(b"opcache.jit")
+/// php's `JIT_G` as `req` has it now, the one place the tier reads it:
+/// its `opcache.jit` as `zend_jit_config` decodes it after the request's
+/// last `ini_set`; none where no extension declares the directive.
+fn jit_g(req: &Request) -> Option<policy::Setting> {
+    req.ini().get(b"opcache.jit").map(policy::Setting::of)
 }
 
 impl JitRequest {
@@ -214,8 +211,8 @@ pub(crate) struct JitEngine {
 #[derive(Debug)]
 pub(crate) struct Shared {
     policy: policy::Policy,
-    /// Whether the engine binds `Jit`'s loop ([`Jit::asked`]).
-    bound: policy::Bound,
+    /// Which loops the engine binds ([`Jit::bound`]).
+    bound: Bound,
     backend: Option<lower::Backend>,
     started: Box<[policy::Note]>,
     /// Whether a request wrote the start's warning and lines yet: once
@@ -360,7 +357,7 @@ impl JitEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::JitEngine;
+    use super::{Bound, JitEngine};
     use crate::policy::Mode;
     use crate::testing::{self, Lane, ini};
 
@@ -385,7 +382,6 @@ mod tests {
     /// may turn on (#3139).
     #[test]
     fn the_engine_start_binds_jits_loop_only_where_the_tier_runs() {
-        use crate::policy::Bound;
         let bound = |asked: &[(&str, &str)], host: &'static str| {
             JitEngine::over(&ini(asked), host, |_| false, crate::lower::Backend::new)
                 .shared
@@ -413,7 +409,6 @@ mod tests {
             (&[("jit.mode", "force")][..], "", Bound::On),
         ] {
             assert_eq!(bound(asked, host), expected, "{asked:?} on {host:?}");
-            assert_eq!(expected.asked(), expected != Bound::Never);
         }
         let refused = JitEngine::over(&ini(&[tracing]), "", |_| true, crate::lower::Backend::new);
         assert_eq!(refused.shared.bound, Bound::Never, "a refused tier");

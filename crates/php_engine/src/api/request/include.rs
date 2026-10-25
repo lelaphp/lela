@@ -1550,7 +1550,7 @@ impl Code<&mut Request> {
         let callee = self.0.push_code_frame(unit, from);
         let callee = self.0.fatal_of(callee)?;
         crate::observer::call(self.0, callee);
-        let reenter = self.0.shared.loops.reenter;
+        let reenter = self.0.loops().reenter;
         let served = reenter(self.0, callee);
         while self.0.vm.depth() > standing {
             let top = self.0.vm.stack.current();

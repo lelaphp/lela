@@ -297,15 +297,24 @@ fn with_none_declared_the_engine_binds_the_loop_that_tells_no_one() {
             .build(),
     ] {
         assert!(!engine.shared.opcodes.declares_any());
-        assert!(std::ptr::fn_addr_eq(engine.shared.loops.entry, untold));
-        assert!(!std::ptr::fn_addr_eq(engine.shared.loops.entry, telling));
+        assert!(std::ptr::fn_addr_eq(
+            engine.shared.binding.first.entry,
+            untold
+        ));
+        assert!(!std::ptr::fn_addr_eq(
+            engine.shared.binding.first.entry,
+            telling
+        ));
     }
     let declared = Engine::cli_builder()
         .extensions(&[Shows::<0>::extension()])
         .ini("t.opcodes_0", "ZEND_ECHO")
         .build();
     assert!(declared.shared.opcodes.declares_any());
-    assert!(std::ptr::fn_addr_eq(declared.shared.loops.entry, telling));
+    assert!(std::ptr::fn_addr_eq(
+        declared.shared.binding.first.entry,
+        telling
+    ));
 }
 
 /// php's `zend_get_opcode_id`: the opcode of the lowest number whose name

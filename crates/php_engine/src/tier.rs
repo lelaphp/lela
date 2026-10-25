@@ -27,7 +27,7 @@
 //! this face, so a host that binds a tier names none of `php_engine`.
 
 use std::any::Any;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// What a tier declares its state with, as an extension does (design
 /// §4.4; `jit-design.md` §4, §5.3).
@@ -182,19 +182,20 @@ pub trait Tier: 'static {
         None
     }
 
-    /// Whether the engine `started` asks the tier at its safepoints at
-    /// all, asked once as the engine binds its loop, after every engine
-    /// state is built: where it answers `false` the engine binds
-    /// [`Nop`]'s loop, so a safepoint costs the loop nothing, as php's VM
-    /// keeps its own handlers where its compiled tier is not on.
-    /// A tier that [`HOLDS`](Tier::HOLDS) or hooks the compile
-    /// ([`HOOKED`](Tier::HOOKED)) is bound whatever it answers, since
-    /// `Nop`'s loop neither holds a frame nor runs a hooked call as it
-    /// does.
+    /// Which loops the engine `started` binds ([`Bound`]), asked once as
+    /// the engine binds them, after every engine state is built: the
+    /// tier's from the start, [`Nop`]'s where the tier never runs, so a
+    /// safepoint costs the loop nothing, as php's VM keeps its own
+    /// handlers where its compiled tier is not on, or both, where a
+    /// request may turn the tier on (ADR-0006, amended on #3301). A tier
+    /// that [`HOLDS`](Tier::HOLDS) or hooks the compile
+    /// ([`HOOKED`](Tier::HOOKED)) is bound from the start whatever it
+    /// answers, since `Nop`'s loop neither holds a frame nor runs a
+    /// hooked call as it does.
     #[must_use]
-    fn asked(started: &Started<'_>) -> bool {
+    fn bound(started: &Started<'_>) -> Bound {
         let _ = started;
-        true
+        Bound::On
     }
 
     /// What php's `zend_jit_status` reports of the tier on `req`'s
@@ -209,18 +210,57 @@ pub trait Tier: 'static {
         TierStatus::default()
     }
 
-    /// Whether the safepoint words of a unit the engine `started`
-    /// publishes now count, asked once per unit as the cache holds it,
-    /// with `req`, the request it is published for, none where the engine
-    /// publishes it for no request: php's `zend_persist` gives an op array
-    /// its counters only while its compiled tier is on, and none of its
-    /// handlers reads that again (`jit-design.md` §4.7). A unit whose words do not
-    /// count has them sealed, so no visit acts on them. Every unit
-    /// counts by default.
+    /// How the safepoint words of a unit the engine `started` publishes
+    /// now are laid ([`Laid`]), asked once per unit as the cache holds
+    /// it, with `req`, the request it is published for, none where the
+    /// engine publishes it for no request: php's `zend_persist` gives an
+    /// op array its counters only while its compiled tier is on, and none
+    /// of its handlers reads that again (`jit-design.md` §4.7). Every
+    /// unit counts from cold by default.
     #[must_use]
-    fn counts(started: &Started<'_>, req: Option<&Request>) -> bool {
+    fn laid(started: &Started<'_>, req: Option<&Request>) -> Laid {
         let _ = (started, req);
-        true
+        Laid::COLD
+    }
+}
+
+/// Which loops an engine binds, as its tier answers at its start
+/// ([`Tier::bound`]; ADR-0006, amended on #3301).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Bound {
+    /// [`Nop`]'s alone: the tier never runs in the engine, and its
+    /// safepoints cost the loop nothing.
+    Never,
+    /// Both, where the tier is set up and off and a request may switch
+    /// it on, php's `opcache.jit=off` with a buffer: a request starts in
+    /// the tier's loop once a unit with counting words ([`Laid`]) has
+    /// been published in the engine and in `Nop`'s otherwise, and at the
+    /// first interrupt check after it publishes one itself, `Nop`'s loop
+    /// hands its frame to the tier's for the rest of the request.
+    Runtime,
+    /// The tier's alone, from the start.
+    On,
+}
+
+/// How the safepoint words of a unit are laid as it is published
+/// ([`Tier::laid`]): sealed, so no visit acts on them, as php's op array
+/// persisted while its compiled tier was off keeps php's own handlers;
+/// or counting, each word at the two halves the tier gives, whose bits
+/// are the tier's alone ([`Word`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Laid {
+    Sealed,
+    Counting([u32; 2]),
+}
+
+impl Laid {
+    /// Counting from cold, every bit of the word zero.
+    pub const COLD: Laid = Laid::Counting([0, 0]);
+
+    /// Whether the words count.
+    #[must_use]
+    pub fn counts(self) -> bool {
+        matches!(self, Laid::Counting(_))
     }
 }
 
@@ -263,20 +303,27 @@ pub(crate) fn interpreted<T: Tier>() -> bool {
     std::any::TypeId::of::<T>() == std::any::TypeId::of::<Nop>()
 }
 
-/// Where a request keeps its tier's [`Tier::State`]
-/// (`jit-design.md` §2.2, #3144): laid once with the request, by the
-/// loop the engine bound ([`Loops::bound`]), and read by [`state`].
-/// Its box is never replaced, moved out of or borrowed mutably while
-/// the request lives, and the types hold that outside `api::request`,
-/// where the request is made: the box is this type's private field,
-/// with no `&mut` method, and the request's field holding it is private
-/// to `api::request`, which hands it out only shared
-/// ([`Request::tier_state`]). A tier lends its state across the
-/// request's own borrow on that (`php_jit`'s `enter::lent`, #3437),
-/// holding a [`Lending`] for as long as the lend stands, so where
-/// `api::request` drops or replaces the state while one is held, a debug
-/// assertion fails as it drops.
+/// Where a request keeps its tier (`jit-design.md` §2.2, #3144, #3362):
+/// the loops it is served in, which re-entry and resumption take, its
+/// tier's [`Tier::State`], laid by those loops ([`Loops::lay`]) and read
+/// by [`state`], and whether a hand-off from `Nop`'s loop to the tier's
+/// can come ([`Switch`]). Laid with the request from the engine's
+/// [`Binding`], and laid again once, at the hand-off
+/// ([`TierState::handed`]), never otherwise. The state's box is never
+/// replaced, moved out of or borrowed mutably while a tier lends it,
+/// and the types hold that outside `api::request`, where the request is
+/// made: the box is this type's private field, with no `&mut` method,
+/// and the request's field holding it is private to `api::request`,
+/// which hands it out only shared ([`Request::tier_state`]). A tier
+/// lends its state across the request's own borrow on that (`php_jit`'s
+/// `enter::lent`, #3437), holding a [`Lending`] for as long as the lend
+/// stands, so where `api::request` drops or replaces the state while one
+/// is held, a debug assertion fails as it drops. No lend stands in
+/// `Nop`'s loop, where the hand-off replaces it.
 pub(crate) struct TierState {
+    /// The loops the request is served in.
+    pub(crate) loops: Loops,
+    switch: std::cell::Cell<Switch>,
     state: Option<Box<dyn Any + Send>>,
     /// How many [`Lending`]s stand, counted under `debug_assertions`
     /// alone.
@@ -284,21 +331,82 @@ pub(crate) struct TierState {
     lends: std::sync::Arc<AtomicU32>,
 }
 
+/// Whether a request's hand-off from `Nop`'s loop to the tier's can
+/// come (#3362).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Switch {
+    /// None can: the engine binds one loop, or the request is in the
+    /// tier's.
+    Settled,
+    /// In `Nop`'s loop, the engine binding the tier's beside it
+    /// ([`Bound::Runtime`]).
+    Ready,
+    /// The request published a unit with counting words in `Nop`'s
+    /// loop: the next interrupt check that can hands its frame to the
+    /// tier's loop ([`interrupted_at`]), and every other raises the
+    /// interrupt again for it ([`owed`]).
+    Due,
+}
+
 impl TierState {
-    /// The tier state of a request of the engine `shared`, as the loop it
-    /// bound lays it.
+    /// The tier of a request of the engine `shared`: the tier's loops
+    /// where the engine binds them from the start, or binds them beside
+    /// `Nop`'s and a unit with counting words is published in it, and
+    /// the engine's first loops otherwise, `Ready` to hand off where the
+    /// tier's stand beside them.
     pub(crate) fn laid(shared: &crate::engine::Shared) -> TierState {
-        (shared.loops.lay)(Started { shared })
+        let binding = &shared.binding;
+        let (loops, switch) = match binding.switched {
+            Some(tier) if binding.counting.load(Ordering::Acquire) => (tier, Switch::Settled),
+            Some(_) => (binding.first, Switch::Ready),
+            None => (binding.first, Switch::Settled),
+        };
+        TierState::of(shared, loops, switch)
     }
 
-    /// `T`'s state for a request of the engine `started`.
-    fn of<T: Tier>(started: Started<'_>) -> TierState {
+    /// The request's tier past its hand-off ([`Switch::Due`]): the
+    /// engine's tier's loops, settled, with the state they lay; none
+    /// where no hand-off is due.
+    pub(crate) fn handed(&self, shared: &crate::engine::Shared) -> Option<TierState> {
+        if self.switch.get() != Switch::Due {
+            return None;
+        }
+        let tier = shared.binding.switched?;
+        Some(TierState::of(shared, tier, Switch::Settled))
+    }
+
+    /// The request published a unit whose words count
+    /// ([`Laid::counts`]), as the engine noted it ([`Binding::published`]):
+    /// in `Nop`'s loop beside the tier's, a hand-off is due, and the
+    /// request's interrupt is raised for the check that takes it. Whether
+    /// it was.
+    pub(crate) fn published_counting(&self) -> bool {
+        if self.switch.get() != Switch::Ready {
+            return false;
+        }
+        self.switch.set(Switch::Due);
+        true
+    }
+
+    /// Whether a hand-off is due.
+    pub(crate) fn due(&self) -> bool {
+        self.switch.get() == Switch::Due
+    }
+
+    fn of(shared: &crate::engine::Shared, loops: Loops, switch: Switch) -> TierState {
         TierState {
-            state: T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>),
+            loops,
+            switch: std::cell::Cell::new(switch),
+            state: (loops.lay)(Started { shared }),
             #[cfg(debug_assertions)]
             lends: std::sync::Arc::default(),
         }
     }
+}
+
+/// `T`'s state for a request of the engine `started`.
+fn state_of<T: Tier>(started: Started<'_>) -> Option<Box<dyn Any + Send>> {
+    T::lay(&started).map(|state| Box::new(state) as Box<dyn Any + Send>)
 }
 
 #[cfg(debug_assertions)]
@@ -347,10 +455,10 @@ pub fn lending(req: &Request) -> Lending {
     }
 }
 
-/// Whether the words of a unit the engine `shared` holds now, for `req`
-/// or for no request, count ([`Tier::counts`]).
-pub(crate) fn counts(shared: &crate::engine::Shared, req: Option<&Request>) -> bool {
-    (shared.loops.counts)(&Started { shared }, req)
+/// How the words of a unit the engine `shared` holds now, for `req` or
+/// for no request, are laid ([`Tier::laid`]).
+pub(crate) fn words_laid(shared: &crate::engine::Shared, req: Option<&Request>) -> Laid {
+    (shared.binding.laid)(&Started { shared }, req)
 }
 
 /// The tier's state the request was laid with, where it is an `S`
@@ -373,6 +481,13 @@ impl Word {
     #[must_use]
     pub fn halves(&self) -> &[AtomicU32; 2] {
         &self.halves
+    }
+
+    /// A word at `halves`, the bits the tier lays it at ([`Laid`]).
+    pub(crate) const fn laid([heat, state]: [u32; 2]) -> Word {
+        Word {
+            halves: [AtomicU32::new(heat), AtomicU32::new(state)],
+        }
     }
 
     /// A word no tier acts on: every bit set. Allocated for every
@@ -667,26 +782,141 @@ fn answered(req: &mut Request, flow: Flow, frame: FrameRef) -> Result<Stepped, F
 
 /// The activation of a frame serving `code`, its prologue having
 /// raised nothing (design §5.6, §4.3 seam 8): the interrupt check, then
-/// `Site::Entry`, then the frame the loop goes on in.
+/// `Site::Entry`, then the frame the loop goes on in. Where `Nop`'s loop
+/// hands the frame to the tier's at the check ([`interrupted_at`]), the
+/// tier's activates it again, past its prologue, so its `Site::Entry` is
+/// the tier's.
 #[inline]
 fn activated<T: Tier>(
     req: &mut Request,
     frame: FrameRef,
     code: &OpArray,
 ) -> Result<Stepped, Fatal> {
-    if interrupt::check(req)? {
-        return Ok(Stepped::Threw(frame));
+    if interrupt::raised(req)
+        && let Some(left) = interrupted_at::<T>(req, frame, Stepped::Pushed(frame))?
+    {
+        return Ok(left);
     }
     let flow = T::safepoint(req, frame, Site::Entry, Held::of(code));
     answered(req, flow, frame)
 }
 
+/// What a site of `T`'s loop, an activation or a back edge, does where
+/// its interrupt check found the interrupt raised (design §5.8):
+/// [`interrupt::interrupted`], and `Threw` of `frame` where it left a
+/// throwable pending, none where the loop goes on along `went`, the
+/// edge it was taking. In `Nop`'s loop, where the request published a
+/// unit with counting words since its last check ([`Switch::Due`]), the
+/// loop hands the edge to the tier's loop instead (ADR-0006, amended on
+/// #3301): the request's tier is laid again with the tier's loops and
+/// state, so every serving it starts from here, a re-entry, a
+/// resumption, an `auto_append_file`, takes them, and the tier's loop
+/// serves the rest of this serving on the entry slot it stands on, under
+/// `Nop`'s, whose serving is then over: `Done`.
+#[cold]
+#[inline(never)]
+pub(crate) fn interrupted_at<T: Tier>(
+    req: &mut Request,
+    frame: FrameRef,
+    went: Stepped,
+) -> Result<Option<Stepped>, Fatal> {
+    let handed = interpreted::<T>() && req.hand_off();
+    let threw = interrupt::interrupted(req)?;
+    let edge = if threw { Stepped::Threw(frame) } else { went };
+    if handed {
+        (req.tier_state().loops.handed)(req, edge)?;
+        return Ok(Some(Stepped::Done));
+    }
+    Ok(threw.then_some(edge))
+}
+
+/// The interrupt raised again where a hand-off is due and the check
+/// that found it raised cannot take it ([`Switch::Due`]): a check
+/// outside the loop or after a call, whose next site in `Nop`'s loop
+/// takes it ([`interrupted_at`]). No serving runs in the tier's loop
+/// while one is due.
+pub(crate) fn owed(req: &Request) {
+    if req.tier_state().due() {
+        req.limits().interrupt().raise();
+    }
+}
+
 /// One entry of the loop, as the engine binds it.
 pub(crate) type Loop = fn(&mut Request, FrameRef) -> Result<(), Fatal>;
 
-/// How an engine binds its tier's loop once its engine states are built
-/// and its declared opcodes fixed: [`Loops::bound`] for the tier.
-pub(crate) type BindLoops = fn(&crate::engine::Shared) -> Loops;
+/// How an engine binds its tier's loops once its engine states are
+/// built and its declared opcodes fixed: [`Binding::bound`] for the
+/// tier.
+pub(crate) type BindLoops = fn(&crate::engine::Shared) -> Binding;
+
+/// The loops an engine binds and what its tier answers whichever serves
+/// (ADR-0006, amended on #3301): the loops a request starts in, and
+/// under [`Bound::Runtime`] the tier's beside them, which a request
+/// starts in once a unit with counting words is published in the engine
+/// and hands its frame to once it publishes one itself
+/// ([`TierState`]).
+pub(crate) struct Binding {
+    /// The loops a request starts in: the tier's where it is bound
+    /// from the start, `Nop`'s otherwise.
+    pub(crate) first: Loops,
+    /// The tier's, beside `Nop`'s, under [`Bound::Runtime`] alone.
+    pub(crate) switched: Option<Loops>,
+    /// Whether a unit with counting words has been published in the
+    /// engine ([`Binding::published`]).
+    counting: AtomicBool,
+    /// The engine's tier's [`Tier::status`], its own whichever loop
+    /// serves; read by `UnitCache::status` alone.
+    pub(crate) status: fn(&Request) -> TierStatus,
+    /// The engine's tier's [`Tier::laid`], its own whichever loop
+    /// serves; read by the unit cache as it holds a unit.
+    pub(crate) laid: fn(&Started<'_>, Option<&Request>) -> Laid,
+}
+
+impl Binding {
+    /// `T`'s loops for the engine `shared` started, as `T` answers
+    /// ([`Tier::bound`]), each told as the declared set says
+    /// ([`Loops::told`]): a tier that holds a frame or hooks the compile
+    /// is bound from the start.
+    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Binding {
+        let bound = if T::HOLDS || T::HOOKED != Hooked::NONE {
+            Bound::On
+        } else {
+            T::bound(&Started { shared })
+        };
+        let tier = Loops::told::<T>(&shared.opcodes);
+        let nop = Loops::told::<Nop>(&shared.opcodes);
+        let (first, switched) = match bound {
+            Bound::On => (tier, None),
+            Bound::Runtime => (nop, Some(tier)),
+            Bound::Never => (nop, None),
+        };
+        Binding {
+            first,
+            switched,
+            counting: AtomicBool::new(false),
+            status: T::status,
+            laid: T::laid,
+        }
+    }
+
+    /// The binding of an engine not yet started, which serves nothing
+    /// until its start binds the tier's ([`Binding::bound`]).
+    pub(crate) fn unstarted() -> Binding {
+        Binding {
+            first: Loops::of::<Nop, Untold>(),
+            switched: None,
+            counting: AtomicBool::new(false),
+            status: Nop::status,
+            laid: Nop::laid,
+        }
+    }
+
+    /// A unit whose words count was published in the engine: every
+    /// request starting after it starts in the tier's loop.
+    pub(crate) fn published(&self) {
+        self.counting.store(true, Ordering::Release);
+    }
+}
 
 /// The loop's three entries, [`execute`], [`reenter`] and [`resume`],
 /// bound to one tier and to one choice of whether declared opcodes are
@@ -702,40 +932,15 @@ pub(crate) struct Loops {
     pub(crate) reenter: Loop,
     /// The same loop over a generator's frame the resumption put back.
     pub(crate) resume: Loop,
-    /// The tier's state a request of the engine is laid with, the bound
-    /// tier's ([`Tier::lay`]).
-    pub(crate) lay: fn(Started<'_>) -> TierState,
-    /// The engine's tier's [`Tier::status`], its own whichever loop is
-    /// bound; read by `UnitCache::status` alone.
-    pub(crate) status: fn(&Request) -> TierStatus,
-    /// The engine's tier's [`Tier::counts`], its own whichever loop is
-    /// bound; read by the unit cache as it holds a unit.
-    pub(crate) counts: fn(&Started<'_>, Option<&Request>) -> bool,
+    /// The loop taking up an edge another loop handed it, the rest of a
+    /// serving standing already ([`interrupted_at`], #3362).
+    pub(crate) handed: fn(&mut Request, Stepped) -> Result<(), Fatal>,
+    /// The tier's state a request served in these loops is laid with
+    /// ([`Tier::lay`]).
+    pub(crate) lay: fn(Started<'_>) -> Option<Box<dyn Any + Send>>,
 }
 
 impl Loops {
-    /// `T`'s loop for the engine `shared` started, or `Nop`'s where `T`
-    /// is not asked ([`Tier::asked`]) and neither holds a frame nor
-    /// hooks the compile, told as its declared set says
-    /// ([`Loops::told`]).
-    pub(crate) fn bound<T: Tier>(shared: &crate::engine::Shared) -> Loops {
-        if T::HOLDS || T::HOOKED != Hooked::NONE || T::asked(&Started { shared }) {
-            Loops::told::<T>(&shared.opcodes)
-        } else {
-            Loops {
-                status: T::status,
-                counts: T::counts,
-                ..Loops::told::<Nop>(&shared.opcodes)
-            }
-        }
-    }
-
-    /// The loop of an engine not yet started, which serves nothing
-    /// until its start binds the tier's ([`Loops::bound`]).
-    pub(crate) fn unstarted() -> Loops {
-        Loops::of::<Nop, Untold>()
-    }
-
     /// `T`'s loop for an engine whose declared set is `opcodes`: the
     /// instantiation that tells the set's observers where an extension
     /// declared an opcode, and the one with no test where none did.
@@ -752,9 +957,8 @@ impl Loops {
             entry: execute::<T, D>,
             reenter: reenter::<T, D>,
             resume: resume::<T, D>,
-            lay: TierState::of::<T>,
-            status: T::status,
-            counts: T::counts,
+            handed: serve_frame::<T, D>,
+            lay: state_of::<T>,
         }
     }
 }

@@ -497,10 +497,9 @@ pub(crate) struct Asked<'a> {
     pub(crate) now: i64,
     pub(crate) levels: Levels<'a>,
     pub(crate) optimizer: Optimizer,
-    /// Whether the safepoint words of a unit held for this question count
-    /// (`tier::Tier::counts`), as the tier answered for the request
-    /// asking.
-    pub(crate) counts: bool,
+    /// How the safepoint words of a unit held for this question are laid
+    /// (`tier::Tier::laid`), as the tier answered for the request asking.
+    pub(crate) laid: crate::tier::Laid,
 }
 
 /// What opcache's optimizer makes of a unit it persists that a request
@@ -1030,7 +1029,7 @@ impl UnitCache {
             now,
             levels,
             optimizer,
-            counts,
+            laid,
         } = asked;
         let (memory, disk) = match levels {
             Levels::Memory => (true, None),
@@ -1081,7 +1080,7 @@ impl UnitCache {
                 observed,
             };
             let (Holding::Built(held) | Holding::Found(held)) =
-                self.hold(files, (path, counts), validation, now, read);
+                self.hold(files, (path, laid), validation, now, read);
             files.hit(&held, validation, now);
             return answered_by(&held, Filed::Hit);
         }
@@ -1142,7 +1141,7 @@ impl UnitCache {
             size,
             observed,
         };
-        let held = match self.hold(files, (path, counts), validation, now, read) {
+        let held = match self.hold(files, (path, laid), validation, now, read) {
             Holding::Built(held) => held,
             Holding::Found(existing) => {
                 return self.existing(files, &existing, written, validation, observed, now);
@@ -1249,11 +1248,11 @@ impl UnitCache {
     /// that copy was filed under, as `cache_script_in_shared_memory`
     /// updates the bucket every key of it points to; the copy another
     /// request held for the path meanwhile where it did; its op arrays'
-    /// words `counts` or sealed as the tier answered (`tier::Tier::counts`).
+    /// words `laid` as the tier answered (`tier::Tier::laid`).
     fn hold(
         &self,
         files: &Files,
-        (path, counts): (&[u8], bool),
+        (path, laid): (&[u8], crate::tier::Laid),
         validation: Validation,
         now: i64,
         read: Read,
@@ -1297,7 +1296,7 @@ impl UnitCache {
             return Holding::Found(held);
         }
         files.used.fetch_add(size, Ordering::Relaxed);
-        files.funcs.publish(&held.unit, counts);
+        files.funcs.publish(&held.unit, laid);
         self.persist_names(path, &held.unit);
         Holding::Built(held)
     }

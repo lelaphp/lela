@@ -719,11 +719,15 @@ impl Request {
             now,
             levels,
             optimizer: shared.optimizer(),
-            counts: crate::tier::counts(&shared, Some(&*self)),
+            laid: crate::tier::words_laid(&shared, Some(&*self)),
         };
+        let laid = asked.laid;
         let arena = Arc::clone(&self.arena);
         // What a compile that ran read and made, none for a hit.
         let scanned = std::cell::Cell::new(None);
+        // Whether the cache published a unit for this request to hold, its
+        // words laid as `laid` says.
+        let published = std::cell::Cell::new(false);
         let (compiled, filed, early) = shared.units.file(
             self,
             &arena.files,
@@ -735,8 +739,14 @@ impl Request {
             },
             |body| shared.decode_kept(body),
             |unit| shared.publish_compiled(unit),
-            |req, unit| req.publish_unit(unit),
+            |req, unit| {
+                published.set(true);
+                req.publish_unit(unit)
+            },
         );
+        if published.get() && laid.counts() {
+            self.published_counting();
+        }
         if filed == Filed::Own {
             return self.compiled_alone(args, &full);
         }
@@ -1137,7 +1147,7 @@ impl UnitCache<'_> {
     #[must_use]
     pub fn status(&self) -> CacheStatus {
         let req = &self.req;
-        let tier = (req.shared.loops.status)(req);
+        let tier = (req.shared.binding.status)(req);
         (req.shared.units).status(&req.arena.files, req.shared.interned_strings(), tier)
     }
 

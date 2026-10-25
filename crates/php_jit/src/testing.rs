@@ -187,12 +187,12 @@ impl Tier for Lane {
         crate::dispatch::safepoint(req, frame, site, held)
     }
 
-    fn asked(started: &Started<'_>) -> bool {
-        <crate::Jit as Tier>::asked(started)
+    fn bound(started: &Started<'_>) -> tier::Bound {
+        <crate::Jit as Tier>::bound(started)
     }
 
-    fn counts(started: &Started<'_>, req: Option<&Request>) -> bool {
-        <crate::Jit as Tier>::counts(started, req)
+    fn laid(started: &Started<'_>, req: Option<&Request>) -> tier::Laid {
+        <crate::Jit as Tier>::laid(started, req)
     }
 
     fn extension() -> Option<Extension> {

@@ -315,7 +315,7 @@ impl Request {
         });
         let callee = self.push_code_frame(unit, from)?;
         crate::observer::call(self, callee);
-        let reenter = self.shared.loops.reenter;
+        let reenter = self.loops().reenter;
         let served = self.serve_host_string(|req| reenter(req, callee));
         // `zend_leave_helper`'s arm for a nested code frame: its CVs
         // detached into the table it shares with the frame it was

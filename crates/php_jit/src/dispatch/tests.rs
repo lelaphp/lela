@@ -602,12 +602,12 @@ impl Tier for Counted {
         flow
     }
 
-    fn asked(started: &tier::Started<'_>) -> bool {
-        <crate::Jit as Tier>::asked(started)
+    fn bound(started: &tier::Started<'_>) -> tier::Bound {
+        <crate::Jit as Tier>::bound(started)
     }
 
-    fn counts(started: &tier::Started<'_>, req: Option<&Request>) -> bool {
-        <crate::Jit as Tier>::counts(started, req)
+    fn laid(started: &tier::Started<'_>, req: Option<&Request>) -> tier::Laid {
+        <crate::Jit as Tier>::laid(started, req)
     }
 
     fn extension() -> Option<Extension> {
@@ -663,12 +663,15 @@ fn a_tier_that_is_off_is_asked_at_no_back_edge() {
 }
 
 /// php gives an op array its counters as it persists it while its tier
-/// is on (#3139): set up and off, the engine binds `Jit`'s loop, and a
-/// unit published while the request's `opcache.jit` is off has its words
-/// sealed, asked at every back edge and never bumped, claimed nor
-/// recorded, while one a request publishes after turning it on counts;
-/// on from the start, a unit published after a request turns it off is
-/// sealed in turn.
+/// is on (#3139), and the loop that serves it follows (#3362). Set up
+/// and off, a request starts in `Nop`'s loop, which asks the tier at no
+/// site; one that turns the tier on and includes a file publishes it
+/// with counting words, and its loop hands the included frame to the
+/// tier's at the activation's check, where the file's entry and loop
+/// are asked. On from the start, a unit's words
+/// count from cold, each back edge bumping its heat, and a unit
+/// published after a request turns the tier off is sealed, asked at
+/// every back edge and never written.
 #[cfg_attr(miri, ignore = "serves PHP through an engine, which Miri does not run")]
 #[test]
 fn a_unit_counts_as_its_request_had_the_tier_when_it_was_published() {
@@ -678,26 +681,33 @@ fn a_unit_counts_as_its_request_had_the_tier_when_it_was_published() {
         format!("{switch}\necho include __DIR__ . '/loop.php';")
     };
     let hot = ("opcache.jit_hot_loop", "255");
-    for (start, switch, written) in [
-        ("off", None, false),
-        ("off", Some("tracing"), true),
-        ("tracing", None, true),
-        ("tracing", Some("off"), false),
-    ] {
+    let serve = |start: &str, switch: Option<&str>| {
         let engine = testing::engine::<Counted>(&[("opcache.jit", start), hot]);
         let scratch = testing::Scratch::new();
         let loop_file = format!("<?php {looped} return g();");
         std::fs::write(scratch.0.join("loop.php"), loop_file).unwrap_or_default();
         let (served, asked) = scratch.serve_kept::<Asked>(&engine, &program(switch));
         assert_eq!(testing::stdout(&served), "6", "{start} then {switch:?}");
-        let asked = asked.unwrap_or_default();
-        assert_eq!(asked.loops, 4, "{start} then {switch:?}: {asked:?}");
-        let counted = if written { 4 } else { 0 };
-        assert_eq!(
-            asked.loops_written, counted,
-            "{start} then {switch:?}: {asked:?}"
-        );
-    }
+        asked.unwrap_or_default()
+    };
+    assert_eq!(
+        serve("off", None),
+        Asked::default(),
+        "Nop's loop throughout"
+    );
+    let switched = serve("off", Some("tracing"));
+    assert!(
+        switched.entries > 0 && switched.loops > 0,
+        "handed to the tier's loop: {switched:?}"
+    );
+    let tracing = serve("tracing", None);
+    assert_eq!(
+        (tracing.loops, tracing.loops_written),
+        (4, 4),
+        "{tracing:?}"
+    );
+    let sealed = serve("tracing", Some("off"));
+    assert_eq!((sealed.loops, sealed.loops_written), (4, 0), "{sealed:?}");
 }
 
 /// A loop in `$main` that no call activates is a root of its own: the

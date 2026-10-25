@@ -115,6 +115,9 @@ pub(crate) fn interrupted(req: &mut Request) -> Result<bool, Fatal> {
             if seconds == 1 { "" } else { "s" }
         )));
     }
+    // A hand-off from `Nop`'s loop that this check cannot take is owed
+    // to the next one that can (#3362).
+    crate::tier::owed(req);
     // `else if (ZEND_HAS_OOM()) { zend_handle_delayed_oom(); HANDLE_EXCEPTION(); }`
     // (`Z/Zend/zend_vm_def.h:10548` at 8.5.12): the heap raised the
     // interrupt as it recorded the delayed OOM, so the memory limit's

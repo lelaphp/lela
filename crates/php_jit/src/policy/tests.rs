@@ -5,7 +5,7 @@
 
 use std::sync::atomic::Ordering;
 
-use php_engine::tier::{Epoch, FuncRef, SafepointIdx, StartupIni, Word};
+use php_engine::tier::{Epoch, FuncRef, Laid, SafepointIdx, StartupIni, Word};
 use php_unit::{OpArray, Opcode, OplineIdx, Unit};
 
 use super::{
@@ -209,7 +209,7 @@ fn the_status_is_zend_jit_status() {
 fn the_status_follows_the_requests_setting_where_the_tier_is_set_up() {
     let status = |entries: &[(&str, &str)], setting: &[u8]| {
         let (policy, _) = read_ini(entries);
-        let s = policy.status(0, Some(setting));
+        let s = policy.status(0, Some(Setting::of(setting)));
         (
             (s.enabled, s.on),
             (s.kind, s.opt_level, s.opt_flags),
@@ -231,32 +231,33 @@ fn the_status_follows_the_requests_setting_where_the_tier_is_set_up() {
 }
 
 /// php gives an op array its counters as it persists it while
-/// `JIT_G(on)`: a unit counts where the request publishing it has the
-/// setting on, whatever the start's was, and a lane counts every unit;
-/// a tier that runs `Off` counts none. With no request, the start's
-/// setting says.
+/// `JIT_G(on)`: a unit's words count where the request publishing it has
+/// the setting on, whatever the start's was, and a lane counts every
+/// unit; a tier that runs `Off` counts none. With no request, the
+/// start's setting says.
 #[test]
-fn a_unit_counts_where_its_request_has_the_tier_on() {
-    let counts = |entries: &[(&str, &str)], setting: Option<&[u8]>| {
+fn a_units_words_are_laid_as_its_request_has_the_tier() {
+    let laid = |entries: &[(&str, &str)], setting: Option<&[u8]>| {
         let (policy, _) = read_ini(entries);
-        (policy.counts(setting), policy.counts_at_start())
+        policy.laid(setting.map(Setting::of))
     };
     let off = [("opcache.jit", "off")];
     let tracing = [("opcache.jit", "tracing")];
-    assert_eq!(counts(&off, Some(b"off")), (false, false));
-    assert_eq!(counts(&off, Some(b"tracing")), (true, false));
-    assert_eq!(counts(&off, Some(b"1205")), (true, false));
-    assert_eq!(counts(&tracing, Some(b"tracing")), (true, true));
-    assert_eq!(counts(&tracing, Some(b"off")), (false, true));
-    assert_eq!(counts(&tracing, None), (false, true));
+    assert_eq!(laid(&off, Some(b"off")), Laid::Sealed);
+    assert_eq!(laid(&off, None), Laid::Sealed);
+    assert_eq!(laid(&off, Some(b"tracing")), Laid::COLD);
+    assert_eq!(laid(&off, Some(b"1205")), Laid::COLD);
+    assert_eq!(laid(&tracing, Some(b"tracing")), Laid::COLD);
+    assert_eq!(laid(&tracing, Some(b"off")), Laid::Sealed);
+    assert_eq!(laid(&tracing, None), Laid::COLD);
     let lane = [("opcache.jit", "off"), ("jit.mode", "force")];
-    assert_eq!(counts(&lane, Some(b"off")), (true, true));
+    assert_eq!(laid(&lane, Some(b"off")), Laid::COLD);
     assert_eq!(
-        counts(&[("opcache.jit", "disable")], Some(b"tracing")),
-        (false, false)
+        laid(&[("opcache.jit", "disable")], Some(b"tracing")),
+        Laid::Sealed
     );
     let zero = [("opcache.jit", "tracing"), ("opcache.jit_buffer_size", "0")];
-    assert_eq!(counts(&zero, Some(b"tracing")), (false, false));
+    assert_eq!(laid(&zero, Some(b"tracing")), Laid::Sealed);
 }
 
 /// `zend_jit_check_support` refuses a buffer the target's code cannot

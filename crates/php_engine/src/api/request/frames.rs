@@ -551,7 +551,7 @@ impl Request {
     /// The loop over a generator's frame, bound to the engine's tier
     /// ([`crate::tier::resume`]).
     pub(crate) fn resume_loop(&self) -> fn(&mut Request, FrameRef) -> Result<(), Fatal> {
-        self.shared.loops.resume
+        self.loops().resume
     }
 
     /// A unit compiled for this request alone, a source the host handed
