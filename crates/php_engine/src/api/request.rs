@@ -256,9 +256,9 @@ pub struct Request {
     pub(crate) shared: Arc<Shared>,
     /// The tier's state, laid with the request and never written again:
     /// private to `api::request`, where the request is made, and read
-    /// elsewhere through [`Request::tier_state`] alone, so a `&mut` of it
-    /// or a value written over it anywhere else fails to compile
-    /// ([`crate::tier::TierState`]).
+    /// elsewhere through [`Request::tier_state`] alone, so a `&mut` of the
+    /// field or a write over it anywhere else fails to compile; a write
+    /// over the whole request does not ([`crate::tier::TierState`]).
     tier: crate::tier::TierState,
     description: RequestDescription,
     /// The uncaught throwable kept for a host that renders it ([`inspect::Inspected`]).

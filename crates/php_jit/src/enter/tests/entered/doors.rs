@@ -16,7 +16,7 @@ use php_engine::tier::{
 };
 use php_unit::OplineIdx;
 
-use crate::enter::{Answered, At, Exited, Left};
+use crate::enter::{Answered, At, Exited, Left, Readiness};
 use crate::record::{Start, Stop};
 use crate::table::{self, TraceId, TraceName};
 use crate::testing::{self, Scratch, function_of, stdout};
@@ -172,7 +172,7 @@ fn raced(req: &mut Request, frame: FrameRef) -> Result<Turns, String> {
     state
         .headers
         .rows(|| table.segments())
-        .lay(side_id, std::ptr::null(), true, true);
+        .lay(side_id, std::ptr::null(), Readiness::Settled);
     let grown = Start::Side {
         parent: root,
         exit: ExitId(0),

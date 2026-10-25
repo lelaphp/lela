@@ -127,8 +127,9 @@ pub(crate) fn visit(
 /// Here, and only here, `Continue` means nothing happened. The tier's
 /// state is looked up once, and the request lends it, the engine's state
 /// and its hold on the epoch to what the visit goes on to ([`enter::lent`]),
-/// so no visit writes a count of an `Arc` the engine's threads share. A
-/// return's word is
+/// so a visit that bumps or enters writes no count of an `Arc` the
+/// engine's threads share; one that claims clones the hold for its
+/// holder, as [`hot`] takes its own. A return's word is
 /// its caller's landing ([`Site`]'s third arm visits no word of the
 /// callee's), which reads sealed, a word no visit acts on, until a
 /// compiled trace armed it.
@@ -615,7 +616,10 @@ pub(crate) fn run(req: &mut Request, lent: Lent<'_>, frame: FrameRef, id: TraceI
 /// nothing done.
 fn run_at(req: &mut Request, lent: Lent<'_>, frame: FrameRef, id: TraceId, at: At) -> Option<Flow> {
     let epoch = lent.epoch;
-    let Some(table) = lent.table else {
+    // The table the request kept, or, where it kept none yet, the one a
+    // request of the epoch made since the lend began, whose trace the
+    // word names.
+    let Some(table) = lent.table.or_else(|| table::of_epoch(epoch)) else {
         return Some(Flow::Continue);
     };
     let Some(trace) = table.get(id) else {
@@ -1192,8 +1196,9 @@ fn went_on(
     }
 }
 
-/// [`run`] under what the request lends, for a caller that holds none of
-/// it; nothing for a request the tier laid no state on.
+/// [`run`] under a lend of its own, which finds the table a claim just
+/// made where the lend its caller is under found none; nothing for a
+/// request the tier laid no state on.
 fn run_lent(req: &mut Request, frame: FrameRef, id: TraceId) -> Flow {
     enter::lent(req, |req, lent| run(req, lent, frame, id)).unwrap_or(Flow::Continue)
 }

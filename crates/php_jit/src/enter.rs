@@ -441,13 +441,15 @@ pub(crate) fn lent<T>(
     // hold that outside `api::request`, where the request is made: the
     // box is `TierState`'s private field, with no `&mut` method, and the
     // request's field holding it is private to `api::request`, which
-    // hands it out only shared (`Request::tier_state`, `tier::state`). So the
-    // state stands where `tier::state` found it, written only through
-    // its cells, for as long as `serve` serves: what the box holds is not
-    // the request's own memory, which `serve`'s borrow covers. What the
-    // types leave open, `api::request` itself and a swap of two whole
-    // requests, the assertion past `serve` catches in every build with
-    // debug assertions.
+    // hands it out only shared (`Request::tier_state`, `tier::state`).
+    // So the state stands where `tier::state` found it, written only
+    // through its cells, for as long as `serve` serves: what the box
+    // holds is not the request's own memory, which `serve`'s borrow
+    // covers. What the types leave open is `api::request` itself and
+    // every file below it, and a swap of two whole requests. The assertion past `serve`, in
+    // every build with debug assertions, catches such a write that still
+    // stands when `serve` returns; one undone before then, or a read of
+    // the state during `serve` after one, it does not.
     let state = unsafe { &*found };
     let epoch = state.epoch.get()?;
     let table = match state.table.get() {
@@ -463,10 +465,9 @@ pub(crate) fn lent<T>(
             table,
         },
     );
-    debug_assert!(
-        tier::state::<crate::JitRequest>(req).is_some_and(|now| ptr::eq(now, found)),
-        "the request's tier state was replaced or moved while a crossing borrowed it"
-    );
+    // The state stands where it was lent: not replaced or moved while
+    // the crossing borrowed it.
+    debug_assert!(tier::state::<crate::JitRequest>(req).is_some_and(|now| ptr::eq(now, found)));
     Some(served)
 }
 
@@ -1275,7 +1276,7 @@ enum Images {
     /// None to read: the trace pushes nothing in place and reads no slot.
     None,
     /// The request's, kept in its state for as long as it runs.
-    Kept { at: *const usize, laid: bool },
+    Kept { at: *const usize, laid: Readiness },
     /// Laid out for this entry alone: the headers, held while the code
     /// reads them, and the addresses.
     Own {
@@ -1302,25 +1303,18 @@ impl Images {
                 crate::table::of_epoch(epoch).map_or(0, crate::table::TraceTable::segments)
             });
             if let Some(at) = rows.settled(trace.id) {
-                return (Images::Kept { at, laid: true }, rows.base());
+                let laid = Readiness::Settled;
+                return (Images::Kept { at, laid }, rows.base());
             }
-            let (images, settled) = if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
-                (Images::None, true)
+            let images = if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
+                Images::None
             } else {
                 (state.headers.entered(req, (epoch, trace))).map_or_else(
-                    || (Images::own(req, (epoch, trace)), false),
-                    |(at, laid, settled)| (Images::Kept { at, laid }, settled),
+                    || Images::own(req, (epoch, trace)),
+                    |(at, laid)| Images::Kept { at, laid },
                 )
             };
-            // A jump enters a trace only through the request's own addresses
-            // for it, never those made for one entry alone.
-            let kept = !matches!(images, Images::Own { .. });
-            rows.lay(
-                trace.id,
-                images.addresses(),
-                images.ready() && kept,
-                settled,
-            );
+            rows.lay(trace.id, images.addresses(), images.row());
             return (images, rows.base());
         }
         if trace.calls.is_empty() && trace.map_ptrs.is_empty() {
@@ -1351,7 +1345,19 @@ impl Images {
     fn ready(&self) -> bool {
         match self {
             Images::None => true,
-            Images::Kept { laid, .. } | Images::Own { laid, .. } => *laid,
+            Images::Kept { laid, .. } => laid.ready(),
+            Images::Own { laid, .. } => *laid,
+        }
+    }
+
+    /// What the trace's row in the request's [`Rows`] says of these: a jump
+    /// enters a trace only through the request's own addresses for it,
+    /// never those made for one entry alone, which it finds unready.
+    fn row(&self) -> Readiness {
+        match self {
+            Images::None => Readiness::Settled,
+            Images::Kept { laid, .. } => *laid,
+            Images::Own { .. } => Readiness::Unready,
         }
     }
 
@@ -1412,12 +1418,33 @@ struct Entered {
 }
 
 impl Entered {
-    /// Where its addresses are, whether its calls are made in place, and
-    /// whether that is settled: every call made in place and every slot
-    /// answered, so no entry after lays out or touches anything again.
-    fn found(&self) -> (*const usize, bool, bool) {
-        let settled = self.laid && !self.untouched;
-        (self.addresses.as_ptr(), self.laid, settled)
+    /// Where its addresses are, and how far they are laid ([`Readiness`]).
+    fn found(&self) -> (*const usize, Readiness) {
+        let readiness = match (self.laid, self.untouched) {
+            (false, _) => Readiness::Unready,
+            (true, true) => Readiness::Ready,
+            (true, false) => Readiness::Settled,
+        };
+        (self.addresses.as_ptr(), readiness)
+    }
+}
+
+/// How far what a trace's code reads in a request is laid: its calls
+/// not all made in place yet, which the kernels serve until they are;
+/// made in place, a cache slot left that each entry after touches again;
+/// or settled, every call made in place and every slot answered, so no
+/// entry after lays out or touches anything again ([`Rows::settled`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Readiness {
+    Unready,
+    Ready,
+    Settled,
+}
+
+impl Readiness {
+    /// Whether the trace's code makes its calls in place.
+    fn ready(self) -> bool {
+        self != Readiness::Unready
     }
 }
 
@@ -1427,14 +1454,13 @@ impl Headers {
     /// as the touch answers them ([`touched`]), and whether its calls are
     /// made in place; a header missing before is laid out once its
     /// function is the request's, and a slot whose cache was not laid
-    /// down is touched again, in place; and whether nothing is left to lay
-    /// out or touch again, so the row it lays is settled ([`Rows::settled`]).
-    /// None for a number no row holds.
+    /// down is touched again, in place; and how far that is laid
+    /// ([`Readiness`]). None for a number no row holds.
     fn entered(
         &self,
         req: &Request,
         (epoch, trace): (&Epoch, &Trace),
-    ) -> Option<(*const usize, bool, bool)> {
+    ) -> Option<(*const usize, Readiness)> {
         let mut kept = self.kept.borrow_mut();
         let row = usize::try_from(trace.id.get()).ok()?;
         let HeadersKept { calls, traces } = &mut *kept;
@@ -1570,10 +1596,10 @@ impl Rows {
     }
 
     /// The row of the trace `id` names: where the addresses its code reads
-    /// are, `images`, whether its calls are `ready`, and whether the row is
-    /// `settled`, its calls made in place and its slots answered, so that
-    /// no entry after lays it again; nothing for a number past the segments.
-    fn lay(&self, id: crate::table::TraceId, images: *const usize, ready: bool, settled: bool) {
+    /// are, `images`, and how far they are laid, `readiness`, which says
+    /// whether its calls are ready and whether no entry after lays the row
+    /// again; nothing for a number past the segments.
+    fn lay(&self, id: crate::table::TraceId, images: *const usize, readiness: Readiness) {
         let (segment, at) = id.slot();
         let (Some(cell), Some(first)) = (self.segments.get(segment), self.firsts.get(segment))
         else {
@@ -1583,8 +1609,8 @@ impl Rows {
         first.set(rows.as_ptr().expose_provenance());
         if let Some(row) = rows.get(at) {
             row.images.set(images.expose_provenance());
-            row.ready.set(u32::from(ready));
-            row.settled.set(settled);
+            row.ready.set(u32::from(readiness.ready()));
+            row.settled.set(readiness == Readiness::Settled);
         }
     }
 
