@@ -168,10 +168,7 @@ fn both(
     // nothing, judged as it stands, and its note names why.
     let mut captured = witness.clone();
     let mut refused = None;
-    let rewrites = on.ask.accept == Accept::Bodies
-        && !witness.capture
-        && !met(on.oracle.pin(), witness, exit, oracle_out).unwrap_or(true);
-    let (was, now) = if rewrites {
+    let (was, now) = if on.body_asked(witness, exit, oracle_out) {
         let written = bodies(on.oracle, witness, exit, oracle_out).and_then(|(stdout, stderr)| {
             fence::streams(&head, &stdout, &stderr).map(|lines| (stdout, stderr, lines))
         });
@@ -277,6 +274,17 @@ struct On<'a> {
     binary: &'a Binary,
 }
 
+impl On<'_> {
+    /// Whether the run asks `--bodies` of `witness`: a plain fence, not
+    /// marked `capture`, whose pins under `exit` the oracle's run does not
+    /// meet (#3455).
+    fn body_asked(&self, witness: &Witness, exit: Exit, oracle_out: &Observation) -> bool {
+        self.ask.accept == Accept::Bodies
+            && !witness.capture
+            && !met(self.oracle.pin(), witness, exit, oracle_out).unwrap_or(true)
+    }
+}
+
 /// A fence `row`, an accepted `trace:` row, covers: held to its pinned
 /// `expect` against the engine alone (harness §4.3, §8; #1650). The oracle
 /// has run, and how it ended and what it printed is recorded in the note,
@@ -298,10 +306,7 @@ fn alone(
     );
     // The fence pins the engine's side of the row, so the oracle's streams
     // are no body for it (#3455).
-    if on.ask.accept == Accept::Bodies
-        && !witness.capture
-        && !met(on.oracle.pin(), witness, witness.exit, oracle_out).unwrap_or(true)
-    {
+    if on.body_asked(witness, witness.exit, oracle_out) {
         recorded = format!(
             "`--bodies` wrote nothing: the fence pins the engine's side of {}, not the oracle's; {recorded}",
             row.id

@@ -1,6 +1,6 @@
-# A negative control (harness-design.md §4.1, §12 item 4): a workspace that
-# must fail the instrument named by the directory above it. The pin is the
-# real one, by path.
+# A negative control (harness-design.md §4.1, §12 item 4): a workspace whose
+# one fence `xtask witness --accept --bodies` must refuse to write, the
+# reading covered and passing (#3455). The pin is the real one, by path.
 [oracle]
 pin = "../../../../oracle.toml"
 [budget]
