@@ -5,6 +5,7 @@ ImageSize
 Serializer
 Serializer::finish
 Serializer::new
+Serializer::set_incomplete_classes_only
 Serializer::write
 Unserializer
 Unserializer::element
@@ -12,6 +13,7 @@ Unserializer::finish
 Unserializer::local
 Unserializer::new
 Unserializer::offset
+Unserializer::set_incomplete_classes_only
 Unserializer::set_offset
 Unserializer::value
 UriParser

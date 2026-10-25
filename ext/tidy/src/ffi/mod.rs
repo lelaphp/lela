@@ -310,10 +310,10 @@ pub(crate) struct NodeFacts {
 /// $m = memory_get_usage(); $s = tidy_repair_string('<p>y'); echo memory_get_usage() - $m, "\n";
 /// ```
 /// ```expect
-/// 16632
+/// 16664
 /// 10752
 /// 1328
-/// -28712
+/// -28744
 /// 112
 /// ```
 pub(crate) struct Doc {

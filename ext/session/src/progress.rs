@@ -15,7 +15,9 @@ use php_ext::raising::Thrown;
 use php_ext::request::{Input, Request, Upload};
 use php_ext::values::{Key, Owner, PhpArray, PhpString, Value, walk};
 
-use crate::{State, Status, absorb, ini, ini_bool, session, session_array_mut, string_value};
+use crate::{
+    Phase, State, Status, absorb, ini, ini_bool, session, session_array_mut, string_value,
+};
 
 /// `php_session_rfc1867_progress`: what one body's reading keeps.
 #[derive(Debug, Default)]
@@ -80,8 +82,14 @@ fn step(req: &mut Request, event: &Upload<'_>) -> Result<bool, Thrown> {
     if !ini_bool(req, b"session.upload_progress.enabled") {
         return Ok(true);
     }
+    // "request_parse_body(). Do not run here as it corrupts the session."
+    if req.state::<State>().phase == Phase::Activated {
+        return Ok(true);
+    }
     match *event {
         Upload::Start { content_length } => {
+            // "This runs before RINIT, so we need to clear these early."
+            session::rinit_globals(req);
             req.state::<State>().progress = Some(Progress {
                 content_length,
                 ..Progress::default()
@@ -313,22 +321,94 @@ fn update(req: &mut Request, force: bool) -> Result<(), Thrown> {
             return Ok(());
         }
     }
+    updating(req, |req| {
+        let key = req
+            .state::<State>()
+            .progress
+            .as_ref()
+            .and_then(|progress| progress.key.clone());
+        if let (Some(mut vars), Some(key)) = (session_array_mut(req)?, key) {
+            let cancel = cancelled(req, vars, &key);
+            with(req, |progress| progress.cancel_upload |= cancel);
+            let data = rendered(req)?;
+            vars.set_str(req, &key, data)?;
+        }
+        Ok(())
+    })
+}
+
+/// What `php_session_rfc1867_update` and `php_session_rfc1867_cleanup`
+/// share since 8.5.12: `PS(in_rfc1867_update)`, [`Phase::ProgressUpdate`], set while the session is
+/// started, `change` made to its variables and the session written and
+/// closed; a start that failed, or left the session other than active
+/// (a decode refused destroys it), ends there, with nothing written.
+///
+/// The record is read and written back with every object kept
+/// incomplete, a `C:` payload and an `E:` case as they were; one whose
+/// object already holds a member that bookkeeping uses is refused and
+/// the session destroyed; and the request's program finds no `$_SESSION`:
+///
+/// ```php
+/// $d = __DIR__; $sid = "rfc1867witness"; $f = "$d/sess_$sid";
+/// file_put_contents("$d/w.php", '<?php var_dump(array_key_exists("_SESSION", $GLOBALS));');
+/// $b = "XYZ";
+/// $body = "--$b\r\nContent-Disposition: form-data; name=\"PHPSESSID\"\r\n\r\n$sid\r\n"
+///     . "--$b\r\nContent-Disposition: form-data; name=\"PHP_SESSION_UPLOAD_PROGRESS\"\r\n\r\nk\r\n"
+///     . "--$b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\n\r\n1\r\n--$b--\r\n";
+/// $cmd = [dirname(PHP_BINARY) . "/php-cgi", "-n", "-q", "-d", "session.save_path=$d", "-d", "session.use_cookies=0",
+///     "-d", "session.cache_limiter=", "-d", "session.upload_progress.cleanup=0",
+///     "-d", "session.upload_progress.freq=1%", "-d", "session.upload_progress.min_freq=0.000000001", "-d", "html_errors=0", "-f", "$d/w.php"];
+/// $env = ["REDIRECT_STATUS" => "1", "REQUEST_METHOD" => "POST", "CONTENT_TYPE" => "multipart/form-data; boundary=$b",
+///     "CONTENT_LENGTH" => (string) strlen($body), "SCRIPT_FILENAME" => "$d/w.php", "PATH_TRANSLATED" => "$d/w.php", "QUERY_STRING" => ""];
+/// foreach (['c|C:4:"Cust":7:{payload}e|a:2:{i:0;E:11:"Suit:Hearts";i:1;r:3;}', 'x|O:8:"stdClass":1:{s:26:"__PHP_Incomplete_Enum_Case";s:3:"foo";}'] as $record) {
+///     file_put_contents($f, $record);
+///     $p = proc_open($cmd, [0 => ["pipe", "r"], 1 => ["pipe", "w"], 2 => ["pipe", "w"]], $pipes, $d, $env);
+///     fwrite($pipes[0], $body); fclose($pipes[0]);
+///     echo str_replace($d, "D", stream_get_contents($pipes[1]) . stream_get_contents($pipes[2]));
+///     proc_close($p);
+///     $after = @file_get_contents($f);
+///     var_dump($after === false ? false : substr($after, 0, strlen($record) + 4) === "{$record}uplo");
+///     @unlink($f);
+/// }
+/// unlink("$d/w.php");
+/// ```
+/// ```expect
+/// X-Powered-By: PHP/8.5.12
+/// Content-type: text/html; charset=UTF-8
+///
+/// bool(false)
+/// bool(true)
+/// X-Powered-By: PHP/8.5.12
+/// Content-type: text/html; charset=UTF-8
+///
+///
+/// Warning: PHP Request Startup: Failed to decode session object. Session has been destroyed in Unknown on line 0
+/// bool(false)
+/// bool(false)
+/// ```
+fn updating(
+    req: &mut Request,
+    change: impl FnOnce(&mut Request) -> Result<(), Thrown>,
+) -> Result<(), Thrown> {
+    req.state::<State>().phase = Phase::ProgressUpdate;
+    let done = update_started(req, change);
+    req.state::<State>().phase = Phase::Startup;
+    done
+}
+
+/// [`updating`]'s body: the session started, and where it stands
+/// active, `change` made and the session written and closed.
+fn update_started(
+    req: &mut Request,
+    change: impl FnOnce(&mut Request) -> Result<(), Thrown>,
+) -> Result<(), Thrown> {
     let initialized = session::initialize(req);
-    absorb(req, initialized)?;
-    req.state::<State>().status = Status::Active;
-    let key = req
-        .state::<State>()
-        .progress
-        .as_ref()
-        .and_then(|progress| progress.key.clone());
-    if let (Some(mut vars), Some(key)) = (session_array_mut(req)?, key) {
-        let cancel = cancelled(req, vars, &key);
-        with(req, |progress| progress.cancel_upload |= cancel);
-        let data = rendered(req)?;
-        vars.set_str(req, &key, data)?;
+    let started = absorb(req, initialized)?.unwrap_or(false);
+    if !started || req.state::<State>().status != Status::Active {
+        return Ok(());
     }
-    session::flush(req, true)?;
-    Ok(())
+    change(req)?;
+    session::flush(req, true).map(|_| ())
 }
 
 /// `php_check_cancel_upload`: the progress array the session holds under
@@ -435,26 +515,27 @@ fn end(req: &mut Request, read: i64) -> Result<(), Thrown> {
         session::rshutdown_globals(req)?;
     }
     req.state::<State>().progress = None;
+    // "$_SESSION was populated in incomplete_classes_only mode", so it
+    // is no global the program sees (8.5.12).
+    req.variables_mut().set_global(b"_SESSION", None);
     Ok(())
 }
 
 /// `php_session_rfc1867_cleanup`: the key taken out of the session, and
 /// the session written and closed.
 fn cleanup(req: &mut Request) -> Result<(), Thrown> {
-    let initialized = session::initialize(req);
-    absorb(req, initialized)?;
-    req.state::<State>().status = Status::Active;
-    let key = req
-        .state::<State>()
-        .progress
-        .as_ref()
-        .and_then(|progress| progress.key.clone());
-    if let (Some(mut vars), Some(key)) = (session_array_mut(req)?, key) {
-        let name = PhpString::new(req, &key)?;
-        let unset = vars.unset(req, &Key::Str(*name));
-        name.give_up(req);
-        unset?;
-    }
-    session::flush(req, true)?;
-    Ok(())
+    updating(req, |req| {
+        let key = req
+            .state::<State>()
+            .progress
+            .as_ref()
+            .and_then(|progress| progress.key.clone());
+        if let (Some(mut vars), Some(key)) = (session_array_mut(req)?, key) {
+            let name = PhpString::new(req, &key)?;
+            let unset = vars.unset(req, &Key::Str(*name));
+            name.give_up(req);
+            unset?;
+        }
+        Ok(())
+    })
 }

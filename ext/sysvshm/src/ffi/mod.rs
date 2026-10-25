@@ -48,16 +48,10 @@ pub(crate) struct Segment {
 unsafe impl Send for Segment {}
 
 impl Segment {
-    /// `shmat(id, NULL, 0)`, its size read with `IPC_STAT`, or the errno.
+    /// `shmat(id, NULL, 0)`, then its size read with `IPC_STAT`, in
+    /// php's order, or the errno of the first that failed; a segment
+    /// whose `IPC_STAT` failed is detached again.
     pub(crate) fn attach(id: i32) -> Result<Segment, i32> {
-        // SAFETY: `shmid_ds` is integers and a permission struct of
-        // integers, for which all zeroes is a value.
-        let mut shm: libc::shmid_ds = unsafe { std::mem::zeroed() };
-        // SAFETY: `shm` is a `shmid_ds` this frame owns, which `IPC_STAT`
-        // writes and nothing else.
-        if unsafe { libc::shmctl(id, libc::IPC_STAT, &raw mut shm) } != 0 {
-            return Err(errno());
-        }
         // SAFETY: a null address lets the kernel choose where the segment
         // is mapped, so nothing of ours is overlaid.
         let addr = unsafe { libc::shmat(id, std::ptr::null(), 0) };
@@ -65,10 +59,23 @@ impl Segment {
             return Err(errno());
         }
         let addr = NonNull::new(addr.cast::<u8>()).ok_or_else(errno)?;
-        Ok(Segment {
-            addr,
-            len: shm.shm_segsz,
-        })
+        let mut segment = Segment { addr, len: 0 };
+        // SAFETY: `shmid_ds` is integers and a permission struct of
+        // integers, for which all zeroes is a value.
+        let mut shm: libc::shmid_ds = unsafe { std::mem::zeroed() };
+        // SAFETY: `shm` is a `shmid_ds` this frame owns, which `IPC_STAT`
+        // writes and nothing else.
+        if unsafe { libc::shmctl(id, libc::IPC_STAT, &raw mut shm) } != 0 {
+            // `segment` drops here, which is php's `shmdt(shm_ptr)`.
+            return Err(errno());
+        }
+        segment.len = shm.shm_segsz;
+        Ok(segment)
+    }
+
+    /// The segment's size, `shm_segsz` as `IPC_STAT` answered it.
+    pub(crate) fn size(&self) -> usize {
+        self.len
     }
 
     /// Whether `n` bytes from `at` lie within the segment.

@@ -10,24 +10,62 @@ use php_ext::raising::{Thrown, fatal, throw_error};
 use php_ext::request::Request;
 use php_ext::values::{Owner, PhpArray, PhpObject, PhpString, Value};
 
-use crate::doc::{NODE, Obj, doc_id, fixed};
+use crate::doc::{NODE, NodeAt, Obj, fixed};
 use crate::ffi::{
     self, NODE_ASP, NODE_COMMENT, NODE_DOCTYPE, NODE_JSTE, NODE_PHP, NODE_ROOT, NODE_TEXT, Step,
 };
-use crate::{DocId, retain, with_doc};
+use crate::{DocId, generation, retain, with_doc};
 
-/// The node an object names, and its document.
-fn of(req: &mut Request, object: PhpObject) -> Result<(DocId, Option<ffi::Node>), Thrown> {
-    let node = object.native_mut::<Obj>(req).and_then(|obj| obj.node);
-    Ok((doc_id(req, object)?, node))
+/// `tidy_node_validate`: the node an object names and its document, or
+/// the `Error` for an object no document made (an unserialized one) and
+/// for one read from a tree its document has since reparsed.
+///
+/// ```php
+/// $n = unserialize('O:8:"tidyNode":0:{}');
+/// try { $n->hasChildren(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// $t = tidy_parse_string('<p>one</p><p>two</p>');
+/// $n = $t->body()->child[0];
+/// var_dump($n->isHtml(), $n->hasSiblings());
+/// $t->parseString('<p>three</p>');
+/// foreach ([fn() => (string) $n, fn() => $n->isText(), fn() => $n->getParent()] as $f) {
+///     try { $f(); } catch (Error $e) { echo $e->getMessage(), "\n"; }
+/// }
+/// var_dump($n->name, $t->body()->child[0]->isHtml());
+/// ```
+/// ```expect
+/// tidyNode object is not initialized
+/// bool(true)
+/// bool(true)
+/// tidyNode object is no longer valid after its document was reparsed
+/// tidyNode object is no longer valid after its document was reparsed
+/// tidyNode object is no longer valid after its document was reparsed
+/// string(1) "p"
+/// bool(true)
+/// ```
+fn of(req: &mut Request, object: PhpObject) -> Result<(DocId, ffi::Node), Thrown> {
+    let named = object
+        .native_mut::<Obj>(req)
+        .and_then(|obj| Some((obj.doc?, obj.node?)));
+    let Some((id, at)) = named else {
+        return Err(throw_error(
+            req,
+            "Error",
+            "tidyNode object is not initialized",
+        ));
+    };
+    if generation(req, id) != Some(at.generation) {
+        return Err(throw_error(
+            req,
+            "Error",
+            "tidyNode object is no longer valid after its document was reparsed",
+        ));
+    }
+    Ok((id, at.node))
 }
 
 /// `tidyNodeGetText` of the object's node, for its string cast.
 pub(crate) fn text(req: &mut Request, object: PhpObject) -> Result<Option<Vec<u8>>, Thrown> {
     let (id, node) = of(req, object)?;
-    let Some(node) = node else {
-        return Ok(None);
-    };
     Ok(with_doc(req, id, |req, doc| doc.node_text(req, node))?.flatten())
 }
 
@@ -51,10 +89,16 @@ pub(crate) fn create(
 ) -> Result<Owner<PhpObject>, Thrown> {
     let class = lookup_class(req, b"tidyNode")?;
     let class = class.ok_or_else(|| fatal(req, "InternalError: tidyNode is not linked"))?;
+    let Some(generation) = generation(req, id) else {
+        return Err(fatal(
+            req,
+            "InternalError: a tidyNode of a document no slot holds",
+        ));
+    };
     let object = new_object(req, class)?;
     if let Some(obj) = object.native_mut::<Obj>(req) {
         obj.doc = Some(id);
-        obj.node = Some(node);
+        obj.node = Some(NodeAt { node, generation });
     }
     retain(req, id);
     if let Err(thrown) = properties(req, *object, id, node) {
@@ -133,9 +177,6 @@ fn walk(
     to: Step,
 ) -> Result<Option<Owner<Instance<tidyNode>>>, Thrown> {
     let (id, node) = of(req, object)?;
-    let Some(node) = node else {
-        return Ok(None);
-    };
     match with_doc(req, id, |_, doc| Ok(doc.step(node, to)))?.flatten() {
         Some(next) => create(req, id, next).map(|made| Some(made.into_instance())),
         None => Ok(None),
@@ -145,9 +186,6 @@ fn walk(
 /// `tidyNodeGetType` of the object's node.
 fn kind(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
     let (id, node) = of(req, object)?;
-    let Some(node) = node else {
-        return Ok(NODE_ROOT);
-    };
     Ok(with_doc(req, id, |_, doc| Ok(doc.kind(node)))?.unwrap_or(NODE_ROOT))
 }
 
@@ -183,7 +221,7 @@ fn kind(req: &mut Request, object: PhpObject) -> Result<i64, Thrown> {
 /// Call to private tidyNode::__construct() from global scope
 /// ```
 #[allow(non_camel_case_types)]
-#[php_class(final, size = 80, payload = Obj, handlers = NODE)]
+#[php_class(final, size = 88, payload = Obj, handlers = NODE)]
 pub(crate) struct tidyNode;
 
 #[php_class]
@@ -237,9 +275,6 @@ impl tidyNode {
     /// ```
     fn hasChildren(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (id, node) = of(req, this.object())?;
-        let Some(node) = node else {
-            return Ok(false);
-        };
         Ok(with_doc(req, id, |_, doc| Ok(doc.step(node, Step::Child)))?
             .flatten()
             .is_some())
@@ -256,9 +291,6 @@ impl tidyNode {
     /// ```
     fn hasSiblings(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (id, node) = of(req, this.object())?;
-        let Some(node) = node else {
-            return Ok(false);
-        };
         Ok(with_doc(req, id, |_, doc| Ok(doc.step(node, Step::Next)))?
             .flatten()
             .is_some())
@@ -288,9 +320,6 @@ impl tidyNode {
     /// ```
     fn isHtml(req: &mut Request, this: This<Self>) -> Result<bool, Thrown> {
         let (id, node) = of(req, this.object())?;
-        let Some(node) = node else {
-            return Ok(false);
-        };
         Ok(with_doc(req, id, |_, doc| Ok(doc.is_html(node)))?.unwrap_or(false))
     }
 

@@ -414,9 +414,18 @@ fn capturing<R>(f: impl FnOnce(*mut Reported) -> R) -> (R, Reported) {
 // ------------------------------------------------------------ output
 
 /// Where an encoder's bytes go as libgd writes them: handed what libgd
-/// reported since the last write and the bytes, it answers how many the
-/// sink took, `-1` for a write that failed, as `php_stream_write` does.
-pub(crate) type Put<'a> = dyn FnMut(Reported, &[u8]) -> c_int + 'a;
+/// reported since the last write and the write, it answers how many
+/// bytes the sink took, `-1` for a write that failed, as
+/// `php_stream_write` does.
+pub(crate) type Put<'a> = dyn FnMut(Reported, Written<'_>) -> c_int + 'a;
+
+/// One write libgd makes through the `gdIOCtx`: `putC`'s byte, whose
+/// answer libgd does not read, or `putBuf`'s bytes.
+#[derive(Clone, Copy)]
+pub(crate) enum Written<'b> {
+    Byte(u8),
+    Bytes(&'b [u8]),
+}
 
 /// What [`writing`]'s `gdIOCtx` points its `data` at.
 struct Out<'p, 'a> {
@@ -453,7 +462,7 @@ fn writing(put: &mut Put<'_>, f: impl FnOnce(*mut IoCtx)) -> Reported {
 unsafe extern "C" fn put_c(ctx: *mut IoCtx, c: c_int) {
     let byte = c.to_le_bytes()[0];
     // SAFETY: libgd hands back the `gdIOCtx` `writing` made.
-    unsafe { put(ctx, &[byte]) };
+    unsafe { put(ctx, Written::Byte(byte)) };
 }
 
 /// `_php_image_output_putbuf` and `_php_image_stream_putbuf`.
@@ -461,20 +470,20 @@ unsafe extern "C" fn put_buf(ctx: *mut IoCtx, buf: *const c_void, len: c_int) ->
     let len = usize::try_from(len).unwrap_or(0);
     if buf.is_null() || len == 0 {
         // SAFETY: as `put_c`.
-        return unsafe { put(ctx, &[]) };
+        return unsafe { put(ctx, Written::Bytes(&[])) };
     }
     // SAFETY: libgd hands `len` bytes it holds for the call.
     let bytes = unsafe { std::slice::from_raw_parts(buf.cast::<u8>(), len) };
     // SAFETY: as `put_c`.
-    unsafe { put(ctx, bytes) }
+    unsafe { put(ctx, Written::Bytes(bytes)) }
 }
 
-/// The bytes to the sink, after what libgd reported before them.
+/// The write to the sink, after what libgd reported before it.
 ///
 /// # Safety
 ///
 /// `ctx` is the `gdIOCtx` [`writing`] made, live for the encode.
-unsafe fn put(ctx: *mut IoCtx, bytes: &[u8]) -> c_int {
+unsafe fn put(ctx: *mut IoCtx, written: Written<'_>) -> c_int {
     // SAFETY: the caller's `gdIOCtx`, its `data` the `Out` of `writing`.
     let data = unsafe { (*ctx).data };
     // SAFETY: the `Out` of `writing`'s frame, which nothing else reaches
@@ -483,7 +492,7 @@ unsafe fn put(ctx: *mut IoCtx, bytes: &[u8]) -> c_int {
     // SAFETY: the capture's vector, which libgd is not reporting into
     // while it writes.
     let pending = std::mem::take(unsafe { &mut *out.reported });
-    (out.put)(pending, bytes)
+    (out.put)(pending, written)
 }
 
 // ------------------------------------------------------------ library

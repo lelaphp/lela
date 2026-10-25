@@ -1,0 +1,6 @@
+# The fixture's hosts are linked for the macOS the pinned php is, as the
+# workspace's `.cargo/config.toml` links them (#3356), so the one reading
+# that fails is the edge's; where the pin moves to another macOS, this
+# moves with the workspace's.
+[env]
+MACOSX_DEPLOYMENT_TARGET = { value = "15.0", force = true }

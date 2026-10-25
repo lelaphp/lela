@@ -34,7 +34,7 @@ mod variant;
 use built_from::BuiltFrom;
 #[cfg(test)]
 pub(crate) use closure::stand_in;
-pub(crate) use closure::{Closure, Own};
+pub(crate) use closure::{Closure, Minos, Own};
 pub use fastcgi::{Mapping, Param, Piece, Sent, Split, Variable};
 pub use variant::{Build, Oracles, Platform, Provenance, Variant};
 

@@ -59,6 +59,7 @@ mod mirrors;
 mod ops;
 pub(crate) mod row;
 mod surfaces;
+mod target;
 mod workspace;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -75,6 +76,7 @@ use binding::Bindings;
 use inventory::{Inventory, Leaf, Written, kernels_named, uses};
 use lock::{Block, Diff, Lock, list};
 use surfaces::Surfaces;
+use target::Target;
 use workspace::{Crates, Present};
 
 pub(crate) const INSTRUMENT: &str = "api-check";
@@ -143,6 +145,7 @@ pub(crate) fn measure(
     let snapshot = Snapshot::disk(root)?;
     let surfaces = Surfaces::read(root, manifest.pin().map(|pin| &pin.source))?;
     let bindings = Bindings::read(manifest, root)?;
+    let target = Target::read(manifest, root)?;
     let mut readings = Vec::new();
     for seam in &manifest.seams {
         readings.push(seam_reading(
@@ -168,7 +171,7 @@ pub(crate) fn measure(
             &crates,
             &mut inventory,
             &surfaces,
-            &bindings,
+            (&bindings, &target),
             krate,
         )?);
     }
@@ -672,7 +675,7 @@ fn crate_reading(
     crates: &Crates,
     inventory: &mut Inventory<'_>,
     surfaces: &Surfaces,
-    bindings: &Bindings,
+    (bindings, target): (&Bindings, &Target),
     krate: &Present,
 ) -> Result<Reading> {
     let mut reading = Reading::for_scope(INSTRUMENT, &krate.name, manifest, snapshot)?;
@@ -762,6 +765,11 @@ fn crate_reading(
     // Its links to a native library, each held to the keg the pinned php
     // loads that library from (#3458).
     let held = bindings.hold(krate);
+    problems.extend(held.problems);
+    notes.extend(held.notes);
+
+    // A host's link, held to the macOS the pinned php is linked for (#3356).
+    let held = target.hold(&krate.name);
     problems.extend(held.problems);
     notes.extend(held.notes);
 
