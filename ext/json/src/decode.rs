@@ -719,18 +719,9 @@ impl Parser<'_> {
             Token::Str(Some(string)) => string.into_value(),
             Token::ArrayOpen => {
                 self.advance(req)?;
-                let array = if self.validating {
-                    None
-                } else {
-                    // `array_finit` since 8.5.12: `YYERROR` where the
-                    // memory limit refused it.
-                    let Some(array) = req.memory_mut().fallible(PhpArray::new)? else {
-                        self.syntax();
-                        return Ok(Begun::Refused);
-                    };
-                    Some(array)
-                };
-                let frame = Open::Array { at, array };
+                // The array is made where its rule reduces, at its first
+                // element ([`Parser::attach`]) or as the empty pair.
+                let frame = Open::Array { at, array: None };
                 return self.opened(req, frame, open);
             }
             Token::ObjectOpen => {
@@ -752,9 +743,36 @@ impl Parser<'_> {
     }
 
     /// A bracket just opened: `elements: %empty` or `members: %empty`
-    /// where the next token closes it, the latter building the holder,
-    /// and the pair closed; else the first member's key read and the
-    /// bracket left open.
+    /// where the next token closes it, and the pair closed; else the
+    /// first member's key read and the bracket left open. Under the
+    /// default methods an empty pair that decodes to an array is
+    /// `ZVAL_EMPTY_ARRAY`, the immutable empty array, which costs
+    /// nothing, and `{}` decoding to an object is `object_create`'s
+    /// `stdClass`; the validating methods build `null` for either.
+    /// An array with elements is made at the first, `element: value`'s
+    /// `array_create`, after that value is built:
+    ///
+    /// ```php
+    /// foreach (['[]', '[[]]', '{}', '[{}]', '{"a":[]}', '[[1]]'] as $j) {
+    ///     foreach ([true, false] as $assoc) {
+    ///         $m = memory_get_usage(); $x = json_decode($j, $assoc); echo $j, ' ', (int) $assoc, ' ', memory_get_usage() - $m, "\n"; $x = null;
+    ///     }
+    /// }
+    /// ```
+    /// ```expect
+    /// [] 1 32
+    /// [] 0 0
+    /// [[]] 1 216
+    /// [[]] 0 216
+    /// {} 1 0
+    /// {} 0 40
+    /// [{}] 1 216
+    /// [{}] 0 256
+    /// {"a":[]} 1 408
+    /// {"a":[]} 0 448
+    /// [[1]] 1 432
+    /// [[1]] 0 432
+    /// ```
     fn opened(
         &mut self,
         req: &mut Request,
@@ -766,14 +784,26 @@ impl Parser<'_> {
                 frame.give_up(req);
                 return Ok(Begun::Refused);
             }
-            if let Open::Object { holder, .. } = &mut frame {
-                match self.holder(req) {
+            let as_array = !self.validating
+                && match &frame {
+                    Open::Array { .. } => true,
+                    Open::Object { .. } => self.scanner.options & JSON_OBJECT_AS_ARRAY != 0,
+                };
+            match &mut frame {
+                Open::Array { array, .. } if as_array => {
+                    *array = Some(Owner::take(req, PhpArray::empty()));
+                }
+                Open::Object { holder, .. } if as_array => {
+                    *holder = Holder::Array(Owner::take(req, PhpArray::empty()));
+                }
+                Open::Object { holder, .. } => match self.holder(req) {
                     Ok(Some(made)) => *holder = made,
                     made => {
                         frame.give_up(req);
                         return made.map(|_| Begun::Refused);
                     }
-                }
+                },
+                Open::Array { .. } => {}
             }
             return Ok(self.close(frame, req)?.map_or(Begun::Refused, Begun::Value));
         }
@@ -845,6 +875,23 @@ impl Parser<'_> {
     ) -> Result<Attached, Thrown> {
         let at = match frame {
             Open::Array { at, array } => {
+                if array.is_none() && !self.validating {
+                    // `element: value`'s `array_create`, `array_finit`
+                    // since 8.5.12: `YYERROR` where the memory limit
+                    // refused it.
+                    match req.memory_mut().fallible(PhpArray::new) {
+                        Ok(Some(made)) => *array = Some(made),
+                        Ok(None) => {
+                            value.give_up(req);
+                            self.syntax();
+                            return Ok(Attached::Refused);
+                        }
+                        Err(thrown) => {
+                            value.give_up(req);
+                            return Err(thrown);
+                        }
+                    }
+                }
                 match array.as_mut() {
                     // `zend_hash_next_index_finsert` since 8.5.12:
                     // `YYERROR` where the memory limit refused the table's
