@@ -12,6 +12,8 @@
 
 use std::cmp::Ordering;
 
+mod dtoa;
+
 /// One operand of php's arithmetic: `IS_LONG` or `IS_DOUBLE`, the two
 /// types `add_function` and its kin switch on, and the two a numeric
 /// string reads as.
@@ -214,9 +216,14 @@ impl Exponent {
     /// The character itself.
     #[must_use]
     pub fn as_char(self) -> char {
+        char::from(self.byte())
+    }
+
+    /// The character as the byte `zend_gcvt` writes.
+    fn byte(self) -> u8 {
         match self {
-            Self::Upper => 'E',
-            Self::Lower => 'e',
+            Self::Upper => b'E',
+            Self::Lower => b'e',
         }
     }
 }
@@ -378,6 +385,19 @@ pub fn double_to_string(value: f64, precision: i32, exponent: Exponent) -> Strin
 /// ```expect
 /// a:4:{i:0;d:;i:1;d:;i:2;d:;i:3;d:2.0E+0;}
 /// ```
+///
+/// The digits are `zend_dtoa`'s own (`dtoa`): where two shortest
+/// strings stand equally near the double, as `...312` and `...313` do
+/// for `2^-25`, whose expansion ends `...3125`, its stopping rule takes
+/// the even one, which a formatter that takes the upper does not:
+///
+/// ```php
+/// echo var_export(2**-25, true), "|", json_encode([2**-25, 2**-1074, 1e23, PHP_FLOAT_MAX]), "|", serialize(2**-25), "|";
+/// ini_set('precision', 17); echo 2**-25, "|", 0.1, "\n";
+/// ```
+/// ```expect
+/// 2.9802322387695312E-8|[2.9802322387695312e-8,5.0e-324,1.0e+23,1.7976931348623157e+308]|d:2.9802322387695312E-8;|2.9802322387695312E-8|0.10000000000000001
+/// ```
 #[must_use]
 pub fn gcvt(value: f64, ndigit: i32, exponent: Exponent) -> String {
     // `zend_gcvt` asks `zend_dtoa` for the shortest digits when `ndigit`
@@ -395,93 +415,60 @@ pub fn gcvt(value: f64, ndigit: i32, exponent: Exponent) -> String {
         let kept = usize::try_from(form_ndigit).unwrap_or(0).min(word.len());
         return word[..kept].to_owned();
     }
-    let (digits, point) = significant(value.abs(), ndigit);
-    let mut out = String::new();
+    let mut out = Vec::with_capacity(24);
     if value.is_sign_negative() {
-        out.push('-');
+        out.push(b'-');
     }
-    if (point >= 0 && point > form_ndigit) || point < -3 {
-        exponential(&mut out, &digits, point - 1, exponent);
+    let start = out.len();
+    let asked = if ndigit < 0 {
+        dtoa::Digits::Shortest
     } else {
-        fixed(&mut out, &digits, point);
-    }
-    out
-}
-
-/// `zend_dtoa`'s two answers for a value that is finite and not negative:
-/// the significant digits with their trailing zeros dropped, and where
-/// the decimal point stands among them (php's `decpt`, one past the last
-/// digit before it). An `ndigit` that is not negative asks for that
-/// many digits, and a negative one for the shortest that reads back as
-/// the same double; Rust's formatter gives both. A count under one is
-/// one, as `zend_dtoa` reads it (`Z/Zend/zend_strtod.c:3940`).
-///
-/// Asked for a digit count, `zend_dtoa` rounds the double's own decimal
-/// expansion to it, under no cap of its own: past seventeen those digits
-/// are no longer the shortest text that reads back, they are the
-/// expansion itself, which is why `precision = 20` writes `0.1` as
-/// `0.10000000000000000555`. Rust's formatter rounds the same expansion
-/// by the same rule, half to even, which is `zend_dtoa`'s where
-/// `ROUND_BIASED` is not defined, as php does not define it.
-fn significant(value: f64, ndigit: i32) -> (String, i32) {
-    let rendered = if ndigit < 0 {
-        format!("{value:e}")
-    } else {
-        let ndigit = usize::try_from(ndigit.max(1))
-            .unwrap_or(EXACT_DIGITS)
-            .min(EXACT_DIGITS);
-        format!("{value:.*e}", ndigit - 1)
+        dtoa::Digits::Significant(ndigit)
     };
-    let (mantissa, exponent) = rendered.split_once('e').unwrap_or((rendered.as_str(), "0"));
-    let mut digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
-    while digits.len() > 1 && digits.ends_with('0') {
-        digits.pop();
-    }
-    (digits, exponent.parse().unwrap_or(0) + 1)
-}
-
-/// The most significant digits a double's decimal expansion carries,
-/// reached at the largest subnormal, `2.2250738585072009E-308`. Every
-/// digit a larger `ndigit` asks `zend_dtoa` for is a trailing zero it
-/// suppresses and the loop above drops, so asking for more renders the
-/// same text and only reads more of the formatter's time.
-const EXACT_DIGITS: usize = 767;
-
-/// `zend_gcvt`'s E-style: one digit, the point, the rest or a zero, the
-/// exponent character, and the exponent with its sign and no padding.
-fn exponential(out: &mut String, digits: &str, exponent: i32, character: Exponent) {
-    let (first, rest) = digits.split_at(1.min(digits.len()));
-    out.push_str(first);
-    out.push('.');
-    out.push_str(if rest.is_empty() { "0" } else { rest });
-    out.push(character.as_char());
-    out.push(if exponent < 0 { '-' } else { '+' });
-    out.push_str(&exponent.abs().to_string());
-}
-
-/// `zend_gcvt`'s standard format, its two arms: a point before every
-/// digit when it stands before them, and among them otherwise, with a
-/// leading zero where php writes one.
-fn fixed(out: &mut String, digits: &str, point: i32) {
-    if point < 0 {
-        out.push_str("0.");
-        for _ in point..0 {
-            out.push('0');
+    let point = dtoa::dtoa(value.abs(), asked, &mut out);
+    let digits = out.len() - start;
+    if (point >= 0 && point > form_ndigit) || point < -3 {
+        // E-style: one digit, the point, the rest or a zero, the
+        // exponent character, and the exponent with its sign and no
+        // padding.
+        out.insert(start + 1, b'.');
+        if digits == 1 {
+            out.push(b'0');
         }
-        out.push_str(digits);
-        return;
-    }
-    let at = usize::try_from(point).unwrap_or(0);
-    for i in 0..at {
-        out.push(digits.as_bytes().get(i).map_or('0', |b| char::from(*b)));
-    }
-    if at < digits.len() {
-        if at == 0 {
-            out.push('0');
+        out.push(exponent.byte());
+        let power = point - 1;
+        out.push(if power < 0 { b'-' } else { b'+' });
+        let power = power.unsigned_abs();
+        let mut place = 1;
+        while place * 10 <= power {
+            place *= 10;
         }
-        out.push('.');
-        out.push_str(digits.get(at..).unwrap_or_default());
+        while place > 0 {
+            out.push(b'0' + u8::try_from(power / place % 10).unwrap_or(0));
+            place /= 10;
+        }
+    } else if point < 0 {
+        // A point before every digit, with a zero before it.
+        let zeros = usize::try_from(point.unsigned_abs()).unwrap_or(0);
+        out.splice(
+            start..start,
+            [b'0', b'.']
+                .into_iter()
+                .chain(std::iter::repeat_n(b'0', zeros)),
+        );
+    } else {
+        // The point among the digits, or past them, padded with zeros.
+        let at = usize::try_from(point).unwrap_or(0);
+        if at >= digits {
+            out.resize(start + at, b'0');
+        } else if at == 0 {
+            out.splice(start..start, [b'0', b'.']);
+        } else {
+            out.insert(start + at, b'.');
+        }
     }
+    // Every byte written is ASCII.
+    String::from_utf8(out).unwrap_or_default()
 }
 
 /// `pow_function_base`'s long arm for an exponent that is not negative
@@ -676,6 +663,98 @@ mod tests {
             );
         }
         assert_eq!(gcvt(10.0 / 3.0, 0, Exponent::Lower), "3.0e+0");
+    }
+
+    /// `zend_dtoa`'s digits against the expansion Rust's formatter
+    /// rounds, the same correctly rounded digits by another algorithm:
+    /// half to even on a tie, as `zend_dtoa` rounds with `ROUND_BIASED`
+    /// undefined, and the shortest that reads back for a negative
+    /// `ndigit`, where the two part only between two strings equally
+    /// near the double. The doubles are the extremes, every power of two
+    /// and ten, and 20,000 bit patterns from a fixed seed.
+    #[test]
+    fn zend_dtoa_s_digits_are_the_correctly_rounded_expansion() {
+        fn expansion(value: f64, ndigit: i32) -> (String, i32) {
+            let rendered = if ndigit < 0 {
+                format!("{value:e}")
+            } else {
+                format!("{value:.*e}", usize::try_from(ndigit.max(1) - 1).unwrap())
+            };
+            let (mantissa, power) = rendered.split_once('e').unwrap();
+            let mut digits: String = mantissa.chars().filter(char::is_ascii_digit).collect();
+            while digits.len() > 1 && digits.ends_with('0') {
+                digits.pop();
+            }
+            (digits, power.parse::<i32>().unwrap() + 1)
+        }
+        let mut values = vec![
+            f64::MIN_POSITIVE,
+            f64::MAX,
+            5e-324,
+            1e-323,
+            2.225_073_858_507_201e-308,
+            1e23,
+            9_007_199_254_740_993.0,
+            0.1,
+            0.5,
+            1.0 / 3.0,
+            123_456_789_012_345.0,
+            999_999_999_999_999.9,
+        ];
+        for e in -1074..1024 {
+            values.push(2_f64.powi(e));
+        }
+        for e in -323..309 {
+            values.push(format!("1e{e}").parse().unwrap());
+        }
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        for _ in 0..20_000 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let value = f64::from_bits(state >> 1);
+            if value.is_finite() && value != 0.0 {
+                values.push(value);
+            }
+        }
+        for value in values {
+            for ndigit in [-1, 0, 1, 2, 3, 6, 14, 15, 16, 17, 18, 25, 40] {
+                let mut out = Vec::new();
+                let asked = if ndigit < 0 {
+                    dtoa::Digits::Shortest
+                } else {
+                    dtoa::Digits::Significant(ndigit)
+                };
+                let point = dtoa::dtoa(value, asked, &mut out);
+                let mut digits = String::from_utf8(out).unwrap();
+                while digits.len() > 1 && digits.ends_with('0') {
+                    digits.pop();
+                }
+                let (expected, at) = expansion(value, ndigit);
+                if ndigit < 0 && digits != expected {
+                    // Two shortest strings equally near the double, as
+                    // `2^-25`'s `...312` and `...313` are: Rust's formatter
+                    // takes the upper, `zend_dtoa` the even one.
+                    let read = |d: &str| format!("0.{d}e{point}").parse::<f64>().unwrap();
+                    assert_eq!((digits.len(), point), (expected.len(), at), "{value:e}");
+                    assert_eq!(
+                        (read(&digits), read(&expected)),
+                        (value, value),
+                        "{value:e}"
+                    );
+                    continue;
+                }
+                assert_eq!((digits, point), (expected, at), "{value:e} at {ndigit}");
+            }
+        }
+        // The widest digit runs: a subnormal's whole expansion, and the
+        // largest double's.
+        for value in [5e-324, 2.225_073_858_507_201e-308, f64::MAX] {
+            let mut out = Vec::new();
+            let point = dtoa::dtoa(value, dtoa::Digits::Significant(800), &mut out);
+            let digits = String::from_utf8(out).unwrap();
+            assert_eq!((digits, point), expansion(value, 800), "{value:e} at 800");
+        }
     }
 
     /// Every row read off the oracle at the pin: `zend_dtoa` takes the
