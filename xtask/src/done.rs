@@ -504,11 +504,12 @@ pub fn judge(
 
 /// Condition 7: the branch's ticket has no unticked box, or was withdrawn
 /// by the instrument, read from the `ticket` reading over its number and
-/// never from the tracker. The
-/// reading is fresh while the workspace's tree, [`ticket::STAMPED_OVER`],
-/// still matches (the rule at the top of this module); a
-/// missing or stale one says what to run, and a failing one carries the
-/// instrument's message, which names each unticked box.
+/// never from the tracker. A withdrawal the tracker took is met whatever
+/// the tree since (#3476); any other reading is fresh while the
+/// workspace's tree, [`ticket::STAMPED_OVER`], still matches (the rule at
+/// the top of this module); a missing or stale one says what to run, and a
+/// failing one carries the instrument's message, which names each
+/// unticked box.
 fn boxes(
     snapshot: &Snapshot,
     store: &Store,
@@ -521,6 +522,14 @@ fn boxes(
         unmet.push(format!("ticket: no reading for {ticket}; {READ}"));
         return Ok(());
     };
+    // A withdrawal the tracker took settled the ticket, and no later tree
+    // undoes it (#3476): a bundle branch withdraws its own ticket and then
+    // lands its other tickets' commits, and neither `ticket read`, which
+    // holds the unticked boxes, nor a second withdrawal, refused as
+    // closed already, could renew it. A refused one is held as any other.
+    if ticket::Closed::of(&reading).is_some_and(|closed| closed.withdrawn) {
+        return Ok(());
+    }
     let tree = snapshot.key(Path::new(ticket::STAMPED_OVER))?;
     if !reading.fresh_for(&tree, pin) {
         unmet.push(format!(

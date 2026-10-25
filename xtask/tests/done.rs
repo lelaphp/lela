@@ -2089,6 +2089,55 @@ fn a_withdrawn_branch_ticket_is_met_and_a_refused_withdrawal_is_not() {
     assert!(!verdict.met(), "{verdict:#?}");
 }
 
+/// A withdrawal stays met past the commits after it (#3476): a bundle
+/// branch withdraws its recorded ticket first and then lands its other
+/// tickets' commits, as t3459 withdrew #3459 at e61851ebe and landed
+/// #3440's and #3449's after it. The withdrawal settled the ticket at the
+/// tracker, which no later tree undoes, and the fixes a stale reading
+/// would point to lead nowhere: `ticket read` holds the unticked boxes,
+/// and a second withdrawal is refused as closed already. So a passing
+/// withdrawal is met whatever the tree; a refused one, stale after the
+/// commit, stays unmet.
+#[test]
+fn a_withdrawal_stays_met_past_a_later_commit_and_a_refused_one_does_not() {
+    use xtask::ticket::{Act, Reach, Successors, Verdict as Close};
+    let root = scratch("withdrawn-then-commit");
+    let repo = Repo::at(&root);
+    repo.git(&["config", "branch.main.ticket", "31"]);
+    let withdrawn = |reason: &str| {
+        let reach = Reach::of(&root).unwrap();
+        Act::Close(
+            Close::Withdrawn(reason.to_owned()),
+            Successors::Nothing,
+            reach,
+        )
+    };
+    let commit = |name: &str| {
+        std::fs::write(root.join(name), "another ticket's work\n").unwrap();
+        repo.git(&["add", "--", name]);
+        repo.git(&["commit", "-q", "-m", name]);
+    };
+
+    let reading = ticket_act(
+        &root,
+        31,
+        "withdrawn.md",
+        withdrawn("measured on HEAD: not in the tree"),
+    );
+    assert_eq!(reading.status, Status::Pass, "{}", reading.message);
+    commit("after-the-withdrawal.txt");
+    let verdict = judge(&root);
+    assert!(about_the_ticket(&verdict).is_empty(), "{verdict:#?}");
+
+    let reading = ticket_act(&root, 31, "unticked.md", withdrawn("nothing here"));
+    assert_eq!(reading.status, Status::Fail, "{}", reading.message);
+    commit("after-the-refusal.txt");
+    let verdict = judge(&root);
+    let lines = about_the_ticket(&verdict);
+    assert_eq!(lines.len(), 1, "{verdict:#?}");
+    assert!(lines[0].contains("stale"), "{lines:?}");
+}
+
 /// The phpt skip the missing engine binary causes is met, and `done`
 /// reaches green for a crate that owns a subset on a checkout with no
 /// engine built (#132): with no run kept here, a fresh such skip is the
