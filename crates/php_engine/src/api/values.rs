@@ -1693,7 +1693,7 @@ impl PhpObject {
     /// echo '[', http_build_query(new DateTime('2020-01-01 UTC')), "]\n";
     /// ```
     /// ```expect
-    /// 408
+    /// 416
     /// b=1&c=2
     /// []
     /// ```
