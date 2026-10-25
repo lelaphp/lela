@@ -535,13 +535,14 @@ fn json_encode(
 /// returns, rather than the values growing on to the hard limit:
 ///
 /// ```php
+/// $j = '[' . str_repeat('[[]],', 1024 * 1024) . '[]]';
 /// ini_set('memory_limit', '10M');
-/// $a = json_decode('[0' . str_repeat(',0', 1024 * 1024) . ']');
+/// $a = json_decode($j);
 /// var_dump("unreached");
 /// ```
 /// ```expect exit=255
 ///
-/// Fatal error: Allowed memory size of 10485760 bytes exhausted (tried to allocate 4210688 bytes) in %s on line 3
+/// Fatal error: Allowed memory size of 10485760 bytes exhausted (tried to allocate 2097152 bytes) in %s on line 4
 /// ```
 ///
 /// ```php
