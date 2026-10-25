@@ -658,7 +658,23 @@ impl Archive {
 
     /// `add_data`: the entry's data from its source or its old self,
     /// decrypted, decompressed, compressed and encrypted as its dirent
-    /// asks, the dirent written before it.
+    /// asks, the dirent written before it. A method that differs from the
+    /// stored one is a recompression, so stored data is compressed where
+    /// there is nothing to decompress (`needs_recompress`):
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('rc-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// $z->addFromString('a', str_repeat('a', 999)); $z->setCompressionName('a', ZipArchive::CM_STORE); $z->close();
+    /// $z->open('rc-witness.zip'); var_dump($z->setCompressionName('a', ZipArchive::CM_DEFLATE)); $z->close();
+    /// $z->open('rc-witness.zip'); $s = $z->statName('a'); var_dump($s['comp_method'], $s['comp_size'], strlen($z->getFromName('a')));
+    /// $z->close(); unlink('rc-witness.zip');
+    /// ```
+    /// ```expect
+    /// bool(true)
+    /// int(8)
+    /// int(11)
+    /// int(999)
+    /// ```
     #[expect(
         clippy::too_many_lines,
         clippy::cast_precision_loss,
@@ -748,7 +764,7 @@ impl Archive {
             host: st_attr,
             ..Attributes::default()
         };
-        if method == 0 && (decompress || has_source || decrypt) && actual(de.comp_method) != 0 {
+        if method == 0 && (recompress || has_source || decrypt) && actual(de.comp_method) != 0 {
             let c = codec::compress(
                 &data,
                 actual(de.comp_method),
