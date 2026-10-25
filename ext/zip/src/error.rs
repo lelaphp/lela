@@ -42,12 +42,13 @@ pub(crate) enum Er {
     DataLength = 33,
     NotAllowed = 34,
     TruncatedZip = 35,
+    EfTooLarge = 36,
 }
 
 /// `_zip_err_str`, as libzip's build generates it from `zip.h`'s comments:
 /// each code's sentence after its kind, `S` where the system half is an
 /// `errno`, `Z` a zlib code, `L` one of libzip's details, `N` none.
-const STR: &str = "N No error|N Multi-disk zip archives not supported|S Renaming temporary file failed|S Closing zip archive failed|S Seek error|S Read error|S Write error|N CRC error|N Containing zip archive was closed|N No such file|N File already exists|S Can't open file|S Failure to create temporary file|Z Zlib error|N Malloc failure|N Entry has been changed|N Compression method not supported|N Premature end of file|N Invalid argument|N Not a zip archive|N Internal error|L Zip archive inconsistent|S Can't remove file|N Entry has been deleted|N Encryption method not supported|N Read-only archive|N No password provided|N Wrong password provided|N Operation not supported|N Resource still in use|S Tell error|N Compressed data invalid|N Operation cancelled|N Unexpected length of data|N Not allowed in torrentzip|N Possibly truncated or corrupted zip archive";
+const STR: &str = "N No error|N Multi-disk zip archives not supported|S Renaming temporary file failed|S Closing zip archive failed|S Seek error|S Read error|S Write error|N CRC error|N Containing zip archive was closed|N No such file|N File already exists|S Can't open file|S Failure to create temporary file|Z Zlib error|N Malloc failure|N Entry has been changed|N Compression method not supported|N Premature end of file|N Invalid argument|N Not a zip archive|N Internal error|L Zip archive inconsistent|S Can't remove file|N Entry has been deleted|N Encryption method not supported|N Read-only archive|N No password provided|N Wrong password provided|N Operation not supported|N Resource still in use|S Tell error|N Compressed data invalid|N Operation cancelled|N Unexpected length of data|N Not allowed in torrentzip|N Possibly truncated or corrupted zip archive|N Extra fields too large";
 
 /// `zip_error_t`: the code and its system half.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]

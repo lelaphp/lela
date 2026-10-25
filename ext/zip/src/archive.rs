@@ -33,7 +33,6 @@ pub(crate) const AFL_WANT_TORRENTZIP: u32 = 8;
 pub(crate) const AFL_CREATE_OR_KEEP_FILE_FOR_EMPTY_ARCHIVE: u32 = 16;
 // Compression methods.
 pub(crate) const CM_DEFAULT: i32 = -1;
-pub(crate) const CM_REPLACED_DEFAULT: i32 = -2;
 pub(crate) const CM_DEFLATE: i32 = 8;
 pub(crate) const CM_BZIP2: i32 = 12;
 pub(crate) const CM_LZMA: i32 = 14;
@@ -66,9 +65,11 @@ pub(crate) const GPBF_DATA_DESCRIPTOR: u16 = 0x0008;
 const GPBF_STRONG_ENCRYPTION: u16 = 0x0040;
 pub(crate) const GPBF_ENCODING_UTF_8: u16 = 0x0800;
 
-/// `ZIP_CM_IS_DEFAULT`.
+/// `method == ZIP_CM_DEFAULT`: libzip 1.12 dropped
+/// `ZIP_CM_REPLACED_DEFAULT`, so the one default is the method left to
+/// libzip.
 pub(crate) fn is_default(method: i32) -> bool {
-    method == CM_DEFAULT || method == CM_REPLACED_DEFAULT
+    method == CM_DEFAULT
 }
 
 /// `ZIP_CM_ACTUAL`.
@@ -750,7 +751,24 @@ impl Archive {
         de.mtime.unwrap_or_else(|| self.zone.d2u(de.last_mod))
     }
 
-    /// `_zip_set_name`.
+    /// `_zip_set_name`: a name past 65535 bytes refused, as libzip 1.12
+    /// refuses it where 1.11.4 cut its length to 16 bits.
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('name-len-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// var_dump($z->addFromString(str_repeat('n', 65536), 'x'), $z->getStatusString(), $z->numFiles);
+    /// var_dump($z->addFromString(str_repeat('n', 65535), 'x'), $z->numFiles, $z->renameIndex(0, str_repeat('r', 65536)), strlen($z->getNameIndex(0)));
+    /// $z->close(); unlink('name-len-witness.zip');
+    /// ```
+    /// ```expect
+    /// bool(false)
+    /// string(16) "Invalid argument"
+    /// int(0)
+    /// bool(true)
+    /// int(1)
+    /// bool(false)
+    /// int(65535)
+    /// ```
     fn set_name(&mut self, idx: usize, name: &[u8], flags: u32) -> Done {
         if idx >= self.entries.len() {
             return self.fail(Er::Inval);
@@ -760,6 +778,8 @@ impl Archive {
         }
         let s = if name.is_empty() {
             None
+        } else if name.len() > 0xffff {
+            return self.fail(Er::Inval);
         } else {
             match ZStr::new(name, flags) {
                 Ok(s) => s.map(|s| {
@@ -804,7 +824,30 @@ impl Archive {
     /// `_zip_file_replace`: `idx` given new data, or with `None` a new
     /// entry, or the one named `name` under `ZIP_FL_OVERWRITE`. Its extra
     /// fields are cleared while torrentzip is wanted too, as 1.11.4 and
-    /// 1.12.1 clear them and 1.12 alone refuses (#2667).
+    /// 1.12.1 clear them and 1.12 alone refuses (#2667). Its method is
+    /// the entry's until the close, whose merge leaves new data to the
+    /// default method: libzip 1.12 marks no `ZIP_CM_REPLACED_DEFAULT`.
+    ///
+    /// ```php
+    /// $z = new ZipArchive; $z->open('rp.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+    /// $z->addFromString('s', str_repeat('s', 999)); $z->setCompressionName('s', ZipArchive::CM_STORE);
+    /// $z->addFromString('d', str_repeat('d', 999)); $z->addFromString('t', str_repeat('t', 999)); $z->close();
+    /// $z->open('rp.zip');
+    /// $z->addFromString('s', str_repeat('S', 999)); $z->addFromString('d', 'x');
+    /// $z->addFromString('t', str_repeat('T', 999)); $z->unchangeName('t');
+    /// foreach (['s', 'd', 't'] as $n) echo $n, ' ', $z->statName($n)['comp_method'], "\n";
+    /// $z->close(); $z->open('rp.zip');
+    /// foreach (['s', 'd', 't'] as $n) { $st = $z->statName($n); echo $n, ' ', $st['comp_method'], ' ', $st['comp_size'], "\n"; }
+    /// $z->close(); unlink('rp.zip');
+    /// ```
+    /// ```expect
+    /// s 0
+    /// d 8
+    /// t 8
+    /// s 8 11
+    /// d 0 1
+    /// t 8 11
+    /// ```
     pub(crate) fn file_replace(
         &mut self,
         idx: Option<usize>,
@@ -841,11 +884,6 @@ impl Archive {
             c.extra_local = Some(Vec::new());
         }
         unchange_data(e);
-        if e.orig.is_some() && !e.changed(D_COMP_METHOD) {
-            let c = e.changes.get_or_insert_with(|| clone_of(e.orig.as_ref()));
-            c.comp_method = CM_REPLACED_DEFAULT;
-            c.changed |= D_COMP_METHOD;
-        }
         e.source = Some(source);
         Ok(idx)
     }
@@ -1450,15 +1488,6 @@ impl Archive {
 /// `_zip_unchange_data`.
 fn unchange_data(e: &mut Entry) {
     e.source = None;
-    if let Some(c) = &mut e.changes
-        && c.changed & D_COMP_METHOD != 0
-        && c.comp_method == CM_REPLACED_DEFAULT
-    {
-        c.changed &= !D_COMP_METHOD;
-        if c.changed == 0 {
-            e.changes = None;
-        }
-    }
     e.deleted = false;
 }
 

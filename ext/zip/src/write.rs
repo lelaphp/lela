@@ -174,9 +174,49 @@ fn ef_utf8(id: u16, s: &ZStr) -> Vec<u8> {
     ef
 }
 
-/// `_zip_dirent_write`: a local header or a central record.
+/// `_zip_dirent_write`: a local header or a central record, refused
+/// with libzip 1.12's `ZIP_ER_EF_TOO_LARGE` where libzip's own extra
+/// fields and the entry's pass 65535 bytes.
+///
+/// A `WinZip` AES entry is AE-2 below 20 bytes and AE-1 from there:
+///
+/// ```php
+/// $z = new ZipArchive; $z->open('aes-witness.zip', ZipArchive::CREATE | ZipArchive::OVERWRITE);
+/// $z->addFromString('small', 'tiny'); $z->addFromString('big', str_repeat('b', 64));
+/// foreach (['small', 'big'] as $n) $z->setEncryptionName($n, ZipArchive::EM_AES_256, 'pw');
+/// $z->close(); $b = file_get_contents('aes-witness.zip');
+/// $v = []; for ($at = 0; ($at = strpos($b, "\x01\x99\x07\x00", $at)) !== false; $at += 4) $v[] = 'AE-' . unpack('v', $b, $at + 4)[1];
+/// echo implode(' ', $v), "\n"; $z->open('aes-witness.zip'); $z->setPassword('pw'); var_dump($z->getFromName('small'), strlen($z->getFromName('big')));
+/// $z->close(); unlink('aes-witness.zip');
+/// ```
+/// ```expect
+/// AE-2 AE-1 AE-2 AE-1
+/// string(4) "tiny"
+/// int(64)
+/// ```
+///
+/// An entry whose own central field leaves no room for the AES field:
+///
+/// ```php
+/// $ef = pack('vv', 0xcafe, 65527) . str_repeat('z', 65527);
+/// $local = "PK\3\4" . pack('vvvvvVVVvv', 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, 0) . 'a' . 'hello';
+/// $cd = "PK\1\2" . pack('vvvvvvVVVvvvvvVV', 0x0314, 20, 0, 0, 0, 0x21, crc32('hello'), 5, 5, 1, strlen($ef), 0, 0, 0, 0x81a40000, 0) . 'a' . $ef;
+/// file_put_contents('ef-witness.zip', $local . $cd . "PK\5\6" . pack('vvvvVVv', 0, 0, 1, 1, strlen($cd), strlen($local), 0));
+/// $z = new ZipArchive; var_dump($z->open('ef-witness.zip'), $z->getFromName('a'));
+/// $z->setEncryptionName('a', ZipArchive::EM_AES_256, 'pw'); var_dump($z->close(), $z->status, $z->getStatusString());
+/// unlink('ef-witness.zip');
+/// ```
+/// ```expect
+/// bool(true)
+/// string(5) "hello"
+///
+/// Warning: ZipArchive::close(): Extra fields too large in %s on line %d
+/// bool(false)
+/// int(36)
+/// string(22) "Extra fields too large"
+/// ```
 #[expect(clippy::too_many_lines, reason = "_zip_dirent_write's one body")]
-fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
+fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Result<Vec<u8>, Status> {
     let name_enc = de.filename.as_ref().map_or(Enc::Ascii, ZStr::guess);
     let com_enc = de.comment.as_ref().map_or(Enc::Ascii, ZStr::guess);
     let mut efs: Vec<Vec<u8>> = Vec::new();
@@ -223,12 +263,15 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
     }
     let aes = matches!(de.encryption_method, EM_AES_128 | EM_AES_192 | EM_AES_256);
     if aes {
+        // `winzip_aes_version` (libzip 1.12): AE-2, the CRC field zero,
+        // below 20 bytes, and AE-1 from there.
+        let version = if de.uncomp_size < 20 { 2 } else { 1 };
         let mut ef = vec![
             0x01,
             0x99,
             7,
             0,
-            2,
+            version,
             0,
             b'A',
             b'E',
@@ -243,6 +286,9 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
         (false, false) => de.extra_local.clone().unwrap_or_default(),
     };
     let internal: Vec<u8> = efs.concat();
+    let Ok(ef_len) = u16::try_from(internal.len() + own.len()) else {
+        return Err(Status::of(Er::EfTooLarge, 0));
+    };
     let name = de.filename.as_ref().map_or(&[][..], |f| f.raw.as_slice());
     let comment = de.comment.as_ref().map_or(&[][..], |c| c.raw.as_slice());
     let mut b = Vec::with_capacity(46 + name.len() + internal.len() + own.len());
@@ -272,7 +318,7 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
     } else {
         put!(b; u32_of(de.comp_size), u32_of(de.uncomp_size));
     }
-    put!(b; u16_of(name.len()), u16_of(internal.len() + own.len()));
+    put!(b; u16_of(name.len()), ef_len);
     if central {
         let comment_len = if torrentzip { 0 } else { u16_of(comment.len()) };
         put!(b; comment_len, u16_of(de.disk_number), de.int_attrib, de.ext_attrib, u32_of(de.offset));
@@ -283,7 +329,7 @@ fn dirent_bytes(de: &mut Dirent, central: bool, torrentzip: bool) -> Vec<u8> {
     if central && !torrentzip {
         b.extend_from_slice(comment);
     }
-    b
+    Ok(b)
 }
 
 /// `write_data_descriptor`.
@@ -555,7 +601,7 @@ impl Archive {
                 if de.encryption_method != EM_TRAD_PKWARE {
                     de.bitflags &= !GPBF_DATA_DESCRIPTOR;
                 }
-                out.write(&dirent_bytes(&mut de, false, torrentzip))?;
+                out.write(&dirent_bytes(&mut de, false, torrentzip)?)?;
                 let raw = self.raw_data(i).inspect_err(|s| self.error = *s)?;
                 let total = raw.len() as f64;
                 let mut done = 0usize;
@@ -581,7 +627,7 @@ impl Archive {
             let ((Some(de), _) | (None, Some(de))) = (&mut e.changes, &mut e.orig) else {
                 continue;
             };
-            out.write(&dirent_bytes(de, true, torrentzip))?;
+            out.write(&dirent_bytes(de, true, torrentzip)?)?;
         }
         let cdir_crc = out.crc.take().map(crc32fast::Hasher::finalize);
         let size = out.pos - offset;
@@ -647,7 +693,7 @@ impl Archive {
             )
         };
         de.bitflags &= !GPBF_DATA_DESCRIPTOR;
-        if is_default(de.comp_method) && st_method != 0 {
+        if de.changed & D_COMP_METHOD == 0 && st_method != 0 {
             de.comp_method = i32::from(st_method);
         }
         if de.changed & D_LAST_MOD == 0 {
@@ -740,7 +786,7 @@ impl Archive {
         if !torrentzip {
             apply_attributes(de, &attrs);
         }
-        out.write(&dirent_bytes(de, false, torrentzip))?;
+        out.write(&dirent_bytes(de, false, torrentzip)?)?;
         let total = size.max(1) as f64;
         let chunks = data.chunks(8192).count().max(1);
         for (n, chunk) in data.chunks(8192).enumerate() {
