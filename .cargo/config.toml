@@ -72,3 +72,25 @@ AARCH64_APPLE_DARWIN_OPENSSL_DIR = { value = "/opt/homebrew/opt/openssl@4", forc
 # directory ahead of the SDK's and fails the build where it names none
 # (#1332), and a Linux host still finds its libcurl through pkg-config.
 AARCH64_APPLE_DARWIN_CURL_LIB_DIR = { value = "/opt/homebrew/opt/curl/lib", force = true }
+
+# Unnamed, rustc links for macOS 11.0 on aarch64-apple-darwin, and ld64
+# then writes the rebase and bind opcodes of LC_DYLD_INFO_ONLY, which dyld
+# applies at launch, so every page of a host's __DATA_CONST is dirty in
+# every process; the oracle, php 8.5.12's keg, is linked for macOS 15.0
+# with LC_DYLD_CHAINED_FIXUPS, which the kernel applies as each page comes
+# in, and its __DATA_CONST stays clean (design §7.2, #3356). Named, it is
+# the oracle's `minos` (`otool -l`, LC_BUILD_VERSION), the macOS rustc
+# compiles every crate's objects and links every host and test binary
+# for, and the one a `cc` build script compiles its C for (lexbor,
+# libmbfl, timelib, uriparser, the shims), which it otherwise built for
+# the installed SDK's own version; the keg archives linked in,
+# libpcre2-8.a, libsqlite3.a and libtidy's, are built for 15.0, so ld no
+# longer warns that an object is newer than the link. Cargo hands it to
+# every build script, rustc run and `cargo run` or test process, the
+# harness's own among them; what the harness runs under the oracle's
+# recipe, a witness's or a phpt test's php, starts from the environment
+# the recipe clears and states (`oracle.toml`, `[recipe.env]`), so no
+# test sees it. Another platform's target reads no such variable.
+# `xtask api-check` holds it to the pinned php's minos in each host's
+# reading, so it moves with the oracle.
+MACOSX_DEPLOYMENT_TARGET = { value = "15.0", force = true }
